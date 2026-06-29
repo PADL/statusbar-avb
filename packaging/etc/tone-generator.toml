@@ -1,0 +1,51 @@
+# /etc/statusbar-avb/tone-generator.toml
+#
+# Configuration for the `statusbar-avb-tone-generator` systemd service.
+#
+# The service is DISABLED by default on install. To run the tone generator at
+# boot:
+#
+#     sudo nano /etc/statusbar-avb/tone-generator.toml   # customize for this site
+#     sudo systemctl enable --now statusbar-avb-tone-generator
+#
+# Every option below maps 1:1 to a `statusbar-avb-tone-generator` command-line
+# flag (--interface, --streams, --tone.base_note, ...): the CLI and this file
+# share one config system. Run `statusbar-avb-tone-generator --help` for the
+# full list. You can still run the binary by hand for debugging, with or
+# without --config-load.
+
+# Network interface the talker binds to.
+interface = "eth0"
+
+# Which streams the talker emits:
+#   "aaf+crf"  AAF int32 8ch audio + a CRF media-clock reference (default).
+#              This is the macOS-validated config -- it presents as a clean 8ch
+#              CoreAudio device whose clock source is the CRF stream.
+#   "aaf"      AAF audio only (no CRF).
+#   "all"      AM824 + AAF + CRF (note: the AM824+AAF aggregate shows up as a
+#              16ch device that some CoreAudio hosts will not open).
+# The descriptor-storage blob is auto-selected to match this value.
+streams = "aaf+crf"
+
+# Test tones: the 8 audio channels are the white piano keys starting at this
+# MIDI note (36 = C2, giving C2..C3). Amplitude 0.1 = -20 dBFS.
+[tone]
+base_note = 36
+amplitude = 0.1
+
+# Talker gate: only put a stream on the wire once a downstream listener is
+# MSRP-ready / ACMP-connected. Set false to stream unconditionally from
+# link-up (legacy / debugging).
+[gate]
+talker_on_listener = true
+
+# ----------------------------------------------------------------------------
+# Optional overrides -- intentionally left at their (correct) built-in defaults.
+# The entity_id is the modified-EUI-64 of the NIC MAC and the entity_model_id is
+# a well-formed EUI-64; do NOT override these unless you know the AVDECC
+# identity rules, as a malformed value makes controllers reject the entity.
+# ----------------------------------------------------------------------------
+# [entity]
+# id = "88:a2:9e:ff:fe:82:83:00"
+# model_id = "70:b3:d5:ff:fe:ed:c0:00"
+# name = "my-tone-generator"

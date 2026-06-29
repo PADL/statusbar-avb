@@ -46,10 +46,12 @@ case "$1" in
             udevadm trigger --subsystem-match=ptp 2>/dev/null || true
         fi
 
-        # Make systemd aware of the statusbar-avb-entity unit. It is DELIBERATELY
-        # left disabled: enabling/starting the entity is a per-host decision made
-        # by the operator after editing /etc/statusbar-avb/entity.toml --
+        # Make systemd aware of the statusbar-avb-entity and
+        # statusbar-avb-tone-generator units. Both are DELIBERATELY left
+        # disabled: enabling/starting an entity is a per-host decision made by
+        # the operator after editing the matching /etc/statusbar-avb/*.toml --
         #   systemctl enable --now statusbar-avb-entity
+        #   systemctl enable --now statusbar-avb-tone-generator
         # so a plain package install never puts a stream on the wire.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload 2>/dev/null || true

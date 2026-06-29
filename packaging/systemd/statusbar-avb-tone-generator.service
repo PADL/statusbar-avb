@@ -1,0 +1,21 @@
+[Unit]
+Description=StatusBar AVB tone generator (AVDECC talker: AAF/AM824/CRF piano tones)
+Documentation=man:statusbar-avb-tone-generator
+# Order after the network and, if present, the gPTP daemon. Ordering on a unit
+# that does not exist is a harmless no-op, so this works whether or not
+# linuxptp/gptp.service is installed on a given host.
+After=network-online.target gptp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# All configuration lives in the conffile; edit it, then enable this unit.
+# CLI flags and the TOML share one config system, so anything in --help can be
+# set there. The deb postinst grants the binary cap_net_raw/cap_sys_nice/
+# cap_ipc_lock via setcap, so no extra privilege directives are needed here.
+ExecStart=/usr/local/bin/statusbar-avb-tone-generator --config-load=/etc/statusbar-avb/tone-generator.toml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

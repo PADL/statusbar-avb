@@ -1,16 +1,17 @@
 #!/bin/sh
 # prerm for the statusbar-avb runtime package.
 #
-# Stop the entity service before the package is removed/upgraded, so an
-# in-flight binary is not yanked out from under a running unit. The unit is
-# never enabled by the package (disabled by default), so this only matters when
-# an operator has enabled and started it.
+# Stop the entity / tone-generator services before the package is
+# removed/upgraded, so an in-flight binary is not yanked out from under a
+# running unit. Neither unit is ever enabled by the package (disabled by
+# default), so this only matters when an operator has enabled and started one.
 set -e
 
 case "$1" in
     remove|upgrade|deconfigure)
         if [ -d /run/systemd/system ]; then
             systemctl --quiet stop statusbar-avb-entity.service 2>/dev/null || true
+            systemctl --quiet stop statusbar-avb-tone-generator.service 2>/dev/null || true
         fi
         ;;
 esac

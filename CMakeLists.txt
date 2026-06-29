@@ -139,10 +139,13 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     install(
       FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/statusbar-avb-entity.service
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/statusbar-avb-tone-generator.service
       DESTINATION /lib/systemd/system
       COMPONENT runtime)
     install(
-      FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/etc/entity.toml
+      FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/etc/entity.toml
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/etc/tone-generator.toml
       DESTINATION /etc/statusbar-avb
       COMPONENT runtime)
   endif()
