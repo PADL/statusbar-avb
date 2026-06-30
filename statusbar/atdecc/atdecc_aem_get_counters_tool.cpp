@@ -8,7 +8,7 @@
 // timestamps) are visible at a glance.
 //
 //   statusbar-aem-get-counters --interface=eth0 \
-//     --target-entity-id=00:1c:ab:ff:fe:00:76:04 --descriptor-index=0
+//     --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=0
 //
 // Runs until Ctrl-C (or --count polls).
 
@@ -299,7 +299,7 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
 {
     static constexpr std::array<std::string_view, 1> examples{
-        "--interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 --descriptor-index=0",
+        "--interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=0",
     };
     statusbar::config::default_print_usage(prog, specs, "", examples);
 }

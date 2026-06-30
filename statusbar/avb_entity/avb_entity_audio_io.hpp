@@ -100,8 +100,8 @@ class AvbEntityAudioIO
     /// redundant into one logical sender — otherwise the two copies land in different
     /// pair_ids and recovery accounting breaks. Bit 24 (LSB of b4 = 0xFE) is reliably
     /// clear in a MAC-derived id and inside owlm's mask. (A NIC-half bit like 1<<23
-    /// was wrong on both counts: it can be set in the MAC, and is outside owlm's
-    /// mask.) The primary id force-clears this bit so the redundant id is always
+    /// would be wrong on both counts: it can be set in the MAC, and lies outside
+    /// owlm's mask.) The primary id force-clears this bit so the redundant id is always
     /// distinct. The b3/b4 mask owlm applies for pairing is OWLM_PAIR_MASK_MIDBYTES.
     static constexpr uint64_t UDPTUN_REDUN_BIT = (1ULL << 24);
     static constexpr uint64_t OWLM_PAIR_MASK_MIDBYTES = 0x000000FF'FF000000ULL;

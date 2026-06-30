@@ -4,7 +4,7 @@
 # GPS-frequency-locked distributed media clock (multi-site AVB over WAN)
 
 Design for frequency-locking media clocks across geographically separate AVB
-LANs (Campbell / Saratoga / Los Angeles) to a common GPS reference, while keeping
+LANs (Site A / Site B / Site C) to a common GPS reference, while keeping
 **low-jitter local AVTP timing**, and bridging audio between sites over the public
 internet with `UDPTUN` (see [`UDPTUN.md`](UDPTUN.md), owlm).
 
@@ -150,8 +150,8 @@ by definition — and emit `r`, offset, `freq_uncertainty_ppb`, and (Kalman) dri
 | GPS holdover | freezes last window avg | **coasts on freq + drift** |
 | code | ~80 lines | ~120 lines; scalar measurement ⇒ no matrix inversion |
 
-Both validated on hardware and against each other: Campbell switch **+42 ppm**,
-Saratoga **+45.7 ppm** vs GPS (OLS and Kalman agree). For the 25 ms buffer the OLS
+Both validated on hardware and against each other: Site A switch **+42 ppm**,
+Site B **+45.7 ppm** vs GPS (OLS and Kalman agree). For the 25 ms buffer the OLS
 ramp-lag is harmless, so OLS is a fine v1; the Kalman earns its keep for
 **GPS-holdover coasting** and tighter buffers.
 
@@ -173,24 +173,24 @@ GPS-disciplined by chrony, all on `linuxptp4avb 0.3.2`:
 
 | Node | Site | PHC (local gPTP GM) | CLOCK_REALTIME (chrony ← GPS grandmaster NTP) |
 |------|------|---------------------|----------------------------------------|
-| jdk01a | Campbell | AVB switch, ~20–30 ns | `192.168.1.90` |
-| jdk01d | Campbell | AVB switch, ~20–30 ns | `192.168.1.90` |
-| jdk01b | Saratoga | AVB switch, ~30 ns | `192.168.1.20` |
-| jdk01e | LA | AVB switch, ~18 ns | `192.168.1.20` (see note) |
+| node-a | Site A | AVB switch, ~20–30 ns | `192.0.2.90` |
+| node-d | Site A | AVB switch, ~20–30 ns | `192.0.2.90` |
+| node-b | Site B | AVB switch, ~30 ns | `192.0.2.20` |
+| node-e | Site C | AVB switch, ~18 ns | `192.0.2.20` (see note) |
 
 - Per-site GPS grandmaster reconfigured off L2 802.1AS (UDP 1588 / NTP), so the local
   switch free-runs as gPTP GM and ptp4l slaves the PHC to it (clean ~20–30 ns).
-- **LA note:** that GPS grandmaster refused to leave its static `192.168.1.20` (DHCP and a
-  `192.168.4.x` static both failed to apply), so jdk01e reaches it **cross-subnet
-  over the shared L2** via a persistent secondary address `192.168.1.250/24`
-  (systemd unit `avb-la-secondary-ip.service`). Functional and reboot-persistent;
+- **Site C note:** that GPS grandmaster refused to leave its static `192.0.2.20` (DHCP and a
+  `198.51.100.x` static both failed to apply), so node-e reaches it **cross-subnet
+  over the shared L2** via a persistent secondary address `192.0.2.250/24`
+  (systemd unit `avb-site-c-secondary-ip.service`). Functional and reboot-persistent;
   collapses to the clean same-subnet form if that unit ever accepts a `.4.x` IP.
 - Ratio estimators + tool implemented and validated on hardware
-  (`statusbar/ptpclient`; Campbell +42 ppm, Saratoga +45.7 ppm vs GPS).
+  (`statusbar/ptpclient`; Site A +42 ppm, Site B +45.7 ppm vs GPS).
 
 ### the DSP processor listener: GET_STREAM_INFO compliance fix
 
-While running the jdk01e → the DSP processor 440 Hz AAF talker test, the DSP processor would
+While running the node-e → the DSP processor 440 Hz AAF talker test, the DSP processor would
 ACMP-connect (FAST_CONNECT, a saved connection) and then immediately self-
 disconnect. A `pcap` of the AECP exchange showed the DSP processor querying
 `GET_STREAM_INFO (0x000f)` on our talker's `STREAM_OUTPUT` right before the
@@ -203,22 +203,22 @@ after connecting and tears the connection down when the talker can't answer.
 `get_counters`), and `AvbEntityAudioIO` serves it from the live ACMP stream
 identity (`stream_id`, `stream_dest_mac`, `stream_vlan_id`), the `STREAM_OUTPUT`
 descriptor's `current_format`, and the live connection state (`CONNECTED` flag).
-Unit-tested in `nanoavb_entity_test`; deployed to jdk01e (transient unit
-`avb440-la.service` via `systemd-run`, logs in `journalctl -u avb440-la`).
+Unit-tested in `nanoavb_entity_test`; deployed to node-e (transient unit
+`avb440-site-c.service` via `systemd-run`, logs in `journalctl -u avb440-site-c`).
 
-### the DSP processor talker -> jdk01e listener: ACMP connect + the multicast-join gap
+### the DSP processor talker -> node-e listener: ACMP connect + the multicast-join gap
 
-Connecting jdk01e's AAF *listener* sink to the DSP processor's *talker* (the direction
+Connecting node-e's AAF *listener* sink to the DSP processor's *talker* (the direction
 that streams cleanly) is a controller-issued CONNECT_RX:
 
 ```
 statusbar-acmp-controller --interface=eth0 --action=CONNECT \
-  --talker-entity-id=00:1c:ab:ff:fe:00:76:04 --talker-uid=0 \
+  --talker-entity-id=00:11:22:ff:fe:33:44:55 --talker-uid=0 \
   --listener-entity-id=70:b3:d5:ed:cf:00:00:02 --listener-uid=1
 ```
 
-jdk01e's listener then sends CONNECT_TX to the DSP processor, declares MSRP Listener
-Ready, and the DSP processor streams. jdk01e's AAF sink (`STREAM_INPUT[1]`, format
+node-e's listener then sends CONNECT_TX to the DSP processor, declares MSRP Listener
+Ready, and the DSP processor streams. node-e's AAF sink (`STREAM_INPUT[1]`, format
 `02 07 02 20 02 00 c0 00`) is byte-identical to the DSP processor's talker outputs
 [0,1,2,3,7,8,9,10]. **Verified glitchless: AAF `rx_bad=0` over 2.6M packets /
 31.6M samples.**
@@ -249,8 +249,8 @@ update_gps_ratio`). The presentation offset is 1 ms.
 
 Why it mattered — diagnosed on a Pi → the audio interface → Pi loopback. The the audio interface recovers its
 entire media clock from `avtp_timestamp` (its CIP SYT is a constant placeholder),
-so the talker's ~±20–80 ns wake jitter became audible warble. After the fix,
-jdk01a's outgoing `avtp_timestamp` deltas are exactly **166669 ns (±1 ns)** (vs
+so the talker's ~±20–80 ns wake jitter became audible warble. With the deterministic generator,
+node-a's outgoing `avtp_timestamp` deltas are exactly **166669 ns (±1 ns)** (vs
 ±20–40 ns before), with GPS-rate pacing visible as a DBC histogram of mostly 12
 with some 11/13. Through the audio interface **digital** passthrough the round-trip is
 **+51.8 dB SNR** — pristine to the 24-bit floor, no drops, no wander. (The earlier

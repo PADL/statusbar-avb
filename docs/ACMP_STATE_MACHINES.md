@@ -645,13 +645,13 @@ Example:
 ```bash
 # Connect a talker to a listener
 sudo ./build/statusbar/atdecc/acmp_controller_tool --interface=eth0 --action=CONNECT \
-    --talker-entity-id=00:1C:AB:00:00:00:00:02 --talker-uid=0 \
-    --listener-entity-id=00:1C:AB:00:00:00:00:03 --listener-uid=0
+    --talker-entity-id=00:11:22:00:00:00:00:02 --talker-uid=0 \
+    --listener-entity-id=00:11:22:00:00:00:00:03 --listener-uid=0
 
 # Disconnect
 sudo ./build/statusbar/atdecc/acmp_controller_tool --interface=eth0 --action=DISCONNECT \
-    --talker-entity-id=00:1C:AB:00:00:00:00:02 --talker-uid=0 \
-    --listener-entity-id=00:1C:AB:00:00:00:00:03 --listener-uid=0
+    --talker-entity-id=00:11:22:00:00:00:00:02 --talker-uid=0 \
+    --listener-entity-id=00:11:22:00:00:00:00:03 --listener-uid=0
 
 # Using a configuration file
 sudo ./build/statusbar/atdecc/acmp_controller_tool --config-load=acmp_config.toml
@@ -661,9 +661,9 @@ Configuration file example:
 ```toml
 interface = "eth0"
 action = "CONNECT"
-talker-entity-id = "00:1C:AB:00:00:00:00:02"
+talker-entity-id = "00:11:22:00:00:00:00:02"
 talker-uid = 0
-listener-entity-id = "00:1C:AB:00:00:00:00:03"
+listener-entity-id = "00:11:22:00:00:00:00:03"
 listener-uid = 0
 ```
 

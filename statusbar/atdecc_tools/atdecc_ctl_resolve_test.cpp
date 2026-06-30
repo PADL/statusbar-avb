@@ -34,9 +34,9 @@ auto make_entity(Eui64 id, std::string name) -> EntityDisplayInfo
 
 TEST(atdecc_ctl_endpoint, name_with_uid)
 {
-    auto e = parse_endpoint("jdk01a:3");
+    auto e = parse_endpoint("node-a:3");
     EXPECT_TRUE(e.has_value());
-    EXPECT_EQ(e->name, std::string{"jdk01a"});
+    EXPECT_EQ(e->name, std::string{"node-a"});
     EXPECT_EQ(e->unique_id, 3U);
 }
 
@@ -84,7 +84,7 @@ TEST(atdecc_ctl_resolve, eui64_passthrough)
 TEST(atdecc_ctl_resolve, case_insensitive_substring)
 {
     std::vector<EntityDisplayInfo> entities{
-        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "jdk01a"),
+        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "node-a"),
         make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 2}, "audio-iface"),
     };
     std::string err;
@@ -95,7 +95,7 @@ TEST(atdecc_ctl_resolve, case_insensitive_substring)
 
 TEST(atdecc_ctl_resolve, no_match_is_error)
 {
-    std::vector<EntityDisplayInfo> entities{make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "jdk01a")};
+    std::vector<EntityDisplayInfo> entities{make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "node-a")};
     std::string err;
     auto id = resolve_entity("dsp-rack", entities, err);
     EXPECT_FALSE(id.has_value());
@@ -105,11 +105,11 @@ TEST(atdecc_ctl_resolve, no_match_is_error)
 TEST(atdecc_ctl_resolve, ambiguous_is_error)
 {
     std::vector<EntityDisplayInfo> entities{
-        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "jdk01a"),
-        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 2}, "jdk01d"),
+        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "node-a"),
+        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 2}, "node-d"),
     };
     std::string err;
-    auto id = resolve_entity("jdk01", entities, err);  // matches both
+    auto id = resolve_entity("node", entities, err);  // matches both
     EXPECT_FALSE(id.has_value());
     EXPECT_FALSE(err.empty());
 }
@@ -118,11 +118,11 @@ TEST(atdecc_ctl_resolve, same_id_twice_is_not_ambiguous)
 {
     // Two display rows for the SAME entity_id resolve unambiguously.
     std::vector<EntityDisplayInfo> entities{
-        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 7}, "jdk01a"),
-        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 7}, "jdk01a"),
+        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 7}, "node-a"),
+        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 7}, "node-a"),
     };
     std::string err;
-    auto id = resolve_entity("jdk01a", entities, err);
+    auto id = resolve_entity("node-a", entities, err);
     EXPECT_TRUE(id.has_value());
     EXPECT_EQ(*id, (Eui64{0, 0, 0, 0, 0, 0, 0, 7}));
 }
@@ -134,11 +134,11 @@ TEST(atdecc_ctl_resolve, same_id_twice_is_not_ambiguous)
 TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
 {
     auto doc = toml::parse("[[connect]]\n"
-                           "talker = \"jdk01a:0\"\n"
-                           "listener = \"jdk01d:1\"\n"
+                           "talker = \"node-a:0\"\n"
+                           "listener = \"node-d:1\"\n"
                            "[[disconnect]]\n"
-                           "talker = \"jdk01a:1\"\n"
-                           "listener = \"jdk01e:1\"\n"
+                           "talker = \"node-a:1\"\n"
+                           "listener = \"node-e:1\"\n"
                            "[[set_clock_source]]\n"
                            "entity = \"audio-iface\"\n"
                            "clock_domain = 0\n"
@@ -151,19 +151,19 @@ TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
     EXPECT_EQ(ops->size(), 3U);
     // Deterministic order: connect, then set_clock_source, then disconnect.
     EXPECT_TRUE((*ops)[0].kind == OpKind::Connect);
-    EXPECT_EQ((*ops)[0].talker.name, std::string{"jdk01a"});
+    EXPECT_EQ((*ops)[0].talker.name, std::string{"node-a"});
     EXPECT_EQ((*ops)[0].listener.unique_id, 1U);
     EXPECT_TRUE((*ops)[1].kind == OpKind::SetClockSource);
     EXPECT_EQ((*ops)[1].entity, std::string{"audio-iface"});
     EXPECT_EQ((*ops)[1].clock_source, 2U);
     EXPECT_TRUE((*ops)[2].kind == OpKind::Disconnect);
-    EXPECT_EQ((*ops)[2].listener.name, std::string{"jdk01e"});
+    EXPECT_EQ((*ops)[2].listener.name, std::string{"node-e"});
 }
 
 TEST(atdecc_ctl_batch, missing_listener_is_error)
 {
     auto doc = toml::parse("[[connect]]\n"
-                           "talker = \"jdk01a:0\"\n");
+                           "talker = \"node-a:0\"\n");
     EXPECT_TRUE(doc.has_value());
     std::string err;
     auto ops = parse_batch_ops(*doc, err);

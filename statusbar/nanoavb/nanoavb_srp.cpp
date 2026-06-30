@@ -86,7 +86,7 @@ auto MvrpHandler::get_vlan_state(uint16_t vlan_id) const noexcept -> VlanState
 
 auto MvrpHandler::receive_packet(std::span<uint8_t const> packet, TimePoint now) -> void
 {
-    // Skeleton validation kept for compatibility with the old tests.
+    // Minimal skeleton validation of the MVRP PDU header.
     if (packet.size() < 3) {
         return;
     }

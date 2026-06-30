@@ -19,8 +19,8 @@
 #              runs for STARTUP_GRACE + SETTLE + DURATION; the startup+settle
 #              prefix is captured but trimmed from the analysis so the reported
 #              latency/loss reflect steady state, not connect-time transients.
-#   NODE_A     ssh host for node A   (e.g. jdk01a)
-#   NODE_B     ssh host for node B   (e.g. jdk01b-tunnel)
+#   NODE_A     ssh host for node A   (e.g. node-a)
+#   NODE_B     ssh host for node B   (e.g. node-b-tunnel)
 #   EXTRA...   any extra args appended to the entity cmdline on BOTH nodes
 #              (e.g. --udptun.redundant --udptun.temporal_shift_ms=5)
 #
@@ -41,11 +41,11 @@
 #
 # Examples:
 #   # 30-min A<->B telemetry test, reconnect both MOTUs after launch:
-#   tunnel_test.sh -A 'statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=jdk01A:0 --listener=8A:0' \
-#                  1800 jdk01a jdk01b-tunnel
+#   tunnel_test.sh -A 'statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=node-a:0 --listener=node-b:0' \
+#                  1800 node-a node-b-tunnel
 #
 #   # 5-min test with redundancy enabled:
-#   tunnel_test.sh 300 jdk01a jdk01b-tunnel -- --udptun.redundant --udptun.temporal_shift_ms=5
+#   tunnel_test.sh 300 node-a node-b-tunnel -- --udptun.redundant --udptun.temporal_shift_ms=5
 #
 set -euo pipefail
 

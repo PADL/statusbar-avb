@@ -50,7 +50,7 @@ TEST(stream_counters, am824_cadence_tv0_not_counted_as_not_valid)
 
     EXPECT_EQ(c.frames_rx.load(), 100U);
     EXPECT_EQ(c.timestamp_valid.load(), 75U);     // 3 of every 4
-    EXPECT_EQ(c.timestamp_not_valid.load(), 0U);  // <-- the bug this fixes
+    EXPECT_EQ(c.timestamp_not_valid.load(), 0U);  // <-- off-SYT tv=0 packets must NOT count as TIMESTAMP_NOT_VALID
     EXPECT_EQ(c.unsupported_format.load(), 0U);
     EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
 }

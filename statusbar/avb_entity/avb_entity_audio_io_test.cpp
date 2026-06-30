@@ -190,8 +190,8 @@ TEST(audio_io_udptun, redundancy_bit_is_collision_proof_and_owlm_maskable)
     EXPECT_EQ(BIT & (BIT - 1), uint64_t{0});                             // exactly one bit
     EXPECT_EQ(BIT & ~MID, uint64_t{0});                                  // inside owlm's masked middle bytes
     for (uint64_t const eid :
-         {0x2ccf67fffedfd196ULL,              // jdk01A (b4 = 0xFE)
-          0x2ccf67fffee01360ULL,              // jdk01E
+         {0x020000fffedfd196ULL,              // node-a (b4 = 0xFE)
+          0x020000fffee01360ULL,              // node-e
           0xFFFFFFFFFFFFFFFFULL}) {           // adversarial: every bit set
         uint64_t const primary = eid & ~BIT;  // entity force-clears the flag
         uint64_t const redundant = primary | BIT;
@@ -292,7 +292,7 @@ TEST(audio_io_print, print_state_does_not_crash)
 
 //
 // Talker-on-listener transmit gate (don't put a stream on the wire when no
-// listener is ready/connected). Hardware-verified on jdk01a: gate on + no
+// listener is ready/connected). Hardware-verified on node-a: gate on + no
 // listener -> AM824/AAF tx=0; gate off -> tx climbs at the Class-A rate.
 //
 
@@ -334,7 +334,7 @@ TEST(audio_io_gate, disabled_allows_all_talkers)
 // entity, it sends a CONNECT_RX_COMMAND to OUR listener; our listener must relay
 // a CONNECT_TX_COMMAND to that talker, and on the talker's CONNECT_TX_RESPONSE
 // answer the controller with CONNECT_RX_RESPONSE(Success) and mark the sink
-// connected. Hardware symptom this guards against: a "connect the audio interface -> jdk01a"
+// connected. Hardware symptom this guards against: a "connect the audio interface -> node-a"
 // timing out because our listener never emitted the CONNECT_TX relay. The entity
 // MUST construct a listener whose entity id matches what it advertises (so the
 // listener_entity_id in the command matches) and whose stream count covers the

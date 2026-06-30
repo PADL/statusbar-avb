@@ -166,7 +166,7 @@ auto run_offrate(double ppm, bool use_discipline, int64_t* worst_after_warmup = 
 }  // namespace
 
 // Without discipline, a +172 ppm off-GPS source drifts the frame-counted TAI by
-// ~172 us over one second (the bug: ~500 ms/hour out of the far egress window).
+// ~172 us over one second (the failure mode: ~500 ms/hour out of the far egress window).
 TEST(audio_ingest_discipline, undisciplined_source_drifts)
 {
     int64_t const drift_1s = run_offrate(172.0, /*use_discipline=*/false);

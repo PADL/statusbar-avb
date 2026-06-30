@@ -133,8 +133,8 @@ void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
     static constexpr std::array<std::string_view, 5> examples{
         "--interface=eth0 --command=list",
-        "--interface=eth0 --command=connect --talker=jdk01a:0 --listener=jdk01d:0",
-        "--interface=eth0 --command=set-clock-source --entity=the audio interface --clock-source=1",
+        "--interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0",
+        "--interface=eth0 --command=set-clock-source --entity=node-a --clock-source=1",
         "--interface=eth0 --command=batch --file=ops.toml",
         "--interface=eth0 --command=supervise --file=ops.toml",
     };
@@ -373,7 +373,7 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
 // OR no reply at all; the caller then (re)asserts the connection, which is
 // harmless because the listener treats a CONNECT_RX for an already-connected
 // stream as a no-op (idempotent). So a listener that doesn't answer GET_RX_STATE
-// (e.g. a Meyer Galaxy) still gets connected without churn.
+// still gets connected without churn.
 auto leg_connected(
     MessageReactor& reactor,
     ControllerSimple& ctrl,

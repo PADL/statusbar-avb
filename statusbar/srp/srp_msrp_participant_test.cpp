@@ -685,8 +685,8 @@ TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
     EXPECT_TRUE(a.listener_permits_transmit(sid));  // registered (Registrar In)
 
     // Fire A's own LeaveAll many times (each ~20 s jump) with NO re-Join delivered
-    // from b. Before the fix this aged the registrar In -> Lv -> Mt and the gate
-    // went false; now our own LeaveAll never touches our Registrars, so it holds.
+    // from b. Our own LeaveAll must never age our own Registrars (In -> Lv -> Mt):
+    // it never touches them, so the transmit gate holds.
     for (int i = 0; i < 6; ++i) {
         t = clock.advance(std::chrono::seconds(20));
         a.tick(t);
@@ -1327,9 +1327,10 @@ TEST(msrp_participant, declared_attribute_reasserts_each_periodic)
     // Regression (IEEE 802.1Q-2014 Clause 10.7.5.23): a declared attribute MUST
     // keep being re-transmitted on the ~1 s PeriodicTransmissionTime
     // (Applicant Qa -> Aa -> JoinIn) so a bridge/switch registrar stays fresh.
-    // The bug: the participant emitted the initial declaration once and then
-    // went silent, so the switch's registration aged out and it dropped the
-    // reserved stream. Over 5 s we must see multiple periodic re-assertions.
+    // The failure mode this guards: a participant that emits the initial
+    // declaration once and then goes silent lets the switch's registration age
+    // out, dropping the reserved stream. Over 5 s we must see multiple periodic
+    // re-assertions.
     MsrpParticipant a{test_msrp_config(), 0xaa11};
     Fabric fab{};
     a.set_send_pdu(fab.make_a_sender());
@@ -1391,7 +1392,7 @@ TEST(msrp_participant_decode, domain_multi_value_increments_class_id_and_priorit
 {
     // 35.1.11: Domain increments BOTH SRclassID and SRclassPriority per value.
     // A 2-value vector based at class B (5, prio 2) must also register class A
-    // (6, prio 3) -- previously index>0 was silently dropped.
+    // (6, prio 3) -- every value past index 0 must register, not be dropped.
     MsrpParticipant p{test_msrp_config(), 0xa00e};
     TestClock clock{};
     p.start(clock.now);

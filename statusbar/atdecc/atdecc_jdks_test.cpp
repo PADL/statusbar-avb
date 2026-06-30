@@ -197,15 +197,15 @@ TEST(jdks_ipv4_blob, flag_accessors)
 TEST(jdks_ipv4_blob, set_address)
 {
     Ipv4ParamsBlob params{};
-    // 192.168.1.100 = 0xC0A80164
-    params.ipv4_address = 0xC0A80164U;
+    // 192.0.2.100 = 0xC0000264
+    params.ipv4_address = 0xC0000264U;
     params.ipv4_netmask = 0xFFFFFF00U;  // 255.255.255.0
-    params.ipv4_gateway = 0xC0A80101U;  // 192.168.1.1
+    params.ipv4_gateway = 0xC0000201U;  // 192.0.2.1
     params.flags = ipv4_flags::IPV4_ADDRESS_VALID | ipv4_flags::IPV4_NETMASK_VALID | ipv4_flags::IPV4_GATEWAY_VALID;
 
-    EXPECT_EQ(static_cast<uint32_t>(params.ipv4_address), 0xC0A80164U);
+    EXPECT_EQ(static_cast<uint32_t>(params.ipv4_address), 0xC0000264U);
     EXPECT_EQ(static_cast<uint32_t>(params.ipv4_netmask), 0xFFFFFF00U);
-    EXPECT_EQ(static_cast<uint32_t>(params.ipv4_gateway), 0xC0A80101U);
+    EXPECT_EQ(static_cast<uint32_t>(params.ipv4_gateway), 0xC0000201U);
     EXPECT_TRUE(params.is_address_valid());
     EXPECT_TRUE(params.is_netmask_valid());
     EXPECT_TRUE(params.is_gateway_valid());

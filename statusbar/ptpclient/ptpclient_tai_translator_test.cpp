@@ -24,7 +24,7 @@ constexpr std::int64_t k_tai_offset = 37'000'000'000LL;
 // the master clock free-runs from an arbitrary boot-ish epoch at a
 // constant ppm offset from GPS:
 //   master(utc) = master_epoch + (utc - utc0) * r
-// jdk01a-like numbers: epoch ~37.9 days, +45 ppm.
+// node-a-like numbers: epoch ~37.9 days, +45 ppm.
 struct SimClocks
 {
     std::int64_t utc0 = 1'780'000'000'000'000'000LL;      // ~2026 in UTC ns
@@ -134,7 +134,7 @@ TEST(gps_tai_translator, reset_returns_to_identity)
     EXPECT_EQ(tr.tai_ns(42), std::int64_t{42});
 }
 
-// Regression for the udptun_session integration bug found on the a-e hardware
+// Guards the udptun_session TAI-translation invariant (two-node hardware case)
 // run (2026-06-10): the wire timestamp must be stamped through ONE consistent
 // master-time source for both TX and RX, or the per-direction error fails to
 // cancel and the measured fwd+rev "RTT" goes impossibly negative.
@@ -147,16 +147,16 @@ TEST(gps_tai_translator, reset_returns_to_identity)
 // stamp carries -D and the receiver's does not, D does NOT cancel in fwd+rev.
 //
 // This models two clock-aligned nodes (different PHC epochs) and shows:
-//   - stamping TX via the bridge-now source (the bug) yields fwd+rev < 0;
-//   - stamping TX via the SAME master_clock(mraw) source RX uses (the fix)
+//   - stamping TX via the bridge-now source (the broken path) yields fwd+rev < 0;
+//   - stamping TX via the SAME master_clock(mraw) source RX uses (the correct path)
 //     recovers the true round-trip transit.
 TEST(gps_tai_translator, tx_must_share_rx_master_source)
 {
     constexpr std::int64_t k_tai = 37'000'000'000LL;
     // True time == utc == mraw (1:1). Each node's PHC master = mraw + epoch.
-    // bridge_now() diverges from master(mraw) by a constant D — the bug source.
+    // bridge_now() diverges from master(mraw) by a constant D — the source of the error.
     constexpr std::int64_t epoch_a = 3'000'000'000'000'000LL;  // ~34.7 days
-    constexpr std::int64_t epoch_e = 3'274'000'000'000'000LL;  // ~37.9 days (jdk01a-like)
+    constexpr std::int64_t epoch_e = 3'274'000'000'000'000LL;  // ~37.9 days (node-a-like)
     constexpr std::int64_t d_a = 180'000'000LL;                // 180 ms bridge/translator gap
     constexpr std::int64_t d_e = 205'000'000LL;
     constexpr std::int64_t t_ea = 12'000'000LL;  // e->a transit (12 ms)
@@ -183,15 +183,15 @@ TEST(gps_tai_translator, tx_must_share_rx_master_source)
     // a->e: A sends at `send`, E receives at send + t_ae.
     std::int64_t const rx_rev = e.tai_ns(master_e(send + t_ae));
 
-    // --- BUG: TX stamps via bridge_now == master(mraw) + D ---
+    // --- BROKEN PATH: TX stamps via bridge_now == master(mraw) + D ---
     std::int64_t const tx_fwd_bug = e.tai_ns(master_e(send) + d_e);
     std::int64_t const tx_rev_bug = a.tai_ns(master_a(send) + d_a);
     std::int64_t const fwd_bug = rx_fwd - tx_fwd_bug;
     std::int64_t const rev_bug = rx_rev - tx_rev_bug;
-    // The hallmark of the bug: an impossible negative round-trip.
+    // The hallmark of the broken path: an impossible negative round-trip.
     EXPECT_TRUE((fwd_bug + rev_bug) < 0);
 
-    // --- FIX: TX stamps via the SAME master(mraw) source RX uses ---
+    // --- CORRECT PATH: TX stamps via the SAME master(mraw) source RX uses ---
     std::int64_t const tx_fwd_fix = e.tai_ns(master_e(send));
     std::int64_t const tx_rev_fix = a.tai_ns(master_a(send));
     std::int64_t const fwd_fix = rx_fwd - tx_fwd_fix;

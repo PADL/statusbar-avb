@@ -2859,15 +2859,15 @@ def run_tests() -> int:
     # _pair_id_from_eui64 zeros the redundancy mid bytes
     expect(
         "pair_id primary",
-        _pair_id_from_eui64("2c:cf:67:00:00:df:d1:96") == "2c:cf:67:00:00:df:d1:96",
+        _pair_id_from_eui64("02:00:00:00:00:df:d1:96") == "02:00:00:00:00:df:d1:96",
     )
     expect(
         "pair_id redundant",
-        _pair_id_from_eui64("2c:cf:67:00:01:df:d1:96") == "2c:cf:67:00:00:df:d1:96",
+        _pair_id_from_eui64("02:00:00:00:01:df:d1:96") == "02:00:00:00:00:df:d1:96",
     )
 
     # _vec_pair_ids: vectorized pair_id derivation matches the scalar version
-    senders = np.array(["2c:cf:67:00:00:df:d1:96", "2c:cf:67:00:01:df:d1:96"])
+    senders = np.array(["02:00:00:00:00:df:d1:96", "02:00:00:00:01:df:d1:96"])
     pair_ids = _vec_pair_ids(senders)
     expect(
         "vec_pair_ids primary == scalar", pair_ids[0] == _pair_id_from_eui64(senders[0])
@@ -2882,10 +2882,10 @@ def run_tests() -> int:
 
     csv = (
         "rx_gptp_ns,presentation_time_ns,latency_ns,sender_eui64,sequence,interval_us,role\n"
-        "100,80,1000000,2c:cf:67:00:00:df:d1:96,1,1000,remote_primary\n"
-        "200,180,2000000,2c:cf:67:00:00:df:d1:96,2,1000,remote_primary\n"
-        "350,330,3000000,2c:cf:67:00:01:df:d1:96,3,1000,remote_redundant\n"
-        "400,380,80000000,2c:cf:67:00:00:df:d1:96,4,1000,remote_primary\n"
+        "100,80,1000000,02:00:00:00:00:df:d1:96,1,1000,remote_primary\n"
+        "200,180,2000000,02:00:00:00:00:df:d1:96,2,1000,remote_primary\n"
+        "350,330,3000000,02:00:00:00:01:df:d1:96,3,1000,remote_redundant\n"
+        "400,380,80000000,02:00:00:00:00:df:d1:96,4,1000,remote_primary\n"
     )
     with tempfile.TemporaryDirectory() as td:
         csv_path = Path(td) / "test.csv"
@@ -2941,7 +2941,7 @@ def run_tests() -> int:
             "rx_gptp_ns,presentation_time_ns,latency_ns,sender_eui64,"
             "sequence,interval_us,role"
         ]
-        sender = "2c:cf:67:00:00:df:d1:96"
+        sender = "02:00:00:00:00:df:d1:96"
         for i, t_s in enumerate([0.0, 2.5, 5.0, 7.5, 10.0]):
             rx = int(t_s * 1_000_000_000)
             rows.append(f"{rx},{rx - 20},1000000,{sender},{i + 1},1000,remote_primary")
@@ -2997,8 +2997,8 @@ def run_tests() -> int:
         # recovered / true_loss tracking spans the full capture so the
         # trimmed-off copy still counts. Only a seq with genuinely no
         # primary copy anywhere is a real recovered.
-        prim_sender = "2c:cf:67:00:00:df:d1:96"
-        redu_sender = "2c:cf:67:00:01:df:d1:96"
+        prim_sender = "02:00:00:00:00:df:d1:96"
+        redu_sender = "02:00:00:00:01:df:d1:96"
         straddle_rows = [
             "rx_gptp_ns,presentation_time_ns,latency_ns,sender_eui64,"
             "sequence,interval_us,role"
@@ -3266,7 +3266,7 @@ def run_tests() -> int:
         # 4 good rows are preserved; with a larger chunksize the whole
         # chunk would be lost (the realistic loss is one chunk of rows).
         trunc_path = Path(td) / "test_trunc.csv"
-        trunc_path.write_text(csv + "500,480,4000000,2c:cf:67:00:00:df:d")
+        trunc_path.write_text(csv + "500,480,4000000,02:00:00:00:00:df:d")
         trunc_out = Path(td) / "test_trunc.parquet"
         meta_t = summarize_csv(
             trunc_path,
@@ -3285,7 +3285,7 @@ def run_tests() -> int:
         # Truncated gzip CSV — same expectation through the streaming path.
         trunc_gz = Path(td) / "test_trunc.csv.gz"
         with gzip.open(trunc_gz, "wt") as f:
-            f.write(csv + "500,480,4000000,2c:cf:67:00:00:df:d")
+            f.write(csv + "500,480,4000000,02:00:00:00:00:df:d")
         trunc_gz_out = Path(td) / "test_trunc_gz.parquet"
         meta_tg = summarize_csv(
             trunc_gz,
@@ -3399,8 +3399,8 @@ def run_tests() -> int:
     # CSV round-trip via StringIO (used by `events`)
     csv_io = io.StringIO(
         "rx_gptp_ns,presentation_time_ns,latency_ns,sender_eui64,sequence,interval_us,role\n"
-        "100,90,10,2c:cf:67:00:00:df:d1:96,1,1000,remote_primary\n"
-        "200,180,20,2c:cf:67:00:00:df:d1:96,2,1000,remote_primary\n"
+        "100,90,10,02:00:00:00:00:df:d1:96,1,1000,remote_primary\n"
+        "200,180,20,02:00:00:00:00:df:d1:96,2,1000,remote_primary\n"
     )
     df = pd.read_csv(csv_io, dtype=CSV_DTYPES)
     expect("loader rows", len(df) == 2)

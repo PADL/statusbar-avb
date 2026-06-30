@@ -62,7 +62,7 @@ statusbar-nanoavb       --interface=eth0 --ptp.driver=system
 
 ```sh
 statusbar-atdecc-ctl --interface=eth0 --command=list
-statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=jdk01a:0 --listener=jdk01d:0
+statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0
 statusbar-atdecc-ctl --interface=eth0 --command=set-clock-source --entity=MyDevice --clock-domain=0 --clock-source=1
 statusbar-acmp-controller --interface=eth0 --action=CONNECT \
   --talker-entity-id=00:11:22:33:44:55:66:77 --talker-uid=0 \
@@ -70,8 +70,8 @@ statusbar-acmp-controller --interface=eth0 --action=CONNECT \
 statusbar-atdecc-controller --interface=eth0
 statusbar-atdecc-monitor --interface=eth0 --show-descriptors
 statusbar-atdecc-monitor --pcap=capture.pcapng --enumerate
-statusbar-aem-get-counters --interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 --descriptor-index=0
-statusbar-aem-set-clock-source --interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 --clock-domain-index=0 --clock-source-index=5
+statusbar-aem-get-counters --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=0
+statusbar-aem-set-clock-source --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --clock-domain-index=0 --clock-source-index=5
 statusbar-aecp-aa-analyzer --input=capture.pcapng --verbose
 statusbar-descriptor-storage entity.aem
 statusbar-aem-entity-blob --dual --channels 8 --sample-rate 96000 --out entity.bin

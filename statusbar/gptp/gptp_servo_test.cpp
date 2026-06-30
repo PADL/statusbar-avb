@@ -3,8 +3,8 @@
 
 // Unit tests for the gPTP ClockSlaveControl / ServoLoop PI controller.
 //
-// Focuses on the two branches that previously only had smoke coverage and
-// that are the exact sites of the media-clock integrator-rail regression:
+// Focuses on the two branches that protect the media-clock integrator rail
+// against a stuck or poisoned integrator:
 //
 //   1. Negative-time-jump suppression: when the grandmaster steps backwards
 //      between two consecutive syncs the servo must suppress that sample
@@ -109,7 +109,7 @@ TEST(gptp_servo, negative_time_jump_suppresses_without_poisoning_integrator)
     EXPECT_TRUE(approx(out.rate_ratio, 1.0));
     EXPECT_FALSE(out.frequency_adjust_ppb.has_value());
     EXPECT_FALSE(out.phase_jump_ns.has_value());
-    // The integrator must be untouched — this is the bug the suppression fixes.
+    // The integrator must be untouched — this is what the suppression protects.
     EXPECT_TRUE(approx(servo.current_ppm(), ppm_before));
 }
 

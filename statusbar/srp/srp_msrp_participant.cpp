@@ -1232,7 +1232,7 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
     // Sticky-Listener exception: when redeclare_registered_listeners_ is set,
     // registered Listener attributes ARE re-emitted (the cfea332 echo, for the
     // Listener type only -- safe because a Listener has no two-source conflict).
-    // See set_redeclare_registered_listeners() for the rationale (jdk01E -> the DSP processor).
+    // See set_redeclare_registered_listeners() for the rationale (node-e -> the DSP processor).
     bool const allow_register_redeclare = redeclare_registered_listeners_ && (attr_type == AttributeType::Listener);
     auto const may_emit = [&](auto const& rec) { return rec.operation == Operation::Declare || allow_register_redeclare; };
     // A run is a maximal sequence of records that (a) want to tx this pass, (b)

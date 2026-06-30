@@ -10,7 +10,7 @@
 // selecting the INPUT_STREAM-type CLOCK_SOURCE whose location is Stream Input N.
 //
 //   statusbar-aem-set-clock-source --interface=eth0 \
-//     --target-entity-id=00:1c:ab:ff:fe:00:76:04 \
+//     --target-entity-id=00:11:22:ff:fe:33:44:55 \
 //     --clock-domain-index=0 --clock-source-index=5
 //
 // Discovers the target via ADP (to learn its MAC), sends the command, prints the
@@ -252,9 +252,9 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
 {
     static constexpr std::array<std::string_view, 2> examples{
-        "--interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 \\\n"
+        "--interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 \\\n"
         "    --clock-domain-index=0 --clock-source-index=5",
-        "--interface=eth0 --action=GET --target-entity-id=00:1c:ab:ff:fe:00:76:04",
+        "--interface=eth0 --action=GET --target-entity-id=00:11:22:ff:fe:33:44:55",
     };
     statusbar::config::default_print_usage(prog, specs, "", examples);
 }

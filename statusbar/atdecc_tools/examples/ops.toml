@@ -2,27 +2,27 @@
 #   statusbar-atdecc-ctl --interface=eth0 --command=batch --file=ops.toml
 #
 # Endpoints are "NAME:UID" where NAME is the entity name (hostname-derived for
-# our nodes; e.g. "jdk01a"), or a raw EUI-64, matched case-insensitively by
+# our nodes; e.g. "node-a"), or a raw EUI-64, matched case-insensitively by
 # substring against discovered entities. UID is the stream's unique_id
 # (0 = AM824, 1 = AAF on the dual audio entity). Order of execution is always:
 # all [[connect]], then all [[set_clock_source]], then all [[disconnect]].
 
 # --- Connect all four A<->D streams (both formats, both directions) ---
 [[connect]]
-talker   = "jdk01a:0"   # AM824
-listener = "jdk01d:0"
+talker   = "node-a:0"   # AM824
+listener = "node-d:0"
 
 [[connect]]
-talker   = "jdk01a:1"   # AAF
-listener = "jdk01d:1"
+talker   = "node-a:1"   # AAF
+listener = "node-d:1"
 
 [[connect]]
-talker   = "jdk01d:0"   # reverse, AM824
-listener = "jdk01a:0"
+talker   = "node-d:0"   # reverse, AM824
+listener = "node-a:0"
 
 [[connect]]
-talker   = "jdk01d:1"   # reverse, AAF
-listener = "jdk01a:1"
+talker   = "node-d:1"   # reverse, AAF
+listener = "node-a:1"
 
 # --- Point a third device's clock at our stream ---
 # Read the available clock-source indices first with:

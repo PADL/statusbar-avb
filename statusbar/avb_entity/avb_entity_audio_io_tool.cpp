@@ -187,8 +187,8 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<bool>(
         "sweep.enable",
         "Test signal: emit a repeating logarithmic sine sweep as the UDP TUNNEL source (replaces the listener "
-        "source / silence). The peer site receives the sweep -- e.g. jdk01B generates it -> tunnel -> jdk01A the audio interface "
-        "8A ch out; patch out->in to loop it back through the tunnel. Default off.",
+        "source / silence). The peer site receives the sweep -- e.g. node-b generates it -> tunnel -> node-a's audio interface "
+        "audio-interface ch out; patch out->in to loop it back through the tunnel. Default off.",
         config.entity.sweep_enable,
         [&](auto v) { config.entity.sweep_enable = v; });
     specs.add<double>("sweep.f_start_hz", "Sweep start frequency Hz (default 20)", config.entity.sweep_f_start_hz, [&](auto v) {
@@ -697,7 +697,7 @@ auto main(int argc, char** argv) -> int
     // entity_id: a modified EUI-64 derived from the interface MAC (OUI:FF:FE:NIC),
     // so two nodes running the same blob never collide on the wire (ACMP/AECP
     // address entities by entity_id). entity_name: the hostname, so a controller
-    // can connect by node name (e.g. `--talker jdk01a:0`).
+    // can connect by node name (e.g. `--talker node-a:0`).
     if (config.entity.interface_name.empty()) {
         std::print(stderr, "Error: --interface=<iface> is required\n");
         print_usage(argv[0], specs);

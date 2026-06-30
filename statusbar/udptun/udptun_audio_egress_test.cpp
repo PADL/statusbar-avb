@@ -193,7 +193,7 @@ TEST(audio_egress_contiguous, variable_read_len_no_tear)
         }
         eg.submit(/*src_tai*/ static_cast<int64_t>(pk) * 4'000'000, p, 4);
     }
-    // Read variable counts (sum 20) on the fixed 4 ms grid; the old code would
+    // Read variable counts (sum 20) on the fixed 4 ms grid; a naive reader would
     // skip/dup a frame at every off-nominal read. Collect each frame's first byte.
     int const counts[] = {4, 5, 3, 4, 4};
     std::vector<uint8_t> got;

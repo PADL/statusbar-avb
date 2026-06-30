@@ -376,9 +376,8 @@ TEST(stun_loopback, mixed_family_pair_is_rejected)
 // waiting-poll interval after the second client shows up, NOT have to
 // wait a full (long) server refresh interval. The server is reactive and
 // never pushes Paired to an idle waiter, so a waiter only learns of
-// pairing on its own next REGISTER. With the old behavior (re-register
-// only every refresh_interval_ms) a staggered first client would not pair
-// until 15s of sim time elapsed; here the server refresh is 15s but the
+// pairing on its own next REGISTER. A waiter that only re-registered
+// every refresh_interval_ms would not pair until 15s of sim time elapsed; here the server refresh is 15s but the
 // client waiting-poll is 50ms, so pairing must complete far under 15s.
 TEST(stun_loopback, staggered_start_pairs_within_waiting_poll)
 {

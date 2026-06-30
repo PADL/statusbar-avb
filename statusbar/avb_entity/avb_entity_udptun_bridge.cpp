@@ -687,7 +687,7 @@ void EntityUdptunBridge::udptun_punch_service(int64_t now_tai_ns)
     // 2b) Egress-anchor self-heal: distinct from the socket teardown below (which
     // fires only when data STOPS). This catches DECODED tunnel AUDIO arriving while
     // the egress emits no real audio for a sustained window -- i.e. the playout
-    // timeline is stale (the punch->egress startup race that left jdk01a silent until
+    // timeline is stale (the punch->egress startup race that can leave a node silent until
     // a 2nd restart). Reset() it so it re-anchors on the next packet. Gated on real
     // audio (the telemetry rx_packets counter, decoded) not keepalives, so an idle tunnel doesn't
     // trip it; the ~22 ms WCL startup gap is far shorter than the 2 s window.

@@ -499,7 +499,7 @@ TEST(nanoavb_acmp_listener, is_connected_initially_false)
 // (here LISTENER_UNKNOWN_ID for an out-of-range sink) clear_pending()s but the
 // transition table still advances the SM into ConnectTxResp -- a dead-end with
 // nothing pending. The listener would then ignore every later controller command
-// (CONNECT_RX, GET_RX_STATE) forever. Hardware-observed on jdk01a: the listener
+// (CONNECT_RX, GET_RX_STATE) forever. Hardware-observed on node-a: the listener
 // went silent after hours while the talker kept answering. The per-tick watchdog
 // must detect the wedge (non-Waiting + nothing pending) and recover to Waiting.
 TEST(nanoavb_acmp_listener, wedge_on_error_path_recovers_via_watchdog)

@@ -14,9 +14,9 @@
 // The decoder owns no I/O. The output sink is a std::function that the
 // caller wires to wherever the samples should land — Bw64Writer for the
 // avtp-to-wav tool, an AudioStream for live monitoring, a network
-// pipe for retransmit, etc. This separation is the whole point of the
-// extraction: the decoding logic was previously bolted to the BWF
-// writer in the avtp_to_wav tool, with no way to repurpose it.
+// pipe for retransmit, etc. Keeping the decoder free of any one sink is
+// the whole point: the same decoding logic is reusable across tools
+// rather than tied to a single output path.
 //
 // Single-stream by design: caller is responsible for stream-id and VLAN
 // filtering before feeding payloads in. To handle multiple streams from

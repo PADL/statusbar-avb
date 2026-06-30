@@ -832,7 +832,7 @@ TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
         if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT || descriptor_index != 1) {
             return false;
         }
-        out.stream_id = Eui64{0x2c, 0xcf, 0x67, 0xe0, 0x13, 0x60, 0x00, 0x01};
+        out.stream_id = Eui64{0x02, 0x00, 0x00, 0xe0, 0x13, 0x60, 0x00, 0x01};
         out.stream_dest_mac = {0x91, 0xe0, 0xf0, 0x00, 0xfe, 0x01};
         out.stream_format = {0x02, 0x70, 0x08, 0x20, 0x00, 0x00, 0x00, 0x00};
         out.stream_vlan_id = doublet_t{2};
@@ -858,7 +858,7 @@ TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
     EXPECT_TRUE(resp.is_connected());
     EXPECT_TRUE(resp.is_stream_id_valid());
     EXPECT_TRUE(resp.is_stream_format_valid());
-    EXPECT_EQ(resp.stream_id, (Eui64{0x2c, 0xcf, 0x67, 0xe0, 0x13, 0x60, 0x00, 0x01}));
+    EXPECT_EQ(resp.stream_id, (Eui64{0x02, 0x00, 0x00, 0xe0, 0x13, 0x60, 0x00, 0x01}));
     EXPECT_EQ(resp.stream_vlan_id.get(), 2);
     EXPECT_EQ(resp.msrp_accumulated_latency.get(), 2'000'000U);
 }
@@ -1115,7 +1115,7 @@ TEST(nanoavb_entity_commands, get_stream_format_implemented)
     std::array<uint8_t, 4> command_data = {0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT[0]
     auto result = make_test_result(handler, header, command_data);
 
-    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // was NOT_IMPLEMENTED before the fix
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
     EXPECT_EQ(result.response_data().size(), AemStreamFormatPayload::LENGTH);  // 12
     EXPECT_EQ(result.response_data()[1], 0x05);                                // echoes descriptor_type = STREAM_INPUT
 }
@@ -1137,7 +1137,7 @@ TEST(nanoavb_entity_commands, get_sampling_rate_implemented)
     std::array<uint8_t, 4> command_data = {0x00, 0x02, 0x00, 0x00};  // AUDIO_UNIT[0]
     auto result = make_test_result(handler, header, command_data);
 
-    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // was NOT_IMPLEMENTED before the fix
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
     EXPECT_EQ(result.response_data().size(), AemSamplingRatePayload::LENGTH);  // 8
     auto const r = result.response_data();
     auto const sr = static_cast<uint32_t>(

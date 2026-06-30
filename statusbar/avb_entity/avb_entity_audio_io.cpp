@@ -152,7 +152,7 @@ auto channels_from_storage(DescriptorStorage const& storage) -> size_t
 }
 
 /// Serves this entity's descriptors from its .aem blob (symbol-aware), patching the
-/// two runtime-only seams build_entity_model used to bake in: the ENTITY identity
+/// two runtime-only seams that cannot live in a static blob: the ENTITY identity
 /// (entity_id/model_id/name/firmware, from config) and the AVB_INTERFACE network +
 /// gPTP identity (live NIC MAC, its modified-EUI-64 clock identity, and the slave-only
 /// gPTP params the blob leaves zero). Every other descriptor is served verbatim.

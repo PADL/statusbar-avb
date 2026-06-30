@@ -59,8 +59,8 @@ The ~1.7 µs through the relay is **within the GPS grandmaster's 3 µs spec** �
 performing to spec, not broken. The same AVB switch delivers ~20–30 ns
 when it free-runs as GM, so the **boundary clocks are not the problem**: a boundary
 clock is a slave on its upstream port and can only relay its lock to the GM. The
-~±500 ns originates *at the GPS grandmaster*; AVB switches at both sites (LA and
-Saratoga) reproduce the same degradation, so it is **switch-brand-independent.**
+~±500 ns originates *at the GPS grandmaster*; AVB switches at both sites (Site C and
+Site B) reproduce the same degradation, so it is **switch-brand-independent.**
 802.1AS conformance is otherwise clean (`gmTimeBaseIndicator`/`lastGmPhaseChange`
 stable = no GM phase jumps; large boundary-clock residence ~1.15–1.77 ms is legal).
 A DSP-processor endpoint shows a **yellow "AVB sync" LED + audible sample slips
@@ -87,11 +87,11 @@ telecom-grade GM (Microsemi TP-2700 / Orolia / Meinberg, sub-100 ns).
 
 | Site | Pi5 nodes | GPS grandmaster web IP | gPTP clock id |
 |---|---|---|---|
-| Campbell | jdk01a, jdk01d | `192.168.1.90` | `9006f2.fffe.15cca3` |
-| Saratoga | jdk01b | `192.168.1.20` | `9006f2.fffe.162c22` |
-| LA | jdk01e | (AVB switch segment) | `9006f2.fffe.15d213` |
+| Site A | node-a, node-d | `192.0.2.90` | `0200de.fffe.000001` |
+| Site B | node-b | `192.0.2.20` | `0200de.fffe.000002` |
+| Site C | node-e | (AVB switch segment) | `0200de.fffe.000003` |
 
-Note: at Campbell the GPS grandmaster has a 3D GPS lock but is **not** the active gPTP GM
+Note: at Site A the GPS grandmaster has a 3D GPS lock but is **not** the active gPTP GM
 (the AVB switch free-runs as GM); fix is on the GPS grandmaster's PTP Config page
 (`Packet Output = 802.1AS`).
 

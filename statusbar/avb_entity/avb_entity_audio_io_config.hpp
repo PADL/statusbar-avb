@@ -92,7 +92,7 @@ struct AvbEntityAudioIOConfig
     /// 96 kHz, the largest size that keeps the datagram within one Ethernet MTU at
     /// 8 ch × int32 (32 B/frame): header (44 B) + 44×32 (1408 B) = 1452 B ≤ 1472
     /// (1500 − 20 IPv4 − 8 UDP), so NO IP fragmentation. 48 frames = a round 500 us
-    /// but 1580 B → fragments into 2. Verified on the wire (jdk01b, 2026-06-08).
+    /// but 1580 B → fragments into 2. Verified on the wire (node-b, 2026-06-08).
     uint16_t udptun_frames_per_packet{44};
 
     /// Inter-site UDPTUN egress (RX/playout). When enabled, the entity binds a UDP
@@ -222,9 +222,9 @@ struct AvbEntityAudioIOConfig
     /// Test-signal generator: a repeating logarithmic sine sweep (chirp) on ONE
     /// channel of the UDP tunnel source. When enabled, the sweep REPLACES the
     /// tunnel's normal source (the AVB listener stream / silence keepalive) so the
-    /// peer site receives the sweep -- e.g. jdk01B generates it, it crosses the
-    /// tunnel to jdk01A's the audio interface channel `sweep_channel` out, and a physical patch
-    /// 8A ch1 -> ch2 returns it through the tunnel for a round-trip latency/
+    /// peer site receives the sweep -- e.g. node-b generates it, it crosses the
+    /// tunnel to node-a's audio interface channel `sweep_channel` out, and a physical patch
+    /// the audio interface ch1 -> ch2 returns it through the tunnel for a round-trip latency/
     /// continuity test. Does NOT affect the local talker (the local the audio interface still gets
     /// the tone/de-tunneled audio). Disabled by default.
     bool sweep_enable{false};

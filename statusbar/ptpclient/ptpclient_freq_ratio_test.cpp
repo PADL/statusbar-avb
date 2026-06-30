@@ -104,7 +104,7 @@ TEST(kalman_ratio_tracker, robust_noisy_startup)
 
 TEST(kalman_ratio_tracker, seed_step_does_not_bake_bogus_rate)
 {
-    // Regression for the +83345 ppm media-clock bug (jdk01a 2026-06-14): the
+    // Guards against a large transient offset railing the rate to +83345 ppm: the
     // entity took its first offset sample, then ptp4l stepped the PHC ~21 ms
     // before the second, so the 2-sample seed computed f0 = 21ms/0.25s ≈ +84000
     // ppm and then "slowly slewed" back over months. The seed must REJECT a
@@ -127,7 +127,7 @@ TEST(kalman_ratio_tracker, seed_step_does_not_bake_bogus_rate)
 
 TEST(kalman_ratio_tracker, runtime_step_reacquires_true_rate)
 {
-    // Regression for jdk01e 2026-06-14: the filter locked the true rate, then
+    // Guards a lock-then-step scenario: the filter locks the true rate, then
     // chrony stepped CLOCK_REALTIME to GPS (~+1.78e9 s) so PHC-REALTIME jumped a
     // huge negative amount. A "snap phase, keep frequency" jump FROZE a corrupted
     // rate (-28913 ppm) forever (it stopped calling update()). The filter must

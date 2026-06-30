@@ -175,7 +175,7 @@ auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
     // for a fresh CONNECT_RX or GET_RX_STATE and (with nothing pending) no
     // timeout to fire, so the listener would silently ignore EVERY later
     // controller command until the process restarts. Recover to Waiting so the
-    // next command is serviced. (Hardware-observed on jdk01a: listener stopped
+    // next command is serviced. (Hardware-observed on node-a: listener stopped
     // answering ACMP after hours while the talker kept working.)
     auto const st = sm_.current_state();
     if (!ctx_.has_pending && st != ListenerState::Waiting && st != ListenerState::Start) {
