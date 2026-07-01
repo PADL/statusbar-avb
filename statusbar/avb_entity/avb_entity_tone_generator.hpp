@@ -10,7 +10,7 @@
 ///   - stream 1: AAF (IEEE 1722 AVTP Audio Format, 32-bit PCM), N-channel 96 kHz
 ///   - stream 2: CRF (Clock Reference Format, Milan 48 kHz media clock)
 /// Each audio channel carries a continuous sine tone; by default the 8 channels
-/// are the white piano keys C2..C3 (C2, D2, E2, F2, G2, A2, B2, C3). The media
+/// are the white piano keys C4..C5 (C4, D4, E4, F4, G4, A4, B4, C5). The media
 /// clock is locked to gPTP at ratio r = 1.0 (no GPS-rate tracking). The entity
 /// model is loaded from a descriptor-storage blob declaring 0 stream inputs and
 /// 3 stream outputs (aem-entity-blob --tone).

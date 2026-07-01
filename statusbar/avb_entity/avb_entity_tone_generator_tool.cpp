@@ -6,7 +6,7 @@
 // Runs an AVB entity with THREE talker stream sources and no listeners:
 //   stream 0 AM824, stream 1 AAF (32-bit PCM), stream 2 CRF (Milan 48 kHz media
 //   clock). Each audio channel carries a continuous sine; by default the 8
-//   channels are the white piano keys C2..C3. The media clock is locked to gPTP
+//   channels are the white piano keys C4..C5. The media clock is locked to gPTP
 //   (r = 1.0). No inter-site tunnel, no listener.
 //
 // Usage: statusbar-avb-tone-generator --interface=eth0 --descriptor-storage=entity_tone.bin
@@ -112,8 +112,8 @@ struct Config
         .firmware_version = "1.0.0",
     };
 
-    /// Lowest white-key tone (MIDI note number). Default 36 = C2; each channel
-    /// takes the next white key up, so 8 channels = C2..C3.
+    /// Lowest white-key tone (MIDI note number). Default 60 = C4; each channel
+    /// takes the next white key up, so 8 channels = C4..C5.
     uint8_t base_midi_note{avb_entity::TONE_DEFAULT_BASE_MIDI_NOTE};
 
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
@@ -268,7 +268,7 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
         program_name,
         specs,
         "AVB Entity Tone Generator (talker-only AM824 + AAF + CRF)\n"
-        "Transmits 8 channels of continuous sine tones (white piano keys C2..C3 by default) as both an AM824 and an\n"
+        "Transmits 8 channels of continuous sine tones (white piano keys C4..C5 by default) as both an AM824 and an\n"
         "AAF 96 kHz stream, plus a CRF media clock. The media clock is locked to gPTP (r = 1.0).",
         examples);
     std::print(stderr, "\nGenerate the blob with: aem-entity-blob --tone --out entity_tone.bin\n");
