@@ -107,7 +107,7 @@ struct Config
         .vlan_id = 2,
         // The media clock is always gPTP-locked (r = 1.0) for the tone generator.
         .media_lock_to_gptp = true,
-        .tone_amplitude = 0.1F,  // -20 dBFS
+        .tone_amplitude = 0.5F,  // -6 dBFS
         .entity_name = "",
         .firmware_version = "1.0.0",
     };
@@ -202,7 +202,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         [&](auto v) { config.entity.packets_per_wake = static_cast<size_t>((v < 1) ? 1 : ((v > 16) ? 16 : v)); });
     specs.add<double>(
         "tone.amplitude",
-        "Per-channel tone amplitude, 0..1 linear (1.0 = 0 dBFS; default 0.1 = -20 dBFS)",
+        "Per-channel tone amplitude, 0..1 linear (1.0 = 0 dBFS; default 0.5 = -6 dBFS)",
         static_cast<double>(config.entity.tone_amplitude),
         [&](auto v) { config.entity.tone_amplitude = static_cast<float>(v); });
     specs.add<uint64_t>(
@@ -262,7 +262,7 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
 {
     static constexpr std::array<std::string_view, 2> examples{
         "--interface=eth0 --descriptor-storage=entity_tone.bin",
-        "--interface=eth0 --tone.base_note=36 --tone.amplitude=0.1",
+        "--interface=eth0 --tone.base_note=36 --tone.amplitude=0.5",
     };
     config::default_print_usage(
         program_name,
