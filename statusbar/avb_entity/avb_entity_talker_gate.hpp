@@ -7,13 +7,22 @@
 /// @brief TalkerGate — the per-stream "should this talker transmit?" gate,
 /// extracted from AvbEntityAudioIO (god-object phase 4).
 ///
-/// Spec-correct SR-class admission: a talker puts a stream on the wire only when
-/// BOTH an ACMP connection exists AND the downstream listener permits transmit via
-/// MSRP Listener Ready, the latter held across an MRP LeaveAll re-registration blip
-/// by a grace window. The gate is cross-thread: the MSRP listener-ready state is
-/// written by the reactor thread (note_listener_ready) and read by the media-timer
-/// thread (should_transmit), so the readiness flags + last-ready timestamps are
-/// atomic. Reads ACMP connection state + the gate-enable flag through references
+/// Spec-correct SR-class admission, evaluated PER STREAM and independently of any
+/// other stream (a CRF media-clock stream is a stream too — it must gate on its own
+/// ACMP connection + reservation, never ride the audio streams' gate). A talker puts
+/// stream `idx` on the wire only when all of its AVB preconditions hold:
+///   1. an ACMP connection exists for that stream (a controller connected a listener),
+///   2. the Talker Advertise attribute is declared — implied by (1)/(3): an ACMP
+///      connection and a peer Listener Ready only arise after our Talker Advertise is
+///      registered, so it needs no separate check,
+///   3. the downstream listener permits transmit via MSRP Listener Ready (held across
+///      an MRP LeaveAll re-registration blip by a grace window),
+///   4. the stream is Started (defaults true; a hook to stop a stream without tearing
+///      down its ACMP connection / reservation).
+/// The gate is cross-thread: the MSRP listener-ready + stream-started state is written
+/// by the reactor thread (note_listener_ready / note_stream_started) and read by the
+/// media-timer thread (should_transmit), so those flags + the last-ready timestamps
+/// are atomic. Reads ACMP connection state + the gate-enable flag through references
 /// bound at construction.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
@@ -31,7 +40,13 @@ struct TalkerGate
     TalkerGate(AvbEntityAudioIOConfig const& config, nanoavb::NanoAvbComponents const& components) noexcept
         : config_{config}
         , components_{components}
-    {}
+    {
+        // Stream Started defaults true: a stream is admitted once ACMP-connected +
+        // Listener Ready unless explicitly stopped via note_stream_started().
+        for (auto& started : stream_started_) {
+            started.store(true, std::memory_order_relaxed);
+        }
+    }
 
     /// One per talker stream: 0=AM824, 1=AAF, 2=CRF.
     static constexpr size_t STREAM_COUNT = 3;
@@ -46,9 +61,21 @@ struct TalkerGate
     /// MSRP advertises); stamps the readiness flag + last-ready time.
     void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready);
 
+    /// Any thread: mark talker stream @p idx Started (@p started true) or Stopped.
+    /// Stopped suppresses transmit without tearing down the ACMP connection or the
+    /// reservation. Defaults Started; out-of-range indices are ignored.
+    void note_stream_started(uint16_t idx, bool started) noexcept
+    {
+        if (idx < stream_started_.size()) {
+            stream_started_[idx].store(started, std::memory_order_relaxed);
+        }
+    }
+
     /// Media-timer thread: may talker stream @p idx put its stream on the wire at
-    /// steady-clock time @p now_ns? True if gating is disabled, or an ACMP
-    /// connection exists AND MSRP Listener Ready is set (or within GRACE_NS).
+    /// steady-clock time @p now_ns? True if gating is disabled, or ALL of this
+    /// stream's own preconditions hold: an ACMP connection exists AND the stream is
+    /// Started AND MSRP Listener Ready is set (or within GRACE_NS). Independent of
+    /// every other stream.
     [[nodiscard]] auto should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
     // --- References (bound at construction) ------------------------------------
@@ -62,6 +89,9 @@ struct TalkerGate
     /// Last steady-clock time (ns) each stream's Listener Ready was observed true;
     /// the strict gate keeps transmitting for GRACE_NS past this.
     std::array<std::atomic<int64_t>, STREAM_COUNT> ready_ns_{};
+    /// Stream Started state, per stream (defaults true; see the constructor). A
+    /// Stopped stream is not admitted even when connected + Listener Ready.
+    std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
 };
 
 }  // namespace statusbar::avb_entity

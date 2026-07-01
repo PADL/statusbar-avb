@@ -198,11 +198,9 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     uint8_t base_midi_note,
     StreamSet streams,
     std::pmr::memory_resource* memory_resource)
-    : config_{std::move(config)}
-    // Talker streams: 3 (AM824+AAF+CRF) for All, 2 (AAF+CRF) for AafCrf, 1 (AAF)
+    : config_{std::move(config)}  // Talker streams: 3 (AM824+AAF+CRF) for All, 2 (AAF+CRF) for AafCrf, 1 (AAF)
     // for AafOnly. 4 max listeners each, 0 listener streams (talker-only).
-    , host_{std::move(handler), make_adp_config(),
-            (streams == StreamSet::All ? size_t{3} : (streams == StreamSet::AafCrf ? size_t{2} : size_t{1})), 4, 0}
+    , host_{std::move(handler), make_adp_config(), (streams == StreamSet::All ? size_t{3} : (streams == StreamSet::AafCrf ? size_t{2} : size_t{1})), 4, 0}
     , has_am824_{streams == StreamSet::All}
     , has_crf_{streams == StreamSet::All || streams == StreamSet::AafCrf}
     , aaf_idx_{streams == StreamSet::All ? AAF_STREAM_INDEX : uint16_t{0}}
@@ -219,9 +217,7 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     for (size_t ch = 0; ch < channels_; ++ch) {
         oscillators_[ch].state_.set_frequency(
             dsp::FrequencyParameters<double>{
-                .sample_rate_recip = sr_recip,
-                .frequency = white_key_frequency_hz(base_midi_note, ch),
-                .phase_in_radians = 0.0},
+                .sample_rate_recip = sr_recip, .frequency = white_key_frequency_hz(base_midi_note, ch), .phase_in_radians = 0.0},
             0);
         oscillators_[ch].coeffs_.set_amplitude(config_.tone_amplitude, 0);
     }
@@ -596,8 +592,11 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         if (!has_crf_) {
             continue;  // no CRF stream in this set
         }
-        // CRF media-clock PDU, decimated to its declared rate.
-        if (tx_am824 || tx_aaf || talker_should_transmit(crf_idx_, now_steady_ns)) {
+        // CRF media-clock PDU, decimated to its declared rate. The CRF stream is a
+        // first-class stream: it gates on ITS OWN ACMP connection + reservation
+        // (listeners ACMP-connect and MSRP-reserve the CRF clock separately), never
+        // on the audio streams' gate.
+        if (talker_should_transmit(crf_idx_, now_steady_ns)) {
             uint32_t const sample_stride = static_cast<uint32_t>(config_.crf_timestamp_interval) * SAMPLE_RATE / CRF_BASE_FREQUENCY;
             uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) /
                 static_cast<uint32_t>(SAMPLES_PER_PACKET);

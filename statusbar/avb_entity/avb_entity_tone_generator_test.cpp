@@ -15,6 +15,7 @@
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
@@ -214,6 +215,83 @@ TEST(tone_gate, disabled_allows_all_talkers)
     EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityToneGenerator::CRF_STREAM_INDEX, 0));
 }
 
+// Each talker stream gates INDEPENDENTLY on its own ACMP connection + reservation.
+// Regression for the CRF-follows-audio bug: CRF is a first-class stream and must
+// NOT transmit merely because an audio stream is admitted. Drives real ACMP
+// connections through the shared acmp_talker; a second TalkerGate over the same
+// components lets the test set listener-ready / stream-started via the public API.
+TEST(tone_gate, crf_gates_independently_of_audio_streams)
+{
+    auto blob = load_file(entity_tone_bin_path());
+    auto config = make_config_with_blob(std::move(blob));
+    EXPECT_TRUE(config.gate_talker_on_listener);
+    auto result = AvbEntityToneGenerator::create(std::move(config));
+    EXPECT_TRUE(result.has_value());
+    if (!result.has_value()) {
+        return;
+    }
+    auto& comps = (*result)->components();
+
+    // Gate under test: a gated config over the entity's live components. Reads the
+    // shared acmp_talker connection state; owns its own listener-ready/started flags.
+    AvbEntityAudioIOConfig gate_cfg{};
+    gate_cfg.gate_talker_on_listener = true;
+    TalkerGate gate{gate_cfg, comps};
+
+    constexpr uint16_t k_aaf = AvbEntityToneGenerator::AAF_STREAM_INDEX;
+    constexpr uint16_t k_crf = AvbEntityToneGenerator::CRF_STREAM_INDEX;
+    auto const* aaf_stream = comps.acmp_talker.get_stream(k_aaf);
+    auto const* crf_stream = comps.acmp_talker.get_stream(k_crf);
+    EXPECT_NE(aaf_stream, nullptr);
+    EXPECT_NE(crf_stream, nullptr);
+    if (aaf_stream == nullptr || crf_stream == nullptr) {
+        return;
+    }
+    auto const as_stream_id = [](Eui64 const& e) {
+        nanoavb::StreamId sid;
+        sid.from_uint64(e.to_uint64());
+        return sid;
+    };
+    auto const aaf_sid = as_stream_id(aaf_stream->stream_id);
+    auto const crf_sid = as_stream_id(crf_stream->stream_id);
+
+    Eui64 const entity_id{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // == make_config_with_blob
+    Eui64 const listener_id{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, 0x33};
+    auto const connect = [&](uint16_t talker_unique, uint16_t listener_unique) {
+        atdecc::AcmpCommandResponse cmd{};
+        cmd.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+        cmd.talker_entity_id = entity_id;
+        cmd.talker_unique_id = talker_unique;
+        cmd.listener_entity_id = listener_id;
+        cmd.listener_unique_id = listener_unique;
+        cmd.sequence_id = 1;
+        (void)comps.acmp_talker.receive_command(cmd, sm::TimePoint{});
+    };
+
+    // Nothing connected -> nothing transmits.
+    EXPECT_FALSE(gate.should_transmit(k_aaf, 0));
+    EXPECT_FALSE(gate.should_transmit(k_crf, 0));
+
+    // Fully admit the AAF stream (ACMP connection + MSRP Listener Ready). CRF is
+    // left untouched -- it must stay suppressed.
+    connect(k_aaf, 0);
+    gate.note_listener_ready(aaf_sid, true);
+    EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{1});
+    EXPECT_EQ(comps.acmp_talker.connection_count(k_crf), size_t{0});
+    EXPECT_TRUE(gate.should_transmit(k_aaf, 0));
+    EXPECT_FALSE(gate.should_transmit(k_crf, 0));  // the regression: CRF must not ride AAF
+
+    // Admit CRF on its OWN merits -> now it transmits, independently.
+    connect(k_crf, 1);
+    gate.note_listener_ready(crf_sid, true);
+    EXPECT_TRUE(gate.should_transmit(k_crf, 0));
+
+    // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.
+    gate.note_stream_started(k_aaf, false);
+    EXPECT_FALSE(gate.should_transmit(k_aaf, 0));
+    EXPECT_TRUE(gate.should_transmit(k_crf, 0));
+}
+
 //
 // Lifecycle / data plane (no network).
 //
@@ -284,8 +362,8 @@ TEST(tone_aaf_create, aaf_only_builds_and_gates)
 {
     auto blob = load_file(entity_tone_aaf_bin_path());
     auto config = make_config_with_blob(std::move(blob));
-    auto result = AvbEntityToneGenerator::create(
-        std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafOnly);
+    auto result =
+        AvbEntityToneGenerator::create(std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafOnly);
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;
@@ -302,8 +380,8 @@ TEST(tone_aaf_create, aaf_only_gate_disabled_transmits_index0)
     auto blob = load_file(entity_tone_aaf_bin_path());
     auto config = make_config_with_blob(std::move(blob));
     config.gate_talker_on_listener = false;
-    auto result = AvbEntityToneGenerator::create(
-        std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafOnly);
+    auto result =
+        AvbEntityToneGenerator::create(std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafOnly);
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;
@@ -349,8 +427,8 @@ TEST(tone_aafcrf_create, aaf_at_0_crf_at_1_transmit_when_ungated)
     auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf_crf.bin");
     auto config = make_config_with_blob(std::move(blob));
     config.gate_talker_on_listener = false;
-    auto result = AvbEntityToneGenerator::create(
-        std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafCrf);
+    auto result =
+        AvbEntityToneGenerator::create(std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafCrf);
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;

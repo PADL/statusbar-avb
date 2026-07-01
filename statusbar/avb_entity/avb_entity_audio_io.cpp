@@ -909,7 +909,10 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         // spans (ts_per_pkt * sample_stride) samples = pkts_per_crf audio packets. At
         // the Milan 48 kHz/interval-96/1-ts format that is 192 samples = every 16
         // audio packets -> 500 PDU/s, matching what Milan CRF inputs expect.
-        if (tx_am824 || tx_aaf || talker_should_transmit(CRF_STREAM_INDEX, now_steady_ns)) {
+        // The CRF stream gates on ITS OWN ACMP connection + reservation (a listener
+        // ACMP-connects and MSRP-reserves the CRF media clock as a separate stream),
+        // never on the audio streams' gate.
+        if (talker_should_transmit(CRF_STREAM_INDEX, now_steady_ns)) {
             uint32_t const sample_stride = static_cast<uint32_t>(config_.crf_timestamp_interval) * SAMPLE_RATE / CRF_BASE_FREQUENCY;
             uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) /
                 static_cast<uint32_t>(SAMPLES_PER_PACKET);

@@ -42,18 +42,27 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
 auto TalkerGate::should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
 {
     if (!config_.gate_talker_on_listener) {
+        // Gate disabled: transmit unconditionally. NOTE: this puts the stream on the
+        // SR class with NO ACMP connection and NO reservation, which is not AVB-spec
+        // compliant -- for bench debugging / free-running reference sources only.
         return true;
     }
-    // Spec-correct gate: transmit ONLY when BOTH an ACMP connection exists AND the
-    // listener permits transmit via MSRP Listener Ready. A talker must not put a
-    // stream on the SR class until the reservation is in place.
+    if (idx >= stream_started_.size()) {
+        return false;
+    }
+    // Spec-correct SR-class admission for THIS stream, evaluated on its own state
+    // (a CRF stream must never ride the audio streams' gate). Requires, together:
+    //   (1) an ACMP connection for this stream (implies our Talker Advertise was
+    //       registered, so no separate Talker-attribute check is needed), and
+    //   (2) the stream is Started (defaults true), and
+    //   (3) MSRP Listener Ready for this stream.
     auto const* s = components_.acmp_talker.get_stream(idx);
     bool const acmp = s != nullptr && s->connection_count() > 0;
     if (!acmp) {
         return false;
     }
-    if (idx >= ready_ns_.size()) {
-        return acmp;
+    if (!stream_started_[idx].load(std::memory_order_relaxed)) {
+        return false;
     }
     // MSRP Listener Ready, held across the MRP LeaveAll re-registration blip by a
     // grace window: the peer's Listener declaration ages out and re-declares on a
