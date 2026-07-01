@@ -28,10 +28,10 @@ interface = "eth0"
 streams = "aaf+crf"
 
 # Test tones: the 8 audio channels are the white piano keys starting at this
-# MIDI note (36 = C2, giving C2..C3). Amplitude 0.5 = -6 dBFS (all channels).
+# MIDI note (60 = C4, giving C4..C5). Amplitude 0.1 = -20 dBFS (all channels).
 [tone]
-base_note = 36
-amplitude = 0.5
+base_note = 60
+amplitude = 0.1
 
 # Talker gate: only put a stream on the wire once a downstream listener is
 # MSRP-ready / ACMP-connected. Set false to stream unconditionally from

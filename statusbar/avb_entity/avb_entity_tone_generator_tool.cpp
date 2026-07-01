@@ -107,7 +107,7 @@ struct Config
         .vlan_id = 2,
         // The media clock is always gPTP-locked (r = 1.0) for the tone generator.
         .media_lock_to_gptp = true,
-        .tone_amplitude = 0.5F,  // -6 dBFS
+        .tone_amplitude = 0.1F,  // -20 dBFS
         .entity_name = "",
         .firmware_version = "1.0.0",
     };
@@ -202,13 +202,13 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         [&](auto v) { config.entity.packets_per_wake = static_cast<size_t>((v < 1) ? 1 : ((v > 16) ? 16 : v)); });
     specs.add<double>(
         "tone.amplitude",
-        "Per-channel tone amplitude, 0..1 linear (1.0 = 0 dBFS; default 0.5 = -6 dBFS)",
+        "Per-channel tone amplitude, 0..1 linear (1.0 = 0 dBFS; default 0.1 = -20 dBFS)",
         static_cast<double>(config.entity.tone_amplitude),
         [&](auto v) { config.entity.tone_amplitude = static_cast<float>(v); });
     specs.add<uint64_t>(
         "tone.base_note",
-        "MIDI note number of the lowest channel's white key (default 36 = C2). Each channel takes the next white "
-        "key up, so 8 channels span C2..C3.",
+        "MIDI note number of the lowest channel's white key (default 60 = C4). Each channel takes the next white "
+        "key up, so 8 channels span C4..C5.",
         static_cast<uint64_t>(config.base_midi_note),
         [&](auto v) { config.base_midi_note = static_cast<uint8_t>(v & 0x7FULL); });
     specs.add<std::string>(
@@ -262,7 +262,7 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
 {
     static constexpr std::array<std::string_view, 2> examples{
         "--interface=eth0 --descriptor-storage=entity_tone.bin",
-        "--interface=eth0 --tone.base_note=36 --tone.amplitude=0.5",
+        "--interface=eth0 --tone.base_note=60 --tone.amplitude=0.1",
     };
     config::default_print_usage(
         program_name,
@@ -298,11 +298,12 @@ void print_entity_config(Config const& config, Entity const& entity)
         ecfg.tone_amplitude,
         ecfg.tone_amplitude > 0.0F ? 20.0 * std::log10(static_cast<double>(ecfg.tone_amplitude)) : -120.0);
     for (size_t ch = 0; ch < entity.channels(); ++ch) {
-        auto const midi = static_cast<uint8_t>(config.base_midi_note + ((ch / 7) * 12) + std::array<int, 7>{0, 2, 4, 5, 7, 9, 11}[ch % 7]);
-        std::print("  ch {}: {:<4} {:8.3f} Hz\n", ch, note_name(midi), avb_entity::white_key_frequency_hz(config.base_midi_note, ch));
+        auto const midi =
+            static_cast<uint8_t>(config.base_midi_note + ((ch / 7) * 12) + std::array<int, 7>{0, 2, 4, 5, 7, 9, 11}[ch % 7]);
+        std::print(
+            "  ch {}: {:<4} {:8.3f} Hz\n", ch, note_name(midi), avb_entity::white_key_frequency_hz(config.base_midi_note, ch));
     }
-    std::print(
-        "Sample Rate:      {} Hz, Samples/Packet: {}\n", Entity::SAMPLE_RATE, Entity::SAMPLES_PER_PACKET);
+    std::print("Sample Rate:      {} Hz, Samples/Packet: {}\n", Entity::SAMPLE_RATE, Entity::SAMPLES_PER_PACKET);
     std::print("Media clock rate: r=1.0 PINNED to gPTP\n");
 }
 
@@ -320,8 +321,7 @@ MainLoopResult run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppCont
     MainLoopResult result;
     result.compensation_ns = ctx.compensation_ns;
 
-    int64_t const PACKET_PERIOD_NS =
-        (static_cast<int64_t>(Entity::SAMPLES_PER_PACKET) * 1'000'000'000LL / Entity::SAMPLE_RATE) *
+    int64_t const PACKET_PERIOD_NS = (static_cast<int64_t>(Entity::SAMPLES_PER_PACKET) * 1'000'000'000LL / Entity::SAMPLE_RATE) *
         static_cast<int64_t>(config.entity.packets_per_wake);
 
     auto* net_handlers = entity.net_handlers();
@@ -509,21 +509,21 @@ auto main(int argc, char** argv) -> int
     }
     // Map --streams to the entity's StreamSet, and pick the matching default blob
     // unless the user gave an explicit --descriptor-storage path.
-    auto const stream_set = (config.streams_mode == "aaf")       ? Entity::StreamSet::AafOnly
-                            : (config.streams_mode == "aaf+crf") ? Entity::StreamSet::AafCrf
-                                                                 : Entity::StreamSet::All;
+    auto const stream_set = (config.streams_mode == "aaf") ? Entity::StreamSet::AafOnly
+        : (config.streams_mode == "aaf+crf")               ? Entity::StreamSet::AafCrf
+                                                           : Entity::StreamSet::All;
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
     if (config.descriptor_storage_path == STATUSBAR_AVB_DEFAULT_TONE_BLOB) {
-#ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB
+#    ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB
         if (stream_set == Entity::StreamSet::AafOnly) {
             config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB;
         }
-#endif
-#ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB
+#    endif
+#    ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB
         if (stream_set == Entity::StreamSet::AafCrf) {
             config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB;
         }
-#endif
+#    endif
     }
 #endif
     if (config.descriptor_storage_path.empty()) {

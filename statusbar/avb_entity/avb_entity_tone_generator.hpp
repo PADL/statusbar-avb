@@ -52,8 +52,8 @@ using statusbar::Status;
 using statusbar::StatusValue;
 using statusbar::success;
 
-/// MIDI note number of C2 (= 36); the default base for the white-key tone set.
-inline constexpr uint8_t TONE_DEFAULT_BASE_MIDI_NOTE = 36;
+/// MIDI note number of C4 (= 60); the default base for the white-key tone set.
+inline constexpr uint8_t TONE_DEFAULT_BASE_MIDI_NOTE = 60;
 
 /// Frequency (Hz, equal temperament, A4 = 440) of the `white_index`-th white
 /// piano key at or above `base_midi_note`. White keys are the natural notes; the
