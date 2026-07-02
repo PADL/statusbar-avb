@@ -117,6 +117,14 @@ struct RxContext
 {
     int udp_fd;
     ieee::Eui64 my_pair_id;
+    /// Expected peer address for the source-address gate (Layer 1). When
+    /// `source_gate_enabled` is true, drain_rx drops any datagram whose
+    /// source host does not match `peer` (host only — NAT may rewrite the
+    /// port). Enabled only for a valid *unicast* peer; disabled for
+    /// multicast (many legitimate senders, kernel enforces group
+    /// membership) and for RX-only nodes with no configured peer.
+    net::SocketAddress peer;
+    bool source_gate_enabled;
     /// Sender-side WCL — assumed identical to the receiver's local
     /// config because both endpoints in a deployment pick the same
     /// value. Used to recover real one-way transit and RTT from the
@@ -309,6 +317,15 @@ void process_one_rx_datagram(
     auto const& pkt = *pkt_or;
     int64_t const rx_gptp = ctx.clock.wire_ns(rx_mraw);
     int64_t const presentation_time_ns = codec.tx_gptp_ns(pkt);
+    // Layer 2: the presentation time is attacker-controlled wire data. It
+    // keys the redundancy slot map (negative -> out-of-bounds index) and
+    // drives self_redundancy_.scan via last_rx_pt (absurdly-future ->
+    // near-infinite loop). Reject anything not plausibly a real GPS-TAI PT
+    // before it is used anywhere. (See presentation_time_plausible.)
+    if (!presentation_time_plausible(presentation_time_ns, rx_gptp)) {
+        ctx.tracker.increment_dropped_invalid();
+        return;
+    }
     if (int64_t const prev = ctx.last_rx_pt_ns.load(); presentation_time_ns > prev) {
         ctx.last_rx_pt_ns.publish(presentation_time_ns);
     }
@@ -400,6 +417,14 @@ void drain_rx(C const& codec, RxContext const& ctx, bool synced) noexcept
         ssize_t const n = ::recvmsg(ctx.udp_fd, &msg, MSG_DONTWAIT | MSG_TRUNC);
         if (n <= 0) {
             return;
+        }
+        // Layer 1 source-address gate: on a unicast tunnel the only
+        // legitimate sender is the configured peer. Drop anything else
+        // before it reaches the parser — this is the primary defense
+        // against off-path injection on the public-internet socket.
+        if (ctx.source_gate_enabled && !same_host(src, ctx.peer)) {
+            ctx.tracker.increment_dropped_invalid();
+            continue;
         }
         auto const datagram_bytes = static_cast<size_t>(n);
         if (datagram_bytes > buf.size()) {
@@ -1260,6 +1285,8 @@ class Session
         return RxContext{
             .udp_fd = udp_.get(),
             .my_pair_id = my_pair_id_,
+            .peer = peer_,
+            .source_gate_enabled = peer_.valid() && !is_ipv4_multicast(peer_),
             .worst_case_latency_ns = cfg_.worst_case_latency_ns,
             .peer_tai_offset_ns = cfg_.peer_tai_offset_ns,
             .clock = clock_,

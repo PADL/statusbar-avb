@@ -47,6 +47,28 @@ inline void bind_to_device(int fd, std::string const& iface)
 /// helpers).
 [[nodiscard]] auto is_ipv4_multicast(net::SocketAddress const& addr) -> bool;
 
+/// True iff `a` and `b` share the same host IP address, ignoring port.
+/// Used as a source-address gate on the RX path: NAT may rewrite the
+/// peer's source port, so only the host is compared. Families must match;
+/// AF_INET compares the 32-bit address, AF_INET6 the 128-bit address.
+/// Any other / mismatched family returns false.
+[[nodiscard]] auto same_host(net::SocketAddress const& a, net::SocketAddress const& b) -> bool;
+
+/// Plausibility gate for an attacker-controlled wire presentation time
+/// (Layer 2 of the RX hardening). The PT keys the redundancy slot map
+/// (a negative value would index it out of bounds) and drives
+/// self-redundancy scan() via last_rx_pt (an absurdly-future value would
+/// loop ~forever). Real PTs are shared GPS-TAI ns close to the local
+/// wire clock, so accept only `0 <= pt <= rx_wire + 5 s`. The 5 s ceiling
+/// is far above any worst-case-latency window yet rejects INT64-scale
+/// garbage; `rx_wire` is the receiver's local wire-clock ns for the
+/// datagram.
+[[nodiscard]] inline auto presentation_time_plausible(int64_t pt_ns, int64_t rx_wire_ns) noexcept -> bool
+{
+    constexpr int64_t max_ahead_ns = 5'000'000'000;  // 5 s
+    return pt_ns >= 0 && pt_ns <= rx_wire_ns + max_ahead_ns;
+}
+
 /// Join an IPv4 multicast group on `fd` and configure outgoing TTL +
 /// loopback-suppression. `iface` selects the interface for the join;
 /// if empty the kernel chooses. Returns true on success.

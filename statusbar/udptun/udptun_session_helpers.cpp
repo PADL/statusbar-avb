@@ -41,6 +41,28 @@ auto is_ipv4_multicast(net::SocketAddress const& addr) -> bool
     return (a >> 28) == 0xE;  // 224.0.0.0/4
 }
 
+auto same_host(net::SocketAddress const& a, net::SocketAddress const& b) -> bool
+{
+    if (a.family() != b.family()) {
+        return false;
+    }
+    if (a.family() == AF_INET) {
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto const* sa = reinterpret_cast<sockaddr_in const*>(a.sockaddr());
+        auto const* sb = reinterpret_cast<sockaddr_in const*>(b.sockaddr());
+        // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+        return sa->sin_addr.s_addr == sb->sin_addr.s_addr;
+    }
+    if (a.family() == AF_INET6) {
+        // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto const* sa = reinterpret_cast<sockaddr_in6 const*>(a.sockaddr());
+        auto const* sb = reinterpret_cast<sockaddr_in6 const*>(b.sockaddr());
+        // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+        return std::memcmp(&sa->sin6_addr, &sb->sin6_addr, sizeof(sa->sin6_addr)) == 0;
+    }
+    return false;
+}
+
 auto configure_multicast(int fd, std::string const& iface, net::SocketAddress const& group, int ttl) -> bool
 {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
