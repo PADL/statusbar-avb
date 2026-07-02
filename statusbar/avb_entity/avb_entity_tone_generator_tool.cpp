@@ -341,13 +341,6 @@ MainLoopResult run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppCont
                 return;
             }
             auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
-            if (net_handlers) {
-                bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
-                if (has_gm && !had_grandmaster) {
-                    entity.on_gptp_announce(now, true);
-                }
-                had_grandmaster = has_gm;
-            }
             auto const cb_t0 = std::chrono::steady_clock::now();
             entity.process_audio(now);
             media_dur_hist.update(
@@ -426,6 +419,19 @@ MainLoopResult run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppCont
         auto const now = std::chrono::steady_clock::now();
         auto const time_in_state = now - last_state_change_time;
         auto const sm_now = TimePoint{now.time_since_epoch()};
+
+        // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
+        // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
+        // SM/MSRP stack is only ever driven from one thread. First-acquire is
+        // also handled promptly by the grandmaster_id_changed reactor callback;
+        // this poll additionally covers GM regained with an unchanged identity.
+        if (net_handlers != nullptr) {
+            bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
+            if (has_gm && !had_grandmaster) {
+                entity.on_gptp_announce(sm_now, has_gm);
+            }
+            had_grandmaster = has_gm;
+        }
 
         if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
             entity.on_timeout(sm_now);

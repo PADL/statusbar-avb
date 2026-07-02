@@ -217,7 +217,7 @@ MainLoopResult run_main_loop(
 
     // Track gPTP announce status
     auto* net_handlers = entity.net_handlers();
-    bool had_grandmaster = net_handlers ? net_handlers->gptp_handler().has_grandmaster() : false;
+    bool had_grandmaster = net_handlers != nullptr ? net_handlers->gptp_handler().has_grandmaster() : false;
 
     // The media-timer callback runs on a SCHED_FIFO RT thread, so it must NOT
     // std::print (alloc/throw/block) — it publishes to these lock-free itc
@@ -237,15 +237,6 @@ MainLoopResult run_main_loop(
             }
 
             auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
-
-            // Check for gPTP grandmaster changes
-            if (net_handlers) {
-                bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
-                if (has_gm && !had_grandmaster) {
-                    entity.on_gptp_announce(now, true);
-                }
-                had_grandmaster = has_gm;
-            }
 
             // Process audio (DSP and packet handling)
             entity.process_audio(now);
@@ -275,7 +266,7 @@ MainLoopResult run_main_loop(
     auto last_state = entity.state_string();
 
     // Wire up gPTP announce callback to update ADP advertiser
-    if (net_handlers) {
+    if (net_handlers != nullptr) {
         net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
             .grandmaster_id_changed =
                 [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
@@ -317,6 +308,19 @@ MainLoopResult run_main_loop(
         auto const now = std::chrono::steady_clock::now();
         auto const time_in_state = now - last_state_change_time;
         auto const sm_now = TimePoint{now.time_since_epoch()};
+
+        // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
+        // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
+        // SM/MSRP stack is only ever driven from one thread. First-acquire is
+        // also handled promptly by the grandmaster_id_changed reactor callback;
+        // this poll additionally covers GM regained with an unchanged identity.
+        if (net_handlers != nullptr) {
+            bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
+            if (has_gm && !had_grandmaster) {
+                entity.on_gptp_announce(sm_now, has_gm);
+            }
+            had_grandmaster = has_gm;
+        }
 
         if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
             entity.on_timeout(sm_now);
