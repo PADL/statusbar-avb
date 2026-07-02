@@ -254,6 +254,15 @@ void GptpSlavePort::tick(TimePoint now)
         } else if (md_pdelay_req_.state() == MDPdelayReq::State::WaitingForPdelayRespFollowUp) {
             md_pdelay_req_.on_pdelay_resp_follow_up_receipt_timeout();
         }
+        // Re-arm the interval timer so the next Pdelay_Req is scheduled.
+        // Without this a single lost Pdelay_Resp/Follow_Up permanently
+        // halts the Pdelay engine (no retries; asCapable frozen), since
+        // the interval timer is otherwise only re-armed on a successful
+        // Follow_Up. The MDPdelayReq SM is in WaitingForPdelayIntervalTimer
+        // after either timeout handler and expects the interval to tick on.
+        if (config_.pdelay_mode == PdelayMode::Active) {
+            arm_pdelay_interval_timer(now);
+        }
     }
     if (sync_receipt_timeout_.has_value() && *sync_receipt_timeout_ <= now) {
         sync_receipt_timeout_.reset();

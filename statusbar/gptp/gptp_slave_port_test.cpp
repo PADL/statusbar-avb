@@ -509,6 +509,41 @@ TEST(gptp_slave_port, tick_past_pdelay_interval_drives_pdelay_send)
     EXPECT_TRUE(send_count > send_count_after_start);
 }
 
+// Regression (G1): a lost Pdelay exchange must not permanently halt the
+// Pdelay engine. Before the fix, the receipt-timeout path reset both timers
+// without re-arming the interval timer, so after the first unanswered
+// Pdelay_Req no further requests were ever sent. Here the peer never
+// responds; the port must still emit a second Pdelay_Req after the receipt
+// timeout and the next interval elapse.
+TEST(gptp_slave_port, pdelay_survives_lost_response)
+{
+    SoftwareOps sw;
+    int send_count = 0;
+    auto ops = sw.make_ops();
+    ops.send_frame = [&send_count](std::span<uint8_t const>) -> TxResult {
+        ++send_count;
+        return TxResult{.ok = true, .tx_timestamp_ns = 0};
+    };
+    auto cfg = GptpConfig::standard_defaults();  // pdelay active by default
+    GptpSlavePort port{cfg, ops};
+    TestClock clock;
+    port.start(clock.now, true);
+    send_count = 0;  // ignore any startup frames
+
+    // First interval fires -> Pdelay_Req #1 is sent (no response follows).
+    port.tick(clock.advance(std::chrono::seconds(60)));
+    int const after_first = send_count;
+    EXPECT_TRUE(after_first >= 1);
+
+    // Receipt timeout fires (peer silent). The fix re-arms the interval timer.
+    port.tick(clock.advance(std::chrono::seconds(60)));
+
+    // Next interval fires -> Pdelay_Req #2. Without the fix the engine is dead
+    // and send_count would stay at after_first forever.
+    port.tick(clock.advance(std::chrono::seconds(60)));
+    EXPECT_TRUE(send_count > after_first);
+}
+
 TEST(gptp_slave_port, tick_past_announce_receipt_timeout_clears_grandmaster)
 {
     SoftwareOps sw;
