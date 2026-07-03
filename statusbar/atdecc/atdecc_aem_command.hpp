@@ -607,7 +607,7 @@ static_assert(sizeof(AemGetCountersCommandPayload) == 4, "AemGetCountersCommandP
 /// GET_COUNTERS response payload
 struct AemCountersPayload
 {
-    static constexpr size_t LENGTH = 132;  // 4 + 4 + 4 + 32*4 = 140... let me check
+    static constexpr size_t LENGTH = 136;  // 2 + 2 + 4 + 32*4 (matches sizeof; see static_assert below)
 
     /// Bytes 0-1: Descriptor type
     doublet_t descriptor_type{0};

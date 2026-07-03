@@ -2770,6 +2770,19 @@ TEST(atdecc_aem_parse, parse_aem_insufficient_data)
     EXPECT_FALSE(result.has_value());
 }
 
+// A GET_COUNTERS response payload is 136 bytes (2+2+4+32*4). parse_aem must reject
+// anything shorter before handing out a ParsedAemPayload pointer, or a caller
+// reading ->counters (136 bytes) reads past the buffer. Regression for
+// AemCountersPayload::LENGTH having been 132 (an OOB read of up to 4 bytes).
+TEST(atdecc_aem_parse, parse_aem_get_counters_response_bounds)
+{
+    std::array<uint8_t, 135> short_payload{};
+    EXPECT_FALSE(atdecc::parse_aem(AEM_COMMAND_GET_COUNTERS, /*is_response=*/true, short_payload).has_value());
+
+    std::array<uint8_t, 136> full_payload{};
+    EXPECT_TRUE(atdecc::parse_aem(AEM_COMMAND_GET_COUNTERS, /*is_response=*/true, full_payload).has_value());
+}
+
 // ===========================================================================
 // JDKS log priority name test
 // ===========================================================================
