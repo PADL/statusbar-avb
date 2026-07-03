@@ -4,6 +4,7 @@
 #include "statusbar/gptp/gptp_slave_port.hpp"
 
 #include "statusbar/buffer/buffer.hpp"
+#include "statusbar/gptp/gptp_time_util.hpp"
 #include "statusbar/gptp/gptp_tlv.hpp"
 #include "statusbar/status/throw_or_abort.hpp"
 
@@ -21,7 +22,10 @@ namespace {
 /// E.g.: log=-3 → 125 ms = 125'000'000 ns.
 auto log2_interval_to_ns(int8_t log_interval) -> std::chrono::nanoseconds
 {
-    double const seconds = std::pow(2.0, static_cast<double>(log_interval));
+    // Clamp to the valid range first: config values are pre-validated, but a value
+    // taken from a received Sync header is not, and an out-of-range exponent would
+    // push the int64 cast into UB (large positive) or arm a 0-ns timeout (negative).
+    double const seconds = std::pow(2.0, static_cast<double>(clamp_log_interval(log_interval)));
     return std::chrono::nanoseconds(static_cast<int64_t>(seconds * 1e9));
 }
 

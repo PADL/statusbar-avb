@@ -9,6 +9,7 @@
 
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/gptp/gptp.hpp"
+#include "statusbar/gptp/gptp_time_util.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -657,6 +658,45 @@ TEST(md_pdelay_req, lost_responses_drop_then_recover_as_capable)
 
     run_pdelay_exchange(mdp, 3'000'000'000, 3'000'000'500, 3'000'001'000, 3'000'001'500);
     EXPECT_TRUE(mdp.is_as_capable());  // recovered
+}
+
+// ===========================================================================
+// logMessageInterval clamping (G3): a wire value must never reach pow()/int64 raw
+// ===========================================================================
+
+TEST(gptp_log_interval, clamp_bounds_out_of_range_values)
+{
+    // In-range values pass through unchanged.
+    EXPECT_EQ(clamp_log_interval(0), 0);
+    EXPECT_EQ(clamp_log_interval(-3), -3);
+    EXPECT_EQ(clamp_log_interval(7), 7);
+    EXPECT_EQ(clamp_log_interval(-7), -7);
+    // The dangerous wire values: 0x7F (127) would drive pow(2,127)*1e9 into an
+    // int64 cast UB; 0x80 (-128) would arm a 0-ns timeout. Both clamp to the range.
+    EXPECT_EQ(clamp_log_interval(static_cast<int8_t>(0x7F)), 7);
+    EXPECT_EQ(clamp_log_interval(static_cast<int8_t>(0x80)), -7);
+    EXPECT_EQ(clamp_log_interval(100), 7);
+    EXPECT_EQ(clamp_log_interval(-100), -7);
+}
+
+// End-to-end: a Sync carrying a rogue logMessageInterval (0x7F) must arm a finite,
+// bounded sync-receipt timeout rather than an absurd/UB one.
+TEST(gptp_slave_port, rogue_sync_interval_arms_bounded_timeout)
+{
+    SoftwareOps sw;
+    auto cfg = GptpConfig::avnu_automotive_slave_defaults();
+    GptpSlavePort port{cfg, sw.make_ops()};
+    TestClock clock;
+    port.start(clock.now, true);
+    auto const t0 = clock.now;
+
+    auto const sync_buf = make_sync(1, gm_port_identity(), static_cast<int8_t>(0x7F));
+    port.receive_frame(std::span<uint8_t const>(sync_buf), 1'000'000'000LL, t0);
+
+    auto const nd = port.next_deadline();
+    EXPECT_TRUE(nd != TimePoint::max());  // a timer is armed
+    EXPECT_TRUE(nd >= t0);                // not in the past (a 0-ns / negative-clamp bug)
+    EXPECT_TRUE(nd - t0 < std::chrono::hours(1));  // bounded (a raw 2^127 s would be astronomically larger)
 }
 
 TEST_MAIN(statusbar_gptp, gptp_slave_port_test)
