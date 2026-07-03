@@ -235,6 +235,56 @@ TEST(avtp_audio_stream_decoder, aaf_round_trip_delivers_interleaved_samples_to_s
     }
 }
 
+// Regression: an AAF frame whose captured payload exceeds stream_data_length
+// (Ethernet min-frame padding, or a crafted/oversized pcap) must decode ONLY the
+// declared samples. Before the fix the deserializer counted samples from the full
+// padded payload while the interleave scratch was sized from stream_data_length,
+// so the delivered span read past the scratch buffer (heap over-read).
+TEST(avtp_audio_stream_decoder, aaf_payload_padding_is_not_decoded_as_audio)
+{
+    constexpr uint16_t channels = 2;
+    constexpr uint16_t samples_per_packet = 8;
+
+    statusbar::tsn::StreamId sid;
+    sid.from_uint64(0x0102030405060708ULL);
+    statusbar::avtp::AafStreamOutputContext ctx{
+        sid,
+        statusbar::avtp::AafFormat::float_32bit,
+        statusbar::avtp::AafSampleRate::rate_48_khz,
+        channels,
+        /*depth=*/32,
+        /*pres_offset=*/0ULL};
+
+    std::vector<std::vector<float>> per_channel{
+        {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f},
+        {-0.1f, -0.2f, -0.3f, -0.4f, -0.5f, -0.6f, -0.7f, -0.8f},
+    };
+    auto packet = make_aaf_packet_float32(ctx, samples_per_packet, per_channel);
+
+    // Append 32 bytes of trailing padding after the valid audio. stream_data_length
+    // still reflects only the 8 real frames -- this is what a padded/crafted capture
+    // looks like on the wire.
+    packet.resize(packet.size() + 32, uint8_t{0xAB});
+
+    AvtpAudioStreamDecoder dec;
+    std::vector<float> received;
+    dec.set_sink([&](AvtpAudioSamples const& s) -> bool {
+        received.assign(s.interleaved.begin(), s.interleaved.end());
+        return true;
+    });
+
+    auto const result = dec.feed(std::span<uint8_t const>(packet));
+    EXPECT_EQ(result.status, FeedStatus::ok);
+    // Only the declared 8 frames are decoded; the padding is ignored, and the
+    // delivered span never exceeds the scratch buffer.
+    EXPECT_EQ(dec.sample_frames_delivered(), size_t{samples_per_packet});
+    EXPECT_EQ(received.size(), size_t{samples_per_packet} * channels);
+    for (size_t i = 0; i < samples_per_packet; ++i) {
+        EXPECT_EQ(received[(i * 2) + 0], per_channel[0][i]);
+        EXPECT_EQ(received[(i * 2) + 1], per_channel[1][i]);
+    }
+}
+
 TEST(avtp_audio_stream_decoder, sink_returning_false_reports_sink_error)
 {
     constexpr uint16_t channels = 1;

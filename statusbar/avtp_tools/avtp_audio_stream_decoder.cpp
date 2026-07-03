@@ -6,6 +6,7 @@
 #include "statusbar/avtp_tools/avtp_channel_interleaver.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <algorithm>
 #include <format>
 
 namespace statusbar::avtp_tools {
@@ -107,9 +108,19 @@ auto AvtpAudioStreamDecoder::decode_aaf_payload(std::span<uint8_t const> payload
 
     avtp::AafPdu pdu;
     span_load(pdu, payload.subspan(0, avtp::AafPdu::HEADER_LENGTH));
-    auto const audio = payload.subspan(avtp::AafPdu::HEADER_LENGTH);
+    auto const raw_audio = payload.subspan(avtp::AafPdu::HEADER_LENGTH);
 
-    size_t const expected_samples = pdu.get_stream_data_length() / bytes_per_frame;
+    // stream_data_length is authoritative (IEEE 1722-2016 7.3.9 / 5.4): any
+    // Ethernet min-frame padding or extra bytes past it are NOT audio. Trim to it
+    // so the scratch sizing (expected_samples) and aaf_stream_deserialize's own
+    // sample count agree. Without this, a padded or crafted frame whose captured
+    // payload exceeds stream_data_length makes the deserializer report more frames
+    // than the scratch was sized for, and the output span below reads past the
+    // heap buffer. min() also covers a truncated frame (declared > captured).
+    size_t const valid_bytes = std::min<size_t>(raw_audio.size(), pdu.get_stream_data_length());
+    auto const audio = raw_audio.first(valid_bytes);
+
+    size_t const expected_samples = valid_bytes / bytes_per_frame;
     if (expected_samples == 0) {
         return FeedResult{};
     }
