@@ -47,9 +47,9 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
+#include "statusbar/sg14/inplace_function.h"
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <utility>
 
@@ -142,7 +142,10 @@ class DescriptorStorageHandler : public AemEntityHandler
     /// AEM_STATUS_SUCCESS to accept (the in-memory name then updates; persist to
     /// non-volatile storage here if you want it to survive a restart), or any other
     /// AEM_STATUS_* to reject the change. Unset => accept (in-memory only).
-    void set_on_entity_name_changed(std::function<uint8_t(AtdeccString const&)> fn) { on_entity_name_changed_ = std::move(fn); }
+    void set_on_entity_name_changed(statusbar::sg14::inplace_function<uint8_t(AtdeccString const&), 64> fn)
+    {
+        on_entity_name_changed_ = std::move(fn);
+    }
 
     auto on_get_name(NameRef ref, uint32_t /*symbol*/) const -> std::optional<AtdeccString> override
     {
@@ -365,7 +368,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     DescriptorStorage storage_;
     AtdeccString entity_name_{};
     bool manage_entity_name_{false};
-    std::function<uint8_t(AtdeccString const&)> on_entity_name_changed_{};
+    statusbar::sg14::inplace_function<uint8_t(AtdeccString const&), 64> on_entity_name_changed_{};
 };
 
 }  // namespace statusbar::nanoavb

@@ -27,9 +27,9 @@
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp_tools/avtp_audio_detect.hpp"
+#include "statusbar/sg14/inplace_function.h"
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -88,11 +88,11 @@ class AvtpAudioStreamDecoder
     // Sink: receives interleaved float samples for one packet. Return
     // true to continue, false to abort (decoder reports sink_error and
     // refuses further work until reset).
-    using SamplesSink = std::function<bool(AvtpAudioSamples const&)>;
+    using SamplesSink = statusbar::sg14::inplace_function<bool(AvtpAudioSamples const&), 64>;
 
     // Diagnostic: optional. Called for non-fatal events (sequence gaps,
     // first-packet format problems). Caller decides whether to log.
-    using Diagnostic = std::function<void(std::string_view message)>;
+    using Diagnostic = statusbar::sg14::inplace_function<void(std::string_view message), 64>;
 
     AvtpAudioStreamDecoder() = default;
     AvtpAudioStreamDecoder(AvtpAudioStreamDecoder const&) = delete;

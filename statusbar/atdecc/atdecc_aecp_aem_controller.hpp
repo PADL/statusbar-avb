@@ -82,13 +82,15 @@ struct AemControllerContext
     // Callbacks
 
     /// Send a serialized AEM packet (AemDu header + payload)
-    std::function<bool(std::span<uint8_t const> packet)> tx_command;
+    statusbar::sg14::inplace_function<bool(std::span<uint8_t const> packet), 64> tx_command;
 
     /// Called on final (non-IN_PROGRESS) response.
     /// `sent_payload` is the original request payload (after the AemDu header)
     /// — useful when the response payload echoes are unreliable (some entities
     /// zero them out on error responses).
-    std::function<void(AemDu const& header, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data, uint8_t status)>
+    statusbar::sg14::inplace_function<
+        void(AemDu const& header, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data, uint8_t status),
+        64>
         on_response;
 
     /// Called when a command times out

@@ -90,7 +90,8 @@ struct MonitorCallbacks
     statusbar::sg14::inplace_function<void(DiscoveredEntity const&), 64> on_entity_available;
     statusbar::sg14::inplace_function<void(DiscoveredEntity const&), 64> on_entity_updated;
     statusbar::sg14::inplace_function<void(Eui64), 64> on_entity_departing;
-    std::function<void(nanoavb::NanoAvbAemController&, Eui64, uint16_t, uint8_t, std::span<uint8_t const>)> on_aem_response;
+    statusbar::sg14::inplace_function<void(nanoavb::NanoAvbAemController&, Eui64, uint16_t, uint8_t, std::span<uint8_t const>), 64>
+        on_aem_response;
     statusbar::sg14::inplace_function<void(nanoavb::NanoAvbAemController&, Eui64, uint16_t), 64> on_aem_timeout;
     statusbar::sg14::inplace_function<void(AcmpDu const&, StreamConnection const&), 64> on_stream_connected;
     statusbar::sg14::inplace_function<void(AcmpDu const&), 64> on_stream_disconnected;
@@ -330,8 +331,8 @@ MonitorCallbacks make_print_callbacks(bool show_descriptors)
 // Shared between live (MonitorPollable) and offline (run_pcap_file) drivers.
 // ---------------------------------------------------------------------------
 
-using SendUnicastFn = std::function<bool(Eui48 const&, std::span<uint8_t const>)>;
-using SendMulticastFn = std::function<bool(std::span<uint8_t const>)>;
+using SendUnicastFn = statusbar::sg14::inplace_function<bool(Eui48 const&, std::span<uint8_t const>), 64>;
+using SendMulticastFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t const>), 64>;
 
 class MonitorCore
 {

@@ -10,6 +10,7 @@
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/stats/stats.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -19,7 +20,6 @@
 #include <cstdint>
 #include <ctime>
 #include <expected>
-#include <functional>
 #include <memory>
 #include <system_error>
 #include <thread>
@@ -246,7 +246,7 @@ class PtpTimeBridge : public PtpTimeBridgeBase
 {
   public:
     /// Function type for reading PTP time (abstracted from hardware)
-    using PtpTimeReader = std::function<StatusValue<int64_t>()>;
+    using PtpTimeReader = statusbar::sg14::inplace_function<StatusValue<int64_t>(), 64>;
 
     PtpTimeBridge() noexcept = default;
     ~PtpTimeBridge() noexcept { stop_sampling(); }

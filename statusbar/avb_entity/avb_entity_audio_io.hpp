@@ -25,7 +25,6 @@
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
-#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_bridge.hpp"
@@ -34,12 +33,14 @@
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -47,7 +48,6 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <memory_resource>
 #include <optional>
@@ -64,7 +64,7 @@ using statusbar::StatusValue;
 using statusbar::success;
 
 /// Audio processing callback type. Called with interleaved N-channel samples.
-using AudioProcessCallback = std::function<void(std::span<float> samples, size_t sample_count)>;
+using AudioProcessCallback = statusbar::sg14::inplace_function<void(std::span<float> samples, size_t sample_count), 64>;
 
 /// AVB Entity with dual-format (AM824 + AAF) N-channel audio streams.
 ///

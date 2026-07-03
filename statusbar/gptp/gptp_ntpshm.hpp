@@ -37,11 +37,11 @@
 
 #if defined(__linux__)
 
+#    include "statusbar/sg14/inplace_function.h"
 #    include "statusbar/status/status.hpp"
 
 #    include <cstdint>
 #    include <ctime>
-#    include <functional>
 #    include <memory>
 
 #    include <sys/shm.h>
@@ -175,7 +175,7 @@ class NtpShmReader
 
     /// Get a PtpTimeReader-compatible callable for use with PtpTimeBridge
     /// @return A function that returns StatusValue<int64_t> with PTP time in nanoseconds
-    [[nodiscard]] auto reader() const -> std::function<StatusValue<int64_t>()>
+    [[nodiscard]] auto reader() const -> statusbar::sg14::inplace_function<StatusValue<int64_t>(), 64>
     {
         return [this]() -> StatusValue<int64_t> { return get_ptp_time_ns(); };
     }

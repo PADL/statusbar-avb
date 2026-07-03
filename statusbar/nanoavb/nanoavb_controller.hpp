@@ -19,7 +19,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <optional>
 #include <span>
 
@@ -32,8 +31,8 @@ using ieee::Eui64;
 struct AemControllerEntityCallbacks
 {
     // Network I/O
-    std::function<bool(std::span<uint8_t const> packet)> send_atdecc_multicast;
-    std::function<bool(Eui48 const& dest_mac, std::span<uint8_t const> packet)> send_atdecc_unicast;
+    statusbar::sg14::inplace_function<bool(std::span<uint8_t const> packet), 64> send_atdecc_multicast;
+    statusbar::sg14::inplace_function<bool(Eui48 const& dest_mac, std::span<uint8_t const> packet), 64> send_atdecc_unicast;
 
     // Entity discovery notifications
     statusbar::sg14::inplace_function<void(atdecc::DiscoveredEntity const&), 64> on_entity_available;
@@ -43,8 +42,9 @@ struct AemControllerEntityCallbacks
     // AEM response notifications
     /// `sent_payload` is the original request payload (after the AemDu header).
     /// Useful when response payload echoes are unreliable on errors.
-    std::function<void(
-        Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data)>
+    statusbar::sg14::inplace_function<
+        void(Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data),
+        64>
         on_aem_response;
     statusbar::sg14::inplace_function<void(Eui64 target, uint16_t cmd), 64> on_aem_timeout;
 

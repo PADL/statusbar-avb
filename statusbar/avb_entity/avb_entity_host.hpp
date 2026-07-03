@@ -52,11 +52,11 @@
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -191,15 +191,18 @@ class AvbEntityHost
     /// Called when MSRP enters the advertise state, AFTER the host has declared the
     /// SR class domain for you. Declare your talker reservations here (one
     /// talker_advertise per STREAM_OUTPUT). Stream-set-specific, so the entity supplies it.
-    void set_advertise_streams(std::function<void(TimePoint)> fn) { advertise_streams_ = std::move(fn); }
+    void set_advertise_streams(statusbar::sg14::inplace_function<void(TimePoint), 64> fn) { advertise_streams_ = std::move(fn); }
 
     /// Called when MSRP withdraws: withdraw the reservations declared above.
-    void set_withdraw_streams(std::function<void(TimePoint)> fn) { withdraw_streams_ = std::move(fn); }
+    void set_withdraw_streams(statusbar::sg14::inplace_function<void(TimePoint), 64> fn) { withdraw_streams_ = std::move(fn); }
 
     /// Called for every MSRP Listener Ready register/leave on one of our talker
     /// streams (after the host drives the talker SM + logs the gate debug). Wire this
     /// to your TalkerGate::note_listener_ready so the transmit gate tracks readiness.
-    void set_on_listener_ready(std::function<void(nanoavb::StreamId const&, bool)> fn) { on_listener_ready_ = std::move(fn); }
+    void set_on_listener_ready(statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> fn)
+    {
+        on_listener_ready_ = std::move(fn);
+    }
 
   private:
     // Generic SM-callback wiring (no stream specifics): split by SM group.
@@ -234,9 +237,9 @@ class AvbEntityHost
     nanoavb::talker_engine_sm::Machine talker_engine_{};
     nanoavb::listener_engine_sm::Machine listener_engine_{};
 
-    std::function<void(TimePoint)> advertise_streams_{};
-    std::function<void(TimePoint)> withdraw_streams_{};
-    std::function<void(nanoavb::StreamId const&, bool)> on_listener_ready_{};
+    statusbar::sg14::inplace_function<void(TimePoint), 64> advertise_streams_{};
+    statusbar::sg14::inplace_function<void(TimePoint), 64> withdraw_streams_{};
+    statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> on_listener_ready_{};
 
     std::string interface_name_{};
     bool running_{false};

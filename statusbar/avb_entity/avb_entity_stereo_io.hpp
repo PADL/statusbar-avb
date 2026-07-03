@@ -18,6 +18,7 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -27,7 +28,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <memory>
 #include <print>
 #include <span>
@@ -80,7 +80,7 @@ struct AvbEntityStereoIOConfig
 /// Called with interleaved stereo samples (left, right, left, right, ...)
 /// @param samples Input/output sample buffer (modified in place)
 /// @param sample_count Number of stereo sample pairs
-using AudioProcessCallback = std::function<void(std::span<float> samples, size_t sample_count)>;
+using AudioProcessCallback = statusbar::sg14::inplace_function<void(std::span<float> samples, size_t sample_count), 64>;
 
 /// AVB Entity with stereo input/output streams and DSP processing
 ///

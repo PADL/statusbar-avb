@@ -23,6 +23,7 @@
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/net/net.hpp"
 #include "statusbar/ptpclient/ptpclient_tai_translator.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/throw_or_abort.hpp"
@@ -56,7 +57,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <functional>
 #include <iostream>
 #include <optional>
 #include <ostream>
@@ -611,7 +611,7 @@ class Session
     /// canonical pair_id used to detect self-loopback. Codec-specific
     /// helpers like `owlm::make_owlm_eui64` and `owlm::eui64_pair_id`
     /// live in the calling tool, not here.
-    using IdentityBuilder = std::function<std::pair<TxIdentityPair, ieee::Eui64>(ieee::Eui48 const&)>;
+    using IdentityBuilder = statusbar::sg14::inplace_function<std::pair<TxIdentityPair, ieee::Eui64>(ieee::Eui48 const&), 64>;
 
     /// Construct a fully-initialised session. Performs (in order):
     ///   1. local-identity discovery — starts a gPTP slave session if

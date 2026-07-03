@@ -22,6 +22,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -31,7 +32,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <memory>
 #include <memory_resource>
 #include <optional>
@@ -96,7 +96,7 @@ struct AvbEntityAm824IOConfig
 /// Called with interleaved N-channel samples
 /// @param samples Input/output sample buffer (modified in place)
 /// @param sample_count Number of sample frames (each frame contains N channel samples)
-using Am824AudioProcessCallback = std::function<void(std::span<float> samples, size_t sample_count)>;
+using Am824AudioProcessCallback = statusbar::sg14::inplace_function<void(std::span<float> samples, size_t sample_count), 64>;
 
 /// AVB Entity with N-channel AM824 input/output streams and DSP processing
 ///
