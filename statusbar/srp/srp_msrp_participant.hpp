@@ -364,6 +364,15 @@ class MsrpParticipantT
     /// being spread across successive PDUs -- expected 0 at normal deployment scale.
     [[nodiscard]] auto pdu_message_skip_count() const noexcept -> size_t { return pdu_message_skip_count_; }
 
+    /// Count of received attributes whose StreamID matches one WE are locally
+    /// declaring but whose payload differs -- a StreamIdInUseByAnotherTalker
+    /// conflict (802.1Q-2018 35.2.4). We keep our own value (never adopt the
+    /// peer's); a non-zero count means another station is declaring our StreamID.
+    [[nodiscard]] auto foreign_declaration_conflict_count() const noexcept -> size_t
+    {
+        return foreign_declaration_conflict_count_;
+    }
+
     // -------------------- PDU I/O --------------------
 
     /// Parse an inbound MSRPDU. The supplied span should cover the
@@ -483,6 +492,8 @@ class MsrpParticipantT
     MutableBufferWithStorage<MAX_PDU_BYTES> pdu_buffer_{};
     /// See pdu_message_skip_count(): messages skipped for not fitting the PDU.
     size_t pdu_message_skip_count_{0};
+    /// See foreign_declaration_conflict_count(): peer declared our StreamID.
+    size_t foreign_declaration_conflict_count_{0};
 
     //
     // --- Observer subscriptions (slot-based, fixed capacity) ---

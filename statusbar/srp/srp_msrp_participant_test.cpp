@@ -1634,4 +1634,47 @@ TEST(msrp_participant, oversized_declaration_set_never_emits_truncated_pdu)
     EXPECT_TRUE(p.pdu_message_skip_count() > 0);
 }
 
+// ===========================================================================
+// StreamIdInUseByAnotherTalker (S2): a peer declaring a StreamID WE declare must
+// not overwrite our record's payload (which we would then re-advertise as ours).
+// ===========================================================================
+
+TEST(msrp_participant, peer_declaration_does_not_overwrite_our_talker)
+{
+    MsrpParticipant a{test_msrp_config(), 0xa100};
+    MsrpParticipant b{test_msrp_config(), 0xb200};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+
+    ieee::Eui48 const our_mac{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
+    ieee::Eui48 const foreign_mac{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB};
+
+    // A declares stream S with OUR dest MAC.
+    auto ta_ours = make_talker_adv(0x0001);
+    ta_ours.destination_address = our_mac;
+    EXPECT_TRUE(bool(a.declare_talker_advertise(ta_ours, clock.now)));
+    a.tick(clock.advance(std::chrono::milliseconds(150)));
+
+    // B declares the SAME stream S with a DIFFERENT dest MAC; A receives it.
+    auto ta_foreign = make_talker_adv(0x0001);
+    ta_foreign.destination_address = foreign_mac;
+    EXPECT_TRUE(bool(b.declare_talker_advertise(ta_foreign, clock.now)));
+    b.tick(clock.advance(std::chrono::milliseconds(150)));
+    fab.deliver_b_to_a(a, clock.now);
+
+    // A must NOT have adopted B's foreign dest MAC into our own declaration -- our
+    // record still carries our value (had it adopted B's, this would be foreign_mac).
+    auto const* fv = a.find_talker_advertise(make_stream_id(0x0001));
+    EXPECT_NE(fv, nullptr);
+    if (fv != nullptr) {
+        EXPECT_TRUE(fv->destination_address == our_mac);
+    }
+    // The collision is observable.
+    EXPECT_TRUE(a.foreign_declaration_conflict_count() > 0);
+}
+
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)

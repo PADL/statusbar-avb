@@ -1030,10 +1030,14 @@ void MsrpParticipantT<Limits>::handle_talker_advertise_rx(
     }
     auto& rec = *rec_ptr;
     bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-    rec.first_value = fv;
+    // Adopt the received payload ONLY for a pure peer registration. If WE are
+    // locally declaring this StreamID, a peer declaring the same one is a
+    // StreamIdInUseByAnotherTalker conflict (802.1Q-2018 35.2.4): keep OUR value so
+    // our next JoinIn re-advertises our own params, not the peer's.
     if (rec.operation == Operation::Register) {
-        // only overwrite operation if not a local declaration
-        rec.operation = Operation::Register;
+        rec.first_value = fv;
+    } else if (!(rec.first_value == fv)) {
+        ++foreign_declaration_conflict_count_;
     }
     mrp::dispatch_applicant(rec, applicant_event, now);
     if (registrar_event == registrar_sm::Def::Event::Count) {
@@ -1074,7 +1078,12 @@ void MsrpParticipantT<Limits>::handle_talker_failed_rx(
     }
     auto& rec = *rec_ptr;
     bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-    rec.first_value = fv;
+    // Keep our own payload if WE declare this StreamID (see handle_talker_advertise_rx).
+    if (rec.operation == Operation::Register) {
+        rec.first_value = fv;
+    } else if (!(rec.first_value == fv)) {
+        ++foreign_declaration_conflict_count_;
+    }
     mrp::dispatch_applicant(rec, applicant_event, now);
     if (registrar_event == registrar_sm::Def::Event::Count) {
         return;
@@ -1114,9 +1123,16 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     auto& rec = *rec_ptr;
     auto const state_before = rec.registrar_sm.current_state();
     bool const was_registered = (state_before == registrar_sm::Def::State::In);
-    rec.first_value = fv;
     auto const prev_substate = rec.substate;
-    rec.substate = decl;
+    // Adopt the received listener declaration ONLY for a pure peer registration. If
+    // WE declare this StreamID, keep OUR substate (first_value is just the StreamID
+    // here; substate is the payload) so our next JoinIn re-advertises our own.
+    if (rec.operation == Operation::Register) {
+        rec.first_value = fv;
+        rec.substate = decl;
+    } else if (rec.substate != decl) {
+        ++foreign_declaration_conflict_count_;
+    }
 
     rec.applicant_ctx.clear_outputs();
     rec.applicant_sm.handle_event(rec.applicant_ctx, applicant_event, now);
@@ -1193,7 +1209,12 @@ void MsrpParticipantT<Limits>::handle_domain_rx(
     }
     auto& rec = *rec_ptr;
     bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-    rec.first_value = fv;
+    // Keep our own payload if WE declare this domain (see handle_talker_advertise_rx).
+    if (rec.operation == Operation::Register) {
+        rec.first_value = fv;
+    } else if (!(rec.first_value == fv)) {
+        ++foreign_declaration_conflict_count_;
+    }
     mrp::dispatch_applicant(rec, applicant_event, now);
     if (registrar_event == registrar_sm::Def::Event::Count) {
         return;
