@@ -422,7 +422,6 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
             avtp::CrfPull::multiply_1_0,
             config_.crf_timestamp_interval,
             config_.crf_timestamps_per_packet);
-        talker_->crf_event_ = 0;
     }
 
     // One TX socket (qdisc-bypass so our own egress is not re-received).
@@ -597,14 +596,16 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         // (listeners ACMP-connect and MSRP-reserve the CRF clock separately), never
         // on the audio streams' gate.
         if (talker_should_transmit(crf_idx_, now_steady_ns)) {
-            uint32_t const sample_stride = static_cast<uint32_t>(config_.crf_timestamp_interval) * SAMPLE_RATE / CRF_BASE_FREQUENCY;
+            uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY);
             uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) /
                 static_cast<uint32_t>(SAMPLES_PER_PACKET);
             if (pkts_per_crf == 0) {
                 pkts_per_crf = 1;
             }
             if (crf_decim_ == 0) {
-                talker_->transmit_crf();
+                // Re-base to the live media-clock position each PDU so CRF timestamps
+                // track gPTP-now, not the (possibly long-past) media-clock anchor.
+                talker_->transmit_crf(crf_aligned_base(tick.first_index, sample_stride));
             }
             crf_decim_ = static_cast<uint16_t>((crf_decim_ + 1U) % pkts_per_crf);
         } else {

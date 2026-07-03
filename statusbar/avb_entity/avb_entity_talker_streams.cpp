@@ -86,7 +86,24 @@ void TalkerStreams::transmit_aaf(uint64_t now_ns, uint16_t samples, std::span<fl
     ++aaf_tx_packets_;
 }
 
-void TalkerStreams::transmit_crf()
+void fill_crf_timestamps(
+    ptpclient::MediaClockGenerator const& media_clock,
+    uint64_t const base_index,
+    uint32_t const sample_stride,
+    uint16_t const n_ts,
+    std::span<uint8_t> ts_data) noexcept
+{
+    // Timestamps come from the media clock, so the CRF conveys exactly our media
+    // clock (event times, evenly spaced by sample_stride in the SAMPLE_RATE domain).
+    // timestamp_for() already carries the presentation offset (Open1722's CRF
+    // talker likewise offsets by the max transit time).
+    for (uint16_t i = 0; i < n_ts; ++i) {
+        uint64_t const ts = media_clock.timestamp_for(base_index + (static_cast<uint64_t>(i) * sample_stride));
+        (void)avtp::crf_set_timestamp(ts_data, i, ts);
+    }
+}
+
+void TalkerStreams::transmit_crf(uint64_t const base_index)
 {
     if (!crf_out_ || stream_tx_.fd() < 0 || !media_clock_.anchored()) {
         return;
@@ -98,7 +115,7 @@ void TalkerStreams::transmit_crf()
     // speaks. With a 48 kHz CRF base and 96 kHz audio, each declared CRF event spans
     // SAMPLE_RATE/base (= 2) audio samples, so the emitted timestamp VALUES stay
     // spaced at interval/base seconds regardless of the base we advertise.
-    uint64_t const sample_stride = static_cast<uint64_t>(interval) * SAMPLE_RATE / crf_out_->base_frequency;
+    uint32_t const sample_stride = crf_sample_stride(interval, crf_out_->base_frequency);
 
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (64 * avtp::CrfPdu::TIMESTAMP_SIZE);
     std::array<uint8_t, MAX_FRAME> frame{};
@@ -107,16 +124,8 @@ void TalkerStreams::transmit_crf()
     pdu.init_audio_sample(crf_out_->stream_id, crf_out_->base_frequency, crf_out_->pull, interval, n_ts);
     pdu.set_sequence_num(crf_out_->sequence_num);
 
-    // Timestamps come from the SAME GPS-locked media clock as the audio, so the CRF
-    // conveys exactly our media clock (event times, evenly spaced by sample_stride
-    // in the 96 kHz domain). timestamp_for() already carries the presentation
-    // offset (Open1722's CRF talker likewise offsets by the max transit time).
     std::span<uint8_t> const ts_data = std::span<uint8_t>{frame}.subspan(avtp::CrfPdu::HEADER_LENGTH);
-    for (uint16_t i = 0; i < n_ts; ++i) {
-        uint64_t const ts = media_clock_.timestamp_for(crf_event_ + (static_cast<uint64_t>(i) * sample_stride));
-        (void)avtp::crf_set_timestamp(ts_data, i, ts);
-    }
-    crf_event_ += static_cast<uint64_t>(n_ts) * sample_stride;
+    fill_crf_timestamps(media_clock_, base_index, sample_stride, n_ts, ts_data);
     crf_out_->sequence_num = static_cast<uint8_t>((crf_out_->sequence_num + 1U) & 0xFFU);
     ++crf_out_->packets_sent;
 

@@ -51,7 +51,11 @@ struct TalkerStreams
     /// Serialize + send one packet of each stream. Media-timer (SCHED_FIFO) thread.
     void transmit_am824(uint64_t now_ns, uint32_t samples);
     void transmit_aaf(uint64_t now_ns, uint16_t samples, std::span<float const> src);
-    void transmit_crf();
+    /// Serialize + send one CRF PDU whose timestamps start at `base_index` in the
+    /// media-clock (SAMPLE_RATE) sample-index domain. The caller passes the LIVE
+    /// media-clock position (see crf_aligned_base) so the CRF conveys gPTP-now and
+    /// not the anchor, regardless of when transmission (re)starts.
+    void transmit_crf(uint64_t base_index);
 
     static constexpr uint32_t SAMPLE_RATE = 96000;
 
@@ -70,7 +74,6 @@ struct TalkerStreams
     ieee::Eui48 aaf_dest_mac_{};
     std::optional<avtp::CrfStreamOutputContext> crf_out_{};
     ieee::Eui48 crf_dest_mac_{};
-    uint64_t crf_event_{0};  ///< media-clock event index for the next CRF timestamp
     uint64_t am824_tx_packets_{0};
     uint64_t aaf_tx_packets_{0};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
@@ -78,5 +81,39 @@ struct TalkerStreams
     TxPcapRecorder tx_pcap_recorder_{};
     uint64_t last_tx_gptp_ns_{0};
 };
+
+// ---------------------------------------------------------------------------
+// CRF timestamp math (pure, socket-free -- unit-testable in isolation).
+// ---------------------------------------------------------------------------
+
+/// Spacing, in media-clock (SAMPLE_RATE) samples, between consecutive CRF
+/// timestamps. The DECLARED interval is in CRF base-frequency events; one such
+/// event spans SAMPLE_RATE/base_frequency audio samples. Returns 0 iff
+/// base_frequency is 0 (degenerate config).
+[[nodiscard]] constexpr auto crf_sample_stride(uint16_t interval, uint32_t base_frequency) noexcept -> uint32_t
+{
+    return base_frequency == 0 ? 0U : static_cast<uint32_t>(interval) * TalkerStreams::SAMPLE_RATE / base_frequency;
+}
+
+/// The media-clock base index for the next CRF PDU: the live media-clock
+/// position (tick.first_index) floored to a sample_stride boundary so
+/// successive PDUs stay contiguous. Re-basing to the live index each PDU is
+/// what keeps CRF timestamps tracking gPTP-now instead of the anchor.
+[[nodiscard]] constexpr auto crf_aligned_base(uint64_t first_index, uint32_t sample_stride) noexcept -> uint64_t
+{
+    return sample_stride == 0 ? first_index : (first_index / sample_stride) * sample_stride;
+}
+
+/// Fill `n_ts` CRF timestamps into `ts_data` (each avtp::CrfPdu::TIMESTAMP_SIZE
+/// bytes) from `media_clock`, starting at `base_index` and spaced by
+/// `sample_stride` in the media-clock sample-index domain. Pure: no socket,
+/// no mutable state -- the timestamp VALUES are exactly the media clock's
+/// presentation times for those sample indices.
+void fill_crf_timestamps(
+    ptpclient::MediaClockGenerator const& media_clock,
+    uint64_t base_index,
+    uint32_t sample_stride,
+    uint16_t n_ts,
+    std::span<uint8_t> ts_data) noexcept;
 
 }  // namespace statusbar::avb_entity
