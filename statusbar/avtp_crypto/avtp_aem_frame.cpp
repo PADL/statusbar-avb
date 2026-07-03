@@ -204,7 +204,21 @@ auto parse_aem_frame(span<uint8_t const> frame) -> std::optional<ParsedAemFrame>
     statusbar::ieee::doublet_t command_code{};
     span_load(command_code, frame.subspan(36, 2));
     result.command_code = static_cast<uint16_t>(command_code.get() & 0x7FFF);
-    result.payload = frame.subspan(aem_payload_offset);
+
+    // Bound the payload by the declared control_data_length, not the frame extent
+    // (which may include Ethernet padding or trailing bytes). control_data_length
+    // counts the octets after target_entity_id, i.e. aem_data_length + payload; the
+    // inverse recovers the payload length. Reject a CDL that under-runs the AEM
+    // common header or over-runs the received frame, so a consumer trusting the
+    // declared length can never read past the buffer.
+    if (result.control_data_length < aem_data_length) {
+        return std::nullopt;
+    }
+    size_t const payload_len = result.control_data_length - aem_data_length;
+    if (aem_payload_offset + payload_len > frame.size()) {
+        return std::nullopt;
+    }
+    result.payload = frame.subspan(aem_payload_offset, payload_len);
 
     return result;
 }
@@ -312,7 +326,15 @@ auto parse_eecf_frame(span<uint8_t const> frame) -> std::optional<ParsedEecfFram
     result.enc = eecf_opt->enc();
     result.encrypted_payload_length = eecf_opt->encrypted_payload_length();
     result.key_id = eecf_opt->key_id();
-    result.encrypted_payload = frame.subspan(eecf_payload_offset);
+
+    // Bound the ciphertext by the declared encrypted_payload_length, not the frame
+    // extent, and reject a length that over-runs the frame -- otherwise padding is
+    // decrypted as ciphertext, or a consumer trusting the declared length reads
+    // past the buffer.
+    if (eecf_payload_offset + result.encrypted_payload_length > frame.size()) {
+        return std::nullopt;
+    }
+    result.encrypted_payload = frame.subspan(eecf_payload_offset, result.encrypted_payload_length);
 
     return result;
 }

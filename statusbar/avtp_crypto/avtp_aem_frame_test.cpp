@@ -310,6 +310,61 @@ TEST(avtp_aem_frame, eecf_frame_roundtrip)
     EXPECT_TRUE(span_compare(parsed->encrypted_payload, std::span<uint8_t const>(enc_payload)));
 }
 
+// ===========================================================================
+// Declared-length bounding (crypto#1, #2): the parsed payload must be bounded by
+// the header's declared length, not the frame extent (padding / trailing bytes),
+// and an over-claiming length must be rejected before a consumer can trust it.
+// ===========================================================================
+
+TEST(avtp_aem_frame, parse_aem_bounds_payload_by_control_data_length)
+{
+    std::array<uint8_t, 128> buf{};
+    auto built = build_auth_get_nonce_frame(
+        buf, test_controller_mac, test_talker_mac, test_talker_eid, test_controller_eid, 42, test_controller_nonce);
+    EXPECT_TRUE(built.has_value());
+    size_t const real_size = built->size();  // 46: 38 header + 8 nonce, control_data_length=20
+
+    // Parse a span with 16 bytes of trailing padding -> payload stays the declared 8
+    // bytes (control_data_length 20 - aem_data_length 12), not the padded extent.
+    auto padded = std::span<uint8_t const>(buf.data(), real_size + 16);
+    auto parsed = parse_aem_frame(padded);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->payload.size() == 8);
+
+    // control_data_length claiming more than the frame holds -> rejected.
+    buf[16] = static_cast<uint8_t>((buf[16] & 0xF8) | ((2000U >> 8) & 0x07));
+    buf[17] = static_cast<uint8_t>(2000U & 0xFF);
+    EXPECT_FALSE(parse_aem_frame(std::span<uint8_t const>(buf.data(), real_size)).has_value());
+
+    // control_data_length below the AEM common header (< aem_data_length) -> rejected.
+    buf[16] = static_cast<uint8_t>(buf[16] & 0xF8);
+    buf[17] = 5;
+    EXPECT_FALSE(parse_aem_frame(std::span<uint8_t const>(buf.data(), real_size)).has_value());
+}
+
+TEST(avtp_aem_frame, parse_eecf_bounds_payload_by_declared_length)
+{
+    std::array<uint8_t, 96> enc_payload{};
+    for (size_t i = 0; i < enc_payload.size(); ++i) {
+        enc_payload[i] = static_cast<uint8_t>(i + 0x10);
+    }
+    std::array<uint8_t, 256> buf{};
+    auto built = build_eecf_frame(buf, test_controller_mac, test_talker_mac, eecf_enc_ecc1, test_talker_eid, enc_payload);
+    EXPECT_TRUE(built.has_value());
+    size_t const real_size = built->size();  // 122: 26 header + 96 payload
+
+    // Trailing padding is dropped -> ciphertext stays the declared 96 bytes.
+    auto padded = std::span<uint8_t const>(buf.data(), real_size + 16);
+    auto parsed = parse_eecf_frame(padded);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->encrypted_payload.size() == 96);
+
+    // encrypted_payload_length claiming more than the frame holds -> rejected.
+    buf[16] = static_cast<uint8_t>((buf[16] & 0xF8) | ((2000U >> 8) & 0x07));
+    buf[17] = static_cast<uint8_t>(2000U & 0xFF);
+    EXPECT_FALSE(parse_eecf_frame(std::span<uint8_t const>(buf.data(), real_size)).has_value());
+}
+
 TEST(avtp_aem_frame, eecf_parse_rejects_wrong_subtype)
 {
     std::array<uint8_t, 64> frame{};
