@@ -320,13 +320,15 @@ class MvrpParticipantT
 
             uint8_t const attr_length = hdr.attribute_length.get();
             if (static_cast<AttributeType>(hdr.attribute_type.get()) != AttributeType::VlanIdentifier) {
-                while (pos + 2 <= pdu.size()) {
+                // This decoder only understands VlanIdentifier. An unknown attribute
+                // must be followed immediately by an EndMark; consume it and move on.
+                // Any non-EndMark word there is malformed -> bail.
+                if (pos + 2 <= pdu.size()) {
                     uint16_t const v = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
-                    if (v == mrp::END_MARK) {
-                        pos += 2;
-                        break;
+                    if (v != mrp::END_MARK) {
+                        return;
                     }
-                    return;
+                    pos += 2;
                 }
                 continue;
             }

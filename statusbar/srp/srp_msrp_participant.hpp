@@ -368,10 +368,7 @@ class MsrpParticipantT
     /// declaring but whose payload differs -- a StreamIdInUseByAnotherTalker
     /// conflict (802.1Q-2018 35.2.4). We keep our own value (never adopt the
     /// peer's); a non-zero count means another station is declaring our StreamID.
-    [[nodiscard]] auto foreign_declaration_conflict_count() const noexcept -> size_t
-    {
-        return foreign_declaration_conflict_count_;
-    }
+    [[nodiscard]] auto foreign_declaration_conflict_count() const noexcept -> size_t { return foreign_declaration_conflict_count_; }
 
     // -------------------- PDU I/O --------------------
 
@@ -621,6 +618,19 @@ class MsrpParticipantT
     //
     // Observer notification helpers
     //
+
+    /// Fan out to every subscribed observer's @p member callback (when set), passing
+    /// @p args. Replaces seven byte-identical "for slot: if set, call" loops.
+    template <class Member, class... Args>
+    void notify_all(Member Observer::* member, Args const&... args)
+    {
+        for (auto const& slot : observers_) {
+            if (slot.id != 0 && (slot.obs.*member)) {
+                (slot.obs.*member)(args...);
+            }
+        }
+    }
+
     void notify_talker_advertise(TalkerAdvertiseFirstValue const& fv, Operation op);
     void notify_talker_failed(TalkerFailedFirstValue const& fv, Operation op);
     void notify_talker_leave(tsn::StreamId const& id);

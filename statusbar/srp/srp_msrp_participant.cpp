@@ -698,71 +698,43 @@ void MsrpParticipantT<Limits>::on_periodic_timer(TimePoint now)
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_talker_advertise(TalkerAdvertiseFirstValue const& fv, Operation op)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_talker_advertise) {
-            slot.obs.on_talker_advertise(fv, op);
-        }
-    }
+    notify_all(&Observer::on_talker_advertise, fv, op);
 }
 
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_talker_failed(TalkerFailedFirstValue const& fv, Operation op)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_talker_failed) {
-            slot.obs.on_talker_failed(fv, op);
-        }
-    }
+    notify_all(&Observer::on_talker_failed, fv, op);
 }
 
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_talker_leave(tsn::StreamId const& id)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_talker_leave) {
-            slot.obs.on_talker_leave(id);
-        }
-    }
+    notify_all(&Observer::on_talker_leave, id);
 }
 
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_listener(tsn::StreamId const& id, ListenerDeclaration decl, Operation op)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_listener) {
-            slot.obs.on_listener(id, decl, op);
-        }
-    }
+    notify_all(&Observer::on_listener, id, decl, op);
 }
 
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_listener_leave(tsn::StreamId const& id)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_listener_leave) {
-            slot.obs.on_listener_leave(id);
-        }
-    }
+    notify_all(&Observer::on_listener_leave, id);
 }
 
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_domain(DomainFirstValue const& fv, Operation op)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_domain) {
-            slot.obs.on_domain(fv, op);
-        }
-    }
+    notify_all(&Observer::on_domain, fv, op);
 }
 
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_domain_leave(DomainFirstValue const& fv)
 {
-    for (auto const& slot : observers_) {
-        if (slot.id != 0 && slot.obs.on_domain_leave) {
-            slot.obs.on_domain_leave(fv);
-        }
-    }
+    notify_all(&Observer::on_domain_leave, fv);
 }
 
 // ============================================================
