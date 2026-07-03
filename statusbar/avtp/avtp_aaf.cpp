@@ -5,6 +5,7 @@
 
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -341,7 +342,13 @@ auto aaf_get_audio_payload(std::span<uint8_t const> const packet) noexcept -> st
     if (packet.size() <= AafPdu::HEADER_LENGTH) {
         return {};
     }
-    return packet.subspan(AafPdu::HEADER_LENGTH);
+    size_t const available = packet.size() - AafPdu::HEADER_LENGTH;
+    // Bound to the declared stream_data_length, not the raw buffer extent: a wire
+    // packet is padded to the 60-byte Ethernet minimum, and returning that padding
+    // would decode as bogus samples. Clamp to the buffer so we never over-read.
+    auto const pdu = aaf_parse_header(packet);
+    size_t const declared = pdu.has_value() ? pdu->get_stream_data_length() : available;
+    return packet.subspan(AafPdu::HEADER_LENGTH, std::min(declared, available));
 }
 
 auto aaf_format_name(AafFormat const format) noexcept -> char const*

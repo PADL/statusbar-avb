@@ -1330,6 +1330,44 @@ TEST(am824_rt_coverage, syt_interval_all_rates)
     EXPECT_EQ(am824_syt_interval(r192), 32U);
 }
 
+// avtp#2: the payload accessor must honor the declared stream_data_length, not the
+// raw buffer extent -- a wire packet is padded to the 60-byte Ethernet minimum and
+// that padding must not be returned as audio.
+TEST(am824_pdu, get_audio_payload_ignores_trailing_padding)
+{
+    Eui48 mac{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56};
+    StreamId sid{mac, 0x0001};
+    std::array<float, 4> audio = {0.5f, -0.5f, 0.25f, -0.25f};  // 2 channels, 2 samples
+    std::array<uint8_t, 64> packet{};
+    size_t const bytes = am824_create_packet(sid, 0, 0, Am824SampleRate::rate_48_khz, 0, std::span{audio}, 2, 2, std::span{packet});
+    EXPECT_EQ(bytes, 48U);  // 32 header + 16 audio
+
+    // Pass the WHOLE 64-byte buffer (16 bytes of trailing padding) rather than `bytes`.
+    auto const payload = am824_get_audio_payload(std::span<uint8_t const>{packet});
+    EXPECT_EQ(payload.size(), 16U);  // declared audio length, not 64 - 32 = 32
+}
+
+// avtp#3: the FDF's SFC (sample-frequency code) is only the low 3 bits; the upper
+// bits select the rate-control mode. is_valid() must accept command-based mode
+// (FDF = 0000 1xxx) and reject only a reserved SFC.
+TEST(am824_pdu, is_valid_accepts_command_based_fdf)
+{
+    Eui48 mac{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56};
+    StreamId sid{mac, 0x0001};
+    Am824Pdu pdu{};
+    pdu.init(sid, 2, Am824SampleRate::rate_48_khz);  // clock-based, SFC = 0x02
+    EXPECT_TRUE(pdu.is_valid());
+
+    // Command-based rate-control mode: FDF = 0000 1xxx (bit 3 set), SFC unchanged.
+    pdu.cip_header.set_format_dependent_field(0x08U | 0x02U);  // 0x0A
+    EXPECT_TRUE(pdu.is_valid());
+    EXPECT_EQ(pdu.cip_header.sample_rate(), Am824SampleRate::rate_48_khz);
+
+    // A reserved SFC (low 3 bits == 0x07) is still rejected, whatever the upper bits.
+    pdu.cip_header.set_format_dependent_field(0x0FU);
+    EXPECT_FALSE(pdu.is_valid());
+}
+
 //
 // Main test runner
 //

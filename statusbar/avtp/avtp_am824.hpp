@@ -592,8 +592,13 @@ struct Am824Pdu
         if (cip_header.fmt() != AM824_FMT) {
             return false;
         }
-        // Check sample rate is valid
-        if (static_cast<uint8_t>(cip_header.format_dependent_field()) > 0x06U) {
+        // Check sample rate is valid. The SFC (sampling-frequency code) is only the
+        // low 3 bits of the FDF: per IEEE Std 1722-2016 5.4.4.3 (FDF has the same
+        // definition as IEC 61883) and Annex I.6, FDF = fdf_evt[7:3] + fdf_sfc[2:0].
+        // The upper bits select the rate-control mode -- clock-based (0000 0xxx) or
+        // command-based (0000 1xxx, IEC 61883-6 Clause 10.4) -- and must NOT gate
+        // validity. Validate only the SFC sub-field, consistent with sample_rate().
+        if ((static_cast<uint8_t>(cip_header.format_dependent_field()) & 0x07U) > 0x06U) {
             return false;
         }
         // Check channel count

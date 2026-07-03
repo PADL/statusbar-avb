@@ -6,6 +6,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -272,7 +273,14 @@ auto am824_get_audio_payload(std::span<uint8_t const> packet) noexcept -> std::s
     if (packet.size() <= Am824Pdu::HEADER_LENGTH) {
         return {};
     }
-    return packet.subspan(Am824Pdu::HEADER_LENGTH);
+    size_t const available = packet.size() - Am824Pdu::HEADER_LENGTH;
+    // Bound the payload to the declared audio length (stream_data_length minus the
+    // CIP header), not the raw buffer extent: a wire packet is padded to the 60-byte
+    // Ethernet minimum, and returning that padding would decode as bogus samples.
+    // Still clamp to what the buffer actually holds so we never over-read.
+    auto const pdu = am824_parse_header(packet);
+    size_t const declared = pdu.has_value() ? pdu->audio_payload_length() : available;
+    return packet.subspan(Am824Pdu::HEADER_LENGTH, std::min(declared, available));
 }
 
 auto am824_sample_rate_name(Am824SampleRate const rate) noexcept -> char const*
