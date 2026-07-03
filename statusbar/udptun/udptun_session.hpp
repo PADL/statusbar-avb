@@ -184,22 +184,20 @@ void send_redundant_replay(C const& codec, TxContext const& ctx, RedundantTxBuff
 /// reordering within RTT is implicit. With worst_case_latency_ns == 0,
 /// PT collapses to the acquisition wall time and the receiver's
 /// "lateness" metric (rx_wall - PT) equals real one-way transit.
+/// Shared TX tail for both send paths: publish the presentation time, encode +
+/// sendto the primary, record it for redundancy, replay the temporally-shifted
+/// redundant copy, and advance the sequence. @p now_mraw is the CLOCK_MONOTONIC_RAW
+/// timestamp used for the redundancy ring + tx history (the two entry points differ
+/// only in how they derive @p presentation_time_ns).
 template <Codec C>
-void send_packet(C const& codec, TxContext const& ctx, std::atomic<uint32_t>& sequence, bool synced) noexcept
+void emit_packet(
+    C const& codec, TxContext const& ctx, std::atomic<uint32_t>& sequence, int64_t presentation_time_ns, int64_t now_mraw) noexcept
 {
-    if (!synced) {
-        return;  // skip transmit until the wire-time source is locked
-    }
-
-    int64_t const now_mraw = monotonic_raw_ns();
-    int64_t const presentation_time_ns = ctx.clock.wire_ns(now_mraw) + ctx.worst_case_latency_ns;
     ctx.last_tx_pt_ns.publish(presentation_time_ns);
 
     uint32_t const seq = sequence.load(std::memory_order_relaxed);
-
-    // The buffer is pre-zeroed at session construction; the codec touches
-    // only the header, so payload bytes stay at zero across the run. No
-    // per-tick re-fill needed.
+    // The buffer is pre-zeroed at session construction; the codec touches only the
+    // header, so payload bytes stay at zero across the run. No per-tick re-fill.
     codec.encode(ctx.tx_buf, ctx.tx.primary_id, seq, presentation_time_ns, ctx.tx_interval_us);
     ssize_t const sent =
         ::sendto(ctx.udp_fd, ctx.tx_buf.data(), ctx.tx_buf.size(), MSG_DONTWAIT, ctx.peer.sockaddr(), ctx.peer.length());
@@ -208,9 +206,9 @@ void send_packet(C const& codec, TxContext const& ctx, std::atomic<uint32_t>& se
     }
     ctx.redundant_buffer.record(now_mraw, seq, presentation_time_ns);
 
-    // Send the redundant copy of the primary that was emitted
-    // `temporal_shift` ago. Skipped silently during the first shift_ms
-    // after startup when the buffer hasn't yet aged a packet that far.
+    // Send the redundant copy of the primary that was emitted `temporal_shift` ago.
+    // Skipped silently during the first shift_ms after startup when the buffer hasn't
+    // yet aged a packet that far.
     if (ctx.tx.redundant_enabled) {
         auto const target_ns = now_mraw - ctx.tx.temporal_shift_ns;
         if (auto replay = ctx.redundant_buffer.entry_at_or_before(target_ns); replay.has_value()) {
@@ -223,39 +221,29 @@ void send_packet(C const& codec, TxContext const& ctx, std::atomic<uint32_t>& se
     ctx.tx_history.record(now_mraw, next_seq);
 }
 
-/// RT-mode TX: the gPTP-domain target time comes from the realtime
-/// timer's scheduled deadline (event.scheduled_time_ns) rather than
-/// being computed from monotonic_raw + bridge slope. Slightly cheaper
-/// (no syscall to read monotonic for PT, no slope multiply) and
-/// aligned to the timer's scheduled tick rather than to "now during
-/// the callback".
+template <Codec C>
+void send_packet(C const& codec, TxContext const& ctx, std::atomic<uint32_t>& sequence, bool synced) noexcept
+{
+    if (!synced) {
+        return;  // skip transmit until the wire-time source is locked
+    }
+    int64_t const now_mraw = monotonic_raw_ns();
+    int64_t const presentation_time_ns = ctx.clock.wire_ns(now_mraw) + ctx.worst_case_latency_ns;
+    emit_packet(codec, ctx, sequence, presentation_time_ns, now_mraw);
+}
+
+/// RT-mode TX: the gPTP-domain target time comes from the realtime timer's scheduled
+/// deadline (event.scheduled_time_ns) rather than being computed from monotonic_raw +
+/// bridge slope -- slightly cheaper (no slope multiply) and aligned to the scheduled
+/// tick. now_mraw is sampled before the sendto (vs after, previously) so it can be
+/// shared with emit_packet; the ~µs difference only shifts the redundancy/history
+/// timestamp, which is millisecond-scale.
 template <Codec C>
 void send_packet_at_gptp(C const& codec, TxContext const& ctx, std::atomic<uint32_t>& sequence, int64_t scheduled_gptp_ns) noexcept
 {
     int64_t const presentation_time_ns = scheduled_gptp_ns + ctx.worst_case_latency_ns;
-    ctx.last_tx_pt_ns.publish(presentation_time_ns);
-
-    uint32_t const seq = sequence.load(std::memory_order_relaxed);
-    codec.encode(ctx.tx_buf, ctx.tx.primary_id, seq, presentation_time_ns, ctx.tx_interval_us);
-    ssize_t const sent =
-        ::sendto(ctx.udp_fd, ctx.tx_buf.data(), ctx.tx_buf.size(), MSG_DONTWAIT, ctx.peer.sockaddr(), ctx.peer.length());
-    if (sent < 0) {
-        ctx.tx_failures.add();
-    }
-
     int64_t const now_mraw = monotonic_raw_ns();
-    ctx.redundant_buffer.record(now_mraw, seq, presentation_time_ns);
-
-    if (ctx.tx.redundant_enabled) {
-        auto const target_ns = now_mraw - ctx.tx.temporal_shift_ns;
-        if (auto replay = ctx.redundant_buffer.entry_at_or_before(target_ns); replay.has_value()) {
-            send_redundant_replay(codec, ctx, *replay);
-        }
-    }
-
-    uint32_t const next_seq = seq + 1;
-    sequence.store(next_seq, std::memory_order_relaxed);
-    ctx.tx_history.record(now_mraw, next_seq);
+    emit_packet(codec, ctx, sequence, presentation_time_ns, now_mraw);
 }
 
 /// Self-loopback: this packet's pair-id matches our local pair-id, so
@@ -367,11 +355,11 @@ void process_one_rx_datagram(
         case PacketRole::RemoteRedundant:
             return;  // drop to avoid double-counting the same logical stream
         case PacketRole::RemotePrimary:
-        case PacketRole::RemoteLegacy: {
-            int64_t const latency_ns = (rx_gptp - presentation_time_ns) + ctx.worst_case_latency_ns + ctx.peer_tai_offset_ns;
-            ctx.tracker.observe(codec.sender_id(pkt), codec.sequence(pkt), latency_ns, rx_gptp, codec.announced_interval_us(pkt));
+        case PacketRole::RemoteLegacy:
+            // latency_for_csv already holds this exact value for the remote roles.
+            ctx.tracker.observe(
+                codec.sender_id(pkt), codec.sequence(pkt), latency_for_csv, rx_gptp, codec.announced_interval_us(pkt));
             return;
-        }
     }
 }
 
