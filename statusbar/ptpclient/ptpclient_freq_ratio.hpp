@@ -298,6 +298,13 @@ class KalmanRatioTracker
         x_[1] += dt * x_[2];
         const M3 F{{{1, dt, 0.5 * t2}, {0, 1, dt}, {0, 0, 1}}};
         P_ = matmul(matmul(F, P_), transpose(F));
+        // Process-noise Q for the continuous white-noise-jerk (3rd-order integrated,
+        // a.k.a. Wiener-process-acceleration) model: state = [offset, freq, drift],
+        // driven by a white jerk of PSD q_. Q is the exact closed form of
+        // integral_0^dt F(t) G G^T F(t)^T dt with G = [0,0,1]^T; the divisors
+        // (20/8/6/3/2) are those integrals, not tuning knobs. See e.g. Bar-Shalom,
+        // "Estimation with Applications to Tracking and Navigation", sec. 6.2-6.3.
+        // Retune the model via q_ (jerk_psd); do not touch the divisors.
         const M3 Q{
             {{q_ * t5 / 20, q_ * t4 / 8, q_ * t3 / 6},
              {q_ * t4 / 8, q_ * t3 / 3, q_ * t2 / 2},

@@ -464,21 +464,7 @@ class MvrpParticipantT
 
         uint16_t const base_vid = fv.get_vid();
         for (uint16_t i = 0; i < num_values; ++i) {
-            auto const unpacked = mrp::unpack3_events(event_bytes[i / 3]);
-            mrp::AttributeEvent event{};
-            switch (i % 3) {
-                case 0:
-                    event = unpacked.first;
-                    break;
-                case 1:
-                    event = unpacked.second;
-                    break;
-                case 2:
-                    event = unpacked.third;
-                    break;
-                default:
-                    break;
-            }
+            mrp::AttributeEvent const event = mrp::nth_of_three(mrp::unpack3_events(event_bytes[i / 3]), i);
             uint16_t const this_vid = static_cast<uint16_t>(base_vid + i);
             handle_rx_event(this_vid, event, now);
         }

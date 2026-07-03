@@ -931,43 +931,11 @@ void MsrpParticipantT<Limits>::decode_vector_attribute(
 
     // Walk each of the num_values attributes in this vector.
     for (uint16_t i = 0; i < num_values; ++i) {
-        auto const unpacked = mrp::unpack3_events(event_bytes[i / 3]);
-        AttributeEvent event{};
-        switch (i % 3) {
-            case 0:
-                event = unpacked.first;
-                break;
-            case 1:
-                event = unpacked.second;
-                break;
-            case 2:
-                event = unpacked.third;
-                break;
-            default:
-                break;  // unreachable (i % 3 is always 0..2)
-        }
+        AttributeEvent const event = mrp::nth_of_three(mrp::unpack3_events(event_bytes[i / 3]), i);
 
         ListenerDeclaration decl = ListenerDeclaration::Ignore;
         if (has_declarations) {
-            auto const four = mrp::unpack4_declarations(decl_bytes[i / 4]);
-            uint8_t raw = 0;
-            switch (i % 4) {
-                case 0:
-                    raw = four.first;
-                    break;
-                case 1:
-                    raw = four.second;
-                    break;
-                case 2:
-                    raw = four.third;
-                    break;
-                case 3:
-                    raw = four.fourth;
-                    break;
-                default:
-                    break;  // unreachable (i % 4 is always 0..3)
-            }
-            decl = static_cast<ListenerDeclaration>(raw);
+            decl = static_cast<ListenerDeclaration>(mrp::nth_of_four(mrp::unpack4_declarations(decl_bytes[i / 4]), i));
         }
 
         handle_rx_event(attr_type, attr_length, first_value_bytes, i, event, decl, now);

@@ -120,6 +120,20 @@ struct ThreePackedEvents
     };
 }
 
+/// Select the event at attribute index @p i (uses i % 3 for the position within the
+/// packed octet), so callers don't hand-write the three-way switch.
+[[nodiscard]] constexpr auto nth_of_three(ThreePackedEvents const& p, size_t i) noexcept -> AttributeEvent
+{
+    switch (i % 3) {
+        case 0:
+            return p.first;
+        case 1:
+            return p.second;
+        default:
+            return p.third;
+    }
+}
+
 /// Calculate the number of octets needed to encode N events in ThreePacked format
 [[nodiscard]] constexpr auto threepacked_octet_count(size_t number_of_events) noexcept -> size_t
 {
@@ -155,6 +169,22 @@ struct FourPackedDeclarations
         .third = static_cast<uint8_t>((value >> 2) & 0x03),
         .fourth = static_cast<uint8_t>(value & 0x03),
     };
+}
+
+/// Select the declaration at attribute index @p i (uses i % 4 for the position within
+/// the packed octet), so callers don't hand-write the four-way switch.
+[[nodiscard]] constexpr auto nth_of_four(FourPackedDeclarations const& p, size_t i) noexcept -> uint8_t
+{
+    switch (i % 4) {
+        case 0:
+            return p.first;
+        case 1:
+            return p.second;
+        case 2:
+            return p.third;
+        default:
+            return p.fourth;
+    }
 }
 
 /// Calculate the number of octets needed to encode N declaration values in FourPacked format
