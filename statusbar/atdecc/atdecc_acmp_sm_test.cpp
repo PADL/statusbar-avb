@@ -1050,6 +1050,63 @@ TEST(listener_sm, connect_listener_exclusive)
     EXPECT_FALSE(ctx.has_pending);
 }
 
+// Regression (acmp#4): a DISCONNECT_RX must name the talker the sink is actually
+// connected to. A command naming a different talker is rejected with
+// NO_SUCH_CONNECTION and must NOT tear down the live connection.
+TEST(listener_sm, disconnect_rx_wrong_talker_rejected)
+{
+    ListenerContext ctx(4);
+    ctx.my_id = LISTENER_ID;
+
+    // Pre-connect sink 0 to TALKER_ID.
+    auto* stream = ctx.get_stream(0);
+    stream->connected = true;
+    stream->talker_entity_id = TALKER_ID;
+    stream->talker_unique_id = 0;
+
+    std::vector<AcmpCommandResponse> sent_commands;
+    std::vector<AcmpCommandResponse> sent_responses;
+    ctx.tx_command = [&](AcmpCommandResponse const& c) {
+        sent_commands.push_back(c);
+        return true;
+    };
+    ctx.tx_response = [&](AcmpCommandResponse const& r) {
+        sent_responses.push_back(r);
+        return true;
+    };
+
+    AcmpListenerStateMachine<> sm;
+    sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
+
+    // DISCONNECT_RX naming a DIFFERENT talker -> NO_SUCH_CONNECTION, no teardown.
+    Eui64 const OTHER_TALKER{0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33};
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.talker_entity_id = OTHER_TALKER;
+    ctx.rcvd_cmd_resp.listener_unique_id = 0;
+    ctx.rcvd_cmd_resp.talker_unique_id = 0;
+    sm.handle_event(ctx, ListenerEvent::RcvdDisconnectRx, test_time(0));
+
+    EXPECT_EQ(sent_responses.size(), 1U);
+    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_NO_SUCH_CONNECTION);
+    EXPECT_TRUE(sent_commands.empty());          // no DISCONNECT_TX to any talker
+    EXPECT_TRUE(ctx.get_stream(0)->connected);   // live connection to TALKER_ID preserved
+
+    // DISCONNECT_RX naming the CORRECT talker -> proceeds (DISCONNECT_TX sent).
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+    ctx.rcvd_cmd_resp.listener_unique_id = 0;
+    ctx.rcvd_cmd_resp.talker_unique_id = 0;
+    sm.handle_event(ctx, ListenerEvent::RcvdDisconnectRx, test_time(1));
+
+    EXPECT_EQ(sent_commands.size(), 1U);
+    EXPECT_EQ(sent_commands[0].message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND);
+    EXPECT_TRUE(ctx.has_pending);
+}
+
 TEST(listener_sm, connect_same_talker_idempotent)
 {
     ListenerContext ctx(4);
