@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc.hpp"
 #include "statusbar/stats/stats_atomic_histogram.hpp"
 #include "statusbar/udptun/udptun_stats.hpp"
 
@@ -14,19 +15,25 @@
 
 namespace statusbar::udptun {
 
+/// Per-source slot. observe() mutates it on the RT drain thread while the reporter
+/// thread reads it, so every reporter-visible field is an itc primitive (no bare
+/// atomics): TelemetryCounter for the monotonic counts, Published for the
+/// point-in-time state. Fields only the RT thread ever reads (LRU bookkeeping)
+/// stay plain. in_use is published LAST in init_state so its release publish makes
+/// a freshly-initialised slot fully visible to a reader that saw in_use == true.
 struct SourceState
 {
-    ieee::Eui64 sender_eui64{};
-    std::unique_ptr<LatencyStats> stats{};  // unique_ptr — LatencyStats holds atomics (non-movable)
-    uint32_t first_seq{0};
-    uint32_t last_seq{0};
-    int64_t first_seen_gptp_ns{0};
-    int64_t last_seen_gptp_ns{0};
-    uint32_t announced_interval_us{0};
-    uint64_t received_count{0};
-    uint64_t out_of_order_count{0};
-    uint64_t duplicate_count{0};
-    bool in_use{false};
+    itc::Published<uint64_t> sender_eui64{};  // packed Eui64 (to_uint64); reporter + RT find_existing
+    std::unique_ptr<LatencyStats> stats{};    // LatencyStats holds atomics (non-movable)
+    itc::Published<uint32_t> first_seq{};
+    itc::Published<uint32_t> last_seq{};
+    int64_t first_seen_gptp_ns{0};    // RT-only (LRU); reporter never reads
+    int64_t last_seen_gptp_ns{0};     // RT-only (LRU)
+    uint32_t announced_interval_us{0};  // RT-only
+    itc::TelemetryCounter<uint64_t> received_count{};
+    itc::TelemetryCounter<uint64_t> out_of_order_count{};
+    itc::TelemetryCounter<uint64_t> duplicate_count{};
+    itc::Published<bool> in_use{};
 };
 
 /// Per-source latency tracker with capped storage and LRU eviction.
@@ -48,16 +55,16 @@ class PerSourceTracker
     /// formatters which iterate active sources.
     [[nodiscard]] auto sources() const -> std::span<SourceState const>;
 
-    [[nodiscard]] auto dropped_invalid() const noexcept -> uint64_t { return dropped_invalid_; }
-    void increment_dropped_invalid() noexcept { ++dropped_invalid_; }
+    [[nodiscard]] auto dropped_invalid() const noexcept -> uint64_t { return dropped_invalid_.load(); }
+    void increment_dropped_invalid() noexcept { dropped_invalid_.add(1); }
 
     /// Truncated datagrams: recvfrom reported a datagram larger than the
     /// drain buffer, so the application-visible bytes are an incomplete
     /// prefix and the codec can't decode them safely. Surfaces a wiring
     /// problem (peer sending jumbo frames at a buffer sized for standard
     /// MTU, or a path-MTU mismatch) rather than a decode-level failure.
-    [[nodiscard]] auto truncated() const noexcept -> uint64_t { return truncated_; }
-    void increment_truncated() noexcept { ++truncated_; }
+    [[nodiscard]] auto truncated() const noexcept -> uint64_t { return truncated_.load(); }
+    void increment_truncated() noexcept { truncated_.add(1); }
 
   private:
     [[nodiscard]] auto find_existing(ieee::Eui64 const& s) noexcept -> SourceState*;
@@ -65,8 +72,8 @@ class PerSourceTracker
 
     statusbar::stats::AtomicHistogramConfig hist_cfg_;
     std::vector<SourceState> slots_;
-    uint64_t dropped_invalid_{0};
-    uint64_t truncated_{0};
+    itc::TelemetryCounter<uint64_t> dropped_invalid_{};
+    itc::TelemetryCounter<uint64_t> truncated_{};
 };
 
 }  // namespace statusbar::udptun

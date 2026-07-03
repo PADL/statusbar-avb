@@ -16,15 +16,16 @@ namespace {
 
 [[nodiscard]] auto compute_loss_pct(SourceState const& s) noexcept -> double
 {
-    if (s.received_count == 0) {
+    auto const received = s.received_count.load();
+    if (received == 0) {
         return 0.0;
     }
-    auto const span = static_cast<uint32_t>(s.last_seq - s.first_seq) + 1U;
+    auto const span = static_cast<uint32_t>(s.last_seq.load() - s.first_seq.load()) + 1U;
     if (span == 0) {
         return 0.0;
     }
     auto const expected = static_cast<double>(span);
-    return 100.0 * (1.0 - (static_cast<double>(s.received_count) / expected));
+    return 100.0 * (1.0 - (static_cast<double>(received) / expected));
 }
 
 /// Convert nanoseconds to milliseconds, rounded to 0.1 ms.
@@ -60,11 +61,13 @@ void format_source_line(std::ostream& out, SourceState const& s, int64_t gptp_ns
     auto ts_snap = s.stats->time_stats.snapshot();
 
     std::format_to(std::ostreambuf_iterator<char>(out), "  eui64=");
-    ieee::format_to(std::ostreambuf_iterator<char>(out), s.sender_eui64);
+    ieee::Eui64 eui{};
+    (void)eui.from_uint64(s.sender_eui64.load());
+    ieee::format_to(std::ostreambuf_iterator<char>(out), eui);
     std::format_to(
         std::ostreambuf_iterator<char>(out),
         " count={} loss={:.2f}% min={:.1f}ms mean={:.1f}ms p50={:.1f}ms p95={:.1f}ms p99={:.1f}ms max={:.1f}ms ooo={} dup={}",
-        s.received_count,
+        s.received_count.load(),
         compute_loss_pct(s),
         ns_to_ms_tenth(ts_snap.min_ns),
         ns_to_ms_tenth(static_cast<int64_t>(ts_snap.average_ns())),
@@ -72,8 +75,8 @@ void format_source_line(std::ostream& out, SourceState const& s, int64_t gptp_ns
         ns_to_ms_tenth(percentile_from_histogram(hist_snap, 0.95)),
         ns_to_ms_tenth(percentile_from_histogram(hist_snap, 0.99)),
         ns_to_ms_tenth(ts_snap.max_ns),
-        s.out_of_order_count,
-        s.duplicate_count);
+        s.out_of_order_count.load(),
+        s.duplicate_count.load());
     if (gptp_ns != 0) {
         std::format_to(std::ostreambuf_iterator<char>(out), " gptp_ns={}", gptp_ns);
     }
@@ -133,7 +136,7 @@ void print_live_report(
 {
     std::format_to(std::ostreambuf_iterator<char>(out), "[{:9.3f}]\n", wall_seconds);
     for (auto const& s : tracker.sources()) {
-        if (!s.in_use) {
+        if (!s.in_use.load()) {
             continue;
         }
         format_source_line(out, s, gptp_ns);
@@ -154,7 +157,7 @@ void print_final_summary(
 {
     std::format_to(std::ostreambuf_iterator<char>(out), "\n=== {} final summary ===\n", label);
     for (auto const& s : tracker.sources()) {
-        if (!s.in_use) {
+        if (!s.in_use.load()) {
             continue;
         }
         format_source_line(out, s, gptp_ns);

@@ -3,19 +3,11 @@
 
 #include "statusbar/udptun/udptun_per_source_tracker.hpp"
 
-#include <cstring>
 #include <limits>
 
 namespace statusbar::udptun {
 
 namespace {
-
-[[nodiscard]] auto eui_eq(ieee::Eui64 const& a, ieee::Eui64 const& b) noexcept -> bool
-{
-    auto const sa = a.span();
-    auto const sb = b.span();
-    return std::memcmp(sa.data(), sb.data(), 8) == 0;
-}
 
 void init_state(
     SourceState& st,
@@ -25,22 +17,22 @@ void init_state(
     int64_t rx_gptp_ns,
     uint32_t interval_us) noexcept
 {
-    st.sender_eui64 = sender;
+    st.sender_eui64.publish(sender.to_uint64());
     if (!st.stats) {
         st.stats = std::make_unique<LatencyStats>(cfg);
     } else {
         st.stats->histogram.configure(cfg);
         st.stats->time_stats.reset();
     }
-    st.first_seq = seq;
-    st.last_seq = seq;
+    st.first_seq.publish(seq);
+    st.last_seq.publish(seq);
     st.first_seen_gptp_ns = rx_gptp_ns;
     st.last_seen_gptp_ns = rx_gptp_ns;
     st.announced_interval_us = interval_us;
-    st.received_count = 0;
-    st.out_of_order_count = 0;
-    st.duplicate_count = 0;
-    st.in_use = true;
+    st.received_count.reset();
+    st.out_of_order_count.reset();
+    st.duplicate_count.reset();
+    st.in_use.publish(true);  // published LAST: release makes the fully-init slot visible
 }
 
 }  // namespace
@@ -52,8 +44,9 @@ PerSourceTracker::PerSourceTracker(statusbar::stats::AtomicHistogramConfig const
 
 auto PerSourceTracker::find_existing(ieee::Eui64 const& s) noexcept -> SourceState*
 {
+    auto const key = s.to_uint64();
     for (auto& st : slots_) {
-        if (st.in_use && eui_eq(st.sender_eui64, s)) {
+        if (st.in_use.load() && st.sender_eui64.load() == key) {
             return &st;
         }
     }
@@ -65,7 +58,7 @@ auto PerSourceTracker::find_free_or_lru() noexcept -> SourceState*
     SourceState* lru = nullptr;
     int64_t lru_seen = std::numeric_limits<int64_t>::max();
     for (auto& st : slots_) {
-        if (!st.in_use) {
+        if (!st.in_use.load()) {
             return &st;
         }
         if (st.last_seen_gptp_ns < lru_seen) {
@@ -92,20 +85,20 @@ auto PerSourceTracker::observe(
         // delta > 0 → forward; delta == 0 → exact duplicate; delta < 0 →
         // out-of-order. The first observation skips this classification
         // because last_seq was just initialized to seq above.
-        auto const delta = static_cast<int32_t>(seq - st->last_seq);
+        auto const delta = static_cast<int32_t>(seq - st->last_seq.load());
         if (delta > 0) {
-            st->last_seq = seq;
+            st->last_seq.publish(seq);
         } else if (delta == 0) {
-            ++st->duplicate_count;
+            st->duplicate_count.add(1);
         } else {
-            ++st->out_of_order_count;
+            st->out_of_order_count.add(1);
         }
     }
 
     st->stats->record(latency_ns);
     st->last_seen_gptp_ns = rx_gptp_ns;
     st->announced_interval_us = interval_us;
-    ++st->received_count;
+    st->received_count.add(1);
     return st;
 }
 
