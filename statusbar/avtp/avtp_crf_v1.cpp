@@ -30,7 +30,12 @@ auto crf_v1_get_timestamp_data(std::span<uint8_t const> const packet) noexcept -
     if (packet.size() <= CrfV1Pdu::HEADER_LENGTH) {
         return {};
     }
-    return packet.subspan(CrfV1Pdu::HEADER_LENGTH);
+    size_t const available = packet.size() - CrfV1Pdu::HEADER_LENGTH;
+    // Bound to the declared length, not the raw buffer extent (which on the wire
+    // includes Ethernet min-frame padding). Clamp so we never over-read.
+    auto const pdu = crf_v1_parse_header(packet);
+    size_t const declared = pdu.has_value() ? pdu->crf_data_length() : available;
+    return packet.subspan(CrfV1Pdu::HEADER_LENGTH, declared < available ? declared : available);
 }
 
 }  // namespace statusbar::avtp
