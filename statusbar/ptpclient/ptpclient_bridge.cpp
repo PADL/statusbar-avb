@@ -43,27 +43,32 @@ PtpTimeBridgeBase::PtpTimeBridgeBase() noexcept
 
 auto PtpTimeBridgeBase::regression_buffer_publish(double const rate, int64_t const offset_ns) noexcept -> void
 {
-    regression_buffer_.publish(RateOffset{.rate = rate, .offset_ns = offset_ns});
+    regression_buffer_.store(RateOffset{.rate = rate, .offset_ns = offset_ns});
 }
 
 auto PtpTimeBridgeBase::regression_buffer_consume() const noexcept -> RateOffset
 {
-    return regression_buffer_.consume();
+    // Non-consuming multi-reader load: safe to call from any thread (the RT timer,
+    // the ClockAdapter, or a status/telemetry caller), unlike the previous SPSC
+    // triple-buffer whose consume() was single-consumer-only.
+    return regression_buffer_.load();
 }
 
 auto PtpTimeBridgeBase::regression_buffer_overruns() const noexcept -> uint64_t
 {
-    return regression_buffer_.overruns();
+    // A seqlock has no unconsumed-overwrite concept: every reader always observes
+    // the latest published value, so there are no overruns to report.
+    return 0;
 }
 
 auto PtpTimeBridgeBase::mono_raw_publish(double const rate, int64_t const offset_ns) noexcept -> void
 {
-    mono_raw_buffer_.publish(RateOffset{.rate = rate, .offset_ns = offset_ns});
+    mono_raw_buffer_.store(RateOffset{.rate = rate, .offset_ns = offset_ns});
 }
 
 auto PtpTimeBridgeBase::mono_raw_consume() const noexcept -> RateOffset
 {
-    return mono_raw_buffer_.consume();
+    return mono_raw_buffer_.load();
 }
 
 // Running state

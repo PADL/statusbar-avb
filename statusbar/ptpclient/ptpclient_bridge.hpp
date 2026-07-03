@@ -7,7 +7,7 @@
 /// Provides PtpTimeBridge class for mapping between PTP and monotonic clocks
 /// Uses background sampling thread with linear regression for accurate time conversion
 
-#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/stats/stats.hpp"
@@ -157,12 +157,15 @@ class PtpTimeBridgeBase
     // plus the main thread during setup before the RT thread starts
     // and during shutdown after it exits). Initialized with
     // {rate=1.0, offset_ns=0} via the initial-value constructor so
-    // the first consume() before any regression fit returns sensible
-    // defaults. Replaces the previous (rate_, offset_ns_) +
-    // rate_offset_seq_ seqlock.
-    mutable statusbar::itc::AtomicTripleBuffer<RateOffset> regression_buffer_{RateOffset{.rate = 1.0, .offset_ns = 0}};
+    // the first load() before any regression fit returns sensible defaults.
+    // Single writer (the sampler thread) via store(); many readers via load() --
+    // now_ns()/get_mapping()/convert_*() are public const and may be called from
+    // any thread (RT timer, ClockAdapter, status/telemetry). A seqlock (not the
+    // strictly-SPSC AtomicTripleBuffer, whose consume() is single-consumer) is the
+    // right primitive: every reader observes a consistent (rate, offset) snapshot.
+    statusbar::itc::SeqlockValue<RateOffset> regression_buffer_{RateOffset{.rate = 1.0, .offset_ns = 0}};
     // Secondary CLOCK_MONOTONIC <- CLOCK_MONOTONIC_RAW line (see mono_raw_publish).
-    mutable statusbar::itc::AtomicTripleBuffer<RateOffset> mono_raw_buffer_{RateOffset{.rate = 1.0, .offset_ns = 0}};
+    statusbar::itc::SeqlockValue<RateOffset> mono_raw_buffer_{RateOffset{.rate = 1.0, .offset_ns = 0}};
     std::atomic<uint64_t> epoch_;
     std::atomic<bool> healthy_;
     std::atomic<bool> ever_healthy_;
