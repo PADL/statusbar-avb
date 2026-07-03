@@ -699,4 +699,109 @@ TEST(gptp_slave_port, rogue_sync_interval_arms_bounded_timeout)
     EXPECT_TRUE(nd - t0 < std::chrono::hours(1));  // bounded (a raw 2^127 s would be astronomically larger)
 }
 
+// ===========================================================================
+// Ingress validation (G4): reject non-gPTP frames and non-grandmaster sources
+// ===========================================================================
+
+// A plain IEEE-1588 frame (majorSdoId 0) or a wrong-domain frame on EtherType
+// 0x88F7 must never reach the servo; a valid domain-0 gPTP frame still does.
+TEST(gptp_slave_port, non_gptp_frames_do_not_reach_servo)
+{
+    SoftwareOps sw;
+    auto cfg = GptpConfig::avnu_automotive_slave_defaults();
+    cfg.pdelay_mode = PdelayMode::Disabled;
+    cfg.manual_peer_delay_ns = 500;
+    cfg.verify_source_port_identity = false;  // isolate the header/domain check
+    GptpSlavePort port{cfg, sw.make_ops()};
+    TestClock clock;
+    port.start(clock.now, true);
+
+    bool sync_update_fired = false;
+    Observer obs{};
+    obs.on_sync_update = [&](int64_t, double) { sync_update_fired = true; };
+    (void)port.subscribe(obs);
+
+    auto const gm = gm_port_identity();
+    auto const t1 = clock.advance(std::chrono::milliseconds(125));
+    sw.current_time_ns = 2'000'000'000LL;
+
+    // Plain IEEE-1588: clear byte-0 upper nibble (majorSdoId -> 0).
+    auto sync_1588 = make_sync(1, gm);
+    sync_1588[0] = static_cast<uint8_t>(sync_1588[0] & 0x0F);
+    port.receive_frame(std::span<uint8_t const>(sync_1588), sw.current_time_ns, t1);
+    auto fup_1588 = make_follow_up_with_tlv(1, Timestamp{1, 999'999'500}, 0, gm, 0);
+    fup_1588[0] = static_cast<uint8_t>(fup_1588[0] & 0x0F);
+    port.receive_frame(std::span<uint8_t const>(fup_1588), 0, t1);
+    EXPECT_FALSE(sync_update_fired);
+    EXPECT_FALSE(port.is_synchronized());
+
+    // Wrong PTP domain: domain_number (byte 4) != 0.
+    auto sync_dom = make_sync(2, gm);
+    sync_dom[4] = 5;
+    port.receive_frame(std::span<uint8_t const>(sync_dom), sw.current_time_ns, t1);
+    auto fup_dom = make_follow_up_with_tlv(2, Timestamp{1, 999'999'500}, 0, gm, 0);
+    fup_dom[4] = 5;
+    port.receive_frame(std::span<uint8_t const>(fup_dom), 0, t1);
+    EXPECT_FALSE(sync_update_fired);
+    EXPECT_FALSE(port.is_synchronized());
+
+    // A valid domain-0 gPTP pair IS processed.
+    auto const sync_ok = make_sync(3, gm);
+    port.receive_frame(std::span<uint8_t const>(sync_ok), sw.current_time_ns, t1);
+    auto const fup_ok = make_follow_up_with_tlv(3, Timestamp{1, 999'999'500}, 0, gm, 0);
+    port.receive_frame(std::span<uint8_t const>(fup_ok), 0, t1);
+    EXPECT_TRUE(sync_update_fired);
+    EXPECT_TRUE(port.is_synchronized());
+}
+
+// With verify_source_port_identity (default on), Sync/FollowUp from a source other
+// than the latched grandmaster are dropped, so a second/rogue master can't thrash
+// the servo; the real grandmaster's Sync is still accepted.
+TEST(gptp_slave_port, sync_from_non_grandmaster_source_is_dropped)
+{
+    SoftwareOps sw;
+    auto cfg = GptpConfig::avnu_automotive_slave_defaults();
+    cfg.pdelay_mode = PdelayMode::Disabled;
+    cfg.manual_peer_delay_ns = 500;
+    cfg.verify_source_port_identity = true;  // automotive defaults this off; opt in for this test
+    GptpSlavePort port{cfg, sw.make_ops()};
+    TestClock clock;
+    port.start(clock.now, true);
+
+    bool sync_update_fired = false;
+    Observer obs{};
+    obs.on_sync_update = [&](int64_t, double) { sync_update_fired = true; };
+    (void)port.subscribe(obs);
+
+    // Latch the grandmaster via an Announce from `gm`.
+    auto const gm = gm_port_identity();
+    AnnounceMessage ann{};
+    ann.init(1);
+    ann.grandmaster_identity = tsn::ClockIdentity{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    ann.header.source_port_identity = gm;
+    std::array<uint8_t, AnnounceMessage::LENGTH> ann_buf{};
+    (void)store_unchecked(std::span<uint8_t>(ann_buf), ann);
+    port.receive_frame(std::span<uint8_t const>(ann_buf), 0, clock.now);
+
+    auto const t1 = clock.advance(std::chrono::milliseconds(125));
+    sw.current_time_ns = 2'000'000'000LL;
+
+    // Sync + FollowUp from a DIFFERENT source -> dropped.
+    SourcePortIdentity const rogue{tsn::ClockIdentity{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11}, 1};
+    auto const sync_rogue = make_sync(1, rogue);
+    port.receive_frame(std::span<uint8_t const>(sync_rogue), sw.current_time_ns, t1);
+    auto const fup_rogue = make_follow_up_with_tlv(1, Timestamp{1, 999'999'500}, 0, rogue, 0);
+    port.receive_frame(std::span<uint8_t const>(fup_rogue), 0, t1);
+    EXPECT_FALSE(sync_update_fired);
+    EXPECT_FALSE(port.is_synchronized());
+
+    // Sync + FollowUp from the latched grandmaster -> accepted.
+    auto const sync_gm = make_sync(2, gm);
+    port.receive_frame(std::span<uint8_t const>(sync_gm), sw.current_time_ns, t1);
+    auto const fup_gm = make_follow_up_with_tlv(2, Timestamp{1, 999'999'500}, 0, gm, 0);
+    port.receive_frame(std::span<uint8_t const>(fup_gm), 0, t1);
+    EXPECT_TRUE(sync_update_fired);
+    EXPECT_TRUE(port.is_synchronized());
+}
+
 TEST_MAIN(statusbar_gptp, gptp_slave_port_test)

@@ -180,6 +180,21 @@ void GptpSlavePort::on_link_down(TimePoint now)
 
 void GptpSlavePort::receive_frame(std::span<uint8_t const> gptp_payload, int64_t rx_hw_timestamp_ns, TimePoint now)
 {
+    // Ingress validation: only accept well-formed gPTP frames for our domain, so a
+    // plain IEEE-1588 frame (majorSdoId 0) or another PTP domain sharing EtherType
+    // 0x88F7 can never reach the servo. is_valid() checks majorSdoId / versionPTP /
+    // message-type / message_length; domain is checked here (gPTP is domain 0). The
+    // header's message_length (>= LENGTH) still tolerates an over-length Follow_Up
+    // (Apple) -- its trailing TLV is parsed below.
+    if (gptp_payload.size() < MessageHeader::LENGTH) {
+        return;
+    }
+    MessageHeader hdr;
+    span_load(hdr, gptp_payload);
+    if (!hdr.is_valid() || hdr.domain_number.get() != 0) {
+        return;
+    }
+
     auto const parsed = parse_gptp(gptp_payload);
     if (!parsed.has_value()) {
         return;
@@ -316,8 +331,25 @@ auto GptpSlavePort::current_port_state() const noexcept -> port_state_sm::Def::S
 // Message handlers
 // =============================================================
 
+auto GptpSlavePort::source_is_grandmaster(SourcePortIdentity const& src) const noexcept -> bool
+{
+    if (!config_.verify_source_port_identity) {
+        return true;  // verification disabled
+    }
+    auto const& gm = grandmaster_info();  // latched from Announce
+    if (!gm.has_value()) {
+        return true;  // no grandmaster latched yet -> cannot verify; engages once known
+    }
+    return src == gm->source_port_identity;
+}
+
 void GptpSlavePort::handle_sync_message(SyncMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now)
 {
+    // Drop Sync from a source other than the latched grandmaster: interleaved Syncs
+    // from a rogue/second master would feed the servo alternating offsets.
+    if (!source_is_grandmaster(msg.header.source_port_identity)) {
+        return;
+    }
     md_sync_receive_.on_sync(msg, rx_hw_timestamp_ns);
     // Rearm the sync receipt timeout from the advertised interval.
     arm_sync_receipt_timeout(now, static_cast<int8_t>(msg.header.log_message_interval));
@@ -325,6 +357,9 @@ void GptpSlavePort::handle_sync_message(SyncMessage const& msg, int64_t rx_hw_ti
 
 void GptpSlavePort::handle_follow_up_message(FollowUpMessage const& msg, std::span<uint8_t const> trailing_bytes, TimePoint now)
 {
+    if (!source_is_grandmaster(msg.header.source_port_identity)) {
+        return;  // Follow_Up from a source other than the latched grandmaster
+    }
     auto const indication = md_sync_receive_.on_follow_up(msg, trailing_bytes);
     if (!indication.has_value()) {
         return;

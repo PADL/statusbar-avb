@@ -289,6 +289,11 @@ class GptpSlavePort
     void sync_as_capable(bool prev_as_capable, TimePoint now);
     void handle_announce_message(AnnounceMessage const& msg, TimePoint now);
     void handle_signaling_message(SignalingMessage const& msg, std::span<uint8_t const> trailing_bytes, TimePoint now);
+    /// True if a Sync/FollowUp from @p src should be accepted: verification off, no
+    /// grandmaster latched yet, or @p src matches the latched grandmaster's source
+    /// port. Drops Sync/FollowUp injected by a rogue/second master (config
+    /// verify_source_port_identity).
+    [[nodiscard]] auto source_is_grandmaster(SourcePortIdentity const& src) const noexcept -> bool;
 
     // =========================================================
     // Timer helpers
