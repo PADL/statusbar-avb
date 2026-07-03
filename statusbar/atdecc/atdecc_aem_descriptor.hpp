@@ -447,11 +447,21 @@ struct DescriptorConfiguration
     // Compare via `wire_span(lhs) == wire_span(rhs)` or inspect the
     // first `descriptor_counts_count` entries explicitly.
 
-    /// On-wire size in a READ_DESCRIPTOR response:
-    /// fixed header plus 4 bytes per populated entry.
+    /// On-wire size in a READ_DESCRIPTOR response: fixed header plus 4 bytes per
+    /// populated entry. Count clamped to capacity so a corrupt/future-larger
+    /// count can never make this exceed sizeof(*this).
     [[nodiscard]] auto wire_size() const noexcept -> size_t
     {
-        return LENGTH + (static_cast<size_t>(descriptor_counts_count.get()) * sizeof(DescriptorCountEntry));
+        size_t const n = std::min(static_cast<size_t>(descriptor_counts_count.get()), MAX_DESCRIPTOR_COUNTS);
+        return LENGTH + (n * sizeof(DescriptorCountEntry));
+    }
+
+    /// Clamp descriptor_counts_count to capacity (serve a valid truncated descriptor).
+    constexpr void clamp_trailer_count() noexcept
+    {
+        if (static_cast<size_t>(descriptor_counts_count.get()) > MAX_DESCRIPTOR_COUNTS) {
+            descriptor_counts_count = static_cast<uint16_t>(MAX_DESCRIPTOR_COUNTS);
+        }
     }
 
     /// View of the populated descriptor_counts entries (length = descriptor_counts_count).
@@ -557,10 +567,21 @@ struct DescriptorAudioUnit
     // would produce surprising equality. Compare via wire_span() or
     // iterate the first `sampling_rates_count` entries.
 
-    /// On-wire size: fixed header plus 4 bytes per populated sampling rate.
+    /// On-wire size: fixed header plus 4 bytes per populated sampling rate. Count
+    /// clamped to capacity so a corrupt/future-larger count can never make this
+    /// exceed sizeof(*this).
     [[nodiscard]] auto wire_size() const noexcept -> size_t
     {
-        return LENGTH + (static_cast<size_t>(sampling_rates_count.get()) * sizeof(quadlet_t));
+        size_t const n = std::min(static_cast<size_t>(sampling_rates_count.get()), MAX_SAMPLING_RATES);
+        return LENGTH + (n * sizeof(quadlet_t));
+    }
+
+    /// Clamp sampling_rates_count to capacity (serve a valid truncated descriptor).
+    constexpr void clamp_trailer_count() noexcept
+    {
+        if (static_cast<size_t>(sampling_rates_count.get()) > MAX_SAMPLING_RATES) {
+            sampling_rates_count = static_cast<uint16_t>(MAX_SAMPLING_RATES);
+        }
     }
 
     /// View of the populated sampling_rates entries (length = sampling_rates_count).
@@ -760,10 +781,22 @@ struct DescriptorStream
     // populated entries explicitly.
 
     /// On-wire size: fixed header plus 8 bytes per populated stream_format.
-    /// Does not include the redundant_streams trailer (not modeled here).
+    /// Does not include the redundant_streams trailer (not modeled here). The
+    /// count is clamped to capacity (matching used_stream_formats) so a corrupt
+    /// or future-larger count can never make this exceed sizeof(*this).
     [[nodiscard]] auto wire_size() const noexcept -> size_t
     {
-        return LENGTH + (static_cast<size_t>(number_of_formats.get()) * sizeof(Eui64));
+        size_t const n = std::min(static_cast<size_t>(number_of_formats.get()), MAX_STREAM_FORMATS);
+        return LENGTH + (n * sizeof(Eui64));
+    }
+
+    /// Clamp number_of_formats to the struct's capacity, so a blob-loaded count
+    /// larger than we can hold serves a valid, truncated descriptor.
+    constexpr void clamp_trailer_count() noexcept
+    {
+        if (static_cast<size_t>(number_of_formats.get()) > MAX_STREAM_FORMATS) {
+            number_of_formats = static_cast<uint16_t>(MAX_STREAM_FORMATS);
+        }
     }
 
     /// View of the populated stream_formats entries (length = number_of_formats).
@@ -1251,11 +1284,21 @@ struct DescriptorAudioMap
     // populated prefix is identical. Compare by `wire_span(lhs) == wire_span(rhs)`
     // or by inspecting the first `number_of_mappings` entries explicitly.
 
-    /// On-wire size in a READ_DESCRIPTOR response:
-    /// fixed header plus 8 bytes per populated mapping entry.
+    /// On-wire size in a READ_DESCRIPTOR response: fixed header plus 8 bytes per
+    /// populated mapping entry. Count clamped to capacity so a corrupt/future-
+    /// larger count can never make this exceed sizeof(*this).
     [[nodiscard]] auto wire_size() const noexcept -> size_t
     {
-        return LENGTH + (static_cast<size_t>(number_of_mappings.get()) * sizeof(AudioMapping));
+        size_t const n = std::min(static_cast<size_t>(number_of_mappings.get()), MAX_MAPPINGS);
+        return LENGTH + (n * sizeof(AudioMapping));
+    }
+
+    /// Clamp number_of_mappings to capacity (serve a valid truncated descriptor).
+    constexpr void clamp_trailer_count() noexcept
+    {
+        if (static_cast<size_t>(number_of_mappings.get()) > MAX_MAPPINGS) {
+            number_of_mappings = static_cast<uint16_t>(MAX_MAPPINGS);
+        }
     }
 
     /// View of the populated mappings (length = number_of_mappings).

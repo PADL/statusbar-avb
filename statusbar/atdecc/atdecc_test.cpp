@@ -118,6 +118,33 @@ TEST(aem_descriptor_stream, struct_size_2021)
     EXPECT_EQ(static_cast<uint16_t>(s.timing), 0u);
 }
 
+// A count larger than the inline array capacity (corrupt or future-larger blob)
+// must never let wire_size() exceed the struct, and clamp_trailer_count() must
+// truncate the count to what fits so a serialized descriptor stays self-consistent.
+TEST(aem_descriptor_stream, oversized_count_is_clamped_not_overrun)
+{
+    using namespace aem;
+    DescriptorStream s{};
+    s.number_of_formats = static_cast<uint16_t>(200);  // > MAX_STREAM_FORMATS (46)
+
+    // wire_size() is clamped to capacity -> never exceeds the struct storage
+    // (this is what stops span_store_wire from over-reading &s).
+    EXPECT_EQ(s.wire_size(), DescriptorStream::LENGTH + (DescriptorStream::MAX_STREAM_FORMATS * sizeof(Eui64)));
+    EXPECT_TRUE(s.wire_size() <= sizeof(DescriptorStream));
+    EXPECT_EQ(s.used_stream_formats().size(), DescriptorStream::MAX_STREAM_FORMATS);
+
+    // clamp_trailer_count() makes the count field honest (matches what is served).
+    s.clamp_trailer_count();
+    EXPECT_EQ(static_cast<uint16_t>(s.number_of_formats), DescriptorStream::MAX_STREAM_FORMATS);
+
+    // A valid in-range count is left untouched.
+    DescriptorStream ok{};
+    ok.number_of_formats = static_cast<uint16_t>(3);
+    ok.clamp_trailer_count();
+    EXPECT_EQ(static_cast<uint16_t>(ok.number_of_formats), 3u);
+    EXPECT_EQ(ok.wire_size(), DescriptorStream::LENGTH + (3 * sizeof(Eui64)));
+}
+
 TEST(aem_descriptor_avb_interface, struct_size_2021)
 {
     using namespace aem;

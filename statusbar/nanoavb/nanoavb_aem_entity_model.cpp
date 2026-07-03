@@ -66,6 +66,16 @@ auto dispatch_fixed(
         return 0;
     }
 
+    // A variable-length descriptor's trailer count (formats, sampling rates,
+    // descriptor_counts, ...) is loaded straight from the on-disk .aem blob and
+    // may be corrupt, or larger than this (possibly older) build's struct can
+    // hold because a future standard grew the descriptor. Clamp it to the struct
+    // capacity so we serve a VALID, truncated descriptor (keep what fits, ignore
+    // the excess) instead of over-reading the struct in span_store_wire below --
+    // the same graceful clamping the receive/parse side already does via used_*().
+    if constexpr (requires { desc.clamp_trailer_count(); }) {
+        desc.clamp_trailer_count();
+    }
     auto const n = desc.wire_size();
     if (out.size() < n) {
         return 0;
