@@ -315,6 +315,64 @@ TEST(nanoavb_entity_acquire, acquire_already_acquired)
     EXPECT_EQ(result3.status, AEM_STATUS_SUCCESS);
 }
 
+// Regression (nano#1): while acquired by controller A, a mutating command from
+// controller B must be rejected with ENTITY_ACQUIRED; the owner A is not blocked.
+TEST(nanoavb_entity_acquire, mutating_command_blocked_while_acquired_by_other)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+
+    statusbar::ieee::Eui64 const controller_a{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    statusbar::ieee::Eui64 const controller_b{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+
+    // A acquires the entity (all-zero payload = acquire).
+    auto acq = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    acq.controller_entity_id = controller_a;
+    std::array<uint8_t, 16> const acquire_data{};
+    EXPECT_EQ(make_test_result(handler, acq, acquire_data).status, AEM_STATUS_SUCCESS);
+
+    // B's SET_CONTROL / SET_NAME are rejected before any mutation.
+    std::array<uint8_t, 8> const set_data{};
+    auto set_ctrl_b = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    set_ctrl_b.controller_entity_id = controller_b;
+    EXPECT_EQ(make_test_result(handler, set_ctrl_b, set_data).status, AEM_STATUS_ENTITY_ACQUIRED);
+    auto set_name_b = create_aem_header(AEM_COMMAND_SET_NAME);
+    set_name_b.controller_entity_id = controller_b;
+    EXPECT_EQ(make_test_result(handler, set_name_b, set_data).status, AEM_STATUS_ENTITY_ACQUIRED);
+
+    // The owner A is NOT blocked (whatever the handler returns, it is not ACQUIRED/LOCKED).
+    auto set_ctrl_a = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    set_ctrl_a.controller_entity_id = controller_a;
+    auto const owner = make_test_result(handler, set_ctrl_a, set_data);
+    EXPECT_NE(owner.status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_NE(owner.status, AEM_STATUS_ENTITY_LOCKED);
+}
+
+// Regression (nano#1): while locked by controller A, a mutating command from
+// controller B must be rejected with ENTITY_LOCKED; the owner A is not blocked.
+TEST(nanoavb_entity_lock, mutating_command_blocked_while_locked_by_other)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+
+    statusbar::ieee::Eui64 const controller_a{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    statusbar::ieee::Eui64 const controller_b{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+
+    auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock.controller_entity_id = controller_a;
+    std::array<uint8_t, 16> const lock_data{};  // no UNLOCK flag = lock
+    EXPECT_EQ(make_test_result(handler, lock, lock_data).status, AEM_STATUS_SUCCESS);
+
+    std::array<uint8_t, 8> const set_data{};
+    auto set_ctrl_b = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    set_ctrl_b.controller_entity_id = controller_b;
+    EXPECT_EQ(make_test_result(handler, set_ctrl_b, set_data).status, AEM_STATUS_ENTITY_LOCKED);
+
+    auto set_ctrl_a = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    set_ctrl_a.controller_entity_id = controller_a;
+    EXPECT_NE(make_test_result(handler, set_ctrl_a, set_data).status, AEM_STATUS_ENTITY_LOCKED);
+}
+
 TEST(nanoavb_entity_acquire, release_acquisition)
 {
     auto model = create_test_model();

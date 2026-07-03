@@ -332,6 +332,17 @@ class AemCommandHandler
     /// on_set_name, echoing the command as the response.
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
+    /// AVDECC exclusive-access gate (IEEE 1722.1 7.4). Returns the AEM status a
+    /// mutating command must be rejected with when the entity is acquired or locked
+    /// by a DIFFERENT controller (ENTITY_ACQUIRED / ENTITY_LOCKED), or nullopt when
+    /// the sender owns the entity (or it is free) and the command may proceed.
+    [[nodiscard]] auto check_exclusive_access(AemDu const& header) const noexcept -> std::optional<uint8_t>;
+
+    /// Build a rejection response: the given status, echoing the command payload so
+    /// the controller can match the response. Applies no mutation.
+    [[nodiscard]] static auto reject_command(
+        uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
     /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
     [[nodiscard]] auto handle_get_stream_format(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;

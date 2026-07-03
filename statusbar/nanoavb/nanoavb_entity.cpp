@@ -118,6 +118,9 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_get_name(command_data, out_buffer);
 
         case AEM_COMMAND_SET_NAME:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
             return handle_set_name(command_data, out_buffer);
 
         case AEM_COMMAND_ENTITY_AVAILABLE:
@@ -136,6 +139,9 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_controller_available(header);
 
         case AEM_COMMAND_SET_CONTROL:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
             return handle_set_descriptor_value(AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
 
         case AEM_COMMAND_GET_CONTROL:
@@ -252,6 +258,31 @@ auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, s
         return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = n};
+}
+
+auto AemCommandHandler::check_exclusive_access(AemDu const& header) const noexcept -> std::optional<uint8_t>
+{
+    // ENTITY_ACQUIRED takes precedence over ENTITY_LOCKED (an acquisition is the
+    // stronger claim). Either held by a controller OTHER than the sender blocks the
+    // mutation; the owning controller (or a free entity) proceeds.
+    if (acquired_ && !(acquiring_controller_ == header.controller_entity_id)) {
+        return AEM_STATUS_ENTITY_ACQUIRED;
+    }
+    if (locked_ && !(locking_controller_ == header.controller_entity_id)) {
+        return AEM_STATUS_ENTITY_LOCKED;
+    }
+    return std::nullopt;
+}
+
+auto AemCommandHandler::reject_command(
+    uint8_t const status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    size_t size = 0;
+    if (out_buffer.size() >= command_data.size()) {
+        std::copy(command_data.begin(), command_data.end(), out_buffer.begin());
+        size = command_data.size();
+    }
+    return {.status = status, .size = size};
 }
 
 auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
