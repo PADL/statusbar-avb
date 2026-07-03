@@ -40,7 +40,8 @@ enum class PtpError
     not_supported,
     bridge_not_running,
     bridge_not_healthy,
-    bridge_epoch_changed
+    bridge_epoch_changed,
+    invalid_period
 };
 
 /// Error category for PTP errors

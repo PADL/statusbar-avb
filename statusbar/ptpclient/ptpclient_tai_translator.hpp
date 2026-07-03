@@ -62,14 +62,19 @@ struct GpsTaiSnapshot
     if (!snap.have_sample) {
         return master_ns;
     }
-    double offset_pred = static_cast<double>(snap.filtered_offset_ns);
+    // Keep the base offset in int64: filtered_offset_ns is ~1.77e18 (GPS-TAI vs
+    // master epoch), which loses ~128-256 ns of resolution if routed through
+    // double. Only the small propagation term (freq*dt + 0.5*drift*dt^2) needs
+    // floating point, and double is exact for a value that small.
+    std::int64_t offset_pred_ns = snap.filtered_offset_ns;
     if (snap.valid) {
         double const dt_s = static_cast<double>(master_ns - snap.last_master_ns) * 1e-9;
         double const freq_ns_per_s = (snap.r - 1.0) * 1e9;
         double const drift_ns_per_s2 = snap.drift_ppm_per_hr / 3.6;
-        offset_pred += (freq_ns_per_s * dt_s) + (0.5 * drift_ns_per_s2 * dt_s * dt_s);
+        double const propagation_ns = (freq_ns_per_s * dt_s) + (0.5 * drift_ns_per_s2 * dt_s * dt_s);
+        offset_pred_ns += static_cast<std::int64_t>(std::llround(propagation_ns));
     }
-    return master_ns - static_cast<std::int64_t>(std::llround(offset_pred)) + snap.tai_minus_utc_ns;
+    return master_ns - offset_pred_ns + snap.tai_minus_utc_ns;
 }
 
 class GpsTaiTranslator

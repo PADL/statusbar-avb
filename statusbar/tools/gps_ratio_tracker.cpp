@@ -97,6 +97,14 @@ int main(int argc, char** argv)
         }
     }
 
+    // sample_hz drives 1e9/sample_hz (sleep) and 1.0/sample_hz (report accumulator);
+    // a non-positive value yields inf/an invalid tv_nsec, so the sleep returns EINVAL
+    // and the loop spins. Reject it up front.
+    if (sample_hz <= 0.0) {
+        std::fprintf(stderr, "Error: --sample-hz must be positive\n");
+        return 1;
+    }
+
     int const fd = open(dev.c_str(), O_RDWR);
     if (fd < 0) {
         perror(("open " + dev).c_str());

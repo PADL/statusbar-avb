@@ -31,6 +31,8 @@ auto PtpErrorCategory::message(int ev) const -> std::string
             return "PTP time bridge mapping not healthy";
         case PtpError::bridge_epoch_changed:
             return "PTP time bridge epoch changed during operation";
+        case PtpError::invalid_period:
+            return "PTP timer period must be positive";
         default:
             return "Unknown PTP error";
     }

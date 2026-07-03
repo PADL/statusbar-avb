@@ -56,7 +56,18 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
             std::print(stderr, "Error: --ethertype is required\n");
             statusbar::throw_or_abort(std::errc::invalid_argument);
         }
-        config.ethertype = static_cast<uint16_t>(std::stoul(std::string{v}, nullptr, 0));
+        // std::stoul throws (std::invalid_argument / std::out_of_range) on garbage,
+        // which would std::terminate the tool. Catch it and exit with a clear error.
+        try {
+            unsigned long const parsed = std::stoul(std::string{v}, nullptr, 0);
+            if (parsed > 0xFFFFU) {
+                throw std::out_of_range{"ethertype"};
+            }
+            config.ethertype = static_cast<uint16_t>(parsed);
+        } catch (std::exception const&) {
+            std::print(stderr, "Error: --ethertype must be a number in 0..65535 (e.g. 0x0800)\n");
+            statusbar::throw_or_abort(std::errc::invalid_argument);
+        }
     });
 
     return specs;

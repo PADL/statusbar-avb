@@ -149,6 +149,11 @@ class PtpTimer : public PtpTimerBase
     /// @return Success or error if timer is already running
     [[nodiscard]] auto start() -> Status
     {
+        // A non-positive period would divide by zero in the catch-up path
+        // (periods_behind = ... / period_ns_). Refuse rather than SIGFPE.
+        if (period_ns_ <= 0) {
+            return failure(PtpError::invalid_period);
+        }
         if (exchange_running(true)) {
             // Already running
             return failure(PtpError::bridge_not_running);  // Reuse error code

@@ -114,7 +114,9 @@ auto LinuxPtpClient::get_capabilities() const noexcept -> StatusValue<ptp_clock_
 
     ptp_clock_caps caps{};
     if (::ioctl(fd_, PTP_CLOCK_GETCAPS, &caps) < 0) {
-        return failure(PtpError::clock_gettime_failed);
+        // A GETCAPS ioctl failure means the device doesn't support the capabilities
+        // query -- not a clock_gettime failure (the previous, misleading code).
+        return failure(PtpError::not_supported);
     }
 
     return success(caps);

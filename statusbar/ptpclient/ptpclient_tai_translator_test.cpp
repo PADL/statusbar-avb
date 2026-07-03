@@ -231,4 +231,19 @@ TEST(gps_tai_translator, tx_must_share_rx_master_source)
     EXPECT_TRUE(std::llabs((fwd_fix + rev_fix) - (t_ea + t_ae)) < 4'000);
 }
 
+// Regression (m4): the base offset (~1.77e18) must be kept in int64. Routing it
+// through double quantizes every emitted TAI stamp by ~128-256 ns; with valid=false
+// the result is exactly master - filtered_offset + tai_minus_utc, low bits and all.
+TEST(gps_tai_translator, huge_base_offset_kept_in_int64)
+{
+    GpsTaiSnapshot snap{};
+    snap.have_sample = true;
+    snap.valid = false;
+    snap.filtered_offset_ns = 1'777'000'000'000'000'123LL;  // low bits a double cannot represent
+    snap.tai_minus_utc_ns = 37'000'000'000LL;
+    std::int64_t const master = 5'000'000'000LL;
+    std::int64_t const expected = master - snap.filtered_offset_ns + snap.tai_minus_utc_ns;
+    EXPECT_EQ(tai_ns(snap, master), expected);
+}
+
 TEST_MAIN(statusbar_ptpclient, ptpclient_tai_translator_test)

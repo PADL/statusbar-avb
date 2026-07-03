@@ -48,7 +48,10 @@ struct Endpoint
     // An EUI-64 literal has 7 colons; a NAME:UID has the uid after the last
     // colon. Treat the tail as a uid only if it is all digits AND the head is
     // non-empty AND the token isn't a bare EUI-64 (8 hex byte fields).
-    if (colon != std::string_view::npos && colon + 1 < token.size()) {
+    // colon > 0 keeps the NAME head non-empty: a leading-colon token like ":5"
+    // must NOT split to an empty name (which resolve_entity would match against
+    // every entity via find("")), so it falls through to a literal-name endpoint.
+    if (colon != std::string_view::npos && colon > 0 && colon + 1 < token.size()) {
         auto const tail = token.substr(colon + 1);
         bool const tail_is_num =
             !tail.empty() && std::all_of(tail.begin(), tail.end(), [](unsigned char c) { return std::isdigit(c) != 0; });

@@ -62,6 +62,16 @@ TEST(atdecc_ctl_endpoint, empty_is_error)
     EXPECT_FALSE(parse_endpoint("").has_value());
 }
 
+// A leading-colon token must NOT split into an empty name (which would match every
+// entity via find("")); it is kept whole as a literal name with uid 0.
+TEST(atdecc_ctl_endpoint, leading_colon_does_not_yield_empty_name)
+{
+    auto e = parse_endpoint(":5");
+    EXPECT_TRUE(e.has_value());
+    EXPECT_EQ(e->name, std::string{":5"});
+    EXPECT_EQ(e->unique_id, 0U);
+}
+
 TEST(atdecc_ctl_endpoint, uid_out_of_range_is_error)
 {
     EXPECT_FALSE(parse_endpoint("name:70000").has_value());
