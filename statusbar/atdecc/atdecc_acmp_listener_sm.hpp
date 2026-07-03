@@ -140,6 +140,27 @@ struct ListenerContext
         return current_time >= pending_timeout;
     }
 
+    /// Tear down every sink connected to a departed talker. For each sink with
+    /// connected==true and talker_entity_id==talker_id, invoke on_cleared(index)
+    /// while the sink is still populated (so the caller can release SRP for the
+    /// stream), then reset the sink. Returns the number cleared. ACMP itself only
+    /// clears a sink on an explicit DISCONNECT_RX, so this is what keeps a sink from
+    /// staying connected forever after its talker leaves (ADP ENTITY_DEPARTING).
+    template <class OnCleared>
+    auto clear_talker_connections(ieee::Eui64 const& talker_id, OnCleared on_cleared) -> size_t
+    {
+        size_t cleared = 0;
+        for (uint16_t i = 0; i < static_cast<uint16_t>(max_streams_); ++i) {
+            auto& stream = streams_[i];
+            if (stream.connected && stream.talker_entity_id == talker_id) {
+                on_cleared(i);
+                stream.reset();
+                ++cleared;
+            }
+        }
+        return cleared;
+    }
+
   private:
     statusbar::sg14::inplace_vector<ListenerStreamInfo, MaxStreams> streams_;
     size_t max_streams_;

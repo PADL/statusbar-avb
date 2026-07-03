@@ -460,6 +460,107 @@ TEST(nanoavb_acmp_listener, connect_rx_response_success)
     EXPECT_TRUE(listener.is_connected(0));
 }
 
+// Regression (acmp#3): ACMP only clears a sink on an explicit DISCONNECT_RX, so a
+// sink stays connected forever after its talker leaves. on_talker_departed() (wired
+// to ADP ENTITY_DEPARTING) tears down only the sinks bound to the departed talker
+// and fires on_disconnect so SRP is released.
+TEST(nanoavb_acmp_listener, talker_departure_tears_down_connected_sink)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto other_talker = make_entity_id(0x03);
+    auto listener_id = make_entity_id(0x02);
+
+    std::vector<uint16_t> disconnected;
+    AcmpListenerCallbacks callbacks;
+    callbacks.tx_command = [](AcmpCommandResponse const&) { return true; };
+    callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
+    callbacks.on_disconnect = [&](uint16_t idx) { disconnected.push_back(idx); };
+
+    NanoAvbAcmpListener listener{listener_id, callbacks};
+    listener.start();
+    auto now = statusbar::sm::TimePoint{};
+
+    // Establish a connection on sink 0 to talker_id.
+    auto cmd = make_connect_rx_command(talker_id, 0, listener_id, 0);
+    (void)listener.receive_controller_command(cmd, now);
+    AcmpCommandResponse talker_resp{};
+    talker_resp.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    talker_resp.set_status(ACMP_STATUS_SUCCESS);
+    talker_resp.talker_entity_id = talker_id;
+    talker_resp.talker_unique_id = 0;
+    talker_resp.listener_entity_id = listener_id;
+    talker_resp.listener_unique_id = 0;
+    talker_resp.sequence_id = cmd.sequence_id;
+    talker_resp.stream_id = make_stream_id(talker_id, 0);
+    talker_resp.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};
+    (void)listener.receive_talker_response(talker_resp, now);
+    EXPECT_TRUE(listener.is_connected(0));
+
+    // A DIFFERENT talker departing does not touch our sink.
+    EXPECT_EQ(listener.on_talker_departed(other_talker), 0U);
+    EXPECT_TRUE(listener.is_connected(0));
+    EXPECT_TRUE(disconnected.empty());
+
+    // OUR talker departing tears the sink down and fires on_disconnect once.
+    EXPECT_EQ(listener.on_talker_departed(talker_id), 1U);
+    EXPECT_FALSE(listener.is_connected(0));
+    EXPECT_EQ(disconnected.size(), 1U);
+    if (!disconnected.empty()) {
+        EXPECT_EQ(disconnected[0], 0U);
+    }
+}
+
+// Regression (acmp#3, ageout): a talker that is powered off never sends
+// ENTITY_DEPARTING, so only a discovery-database ageout catches it. Wiring the
+// discovery's on_entity_departing to on_talker_departed (as NanoAvbNetHandlers does)
+// tears the sink down when the talker's advertisement expires.
+TEST(nanoavb_acmp_listener, talker_ageout_tears_down_connected_sink)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+
+    AcmpListenerCallbacks callbacks;
+    callbacks.tx_command = [](AcmpCommandResponse const&) { return true; };
+    callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
+
+    NanoAvbAcmpListener listener{listener_id, callbacks};
+    listener.start();
+    auto now = statusbar::sm::TimePoint{};
+
+    // Establish a connection on sink 0 to talker_id.
+    auto cmd = make_connect_rx_command(talker_id, 0, listener_id, 0);
+    (void)listener.receive_controller_command(cmd, now);
+    AcmpCommandResponse talker_resp{};
+    talker_resp.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    talker_resp.set_status(ACMP_STATUS_SUCCESS);
+    talker_resp.talker_entity_id = talker_id;
+    talker_resp.talker_unique_id = 0;
+    talker_resp.listener_entity_id = listener_id;
+    talker_resp.listener_unique_id = 0;
+    talker_resp.sequence_id = cmd.sequence_id;
+    talker_resp.stream_id = make_stream_id(talker_id, 0);
+    talker_resp.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};
+    (void)listener.receive_talker_response(talker_resp, now);
+    EXPECT_TRUE(listener.is_connected(0));
+
+    // Discovery wired to the listener exactly as NanoAvbNetHandlers wires it.
+    AdpDiscoveryCallbacks disc_cb;
+    disc_cb.on_entity_departing = [&](Eui64 id) { (void)listener.on_talker_departed(id); };
+    NanoAvbAdpDiscovery discovery{disc_cb};
+
+    // The talker is advertising (valid_time field 1 -> valid ~2s).
+    AdpDu adp{};
+    adp.init_entity_available(talker_id, 1);
+    adp.available_index = 1;
+    discovery.receive_adpdu(adp, Eui48{}, now);
+    EXPECT_TRUE(listener.is_connected(0));  // still up while advertising
+
+    // Powered off: no more advertisements. Ticking past its validity ages it out ->
+    // on_entity_departing -> the sink is torn down.
+    discovery.tick(now + std::chrono::seconds(3));
+    EXPECT_FALSE(listener.is_connected(0));
+}
+
 TEST(nanoavb_acmp_listener, ignores_wrong_entity_id)
 {
     auto listener_id = make_entity_id(0x01);

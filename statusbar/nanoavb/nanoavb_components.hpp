@@ -603,6 +603,10 @@ class NanoAvbNetHandlers
   private:
     std::string interface_name_;
     NanoAvbComponents* components_;
+    // Passive discovery database, owned here and fed/ticked by the AtdeccNetHandler.
+    // Its ageout tears down listener sinks whose talker vanished without an explicit
+    // ENTITY_DEPARTING (e.g. powered off). Must outlive the reactor's handlers.
+    NanoAvbAdpDiscovery discovery_{};
     MvrpNetHandler* mvrp_ptr_{nullptr};
     MsrpNetHandler* msrp_ptr_{nullptr};
     AtdeccNetHandler* atdecc_ptr_{nullptr};

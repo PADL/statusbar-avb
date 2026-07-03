@@ -194,6 +194,13 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
             if (adp_discovery_ != nullptr) {
                 adp_discovery_->receive_adpdu(adp, src_mac, sm_now);
             }
+            // A talker announcing ENTITY_DEPARTING must tear down any listener sink
+            // still connected to it: ACMP alone only clears a sink on an explicit
+            // controller DISCONNECT_RX, so otherwise the sink would report connected
+            // (and hold its SRP reservation) forever after the talker left.
+            if (adp.is_entity_departing()) {
+                (void)acmp_listener_.on_talker_departed(adp.entity_id);
+            }
             break;
         }
 
@@ -351,6 +358,19 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
         components_->acmp_talker,
         components_->acmp_listener,
         components_->aem_handler);
+
+    // Wire discovery ageout -> listener teardown. A talker that is powered off never
+    // sends ENTITY_DEPARTING, so the explicit-departing path in dispatch_frame can't
+    // catch it; the discovery database expires the stale entity and fires this, which
+    // tears down any sink still connected to it. The AtdeccNetHandler feeds this
+    // discovery received ADPDUs and ticks it once set below.
+    AdpDiscoveryCallbacks discovery_callbacks{};
+    discovery_callbacks.on_entity_departing = [this](Eui64 id) {
+        (void)components_->acmp_listener.on_talker_departed(id);
+    };
+    discovery_.set_callbacks(std::move(discovery_callbacks));
+    atdecc->set_adp_discovery(&discovery_);
+
     auto gptp = std::make_unique<GptpAnnounceHandler>(interface_name_);
 
     mvrp_valid_ = mvrp->valid();

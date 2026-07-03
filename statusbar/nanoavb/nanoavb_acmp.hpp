@@ -244,6 +244,13 @@ class NanoAvbAcmpListener
     /// Check if there is a pending command (waiting for talker response)
     [[nodiscard]] auto has_pending() const noexcept -> bool { return ctx_.has_pending; }
 
+    /// Tear down any sink connected to a departed talker (ADP ENTITY_DEPARTING or a
+    /// discovery ageout). Clears each matching sink's connection state and fires the
+    /// on_disconnect callback so SRP/MSRP is released. Returns the number torn down.
+    /// Without this a sink stays connected forever after its talker vanishes, since
+    /// ACMP only clears a sink on an explicit controller DISCONNECT_RX.
+    auto on_talker_departed(Eui64 const& talker_id) -> size_t;
+
     // ACMP Command/Response Processing
 
     /// Process a received ACMP command from a controller

@@ -184,6 +184,15 @@ auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
     return false;
 }
 
+auto NanoAvbAcmpListener::on_talker_departed(Eui64 const& talker_id) -> size_t
+{
+    return ctx_.clear_talker_connections(talker_id, [this](uint16_t stream_index) {
+        if (callbacks_.on_disconnect) {
+            callbacks_.on_disconnect(stream_index);
+        }
+    });
+}
+
 //
 // NanoAvbAcmpController
 //
