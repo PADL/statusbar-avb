@@ -17,13 +17,13 @@
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
-#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
-#include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_telemetry.hpp"
 #include "statusbar/avb_entity/log_sweep_generator.hpp"
 #include "statusbar/colbin/colbin_writer.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
+#include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/net/net_address.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/udptun/udptun_aaf_v1_codec.hpp"
@@ -33,6 +33,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -42,6 +43,20 @@
 #include <vector>
 
 namespace statusbar::avb_entity {
+
+/// CLOCK_REALTIME as nanoseconds since epoch plus @p offset_ns -- i.e. a point on the
+/// TAI tunnel timeline (offset is TAI-UTC, default 37e9). Returns @p fallback if the
+/// clock read fails (does not happen on Linux in practice). Centralizes the ns
+/// arithmetic + the easy-to-forget offset that was repeated ~7 times across the entity
+/// data plane.
+[[nodiscard]] inline auto realtime_tai_ns(int64_t offset_ns, int64_t fallback = 0) noexcept -> int64_t
+{
+    timespec ts{};
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        return fallback;
+    }
+    return (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + offset_ns;
+}
 
 /// The inter-site WAN tunnel collaborator: owns the tunnel state and the
 /// operating methods (ingest/egress/send/punch worker/watchdog). The entity owns

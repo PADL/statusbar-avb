@@ -102,10 +102,7 @@ auto EntityUdptunBridge::setup_udptun_direct_shared() -> bool
     // armed this via the worker's socket hand-off, which never happens here -- so
     // set the install timestamp ourselves. (The STUN-only teardown/re-punch paths
     // in that service are gated off by direct_shared_mode_.)
-    timespec ts{};
-    int64_t const tai = (clock_gettime(CLOCK_REALTIME, &ts) == 0)
-        ? ((static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns)
-        : 1;
+    int64_t const tai = realtime_tai_ns(config_.udptun_tai_offset_ns, 1);
     install_tai_ns_ = tai;
     last_rx_ns_ = tai;
     rx_baseline_ = telemetry_->any_rx.load();
@@ -533,13 +530,7 @@ void EntityUdptunBridge::udptun_punch_loop()
     // when the media-thread watchdog (udptun_punch_service) reports lost data.
     constexpr int64_t WINDOW_NS = 15'000'000'000LL;  // 15 s rendezvous window
 
-    auto tai_now = [this]() -> int64_t {
-        timespec ts{};
-        if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-            return 0;
-        }
-        return (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns;
-    };
+    auto tai_now = [this]() -> int64_t { return realtime_tai_ns(config_.udptun_tai_offset_ns); };
 
     while (punch_run_.load()) {
         int64_t const now = tai_now();
@@ -731,7 +722,7 @@ void EntityUdptunBridge::udptun_punch_service(int64_t now_tai_ns)
                 telemetry_->egress_repunch_count.add(1);
                 {
                     std::scoped_lock const ig(ingest_lock_);  // no close while the reactor may sendto
-                    fd_ = net::FileDescriptor{};       // close -> forces a fresh punch
+                    fd_ = net::FileDescriptor{};              // close -> forces a fresh punch
                 }
                 shared_socket_ = false;
                 rendezvous_active_ = false;
@@ -761,7 +752,7 @@ void EntityUdptunBridge::udptun_punch_service(int64_t now_tai_ns)
         telemetry_->egress_repunch_count.add(1);
         {
             std::scoped_lock const ig(ingest_lock_);  // no close while the reactor may sendto
-            fd_ = net::FileDescriptor{};        // close
+            fd_ = net::FileDescriptor{};              // close
         }
         shared_socket_ = false;
         rendezvous_active_ = false;
@@ -805,10 +796,7 @@ void EntityUdptunBridge::udptun_egress_drain_rx()
         // presentation time. Same TAI basis (CLOCK_REALTIME + tai_offset) the
         // ingest stamps with, so both ends share one absolute timeline.
         if (egress_colbin_) {
-            timespec ts{};
-            if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-                int64_t const rx_tai =
-                    (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns;
+            if (int64_t const rx_tai = realtime_tai_ns(config_.udptun_tai_offset_ns); rx_tai != 0) {
                 // Classify primary vs redundant by the REDUN_BIT; record the
                 // PRIMARY-form stream_id for both so owlm_analyze groups them as
                 // one logical stream (role distinguishes them for recovery accounting).
@@ -902,10 +890,8 @@ void EntityUdptunBridge::udptun_ingest_audio(std::span<uint8_t const> const audi
     // as "real audio" and suppress itself. CLOCK_REALTIME = same TAI base the media
     // thread's checks read.
     if (real_source) {
-        timespec rts{};
-        if (clock_gettime(CLOCK_REALTIME, &rts) == 0) {
-            telemetry_->last_real_ingest_tai.publish(
-                (static_cast<int64_t>(rts.tv_sec) * 1'000'000'000LL) + rts.tv_nsec + config_.udptun_tai_offset_ns);
+        if (int64_t const rx_tai = realtime_tai_ns(config_.udptun_tai_offset_ns); rx_tai != 0) {
+            telemetry_->last_real_ingest_tai.publish(rx_tai);
         }
     }
 

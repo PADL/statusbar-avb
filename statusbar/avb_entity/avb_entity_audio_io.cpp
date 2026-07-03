@@ -745,12 +745,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
     // hole-punched socket staged by the worker and watchdog the RX. Runs before
     // the drain so a just-installed socket is drained this same wake.
     if (udptun_->punch_service_active()) {
-        timespec pts{};
-        int64_t punch_tai = 0;
-        if (clock_gettime(CLOCK_REALTIME, &pts) == 0) {
-            punch_tai = (static_cast<int64_t>(pts.tv_sec) * 1'000'000'000LL) + pts.tv_nsec + config_.udptun_tai_offset_ns;
-        }
-        udptun_->udptun_punch_service(punch_tai);
+        udptun_->udptun_punch_service(realtime_tai_ns(config_.udptun_tai_offset_ns));
     }
 
     // Inter-site egress: drain the UDP socket and snapshot the TAI playout clock
@@ -766,11 +761,8 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         // Falls back to raw CLOCK_REALTIME+offset until the translator has a sample.
         if (rate_tracker_.has_tai_sample()) {
             udptun_now_tai_ns = rate_tracker_.tai_ns(static_cast<int64_t>(base_now_ns));
-        } else {
-            timespec ts{};
-            if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-                udptun_now_tai_ns = (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns;
-            }
+        } else if (int64_t const t = realtime_tai_ns(config_.udptun_tai_offset_ns); t != 0) {
+            udptun_now_tai_ns = t;
         }
     }
 
@@ -787,10 +779,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
     if (udptun_->enable_ && config_.udptun_silence_source) {
         int64_t now_tai = udptun_now_tai_ns;
         if (now_tai == 0) {
-            timespec ts{};
-            if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-                now_tai = (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns;
-            }
+            now_tai = realtime_tai_ns(config_.udptun_tai_offset_ns);
         }
         int64_t const last_audio = udptun_->telemetry_->last_real_ingest_tai.load();
         bool const streaming = (last_audio != 0) && (now_tai != 0) && (now_tai - last_audio < 100'000'000LL);
