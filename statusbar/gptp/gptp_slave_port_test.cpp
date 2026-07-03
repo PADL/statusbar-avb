@@ -600,4 +600,63 @@ TEST(gptp_slave_port, report_tx_timestamp_does_not_crash_on_unknown_message)
     EXPECT_TRUE(port.as_capable());
 }
 
+// ===========================================================================
+// asCapable acquisition/loss (MDPdelayReq state that the port forwards to the SM)
+// ===========================================================================
+
+namespace {
+// Drive one full successful Pdelay exchange through MDPdelayReq with local
+// (t1,t4) and peer (t2,t3) timestamps in ns. link_delay = ((t4-t1)-(t3-t2))/2.
+void run_pdelay_exchange(MDPdelayReq& mdp, std::int64_t t1, std::int64_t t2, std::int64_t t3, std::int64_t t4)
+{
+    auto const seq = mdp.pdelay_interval_timer_expired();
+    if (!seq.has_value()) {
+        return;
+    }
+    mdp.on_pdelay_req_tx_timestamp(*seq, t1);
+    PdelayRespMessage resp{};
+    resp.init(*seq);
+    resp.request_receipt_timestamp = Timestamp(static_cast<uint64_t>(t2 / 1'000'000'000LL), static_cast<uint32_t>(t2 % 1'000'000'000LL));
+    mdp.on_pdelay_resp(resp, t4);
+    PdelayRespFollowUpMessage fup{};
+    fup.init(*seq);
+    fup.response_origin_timestamp = Timestamp(static_cast<uint64_t>(t3 / 1'000'000'000LL), static_cast<uint32_t>(t3 % 1'000'000'000LL));
+    (void)mdp.on_pdelay_resp_follow_up(fup);
+}
+}  // namespace
+
+// A link delay beyond the neighbor-prop-delay threshold drops asCapable even
+// though the exchange itself succeeded (802.1AS 11.2.2).
+TEST(md_pdelay_req, link_delay_over_threshold_drops_as_capable)
+{
+    MDPdelayReq mdp{MDPdelayReq::Config{.lost_response_threshold = 3, .neighbor_prop_delay_threshold_ns = 800}};
+    mdp.enable();
+    // Under threshold: round_trip 1500, peer_delta 500 -> 500 ns.
+    run_pdelay_exchange(mdp, 1'000'000'000, 1'000'000'500, 1'000'001'000, 1'000'001'500);
+    EXPECT_TRUE(mdp.is_as_capable());
+    // Over threshold: round_trip 2500, peer_delta 500 -> 1000 ns > 800.
+    run_pdelay_exchange(mdp, 2'000'000'000, 2'000'000'500, 2'000'001'000, 2'000'002'500);
+    EXPECT_FALSE(mdp.is_as_capable());
+}
+
+// Consecutive lost responses past the threshold drop asCapable; a later success
+// re-acquires it. (Before the G1/G2 fixes this state was frozen and never
+// reached the port state machine.)
+TEST(md_pdelay_req, lost_responses_drop_then_recover_as_capable)
+{
+    MDPdelayReq mdp{MDPdelayReq::Config{.lost_response_threshold = 3, .neighbor_prop_delay_threshold_ns = 0}};
+    mdp.enable();
+    run_pdelay_exchange(mdp, 1'000'000'000, 1'000'000'500, 1'000'001'000, 1'000'001'500);
+    EXPECT_TRUE(mdp.is_as_capable());
+
+    for (int i = 0; i < 3; ++i) {
+        (void)mdp.pdelay_interval_timer_expired();     // send a Pdelay_Req
+        mdp.on_pdelay_resp_receipt_timeout();          // ... no response arrives
+    }
+    EXPECT_FALSE(mdp.is_as_capable());  // 3 losses >= threshold
+
+    run_pdelay_exchange(mdp, 3'000'000'000, 3'000'000'500, 3'000'001'000, 3'000'001'500);
+    EXPECT_TRUE(mdp.is_as_capable());  // recovered
+}
+
 TEST_MAIN(statusbar_gptp, gptp_slave_port_test)

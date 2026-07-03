@@ -39,6 +39,7 @@ GptpSlavePort::GptpSlavePort(GptpConfig const& config, GptpClockOps ops, std::pm
           .seq_id_mismatch_threshold = config_.seq_id_as_capable_threshold,
           .lost_response_threshold = config_.lost_pdelay_resp_threshold,
           .max_rate_ratio_ppm = config_.servo_ppm_limit,
+          .neighbor_prop_delay_threshold_ns = config_.neighbor_prop_delay_threshold_ns,
       }}
     , servo_{config_}
     , observers_{memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource()}
@@ -249,11 +250,14 @@ void GptpSlavePort::tick(TimePoint now)
     }
     if (pdelay_receipt_timeout_.has_value() && *pdelay_receipt_timeout_ <= now) {
         pdelay_receipt_timeout_.reset();
+        bool const prev_as_capable = md_pdelay_req_.is_as_capable();
         if (md_pdelay_req_.state() == MDPdelayReq::State::WaitingForPdelayResp) {
             md_pdelay_req_.on_pdelay_resp_receipt_timeout();
         } else if (md_pdelay_req_.state() == MDPdelayReq::State::WaitingForPdelayRespFollowUp) {
             md_pdelay_req_.on_pdelay_resp_follow_up_receipt_timeout();
         }
+        // A crossed lost-response threshold drops asCapable -> tell the SM.
+        sync_as_capable(prev_as_capable, now);
         // Re-arm the interval timer so the next Pdelay_Req is scheduled.
         // Without this a single lost Pdelay_Resp/Follow_Up permanently
         // halts the Pdelay engine (no retries; asCapable frozen), since
@@ -433,23 +437,34 @@ void GptpSlavePort::handle_pdelay_resp_follow_up_message(PdelayRespFollowUpMessa
             notify_peer_delay_update(mean_link_delay_ns_, neighbor_rate_ratio_);
         }
 
-        // asCapable may have been acquired by this exchange.
-        // PortStateSM needs TWO AsCapableAcquired events to traverse
-        // Initializing → Listening → Uncalibrated. In automotive the
-        // pair is fired up front in on_link_up() because asCapable is
-        // pre-granted. In standard mode, asCapable transitions on
-        // first successful Pdelay — that single transition has to fire
-        // both events so the SM doesn't get stuck in Listening.
-        if (!prev_as_capable && md_pdelay_req_.is_as_capable()) {
-            port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
-            port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
-        }
     }
+    // Reconcile the PortStateSM to any asCapable change from this exchange:
+    // acquired on the first success, or lost if the measured link delay exceeded
+    // the neighbor-prop-delay threshold (802.1AS 11.2.2).
+    sync_as_capable(prev_as_capable, now);
     // Cancel the receipt timeout — exchange completed (or failed cleanly).
     pdelay_receipt_timeout_.reset();
     // Re-arm the interval timer for the next exchange.
     arm_pdelay_interval_timer(now);
     publish_state_changes();
+}
+
+void GptpSlavePort::sync_as_capable(bool const prev_as_capable, TimePoint const now)
+{
+    bool const now_as_capable = md_pdelay_req_.is_as_capable();
+    if (now_as_capable == prev_as_capable) {
+        return;
+    }
+    if (now_as_capable) {
+        // false -> true: two events to traverse Initializing -> Listening ->
+        // Uncalibrated (the SM needs both so it does not get stuck in Listening).
+        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
+        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
+    } else {
+        // true -> false: too many lost Pdelay responses, or the measured link
+        // delay exceeded the neighbor-prop-delay threshold (802.1AS 11.2.2).
+        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableLost, now);
+    }
 }
 
 void GptpSlavePort::handle_announce_message(AnnounceMessage const& msg, TimePoint now)
@@ -501,7 +516,11 @@ void GptpSlavePort::arm_announce_receipt_timeout(TimePoint now)
 
 void GptpSlavePort::on_pdelay_interval_expired(TimePoint now)
 {
+    // A stale in-flight exchange is failed here (may cross the lost-response
+    // threshold and drop asCapable), so reconcile the SM afterwards.
+    bool const prev_as_capable = md_pdelay_req_.is_as_capable();
     auto const seq_opt = md_pdelay_req_.pdelay_interval_timer_expired();
+    sync_as_capable(prev_as_capable, now);
     if (!seq_opt.has_value()) {
         return;
     }

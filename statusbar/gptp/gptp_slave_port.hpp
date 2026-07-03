@@ -283,6 +283,10 @@ class GptpSlavePort
     void handle_pdelay_req_message(PdelayReqMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
     void handle_pdelay_resp_message(PdelayRespMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
     void handle_pdelay_resp_follow_up_message(PdelayRespFollowUpMessage const& msg, TimePoint now);
+    /// Reconcile the PortStateSM to MDPdelayReq's asCapable after a Pdelay event:
+    /// given the value BEFORE the event, dispatch AsCapableAcquired (x2) on a
+    /// false->true edge or AsCapableLost on true->false. No-op if unchanged.
+    void sync_as_capable(bool prev_as_capable, TimePoint now);
     void handle_announce_message(AnnounceMessage const& msg, TimePoint now);
     void handle_signaling_message(SignalingMessage const& msg, std::span<uint8_t const> trailing_bytes, TimePoint now);
 

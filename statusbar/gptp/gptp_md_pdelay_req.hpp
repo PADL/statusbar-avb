@@ -88,6 +88,11 @@ class MDPdelayReq
 
         /// Rate ratio ±ppm clamp, from GptpConfig::servo_ppm_limit.
         double max_rate_ratio_ppm{250.0};
+
+        /// Max mean link delay (ns) for the peer to be asCapable (802.1AS 11.2.2).
+        /// A successful exchange whose measured delay exceeds this still drops
+        /// asCapable. 0 = disabled. From GptpConfig::neighbor_prop_delay_threshold_ns.
+        int64_t neighbor_prop_delay_threshold_ns{0};
     };
 
     explicit MDPdelayReq(Config const& config) noexcept

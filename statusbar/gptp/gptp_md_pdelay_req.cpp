@@ -104,6 +104,11 @@ auto MDPdelayReq::on_pdelay_resp_follow_up(PdelayRespFollowUpMessage const& msg)
     // Record for next rate-ratio computation.
     previous_completed_ = in_flight_.ex;
     complete_exchange_success();
+    // 802.1AS 11.2.2: a link longer than the neighbor-prop-delay threshold is not
+    // AVB-usable even though the exchange succeeded -- drop asCapable. 0 = disabled.
+    if (config_.neighbor_prop_delay_threshold_ns > 0 && link_delay > config_.neighbor_prop_delay_threshold_ns) {
+        as_capable_ = false;
+    }
     return meas;
 }
 
