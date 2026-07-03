@@ -495,14 +495,14 @@ TEST(nanoavb_acmp_listener, is_connected_initially_false)
     EXPECT_FALSE(listener.is_connected(1));
 }
 
-// Regression: a CONNECT_RX whose send_connect_tx takes an immediate error path
-// (here LISTENER_UNKNOWN_ID for an out-of-range sink) clear_pending()s but the
-// transition table still advances the SM into ConnectTxResp -- a dead-end with
-// nothing pending. The listener would then ignore every later controller command
-// (CONNECT_RX, GET_RX_STATE) forever. Hardware-observed on node-a: the listener
-// went silent after hours while the talker kept answering. The per-tick watchdog
-// must detect the wedge (non-Waiting + nothing pending) and recover to Waiting.
-TEST(nanoavb_acmp_listener, wedge_on_error_path_recovers_via_watchdog)
+// Regression (acmp#1): a CONNECT_RX whose send_connect_tx takes an immediate error
+// path (here LISTENER_UNKNOWN_ID for an out-of-range sink) must return the SM to
+// Waiting -- it must NOT park in a response-wait state with nothing pending (which
+// had no timeout to escape and dropped every later controller command; the
+// listener went silent after hours on node-a). Fixed in the listener transition
+// table: the send actions return to Waiting. The next command is serviced
+// immediately, with no watchdog tick required.
+TEST(nanoavb_acmp_listener, error_path_does_not_wedge)
 {
     auto listener_id = make_entity_id(0x01);
     auto talker_id = make_entity_id(0x02);
@@ -525,21 +525,12 @@ TEST(nanoavb_acmp_listener, wedge_on_error_path_recovers_via_watchdog)
     auto bad = make_connect_rx_command(talker_id, 0, listener_id, 5);
     (void)listener.receive_controller_command(bad, now);
     EXPECT_EQ(last_response.status(), ACMP_STATUS_LISTENER_UNKNOWN_ID);
-    EXPECT_TRUE(listener.current_state() != ListenerState::Waiting);  // wedged in ConnectTxResp
+    EXPECT_EQ(listener.current_state(), ListenerState::Waiting);  // no wedge
     EXPECT_FALSE(listener.has_pending());
 
-    // While wedged, a valid GET_RX_STATE for sink 0 is silently dropped.
+    // The very next controller command is serviced immediately -- no watchdog tick.
     responses = 0;
     auto probe = make_get_rx_state_command(listener_id, 0);
-    (void)listener.receive_controller_command(probe, now);
-    EXPECT_EQ(responses, 0);
-
-    // The per-tick watchdog recovers the SM to Waiting.
-    listener.tick(now);
-    EXPECT_EQ(listener.current_state(), ListenerState::Waiting);
-
-    // ...and the listener services controller commands again.
-    responses = 0;
     (void)listener.receive_controller_command(probe, now);
     EXPECT_EQ(responses, 1);
     EXPECT_EQ(last_response.message_type(), ACMP_MESSAGE_TYPE_GET_RX_STATE_RESPONSE);

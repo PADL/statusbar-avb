@@ -3,8 +3,6 @@
 
 #include "statusbar/nanoavb/nanoavb_acmp.hpp"
 
-#include <print>
-
 namespace statusbar::nanoavb {
 
 NanoAvbAcmpTalker::NanoAvbAcmpTalker(
@@ -163,26 +161,21 @@ auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
         return true;
     }
 
-    // Watchdog against a wedged listener. The SM only ever rests in Waiting:
-    // every other state is either transient (entered and left inside a single
-    // handle_event UCT chain) or a *_TxResp wait that persists strictly while a
-    // talker request is pending. So a non-Waiting, non-Start state with NO
-    // pending request is a wedge. It happens because send_connect_tx /
-    // send_disconnect_tx take immediate error-response paths (LISTENER_UNKNOWN_ID
-    // for an out-of-range stream, CONTROLLER_NOT_AUTHORIZED, LISTENER_EXCLUSIVE)
-    // that clear_pending() and return -- yet the transition table still advances
-    // the SM into ConnectTxResp / DisconnectTxResp. That state has no transition
-    // for a fresh CONNECT_RX or GET_RX_STATE and (with nothing pending) no
-    // timeout to fire, so the listener would silently ignore EVERY later
-    // controller command until the process restarts. Recover to Waiting so the
-    // next command is serviced. (Hardware-observed on node-a: listener stopped
-    // answering ACMP after hours while the talker kept working.)
+    // Belt-and-suspenders against a wedged listener. The root cause is now fixed in
+    // the listener transition table: send_connect_tx / send_disconnect_tx took an
+    // immediate synchronous response path (LISTENER_UNKNOWN_ID for an out-of-range
+    // stream, CONTROLLER_NOT_AUTHORIZED, LISTENER_EXCLUSIVE, or an idempotent hit)
+    // that clear_pending()d and returned, yet the table still advanced the SM into a
+    // response-wait state with nothing pending and no timeout to escape -- so the
+    // listener silently ignored every later controller command (hardware-observed on
+    // node-a: it went silent after hours while the talker kept working). Those send
+    // actions now return to Waiting, so at rest the SM is only ever in Waiting (or
+    // Start before its initial UCT); every other state is transient within a single
+    // handle_event UCT chain, or a wait that persists strictly while a request is
+    // pending. A non-Waiting, non-Start state with NO pending request should now be
+    // impossible -- but recover to Waiting if it ever occurs.
     auto const st = sm_.current_state();
     if (!ctx_.has_pending && st != ListenerState::Waiting && st != ListenerState::Start) {
-        // TEMPORARY diagnostic: surface every wedge recovery so we can confirm in
-        // production how often the error-path wedge fires (and remove this log
-        // once we've stopped seeing it). The recovery itself is permanent.
-        std::print(stderr, "[acmp-listener] watchdog: recovered wedged listener from state {} -> Waiting\n", static_cast<int>(st));
         ctx_.clear_pending();
         sm_.reset();          // -> Start
         start(current_time);  // UCT: Start -> Waiting

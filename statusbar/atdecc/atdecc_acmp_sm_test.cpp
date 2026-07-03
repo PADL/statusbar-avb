@@ -801,8 +801,10 @@ TEST(listener_sm, connect_sends_to_talker)
     sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
     sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
 
-    // Should be in ConnectTxResp state waiting for talker response
-    EXPECT_EQ(sm.current_state(), ListenerState::ConnectTxResp);
+    // Async send: the SM waits in Waiting with a pending command (the talker's
+    // response / a timeout is handled from Waiting; there is no separate
+    // response-wait state to park in).
+    EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
 
     // Command should have been sent to talker
     EXPECT_EQ(sent_commands.size(), 1U);
@@ -837,11 +839,57 @@ TEST(listener_sm, connect_unknown_stream)
     EXPECT_EQ(sent_responses.size(), 1U);
     EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_LISTENER_UNKNOWN_ID);
 
-    // Should be back to waiting, no pending
-    // Note: After UCT, action runs and returns error, transitions to ConnectTxResp then waits
-    // Actually, looking at the SM, error paths return early and stay in ConnectTxResp
-    // Let me check the actual behavior - the action sends error and clears pending
+    // A synchronous error must return the SM to Waiting (not park in a dead
+    // response-wait state) so the next command is accepted rather than dropped.
+    EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
     EXPECT_FALSE(ctx.has_pending);
+}
+
+// Regression (acmp#1): after a synchronous error CONNECT_RX the listener must not
+// wedge -- a subsequent VALID CONNECT_RX is dispatched to the talker, not dropped.
+TEST(listener_sm, error_then_valid_connect_not_wedged)
+{
+    ListenerContext ctx(4);
+    ctx.my_id = LISTENER_ID;
+
+    std::vector<AcmpCommandResponse> sent_commands;
+    std::vector<AcmpCommandResponse> sent_responses;
+    ctx.tx_command = [&](AcmpCommandResponse const& cmd) {
+        sent_commands.push_back(cmd);
+        return true;
+    };
+    ctx.tx_response = [&](AcmpCommandResponse const& resp) {
+        sent_responses.push_back(resp);
+        return true;
+    };
+
+    AcmpListenerStateMachine<> sm;
+    sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
+
+    // First: an error-path CONNECT_RX (unknown stream) -> error response, back to Waiting.
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.listener_unique_id = 99;  // invalid stream
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
+    EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
+    EXPECT_EQ(sent_responses.size(), 1U);
+    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_LISTENER_UNKNOWN_ID);
+
+    // Second: a VALID CONNECT_RX must now be processed -- a CONNECT_TX goes to the
+    // talker. The wedge would have left the SM parked in ConnectTxResp and dropped
+    // this command (sent_commands stays empty).
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+    ctx.rcvd_cmd_resp.listener_unique_id = 0;  // valid stream
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(1));
+
+    EXPECT_EQ(sent_commands.size(), 1U);
+    EXPECT_EQ(sent_commands[0].message_type(), ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    EXPECT_TRUE(ctx.has_pending);
+    EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
 }
 
 TEST(listener_sm, connect_listener_exclusive)
@@ -959,7 +1007,7 @@ TEST(listener_sm, connect_receives_response)
     sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
     sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
 
-    EXPECT_EQ(sm.current_state(), ListenerState::ConnectTxResp);
+    EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
 
     // Receive success response from talker
     ctx.rcvd_cmd_resp = {};
@@ -1004,7 +1052,7 @@ TEST(listener_sm, connect_timeout)
     sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
     sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
 
-    EXPECT_EQ(sm.current_state(), ListenerState::ConnectTxResp);
+    EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
 
     // First timeout triggers retry
     sm.handle_event(ctx, ListenerEvent::TxTimeout, test_time(5000));

@@ -27,13 +27,13 @@ namespace statusbar::atdecc {
 /// Listener state machine states
 enum class ListenerState : uint8_t
 {
-    Start,             // Initial state after construction
-    Waiting,           // Idle state, waiting for commands or responses
-    ConnectTxCmd,      // Sending CONNECT_TX_COMMAND to talker
-    DisconnectTxCmd,   // Sending DISCONNECT_TX_COMMAND to talker
-    ConnectTxResp,     // Processing CONNECT_TX_RESPONSE from talker
-    DisconnectTxResp,  // Processing DISCONNECT_TX_RESPONSE from talker
-    GetState,          // Processing GET_RX_STATE_COMMAND
+    Start,            // Initial state after construction
+    Waiting,          // Idle state; also where async talker responses/timeouts are handled
+    ConnectTxCmd,     // Sending CONNECT_TX_COMMAND to talker
+    DisconnectTxCmd,  // Sending DISCONNECT_TX_COMMAND to talker
+    ConnectTxResp,    // Deprecated: response-wait is now folded into Waiting (kept for API compat)
+    DisconnectTxResp, // Deprecated: response-wait is now folded into Waiting (kept for API compat)
+    GetState,         // Processing GET_RX_STATE_COMMAND
     Count
 };
 
@@ -187,28 +187,27 @@ consteval auto make_listener_table()
     // From START state - UCT to Waiting
     t.at(State::Start, Event::UCT) = T::transition(State::Waiting);
 
-    // From WAITING state - transition to appropriate action state
+    // From WAITING state - either dispatch a new command to its action state, or
+    // handle an async talker response / timeout for a command already in flight.
+    // The listener waits for CONNECT_TX / DISCONNECT_TX responses HERE rather than
+    // in a distinct *Resp state: a command that finishes synchronously (an error,
+    // or an idempotent already-connected hit) clears pending and returns to Waiting
+    // ready for the next command -- so it can never park in a response-wait state
+    // with nothing pending, which had no timeout to escape and dropped every
+    // subsequent command (the listener wedge).
     t.at(State::Waiting, Event::RcvdConnectRx) = T::transition(State::ConnectTxCmd);
     t.at(State::Waiting, Event::RcvdDisconnectRx) = T::transition(State::DisconnectTxCmd);
     t.at(State::Waiting, Event::RcvdGetRxState) = T::transition(State::GetState);
-    // Handle retry: after first timeout retries, response/timeout arrives in Waiting
     t.at(State::Waiting, Event::RcvdConnectTxResp) = T::action<listener_actions::handle_connect_tx_response>(State::Waiting);
+    t.at(State::Waiting, Event::RcvdDisconnectTxResp) = T::action<listener_actions::handle_disconnect_tx_response>(State::Waiting);
     t.at(State::Waiting, Event::TxTimeout) = T::action<listener_actions::handle_timeout>(State::Waiting);
 
-    // From CONNECT_TX_CMD state - send command, then wait for response or timeout
-    t.at(State::ConnectTxCmd, Event::UCT) = T::action<listener_actions::send_connect_tx>(State::ConnectTxResp);
-
-    // From CONNECT_TX_RESP state - waiting for talker response
-    t.at(State::ConnectTxResp, Event::RcvdConnectTxResp) = T::action<listener_actions::handle_connect_tx_response>(State::Waiting);
-    t.at(State::ConnectTxResp, Event::TxTimeout) = T::action<listener_actions::handle_timeout>(State::Waiting);
-
-    // From DISCONNECT_TX_CMD state - send command, then wait for response or timeout
-    t.at(State::DisconnectTxCmd, Event::UCT) = T::action<listener_actions::send_disconnect_tx>(State::DisconnectTxResp);
-
-    // From DISCONNECT_TX_RESP state - waiting for talker response
-    t.at(State::DisconnectTxResp, Event::RcvdDisconnectTxResp) =
-        T::action<listener_actions::handle_disconnect_tx_response>(State::Waiting);
-    t.at(State::DisconnectTxResp, Event::TxTimeout) = T::action<listener_actions::handle_timeout>(State::Waiting);
+    // CONNECT_TX_CMD / DISCONNECT_TX_CMD: run the send action, then return to
+    // Waiting. On the async path the action sets has_pending and the talker's
+    // response (or a timeout) is handled from Waiting above; on a synchronous path
+    // the action has already answered the controller and cleared pending.
+    t.at(State::ConnectTxCmd, Event::UCT) = T::action<listener_actions::send_connect_tx>(State::Waiting);
+    t.at(State::DisconnectTxCmd, Event::UCT) = T::action<listener_actions::send_disconnect_tx>(State::Waiting);
 
     // From GET_STATE state - UCT back to WAITING after handling
     t.at(State::GetState, Event::UCT) = T::action<listener_actions::handle_get_rx_state>(State::Waiting);
