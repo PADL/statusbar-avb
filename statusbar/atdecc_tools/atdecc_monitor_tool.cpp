@@ -51,6 +51,12 @@ using namespace statusbar::atdecc::aem;
 using namespace statusbar::ieee;
 using namespace statusbar::net;
 
+// Defensive caps against a hostile/corrupt CONFIGURATION descriptor: real entities
+// have at most tens of any descriptor type and far fewer than 108 types, so these
+// bound enumeration hard (a raw 65535 x 65535 would otherwise be ~4 billion enqueues).
+constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 512;
+constexpr uint16_t MAX_DESCRIPTOR_TYPES = 108;  // total AVDECC descriptor types
+
 using atdecc_tools::CommonConfig;
 
 // Env-gated tracing for --enumerate (set STATUSBAR_ENUM_DEBUG=1).
@@ -720,7 +726,9 @@ class Enumerator
             } else if (dtype == DESCRIPTOR_CONFIGURATION) {
                 it->second.seen_config = true;
                 // descriptor_counts: count at offset 70, table offset at 72.
-                uint16_t const counts = be16_at(body, 70);
+                // Both counts are untrusted uint16 -- bound them so a hostile
+                // CONFIGURATION can't drive ~4 billion enqueues (M2 DoS).
+                uint16_t const counts = std::min<uint16_t>(be16_at(body, 70), MAX_DESCRIPTOR_TYPES);
                 uint16_t off = be16_at(body, 72);
                 if (off < 74) {
                     off = 74;
@@ -728,7 +736,7 @@ class Enumerator
                 for (uint16_t i = 0; i < counts; ++i) {
                     size_t const base = static_cast<size_t>(off) + (static_cast<size_t>(i) * 4);
                     uint16_t const t = be16_at(body, base);
-                    uint16_t const cnt = be16_at(body, base + 2);
+                    uint16_t const cnt = std::min<uint16_t>(be16_at(body, base + 2), MAX_DESCRIPTORS_PER_TYPE);
                     if (t == DESCRIPTOR_ENTITY || t == DESCRIPTOR_CONFIGURATION) {
                         continue;  // already covered; avoid recursion
                     }

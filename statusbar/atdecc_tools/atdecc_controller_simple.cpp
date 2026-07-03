@@ -29,6 +29,13 @@ using namespace statusbar::atdecc::aem;
 using namespace statusbar::ieee;
 using namespace statusbar::net;
 
+// Defensive cap on how many descriptors of one type a (possibly hostile or corrupt)
+// entity's CONFIGURATION can make us enumerate. A wire count near 65535 across ~108
+// descriptor types would otherwise drive millions of set inserts + queue pushes
+// (hundreds of MB) -- a DoS from a single discovered entity. Real AVDECC entities
+// have at most tens of any descriptor type, so this is far above anything genuine.
+constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 512;
+
 ControllerSimple::ControllerSimple(RawnetContext context, Eui64 controller_id)
     : context_{std::move(context)}
     , controller_{controller_id}
@@ -900,7 +907,19 @@ void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& tar
         } else if (entry_type == DESCRIPTOR_STREAM_OUTPUT) {
             counts.stream_outputs = entry_count;
         }
-        for (uint16_t idx = 0; idx < entry_count; ++idx) {
+        // Bound enumeration so a hostile/corrupt count can't drive millions of
+        // queued reads + set inserts (M2 DoS). Real entities never exceed this.
+        uint16_t const read_count = std::min<uint16_t>(entry_count, MAX_DESCRIPTORS_PER_TYPE);
+        if (read_count < entry_count) {
+            std::print(
+                stderr,
+                "[atdecc] entity advertises {} descriptors of type 0x{:04x} (> {}); enumerating only {}\n",
+                entry_count,
+                entry_type,
+                MAX_DESCRIPTORS_PER_TYPE,
+                read_count);
+        }
+        for (uint16_t idx = 0; idx < read_count; ++idx) {
             enqueue_descriptor_read(target, entry_type, idx);
             if (entry_type == DESCRIPTOR_STREAM_INPUT || entry_type == DESCRIPTOR_STREAM_OUTPUT) {
                 enqueue_stream_format_query(target, entry_type, idx);
@@ -1037,6 +1056,12 @@ void ControllerSimple::handle_get_stream_format_response(Eui64 target, uint8_t s
     uint16_t const desc_type = resp.descriptor_type.get();
     uint16_t const idx = resp.descriptor_index.get();
 
+    // A response-supplied descriptor_index can be up to 65535; we only ever request
+    // indices below the cap, so ignore anything beyond it rather than resize a
+    // vector to ~64K entries from a single crafted response (M2 DoS).
+    if (idx >= MAX_DESCRIPTORS_PER_TYPE) {
+        return;
+    }
     auto& map = (desc_type == DESCRIPTOR_STREAM_OUTPUT) ? talker_formats_ : listener_formats_;
     auto& vec = map[target];
     if (vec.size() <= idx) {
