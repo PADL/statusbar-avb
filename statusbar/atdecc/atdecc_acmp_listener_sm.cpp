@@ -19,6 +19,15 @@ void send_connect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
 {
     auto& cmd = ctx.rcvd_cmd_resp;
 
+    // A talker exchange is already in flight: drop this command rather than
+    // overwrite pending_command (the in-flight response would then be matched to
+    // the wrong sequence_id and dropped) or let it inherit the in-flight command's
+    // retried flag. The controller retries; the slot frees when the pending
+    // exchange completes or times out (bounded by the ACMP timeout).
+    if (ctx.has_pending) {
+        return;
+    }
+
     // Validate stream exists
     auto* stream = ctx.get_stream(cmd.listener_unique_id.get());
     if (stream == nullptr) {
@@ -85,10 +94,13 @@ void send_connect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
     tx_cmd.listener_entity_id = ctx.my_id;
     tx_cmd.connection_count = 0;
 
-    // Store pending state
+    // Store pending state. retried is reset here (not only in clear_pending) so a
+    // fresh transaction always starts its retry budget clean, independent of how
+    // the previous one ended.
     ctx.pending_command = cmd;
     ctx.current_stream_index = cmd.listener_unique_id.get();
     ctx.has_pending = true;
+    ctx.retried = false;
 
     // Set timeout
     auto timeout = acmp_timeout_for_message_type(tx_cmd.message_type());
@@ -103,6 +115,12 @@ void send_connect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
 void send_disconnect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
 {
     auto& cmd = ctx.rcvd_cmd_resp;
+
+    // Already-in-flight guard: see send_connect_tx. Don't clobber a pending
+    // transaction or inherit its retried flag; drop and let the controller retry.
+    if (ctx.has_pending) {
+        return;
+    }
 
     // Validate stream exists
     auto* stream = ctx.get_stream(cmd.listener_unique_id.get());
@@ -152,10 +170,13 @@ void send_disconnect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
     tx_cmd.connection_count = 0;
     tx_cmd.stream_vlan_id = stream->stream_vlan_id;
 
-    // Store pending state
+    // Store pending state. retried is reset here (not only in clear_pending) so a
+    // fresh transaction always starts its retry budget clean, independent of how
+    // the previous one ended.
     ctx.pending_command = cmd;
     ctx.current_stream_index = cmd.listener_unique_id.get();
     ctx.has_pending = true;
+    ctx.retried = false;
 
     // Set timeout
     auto timeout = acmp_timeout_for_message_type(tx_cmd.message_type());

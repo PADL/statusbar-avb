@@ -892,6 +892,129 @@ TEST(listener_sm, error_then_valid_connect_not_wedged)
     EXPECT_EQ(sm.current_state(), ListenerState::Waiting);
 }
 
+// Regression (acmp#2): a second command arriving while a talker exchange is in
+// flight must NOT clobber the pending transaction; the original completes and its
+// controller gets the answer.
+TEST(listener_sm, pending_connect_not_clobbered_by_second_command)
+{
+    ListenerContext ctx(4);
+    ctx.my_id = LISTENER_ID;
+
+    std::vector<AcmpCommandResponse> sent_commands;
+    std::vector<AcmpCommandResponse> sent_responses;
+    ctx.tx_command = [&](AcmpCommandResponse const& c) {
+        sent_commands.push_back(c);
+        return true;
+    };
+    ctx.tx_response = [&](AcmpCommandResponse const& r) {
+        sent_responses.push_back(r);
+        return true;
+    };
+
+    AcmpListenerStateMachine<> sm;
+    sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
+
+    // First CONNECT_RX (seq 1) -> pending, CONNECT_TX sent to talker.
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+    ctx.rcvd_cmd_resp.listener_unique_id = 0;
+    ctx.rcvd_cmd_resp.sequence_id = 1;
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
+    EXPECT_EQ(sent_commands.size(), 1U);
+    EXPECT_TRUE(ctx.has_pending);
+    EXPECT_EQ(ctx.pending_command.sequence_id.get(), 1U);
+
+    // Second CONNECT_RX (seq 2) while the first is in flight -> dropped, does NOT
+    // overwrite the pending transaction.
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+    ctx.rcvd_cmd_resp.listener_unique_id = 0;
+    ctx.rcvd_cmd_resp.sequence_id = 2;
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(1));
+    EXPECT_EQ(sent_commands.size(), 1U);  // no second CONNECT_TX
+    EXPECT_EQ(ctx.pending_command.sequence_id.get(), 1U);  // still the original
+
+    // The talker responds to the ORIGINAL (seq 1); the controller gets its answer
+    // (built from pending_command, so it carries seq 1 -- a clobber would have made
+    // this seq 2 and left the seq-1 controller unanswered).
+    ctx.rcvd_cmd_resp = {};
+    ctx.rcvd_cmd_resp.init_response(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE, ACMP_STATUS_SUCCESS);
+    ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+    ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+    ctx.rcvd_cmd_resp.sequence_id = 1;
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectTxResp, test_time(2));
+    EXPECT_EQ(sent_responses.size(), 1U);
+    EXPECT_EQ(sent_responses[0].message_type(), ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
+    EXPECT_EQ(sent_responses[0].sequence_id.get(), 1U);
+}
+
+// Regression (acmp#2): the busy gate holds through the retry window, and a fresh
+// transaction always starts with a clean retry budget (retried reset).
+TEST(listener_sm, busy_gate_during_retry_and_fresh_retry_budget)
+{
+    ListenerContext ctx(4);
+    ctx.my_id = LISTENER_ID;
+
+    std::vector<AcmpCommandResponse> sent_commands;
+    std::vector<AcmpCommandResponse> sent_responses;
+    ctx.tx_command = [&](AcmpCommandResponse const& c) {
+        sent_commands.push_back(c);
+        return true;
+    };
+    ctx.tx_response = [&](AcmpCommandResponse const& r) {
+        sent_responses.push_back(r);
+        return true;
+    };
+
+    auto connect_rx = [&](uint16_t seq) {
+        ctx.rcvd_cmd_resp = {};
+        ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+        ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+        ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+        ctx.rcvd_cmd_resp.listener_unique_id = 0;
+        ctx.rcvd_cmd_resp.sequence_id = seq;
+    };
+
+    AcmpListenerStateMachine<> sm;
+    sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
+
+    connect_rx(1);
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
+    EXPECT_EQ(sent_commands.size(), 1U);
+
+    // First timeout -> retry (retried set), a second CONNECT_TX for the same txn.
+    sm.handle_event(ctx, ListenerEvent::TxTimeout, test_time(5000));
+    EXPECT_EQ(sent_commands.size(), 2U);
+    EXPECT_TRUE(ctx.retried);
+    EXPECT_TRUE(ctx.has_pending);
+
+    // A new CONNECT_RX during the retry window is dropped (no clobber, no 3rd send).
+    connect_rx(2);
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(5001));
+    EXPECT_EQ(sent_commands.size(), 2U);
+
+    // Second timeout -> the original fails and pending clears (retried reset).
+    sm.handle_event(ctx, ListenerEvent::TxTimeout, test_time(10000));
+    EXPECT_EQ(sent_responses.size(), 1U);
+    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_LISTENER_TALKER_TIMEOUT);
+    EXPECT_FALSE(ctx.has_pending);
+    EXPECT_FALSE(ctx.retried);
+
+    // A FRESH CONNECT_RX gets its OWN full retry budget: its first timeout retries
+    // (a stale retried flag would have made it fail immediately instead).
+    connect_rx(3);
+    sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(11000));
+    EXPECT_EQ(sent_commands.size(), 3U);
+    EXPECT_FALSE(ctx.retried);
+    sm.handle_event(ctx, ListenerEvent::TxTimeout, test_time(16000));
+    EXPECT_EQ(sent_commands.size(), 4U);  // retried, not failed
+    EXPECT_TRUE(ctx.retried);
+}
+
 TEST(listener_sm, connect_listener_exclusive)
 {
     ListenerContext ctx(4);
