@@ -169,8 +169,10 @@ class AvbEntityAudioIO
     auto process_audio(TimePoint time) -> void;
 
     /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
-    /// stream on the wire this tick: true if gating is disabled, or a downstream
-    /// listener is ready (MSRP Listener Ready) / connected (ACMP) for the stream.
+    /// stream on the wire this tick: true if gating is disabled, or ALL of this
+    /// stream's own preconditions hold -- an ACMP connection exists AND the stream
+    /// is Started AND MSRP Listener Ready (with grace). Each stream (CRF included)
+    /// gates independently. See TalkerGate / gate_talker_on_listener.
     [[nodiscard]] auto talker_should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
     auto set_audio_callback(AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }

@@ -173,8 +173,10 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         [&](auto v) { config.entity.suppress_leaveall = v; });
     specs.add<bool>(
         "gate.talker_on_listener",
-        "Transmit a talker stream only when a downstream listener has declared MSRP Listener Ready (or has an ACMP "
-        "connection); stay silent otherwise (IEEE 802.1Q SRP). Default true. The CRF media clock follows the audio talkers.",
+        "Transmit a talker stream only when it is fully SR-class admitted: an ACMP connection AND MSRP Listener "
+        "Ready (with grace) for that stream; stay silent otherwise (IEEE 802.1Q SRP). Each stream gates "
+        "independently -- the CRF media clock on its own connection + reservation, not on the audio talkers. "
+        "Default true (false = stream unconditionally from link-up; non-spec, bench only).",
         config.entity.gate_talker_on_listener,
         [&](auto v) { config.entity.gate_talker_on_listener = v; });
     specs.add<ieee::Eui48>(
