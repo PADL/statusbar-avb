@@ -153,4 +153,43 @@ TEST(media_clock_generator, long_run_float_accumulator_stays_accurate)
 // Main test runner
 //
 
+// A gPTP timeline step (GM reboot / epoch reset) must re-anchor, not slow-catch-up.
+// Forward jump: without re-anchoring the phase crawls at +1 sample/tick and emits
+// dead-epoch timestamps for seconds; here the very next packet is on the new epoch.
+TEST(media_clock_generator, reanchors_on_forward_gptp_step)
+{
+    constexpr std::uint64_t offset = 1'000'000;
+    MediaClockGenerator mcg{MediaClockGenerator::Config{.sample_rate_hz = 96000.0, .presentation_offset_ns = offset}};
+    for (int k = 0; k < 100; ++k) {
+        mcg.advance(k_base + (static_cast<std::uint64_t>(k) * k_wake_ns), 1.0, 12);
+    }
+    EXPECT_EQ(mcg.step_count(), std::uint64_t{0});  // normal ticks never trip the step detector
+
+    // GM reboot bumped the epoch by 10 s beyond the expected next wake.
+    std::uint64_t const jumped = k_base + (100ULL * k_wake_ns) + 10'000'000'000ULL;
+    auto const e = mcg.advance(jumped, 1.0, 12);
+    EXPECT_EQ(mcg.step_count(), std::uint64_t{1});
+    EXPECT_EQ(e.samples, std::uint32_t{12});  // emits nominal, not a clamped catch-up
+    EXPECT_EQ(mcg.timestamp_for(e.first_index), jumped + offset);  // on the NEW epoch
+}
+
+// Backward jump: the buggy path underflowed and clamped want to 0 -> stream stalled.
+TEST(media_clock_generator, reanchors_on_backward_gptp_step)
+{
+    constexpr std::uint64_t offset = 1'000'000;
+    MediaClockGenerator mcg{MediaClockGenerator::Config{.sample_rate_hz = 96000.0, .presentation_offset_ns = offset}};
+    for (int k = 0; k < 100; ++k) {
+        mcg.advance(k_base + (static_cast<std::uint64_t>(k) * k_wake_ns), 1.0, 12);
+    }
+    // The GM timeline reset to a much smaller epoch (5 s earlier).
+    std::uint64_t const n_before = mcg.samples_emitted();
+    std::uint64_t const reset = k_base - 5'000'000'000ULL;
+    auto const e = mcg.advance(reset, 1.0, 12);
+    EXPECT_EQ(mcg.step_count(), std::uint64_t{1});
+    EXPECT_EQ(e.samples, std::uint32_t{12});  // keeps emitting -- the bug stalled at 0
+    EXPECT_EQ(mcg.timestamp_for(e.first_index), reset + offset);
+    // first_index stays monotonic across the re-anchor (n_ is not reset to 0).
+    EXPECT_EQ(e.first_index, n_before);
+}
+
 TEST_MAIN(statusbar_ptpclient, ptpclient_media_clock_test)

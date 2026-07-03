@@ -105,6 +105,21 @@ class MediaClockGenerator
         // (growing) value is ever held in floating point.
         std::uint64_t const target_ns = (gptp_now_ns - base_) + offset_ns_;
         auto const diff_ns = static_cast<std::int64_t>(target_ns - phase_ns_);
+        // gPTP timeline step (GM reboot / epoch reset): the phase is implausibly far
+        // from where the wake clock says it should be. Slow catch-up (clamped to
+        // nominal+1) would stream dead-epoch timestamps for seconds-to-forever on a
+        // forward jump, or stall at 0 samples on a backward one, so re-anchor to the
+        // new timeline instead (like a fresh anchor). One |diff| test catches both
+        // directions: forward jump -> huge positive; backward -> huge negative after
+        // the uint64 target wraps. n_ is NOT reset, so first_index stays monotonic
+        // and timestamp_for() maps it onto the new base_ immediately.
+        if (diff_ns > STEP_THRESHOLD_NS || diff_ns < -STEP_THRESHOLD_NS) {
+            base_ = gptp_now_ns;
+            phase_ns_ = offset_ns_;
+            phase_frac_ = 0;
+            ++step_count_;
+            return emit_(nominal_samples);
+        }
         real_t const diff = static_cast<real_t>(diff_ns) - phase_frac_;
         long want = std::lround(diff / slope_real());
         // Bound to nominal+1: keeps every packet within the advertised SRP frame
@@ -147,13 +162,24 @@ class MediaClockGenerator
     [[nodiscard]] double ns_per_sample() const noexcept { return slope_; }
     [[nodiscard]] double ratio() const noexcept { return r_; }
 
+    /// Number of gPTP-timeline steps re-anchored so far (observability; a change
+    /// signals the media clock restarted onto a new epoch this tick).
+    [[nodiscard]] std::uint64_t step_count() const noexcept { return step_count_; }
+
     void reset() noexcept
     {
         anchored_ = false;
         n_ = 0;
         phase_ns_ = 0;
         phase_frac_ = 0;
+        step_count_ = 0;
     }
+
+    /// A gPTP jump larger than this (vs. where the wake clock says the phase should
+    /// be) is treated as a timeline step and re-anchored rather than caught up. Far
+    /// above SCHED_FIFO wake jitter / the ~1 ms presentation offset, far below any
+    /// GM-reboot epoch step (seconds+).
+    static constexpr std::int64_t STEP_THRESHOLD_NS = 100'000'000;  // 100 ms
 
   private:
     // Set the per-sample slope from the GPS ratio, split into an exact integer-ns
@@ -207,6 +233,7 @@ class MediaClockGenerator
 
     std::uint64_t base_ = 0;
     std::uint64_t n_ = 0;
+    std::uint64_t step_count_ = 0;
     bool anchored_ = false;
 };
 
