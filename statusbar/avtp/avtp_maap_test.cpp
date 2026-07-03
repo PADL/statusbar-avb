@@ -256,7 +256,7 @@ TEST(maapdu_init, probe)
 
     EXPECT_TRUE(maap.subtype == AvtpSubtype::maap);
     EXPECT_TRUE(maap.is_probe());
-    EXPECT_EQ(maap.maap_version(), 0);
+    EXPECT_EQ(maap.maap_version(), 1);
     EXPECT_EQ(maap.maap_data_length(), 16);
     EXPECT_TRUE(maap.requested_start_address == start_addr);
     EXPECT_EQ(maap.requested_count.get(), 8);
@@ -275,7 +275,7 @@ TEST(maapdu_init, defend)
 
     EXPECT_TRUE(maap.subtype == AvtpSubtype::maap);
     EXPECT_TRUE(maap.is_defend());
-    EXPECT_EQ(maap.maap_version(), 0);
+    EXPECT_EQ(maap.maap_version(), 1);
     EXPECT_EQ(maap.maap_data_length(), 16);
     EXPECT_TRUE(maap.requested_start_address == req_start);
     EXPECT_EQ(maap.requested_count.get(), 8);
@@ -294,7 +294,7 @@ TEST(maapdu_init, announce)
 
     EXPECT_TRUE(maap.subtype == AvtpSubtype::maap);
     EXPECT_TRUE(maap.is_announce());
-    EXPECT_EQ(maap.maap_version(), 0);
+    EXPECT_EQ(maap.maap_version(), 1);
     EXPECT_EQ(maap.maap_data_length(), 16);
     EXPECT_TRUE(maap.requested_start_address == start_addr);
     EXPECT_EQ(maap.requested_count.get(), 8);
@@ -432,7 +432,10 @@ TEST(maapdu_is_valid, invalid_message_type_four)
     EXPECT_FALSE(maap.is_valid());
 }
 
-TEST(maapdu_is_valid, wrong_data_length)
+// IEEE 1722-2025 B.2.2 mandates ignoring a MAAP AVTPDU only on a RESERVED
+// message_type -- not on a nonconformant control_data_length. The MAAP fields are
+// fixed-offset, so is_valid() tolerates a wrong data length and parses the PDU.
+TEST(maapdu_is_valid, nonconformant_data_length_is_tolerated)
 {
     MaapDu maap;
     Eui48 system_addr(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
@@ -440,9 +443,29 @@ TEST(maapdu_is_valid, wrong_data_length)
     Eui48 start_addr(0x91, 0xe0, 0xf0, 0x00, 0x00, 0x10);
 
     maap.init_probe(sid, start_addr, 8);
-    maap.set_maap_data_length(20);  // Should be 16
+    maap.set_maap_data_length(20);  // not the spec value of 16 -- still parseable
 
-    EXPECT_FALSE(maap.is_valid());
+    EXPECT_TRUE(maap.is_valid());
+}
+
+// Interop (receive side): we emit maap_version 1, but must ACCEPT any maap_version
+// on ingress. IEEE 1722-2025 B.2.2 gates only on a reserved message_type, and MAAP
+// fields are fixed-offset regardless of version. Rejecting version 0 would break
+// address defense against older/other stations (incl. our own pre-fix nodes).
+TEST(maapdu_is_valid, foreign_maap_version_is_accepted)
+{
+    MaapDu maap;
+    Eui48 system_addr(0x00, 0x11, 0x22, 0x33, 0x44, 0x55);
+    StreamId sid(system_addr, 0x0001);
+    Eui48 start_addr(0x91, 0xe0, 0xf0, 0x00, 0x00, 0x10);
+
+    maap.init_probe(sid, start_addr, 8);
+
+    maap.set_maap_version(0);  // an older/other station (or our own pre-fix node)
+    EXPECT_TRUE(maap.is_valid());
+
+    maap.set_maap_version(31);  // an unknown future version -- still accepted
+    EXPECT_TRUE(maap.is_valid());
 }
 
 //

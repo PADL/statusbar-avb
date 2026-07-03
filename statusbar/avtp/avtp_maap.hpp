@@ -40,6 +40,10 @@ constexpr uint8_t MAAP_MESSAGE_TYPE_PROBE = 1;
 constexpr uint8_t MAAP_MESSAGE_TYPE_DEFEND = 2;
 constexpr uint8_t MAAP_MESSAGE_TYPE_ANNOUNCE = 3;
 
+/// The MAAP protocol version this implementation emits (IEEE 1722-2025 B.2.3:
+/// "The current version of MAAP is one (1)").
+constexpr uint8_t MAAP_VERSION = 1;
+
 /// Get human-readable name for MAAP message type
 /// @param type The MAAP message type value (1-3)
 [[nodiscard]] auto maap_message_type_name(uint8_t type) noexcept -> char const*;
@@ -195,7 +199,7 @@ struct MaapDu
     {
         subtype = AvtpSubtype::maap;
         sv_version_msgtype = MAAP_MESSAGE_TYPE_PROBE;
-        set_maap_version(0);
+        set_maap_version(MAAP_VERSION);
         set_maap_data_length(DATA_LENGTH);
         set_stream_id(sid);
         requested_start_address = start_addr;
@@ -215,7 +219,7 @@ struct MaapDu
     {
         subtype = AvtpSubtype::maap;
         sv_version_msgtype = MAAP_MESSAGE_TYPE_DEFEND;
-        set_maap_version(0);
+        set_maap_version(MAAP_VERSION);
         set_maap_data_length(DATA_LENGTH);
         set_stream_id(sid);
         requested_start_address = req_start;
@@ -232,7 +236,7 @@ struct MaapDu
     {
         subtype = AvtpSubtype::maap;
         sv_version_msgtype = MAAP_MESSAGE_TYPE_ANNOUNCE;
-        set_maap_version(0);
+        set_maap_version(MAAP_VERSION);
         set_maap_data_length(DATA_LENGTH);
         set_stream_id(sid);
         requested_start_address = start_addr;
@@ -250,16 +254,17 @@ struct MaapDu
         if (subtype != AvtpSubtype::maap) {
             return false;
         }
-        // Check message type is valid (1-3)
+        // Check message type is valid (1-3). IEEE 1722-2025 B.2.2: a MAAP AVTPDU
+        // with a reserved message_type shall be ignored. This is the ONLY
+        // receiver-side ignore rule the standard mandates.
+        // NOTE: control_data_length is NOT validated here. The standard requires a
+        // SENDER to set it to 16 (DATA_LENGTH), but the MAAP fields sit at fixed
+        // offsets regardless of its value, and B.2.2 only mandates ignoring on a
+        // reserved message_type -- so rejecting on control_data_length would be
+        // stricter than the standard and could drop a parseable PDU from a
+        // slightly-nonconformant sender. Parse it instead (Postel's law).
         uint8_t const msg_type = message_type();
-        if (msg_type < 1 || msg_type > 3) {
-            return false;
-        }
-        // Check MAAP data length
-        if (maap_data_length() != DATA_LENGTH) {
-            return false;
-        }
-        return true;
+        return msg_type >= 1 && msg_type <= 3;
     }
 
     auto operator<=>(MaapDu const& rhs) const noexcept -> std::strong_ordering = default;

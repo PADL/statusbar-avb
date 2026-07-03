@@ -186,6 +186,31 @@ TEST(maap_handler, probe_against_us_while_defending_sends_defend)
     EXPECT_TRUE(rig.sent.back().is_defend());
 }
 
+// Interop: a conflicting PROBE that carries maap_version 0 (a peer, or one of our
+// own not-yet-updated pre-fix nodes) must still be honored -- we defend our range.
+// Rejecting on version would let such a station steal our multicast MAC.
+TEST(maap_handler, version_zero_probe_against_us_still_defended)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    Eui48 const addr = rig.handler.address();
+    auto const sent_before = rig.sent.size();
+
+    // Build a PROBE for our range but stamp maap_version 0 on the wire.
+    MaapDu du{};
+    du.init_probe(StreamId{}, addr, 2);
+    du.set_maap_version(0);
+    std::array<uint8_t, MaapDu::LENGTH> frame{};
+    (void)statusbar::protocol::store_unchecked(frame, du);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x09}, frame, 100 * SEC);
+
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_TRUE(rig.sent.size() > sent_before);
+    EXPECT_TRUE(rig.sent.back().is_defend());
+}
+
 TEST(maap_handler, announce_against_us_while_defending_fires_lost_and_repicks)
 {
     Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
