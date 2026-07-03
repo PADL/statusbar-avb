@@ -294,7 +294,11 @@ class MsrpHandler
         if (!found) {
             auto copy = info;
             copy.state = TalkerReservationState::Advertising;
-            talker_streams_.push_back(copy);
+            // inplace_vector::push_back throws when full; on the MSRP reactor path a
+            // peer advertising more than MaxStreams must be rejected, not terminate.
+            if (talker_streams_.try_push_back(copy) == nullptr) {
+                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
+            }
             idx = talker_streams_.size() - 1;
         }
 
@@ -380,7 +384,10 @@ class MsrpHandler
             }
         }
         if (!found) {
-            listener_streams_.push_back({.stream_id = stream_id, .state = ListenerReservationState::Ready});
+            // Reject rather than throw when the reservation table is full (reactor path).
+            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = ListenerReservationState::Ready}) == nullptr) {
+                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
+            }
             idx = listener_streams_.size() - 1;
         }
 
@@ -403,7 +410,11 @@ class MsrpHandler
             }
         }
         if (!found) {
-            listener_streams_.push_back({.stream_id = stream_id, .state = ListenerReservationState::AskingFailed});
+            // Reject rather than throw when the reservation table is full (reactor path).
+            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = ListenerReservationState::AskingFailed}) ==
+                nullptr) {
+                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
+            }
         }
 
         if (!started_) {

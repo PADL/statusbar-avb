@@ -274,8 +274,8 @@ auto AemCommandHandler::check_exclusive_access(AemDu const& header) const noexce
     return std::nullopt;
 }
 
-auto AemCommandHandler::reject_command(
-    uint8_t const status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+auto AemCommandHandler::reject_command(uint8_t const status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
 {
     size_t size = 0;
     if (out_buffer.size() >= command_data.size()) {
@@ -717,6 +717,21 @@ auto AemCommandHandler::handle_deregister_unsolicited(AemDu const& header) -> Ae
     }
     // Deregister is idempotent — always return success, even for unknown controllers.
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
+}
+
+auto AemCommandHandler::remove_unsolicited_registrations_for(Eui64 controller_entity_id) noexcept -> size_t
+{
+    size_t removed = 0;
+    for (;;) {
+        auto const idx = unsolicited_registrations_.find_if(
+            [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == controller_entity_id; });
+        if (idx >= unsolicited_registrations_.capacity()) {
+            break;
+        }
+        unsolicited_registrations_.remove(idx);
+        ++removed;
+    }
+    return removed;
 }
 
 auto AemCommandHandler::unsolicited_registration_count() const noexcept -> size_t

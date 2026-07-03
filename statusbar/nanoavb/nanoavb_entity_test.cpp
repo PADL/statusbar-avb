@@ -590,6 +590,29 @@ TEST(nanoavb_entity_unsolicited, deregister_success)
     EXPECT_EQ(handler.unsolicited_registration_count(), 0U);
 }
 
+TEST(nanoavb_entity_unsolicited, remove_for_departed_controller)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+
+    auto reg = create_aem_header(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION);
+    auto const ctrl_a = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    auto const ctrl_b = statusbar::ieee::Eui64{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+    reg.controller_entity_id = ctrl_a;
+    (void)make_test_result(handler, reg, {});
+    reg.controller_entity_id = ctrl_b;
+    (void)make_test_result(handler, reg, {});
+    EXPECT_EQ(handler.unsolicited_registration_count(), 2U);
+
+    // A departed controller's registration is pruned; the other survives.
+    EXPECT_EQ(handler.remove_unsolicited_registrations_for(ctrl_a), 1U);
+    EXPECT_EQ(handler.unsolicited_registration_count(), 1U);
+
+    // Removing an unregistered / already-removed id is a no-op.
+    EXPECT_EQ(handler.remove_unsolicited_registrations_for(ctrl_a), 0U);
+    EXPECT_EQ(handler.unsolicited_registration_count(), 1U);
+}
+
 TEST(nanoavb_entity_unsolicited, max_registrations)
 {
     auto model = create_test_model();
@@ -1173,7 +1196,7 @@ TEST(nanoavb_entity_commands, get_stream_format_implemented)
     std::array<uint8_t, 4> command_data = {0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT[0]
     auto result = make_test_result(handler, header, command_data);
 
-    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
     EXPECT_EQ(result.response_data().size(), AemStreamFormatPayload::LENGTH);  // 12
     EXPECT_EQ(result.response_data()[1], 0x05);                                // echoes descriptor_type = STREAM_INPUT
 }
@@ -1195,7 +1218,7 @@ TEST(nanoavb_entity_commands, get_sampling_rate_implemented)
     std::array<uint8_t, 4> command_data = {0x00, 0x02, 0x00, 0x00};  // AUDIO_UNIT[0]
     auto result = make_test_result(handler, header, command_data);
 
-    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
     EXPECT_EQ(result.response_data().size(), AemSamplingRatePayload::LENGTH);  // 8
     auto const r = result.response_data();
     auto const sr = static_cast<uint32_t>(

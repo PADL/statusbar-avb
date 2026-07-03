@@ -201,6 +201,8 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
             // (and hold its SRP reservation) forever after the talker left.
             if (adp.is_entity_departing()) {
                 (void)acmp_listener_.on_talker_departed(adp.entity_id);
+                // A departing controller's unsolicited registration is now stale.
+                (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
             }
             break;
         }
@@ -372,6 +374,8 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
     AdpDiscoveryCallbacks discovery_callbacks{};
     discovery_callbacks.on_entity_departing = [this](Eui64 id) {
         (void)components_->acmp_listener.on_talker_departed(id);
+        // Aged-out controller: drop its now-stale unsolicited registration too.
+        (void)components_->aem_handler.remove_unsolicited_registrations_for(id);
     };
     discovery_.set_callbacks(std::move(discovery_callbacks));
     atdecc->set_adp_discovery(&discovery_);

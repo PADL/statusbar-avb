@@ -258,6 +258,12 @@ class AemCommandHandler
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;
 
+    /// Drop any unsolicited-notification registration held by @p controller_entity_id.
+    /// Call this when that controller departs (ENTITY_DEPARTING or discovery age-out):
+    /// otherwise its registration lingers forever, holding a slot and making us frame
+    /// and send notifications to an entity that is gone. Returns the number removed.
+    auto remove_unsolicited_registrations_for(Eui64 controller_entity_id) noexcept -> size_t;
+
     /// Set our own entity_id, used as the target_entity_id of unsolicited
     /// notifications. process_packet() also keeps this current; call this so
     /// notifications emitted before any command is received carry the right id.
@@ -340,8 +346,8 @@ class AemCommandHandler
 
     /// Build a rejection response: the given status, echoing the command payload so
     /// the controller can match the response. Applies no mutation.
-    [[nodiscard]] static auto reject_command(
-        uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
 
     /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
     [[nodiscard]] auto handle_get_stream_format(
