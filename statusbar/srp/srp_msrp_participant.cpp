@@ -917,43 +917,17 @@ void MsrpParticipantT<Limits>::handle_talker_advertise_rx(
     registrar_sm::Def::Event registrar_event,
     TimePoint now)
 {
-    if (attr_length < TalkerAdvertiseFirstValue::LENGTH) {
-        return;
-    }
-    TalkerAdvertiseFirstValue fv;
-    (void)load_unchecked(first_value_bytes, &fv);
-    for (uint16_t k = 0; k < value_index; ++k) {
-        increment_first_value(fv);
-    }
-    if (!is_interesting(fv.stream_id)) {
-        return;
-    }
-    auto* rec_ptr = find_or_create_talker_advertise(fv.stream_id);
-    if (rec_ptr == nullptr) {
-        return;  // peer attribute, table full — silently drop
-    }
-    auto& rec = *rec_ptr;
-    bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-    // Adopt the received payload ONLY for a pure peer registration. If WE are
-    // locally declaring this StreamID, a peer declaring the same one is a
-    // StreamIdInUseByAnotherTalker conflict (802.1Q-2018 35.2.4): keep OUR value so
-    // our next JoinIn re-advertises our own params, not the peer's.
-    if (rec.operation == Operation::Register) {
-        rec.first_value = fv;
-    } else if (!(rec.first_value == fv)) {
-        ++foreign_declaration_conflict_count_;
-    }
-    mrp::dispatch_applicant(rec, applicant_event, now);
-    if (registrar_event == registrar_sm::Def::Event::Count) {
-        return;
-    }
-    mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
-    auto const n = rec.registrar_ctx.notify;
-    if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
-        notify_talker_advertise(rec.first_value, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && was_registered) {
-        notify_talker_leave(rec.first_value.stream_id);
-    }
+    handle_peer_attr_rx<TalkerAdvertiseFirstValue>(
+        attr_length,
+        first_value_bytes,
+        value_index,
+        applicant_event,
+        registrar_event,
+        now,
+        [this](TalkerAdvertiseFirstValue const& fv) { return is_interesting(fv.stream_id); },
+        [this](TalkerAdvertiseFirstValue const& fv) { return find_or_create_talker_advertise(fv.stream_id); },
+        [this](TalkerAdvertiseFirstValue const& fv) { notify_talker_advertise(fv, Operation::Register); },
+        [this](TalkerAdvertiseFirstValue const& fv) { notify_talker_leave(fv.stream_id); });
 }
 
 template <class Limits>
@@ -965,40 +939,17 @@ void MsrpParticipantT<Limits>::handle_talker_failed_rx(
     registrar_sm::Def::Event registrar_event,
     TimePoint now)
 {
-    if (attr_length < TalkerFailedFirstValue::LENGTH) {
-        return;
-    }
-    TalkerFailedFirstValue fv;
-    (void)load_unchecked(first_value_bytes, &fv);
-    for (uint16_t k = 0; k < value_index; ++k) {
-        increment_first_value(fv);
-    }
-    if (!is_interesting(fv.advertise.stream_id)) {
-        return;
-    }
-    auto* rec_ptr = find_or_create_talker_failed(fv.advertise.stream_id);
-    if (rec_ptr == nullptr) {
-        return;  // peer attribute, table full — silently drop
-    }
-    auto& rec = *rec_ptr;
-    bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-    // Keep our own payload if WE declare this StreamID (see handle_talker_advertise_rx).
-    if (rec.operation == Operation::Register) {
-        rec.first_value = fv;
-    } else if (!(rec.first_value == fv)) {
-        ++foreign_declaration_conflict_count_;
-    }
-    mrp::dispatch_applicant(rec, applicant_event, now);
-    if (registrar_event == registrar_sm::Def::Event::Count) {
-        return;
-    }
-    mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
-    auto const n = rec.registrar_ctx.notify;
-    if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
-        notify_talker_failed(rec.first_value, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && was_registered) {
-        notify_talker_leave(rec.first_value.advertise.stream_id);
-    }
+    handle_peer_attr_rx<TalkerFailedFirstValue>(
+        attr_length,
+        first_value_bytes,
+        value_index,
+        applicant_event,
+        registrar_event,
+        now,
+        [this](TalkerFailedFirstValue const& fv) { return is_interesting(fv.advertise.stream_id); },
+        [this](TalkerFailedFirstValue const& fv) { return find_or_create_talker_failed(fv.advertise.stream_id); },
+        [this](TalkerFailedFirstValue const& fv) { notify_talker_failed(fv, Operation::Register); },
+        [this](TalkerFailedFirstValue const& fv) { notify_talker_leave(fv.advertise.stream_id); });
 }
 
 template <class Limits>
@@ -1096,40 +1047,21 @@ void MsrpParticipantT<Limits>::handle_domain_rx(
     registrar_sm::Def::Event registrar_event,
     TimePoint now)
 {
-    if (attr_length < DomainFirstValue::LENGTH) {
-        return;
-    }
-    DomainFirstValue fv;
-    (void)load_unchecked(first_value_bytes, &fv);
-    // Multi-value Domain vectors increment SRclassID and SRclassPriority per
-    // value (IEEE 802.1Q 35.2.2.9; AVnu MSRP.End.c.35.1.11 Part B). The VID is
-    // carried unchanged.
-    for (uint16_t k = 0; k < value_index; ++k) {
-        increment_first_value(fv);
-    }
-    auto* rec_ptr = find_or_create_domain(fv.sr_class_id.get());
-    if (rec_ptr == nullptr) {
-        return;  // peer attribute, table full — silently drop
-    }
-    auto& rec = *rec_ptr;
-    bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-    // Keep our own payload if WE declare this domain (see handle_talker_advertise_rx).
-    if (rec.operation == Operation::Register) {
-        rec.first_value = fv;
-    } else if (!(rec.first_value == fv)) {
-        ++foreign_declaration_conflict_count_;
-    }
-    mrp::dispatch_applicant(rec, applicant_event, now);
-    if (registrar_event == registrar_sm::Def::Event::Count) {
-        return;
-    }
-    mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
-    auto const n = rec.registrar_ctx.notify;
-    if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
-        notify_domain(rec.first_value, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && was_registered) {
-        notify_domain_leave(rec.first_value);
-    }
+    // Domain has no interesting-stream filter, so it passes an always-true predicate.
+    // Multi-value Domain vectors increment SRclassID and SRclassPriority per value
+    // (IEEE 802.1Q 35.2.2.9; AVnu MSRP.End.c.35.1.11 Part B), handled by
+    // increment_first_value inside the shared spine; the VID is carried unchanged.
+    handle_peer_attr_rx<DomainFirstValue>(
+        attr_length,
+        first_value_bytes,
+        value_index,
+        applicant_event,
+        registrar_event,
+        now,
+        [](DomainFirstValue const&) { return true; },
+        [this](DomainFirstValue const& fv) { return find_or_create_domain(fv.sr_class_id.get()); },
+        [this](DomainFirstValue const& fv) { notify_domain(fv, Operation::Register); },
+        [this](DomainFirstValue const& fv) { notify_domain_leave(fv); });
 }
 
 // ============================================================

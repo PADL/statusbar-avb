@@ -552,6 +552,70 @@ class MsrpParticipantT
         ListenerDeclaration decl,  // meaningful only for Listener
         TimePoint now);
 
+    /// Shared spine for the three "peer attribute registration" rx handlers
+    /// (TalkerAdvertise / TalkerFailed / Domain), which differ only by first-value
+    /// type, key extraction, the optional is_interesting gate, and which observer
+    /// notifications fire. Listener rx is deliberately NOT routed through here -- it
+    /// carries a ListenerDeclaration substate and its own registrar-flap diagnostic,
+    /// so it stays specialized.
+    ///
+    /// @p interesting returns whether to process this attribute at all (Domain passes
+    /// an always-true predicate -- it has no interesting-stream filter). @p find_rec
+    /// maps the parsed first value to its record (nullptr when the table is full).
+    /// @p notify_register / @p notify_leave fire the type-specific observer callbacks
+    /// with the record's authoritative first value.
+    template <class FirstValue, class Interesting, class FindRec, class NotifyRegister, class NotifyLeave>
+    void handle_peer_attr_rx(
+        uint8_t attr_length,
+        std::span<uint8_t const> first_value_bytes,
+        uint16_t value_index,
+        applicant_sm::Def::Event applicant_event,
+        registrar_sm::Def::Event registrar_event,
+        TimePoint now,
+        Interesting interesting,
+        FindRec find_rec,
+        NotifyRegister notify_register,
+        NotifyLeave notify_leave)
+    {
+        if (attr_length < FirstValue::LENGTH) {
+            return;
+        }
+        FirstValue fv;
+        (void)load_unchecked(first_value_bytes, &fv);
+        for (uint16_t k = 0; k < value_index; ++k) {
+            increment_first_value(fv);
+        }
+        if (!interesting(fv)) {
+            return;
+        }
+        auto* rec_ptr = find_rec(fv);
+        if (rec_ptr == nullptr) {
+            return;  // peer attribute, table full -- silently drop
+        }
+        auto& rec = *rec_ptr;
+        bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
+        // Adopt the received payload ONLY for a pure peer registration. If WE are
+        // locally declaring this key, a peer declaring the same one is a conflict
+        // (802.1Q-2018 35.2.4): keep OUR value so our next JoinIn re-advertises our
+        // own params, not the peer's.
+        if (rec.operation == Operation::Register) {
+            rec.first_value = fv;
+        } else if (!(rec.first_value == fv)) {
+            ++foreign_declaration_conflict_count_;
+        }
+        mrp::dispatch_applicant(rec, applicant_event, now);
+        if (registrar_event == registrar_sm::Def::Event::Count) {
+            return;
+        }
+        mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
+        auto const n = rec.registrar_ctx.notify;
+        if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
+            notify_register(rec.first_value);
+        } else if (n == registrar_sm::Notify::Leave && was_registered) {
+            notify_leave(rec.first_value);
+        }
+    }
+
     // Per-AttributeType rx handlers. Each is invoked by handle_rx_event
     // after translating the wire AttributeEvent to Applicant/Registrar
     // events. Keeps handle_rx_event down to a dispatch switch.
