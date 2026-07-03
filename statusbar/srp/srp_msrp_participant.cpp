@@ -357,69 +357,45 @@ template <class Limits>
 auto MsrpParticipantT<Limits>::find_or_create_talker_advertise(tsn::StreamId const& id)
     -> AttributeRecord<TalkerAdvertiseFirstValue>*
 {
-    for (auto& rec : talker_adv_) {
-        if (rec.first_value.stream_id == id) {
-            return &rec;
-        }
-    }
-    if (talker_adv_.size() >= config_.max_talker_advertise) {
-        return nullptr;
-    }
-    AttributeRecord<TalkerAdvertiseFirstValue> rec{};
-    rec.first_value.stream_id = id;
-    talker_adv_.push_back(rec);
-    return &talker_adv_.back();
+    return find_or_create(
+        talker_adv_,
+        config_.max_talker_advertise,
+        id,
+        [](auto const& r) { return r.first_value.stream_id; },
+        [](auto& r, auto const& k) { r.first_value.stream_id = k; });
 }
 
 template <class Limits>
 auto MsrpParticipantT<Limits>::find_or_create_talker_failed(tsn::StreamId const& id) -> AttributeRecord<TalkerFailedFirstValue>*
 {
-    for (auto& rec : talker_failed_) {
-        if (rec.first_value.advertise.stream_id == id) {
-            return &rec;
-        }
-    }
-    if (talker_failed_.size() >= config_.max_talker_failed) {
-        return nullptr;
-    }
-    AttributeRecord<TalkerFailedFirstValue> rec{};
-    rec.first_value.advertise.stream_id = id;
-    talker_failed_.push_back(rec);
-    return &talker_failed_.back();
+    return find_or_create(
+        talker_failed_,
+        config_.max_talker_failed,
+        id,
+        [](auto const& r) { return r.first_value.advertise.stream_id; },
+        [](auto& r, auto const& k) { r.first_value.advertise.stream_id = k; });
 }
 
 template <class Limits>
 auto MsrpParticipantT<Limits>::find_or_create_listener(tsn::StreamId const& id) -> ListenerRecord*
 {
-    for (auto& rec : listeners_) {
-        if (rec.first_value.stream_id == id) {
-            return &rec;
-        }
-    }
-    if (listeners_.size() >= config_.max_listeners) {
-        return nullptr;
-    }
-    ListenerRecord rec{};
-    rec.first_value.stream_id = id;
-    listeners_.push_back(rec);
-    return &listeners_.back();
+    return find_or_create(
+        listeners_,
+        config_.max_listeners,
+        id,
+        [](auto const& r) { return r.first_value.stream_id; },
+        [](auto& r, auto const& k) { r.first_value.stream_id = k; });
 }
 
 template <class Limits>
 auto MsrpParticipantT<Limits>::find_or_create_domain(uint8_t sr_class_id) -> AttributeRecord<DomainFirstValue>*
 {
-    for (auto& rec : domains_) {
-        if (rec.first_value.sr_class_id.get() == sr_class_id) {
-            return &rec;
-        }
-    }
-    if (domains_.size() >= config_.max_domains) {
-        return nullptr;
-    }
-    AttributeRecord<DomainFirstValue> rec{};
-    rec.first_value.sr_class_id = sr_class_id;
-    domains_.push_back(rec);
-    return &domains_.back();
+    return find_or_create(
+        domains_,
+        config_.max_domains,
+        sr_class_id,
+        [](auto const& r) { return r.first_value.sr_class_id.get(); },
+        [](auto& r, auto const& k) { r.first_value.sr_class_id = k; });
 }
 
 // ============================================================
@@ -434,13 +410,10 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    bool const is_new = (rec.operation == Operation::Register) &&
-        (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
-         rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
     rec.first_value = fv;
     rec.operation = Operation::Declare;
 
-    auto const event = is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    auto const event = first_declare_event(rec);
     mrp::dispatch_applicant(rec, event, now);
     port_.timers().start_join(now);
     return success();
@@ -454,13 +427,10 @@ auto MsrpParticipantT<Limits>::declare_talker_failed(TalkerFailedFirstValue cons
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    bool const is_new = (rec.operation == Operation::Register) &&
-        (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
-         rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
     rec.first_value = fv;
     rec.operation = Operation::Declare;
 
-    auto const event = is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    auto const event = first_declare_event(rec);
     mrp::dispatch_applicant(rec, event, now);
     port_.timers().start_join(now);
     return success();
@@ -496,13 +466,10 @@ auto MsrpParticipantT<Limits>::declare_listener(tsn::StreamId const& stream_id, 
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    bool const is_new = (rec.operation == Operation::Register) &&
-        (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
-         rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
     rec.operation = Operation::Declare;
     rec.substate = decl;
 
-    auto const event = is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    auto const event = first_declare_event(rec);
     rec.applicant_ctx.clear_outputs();
     rec.applicant_sm.handle_event(rec.applicant_ctx, event, now);
     port_.timers().start_join(now);
@@ -531,13 +498,10 @@ auto MsrpParticipantT<Limits>::declare_domain(DomainFirstValue const& fv, TimePo
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    bool const is_new = (rec.operation == Operation::Register) &&
-        (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
-         rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
     rec.first_value = fv;
     rec.operation = Operation::Declare;
 
-    auto const event = is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    auto const event = first_declare_event(rec);
     mrp::dispatch_applicant(rec, event, now);
     port_.timers().start_join(now);
     return success();

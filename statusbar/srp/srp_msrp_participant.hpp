@@ -610,6 +610,40 @@ class MsrpParticipantT
     auto find_or_create_listener(tsn::StreamId const& id) -> ListenerRecord*;
     auto find_or_create_domain(uint8_t sr_class_id) -> AttributeRecord<DomainFirstValue>*;
 
+    /// Generic linear-search-or-append over a capacity-bounded attribute table.
+    /// Returns the existing record whose key (via @p key_of) matches @p key, else a
+    /// freshly appended one with @p key_set applied, else nullptr if the table is full.
+    /// Backs the four find_or_create_* wrappers (they differ only by container/limit/key).
+    template <class Container, class Key, class KeyOf, class KeySet>
+    auto find_or_create(Container& table, size_t cap, Key const& key, KeyOf key_of, KeySet key_set) ->
+        typename Container::value_type*
+    {
+        for (auto& rec : table) {
+            if (key_of(rec) == key) {
+                return &rec;
+            }
+        }
+        if (table.size() >= cap) {
+            return nullptr;
+        }
+        typename Container::value_type rec{};
+        key_set(rec, key);
+        table.push_back(rec);
+        return &table.back();
+    }
+
+    /// The applicant event for a local (re)declaration: New when the attribute is not
+    /// yet actively declared (operation Register AND applicant idle in Start/Vo), else
+    /// Join. Shared by every declare_* handler so this rule lives in one place.
+    template <class Record>
+    [[nodiscard]] static auto first_declare_event(Record const& rec) noexcept -> applicant_sm::Def::Event
+    {
+        bool const is_new = (rec.operation == Operation::Register) &&
+            (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
+             rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
+        return is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    }
+
     //
     // Reclaim sweep — remove fully-decayed attributes.
     //
