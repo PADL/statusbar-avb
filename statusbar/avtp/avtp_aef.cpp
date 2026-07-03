@@ -5,6 +5,8 @@
 
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <algorithm>
+
 namespace statusbar::avtp {
 
 using statusbar::span_load;
@@ -58,7 +60,12 @@ auto aef_continuous_get_encrypted_payload(std::span<uint8_t const> const packet)
     if (packet.size() <= AefContinuousPdu::HEADER_LENGTH) {
         return {};
     }
-    return packet.subspan(AefContinuousPdu::HEADER_LENGTH);
+    size_t const available = packet.size() - AefContinuousPdu::HEADER_LENGTH;
+    // Bound to the declared stream_data_length, not the raw buffer extent (which on
+    // the wire carries Ethernet min-frame padding). Clamp so we never over-read.
+    auto const pdu = aef_continuous_parse_header(packet);
+    size_t const declared = pdu.has_value() ? pdu->get_stream_data_length() : available;
+    return packet.subspan(AefContinuousPdu::HEADER_LENGTH, std::min(declared, available));
 }
 
 auto aef_discrete_get_encrypted_payload(std::span<uint8_t const> const packet) noexcept -> std::span<uint8_t const>
@@ -66,7 +73,12 @@ auto aef_discrete_get_encrypted_payload(std::span<uint8_t const> const packet) n
     if (packet.size() <= AefDiscretePdu::HEADER_LENGTH) {
         return {};
     }
-    return packet.subspan(AefDiscretePdu::HEADER_LENGTH);
+    size_t const available = packet.size() - AefDiscretePdu::HEADER_LENGTH;
+    // Bound to the declared control_data_length (discrete AEF's payload length), not
+    // the raw buffer extent. Clamp so we never over-read.
+    auto const pdu = aef_discrete_parse_header(packet);
+    size_t const declared = pdu.has_value() ? pdu->control_data_length() : available;
+    return packet.subspan(AefDiscretePdu::HEADER_LENGTH, std::min(declared, available));
 }
 
 }  // namespace statusbar::avtp

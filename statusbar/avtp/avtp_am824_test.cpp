@@ -1368,6 +1368,24 @@ TEST(am824_pdu, is_valid_accepts_command_based_fdf)
     EXPECT_FALSE(pdu.is_valid());
 }
 
+// avtp#SPH/FN: SPH (source packet header) and FN != 0 (fragmentation) change the CIP
+// payload layout, which the flat sample model here cannot parse -- is_valid() must
+// reject them rather than misinterpret the payload.
+TEST(am824_pdu, is_valid_rejects_sph_and_fragmented)
+{
+    Eui48 mac{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56};
+    StreamId sid{mac, 0x0001};
+    Am824Pdu pdu{};
+    pdu.init(sid, 2, Am824SampleRate::rate_48_khz);
+    EXPECT_TRUE(pdu.is_valid());
+
+    pdu.cip_header.fn_qpc_sph = 0x04U;  // SPH = 1
+    EXPECT_FALSE(pdu.is_valid());
+
+    pdu.cip_header.fn_qpc_sph = 0x40U;  // FN = 01 (fragmented)
+    EXPECT_FALSE(pdu.is_valid());
+}
+
 //
 // Main test runner
 //

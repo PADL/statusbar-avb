@@ -97,9 +97,12 @@ TEST(aef_continuous, get_encrypted_payload)
 {
     std::array<uint8_t, 32> buf{};
     buf[0] = AvtpSubtype::aef_continuous;
+    buf[3] = 16;  // stream_data_length = 16 (bytes 2-3, big-endian)
 
+    // Payload is bounded to the declared stream_data_length, not the 20-byte buffer
+    // remainder (which would include Ethernet padding).
     auto payload = aef_continuous_get_encrypted_payload(std::span<uint8_t const>(buf));
-    EXPECT_EQ(payload.size(), 20U);  // 32 - 12
+    EXPECT_EQ(payload.size(), 16U);
 
     // Too short -> empty
     auto empty = aef_continuous_get_encrypted_payload(std::span<uint8_t const>(buf.data(), AefContinuousPdu::HEADER_LENGTH));
@@ -181,9 +184,12 @@ TEST(aef_discrete, get_encrypted_payload)
 {
     std::array<uint8_t, 24> buf{};
     buf[0] = AvtpSubtype::aef_discrete;
+    buf[3] = 8;  // control_data_length = 8 (11-bit field in bytes 2-3)
 
+    // Payload is bounded to the declared control_data_length, not the 12-byte buffer
+    // remainder.
     auto payload = aef_discrete_get_encrypted_payload(std::span<uint8_t const>(buf));
-    EXPECT_EQ(payload.size(), 12U);  // 24 - 12
+    EXPECT_EQ(payload.size(), 8U);
 }
 
 // Format tests

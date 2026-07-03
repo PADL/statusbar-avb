@@ -601,6 +601,14 @@ struct Am824Pdu
         if ((static_cast<uint8_t>(cip_header.format_dependent_field()) & 0x07U) > 0x06U) {
             return false;
         }
+        // Reject source-packet-header (SPH=1) and fragmented (FN != 0) CIP: both
+        // change the payload layout (an SPH prepends a 4-byte timestamp to each
+        // source packet; FN != 0 splits a source packet across CIPs), which the flat
+        // audio_payload_length()/sample_count() model here cannot parse. Reject
+        // rather than silently misinterpret the payload.
+        if (cip_header.sph() || cip_header.fn() != 0) {
+            return false;
+        }
         // Check channel count
         if (channel_count() == 0) {
             return false;
