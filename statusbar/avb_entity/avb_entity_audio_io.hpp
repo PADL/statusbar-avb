@@ -25,6 +25,7 @@
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
+#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_bridge.hpp"
@@ -281,13 +282,19 @@ class AvbEntityAudioIO
     /// update_gps_ratio on the media thread. See avb_entity_media_rate.hpp.
     MediaClockRateTracker rate_tracker_{};
 
+    /// Latest GPS-TAI translator snapshot, published by update_gps_ratio on the
+    /// media thread and consumed by the tunnel bridge's reactor-thread ingest
+    /// path so it never touches the single-threaded Kalman directly. SPSC:
+    /// media = producer, reactor = sole consumer.
+    itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot> tai_snapshot_{};
+
     /// The inter-site WAN tunnel collaborator (god-object phase 2): owns all tunnel
     /// state + the ingest/egress/send/punch-worker/watchdog methods; the entity
     /// forwards into it (udptun_->...). Declared AFTER the members it references
-    /// (config_, rate_tracker_, audio_buffer_, channels_, last_gptp_ns_) so those
-    /// bind constructed and outlive it (it destructs first). Always allocated.
+    /// (config_, rate_tracker_, tai_snapshot_, audio_buffer_, channels_, last_gptp_ns_)
+    /// so those bind constructed and outlive it (it destructs first). Always allocated.
     std::unique_ptr<EntityUdptunBridge> udptun_{
-        std::make_unique<EntityUdptunBridge>(config_, rate_tracker_, audio_buffer_, channels_, last_gptp_ns_)};
+        std::make_unique<EntityUdptunBridge>(config_, rate_tracker_, tai_snapshot_, audio_buffer_, channels_, last_gptp_ns_)};
 
     /// The local AVB stream RX path (god-object phase 3, RX half): owns the AM824/
     /// AAF deserialize contexts, the RX counters, the STREAM_INPUT health counters,

@@ -17,6 +17,7 @@
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
+#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_telemetry.hpp"
 #include "statusbar/avb_entity/log_sweep_generator.hpp"
@@ -51,15 +52,36 @@ struct EntityUdptunBridge : public StreamRxAudioSink
     EntityUdptunBridge(
         AvbEntityAudioIOConfig const& config,
         MediaClockRateTracker const& rate_tracker,
+        itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot,
         std::pmr::vector<float>& audio_buffer,
         size_t const& channels,
         std::atomic<uint64_t> const& last_gptp_ns) noexcept
         : config_{config}
         , rate_tracker_{rate_tracker}
+        , tai_snapshot_{tai_snapshot}
         , audio_buffer_{audio_buffer}
         , channels_{channels}
         , last_gptp_ns_{last_gptp_ns}
     {}
+
+    /// GPS-TAI mapping for the ingest anchor/discipline, resolved without racing
+    /// the single-threaded Kalman. On the media thread (rt_caller) the Kalman is
+    /// coherent (same thread as its writer) so read it directly; on the reactor
+    /// thread consume the latest published snapshot. Returns {have_sample, tai_ns}.
+    struct IngestTai
+    {
+        bool have_sample;
+        int64_t tai_ns;
+    };
+    [[nodiscard]] auto ingest_gps_tai(int64_t master_ns, bool rt_caller) -> IngestTai
+    {
+        if (rt_caller) {
+            bool const have = rate_tracker_.has_tai_sample();
+            return {.have_sample = have, .tai_ns = have ? rate_tracker_.tai_ns(master_ns) : 0};
+        }
+        auto const snap = tai_snapshot_.consume();  // reactor thread: sole consumer
+        return {.have_sample = snap.have_sample, .tai_ns = snap.have_sample ? ptpclient::tai_ns(snap, master_ns) : 0};
+    }
 
     // --- Operations (run on the entity's threads; reach into the state below) --
     [[nodiscard]] auto setup_udptun_ingest() -> bool;
@@ -117,6 +139,7 @@ struct EntityUdptunBridge : public StreamRxAudioSink
     static constexpr uint64_t OWLM_PAIR_MASK_MIDBYTES = 0x000000FF'FF000000ULL;
     AvbEntityAudioIOConfig const& config_;
     MediaClockRateTracker const& rate_tracker_;
+    itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot_;
     std::pmr::vector<float>& audio_buffer_;
     size_t const& channels_;
     std::atomic<uint64_t> const& last_gptp_ns_;

@@ -913,14 +913,18 @@ void EntityUdptunBridge::udptun_ingest_audio(std::span<uint8_t const> const audi
         }
     }
 
+    // Resolve the GPS-TAI mapping once for this ingest. On the reactor thread this
+    // consumes the media-thread-published snapshot (never the live Kalman); on the
+    // media thread (rt_caller) it reads the Kalman directly, which is coherent.
+    auto const gps_tai = ingest_gps_tai(static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed)), rt_caller);
     if (!anchored_) {
-        // Anchor the ingest timeline to GPS-TAI via the translator (gPTP master ->
-        // GPS-TAI), the same clock that paces the source and that the egress plays
-        // on -- so the ingest avtp_timestamp is drift-free TAI. Fall back to raw
-        // CLOCK_REALTIME+offset until the translator has a sample.
+        // Anchor the ingest timeline to GPS-TAI (gPTP master -> GPS-TAI), the same
+        // clock that paces the source and that the egress plays on -- so the ingest
+        // avtp_timestamp is drift-free TAI. Fall back to raw CLOCK_REALTIME+offset
+        // until the translator has a sample.
         int64_t anchor_tai_ns = 0;
-        if (rate_tracker_.has_tai_sample()) {
-            anchor_tai_ns = rate_tracker_.tai_ns(static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed)));
+        if (gps_tai.have_sample) {
+            anchor_tai_ns = gps_tai.tai_ns;
         } else {
             timespec ts{};
             if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
@@ -939,8 +943,8 @@ void EntityUdptunBridge::udptun_ingest_audio(std::span<uint8_t const> const audi
     // ~500 ms/hour out of the far egress window (the AAF path stays locked because the DSP
     // processor follows our GPS-rate CRF). The slew is gentle, so the emitted timestamps stay
     // smooth. Only when the translator has a global-epoch sample.
-    if (rate_tracker_.has_tai_sample()) {
-        ingest_->discipline(rate_tracker_.tai_ns(static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed))));
+    if (gps_tai.have_sample) {
+        ingest_->discipline(gps_tai.tai_ns);
     }
     (void)ingest_->submit(audio.first(static_cast<size_t>(n_frames) * frame_bytes), n_frames, [this](auto const& pkt) {
         udptun_send(pkt.tai_ns, pkt.pcm);

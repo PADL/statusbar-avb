@@ -946,6 +946,9 @@ void AvbEntityAudioIO::update_gps_ratio(uint64_t gptp_now_ns)
     }
     uint64_t const gps_ns = (static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL) + static_cast<uint64_t>(ts.tv_nsec);
     auto const est = rate_tracker_.add_sample(gptp_now_ns, gps_ns);
+    // Publish the updated GPS-TAI mapping for the reactor-thread tunnel ingest,
+    // which must never read the single-threaded Kalman directly (data race).
+    tai_snapshot_.publish(rate_tracker_.tai_snapshot());
     if (est.valid && rate_tracker_.should_log(gptp_now_ns)) {
         // Live media-clock telemetry (rate-limited; runs on the media-timer
         // thread, so keep it to once every few seconds). Lets an operator SEE the

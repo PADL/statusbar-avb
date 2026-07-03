@@ -45,6 +45,12 @@ class MediaClockRateTracker
     [[nodiscard]] bool has_tai_sample() const noexcept { return tai_.has_sample(); }
     [[nodiscard]] auto tai_ns(std::int64_t gptp_ns) const noexcept -> std::int64_t { return tai_.tai_ns(gptp_ns); }
 
+    /// Trivially-copyable snapshot of the GPS-TAI translator state for
+    /// cross-thread publication (itc). A consumer thread evaluates
+    /// ptpclient::tai_ns(snapshot, gptp_ns) instead of touching the live
+    /// translator, which is single-threaded by contract.
+    [[nodiscard]] auto tai_snapshot() const noexcept -> ptpclient::GpsTaiSnapshot { return tai_.snapshot(); }
+
     /// Rate-limit the GPS sampling to at most once per SAMPLE_INTERVAL so the
     /// CLOCK_REALTIME syscall stays off the per-packet hot path.
     [[nodiscard]] bool should_sample(std::uint64_t gptp_now_ns) const noexcept

@@ -123,6 +123,35 @@ TEST(gps_tai_translator, filtered_phase_rejects_sample_jitter)
     EXPECT_TRUE(std::fabs(err_sum / 16.0) < 400.0);  // mean well inside 1 sigma
 }
 
+TEST(gps_tai_translator, snapshot_reproduces_stateful_tai_ns)
+{
+    // The cross-thread publication (itc snapshot) relies on the pure
+    // tai_ns(snapshot, master) matching the stateful member tai_ns(master)
+    // EXACTLY, at arbitrary probe points and every sample-count tier.
+    SimClocks sim;
+    GpsTaiTranslator tr{GpsTaiTranslator::Config{.kalman = {.meas_noise_ns = 50.0, .jerk_psd = 1e-3}}};
+
+    // Before the first sample: identity, and snapshot agrees.
+    {
+        auto const snap = tr.snapshot();
+        std::int64_t const m = sim.master_at(0.0);
+        EXPECT_EQ(tai_ns(snap, m), m);            // identity
+        EXPECT_EQ(tai_ns(snap, m), tr.tai_ns(m));  // snapshot == member
+    }
+
+    // 1-sample (raw offset) then filtered (>=2): snapshot must reproduce the
+    // member at several propagation offsets past the last update.
+    double t = 0.0;
+    for (int k = 0; k < 300; ++k, t += 0.25) {
+        tr.add_sample(sim.master_at(t), sim.utc_at(t));
+        auto const snap = tr.snapshot();
+        for (double const dp : {0.0, 0.05, 0.1, 0.2}) {
+            std::int64_t const m = sim.master_at(t + dp);
+            EXPECT_EQ(tai_ns(snap, m), tr.tai_ns(m));
+        }
+    }
+}
+
 TEST(gps_tai_translator, reset_returns_to_identity)
 {
     SimClocks sim;

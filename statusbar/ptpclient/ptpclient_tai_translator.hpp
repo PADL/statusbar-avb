@@ -37,6 +37,41 @@
 
 namespace statusbar::ptpclient {
 
+/// Immutable snapshot of the translator state needed to evaluate tai_ns() for
+/// an arbitrary master-timeline reading. Trivially copyable so it can be
+/// published across threads via itc::AtomicTripleBuffer: the thread that owns
+/// the Kalman (the media-timer thread) publishes a snapshot after each
+/// add_sample(); other threads evaluate tai_ns() from the snapshot without ever
+/// touching the live filter (which is single-threaded by contract).
+struct GpsTaiSnapshot
+{
+    bool have_sample = false;
+    bool valid = false;
+    std::int64_t filtered_offset_ns = 0;
+    double r = 1.0;
+    double drift_ppm_per_hr = 0.0;
+    std::int64_t last_master_ns = 0;
+    std::int64_t tai_minus_utc_ns = 37'000'000'000LL;
+};
+
+/// Pure evaluation of the GPS-TAI mapping from a snapshot. Identical formula to
+/// GpsTaiTranslator::tai_ns() (see that method for the derivation); the member
+/// delegates here so the two can never diverge.
+[[nodiscard]] inline auto tai_ns(GpsTaiSnapshot const& snap, std::int64_t master_ns) noexcept -> std::int64_t
+{
+    if (!snap.have_sample) {
+        return master_ns;
+    }
+    double offset_pred = static_cast<double>(snap.filtered_offset_ns);
+    if (snap.valid) {
+        double const dt_s = static_cast<double>(master_ns - snap.last_master_ns) * 1e-9;
+        double const freq_ns_per_s = (snap.r - 1.0) * 1e9;
+        double const drift_ns_per_s2 = snap.drift_ppm_per_hr / 3.6;
+        offset_pred += (freq_ns_per_s * dt_s) + (0.5 * drift_ns_per_s2 * dt_s * dt_s);
+    }
+    return master_ns - static_cast<std::int64_t>(std::llround(offset_pred)) + snap.tai_minus_utc_ns;
+}
+
 class GpsTaiTranslator
 {
   public:
@@ -82,24 +117,30 @@ class GpsTaiTranslator
     ///     (+ drift) from the last update epoch. Converges in ~5 s of
     ///     samples; long-run accuracy is bounded by chrony's absolute
     ///     accuracy, not by per-sample jitter.
+    //
+    // Propagates the filtered phase from the last update epoch; dt is measured
+    // on the master timeline, differing from GPS time by the ppm-level ratio (a
+    // second-order error over the sub-second horizon — negligible).
     [[nodiscard]] std::int64_t tai_ns(std::int64_t master_ns) const noexcept
     {
-        if (!have_sample_) {
-            return master_ns;
-        }
+        return ptpclient::tai_ns(snapshot(), master_ns);
+    }
+
+    /// Capture the current state as a trivially-copyable snapshot for
+    /// cross-thread publication. Evaluating tai_ns(snapshot(), m) equals
+    /// tai_ns(m) exactly.
+    [[nodiscard]] auto snapshot() const noexcept -> GpsTaiSnapshot
+    {
         auto const est = kalman_.estimate();
-        double offset_pred = static_cast<double>(est.filtered_offset_ns);
-        if (est.valid) {
-            // Propagate phase from the last update epoch. dt is measured on
-            // the master timeline; it differs from GPS time by the ppm-level
-            // ratio, a second-order error (ppm * ppm) over the sub-second
-            // propagation horizon — negligible.
-            double const dt_s = static_cast<double>(master_ns - last_master_ns_) * 1e-9;
-            double const freq_ns_per_s = (est.r - 1.0) * 1e9;
-            double const drift_ns_per_s2 = est.drift_ppm_per_hr / 3.6;  // inverse of x2 * 3.6
-            offset_pred += (freq_ns_per_s * dt_s) + (0.5 * drift_ns_per_s2 * dt_s * dt_s);
-        }
-        return master_ns - static_cast<std::int64_t>(std::llround(offset_pred)) + cfg_.tai_minus_utc_ns;
+        return GpsTaiSnapshot{
+            .have_sample = have_sample_,
+            .valid = est.valid,
+            .filtered_offset_ns = est.filtered_offset_ns,
+            .r = est.r,
+            .drift_ppm_per_hr = est.drift_ppm_per_hr,
+            .last_master_ns = last_master_ns_,
+            .tai_minus_utc_ns = cfg_.tai_minus_utc_ns,
+        };
     }
 
     [[nodiscard]] bool has_sample() const noexcept { return have_sample_; }
