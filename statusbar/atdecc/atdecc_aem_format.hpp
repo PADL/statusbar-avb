@@ -861,7 +861,17 @@ auto format_aem(
             }
 
         case AEM_COMMAND_SET_CONFIGURATION:
+            return format_to(out, parsed.data.set_configuration);
+
         case AEM_COMMAND_GET_CONFIGURATION:
+            // The GET_CONFIGURATION command carries no configuration_index (it is
+            // reserved-only, min_length 0); only the response has the field. Reading
+            // set_configuration for the command direction would over-read a
+            // spec-compliant (2-byte) command payload -- parse_aem does not validate
+            // a length of 0. Only format the struct for the response.
+            if (!is_response) {
+                return out;
+            }
             return format_to(out, parsed.data.set_configuration);
 
         case AEM_COMMAND_SET_STREAM_FORMAT:
@@ -972,6 +982,12 @@ auto format_aem(
             return format_to(out, parsed.data.abort_operation);
 
         case AEM_COMMAND_OPERATION_STATUS:
+            // OPERATION_STATUS is an unsolicited response; its command direction
+            // (min_length 0) carries no operation_status payload, so reading the
+            // 8-byte struct there would over-read a short command payload.
+            if (!is_response) {
+                return out;
+            }
             return format_to(out, parsed.data.operation_status);
 
         case AEM_COMMAND_SET_MAX_TRANSIT_TIME:

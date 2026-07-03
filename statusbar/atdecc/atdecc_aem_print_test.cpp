@@ -1434,6 +1434,46 @@ TEST(aem_sensor_map_list, format_to_emits_each_entry)
     EXPECT_TRUE(buf.find("stream[4]ch5 -> cluster[6]ch7") != std::string::npos);
 }
 
+// Security regression: a GET_CONFIGURATION *command* carries no configuration_index
+// (min_length 0), yet parse_aem accepts a zero-length payload. Formatting the command
+// direction must NOT read the 4-byte set_configuration struct off that short payload
+// (OOB read on the print/analyzer path). The command now formats no fields.
+TEST(aem_print, format_get_configuration_command_does_not_read_payload)
+{
+    std::array<uint8_t, 0> empty{};
+    auto parsed = parse_aem(AEM_COMMAND_GET_CONFIGURATION, /*is_response=*/false, std::span<uint8_t const>(empty));
+    EXPECT_TRUE(parsed.has_value());  // min_length 0 -> accepted
+    if (parsed.has_value()) {
+        std::string result;
+        format_aem(
+            std::back_inserter(result),
+            AEM_COMMAND_GET_CONFIGURATION,
+            /*is_response=*/false,
+            **parsed,
+            std::span<uint8_t const>(empty));
+        EXPECT_TRUE(result.empty());  // no set_configuration fields read/printed
+    }
+}
+
+// Same for OPERATION_STATUS: the command direction (min_length 0) must not read the
+// 8-byte operation_status struct.
+TEST(aem_print, format_operation_status_command_does_not_read_payload)
+{
+    std::array<uint8_t, 0> empty{};
+    auto parsed = parse_aem(AEM_COMMAND_OPERATION_STATUS, /*is_response=*/false, std::span<uint8_t const>(empty));
+    EXPECT_TRUE(parsed.has_value());
+    if (parsed.has_value()) {
+        std::string result;
+        format_aem(
+            std::back_inserter(result),
+            AEM_COMMAND_OPERATION_STATUS,
+            /*is_response=*/false,
+            **parsed,
+            std::span<uint8_t const>(empty));
+        EXPECT_TRUE(result.empty());
+    }
+}
+
 //
 // Test Runner
 //

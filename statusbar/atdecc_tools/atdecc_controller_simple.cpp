@@ -939,6 +939,9 @@ static void resolve_stream_name_from_cache(
     DescriptorStrings sd{};
     span_load(sd, make_const_span(cached_payload).first<DescriptorStrings::LENGTH>());
     auto const sa = sd.as_string_array();
+    if (string_offset >= sa.size()) {  // parity with handle_strings_descriptor_response
+        return;
+    }
     std::string resolved{sa[string_offset]->as_string_view()};
     if (!resolved.empty()) {
         if (vec.size() <= desc_index) {
