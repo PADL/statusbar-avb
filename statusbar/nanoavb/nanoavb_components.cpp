@@ -128,6 +128,7 @@ void AtdeccNetHandler::tick(int64_t now_ns)
     adp_advertiser_.tick(sm_now);
     // Note: NanoAvbAcmpTalker is event-driven, no tick needed
     acmp_listener_.tick(sm_now);  // Listener has timeout checking
+    aem_handler_.tick(sm_now);    // AEM has LOCK / pending-acquire timeout checking
     if (adp_discovery_ != nullptr) {
         adp_discovery_->tick(sm_now);
     }
@@ -240,6 +241,10 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
         case AvtpSubtype::aecp: {
             // AECP/AEM message - process and send unicast response
             auto const our_entity_id = adp_advertiser_.adpdu().entity_id;
+            // Advance the handler's clock so a LOCK/ACQUIRE deadline set while
+            // processing this command is relative to now, not epoch 0 (tick()
+            // above then checks those deadlines each reactor tick).
+            aem_handler_.set_event_time(sm_now);
             (void)aem_handler_.process_packet(src_mac, payload, our_entity_id);
             break;
         }
