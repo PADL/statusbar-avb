@@ -739,7 +739,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
     // Inter-site rendezvous punch-retry (media-thread half): install a freshly
     // hole-punched socket staged by the worker and watchdog the RX. Runs before
     // the drain so a just-installed socket is drained this same wake.
-    if (udptun_->punch_run_.load()) {
+    if (udptun_->punch_service_active()) {
         timespec pts{};
         int64_t punch_tai = 0;
         if (clock_gettime(CLOCK_REALTIME, &pts) == 0) {

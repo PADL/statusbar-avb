@@ -76,6 +76,21 @@ struct EntityUdptunBridge : public StreamRxAudioSink
     void udptun_punch_loop();
     void stop_udptun_punch_worker();
     void udptun_punch_service(int64_t now_tai_ns);
+
+    /// Whether the media-thread must run udptun_punch_service() this wake.
+    /// True for the STUN worker (punch_run) AND for a DIRECT-SHARED socket:
+    /// direct-shared has no worker to publish punch_run, but still needs the
+    /// service's NAT keepalive + egress anchor-reset self-heal (the STUN-only
+    /// teardown/re-punch paths inside the service are separately gated off by
+    /// direct_shared_mode_). Pure so it is unit-testable without a socket.
+    [[nodiscard]] static constexpr auto punch_service_should_run(bool punch_run, bool direct_shared_mode) noexcept -> bool
+    {
+        return punch_run || direct_shared_mode;
+    }
+    [[nodiscard]] auto punch_service_active() const noexcept -> bool
+    {
+        return punch_service_should_run(punch_run_.load(), direct_shared_mode_);
+    }
     void build_udptun_ingest_state();
     void build_udptun_egress_state();
     [[nodiscard]] auto udptun_rx_fd() const noexcept -> int { return shared_socket_ ? fd_.get() : rx_fd_.get(); }
