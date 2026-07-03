@@ -107,42 +107,28 @@ auto ControllerSimple::get_display_entities() -> std::vector<EntityDisplayInfo>
         EntityDisplayInfo info{};
         info.entity_id = id;
 
-        auto it = entity_names_.find(id);
-        if (it != entity_names_.end()) {
-            info.name = it->second;
-        } else {
-            info.name = std::string{ieee::to_string(id).view()};
-        }
+        auto const* const rec = find_entity(id);
+        info.name = (rec != nullptr && !rec->name.empty()) ? rec->name : std::string{ieee::to_string(id).view()};
 
         info.has_talker = adp.has_talker_capability(talker_capabilities::IMPLEMENTED);
         info.has_listener = adp.has_listener_capability(listener_capabilities::IMPLEMENTED);
         // Prefer the actual counts from the entity's CONFIGURATION descriptor
         // (descriptor_counts table). Fall back to the ADPDU's upper bounds
         // until that has been read.
-        if (auto cit = descriptor_counts_.find(id); cit != descriptor_counts_.end()) {
-            info.talker_stream_sources = cit->second.stream_outputs;
-            info.listener_stream_sinks = cit->second.stream_inputs;
+        if (rec != nullptr && rec->descriptor_counts.has_value()) {
+            info.talker_stream_sources = rec->descriptor_counts->stream_outputs;
+            info.listener_stream_sinks = rec->descriptor_counts->stream_inputs;
         } else {
             info.talker_stream_sources = adp.talker_stream_sources.get();
             info.listener_stream_sinks = adp.listener_stream_sinks.get();
         }
 
-        // Populate per-stream format strings from the cache
-        auto t_it = talker_formats_.find(id);
-        if (t_it != talker_formats_.end()) {
-            info.talker_stream_formats = t_it->second;
-        }
-        auto l_it = listener_formats_.find(id);
-        if (l_it != listener_formats_.end()) {
-            info.listener_stream_formats = l_it->second;
-        }
-        auto tn_it = talker_stream_names_.find(id);
-        if (tn_it != talker_stream_names_.end()) {
-            info.talker_stream_names = tn_it->second;
-        }
-        auto ln_it = listener_stream_names_.find(id);
-        if (ln_it != listener_stream_names_.end()) {
-            info.listener_stream_names = ln_it->second;
+        // Populate per-stream format/name strings from the cache.
+        if (rec != nullptr) {
+            info.talker_stream_formats = rec->talker_formats;
+            info.listener_stream_formats = rec->listener_formats;
+            info.talker_stream_names = rec->talker_stream_names;
+            info.listener_stream_names = rec->listener_stream_names;
         }
 
         result.push_back(std::move(info));
@@ -196,39 +182,32 @@ void ControllerSimple::fetch_entity_descriptors(Eui64 entity_id, int64_t /*now_n
     // fetched; enqueue the rest through the unified queue, which respects
     // the AEM inflight cap and retries. Sending them all directly here used
     // to overflow the 8-slot inflight tracker and silently drop responses.
-    auto cache_it = descriptor_data_cache_.find(entity_id);
+    auto& rec = entities_[entity_id];
     for (auto const& [type, index] : expected_descs) {
-        bool fed_from_cache = false;
-        if (cache_it != descriptor_data_cache_.end()) {
-            auto data_it = cache_it->second.find({type, index});
-            if (data_it != cache_it->second.end()) {
-                builder.receive(type, index, data_it->second.success, make_const_span(data_it->second.data));
-                fed_from_cache = true;
-            }
-        }
-        if (!fed_from_cache) {
+        auto const data_it = rec.descriptor_cache.find({type, index});
+        if (data_it != rec.descriptor_cache.end()) {
+            builder.receive(type, index, data_it->second.success, make_const_span(data_it->second.data));
+        } else {
             enqueue_descriptor_read(entity_id, type, index);
         }
     }
 
-    bool const already_complete = builder.is_complete();
-    detail_builders_[entity_id] = std::move(builder);
-
-    if (already_complete) {
-        auto it = detail_builders_.find(entity_id);
-        pending_events_.emplace_back(EntityDetailReadyEvent{it->second.build()});
-        detail_builders_.erase(it);
+    if (builder.is_complete()) {
+        pending_events_.emplace_back(EntityDetailReadyEvent{builder.build()});
+        rec.detail_builder.reset();
+    } else {
+        rec.detail_builder = std::move(builder);
     }
 }
 
 auto ControllerSimple::cached_descriptors(ieee::Eui64 const& id) const -> std::vector<RawDescriptor>
 {
     std::vector<RawDescriptor> out;
-    auto const it = descriptor_data_cache_.find(id);
-    if (it == descriptor_data_cache_.end()) {
+    auto const* const rec = find_entity(id);
+    if (rec == nullptr) {
         return out;
     }
-    for (auto const& [key, cached] : it->second) {
+    for (auto const& [key, cached] : rec->descriptor_cache) {
         if (!cached.success) {
             continue;
         }
@@ -264,9 +243,9 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
         case ControllerActionKind::IdentifyEntity: {
             // Toggle the per-entity identify state.
             auto const target = action.request.talker_entity_id;
-            bool const new_on = !identify_state_[target];
+            bool const new_on = !entities_[target].identify_on;
             if (controller_.set_identify(target, new_on)) {
-                identify_state_[target] = new_on;
+                entities_[target].identify_on = new_on;
                 emit_status(new_on ? "Identify on" : "Identify off");
             } else {
                 emit_status("Identify failed: entity not found or queue full");
@@ -528,9 +507,9 @@ void ControllerSimple::wire_controller()
                 last_available_index_[id] = new_index;
 
                 if (rebooted) {
-                    auto const name_it = entity_names_.find(id);
+                    auto const* const rec = find_entity(id);
                     std::string const name =
-                        (name_it != entity_names_.end()) ? name_it->second : std::string{ieee::to_string(id).view()};
+                        (rec != nullptr && !rec->name.empty()) ? rec->name : std::string{ieee::to_string(id).view()};
                     forget_entity_metadata(id);
                     enqueue_descriptor_read(id, DESCRIPTOR_ENTITY, 0);
                     queue_rx_state_for_entity(e.adpdu);
@@ -541,7 +520,7 @@ void ControllerSimple::wire_controller()
                 // Normal heartbeat: skip re-read if we already have the entity's
                 // name (and therefore already queued and processed its stream
                 // metadata).
-                if (entity_names_.contains(id)) {
+                if (auto const* const rec = find_entity(id); rec != nullptr && !rec->name.empty()) {
                     return;
                 }
                 enqueue_descriptor_read(id, DESCRIPTOR_ENTITY, 0);
@@ -564,9 +543,9 @@ void ControllerSimple::wire_controller()
                 auto const mt = resp.message_type();
                 auto const st = resp.status();
                 auto name_or_id = [this](Eui64 const& id) -> std::string {
-                    auto it = entity_names_.find(id);
-                    if (it != entity_names_.end() && !it->second.empty()) {
-                        return it->second;
+                    auto const* const rec = find_entity(id);
+                    if (rec != nullptr && !rec->name.empty()) {
+                        return rec->name;
                     }
                     return std::string{ieee::to_string(id).view()};
                 };
@@ -596,20 +575,14 @@ void ControllerSimple::wire_controller()
 
 void ControllerSimple::forget_entity_metadata(Eui64 const& id)
 {
-    entity_names_.erase(id);
-    talker_formats_.erase(id);
-    listener_formats_.erase(id);
-    talker_stream_names_.erase(id);
-    listener_stream_names_.erase(id);
+    // All per-entity metadata lives in one EntityRecord, so this is a single erase
+    // (was 10 parallel map erases that had to stay in lockstep). last_available_index_
+    // is intentionally NOT cleared here -- see its declaration.
+    entities_.erase(id);
     std::erase_if(strings_waiters_, [&](auto const& kv) { return kv.first.first == id; });
     std::erase_if(strings_cache_, [&](auto const& kv) { return kv.first.first == id; });
     std::erase_if(stream_format_queries_, [&](auto const& q) { return q.target == id; });
     std::erase_if(descriptor_read_queue_, [&](auto const& q) { return q.target == id; });
-    requested_descriptors_.erase(id);
-    detail_builders_.erase(id);
-    identify_state_.erase(id);
-    descriptor_counts_.erase(id);
-    descriptor_data_cache_.erase(id);
 }
 
 void ControllerSimple::query_rx_state(Eui64 listener_id, uint16_t unique_id, int64_t now_ns)
@@ -647,8 +620,8 @@ void ControllerSimple::queue_rx_state_for_entity(AdpDu const& adp)
 auto ControllerSimple::make_active_connection(AcmpDu const& acmp) -> ActiveConnection
 {
     auto name_or_empty = [this](Eui64 const& id) -> std::string {
-        auto it = entity_names_.find(id);
-        return (it != entity_names_.end()) ? it->second : std::string{};
+        auto const* const rec = find_entity(id);
+        return (rec != nullptr) ? rec->name : std::string{};
     };
     ActiveConnection conn{};
     conn.talker_entity_id = acmp.talker_entity_id;
@@ -786,8 +759,9 @@ void ControllerSimple::handle_aem_response(
         pending_events_.emplace_back(ev);
         return;
     }
-    auto name_it = entity_names_.find(target);
-    std::string name = (name_it != entity_names_.end()) ? name_it->second : std::string{ieee::to_string(target).view()};
+    auto const* const name_rec = find_entity(target);
+    std::string name =
+        (name_rec != nullptr && !name_rec->name.empty()) ? name_rec->name : std::string{ieee::to_string(target).view()};
     // GET/SET_CLOCK_SOURCE: also report the (current) clock source index from the
     // 8-byte AemClockSourcePayload the entity echoes back, so a scriptable caller
     // can read back which source the device is now locked to.
@@ -829,32 +803,33 @@ void ControllerSimple::handle_read_descriptor_response(
         : std::span<uint8_t const>{};
 
     // Every READ_DESCRIPTOR response clears its entry from the unified queue.
-    // (The dedup set in requested_descriptors_ keeps the (type, index) pair
+    // (The per-entity dedup set (EntityRecord::requested_descriptors) keeps the (type, index) pair
     // so we don't re-enqueue.)
     clear_descriptor_read(target, desc_type, desc_index);
 
     // Cache the response so a later detail fetch can seed its builder
     // without re-issuing reads that the dedup set would skip.
+    auto& rec = entities_[target];
     {
-        auto& entry = descriptor_data_cache_[target][{desc_type, desc_index}];
+        auto& entry = rec.descriptor_cache[{desc_type, desc_index}];
         entry.success = (status == AEM_STATUS_SUCCESS);
         entry.data.assign(desc_payload.begin(), desc_payload.end());
     }
 
-    // Feed the detail builder if one exists for this entity.
+    // Feed the detail builder if one is in progress for this entity.
     // When complete, emit an EntityDetailReadyEvent and remove the builder.
-    if (auto it = detail_builders_.find(target); it != detail_builders_.end()) {
-        it->second.receive(desc_type, desc_index, status == AEM_STATUS_SUCCESS, desc_payload);
-        if (it->second.is_complete()) {
-            pending_events_.emplace_back(EntityDetailReadyEvent{it->second.build()});
-            detail_builders_.erase(it);
+    if (rec.detail_builder.has_value()) {
+        rec.detail_builder->receive(desc_type, desc_index, status == AEM_STATUS_SUCCESS, desc_payload);
+        if (rec.detail_builder->is_complete()) {
+            pending_events_.emplace_back(EntityDetailReadyEvent{rec.detail_builder->build()});
+            rec.detail_builder.reset();
         }
     }
 
     if (desc_type == DESCRIPTOR_ENTITY && status == AEM_STATUS_SUCCESS && desc_payload.size() >= DescriptorEntity::LENGTH) {
         DescriptorEntity desc{};
         span_load(desc, desc_payload);
-        entity_names_[target] = std::string{desc.entity_name.as_string_view()};
+        rec.name = std::string{desc.entity_name.as_string_view()};
         // Enqueue the CONFIGURATION descriptor read at the entity's
         // current_configuration index. The unified queue defers it to the
         // next tick so we don't re-enter the AEM state machine.
@@ -897,7 +872,7 @@ void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& tar
 
     // Walk the descriptor_counts table in declaration order, enqueueing
     // a READ_DESCRIPTOR for every (type, index) the entity advertises.
-    // The unified queue dedupes against requested_descriptors_.
+    // The unified queue dedupes against EntityRecord::requested_descriptors.
     for (size_t i = 0; i < n_clamped; ++i) {
         auto const& entry = cfg.descriptor_counts[i];
         auto const entry_type = entry.descriptor_type.get();
@@ -926,7 +901,7 @@ void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& tar
             }
         }
     }
-    descriptor_counts_[target] = counts;
+    entities_[target].descriptor_counts = counts;
 }
 
 /// Resolve a stream name from cached STRINGS payload data.
@@ -954,8 +929,8 @@ static void resolve_stream_name_from_cache(
 void ControllerSimple::handle_stream_descriptor_response(
     Eui64 target, uint8_t status, uint16_t desc_type, uint16_t desc_index, std::span<uint8_t const> desc_payload)
 {
-    auto& map = (desc_type == DESCRIPTOR_STREAM_OUTPUT) ? talker_stream_names_ : listener_stream_names_;
-    auto& vec = map[target];
+    auto& rec = entities_[target];
+    auto& vec = (desc_type == DESCRIPTOR_STREAM_OUTPUT) ? rec.talker_stream_names : rec.listener_stream_names;
     if (vec.size() <= desc_index) {
         vec.resize(static_cast<size_t>(desc_index) + 1);
     }
@@ -1040,8 +1015,8 @@ void ControllerSimple::handle_strings_descriptor_response(
         if (resolved.empty()) {
             continue;
         }
-        auto& map = (w.stream_desc_type == DESCRIPTOR_STREAM_OUTPUT) ? talker_stream_names_ : listener_stream_names_;
-        auto& vec = map[target];
+        auto& rec = entities_[target];
+        auto& vec = (w.stream_desc_type == DESCRIPTOR_STREAM_OUTPUT) ? rec.talker_stream_names : rec.listener_stream_names;
         if (vec.size() <= w.stream_index) {
             vec.resize(static_cast<size_t>(w.stream_index) + 1);
         }
@@ -1065,8 +1040,8 @@ void ControllerSimple::handle_get_stream_format_response(Eui64 target, uint8_t s
     if (idx >= MAX_DESCRIPTORS_PER_TYPE) {
         return;
     }
-    auto& map = (desc_type == DESCRIPTOR_STREAM_OUTPUT) ? talker_formats_ : listener_formats_;
-    auto& vec = map[target];
+    auto& rec = entities_[target];
+    auto& vec = (desc_type == DESCRIPTOR_STREAM_OUTPUT) ? rec.talker_formats : rec.listener_formats;
     if (vec.size() <= idx) {
         vec.resize(static_cast<size_t>(idx) + 1);
     }
@@ -1106,7 +1081,7 @@ void ControllerSimple::enqueue_stream_format_query(Eui64 const& target, uint16_t
 void ControllerSimple::enqueue_descriptor_read(Eui64 const& target, uint16_t desc_type, uint16_t desc_index)
 {
     // Dedupe against the per-entity already-requested set.
-    auto& seen = requested_descriptors_[target];
+    auto& seen = entities_[target].requested_descriptors;
     if (!seen.insert(std::make_pair(desc_type, desc_index)).second) {
         return;  // already requested (in queue, in flight, or already received)
     }

@@ -174,13 +174,6 @@ class ControllerSimple : public net::Pollable
     bool acmp_trace_{false};
 
     std::vector<ieee::Eui64> known_entity_ids_;
-    std::map<ieee::Eui64, std::string> entity_names_;
-
-    // Per-entity stream metadata caches, indexed by stream unique_id
-    std::map<ieee::Eui64, std::vector<std::string>> talker_formats_;
-    std::map<ieee::Eui64, std::vector<std::string>> listener_formats_;
-    std::map<ieee::Eui64, std::vector<std::string>> talker_stream_names_;
-    std::map<ieee::Eui64, std::vector<std::string>> listener_stream_names_;
 
     // Streams waiting on a STRINGS descriptor fetch. Keyed by
     // {entity_id, strings_descriptor_index}. Multiple streams can reference
@@ -208,22 +201,17 @@ class ControllerSimple : public net::Pollable
     // full descriptor crawl.
     std::vector<PendingDescriptorRead> descriptor_read_queue_;
     size_t descriptor_read_cursor_{0};
-    /// Per-entity set of (descriptor_type, descriptor_index) pairs we have
-    /// already enqueued or read. Used to dedupe enqueue requests.
-    std::map<ieee::Eui64, std::set<std::pair<uint16_t, uint16_t>>> requested_descriptors_;
     static constexpr int64_t STREAM_QUERY_RETRY_NS = 1'000'000'000;  // 1 second
 
-    // Cached READ_DESCRIPTOR responses, keyed by {entity_id, (type, index)}.
-    // Populated by every READ_DESCRIPTOR response (success or failure) so the
-    // detail builder can be seeded from already-fetched descriptors instead
-    // of trying to re-issue reads that the dedup set in requested_descriptors_
-    // would skip.
+    // Cached READ_DESCRIPTOR response bytes for one (type, index). Populated by
+    // every READ_DESCRIPTOR response (success or failure) so the detail builder
+    // can be seeded from already-fetched descriptors instead of re-issuing reads
+    // the dedup set (EntityRecord::requested_descriptors) would skip.
     struct CachedDescriptor
     {
         bool success{false};
         std::vector<uint8_t> data;
     };
-    std::map<ieee::Eui64, std::map<std::pair<uint16_t, uint16_t>, CachedDescriptor>> descriptor_data_cache_;
 
     // Entity detail builder for descriptor browsing.
     // Deduplicates responses by (descriptor_type, descriptor_index) so that
@@ -251,7 +239,6 @@ class ControllerSimple : public net::Pollable
 
         [[nodiscard]] auto build() const -> EntityDetail;
     };
-    std::map<ieee::Eui64, EntityDetailBuilder> detail_builders_;
 
     // GET_RX_STATE query queue: {listener_entity_id, unique_id}
     std::vector<std::pair<ieee::Eui64, uint16_t>> rx_state_query_queue_;
@@ -259,11 +246,11 @@ class ControllerSimple : public net::Pollable
     // Queue of events ready to be drained by drain_events().
     std::vector<ControllerEvent> pending_events_;
 
-    // Per-entity identify toggle state. true = identify currently on.
-    std::map<ieee::Eui64, bool> identify_state_;
-
-    // Last seen available_index per entity. A new value strictly less than
-    // the previous value indicates the entity rebooted (sequence reset).
+    // Last seen available_index per entity. A new value strictly less than the
+    // previous value indicates the entity rebooted (sequence reset). Kept SEPARATE
+    // from EntityRecord because it has a distinct lifecycle: it must survive
+    // forget_entity_metadata (a reboot forgets the metadata but keeps tracking the
+    // index for the next comparison).
     std::map<ieee::Eui64, uint32_t> last_available_index_;
 
     // Per-entity actual descriptor counts from the entity's CONFIGURATION
@@ -275,7 +262,38 @@ class ControllerSimple : public net::Pollable
         uint16_t stream_inputs{0};
         uint16_t stream_outputs{0};
     };
-    std::map<ieee::Eui64, EntityDescriptorCounts> descriptor_counts_;
+
+    // All per-entity metadata that forget_entity_metadata() clears, gathered in one
+    // record. Adding a field here can never leave a stale-data leak in
+    // forget_entity_metadata (which is now a single entities_.erase). Keyed by
+    // entity_id; the stream-indexed vectors are indexed by stream unique_id.
+    struct EntityRecord
+    {
+        std::string name;
+        std::vector<std::string> talker_formats;
+        std::vector<std::string> listener_formats;
+        std::vector<std::string> talker_stream_names;
+        std::vector<std::string> listener_stream_names;
+        // (descriptor_type, descriptor_index) pairs already enqueued or read (dedup).
+        std::set<std::pair<uint16_t, uint16_t>> requested_descriptors;
+        // Cached READ_DESCRIPTOR responses, keyed by (type, index).
+        std::map<std::pair<uint16_t, uint16_t>, CachedDescriptor> descriptor_cache;
+        // Present only while a detail build is in progress for this entity.
+        std::optional<EntityDetailBuilder> detail_builder;
+        bool identify_on{false};
+        // Set once the CONFIGURATION descriptor is read; optional so a legitimate
+        // {0,0} (controller-only entity) is distinguished from "not yet read".
+        std::optional<EntityDescriptorCounts> descriptor_counts;
+    };
+    std::map<ieee::Eui64, EntityRecord> entities_;
+
+    /// The record for @p id, or nullptr if the entity is unknown. Read-side helper
+    /// for the many `if (found) use field` call sites.
+    [[nodiscard]] auto find_entity(ieee::Eui64 const& id) const -> EntityRecord const*
+    {
+        auto const it = entities_.find(id);
+        return (it != entities_.end()) ? &it->second : nullptr;
+    }
 };
 
 }  // namespace statusbar::atdecc_tools
