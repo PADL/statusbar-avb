@@ -26,6 +26,7 @@
 /// bound at construction.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/itc/itc_published.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 
 #include <array>
@@ -71,6 +72,17 @@ struct TalkerGate
         }
     }
 
+    /// Reactor thread: talker stream @p idx now has @p count ACMP connections
+    /// (call from the acmp_talker connect/disconnect callback with the fresh
+    /// acmp_talker.connection_count(idx)). Publishes it for the media-timer thread
+    /// so should_transmit never reads the reactor-mutated connection list directly.
+    void note_acmp_connections(uint16_t idx, uint32_t count) noexcept
+    {
+        if (idx < acmp_conn_.size()) {
+            acmp_conn_[idx].publish(count);
+        }
+    }
+
     /// Media-timer thread: may talker stream @p idx put its stream on the wire at
     /// steady-clock time @p now_ns? True if gating is disabled, or ALL of this
     /// stream's own preconditions hold: an ACMP connection exists AND the stream is
@@ -92,6 +104,11 @@ struct TalkerGate
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even when connected + Listener Ready.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
+    /// Per-stream ACMP connection count, published by note_acmp_connections
+    /// (reactor) and read by should_transmit (media timer). Mirrors
+    /// acmp_talker.connection_count(idx) so the media thread never reads the
+    /// reactor-mutated connection list directly.
+    std::array<itc::Published<uint32_t>, STREAM_COUNT> acmp_conn_{};
 };
 
 }  // namespace statusbar::avb_entity

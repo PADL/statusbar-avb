@@ -56,8 +56,9 @@ auto TalkerGate::should_transmit(uint16_t const idx, int64_t const now_ns) const
     //       registered, so no separate Talker-attribute check is needed), and
     //   (2) the stream is Started (defaults true), and
     //   (3) MSRP Listener Ready for this stream.
-    auto const* s = components_.acmp_talker.get_stream(idx);
-    bool const acmp = s != nullptr && s->connection_count() > 0;
+    // ACMP connection count is published by the reactor thread (note_acmp_connections)
+    // rather than read live from the reactor-mutated connection list here.
+    bool const acmp = acmp_conn_[idx].load() > 0;
     if (!acmp) {
         return false;
     }

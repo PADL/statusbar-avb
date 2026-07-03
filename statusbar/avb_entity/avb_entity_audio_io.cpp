@@ -371,21 +371,26 @@ void AvbEntityAudioIO::wire_stream_callbacks()
     // ACMP: log talker connections; drive our listener (MSRP Listener Ready + mcast
     // join) on listener connect/disconnect. See ListenerStreams.
     host_.components().acmp_talker.set_connection_callbacks(
-        [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             std::print(
                 "[acmp] talker stream {} ({}) CONNECTED by listener {:012x} unique_id {}\n",
                 stream_index,
                 stream_index == AAF_STREAM_INDEX ? "AAF" : "AM824",
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
+            // Publish the fresh connection count for the media-timer gate.
+            gate_.note_acmp_connections(
+                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
-        [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             std::print(
                 "[acmp] talker stream {} ({}) DISCONNECTED by listener {:012x} unique_id {}\n",
                 stream_index,
                 stream_index == AAF_STREAM_INDEX ? "AAF" : "AM824",
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
+            gate_.note_acmp_connections(
+                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         });
     host_.components().acmp_listener.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {

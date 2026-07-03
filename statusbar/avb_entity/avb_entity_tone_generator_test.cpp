@@ -266,6 +266,10 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
         cmd.listener_unique_id = listener_unique;
         cmd.sequence_id = 1;
         (void)comps.acmp_talker.receive_command(cmd, sm::TimePoint{});
+        // Mirror what the entity's on_connect callback does: publish the fresh
+        // ACMP connection count into the gate (the media thread reads only this,
+        // never the reactor-mutated connection list).
+        gate.note_acmp_connections(talker_unique, static_cast<uint32_t>(comps.acmp_talker.connection_count(talker_unique)));
     };
 
     // Nothing connected -> nothing transmits.
