@@ -1547,4 +1547,91 @@ TEST(msrp_participant, domain_class_b_then_a_coalesce_and_round_trip)
     EXPECT_NE(b.find_domain(SR_CLASS_A), nullptr);
 }
 
+// ===========================================================================
+// PDU buffer overflow (S1): a message that does not fit is skipped whole, never
+// emitted as a truncated length-prefix that desyncs the receiver.
+// ===========================================================================
+
+namespace {
+
+// Mirror of receive_pdu's bounds discipline: an MSRPDU is well-formed iff every
+// message fits within the buffer (its attribute_list_length never claims bytes
+// past the end -- the S1 truncation bug) and it terminates with an END_MARK.
+auto msrpdu_well_formed(std::span<uint8_t const> pdu) -> bool
+{
+    if (pdu.empty()) {
+        return false;
+    }
+    size_t pos = 1;  // skip PROTOCOL_VERSION
+    while (pos + 2 <= pdu.size()) {
+        uint16_t const end_check = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
+        if (end_check == 0) {
+            return true;  // END_MARK terminator
+        }
+        if (pos + 4 > pdu.size()) {
+            return false;  // header itself truncated
+        }
+        uint16_t const attr_list_length = (static_cast<uint16_t>(pdu[pos + 2]) << 8) | pdu[pos + 3];
+        size_t const msg_end = pos + 4 + attr_list_length;
+        if (msg_end > pdu.size()) {
+            return false;  // message claims more bytes than present -> truncated
+        }
+        pos = msg_end;
+    }
+    return false;  // ran off the end with no END_MARK
+}
+
+}  // namespace
+
+TEST(msrp_participant, oversized_declaration_set_never_emits_truncated_pdu)
+{
+    // Full storage tables (default 32/16/32) all near-max: TalkerAdvertise +
+    // TalkerFailed + Listener together pack to ~1.9 KB, past one 1500-byte MSRPDU.
+    MsrpConfig const cfg{
+        .max_talker_advertise = 32,
+        .max_talker_failed = 16,
+        .max_listeners = 32,
+        .max_domains = 8,
+        .max_observers = 16,
+        .max_interesting_stream_ids = 32,
+    };
+    MsrpParticipant p{cfg, 0xabc};
+    std::vector<std::vector<uint8_t>> pdus;
+    p.set_send_pdu([&](std::span<uint8_t const> pdu) -> bool {
+        pdus.emplace_back(pdu.begin(), pdu.end());
+        return true;
+    });
+    TestClock clock{};
+    p.start(clock.now);
+
+    // Declare NON-consecutive stream IDs so each is its own singleton vector run (no
+    // coalescing) -> large packed encoding. All pending together, flushed by the
+    // single join-timer tick below.
+    for (uint16_t i = 0; i < 32; ++i) {
+        (void)p.declare_talker_advertise(make_talker_adv(static_cast<uint16_t>(1 + (i * 3))), clock.now);
+    }
+    for (uint16_t i = 0; i < 16; ++i) {
+        TalkerFailedFirstValue tfv{};
+        tfv.advertise = make_talker_adv(static_cast<uint16_t>(1000 + (i * 3)));
+        tfv.set_failure_code(FailureCode::InsufficientBandwidth);
+        (void)p.declare_talker_failed(tfv, clock.now);
+    }
+    for (uint16_t i = 0; i < 32; ++i) {
+        (void)p.declare_listener(make_stream_id(static_cast<uint16_t>(2000 + (i * 3))), ListenerDeclaration::Ready, clock.now);
+    }
+
+    // Fire the join timer -> one build with everything pending -> the overflow path.
+    p.tick(clock.advance(std::chrono::milliseconds(200)));
+
+    // Every emitted PDU is well-formed: no message ever claims more bytes than are
+    // present (the S1 truncation bug would fail this).
+    EXPECT_FALSE(pdus.empty());
+    for (auto const& pdu : pdus) {
+        EXPECT_TRUE(msrpdu_well_formed(std::span<uint8_t const>(pdu.data(), pdu.size())));
+    }
+    // The declared set exceeds one PDU, so at least one whole message must have been
+    // skipped (its records stay pending and retransmit) -- the observability counter.
+    EXPECT_TRUE(p.pdu_message_skip_count() > 0);
+}
+
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)

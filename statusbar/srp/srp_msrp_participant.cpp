@@ -1297,6 +1297,19 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
         return false;
     }
 
+    // The WHOLE message must fit before we commit its header. The header writes
+    // attribute_list_length up front; if a later vector append then hit the buffer
+    // cap and we bailed mid-message, the header would promise more bytes than we
+    // wrote and a receiver seeking by attribute_list_length would read the next
+    // message as vector garbage. Message = attribute_type(1) + attribute_length(1) +
+    // attribute_list_length(2) + attribute_list(attr_list_length); reserve 2 more
+    // for the trailing PDU EndMark. If it won't fit, skip the whole message --
+    // tx_pending stays set on its records, so MRP retransmits it in a later PDU.
+    if ((size_t{4} + attr_list_length + size_t{2}) > out.available_space()) {
+        ++pdu_message_skip_count_;
+        return false;
+    }
+
     // AttributeListHeader: attribute_type, attribute_length, attribute_list_length
     if (!append_u8(out, static_cast<uint8_t>(attr_type))) {
         return false;

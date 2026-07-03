@@ -358,6 +358,12 @@ class MsrpParticipantT
     [[nodiscard]] auto listener_count() const noexcept -> size_t { return listeners_.size(); }
     [[nodiscard]] auto domain_count() const noexcept -> size_t { return domains_.size(); }
 
+    /// Count of attribute messages skipped because the whole message would not fit
+    /// in the current PDU (their records stay tx_pending and retransmit on the next
+    /// build). Non-zero means the declared attribute set exceeds one MSRPDU and is
+    /// being spread across successive PDUs -- expected 0 at normal deployment scale.
+    [[nodiscard]] auto pdu_message_skip_count() const noexcept -> size_t { return pdu_message_skip_count_; }
+
     // -------------------- PDU I/O --------------------
 
     /// Parse an inbound MSRPDU. The supplied span should cover the
@@ -475,6 +481,8 @@ class MsrpParticipantT
     // on the TX hot path.
     //
     MutableBufferWithStorage<MAX_PDU_BYTES> pdu_buffer_{};
+    /// See pdu_message_skip_count(): messages skipped for not fitting the PDU.
+    size_t pdu_message_skip_count_{0};
 
     //
     // --- Observer subscriptions (slot-based, fixed capacity) ---
