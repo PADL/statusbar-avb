@@ -966,4 +966,52 @@ TEST(avtp_keychain, keychain_lookup)
 
 //
 
+// Regression (crypto#3): Ed25519 and X25519 signed entries otherwise share an
+// identical signed message, so a CA signature over one binds the other. The
+// per-type domain tag must make a repurposed signature fail to verify.
+TEST(avtp_keychain, cross_type_signature_confusion_rejected)
+{
+    std::array<uint8_t, 32> ca_seed{};
+    ca_seed.fill(0x11);
+    auto ca_sk = ed25519_keypair_from_seed(ca_seed);
+    auto ca_pk = ed25519_public_key(ca_sk);
+
+    std::array<uint8_t, 32> x_seed{};
+    x_seed.fill(0x22);
+    auto x_kp = x25519_keypair_from_seed(x_seed);
+
+    KeyId kid{};
+    kid.data = {0x91, 0xE0, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x0A};
+    KeyId rkid{};
+    rkid.data = {0x91, 0xE0, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x0B};
+    KeyId skid{};
+    skid.data = {0x91, 0xE0, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x0C};
+
+    // The CA legitimately signs an X25519 (DH-only) key binding.
+    auto x_entry = build_x25519_signed_public_key_entry(kid, rkid, x_kp.public_key, skid, ca_sk);
+    EXPECT_TRUE(verify_x25519_signed_public_key_entry(x_entry, ca_pk));
+
+    // An attacker repurposes that exact signature as an Ed25519 (signing) key
+    // binding for the same key_id: same fields, public_key = the X25519 bytes, same
+    // signature. The domain tag must make this fail (it would verify without it).
+    Ed25519SignedPublicKeyEntry forged_ed{};
+    forged_ed.key_id = x_entry.key_id;
+    forged_ed.related_key_id = x_entry.related_key_id;
+    forged_ed.public_key.data = x_entry.public_key.data;
+    forged_ed.signature_key_id = x_entry.signature_key_id;
+    forged_ed.signature = x_entry.signature;
+    EXPECT_FALSE(verify_ed25519_signed_public_key_entry(forged_ed, ca_pk));
+
+    // Symmetric direction: an Ed25519 binding repurposed as X25519.
+    auto ed_entry = build_ed25519_signed_public_key_entry(kid, rkid, ca_pk, skid, ca_sk);
+    EXPECT_TRUE(verify_ed25519_signed_public_key_entry(ed_entry, ca_pk));
+    X25519SignedPublicKeyEntry forged_x{};
+    forged_x.key_id = ed_entry.key_id;
+    forged_x.related_key_id = ed_entry.related_key_id;
+    forged_x.public_key.data = ed_entry.public_key.data;
+    forged_x.signature_key_id = ed_entry.signature_key_id;
+    forged_x.signature = ed_entry.signature;
+    EXPECT_FALSE(verify_x25519_signed_public_key_entry(forged_x, ca_pk));
+}
+
 TEST_MAIN(statusbar_avtp_crypto, avtp_keychain_test)

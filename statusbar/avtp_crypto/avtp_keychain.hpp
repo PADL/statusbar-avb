@@ -59,6 +59,20 @@ using ::statusbar::crypto::X25519PublicKey;
 /// @brief Size of a key identifier (EUI-64) in bytes.
 inline constexpr size_t key_id_size = 8;
 
+/// @brief Domain-separation tags prepended to the SIGNED MESSAGE of each
+/// signed-public-key entry type.
+///
+/// Without a tag, an Ed25519 and an X25519 entry produce a byte-identical 48-byte
+/// signed message (key_id || related_key_id || 32-byte public_key), both verified
+/// with Ed25519 -- so a CA signature over one binds the other (a key-type
+/// confusion). The tag makes each type sign a distinct message. It is part of the
+/// signed message only; it is NOT stored on the wire, so *_wire_size is unchanged.
+/// (Mirrors the AKE path, which prepends message_type.)
+inline constexpr uint8_t signed_public_key_entry_domain_ed25519 = 0x01;
+inline constexpr uint8_t signed_public_key_entry_domain_x25519 = 0x02;
+inline constexpr uint8_t signed_public_key_entry_domain_p256 = 0x03;
+inline constexpr uint8_t signed_public_key_entry_domain_p256_x25519 = 0x04;
+
 /// @brief EUI-64 key identifier per IEEE 1722.1.
 ///
 /// Bit 0 of the first octet distinguishes static (0) from dynamic (1) keys.
@@ -121,7 +135,7 @@ auto is_valid_key_type(KeyType type) -> bool;
 inline constexpr size_t ed25519_signed_public_key_entry_wire_size = 120;
 
 /// @brief Size of the data covered by the Ed25519 signature (key_id + related_key_id + public_key = 48 bytes).
-inline constexpr size_t ed25519_signed_public_key_entry_signed_data_size = 48;
+inline constexpr size_t ed25519_signed_public_key_entry_signed_data_size = 49;  // 1 tag + 8 + 8 + 32
 
 /// @brief A public key entry signed by an authority's Ed25519 key.
 ///
@@ -143,7 +157,7 @@ struct Ed25519SignedPublicKeyEntry
 inline constexpr size_t x25519_signed_public_key_entry_wire_size = 120;
 
 /// @brief Size of the data covered by the Ed25519 signature (key_id + related_key_id + public_key = 48 bytes).
-inline constexpr size_t x25519_signed_public_key_entry_signed_data_size = 48;
+inline constexpr size_t x25519_signed_public_key_entry_signed_data_size = 49;  // 1 tag + 8 + 8 + 32
 
 /// @brief An X25519 public key entry signed by an authority's Ed25519 key.
 ///
@@ -165,7 +179,7 @@ struct X25519SignedPublicKeyEntry
 inline constexpr size_t p256_signed_public_key_entry_wire_size = 152;
 
 /// @brief Size of the data covered by the P-256 ECDSA signature (key_id + related_key_id + public_key = 80 bytes).
-inline constexpr size_t p256_signed_public_key_entry_signed_data_size = 80;
+inline constexpr size_t p256_signed_public_key_entry_signed_data_size = 81;  // 1 tag + 8 + 8 + 64
 
 /// @brief A P-256 public key entry signed by an authority's P-256 ECDSA key.
 ///
@@ -233,7 +247,7 @@ auto deserialize_x25519_signed_public_key_entry(std::span<uint8_t const, x25519_
 inline constexpr size_t p256_signed_x25519_public_key_entry_wire_size = 120;
 
 /// @brief Size of the data covered by the P-256 ECDSA signature (key_id + related_key_id + public_key = 48 bytes).
-inline constexpr size_t p256_signed_x25519_public_key_entry_signed_data_size = 48;
+inline constexpr size_t p256_signed_x25519_public_key_entry_signed_data_size = 49;  // 1 tag + 8 + 8 + 32
 
 /// @brief An X25519 public key entry signed by an authority's P-256 ECDSA key.
 ///

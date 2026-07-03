@@ -61,9 +61,10 @@ auto verify_ed25519_signed_public_key_entry(Ed25519SignedPublicKeyEntry const& e
 {
     std::array<uint8_t, ed25519_signed_public_key_entry_signed_data_size> signed_data{};
     auto sd = span<uint8_t>(signed_data);
-    span_copy(sd.subspan(0, key_id_size), entry.key_id.data);
-    span_copy(sd.subspan(key_id_size, key_id_size), entry.related_key_id.data);
-    span_copy(sd.subspan(2 * key_id_size, Ed25519PublicKey::LENGTH), entry.public_key.data);
+    sd[0] = signed_public_key_entry_domain_ed25519;
+    span_copy(sd.subspan(1, key_id_size), entry.key_id.data);
+    span_copy(sd.subspan(1 + key_id_size, key_id_size), entry.related_key_id.data);
+    span_copy(sd.subspan(1 + (2 * key_id_size), Ed25519PublicKey::LENGTH), entry.public_key.data);
 
     return ed25519_verify(signer_public_key, signed_data, entry.signature);
 }
@@ -109,9 +110,10 @@ auto verify_x25519_signed_public_key_entry(X25519SignedPublicKeyEntry const& ent
 {
     std::array<uint8_t, x25519_signed_public_key_entry_signed_data_size> signed_data{};
     auto sd = span<uint8_t>(signed_data);
-    span_copy(sd.subspan(0, key_id_size), entry.key_id.data);
-    span_copy(sd.subspan(key_id_size, key_id_size), entry.related_key_id.data);
-    span_copy(sd.subspan(2 * key_id_size, X25519PublicKey::LENGTH), entry.public_key.data);
+    sd[0] = signed_public_key_entry_domain_x25519;
+    span_copy(sd.subspan(1, key_id_size), entry.key_id.data);
+    span_copy(sd.subspan(1 + key_id_size, key_id_size), entry.related_key_id.data);
+    span_copy(sd.subspan(1 + (2 * key_id_size), X25519PublicKey::LENGTH), entry.public_key.data);
 
     return ed25519_verify(signer_public_key, signed_data, entry.signature);
 }
@@ -156,9 +158,10 @@ auto verify_p256_signed_public_key_entry(P256SignedPublicKeyEntry const& entry, 
 {
     std::array<uint8_t, p256_signed_public_key_entry_signed_data_size> signed_data{};
     auto sd = span<uint8_t>(signed_data);
-    span_copy(sd.subspan(0, key_id_size), entry.key_id.data);
-    span_copy(sd.subspan(key_id_size, key_id_size), entry.related_key_id.data);
-    span_copy(sd.subspan(2 * key_id_size, P256PublicKey::LENGTH), entry.public_key.data);
+    sd[0] = signed_public_key_entry_domain_p256;
+    span_copy(sd.subspan(1, key_id_size), entry.key_id.data);
+    span_copy(sd.subspan(1 + key_id_size, key_id_size), entry.related_key_id.data);
+    span_copy(sd.subspan(1 + (2 * key_id_size), P256PublicKey::LENGTH), entry.public_key.data);
 
     return p256_ecdsa_verify(signer_public_key, signed_data, entry.signature);
 }
@@ -204,9 +207,10 @@ auto verify_p256_signed_x25519_public_key_entry(P256SignedX25519PublicKeyEntry c
 {
     std::array<uint8_t, p256_signed_x25519_public_key_entry_signed_data_size> signed_data{};
     auto sd = span<uint8_t>(signed_data);
-    span_copy(sd.subspan(0, key_id_size), entry.key_id.data);
-    span_copy(sd.subspan(key_id_size, key_id_size), entry.related_key_id.data);
-    span_copy(sd.subspan(2 * key_id_size, X25519PublicKey::LENGTH), entry.public_key.data);
+    sd[0] = signed_public_key_entry_domain_p256_x25519;
+    span_copy(sd.subspan(1, key_id_size), entry.key_id.data);
+    span_copy(sd.subspan(1 + key_id_size, key_id_size), entry.related_key_id.data);
+    span_copy(sd.subspan(1 + (2 * key_id_size), X25519PublicKey::LENGTH), entry.public_key.data);
 
     return p256_ecdsa_verify(signer_public_key, signed_data, entry.signature);
 }

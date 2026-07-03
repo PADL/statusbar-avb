@@ -326,9 +326,10 @@ auto build_ed25519_signed_public_key_entry(
 
     std::array<uint8_t, ed25519_signed_public_key_entry_signed_data_size> signed_data{};
     auto sd = std::span<uint8_t>(signed_data);
-    internal::span_copy(sd.subspan(0, key_id_size), std::span<uint8_t const>(key_id.data));
-    internal::span_copy(sd.subspan(key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
-    internal::span_copy(sd.subspan(2 * key_id_size, Ed25519PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
+    sd[0] = signed_public_key_entry_domain_ed25519;
+    internal::span_copy(sd.subspan(1, key_id_size), std::span<uint8_t const>(key_id.data));
+    internal::span_copy(sd.subspan(1 + key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
+    internal::span_copy(sd.subspan(1 + (2 * key_id_size), Ed25519PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
 
     entry.signature = ed25519_sign(signing_key, signed_data);
     return entry;
@@ -357,9 +358,10 @@ auto build_x25519_signed_public_key_entry(
 
     std::array<uint8_t, x25519_signed_public_key_entry_signed_data_size> signed_data{};
     auto sd = std::span<uint8_t>(signed_data);
-    internal::span_copy(sd.subspan(0, key_id_size), std::span<uint8_t const>(key_id.data));
-    internal::span_copy(sd.subspan(key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
-    internal::span_copy(sd.subspan(2 * key_id_size, X25519PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
+    sd[0] = signed_public_key_entry_domain_x25519;
+    internal::span_copy(sd.subspan(1, key_id_size), std::span<uint8_t const>(key_id.data));
+    internal::span_copy(sd.subspan(1 + key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
+    internal::span_copy(sd.subspan(1 + (2 * key_id_size), X25519PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
 
     entry.signature = ed25519_sign(signing_key, signed_data);
     return entry;
@@ -387,9 +389,10 @@ auto build_p256_signed_public_key_entry(
 
     std::array<uint8_t, p256_signed_public_key_entry_signed_data_size> signed_data{};
     auto sd = std::span<uint8_t>(signed_data);
-    internal::span_copy(sd.subspan(0, key_id_size), std::span<uint8_t const>(key_id.data));
-    internal::span_copy(sd.subspan(key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
-    internal::span_copy(sd.subspan(2 * key_id_size, P256PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
+    sd[0] = signed_public_key_entry_domain_p256;
+    internal::span_copy(sd.subspan(1, key_id_size), std::span<uint8_t const>(key_id.data));
+    internal::span_copy(sd.subspan(1 + key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
+    internal::span_copy(sd.subspan(1 + (2 * key_id_size), P256PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
 
     entry.signature = p256_ecdsa_sign(signing_key, signed_data);
     return entry;
@@ -418,9 +421,10 @@ auto build_p256_signed_x25519_public_key_entry(
 
     std::array<uint8_t, p256_signed_x25519_public_key_entry_signed_data_size> signed_data{};
     auto sd = std::span<uint8_t>(signed_data);
-    internal::span_copy(sd.subspan(0, key_id_size), std::span<uint8_t const>(key_id.data));
-    internal::span_copy(sd.subspan(key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
-    internal::span_copy(sd.subspan(2 * key_id_size, X25519PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
+    sd[0] = signed_public_key_entry_domain_p256_x25519;
+    internal::span_copy(sd.subspan(1, key_id_size), std::span<uint8_t const>(key_id.data));
+    internal::span_copy(sd.subspan(1 + key_id_size, key_id_size), std::span<uint8_t const>(related_key_id.data));
+    internal::span_copy(sd.subspan(1 + (2 * key_id_size), X25519PublicKey::LENGTH), std::span<uint8_t const>(public_key.data));
 
     entry.signature = p256_ecdsa_sign(signing_key, signed_data);
     return entry;
