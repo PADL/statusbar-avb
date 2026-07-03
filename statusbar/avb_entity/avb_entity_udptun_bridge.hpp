@@ -18,6 +18,7 @@
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
 #include "statusbar/itc/itc_atomic_triple_buffer.hpp"
+#include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_telemetry.hpp"
 #include "statusbar/avb_entity/log_sweep_generator.hpp"
@@ -155,9 +156,11 @@ struct EntityUdptunBridge : public StreamRxAudioSink
     uint32_t seq_{0};
     bool anchored_{false};
     /// Serializes the two ingest producers (reactor RX = real audio, media RT =
-    /// silence/sweep filler) into the non-thread-safe reframer. RT caller
+    /// silence/sweep filler) into the non-thread-safe reframer, AND guards the
+    /// send-visible socket state (fd_/peer_/anchored_) so the punch service's
+    /// install/teardown never overlaps a reactor-thread sendto. RT caller
     /// try-acquires (wait-free skip on contention); reactor caller spin-acquires.
-    std::atomic_flag ingest_lock_{};
+    itc::SpinLock ingest_lock_{};
 
     /// Tunnel telemetry counters; shared with the entity's print_state.
     std::shared_ptr<UdptunTelemetry> telemetry_{std::make_shared<UdptunTelemetry>()};

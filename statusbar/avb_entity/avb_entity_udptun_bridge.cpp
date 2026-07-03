@@ -581,7 +581,7 @@ void EntityUdptunBridge::udptun_punch_loop()
                 std::print(stderr, "[udptun] set_nonblocking(staged socket) failed: {}\n", s.error().message());
             }
             {
-                std::lock_guard<std::mutex> lk(stage_mutex_);
+                std::scoped_lock const lk(stage_mutex_);
                 staged_fd_ = std::move(result->socket);
                 staged_peer_ = result->peer_reflexive_address;
                 staged_ready_ = true;
@@ -619,8 +619,12 @@ void EntityUdptunBridge::udptun_punch_service(int64_t now_tai_ns)
     // 1) Install a staged hole-punched socket (worker -> media handoff). Only this
     // (media) thread ever assigns fd_ during operation.
     {
-        std::lock_guard<std::mutex> lk(stage_mutex_);
+        std::scoped_lock const lk(stage_mutex_);
         if (staged_ready_) {
+            // Exclude the reactor-thread send while we swap the socket + peer.
+            // Lock order stage_mutex_ -> ingest_lock_ is the only site taking
+            // both; the send takes only ingest_lock_, staging only stage_mutex_.
+            std::scoped_lock const ig(ingest_lock_);
             fd_ = std::move(staged_fd_);
             peer_ = staged_peer_;
             staged_ready_ = false;
@@ -725,7 +729,10 @@ void EntityUdptunBridge::udptun_punch_service(int64_t now_tai_ns)
             if (!direct_shared_mode_ && ++egress_reset_streak_ >= kEgressResetEscalate) {
                 egress_reset_streak_ = 0;
                 telemetry_->egress_repunch_count.add(1);
-                fd_ = net::FileDescriptor{};  // close -> forces a fresh punch
+                {
+                    std::scoped_lock const ig(ingest_lock_);  // no close while the reactor may sendto
+                    fd_ = net::FileDescriptor{};       // close -> forces a fresh punch
+                }
                 shared_socket_ = false;
                 rendezvous_active_ = false;
                 install_tai_ns_ = 0;
@@ -752,7 +759,10 @@ void EntityUdptunBridge::udptun_punch_service(int64_t now_tai_ns)
     if (dead && !direct_shared_mode_) {
         // RT path: count, don't print (the worker logs the ensuing re-punch).
         telemetry_->egress_repunch_count.add(1);
-        fd_ = net::FileDescriptor{};  // close
+        {
+            std::scoped_lock const ig(ingest_lock_);  // no close while the reactor may sendto
+            fd_ = net::FileDescriptor{};        // close
+        }
         shared_socket_ = false;
         rendezvous_active_ = false;
         install_tai_ns_ = 0;
@@ -902,15 +912,13 @@ void EntityUdptunBridge::udptun_ingest_audio(std::span<uint8_t const> const audi
     // Single-producer handoff into the (non-thread-safe) reframer. The media RT
     // thread (rt_caller) try-acquires and skips its filler on contention so it
     // never blocks; the reactor thread spins until real audio gets exclusive
-    // access. Everything below up to the matching clear() is the critical section.
+    // access. Everything below up to the matching unlock() is the critical section.
     if (rt_caller) {
-        if (ingest_lock_.test_and_set(std::memory_order_acquire)) {
+        if (!ingest_lock_.try_lock()) {
             return;  // reactor thread is ingesting real audio; drop this filler tick
         }
     } else {
-        while (ingest_lock_.test_and_set(std::memory_order_acquire)) {
-            // bounded spin: the RT critical section is a single reframer submit
-        }
+        ingest_lock_.lock();  // bounded spin: the RT critical section is a single reframer submit
     }
 
     // Resolve the GPS-TAI mapping once for this ingest. On the reactor thread this
@@ -928,7 +936,7 @@ void EntityUdptunBridge::udptun_ingest_audio(std::span<uint8_t const> const audi
         } else {
             timespec ts{};
             if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-                ingest_lock_.clear(std::memory_order_release);
+                ingest_lock_.unlock();
                 return;
             }
             anchor_tai_ns = (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns;
@@ -949,7 +957,7 @@ void EntityUdptunBridge::udptun_ingest_audio(std::span<uint8_t const> const audi
     (void)ingest_->submit(audio.first(static_cast<size_t>(n_frames) * frame_bytes), n_frames, [this](auto const& pkt) {
         udptun_send(pkt.tai_ns, pkt.pcm);
     });
-    ingest_lock_.clear(std::memory_order_release);
+    ingest_lock_.unlock();
 }
 
 void EntityUdptunBridge::on_listener_audio(
