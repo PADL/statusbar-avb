@@ -191,8 +191,8 @@ void ListenerStreams::update_stream_input_counters(
         samples_per_ch,
         ts_sparse,
         static_cast<uint64_t>(gptp_now_ns),
-        config_.lock_tolerance_ns,
-        SAMPLE_RATE);
+        lock_tolerance_ns_,
+        sample_rate_);
 }
 
 auto ListenerStreams::fill_stream_input_counters(

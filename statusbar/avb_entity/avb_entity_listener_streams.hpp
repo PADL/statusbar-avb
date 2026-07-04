@@ -20,7 +20,6 @@
 /// the entity's members, so the moved method bodies are unchanged). It knows
 /// nothing about where the audio goes -- only the StreamRxAudioSink.
 
-#include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_input.hpp"
@@ -41,18 +40,24 @@ namespace statusbar::avb_entity {
 
 struct ListenerStreams
 {
+    /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns).
+    /// @param sample_rate        Stream sample rate in Hz (96000 for AudioIO/AM824, 48000
+    ///                           for StereoIO) -- used for the media-lock nominal step.
+    /// Taking the two values it actually needs (rather than a whole entity config) lets
+    /// any listener entity reuse ListenerStreams, not just AvbEntityAudioIO.
     ListenerStreams(
-        AvbEntityAudioIOConfig const& config,
+        uint32_t lock_tolerance_ns,
+        uint32_t sample_rate,
         nanoavb::NanoAvbComponents& components,
         std::atomic<uint64_t> const& last_gptp_ns,
         StreamRxAudioSink* audio_sink) noexcept
-        : config_{config}
+        : lock_tolerance_ns_{lock_tolerance_ns}
+        , sample_rate_{sample_rate}
         , components_{components}
         , last_gptp_ns_{last_gptp_ns}
         , audio_sink_{audio_sink}
     {}
 
-    static constexpr uint32_t SAMPLE_RATE = 96000;
     static constexpr uint16_t AM824_STREAM_INDEX = 0;
     static constexpr uint16_t AAF_STREAM_INDEX = 1;
 
@@ -111,7 +116,8 @@ struct ListenerStreams
     void on_listener_disconnected(uint16_t stream_index);
 
     // --- References / collaborators (bound at construction) --------------------
-    AvbEntityAudioIOConfig const& config_;
+    uint32_t lock_tolerance_ns_;              ///< MEDIA_LOCKED step tolerance
+    uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
     nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
     std::atomic<uint64_t> const& last_gptp_ns_;
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does

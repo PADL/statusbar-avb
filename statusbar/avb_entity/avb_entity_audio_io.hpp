@@ -302,8 +302,8 @@ class AvbEntityAudioIO
     /// config / gPTP-now / ACMP+MSRP state through refs (config_, last_gptp_ns_,
     /// components_) and delivers accepted audio to the tunnel via the StreamRxAudioSink
     /// (udptun_). Declared AFTER components_/config_/last_gptp_ns_/udptun_. Always allocated.
-    std::unique_ptr<ListenerStreams> listener_{
-        std::make_unique<ListenerStreams>(config_, host_.components(), last_gptp_ns_, udptun_.get())};
+    std::unique_ptr<ListenerStreams> listener_{std::make_unique<ListenerStreams>(
+        config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, udptun_.get())};
 
     /// The stream RX socket handler. In the default path it is moved into the reactor
     /// by start(); when config.stream_rx_rt_timer is set it is kept HERE (alive, owning
