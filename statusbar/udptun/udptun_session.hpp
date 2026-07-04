@@ -32,6 +32,7 @@
 #include "statusbar/udptun/udptun_deadline_timer.hpp"
 #include "statusbar/udptun/udptun_identity.hpp"
 #include "statusbar/udptun/udptun_per_source_tracker.hpp"
+#include "statusbar/udptun/udptun_record_sink.hpp"
 #include "statusbar/udptun/udptun_redundant_rx.hpp"
 #include "statusbar/udptun/udptun_redundant_tx.hpp"
 #include "statusbar/udptun/udptun_report.hpp"
@@ -619,6 +620,7 @@ class Session
         , rtt_stats_{cfg_.latency_hist}
         , tx_buf_(codec_.header_size() + cfg_.payload_bytes, uint8_t{0})
         , self_redundancy_{slot_width_ns_for_tracker(cfg_.tx_interval_us)}
+        , record_sink_{cfg_.csv_output_path, cfg_.bin_output_path, cfg_.bin_capacity_bytes}
     {
         auto mac = bring_up_local_identity();
         if (!mac) {
@@ -652,30 +654,11 @@ class Session
         }
         int64_t const report_interval_ns = static_cast<int64_t>(cfg_.report_interval_us) * 1'000;
         report_timer_.arm(start_mraw_ + report_interval_ns, report_interval_ns);
-
-        // Per-packet streaming setup goes last so the writer thread is
-        // the very last resource acquired. Anything earlier that throws
-        // leaves us with no thread to join. CsvWriter throws
-        // std::system_error on fopen / header-write failure; colbin
-        // returns Status — surface either as system_error so callers
-        // see a single failure mode.
-        if (!cfg_.csv_output_path.empty()) {
-            csv_writer_.emplace(cfg_.csv_output_path, kUdpTunCsvHeader);
-        }
-        if (!cfg_.bin_output_path.empty()) {
-            statusbar::colbin::WriterConfig const bin_cfg{.max_capacity_bytes = cfg_.bin_capacity_bytes, .preallocate = true};
-            auto w = statusbar::colbin::Writer::create(cfg_.bin_output_path, udptun_colbin_schema(), bin_cfg);
-            if (!w) {
-                statusbar::throw_or_abort(w.error(), "colbin::Writer::create failed");
-            }
-            bin_writer_.emplace(std::move(*w));
-        }
-        if (record_sink_enabled()) {
-            csv_writer_thread_ = std::thread{[this]() { csv_writer_loop(); }};
-        }
+        // The per-packet recorder (CSV/colbin ring + writer thread) is the record_sink_
+        // member: it opened its files and started its thread during member init, and
+        // its dtor stops+joins on destruction or a throw here (RAII replaces the old
+        // "start the thread last, join it by hand" dance).
     }
-
-    ~Session() { stop_csv_writer(); }
 
     Session(Session const&) = delete;
     auto operator=(Session const&) -> Session& = delete;
@@ -1149,35 +1132,16 @@ class Session
             out, wall, tracker_, &rtt_stats_, &tx, red_enabled ? &red : nullptr, cached_master_ns() + last_tai_shift_ns_.load());
     }
 
-    /// Drain and close the CSV writer thread. No-op when CSV is
-    /// disabled. Signals the writer to stop, joins it, then closes the
-    /// file (via ~CsvWriter). Returns the first write error the writer
-    /// thread observed, if any.
-    [[nodiscard]] auto flush_csv() -> Status
-    {
-        if (!record_sink_enabled()) {
-            return success();
-        }
-        stop_csv_writer();
-        int const err = csv_writer_error_.load(std::memory_order_relaxed);
-        if (err != 0) {
-            return failure(std::error_code{err, std::generic_category()});
-        }
-        return success();
-    }
+    /// Drain and close the record-sink writer thread. No-op when recording is
+    /// disabled. Returns the first write error the writer thread observed, if any.
+    [[nodiscard]] auto flush_csv() -> Status { return record_sink_.flush(); }
 
-    /// Returns true if at least one per-packet sink (CSV or colbin) is
-    /// configured. The SPSC ring + writer thread are only set up when
-    /// this is true.
-    [[nodiscard]] auto record_sink_enabled() const noexcept -> bool
-    {
-        return !cfg_.csv_output_path.empty() || !cfg_.bin_output_path.empty();
-    }
+    /// Returns true if at least one per-packet sink (CSV or colbin) is configured.
+    [[nodiscard]] auto record_sink_enabled() const noexcept -> bool { return record_sink_.enabled(); }
 
-    /// Number of CSV records dropped because the SPSC ring was full
-    /// (i.e. the writer thread fell behind disk for longer than the
-    /// ring depth).
-    [[nodiscard]] auto csv_records_dropped() const noexcept -> uint64_t { return csv_records_dropped_.load(); }
+    /// Number of CSV records dropped because the SPSC ring was full (writer thread fell
+    /// behind disk for longer than the ring depth).
+    [[nodiscard]] auto csv_records_dropped() const noexcept -> uint64_t { return record_sink_.records_dropped(); }
 
     /// Print the end-of-run summary (per-source lines + histograms +
     /// dropped/truncated counters) to `out`. Should be called after
@@ -1299,11 +1263,7 @@ class Session
             .tracker = tracker_,
             .rtt_stats = rtt_stats_,
             .self_redundancy = self_redundancy_,
-            .csv_sink =
-                CsvSink{
-                    .ring = record_sink_enabled() ? &csv_ring_ : nullptr,
-                    .records_dropped = record_sink_enabled() ? &csv_records_dropped_ : nullptr,
-                },
+            .csv_sink = record_sink_.sink(),
             .last_rx_pt_ns = last_rx_pt_,
         };
     }
@@ -1582,126 +1542,16 @@ class Session
     /// signals the writer to drain and exit; `csv_writer_error_` holds
     /// the first errno seen (0 = healthy). All addresses are stable for
     /// the run since Session is non-movable; RxContext borrows pointers.
-    CsvRing csv_ring_{};
-    statusbar::itc::TelemetryCounter<uint64_t> csv_records_dropped_{};
-    std::optional<statusbar::csv::CsvWriter> csv_writer_{};
-    std::optional<statusbar::colbin::Writer> bin_writer_{};
 #if defined(__linux__)
     /// Final snapshot of the realtime timer's wake/duration stats. Set
     /// at the end of run_realtime_with_adapter (after timer.stop), so
     /// callers can read it once `run()` has returned.
     std::optional<statusbar::stats::AtomicWakeStats::Snapshot> latest_wake_stats_{};
 #endif
-    std::thread csv_writer_thread_{};
-    std::atomic<bool> csv_writer_stop_{false};
-    std::atomic<int> csv_writer_error_{0};
-
-    /// Drain everything currently in the ring; format and write each
-    /// via CsvWriter. Errors set `csv_writer_error_` but otherwise let
-    /// the remaining ring contents drain (so the producer doesn't start
-    /// counting drops just because disk is broken). Returns true if any
-    /// records were consumed.
-    auto csv_drain_ring(CsvScratch& scratch, std::array<std::string_view, 7>& fields) noexcept -> bool
-    {
-        bool drained = false;
-        while (auto const rec = csv_ring_.try_consume()) {
-            if (csv_writer_error_.load(std::memory_order_relaxed) == 0) {
-                if (csv_writer_) {
-                    format_csv_record(*rec, scratch, fields);
-                    if (auto const st = csv_writer_->write_row(fields); !st) {
-                        csv_writer_error_.store(st.error().value(), std::memory_order_relaxed);
-                    }
-                }
-                if (bin_writer_) {
-                    // UdpTunCsvRecord is 48 bytes and matches the colbin
-                    // schema's row layout exactly — memcpy directly.
-                    std::span<uint8_t const> const row{reinterpret_cast<uint8_t const*>(&*rec), sizeof(UdpTunCsvRecord)};
-                    if (auto const st = bin_writer_->write_row(row); !st) {
-                        // Mirror CSV error path: surface the errno
-                        // (system_category) so flush_csv reports it.
-                        csv_writer_error_.store(st.error().value() ? st.error().value() : EIO, std::memory_order_relaxed);
-                    }
-                }
-            }
-            drained = true;
-        }
-        return drained;
-    }
-
-    /// Flush both sinks if no prior write error. CSV does an fflush;
-    /// colbin publishes committed_rows into the header so readers see
-    /// the latest count (mmap pages are already visible).
-    void csv_maybe_flush() noexcept
-    {
-        if (csv_writer_error_.load(std::memory_order_relaxed) != 0) {
-            return;
-        }
-        if (csv_writer_) {
-            if (auto const st = csv_writer_->flush(); !st) {
-                csv_writer_error_.store(st.error().value(), std::memory_order_relaxed);
-                return;
-            }
-        }
-        if (bin_writer_) {
-            if (auto const st = bin_writer_->commit(); !st) {
-                csv_writer_error_.store(st.error().value() ? st.error().value() : EIO, std::memory_order_relaxed);
-            }
-        }
-    }
-
-    /// One iteration of the writer loop: drain, check stop, maybe flush,
-    /// sleep if idle. Returns true when caller should exit the loop
-    /// (stop signaled and ring already drained).
-    auto csv_writer_pass(
-        CsvScratch& scratch, std::array<std::string_view, 7>& fields, std::chrono::steady_clock::time_point& last_flush) noexcept
-        -> bool
-    {
-        bool const drained = csv_drain_ring(scratch, fields);
-        if (csv_writer_stop_.load(std::memory_order_acquire) && csv_ring_.empty()) {
-            return true;
-        }
-        auto const now = std::chrono::steady_clock::now();
-        if (now - last_flush >= std::chrono::seconds{1}) {
-            csv_maybe_flush();
-            last_flush = now;
-        }
-        if (!drained) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        return false;
-    }
-
-    /// Writer-thread body. Repeatedly drains the ring, fflushes every
-    /// ~1 s (so recent rows survive an unclean process exit), and sleeps
-    /// 20 ms when idle to avoid burning CPU. Exits once the producer has
-    /// signalled stop and the ring is empty. On a write error keeps
-    /// draining the ring (without writing) so the producer doesn't start
-    /// counting drops; flush_csv() surfaces the captured errno.
-    void csv_writer_loop() noexcept
-    {
-        CsvScratch scratch{};
-        std::array<std::string_view, 7> fields{};
-        auto last_flush = std::chrono::steady_clock::now();
-        while (true) {
-            if (csv_writer_pass(scratch, fields, last_flush)) {
-                break;
-            }
-        }
-        csv_maybe_flush();  // final fflush before ~CsvWriter fcloses
-    }
-
-    /// Idempotent shutdown of the writer thread. Safe to call from
-    /// flush_csv() (deliberately) and from ~Session() (as a fallback).
-    void stop_csv_writer() noexcept
-    {
-        if (!csv_writer_thread_.joinable()) {
-            return;
-        }
-        csv_writer_stop_.store(true, std::memory_order_release);
-        csv_writer_thread_.join();
-        csv_writer_.reset();
-        bin_writer_.reset();
-    }
+    // Per-packet CSV/colbin recorder (SPSC ring + writer thread). Declared last so it
+    // is the last member constructed (thread starts after everything it might race) and
+    // the first destroyed (thread stops before the state it reads goes away).
+    RecordSink record_sink_;
 };
 
 }  // namespace statusbar::udptun
