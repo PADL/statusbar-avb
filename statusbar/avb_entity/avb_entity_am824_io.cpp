@@ -10,6 +10,7 @@
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/dsp/dsp.hpp"
@@ -56,49 +57,6 @@ namespace statusbar::avb_entity {
 using namespace statusbar::atdecc;
 using namespace statusbar::atdecc::aem;
 using namespace statusbar::nanoavb;
-
-namespace {
-
-/// Reactor port that receives AVTP AM824 stream frames on a dedicated socket
-/// joined to the talker stream's multicast group, and hands each frame to the
-/// owning entity for decode/metering. Owns its own RawnetContext so the stream
-/// RX path is independent of the ATDECC control socket.
-class StreamRxHandler : public net::Pollable
-{
-  public:
-    StreamRxHandler(std::string_view interface_name, ieee::Eui48 const& group, ListenerStreams* owner)
-        : owner_{owner}
-    {
-        // Join the stream multicast group; the NIC's multicast hash filter
-        // delivers it to this (non-promiscuous) socket — verified on the Pi5
-        // macb NIC. (Promiscuous mode was briefly used as a workaround but is
-        // unnecessary, and its full-wire flood preempted the PTP time-bridge
-        // sampler thread, which destabilised the media clock and caused bursty
-        // streaming.)
-        (void)sock_.open(interface_name, avtp::AVTP_ETHERTYPE, &group, /*qdisc_bypass=*/false);
-    }
-
-    [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
-    [[nodiscard]] auto socket() noexcept -> net::RawnetContext* { return &sock_; }
-
-    [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
-
-    // Reactor path: stamp RX frames with the media-timer gPTP (current_gptp_ns()). The
-    // batch drain lives in ListenerStreams::drain_rx so the optional RT RX timer calls
-    // the same code with its own wake time. The reactor's monotonic now_ns is ignored --
-    // the tally + deserialize need gPTP.
-    void on_ready(int64_t /*reactor_now_ns*/) override { owner_->drain_rx(owner_->current_gptp_ns()); }
-
-    void tick(int64_t /*now_ns*/) override {}
-
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
-
-  private:
-    net::RawnetContext sock_{};
-    ListenerStreams* owner_;
-};
-
-}  // namespace
 
 //
 // File-static helpers
@@ -358,7 +316,9 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
     // Receive port: join the stream multicast group; the shared ListenerStreams decodes
     // + tallies incoming AM824 (STREAM_INPUT health counters). Same handler shape as
     // AvbEntityAudioIO: a thin socket owner delegating the batch drain to drain_rx.
-    auto rx = std::make_unique<StreamRxHandler>(config_.interface_name, stream_dest_mac_, &listener_);
+    std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
+    auto rx = std::make_unique<StreamRxHandler>(
+        config_.interface_name, rx_groups, [this] { listener_.drain_rx(listener_.current_gptp_ns()); });
     if (rx->valid()) {
         listener_.rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
         if (config_.stream_rx_rt_timer) {

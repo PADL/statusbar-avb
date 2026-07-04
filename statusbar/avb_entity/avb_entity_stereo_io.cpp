@@ -9,6 +9,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -74,35 +75,6 @@ static auto make_adp_config() -> AdpAdvertiserConfig
     adp_config.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
     return adp_config;
 }
-
-namespace {
-
-/// Thin reactor adapter owning the RX socket; delegates the batch drain to the entity
-/// (which decodes + publishes to the loopback pipe). Same shape as the AM824/AudioIO
-/// handlers -- the reactor's monotonic now is ignored; the entity stamps with gPTP.
-class StreamRxHandler : public net::Pollable
-{
-  public:
-    StreamRxHandler(std::string_view interface_name, ieee::Eui48 const& group, AvbEntityStereoIO* owner)
-        : owner_{owner}
-    {
-        (void)sock_.open(interface_name, avtp::AVTP_ETHERTYPE, &group, /*qdisc_bypass=*/false);
-    }
-
-    [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
-    [[nodiscard]] auto socket() noexcept -> net::RawnetContext* { return &sock_; }
-    [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
-
-    void on_ready(int64_t /*reactor_now_ns*/) override { owner_->drain_stream_rx_reactor(); }
-    void tick(int64_t /*now_ns*/) override {}
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
-
-  private:
-    net::RawnetContext sock_{};
-    AvbEntityStereoIO* owner_;
-};
-
-}  // namespace
 
 AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     // Build the control plane host in place from the hand-built model: 1 talker
@@ -313,7 +285,8 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
     // Receive port: join the stream multicast group; the entity decodes each AM824 frame
     // and publishes it to the loopback pipe (the pipe's producer). Same handler shape as
     // AvbEntityAudioIO / AvbEntityAm824IO.
-    auto rx = std::make_unique<StreamRxHandler>(config_.interface_name, stream_dest_mac_, this);
+    std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
+    auto rx = std::make_unique<StreamRxHandler>(config_.interface_name, rx_groups, [this] { drain_stream_rx_reactor(); });
     if (rx->valid()) {
         rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
         if (config_.stream_rx_rt_timer) {
