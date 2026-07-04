@@ -22,6 +22,7 @@ from aemxml.blob_writer import write_blob
 from aemxml.flatten import flatten
 from aemxml.json_reader import read_json
 from aemxml.json_writer import write_json
+from aemxml.unflatten import unflatten
 
 
 def cmd_xml2bin(args: argparse.Namespace) -> None:
@@ -39,13 +40,22 @@ def cmd_bin2xml(args: argparse.Namespace) -> None:
     with open(args.input, "rb") as f:
         data = f.read()
     descs, syms = read_blob(data)
+    entity = unflatten(descs, syms)
+    write_aemxml(entity, path=args.output, schema_year=args.schema_year)
+    print(
+        f"Wrote AEMXML ({len(descs)} descriptors, {len(syms)} symbols) to {args.output}"
+    )
 
-    # Reconstruct entity from blob — for now, re-read via flatten round-trip
-    # Full blob->model reconstruction is needed for Phase 2
-    # For now: write raw descriptor info as a dump
-    print(f"Read {len(data)} bytes ({len(descs)} descriptors, {len(syms)} symbols)")
-    print("bin2xml: full model reconstruction not yet implemented (Phase 2)")
-    print("Use 'dump' command for inspection.")
+
+def cmd_bin2json(args: argparse.Namespace) -> None:
+    with open(args.input, "rb") as f:
+        data = f.read()
+    descs, syms = read_blob(data)
+    entity = unflatten(descs, syms)
+    write_json(entity, args.output)
+    print(
+        f"Wrote simplified JSON ({len(descs)} descriptors, {len(syms)} symbols) to {args.output}"
+    )
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -203,6 +213,12 @@ def main() -> None:
         help="Schema version year (default: 2021)",
     )
 
+    p_bin2json = sub.add_parser(
+        "bin2json", help="Convert binary .aem blob to simplified JSON"
+    )
+    p_bin2json.add_argument("input", help="Input .aem file")
+    p_bin2json.add_argument("output", help="Output .json file")
+
     p_validate = sub.add_parser("validate", help="Validate AEMXML against XSD schema")
     p_validate.add_argument("input", help="Input .aemxml file")
 
@@ -248,6 +264,7 @@ def main() -> None:
     {
         "xml2bin": cmd_xml2bin,
         "bin2xml": cmd_bin2xml,
+        "bin2json": cmd_bin2json,
         "validate": cmd_validate,
         "dump": cmd_dump,
         "json2bin": cmd_json2bin,
