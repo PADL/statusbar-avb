@@ -40,6 +40,7 @@ statusbar_add_module(
   udptun_tx_history_test.cpp
   udptun_wire_clock_test.cpp
   udptun_csv_record_test.cpp
+  udptun_record_sink_test.cpp
   udptun_aaf_v1_codec_test.cpp
   udptun_audio_reframe_test.cpp
   udptun_audio_ingest_test.cpp
