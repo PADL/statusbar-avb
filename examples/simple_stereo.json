@@ -1,0 +1,137 @@
+{
+  "entity": {
+    "vendor": "Statusbar",
+    "model": "Statusbar Stereo",
+    "capabilities": [
+      "AEM_SUPPORTED",
+      "CLASS_A_SUPPORTED",
+      "GPTP_SUPPORTED"
+    ],
+    "talker": {
+      "capabilities": [
+        "IMPLEMENTED",
+        "AUDIO_SOURCE"
+      ],
+      "stream_sources": 1
+    },
+    "listener": {
+      "capabilities": [
+        "IMPLEMENTED",
+        "AUDIO_SINK"
+      ],
+      "stream_sinks": 1
+    },
+    "configurations": [
+      {
+        "name": "Stereo",
+        "streams_in": [
+          {
+            "name": "StreamInput",
+            "format": "0x00A0020860000200",
+            "flags": [
+              "CLASS_A"
+            ]
+          }
+        ],
+        "streams_out": [
+          {
+            "name": "StreamOutput",
+            "format": "0x00A0020860000200",
+            "flags": [
+              "CLASS_A"
+            ]
+          }
+        ],
+        "audio_units": [
+          {
+            "name": "AudioUnit",
+            "rates": [
+              48000
+            ],
+            "input_ports": [
+              {
+                "clusters": [
+                  {
+                    "name": "InputCluster",
+                    "channels": 2
+                  }
+                ],
+                "maps": [
+                  {
+                    "mappings": [
+                      {
+                        "stream": 0,
+                        "stream_ch": 0,
+                        "cluster": 0,
+                        "cluster_ch": 0
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 1,
+                        "cluster": 0,
+                        "cluster_ch": 1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_ports": [
+              {
+                "clusters": [
+                  {
+                    "name": "OutputCluster",
+                    "channels": 2
+                  }
+                ],
+                "maps": [
+                  {
+                    "mappings": [
+                      {
+                        "stream": 0,
+                        "stream_ch": 0,
+                        "cluster": 0,
+                        "cluster_ch": 0
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 1,
+                        "cluster": 0,
+                        "cluster_ch": 1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "avb_interfaces": [
+          {
+            "name": "eth0",
+            "flags": [
+              "GPTP_SUPPORTED"
+            ]
+          }
+        ],
+        "clock_sources": [
+          {
+            "name": "Internal",
+            "type": "INTERNAL",
+            "location_type": 2,
+            "location_index": 0
+          }
+        ],
+        "clock_domains": [
+          {
+            "name": "ClockDomain",
+            "source": 0,
+            "sources": [
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

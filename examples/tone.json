@@ -1,0 +1,210 @@
+{
+  "entity": {
+    "vendor": "Statusbar",
+    "model": "Statusbar AVB Tone Generator",
+    "capabilities": [
+      "AEM_SUPPORTED",
+      "CLASS_A_SUPPORTED",
+      "GPTP_SUPPORTED"
+    ],
+    "talker": {
+      "capabilities": [
+        "IMPLEMENTED",
+        "AUDIO_SOURCE",
+        "MEDIA_CLOCK_SOURCE"
+      ],
+      "stream_sources": 3
+    },
+    "listener": {
+      "capabilities": [],
+      "stream_sinks": 0
+    },
+    "configurations": [
+      {
+        "name": "ToneGen",
+        "streams_out": [
+          {
+            "name": "StreamOutputAM824",
+            "format": "0x00A0040860000800",
+            "flags": [
+              "CLASS_A"
+            ]
+          },
+          {
+            "name": "StreamOutputAAF",
+            "format": "0x020702200200C000",
+            "flags": [
+              "CLASS_A"
+            ]
+          },
+          {
+            "name": "StreamOutputCRF",
+            "format": "0x041060010000BB80",
+            "flags": [
+              "CLASS_A"
+            ]
+          }
+        ],
+        "audio_units": [
+          {
+            "name": "AudioUnit",
+            "rates": [
+              96000
+            ],
+            "output_ports": [
+              {
+                "clusters": [
+                  {
+                    "name": "OutputCluster",
+                    "channels": 8
+                  }
+                ],
+                "maps": [
+                  {
+                    "mappings": [
+                      {
+                        "stream": 0,
+                        "stream_ch": 0,
+                        "cluster": 0,
+                        "cluster_ch": 0
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 1,
+                        "cluster": 0,
+                        "cluster_ch": 1
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 2,
+                        "cluster": 0,
+                        "cluster_ch": 2
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 3,
+                        "cluster": 0,
+                        "cluster_ch": 3
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 4,
+                        "cluster": 0,
+                        "cluster_ch": 4
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 5,
+                        "cluster": 0,
+                        "cluster_ch": 5
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 6,
+                        "cluster": 0,
+                        "cluster_ch": 6
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 7,
+                        "cluster": 0,
+                        "cluster_ch": 7
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "clusters": [
+                  {
+                    "name": "OutputCluster",
+                    "channels": 8
+                  }
+                ],
+                "maps": [
+                  {
+                    "mappings": [
+                      {
+                        "stream": 0,
+                        "stream_ch": 0,
+                        "cluster": 0,
+                        "cluster_ch": 0
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 1,
+                        "cluster": 0,
+                        "cluster_ch": 1
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 2,
+                        "cluster": 0,
+                        "cluster_ch": 2
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 3,
+                        "cluster": 0,
+                        "cluster_ch": 3
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 4,
+                        "cluster": 0,
+                        "cluster_ch": 4
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 5,
+                        "cluster": 0,
+                        "cluster_ch": 5
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 6,
+                        "cluster": 0,
+                        "cluster_ch": 6
+                      },
+                      {
+                        "stream": 0,
+                        "stream_ch": 7,
+                        "cluster": 0,
+                        "cluster_ch": 7
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "avb_interfaces": [
+          {
+            "name": "eth0",
+            "flags": [
+              "GPTP_SUPPORTED"
+            ]
+          }
+        ],
+        "clock_sources": [
+          {
+            "name": "Internal",
+            "type": "INTERNAL",
+            "location_type": 2,
+            "location_index": 0
+          }
+        ],
+        "clock_domains": [
+          {
+            "name": "ClockDomain",
+            "source": 0,
+            "sources": [
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

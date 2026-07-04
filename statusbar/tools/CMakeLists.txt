@@ -125,6 +125,47 @@ install(
   DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
   COMPONENT runtime)
 
+# --- AEM model JSON -> blob (Python aemxml pipeline) + migration verify ---
+# The declarative models in avb/examples/*.json are the emerging single source of
+# truth for the AEM descriptor blobs; the pure-stdlib Python aemxml tool compiles
+# them (`aemxml_tool.py json2bin`). The C++ aem_entity_blob_tool above still ships
+# the runtime entity_*.bin blobs; this block proves the JSON models are ready to
+# take over by compiling each one and checking its descriptor-type multiset matches
+# the C++ generator's (byte-identity is not required -- only what the C++
+# DescriptorStorage parser sees at runtime). To flip the switch later, point the
+# entity_*.bin commands above at `${Python3_EXECUTABLE} <aemxml_tool> json2bin
+# examples/<model>.json` and retire the C++ model builders (keep the DescriptorStorage
+# parser -- it stays the runtime consumer).
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_FOUND)
+  set(_aem_examples "${CMAKE_CURRENT_LIST_DIR}/../../examples")
+  set(_aemxml_tool "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_tool.py")
+
+  # Compile every declarative model to a build-tree blob (build-time proof the
+  # json2bin pipeline runs; not installed -- the C++ blobs above stay canonical).
+  set(_aem_json_blobs)
+  foreach(_m bridge dual tone tone-aaf tone-aaf-crf simple_stereo)
+    add_custom_command(
+      OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/aem"
+      COMMAND ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
+              "${_aem_examples}/${_m}.json"
+              "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
+      DEPENDS "${_aem_examples}/${_m}.json"
+      COMMENT "AEM blob (json2bin): ${_m}.aem <- examples/${_m}.json"
+      VERBATIM)
+    list(APPEND _aem_json_blobs "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem")
+  endforeach()
+  add_custom_target(statusbar_avb_json_blobs ALL DEPENDS ${_aem_json_blobs})
+
+  # Regression net: each JSON model's blob must match the C++ generator's descriptor
+  # set, so the C++ model builders can be retired with confidence.
+  add_test(
+    NAME statusbar/avb/aem_json_models_match_cpp
+    COMMAND ${Python3_EXECUTABLE} "${_aem_examples}/verify_models.py"
+            $<TARGET_FILE:aem_entity_blob_tool>)
+endif()
+
 # --- L2 ADPDU send probe (Linux: AF_PACKET, diagnoses PACKET_QDISC_BYPASS) ---
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
