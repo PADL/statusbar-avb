@@ -10,6 +10,7 @@
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -59,78 +60,6 @@ using namespace statusbar::atdecc::aem;
 using namespace statusbar::nanoavb;
 
 //
-// File-static helpers
-//
-
-/// Load a single AEM descriptor of type T from storage.
-/// Accepts blobs smaller than sizeof(T) via partial-load fallback.
-template <typename T>
-static auto load_descriptor(DescriptorStorage const& storage, uint16_t config_idx, uint16_t type, uint16_t index) -> StatusValue<T>
-{
-    auto result = storage.get_descriptor(config_idx, type, index);
-    if (!result) {
-        return failure(result.error());
-    }
-    auto const blob = *result;
-    T desc{};
-    span_load_padded(desc, blob);
-    return success(desc);
-}
-
-/// Channel count from the first AUDIO_CLUSTER descriptor (default 2). Drives the
-/// data-plane buffer sizing; the rest of the model is served straight from the blob.
-static auto channels_from_storage(DescriptorStorage const& storage) -> size_t
-{
-    size_t channels = 2;
-    if (auto r = load_descriptor<DescriptorAudioCluster>(storage, 0, DESCRIPTOR_AUDIO_CLUSTER, 0)) {
-        auto const ch = static_cast<uint16_t>(r->channel_count);
-        if (ch >= 1) {
-            channels = static_cast<size_t>(ch);
-        }
-    }
-    return channels;
-}
-
-namespace {
-/// Serves this entity's descriptors from its .aem blob (symbol-aware), patching the
-/// ENTITY identity (entity_id/model_id/name/firmware) from config. Every other
-/// descriptor -- including AVB_INTERFACE -- is served verbatim, matching the prior
-/// build_entity_model (am824 did not patch the AVB_INTERFACE network/gPTP fields).
-class Am824IODescriptorHandler : public nanoavb::DescriptorStorageHandler
-{
-  public:
-    Am824IODescriptorHandler(DescriptorStorage storage, AvbEntityAm824IOConfig const& config)
-        : DescriptorStorageHandler{storage}
-        , entity_id_{config.entity_id}
-        , entity_model_id_{config.entity_model_id}
-        , firmware_version_{config.firmware_version}
-    {
-        // Built-in GET_NAME/SET_NAME of the ENTITY's entity_name (descriptor 0,
-        // name 0): seed from config; the base serves get/set and reflects the
-        // current value in on_get_entity. In-memory only (resets on restart).
-        manage_entity_name(AtdeccString{config.entity_name.c_str()});
-    }
-
-    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
-    {
-        // Base fills the blob bytes and reflects the managed entity_name.
-        if (!DescriptorStorageHandler::on_get_entity(ref, symbol, desc)) {
-            return false;
-        }
-        desc.entity_id = entity_id_;
-        desc.entity_model_id = entity_model_id_;
-        desc.firmware_version = AtdeccString{firmware_version_.c_str()};
-        return true;
-    }
-
-  private:
-    ieee::Eui64 entity_id_;
-    ieee::Eui64 entity_model_id_;
-    std::string firmware_version_;
-};
-}  // namespace
-
-//
 // Factory method
 //
 
@@ -146,8 +75,15 @@ auto AvbEntityAm824IO::create(AvbEntityAm824IOConfig config, std::pmr::memory_re
     // Step 2: Symbol-aware. Serve descriptors from the blob through a
     // DescriptorStorageHandler (retains the blob + symbol table) instead of a parsed
     // EntityModel; extract the channel count for the data plane.
-    size_t const channels = channels_from_storage(*storage_result);
-    auto handler = std::make_unique<Am824IODescriptorHandler>(*storage_result, config);
+    size_t const channels = channels_from_storage(*storage_result, 2);
+    auto handler = std::make_unique<EntityIdentityDescriptorHandler>(
+        *storage_result,
+        config.entity_id,
+        config.entity_model_id,
+        config.firmware_version,
+        config.entity_name,
+        /*iface_mac=*/std::nullopt,
+        /*patch_avb_interface=*/false);
 
     // Step 3: Construct entity via make_unique (gated by CreateKey). The entity owns
     // the handler (through the host) and builds NanoAvbComponents in place (it is

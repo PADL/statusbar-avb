@@ -13,6 +13,7 @@
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -61,86 +62,6 @@ auto white_key_frequency_hz(uint8_t const base_midi_note, size_t const white_ind
 
 namespace {
 
-template <typename T>
-auto load_descriptor(DescriptorStorage const& storage, uint16_t config_idx, uint16_t type, uint16_t index) -> StatusValue<T>
-{
-    auto result = storage.get_descriptor(config_idx, type, index);
-    if (!result) {
-        return failure(result.error());
-    }
-    T desc{};
-    span_load_padded(desc, *result);
-    return success(desc);
-}
-
-/// Channel count from the first AUDIO_CLUSTER descriptor (default 8). In the
-/// tone-generator model AUDIO_CLUSTER 0 is the first OUTPUT cluster.
-auto channels_from_storage(DescriptorStorage const& storage) -> size_t
-{
-    size_t channels = 8;
-    if (auto r = load_descriptor<DescriptorAudioCluster>(storage, 0, DESCRIPTOR_AUDIO_CLUSTER, 0)) {
-        auto const ch = static_cast<uint16_t>(r->channel_count);
-        if (ch >= 1) {
-            channels = static_cast<size_t>(ch);
-        }
-    }
-    return channels;
-}
-
-/// Serves the entity's descriptors from its .aem blob (symbol-aware), patching
-/// the runtime-only ENTITY identity and AVB_INTERFACE network/gPTP fields.
-class ToneGenDescriptorHandler : public nanoavb::DescriptorStorageHandler
-{
-  public:
-    ToneGenDescriptorHandler(DescriptorStorage storage, AvbEntityAudioIOConfig const& config, std::optional<ieee::Eui48> iface_mac)
-        : DescriptorStorageHandler{storage}
-        , entity_id_{config.entity_id}
-        , entity_model_id_{config.entity_model_id}
-        , firmware_version_{config.firmware_version}
-        , iface_mac_{iface_mac}
-    {
-        manage_entity_name(AtdeccString{config.entity_name.c_str()});
-    }
-
-    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
-    {
-        if (!DescriptorStorageHandler::on_get_entity(ref, symbol, desc)) {
-            return false;
-        }
-        desc.entity_id = entity_id_;
-        desc.entity_model_id = entity_model_id_;
-        desc.firmware_version = AtdeccString{firmware_version_.c_str()};
-        return true;
-    }
-
-    auto on_get_avb_interface(DescriptorRef ref, uint32_t symbol, DescriptorAvbInterface& desc) -> bool override
-    {
-        if (!DescriptorStorageHandler::on_get_avb_interface(ref, symbol, desc)) {
-            return false;
-        }
-        if (iface_mac_) {
-            desc.mac_address = *iface_mac_;
-            desc.clock_identity = iface_mac_->to_modified_eui64();
-        }
-        desc.priority1 = 248;
-        desc.clock_class = 248;  // slave-only (not grandmaster-capable)
-        desc.offset_scaled_log_variance = 0x436A;
-        desc.clock_accuracy = 0xFE;
-        desc.priority2 = 248;
-        desc.domain_number = 0;
-        desc.log_sync_interval = static_cast<uint8_t>(static_cast<int8_t>(-3));  // 125 ms
-        desc.log_announce_interval = 0;                                          // 1 s
-        desc.log_pdelay_interval = 0;                                            // 1 s
-        return true;
-    }
-
-  private:
-    ieee::Eui64 entity_id_;
-    ieee::Eui64 entity_model_id_;
-    std::string firmware_version_;
-    std::optional<ieee::Eui48> iface_mac_;
-};
-
 /// Globally-unique IEEE 1722 stream_id from the talker's NIC MAC (high 6 bytes)
 /// plus a per-stream index in the low byte.
 auto stream_id_for(ieee::Eui48 const& base_mac, uint16_t index) -> ieee::Eui64
@@ -168,9 +89,16 @@ auto AvbEntityToneGenerator::create(
         return failure(storage_result.error());
     }
 
-    size_t const channels = channels_from_storage(*storage_result);
+    size_t const channels = channels_from_storage(*storage_result, 8);
     auto const iface_mac = net::read_interface_mac(config.interface_name);
-    auto handler = std::make_unique<ToneGenDescriptorHandler>(*storage_result, config, iface_mac);
+    auto handler = std::make_unique<EntityIdentityDescriptorHandler>(
+        *storage_result,
+        config.entity_id,
+        config.entity_model_id,
+        config.firmware_version,
+        config.entity_name,
+        iface_mac,
+        /*patch_avb_interface=*/true);
 
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity = std::make_unique<AvbEntityToneGenerator>(

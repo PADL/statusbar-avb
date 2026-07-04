@@ -11,6 +11,7 @@
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_egress.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_ingest.hpp"
@@ -73,98 +74,6 @@ using namespace statusbar::nanoavb;
 
 namespace {
 
-//
-// File-static helpers
-//
-
-template <typename T>
-auto load_descriptor(DescriptorStorage const& storage, uint16_t config_idx, uint16_t type, uint16_t index) -> StatusValue<T>
-{
-    auto result = storage.get_descriptor(config_idx, type, index);
-    if (!result) {
-        return failure(result.error());
-    }
-    T desc{};
-    span_load_padded(desc, *result);
-    return success(desc);
-}
-
-/// Channel count from the first AUDIO_CLUSTER descriptor (default 2). Drives the
-/// data-plane buffer sizing; the rest of the model is served straight from the blob.
-auto channels_from_storage(DescriptorStorage const& storage) -> size_t
-{
-    size_t channels = 2;
-    if (auto r = load_descriptor<DescriptorAudioCluster>(storage, 0, DESCRIPTOR_AUDIO_CLUSTER, 0)) {
-        auto const ch = static_cast<uint16_t>(r->channel_count);
-        if (ch >= 1) {
-            channels = static_cast<size_t>(ch);
-        }
-    }
-    return channels;
-}
-
-/// Serves this entity's descriptors from its .aem blob (symbol-aware), patching the
-/// two runtime-only seams that cannot live in a static blob: the ENTITY identity
-/// (entity_id/model_id/name/firmware, from config) and the AVB_INTERFACE network +
-/// gPTP identity (live NIC MAC, its modified-EUI-64 clock identity, and the slave-only
-/// gPTP params the blob leaves zero). Every other descriptor is served verbatim.
-class AudioIODescriptorHandler : public nanoavb::DescriptorStorageHandler
-{
-  public:
-    AudioIODescriptorHandler(DescriptorStorage storage, AvbEntityAudioIOConfig const& config, std::optional<ieee::Eui48> iface_mac)
-        : DescriptorStorageHandler{storage}
-        , entity_id_{config.entity_id}
-        , entity_model_id_{config.entity_model_id}
-        , firmware_version_{config.firmware_version}
-        , iface_mac_{iface_mac}
-    {
-        // Built-in GET_NAME/SET_NAME of the ENTITY's entity_name (descriptor 0,
-        // name 0): seed it from config; the base then serves get/set and reflects
-        // the current value here in on_get_entity. In-memory only (resets on
-        // restart) unless a caller wires set_on_entity_name_changed for NV storage.
-        manage_entity_name(AtdeccString{config.entity_name.c_str()});
-    }
-
-    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
-    {
-        // Base fills the blob bytes and reflects the managed entity_name.
-        if (!DescriptorStorageHandler::on_get_entity(ref, symbol, desc)) {
-            return false;
-        }
-        desc.entity_id = entity_id_;
-        desc.entity_model_id = entity_model_id_;
-        desc.firmware_version = AtdeccString{firmware_version_.c_str()};
-        return true;
-    }
-
-    auto on_get_avb_interface(DescriptorRef ref, uint32_t symbol, DescriptorAvbInterface& desc) -> bool override
-    {
-        if (!DescriptorStorageHandler::on_get_avb_interface(ref, symbol, desc)) {
-            return false;
-        }
-        if (iface_mac_) {
-            desc.mac_address = *iface_mac_;
-            desc.clock_identity = iface_mac_->to_modified_eui64();
-        }
-        desc.priority1 = 248;    // gPTP default priority1
-        desc.clock_class = 248;  // not grandmaster-capable (slave-only)
-        desc.offset_scaled_log_variance = 0x436A;
-        desc.clock_accuracy = 0xFE;  // unknown
-        desc.priority2 = 248;
-        desc.domain_number = 0;
-        desc.log_sync_interval = static_cast<uint8_t>(static_cast<int8_t>(-3));  // 125 ms (gPTP Class A)
-        desc.log_announce_interval = 0;                                          // 1 s
-        desc.log_pdelay_interval = 0;                                            // 1 s
-        return true;
-    }
-
-  private:
-    ieee::Eui64 entity_id_;
-    ieee::Eui64 entity_model_id_;
-    std::string firmware_version_;
-    std::optional<ieee::Eui48> iface_mac_;
-};
-
 /// Derive a stream id from the entity id, with the low byte set to the stream
 /// index so the two talker streams have distinct ids.
 // Derive a globally-unique IEEE 1722 stream_id from the talker's NIC MAC (high 6
@@ -200,9 +109,16 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
     // Symbol-aware: serve descriptors from the blob through a DescriptorStorageHandler
     // (retains the blob + its symbol table) instead of a parsed EntityModel. The handler
     // patches the runtime ENTITY identity + AVB_INTERFACE network/gPTP fields.
-    size_t const channels = channels_from_storage(*storage_result);
+    size_t const channels = channels_from_storage(*storage_result, 2);
     auto const iface_mac = net::read_interface_mac(config.interface_name);
-    auto handler = std::make_unique<AudioIODescriptorHandler>(*storage_result, config, iface_mac);
+    auto handler = std::make_unique<EntityIdentityDescriptorHandler>(
+        *storage_result,
+        config.entity_id,
+        config.entity_model_id,
+        config.firmware_version,
+        config.entity_name,
+        iface_mac,
+        /*patch_avb_interface=*/true);
 
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity =
