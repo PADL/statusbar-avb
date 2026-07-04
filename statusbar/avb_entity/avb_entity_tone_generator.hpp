@@ -157,6 +157,12 @@ class AvbEntityToneGenerator
     /// ready/connected). Also gated on MAAP-address readiness in "maap" mode.
     [[nodiscard]] auto talker_should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
+    /// Emit this tick's CRF media-clock PDU if the entity has a CRF stream, it is gated
+    /// open, and the decimation counter says it's due. No-op when has_crf_ is false.
+    /// Extracted from process_audio's per-packet loop (CRF is a first-class stream that
+    /// gates on its own ACMP connection, independent of the audio gate).
+    void transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, int64_t now_steady_ns);
+
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
     [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
     [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }

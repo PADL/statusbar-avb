@@ -593,29 +593,34 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
             aaf_reframer_.clear();
         }
 
-        if (!has_crf_) {
-            continue;  // no CRF stream in this set
+        transmit_crf_if_due(tick, now_steady_ns);
+    }
+}
+
+void AvbEntityToneGenerator::transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, int64_t const now_steady_ns)
+{
+    if (!has_crf_) {
+        return;  // no CRF stream in this set
+    }
+    // CRF media-clock PDU, decimated to its declared rate. The CRF stream is a
+    // first-class stream: it gates on ITS OWN ACMP connection + reservation
+    // (listeners ACMP-connect and MSRP-reserve the CRF clock separately), never
+    // on the audio streams' gate.
+    if (talker_should_transmit(crf_idx_, now_steady_ns)) {
+        uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY);
+        uint32_t pkts_per_crf =
+            (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) / static_cast<uint32_t>(SAMPLES_PER_PACKET);
+        if (pkts_per_crf == 0) {
+            pkts_per_crf = 1;
         }
-        // CRF media-clock PDU, decimated to its declared rate. The CRF stream is a
-        // first-class stream: it gates on ITS OWN ACMP connection + reservation
-        // (listeners ACMP-connect and MSRP-reserve the CRF clock separately), never
-        // on the audio streams' gate.
-        if (talker_should_transmit(crf_idx_, now_steady_ns)) {
-            uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY);
-            uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) /
-                static_cast<uint32_t>(SAMPLES_PER_PACKET);
-            if (pkts_per_crf == 0) {
-                pkts_per_crf = 1;
-            }
-            if (crf_decim_ == 0) {
-                // Re-base to the live media-clock position each PDU so CRF timestamps
-                // track gPTP-now, not the (possibly long-past) media-clock anchor.
-                talker_->transmit_crf(crf_aligned_base(tick.first_index, sample_stride));
-            }
-            crf_decim_ = static_cast<uint16_t>((crf_decim_ + 1U) % pkts_per_crf);
-        } else {
-            crf_decim_ = 0;
+        if (crf_decim_ == 0) {
+            // Re-base to the live media-clock position each PDU so CRF timestamps
+            // track gPTP-now, not the (possibly long-past) media-clock anchor.
+            talker_->transmit_crf(crf_aligned_base(tick.first_index, sample_stride));
         }
+        crf_decim_ = static_cast<uint16_t>((crf_decim_ + 1U) % pkts_per_crf);
+    } else {
+        crf_decim_ = 0;
     }
 }
 
