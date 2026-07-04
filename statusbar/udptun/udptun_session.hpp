@@ -884,6 +884,98 @@ class Session
         return !stop.stop_requested();
     }
 
+    /// One realtime-timer tick: tripwire wake-gate, drain gPTP + udp, periodic gPTP,
+    /// GPS-TAI training sample, and (when synced and past the TX cursor) send the next
+    /// primary packet, then the tripwire duration-gate. Extracted verbatim from the
+    /// timer callback so run_realtime_with_adapter reads as setup + run + teardown; the
+    /// former lambda captures are now explicit parameters. @p monitor_ptr is null when
+    /// no trace config is active.
+    template <typename ClockT>
+    void realtime_tick(
+        statusbar::realtime::TimerEvent<ClockT> const& event,
+        TxContext const& tx_ctx,
+        RxContext const& rx_ctx,
+        int64_t tx_interval_ns,
+        statusbar::realtime::TripwireMonitor* monitor_ptr,
+        statusbar::itc::StopToken& stop)
+    {
+        // Suppress the tripwire if either:
+        //   - stop flag is set (shutdown drain may be slow / blocked),
+        //   - master clock isn't synced (mid-run sync loss invalidates
+        //     the bridge mapping, so wake error becomes meaningless
+        //     until sync re-acquires).
+        // Wake check at entry, duration check at exit; either gate
+        // closing mid-callback short-circuits the duration trip.
+        int64_t tripwire_start_ns = 0;
+        if (monitor_ptr != nullptr && !stop.stop_requested() && gptp_synced()) {
+            tripwire_start_ns = observe_wake_and_handle_tripwire(*monitor_ptr, event);
+            if (tripwire_start_ns == 0) {
+                return;  // wake threshold exceeded — abort this tick
+            }
+        }
+
+        // Drain gPTP + udp non-blocking. timeout_ms=0 means "tell
+        // me what's ready right now"; we already slept inside the
+        // timer's wait_until_deadline. In ptp4l mode the gPTP
+        // helpers are no-ops (gptp_session_ is empty).
+        std::array<pollfd, 2> fds{};
+        size_t const n_fds = build_session_pollfds(fds);
+        ::poll(fds.data(), n_fds, /*timeout_ms*/ 0);
+
+        auto const now_steady = std::chrono::steady_clock::now();
+        bool const synced = gptp_synced();
+        for (size_t i = 0; i < n_fds; ++i) {
+            if ((fds[i].revents & POLLIN) == 0) {
+                continue;
+            }
+            if (gptp_dispatch_if_owned(fds[i].fd, now_steady)) {
+                continue;
+            }
+            if (fds[i].fd == udp_.get()) {
+                drain_rx(codec_, rx_ctx, synced);
+            }
+        }
+        gptp_periodic_tick(now_steady);
+        tai_sample_tick(monotonic_raw_ns());
+
+        if (tx_interval_ns > 0 && synced) {
+            // Use the bridge's live master-clock reading, not
+            // event.scheduled_time. realtime::Timer's scheduled_time
+            // is anchored to adapter.now_ns() at run_loop start and
+            // increments by period_ns each tick, but that anchor
+            // doesn't track mid-run clock steps (the gPTP slave's
+            // clock_settime fallback for large initial offsets
+            // bypasses the bridge offset; ptp4l-fed PHC step is
+            // similar). The live read is always in the current
+            // time domain — at the cost of a clock read per send,
+            // we get correct PT values even after a discontinuity.
+            // The TX cadence cursor stays in the master (bridge-now)
+            // domain. The stamped PT, however, MUST go through the same
+            // WireClock+mraw path that RX (ctx.clock.wire_ns(rx_mraw)) and
+            // the gps-tai training sampler (master_clock_.wire_ns(mraw))
+            // use. Stamping it from consume_master_ns()/bridge->now_ns()
+            // instead diverges from master_clock_.wire_ns(mraw) by a large,
+            // PHC-epoch-dependent constant that does NOT cancel in fwd+rev
+            // (it produced an impossible negative cross-site RTT on a-e —
+            // see ptpclient_tai_translator_test tx_must_share_rx_master_source).
+            // In master mode clock_.wire_ns == master_clock_.wire_ns, so
+            // this also makes RT-mode TX match the portable polling path
+            // (send_packet, which already stamps via ctx.clock.wire_ns).
+            int64_t const sched_gptp_ns = consume_master_ns();
+            if (sched_gptp_ns >= next_tx_gptp_ns_) {
+                send_packet_at_gptp(codec_, tx_ctx, sequence_, clock_.wire_ns(monotonic_raw_ns()));
+                next_tx_gptp_ns_ += tx_interval_ns;
+            }
+        }
+
+        // Duration check gated on the same conditions as the wake
+        // check; either stop or sync loss mid-callback suppresses
+        // the duration trip.
+        if (monitor_ptr != nullptr && tripwire_start_ns != 0 && !stop.stop_requested() && gptp_synced()) {
+            (void)observe_duration_and_handle_tripwire(*monitor_ptr, event, tripwire_start_ns);
+        }
+    }
+
     /// Templated body of run_realtime: builds the realtime::Timer,
     /// spawns the reporter thread, idle-waits for stop. The adapter
     /// type encodes which clock source drives the timer (gptp-slave
@@ -914,81 +1006,7 @@ class Session
         using ClockT = typename AdapterT::clock_type;
         auto callback = [this, &tx_ctx, &rx_ctx, tx_interval_ns, monitor_ptr, &stop](
                             TimerEvent<ClockT> const& event, statusbar::stats::AtomicWakeStats::Snapshot const& /*stats*/) {
-            // Suppress the tripwire if either:
-            //   - stop flag is set (shutdown drain may be slow / blocked),
-            //   - master clock isn't synced (mid-run sync loss invalidates
-            //     the bridge mapping, so wake error becomes meaningless
-            //     until sync re-acquires).
-            // Wake check at entry, duration check at exit; either gate
-            // closing mid-callback short-circuits the duration trip.
-            int64_t tripwire_start_ns = 0;
-            if (monitor_ptr != nullptr && !stop.stop_requested() && gptp_synced()) {
-                tripwire_start_ns = observe_wake_and_handle_tripwire(*monitor_ptr, event);
-                if (tripwire_start_ns == 0) {
-                    return;  // wake threshold exceeded — abort this tick
-                }
-            }
-
-            // Drain gPTP + udp non-blocking. timeout_ms=0 means "tell
-            // me what's ready right now"; we already slept inside the
-            // timer's wait_until_deadline. In ptp4l mode the gPTP
-            // helpers are no-ops (gptp_session_ is empty).
-            std::array<pollfd, 2> fds{};
-            size_t const n_fds = build_session_pollfds(fds);
-            ::poll(fds.data(), n_fds, /*timeout_ms*/ 0);
-
-            auto const now_steady = std::chrono::steady_clock::now();
-            bool const synced = gptp_synced();
-            for (size_t i = 0; i < n_fds; ++i) {
-                if ((fds[i].revents & POLLIN) == 0) {
-                    continue;
-                }
-                if (gptp_dispatch_if_owned(fds[i].fd, now_steady)) {
-                    continue;
-                }
-                if (fds[i].fd == udp_.get()) {
-                    drain_rx(codec_, rx_ctx, synced);
-                }
-            }
-            gptp_periodic_tick(now_steady);
-            tai_sample_tick(monotonic_raw_ns());
-
-            if (tx_interval_ns > 0 && synced) {
-                // Use the bridge's live master-clock reading, not
-                // event.scheduled_time. realtime::Timer's scheduled_time
-                // is anchored to adapter.now_ns() at run_loop start and
-                // increments by period_ns each tick, but that anchor
-                // doesn't track mid-run clock steps (the gPTP slave's
-                // clock_settime fallback for large initial offsets
-                // bypasses the bridge offset; ptp4l-fed PHC step is
-                // similar). The live read is always in the current
-                // time domain — at the cost of a clock read per send,
-                // we get correct PT values even after a discontinuity.
-                // The TX cadence cursor stays in the master (bridge-now)
-                // domain. The stamped PT, however, MUST go through the same
-                // WireClock+mraw path that RX (ctx.clock.wire_ns(rx_mraw)) and
-                // the gps-tai training sampler (master_clock_.wire_ns(mraw))
-                // use. Stamping it from consume_master_ns()/bridge->now_ns()
-                // instead diverges from master_clock_.wire_ns(mraw) by a large,
-                // PHC-epoch-dependent constant that does NOT cancel in fwd+rev
-                // (it produced an impossible negative cross-site RTT on a-e —
-                // see ptpclient_tai_translator_test tx_must_share_rx_master_source).
-                // In master mode clock_.wire_ns == master_clock_.wire_ns, so
-                // this also makes RT-mode TX match the portable polling path
-                // (send_packet, which already stamps via ctx.clock.wire_ns).
-                int64_t const sched_gptp_ns = consume_master_ns();
-                if (sched_gptp_ns >= next_tx_gptp_ns_) {
-                    send_packet_at_gptp(codec_, tx_ctx, sequence_, clock_.wire_ns(monotonic_raw_ns()));
-                    next_tx_gptp_ns_ += tx_interval_ns;
-                }
-            }
-
-            // Duration check gated on the same conditions as the wake
-            // check; either stop or sync loss mid-callback suppresses
-            // the duration trip.
-            if (monitor_ptr != nullptr && tripwire_start_ns != 0 && !stop.stop_requested() && gptp_synced()) {
-                (void)observe_duration_and_handle_tripwire(*monitor_ptr, event, tripwire_start_ns);
-            }
+            realtime_tick(event, tx_ctx, rx_ctx, tx_interval_ns, monitor_ptr, stop);
         };
 
         Timer<AdapterT> timer{tcfg, std::move(callback), std::move(adapter)};
