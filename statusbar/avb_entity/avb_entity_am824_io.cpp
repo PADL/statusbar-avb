@@ -66,7 +66,7 @@ namespace {
 class StreamRxHandler : public net::Pollable
 {
   public:
-    StreamRxHandler(std::string_view interface_name, ieee::Eui48 const& group, AvbEntityAm824IO* owner)
+    StreamRxHandler(std::string_view interface_name, ieee::Eui48 const& group, ListenerStreams* owner)
         : owner_{owner}
     {
         // Join the stream multicast group; the NIC's multicast hash filter
@@ -79,21 +79,15 @@ class StreamRxHandler : public net::Pollable
     }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
+    [[nodiscard]] auto socket() noexcept -> net::RawnetContext* { return &sock_; }
 
     [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
 
-    void on_ready(int64_t now_ns) override
-    {
-        ieee::Eui48 src{};
-        ieee::Eui48 dst{};
-        while (true) {
-            auto const r = sock_.recv(&src, &dst, buf_);
-            if (!r || *r <= 0) {
-                break;
-            }
-            owner_->on_stream_rx_frame({buf_.data(), static_cast<size_t>(*r)}, now_ns);
-        }
-    }
+    // Reactor path: stamp RX frames with the media-timer gPTP (current_gptp_ns()). The
+    // batch drain lives in ListenerStreams::drain_rx so the optional RT RX timer calls
+    // the same code with its own wake time. The reactor's monotonic now_ns is ignored --
+    // the tally + deserialize need gPTP.
+    void on_ready(int64_t /*reactor_now_ns*/) override { owner_->drain_rx(owner_->current_gptp_ns()); }
 
     void tick(int64_t /*now_ns*/) override {}
 
@@ -101,8 +95,7 @@ class StreamRxHandler : public net::Pollable
 
   private:
     net::RawnetContext sock_{};
-    std::array<uint8_t, 2048> buf_{};
-    AvbEntityAm824IO* owner_;
+    ListenerStreams* owner_;
 };
 
 }  // namespace
@@ -348,17 +341,42 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         stream_dest_mac_ = s->stream_dest_mac;
     }
     talker_out_.emplace(sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), PRESENTATION_OFFSET_NS);
-    listener_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
+    listener_.am824_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
 
     // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
     // our own stream frames on this host.
     (void)stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
 
-    // Receive port: join the stream multicast group and decode incoming AM824.
-    auto rx = std::make_unique<StreamRxHandler>(config_.interface_name, stream_dest_mac_, this);
+    // Receive port: join the stream multicast group; the shared ListenerStreams decodes
+    // + tallies incoming AM824 (STREAM_INPUT health counters). Same handler shape as
+    // AvbEntityAudioIO: a thin socket owner delegating the batch drain to drain_rx.
+    auto rx = std::make_unique<StreamRxHandler>(config_.interface_name, stream_dest_mac_, &listener_);
     if (rx->valid()) {
-        reactor.add(std::move(rx));
+        listener_.rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
+        if (config_.stream_rx_rt_timer) {
+            rt_rx_handler_ = std::move(rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
+        } else {
+            reactor.add(std::move(rx));  // default: drained on the shared reactor thread
+        }
     }
+
+    // Listener connect/disconnect -> MSRP reserve + join/leave the talker's multicast
+    // group on the RX socket. Wired as the acmp_listener connection callbacks.
+    host_.components().acmp_listener.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
+            listener_.on_listener_connected(stream_index, stream_id, dest_mac);
+        },
+        [this](uint16_t stream_index) { listener_.on_listener_disconnected(stream_index); });
+
+    // AECP GET_COUNTERS: expose the IEEE 1722.1 STREAM_INPUT health counters
+    // (Clause 7.4.42) for our AM824 listener stream.
+    host_.components().aem_handler.set_get_counters(
+        [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
+            if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+                return listener_.fill_stream_input_counters(descriptor_index, valid, counters);
+            }
+            return false;
+        });
 
     return success();
 }
@@ -387,9 +405,9 @@ void AvbEntityAm824IO::print_state() const
         host_.components().acmp_talker.connection_count(0),
         channels_,
         stream_tx_packets_,
-        stream_rx_packets_.load(std::memory_order_relaxed),
-        stream_rx_samples_.load(std::memory_order_relaxed),
-        stream_rx_bad_.load(std::memory_order_relaxed));
+        listener_.am824_rx_packets_.load(),
+        listener_.am824_rx_samples_.load(),
+        listener_.am824_rx_bad_.load());
 }
 
 //
@@ -453,6 +471,10 @@ void AvbEntityAm824IO::on_timeout(TimePoint time)
 
 void AvbEntityAm824IO::process_audio(TimePoint time)
 {
+    // Publish this media-timer wake's gPTP time for the listener RX tally (the reactor /
+    // RX-timer path reads it as the "now" for the STREAM_INPUT LATE/EARLY classification).
+    last_gptp_ns_.store(static_cast<uint64_t>(time.time_since_epoch().count()), std::memory_order_relaxed);
+
     // Source: generate the per-channel sine into the interleaved buffer.
     for (size_t i = 0; i < SAMPLES_PER_PACKET; ++i) {
         for (size_t ch = 0; ch < channels_; ++ch) {
@@ -509,37 +531,6 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
     size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
     (void)stream_tx_.send(&stream_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len});
     ++stream_tx_packets_;
-}
-
-void AvbEntityAm824IO::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t now_ns)
-{
-    if (!listener_in_ || frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
-        return;
-    }
-    if (frame[0] != avtp::AvtpSubtype::iec_61883_iidc) {
-        return;  // not an IEC 61883/AM824 stream frame
-    }
-
-    avtp::Am824Pdu pdu{};
-    span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
-        stream_rx_bad_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-    std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
-    uint64_t samples_this = 0;
-    avtp::am824_deserialize_mbla(
-        *listener_in_,
-        pdu,
-        audio,
-        static_cast<uint64_t>(now_ns),
-        [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
-            samples_this = s.size();  // identical across channels
-        });
-
-    stream_rx_packets_.fetch_add(1, std::memory_order_relaxed);
-    stream_rx_samples_.fetch_add(samples_this, std::memory_order_relaxed);
 }
 
 void AvbEntityAm824IO::configure_filter(double const freq_hz, double const gain_db, double const q)

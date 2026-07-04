@@ -11,6 +11,7 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
@@ -90,6 +91,17 @@ struct AvbEntityAm824IOConfig
 
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
+
+    /// MEDIA_LOCKED detector tolerance in ns (STREAM_INPUT health counters). See
+    /// AvbEntityAudioIOConfig::lock_tolerance_ns.
+    uint32_t lock_tolerance_ns{5'000};
+
+    /// Drain the AM824 stream RX on a dedicated SCHED_FIFO timer (its own isolated
+    /// core) instead of the shared reactor -- see AvbEntityAudioIOConfig::stream_rx_rt_timer.
+    /// Off (default) = reactor path.
+    bool stream_rx_rt_timer{false};
+    int stream_rx_cpu_affinity{2};     ///< isolated core for the RX timer (media timer = 3)
+    uint32_t stream_rx_period_us{50};  ///< RX drain tick
 };
 
 /// Audio processing callback type
@@ -240,12 +252,13 @@ class AvbEntityAm824IO
     /// @param time Current PTP-synchronized time point for packet timestamping
     auto process_audio(TimePoint time) -> void;
 
-    /// Decode one received AVTP AM824 stream frame. Called from the stream RX
-    /// handler on the reactor thread; meters packets/samples. Non-AM824 or
-    /// invalid frames are ignored.
-    /// @param frame  The received Ethernet payload (AVTP header onward)
-    /// @param now_ns Arrival time in nanoseconds
-    void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t now_ns);
+    /// Batch-drain the AM824 RX socket, stamping frames with @p wake_gptp_ns. Called
+    /// from the tool's dedicated SCHED_FIFO RX timer when stream_rx_rt_timer is set; a
+    /// no-op when the RX handler is on the reactor instead. Mirrors AvbEntityAudioIO.
+    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t
+    {
+        return (rt_rx_handler_ != nullptr) ? listener_.drain_rx(wake_gptp_ns) : 0;
+    }
 
     /// Set custom audio processing callback (in addition to biquad filter)
     /// @param callback Function called with interleaved N-channel samples for processing
@@ -328,18 +341,29 @@ class AvbEntityAm824IO
     /// Talker per-stream serialization state (DBC, timestamps, sequence).
     std::optional<avtp::Am824StreamOutputContext> talker_out_{};
 
-    /// Listener per-stream deserialization state.
-    std::optional<avtp::Am824StreamInputContext> listener_in_{};
+    /// gPTP-domain wake time published by process_audio (media-timer thread), read by
+    /// the listener RX tally (reactor / RX-timer thread) as the "now" for the
+    /// STREAM_INPUT LATE/EARLY classification. Declared before listener_.
+    std::atomic<uint64_t> last_gptp_ns_{0};
+
+    /// The shared RX path: owns the AM824 deserialize context, the IEEE 1722.1
+    /// STREAM_INPUT health counters, and the borrowed RX socket. Counting-only here
+    /// (sink=nullptr) -- this entity's process_audio generates its own tone independent
+    /// of RX. Declared after config_ + host_ (components) + last_gptp_ns_.
+    ListenerStreams listener_{config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, nullptr};
+
+    /// The stream RX socket handler. Default: moved into the reactor by start(). With
+    /// stream_rx_rt_timer set it is kept HERE (owning the socket) + drained by the
+    /// tool's SCHED_FIFO RX timer via drain_stream_rx(). Base type so the concrete
+    /// handler stays private to the .cpp.
+    std::unique_ptr<net::Pollable> rt_rx_handler_{};
 
     /// Resolved stream destination MAC (from ACMP talker stream 0).
     ieee::Eui48 stream_dest_mac_{};
 
-    /// Stream data-plane counters. tx is touched only on the PTP thread; rx
-    /// counters are atomic (written on the reactor thread, read for status).
+    /// TX packet counter (PTP thread only). RX packet/sample/health counters now live
+    /// in listener_ (STREAM_INPUT counters + am824_rx_* data-plane counters).
     uint64_t stream_tx_packets_{0};
-    std::atomic<uint64_t> stream_rx_packets_{0};
-    std::atomic<uint64_t> stream_rx_samples_{0};
-    std::atomic<uint64_t> stream_rx_bad_{0};
 
     //
     // Packet Handling
