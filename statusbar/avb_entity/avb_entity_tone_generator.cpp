@@ -141,14 +141,6 @@ class ToneGenDescriptorHandler : public nanoavb::DescriptorStorageHandler
     std::optional<ieee::Eui48> iface_mac_;
 };
 
-auto make_adp_config() -> AdpAdvertiserConfig
-{
-    AdpAdvertiserConfig adp_config{};
-    adp_config.valid_time = 31;                                        // 62 seconds
-    adp_config.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
-    return adp_config;
-}
-
 /// Globally-unique IEEE 1722 stream_id from the talker's NIC MAC (high 6 bytes)
 /// plus a per-stream index in the low byte.
 auto stream_id_for(ieee::Eui48 const& base_mac, uint16_t index) -> ieee::Eui64
@@ -200,7 +192,7 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     std::pmr::memory_resource* memory_resource)
     : config_{std::move(config)}  // Talker streams: 3 (AM824+AAF+CRF) for All, 2 (AAF+CRF) for AafCrf, 1 (AAF)
     // for AafOnly. 4 max listeners each, 0 listener streams (talker-only).
-    , host_{std::move(handler), make_adp_config(), (streams == StreamSet::All ? size_t{3} : (streams == StreamSet::AafCrf ? size_t{2} : size_t{1})), 4, 0}
+    , host_{std::move(handler), default_adp_advertiser_config(), (streams == StreamSet::All ? size_t{3} : (streams == StreamSet::AafCrf ? size_t{2} : size_t{1})), 4, 0}
     , has_am824_{streams == StreamSet::All}
     , has_crf_{streams == StreamSet::All || streams == StreamSet::AafCrf}
     , aaf_idx_{streams == StreamSet::All ? AAF_STREAM_INDEX : uint16_t{0}}

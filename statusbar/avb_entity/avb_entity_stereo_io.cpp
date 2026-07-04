@@ -67,21 +67,12 @@ using namespace statusbar::nanoavb;
 // Constructor / Destructor
 //
 
-// ADP advertiser configuration for this entity (valid_time + reannounce).
-static auto make_adp_config() -> AdpAdvertiserConfig
-{
-    AdpAdvertiserConfig adp_config{};
-    adp_config.valid_time = 31;                                        // 62 seconds
-    adp_config.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
-    return adp_config;
-}
-
 AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     // Build the control plane host in place from the hand-built model: 1 talker
     // stream (4 max listeners), 1 listener stream. create_entity_model() reads
     // config_ (constructed first); the host's NanoAvbComponents is non-movable.
     : config_{std::move(config)}
-    , host_{create_entity_model(), make_adp_config(), 1, 4, 1}
+    , host_{create_entity_model(), default_adp_advertiser_config(), 1, 4, 1}
 {
     // Configure biquad filters for both channels
     configure_filter(config_.filter_freq_hz, config_.filter_gain_db, config_.filter_q);

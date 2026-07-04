@@ -165,14 +165,6 @@ class AudioIODescriptorHandler : public nanoavb::DescriptorStorageHandler
     std::optional<ieee::Eui48> iface_mac_;
 };
 
-auto make_adp_config() -> AdpAdvertiserConfig
-{
-    AdpAdvertiserConfig adp_config{};
-    adp_config.valid_time = 31;                                        // 62 seconds
-    adp_config.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
-    return adp_config;
-}
-
 /// Derive a stream id from the entity id, with the low byte set to the stream
 /// index so the two talker streams have distinct ids.
 // Derive a globally-unique IEEE 1722 stream_id from the talker's NIC MAC (high 6
@@ -233,7 +225,7 @@ AvbEntityAudioIO::AvbEntityAudioIO(
     std::pmr::memory_resource* memory_resource)
     : config_{std::move(config)}  // 3 talker streams (AM824, AAF, CRF), 4 max listeners each; 2 listener streams.
     // Symbol-aware: the host serves descriptors through the handler (retains the blob).
-    , host_{std::move(handler), make_adp_config(), 3, 4, 2}
+    , host_{std::move(handler), default_adp_advertiser_config(), 3, 4, 2}
     , channels_{channels}
     , mem_resource_{memory_resource}
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)

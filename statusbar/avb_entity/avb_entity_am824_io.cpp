@@ -130,15 +130,6 @@ class Am824IODescriptorHandler : public nanoavb::DescriptorStorageHandler
 };
 }  // namespace
 
-/// ADP advertiser configuration for this entity (valid_time + reannounce).
-static auto make_adp_config() -> AdpAdvertiserConfig
-{
-    AdpAdvertiserConfig adp_config{};
-    adp_config.valid_time = 31;                                        // 62 seconds
-    adp_config.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
-    return adp_config;
-}
-
 //
 // Factory method
 //
@@ -185,7 +176,7 @@ AvbEntityAm824IO::AvbEntityAm824IO(
     // listener stream. Symbol-aware: the host serves descriptors through the handler
     // (retains the blob); NanoAvbComponents is non-movable, built in place.
     : config_{std::move(config)}
-    , host_{std::move(handler), make_adp_config(), 1, 4, 1}
+    , host_{std::move(handler), default_adp_advertiser_config(), 1, 4, 1}
     , channels_{channels}
     , mem_resource_{memory_resource}
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)

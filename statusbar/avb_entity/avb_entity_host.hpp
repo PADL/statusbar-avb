@@ -66,6 +66,17 @@ namespace statusbar::avb_entity {
 
 using statusbar::Status;
 
+/// The default ADP advertiser identity/timing shared by every avb_entity: valid_time 31
+/// (62 s) + a 5 s reannounce interval. All four entities used byte-identical local copies;
+/// this is the single source of truth.
+[[nodiscard]] inline auto default_adp_advertiser_config() noexcept -> nanoavb::AdpAdvertiserConfig
+{
+    nanoavb::AdpAdvertiserConfig cfg{};
+    cfg.valid_time = 31;                                        // 62 seconds
+    cfg.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
+    return cfg;
+}
+
 /// The shared AVB entity control plane: state machines + NanoAvbComponents + net
 /// handlers + lifecycle. Owned by a concrete entity (composition). Non-copyable and
 /// non-movable (NanoAvbComponents pins itself), so build it in place in the entity's
