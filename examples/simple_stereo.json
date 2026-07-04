@@ -1,7 +1,11 @@
 {
   "entity": {
-    "vendor": "Statusbar",
-    "model": "Statusbar Stereo",
+    "entity_id": "0x0000000000000001",
+    "model_id": "0x0000000000000001",
+    "name": "Simple Stereo Device",
+    "firmware": "1.0.0",
+    "vendor": "Example Vendor",
+    "model": "Stereo I/O",
     "capabilities": [
       "AEM_SUPPORTED",
       "CLASS_A_SUPPORTED",
@@ -23,10 +27,11 @@
     },
     "configurations": [
       {
-        "name": "Stereo",
+        "name": "Default",
         "streams_in": [
           {
-            "name": "StreamInput",
+            "name": "Input",
+            "symbol": "STREAM_INPUT_0",
             "format": "0x00A0020860000200",
             "flags": [
               "CLASS_A"
@@ -35,7 +40,8 @@
         ],
         "streams_out": [
           {
-            "name": "StreamOutput",
+            "name": "Output",
+            "symbol": "STREAM_OUTPUT_0",
             "format": "0x00A0020860000200",
             "flags": [
               "CLASS_A"
@@ -44,35 +50,29 @@
         ],
         "audio_units": [
           {
-            "name": "AudioUnit",
+            "name": "Main",
             "rates": [
-              48000
+              44100,
+              48000,
+              96000
             ],
             "input_ports": [
               {
                 "clusters": [
                   {
-                    "name": "InputCluster",
-                    "channels": 2
+                    "name": "Left In",
+                    "symbol": "INPUT_LEFT",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Right In",
+                    "symbol": "INPUT_RIGHT",
+                    "channels": 1
                   }
                 ],
                 "maps": [
-                  {
-                    "mappings": [
-                      {
-                        "stream": 0,
-                        "stream_ch": 0,
-                        "cluster": 0,
-                        "cluster_ch": 0
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 1,
-                        "cluster": 0,
-                        "cluster_ch": 1
-                      }
-                    ]
-                  }
+                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
+                  { "stream": 0, "stream_ch": 1, "cluster": 1, "cluster_ch": 0 }
                 ]
               }
             ],
@@ -80,27 +80,17 @@
               {
                 "clusters": [
                   {
-                    "name": "OutputCluster",
-                    "channels": 2
+                    "name": "Left Out",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Right Out",
+                    "channels": 1
                   }
                 ],
                 "maps": [
-                  {
-                    "mappings": [
-                      {
-                        "stream": 0,
-                        "stream_ch": 0,
-                        "cluster": 0,
-                        "cluster_ch": 0
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 1,
-                        "cluster": 0,
-                        "cluster_ch": 1
-                      }
-                    ]
-                  }
+                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
+                  { "stream": 0, "stream_ch": 1, "cluster": 1, "cluster_ch": 0 }
                 ]
               }
             ]

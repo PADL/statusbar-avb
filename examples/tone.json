@@ -1,7 +1,7 @@
 {
   "entity": {
     "vendor": "Statusbar",
-    "model": "Statusbar AVB Tone Generator",
+    "name": "Statusbar Tone Generator",
     "capabilities": [
       "AEM_SUPPORTED",
       "CLASS_A_SUPPORTED",
@@ -22,32 +22,39 @@
     "configurations": [
       {
         "name": "ToneGen",
+        "strings": [
+          "Statusbar Tone Generator"
+        ],
         "streams_out": [
           {
             "name": "StreamOutputAM824",
             "format": "0x00A0040860000800",
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "localized_description": 65535
           },
           {
             "name": "StreamOutputAAF",
-            "format": "0x020702200200C000",
+            "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "localized_description": 65535
           },
           {
             "name": "StreamOutputCRF",
             "format": "0x041060010000BB80",
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "localized_description": 65535
           }
         ],
         "audio_units": [
           {
             "name": "AudioUnit",
+            "localized_description": 65535,
             "rates": [
               96000
             ],
@@ -56,124 +63,38 @@
                 "clusters": [
                   {
                     "name": "OutputCluster",
+                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
                 "maps": [
-                  {
-                    "mappings": [
-                      {
-                        "stream": 0,
-                        "stream_ch": 0,
-                        "cluster": 0,
-                        "cluster_ch": 0
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 1,
-                        "cluster": 0,
-                        "cluster_ch": 1
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 2,
-                        "cluster": 0,
-                        "cluster_ch": 2
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 3,
-                        "cluster": 0,
-                        "cluster_ch": 3
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 4,
-                        "cluster": 0,
-                        "cluster_ch": 4
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 5,
-                        "cluster": 0,
-                        "cluster_ch": 5
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 6,
-                        "cluster": 0,
-                        "cluster_ch": 6
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 7,
-                        "cluster": 0,
-                        "cluster_ch": 7
-                      }
-                    ]
-                  }
+                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
+                  { "stream": 0, "stream_ch": 1, "cluster": 0, "cluster_ch": 1 },
+                  { "stream": 0, "stream_ch": 2, "cluster": 0, "cluster_ch": 2 },
+                  { "stream": 0, "stream_ch": 3, "cluster": 0, "cluster_ch": 3 },
+                  { "stream": 0, "stream_ch": 4, "cluster": 0, "cluster_ch": 4 },
+                  { "stream": 0, "stream_ch": 5, "cluster": 0, "cluster_ch": 5 },
+                  { "stream": 0, "stream_ch": 6, "cluster": 0, "cluster_ch": 6 },
+                  { "stream": 0, "stream_ch": 7, "cluster": 0, "cluster_ch": 7 }
                 ]
               },
               {
                 "clusters": [
                   {
                     "name": "OutputCluster",
+                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
                 "maps": [
-                  {
-                    "mappings": [
-                      {
-                        "stream": 0,
-                        "stream_ch": 0,
-                        "cluster": 0,
-                        "cluster_ch": 0
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 1,
-                        "cluster": 0,
-                        "cluster_ch": 1
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 2,
-                        "cluster": 0,
-                        "cluster_ch": 2
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 3,
-                        "cluster": 0,
-                        "cluster_ch": 3
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 4,
-                        "cluster": 0,
-                        "cluster_ch": 4
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 5,
-                        "cluster": 0,
-                        "cluster_ch": 5
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 6,
-                        "cluster": 0,
-                        "cluster_ch": 6
-                      },
-                      {
-                        "stream": 0,
-                        "stream_ch": 7,
-                        "cluster": 0,
-                        "cluster_ch": 7
-                      }
-                    ]
-                  }
+                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
+                  { "stream": 0, "stream_ch": 1, "cluster": 0, "cluster_ch": 1 },
+                  { "stream": 0, "stream_ch": 2, "cluster": 0, "cluster_ch": 2 },
+                  { "stream": 0, "stream_ch": 3, "cluster": 0, "cluster_ch": 3 },
+                  { "stream": 0, "stream_ch": 4, "cluster": 0, "cluster_ch": 4 },
+                  { "stream": 0, "stream_ch": 5, "cluster": 0, "cluster_ch": 5 },
+                  { "stream": 0, "stream_ch": 6, "cluster": 0, "cluster_ch": 6 },
+                  { "stream": 0, "stream_ch": 7, "cluster": 0, "cluster_ch": 7 }
                 ]
               }
             ]
@@ -182,6 +103,7 @@
         "avb_interfaces": [
           {
             "name": "eth0",
+            "localized_description": 65535,
             "flags": [
               "GPTP_SUPPORTED"
             ]
@@ -190,6 +112,7 @@
         "clock_sources": [
           {
             "name": "Internal",
+            "localized_description": 65535,
             "type": "INTERNAL",
             "location_type": 2,
             "location_index": 0
@@ -198,6 +121,7 @@
         "clock_domains": [
           {
             "name": "ClockDomain",
+            "localized_description": 65535,
             "source": 0,
             "sources": [
               0

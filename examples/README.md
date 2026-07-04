@@ -26,31 +26,54 @@ all three front-ends (JSON, AEMXML, direct Python) feed.
 
 ## Why these exist / migration
 
-Today the shipped `.aem` blobs are generated at build time by the **C++**
-`aem_entity_blob_tool`, whose five model shapes are hardcoded in
-`statusbar/tools/aem_entity_blob_tool.cpp`. These JSON files are the declarative,
-data-driven replacement — one source of truth, editable without recompiling, and able to
-express arbitrary entities (the Python model covers Mixer/Matrix/Selector/Splitter
-descriptors the C++ tool cannot).
+These JSON files are now the **single source of truth** for the shipped `.aem` blobs.
+`statusbar/tools/CMakeLists.txt` generates the runtime `entity_*.bin` blobs from them at
+build time via `aemxml_tool.py json2bin` (`dual.json -> entity_audio.bin`,
+`tone.json -> entity_tone.bin`, `tone-aaf.json -> entity_tone_aaf.bin`,
+`tone-aaf-crf.json -> entity_tone_aaf_crf.bin`). They are declarative, editable without
+recompiling, and able to express arbitrary entities (the Python model covers
+Mixer/Matrix/Selector/Splitter descriptors the C++ tool cannot).
 
-`verify_models.py` (run by the ctest `statusbar/avb/aem_json_models_match_cpp`) compiles
-each model and asserts its **descriptor-type multiset matches the C++ generator's** — the
-regression net that lets the C++ model builders be retired later (the C++
-`DescriptorStorage` *parser* stays; it is the runtime consumer). To flip the switch, point
-the `entity_*.bin` `add_custom_command`s in `statusbar/tools/CMakeLists.txt` at
-`json2bin <model>.json` instead of `aem_entity_blob_tool <flag>`.
+The **C++** `aem_entity_blob_tool` (five hardcoded model shapes in
+`statusbar/tools/aem_entity_blob_tool.cpp`) is retained for two reasons: it is the
+reference the CONTENT-parity test compares against, and it is the fallback blob generator
+when Python is unavailable (or when the CMake option `STATUSBAR_AVB_BLOBS_FROM_JSON` is
+set `OFF` — it defaults `ON`). The C++ `DescriptorStorage` *parser* is the runtime
+consumer in every case.
 
-## Known gaps (see the JSON-model investigation notes)
+`verify_models.py` (ctest `statusbar/avb/aem_json_models_match_cpp`) compiles each model
+and asserts its descriptor **CONTENT** matches the C++ generator's — a multiset of
+`(descriptor_type, descriptor_index, wire_bytes)`, byte-for-byte per descriptor. Fields
+that are not authored content are canonicalized before the comparison (see below and the
+`NEUTRAL_FIELDS` table in `verify_models.py`). The aemxml Python unit suite runs as the
+ctest `statusbar/avb/aemxml_python_unit`.
+
+## Descriptor fields the JSON models cannot byte-match (canonicalized in `verify_models.py`)
+
+The five JSON models CONTENT-match the C++ generator. A handful of per-descriptor bytes
+are *not* authored content and are normalized away before comparison, because they are
+either runtime-populated, pure serialization artifacts, an unordered set in a different
+order, or a field the JSON front-end has no key for:
+
+- **AVB_INTERFACE** `mac_address`, `clock_identity`, and the gPTP BMCA parameters
+  (`priority1`, `clock_class`, `clock_accuracy`, `priority2`, …, `port_number`) — filled
+  at runtime from the live NIC and gPTP. The Python model defaults several of these to
+  `0xFF`, the C++ struct to `0`.
+- **STREAM_INPUT/OUTPUT** the 2021 `redundant_offset` / `number_of_redundant_streams` /
+  `timing` trailer-offset fields (bytes 132–137) — `flatten.py` computes
+  `redundant_offset`; the C++ struct leaves it `0` because the (empty) trailer is not
+  modeled.
+- **CONFIGURATION** the `descriptor_counts` pairs — the same multiset of (type, count)
+  pairs emitted in a different but equally valid order (STRINGS vs CLOCK_DOMAIN position).
+- **CONFIGURATION / AVB_INTERFACE / JACK** `localized_description` — the C++ sets
+  `0xFFFF` (NO_STRING); `json_reader.py` has no per-descriptor key for these three
+  descriptor types, so it stays `0`. (Streams, clusters, audio units, clock sources and
+  clock domains *do* accept a `localized_description` key and are matched exactly — see
+  `tone-aaf-crf.json`, which reproduces the C++ `localized_description = 1..6` STRINGS
+  cross-refs.)
+
+## Known gaps
 
 - **`bin2xml` is a stub** (`aemxml_tool.py`: "full model reconstruction not yet implemented
   (Phase 2)") — so an existing device blob / Hive export can't yet be imported back into
   JSON automatically. Finishing it enables round-trip import/export.
-- **`tone-aaf-crf.json` omits the per-descriptor localized-name references.** The C++
-  model sets `localized_description = 1..6` cross-refs into STRINGS for controller UI
-  labels; `json_reader.py` reads a config-level `strings` array but not a per-descriptor
-  `localized_description` key. The stream/clock/port descriptor set matches; only the
-  name-ref wiring is missing (`model.py` already carries the field — only the reader needs
-  it).
-- Stream formats use literal hex for AM824/CRF; only AAF has a structured
-  (`{"type":"AAF",...}`) encoder in `stream_formats.py`, and that encoder currently
-  disagrees byte-for-byte with the C++ `aaf_8ch_96k_32bit()` layout — worth reconciling.

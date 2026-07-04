@@ -174,7 +174,9 @@ def _serialize_configuration(
         pack_u16(n),  # descriptor_counts_count
         pack_u16(74),  # descriptor_counts_offset
     ]
-    for desc_type, count in descriptor_counts:
+    # Emit the counts in ascending descriptor-type order (the C++ generator + the AEM
+    # convention), so a JSON-generated blob is byte-identical to the C++ one.
+    for desc_type, count in sorted(descriptor_counts):
         parts.append(pack_u16(desc_type))
         parts.append(pack_u16(count))
     return b"".join(parts)
@@ -252,7 +254,11 @@ def _serialize_stream(stream: Stream, desc_type: int, desc_index: int) -> bytes:
     n_formats = len(stream.formats)
     n_redundant = len(stream.redundant_streams)
     formats_offset = 138
-    redundant_offset = formats_offset + 8 * n_formats
+    # The redundant-streams list follows the formats list. With no redundant trailer,
+    # emit 0 (as the C++ generator + the spec convention do) rather than an offset
+    # pointing past the descriptor -- a strict controller (Hive) would otherwise read a
+    # redundant list at that offset and mis-enumerate.
+    redundant_offset = (formats_offset + 8 * n_formats) if n_redundant > 0 else 0
     parts = [
         pack_u16(desc_type),
         pack_u16(desc_index),
