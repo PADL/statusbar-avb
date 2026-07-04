@@ -141,13 +141,10 @@ void GptpSlavePort::on_link_up(TimePoint now)
 {
     port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::LinkUp, now);
 
-    // In Automotive Profile with pre-asCapable, the port jumps
-    // straight past Listening to Uncalibrated. The PortStateSM needs
-    // two AsCapableAcquired events: one to move Initializing →
-    // Listening, another to move Listening → Uncalibrated.
+    // In Automotive Profile with pre-asCapable, the port jumps straight past Listening
+    // to Uncalibrated (see drive_as_capable_acquired for why this is two events).
     if (config_.as_capable_initial) {
-        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
-        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
+        drive_as_capable_acquired(now);
     }
 
     // Arm the first Pdelay interval (if Active).
@@ -475,7 +472,6 @@ void GptpSlavePort::handle_pdelay_resp_follow_up_message(PdelayRespFollowUpMessa
         if (mean_link_delay_ns_ != prev_delay || neighbor_rate_ratio_ != meas->neighbor_rate_ratio) {
             notify_peer_delay_update(mean_link_delay_ns_, neighbor_rate_ratio_);
         }
-
     }
     // Reconcile the PortStateSM to any asCapable change from this exchange:
     // acquired on the first success, or lost if the measured link delay exceeded
@@ -495,15 +491,20 @@ void GptpSlavePort::sync_as_capable(bool const prev_as_capable, TimePoint const 
         return;
     }
     if (now_as_capable) {
-        // false -> true: two events to traverse Initializing -> Listening ->
-        // Uncalibrated (the SM needs both so it does not get stuck in Listening).
-        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
-        port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
+        drive_as_capable_acquired(now);  // false -> true
     } else {
         // true -> false: too many lost Pdelay responses, or the measured link
         // delay exceeded the neighbor-prop-delay threshold (802.1AS 11.2.2).
         port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableLost, now);
     }
+}
+
+void GptpSlavePort::drive_as_capable_acquired(TimePoint const now)
+{
+    // Two events, deliberately: one moves Initializing -> Listening, the second moves
+    // Listening -> Uncalibrated. With only one the port sticks in Listening.
+    port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
+    port_state_sm_.handle_event(port_state_ctx_, port_state_sm::Def::Event::AsCapableAcquired, now);
 }
 
 void GptpSlavePort::handle_announce_message(AnnounceMessage const& msg, TimePoint now)

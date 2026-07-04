@@ -283,6 +283,12 @@ class GptpSlavePort
     void handle_pdelay_req_message(PdelayReqMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
     void handle_pdelay_resp_message(PdelayRespMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
     void handle_pdelay_resp_follow_up_message(PdelayRespFollowUpMessage const& msg, TimePoint now);
+    /// Dispatch the two AsCapableAcquired events the PortStateSM needs to traverse
+    /// Initializing -> Listening -> Uncalibrated on a false->true asCapable edge. A
+    /// single event only reaches Listening; a second is required or the port sticks
+    /// there. Named + centralized so the two call sites don't look like a stray
+    /// duplicate handle_event().
+    void drive_as_capable_acquired(TimePoint now);
     /// Reconcile the PortStateSM to MDPdelayReq's asCapable after a Pdelay event:
     /// given the value BEFORE the event, dispatch AsCapableAcquired (x2) on a
     /// false->true edge or AsCapableLost on true->false. No-op if unchanged.
