@@ -206,10 +206,6 @@ class AvbEntityToneGenerator
     std::pmr::vector<float> audio_buffer_;
     std::pmr::vector<dsp::Oscillator<float>> oscillators_;
 
-    /// AAF reframe FIFO: the media clock is gPTP-paced so a wake yields a variable
-    /// sample count; AM824 sends it directly, AAF must emit constant blocks.
-    AafReframer aaf_reframer_;
-
     /// Latest gPTP time (ns) seen by the media timer (TalkerStreams reads it).
     std::atomic<uint64_t> last_gptp_ns_{0};
 
@@ -220,7 +216,7 @@ class AvbEntityToneGenerator
     /// Stream TX path: qdisc-bypass socket + AM824/AAF/CRF serializers + dest MACs
     /// + TX counters + capture recorder. Declared after the members it references.
     std::unique_ptr<TalkerStreams> talker_{
-        std::make_unique<TalkerStreams>(config_, media_clock_, audio_buffer_, channels_, last_gptp_ns_)};
+        std::make_unique<TalkerStreams>(config_, media_clock_, audio_buffer_, channels_, last_gptp_ns_, mem_resource_)};
 
     /// MAAP handler, allocated only in "maap" stream_address_mode (null otherwise).
     std::unique_ptr<avtp::MaapHandler> maap_handler_;

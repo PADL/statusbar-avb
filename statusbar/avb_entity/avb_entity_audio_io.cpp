@@ -287,10 +287,6 @@ AvbEntityAudioIO::AvbEntityAudioIO(
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)
     , audio_buffer_((SAMPLES_PER_PACKET + 1) * channels, 0.0f, mem_resource_)  // +1: GPS pacing may emit nominal+1
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
-    // AAF reframe FIFO: a wake pushes <= SAMPLES_PER_PACKET+1 frames and then
-    // drains 12-blocks, so the backlog never exceeds ~2 blocks. 4 blocks of
-    // headroom keeps a fixed, allocation-free buffer.
-    , aaf_reframer_(channels, SAMPLES_PER_PACKET, 4, mem_resource_)
 {
     // Per-channel sine source: identical frequency, distinct initial phase.
     double const sr_recip = 1.0 / static_cast<double>(SAMPLE_RATE);
@@ -880,22 +876,10 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
             // AM824 tolerates the GPS-paced variable block count directly.
             talker_->transmit_am824(pts_base, tick.samples);
         }
-        if (tx_aaf) {
-            // AAF must be constant-size: buffer this wake's variable samples and
-            // emit only whole SAMPLES_PER_PACKET blocks (0, 1, or 2+ this wake);
-            // the <block remainder carries to the next wake. Each block's
-            // avtp_timestamp is the jitter-free media-clock time of its first
-            // sample, so the on-wire cadence stays a clean 12-sample step.
-            aaf_reframer_.push(
-                std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
-            aaf_reframer_.drain([this](uint64_t first_index, std::span<float const> block) {
-                talker_->transmit_aaf(media_clock_.timestamp_for(first_index), static_cast<uint16_t>(SAMPLES_PER_PACKET), block);
-            });
-        } else {
-            // Gate closed: drop any partial block so a later reconnect starts
-            // clean (no stale samples / stale timestamps).
-            aaf_reframer_.clear();
-        }
+        // AAF egress (reframer owned by TalkerStreams): buffer the variable-per-wake
+        // samples and emit whole SAMPLES_PER_PACKET blocks; gate closed -> clear.
+        talker_->transmit_aaf_if_due(tick, tx_aaf, samples);
+
         // CRF media-clock PDU (decimation owned by TalkerStreams). The CRF stream
         // gates on ITS OWN ACMP connection + reservation (a listener ACMP-connects and
         // MSRP-reserves the CRF media clock as a separate stream), never on the audio

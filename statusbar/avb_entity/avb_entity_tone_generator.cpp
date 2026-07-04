@@ -209,7 +209,6 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     , mem_resource_{memory_resource}
     , audio_buffer_((SAMPLES_PER_PACKET + 1) * channels, 0.0F, mem_resource_)  // +1: gPTP pacing may emit nominal+1
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
-    , aaf_reframer_(channels, SAMPLES_PER_PACKET, 4, mem_resource_)
 {
     // Per-channel continuous sine: each channel is the next white piano key up
     // from base_midi_note (default C2). Amplitude is shared (config tone level).
@@ -583,15 +582,9 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         if (tx_am824) {
             talker_->transmit_am824(pts_base, tick.samples);
         }
-        if (tx_aaf) {
-            aaf_reframer_.push(
-                std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
-            aaf_reframer_.drain([this](uint64_t first_index, std::span<float const> block) {
-                talker_->transmit_aaf(media_clock_.timestamp_for(first_index), static_cast<uint16_t>(SAMPLES_PER_PACKET), block);
-            });
-        } else {
-            aaf_reframer_.clear();
-        }
+        // AAF egress (reframer owned by TalkerStreams): buffer the variable-per-wake
+        // samples and emit whole SAMPLES_PER_PACKET blocks; gate closed -> clear.
+        talker_->transmit_aaf_if_due(tick, tx_aaf, samples);
 
         // CRF media-clock PDU (decimation owned by TalkerStreams). The CRF stream is a
         // first-class stream that gates on ITS OWN ACMP connection + reservation, never

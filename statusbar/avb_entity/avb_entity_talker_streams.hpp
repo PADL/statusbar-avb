@@ -15,6 +15,7 @@
 /// audio buffer / gPTP-now through references bound at construction (same names
 /// as the entity's members, so the moved method bodies are unchanged).
 
+#include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
@@ -40,12 +41,14 @@ struct TalkerStreams
         ptpclient::MediaClockGenerator const& media_clock,
         std::pmr::vector<float>& audio_buffer,
         size_t const& channels,
-        std::atomic<uint64_t> const& last_gptp_ns) noexcept
+        std::atomic<uint64_t> const& last_gptp_ns,
+        std::pmr::memory_resource* memory_resource) noexcept
         : config_{config}
         , media_clock_{media_clock}
         , audio_buffer_{audio_buffer}
         , channels_{channels}
         , last_gptp_ns_{last_gptp_ns}
+        , aaf_reframer_{channels, SAMPLES_PER_PACKET, 4, memory_resource}
     {}
 
     /// Serialize + send one packet of each stream. Media-timer (SCHED_FIFO) thread.
@@ -66,6 +69,13 @@ struct TalkerStreams
     /// the call entirely when it has no CRF stream).
     void transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open);
 
+    /// Push this tick's @p samples of interleaved audio through the AAF reframer and
+    /// emit whole SAMPLES_PER_PACKET blocks (the variable-per-wake sample count is
+    /// buffered to a constant on-wire cadence). When @p gate_open is false the reframer
+    /// is cleared so a reconnect starts from a clean block boundary. Owns the reframer
+    /// so both entities share one copy of the AAF egress logic.
+    void transmit_aaf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
+
     static constexpr uint32_t SAMPLE_RATE = 96000;
     static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
     static constexpr uint32_t SAMPLES_PER_PACKET = SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC;  // 12
@@ -79,6 +89,9 @@ struct TalkerStreams
     std::atomic<uint64_t> const& last_gptp_ns_;
 
     // Owned TX state.
+    /// AAF reframe FIFO: the media clock is gPTP-paced, so a wake yields a variable
+    /// sample count; AM824 sends it directly, AAF must emit constant-size blocks.
+    AafReframer aaf_reframer_;
     net::RawnetContext stream_tx_{};
     std::optional<avtp::Am824StreamOutputContext> am824_out_{};
     ieee::Eui48 am824_dest_mac_{};

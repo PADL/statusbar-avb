@@ -136,6 +136,26 @@ void TalkerStreams::transmit_crf(uint64_t const base_index)
         &crf_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
 }
 
+void TalkerStreams::transmit_aaf_if_due(
+    ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open, size_t const samples)
+{
+    if (!gate_open) {
+        // Gate closed: drop any partial block so a later reconnect starts clean (no
+        // stale samples / stale timestamps).
+        aaf_reframer_.clear();
+        return;
+    }
+    // AAF must be constant-size: buffer this wake's variable samples and emit only
+    // whole SAMPLES_PER_PACKET blocks (0, 1, or 2+ this wake); the < block remainder
+    // carries to the next wake. Each block's avtp_timestamp is the jitter-free
+    // media-clock time of its first sample, so the on-wire cadence stays a clean step.
+    aaf_reframer_.push(
+        std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
+    aaf_reframer_.drain([this](uint64_t first_index, std::span<float const> block) {
+        transmit_aaf(media_clock_.timestamp_for(first_index), static_cast<uint16_t>(SAMPLES_PER_PACKET), block);
+    });
+}
+
 void TalkerStreams::transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open)
 {
     if (!gate_open) {

@@ -256,13 +256,6 @@ class AvbEntityAudioIO
     // Stream data plane (one TX socket shared by both talkers)
     //
 
-    /// AAF reframe FIFO: the media timer wakes on gPTP but the media clock is
-    /// GPS/TAI-paced, so each wake yields a VARIABLE sample count. AM824 sends
-    /// that directly; AAF must emit a CONSTANT SAMPLES_PER_PACKET, so the
-    /// reframer buffers the GPS-paced samples and drains them in fixed blocks
-    /// (carrying the <block remainder to the next wake).
-    AafReframer aaf_reframer_;
-
     /// Latest gPTP time (ns) seen by the media timer; the RX thread reads it as
     /// "gPTP now" (<=125 us stale) for LATE/EARLY_TIMESTAMP detection, since the
     /// reactor's own clock is CLOCK_MONOTONIC, not gPTP.
@@ -310,7 +303,7 @@ class AvbEntityAudioIO
     /// Declared after the members it references (config_, media_clock_,
     /// audio_buffer_, channels_, last_gptp_ns_). Always allocated.
     std::unique_ptr<TalkerStreams> talker_{
-        std::make_unique<TalkerStreams>(config_, media_clock_, audio_buffer_, channels_, last_gptp_ns_)};
+        std::make_unique<TalkerStreams>(config_, media_clock_, audio_buffer_, channels_, last_gptp_ns_, mem_resource_)};
 
     /// MAAP protocol handler, allocated by acquire_maap_addresses() only in "maap"
     /// stream_address_mode (null otherwise). Owned here so it outlives the
