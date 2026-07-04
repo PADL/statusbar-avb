@@ -207,10 +207,8 @@ auto AvbEntityAm824IO::create(AvbEntityAm824IOConfig config, std::pmr::memory_re
     auto entity =
         std::make_unique<AvbEntityAm824IO>(AvbEntityAm824IO::CreateKey{}, std::move(config), std::move(handler), channels, mr);
 
-    // Step 5: Configure filter and set talker stream ID
+    // Step 5: Configure filter
     entity->configure_filter(entity->config_.filter_freq_hz, entity->config_.filter_gain_db, entity->config_.filter_q);
-
-    entity->talker_stream_id_ = entity->config_.entity_id;
 
     return success(std::move(entity));
 }
@@ -340,12 +338,22 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
         stream_dest_mac_ = s->stream_dest_mac;
     }
-    talker_out_.emplace(sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), PRESENTATION_OFFSET_NS);
+    talker_.am824_dest_mac_ = stream_dest_mac_;
+
+    // Deterministic media clock (r=1.0, gPTP-locked): owns the presentation offset and
+    // supplies the smooth avtp_timestamp, so the stream-output context below adds ZERO
+    // extra offset -- the timestamp handed to transmit_am824 is already the final
+    // presentation time.
+    media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
+        .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = PRESENTATION_OFFSET_NS}};
+
+    talker_.am824_out_.emplace(
+        sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), /*presentation_offset_ns=*/0);
     listener_.am824_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
 
     // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
     // our own stream frames on this host.
-    (void)stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
+    (void)talker_.stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
 
     // Receive port: join the stream multicast group; the shared ListenerStreams decodes
     // + tallies incoming AM824 (STREAM_INPUT health counters). Same handler shape as
@@ -359,6 +367,33 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
             reactor.add(std::move(rx));  // default: drained on the shared reactor thread
         }
     }
+
+    // The per-stream transmit gate tracks MSRP Listener Ready + the ACMP connection
+    // count. Re-sets the acmp_talker callbacks wire_stream_callbacks installed for
+    // logging, MERGING the gate publish -- the media timer never reads the reactor-
+    // mutated connection list directly. (Gating is disabled by default for this bench
+    // entity, so the gate is effectively a no-op unless gate_talker_on_listener is set.)
+    host_.set_on_listener_ready(
+        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+    host_.components().acmp_talker.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+            std::print(
+                "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
+                stream_index,
+                listener_entity_id.to_uint64(),
+                listener_unique_id);
+            gate_.note_acmp_connections(
+                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+        },
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+            std::print(
+                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+                stream_index,
+                listener_entity_id.to_uint64(),
+                listener_unique_id);
+            gate_.note_acmp_connections(
+                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+        });
 
     // Listener connect/disconnect -> MSRP reserve + join/leave the talker's multicast
     // group on the RX socket. Wired as the acmp_listener connection callbacks.
@@ -404,7 +439,7 @@ void AvbEntityAm824IO::print_state() const
         host_.mvrp_joined() ? "Joined" : "NotJoined",
         host_.components().acmp_talker.connection_count(0),
         channels_,
-        stream_tx_packets_,
+        talker_.am824_tx_packets_,
         listener_.am824_rx_packets_.load(),
         listener_.am824_rx_samples_.load(),
         listener_.am824_rx_bad_.load());
@@ -494,43 +529,27 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
         audio_callback_(std::span{audio_buffer_}, SAMPLES_PER_PACKET);
     }
 
-    // Transmit: stream continuously to the talker's multicast destination.
-    // process_audio() only runs when the media timer fires, which (with the
-    // linuxptp driver) only happens while the PTP bridge is healthy — i.e. we
-    // have a usable clock. We deliberately do NOT gate on the announce-based
-    // supervisor lock (talker_engine_ctx_.send_allowed): loss of gPTP Announces
-    // must not stop transmission. A proper "stop after prolonged sync loss"
-    // gate (drift-budget / asCapable model) is future work — see the
-    // gptp-sync-loss-drift-budget design note.
-    if (!talker_out_ || stream_tx_.fd() < 0) {
-        return;
+    // Transmit via the shared TalkerStreams path. process_audio() only runs when the
+    // media timer fires, which (with the linuxptp driver) only happens while the PTP
+    // bridge is healthy — i.e. we have a usable clock. This entity deliberately does
+    // NOT gate on the supervisor lock: loss of gPTP Announces must not stop
+    // transmission (gate_talker_on_listener defaults false, so should_transmit is
+    // always true). A proper "stop after prolonged sync loss" gate (drift-budget /
+    // asCapable model) is future work — see the gptp-sync-loss-drift-budget note.
+    auto const gptp_now = static_cast<uint64_t>(time.time_since_epoch().count());
+
+    // Advance the deterministic media clock (r=1.0, gPTP-locked). first_index anchors
+    // the smooth presentation timestamp used for the transmitted packet.
+    auto const tick = media_clock_.advance(gptp_now, 1.0, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+    uint64_t const pts = media_clock_.timestamp_for(tick.first_index);
+
+    // Steady-clock now for the MSRP-ready grace window (same clock note_listener_ready
+    // stamps last-ready with); decide the gate once per wake.
+    int64_t const now_steady_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (gate_.should_transmit(0, now_steady_ns)) {
+        talker_.transmit_am824(pts, static_cast<uint32_t>(SAMPLES_PER_PACKET));
     }
-
-    auto const now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
-
-    static constexpr size_t MAX_FRAME =
-        avtp::Am824Pdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
-    std::array<uint8_t, MAX_FRAME> frame{};
-
-    avtp::Am824Pdu pdu{};
-    pdu.init(talker_out_->stream_id, static_cast<uint8_t>(channels_), avtp::Am824SampleRate::rate_96_khz);
-
-    std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
-    size_t const audio_bytes = avtp::am824_serialize_mbla(
-        *talker_out_, pdu, payload, static_cast<uint8_t>(SAMPLES_PER_PACKET), now_ns, [this](uint8_t ch, std::span<float> dest) {
-            for (size_t s = 0; s < dest.size(); ++s) {
-                dest[s] = audio_buffer_[(s * channels_) + ch];
-            }
-        });
-    if (audio_bytes == 0) {
-        return;
-    }
-
-    // Prepend the 32-byte AM824 header (am824_serialize_mbla filled `pdu`).
-    span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
-    size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
-    (void)stream_tx_.send(&stream_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len});
-    ++stream_tx_packets_;
 }
 
 void AvbEntityAm824IO::configure_filter(double const freq_hz, double const gain_db, double const q)

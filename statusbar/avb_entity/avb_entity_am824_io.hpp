@@ -12,6 +12,8 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
@@ -22,6 +24,7 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
@@ -91,6 +94,13 @@ struct AvbEntityAm824IOConfig
 
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
+
+    /// Gate transmit on an admitted downstream (ACMP connection + MSRP Listener Ready).
+    /// DEFAULT FALSE (unlike audio/stereo/tone which default true): the AM824 bench
+    /// entity deliberately streams ungated so it transmits its test tone with no
+    /// controller connected. False keeps should_transmit always-true, preserving the
+    /// prior always-on TX behavior.
+    bool gate_talker_on_listener{false};
 
     /// MEDIA_LOCKED detector tolerance in ns (STREAM_INPUT health counters). See
     /// AvbEntityAudioIOConfig::lock_tolerance_ns.
@@ -334,16 +344,9 @@ class AvbEntityAm824IO
     // Stream data plane (AVTP AM824)
     //
 
-    /// AVTP stream transmit socket (used from the PTP timer thread). Opened with
-    /// PACKET_QDISC_BYPASS so our own egress is not re-received on this host.
-    net::RawnetContext stream_tx_{};
-
-    /// Talker per-stream serialization state (DBC, timestamps, sequence).
-    std::optional<avtp::Am824StreamOutputContext> talker_out_{};
-
     /// gPTP-domain wake time published by process_audio (media-timer thread), read by
     /// the listener RX tally (reactor / RX-timer thread) as the "now" for the
-    /// STREAM_INPUT LATE/EARLY classification. Declared before listener_.
+    /// STREAM_INPUT LATE/EARLY classification. Declared before listener_ + talker_.
     std::atomic<uint64_t> last_gptp_ns_{0};
 
     /// The shared RX path: owns the AM824 deserialize context, the IEEE 1722.1
@@ -361,22 +364,34 @@ class AvbEntityAm824IO
     /// Resolved stream destination MAC (from ACMP talker stream 0).
     ieee::Eui48 stream_dest_mac_{};
 
-    /// TX packet counter (PTP thread only). RX packet/sample/health counters now live
-    /// in listener_ (STREAM_INPUT counters + am824_rx_* data-plane counters).
-    uint64_t stream_tx_packets_{0};
-
     //
-    // Packet Handling
+    // Stream data plane TX (shared TalkerStreams + gate + media clock)
     //
 
-    /// Talker sequence number
-    uint8_t talker_sequence_num_{0};
+    /// Media clock for TX presentation timestamps (r=1.0, gPTP-locked). Advanced once
+    /// per media-timer wake in process_audio. Declared before talker_ (bound by ref).
+    ptpclient::MediaClockGenerator media_clock_{};
 
-    /// Talker data block count
-    uint8_t talker_dbc_{0};
+    /// Shared TX path (96 kHz AM824 via TalkerStreamsConfig). Declared after config_/
+    /// media_clock_/audio_buffer_/channels_/last_gptp_ns_/mem_resource_ (all bound by
+    /// reference). TX packet count now lives in talker_.am824_tx_packets_.
+    TalkerStreams talker_{
+        TalkerStreamsConfig{
+            .sample_rate = SAMPLE_RATE,
+            .crf_timestamp_interval = 96,
+            .crf_timestamps_per_packet = 1,
+            .vlan_id = config_.vlan_id,
+            .stream_pcp = 3},
+        media_clock_,
+        audio_buffer_,
+        channels_,
+        last_gptp_ns_,
+        mem_resource_};
 
-    /// Talker stream ID (derived from entity ID)
-    ieee::Eui64 talker_stream_id_{};
+    /// Per-stream transmit gate (ACMP connection + MSRP Listener Ready). Gating is
+    /// disabled by default (gate_talker_on_listener=false) so TX stays always-on.
+    /// After host_.
+    TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 };
 
 }  // namespace statusbar::avb_entity
