@@ -896,31 +896,11 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
             // clean (no stale samples / stale timestamps).
             aaf_reframer_.clear();
         }
-        // CRF media-clock PDU, decimated to its declared rate. One PDU carries
-        // crf_timestamps_per_packet timestamps, each spaced sample_stride =
-        // interval * SAMPLE_RATE / CRF_BASE_FREQUENCY of our 96 kHz samples, so a PDU
-        // spans (ts_per_pkt * sample_stride) samples = pkts_per_crf audio packets. At
-        // the Milan 48 kHz/interval-96/1-ts format that is 192 samples = every 16
-        // audio packets -> 500 PDU/s, matching what Milan CRF inputs expect.
-        // The CRF stream gates on ITS OWN ACMP connection + reservation (a listener
-        // ACMP-connects and MSRP-reserves the CRF media clock as a separate stream),
-        // never on the audio streams' gate.
-        if (talker_should_transmit(CRF_STREAM_INDEX, now_steady_ns)) {
-            uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY);
-            uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) /
-                static_cast<uint32_t>(SAMPLES_PER_PACKET);
-            if (pkts_per_crf == 0) {
-                pkts_per_crf = 1;
-            }
-            if (crf_decim_ == 0) {
-                // Re-base to the live media-clock position each PDU so CRF timestamps
-                // track gPTP-now, not the (possibly long-past) media-clock anchor.
-                talker_->transmit_crf(crf_aligned_base(tick.first_index, sample_stride));
-            }
-            crf_decim_ = static_cast<uint16_t>((crf_decim_ + 1U) % pkts_per_crf);
-        } else {
-            crf_decim_ = 0;  // gate closed: next emission starts a fresh PDU phase
-        }
+        // CRF media-clock PDU (decimation owned by TalkerStreams). The CRF stream
+        // gates on ITS OWN ACMP connection + reservation (a listener ACMP-connects and
+        // MSRP-reserves the CRF media clock as a separate stream), never on the audio
+        // streams' gate.
+        talker_->transmit_crf_if_due(tick, talker_should_transmit(CRF_STREAM_INDEX, now_steady_ns));
     }
 }
 

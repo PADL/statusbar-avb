@@ -263,10 +263,6 @@ class AvbEntityAudioIO
     /// (carrying the <block remainder to the next wake).
     AafReframer aaf_reframer_;
 
-    /// Stream 2: CRF media-clock talker context + destination MAC. Driven by the
-    /// same GPS-locked media clock as the audio; carries no audio, no listener.
-    uint16_t crf_decim_{0};  ///< audio-packet counter to decimate CRF emission to its PDU rate
-
     /// Latest gPTP time (ns) seen by the media timer; the RX thread reads it as
     /// "gPTP now" (<=125 us stale) for LATE/EARLY_TIMESTAMP detection, since the
     /// reactor's own clock is CLOCK_MONOTONIC, not gPTP.

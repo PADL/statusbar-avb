@@ -57,7 +57,19 @@ struct TalkerStreams
     /// not the anchor, regardless of when transmission (re)starts.
     void transmit_crf(uint64_t base_index);
 
+    /// Emit this tick's CRF PDU when @p gate_open, decimated to the declared CRF rate
+    /// (one PDU per pkts_per_crf audio packets). Re-bases to the live media-clock
+    /// position each PDU so timestamps track gPTP-now. When @p gate_open is false the
+    /// decimation phase resets so the next emission starts a fresh PDU. Owns the
+    /// decimation counter so both entities share one copy of this logic; the caller
+    /// supplies only the per-stream gate decision (and, for the tone generator, skips
+    /// the call entirely when it has no CRF stream).
+    void transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open);
+
     static constexpr uint32_t SAMPLE_RATE = 96000;
+    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
+    static constexpr uint32_t SAMPLES_PER_PACKET = SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC;  // 12
+    static constexpr uint32_t CRF_BASE_FREQUENCY = 48000;
 
     // References into the owning entity (bound at construction).
     AvbEntityAudioIOConfig const& config_;
@@ -76,6 +88,9 @@ struct TalkerStreams
     ieee::Eui48 crf_dest_mac_{};
     uint64_t am824_tx_packets_{0};
     uint64_t aaf_tx_packets_{0};
+    /// CRF decimation phase: transmit one PDU every pkts_per_crf audio packets. Reset
+    /// to 0 whenever the CRF gate is closed so a reconnect starts a fresh PDU.
+    uint16_t crf_decim_{0};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the socket egress tap can stamp the captured frame with the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};

@@ -136,4 +136,27 @@ void TalkerStreams::transmit_crf(uint64_t const base_index)
         &crf_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
 }
 
+void TalkerStreams::transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open)
+{
+    if (!gate_open) {
+        crf_decim_ = 0;  // gate closed: next emission starts a fresh PDU phase
+        return;
+    }
+    // One PDU carries crf_timestamps_per_packet timestamps, each spaced sample_stride =
+    // interval * SAMPLE_RATE / CRF_BASE_FREQUENCY of our 96 kHz samples, so a PDU spans
+    // (ts_per_pkt * sample_stride) samples = pkts_per_crf audio packets (e.g. the Milan
+    // 48 kHz/interval-96/1-ts format -> 192 samples = every 16 packets -> 500 PDU/s).
+    uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY);
+    uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) / SAMPLES_PER_PACKET;
+    if (pkts_per_crf == 0) {
+        pkts_per_crf = 1;
+    }
+    if (crf_decim_ == 0) {
+        // Re-base to the live media-clock position each PDU so CRF timestamps track
+        // gPTP-now, not the (possibly long-past) media-clock anchor.
+        transmit_crf(crf_aligned_base(tick.first_index, sample_stride));
+    }
+    crf_decim_ = static_cast<uint16_t>((crf_decim_ + 1U) % pkts_per_crf);
+}
+
 }  // namespace statusbar::avb_entity
