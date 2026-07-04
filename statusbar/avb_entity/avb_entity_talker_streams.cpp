@@ -115,7 +115,7 @@ void TalkerStreams::transmit_crf(uint64_t const base_index)
     // speaks. With a 48 kHz CRF base and 96 kHz audio, each declared CRF event spans
     // SAMPLE_RATE/base (= 2) audio samples, so the emitted timestamp VALUES stay
     // spaced at interval/base seconds regardless of the base we advertise.
-    uint32_t const sample_stride = crf_sample_stride(interval, crf_out_->base_frequency);
+    uint32_t const sample_stride = crf_sample_stride(interval, crf_out_->base_frequency, config_.sample_rate);
 
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (64 * avtp::CrfPdu::TIMESTAMP_SIZE);
     std::array<uint8_t, MAX_FRAME> frame{};
@@ -152,7 +152,7 @@ void TalkerStreams::transmit_aaf_if_due(
     aaf_reframer_.push(
         std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
     aaf_reframer_.drain([this](uint64_t first_index, std::span<float const> block) {
-        transmit_aaf(media_clock_.timestamp_for(first_index), static_cast<uint16_t>(SAMPLES_PER_PACKET), block);
+        transmit_aaf(media_clock_.timestamp_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
     });
 }
 
@@ -166,8 +166,8 @@ void TalkerStreams::transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit con
     // interval * SAMPLE_RATE / CRF_BASE_FREQUENCY of our 96 kHz samples, so a PDU spans
     // (ts_per_pkt * sample_stride) samples = pkts_per_crf audio packets (e.g. the Milan
     // 48 kHz/interval-96/1-ts format -> 192 samples = every 16 packets -> 500 PDU/s).
-    uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY);
-    uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) / SAMPLES_PER_PACKET;
+    uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY, config_.sample_rate);
+    uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) / samples_per_packet_;
     if (pkts_per_crf == 0) {
         pkts_per_crf = 1;
     }

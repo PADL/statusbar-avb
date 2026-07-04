@@ -16,7 +16,6 @@
 /// as the entity's members, so the moved method bodies are unchanged).
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
-#include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
@@ -34,10 +33,22 @@
 
 namespace statusbar::avb_entity {
 
+/// The subset of an entity config that TalkerStreams needs, passed by value so any
+/// talker entity (96 kHz or 48 kHz) can drive the shared TX path without depending on
+/// a concrete entity config. Destructured at the call site (mirrors ListenerStreams).
+struct TalkerStreamsConfig
+{
+    uint32_t sample_rate;                ///< stream sample rate (Hz), e.g. 96000 or 48000
+    uint16_t crf_timestamp_interval;     ///< CRF events per timestamp (CRF base-freq domain)
+    uint16_t crf_timestamps_per_packet;  ///< CRF timestamps per CRF PDU
+    uint16_t vlan_id;                    ///< AVB VLAN id
+    uint8_t stream_pcp;                  ///< AVB priority code point
+};
+
 struct TalkerStreams
 {
     TalkerStreams(
-        AvbEntityAudioIOConfig const& config,
+        TalkerStreamsConfig const& config,
         ptpclient::MediaClockGenerator const& media_clock,
         std::pmr::vector<float>& audio_buffer,
         size_t const& channels,
@@ -48,7 +59,8 @@ struct TalkerStreams
         , audio_buffer_{audio_buffer}
         , channels_{channels}
         , last_gptp_ns_{last_gptp_ns}
-        , aaf_reframer_{channels, SAMPLES_PER_PACKET, 4, memory_resource}
+        , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
+        , aaf_reframer_{channels, samples_per_packet_, 4, memory_resource}
     {}
 
     /// Serialize + send one packet of each stream. Media-timer (SCHED_FIFO) thread.
@@ -76,17 +88,19 @@ struct TalkerStreams
     /// so both entities share one copy of the AAF egress logic.
     void transmit_aaf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
 
-    static constexpr uint32_t SAMPLE_RATE = 96000;
+    /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
+    /// sample_rate/8000 (12 @ 96k, 6 @ 48k) -- a runtime value now (samples_per_packet_),
+    /// not a compile-time constant, so the block reframes correctly at either rate.
     static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
-    static constexpr uint32_t SAMPLES_PER_PACKET = SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC;  // 12
     static constexpr uint32_t CRF_BASE_FREQUENCY = 48000;
 
-    // References into the owning entity (bound at construction).
-    AvbEntityAudioIOConfig const& config_;
+    // References / values (bound at construction).
+    TalkerStreamsConfig config_;  ///< destructured entity config (rate + CRF/VLAN/PCP), by value
     ptpclient::MediaClockGenerator const& media_clock_;
     std::pmr::vector<float>& audio_buffer_;
     size_t const& channels_;
     std::atomic<uint64_t> const& last_gptp_ns_;
+    uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
 
     // Owned TX state.
     /// AAF reframe FIFO: the media clock is gPTP-paced, so a wake yields a variable
@@ -114,13 +128,14 @@ struct TalkerStreams
 // CRF timestamp math (pure, socket-free -- unit-testable in isolation).
 // ---------------------------------------------------------------------------
 
-/// Spacing, in media-clock (SAMPLE_RATE) samples, between consecutive CRF
+/// Spacing, in media-clock (@p sample_rate) samples, between consecutive CRF
 /// timestamps. The DECLARED interval is in CRF base-frequency events; one such
-/// event spans SAMPLE_RATE/base_frequency audio samples. Returns 0 iff
+/// event spans sample_rate/base_frequency audio samples. Returns 0 iff
 /// base_frequency is 0 (degenerate config).
-[[nodiscard]] constexpr auto crf_sample_stride(uint16_t interval, uint32_t base_frequency) noexcept -> uint32_t
+[[nodiscard]] constexpr auto crf_sample_stride(uint16_t interval, uint32_t base_frequency, uint32_t sample_rate) noexcept
+    -> uint32_t
 {
-    return base_frequency == 0 ? 0U : static_cast<uint32_t>(interval) * TalkerStreams::SAMPLE_RATE / base_frequency;
+    return base_frequency == 0 ? 0U : static_cast<uint32_t>(interval) * sample_rate / base_frequency;
 }
 
 /// The media-clock base index for the next CRF PDU: the live media-clock

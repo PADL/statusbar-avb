@@ -25,7 +25,6 @@
 /// are atomic. Reads ACMP connection state + the gate-enable flag through references
 /// bound at construction.
 
-#include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/itc/itc_published.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 
@@ -38,8 +37,8 @@ namespace statusbar::avb_entity {
 
 struct TalkerGate
 {
-    TalkerGate(AvbEntityAudioIOConfig const& config, nanoavb::NanoAvbComponents const& components) noexcept
-        : config_{config}
+    TalkerGate(bool gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept
+        : gate_enabled_{gate_enabled}
         , components_{components}
     {
         // Stream Started defaults true: a stream is admitted once ACMP-connected +
@@ -90,8 +89,8 @@ struct TalkerGate
     /// every other stream.
     [[nodiscard]] auto should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
-    // --- References (bound at construction) ------------------------------------
-    AvbEntityAudioIOConfig const& config_;
+    // --- References / values (bound at construction) ---------------------------
+    bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
     nanoavb::NanoAvbComponents const& components_;  ///< reads acmp_talker connection state
 
     // --- Owned gate state (cross-thread) ---------------------------------------

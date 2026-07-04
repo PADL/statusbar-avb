@@ -232,11 +232,9 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     }
     auto& comps = (*result)->components();
 
-    // Gate under test: a gated config over the entity's live components. Reads the
+    // Gate under test: gating enabled, over the entity's live components. Reads the
     // shared acmp_talker connection state; owns its own listener-ready/started flags.
-    AvbEntityAudioIOConfig gate_cfg{};
-    gate_cfg.gate_talker_on_listener = true;
-    TalkerGate gate{gate_cfg, comps};
+    TalkerGate gate{/*gate_enabled=*/true, comps};
 
     constexpr uint16_t k_aaf = AvbEntityToneGenerator::AAF_STREAM_INDEX;
     constexpr uint16_t k_crf = AvbEntityToneGenerator::CRF_STREAM_INDEX;

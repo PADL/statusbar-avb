@@ -195,7 +195,7 @@ class AvbEntityToneGenerator
     uint16_t crf_idx_{CRF_STREAM_INDEX};
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
-    TalkerGate gate_{config_, host_.components()};
+    TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 
     size_t channels_{0};
 
@@ -215,8 +215,18 @@ class AvbEntityToneGenerator
 
     /// Stream TX path: qdisc-bypass socket + AM824/AAF/CRF serializers + dest MACs
     /// + TX counters + capture recorder. Declared after the members it references.
-    std::unique_ptr<TalkerStreams> talker_{
-        std::make_unique<TalkerStreams>(config_, media_clock_, audio_buffer_, channels_, last_gptp_ns_, mem_resource_)};
+    std::unique_ptr<TalkerStreams> talker_{std::make_unique<TalkerStreams>(
+        TalkerStreamsConfig{
+            .sample_rate = SAMPLE_RATE,
+            .crf_timestamp_interval = config_.crf_timestamp_interval,
+            .crf_timestamps_per_packet = config_.crf_timestamps_per_packet,
+            .vlan_id = config_.vlan_id,
+            .stream_pcp = config_.stream_pcp},
+        media_clock_,
+        audio_buffer_,
+        channels_,
+        last_gptp_ns_,
+        mem_resource_)};
 
     /// MAAP handler, allocated only in "maap" stream_address_mode (null otherwise).
     std::unique_ptr<avtp::MaapHandler> maap_handler_;

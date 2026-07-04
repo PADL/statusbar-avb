@@ -28,7 +28,7 @@ namespace {
 // audio samples; interval 96 -> stride 192 samples.
 constexpr uint16_t kInterval = 96;
 constexpr uint32_t kCrfBase = 48'000;
-constexpr uint32_t kAudioRate = avb_entity::TalkerStreams::SAMPLE_RATE;  // 96'000
+constexpr uint32_t kAudioRate = 96'000;  // 96 kHz audio
 
 // Advance a fresh media clock by `ticks` packets of `nominal` samples at r=1.0
 // and return the resulting live first_index. Anchors on the first advance.
@@ -47,9 +47,10 @@ auto advance_media_clock(ptpclient::MediaClockGenerator& mc, uint64_t t0_ns, uin
 
 TEST(crf_math, sample_stride)
 {
-    EXPECT_EQ(crf_sample_stride(kInterval, kCrfBase), 192U);  // 96 * 96000 / 48000
-    EXPECT_EQ(crf_sample_stride(1, 96'000), 1U);
-    EXPECT_EQ(crf_sample_stride(96, 0), 0U);  // degenerate: base 0 -> 0, no div-by-zero
+    EXPECT_EQ(crf_sample_stride(kInterval, kCrfBase, kAudioRate), 192U);  // 96 * 96000 / 48000
+    EXPECT_EQ(crf_sample_stride(1, 96'000, kAudioRate), 1U);
+    EXPECT_EQ(crf_sample_stride(96, 0, kAudioRate), 0U);              // degenerate: base 0 -> 0, no div-by-zero
+    EXPECT_EQ(crf_sample_stride(kInterval, kCrfBase, 48'000U), 96U);  // 48 kHz audio: 96 * 48000 / 48000
 }
 
 TEST(crf_math, aligned_base_floors_to_stride)
@@ -66,7 +67,7 @@ TEST(crf_math, fill_matches_media_clock_timestamps)
 {
     ptpclient::MediaClockGenerator mc{};
     uint64_t const base = advance_media_clock(mc, /*t0_ns=*/1'000'000'000ULL, /*nominal=*/12, /*ticks=*/100);
-    uint32_t const stride = crf_sample_stride(kInterval, kCrfBase);
+    uint32_t const stride = crf_sample_stride(kInterval, kCrfBase, kAudioRate);
     uint64_t const aligned = crf_aligned_base(base, stride);
 
     constexpr uint16_t n_ts = 6;
@@ -91,7 +92,7 @@ TEST(crf_math, live_base_tracks_now_not_anchor)
     ptpclient::MediaClockGenerator mc{};
     // 8000 ticks * 12 samples / 96 kHz = 1.0 s of media time elapsed.
     uint64_t const base = advance_media_clock(mc, /*t0_ns=*/1'000'000'000ULL, /*nominal=*/12, /*ticks=*/8000);
-    uint32_t const stride = crf_sample_stride(kInterval, kCrfBase);
+    uint32_t const stride = crf_sample_stride(kInterval, kCrfBase, kAudioRate);
 
     uint64_t const ts_live = mc.timestamp_for(crf_aligned_base(base, stride));
     uint64_t const ts_anchor = mc.timestamp_for(0);  // the old, stale behavior

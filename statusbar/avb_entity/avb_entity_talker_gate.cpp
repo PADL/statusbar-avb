@@ -41,7 +41,7 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
 
 auto TalkerGate::should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
 {
-    if (!config_.gate_talker_on_listener) {
+    if (!gate_enabled_) {
         // Gate disabled: transmit unconditionally. NOTE: this puts the stream on the
         // SR class with NO ACMP connection and NO reservation, which is not AVB-spec
         // compliant -- for bench debugging / free-running reference sources only.
