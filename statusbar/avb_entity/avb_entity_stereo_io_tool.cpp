@@ -133,6 +133,23 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<bool>("dump_stats_on_exit", "Dump timer statistics on exit", config.dump_stats_on_exit, [&](auto v) {
         config.dump_stats_on_exit = v;
     });
+    specs.add<bool>(
+        "stream_rx.rt_timer",
+        "Drain the AM824 stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the shared "
+        "reactor -- deterministic low-latency draining stamps ingress against a fresh gPTP wake time, eliminating "
+        "spurious LATE_TIMESTAMP from reactor scheduling jitter. Default false (reactor); needs a spare isolated core",
+        config.entity.stream_rx_rt_timer,
+        [&](auto v) { config.entity.stream_rx_rt_timer = v; });
+    specs.add<int64_t>(
+        "stream_rx.cpu",
+        "CPU core for the RX timer thread (stream_rx.rt_timer); isolated + distinct from the media timer",
+        static_cast<int64_t>(config.entity.stream_rx_cpu_affinity),
+        [&](auto v) { config.entity.stream_rx_cpu_affinity = static_cast<int>(v); });
+    specs.add<uint64_t>(
+        "stream_rx.period_us",
+        "RX drain tick period in microseconds (stream_rx.rt_timer). Default 50",
+        static_cast<uint64_t>(config.entity.stream_rx_period_us),
+        [&](auto v) { config.entity.stream_rx_period_us = static_cast<uint32_t>((v < 5) ? 5 : ((v > 1000) ? 1000 : v)); });
 
     return specs;
 }
@@ -256,6 +273,44 @@ MainLoopResult run_main_loop(
         return result;
     }
 
+    // ---- Optional dedicated RT RX timer (stream_rx.rt_timer) -------------------
+    // Drain AM824 on its own SCHED_FIFO core so the reactor/control-plane can't delay
+    // RX (which otherwise batch-tallies queued frames against a now-later clock and
+    // reads as spurious LATE_TIMESTAMP). Stats mirror the media timer.
+    itc::TelemetryCounter<int64_t> rx_timer_error_count;
+    itc::TelemetryCounter<uint64_t> rx_frames_drained;
+    itc::Published<int64_t> rx_last_wake_error_ns;
+    itc::Published<int64_t> rx_last_batch;
+
+    int64_t const RX_PERIOD_NS = static_cast<int64_t>(config.entity.stream_rx_period_us) * 1'000;
+    auto rx_timer = ptpclient::make_ptp_timer(
+        *ctx.bridge,
+        RX_PERIOD_NS,
+        [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
+            if (!wake_info) {
+                rx_timer_error_count.add(1);
+                return;
+            }
+            size_t const n = entity.drain_stream_rx(wake_info->actual_time_ns);
+            rx_frames_drained.add(n);
+            rx_last_batch.publish(static_cast<int64_t>(n));
+            rx_last_wake_error_ns.publish(wake_info->error_ns);
+        },
+        ctx.compensation_ns,
+        ctx.enable_realtime,
+        config.entity.stream_rx_cpu_affinity);
+
+    if (config.entity.stream_rx_rt_timer) {
+        if (auto const rs = rx_timer.start(); !rs) {
+            std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
+        } else {
+            std::print(
+                "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick\n",
+                config.entity.stream_rx_cpu_affinity,
+                config.entity.stream_rx_period_us);
+        }
+    }
+
     // Simulate link up on startup
     auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     entity.on_link_up(startup_time);
@@ -339,7 +394,29 @@ MainLoopResult run_main_loop(
                 timer_error_count.load(),
                 timer.recovery_count(),
                 timer.missed_cycles());
+            if (config.entity.stream_rx_rt_timer) {
+                std::print(
+                    stderr,
+                    "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
+                    rx_last_wake_error_ns.load(),
+                    rx_last_batch.load(),
+                    rx_frames_drained.load(),
+                    rx_timer.recovery_count(),
+                    rx_timer.missed_cycles(),
+                    rx_timer_error_count.load());
+            }
         }
+    }
+
+    if (config.entity.stream_rx_rt_timer) {
+        rx_timer.stop();
+        std::print(
+            stderr,
+            "[rx-timer] final: frames_drained={} wake_errors={} recovery={} missed={}\n",
+            rx_frames_drained.load(),
+            rx_timer_error_count.load(),
+            rx_timer.recovery_count(),
+            rx_timer.missed_cycles());
     }
 
     // Stop timer and capture statistics

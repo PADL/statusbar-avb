@@ -234,19 +234,19 @@ TEST(biquad_filter, stereo_processing)
 
     // Fill with DC signal
     for (size_t i = 0; i < SAMPLES; ++i) {
-        buffer[i * 2] = 0.5f;      // Left
-        buffer[i * 2 + 1] = 0.5f;  // Right
+        buffer[i * 2] = 0.5f;        // Left
+        buffer[(i * 2) + 1] = 0.5f;  // Right
     }
 
     // Process
     for (size_t i = 0; i < SAMPLES; ++i) {
         buffer[i * 2] = biquad_left(buffer[i * 2]);
-        buffer[i * 2 + 1] = biquad_right(buffer[i * 2 + 1]);
+        buffer[(i * 2) + 1] = biquad_right(buffer[(i * 2) + 1]);
     }
 
     // Left and right should be equal
     for (size_t i = 0; i < SAMPLES; ++i) {
-        EXPECT_TRUE(approx_equal(buffer[i * 2], buffer[i * 2 + 1], 1e-6f));
+        EXPECT_TRUE(approx_equal(buffer[i * 2], buffer[(i * 2) + 1], 1e-6f));
     }
 }
 
@@ -374,25 +374,24 @@ TEST(stereo_io_audio, process_audio_does_not_crash)
     EXPECT_FALSE(entity.is_running());
 }
 
-TEST(stereo_io_audio, process_audio_invokes_callback)
+TEST(stereo_io_audio, process_audio_no_input_no_callback)
 {
     AvbEntityStereoIOConfig config{};
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
 
-    size_t callback_buf_size = 0;
-    size_t callback_sample_count = 0;
-    entity.set_audio_callback([&](std::span<float> samples, size_t count) {
-        callback_buf_size = samples.size();
-        callback_sample_count = count;
-    });
+    // The loopback is input-driven: the audio callback (and the DSP) run only for
+    // blocks the RX path published to the compensation pipe and whose presentation
+    // time is due. With no received audio the pipe is empty, so process_audio must
+    // do nothing -- the callback never fires.
+    bool callback_invoked = false;
+    entity.set_audio_callback([&](std::span<float> /*samples*/, size_t /*count*/) { callback_invoked = true; });
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     entity.process_audio(now);
 
-    EXPECT_EQ(callback_buf_size, AvbEntityStereoIO::SAMPLES_PER_PACKET * AvbEntityStereoIO::CHANNELS);
-    EXPECT_EQ(callback_sample_count, AvbEntityStereoIO::SAMPLES_PER_PACKET);
+    EXPECT_FALSE(callback_invoked);
 }
 
 //

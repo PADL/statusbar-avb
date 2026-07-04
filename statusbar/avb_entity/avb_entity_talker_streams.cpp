@@ -28,7 +28,11 @@ void TalkerStreams::transmit_am824(uint64_t now_ns, uint32_t samples)
     std::array<uint8_t, MAX_FRAME> frame{};
 
     avtp::Am824Pdu pdu{};
-    pdu.init(am824_out_->stream_id, static_cast<uint8_t>(channels_), avtp::Am824SampleRate::rate_96_khz);
+    // Nominal AM824 rate (CIP FDF) from the configured sample rate: 48 kHz for the stereo
+    // entity, 96 kHz for the audio/tone entities. Hardcoding 96 kHz would mislabel a 48 kHz
+    // stream on the wire; value_or keeps the 96 kHz default for any unmapped rate.
+    auto const am824_rate = avtp::am824_sample_rate_from_hz(config_.sample_rate).value_or(avtp::Am824SampleRate::rate_96_khz);
+    pdu.init(am824_out_->stream_id, static_cast<uint8_t>(channels_), am824_rate);
 
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::am824_serialize_mbla(

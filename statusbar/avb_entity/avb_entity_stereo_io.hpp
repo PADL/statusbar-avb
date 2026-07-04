@@ -10,13 +10,21 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
+#include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_message_pipe.hpp"
+#include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
@@ -29,11 +37,14 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <memory_resource>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace statusbar::avb_entity {
 
@@ -74,6 +85,19 @@ struct AvbEntityStereoIOConfig
 
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
+
+    /// Gate transmit on an admitted downstream (ACMP connection + MSRP Listener Ready).
+    /// See AvbEntityAudioIOConfig::gate_talker_on_listener. Default true.
+    bool gate_talker_on_listener{true};
+
+    /// MEDIA_LOCKED detector tolerance in ns for the STREAM_INPUT health counters.
+    uint32_t lock_tolerance_ns{5'000};
+
+    /// Drain the AM824 stream RX on a dedicated SCHED_FIFO timer (its own isolated
+    /// core) instead of the shared reactor -- see AvbEntityAudioIOConfig::stream_rx_rt_timer.
+    bool stream_rx_rt_timer{false};
+    int stream_rx_cpu_affinity{2};     ///< isolated core for the RX timer (media timer = 3)
+    uint32_t stream_rx_period_us{50};  ///< RX drain tick
 };
 
 /// Audio processing callback type
@@ -131,6 +155,23 @@ class AvbEntityStereoIO
     static constexpr size_t CHANNELS = 2;
     static constexpr size_t SAMPLES_PER_PACKET = 6;
 
+    /// One received packet of interleaved stereo audio, queued for loopback playout.
+    /// POD (trivially copyable) so the lock-free itc pipe carries it by value; its gPTP
+    /// presentation time is the pipe's per-entry activation time, not a field here.
+    struct LoopbackBlock
+    {
+        std::array<float, SAMPLES_PER_PACKET * CHANNELS> samples{};
+    };
+
+    /// Presentation-time compensation buffer for the RX->TX loopback: an itc SPSC
+    /// Timestamped pipe. The RX thread publishes each decoded block at its gPTP
+    /// presentation time; the media-timer thread pops only blocks whose presentation
+    /// time has elapsed (try_consume_due), so the pipe reclocks the source stream onto
+    /// the local media clock -- no FIFO, no cross-thread lock. Capacity spans the
+    /// presentation window (~2 ms @ 125 us = 16 packets; 32 gives headroom).
+    static constexpr size_t LOOPBACK_PIPE_CAPACITY = 32;
+    using LoopbackPipe = itc::MessagePipe<LoopbackBlock, LOOPBACK_PIPE_CAPACITY, itc::Policy::Timestamped>;
+
     /// Construct entity with configuration
     /// @param config Entity configuration including network, stream, and DSP settings
     explicit AvbEntityStereoIO(AvbEntityStereoIOConfig config);
@@ -182,10 +223,23 @@ class AvbEntityStereoIO
     /// @param time Current time point for timeout evaluation
     auto on_timeout(TimePoint time) -> void;
 
-    /// Process one audio packet period
-    /// Called from PTP timer callback at packet rate (8000 Hz for 48 kHz audio)
-    /// @param time Current PTP-synchronized time point for packet timestamping
+    /// Process one audio packet period on the media-timer (SCHED_FIFO) thread: pop the
+    /// loopback blocks now due (their gPTP presentation time has elapsed) from the
+    /// compensation pipe, run each through the DSP biquads, and transmit via TalkerStreams
+    /// (gated). @p time is the media-timer wake (gPTP).
     auto process_audio(TimePoint time) -> void;
+
+    /// Batch-drain the AM824 RX socket, decoding + publishing each block to the loopback
+    /// pipe stamped with @p wake_gptp_ns. Called from the tool's dedicated SCHED_FIFO RX
+    /// timer when stream_rx_rt_timer is set; a no-op when RX is on the reactor instead.
+    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t { return (rt_rx_handler_ != nullptr) ? drain_rx(wake_gptp_ns) : 0; }
+
+    /// Reactor-path RX drain: stamp frames with the media-timer gPTP (last_gptp_ns_).
+    /// Called by the reactor StreamRxHandler when stream_rx_rt_timer is off.
+    auto drain_stream_rx_reactor() -> size_t
+    {
+        return drain_rx(static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed)));
+    }
 
     /// Set custom audio processing callback (in addition to biquad filter)
     /// @param callback Function called with interleaved stereo samples for processing
@@ -222,49 +276,93 @@ class AvbEntityStereoIO
     /// stream 0 so MSRP, ACMP, and the AVTP stream share one identity.
     [[nodiscard]] auto make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo;
 
-    /// Process received AM824 packet through DSP and queue for transmission
-    /// @param packet Raw AM824 packet data received from listener stream
-    /// @param time Receive time point for packet timing
-    auto process_listener_packet(std::span<uint8_t const> packet, TimePoint time) -> void;
+    /// Batch-drain the RX socket: for each AM824 frame, deserialize to interleaved stereo
+    /// samples + their gPTP presentation time, publish the block to the loopback pipe at
+    /// that presentation time, and tally STREAM_INPUT health counters against @p gptp_now_ns.
+    /// Runs on the reactor / RX-timer thread (the pipe's producer). Returns frames drained.
+    auto drain_rx(int64_t gptp_now_ns) -> size_t;
 
-    // Member order optimized to minimize struct padding
-    // (config_ must precede components_ for initialization dependency)
+    /// Feed one decoded packet's inputs to the pure tally_stream_input_packet.
+    void update_stream_input_counters(
+        uint8_t seq, uint32_t avtp_ts, bool tv, bool tu, bool mr, bool format_ok, uint64_t samples_per_ch, int64_t gptp_now_ns);
 
-    /// Configuration
+    /// Fill the GET_COUNTERS bitmap + values for our single STREAM_INPUT (index 0).
+    [[nodiscard]] auto fill_stream_input_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
+        -> bool;
+
+    // --- Members (declaration order carries init dependencies) ------------------
+    /// Configuration (declared first: host_ + talker_ read it).
     AvbEntityStereoIOConfig config_;
 
-    /// Custom audio callback (optional)
+    /// Custom audio callback (optional; runs after the biquads in process_audio).
     AudioProcessCallback audio_callback_;
 
-    /// The reusable AVB control plane: state machines + NanoAvbComponents + net
-    /// handlers + lifecycle. This entity supplies only its single stereo stream +
-    /// DSP and attaches them via host_.components() + the typed hooks. Declared
-    /// after config_ (the model is built from config_ via create_entity_model()).
+    /// The reusable AVB control plane (SMs + NanoAvbComponents + net handlers +
+    /// lifecycle). Declared after config_ (the model is built from config_).
     AvbEntityHost host_;
 
-    //
-    // DSP Processing
-    //
+    /// Channel count (fixed stereo) + DSP memory resource; declared before the buffer
+    /// and TalkerStreams that reference them.
+    size_t channels_{CHANNELS};
+    std::pmr::memory_resource* mem_resource_{std::pmr::get_default_resource()};
 
-    /// Biquad filters (one per channel)
+    /// Interleaved stereo TX scratch (TalkerStreams reads it in transmit_am824). Sized
+    /// SAMPLES_PER_PACKET*CHANNELS in the constructor.
+    std::pmr::vector<float> audio_buffer_{mem_resource_};
+
+    /// gPTP wake time published by process_audio; read by the RX tally for LATE/EARLY.
+    std::atomic<uint64_t> last_gptp_ns_{0};
+
+    /// Media clock for TX presentation timestamps (r=1.0, gPTP-locked -- stereo has no
+    /// separate GPS media clock). Advanced once per media-timer wake.
+    ptpclient::MediaClockGenerator media_clock_{};
+
+    /// Shared TX path (48 kHz via TalkerStreamsConfig). Declared after config_/
+    /// media_clock_/audio_buffer_/channels_/last_gptp_ns_/mem_resource_.
+    TalkerStreams talker_{
+        TalkerStreamsConfig{
+            .sample_rate = SAMPLE_RATE,
+            .crf_timestamp_interval = 48,
+            .crf_timestamps_per_packet = 1,
+            .vlan_id = config_.vlan_id,
+            .stream_pcp = 3},
+        media_clock_,
+        audio_buffer_,
+        channels_,
+        last_gptp_ns_,
+        mem_resource_};
+
+    /// Per-stream transmit gate (ACMP connection + MSRP Listener Ready). After host_.
+    TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
+
+    /// RX AM824 deserialize context (emplaced in start() with the channel count).
+    std::optional<avtp::Am824StreamInputContext> listener_in_{};
+
+    /// IEEE 1722.1 STREAM_INPUT health counters for the single listener stream.
+    StreamInputCounters stream_in_counters_{};
+
+    /// Presentation-time compensation buffer (RX producer -> media-timer consumer).
+    LoopbackPipe loopback_pipe_{};
+
+    /// Borrowed RX socket (owned by the StreamRxHandler) + drain scratch. Set in start().
+    net::RawnetContext* rx_sock_{nullptr};
+    std::array<uint8_t, 2048> rx_buf_{};
+
+    /// The stream RX socket handler. Default: moved into the reactor by start(). With
+    /// stream_rx_rt_timer set it is kept HERE + drained by the tool's RX timer via
+    /// drain_stream_rx(). Base type so the concrete handler stays private to the .cpp.
+    std::unique_ptr<net::Pollable> rt_rx_handler_{};
+
+    /// Resolved stream destination MAC (from ACMP talker stream 0).
+    ieee::Eui48 stream_dest_mac_{};
+
+    /// RX data-plane counters (published for status).
+    itc::TelemetryCounter<uint64_t> rx_packets_{};
+    itc::TelemetryCounter<uint64_t> rx_bad_{};
+
+    // --- DSP -------------------------------------------------------------------
     dsp::BiQuad<float> biquad_left_{};
     dsp::BiQuad<float> biquad_right_{};
-
-    /// Audio processing buffer (interleaved stereo)
-    std::array<float, SAMPLES_PER_PACKET * CHANNELS> audio_buffer_{};
-
-    //
-    // Packet Handling
-    //
-
-    /// Talker sequence number
-    uint8_t talker_sequence_num_{0};
-
-    /// Talker data block count
-    uint8_t talker_dbc_{0};
-
-    /// Talker stream ID (derived from entity ID)
-    ieee::Eui64 talker_stream_id_{};
 };
 
 }  // namespace statusbar::avb_entity

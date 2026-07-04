@@ -75,6 +75,35 @@ static auto make_adp_config() -> AdpAdvertiserConfig
     return adp_config;
 }
 
+namespace {
+
+/// Thin reactor adapter owning the RX socket; delegates the batch drain to the entity
+/// (which decodes + publishes to the loopback pipe). Same shape as the AM824/AudioIO
+/// handlers -- the reactor's monotonic now is ignored; the entity stamps with gPTP.
+class StreamRxHandler : public net::Pollable
+{
+  public:
+    StreamRxHandler(std::string_view interface_name, ieee::Eui48 const& group, AvbEntityStereoIO* owner)
+        : owner_{owner}
+    {
+        (void)sock_.open(interface_name, avtp::AVTP_ETHERTYPE, &group, /*qdisc_bypass=*/false);
+    }
+
+    [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
+    [[nodiscard]] auto socket() noexcept -> net::RawnetContext* { return &sock_; }
+    [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
+
+    void on_ready(int64_t /*reactor_now_ns*/) override { owner_->drain_stream_rx_reactor(); }
+    void tick(int64_t /*now_ns*/) override {}
+    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+
+  private:
+    net::RawnetContext sock_{};
+    AvbEntityStereoIO* owner_;
+};
+
+}  // namespace
+
 AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     // Build the control plane host in place from the hand-built model: 1 talker
     // stream (4 max listeners), 1 listener stream. create_entity_model() reads
@@ -85,8 +114,8 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     // Configure biquad filters for both channels
     configure_filter(config_.filter_freq_hz, config_.filter_gain_db, config_.filter_q);
 
-    // Derive talker stream ID from entity ID (entity_id + unique_id 0x0000)
-    talker_stream_id_ = config_.entity_id;
+    // Size the interleaved TX scratch (TalkerStreams reads it in transmit_am824).
+    audio_buffer_.assign(SAMPLES_PER_PACKET * CHANNELS, 0.0F);
 
     // Post-construction setup that needs config-supplied values.
     auto const& entity = host_.components().entity_model.get_entity();
@@ -255,6 +284,108 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         return status;
     }
     wire_stream_callbacks();
+
+    // --- Stream data plane (one stereo 48 kHz AM824 loopback) ------------------
+    // Resolve the talker stream identity (id + dest MAC) from ACMP stream 0 so the
+    // AVTP stream, MSRP reservation, and ACMP all agree.
+    statusbar::tsn::StreamId sid{};
+    if (auto const* s = host_.components().acmp_talker.get_stream(0); s != nullptr) {
+        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
+        stream_dest_mac_ = s->stream_dest_mac;
+    }
+    talker_.am824_dest_mac_ = stream_dest_mac_;
+
+    // Deterministic media clock (r=1.0, gPTP-locked): supplies the smooth presentation
+    // timestamp for the re-transmitted audio. The stream-output context adds ZERO extra
+    // offset -- the timestamp handed to it is already the final presentation time.
+    media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
+        .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = 1'000'000}};
+
+    // AM824 TX/RX contexts at 48 kHz stereo (single stream; no AAF/CRF).
+    talker_.am824_out_.emplace(
+        sid, avtp::Am824SampleRate::rate_48_khz, static_cast<uint8_t>(CHANNELS), /*presentation_offset_ns=*/0);
+    listener_in_.emplace(avtp::Am824SampleRate::rate_48_khz, static_cast<uint8_t>(CHANNELS));
+
+    // Transmit socket (media-timer egress). qdisc-bypass so we do not re-receive our
+    // own stream frames on this host.
+    (void)talker_.stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
+
+    // Receive port: join the stream multicast group; the entity decodes each AM824 frame
+    // and publishes it to the loopback pipe (the pipe's producer). Same handler shape as
+    // AvbEntityAudioIO / AvbEntityAm824IO.
+    auto rx = std::make_unique<StreamRxHandler>(config_.interface_name, stream_dest_mac_, this);
+    if (rx->valid()) {
+        rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
+        if (config_.stream_rx_rt_timer) {
+            rt_rx_handler_ = std::move(rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
+        } else {
+            reactor.add(std::move(rx));  // default: drained on the shared reactor thread
+        }
+    }
+
+    // The per-stream transmit gate tracks MSRP Listener Ready + the ACMP connection
+    // count. (Re-sets the acmp_talker callbacks wire_stream_callbacks installed for
+    // logging, adding the gate publish -- the media timer never reads the reactor-
+    // mutated connection list directly.)
+    host_.set_on_listener_ready(
+        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+    host_.components().acmp_talker.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+            std::print(
+                "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
+                stream_index,
+                listener_entity_id.to_uint64(),
+                listener_unique_id);
+            gate_.note_acmp_connections(
+                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+        },
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+            std::print(
+                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+                stream_index,
+                listener_entity_id.to_uint64(),
+                listener_unique_id);
+            gate_.note_acmp_connections(
+                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+        });
+
+    // Listener connect/disconnect -> MSRP Listener Ready + join/leave the talker's
+    // multicast group on the RX socket (a talker uses a fresh dest MAC per connection).
+    host_.components().acmp_listener.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
+            tsn::StreamId lsid{};
+            (void)statusbar::tsn::load_unchecked(stream_id.span(), &lsid);
+            auto const result = host_.components().msrp_handler.listener_ready(lsid, sm::Clock::now());
+            bool const joined = rx_sock_ != nullptr && rx_sock_->join_multicast(dest_mac).has_value();
+            std::print(
+                "[acmp] listener stream {} CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}\n",
+                stream_index,
+                dest_mac.to_uint64(),
+                result.has_value() ? "declared" : "failed",
+                joined ? "ok" : "FAILED");
+        },
+        [this](uint16_t stream_index) {
+            if (auto const* stream = host_.components().acmp_listener.get_stream(stream_index); stream != nullptr) {
+                tsn::StreamId lsid{};
+                (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &lsid);
+                (void)host_.components().msrp_handler.listener_withdraw(lsid, sm::Clock::now());
+                if (rx_sock_ != nullptr) {
+                    (void)rx_sock_->leave_multicast(stream->stream_dest_mac);
+                }
+            }
+            std::print("[acmp] listener stream {} DISCONNECTED from talker -> MSRP Listener withdrawn\n", stream_index);
+        });
+
+    // AECP GET_COUNTERS: expose the IEEE 1722.1 STREAM_INPUT health counters
+    // (Clause 7.4.42) for our single AM824 listener stream (index 0).
+    host_.components().aem_handler.set_get_counters(
+        [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
+            if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+                return fill_stream_input_counters(descriptor_index, valid, counters);
+            }
+            return false;
+        });
+
     return success();
 }
 
@@ -274,11 +405,14 @@ auto AvbEntityStereoIO::stop() -> Status
 void AvbEntityStereoIO::print_state() const
 {
     std::print(
-        "State: supervisor={} gptp={} mvrp={} acmp_connections={}\n",
+        "State: supervisor={} gptp={} mvrp={} acmp_connections={} stream_tx={} rx_packets={} rx_bad={}\n",
         state_string(),
         host_.gptp_locked() ? "Locked" : "Unlocked",
         host_.mvrp_joined() ? "Joined" : "NotJoined",
-        host_.components().acmp_talker.connection_count(0));
+        host_.components().acmp_talker.connection_count(0),
+        talker_.am824_tx_packets_,
+        rx_packets_.load(),
+        rx_bad_.load());
 }
 
 //
@@ -342,19 +476,45 @@ void AvbEntityStereoIO::on_timeout(TimePoint time)
 
 void AvbEntityStereoIO::process_audio(TimePoint time)
 {
-    (void)time;
+    auto const gptp_now = static_cast<uint64_t>(time.time_since_epoch().count());
+    // Publish this media-timer wake's gPTP time so the reactor-path RX drain stamps
+    // ingress against it for the STREAM_INPUT LATE/EARLY classification.
+    last_gptp_ns_.store(gptp_now, std::memory_order_relaxed);
 
-    // Process through biquad filters (left and right channels)
-    for (size_t i = 0; i < SAMPLES_PER_PACKET; ++i) {
-        // Left channel (even indices)
-        audio_buffer_[(i * 2)] = biquad_left_(audio_buffer_[(i * 2)]);
-        // Right channel (odd indices)
-        audio_buffer_[(i * 2) + 1] = biquad_right_(audio_buffer_[(i * 2) + 1]);
-    }
+    // Advance the deterministic media clock (r=1.0, gPTP-locked -- stereo has no
+    // separate GPS media clock). first_index anchors the smooth presentation
+    // timestamp used for the re-transmitted packets (jitter-free, offset ahead).
+    auto const tick = media_clock_.advance(gptp_now, 1.0, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+    uint64_t const pts_base = media_clock_.timestamp_for(tick.first_index);
 
-    // Call custom audio callback if set
-    if (audio_callback_) {
-        audio_callback_(std::span{audio_buffer_}, SAMPLES_PER_PACKET);
+    // Steady-clock now for the MSRP-ready grace window (same clock note_listener_ready
+    // stamps last-ready with); decide the gate once per wake.
+    int64_t const now_steady_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    bool const gate_open = gate_.should_transmit(0, now_steady_ns);
+
+    // Reclock every loopback block whose gPTP presentation time has elapsed onto our
+    // local media clock. Both ends run 48 kHz gPTP so the pipe is naturally rate-matched
+    // (typically one due block per wake), but drain ALL due blocks to be safe.
+    while (auto const block = loopback_pipe_.try_consume_due(gptp_now)) {
+        // Copy the interleaved stereo block into the TX scratch (TalkerStreams reads it
+        // in transmit_am824). Layout is [s0L,s0R,s1L,s1R,...].
+        for (size_t i = 0; i < SAMPLES_PER_PACKET * CHANNELS; ++i) {
+            audio_buffer_[i] = block->samples[i];
+        }
+        // Process through biquad filters (even indices = left, odd = right).
+        for (size_t i = 0; i < SAMPLES_PER_PACKET; ++i) {
+            audio_buffer_[(i * 2)] = biquad_left_(audio_buffer_[(i * 2)]);
+            audio_buffer_[(i * 2) + 1] = biquad_right_(audio_buffer_[(i * 2) + 1]);
+        }
+        // Call custom audio callback if set.
+        if (audio_callback_) {
+            audio_callback_(std::span{audio_buffer_}, SAMPLES_PER_PACKET);
+        }
+        // Re-transmit the processed audio, gated on an admitted downstream listener.
+        if (gate_open) {
+            talker_.transmit_am824(pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+        }
     }
 }
 
@@ -374,24 +534,134 @@ void AvbEntityStereoIO::configure_filter(double const freq_hz, double const gain
     biquad_right_.reset();
 }
 
-void AvbEntityStereoIO::process_listener_packet(std::span<uint8_t const> packet, TimePoint time)
+//
+// Stream RX data plane (RX-timer / reactor thread; loopback-pipe producer)
+//
+
+auto AvbEntityStereoIO::drain_rx(int64_t const gptp_now_ns) -> size_t
 {
-    auto const header = avtp::am824_parse_header(packet);
-    if (!header) {
-        return;  // malformed AM824 packet
+    if (rx_sock_ == nullptr || !listener_in_) {
+        return 0;
     }
+    // Drain every queued frame in one pass (arrival rate is 8000/s = 125 us apart; a
+    // 50 us RX-timer tick or a reactor wake sees 0-3 frames). All frames in this pass
+    // are stamped with the caller's fresh gPTP "now".
+    ieee::Eui48 src{};
+    ieee::Eui48 dst{};
+    size_t drained = 0;
+    while (true) {
+        auto const r = rx_sock_->recv(&src, &dst, rx_buf_);
+        if (!r || *r <= 0) {
+            break;
+        }
+        ++drained;
+        std::span<uint8_t const> const frame{rx_buf_.data(), static_cast<size_t>(*r)};
 
-    auto const payload = avtp::am824_get_audio_payload(packet);
-    if (payload.empty()) {
-        return;
+        // Stereo entity carries a single AM824 stream; ignore anything else on the group.
+        if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH || frame[0] != avtp::AvtpSubtype::iec_61883_iidc) {
+            continue;
+        }
+        avtp::Am824Pdu pdu{};
+        span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
+        if (!pdu.is_valid()) {
+            rx_bad_.add(1);
+            update_stream_input_counters(0, 0, false, false, false, /*format_ok=*/false, 0, gptp_now_ns);
+            continue;
+        }
+
+        // Deserialize the interleaved stereo block + its 64-bit gPTP presentation time.
+        std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
+        LoopbackBlock block{};
+        uint64_t base_pts = static_cast<uint64_t>(gptp_now_ns);
+        uint64_t samples_this = 0;
+        avtp::am824_deserialize_mbla(
+            *listener_in_,
+            pdu,
+            audio,
+            static_cast<uint64_t>(gptp_now_ns),
+            [&block, &base_pts, &samples_this](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t /*period*/) {
+                base_pts = pts;
+                samples_this = s.size();
+                if (ch >= CHANNELS) {
+                    return;
+                }
+                size_t const n = (s.size() < SAMPLES_PER_PACKET) ? s.size() : SAMPLES_PER_PACKET;
+                for (size_t i = 0; i < n; ++i) {
+                    block.samples[(i * CHANNELS) + ch] = s[i];
+                }
+            });
+        rx_packets_.add(1);
+        update_stream_input_counters(
+            pdu.stream_header.sequence_num.get(),
+            pdu.avtp_timestamp(),
+            pdu.stream_header.tv(),
+            pdu.stream_header.tu(),
+            pdu.stream_header.mr(),
+            /*format_ok=*/true,
+            samples_this,
+            gptp_now_ns);
+
+        // Hand the block to the media-timer thread at its gPTP presentation time; the
+        // pipe reclocks it onto our local media clock (no FIFO, no lock). A full pipe
+        // (media timer wedged) drops the block rather than blocking the RX thread.
+        (void)loopback_pipe_.try_publish(base_pts, block);
     }
+    return drained;
+}
 
-    auto const samples_per_channel = avtp::am824_deserialize_interleaved(
-        payload, static_cast<uint8_t>(CHANNELS), static_cast<uint8_t>(SAMPLES_PER_PACKET), std::span{audio_buffer_});
+void AvbEntityStereoIO::update_stream_input_counters(
+    uint8_t const seq,
+    uint32_t const avtp_ts,
+    bool const tv,
+    bool const tu,
+    bool const mr,
+    bool const format_ok,
+    uint64_t const samples_per_ch,
+    int64_t const gptp_now_ns)
+{
+    // ts_sparse=true: 61883-6 carries a valid AVTP timestamp only on SYT-bearing
+    // packets, so tv=0 in between is normal (not a TIMESTAMP_NOT_VALID fault).
+    tally_stream_input_packet(
+        stream_in_counters_,
+        seq,
+        avtp_ts,
+        tv,
+        tu,
+        mr,
+        format_ok,
+        samples_per_ch,
+        /*ts_sparse=*/true,
+        static_cast<uint64_t>(gptp_now_ns),
+        config_.lock_tolerance_ns,
+        SAMPLE_RATE);
+}
 
-    if (samples_per_channel > 0) {
-        process_audio(time);
+auto AvbEntityStereoIO::fill_stream_input_counters(
+    uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
+{
+    if (descriptor_index != 0) {
+        return false;
     }
+    auto const& c = stream_in_counters_;
+    auto const relaxed = std::memory_order_relaxed;
+    // IEEE 1722.1 STREAM_INPUT counter bit positions (Clause 7.4.42). out[bit] holds the
+    // value for the bit set in `valid`.
+    auto set = [&](size_t bit, uint32_t v) {
+        valid |= (1U << bit);
+        out[bit] = v;
+    };
+    set(0, c.media_locked.load(relaxed));
+    set(1, c.media_unlocked.load(relaxed));
+    set(3, c.seq_num_mismatch.load(relaxed));
+    set(4, c.media_reset.load(relaxed));
+    set(5, c.timestamp_uncertain.load(relaxed));
+    set(6, c.timestamp_valid.load(relaxed));
+    set(7, c.timestamp_not_valid.load(relaxed));
+    set(8, c.unsupported_format.load(relaxed));
+    set(9, c.late_timestamp.load(relaxed));
+    set(10, c.early_timestamp.load(relaxed));
+    set(11, c.frames_rx.load(relaxed));
+    return true;
 }
 
 }  // namespace statusbar::avb_entity
