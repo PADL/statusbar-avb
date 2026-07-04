@@ -1127,18 +1127,78 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
 
     bool const is_listener_attr = (attr_type == AttributeType::Listener);
 
-    // Pre-compute AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3): byte
-    // count of the VectorAttributes plus the trailing EndMark (2 octets). A run
-    // of length L costs: VectorHeader(2) + FirstValue(attr_length) +
-    // ThreePackedEvents(ceil(L/3)) [+ FourPackedDeclarations(ceil(L/4)) for
-    // Listener]. This run walk MUST match the emit loop below so the length
-    // stays in sync with the bytes actually written.
+    // The byte cost of one emitted run of length L, and the code that actually emits
+    // it, are defined as a pair right here so the size pass and the emit pass below
+    // cannot drift out of sync (the classic "two loops that must match" hazard). A run
+    // costs: VectorHeader(2) + FirstValue(attr_length) + ThreePackedEvents(ceil(L/3))
+    // [+ FourPackedDeclarations(ceil(L/4)) for Listener]. emit_run writes exactly that.
+    auto const run_encoded_size = [&](size_t run_len) -> size_t {
+        return size_t{2} + size_t{attr_length} + mrp::threepacked_octet_count(run_len) +
+            (is_listener_attr ? mrp::fourpacked_octet_count(run_len) : size_t{0});
+    };
+
+    // Emit one VectorAttribute for the run [s, s+run_len): the VectorAttributeHeader
+    // (leave_all_flag | num_values), the run's base FirstValue, the ThreePacked event
+    // octets (one AttributeEvent per value, Mt fillers in the last octet), and -- for
+    // Listener only -- the FourPacked declaration octets (Ignore fillers). Returns
+    // false if any append hit the buffer cap. Must write exactly run_encoded_size(L).
+    auto emit_run = [&](size_t s, size_t run_len, bool leave_all_flag) -> bool {
+        VectorAttributeHeader vh{};
+        vh.set(leave_all_flag, static_cast<uint16_t>(run_len));
+        if (!append_be16(out, vh.vector_header.get())) {
+            return false;
+        }
+        std::array<uint8_t, 64> fv_buf{};  // 34 bytes is the largest (TalkerFailed)
+        auto const fv_span = std::span<uint8_t>(fv_buf.data(), attr_length);
+        (void)store_unchecked(fv_span, records[s].first_value);
+        if (!static_cast<bool>(out.append(std::span<uint8_t const>(fv_span.data(), attr_length)))) {
+            return false;
+        }
+        auto event_at = [&](size_t k) -> AttributeEvent {
+            if (k >= run_len) {
+                return AttributeEvent::Mt;
+            }
+            auto const& rec = records[s + k];
+            bool reg_in = false;
+            if constexpr (requires { rec.registrar_is_in(); }) {
+                reg_in = rec.registrar_is_in();
+            }
+            return detail_msrp::translate_sndmsg(rec.applicant_ctx.send_msg, reg_in);
+        };
+        for (size_t o = 0; o < run_len; o += 3) {
+            if (!append_u8(out, mrp::pack3_events(event_at(o), event_at(o + 1), event_at(o + 2)))) {
+                return false;
+            }
+        }
+        if (is_listener_attr) {
+            auto decl_at = [&](size_t k) -> uint8_t {
+                if (k >= run_len) {
+                    return 0;
+                }
+                auto const& rec = records[s + k];
+                if constexpr (requires { rec.substate; }) {
+                    return static_cast<uint8_t>(rec.substate);
+                } else {
+                    return 0;
+                }
+            };
+            for (size_t o = 0; o < run_len; o += 4) {
+                if (!append_u8(out, mrp::pack4_declarations(decl_at(o), decl_at(o + 1), decl_at(o + 2), decl_at(o + 3)))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // Pre-compute AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3): byte count of
+    // the VectorAttributes plus the trailing EndMark (2 octets), summing run_encoded_size
+    // over the same runs the emit pass will write.
     size_t attr_list_length = size_t{2};  // trailing EndMark
     size_t run_count = 0;
     for (size_t run_len = 0, s = next_run(records, 0, run_len); s < records.size(); s = next_run(records, s + run_len, run_len)) {
         ++run_count;
-        attr_list_length += size_t{2} + size_t{attr_length} + mrp::threepacked_octet_count(run_len) +
-            (is_listener_attr ? mrp::fourpacked_octet_count(run_len) : size_t{0});
+        attr_list_length += run_encoded_size(run_len);
     }
 
     // If no attributes want to tx and we don't need to broadcast a
@@ -1198,59 +1258,10 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
     bool any_vector_emitted = false;
 
     for (size_t run_len = 0, s = next_run(records, 0, run_len); s < records.size(); s = next_run(records, s + run_len, run_len)) {
-        // VectorAttributeHeader (2 bytes): leave_all_flag | num_values=run_len
-        VectorAttributeHeader vh{};
-        vh.set(!leave_all_emitted, static_cast<uint16_t>(run_len));
-        if (!append_be16(out, vh.vector_header.get())) {
+        // The LeaveAll flag rides the first vector emitted.
+        if (!emit_run(s, run_len, !leave_all_emitted)) {
             return any_vector_emitted;
         }
-        // FirstValue: the run's base value. The receiver derives values 1..L-1 by
-        // applying increment_first_value() per the matching ThreePackedEvent.
-        std::array<uint8_t, 64> fv_buf{};  // 34 bytes is the largest (TalkerFailed)
-        auto const fv_span = std::span<uint8_t>(fv_buf.data(), attr_length);
-        (void)store_unchecked(fv_span, records[s].first_value);
-        if (!static_cast<bool>(out.append(std::span<uint8_t const>(fv_span.data(), attr_length)))) {
-            return any_vector_emitted;
-        }
-        // ThreePackedEvents: one AttributeEvent per value, packed 3 per octet
-        // (unused trailing slots in the final octet are Mt fillers).
-        auto event_at = [&](size_t k) -> AttributeEvent {
-            if (k >= run_len) {
-                return AttributeEvent::Mt;
-            }
-            auto const& rec = records[s + k];
-            bool reg_in = false;
-            if constexpr (requires { rec.registrar_is_in(); }) {
-                reg_in = rec.registrar_is_in();
-            }
-            return detail_msrp::translate_sndmsg(rec.applicant_ctx.send_msg, reg_in);
-        };
-        for (size_t o = 0; o < run_len; o += 3) {
-            if (!append_u8(out, mrp::pack3_events(event_at(o), event_at(o + 1), event_at(o + 2)))) {
-                return any_vector_emitted;
-            }
-        }
-        // FourPackedDeclarations (Listener only): one per value, packed 4 per
-        // octet (unused trailing slots are 0 == Ignore fillers).
-        if (is_listener_attr) {
-            auto decl_at = [&](size_t k) -> uint8_t {
-                if (k >= run_len) {
-                    return 0;
-                }
-                auto const& rec = records[s + k];
-                if constexpr (requires { rec.substate; }) {
-                    return static_cast<uint8_t>(rec.substate);
-                } else {
-                    return 0;
-                }
-            };
-            for (size_t o = 0; o < run_len; o += 4) {
-                if (!append_u8(out, mrp::pack4_declarations(decl_at(o), decl_at(o + 1), decl_at(o + 2), decl_at(o + 3)))) {
-                    return any_vector_emitted;
-                }
-            }
-        }
-
         leave_all_emitted = true;
         any_vector_emitted = true;
 
