@@ -23,7 +23,29 @@
 
 namespace statusbar::avb_entity {
 
-void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t now_ns)
+auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
+{
+    if (rx_sock_ == nullptr) {
+        return 0;
+    }
+    // Drain every queued frame in one pass (the arrival rate is 8000/s = 125 us apart;
+    // a 50 us RX-timer tick or a reactor wake sees 0-3 frames). All frames in this pass
+    // share gptp_now_ns -- the caller's fresh gPTP "now".
+    ieee::Eui48 src{};
+    ieee::Eui48 dst{};
+    size_t drained = 0;
+    while (true) {
+        auto const r = rx_sock_->recv(&src, &dst, rx_buf_);
+        if (!r || *r <= 0) {
+            break;
+        }
+        on_stream_rx_frame({rx_buf_.data(), static_cast<size_t>(*r)}, gptp_now_ns);
+        ++drained;
+    }
+    return drained;
+}
+
+void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
 {
     if (frame.empty()) {
         return;
@@ -43,7 +65,8 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
         if (!pdu.is_valid()) {
             am824_rx_bad_.add(1);
-            update_stream_input_counters(AM824_STREAM_INDEX, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true);
+            update_stream_input_counters(
+                AM824_STREAM_INDEX, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
             return;
         }
         std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
@@ -52,7 +75,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             *am824_in_,
             pdu,
             audio,
-            static_cast<uint64_t>(now_ns),
+            static_cast<uint64_t>(gptp_now_ns),
             [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
                 samples_this = s.size();
             });
@@ -67,7 +90,8 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             pdu.stream_header.mr(),
             /*format_ok=*/true,
             samples_this,
-            /*ts_sparse=*/true);  // 61883-6 SYT cadence: tv=0 between SYT packets is normal
+            /*ts_sparse=*/true,  // 61883-6 SYT cadence: tv=0 between SYT packets is normal
+            gptp_now_ns);
 
         // Hand the accepted audio to the RX sink (today the WAN tunnel; the sink
         // decides whether to consume it -- e.g. only when this is the configured
@@ -86,7 +110,8 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         auto pdu_opt = avtp::aaf_parse_header(frame);
         if (!pdu_opt) {
             aaf_rx_bad_.add(1);
-            update_stream_input_counters(AAF_STREAM_INDEX, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false);
+            update_stream_input_counters(
+                AAF_STREAM_INDEX, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
             return;
         }
         std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);
@@ -95,7 +120,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             *aaf_in_,
             *pdu_opt,
             audio,
-            static_cast<uint64_t>(now_ns),
+            static_cast<uint64_t>(gptp_now_ns),
             [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
                 samples_this = s.size();
             });
@@ -110,7 +135,8 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             pdu_opt->mr(),
             /*format_ok=*/true,
             samples_this,
-            /*ts_sparse=*/false);  // AAF timestamps every packet: tv=0 is a real fault
+            /*ts_sparse=*/false,  // AAF timestamps every packet: tv=0 is a real fault
+            gptp_now_ns);
 
         // Hand the accepted audio to the RX sink (today the WAN tunnel). Symmetric
         // to the AM824 path above; the sink ignores it unless AAF is its source.
@@ -144,13 +170,16 @@ void ListenerStreams::update_stream_input_counters(
     bool const mr,
     bool const format_ok,
     uint64_t const samples_per_ch,
-    bool const ts_sparse)
+    bool const ts_sparse,
+    int64_t const gptp_now_ns)
 {
     if (stream_index >= stream_in_counters_.size()) {
         return;
     }
-    // The bookkeeping itself lives in avb_entity_stream_counters.* (unit-tested);
-    // feed it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs).
+    // The bookkeeping itself lives in avb_entity_stream_counters.* (unit-tested); feed
+    // it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs). gptp_now_ns
+    // is the caller's fresh receive time -- the reactor path passes current_gptp_ns()
+    // (the media-timer wake), the RT-timer path passes its own wake time.
     tally_stream_input_packet(
         stream_in_counters_[stream_index],
         seq,
@@ -161,7 +190,7 @@ void ListenerStreams::update_stream_input_counters(
         format_ok,
         samples_per_ch,
         ts_sparse,
-        last_gptp_ns_.load(std::memory_order_relaxed),
+        static_cast<uint64_t>(gptp_now_ns),
         config_.lock_tolerance_ns,
         SAMPLE_RATE);
 }

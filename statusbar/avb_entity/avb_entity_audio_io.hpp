@@ -192,6 +192,14 @@ class AvbEntityAudioIO
     [[nodiscard]] auto flush_tx_pcap() -> Status { return talker_->tx_pcap_recorder_.write_to_file(); }
     [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return talker_->tx_pcap_recorder_.frame_count(); }
 
+    /// Batch-drain the AM824/AAF RX socket, stamping frames with @p wake_gptp_ns. Called
+    /// from the tool's dedicated SCHED_FIFO RX timer when config.stream_rx_rt_timer is
+    /// set (see start()); a no-op when the RX handler is on the reactor instead.
+    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t
+    {
+        return (rt_rx_handler_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
+    }
+
   private:
     /// Attach this entity's STREAM-specific behavior to the host: the MSRP
     /// advertise/withdraw reservations + the talker gate (typed hooks), the ACMP
@@ -296,6 +304,12 @@ class AvbEntityAudioIO
     /// (udptun_). Declared AFTER components_/config_/last_gptp_ns_/udptun_. Always allocated.
     std::unique_ptr<ListenerStreams> listener_{
         std::make_unique<ListenerStreams>(config_, host_.components(), last_gptp_ns_, udptun_.get())};
+
+    /// The stream RX socket handler. In the default path it is moved into the reactor
+    /// by start(); when config.stream_rx_rt_timer is set it is kept HERE (alive, owning
+    /// the socket) and drained by the tool's SCHED_FIFO RX timer via drain_stream_rx().
+    /// Base type so the concrete StreamRxHandler (defined in the .cpp) stays private.
+    std::unique_ptr<net::Pollable> rt_rx_handler_{};
 
     /// The local AVB stream TX path (god-object phase 3): owns the qdisc-bypass TX
     /// socket, the AM824/AAF/CRF serializers, dest MACs, TX counters, and the

@@ -98,18 +98,11 @@ class StreamRxHandler : public net::Pollable
 
     [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
 
-    void on_ready(int64_t now_ns) override
-    {
-        ieee::Eui48 src{};
-        ieee::Eui48 dst{};
-        while (true) {
-            auto const r = sock_.recv(&src, &dst, buf_);
-            if (!r || *r <= 0) {
-                break;
-            }
-            owner_->on_stream_rx_frame({buf_.data(), static_cast<size_t>(*r)}, now_ns);
-        }
-    }
+    // Reactor path: stamp RX frames with the media-timer gPTP (current_gptp_ns()). The
+    // batch drain itself lives in ListenerStreams::drain_rx so the optional RT RX timer
+    // can call the same code with its own (fresher) wake time. The reactor's monotonic
+    // now_ns is intentionally ignored -- the tally + deserialize need gPTP.
+    void on_ready(int64_t /*reactor_now_ns*/) override { owner_->drain_rx(owner_->current_gptp_ns()); }
 
     void tick(int64_t /*now_ns*/) override {}
 
@@ -117,7 +110,6 @@ class StreamRxHandler : public net::Pollable
 
   private:
     net::RawnetContext sock_{};
-    std::array<uint8_t, 2048> buf_{};
     ListenerStreams* owner_;
 };
 
@@ -575,7 +567,15 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
         config_.interface_name, talker_->am824_dest_mac_, talker_->aaf_dest_mac_, listener_.get());
     if (rx->valid()) {
         listener_->rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
-        reactor.add(std::move(rx));
+        if (config_.stream_rx_rt_timer) {
+            // Dedicated RT RX timer mode: keep the handler (its socket) alive here; the
+            // tool's SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake
+            // gPTP time. The reactor never polls it, so RX can't be starved by the
+            // control plane. (net_handlers still add the gPTP fd to the reactor.)
+            rt_rx_handler_ = std::move(rx);
+        } else {
+            reactor.add(std::move(rx));  // default: drained on the shared reactor thread
+        }
     }
 
     // Inter-site UDPTUN (optional; any failure is non-fatal -- the entity runs its

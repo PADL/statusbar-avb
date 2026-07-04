@@ -263,6 +263,24 @@ struct AvbEntityAudioIOConfig
     /// which must exceed N*125 us (it does at the 2 ms default). Non-default.
     size_t packets_per_wake{1};
 
+    /// Drain the AM824/AAF stream RX on a dedicated SCHED_FIFO timer thread (its own,
+    /// ideally isolated, core) instead of the shared reactor. The reactor also runs the
+    /// control plane (gPTP/MSRP/ACMP/MAAP), so under load or media-timer preemption it
+    /// services RX with jitter; queued frames are then batch-tallied against a now-later
+    /// clock and read as spurious LATE_TIMESTAMP. A ~50 us RT drain keeps frames tallied
+    /// within one tick of arrival, against the timer's own fresh gPTP wake time. Off
+    /// (default) = reactor path. Requires a spare core; on the Pi5 rig core 3 is the
+    /// media timer, so the RX timer takes isolated core 2.
+    bool stream_rx_rt_timer{false};
+
+    /// CPU core for the RX timer thread when stream_rx_rt_timer is set (should be an
+    /// isolated core, distinct from the media timer's).
+    int stream_rx_cpu_affinity{2};
+
+    /// RX drain tick period in microseconds when stream_rx_rt_timer is set. 50 us
+    /// (2.5x the 125 us packet interval) keeps the per-tick backlog to 0-3 frames.
+    uint32_t stream_rx_period_us{50};
+
     /// Pin the media-clock rate ratio r to exactly 1.0 (media clock = gPTP) instead
     /// of tracking r = gPTP/CLOCK_REALTIME via the GPS ratio Kalman. Use when the
     /// gPTP grandmaster IS the reference the listener recovers against (e.g. the

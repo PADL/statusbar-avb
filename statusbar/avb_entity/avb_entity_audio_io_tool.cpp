@@ -244,6 +244,24 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "r would otherwise wander and wobble the listener's recovered clock. Default false (GPS-rate-pinned)",
         config.entity.media_lock_to_gptp,
         [&](auto v) { config.entity.media_lock_to_gptp = v; });
+    specs.add<bool>(
+        "stream_rx.rt_timer",
+        "Drain the AM824/AAF stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the "
+        "shared reactor. Deterministic low-latency draining stamps ingress frames against a fresh gPTP wake time, "
+        "eliminating spurious LATE_TIMESTAMP from reactor scheduling jitter. Default false (reactor). Needs a spare "
+        "core -- set stream_rx.cpu to an isolated core distinct from the media timer",
+        config.entity.stream_rx_rt_timer,
+        [&](auto v) { config.entity.stream_rx_rt_timer = v; });
+    specs.add<int64_t>(
+        "stream_rx.cpu",
+        "CPU core for the RX timer thread (stream_rx.rt_timer). Should be isolated + distinct from the media timer",
+        static_cast<int64_t>(config.entity.stream_rx_cpu_affinity),
+        [&](auto v) { config.entity.stream_rx_cpu_affinity = static_cast<int>(v); });
+    specs.add<uint64_t>(
+        "stream_rx.period_us",
+        "RX drain tick period in microseconds (stream_rx.rt_timer). Default 50 (2.5x the 125us packet interval)",
+        static_cast<uint64_t>(config.entity.stream_rx_period_us),
+        [&](auto v) { config.entity.stream_rx_period_us = static_cast<uint32_t>((v < 5) ? 5 : ((v > 1000) ? 1000 : v)); });
     specs.add<ieee::Eui48>(
         "am824.dest_mac", "AM824 talker destination multicast MAC (stream 0)", config.entity.am824_talker_dest_mac, [&](auto v) {
             config.entity.am824_talker_dest_mac = v;
@@ -541,6 +559,50 @@ MainLoopResult run_main_loop(
         return result;
     }
 
+    // ---- Optional dedicated RT RX timer (stream_rx.rt_timer) -------------------
+    // Drain AM824/AAF on its own SCHED_FIFO core so the reactor/control-plane (and
+    // media-timer preemption) can't delay RX -- which otherwise batch-tallies queued
+    // frames against a now-later clock and reads as spurious LATE_TIMESTAMP. Its stats
+    // mirror the media timer: wake accuracy (timer.stats()/error_ns), callback duration,
+    // per-tick batch size, total frames drained, and error/recovery/missed counts.
+    itc::TelemetryCounter<int64_t> rx_timer_error_count;
+    itc::TelemetryCounter<uint64_t> rx_frames_drained;
+    itc::Published<int64_t> rx_last_wake_error_ns;
+    itc::Published<int64_t> rx_last_batch;
+    stats::AtomicHistogram<128> rx_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 50'000, .bin_width_ns = 500}};
+
+    int64_t const RX_PERIOD_NS = static_cast<int64_t>(config.entity.stream_rx_period_us) * 1'000;
+    auto rx_timer = ptpclient::make_ptp_timer(
+        *ctx.bridge,
+        RX_PERIOD_NS,
+        [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
+            if (!wake_info) {
+                rx_timer_error_count.add(1);
+                return;
+            }
+            auto const cb_t0 = std::chrono::steady_clock::now();
+            size_t const n = entity.drain_stream_rx(wake_info->actual_time_ns);
+            rx_dur_hist.update(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
+            rx_frames_drained.add(n);
+            rx_last_batch.publish(static_cast<int64_t>(n));
+            rx_last_wake_error_ns.publish(wake_info->error_ns);
+        },
+        ctx.compensation_ns,
+        ctx.enable_realtime,
+        config.entity.stream_rx_cpu_affinity);
+
+    if (config.entity.stream_rx_rt_timer) {
+        if (auto const rs = rx_timer.start(); !rs) {
+            std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
+        } else {
+            std::print(
+                "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick\n",
+                config.entity.stream_rx_cpu_affinity,
+                config.entity.stream_rx_period_us);
+        }
+    }
+
     // Drive the initial link-up synchronously (before the reactor runs) so the
     // supervisor leaves Down -> Init before any gPTP announce is processed.
     auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
@@ -647,7 +709,29 @@ MainLoopResult run_main_loop(
                 last_wake_error_ns.load(),
                 entity.state_string(),
                 timer_error_count.load());
+            if (config.entity.stream_rx_rt_timer) {
+                std::print(
+                    stderr,
+                    "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
+                    rx_last_wake_error_ns.load(),
+                    rx_last_batch.load(),
+                    rx_frames_drained.load(),
+                    rx_timer.recovery_count(),
+                    rx_timer.missed_cycles(),
+                    rx_timer_error_count.load());
+            }
         }
+    }
+
+    if (config.entity.stream_rx_rt_timer) {
+        rx_timer.stop();
+        std::print(
+            stderr,
+            "[rx-timer] final: frames_drained={} wake_errors={} recovery={} missed={}\n",
+            rx_frames_drained.load(),
+            rx_timer_error_count.load(),
+            rx_timer.recovery_count(),
+            rx_timer.missed_cycles());
     }
 
     timer.stop();

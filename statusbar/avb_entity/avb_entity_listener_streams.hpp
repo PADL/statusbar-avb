@@ -56,10 +56,27 @@ struct ListenerStreams
     static constexpr uint16_t AM824_STREAM_INDEX = 0;
     static constexpr uint16_t AAF_STREAM_INDEX = 1;
 
+    /// Non-blocking-drain every queued frame from the RX socket and process each via
+    /// on_stream_rx_frame, stamping them all with @p gptp_now_ns (the caller's fresh
+    /// gPTP "now"). Called either from the reactor's thin RX adapter (gptp_now_ns =
+    /// current_gptp_ns()) or, when stream_rx_rt_timer is set, from a dedicated
+    /// SCHED_FIFO RX timer on an isolated core (gptp_now_ns = the timer's wake time),
+    /// which keeps ingress frames tallied against a clock at most one tick stale.
+    /// Returns the number of frames drained this call (for the RX-timer batch-size stat).
+    auto drain_rx(int64_t gptp_now_ns) -> size_t;
+
+    /// The gPTP time the reactor path stamps RX frames with: the media-timer wake
+    /// (last_gptp_ns_). The RT-timer path passes its own, fresher wake time instead.
+    [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t
+    {
+        return static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed));
+    }
+
     /// Decode one received AVTP stream frame, dispatch by subtype to the AM824 or
     /// AAF deserializer, update counters, and offer the accepted audio to the sink.
-    /// Reactor/RX thread.
-    void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t now_ns);
+    /// @p gptp_now_ns is the gPTP receive time used for the deserialize anchor and the
+    /// LATE/EARLY classification. Reactor/RX thread.
+    void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns);
 
     /// True if @p frame belongs to the stream currently connected to STREAM_INPUT
     /// @p stream_index (listener connected + stream_id at offset 4 matches).
@@ -76,7 +93,8 @@ struct ListenerStreams
         bool mr,
         bool format_ok,
         uint64_t samples_per_ch,
-        bool ts_sparse);
+        bool ts_sparse,
+        int64_t gptp_now_ns);
 
     /// Fill the GET_COUNTERS bitmap + values for a STREAM_INPUT index (true if it is
     /// one of our stream inputs). Control plane (AEM handler).
@@ -103,6 +121,9 @@ struct ListenerStreams
     /// Set by the entity in start() before the handler is moved into the reactor;
     /// used to join/leave a remote talker's stream multicast group on connect/disconnect.
     net::RawnetContext* rx_sock_{nullptr};
+    /// Receive scratch for drain_rx (was owned by the StreamRxHandler). 2 KB covers a
+    /// full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
+    std::array<uint8_t, 2048> rx_buf_{};
 
     // --- Owned RX state --------------------------------------------------------
     /// Stream 0: AM824 deserialize context. Stream 1: AAF deserialize context.
