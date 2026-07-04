@@ -57,6 +57,18 @@ def _parse_enum(name: str, name_map: dict[str, int], context: str) -> int:
     return name_map[name]
 
 
+def _parse_localized(obj: dict, key: str = "localized_description") -> LocalizedStringRef:
+    """Parse a per-descriptor localized-string reference. Accepts either the raw 16-bit
+    wire value (offset << 3 | index -- what the C++ models set, e.g. 5) or an explicit
+    {"offset": O, "index": I} object. Absent -> the default (0,0 = no localized name)."""
+    v = obj.get(key)
+    if v is None:
+        return LocalizedStringRef()
+    if isinstance(v, dict):
+        return LocalizedStringRef(offset=int(v.get("offset", 0)), index=int(v.get("index", 0)))
+    return LocalizedStringRef(offset=(int(v) >> 3) & 0x1FFF, index=int(v) & 0x07)
+
+
 def _get_list(obj: dict, singular: str, plural: str) -> list:
     """Get a list from dict accepting singular (object) or plural (array) form."""
     if plural in obj:
@@ -122,6 +134,7 @@ def _parse_cluster(c: dict, context: str) -> AudioCluster:
     """Parse an audio cluster from JSON."""
     return AudioCluster(
         object_name=c.get("name", ""),
+        localized_description=_parse_localized(c),
         channel_count=c.get("channels", 0),
         format=0x40,  # MBLA default
         symbol=c.get("symbol"),
@@ -164,6 +177,7 @@ def _parse_stream(s: dict, context: str) -> Stream:
 
     return Stream(
         object_name=s.get("name", ""),
+        localized_description=_parse_localized(s),
         current_format=current_format,
         formats=formats,
         stream_flags=flags,
@@ -243,6 +257,7 @@ def _parse_audio_unit(au: dict, context: str) -> AudioUnit:
 
     return AudioUnit(
         object_name=au.get("name", ""),
+        localized_description=_parse_localized(au),
         current_sampling_rate=current_rate,
         sampling_rates=rates,
         input_stream_ports=input_ports,
@@ -270,6 +285,7 @@ def _parse_clock_source(cs: dict, context: str) -> ClockSource:
     cs_type = cs.get("type", "INTERNAL")
     return ClockSource(
         object_name=cs.get("name", ""),
+        localized_description=_parse_localized(cs),
         clock_source_type=_parse_enum(
             cs_type, CLOCK_SOURCE_TYPE_NAMES, f"{context}.type"
         ),
@@ -283,6 +299,7 @@ def _parse_clock_domain(cd: dict, context: str) -> ClockDomain:
     """Parse a clock domain from JSON."""
     return ClockDomain(
         object_name=cd.get("name", ""),
+        localized_description=_parse_localized(cd),
         clock_source_index=cd.get("source", 0),
         clock_sources=cd.get("sources", [cd.get("source", 0)]),
         symbol=cd.get("symbol"),

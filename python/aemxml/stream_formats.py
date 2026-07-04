@@ -21,36 +21,51 @@ _NSR_TO_RATE: dict[int, int] = {v: k for k, v in _RATE_TO_NSR.items()}
 
 AAF_SUBTYPE = 0x02
 
+# AAF "format" (sample-format) field, IEEE 1722-2016 Table 20.
+AAF_FORMAT_USER = 0x00
+AAF_FORMAT_FLOAT_32 = 0x01
+AAF_FORMAT_INT_32 = 0x02
+AAF_FORMAT_INT_24 = 0x03
+AAF_FORMAT_INT_16 = 0x04
 
-def encode_aaf_stream_format(rate: int, channels: int, depth: int) -> int:
-    """Encode AAF parameters into an 8-byte IEEE 1722 stream format value.
 
-    Uses the AVTP-defined format (v=0):
-    Byte 0: 0x02 (AAF subtype)
-    Byte 1: nsr[7:4] | 00 | channels_per_frame[9:8]
-    Byte 2: channels_per_frame[7:0]
-    Byte 3: bit_depth
-    Bytes 4-7: 0x00
+def encode_aaf_stream_format(
+    rate: int,
+    channels: int,
+    depth: int,
+    aaf_format: int = AAF_FORMAT_INT_32,
+    samples_per_frame: int | None = None,
+) -> int:
+    """Encode AAF-PCM parameters into an 8-byte IEEE 1722-2016 stream format value (v=0).
+
+    Wire layout (byte 0 = MSB), matching the authoritative C++ aaf_8ch_96k_32bit()
+    (0x020702200200C000):
+      byte 0            : 0x02 (AAF subtype)
+      byte 1            : nsr in the LOW nibble (0x07 = 96 kHz)
+      byte 2            : format -- sample format (0x02 = INT_32)
+      byte 3            : bit_depth (0x20 = 32)
+      bytes 4-7 (BE 32) : channels_per_frame[9:0] << 22 | samples_per_frame[9:0] << 12
+
+    samples_per_frame defaults to the SR class A value rate/8000 (one 125 us packet;
+    12 @ 96 kHz).
     """
     if rate not in _RATE_TO_NSR:
-        raise ValueError(
-            f"Unsupported sample rate {rate}, valid: {sorted(_RATE_TO_NSR.keys())}"
-        )
+        raise ValueError(f"Unsupported sample rate {rate}, valid: {sorted(_RATE_TO_NSR.keys())}")
     if channels < 1 or channels > 1023:
         raise ValueError(f"Channels must be 1-1023, got {channels}")
     if depth < 1 or depth > 255:
         raise ValueError(f"Bit depth must be 1-255, got {depth}")
-
-    nsr = _RATE_TO_NSR[rate]
-    channels_hi = (channels >> 8) & 0x03
-    channels_lo = channels & 0xFF
+    if samples_per_frame is None:
+        samples_per_frame = rate // 8000
+    if samples_per_frame < 0 or samples_per_frame > 1023:
+        raise ValueError(f"samples_per_frame must be 0-1023, got {samples_per_frame}")
 
     b0 = AAF_SUBTYPE
-    b1 = (nsr << 4) | channels_hi
-    b2 = channels_lo
-    b3 = depth
-
-    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+    b1 = _RATE_TO_NSR[rate] & 0x0F  # nsr in the low nibble
+    b2 = aaf_format & 0xFF
+    b3 = depth & 0xFF
+    lower = ((channels & 0x3FF) << 22) | ((samples_per_frame & 0x3FF) << 12)
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | lower
 
 
 def decode_aaf_stream_format(fmt: int) -> dict | None:
@@ -59,24 +74,25 @@ def decode_aaf_stream_format(fmt: int) -> dict | None:
     Returns {"type": "AAF", "rate": int, "channels": int, "depth": int} or None
     if the format is not AAF.
     """
-    b0 = (fmt >> 56) & 0xFF
-    if b0 != AAF_SUBTYPE:
+    if ((fmt >> 56) & 0xFF) != AAF_SUBTYPE:
         return None
-
-    b1 = (fmt >> 48) & 0xFF
-    b2 = (fmt >> 40) & 0xFF
-    b3 = (fmt >> 32) & 0xFF
-
-    nsr = (b1 >> 4) & 0x0F
-    channels_hi = b1 & 0x03
-    channels = (channels_hi << 8) | b2
-    depth = b3
-
+    nsr = (fmt >> 48) & 0x0F  # nsr in the low nibble of byte 1
     rate = _NSR_TO_RATE.get(nsr)
     if rate is None:
         return None
-
-    return {"type": "AAF", "rate": rate, "channels": channels, "depth": depth}
+    aaf_format = (fmt >> 40) & 0xFF
+    depth = (fmt >> 32) & 0xFF
+    lower = fmt & 0xFFFFFFFF
+    channels = (lower >> 22) & 0x3FF
+    samples_per_frame = (lower >> 12) & 0x3FF
+    return {
+        "type": "AAF",
+        "rate": rate,
+        "channels": channels,
+        "depth": depth,
+        "format": aaf_format,
+        "samples_per_frame": samples_per_frame,
+    }
 
 
 def parse_stream_format(fmt_obj) -> int:
