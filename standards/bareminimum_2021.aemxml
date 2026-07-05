@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<entity version="2.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns="http://grouper.ieee.org/groups/1722/1/contributions/xml"
+  xsi:schemaLocation="http://grouper.ieee.org/groups/1722/1/contributions/xml http://grouper.ieee.org/groups/1722/1/contributions/xml/atdecc.xsd"
+  >
+  <entity_id>0000000000000001</entity_id>
+  <entity_model_id>0000000000000001</entity_model_id>
+  <entity_capabilities>0000ef28</entity_capabilities>
+  <talker_stream_sources>0000</talker_stream_sources>
+  <talker_capabilities>0000</talker_capabilities>
+  <listener_stream_sinks>0000</listener_stream_sinks>
+  <listener_capabilities>0000</listener_capabilities>
+  <controller_capabilities>00000000</controller_capabilities>
+  <association_id>0000000000000000</association_id>
+  <entity_name>Bare Minimum Entity</entity_name>
+  <vendor_name>
+    <localized_string>
+      <offset>0000</offset>
+      <index>00</index>
+    </localized_string>
+  </vendor_name>
+  <model_name>
+    <localized_string>
+      <offset>0000</offset>
+      <index>01</index>
+    </localized_string>
+  </model_name>
+  <firmware_version>October 29, 2013</firmware_version>
+  <group_name/>
+  <serial_number>123456789abcd</serial_number>
+  <current_configuration>0000</current_configuration>
+  <configurations>
+    <configuration>
+      <localized_description>
+        <localized_string>
+          <offset>0000</offset>
+          <index>02</index>
+        </localized_string>
+      </localized_description>
+      <locales>
+        <locale>
+          <locale_identifier>en</locale_identifier>
+          <locale_strings>
+            <strings>
+              <string>The vendor name in english</string>
+              <string>The model name in english</string>
+              <string>The name of the first configuration in english</string>
+            </strings>
+          </locale_strings>
+        </locale>
+      </locales>
+    </configuration>
+  </configurations>
+</entity>

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<entity xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://grouper.ieee.org/groups/1722/1/contributions/xml" version="1.0" xsi:schemaLocation="http://grouper.ieee.org/groups/1722/1/contributions/xml http://grouper.ieee.org/groups/1722/1/contributions/xml/avdecc.xsd">
+    <entity_id>ffffffffffffffff</entity_id>
+    <entity_model_id>ffffffffffffffff</entity_model_id>
+    <entity_capabilities>0000ef28</entity_capabilities>
+    <talker_stream_sources>0002</talker_stream_sources>
+    <talker_capabilities>4801</talker_capabilities>
+    <listener_stream_sinks>0002</listener_stream_sinks>
+    <listener_capabilities>4801</listener_capabilities>
+    <controller_capabilities>00000000</controller_capabilities>
+    <association_id>0000000000000000</association_id>
+    <entity_name>Bob</entity_name>
+    <vendor_name>
+        <localized_string>
+            <offset>0000</offset>
+            <index>00</index>
+        </localized_string>
+    </vendor_name>
+    <model_name>
+        <localized_string>
+            <offset>0000</offset>
+            <index>01</index>
+        </localized_string>
+    </model_name>
+    <firmware_version>Oct 15 2013-r12</firmware_version>
+    <group_name/>
+    <serial_number>123456789abcd</serial_number>
+    <current_configuration>0000</current_configuration>
+    <configurations>
+        <configuration>
+            <object_name/>
+            <localized_description>
+                <localized_string>
+                    <offset>0000</offset>
+                    <index>02</index>
+                </localized_string>
+            </localized_description>
+            <controls>
+                <control symbol="control_signal_wink">
+                    <!--  See Clause 7.3.4.2 !-->
+                    <object_name/>
+                    <localized_description>
+                        <localized_string>
+                            <offset>0000</offset>
+                            <index>03</index>
+                        </localized_string>
+                    </localized_description>
+                    <block_latency>00000000</block_latency>
+                    <control_latency>00000000</control_latency>
+                    <control_domain>0000</control_domain>
+                    <control_type>90e0f00000000000</control_type>
+                    <control_value_type>0001</control_value_type>
+                    <reset_time>00000000</reset_time>
+                    <signal_type>0000</signal_type>
+                    <signal_index>0000</signal_index>
+                    <signal_output>0000</signal_output>
+                    <values>
+                        <value xsi:type="T0001">
+                            <string>
+                                <localized_string>
+                                    <offset>0000</offset>
+                                    <index>04</index>
+                                </localized_string>
+                            </string>
+                            <units>0000</units>
+                            <minimum>00</minimum>
+                            <maximum>ff</maximum>
+                            <step>ff</step>
+                            <default>00</default>
+                        </value>
+                    </values>
+                </control>
+            </controls>
+            <locales>
+                <locale>
+                    <locale_identifier>en</locale_identifier>
+                    <locale_strings>
+                        <strings>
+                            <string>The vendor name in english</string>
+                            <string>The model name in english</string>
+                            <string>The name of the first configuration in english</string>
+                            <string>The name of the identify/signal/wink control in english</string>
+                            <string>The name of the first value in the first control in english</string>
+                        </strings>
+                    </locale_strings>
+                </locale>
+            </locales>
+        </configuration>
+    </configurations>
+</entity>
