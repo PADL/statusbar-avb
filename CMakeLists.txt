@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 project(
   statusbar-avb
-  VERSION 1.6.0
+  VERSION 1.6.1
   LANGUAGES CXX)
 
 include(GNUInstallDirs)
@@ -99,7 +99,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/statusbar-avb)
   write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfigVersion.cmake
-    VERSION 1.6.0
+    VERSION 1.6.1
     COMPATIBILITY AnyNewerVersion)
   install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfig.cmake
@@ -192,7 +192,7 @@ endif()
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_PACKAGE_NAME "statusbar-avb")
   set(CPACK_PACKAGE_VENDOR "Jeff Koftinoff")
-  set(CPACK_PACKAGE_VERSION "1.6.0")
+  set(CPACK_PACKAGE_VERSION "1.6.1")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "AVB/TSN protocol stack — SRP, AVTP, gPTP, ATDECC, NanoAVB, and AVTP crypto — with ATDECC controller and AVTP command-line tools."
   )
