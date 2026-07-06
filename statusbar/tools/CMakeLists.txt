@@ -53,15 +53,15 @@ set_property(
                          "${CMAKE_CURRENT_LIST_DIR}/aem_entity_blob_test.cpp")
 
 # --- Runtime entity blobs: the declarative JSON models are the source of truth
-# ---
-# The runtime entity_*.bin descriptor-storage blobs the entities load at startup
-# are generated at build time from the declarative avb/examples/*.json models,
-# compiled by the pure-stdlib Python aemxml tool (`aemxml_tool.py json2bin`).
-# This makes the JSON the single source of truth (editable without recompiling).
-# The C++ aem_entity_blob_tool above is retained (a) as the reference for the
-# CONTENT-parity regression test (verify_models.py) and (b) as a fallback
-# generator when Python3 is unavailable or STATUSBAR_AVB_BLOBS_FROM_JSON is OFF.
-# The C++ DescriptorStorage parser remains the runtime consumer either way.
+# --- The runtime entity_*.bin descriptor-storage blobs the entities load at
+# startup are generated at build time from the declarative avb/examples/*.json
+# models, compiled by the pure-stdlib Python aemxml tool (`aemxml_tool.py
+# json2bin`). This makes the JSON the single source of truth (editable without
+# recompiling). The C++ aem_entity_blob_tool above is retained (a) as the
+# reference for the CONTENT-parity regression test (verify_models.py) and (b) as
+# a fallback generator when Python3 is unavailable or
+# STATUSBAR_AVB_BLOBS_FROM_JSON is OFF. The C++ DescriptorStorage parser remains
+# the runtime consumer either way.
 find_package(Python3 QUIET COMPONENTS Interpreter)
 set(_aem_examples "${CMAKE_CURRENT_LIST_DIR}/../../examples")
 set(_aemxml_tool "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_tool.py")
