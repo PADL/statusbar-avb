@@ -87,7 +87,7 @@ installed binary, grouped by purpose. Highlights:
   batch), `statusbar-acmp-controller` (one-shot connect),
   `statusbar-atdecc-controller` (interactive TUI), `statusbar-atdecc-monitor`,
   `statusbar-aem-get-counters`, `statusbar-aem-set-clock-source`,
-  `statusbar-aem-entity-blob`, `statusbar-descriptor-storage`,
+  `statusbar-aemxml`, `statusbar-descriptor-storage`,
   `statusbar-aecp-aa-analyzer`.
 - **Capture / audio**: `statusbar-pcap-dump`, `statusbar-bpf-dump`,
   `statusbar-avtp-to-wav`, `statusbar-avtp-retransmit`,

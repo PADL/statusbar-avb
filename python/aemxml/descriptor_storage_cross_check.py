@@ -12,7 +12,7 @@ Generates a blob from simple_stereo.json, runs the C++ descriptor_storage_tool,
 and verifies the output matches what Python wrote.
 
 Usage:
-    python3 descriptor_storage_cross_check.py
+    python3 descriptor_storage_cross_check.py --tool path/to/statusbar-descriptor-storage
     python3 descriptor_storage_cross_check.py --build-dir build/build-Debug
 """
 
@@ -102,6 +102,9 @@ def main():
         description="Cross-validate Python blobs with C++ DescriptorStorage"
     )
     parser.add_argument(
+        "--tool", help="Path to the statusbar-descriptor-storage executable"
+    )
+    parser.add_argument(
         "--build-dir", default="build/build-Debug", help="Path to CMake build directory"
     )
     args = parser.parse_args()
@@ -110,7 +113,7 @@ def main():
     os.chdir(repo_root)
 
     # Find C++ tool
-    tool_path = find_tool(args.build_dir)
+    tool_path = Path(args.tool) if args.tool else find_tool(args.build_dir)
     print(f"Using tool: {tool_path}")
 
     # Read JSON and generate blob

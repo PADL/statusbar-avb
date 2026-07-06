@@ -19,8 +19,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TREE_DIR="$(dirname "$SCRIPT_DIR")"
 EXPORT_ROOT="$(dirname "$TREE_DIR")"
 DEB_OUTPUT="${DEB_OUTPUT:-$EXPORT_ROOT/deb-output}"
-HOST_BUILD_DIR="${HOST_BUILD_DIR:-$EXPORT_ROOT/build}"
-HOST_TOOLS_DIR="$HOST_BUILD_DIR/avb/statusbar/tools"
 IMAGE="localhost/statusbar-deb-builder-cross:$DEBIAN_VERSION-$TARGET_ARCH"
 
 MOUNT_OPT=""
@@ -30,12 +28,20 @@ fi
 
 mkdir -p "$DEB_OUTPUT"
 
-if ! "$ENGINE" image exists "$IMAGE" >/dev/null 2>&1; then
+# Rebuild the cross builder image when it is missing or its Containerfile
+# changed — the image records the Containerfile checksum in a label at build
+# time. The tag is shared by all statusbar packages, whose Containerfiles are
+# kept byte-identical so any package can (re)build the image for the others.
+CF_SUM="$(cksum "$TREE_DIR/Containerfile.cross" | cut -d' ' -f1)"
+if [ "$("$ENGINE" image inspect \
+         --format '{{index .Config.Labels "statusbar.containerfile"}}' \
+         "$IMAGE" 2>/dev/null)" != "$CF_SUM" ]; then
   echo "=== building cross builder image $IMAGE ==="
   "$ENGINE" build -t "$IMAGE" \
     --platform linux/amd64 \
     --build-arg "DEBIAN_VERSION=$DEBIAN_VERSION" \
     --build-arg "TARGET_ARCH=$TARGET_ARCH" \
+    --label "statusbar.containerfile=$CF_SUM" \
     -f "$TREE_DIR/Containerfile.cross" "$TREE_DIR"
 fi
 
@@ -47,35 +53,15 @@ for d in $DEPS; do
   fi
 done
 
-if [ ! -x "$HOST_TOOLS_DIR/statusbar-aem-entity-blob" ]; then
-  echo "error: host amd64 tool $HOST_TOOLS_DIR/statusbar-aem-entity-blob is missing" >&2
-  echo "       run ./local-build.sh first (top-level container-build-cross.sh does this automatically)" >&2
-  exit 1
-fi
-
-# Mount the real lib dirs the host tool links against.
-HOST_LIB_DIRS="$(ldd "$HOST_TOOLS_DIR/statusbar-aem-entity-blob" 2>/dev/null \
-  | awk '/=>/ {print $3}' | xargs -r -I{} readlink -f {} | xargs -r -n1 dirname | sort -u)"
-LIB_MOUNTS=()
-for d in $HOST_LIB_DIRS; do
-  case "$d" in
-    /lib|/usr/lib|/usr/lib/x86_64-linux-gnu|/lib/x86_64-linux-gnu) ;;  # already present
-    *) LIB_MOUNTS+=( -v "$d:$d:ro$MOUNT_OPT" ) ;;
-  esac
-done
-
 echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
 "$ENGINE" run --rm \
   --platform linux/amd64 \
   -v "$TREE_DIR:/src:ro$MOUNT_OPT" \
   -v "$DEB_OUTPUT:/debs:rw$MOUNT_OPT" \
-  -v "$HOST_TOOLS_DIR:/host-tools:ro$MOUNT_OPT" \
-  "${LIB_MOUNTS[@]}" \
   -v "statusbar-deb-ccache-cross-$TARGET_ARCH:/root/.ccache" \
   -e "DEPS=$DEPS" \
   -e "PKG=$PKG" \
   -e "TARGET_ARCH=$TARGET_ARCH" \
-  -e "HOST_LIB_DIRS=$HOST_LIB_DIRS" \
   "$IMAGE" bash -euo pipefail -c '
     debs=()
     for d in $DEPS; do
@@ -89,17 +75,6 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
       if [ ! -e /usr/lib/llvm-19/bin/clang-scan-deps ] && [ -e /opt/cross-tools/clang-scan-deps ]; then
         cp /opt/cross-tools/clang-scan-deps /usr/lib/llvm-19/bin/clang-scan-deps
       fi
-    fi
-    # Host-arch tools on PATH for build-time add_custom_command rules.
-    if [ -d /host-tools ]; then
-      ln -sf /host-tools/statusbar-aem-entity-blob /usr/local/bin/aem_entity_blob_tool
-      ln -sf /host-tools/statusbar-aem-entity-blob /usr/local/bin/statusbar-aem-entity-blob
-    fi
-    if [ -n "${HOST_LIB_DIRS:-}" ]; then
-      for d in $HOST_LIB_DIRS; do
-        [ -d "$d" ] && echo "$d"
-      done > /etc/ld.so.conf.d/host-amd64.conf
-      ldconfig
     fi
     cmake -Wno-dev -S /src -B /build -G Ninja \
       --toolchain /src/cmake/toolchain-clang-aarch64.cmake \

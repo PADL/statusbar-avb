@@ -30,8 +30,8 @@ Examples use `eth0`; substitute your interface. Live AVB/raw-socket tools need
 | `statusbar-nanoavb` | Demonstration entity wiring the nanoavb components (ADP/ACMP/MVRP/MSRP/gPTP) under a state-machine supervisor. | Linux-only |
 
 ```sh
-# Build the descriptor model first, then run the dual-format entity.
-statusbar-aem-entity-blob --dual --channels 8 --sample-rate 96000 --out entity_audio.bin
+# Compile the descriptor model from its JSON source, then run the dual-format entity.
+statusbar-aemxml json2bin examples/dual.json entity_audio.bin
 statusbar-avb-audio-io --interface=eth0 --descriptor-storage=entity_audio.bin
 
 statusbar-avb-am824-io --interface=eth0 --descriptor-storage=entity.bin
@@ -58,7 +58,7 @@ statusbar-nanoavb       --interface=eth0 --ptp.driver=system
 | `statusbar-aem-set-clock-source` | Discover a target and SET/GET its CLOCK_DOMAIN media-clock source. | all |
 | `statusbar-aecp-aa-analyzer` | Offline analysis of AECP Address-Access / Memory-Object firmware-upload sessions in a capture. | all |
 | `statusbar-descriptor-storage` | Dump a `.aem` DescriptorStorage blob (configs, descriptors, string symbols). Positional `<file.aem>`. | all |
-| `statusbar-aem-entity-blob` | Generate the in-tree AEM descriptor-storage blob consumed by the entity tools. | all |
+| `statusbar-aemxml` | Compile/convert AEM entity models: `json2bin` builds the descriptor-storage blob the entity tools consume from a declarative `examples/*.json` model; also `json2xml`/`xml2json`/`xml2bin`/`validate`/`dump` (AEMXML interchange). | all |
 
 ```sh
 statusbar-atdecc-ctl --interface=eth0 --command=list
@@ -74,7 +74,7 @@ statusbar-aem-get-counters --interface=eth0 --target-entity-id=00:11:22:ff:fe:33
 statusbar-aem-set-clock-source --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --clock-domain-index=0 --clock-source-index=5
 statusbar-aecp-aa-analyzer --input=capture.pcapng --verbose
 statusbar-descriptor-storage entity.aem
-statusbar-aem-entity-blob --dual --channels 8 --sample-rate 96000 --out entity.bin
+statusbar-aemxml json2bin examples/dual.json entity.bin
 ```
 
 `atdecc-ctl --command` accepts `list`, `validate`, `connect`, `disconnect`,

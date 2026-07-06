@@ -11,7 +11,7 @@
 //
 // Usage: statusbar-avb-tone-generator --interface=eth0 --descriptor-storage=entity_tone.bin
 //   (the blob must declare 0 stream inputs + 3 stream outputs; build with
-//    `aem-entity-blob --tone --out entity_tone.bin`)
+//    `statusbar-aemxml json2bin examples/tone.json entity_tone.bin`)
 
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
@@ -273,7 +273,7 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
         "Transmits 8 channels of continuous sine tones (white piano keys C4..C5 by default) as both an AM824 and an\n"
         "AAF 96 kHz stream, plus a CRF media clock. The media clock is locked to gPTP (r = 1.0).",
         examples);
-    std::print(stderr, "\nGenerate the blob with: aem-entity-blob --tone --out entity_tone.bin\n");
+    std::print(stderr, "\nGenerate the blob with: statusbar-aemxml json2bin examples/tone.json entity_tone.bin\n");
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }
 

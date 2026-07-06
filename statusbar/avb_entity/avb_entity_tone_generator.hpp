@@ -13,7 +13,7 @@
 /// are the white piano keys C4..C5 (C4, D4, E4, F4, G4, A4, B4, C5). The media
 /// clock is locked to gPTP at ratio r = 1.0 (no GPS-rate tracking). The entity
 /// model is loaded from a descriptor-storage blob declaring 0 stream inputs and
-/// 3 stream outputs (aem-entity-blob --tone).
+/// 3 stream outputs (examples/tone.json, compiled by aemxml json2bin).
 ///
 /// This reuses the shared AVB control plane (AvbEntityHost), the stream TX path
 /// (TalkerStreams: AM824 + AAF + CRF), the per-stream transmit gate (TalkerGate),
@@ -91,10 +91,10 @@ class AvbEntityToneGenerator
     ///   All     = AM824 (idx 0) + AAF (idx 1) + CRF (idx 2) — the full generator.
     ///   AafOnly = a single AAF stream at index 0 — a clean 8-ch AAF device, for a
     ///             listener that stalls on the mixed AM824+AAF 16-ch aggregate.
-    ///             Pairs with `aem-entity-blob --tone-aaf`.
+    ///             Pairs with the examples/tone-aaf.json model.
     ///   AafCrf  = AAF (idx 0) + CRF (idx 1) — a clean 8-ch AAF device PLUS a CRF
     ///             media-clock stream, so a listener (e.g. macOS) has a clock
-    ///             reference to recover. Pairs with `aem-entity-blob --tone-aaf-crf`.
+    ///             reference to recover. Pairs with examples/tone-aaf-crf.json.
     enum class StreamSet
     {
         All,

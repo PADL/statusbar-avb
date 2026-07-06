@@ -36,78 +36,37 @@ add_executable(stun_sm_tool stun_sm_tool.cpp)
 target_link_libraries(stun_sm_tool PRIVATE statusbar)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS stun_sm_tool)
 
-# --- AEM entity descriptor-storage blob generator (cross-platform) ---
-
-add_executable(aem_entity_blob_tool aem_entity_blob_tool.cpp)
-target_link_libraries(aem_entity_blob_tool PRIVATE statusbar)
-set_target_properties(aem_entity_blob_tool PROPERTIES OUTPUT_NAME
-                                                      statusbar-aem-entity-blob)
-set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
-                                    aem_entity_blob_tool)
-
-# Unit test for the AemEntityBlob writer (statusbar/tools/aem_entity_blob.hpp).
-# tools/ is not a statusbar_add_module, so register the test file directly into
-# the global list the umbrella feeds to create_test_sourcelist.
-set_property(
-  GLOBAL APPEND PROPERTY STATUSBAR_TEST_FILES
-                         "${CMAKE_CURRENT_LIST_DIR}/aem_entity_blob_test.cpp")
-
 # --- Runtime entity blobs: the declarative JSON models are the source of truth
-# --- The runtime entity_*.bin descriptor-storage blobs the entities load at
-# startup are generated at build time from the declarative avb/examples/*.json
-# models, compiled by the pure-stdlib Python aemxml tool (`aemxml_tool.py
-# json2bin`). This makes the JSON the single source of truth (editable without
-# recompiling). The C++ aem_entity_blob_tool above is retained (a) as the
-# reference for the CONTENT-parity regression test (verify_models.py) and (b) as
-# a fallback generator when Python3 is unavailable or
-# STATUSBAR_AVB_BLOBS_FROM_JSON is OFF. The C++ DescriptorStorage parser remains
-# the runtime consumer either way.
-find_package(Python3 QUIET COMPONENTS Interpreter)
+#
+# The runtime entity_*.bin descriptor-storage blobs the entities load at startup
+# are generated at build time from the declarative avb/examples/*.json models by
+# the pure-stdlib Python aemxml tool (`aemxml_tool.py json2bin`). The JSON is
+# the single source of truth — editable without recompiling — and, because the
+# generator is host Python rather than a compiled tool, cross builds need no
+# build-host-runnable binary. The C++ DescriptorStorage parser
+# (statusbar/atdecc) remains the runtime consumer.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(_aem_examples "${CMAKE_CURRENT_LIST_DIR}/../../examples")
 set(_aemxml_tool "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_tool.py")
 
-option(
-  STATUSBAR_AVB_BLOBS_FROM_JSON
-  "Generate the runtime AEM entity blobs from examples/*.json (Python aemxml json2bin) instead of the C++ generator"
-  ON)
-
-if(STATUSBAR_AVB_BLOBS_FROM_JSON AND NOT Python3_FOUND)
-  message(
-    WARNING
-      "STATUSBAR_AVB_BLOBS_FROM_JSON=ON but Python3 was not found; falling back to the C++ aem_entity_blob_tool for the runtime entity blobs."
-  )
-endif()
-
-# _statusbar_avb_entity_blob(<out-abspath> <cpp-flag> <json-model> <cpp-name>
-# <label>) Emit an add_custom_command producing <out> either from json2bin
-# <json-model>.json (JSON source of truth) or, as a fallback, from
-# `aem_entity_blob_tool <cpp-flag>`.
-function(_statusbar_avb_entity_blob out cpp_flag json_model cpp_name label)
-  if(STATUSBAR_AVB_BLOBS_FROM_JSON AND Python3_FOUND)
-    add_custom_command(
-      OUTPUT "${out}"
-      COMMAND ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
-              "${_aem_examples}/${json_model}.json" "${out}"
-      DEPENDS "${_aem_examples}/${json_model}.json" "${_aemxml_tool}"
-      COMMENT "Generating ${label} from examples/${json_model}.json (json2bin)"
-      VERBATIM)
-  else()
-    add_custom_command(
-      OUTPUT "${out}"
-      COMMAND aem_entity_blob_tool ${cpp_flag} --channels 8 --sample-rate 96000
-              --name "${cpp_name}" --out "${out}"
-      DEPENDS aem_entity_blob_tool
-      COMMENT "Generating ${label} from the C++ aem_entity_blob_tool (fallback)"
-      VERBATIM)
-  endif()
+# _statusbar_avb_entity_blob(<out-abspath> <json-model> <label>) Emit an
+# add_custom_command producing <out> from json2bin <json-model>.json.
+function(_statusbar_avb_entity_blob out json_model label)
+  add_custom_command(
+    OUTPUT "${out}"
+    COMMAND ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
+            "${_aem_examples}/${json_model}.json" "${out}"
+    DEPENDS "${_aem_examples}/${json_model}.json" "${_aemxml_tool}"
+    COMMENT "Generating ${label} from examples/${json_model}.json (json2bin)"
+    VERBATIM)
 endfunction()
 
 # Dual-format audio-io blob (2 in + 3 out). Installed to
 # <datadir>/statusbar-avb/entity_audio.bin; the audio-io tool defaults to it.
 set(STATUSBAR_AVB_DESCRIPTOR_BLOB
     "${CMAKE_CURRENT_BINARY_DIR}/entity_audio.bin")
-_statusbar_avb_entity_blob("${STATUSBAR_AVB_DESCRIPTOR_BLOB}" "--dual" "dual"
-                           "AVB Audio IO" "entity_audio.bin")
+_statusbar_avb_entity_blob("${STATUSBAR_AVB_DESCRIPTOR_BLOB}" "dual"
+                           "entity_audio.bin")
 add_custom_target(statusbar_avb_descriptor_blob ALL
                   DEPENDS "${STATUSBAR_AVB_DESCRIPTOR_BLOB}")
 install(
@@ -118,8 +77,8 @@ install(
 # Talker-only tone-generator blob (3 stream outputs, no inputs).
 # entity_tone.bin.
 set(STATUSBAR_AVB_TONE_BLOB "${CMAKE_CURRENT_BINARY_DIR}/entity_tone.bin")
-_statusbar_avb_entity_blob("${STATUSBAR_AVB_TONE_BLOB}" "--tone" "tone"
-                           "Statusbar Tone Generator" "entity_tone.bin")
+_statusbar_avb_entity_blob("${STATUSBAR_AVB_TONE_BLOB}" "tone"
+                           "entity_tone.bin")
 add_custom_target(statusbar_avb_tone_blob ALL
                   DEPENDS "${STATUSBAR_AVB_TONE_BLOB}")
 install(
@@ -130,9 +89,8 @@ install(
 # AAF-only tone-generator blob (single 8-ch AAF output). entity_tone_aaf.bin.
 set(STATUSBAR_AVB_TONE_AAF_BLOB
     "${CMAKE_CURRENT_BINARY_DIR}/entity_tone_aaf.bin")
-_statusbar_avb_entity_blob(
-  "${STATUSBAR_AVB_TONE_AAF_BLOB}" "--tone-aaf" "tone-aaf"
-  "Statusbar Tone Generator" "entity_tone_aaf.bin")
+_statusbar_avb_entity_blob("${STATUSBAR_AVB_TONE_AAF_BLOB}" "tone-aaf"
+                           "entity_tone_aaf.bin")
 add_custom_target(statusbar_avb_tone_aaf_blob ALL
                   DEPENDS "${STATUSBAR_AVB_TONE_AAF_BLOB}")
 install(
@@ -144,9 +102,8 @@ install(
 # entity_tone_aaf_crf.bin.
 set(STATUSBAR_AVB_TONE_AAF_CRF_BLOB
     "${CMAKE_CURRENT_BINARY_DIR}/entity_tone_aaf_crf.bin")
-_statusbar_avb_entity_blob(
-  "${STATUSBAR_AVB_TONE_AAF_CRF_BLOB}" "--tone-aaf-crf" "tone-aaf-crf"
-  "Statusbar Tone Generator" "entity_tone_aaf_crf.bin")
+_statusbar_avb_entity_blob("${STATUSBAR_AVB_TONE_AAF_CRF_BLOB}" "tone-aaf-crf"
+                           "entity_tone_aaf_crf.bin")
 add_custom_target(statusbar_avb_tone_aaf_crf_blob ALL
                   DEPENDS "${STATUSBAR_AVB_TONE_AAF_CRF_BLOB}")
 install(
@@ -154,44 +111,45 @@ install(
   DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
   COMPONENT runtime)
 
-# --- AEM model JSON -> blob build-proof + CONTENT-parity regression test ---
+# --- AEM model JSON -> blob build-proof + validation tests ---
 # Compile every declarative model to a build-tree blob (build-time proof the
 # json2bin pipeline runs for all shapes, including the ones with no runtime
-# blob) and assert each one's descriptor CONTENT matches the C++ generator's, so
-# the C++ model builders can be retired with confidence (the C++
-# DescriptorStorage parser stays -- it is the runtime consumer). Also run the
-# aemxml Python unit suite so the pipeline can't rot.
-if(Python3_FOUND)
-  set(_aem_json_blobs)
-  foreach(_m bridge dual tone tone-aaf tone-aaf-crf simple_stereo)
-    add_custom_command(
-      OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
-      COMMAND ${CMAKE_COMMAND} -E make_directory
-              "${CMAKE_CURRENT_BINARY_DIR}/aem"
-      COMMAND
-        ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
-        "${_aem_examples}/${_m}.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
-      DEPENDS "${_aem_examples}/${_m}.json" "${_aemxml_tool}"
-      COMMENT "AEM blob (json2bin): ${_m}.aem <- examples/${_m}.json"
-      VERBATIM)
-    list(APPEND _aem_json_blobs "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem")
-  endforeach()
-  add_custom_target(statusbar_avb_json_blobs ALL DEPENDS ${_aem_json_blobs})
+# blob). The regression net is three ctests: every model must compile + parse
+# (verify_models.py), the C++ DescriptorStorage parser must read what the Python
+# writer emits (descriptor_storage_cross_check.py), and the aemxml Python unit
+# suite must pass.
+set(_aem_json_blobs)
+foreach(_m bridge dual tone tone-aaf tone-aaf-crf simple_stereo)
+  add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/aem"
+    COMMAND
+      ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
+      "${_aem_examples}/${_m}.json" "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
+    DEPENDS "${_aem_examples}/${_m}.json" "${_aemxml_tool}"
+    COMMENT "AEM blob (json2bin): ${_m}.aem <- examples/${_m}.json"
+    VERBATIM)
+  list(APPEND _aem_json_blobs "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem")
+endforeach()
+add_custom_target(statusbar_avb_json_blobs ALL DEPENDS ${_aem_json_blobs})
 
-  # Regression net: each JSON model's blob must CONTENT-match the C++
-  # generator's descriptor set (byte-identity per (type, index), modulo
-  # non-authored fields).
-  add_test(NAME statusbar/avb/aem_json_models_match_cpp
-           COMMAND ${Python3_EXECUTABLE} "${_aem_examples}/verify_models.py"
-                   $<TARGET_FILE:aem_entity_blob_tool>)
+# Every declarative model must compile (json2bin) and parse back (blob_reader).
+add_test(NAME statusbar/avb/aem_json_models_compile
+         COMMAND ${Python3_EXECUTABLE} "${_aem_examples}/verify_models.py")
 
-  # Unit suite for the aemxml pipeline (model / flatten / blob / AEMXML / JSON).
-  add_test(
-    NAME statusbar/avb/aemxml_python_unit
-    COMMAND ${Python3_EXECUTABLE}
-            "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_test.py")
-endif()
+# Cross-language net: the C++ DescriptorStorage parser (the runtime consumer)
+# must read a Python-written blob and see the same descriptor/symbol tables.
+add_test(
+  NAME statusbar/avb/aem_descriptor_storage_cross_check
+  COMMAND
+    ${Python3_EXECUTABLE}
+    "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/descriptor_storage_cross_check.py"
+    --tool $<TARGET_FILE:descriptor_storage_tool>)
+
+# Unit suite for the aemxml pipeline (model / flatten / blob / AEMXML / JSON).
+add_test(NAME statusbar/avb/aemxml_python_unit
+         COMMAND ${Python3_EXECUTABLE}
+                 "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_test.py")
 
 # --- L2 ADPDU send probe (Linux: AF_PACKET, diagnoses PACKET_QDISC_BYPASS) ---
 

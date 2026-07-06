@@ -10,7 +10,7 @@
 //
 // Usage: avb_entity_audio_io_tool --interface=eth0 --descriptor-storage=entity_audio.bin
 //   (the blob must declare 2 stream inputs + 2 stream outputs; build with
-//    `aem-entity-blob --dual --out entity_audio.bin`)
+//    `statusbar-aemxml json2bin examples/dual.json entity_audio.bin`)
 
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
@@ -443,7 +443,7 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
         "Runs an AVB entity with one AM824 stream pair and one AAF stream pair.",
         examples);
 
-    std::print(stderr, "\nGenerate the blob with: aem-entity-blob --dual --out entity_audio.bin\n");
+    std::print(stderr, "\nGenerate the blob with: statusbar-aemxml json2bin examples/dual.json entity_audio.bin\n");
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }
 
