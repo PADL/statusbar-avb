@@ -902,8 +902,7 @@ using statusbar::tools::AemEntityBlob;
 // media-clock stream a listener (e.g. macOS) can recover its clock from.
 // Consumed by AvbEntityToneGenerator in AafCrf mode.
 // --------------------------------------------------------------------------
-[[nodiscard]] auto build_tone_aaf_crf_model(std::string_view name, uint16_t channels, uint32_t sample_rate)
-    -> std::vector<uint8_t>
+[[nodiscard]] auto build_tone_aaf_crf_model(std::string_view name, uint16_t channels, uint32_t sample_rate) -> std::vector<uint8_t>
 {
     AemEntityBlob b;
     bool ok = true;
@@ -1153,10 +1152,10 @@ int main(int argc, char** argv)
         return 1;
     }
     auto const blob = tone_aaf_crf ? build_tone_aaf_crf_model(cfg.name, channels, sample_rate)
-                      : tone_aaf    ? build_tone_aaf_model(cfg.name, channels, sample_rate)
-                      : tone        ? build_tone_generator_model(cfg.name, channels, sample_rate)
-                      : dual        ? build_audio_model(cfg.name, channels, sample_rate)
-                                    : build_bridge_model(cfg.name, channels, sample_rate);
+        : tone_aaf                 ? build_tone_aaf_model(cfg.name, channels, sample_rate)
+        : tone                     ? build_tone_generator_model(cfg.name, channels, sample_rate)
+        : dual                     ? build_audio_model(cfg.name, channels, sample_rate)
+                                   : build_bridge_model(cfg.name, channels, sample_rate);
 
     if (blob.empty()) {
         std::println(stderr, "error: descriptor model overflowed an inline buffer (a push failed); blob not generated");

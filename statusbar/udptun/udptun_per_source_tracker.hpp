@@ -27,8 +27,8 @@ struct SourceState
     std::unique_ptr<LatencyStats> stats{};    // LatencyStats holds atomics (non-movable)
     itc::Published<uint32_t> first_seq{};
     itc::Published<uint32_t> last_seq{};
-    int64_t first_seen_gptp_ns{0};    // RT-only (LRU); reporter never reads
-    int64_t last_seen_gptp_ns{0};     // RT-only (LRU)
+    int64_t first_seen_gptp_ns{0};      // RT-only (LRU); reporter never reads
+    int64_t last_seen_gptp_ns{0};       // RT-only (LRU)
     uint32_t announced_interval_us{0};  // RT-only
     itc::TelemetryCounter<uint64_t> received_count{};
     itc::TelemetryCounter<uint64_t> out_of_order_count{};

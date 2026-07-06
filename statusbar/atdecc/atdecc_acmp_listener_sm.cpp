@@ -165,8 +165,8 @@ void send_disconnect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
     // (IEEE 1722.1 Clause 8.2.2.6.2). Otherwise a command for a different talker
     // would tear down the live connection to the one we ARE connected to. Reject a
     // mismatch with NO_SUCH_CONNECTION rather than disconnecting.
-    bool const same_talker = stream->talker_entity_id == cmd.talker_entity_id
-        && stream->talker_unique_id == cmd.talker_unique_id.get();
+    bool const same_talker =
+        stream->talker_entity_id == cmd.talker_entity_id && stream->talker_unique_id == cmd.talker_unique_id.get();
     if (!same_talker) {
         ctx.response = cmd;
         ctx.response.set_message_type(ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE);

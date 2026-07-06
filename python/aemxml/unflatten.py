@@ -307,9 +307,7 @@ def _parse_locale(d: bytes) -> tuple[Locale, int, int]:
 
 
 def _parse_strings(d: bytes) -> StringsDescriptor:
-    return StringsDescriptor(
-        strings=[unpack_string64(d, 4 + 64 * i) for i in range(7)]
-    )
+    return StringsDescriptor(strings=[unpack_string64(d, 4 + 64 * i) for i in range(7)])
 
 
 def _parse_memory_object(d: bytes) -> MemoryObject:
@@ -761,26 +759,37 @@ def _build_configuration(
     config = _parse_configuration(config_bytes)
 
     # Parse leaf/child pools keyed by descriptor index.
-    controls = {i: _parse_control(b) for i, b in types.get(DESCRIPTOR_CONTROL, {}).items()}
+    controls = {
+        i: _parse_control(b) for i, b in types.get(DESCRIPTOR_CONTROL, {}).items()
+    }
     audio_clusters = {
-        i: _parse_audio_cluster(b) for i, b in types.get(DESCRIPTOR_AUDIO_CLUSTER, {}).items()
+        i: _parse_audio_cluster(b)
+        for i, b in types.get(DESCRIPTOR_AUDIO_CLUSTER, {}).items()
     }
-    audio_maps = {i: _parse_audio_map(b) for i, b in types.get(DESCRIPTOR_AUDIO_MAP, {}).items()}
+    audio_maps = {
+        i: _parse_audio_map(b) for i, b in types.get(DESCRIPTOR_AUDIO_MAP, {}).items()
+    }
     video_clusters = {
-        i: _parse_video_cluster(b) for i, b in types.get(DESCRIPTOR_VIDEO_CLUSTER, {}).items()
+        i: _parse_video_cluster(b)
+        for i, b in types.get(DESCRIPTOR_VIDEO_CLUSTER, {}).items()
     }
-    video_maps = {i: _parse_video_map(b) for i, b in types.get(DESCRIPTOR_VIDEO_MAP, {}).items()}
+    video_maps = {
+        i: _parse_video_map(b) for i, b in types.get(DESCRIPTOR_VIDEO_MAP, {}).items()
+    }
     sensor_clusters = {
-        i: _parse_sensor_cluster(b) for i, b in types.get(DESCRIPTOR_SENSOR_CLUSTER, {}).items()
+        i: _parse_sensor_cluster(b)
+        for i, b in types.get(DESCRIPTOR_SENSOR_CLUSTER, {}).items()
     }
     sensor_maps = {
         i: _parse_sensor_map(b) for i, b in types.get(DESCRIPTOR_SENSOR_MAP, {}).items()
     }
     stream_ports_in = {
-        i: _parse_stream_port(b) for i, b in types.get(DESCRIPTOR_STREAM_PORT_INPUT, {}).items()
+        i: _parse_stream_port(b)
+        for i, b in types.get(DESCRIPTOR_STREAM_PORT_INPUT, {}).items()
     }
     stream_ports_out = {
-        i: _parse_stream_port(b) for i, b in types.get(DESCRIPTOR_STREAM_PORT_OUTPUT, {}).items()
+        i: _parse_stream_port(b)
+        for i, b in types.get(DESCRIPTOR_STREAM_PORT_OUTPUT, {}).items()
     }
     external_ports_in = {
         i: _parse_external_port(b)
@@ -798,8 +807,12 @@ def _build_configuration(
         i: _parse_internal_port(b)
         for i, b in types.get(DESCRIPTOR_INTERNAL_PORT_OUTPUT, {}).items()
     }
-    strings = {i: _parse_strings(b) for i, b in types.get(DESCRIPTOR_STRINGS, {}).items()}
-    ptp_ports = {i: _parse_ptp_port(b) for i, b in types.get(DESCRIPTOR_PTP_PORT, {}).items()}
+    strings = {
+        i: _parse_strings(b) for i, b in types.get(DESCRIPTOR_STRINGS, {}).items()
+    }
+    ptp_ports = {
+        i: _parse_ptp_port(b) for i, b in types.get(DESCRIPTOR_PTP_PORT, {}).items()
+    }
 
     referenced_controls: set[int] = set()
 
@@ -818,7 +831,9 @@ def _build_configuration(
             controls=take_controls(pd["base_control"], pd["num_controls"]),
             clusters=[
                 audio_clusters[i]
-                for i in range(pd["base_cluster"], pd["base_cluster"] + pd["num_clusters"])
+                for i in range(
+                    pd["base_cluster"], pd["base_cluster"] + pd["num_clusters"]
+                )
                 if i in audio_clusters
             ],
             maps=[
@@ -835,7 +850,9 @@ def _build_configuration(
             controls=take_controls(pd["base_control"], pd["num_controls"]),
             clusters=[
                 video_clusters[i]
-                for i in range(pd["base_cluster"], pd["base_cluster"] + pd["num_clusters"])
+                for i in range(
+                    pd["base_cluster"], pd["base_cluster"] + pd["num_clusters"]
+                )
                 if i in video_clusters
             ],
             maps=[
@@ -852,7 +869,9 @@ def _build_configuration(
             controls=take_controls(pd["base_control"], pd["num_controls"]),
             clusters=[
                 sensor_clusters[i]
-                for i in range(pd["base_cluster"], pd["base_cluster"] + pd["num_clusters"])
+                for i in range(
+                    pd["base_cluster"], pd["base_cluster"] + pd["num_clusters"]
+                )
                 if i in sensor_clusters
             ],
             maps=[
@@ -899,19 +918,27 @@ def _build_configuration(
         base = rng["base_external_input_port"]
         for i in range(base, base + rng["num_external_input_ports"]):
             if i in external_ports_in:
-                unit.input_external_ports.append(build_external_port(external_ports_in[i]))
+                unit.input_external_ports.append(
+                    build_external_port(external_ports_in[i])
+                )
         base = rng["base_external_output_port"]
         for i in range(base, base + rng["num_external_output_ports"]):
             if i in external_ports_out:
-                unit.output_external_ports.append(build_external_port(external_ports_out[i]))
+                unit.output_external_ports.append(
+                    build_external_port(external_ports_out[i])
+                )
         base = rng["base_internal_input_port"]
         for i in range(base, base + rng["num_internal_input_ports"]):
             if i in internal_ports_in:
-                unit.input_internal_ports.append(build_internal_port(internal_ports_in[i]))
+                unit.input_internal_ports.append(
+                    build_internal_port(internal_ports_in[i])
+                )
         base = rng["base_internal_output_port"]
         for i in range(base, base + rng["num_internal_output_ports"]):
             if i in internal_ports_out:
-                unit.output_internal_ports.append(build_internal_port(internal_ports_out[i]))
+                unit.output_internal_ports.append(
+                    build_internal_port(internal_ports_out[i])
+                )
 
     # Audio units.
     for i in sorted(types.get(DESCRIPTOR_AUDIO_UNIT, {})):
@@ -932,13 +959,23 @@ def _build_configuration(
         config.sensor_units.append(unit)
 
     # Configuration-level controls = those not referenced by any unit/port.
-    config.controls = [controls[i] for i in sorted(controls) if i not in referenced_controls]
+    config.controls = [
+        controls[i] for i in sorted(controls) if i not in referenced_controls
+    ]
 
     # Direct config-level descriptor lists (ordered by descriptor index).
-    config.streams_input = [_parse_stream(b) for b in _indexed(types, DESCRIPTOR_STREAM_INPUT)]
-    config.streams_output = [_parse_stream(b) for b in _indexed(types, DESCRIPTOR_STREAM_OUTPUT)]
-    config.jacks_input = [_parse_jack(b) for b in _indexed(types, DESCRIPTOR_JACK_INPUT)]
-    config.jacks_output = [_parse_jack(b) for b in _indexed(types, DESCRIPTOR_JACK_OUTPUT)]
+    config.streams_input = [
+        _parse_stream(b) for b in _indexed(types, DESCRIPTOR_STREAM_INPUT)
+    ]
+    config.streams_output = [
+        _parse_stream(b) for b in _indexed(types, DESCRIPTOR_STREAM_OUTPUT)
+    ]
+    config.jacks_input = [
+        _parse_jack(b) for b in _indexed(types, DESCRIPTOR_JACK_INPUT)
+    ]
+    config.jacks_output = [
+        _parse_jack(b) for b in _indexed(types, DESCRIPTOR_JACK_OUTPUT)
+    ]
     config.avb_interfaces = [
         _parse_avb_interface(b) for b in _indexed(types, DESCRIPTOR_AVB_INTERFACE)
     ]
@@ -967,10 +1004,12 @@ def _build_configuration(
         for b in _indexed(types, DESCRIPTOR_SIGNAL_DEMULTIPLEXER)
     ]
     config.multiplexers = [
-        _parse_signal_multiplexer(b) for b in _indexed(types, DESCRIPTOR_SIGNAL_MULTIPLEXER)
+        _parse_signal_multiplexer(b)
+        for b in _indexed(types, DESCRIPTOR_SIGNAL_MULTIPLEXER)
     ]
     config.transcoders = [
-        _parse_signal_transcoder(b) for b in _indexed(types, DESCRIPTOR_SIGNAL_TRANSCODER)
+        _parse_signal_transcoder(b)
+        for b in _indexed(types, DESCRIPTOR_SIGNAL_TRANSCODER)
     ]
     config.control_blocks = [
         _parse_control_block(b) for b in _indexed(types, DESCRIPTOR_CONTROL_BLOCK)
@@ -987,7 +1026,9 @@ def _build_configuration(
 
     # PTP instances own their PTP_PORTs via base_ptp_port/number_of_ptp_ports.
     for i in sorted(types.get(DESCRIPTOR_PTP_INSTANCE, {})):
-        pi, num_ports, base_port = _parse_ptp_instance(types[DESCRIPTOR_PTP_INSTANCE][i])
+        pi, num_ports, base_port = _parse_ptp_instance(
+            types[DESCRIPTOR_PTP_INSTANCE][i]
+        )
         for p in range(base_port, base_port + num_ports):
             if p in ptp_ports:
                 pi.ptp_ports.append(ptp_ports[p])

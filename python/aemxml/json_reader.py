@@ -57,7 +57,9 @@ def _parse_enum(name: str, name_map: dict[str, int], context: str) -> int:
     return name_map[name]
 
 
-def _parse_localized(obj: dict, key: str = "localized_description") -> LocalizedStringRef:
+def _parse_localized(
+    obj: dict, key: str = "localized_description"
+) -> LocalizedStringRef:
     """Parse a per-descriptor localized-string reference. Accepts either the raw 16-bit
     wire value (offset << 3 | index -- what the C++ models set, e.g. 5) or an explicit
     {"offset": O, "index": I} object. Absent -> the default (0,0 = no localized name)."""
@@ -65,7 +67,9 @@ def _parse_localized(obj: dict, key: str = "localized_description") -> Localized
     if v is None:
         return LocalizedStringRef()
     if isinstance(v, dict):
-        return LocalizedStringRef(offset=int(v.get("offset", 0)), index=int(v.get("index", 0)))
+        return LocalizedStringRef(
+            offset=int(v.get("offset", 0)), index=int(v.get("index", 0))
+        )
     return LocalizedStringRef(offset=(int(v) >> 3) & 0x1FFF, index=int(v) & 0x07)
 
 

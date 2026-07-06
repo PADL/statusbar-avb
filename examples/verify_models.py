@@ -31,6 +31,7 @@ Usage: verify_models.py [PATH_TO_statusbar-aem-entity-blob]
   With the C++ tool path  -> compare each JSON blob to the C++ blob (fails on mismatch).
   Without it              -> parse-only (just confirm every JSON compiles + parses).
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -124,7 +125,10 @@ def json_blob(name: str) -> bytes:
 
 def content_counter(blob: bytes) -> Counter:
     """Multiset of (descriptor_type, descriptor_index, canon(wire_bytes)) for a blob."""
-    return Counter((d.descriptor_type, d.descriptor_index, canon(d.descriptor_type, d.wire_bytes)) for d in read_blob(blob)[0])
+    return Counter(
+        (d.descriptor_type, d.descriptor_index, canon(d.descriptor_type, d.wire_bytes))
+        for d in read_blob(blob)[0]
+    )
 
 
 def _hexdiff(py_bytes: bytes | None, cpp_bytes: bytes | None) -> str:
@@ -135,7 +139,10 @@ def _hexdiff(py_bytes: bytes | None, cpp_bytes: bytes | None) -> str:
     if len(py_bytes) != len(cpp_bytes):
         return f"    length py={len(py_bytes)} cpp={len(cpp_bytes)}"
     diffs = [i for i in range(len(py_bytes)) if py_bytes[i] != cpp_bytes[i]]
-    out = [f"    @{off}: py={py_bytes[off]:02x} cpp={cpp_bytes[off]:02x}" for off in diffs[:8]]
+    out = [
+        f"    @{off}: py={py_bytes[off]:02x} cpp={cpp_bytes[off]:02x}"
+        for off in diffs[:8]
+    ]
     if len(diffs) > 8:
         out.append(f"    ... +{len(diffs) - 8} more byte(s)")
     return "\n".join(out)
@@ -144,8 +151,14 @@ def _hexdiff(py_bytes: bytes | None, cpp_bytes: bytes | None) -> str:
 def report_diff(py_blob: bytes, cpp_blob: bytes, limit: int = 6) -> None:
     """Print the first `limit` descriptors that differ AFTER canonicalization, showing the
     RAW wire bytes so the real difference is visible."""
-    py_raw = {(d.descriptor_type, d.descriptor_index): d.wire_bytes for d in read_blob(py_blob)[0]}
-    cpp_raw = {(d.descriptor_type, d.descriptor_index): d.wire_bytes for d in read_blob(cpp_blob)[0]}
+    py_raw = {
+        (d.descriptor_type, d.descriptor_index): d.wire_bytes
+        for d in read_blob(py_blob)[0]
+    }
+    cpp_raw = {
+        (d.descriptor_type, d.descriptor_index): d.wire_bytes
+        for d in read_blob(cpp_blob)[0]
+    }
     py_canon = {k: canon(k[0], v) for k, v in py_raw.items()}
     cpp_canon = {k: canon(k[0], v) for k, v in cpp_raw.items()}
     keys = sorted(set(py_canon) | set(cpp_canon))
@@ -158,7 +171,9 @@ def report_diff(py_blob: bytes, cpp_blob: bytes, limit: int = 6) -> None:
         print(_hexdiff(py_raw.get(key), cpp_raw.get(key)))
         shown += 1
         if shown >= limit:
-            remaining = sum(1 for k in keys if py_canon.get(k) != cpp_canon.get(k)) - shown
+            remaining = (
+                sum(1 for k in keys if py_canon.get(k) != cpp_canon.get(k)) - shown
+            )
             if remaining > 0:
                 print(f"    ... +{remaining} more differing descriptor(s)")
             break
@@ -167,12 +182,20 @@ def report_diff(py_blob: bytes, cpp_blob: bytes, limit: int = 6) -> None:
 def main() -> int:
     cpp_tool = sys.argv[1] if len(sys.argv) > 1 else None
     if cpp_tool:
-        print("Comparing JSON json2bin blobs to the C++ generator at the descriptor CONTENT level.")
+        print(
+            "Comparing JSON json2bin blobs to the C++ generator at the descriptor CONTENT level."
+        )
         print("Non-authored fields are canonicalized before comparison: CONFIGURATION")
-        print("localized_description + descriptor_counts order; STREAM 2021 redundant/timing")
-        print("trailer offsets; AVB_INTERFACE mac/clock_identity/gPTP + localized_description;")
+        print(
+            "localized_description + descriptor_counts order; STREAM 2021 redundant/timing"
+        )
+        print(
+            "trailer offsets; AVB_INTERFACE mac/clock_identity/gPTP + localized_description;"
+        )
         print("JACK localized_description (all runtime-filled, serialization, or not")
-        print("expressible via json_reader.py). See NEUTRAL_FIELDS for exact byte ranges.\n")
+        print(
+            "expressible via json_reader.py). See NEUTRAL_FIELDS for exact byte ranges.\n"
+        )
     failures = 0
     for name, flag in MODELS.items():
         pyb = json_blob(name)
@@ -189,7 +212,9 @@ def main() -> int:
             ok = py == cpp
             failures += not ok
             status = "CONTENT MATCH" if ok else "MISMATCH"
-            print(f"  {name:14s} py={sum(py.values()):>2} descs, cpp={sum(cpp.values()):>2} descs  {status}")
+            print(
+                f"  {name:14s} py={sum(py.values()):>2} descs, cpp={sum(cpp.values()):>2} descs  {status}"
+            )
             if not ok:
                 report_diff(pyb, cppb)
         else:
@@ -199,9 +224,16 @@ def main() -> int:
         n = sum(content_counter(json_blob("simple_stereo")).values())
         print(f"  {'simple_stereo':14s} py={n:>2}  (parse-only)")
     if failures:
-        print(f"\nFAILED: {failures} model(s) diverge from the C++ generator at the CONTENT level", file=sys.stderr)
+        print(
+            f"\nFAILED: {failures} model(s) diverge from the C++ generator at the CONTENT level",
+            file=sys.stderr,
+        )
         return 1
-    print("\nAll models CONTENT-MATCH the C++ generator." if cpp_tool else "\nAll models compile + parse.")
+    print(
+        "\nAll models CONTENT-MATCH the C++ generator."
+        if cpp_tool
+        else "\nAll models compile + parse."
+    )
     return 0
 
 

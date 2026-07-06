@@ -169,7 +169,7 @@ TEST(media_clock_generator, reanchors_on_forward_gptp_step)
     std::uint64_t const jumped = k_base + (100ULL * k_wake_ns) + 10'000'000'000ULL;
     auto const e = mcg.advance(jumped, 1.0, 12);
     EXPECT_EQ(mcg.step_count(), std::uint64_t{1});
-    EXPECT_EQ(e.samples, std::uint32_t{12});  // emits nominal, not a clamped catch-up
+    EXPECT_EQ(e.samples, std::uint32_t{12});                       // emits nominal, not a clamped catch-up
     EXPECT_EQ(mcg.timestamp_for(e.first_index), jumped + offset);  // on the NEW epoch
 }
 

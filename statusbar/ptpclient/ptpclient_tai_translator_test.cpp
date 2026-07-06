@@ -135,7 +135,7 @@ TEST(gps_tai_translator, snapshot_reproduces_stateful_tai_ns)
     {
         auto const snap = tr.snapshot();
         std::int64_t const m = sim.master_at(0.0);
-        EXPECT_EQ(tai_ns(snap, m), m);            // identity
+        EXPECT_EQ(tai_ns(snap, m), m);             // identity
         EXPECT_EQ(tai_ns(snap, m), tr.tai_ns(m));  // snapshot == member
     }
 

@@ -935,7 +935,7 @@ TEST(listener_sm, pending_connect_not_clobbered_by_second_command)
     ctx.rcvd_cmd_resp.listener_unique_id = 0;
     ctx.rcvd_cmd_resp.sequence_id = 2;
     sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(1));
-    EXPECT_EQ(sent_commands.size(), 1U);  // no second CONNECT_TX
+    EXPECT_EQ(sent_commands.size(), 1U);                   // no second CONNECT_TX
     EXPECT_EQ(ctx.pending_command.sequence_id.get(), 1U);  // still the original
 
     // The talker responds to the ORIGINAL (seq 1); the controller gets its answer
@@ -1090,8 +1090,8 @@ TEST(listener_sm, disconnect_rx_wrong_talker_rejected)
 
     EXPECT_EQ(sent_responses.size(), 1U);
     EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_NO_SUCH_CONNECTION);
-    EXPECT_TRUE(sent_commands.empty());          // no DISCONNECT_TX to any talker
-    EXPECT_TRUE(ctx.get_stream(0)->connected);   // live connection to TALKER_ID preserved
+    EXPECT_TRUE(sent_commands.empty());         // no DISCONNECT_TX to any talker
+    EXPECT_TRUE(ctx.get_stream(0)->connected);  // live connection to TALKER_ID preserved
 
     // DISCONNECT_RX naming the CORRECT talker -> proceeds (DISCONNECT_TX sent).
     ctx.rcvd_cmd_resp = {};

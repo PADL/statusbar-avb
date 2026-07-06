@@ -79,7 +79,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                       avb_entity_audio_io_tool)
 
-  add_executable(avb_entity_tone_generator_tool avb_entity_tone_generator_tool.cpp)
+  add_executable(avb_entity_tone_generator_tool
+                 avb_entity_tone_generator_tool.cpp)
   target_link_libraries(avb_entity_tone_generator_tool PRIVATE statusbar)
   # Default --descriptor-storage to the tone blob shipped by the package
   # (generated in statusbar/tools/CMakeLists.txt).

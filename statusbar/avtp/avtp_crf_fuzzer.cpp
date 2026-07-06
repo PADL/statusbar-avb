@@ -13,7 +13,7 @@
 #include <span>
 
 namespace {
-volatile uint64_t g_sink = 0;
+uint64_t volatile g_sink = 0;
 }  // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)

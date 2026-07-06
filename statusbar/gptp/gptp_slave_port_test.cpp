@@ -617,11 +617,13 @@ void run_pdelay_exchange(MDPdelayReq& mdp, std::int64_t t1, std::int64_t t2, std
     mdp.on_pdelay_req_tx_timestamp(*seq, t1);
     PdelayRespMessage resp{};
     resp.init(*seq);
-    resp.request_receipt_timestamp = Timestamp(static_cast<uint64_t>(t2 / 1'000'000'000LL), static_cast<uint32_t>(t2 % 1'000'000'000LL));
+    resp.request_receipt_timestamp =
+        Timestamp(static_cast<uint64_t>(t2 / 1'000'000'000LL), static_cast<uint32_t>(t2 % 1'000'000'000LL));
     mdp.on_pdelay_resp(resp, t4);
     PdelayRespFollowUpMessage fup{};
     fup.init(*seq);
-    fup.response_origin_timestamp = Timestamp(static_cast<uint64_t>(t3 / 1'000'000'000LL), static_cast<uint32_t>(t3 % 1'000'000'000LL));
+    fup.response_origin_timestamp =
+        Timestamp(static_cast<uint64_t>(t3 / 1'000'000'000LL), static_cast<uint32_t>(t3 % 1'000'000'000LL));
     (void)mdp.on_pdelay_resp_follow_up(fup);
 }
 }  // namespace
@@ -651,8 +653,8 @@ TEST(md_pdelay_req, lost_responses_drop_then_recover_as_capable)
     EXPECT_TRUE(mdp.is_as_capable());
 
     for (int i = 0; i < 3; ++i) {
-        (void)mdp.pdelay_interval_timer_expired();     // send a Pdelay_Req
-        mdp.on_pdelay_resp_receipt_timeout();          // ... no response arrives
+        (void)mdp.pdelay_interval_timer_expired();  // send a Pdelay_Req
+        mdp.on_pdelay_resp_receipt_timeout();       // ... no response arrives
     }
     EXPECT_FALSE(mdp.is_as_capable());  // 3 losses >= threshold
 
@@ -694,8 +696,8 @@ TEST(gptp_slave_port, rogue_sync_interval_arms_bounded_timeout)
     port.receive_frame(std::span<uint8_t const>(sync_buf), 1'000'000'000LL, t0);
 
     auto const nd = port.next_deadline();
-    EXPECT_TRUE(nd != TimePoint::max());  // a timer is armed
-    EXPECT_TRUE(nd >= t0);                // not in the past (a 0-ns / negative-clamp bug)
+    EXPECT_TRUE(nd != TimePoint::max());           // a timer is armed
+    EXPECT_TRUE(nd >= t0);                         // not in the past (a 0-ns / negative-clamp bug)
     EXPECT_TRUE(nd - t0 < std::chrono::hours(1));  // bounded (a raw 2^127 s would be astronomically larger)
 }
 

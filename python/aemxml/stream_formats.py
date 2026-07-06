@@ -50,7 +50,9 @@ def encode_aaf_stream_format(
     12 @ 96 kHz).
     """
     if rate not in _RATE_TO_NSR:
-        raise ValueError(f"Unsupported sample rate {rate}, valid: {sorted(_RATE_TO_NSR.keys())}")
+        raise ValueError(
+            f"Unsupported sample rate {rate}, valid: {sorted(_RATE_TO_NSR.keys())}"
+        )
     if channels < 1 or channels > 1023:
         raise ValueError(f"Channels must be 1-1023, got {channels}")
     if depth < 1 or depth > 255:

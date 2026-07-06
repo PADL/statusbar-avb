@@ -126,10 +126,7 @@ class GpsTaiTranslator
     // Propagates the filtered phase from the last update epoch; dt is measured
     // on the master timeline, differing from GPS time by the ppm-level ratio (a
     // second-order error over the sub-second horizon — negligible).
-    [[nodiscard]] std::int64_t tai_ns(std::int64_t master_ns) const noexcept
-    {
-        return ptpclient::tai_ns(snapshot(), master_ns);
-    }
+    [[nodiscard]] std::int64_t tai_ns(std::int64_t master_ns) const noexcept { return ptpclient::tai_ns(snapshot(), master_ns); }
 
     /// Capture the current state as a trivially-copyable snapshot for
     /// cross-thread publication. Evaluating tai_ns(snapshot(), m) equals

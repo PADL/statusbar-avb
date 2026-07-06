@@ -724,8 +724,7 @@ int main(int argc, char* argv[])
         // These are descriptor indices (uint16 on the wire). The TOML path range-
         // checks them; the single-command CLI path must too, or e.g. --clock-domain
         // 70000 would silently wrap to 4464.
-        if (config.clock_domain < 0 || config.clock_domain > 0xFFFF || config.clock_source < 0 ||
-            config.clock_source > 0xFFFF) {
+        if (config.clock_domain < 0 || config.clock_domain > 0xFFFF || config.clock_source < 0 || config.clock_source > 0xFFFF) {
             std::println(stderr, "Error: --clock-domain and --clock-source must be 0..65535");
             return 1;
         }

@@ -14,7 +14,7 @@
 #include <span>
 
 namespace {
-volatile uint8_t g_sink = 0;
+uint8_t volatile g_sink = 0;
 void consume(std::span<uint8_t const> const s) noexcept
 {
     uint8_t x = 0;

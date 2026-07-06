@@ -27,13 +27,13 @@ namespace statusbar::atdecc {
 /// Listener state machine states
 enum class ListenerState : uint8_t
 {
-    Start,            // Initial state after construction
-    Waiting,          // Idle state; also where async talker responses/timeouts are handled
-    ConnectTxCmd,     // Sending CONNECT_TX_COMMAND to talker
-    DisconnectTxCmd,  // Sending DISCONNECT_TX_COMMAND to talker
-    ConnectTxResp,    // Deprecated: response-wait is now folded into Waiting (kept for API compat)
-    DisconnectTxResp, // Deprecated: response-wait is now folded into Waiting (kept for API compat)
-    GetState,         // Processing GET_RX_STATE_COMMAND
+    Start,             // Initial state after construction
+    Waiting,           // Idle state; also where async talker responses/timeouts are handled
+    ConnectTxCmd,      // Sending CONNECT_TX_COMMAND to talker
+    DisconnectTxCmd,   // Sending DISCONNECT_TX_COMMAND to talker
+    ConnectTxResp,     // Deprecated: response-wait is now folded into Waiting (kept for API compat)
+    DisconnectTxResp,  // Deprecated: response-wait is now folded into Waiting (kept for API compat)
+    GetState,          // Processing GET_RX_STATE_COMMAND
     Count
 };
 
