@@ -462,6 +462,13 @@ TEST(nanoavb_adp_advertiser, set_identify_control_index)
     // Advertising the index must also assert AEM_IDENTIFY_CONTROL_INDEX_VALID so
     // controllers know the index is meaningful.
     EXPECT_TRUE(advertiser.adpdu().has_entity_capability(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
+
+    // The identify advertisement must survive an ADPDU rebuild from the model
+    // (notify_entity_changed runs on startup MAC/entity-id patching) — it is
+    // discovered from the descriptor storage, not the ENTITY descriptor.
+    advertiser.notify_entity_changed();
+    EXPECT_EQ(advertiser.adpdu().identify_control_index.get(), 123);
+    EXPECT_TRUE(advertiser.adpdu().has_entity_capability(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
 }
 
 TEST(nanoavb_adp_advertiser, update_config)

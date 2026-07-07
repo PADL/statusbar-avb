@@ -65,6 +65,14 @@ auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
     adpdu_.available_index = available_index_;
     adpdu_.association_id = entity.association_id;
 
+    // Re-apply the identify-control advertisement: it is discovered from the
+    // descriptor storage (see AvbEntityHost::wire_identify_control), not part
+    // of the ENTITY descriptor this rebuild copies from.
+    if (identify_control_index_valid_) {
+        adpdu_.identify_control_index = identify_control_index_;
+        adpdu_.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID);
+    }
+
     // gPTP fields would typically come from gPTP stack
     // For now, leave at defaults (0)
 }

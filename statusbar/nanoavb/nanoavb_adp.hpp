@@ -177,10 +177,14 @@ class NanoAvbAdpAdvertiser
     /// Set the identify control index and advertise it as valid.
     /// Sets the ADPDU identify_control_index and the AEM_IDENTIFY_CONTROL_INDEX_VALID
     /// entity-capability bit (IEEE 1722.1 6.2.1.10) so controllers know which CONTROL
-    /// descriptor is the entity's IDENTIFY control.
+    /// descriptor is the entity's IDENTIFY control. Remembered across
+    /// update_adpdu_from_model() rebuilds — the index is discovered from the
+    /// descriptor storage, not part of the ENTITY descriptor the rebuild copies.
     /// @param index The identify control descriptor index
     void set_identify_control_index(uint16_t index)
     {
+        identify_control_index_ = index;
+        identify_control_index_valid_ = true;
         adpdu_.identify_control_index = index;
         adpdu_.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID);
     }
@@ -224,6 +228,8 @@ class NanoAvbAdpAdvertiser
     DescriptorEntity entity_;  // Owned snapshot (~312 bytes) — see ctor for rationale
     AdpAdvertiserCallbacks callbacks_;
     AdpAdvertiserConfig config_;
+    uint16_t identify_control_index_ = 0;
+    bool identify_control_index_valid_ = false;
 
     AdpAdvertiserState state_ = AdpAdvertiserState::Stopped;
     AdpDu adpdu_;
