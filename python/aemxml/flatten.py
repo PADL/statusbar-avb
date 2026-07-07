@@ -7,6 +7,7 @@ from __future__ import annotations
 import zlib
 from dataclasses import dataclass
 
+from .control_values import count_values
 from .model import (
     DESCRIPTOR_ENTITY,
     DESCRIPTOR_CONFIGURATION,
@@ -523,7 +524,7 @@ def _serialize_control(ctrl: Control, desc_index: int) -> bytes:
         pack_eui64(ctrl.control_type),
         pack_u32(ctrl.reset_time),
         pack_u16(104),  # values_offset
-        pack_u16(val_len),
+        pack_u16(count_values(ctrl.control_value_type, ctrl.value_details)),
         pack_u16(ctrl.signal_type),
         pack_u16(ctrl.signal_index),
         pack_u16(ctrl.signal_output),
@@ -751,7 +752,7 @@ def _serialize_signal_transcoder(tc: SignalTranscoder, desc_index: int) -> bytes
         pack_u16(tc.control_domain),
         pack_u16(tc.control_value_type),
         pack_u16(100),  # values_offset
-        pack_u16(val_len),
+        pack_u16(count_values(tc.control_value_type, tc.value_details)),
         pack_u16(tc.signal_type),
         pack_u16(tc.signal_index),
         pack_u16(tc.signal_output),

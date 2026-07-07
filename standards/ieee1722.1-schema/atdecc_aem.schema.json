@@ -13,7 +13,9 @@
       "$ref": "#/$defs/entity"
     }
   },
-  "required": ["entity"],
+  "required": [
+    "entity"
+  ],
   "additionalProperties": false,
   "$defs": {
     "hex_string": {
@@ -37,7 +39,9 @@
     "localized_string_ref": {
       "description": "Localized name for the descriptor. Preferred form: a {locale: text} dict — the LOCALE/STRINGS descriptors and the wire reference are generated automatically. For hand-managed 'strings' tables: the raw 16-bit wire value (offset << 3 | index; 65535 = NO_STRING) or an explicit {offset, index} object. Omitted = NO_STRING.",
       "oneOf": [
-        { "$ref": "#/$defs/localized_texts" },
+        {
+          "$ref": "#/$defs/localized_texts"
+        },
         {
           "type": "integer",
           "minimum": 0,
@@ -48,8 +52,18 @@
           "type": "object",
           "description": "Explicit reference into the configuration's hand-managed 'strings' table.",
           "properties": {
-            "offset": { "type": "integer", "minimum": 0, "maximum": 8191, "description": "STRINGS descriptor offset within the locale." },
-            "index": { "type": "integer", "minimum": 0, "maximum": 7, "description": "String index within the STRINGS descriptor (0-6; 7 with offset 8191 = NO_STRING)." }
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8191,
+              "description": "STRINGS descriptor offset within the locale."
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 7,
+              "description": "String index within the STRINGS descriptor (0-6; 7 with offset 8191 = NO_STRING)."
+            }
           },
           "additionalProperties": false
         }
@@ -58,84 +72,162 @@
     "name_string": {
       "description": "A name that is either a plain string (same text in every locale) or a {locale: text} dict.",
       "oneOf": [
-        { "type": "string", "maxLength": 64 },
-        { "$ref": "#/$defs/localized_texts" }
+        {
+          "type": "string",
+          "maxLength": 64
+        },
+        {
+          "$ref": "#/$defs/localized_texts"
+        }
       ]
     },
     "entity_capability": {
       "type": "string",
       "enum": [
-        "EFU_MODE", "ADDRESS_ACCESS_SUPPORTED", "GATEWAY_ENTITY",
-        "AEM_SUPPORTED", "LEGACY_AVC", "ASSOCIATION_ID_SUPPORTED",
-        "ASSOCIATION_ID_VALID", "VENDOR_UNIQUE_SUPPORTED",
-        "CLASS_A_SUPPORTED", "CLASS_B_SUPPORTED", "GPTP_SUPPORTED",
-        "AEM_AUTHENTICATION_SUPPORTED", "AEM_AUTHENTICATION_REQUIRED",
-        "AEM_PERSISTENT_ACQUIRE_SUPPORTED", "AEM_IDENTIFY_CONTROL_INDEX_VALID",
-        "AEM_INTERFACE_INDEX_VALID", "GENERAL_CONTROLLER_IGNORE", "ENTITY_NOT_READY"
+        "EFU_MODE",
+        "ADDRESS_ACCESS_SUPPORTED",
+        "GATEWAY_ENTITY",
+        "AEM_SUPPORTED",
+        "LEGACY_AVC",
+        "ASSOCIATION_ID_SUPPORTED",
+        "ASSOCIATION_ID_VALID",
+        "VENDOR_UNIQUE_SUPPORTED",
+        "CLASS_A_SUPPORTED",
+        "CLASS_B_SUPPORTED",
+        "GPTP_SUPPORTED",
+        "AEM_AUTHENTICATION_SUPPORTED",
+        "AEM_AUTHENTICATION_REQUIRED",
+        "AEM_PERSISTENT_ACQUIRE_SUPPORTED",
+        "AEM_IDENTIFY_CONTROL_INDEX_VALID",
+        "AEM_INTERFACE_INDEX_VALID",
+        "GENERAL_CONTROLLER_IGNORE",
+        "ENTITY_NOT_READY"
       ],
       "description": "Entity capability flag (IEEE 1722.1 Clause 6.2.1)."
     },
     "talker_capability": {
       "type": "string",
       "enum": [
-        "IMPLEMENTED", "OTHER_SOURCE", "CONTROL_SOURCE",
-        "MEDIA_CLOCK_SOURCE", "SMPTE_SOURCE", "MIDI_SOURCE",
-        "AUDIO_SOURCE", "VIDEO_SOURCE"
+        "IMPLEMENTED",
+        "OTHER_SOURCE",
+        "CONTROL_SOURCE",
+        "MEDIA_CLOCK_SOURCE",
+        "SMPTE_SOURCE",
+        "MIDI_SOURCE",
+        "AUDIO_SOURCE",
+        "VIDEO_SOURCE"
       ],
       "description": "Talker capability flag."
     },
     "listener_capability": {
       "type": "string",
       "enum": [
-        "IMPLEMENTED", "OTHER_SINK", "CONTROL_SINK",
-        "MEDIA_CLOCK_SINK", "SMPTE_SINK", "MIDI_SINK",
-        "AUDIO_SINK", "VIDEO_SINK"
+        "IMPLEMENTED",
+        "OTHER_SINK",
+        "CONTROL_SINK",
+        "MEDIA_CLOCK_SINK",
+        "SMPTE_SINK",
+        "MIDI_SINK",
+        "AUDIO_SINK",
+        "VIDEO_SINK"
       ],
       "description": "Listener capability flag."
     },
     "stream_flag": {
       "type": "string",
       "enum": [
-        "CLOCK_SYNC_SOURCE", "CLASS_A", "CLASS_B",
-        "SUPPORTS_ENCRYPTED", "PRIMARY_BACKUP_SUPPORTED",
-        "PRIMARY_BACKUP_VALID", "SECONDARY_BACKUP_SUPPORTED",
-        "SECONDARY_BACKUP_VALID", "TERTIARY_BACKUP_SUPPORTED",
-        "TERTIARY_BACKUP_VALID", "SUPPORTS_AVTP_UDPV4",
-        "SUPPORTS_AVTP_UDPV6", "NO_SUPPORT_AVTP_NATIVE",
-        "TIMING_FIELD_VALID", "NO_MEDIA_CLOCK", "SUPPORTS_NO_SRP"
+        "CLOCK_SYNC_SOURCE",
+        "CLASS_A",
+        "CLASS_B",
+        "SUPPORTS_ENCRYPTED",
+        "PRIMARY_BACKUP_SUPPORTED",
+        "PRIMARY_BACKUP_VALID",
+        "SECONDARY_BACKUP_SUPPORTED",
+        "SECONDARY_BACKUP_VALID",
+        "TERTIARY_BACKUP_SUPPORTED",
+        "TERTIARY_BACKUP_VALID",
+        "SUPPORTS_AVTP_UDPV4",
+        "SUPPORTS_AVTP_UDPV6",
+        "NO_SUPPORT_AVTP_NATIVE",
+        "TIMING_FIELD_VALID",
+        "NO_MEDIA_CLOCK",
+        "SUPPORTS_NO_SRP"
       ],
       "description": "Stream flag (IEEE 1722.1 Clause 7.2.6)."
     },
     "interface_flag": {
       "type": "string",
       "enum": [
-        "GPTP_GRANDMASTER_SUPPORTED", "GPTP_SUPPORTED", "SRP_SUPPORTED",
-        "FQTSS_NOT_SUPPORTED", "SCHEDULED_TRAFFIC_SUPPORTED",
-        "CAN_LISTEN_TO_SELF", "CAN_LISTEN_TO_OTHER_SELF"
+        "GPTP_GRANDMASTER_SUPPORTED",
+        "GPTP_SUPPORTED",
+        "SRP_SUPPORTED",
+        "FQTSS_NOT_SUPPORTED",
+        "SCHEDULED_TRAFFIC_SUPPORTED",
+        "CAN_LISTEN_TO_SELF",
+        "CAN_LISTEN_TO_OTHER_SELF"
       ],
       "description": "AVB interface flag."
     },
     "jack_flag": {
       "type": "string",
-      "enum": ["CLOCK_SYNC_SOURCE", "CAPTIVE"],
+      "enum": [
+        "CLOCK_SYNC_SOURCE",
+        "CAPTIVE"
+      ],
       "description": "Jack flag."
     },
     "jack_type": {
       "type": "string",
       "enum": [
-        "SPEAKER", "HEADPHONE", "ANALOG_MICROPHONE", "SPDIF", "ADAT",
-        "TDIF", "MADI", "UNBALANCED_ANALOG", "BALANCED_ANALOG", "DIGITAL",
-        "MIDI", "AES_EBU", "COMPOSITE_VIDEO", "S_VHS_VIDEO", "COMPONENT_VIDEO",
-        "DVI", "HDMI", "UDI", "DISPLAYPORT", "ANTENNA", "ANALOG_TUNER",
-        "ETHERNET", "WIFI", "USB", "PCI", "PCI_E", "SCSI", "ATA", "IMAGER",
-        "IR", "THUNDERBOLT", "SATA", "SMPTE_LTC", "DIGITAL_MICROPHONE",
-        "AUDIO_MEDIA_CLOCK", "VIDEO_MEDIA_CLOCK", "GNSS_CLOCK", "PPS"
+        "SPEAKER",
+        "HEADPHONE",
+        "ANALOG_MICROPHONE",
+        "SPDIF",
+        "ADAT",
+        "TDIF",
+        "MADI",
+        "UNBALANCED_ANALOG",
+        "BALANCED_ANALOG",
+        "DIGITAL",
+        "MIDI",
+        "AES_EBU",
+        "COMPOSITE_VIDEO",
+        "S_VHS_VIDEO",
+        "COMPONENT_VIDEO",
+        "DVI",
+        "HDMI",
+        "UDI",
+        "DISPLAYPORT",
+        "ANTENNA",
+        "ANALOG_TUNER",
+        "ETHERNET",
+        "WIFI",
+        "USB",
+        "PCI",
+        "PCI_E",
+        "SCSI",
+        "ATA",
+        "IMAGER",
+        "IR",
+        "THUNDERBOLT",
+        "SATA",
+        "SMPTE_LTC",
+        "DIGITAL_MICROPHONE",
+        "AUDIO_MEDIA_CLOCK",
+        "VIDEO_MEDIA_CLOCK",
+        "GNSS_CLOCK",
+        "PPS"
       ],
       "description": "Jack type (IEEE 1722.1 Clause 7.2.7)."
     },
     "clock_source_type": {
       "type": "string",
-      "enum": ["INTERNAL", "EXTERNAL", "INPUT_STREAM", "MEDIA_CLOCK_STREAM"],
+      "enum": [
+        "INTERNAL",
+        "EXTERNAL",
+        "INPUT_STREAM",
+        "MEDIA_CLOCK_STREAM"
+      ],
       "description": "Clock source type."
     },
     "stream_format_object": {
@@ -144,12 +236,25 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["AAF"],
+          "enum": [
+            "AAF"
+          ],
           "description": "AVTP subtype."
         },
         "rate": {
           "type": "integer",
-          "enum": [8000, 16000, 24000, 32000, 44100, 48000, 88200, 96000, 176400, 192000],
+          "enum": [
+            8000,
+            16000,
+            24000,
+            32000,
+            44100,
+            48000,
+            88200,
+            96000,
+            176400,
+            192000
+          ],
           "description": "Nominal sample rate in Hz."
         },
         "channels": {
@@ -160,17 +265,30 @@
         },
         "depth": {
           "type": "integer",
-          "enum": [16, 24, 32],
+          "enum": [
+            16,
+            24,
+            32
+          ],
           "description": "Bit depth per sample."
         }
       },
-      "required": ["type", "rate", "channels", "depth"],
+      "required": [
+        "type",
+        "rate",
+        "channels",
+        "depth"
+      ],
       "additionalProperties": false
     },
     "stream_format": {
       "oneOf": [
-        { "$ref": "#/$defs/stream_format_object" },
-        { "$ref": "#/$defs/hex_string" }
+        {
+          "$ref": "#/$defs/stream_format_object"
+        },
+        {
+          "$ref": "#/$defs/hex_string"
+        }
       ],
       "description": "Stream format: structured AAF object or raw hex string."
     },
@@ -178,12 +296,29 @@
       "type": "object",
       "description": "Maps a stream channel to an audio cluster channel.",
       "properties": {
-        "stream": { "type": "integer", "description": "Stream index." },
-        "stream_ch": { "type": "integer", "description": "Stream channel." },
-        "cluster": { "type": "integer", "description": "Cluster offset." },
-        "cluster_ch": { "type": "integer", "description": "Cluster channel." }
+        "stream": {
+          "type": "integer",
+          "description": "Stream index."
+        },
+        "stream_ch": {
+          "type": "integer",
+          "description": "Stream channel."
+        },
+        "cluster": {
+          "type": "integer",
+          "description": "Cluster offset."
+        },
+        "cluster_ch": {
+          "type": "integer",
+          "description": "Cluster channel."
+        }
       },
-      "required": ["stream", "stream_ch", "cluster", "cluster_ch"],
+      "required": [
+        "stream",
+        "stream_ch",
+        "cluster",
+        "cluster_ch"
+      ],
       "additionalProperties": false
     },
     "symbol": {
@@ -192,39 +327,410 @@
     },
     "signal_type": {
       "type": "string",
-      "enum": ["ENTITY", "CONFIGURATION", "AUDIO_UNIT", "VIDEO_UNIT", "SENSOR_UNIT",
-               "STREAM_INPUT", "STREAM_OUTPUT", "JACK_INPUT", "JACK_OUTPUT",
-               "AVB_INTERFACE", "CLOCK_SOURCE", "MEMORY_OBJECT", "LOCALE", "STRINGS",
-               "STREAM_PORT_INPUT", "STREAM_PORT_OUTPUT",
-               "EXTERNAL_PORT_INPUT", "EXTERNAL_PORT_OUTPUT",
-               "INTERNAL_PORT_INPUT", "INTERNAL_PORT_OUTPUT",
-               "AUDIO_CLUSTER", "VIDEO_CLUSTER", "SENSOR_CLUSTER",
-               "AUDIO_MAP", "VIDEO_MAP", "SENSOR_MAP",
-               "CONTROL", "SIGNAL_SELECTOR", "MIXER", "MATRIX", "MATRIX_SIGNAL",
-               "SIGNAL_SPLITTER", "SIGNAL_COMBINER", "SIGNAL_DEMULTIPLEXER",
-               "SIGNAL_MULTIPLEXER", "SIGNAL_TRANSCODER", "CLOCK_DOMAIN",
-               "CONTROL_BLOCK"],
+      "enum": [
+        "ENTITY",
+        "CONFIGURATION",
+        "AUDIO_UNIT",
+        "VIDEO_UNIT",
+        "SENSOR_UNIT",
+        "STREAM_INPUT",
+        "STREAM_OUTPUT",
+        "JACK_INPUT",
+        "JACK_OUTPUT",
+        "AVB_INTERFACE",
+        "CLOCK_SOURCE",
+        "MEMORY_OBJECT",
+        "LOCALE",
+        "STRINGS",
+        "STREAM_PORT_INPUT",
+        "STREAM_PORT_OUTPUT",
+        "EXTERNAL_PORT_INPUT",
+        "EXTERNAL_PORT_OUTPUT",
+        "INTERNAL_PORT_INPUT",
+        "INTERNAL_PORT_OUTPUT",
+        "AUDIO_CLUSTER",
+        "VIDEO_CLUSTER",
+        "SENSOR_CLUSTER",
+        "AUDIO_MAP",
+        "VIDEO_MAP",
+        "SENSOR_MAP",
+        "CONTROL",
+        "SIGNAL_SELECTOR",
+        "MIXER",
+        "MATRIX",
+        "MATRIX_SIGNAL",
+        "SIGNAL_SPLITTER",
+        "SIGNAL_COMBINER",
+        "SIGNAL_DEMULTIPLEXER",
+        "SIGNAL_MULTIPLEXER",
+        "SIGNAL_TRANSCODER",
+        "CLOCK_DOMAIN",
+        "CONTROL_BLOCK"
+      ],
       "description": "Descriptor type name for signal routing references."
+    },
+    "control_value_type_name": {
+      "type": "string",
+      "enum": [
+        "LINEAR_INT8",
+        "LINEAR_UINT8",
+        "LINEAR_INT16",
+        "LINEAR_UINT16",
+        "LINEAR_INT32",
+        "LINEAR_UINT32",
+        "LINEAR_INT64",
+        "LINEAR_UINT64",
+        "LINEAR_FLOAT",
+        "LINEAR_DOUBLE",
+        "SELECTOR_INT8",
+        "SELECTOR_UINT8",
+        "SELECTOR_INT16",
+        "SELECTOR_UINT16",
+        "SELECTOR_INT32",
+        "SELECTOR_UINT32",
+        "SELECTOR_INT64",
+        "SELECTOR_UINT64",
+        "SELECTOR_FLOAT",
+        "SELECTOR_DOUBLE",
+        "SELECTOR_STRING",
+        "ARRAY_INT8",
+        "ARRAY_UINT8",
+        "ARRAY_INT16",
+        "ARRAY_UINT16",
+        "ARRAY_INT32",
+        "ARRAY_UINT32",
+        "ARRAY_INT64",
+        "ARRAY_UINT64",
+        "ARRAY_FLOAT",
+        "ARRAY_DOUBLE",
+        "UTF8",
+        "BODE_PLOT",
+        "SMPTE_TIME",
+        "SAMPLE_RATE",
+        "GPTP_TIME",
+        "VENDOR",
+        "EXPANSION"
+      ],
+      "description": "Control value type name (IEEE 1722.1 Clause 7.3.5)."
+    },
+    "control_type_name": {
+      "type": "string",
+      "enum": [
+        "ABSOLUTE_HUMIDITY",
+        "ACCELERATION",
+        "ALTITUDE",
+        "ATTENUATE",
+        "AUDIO_METERS",
+        "AUDIO_SCALE",
+        "AUDIO_SPECTRUM",
+        "AUTO_EXP_MODE",
+        "AUTO_EXP_PRIO",
+        "BACKLIGHT",
+        "BAROMETRIC_PRESSURE",
+        "BAUD_RATE",
+        "BIT_WIDTH",
+        "BRIGHTNESS",
+        "CONFIGURATION_URL",
+        "CONTRAST",
+        "CONTROLLER_TARGET_ENTITY",
+        "CONTROLLER_TARGET_OBJECT",
+        "DELAY",
+        "DIGITAL_ZOOM",
+        "ENABLE",
+        "ENTITY_URL",
+        "EXP_TIME",
+        "FAN_STATUS",
+        "FAULT",
+        "FILTER_RESPONSE",
+        "FOCUS",
+        "FOCUS_AUTO",
+        "FQTSS_ADMIN_IDLE_SLOPE",
+        "FQTSS_CLASS_MEASUREMENT_INTERVAL",
+        "FQTSS_DELTA_BANDWIDTH",
+        "FQTSS_LOCK_CLASS_BANDWIDTH",
+        "FQTSS_OPER_IDLE_SLOPE",
+        "FQTSS_PORT_TRANSMIT_RATE",
+        "FREQUENCY",
+        "GAIN",
+        "GAMMA",
+        "GENERIC_URL",
+        "HUE",
+        "IDENTIFY",
+        "INTERFACE_MEDIA_OPTIONS",
+        "INTERFACE_MEDIA_STATUS",
+        "INTERFACE_NETWORK_NAME",
+        "INTERFACE_OPERATIONAL",
+        "INVERT",
+        "IRIS",
+        "LATENCY_COMPENSATION",
+        "MANUFACTURER_URL",
+        "MEDIA_DISK",
+        "MEDIA_DISK_NAME",
+        "MEDIA_PLAYBACK_TRANSPORT",
+        "MEDIA_PLAYLIST",
+        "MEDIA_PLAYLIST_NAME",
+        "MEDIA_RECORD_TRANSPORT",
+        "MEDIA_SAMPLE_POSITION",
+        "MEDIA_SPEED",
+        "MEDIA_TRACK",
+        "MEDIA_TRACK_NAME",
+        "MODULATION",
+        "MUTE",
+        "ORIENTATION",
+        "PANPOT",
+        "PARITY",
+        "PHANTOM",
+        "POLARIZATION",
+        "POWER_STATUS",
+        "POW_LINE_FREQ",
+        "PRIVACY",
+        "RELATIVE_HUMIDITY",
+        "SATURATION",
+        "SCANNING_MODE",
+        "SHARPNESS",
+        "SNAPSHOT",
+        "SRC_MODE",
+        "STOP_BITS",
+        "TEMPERATURE",
+        "VELOCITY",
+        "WHITE_BAL_COMP",
+        "WHITE_BAL_COMP_AUTO",
+        "WHITE_BAL_TEMP",
+        "WHITE_BAL_TEMP_AUTO",
+        "ZOOM"
+      ],
+      "description": "Standard control_type name (IEEE 1722.1 Clause 7.3.4); resolves to its 90:e0:f0 EUI-64."
+    },
+    "unit": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "UNITLESS",
+            "COUNT",
+            "PERCENT",
+            "FSTOP",
+            "TIME_SECONDS",
+            "TIME_MINUTES",
+            "TIME_HOURS",
+            "TIME_DAYS",
+            "TIME_MONTHS",
+            "TIME_YEARS",
+            "TIME_SAMPLES",
+            "TIME_FRAMES",
+            "FREQUENCY_HERTZ",
+            "FREQUENCY_SEMITONES",
+            "FREQUENCY_CENTS",
+            "FREQUENCY_OCTAVES",
+            "FREQUENCY_FPS",
+            "DISTANCE_METRES",
+            "TEMPERATURE_KELVIN",
+            "MASS_GRAMS",
+            "VOLTAGE_VOLTS",
+            "VOLTAGE_DBV",
+            "VOLTAGE_DBU",
+            "CURRENT_AMPS",
+            "POWER_WATTS",
+            "POWER_DBM",
+            "POWER_DBW",
+            "PRESSURE_PASCALS",
+            "MEMORY_BITS",
+            "MEMORY_BYTES",
+            "LEVEL_DB",
+            "LEVEL_DB_PEAK",
+            "LEVEL_DB_RMS",
+            "LEVEL_DBFS",
+            "LEVEL_DBFS_PEAK",
+            "LEVEL_DBFS_RMS",
+            "LEVEL_DBTP",
+            "LEVEL_DBA",
+            "LEVEL_DBB",
+            "LEVEL_DBC",
+            "LEVEL_DBSPL",
+            "LEVEL_LU",
+            "LEVEL_LUFS"
+          ]
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        }
+      ],
+      "description": "Value unit: a UnitsCode name (IEEE 1722.1 Clause 7.3.3) or the raw code."
+    },
+    "linear_value": {
+      "type": "object",
+      "description": "One LINEAR_* control value item. Wire encoding (current/min/max/step/default + unit + string_ref) is generated.",
+      "properties": {
+        "current": {
+          "type": "number",
+          "description": "Current value (defaults to 'default')."
+        },
+        "min": {
+          "type": "number",
+          "description": "Minimum value."
+        },
+        "max": {
+          "type": "number",
+          "description": "Maximum value."
+        },
+        "step": {
+          "type": "number",
+          "description": "Step size."
+        },
+        "default": {
+          "type": "number",
+          "description": "Default value."
+        },
+        "unit": {
+          "$ref": "#/$defs/unit"
+        },
+        "string_ref": {
+          "$ref": "#/$defs/localized_string_ref",
+          "description": "Localized name for this value item (dict form supported); omitted = NO_STRING."
+        }
+      },
+      "additionalProperties": false
+    },
+    "selector_value": {
+      "type": "object",
+      "description": "One numeric SELECTOR_* control value item. Wire encoding (current/default/options + unit + string_ref) is generated.",
+      "properties": {
+        "current": {
+          "type": "number",
+          "description": "Current value (defaults to 'default')."
+        },
+        "default": {
+          "type": "number",
+          "description": "Default value."
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Selectable values."
+        },
+        "unit": {
+          "$ref": "#/$defs/unit"
+        },
+        "string_ref": {
+          "$ref": "#/$defs/localized_string_ref",
+          "description": "Localized name for this value item (dict form supported); omitted = NO_STRING."
+        }
+      },
+      "additionalProperties": false
     },
     "control": {
       "type": "object",
       "description": "Control descriptor (IEEE 1722.1 Clause 7.2.22).",
       "properties": {
-        "name": {"type": "string", "description": "Control name (object_name)."},
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
+        "name": {
+          "type": "string",
+          "description": "Control name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
         "control_type": {
           "oneOf": [
-            { "$ref": "#/$defs/hex_string" },
-            { "type": "integer" }
+            {
+              "$ref": "#/$defs/control_type_name"
+            },
+            {
+              "$ref": "#/$defs/hex_string"
+            },
+            {
+              "type": "integer"
+            }
           ],
-          "description": "Control type EUI-64 (e.g., 0x90e0f00000000000 for identify)."
+          "description": "Control type: a standard name (e.g. IDENTIFY), a hex EUI-64 (vendor types), or a raw integer."
         },
-        "value_type": {"type": "integer", "description": "Control value type code (e.g., 1 for LINEAR_UINT8)."},
-        "signal_type": {"$ref": "#/$defs/signal_type"},
-        "signal_index": {"type": "integer", "default": 0},
-        "signal_output": {"type": "integer", "default": 0},
-        "value_details": {"$ref": "#/$defs/hex_string", "description": "Raw hex bytes for control value payload (type-specific)."},
-        "symbol": {"$ref": "#/$defs/symbol"}
+        "value_type": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/control_value_type_name"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "description": "Control value type: a ControlValueType name or the raw 16-bit code (integer form carries the R/U flag bits itself)."
+        },
+        "read_only": {
+          "type": "boolean",
+          "description": "Set the read-only (R) flag bit on a named value_type."
+        },
+        "unsettable": {
+          "type": "boolean",
+          "description": "Set the unsettable (U) flag bit on a named value_type."
+        },
+        "values": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/linear_value"
+              }
+            },
+            {
+              "$ref": "#/$defs/linear_value"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/selector_value"
+              }
+            },
+            {
+              "$ref": "#/$defs/selector_value"
+            },
+            {
+              "type": "string",
+              "description": "UTF8 control text."
+            }
+          ],
+          "description": "Typed value payload for LINEAR_* (list of items), numeric SELECTOR_* (single item or list), or UTF8 (string) value types. The value_details bytes and number_of_values are generated. Mutually exclusive with value_details."
+        },
+        "value_details": {
+          "$ref": "#/$defs/hex_string",
+          "description": "Raw hex bytes for the value payload — for value types the typed 'values' form does not cover. Mutually exclusive with values."
+        },
+        "signal_type": {
+          "$ref": "#/$defs/signal_type"
+        },
+        "signal_index": {
+          "type": "integer",
+          "default": 0
+        },
+        "signal_output": {
+          "type": "integer",
+          "default": 0
+        },
+        "block_latency": {
+          "type": "integer",
+          "default": 0,
+          "description": "Block latency in nanoseconds."
+        },
+        "control_latency": {
+          "type": "integer",
+          "default": 0,
+          "description": "Control latency in nanoseconds."
+        },
+        "control_domain": {
+          "type": "integer",
+          "default": 0,
+          "description": "Control domain number."
+        },
+        "reset_time": {
+          "type": "integer",
+          "default": 0,
+          "description": "Auto-reset time in milliseconds (0 = no auto-reset)."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -232,11 +738,24 @@
       "type": "object",
       "description": "External port descriptor (IEEE 1722.1 Clause 7.2.14).",
       "properties": {
-        "signal_type": {"$ref": "#/$defs/signal_type"},
-        "signal_index": {"type": "integer", "default": 0},
-        "signal_output": {"type": "integer", "default": 0},
-        "jack_index": {"type": "integer", "default": 0},
-        "symbol": {"$ref": "#/$defs/symbol"}
+        "signal_type": {
+          "$ref": "#/$defs/signal_type"
+        },
+        "signal_index": {
+          "type": "integer",
+          "default": 0
+        },
+        "signal_output": {
+          "type": "integer",
+          "default": 0
+        },
+        "jack_index": {
+          "type": "integer",
+          "default": 0
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -244,12 +763,25 @@
       "type": "object",
       "description": "Audio cluster (group of channels).",
       "properties": {
-        "name": { "type": "string", "description": "Cluster name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
-        "channels": { "type": "integer", "minimum": 1, "description": "Number of channels." },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "name": {
+          "type": "string",
+          "description": "Cluster name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of channels."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
-      "required": ["channels"],
+      "required": [
+        "channels"
+      ],
       "additionalProperties": false
     },
     "stream_port": {
@@ -258,15 +790,21 @@
       "properties": {
         "clusters": {
           "type": "array",
-          "items": { "$ref": "#/$defs/audio_cluster" },
+          "items": {
+            "$ref": "#/$defs/audio_cluster"
+          },
           "description": "Audio clusters in this port."
         },
         "maps": {
           "type": "array",
-          "items": { "$ref": "#/$defs/audio_mapping" },
+          "items": {
+            "$ref": "#/$defs/audio_mapping"
+          },
           "description": "Audio mappings (stream channel to cluster channel)."
         },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -274,22 +812,43 @@
       "type": "object",
       "description": "STREAM_INPUT or STREAM_OUTPUT descriptor.",
       "properties": {
-        "name": { "type": "string", "description": "Stream name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
-        "format": { "$ref": "#/$defs/stream_format" },
+        "name": {
+          "type": "string",
+          "description": "Stream name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "format": {
+          "$ref": "#/$defs/stream_format"
+        },
         "formats": {
           "type": "array",
-          "items": { "$ref": "#/$defs/stream_format" },
+          "items": {
+            "$ref": "#/$defs/stream_format"
+          },
           "description": "Supported stream formats. Defaults to [format] if omitted."
         },
         "flags": {
           "type": "array",
-          "items": { "$ref": "#/$defs/stream_flag" },
+          "items": {
+            "$ref": "#/$defs/stream_flag"
+          },
           "description": "Stream flags."
         },
-        "avb_interface_index": { "type": "integer", "default": 0, "description": "Index of the AVB_INTERFACE this stream uses." },
-        "clock_domain_index": { "type": "integer", "default": 0, "description": "Index of the CLOCK_DOMAIN this stream belongs to." },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "avb_interface_index": {
+          "type": "integer",
+          "default": 0,
+          "description": "Index of the AVB_INTERFACE this stream uses."
+        },
+        "clock_domain_index": {
+          "type": "integer",
+          "default": 0,
+          "description": "Index of the CLOCK_DOMAIN this stream belongs to."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -297,53 +856,87 @@
       "type": "object",
       "description": "Audio unit descriptor.",
       "properties": {
-        "name": { "type": "string", "description": "Audio unit name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
+        "name": {
+          "type": "string",
+          "description": "Audio unit name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
         "rates": {
           "type": "array",
           "items": {
             "oneOf": [
-              { "type": "integer", "description": "Sampling rate in Hz (pull=1.0)." },
+              {
+                "type": "integer",
+                "description": "Sampling rate in Hz (pull=1.0)."
+              },
               {
                 "type": "object",
                 "description": "Sampling rate with pull factor (e.g., NTSC 44055.9 Hz = {base: 44100, pull: '1/1.001'}).",
                 "properties": {
-                  "base": { "type": "integer", "description": "Base frequency in Hz." },
+                  "base": {
+                    "type": "integer",
+                    "description": "Base frequency in Hz."
+                  },
                   "pull": {
                     "type": "string",
-                    "enum": ["1.0", "1/1.001", "1.001", "24/25", "25/24"],
+                    "enum": [
+                      "1.0",
+                      "1/1.001",
+                      "1.001",
+                      "24/25",
+                      "25/24"
+                    ],
                     "description": "Pull rate multiplier."
                   }
                 },
-                "required": ["base", "pull"],
+                "required": [
+                  "base",
+                  "pull"
+                ],
                 "additionalProperties": false
               },
-              { "type": "string", "pattern": "^0x[0-9a-fA-F]{8}$", "description": "Raw hex sampling rate." }
+              {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{8}$",
+                "description": "Raw hex sampling rate."
+              }
             ]
           },
           "description": "Supported sampling rates. Plain integer for nominal Hz, object for pull variants."
         },
         "input_ports": {
           "type": "array",
-          "items": { "$ref": "#/$defs/stream_port" },
+          "items": {
+            "$ref": "#/$defs/stream_port"
+          },
           "description": "Input stream ports."
         },
         "output_ports": {
           "type": "array",
-          "items": { "$ref": "#/$defs/stream_port" },
+          "items": {
+            "$ref": "#/$defs/stream_port"
+          },
           "description": "Output stream ports."
         },
         "external_ports_in": {
           "type": "array",
-          "items": { "$ref": "#/$defs/external_port" },
+          "items": {
+            "$ref": "#/$defs/external_port"
+          },
           "description": "Input external ports."
         },
         "external_ports_out": {
           "type": "array",
-          "items": { "$ref": "#/$defs/external_port" },
+          "items": {
+            "$ref": "#/$defs/external_port"
+          },
           "description": "Output external ports."
         },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -351,14 +944,23 @@
       "type": "object",
       "description": "AVB interface descriptor.",
       "properties": {
-        "name": { "type": "string", "description": "Interface name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
+        "name": {
+          "type": "string",
+          "description": "Interface name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
         "flags": {
           "type": "array",
-          "items": { "$ref": "#/$defs/interface_flag" },
+          "items": {
+            "$ref": "#/$defs/interface_flag"
+          },
           "description": "Interface flags."
         },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -366,12 +968,29 @@
       "type": "object",
       "description": "Clock source descriptor.",
       "properties": {
-        "name": { "type": "string", "description": "Clock source name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
-        "type": { "$ref": "#/$defs/clock_source_type" },
-        "location_type": { "type": "integer", "default": 0, "description": "Descriptor type of the clock source location." },
-        "location_index": { "type": "integer", "default": 0, "description": "Descriptor index of the clock source location." },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "name": {
+          "type": "string",
+          "description": "Clock source name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "type": {
+          "$ref": "#/$defs/clock_source_type"
+        },
+        "location_type": {
+          "type": "integer",
+          "default": 0,
+          "description": "Descriptor type of the clock source location."
+        },
+        "location_index": {
+          "type": "integer",
+          "default": 0,
+          "description": "Descriptor index of the clock source location."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -379,15 +998,27 @@
       "type": "object",
       "description": "Clock domain descriptor.",
       "properties": {
-        "name": { "type": "string", "description": "Clock domain name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
-        "source": { "type": "integer", "description": "Current clock source index." },
+        "name": {
+          "type": "string",
+          "description": "Clock domain name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "source": {
+          "type": "integer",
+          "description": "Current clock source index."
+        },
         "sources": {
           "type": "array",
-          "items": { "type": "integer" },
+          "items": {
+            "type": "integer"
+          },
           "description": "List of valid clock source indices."
         },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -395,15 +1026,26 @@
       "type": "object",
       "description": "Jack descriptor.",
       "properties": {
-        "name": { "type": "string", "description": "Jack name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
-        "type": { "$ref": "#/$defs/jack_type" },
+        "name": {
+          "type": "string",
+          "description": "Jack name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "type": {
+          "$ref": "#/$defs/jack_type"
+        },
         "flags": {
           "type": "array",
-          "items": { "$ref": "#/$defs/jack_flag" },
+          "items": {
+            "$ref": "#/$defs/jack_flag"
+          },
           "description": "Jack flags."
         },
-        "symbol": { "$ref": "#/$defs/symbol" }
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
       },
       "additionalProperties": false
     },
@@ -411,85 +1053,140 @@
       "type": "object",
       "description": "Configuration descriptor. Contains all child descriptors.",
       "properties": {
-        "name": { "type": "string", "description": "Configuration name (object_name)." },
-        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
-        "symbol": { "$ref": "#/$defs/symbol" },
+        "name": {
+          "type": "string",
+          "description": "Configuration name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        },
         "streams_in": {
           "type": "array",
-          "items": { "$ref": "#/$defs/stream" },
+          "items": {
+            "$ref": "#/$defs/stream"
+          },
           "description": "Input streams."
         },
         "streams_out": {
           "type": "array",
-          "items": { "$ref": "#/$defs/stream" },
+          "items": {
+            "$ref": "#/$defs/stream"
+          },
           "description": "Output streams."
         },
         "audio_unit": {
           "oneOf": [
-            { "$ref": "#/$defs/audio_unit" },
-            { "type": "array", "items": { "$ref": "#/$defs/audio_unit" } }
+            {
+              "$ref": "#/$defs/audio_unit"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/audio_unit"
+              }
+            }
           ],
           "description": "Audio unit (singular) or audio_units (array)."
         },
         "audio_units": {
           "type": "array",
-          "items": { "$ref": "#/$defs/audio_unit" },
+          "items": {
+            "$ref": "#/$defs/audio_unit"
+          },
           "description": "Audio units (array form)."
         },
         "avb_interface": {
           "oneOf": [
-            { "$ref": "#/$defs/avb_interface" },
-            { "type": "array", "items": { "$ref": "#/$defs/avb_interface" } }
+            {
+              "$ref": "#/$defs/avb_interface"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/avb_interface"
+              }
+            }
           ],
           "description": "AVB interface (singular) or avb_interfaces (array)."
         },
         "avb_interfaces": {
           "type": "array",
-          "items": { "$ref": "#/$defs/avb_interface" },
+          "items": {
+            "$ref": "#/$defs/avb_interface"
+          },
           "description": "AVB interfaces (array form)."
         },
         "clock_source": {
           "oneOf": [
-            { "$ref": "#/$defs/clock_source" },
-            { "type": "array", "items": { "$ref": "#/$defs/clock_source" } }
+            {
+              "$ref": "#/$defs/clock_source"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/clock_source"
+              }
+            }
           ],
           "description": "Clock source (singular) or clock_sources (array)."
         },
         "clock_sources": {
           "type": "array",
-          "items": { "$ref": "#/$defs/clock_source" },
+          "items": {
+            "$ref": "#/$defs/clock_source"
+          },
           "description": "Clock sources (array form)."
         },
         "clock_domain": {
           "oneOf": [
-            { "$ref": "#/$defs/clock_domain" },
-            { "type": "array", "items": { "$ref": "#/$defs/clock_domain" } }
+            {
+              "$ref": "#/$defs/clock_domain"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/clock_domain"
+              }
+            }
           ],
           "description": "Clock domain (singular) or clock_domains (array)."
         },
         "clock_domains": {
           "type": "array",
-          "items": { "$ref": "#/$defs/clock_domain" },
+          "items": {
+            "$ref": "#/$defs/clock_domain"
+          },
           "description": "Clock domains (array form)."
         },
         "jacks_in": {
           "type": "array",
-          "items": { "$ref": "#/$defs/jack" },
+          "items": {
+            "$ref": "#/$defs/jack"
+          },
           "description": "Input jacks."
         },
         "jacks_out": {
           "type": "array",
-          "items": { "$ref": "#/$defs/jack" },
+          "items": {
+            "$ref": "#/$defs/jack"
+          },
           "description": "Output jacks."
         },
         "controls": {
           "type": "array",
-          "items": { "$ref": "#/$defs/control" },
+          "items": {
+            "$ref": "#/$defs/control"
+          },
           "description": "Control descriptors."
         },
         "strings": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Hand-managed localized strings table (legacy). Position 0=vendor, 1=model, 2=config name, 3+=descriptor names, referenced by integer localized_description values. Cannot be mixed with dict-form localized_description entries, which generate the table automatically."
         }
       },
@@ -505,21 +1202,31 @@
         },
         "entity_id": {
           "oneOf": [
-            { "$ref": "#/$defs/hex_string" },
-            { "type": "integer" }
+            {
+              "$ref": "#/$defs/hex_string"
+            },
+            {
+              "type": "integer"
+            }
           ],
           "description": "Entity ID (EUI-64, hex string or integer). Usually omitted: the runtime derives it from the NIC MAC."
         },
         "model_id": {
           "oneOf": [
-            { "$ref": "#/$defs/hex_string" },
-            { "type": "integer" }
+            {
+              "$ref": "#/$defs/hex_string"
+            },
+            {
+              "type": "integer"
+            }
           ],
           "description": "Entity model ID (EUI-64, hex string or integer)."
         },
         "capabilities": {
           "type": "array",
-          "items": { "$ref": "#/$defs/entity_capability" },
+          "items": {
+            "$ref": "#/$defs/entity_capability"
+          },
           "description": "Entity capability flags."
         },
         "talker": {
@@ -528,9 +1235,14 @@
           "properties": {
             "capabilities": {
               "type": "array",
-              "items": { "$ref": "#/$defs/talker_capability" }
+              "items": {
+                "$ref": "#/$defs/talker_capability"
+              }
             },
-            "stream_sources": { "type": "integer", "minimum": 0 }
+            "stream_sources": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
@@ -540,9 +1252,14 @@
           "properties": {
             "capabilities": {
               "type": "array",
-              "items": { "$ref": "#/$defs/listener_capability" }
+              "items": {
+                "$ref": "#/$defs/listener_capability"
+              }
             },
-            "stream_sinks": { "type": "integer", "minimum": 0 }
+            "stream_sinks": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
@@ -568,14 +1285,23 @@
         },
         "configuration": {
           "oneOf": [
-            { "$ref": "#/$defs/configuration" },
-            { "type": "array", "items": { "$ref": "#/$defs/configuration" } }
+            {
+              "$ref": "#/$defs/configuration"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/configuration"
+              }
+            }
           ],
           "description": "Configuration (singular) or configurations (array)."
         },
         "configurations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/configuration" },
+          "items": {
+            "$ref": "#/$defs/configuration"
+          },
           "description": "Configurations (array form)."
         }
       },

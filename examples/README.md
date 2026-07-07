@@ -93,6 +93,35 @@ Rules (see `tone-aaf-crf.json` for a full multi-language model):
   configuration is an error. With neither present, the table defaults to
   `[vendor, model, configuration-name]` in an `en` locale.
 
+## Controls
+
+CONTROL descriptors are authored with symbolic names and typed values — the
+`value_details` wire payload and the descriptor's `number_of_values` are generated:
+
+```json
+"controls": [
+  {
+    "name": "Volume",
+    "control_type": "GAIN",
+    "value_type": "LINEAR_INT32",
+    "localized_description": { "en-US": "Volume", "de-DE": "Lautstärke" },
+    "values": [
+      { "min": -60, "max": 12, "step": 1, "default": 0, "unit": "LEVEL_DB" }
+    ]
+  }
+]
+```
+
+`control_type` takes a standard name (ENABLE, IDENTIFY, MUTE, GAIN, …, per IEEE 1722.1
+Clause 7.3.4) or a hex EUI-64 for vendor types. `value_type` takes a ControlValueType
+name; `read_only: true` / `unsettable: true` set the R/U flag bits. The typed `values`
+form covers LINEAR_* (list of `{current/min/max/step/default/unit/string_ref}` items),
+numeric SELECTOR_* (`{current/default/options/unit}`), and UTF8 (a plain string); each
+value item's `string_ref` accepts the dict form. `unit` takes a UnitsCode name
+(LEVEL_DB, PERCENT, …). Other value types are authored as raw hex in `value_details`.
+`block_latency`, `control_latency`, `control_domain`, and `reset_time` are plain
+integers. The schema completes and validates all of these names in the editor.
+
 ## Descriptor fields that are not authored content
 
 A handful of per-descriptor bytes are *not* authored by these models and are filled in

@@ -35,6 +35,18 @@ from .model import (
     CLOCK_SOURCE_TYPE_NAMES,
     INTERFACE_FLAGS_NAMES,
 )
+from .control_values import (
+    CONTROL_TYPE_NAMES,
+    ControlValueType,
+    LinearValue,
+    SelectorValue,
+    UnitsCode,
+    Utf8Value,
+    is_linear_type,
+    is_selector_type,
+    linear_item_size,
+    serialize_value_details,
+)
 from .stream_formats import parse_stream_format
 
 
@@ -298,6 +310,128 @@ def _parse_external_port(ep: dict, context: str) -> ExternalPort:
     )
 
 
+def _parse_control_value_type(c: dict, context: str) -> int:
+    """value_type: a ControlValueType name (e.g. "LINEAR_UINT8") or the raw
+    integer code. The read_only / unsettable booleans set the R/U flag bits."""
+    v = c.get("value_type", 0)
+    if isinstance(v, str):
+        try:
+            value_type = int(ControlValueType[v])
+        except KeyError:
+            valid = ", ".join(m.name for m in ControlValueType)
+            raise ValueError(
+                f"Unknown value_type '{v}' in {context}. Valid: {valid}"
+            ) from None
+    else:
+        value_type = int(v)
+    if c.get("read_only"):
+        value_type |= 0x8000
+    if c.get("unsettable"):
+        value_type |= 0x4000
+    return value_type
+
+
+def _parse_control_type(c: dict, context: str) -> int:
+    """control_type: a standard control-type name (e.g. "IDENTIFY"), a hex
+    EUI-64 string, or a raw integer."""
+    v = c.get("control_type", 0)
+    if isinstance(v, str):
+        if v.lower().startswith("0x"):
+            return int(v, 16)
+        ct = CONTROL_TYPE_NAMES.get(v)
+        if ct is None:
+            raise ValueError(
+                f"Unknown control_type '{v}' in {context}. Use a standard name "
+                f"({', '.join(sorted(CONTROL_TYPE_NAMES))}) or a 0x… EUI-64."
+            )
+        return ct
+    return int(v)
+
+
+def _parse_unit(v, context: str) -> int:
+    """A UnitsCode name (e.g. "LEVEL_DB") or the raw integer code."""
+    if isinstance(v, str):
+        try:
+            return int(UnitsCode[v])
+        except KeyError:
+            valid = ", ".join(m.name for m in UnitsCode)
+            raise ValueError(
+                f"Unknown unit '{v}' in {context}. Valid: {valid}"
+            ) from None
+    return int(v)
+
+
+def _parse_value_string_ref(
+    item: dict, strings: _LocalizedStrings, context: str
+) -> int:
+    """A control value item's string_ref, packed to its 16-bit wire form.
+    Accepts the same forms as localized_description; absent -> NO_STRING."""
+    ref = _parse_localized(item, strings, key="string_ref", context=context)
+    return ((ref.offset & 0x1FFF) << 3) | (ref.index & 0x07)
+
+
+def _parse_control_values(
+    c: dict, value_type: int, strings: _LocalizedStrings, context: str
+) -> bytes:
+    """Encode a control's value payload. The typed 'values' form covers the
+    LINEAR_* types (list of {current/min/max/step/default/unit/string_ref}),
+    the numeric SELECTOR_* types ({current/default/options/unit/string_ref}),
+    and UTF8 (a plain string); anything else is authored as raw hex bytes in
+    'value_details'."""
+    values = c.get("values")
+    if values is None:
+        if "value_details" not in c:
+            return b""
+        raw = bytes.fromhex(c["value_details"].replace("0x", ""))
+        item_size = linear_item_size(value_type)
+        if item_size is not None and len(raw) % item_size != 0:
+            raise ValueError(
+                f"{context}: value_details is {len(raw)} bytes but this LINEAR "
+                f"type's value items are {item_size} bytes each"
+            )
+        return raw
+    if "value_details" in c:
+        raise ValueError(
+            f"{context}: give either typed 'values' or raw 'value_details', not both"
+        )
+    if is_linear_type(value_type):
+        items = values if isinstance(values, list) else [values]
+        linear = [
+            LinearValue(
+                current=i.get("current", i.get("default", 0)),
+                minimum=i.get("min", i.get("minimum", 0)),
+                maximum=i.get("max", i.get("maximum", 0)),
+                step=i.get("step", 0),
+                default_value=i.get("default", i.get("default_value", 0)),
+                unit=_parse_unit(i.get("unit", 0), f"{context}.values"),
+                string_ref=_parse_value_string_ref(i, strings, f"{context}.values"),
+            )
+            for i in items
+        ]
+        return serialize_value_details(value_type, linear)
+    if is_selector_type(value_type):
+        items = values if isinstance(values, list) else [values]
+        selector = [
+            SelectorValue(
+                current=i.get("current", i.get("default", 0)),
+                default_value=i.get("default", i.get("default_value", 0)),
+                options=i.get("options", []),
+                unit=_parse_unit(i.get("unit", 0), f"{context}.values"),
+                string_ref=_parse_value_string_ref(i, strings, f"{context}.values"),
+            )
+            for i in items
+        ]
+        return serialize_value_details(value_type, selector)
+    if (value_type & 0x3FFF) == ControlValueType.UTF8:
+        if not isinstance(values, str):
+            raise ValueError(f"{context}: a UTF8 control's 'values' is a string")
+        return serialize_value_details(value_type, Utf8Value(values))
+    raise ValueError(
+        f"{context}: typed 'values' is not supported for this value_type; "
+        f"author raw 'value_details' hex bytes instead"
+    )
+
+
 def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control:
     """Parse a control descriptor from JSON."""
     sig_type = _parse_enum(
@@ -305,25 +439,20 @@ def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control
         DESCRIPTOR_TYPE_NAMES,
         f"{context}.signal_type",
     )
-    control_type = (
-        int(c.get("control_type", "0x0"), 16)
-        if isinstance(c.get("control_type"), str)
-        else c.get("control_type", 0)
-    )
-    value_details = (
-        bytes.fromhex(c["value_details"].replace("0x", ""))
-        if "value_details" in c
-        else b""
-    )
+    value_type = _parse_control_value_type(c, context)
     return Control(
         object_name=c.get("name", ""),
         localized_description=_parse_localized(c, strings, context=context),
-        control_value_type=c.get("value_type", 0),
-        control_type=control_type,
+        block_latency=c.get("block_latency", 0),
+        control_latency=c.get("control_latency", 0),
+        control_domain=c.get("control_domain", 0),
+        control_value_type=value_type,
+        control_type=_parse_control_type(c, context),
+        reset_time=c.get("reset_time", 0),
         signal_type=sig_type,
         signal_index=c.get("signal_index", 0),
         signal_output=c.get("signal_output", 0),
-        value_details=value_details,
+        value_details=_parse_control_values(c, value_type, strings, context),
         symbol=c.get("symbol"),
     )
 

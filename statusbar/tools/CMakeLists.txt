@@ -114,10 +114,11 @@ install(
 # --- AEM model JSON -> blob build-proof + validation tests ---
 # Compile every declarative model to a build-tree blob (build-time proof the
 # json2bin pipeline runs for all shapes, including the ones with no runtime
-# blob). The regression net is three ctests: every model must compile + parse
-# (verify_models.py), the C++ DescriptorStorage parser must read what the Python
-# writer emits (descriptor_storage_cross_check.py), and the aemxml Python unit
-# suite must pass.
+# blob). The regression net: every model must compile + parse (verify_models.py)
+# and match the authoring schema (validate_schema.py), the C++ DescriptorStorage
+# parser must read what the Python writer emits
+# (descriptor_storage_cross_check.py), and the aemxml + control-values Python
+# unit suites must pass.
 set(_aem_json_blobs)
 foreach(_m bridge dual tone tone-aaf tone-aaf-crf simple_stereo)
   add_custom_command(
@@ -158,6 +159,13 @@ add_test(
 add_test(NAME statusbar/avb/aemxml_python_unit
          COMMAND ${Python3_EXECUTABLE}
                  "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_test.py")
+
+# Unit suite for the typed control-values codec (LINEAR/SELECTOR/UTF8 payloads).
+add_test(
+  NAME statusbar/avb/aemxml_control_values_unit
+  COMMAND ${Python3_EXECUTABLE}
+          "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/control_values_test.py"
+)
 
 # --- L2 ADPDU send probe (Linux: AF_PACKET, diagnoses PACKET_QDISC_BYPASS) ---
 

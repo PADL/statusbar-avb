@@ -143,6 +143,95 @@ _SELECTOR_TYPE_INFO: dict[int, tuple[str, int]] = {
 }
 
 
+# Standard AEM control_type EUI-64 values — IEEE 1722.1 Clause 7.3.4.
+# Keep in lockstep with statusbar/atdecc/atdecc_aem_control_types.hpp.
+_CT = 0x90E0F00000000000  # standard control-type OUI-24 base (90:e0:f0)
+CONTROL_TYPE_NAMES: dict[str, int] = {
+    "ENABLE": _CT | 0x00,
+    "IDENTIFY": _CT | 0x01,
+    "MUTE": _CT | 0x02,
+    "INVERT": _CT | 0x03,
+    "GAIN": _CT | 0x04,
+    "ATTENUATE": _CT | 0x05,
+    "DELAY": _CT | 0x06,
+    "SRC_MODE": _CT | 0x07,
+    "SNAPSHOT": _CT | 0x08,
+    "POW_LINE_FREQ": _CT | 0x09,
+    "POWER_STATUS": _CT | 0x0A,
+    "FAN_STATUS": _CT | 0x0B,
+    "TEMPERATURE": _CT | 0x0C,
+    "ALTITUDE": _CT | 0x0D,
+    "ABSOLUTE_HUMIDITY": _CT | 0x0E,
+    "RELATIVE_HUMIDITY": _CT | 0x0F,
+    "ORIENTATION": _CT | 0x10,
+    "VELOCITY": _CT | 0x11,
+    "ACCELERATION": _CT | 0x12,
+    "FILTER_RESPONSE": _CT | 0x13,
+    "BAROMETRIC_PRESSURE": _CT | 0x14,
+    "MANUFACTURER_URL": _CT | 0x15,
+    "ENTITY_URL": _CT | 0x16,
+    "CONFIGURATION_URL": _CT | 0x17,
+    "GENERIC_URL": _CT | 0x18,
+    "FAULT": _CT | 0x19,
+    "CONTROLLER_TARGET_ENTITY": _CT | 0x1A,
+    "CONTROLLER_TARGET_OBJECT": _CT | 0x1B,
+    "LATENCY_COMPENSATION": _CT | 0x1C,
+    "PANPOT": _CT | 0x00010000,
+    "PHANTOM": _CT | 0x00010001,
+    "AUDIO_SCALE": _CT | 0x00010002,
+    "AUDIO_METERS": _CT | 0x00010003,
+    "AUDIO_SPECTRUM": _CT | 0x00010004,
+    "SCANNING_MODE": _CT | 0x00020000,
+    "AUTO_EXP_MODE": _CT | 0x00020001,
+    "AUTO_EXP_PRIO": _CT | 0x00020002,
+    "EXP_TIME": _CT | 0x00020003,
+    "FOCUS": _CT | 0x00020004,
+    "FOCUS_AUTO": _CT | 0x00020005,
+    "IRIS": _CT | 0x00020006,
+    "ZOOM": _CT | 0x00020007,
+    "PRIVACY": _CT | 0x00020008,
+    "BACKLIGHT": _CT | 0x00020009,
+    "BRIGHTNESS": _CT | 0x0002000A,
+    "CONTRAST": _CT | 0x0002000B,
+    "HUE": _CT | 0x0002000C,
+    "SATURATION": _CT | 0x0002000D,
+    "SHARPNESS": _CT | 0x0002000E,
+    "GAMMA": _CT | 0x0002000F,
+    "WHITE_BAL_TEMP": _CT | 0x00020010,
+    "WHITE_BAL_TEMP_AUTO": _CT | 0x00020011,
+    "WHITE_BAL_COMP": _CT | 0x00020012,
+    "WHITE_BAL_COMP_AUTO": _CT | 0x00020013,
+    "DIGITAL_ZOOM": _CT | 0x00020014,
+    "MEDIA_PLAYLIST": _CT | 0x00030000,
+    "MEDIA_PLAYLIST_NAME": _CT | 0x00030001,
+    "MEDIA_DISK": _CT | 0x00030002,
+    "MEDIA_DISK_NAME": _CT | 0x00030003,
+    "MEDIA_TRACK": _CT | 0x00030004,
+    "MEDIA_TRACK_NAME": _CT | 0x00030005,
+    "MEDIA_SPEED": _CT | 0x00030006,
+    "MEDIA_SAMPLE_POSITION": _CT | 0x00030007,
+    "MEDIA_PLAYBACK_TRANSPORT": _CT | 0x00030008,
+    "MEDIA_RECORD_TRANSPORT": _CT | 0x00030009,
+    "FREQUENCY": _CT | 0x00040000,
+    "MODULATION": _CT | 0x00040001,
+    "POLARIZATION": _CT | 0x00040002,
+    "BAUD_RATE": _CT | 0x00050000,
+    "BIT_WIDTH": _CT | 0x00050001,
+    "PARITY": _CT | 0x00050002,
+    "STOP_BITS": _CT | 0x00050003,
+    "INTERFACE_OPERATIONAL": _CT | 0x00060000,
+    "INTERFACE_MEDIA_OPTIONS": _CT | 0x00060001,
+    "INTERFACE_MEDIA_STATUS": _CT | 0x00060002,
+    "INTERFACE_NETWORK_NAME": _CT | 0x00060003,
+    "FQTSS_DELTA_BANDWIDTH": _CT | 0x00060004,
+    "FQTSS_ADMIN_IDLE_SLOPE": _CT | 0x00060005,
+    "FQTSS_OPER_IDLE_SLOPE": _CT | 0x00060006,
+    "FQTSS_PORT_TRANSMIT_RATE": _CT | 0x00060007,
+    "FQTSS_CLASS_MEASUREMENT_INTERVAL": _CT | 0x00060008,
+    "FQTSS_LOCK_CLASS_BANDWIDTH": _CT | 0x00060009,
+}
+
+
 @dataclass
 class LinearValue:
     """A single LINEAR control value item."""
@@ -289,6 +378,48 @@ def serialize_selector_values(
             parts.append(struct.pack(fmt, opt))
         parts.append(struct.pack(">HH", v.unit, v.string_ref))
     return b"".join(parts)
+
+
+def is_linear_type(control_value_type: int) -> bool:
+    """True if the base type (flag bits masked) is a LINEAR_* value type."""
+    return (control_value_type & 0x3FFF) in _LINEAR_TYPE_INFO
+
+
+def linear_item_size(control_value_type: int) -> int | None:
+    """Wire size of one LINEAR value item (5 fields + unit + string_ref), or
+    None if the type is not LINEAR."""
+    info = _LINEAR_TYPE_INFO.get(control_value_type & 0x3FFF)
+    return None if info is None else info[1] * 5 + 4
+
+
+def is_selector_type(control_value_type: int) -> bool:
+    """True if the base type (flag bits masked) is a numeric SELECTOR_* type."""
+    return (control_value_type & 0x3FFF) in _SELECTOR_TYPE_INFO
+
+
+def count_values(control_value_type: int, data: bytes) -> int:
+    """Number of value items encoded in value_details wire bytes — the CONTROL
+    descriptor's number_of_values field. LINEAR items are fixed-size; SELECTOR
+    items are walked (variable-length options list); UTF8 and VENDOR/unknown
+    payloads count as one value when non-empty."""
+    if not data:
+        return 0
+    base_type = control_value_type & 0x3FFF
+    info = _LINEAR_TYPE_INFO.get(base_type)
+    if info is not None:
+        item_size = info[1] * 5 + 4
+        return len(data) // item_size
+    info = _SELECTOR_TYPE_INFO.get(base_type)
+    if info is not None:
+        val_size = info[1]
+        count = 0
+        offset = 0
+        while offset + val_size * 2 + 2 <= len(data):
+            num_options = struct.unpack_from(">H", data, offset + val_size * 2)[0]
+            offset += val_size * 2 + 2 + num_options * val_size + 4
+            count += 1
+        return count
+    return 1
 
 
 def parse_value_details(

@@ -1766,6 +1766,135 @@ def test_json_localized_dict():
     print("  [+] json localized dict authoring: OK")
 
 
+def test_json_control_values():
+    """Typed control authoring: named control/value types, LINEAR / SELECTOR /
+    UTF8 payload generation, flag bits, and a correct number_of_values on the
+    wire (the field is an item count, not the payload byte length)."""
+    import struct
+
+    from aemxml.control_values import (
+        CONTROL_TYPE_NAMES,
+        count_values,
+        parse_value_details,
+    )
+    from aemxml.flatten import flatten
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "V",
+                "model": "M",
+                "name": "N",
+                "configuration": {
+                    "name": "C",
+                    "controls": [
+                        {
+                            "name": "Identify",
+                            "control_type": "IDENTIFY",
+                            "value_type": "LINEAR_UINT8",
+                            "values": [
+                                {"min": 0, "max": 255, "step": 255, "default": 0}
+                            ],
+                        },
+                        {
+                            "name": "Volume",
+                            "control_type": "GAIN",
+                            "value_type": "LINEAR_INT32",
+                            "block_latency": 100,
+                            "control_latency": 200,
+                            "control_domain": 3,
+                            "reset_time": 5000,
+                            "values": [
+                                {
+                                    "min": -60,
+                                    "max": 12,
+                                    "step": 1,
+                                    "default": 0,
+                                    "unit": "LEVEL_DB",
+                                    "string_ref": {"en-US": "Volume"},
+                                }
+                            ],
+                        },
+                        {
+                            "name": "Source",
+                            "control_type": "SRC_MODE",
+                            "value_type": "SELECTOR_UINT16",
+                            "read_only": True,
+                            "values": {
+                                "current": 1,
+                                "default": 0,
+                                "options": [0, 1, 2],
+                                "unit": "COUNT",
+                            },
+                        },
+                        {
+                            "name": "Url",
+                            "control_type": "ENTITY_URL",
+                            "value_type": "UTF8",
+                            "values": "https://example.com/",
+                        },
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    ident, vol, sel, url = entity.configurations[0].controls
+
+    assert ident.control_type == CONTROL_TYPE_NAMES["IDENTIFY"]
+    assert ident.control_value_type == 0x0001  # LINEAR_UINT8
+    assert len(ident.value_details) == 9  # 5x1 + unit + string_ref
+    iv = parse_value_details(ident.control_value_type, ident.value_details, 1)[0]
+    assert (iv.minimum, iv.maximum, iv.step) == (0, 255, 255)
+    assert iv.string_ref == 0xFFFF  # absent -> NO_STRING
+
+    assert vol.block_latency == 100 and vol.control_latency == 200
+    assert vol.control_domain == 3 and vol.reset_time == 5000
+    vv = parse_value_details(vol.control_value_type, vol.value_details, 1)[0]
+    assert (vv.minimum, vv.maximum) == (-60, 12)
+    assert vv.unit == 0xB0  # LEVEL_DB
+    assert vv.string_ref == (0 << 3) | 2  # collector slot 2 (after vendor/model)
+
+    assert sel.control_value_type == 0x800D  # SELECTOR_UINT16 | read-only
+    sv = parse_value_details(sel.control_value_type, sel.value_details, 1)[0]
+    assert sv.options == [0, 1, 2] and sv.current == 1
+
+    # number_of_values on the wire is the item COUNT (offset 96), not bytes.
+    descs, _ = flatten(entity)
+    controls_wire = [d for d in descs if d.descriptor_type == 0x001A]
+    assert [struct.unpack_from(">H", d.wire_bytes, 96)[0] for d in controls_wire] == [
+        1,
+        1,
+        1,
+        1,
+    ]
+    assert count_values(url.control_value_type, url.value_details) == 1
+
+    # Typed values + raw value_details is an error; so is a truncated LINEAR payload.
+    for bad in (
+        {"value_type": "LINEAR_UINT8", "values": [{}], "value_details": "0x00"},
+        {"value_type": "LINEAR_UINT8", "value_details": "0x00006464000000"},
+        {"value_type": "NOT_A_TYPE"},
+        {"control_type": "NOT_A_CONTROL"},
+    ):
+        try:
+            read_json(
+                json.dumps(
+                    {
+                        "entity": {
+                            "vendor": "V",
+                            "configuration": {"name": "C", "controls": [bad]},
+                        }
+                    }
+                )
+            )
+            raise AssertionError(f"not rejected: {bad}")
+        except ValueError:
+            pass
+    print("  [+] json control values: OK")
+
+
 def test_upgrade_2013_to_2021():
     """Upgrade a 2013 AEMXML file to 2021 schema."""
     aemxml_path = str(
@@ -1945,6 +2074,7 @@ def main():
         test_json_symbols_to_blob,
         test_json_pull_rates,
         test_json_localized_dict,
+        test_json_control_values,
         test_upgrade_2013_to_2021,
         test_downgrade_2021_to_2013,
         test_upgrade_is_idempotent,

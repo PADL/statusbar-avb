@@ -27,6 +27,7 @@ from aemxml.control_values import (
     serialize_selector_values,
     parse_value_details,
     serialize_value_details,
+    count_values,
 )
 
 
@@ -192,6 +193,29 @@ def test_readonly_flag_stripped():
     assert parsed[0].current == 50
 
 
+def test_count_values():
+    """count_values derives the number_of_values item count from wire bytes."""
+    # LINEAR: fixed item size (5 fields + unit + string_ref).
+    two = serialize_linear_values(
+        ControlValueType.LINEAR_UINT8, [LinearValue(), LinearValue()]
+    )
+    assert count_values(ControlValueType.LINEAR_UINT8, two) == 2
+    one64 = serialize_linear_values(ControlValueType.LINEAR_INT64, [LinearValue()])
+    assert count_values(ControlValueType.LINEAR_INT64, one64) == 1
+    # Flag bits are masked off.
+    assert count_values(0x8000 | ControlValueType.LINEAR_UINT8, two) == 2
+    # SELECTOR: variable-length items are walked.
+    sel = serialize_selector_values(
+        ControlValueType.SELECTOR_UINT16,
+        [SelectorValue(options=[1, 2, 3]), SelectorValue(options=[4])],
+    )
+    assert count_values(ControlValueType.SELECTOR_UINT16, sel) == 2
+    # UTF8 / VENDOR payloads are one value; empty payloads are zero.
+    assert count_values(ControlValueType.UTF8, b"hi\x00") == 1
+    assert count_values(ControlValueType.VENDOR, b"\x01\x02") == 1
+    assert count_values(ControlValueType.LINEAR_UINT8, b"") == 0
+
+
 def main():
     tests = [
         test_linear_int16_roundtrip,
@@ -204,6 +228,7 @@ def main():
         test_parse_value_details_unknown,
         test_serialize_value_details_roundtrip,
         test_readonly_flag_stripped,
+        test_count_values,
     ]
     passed = 0
     failed = 0
