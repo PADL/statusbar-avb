@@ -40,12 +40,58 @@ build-host-runnable generator binary. The C++ `DescriptorStorage` *parser*
 was kept during the migration as a CONTENT-parity reference until every model was proven
 byte-equivalent at the descriptor level, then deleted.)
 
-Three ctests keep the pipeline honest: `statusbar/avb/aem_json_models_compile`
+Four ctests keep the pipeline honest: `statusbar/avb/aem_json_models_compile`
 (`verify_models.py` — every model compiles and parses back),
+`statusbar/avb/aem_json_models_schema` (`validate_schema.py` — every model matches the
+authoring schema; skips without python3-jsonschema),
 `statusbar/avb/aem_descriptor_storage_cross_check` (`descriptor_storage_cross_check.py` —
 the C++ DescriptorStorage parser reads a Python-written blob and sees the same
 descriptor/symbol tables), and `statusbar/avb/aemxml_python_unit` (the aemxml unit
 suite).
+
+## Editor support (JSON Schema)
+
+Each model's `"$schema"` key points at
+[`../standards/ieee1722.1-schema/atdecc_aem.schema.json`](../standards/ieee1722.1-schema/atdecc_aem.schema.json),
+so editors with JSON-Schema support (VS Code out of the box) get completion, hover
+documentation, enum validation for every flag/type name, and typo detection
+(`additionalProperties: false`) while authoring a model. The schema mirrors exactly what
+`json_reader.py` accepts — including the dict-form `localized_description` — and the
+`aem_json_models_schema` ctest keeps it from drifting.
+
+## Localized strings
+
+Author localized names as a `{locale: text}` dict directly at any
+`localized_description` field — the string table and the per-language LOCALE + STRINGS
+descriptors are generated automatically:
+
+```json
+"streams_out": [
+  {
+    "name": "StreamOutputAAF",
+    "localized_description": { "en-US": "AAF Audio", "de-DE": "AAF-Audio" }
+  }
+]
+```
+
+Rules (see `tone-aaf-crf.json` for a full multi-language model):
+
+- Every descriptor with a localized name takes the dict form: configurations, streams,
+  jacks, AVB interfaces, audio units, clusters, controls, clock sources, clock domains.
+- One LOCALE (plus its STRINGS descriptors) is generated per language, in order of first
+  appearance; every locale has the same table layout, so one wire reference resolves in
+  all of them. A language missing from some entry falls back to that entry's first-listed
+  text, never an empty name.
+- Identical dicts share one table slot. Slots 0 and 1 hold the entity `vendor` and
+  `model` names (which may themselves be dicts), matching the ENTITY descriptor's fixed
+  vendor/model string references.
+- Omitting `localized_description` means NO_STRING (`0xFFFF`) — no more authoring
+  `65535` by hand.
+- The old forms still work when a model manages its own table: a config-level `strings`
+  array with raw integer references (`offset << 3 | index`) or `{"offset": O, "index":
+  I}` objects. Mixing an explicit `strings` array with dict-form localization in the same
+  configuration is an error. With neither present, the table defaults to
+  `[vendor, model, configuration-name]` in an `en` locale.
 
 ## Descriptor fields that are not authored content
 
@@ -58,13 +104,12 @@ elsewhere:
 - **STREAM_INPUT/OUTPUT** the 2021 `redundant_offset` / `number_of_redundant_streams` /
   `timing` trailer-offset fields (bytes 132–137) — computed by `flatten.py` during
   serialization.
-- **CONFIGURATION / AVB_INTERFACE / JACK** `localized_description` — `json_reader.py` has
-  no per-descriptor key for these three descriptor types. (Streams, clusters, audio
-  units, clock sources and clock domains *do* accept a `localized_description` key — see
-  `tone-aaf-crf.json`, which cross-references STRINGS entries 1..6.)
 
 ## Known gaps
 
 - **`bin2xml` is a stub** (`aemxml_tool.py`: "full model reconstruction not yet implemented
   (Phase 2)") — so an existing device blob / Hive export can't yet be imported back into
   JSON automatically. Finishing it enables round-trip import/export.
+- **`bin2json` flattens locales**: `json_writer.py` emits a single explicit `strings`
+  table and does not reconstruct the dict form, so converting a *multi-locale* blob back
+  to JSON loses the per-language grouping.

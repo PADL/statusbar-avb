@@ -14,11 +14,53 @@
     }
   },
   "required": ["entity"],
+  "additionalProperties": false,
   "$defs": {
     "hex_string": {
       "type": "string",
       "pattern": "^0x[0-9a-fA-F]+$",
       "description": "Hexadecimal string (e.g., '0x0000000000000001')."
+    },
+    "localized_texts": {
+      "type": "object",
+      "description": "Localized name texts, one per locale (e.g. {\"en-US\": \"AAF Audio\", \"de-DE\": \"AAF-Audio\"}). The string table and the per-language LOCALE + STRINGS descriptors are generated automatically; identical dicts share one table slot. A language missing from some entry falls back to that entry's first-listed text.",
+      "patternProperties": {
+        "^[A-Za-z]{2,3}([_-][A-Za-z0-9]{1,8})*$": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Name text for this locale."
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "localized_string_ref": {
+      "description": "Localized name for the descriptor. Preferred form: a {locale: text} dict — the LOCALE/STRINGS descriptors and the wire reference are generated automatically. For hand-managed 'strings' tables: the raw 16-bit wire value (offset << 3 | index; 65535 = NO_STRING) or an explicit {offset, index} object. Omitted = NO_STRING.",
+      "oneOf": [
+        { "$ref": "#/$defs/localized_texts" },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Raw 16-bit localized string reference (offset << 3 | index) into the configuration's hand-managed 'strings' table; 65535 = NO_STRING."
+        },
+        {
+          "type": "object",
+          "description": "Explicit reference into the configuration's hand-managed 'strings' table.",
+          "properties": {
+            "offset": { "type": "integer", "minimum": 0, "maximum": 8191, "description": "STRINGS descriptor offset within the locale." },
+            "index": { "type": "integer", "minimum": 0, "maximum": 7, "description": "String index within the STRINGS descriptor (0-6; 7 with offset 8191 = NO_STRING)." }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "name_string": {
+      "description": "A name that is either a plain string (same text in every locale) or a {locale: text} dict.",
+      "oneOf": [
+        { "type": "string", "maxLength": 64 },
+        { "$ref": "#/$defs/localized_texts" }
+      ]
     },
     "entity_capability": {
       "type": "string",
@@ -122,7 +164,8 @@
           "description": "Bit depth per sample."
         }
       },
-      "required": ["type", "rate", "channels", "depth"]
+      "required": ["type", "rate", "channels", "depth"],
+      "additionalProperties": false
     },
     "stream_format": {
       "oneOf": [
@@ -140,7 +183,8 @@
         "cluster": { "type": "integer", "description": "Cluster offset." },
         "cluster_ch": { "type": "integer", "description": "Cluster channel." }
       },
-      "required": ["stream", "stream_ch", "cluster", "cluster_ch"]
+      "required": ["stream", "stream_ch", "cluster", "cluster_ch"],
+      "additionalProperties": false
     },
     "symbol": {
       "type": "string",
@@ -167,14 +211,22 @@
       "description": "Control descriptor (IEEE 1722.1 Clause 7.2.22).",
       "properties": {
         "name": {"type": "string", "description": "Control name (object_name)."},
-        "control_type": {"$ref": "#/$defs/hex_string", "description": "Control type EUI-64 (e.g., 0x90e0f00000000000 for identify)."},
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
+        "control_type": {
+          "oneOf": [
+            { "$ref": "#/$defs/hex_string" },
+            { "type": "integer" }
+          ],
+          "description": "Control type EUI-64 (e.g., 0x90e0f00000000000 for identify)."
+        },
         "value_type": {"type": "integer", "description": "Control value type code (e.g., 1 for LINEAR_UINT8)."},
         "signal_type": {"$ref": "#/$defs/signal_type"},
         "signal_index": {"type": "integer", "default": 0},
         "signal_output": {"type": "integer", "default": 0},
         "value_details": {"$ref": "#/$defs/hex_string", "description": "Raw hex bytes for control value payload (type-specific)."},
         "symbol": {"$ref": "#/$defs/symbol"}
-      }
+      },
+      "additionalProperties": false
     },
     "external_port": {
       "type": "object",
@@ -185,17 +237,20 @@
         "signal_output": {"type": "integer", "default": 0},
         "jack_index": {"type": "integer", "default": 0},
         "symbol": {"$ref": "#/$defs/symbol"}
-      }
+      },
+      "additionalProperties": false
     },
     "audio_cluster": {
       "type": "object",
       "description": "Audio cluster (group of channels).",
       "properties": {
         "name": { "type": "string", "description": "Cluster name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "channels": { "type": "integer", "minimum": 1, "description": "Number of channels." },
         "symbol": { "$ref": "#/$defs/symbol" }
       },
-      "required": ["channels"]
+      "required": ["channels"],
+      "additionalProperties": false
     },
     "stream_port": {
       "type": "object",
@@ -212,13 +267,15 @@
           "description": "Audio mappings (stream channel to cluster channel)."
         },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "stream": {
       "type": "object",
       "description": "STREAM_INPUT or STREAM_OUTPUT descriptor.",
       "properties": {
         "name": { "type": "string", "description": "Stream name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "format": { "$ref": "#/$defs/stream_format" },
         "formats": {
           "type": "array",
@@ -230,14 +287,18 @@
           "items": { "$ref": "#/$defs/stream_flag" },
           "description": "Stream flags."
         },
+        "avb_interface_index": { "type": "integer", "default": 0, "description": "Index of the AVB_INTERFACE this stream uses." },
+        "clock_domain_index": { "type": "integer", "default": 0, "description": "Index of the CLOCK_DOMAIN this stream belongs to." },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "audio_unit": {
       "type": "object",
       "description": "Audio unit descriptor.",
       "properties": {
         "name": { "type": "string", "description": "Audio unit name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "rates": {
           "type": "array",
           "items": {
@@ -254,7 +315,8 @@
                     "description": "Pull rate multiplier."
                   }
                 },
-                "required": ["base", "pull"]
+                "required": ["base", "pull"],
+                "additionalProperties": false
               },
               { "type": "string", "pattern": "^0x[0-9a-fA-F]{8}$", "description": "Raw hex sampling rate." }
             ]
@@ -282,35 +344,43 @@
           "description": "Output external ports."
         },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "avb_interface": {
       "type": "object",
       "description": "AVB interface descriptor.",
       "properties": {
         "name": { "type": "string", "description": "Interface name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "flags": {
           "type": "array",
           "items": { "$ref": "#/$defs/interface_flag" },
           "description": "Interface flags."
         },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "clock_source": {
       "type": "object",
       "description": "Clock source descriptor.",
       "properties": {
         "name": { "type": "string", "description": "Clock source name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "type": { "$ref": "#/$defs/clock_source_type" },
+        "location_type": { "type": "integer", "default": 0, "description": "Descriptor type of the clock source location." },
+        "location_index": { "type": "integer", "default": 0, "description": "Descriptor index of the clock source location." },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "clock_domain": {
       "type": "object",
       "description": "Clock domain descriptor.",
       "properties": {
         "name": { "type": "string", "description": "Clock domain name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "source": { "type": "integer", "description": "Current clock source index." },
         "sources": {
           "type": "array",
@@ -318,13 +388,15 @@
           "description": "List of valid clock source indices."
         },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "jack": {
       "type": "object",
       "description": "Jack descriptor.",
       "properties": {
         "name": { "type": "string", "description": "Jack name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "type": { "$ref": "#/$defs/jack_type" },
         "flags": {
           "type": "array",
@@ -332,13 +404,15 @@
           "description": "Jack flags."
         },
         "symbol": { "$ref": "#/$defs/symbol" }
-      }
+      },
+      "additionalProperties": false
     },
     "configuration": {
       "type": "object",
       "description": "Configuration descriptor. Contains all child descriptors.",
       "properties": {
         "name": { "type": "string", "description": "Configuration name (object_name)." },
+        "localized_description": { "$ref": "#/$defs/localized_string_ref" },
         "symbol": { "$ref": "#/$defs/symbol" },
         "streams_in": {
           "type": "array",
@@ -416,9 +490,10 @@
         "strings": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Localized strings. Position 0=vendor, 1=model, 2=config name, 3+=descriptor names."
+          "description": "Hand-managed localized strings table (legacy). Position 0=vendor, 1=model, 2=config name, 3+=descriptor names, referenced by integer localized_description values. Cannot be mixed with dict-form localized_description entries, which generate the table automatically."
         }
-      }
+      },
+      "additionalProperties": false
     },
     "entity": {
       "type": "object",
@@ -429,12 +504,18 @@
           "description": "Entity name (64-byte settable string)."
         },
         "entity_id": {
-          "$ref": "#/$defs/hex_string",
-          "description": "Entity ID (EUI-64 hex string)."
+          "oneOf": [
+            { "$ref": "#/$defs/hex_string" },
+            { "type": "integer" }
+          ],
+          "description": "Entity ID (EUI-64, hex string or integer). Usually omitted: the runtime derives it from the NIC MAC."
         },
         "model_id": {
-          "$ref": "#/$defs/hex_string",
-          "description": "Entity model ID (EUI-64 hex string)."
+          "oneOf": [
+            { "$ref": "#/$defs/hex_string" },
+            { "type": "integer" }
+          ],
+          "description": "Entity model ID (EUI-64, hex string or integer)."
         },
         "capabilities": {
           "type": "array",
@@ -450,7 +531,8 @@
               "items": { "$ref": "#/$defs/talker_capability" }
             },
             "stream_sources": { "type": "integer", "minimum": 0 }
-          }
+          },
+          "additionalProperties": false
         },
         "listener": {
           "type": "object",
@@ -461,15 +543,16 @@
               "items": { "$ref": "#/$defs/listener_capability" }
             },
             "stream_sinks": { "type": "integer", "minimum": 0 }
-          }
+          },
+          "additionalProperties": false
         },
         "vendor": {
-          "type": "string",
-          "description": "Vendor name (auto-creates localized string at position 0)."
+          "$ref": "#/$defs/name_string",
+          "description": "Vendor name — string or {locale: text} dict (localized string slot 0)."
         },
         "model": {
-          "type": "string",
-          "description": "Model name (auto-creates localized string at position 1)."
+          "$ref": "#/$defs/name_string",
+          "description": "Model name — string or {locale: text} dict (localized string slot 1)."
         },
         "firmware": {
           "type": "string",
@@ -496,7 +579,7 @@
           "description": "Configurations (array form)."
         }
       },
-      "required": ["entity_id", "model_id"]
+      "additionalProperties": false
     }
   }
 }

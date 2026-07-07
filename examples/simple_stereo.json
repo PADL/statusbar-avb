@@ -1,4 +1,5 @@
 {
+  "$schema": "../standards/ieee1722.1-schema/atdecc_aem.schema.json",
   "entity": {
     "entity_id": "0x0000000000000001",
     "model_id": "0x0000000000000001",

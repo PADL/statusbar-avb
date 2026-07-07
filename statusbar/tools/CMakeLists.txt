@@ -137,6 +137,14 @@ add_custom_target(statusbar_avb_json_blobs ALL DEPENDS ${_aem_json_blobs})
 add_test(NAME statusbar/avb/aem_json_models_compile
          COMMAND ${Python3_EXECUTABLE} "${_aem_examples}/verify_models.py")
 
+# Every model must match the authoring schema the editors use (the models'
+# "$schema" key). Skips (77) when python3-jsonschema is not installed — the
+# aemxml pipeline itself stays pure-stdlib.
+add_test(NAME statusbar/avb/aem_json_models_schema
+         COMMAND ${Python3_EXECUTABLE} "${_aem_examples}/validate_schema.py")
+set_tests_properties(statusbar/avb/aem_json_models_schema
+                     PROPERTIES SKIP_RETURN_CODE 77)
+
 # Cross-language net: the C++ DescriptorStorage parser (the runtime consumer)
 # must read a Python-written blob and see the same descriptor/symbol tables.
 add_test(
