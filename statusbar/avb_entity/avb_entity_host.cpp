@@ -62,6 +62,12 @@ void AvbEntityHost::wire_identify_control()
         if (control_type == atdecc::aem::CONTROL_TYPE_IDENTIFY) {
             components_.aem_handler.set_identify_control_index(index);
             components_.adp_advertiser.set_identify_control_index(index);
+            // Default identify indicator: these entities have no LED, so log to
+            // the journal. Entities with a real indicator can override via
+            // components().aem_handler.set_identify_changed().
+            components_.aem_handler.set_identify_changed([](bool const active) {
+                std::print(stderr, "[identify] {}\n", active ? "ON — a controller is identifying this entity" : "off");
+            });
             return;
         }
     }

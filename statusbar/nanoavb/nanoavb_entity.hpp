@@ -88,6 +88,12 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 using GetStreamInfoFn =
     statusbar::sg14::inplace_function<bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out), 64>;
 
+/// Notified when a SET_CONTROL targeting the entity's IDENTIFY control is
+/// applied (see set_identify_control_index). @p active is true when the new
+/// value is non-zero (a controller is identifying this entity), false when
+/// cleared.
+using IdentifyChangedFn = statusbar::sg14::inplace_function<void(bool active), 64>;
+
 /// Callbacks for AECP AEM command handling
 struct AemCommandHandlerCallbacks
 {
@@ -104,6 +110,10 @@ struct AemCommandHandlerCallbacks
     /// Provide stream parameters for GET_STREAM_INFO. Optional; if unset,
     /// GET_STREAM_INFO replies NOT_IMPLEMENTED.
     GetStreamInfoFn get_stream_info;
+
+    /// Observe IDENTIFY-control changes (e.g. blink an LED, or log when there
+    /// is none). Optional.
+    IdentifyChangedFn identify_changed;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -189,6 +199,7 @@ class AemCommandHandler
     /// Set only the GET_STREAM_INFO provider, without disturbing the others.
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
+    void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
 
     /// Callback to send CONTROLLER_AVAILABLE command to the current owner.
     /// Set this to enable the CONTROLLER_AVAILABLE handshake on acquire contention.

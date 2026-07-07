@@ -790,6 +790,11 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
     // so controller_entity_id is left zero.
     if (targets_identify_control(command_type, body)) {
         send_unsolicited_to(atdecc::ATDECC_IDENTIFY_MULTICAST_MAC, Eui64{}, command_type, body);
+        if (callbacks_.identify_changed) {
+            // SET_CONTROL body: descriptor_type(2) + descriptor_index(2) + values.
+            // The IDENTIFY control is LINEAR_UINT8: byte 4 is the new value.
+            callbacks_.identify_changed(body.size() > 4 && body[4] != 0);
+        }
     }
 }
 

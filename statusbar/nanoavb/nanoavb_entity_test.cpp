@@ -1402,10 +1402,12 @@ TEST(nanoavb_entity_unsolicited_notify, identify_control_change_hits_identify_mu
     handler.set_identify_control_index(3);  // CONTROL index 3 is the IDENTIFY control
 
     std::vector<CapturedSend> sends;
+    std::vector<bool> identify_changes;
     handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
         sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
         return true;
     }});
+    handler.set_identify_changed([&](bool const active) { identify_changes.push_back(active); });
 
     // No registered controllers — but an IDENTIFY change still reaches the multicast.
     // SET_CONTROL body: descriptor_type=CONTROL(0x001A), descriptor_index=3, value=0x01.
@@ -1419,6 +1421,14 @@ TEST(nanoavb_entity_unsolicited_notify, identify_control_change_hits_identify_mu
     EXPECT_TRUE(hdr.is_unsolicited());
     EXPECT_EQ(hdr.command_code(), AEM_COMMAND_SET_CONTROL);
     EXPECT_EQ(hdr.target_entity_id, entity_id);
+
+    // The identify observer saw the change (non-zero value = active), and a
+    // subsequent clear reports inactive.
+    std::array<uint8_t, 5> clear{0x00, 0x1A, 0x00, 0x03, 0x00};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, clear), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(identify_changes.size(), size_t{2});
+    EXPECT_TRUE(identify_changes[0]);
+    EXPECT_FALSE(identify_changes[1]);
 }
 
 TEST(nanoavb_entity_unsolicited_notify, non_identify_control_skips_multicast)
