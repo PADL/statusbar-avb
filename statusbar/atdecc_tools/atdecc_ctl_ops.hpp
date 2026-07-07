@@ -129,6 +129,7 @@ enum class OpKind : uint8_t
     Disconnect,
     SetClockSource,
     GetClockSource,
+    Identify,
 };
 
 struct Op
@@ -136,9 +137,10 @@ struct Op
     OpKind kind{OpKind::Connect};
     Endpoint talker{};     ///< connect/disconnect
     Endpoint listener{};   ///< connect/disconnect
-    std::string entity{};  ///< clock-source ops: target entity name
+    std::string entity{};  ///< clock-source / identify ops: target entity name
     uint16_t clock_domain{0};
     uint16_t clock_source{0};
+    bool identify_on{true};  ///< identify: desired state
 };
 
 namespace detail {
@@ -190,6 +192,32 @@ namespace detail {
         .clock_source = static_cast<uint16_t>(*srci)};
 }
 
+/// Parse an `[[identify]]` table into an Op. Requires `entity` (string);
+/// `state` optional ("on"/"off", default "on").
+[[nodiscard]] inline auto parse_identify_op(toml::Table const& t, std::string& err) -> std::optional<Op>
+{
+    auto const* ent = t.get("entity");
+    auto const ents = (ent != nullptr) ? ent->as_string() : std::nullopt;
+    if (!ents) {
+        err = "identify requires string 'entity'";
+        return std::nullopt;
+    }
+    bool on = true;
+    if (auto const* st = t.get("state"); st != nullptr) {
+        auto const sts = st->as_string();
+        if (!sts || (*sts != "on" && *sts != "off")) {
+            err = "identify 'state' must be \"on\" or \"off\"";
+            return std::nullopt;
+        }
+        on = (*sts == "on");
+    }
+    Op op{};
+    op.kind = OpKind::Identify;
+    op.entity = std::string{*ents};
+    op.identify_on = on;
+    return op;
+}
+
 /// Append every table in `root[key]` (a TOML array-of-tables) parsed via `fn`.
 template <typename Fn>
 [[nodiscard]] inline auto parse_array_of_tables(toml::Table const& root, std::string_view key, std::vector<Op>& out, Fn fn)
@@ -220,9 +248,9 @@ template <typename Fn>
 }  // namespace detail
 
 /// Parse a batch-ops TOML document into a flat op list. Connections are applied
-/// first, then clock-source sets, then disconnects (deterministic ordering
-/// independent of key order in the file). On error, returns nullopt and fills
-/// `err`.
+/// first, then clock-source sets, then identifies, then disconnects
+/// (deterministic ordering independent of key order in the file). On error,
+/// returns nullopt and fills `err`.
 [[nodiscard]] inline auto parse_batch_ops(toml::Table const& root, std::string& err) -> std::optional<std::vector<Op>>
 {
     std::vector<Op> ops;
@@ -237,6 +265,11 @@ template <typename Fn>
         err = *e;
         return std::nullopt;
     }
+    if (auto e = detail::parse_array_of_tables(
+            root, "identify", ops, [](toml::Table const& t, std::string& er) { return detail::parse_identify_op(t, er); })) {
+        err = *e;
+        return std::nullopt;
+    }
     if (auto e = detail::parse_array_of_tables(root, "disconnect", ops, [](toml::Table const& t, std::string& er) {
             return detail::parse_stream_op(t, OpKind::Disconnect, er);
         })) {
@@ -244,7 +277,7 @@ template <typename Fn>
         return std::nullopt;
     }
     if (ops.empty()) {
-        err = "batch file contains no [[connect]], [[set_clock_source]], or [[disconnect]] entries";
+        err = "batch file contains no [[connect]], [[set_clock_source]], [[identify]], or [[disconnect]] entries";
         return std::nullopt;
     }
     return ops;

@@ -64,6 +64,7 @@ statusbar-nanoavb       --interface=eth0 --ptp.driver=system
 statusbar-atdecc-ctl --interface=eth0 --command=list
 statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0
 statusbar-atdecc-ctl --interface=eth0 --command=set-clock-source --entity=MyDevice --clock-domain=0 --clock-source=1
+statusbar-atdecc-ctl --interface=eth0 --command=identify --entity=MyDevice --state=on
 statusbar-acmp-controller --interface=eth0 --action=CONNECT \
   --talker-entity-id=00:11:22:33:44:55:66:77 --talker-uid=0 \
   --listener-entity-id=aa:bb:cc:dd:ee:ff:00:11 --listener-uid=1
@@ -78,8 +79,8 @@ statusbar-aemxml json2bin examples/dual.json entity.bin
 ```
 
 `atdecc-ctl --command` accepts `list`, `validate`, `connect`, `disconnect`,
-`get-rx-state`, `get-tx-state`, `set-clock-source`, `get-clock-source`, `batch`
-(TOML `--file`), and `supervise`.
+`get-rx-state`, `get-tx-state`, `set-clock-source`, `get-clock-source`,
+`identify` (`--state=on|off`), `batch` (TOML `--file`), and `supervise`.
 
 ## AVTP, capture & audio
 

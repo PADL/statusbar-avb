@@ -241,14 +241,16 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             fetch_entity_descriptors(action.request.talker_entity_id, now_ns);
             break;
         case ControllerActionKind::IdentifyEntity: {
-            // Toggle the per-entity identify state.
+            // identify_state 0/1 sets an explicit state (scriptable callers need
+            // determinism); -1 toggles the per-entity state (the TUI's 'i' key).
             auto const target = action.request.talker_entity_id;
-            bool const new_on = !entities_[target].identify_on;
+            bool const new_on =
+                (action.request.identify_state < 0) ? !entities_[target].identify_on : (action.request.identify_state != 0);
             if (controller_.set_identify(target, new_on)) {
                 entities_[target].identify_on = new_on;
                 emit_status(new_on ? "Identify on" : "Identify off");
             } else {
-                emit_status("Identify failed: entity not found or queue full");
+                emit_status("Identify failed: entity unknown, no identify control advertised, or queue full");
             }
             break;
         }

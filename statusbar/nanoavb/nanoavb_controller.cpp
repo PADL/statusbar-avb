@@ -224,6 +224,12 @@ auto NanoAvbAemController::set_identify(Eui64 target, bool on) -> bool
     if (entity == nullptr) {
         return false;
     }
+    // Only trust identify_control_index when the entity advertises it as valid
+    // (IEEE 1722.1 6.2.1.10) — otherwise the field defaults to 0 and we would
+    // blindly write CONTROL index 0, which may be some other control.
+    if (!entity->adpdu.has_entity_capability(atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID)) {
+        return false;
+    }
     uint16_t const control_index = entity->adpdu.identify_control_index.get();
     std::array<uint8_t, 5> payload{};
     payload[0] = static_cast<uint8_t>((DESCRIPTOR_CONTROL >> 8) & 0xFF);

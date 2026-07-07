@@ -303,4 +303,37 @@ TEST(atdecc_ctl_trace, first_broken_leg_wins)
     EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::TalkerRejected);
 }
 
+TEST(atdecc_ctl_batch, parses_identify_ops)
+{
+    auto doc = toml::parse("[[identify]]\n"
+                           "entity = \"tone\"\n"
+                           "[[identify]]\n"
+                           "entity = \"88:a2:9e:ff:fe:82:83:00\"\n"
+                           "state = \"off\"\n");
+    EXPECT_TRUE(doc.has_value());
+    std::string err;
+    auto ops = parse_batch_ops(*doc, err);
+    EXPECT_TRUE(ops.has_value());
+    EXPECT_EQ(ops->size(), 2u);
+    EXPECT_TRUE((*ops)[0].kind == OpKind::Identify);
+    EXPECT_EQ((*ops)[0].entity, "tone");
+    EXPECT_TRUE((*ops)[0].identify_on);  // state defaults to "on"
+    EXPECT_TRUE((*ops)[1].kind == OpKind::Identify);
+    EXPECT_FALSE((*ops)[1].identify_on);
+}
+
+TEST(atdecc_ctl_batch, identify_rejects_bad_state_and_missing_entity)
+{
+    std::string err;
+    auto bad_state = toml::parse("[[identify]]\n"
+                                 "entity = \"tone\"\n"
+                                 "state = \"blink\"\n");
+    EXPECT_TRUE(bad_state.has_value());
+    EXPECT_FALSE(parse_batch_ops(*bad_state, err).has_value());
+
+    auto no_entity = toml::parse("[[identify]]\nstate = \"on\"\n");
+    EXPECT_TRUE(no_entity.has_value());
+    EXPECT_FALSE(parse_batch_ops(*no_entity, err).has_value());
+}
+
 TEST_MAIN(statusbar_atdecc_tools, atdecc_ctl_resolve_test)

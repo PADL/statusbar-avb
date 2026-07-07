@@ -35,6 +35,7 @@ struct StreamRequest
     uint16_t desc_index{0};          ///< Descriptor index for AEM commands
     uint64_t stream_format{0};       ///< Stream format for SET_STREAM_FORMAT
     uint16_t clock_source_index{0};  ///< Clock source index for SET_CLOCK_SOURCE
+    int8_t identify_state{-1};       ///< IdentifyEntity: -1 = toggle, 0 = off, 1 = on
 };
 
 /// Kind of controller action — every command a driver can issue.
@@ -44,7 +45,7 @@ enum class ControllerActionKind : uint8_t
     ConnectStream,          ///< ACMP CONNECT_TX_COMMAND
     DisconnectStream,       ///< ACMP DISCONNECT_TX_COMMAND
     ReadEntityDescriptors,  ///< Read all descriptors for entity in request.talker_entity_id
-    IdentifyEntity,         ///< Send IDENTIFY_NOTIFICATION for entity in request.talker_entity_id
+    IdentifyEntity,         ///< SET_CONTROL on the entity's advertised identify control (request.identify_state)
     StartStreaming,         ///< Start streaming on stream (desc_type + desc_index)
     StopStreaming,          ///< Stop streaming on stream (desc_type + desc_index)
     SetStreamFormat,        ///< Set stream format (desc_type + desc_index + stream_format)

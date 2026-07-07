@@ -15,6 +15,7 @@
 //   --command=disconnect      --talker NAME:UID --listener NAME:UID
 //   --command=set-clock-source --entity NAME --clock-source S [--clock-domain D]
 //   --command=get-clock-source --entity NAME             [--clock-domain D]
+//   --command=identify        --entity NAME [--state on|off]
 //   --command=batch           --file ops.toml
 //   --command=supervise       --file ops.toml  [--watch-ms N]
 //                             ensure each declared connection exists (idempotent:
@@ -71,10 +72,11 @@ struct Config
 {
     std::string command;  // list|connect|disconnect|set-clock-source|get-clock-source|batch
     std::string interface_name;
-    std::string talker;    // NAME:UID
-    std::string listener;  // NAME:UID
-    std::string entity;    // NAME (clock-source target / list detail)
-    std::string file;      // batch TOML path
+    std::string talker;       // NAME:UID
+    std::string listener;     // NAME:UID
+    std::string entity;       // NAME (clock-source target / list detail)
+    std::string file;         // batch TOML path
+    std::string state{"on"};  // identify: desired state (on|off)
     int64_t discover_ms{1500};
     int64_t clock_domain{0};
     int64_t clock_source{0};
@@ -90,7 +92,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add_choice(
         "command",
         "Action: list, validate, connect, disconnect, get-rx-state, get-tx-state, set-clock-source, get-clock-source, "
-        "batch, supervise",
+        "identify, batch, supervise",
         {"list",
          "validate",
          "connect",
@@ -99,6 +101,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
          "get-tx-state",
          "set-clock-source",
          "get-clock-source",
+         "identify",
          "batch",
          "supervise"},
         "list",
@@ -108,8 +111,10 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "talker", "Talker endpoint NAME:UID (connect/disconnect)", "", [&](auto v) { config.talker = std::string{v}; });
     specs.add<std::string>(
         "listener", "Listener endpoint NAME:UID (connect/disconnect)", "", [&](auto v) { config.listener = std::string{v}; });
-    specs.add<std::string>(
-        "entity", "Target entity NAME (clock-source / list detail)", "", [&](auto v) { config.entity = std::string{v}; });
+    specs.add<std::string>("entity", "Target entity NAME (clock-source / identify / list detail)", "", [&](auto v) {
+        config.entity = std::string{v};
+    });
+    specs.add_choice("state", "identify: desired state", {"on", "off"}, "on", [&](auto v) { config.state = std::string{v}; });
     specs.add<std::string>(
         "file", "Batch/supervise TOML file (command=batch|supervise)", "", [&](auto v) { config.file = std::string{v}; });
     specs.add<int64_t>("discover-ms", "Discovery window in ms", 1500, [&](auto v) { config.discover_ms = v; });
@@ -131,10 +136,11 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
 
 void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
-    static constexpr std::array<std::string_view, 5> examples{
+    static constexpr std::array<std::string_view, 6> examples{
         "--interface=eth0 --command=list",
         "--interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0",
         "--interface=eth0 --command=set-clock-source --entity=node-a --clock-source=1",
+        "--interface=eth0 --command=identify --entity=node-a --state=on",
         "--interface=eth0 --command=batch --file=ops.toml",
         "--interface=eth0 --command=supervise --file=ops.toml",
     };
@@ -358,6 +364,43 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
                         auto const lower = atdecc_tools::detail::to_lower(text);
                         ok = lower.find("success") != std::string::npos;
                         done = true;
+                    }
+                });
+            std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
+            return done && ok;
+        }
+        case OpKind::Identify: {
+            auto const eid = resolve_or_report(op.entity, snap);
+            if (!eid) {
+                return false;
+            }
+            ControllerAction action{};
+            action.kind = ControllerActionKind::IdentifyEntity;
+            action.request.talker_entity_id = *eid;
+            action.request.identify_state = op.identify_on ? int8_t{1} : int8_t{0};
+            std::println("identify {} {} ...", op.entity, op.identify_on ? "on" : "off");
+            ctrl.dispatch(action, elapsed_ns());
+            bool done = false;
+            bool ok = false;
+            std::string text;
+            (void)pump(
+                reactor,
+                ctrl,
+                5000,
+                [&] { return done; },
+                [&](auto const& ev) {
+                    if (auto const* s = std::get_if<StatusChangedEvent>(&ev)) {
+                        auto const lower = atdecc_tools::detail::to_lower(s->status);
+                        // Dispatch acks immediately ("Identify on/off"); the
+                        // SET_CONTROL response is what proves the entity heard us.
+                        if (lower.find("failed") != std::string::npos) {
+                            text = s->status;
+                            done = true;
+                        } else if (lower.find("set_control") != std::string::npos) {
+                            text = s->status;
+                            ok = lower.find("success") != std::string::npos;
+                            done = true;
+                        }
                     }
                 });
             std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
@@ -735,6 +778,18 @@ int main(int argc, char* argv[])
             .entity = config.entity,
             .clock_domain = static_cast<uint16_t>(config.clock_domain),
             .clock_source = static_cast<uint16_t>(config.clock_source)};
+        return execute_op(reactor, *ctrl, op) ? 0 : 1;
+    }
+
+    if (config.command == "identify") {
+        if (config.entity.empty()) {
+            std::println(stderr, "Error: --entity is required");
+            return 1;
+        }
+        Op op{};
+        op.kind = OpKind::Identify;
+        op.entity = config.entity;
+        op.identify_on = (config.state != "off");
         return execute_op(reactor, *ctrl, op) ? 0 : 1;
     }
 

@@ -306,8 +306,15 @@ TEST(nanoavb_integration, identify_command)
     (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
+    // Without AEM_IDENTIFY_CONTROL_INDEX_VALID in the ADPDU the controller
+    // refuses to guess a control index.
+    EXPECT_FALSE(f.controller.set_identify(ENTITY_ID, true));
+
     // Identify is implemented as SET_CONTROL on the CONTROL descriptor at
     // the index advertised by the ADPDU's identify_control_index field.
+    f.adp_advertiser.set_identify_control_index(0);
+    f.adp_advertiser.notify_entity_changed();
+    f.run_discovery_round(1'050'000'000);
     EXPECT_TRUE(f.controller.set_identify(ENTITY_ID, true));
     f.run_command_round(1'100'000'000);
 
