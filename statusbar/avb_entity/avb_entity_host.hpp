@@ -216,6 +216,14 @@ class AvbEntityHost
     }
 
   private:
+    /// Scan configuration 0's CONTROL descriptors for the standard IDENTIFY
+    /// control_type and, when found, mirror its index into the AEM handler
+    /// (SET_CONTROL on it additionally notifies the IDENTIFY multicast) and the
+    /// ADP advertiser (identify_control_index + the
+    /// AEM_IDENTIFY_CONTROL_INDEX_VALID capability). Symbol-aware path only —
+    /// no-op without a descriptor storage.
+    void wire_identify_control();
+
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();
     void wire_supervisor_callbacks();

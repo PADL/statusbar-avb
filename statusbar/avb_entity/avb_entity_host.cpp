@@ -9,6 +9,7 @@
 
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 
+#include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/srp/srp_msrp.hpp"
 
 #include <chrono>
@@ -37,7 +38,34 @@ AvbEntityHost::AvbEntityHost(
     // which reference it on the symbol-aware path, outlive nothing.
     : handler_{std::move(handler)}
     , components_{*handler_, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
-{}
+{
+    wire_identify_control();
+}
+
+void AvbEntityHost::wire_identify_control()
+{
+    auto const* storage = descriptor_storage();
+    if (storage == nullptr) {
+        return;
+    }
+    for (uint16_t index = 0;; ++index) {
+        auto const desc = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_CONTROL, index);
+        if (!desc) {
+            return;
+        }
+        if (desc.value().size() < atdecc::aem::DescriptorControl::LENGTH) {
+            continue;
+        }
+        // control_type is the EUI-64 at offset 82 of the CONTROL descriptor.
+        ieee::Eui64 control_type{};
+        span_load(control_type, desc.value().subspan(82));
+        if (control_type == atdecc::aem::CONTROL_TYPE_IDENTIFY) {
+            components_.aem_handler.set_identify_control_index(index);
+            components_.adp_advertiser.set_identify_control_index(index);
+            return;
+        }
+    }
+}
 
 //
 // Lifecycle

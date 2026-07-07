@@ -8,6 +8,7 @@
 
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 
+#include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -78,6 +79,66 @@ auto make_host_from_blob(std::vector<uint8_t> const& blob) -> std::unique_ptr<Av
     return std::make_unique<AvbEntityHost>(std::move(handler), AdpAdvertiserConfig{}, 1, 4, 1);
 }
 
+/// Blob with an ENTITY descriptor plus two CONTROL descriptors: index 0 a MUTE,
+/// index 1 the standard IDENTIFY — so the identify scan must pass over a
+/// non-identify control and land on index 1.
+auto make_blob_with_identify_control() -> std::vector<uint8_t>
+{
+    using statusbar::atdecc::aem::DESCRIPTOR_CONTROL;
+    using statusbar::atdecc::aem::DescriptorControl;
+
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr uint32_t entity_size = DescriptorEntity::LENGTH;
+    constexpr uint32_t control_size = DescriptorControl::LENGTH;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t entity_offset = toc_offset + (3 * toc_entry_size);
+    constexpr uint32_t control0_offset = entity_offset + entity_size;
+    constexpr uint32_t control1_offset = control0_offset + control_size;
+    constexpr uint32_t total = control1_offset + control_size;
+
+    std::vector<uint8_t> blob(total, 0);
+    blob[0] = 0x41;  // "AEM1"
+    blob[1] = 0x45;
+    blob[2] = 0x4D;
+    blob[3] = 0x31;
+    blob[7] = 0x03;                               // toc_count = 3
+    blob[11] = static_cast<uint8_t>(toc_offset);  // toc_offset = 20 (no symbols)
+
+    // TOC entry: type(2) index(2) config(2) length(2) offset(4), big-endian.
+    auto put_toc = [&](uint32_t slot, uint16_t type, uint16_t index, uint16_t length, uint32_t offset) {
+        auto const base = toc_offset + (slot * toc_entry_size);
+        blob[base + 0] = static_cast<uint8_t>(type >> 8);
+        blob[base + 1] = static_cast<uint8_t>(type & 0xFF);
+        blob[base + 2] = static_cast<uint8_t>(index >> 8);
+        blob[base + 3] = static_cast<uint8_t>(index & 0xFF);
+        blob[base + 6] = static_cast<uint8_t>(length >> 8);
+        blob[base + 7] = static_cast<uint8_t>(length & 0xFF);
+        blob[base + 8] = static_cast<uint8_t>(offset >> 24);
+        blob[base + 9] = static_cast<uint8_t>((offset >> 16) & 0xFF);
+        blob[base + 10] = static_cast<uint8_t>((offset >> 8) & 0xFF);
+        blob[base + 11] = static_cast<uint8_t>(offset & 0xFF);
+    };
+    put_toc(0, DESCRIPTOR_ENTITY, 0, entity_size, entity_offset);
+    put_toc(1, DESCRIPTOR_CONTROL, 0, control_size, control0_offset);
+    put_toc(2, DESCRIPTOR_CONTROL, 1, control_size, control1_offset);
+
+    DescriptorEntity entity{};
+    entity.configurations_count = 1;
+    std::memcpy(blob.data() + entity_offset, &entity, entity_size);
+
+    DescriptorControl mute{};
+    mute.descriptor_index = 0;
+    mute.control_type = statusbar::atdecc::aem::CONTROL_TYPE_MUTE;
+    std::memcpy(blob.data() + control0_offset, &mute, control_size);
+
+    DescriptorControl identify{};
+    identify.descriptor_index = 1;
+    identify.control_type = statusbar::atdecc::aem::CONTROL_TYPE_IDENTIFY;
+    std::memcpy(blob.data() + control1_offset, &identify, control_size);
+    return blob;
+}
+
 }  // namespace
 
 TEST(avb_entity_host_symbol, constructs_symbol_aware_and_resolves_forward)
@@ -119,6 +180,28 @@ TEST(avb_entity_host_symbol, unknown_symbol_and_descriptor_fail)
     EXPECT_FALSE(host->symbol_of(DESCRIPTOR_ENTITY, 7).has_value());  // no such index
     EXPECT_FALSE(host->descriptor_for_symbol(0x12345678u).has_value());
     EXPECT_FALSE(host->get_descriptor(DESCRIPTOR_ENTITY, 7).has_value());
+}
+
+TEST(avb_entity_host_symbol, identify_control_wired_from_blob)
+{
+    // The host scans configuration 0's CONTROL descriptors for the standard
+    // IDENTIFY control_type and mirrors its index into the ADP advertisement.
+    auto blob = make_blob_with_identify_control();
+    auto host = make_host_from_blob(blob);
+
+    auto const& adpdu = host->components().adp_advertiser.adpdu();
+    EXPECT_EQ(static_cast<uint16_t>(adpdu.identify_control_index), 1u);
+    EXPECT_TRUE(adpdu.entity_capabilities.has_flag(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
+}
+
+TEST(avb_entity_host_symbol, no_identify_control_leaves_adp_untouched)
+{
+    // A blob without an IDENTIFY-typed control must not set the capability.
+    auto blob = make_entity_blob();
+    auto host = make_host_from_blob(blob);
+
+    auto const& adpdu = host->components().adp_advertiser.adpdu();
+    EXPECT_FALSE(adpdu.entity_capabilities.has_flag(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
 }
 
 TEST(avb_entity_host_symbol, legacy_parsed_model_path_has_no_storage)

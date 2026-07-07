@@ -60,6 +60,18 @@
             ]
           }
         ],
+        "controls": [
+          {
+            "name": "Identify",
+            "control_type": "IDENTIFY",
+            "value_type": "LINEAR_UINT8",
+            "localized_description": { "en-US": "Identify" },
+            "values": [
+              { "min": 0, "max": 255, "step": 255, "default": 0, "unit": "UNITLESS" }
+            ],
+            "symbol": "identify"
+          }
+        ],
         "avb_interfaces": [
           {
             "name": "eth0",
