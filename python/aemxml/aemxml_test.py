@@ -1602,6 +1602,170 @@ def test_json_pull_rates():
     print("  [+] JSON pull rates: OK")
 
 
+def test_json_localized_dict():
+    """Dict-form localized strings: {locale: text} authored at the field site
+    generates the LOCALE + STRINGS descriptors and the wire references."""
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "Statusbar",
+                "model": {"en-US": "Tone Generator", "de-DE": "Tongenerator"},
+                "name": "Localized Test",
+                "configuration": {
+                    "name": "Main",
+                    "localized_description": {
+                        "en-US": "Main Config",
+                        "de-DE": "Hauptkonfiguration",
+                    },
+                    "streams_out": [
+                        {
+                            "name": "S1",
+                            "format": "0x0205022002006000",
+                            "localized_description": {
+                                "en-US": "AAF Audio",
+                                "de-DE": "AAF-Audio",
+                            },
+                        },
+                        {
+                            "name": "S2",
+                            "format": "0x041060010000BB80",
+                            # No de-DE: falls back to the entry's primary text.
+                            "localized_description": {"en-US": "CRF Clock"},
+                        },
+                    ],
+                    "clock_sources": [
+                        {
+                            "name": "CS",
+                            "type": "INTERNAL",
+                            # Identical dict to S1's: deduplicated to one slot.
+                            "localized_description": {
+                                "en-US": "AAF Audio",
+                                "de-DE": "AAF-Audio",
+                            },
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    config = entity.configurations[0]
+
+    # One locale per language, in authoring order, with identical layouts.
+    assert [loc.locale_identifier for loc in config.locales] == ["en-US", "de-DE"]
+    en, de = config.locales
+    assert len(en.strings_descriptors) == len(de.strings_descriptors) == 1
+    # Slots 0/1 are the entity vendor/model (matching the fixed ENTITY refs);
+    # authored entries follow. The plain-string vendor appears in every locale.
+    assert en.strings_descriptors[0].strings == [
+        "Statusbar",
+        "Tone Generator",
+        "Main Config",
+        "AAF Audio",
+        "CRF Clock",
+    ]
+    assert de.strings_descriptors[0].strings == [
+        "Statusbar",
+        "Tongenerator",
+        "Hauptkonfiguration",
+        "AAF-Audio",
+        "CRF Clock",  # en-US fallback
+    ]
+    assert entity.vendor_name_string.offset == 0
+    assert entity.vendor_name_string.index == 0
+    assert entity.model_name_string.index == 1
+    assert config.localized_description.index == 2
+    assert config.streams_output[0].localized_description.index == 3
+    assert config.streams_output[1].localized_description.index == 4
+    # Deduplicated: the clock source shares S1's slot.
+    assert config.clock_sources[0].localized_description.index == 3
+
+    # Absent localized_description -> NO_STRING (0xFFFF on the wire).
+    ref = pack_localized_string_ref(
+        config.streams_output[0].localized_description.offset,
+        config.streams_output[0].localized_description.index,
+    )
+    assert unpack_u16(ref, 0) == 3
+    plain = read_json(
+        json.dumps(
+            {
+                "entity": {
+                    "vendor": "V",
+                    "name": "N",
+                    "configuration": {
+                        "name": "C",
+                        "streams_out": [{"name": "S", "format": "0x041060010000BB80"}],
+                    },
+                }
+            }
+        )
+    )
+    no_string = plain.configurations[0].streams_output[0].localized_description
+    assert (
+        unpack_u16(pack_localized_string_ref(no_string.offset, no_string.index), 0)
+        == 0xFFFF
+    )
+
+    # The eighth unique entry spills into a second STRINGS descriptor (offset 1).
+    many = read_json(
+        json.dumps(
+            {
+                "entity": {
+                    "vendor": "V",
+                    "model": "M",
+                    "name": "N",
+                    "configuration": {
+                        "name": "C",
+                        "streams_out": [
+                            {
+                                "name": f"S{i}",
+                                "format": "0x041060010000BB80",
+                                "localized_description": {"en": f"Stream {i}"},
+                            }
+                            for i in range(6)
+                        ],
+                    },
+                }
+            }
+        )
+    )
+    cfg = many.configurations[0]
+    assert cfg.streams_output[4].localized_description.offset == 0
+    assert cfg.streams_output[4].localized_description.index == 6
+    assert cfg.streams_output[5].localized_description.offset == 1
+    assert cfg.streams_output[5].localized_description.index == 0
+    assert len(cfg.locales[0].strings_descriptors) == 2
+
+    # Mixing an explicit strings table with dict-form localization is an error.
+    try:
+        read_json(
+            json.dumps(
+                {
+                    "entity": {
+                        "vendor": "V",
+                        "configuration": {
+                            "name": "C",
+                            "strings": ["x"],
+                            "streams_out": [
+                                {
+                                    "name": "S",
+                                    "format": "0x041060010000BB80",
+                                    "localized_description": {"en": "S"},
+                                }
+                            ],
+                        },
+                    }
+                }
+            )
+        )
+        raise AssertionError("mixing strings + dict-form localization not rejected")
+    except ValueError:
+        pass
+    print("  [+] json localized dict authoring: OK")
+
+
 def test_upgrade_2013_to_2021():
     """Upgrade a 2013 AEMXML file to 2021 schema."""
     aemxml_path = str(
@@ -1780,6 +1944,7 @@ def main():
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,
         test_json_pull_rates,
+        test_json_localized_dict,
         test_upgrade_2013_to_2021,
         test_downgrade_2021_to_2013,
         test_upgrade_is_idempotent,

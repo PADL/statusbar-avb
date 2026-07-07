@@ -1,6 +1,8 @@
 {
+  "$schema": "../standards/ieee1722.1-schema/atdecc_aem.schema.json",
   "entity": {
     "vendor": "Statusbar",
+    "model": "Tone Generator",
     "name": "Statusbar Tone Generator",
     "capabilities": [
       "AEM_SUPPORTED",
@@ -22,15 +24,7 @@
     "configurations": [
       {
         "name": "ToneAAFCRF",
-        "strings": [
-          "Statusbar Tone Generator",
-          "Internal",
-          "Clock Domain",
-          "AAF Audio",
-          "CRF Media Clock",
-          "Audio Unit",
-          "Output"
-        ],
+        "localized_description": { "en-US": "Tone AAF + CRF", "de-DE": "Ton AAF + CRF" },
         "streams_out": [
           {
             "name": "StreamOutputAAF",
@@ -38,7 +32,7 @@
             "flags": [
               "CLASS_A"
             ],
-            "localized_description": 3
+            "localized_description": { "en-US": "AAF Audio", "de-DE": "AAF-Audio" }
           },
           {
             "name": "StreamOutputCRF",
@@ -46,13 +40,13 @@
             "flags": [
               "CLASS_A"
             ],
-            "localized_description": 4
+            "localized_description": { "en-US": "CRF Media Clock", "de-DE": "CRF-Medientakt" }
           }
         ],
         "audio_units": [
           {
             "name": "AudioUnit",
-            "localized_description": 5,
+            "localized_description": { "en-US": "Audio Unit", "de-DE": "Audioeinheit" },
             "rates": [
               96000
             ],
@@ -61,7 +55,7 @@
                 "clusters": [
                   {
                     "name": "OutputCluster",
-                    "localized_description": 6,
+                    "localized_description": { "en-US": "Output", "de-DE": "Ausgang" },
                     "channels": 8
                   }
                 ],
@@ -82,7 +76,6 @@
         "avb_interfaces": [
           {
             "name": "eth0",
-            "localized_description": 65535,
             "flags": [
               "GPTP_SUPPORTED"
             ]
@@ -91,7 +84,7 @@
         "clock_sources": [
           {
             "name": "Internal",
-            "localized_description": 1,
+            "localized_description": { "en-US": "Internal", "de-DE": "Intern" },
             "type": "INTERNAL",
             "location_type": 2,
             "location_index": 0
@@ -100,7 +93,7 @@
         "clock_domains": [
           {
             "name": "ClockDomain",
-            "localized_description": 2,
+            "localized_description": { "en-US": "Clock Domain", "de-DE": "Taktdomäne" },
             "source": 0,
             "sources": [
               0

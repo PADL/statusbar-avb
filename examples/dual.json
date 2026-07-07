@@ -1,6 +1,8 @@
 {
+  "$schema": "../standards/ieee1722.1-schema/atdecc_aem.schema.json",
   "entity": {
     "vendor": "Statusbar",
+    "model": "Audio IO",
     "name": "AVB Audio IO",
     "capabilities": [
       "AEM_SUPPORTED",
@@ -25,25 +27,20 @@
     "configurations": [
       {
         "name": "AudioIO",
-        "strings": [
-          "AVB Audio IO"
-        ],
         "streams_in": [
           {
             "name": "StreamInputAM824",
             "format": "0x00A0040860000800",
             "flags": [
               "CLASS_A"
-            ],
-            "localized_description": 65535
+            ]
           },
           {
             "name": "StreamInputAAF",
             "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
             "flags": [
               "CLASS_A"
-            ],
-            "localized_description": 65535
+            ]
           }
         ],
         "streams_out": [
@@ -52,30 +49,26 @@
             "format": "0x00A0040860000800",
             "flags": [
               "CLASS_A"
-            ],
-            "localized_description": 65535
+            ]
           },
           {
             "name": "StreamOutputAAF",
             "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
             "flags": [
               "CLASS_A"
-            ],
-            "localized_description": 65535
+            ]
           },
           {
             "name": "StreamOutputCRF",
             "format": "0x041060010000BB80",
             "flags": [
               "CLASS_A"
-            ],
-            "localized_description": 65535
+            ]
           }
         ],
         "audio_units": [
           {
             "name": "AudioUnit",
-            "localized_description": 65535,
             "rates": [
               96000
             ],
@@ -84,7 +77,6 @@
                 "clusters": [
                   {
                     "name": "InputCluster",
-                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
@@ -103,7 +95,6 @@
                 "clusters": [
                   {
                     "name": "InputCluster",
-                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
@@ -124,7 +115,6 @@
                 "clusters": [
                   {
                     "name": "OutputCluster",
-                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
@@ -143,7 +133,6 @@
                 "clusters": [
                   {
                     "name": "OutputCluster",
-                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
@@ -176,7 +165,6 @@
         "avb_interfaces": [
           {
             "name": "eth0",
-            "localized_description": 65535,
             "flags": [
               "GPTP_SUPPORTED"
             ]
@@ -185,14 +173,12 @@
         "clock_sources": [
           {
             "name": "Internal",
-            "localized_description": 65535,
             "type": "INTERNAL",
             "location_type": 2,
             "location_index": 0
           },
           {
             "name": "InputStream",
-            "localized_description": 65535,
             "type": "INPUT_STREAM",
             "location_type": 5,
             "location_index": 0
@@ -201,7 +187,6 @@
         "clock_domains": [
           {
             "name": "ClockDomain",
-            "localized_description": 65535,
             "source": 0,
             "sources": [
               0,

@@ -1,6 +1,8 @@
 {
+  "$schema": "../standards/ieee1722.1-schema/atdecc_aem.schema.json",
   "entity": {
     "vendor": "Statusbar",
+    "model": "AM824 Bridge",
     "name": "Statusbar AVB Bridge",
     "capabilities": [
       "AEM_SUPPORTED",
@@ -24,9 +26,6 @@
     "configurations": [
       {
         "name": "Bridge",
-        "strings": [
-          "Statusbar AVB Bridge"
-        ],
         "streams_in": [
           {
             "name": "StreamInput",
@@ -34,7 +33,6 @@
             "flags": [
               "CLASS_A"
             ],
-            "localized_description": 65535,
             "clock_domain_index": 0
           }
         ],
@@ -45,14 +43,12 @@
             "flags": [
               "CLASS_A"
             ],
-            "localized_description": 65535,
             "clock_domain_index": 0
           }
         ],
         "audio_units": [
           {
             "name": "AudioUnit",
-            "localized_description": 65535,
             "rates": [
               96000
             ],
@@ -61,7 +57,6 @@
                 "clusters": [
                   {
                     "name": "InputCluster",
-                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
@@ -82,7 +77,6 @@
                 "clusters": [
                   {
                     "name": "OutputCluster",
-                    "localized_description": 65535,
                     "channels": 8
                   }
                 ],
@@ -103,7 +97,6 @@
         "avb_interfaces": [
           {
             "name": "eth0",
-            "localized_description": 65535,
             "flags": [
               "GPTP_SUPPORTED"
             ]
@@ -112,14 +105,12 @@
         "clock_sources": [
           {
             "name": "Internal",
-            "localized_description": 65535,
             "type": "INTERNAL"
           }
         ],
         "clock_domains": [
           {
             "name": "ClockDomain",
-            "localized_description": 65535,
             "source": 0,
             "sources": [
               0

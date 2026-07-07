@@ -57,19 +57,108 @@ def _parse_enum(name: str, name_map: dict[str, int], context: str) -> int:
     return name_map[name]
 
 
+def _no_string_ref() -> LocalizedStringRef:
+    """The AEM NO_STRING localized reference (packs to 0xFFFF)."""
+    return LocalizedStringRef(offset=0x1FFF, index=7)
+
+
+def _as_locale_dict(value, context: str = "") -> dict:
+    """Normalize a vendor/model/localized value to {locale-or-None: text}. A plain
+    string is language-independent (key None): it appears verbatim in every locale."""
+    if isinstance(value, dict):
+        if not value:
+            raise ValueError(f"localized strings dict in {context} is empty")
+        for k, v in value.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise ValueError(
+                    f"localized strings dict in {context} must map locale "
+                    f"identifiers to strings"
+                )
+        return dict(value)
+    return {None: str(value or "")}
+
+
+def _string_for_locale(entry: dict, lang: str | None) -> str:
+    """The entry's text for `lang`, falling back to the language-independent text
+    or the entry's first-listed language (so a missing translation shows the
+    primary text rather than an empty name)."""
+    if lang in entry:
+        return entry[lang]
+    if None in entry:
+        return entry[None]
+    return next(iter(entry.values()))
+
+
+class _LocalizedStrings:
+    """Per-configuration collector for dict-form localized strings.
+
+    A localized_description may be authored as a {locale: text} dict right at the
+    field site (e.g. {"en-US": "AAF Audio", "de-DE": "AAF-Audio"}). Each unique
+    dict gets a slot in an auto-generated strings table, and the LOCALE + STRINGS
+    descriptors for every referenced language are synthesized from that table with
+    an identical layout per locale, so a single reference resolves in all of them.
+    Slots 0 and 1 are reserved for the entity vendor and model names, keeping the
+    ENTITY descriptor's fixed (0,0)/(0,1) references valid.
+    """
+
+    def __init__(self, vendor, model) -> None:
+        self._entries: list[dict] = [_as_locale_dict(vendor), _as_locale_dict(model)]
+        self._slots: dict[tuple, int] = {}
+        self.authored = False
+
+    def add(self, value: dict, context: str) -> LocalizedStringRef:
+        entry = _as_locale_dict(value, context)
+        key = tuple(sorted(entry.items()))
+        slot = self._slots.get(key)
+        if slot is None:
+            self._entries.append(entry)
+            slot = len(self._entries) - 1
+            self._slots[key] = slot
+        self.authored = True
+        return LocalizedStringRef(offset=slot // 7, index=slot % 7)
+
+    def build_locales(self) -> list[Locale]:
+        # Language order = first appearance in authoring order.
+        languages: list[str] = []
+        for entry in self._entries:
+            for lang in entry:
+                if lang is not None and lang not in languages:
+                    languages.append(lang)
+        if not languages:
+            languages = ["en"]
+        locales = []
+        for lang in languages:
+            strings = [_string_for_locale(entry, lang) for entry in self._entries]
+            descs = [
+                StringsDescriptor(strings=strings[i : i + 7])
+                for i in range(0, len(strings), 7)
+            ]
+            locales.append(Locale(locale_identifier=lang, strings_descriptors=descs))
+        return locales
+
+
 def _parse_localized(
-    obj: dict, key: str = "localized_description"
+    obj: dict,
+    strings: _LocalizedStrings,
+    key: str = "localized_description",
+    context: str = "",
 ) -> LocalizedStringRef:
-    """Parse a per-descriptor localized-string reference. Accepts either the raw 16-bit
-    wire value (offset << 3 | index -- what the C++ models set, e.g. 5) or an explicit
-    {"offset": O, "index": I} object. Absent -> the default (0,0 = no localized name)."""
+    """Parse a per-descriptor localized-string reference. Accepts:
+    - a {locale: text} dict, e.g. {"en-US": "AAF Audio"} -- the string table
+      and the LOCALE + STRINGS descriptors are generated automatically;
+    - the raw 16-bit wire value (offset << 3 | index -- what the retired C++
+      models set, e.g. 5), for hand-managed 'strings' tables;
+    - an explicit {"offset": O, "index": I} object;
+    - absent -> NO_STRING (0xFFFF)."""
     v = obj.get(key)
     if v is None:
-        return LocalizedStringRef()
+        return _no_string_ref()
     if isinstance(v, dict):
-        return LocalizedStringRef(
-            offset=int(v.get("offset", 0)), index=int(v.get("index", 0))
-        )
+        if set(v.keys()) <= {"offset", "index"}:
+            return LocalizedStringRef(
+                offset=int(v.get("offset", 0)), index=int(v.get("index", 0))
+            )
+        return strings.add(v, context or key)
     return LocalizedStringRef(offset=(int(v) >> 3) & 0x1FFF, index=int(v) & 0x07)
 
 
@@ -134,21 +223,23 @@ def _parse_mapping(m: dict, context: str) -> AudioMapping:
     )
 
 
-def _parse_cluster(c: dict, context: str) -> AudioCluster:
+def _parse_cluster(c: dict, strings: _LocalizedStrings, context: str) -> AudioCluster:
     """Parse an audio cluster from JSON."""
     return AudioCluster(
         object_name=c.get("name", ""),
-        localized_description=_parse_localized(c),
+        localized_description=_parse_localized(c, strings, context=context),
         channel_count=c.get("channels", 0),
         format=0x40,  # MBLA default
         symbol=c.get("symbol"),
     )
 
 
-def _parse_port(port_obj: dict, context: str) -> AudioStreamPort:
+def _parse_port(
+    port_obj: dict, strings: _LocalizedStrings, context: str
+) -> AudioStreamPort:
     """Parse a stream port (input_port or output_port) from JSON."""
     clusters = [
-        _parse_cluster(c, f"{context}.clusters[{i}]")
+        _parse_cluster(c, strings, f"{context}.clusters[{i}]")
         for i, c in enumerate(port_obj.get("clusters", []))
     ]
     maps_data = port_obj.get("maps", [])
@@ -163,7 +254,7 @@ def _parse_port(port_obj: dict, context: str) -> AudioStreamPort:
     )
 
 
-def _parse_stream(s: dict, context: str) -> Stream:
+def _parse_stream(s: dict, strings: _LocalizedStrings, context: str) -> Stream:
     """Parse a stream descriptor from JSON."""
     fmt = s.get("format")
     current_format = 0
@@ -181,7 +272,7 @@ def _parse_stream(s: dict, context: str) -> Stream:
 
     return Stream(
         object_name=s.get("name", ""),
-        localized_description=_parse_localized(s),
+        localized_description=_parse_localized(s, strings, context=context),
         current_format=current_format,
         formats=formats,
         stream_flags=flags,
@@ -207,7 +298,7 @@ def _parse_external_port(ep: dict, context: str) -> ExternalPort:
     )
 
 
-def _parse_control(c: dict, context: str) -> Control:
+def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control:
     """Parse a control descriptor from JSON."""
     sig_type = _parse_enum(
         c.get("signal_type", "ENTITY"),
@@ -226,6 +317,7 @@ def _parse_control(c: dict, context: str) -> Control:
     )
     return Control(
         object_name=c.get("name", ""),
+        localized_description=_parse_localized(c, strings, context=context),
         control_value_type=c.get("value_type", 0),
         control_type=control_type,
         signal_type=sig_type,
@@ -236,17 +328,17 @@ def _parse_control(c: dict, context: str) -> Control:
     )
 
 
-def _parse_audio_unit(au: dict, context: str) -> AudioUnit:
+def _parse_audio_unit(au: dict, strings: _LocalizedStrings, context: str) -> AudioUnit:
     """Parse an audio unit from JSON."""
     rates = [_encode_sampling_rate(r) for r in au.get("rates", [])]
     current_rate = rates[0] if rates else 0
 
     input_ports = [
-        _parse_port(p, f"{context}.input_ports[{i}]")
+        _parse_port(p, strings, f"{context}.input_ports[{i}]")
         for i, p in enumerate(au.get("input_ports", []))
     ]
     output_ports = [
-        _parse_port(p, f"{context}.output_ports[{i}]")
+        _parse_port(p, strings, f"{context}.output_ports[{i}]")
         for i, p in enumerate(au.get("output_ports", []))
     ]
 
@@ -261,7 +353,7 @@ def _parse_audio_unit(au: dict, context: str) -> AudioUnit:
 
     return AudioUnit(
         object_name=au.get("name", ""),
-        localized_description=_parse_localized(au),
+        localized_description=_parse_localized(au, strings, context=context),
         current_sampling_rate=current_rate,
         sampling_rates=rates,
         input_stream_ports=input_ports,
@@ -272,24 +364,29 @@ def _parse_audio_unit(au: dict, context: str) -> AudioUnit:
     )
 
 
-def _parse_avb_interface(iface: dict, context: str) -> AvbInterface:
+def _parse_avb_interface(
+    iface: dict, strings: _LocalizedStrings, context: str
+) -> AvbInterface:
     """Parse an AVB interface from JSON."""
     flags = _parse_flags(
         iface.get("flags", []), INTERFACE_FLAGS_NAMES, f"{context}.flags"
     )
     return AvbInterface(
         object_name=iface.get("name", ""),
+        localized_description=_parse_localized(iface, strings, context=context),
         interface_flags=flags,
         symbol=iface.get("symbol"),
     )
 
 
-def _parse_clock_source(cs: dict, context: str) -> ClockSource:
+def _parse_clock_source(
+    cs: dict, strings: _LocalizedStrings, context: str
+) -> ClockSource:
     """Parse a clock source from JSON."""
     cs_type = cs.get("type", "INTERNAL")
     return ClockSource(
         object_name=cs.get("name", ""),
-        localized_description=_parse_localized(cs),
+        localized_description=_parse_localized(cs, strings, context=context),
         clock_source_type=_parse_enum(
             cs_type, CLOCK_SOURCE_TYPE_NAMES, f"{context}.type"
         ),
@@ -299,23 +396,26 @@ def _parse_clock_source(cs: dict, context: str) -> ClockSource:
     )
 
 
-def _parse_clock_domain(cd: dict, context: str) -> ClockDomain:
+def _parse_clock_domain(
+    cd: dict, strings: _LocalizedStrings, context: str
+) -> ClockDomain:
     """Parse a clock domain from JSON."""
     return ClockDomain(
         object_name=cd.get("name", ""),
-        localized_description=_parse_localized(cd),
+        localized_description=_parse_localized(cd, strings, context=context),
         clock_source_index=cd.get("source", 0),
         clock_sources=cd.get("sources", [cd.get("source", 0)]),
         symbol=cd.get("symbol"),
     )
 
 
-def _parse_jack(j: dict, context: str) -> Jack:
+def _parse_jack(j: dict, strings: _LocalizedStrings, context: str) -> Jack:
     """Parse a jack descriptor from JSON."""
     jack_type = j.get("type", "BALANCED_ANALOG")
     flags = _parse_flags(j.get("flags", []), JACK_FLAGS_NAMES, f"{context}.flags")
     return Jack(
         object_name=j.get("name", ""),
+        localized_description=_parse_localized(j, strings, context=context),
         jack_type=_parse_enum(jack_type, JACK_TYPE_NAMES, f"{context}.type"),
         jack_flags=flags,
         symbol=j.get("symbol"),
@@ -337,8 +437,8 @@ def _build_strings_infrastructure(strings: list[str]) -> list[Locale]:
 def _collect_strings(entity_obj: dict, config_obj: dict) -> list[str]:
     """Auto-collect strings from entity vendor/model and config name fields."""
     strings = []
-    vendor = entity_obj.get("vendor", "")
-    model = entity_obj.get("model", "")
+    vendor = _string_for_locale(_as_locale_dict(entity_obj.get("vendor", "")), "en")
+    model = _string_for_locale(_as_locale_dict(entity_obj.get("model", "")), "en")
     config_name = config_obj.get("name", "")
     strings.append(vendor)
     strings.append(model)
@@ -350,70 +450,89 @@ def _parse_configuration(
     config_obj: dict, entity_obj: dict, context: str
 ) -> Configuration:
     """Parse a configuration from JSON."""
+    # Dict-form localized strings authored anywhere in this configuration are
+    # collected here; the LOCALE + STRINGS descriptors are generated at the end.
+    loc = _LocalizedStrings(entity_obj.get("vendor", ""), entity_obj.get("model", ""))
+
+    localized_description = _parse_localized(
+        config_obj, loc, context=f"{context}.localized_description"
+    )
+
     # Streams
     streams_in = [
-        _parse_stream(s, f"{context}.streams_in[{i}]")
+        _parse_stream(s, loc, f"{context}.streams_in[{i}]")
         for i, s in enumerate(config_obj.get("streams_in", []))
     ]
     streams_out = [
-        _parse_stream(s, f"{context}.streams_out[{i}]")
+        _parse_stream(s, loc, f"{context}.streams_out[{i}]")
         for i, s in enumerate(config_obj.get("streams_out", []))
     ]
 
     # Audio units (singular/plural)
     au_list = _get_list(config_obj, "audio_unit", "audio_units")
     audio_units = [
-        _parse_audio_unit(au, f"{context}.audio_units[{i}]")
+        _parse_audio_unit(au, loc, f"{context}.audio_units[{i}]")
         for i, au in enumerate(au_list)
     ]
 
     # AVB interfaces (singular/plural)
     iface_list = _get_list(config_obj, "avb_interface", "avb_interfaces")
     avb_interfaces = [
-        _parse_avb_interface(iface, f"{context}.avb_interfaces[{i}]")
+        _parse_avb_interface(iface, loc, f"{context}.avb_interfaces[{i}]")
         for i, iface in enumerate(iface_list)
     ]
 
     # Clock sources (singular/plural)
     cs_list = _get_list(config_obj, "clock_source", "clock_sources")
     clock_sources = [
-        _parse_clock_source(cs, f"{context}.clock_sources[{i}]")
+        _parse_clock_source(cs, loc, f"{context}.clock_sources[{i}]")
         for i, cs in enumerate(cs_list)
     ]
 
     # Clock domains (singular/plural)
     cd_list = _get_list(config_obj, "clock_domain", "clock_domains")
     clock_domains = [
-        _parse_clock_domain(cd, f"{context}.clock_domains[{i}]")
+        _parse_clock_domain(cd, loc, f"{context}.clock_domains[{i}]")
         for i, cd in enumerate(cd_list)
     ]
 
     # Jacks
     jacks_in = [
-        _parse_jack(j, f"{context}.jacks_in[{i}]")
+        _parse_jack(j, loc, f"{context}.jacks_in[{i}]")
         for i, j in enumerate(config_obj.get("jacks_in", []))
     ]
     jacks_out = [
-        _parse_jack(j, f"{context}.jacks_out[{i}]")
+        _parse_jack(j, loc, f"{context}.jacks_out[{i}]")
         for i, j in enumerate(config_obj.get("jacks_out", []))
     ]
 
     # Controls
     controls = [
-        _parse_control(c, f"{context}.controls[{i}]")
+        _parse_control(c, loc, f"{context}.controls[{i}]")
         for i, c in enumerate(config_obj.get("controls", []))
     ]
 
-    # Strings infrastructure
+    # Strings infrastructure: dict-form localized strings own the table when
+    # present; otherwise an explicit 'strings' array (with hand-managed integer
+    # references), or the legacy vendor/model/config-name fallback.
     explicit_strings = config_obj.get("strings")
-    if explicit_strings is not None:
-        strings = explicit_strings
+    if loc.authored:
+        if explicit_strings is not None:
+            raise ValueError(
+                f"{context}: cannot mix an explicit 'strings' table with "
+                f"dict-form localized strings"
+            )
+        locales = loc.build_locales()
+    elif explicit_strings is not None:
+        locales = _build_strings_infrastructure(explicit_strings)
     else:
-        strings = _collect_strings(entity_obj, config_obj)
-    locales = _build_strings_infrastructure(strings)
+        locales = _build_strings_infrastructure(
+            _collect_strings(entity_obj, config_obj)
+        )
 
     return Configuration(
         object_name=config_obj.get("name", ""),
+        localized_description=localized_description,
         streams_input=streams_in,
         streams_output=streams_out,
         audio_units=audio_units,
