@@ -1452,6 +1452,32 @@ TEST(nanoavb_entity_unsolicited_notify, non_identify_control_skips_multicast)
     EXPECT_EQ(sends.size(), size_t{0});
 }
 
+TEST(nanoavb_entity_acquire, identify_control_exempt_from_acquire)
+{
+    // Milan: SET_CONTROL of the IDENTIFY control works even while another
+    // controller holds the entity; every other control honors the claim.
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_identify_control_index(3);
+
+    auto acquire_header = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    acquire_header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    std::array<uint8_t, 16> acquire_data{};
+    EXPECT_EQ(make_test_result(handler, acquire_header, acquire_data).status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(handler.is_acquired());
+
+    auto other_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    other_header.controller_entity_id = statusbar::ieee::Eui64{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+
+    // Identify control (index 3): allowed despite the foreign acquire.
+    std::array<uint8_t, 5> identify_body{0x00, 0x1A, 0x00, 0x03, 0xFF};
+    EXPECT_EQ(make_test_result(handler, other_header, identify_body).status, AEM_STATUS_SUCCESS);
+
+    // A different control (index 5): still refused with ENTITY_ACQUIRED.
+    std::array<uint8_t, 5> other_body{0x00, 0x1A, 0x00, 0x05, 0xFF};
+    EXPECT_EQ(make_test_result(handler, other_header, other_body).status, AEM_STATUS_ENTITY_ACQUIRED);
+}
+
 //
 // Test Runner
 //

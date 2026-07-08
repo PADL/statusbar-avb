@@ -139,8 +139,14 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_controller_available(header);
 
         case AEM_COMMAND_SET_CONTROL:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+            // The IDENTIFY control is exempt from acquire/lock (Milan: identify
+            // shall work even when another controller holds the entity) — any
+            // controller may ask "which box are you". Every other control honors
+            // the exclusive claim.
+            if (!targets_identify_control(AEM_COMMAND_SET_CONTROL, command_data)) {
+                if (auto const blocked = check_exclusive_access(header)) {
+                    return reject_command(*blocked, command_data, out_buffer);
+                }
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
 
