@@ -204,6 +204,36 @@ TEST(avb_entity_host_symbol, no_identify_control_leaves_adp_untouched)
     EXPECT_FALSE(adpdu.entity_capabilities.has_flag(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
 }
 
+TEST(avb_entity_host_symbol, identify_control_value_set_get)
+{
+    // The storage handler itself accepts SET_CONTROL for the blob's IDENTIFY
+    // control and serves the stored value back on GET_CONTROL; other controls
+    // keep the conservative NOT_IMPLEMENTED default.
+    auto blob = make_blob_with_identify_control();
+    auto storage = DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    DescriptorStorageHandler handler{*storage};
+
+    using statusbar::atdecc::AEM_COMMAND_GET_CONTROL;
+    using statusbar::atdecc::AEM_COMMAND_SET_CONTROL;
+    using statusbar::atdecc::AEM_STATUS_NOT_IMPLEMENTED;
+    using statusbar::atdecc::AEM_STATUS_SUCCESS;
+    using statusbar::atdecc::aem::DESCRIPTOR_CONTROL;
+
+    statusbar::nanoavb::DescriptorRef const identify{
+        .configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 1};
+    statusbar::nanoavb::DescriptorRef const mute{
+        .configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 0};
+
+    std::array<uint8_t, 1> const on{0xFF};
+    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, identify, 0, on), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(handler.identify_value(), 0xFF);
+    std::array<uint8_t, 8> out{};
+    EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, identify, 0, out), 1u);
+    EXPECT_EQ(out[0], 0xFF);
+    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, 0, on), AEM_STATUS_NOT_IMPLEMENTED);
+}
+
 TEST(avb_entity_host_symbol, legacy_parsed_model_path_has_no_storage)
 {
     // The legacy (EntityModel) ctor leaves the host with no backing blob, so the

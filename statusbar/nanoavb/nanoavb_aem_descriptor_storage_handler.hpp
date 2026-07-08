@@ -44,6 +44,8 @@
 /// itself can be passed directly to AemEntityModel / AemCommandHandler
 /// without subclassing.
 
+#include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
@@ -338,11 +340,61 @@ class DescriptorStorageHandler : public AemEntityHandler
         return load(ref, desc);
     }
 
+    // ---- Built-in IDENTIFY control (automatic when the blob has one) ------
+    //
+    // When the blob contains a CONTROL descriptor with the standard IDENTIFY
+    // control_type, this handler accepts SET_CONTROL (stores the value) and
+    // serves GET_CONTROL for it, so a blob-backed entity honors identify with
+    // no per-entity code. The externally visible indicator is the
+    // AemCommandHandler's identify_changed callback (fired on the successful
+    // SET); the stored value keeps GET_CONTROL and polling controllers honest.
+
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorRef ref, uint32_t symbol, std::span<uint8_t const> value)
+        -> uint8_t override
+    {
+        if (command_type == atdecc::AEM_COMMAND_SET_CONTROL && is_identify_control(ref) && !value.empty()) {
+            identify_value_ = value[0];
+            return atdecc::AEM_STATUS_SUCCESS;
+        }
+        return AemEntityHandler::on_set_descriptor_value(command_type, ref, symbol, value);
+    }
+
+    auto on_get_descriptor_value(uint16_t command_type, DescriptorRef ref, uint32_t symbol, std::span<uint8_t> out)
+        -> size_t override
+    {
+        if (command_type == atdecc::AEM_COMMAND_GET_CONTROL && is_identify_control(ref) && !out.empty()) {
+            out[0] = identify_value_;
+            return 1;
+        }
+        return AemEntityHandler::on_get_descriptor_value(command_type, ref, symbol, out);
+    }
+
+    /// The stored identify value (0 = off, non-zero = identifying).
+    [[nodiscard]] auto identify_value() const noexcept -> uint8_t { return identify_value_; }
+
     /// Access the underlying storage (useful for derived handlers that
     /// want to look up additional blobs beyond descriptors).
     [[nodiscard]] auto storage() const noexcept -> DescriptorStorage const& { return storage_; }
 
   private:
+    /// True if @p ref names a CONTROL descriptor whose control_type (the
+    /// EUI-64 at offset 82) is the standard IDENTIFY type.
+    [[nodiscard]] auto is_identify_control(DescriptorRef ref) const noexcept -> bool
+    {
+        if (ref.descriptor_type != atdecc::aem::DESCRIPTOR_CONTROL) {
+            return false;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorControl::LENGTH) {
+            return false;
+        }
+        ieee::Eui64 control_type{};
+        span_load(control_type, blob->subspan(82));
+        return control_type == atdecc::aem::CONTROL_TYPE_IDENTIFY;
+    }
+
+    uint8_t identify_value_{0};
+
     /// Load the descriptor bytes for `ref` into `desc` via
     /// span_load_padded. Returns false if the storage doesn't have a
     /// descriptor for `ref`. Used by every on_get_* override.
