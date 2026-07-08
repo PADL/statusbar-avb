@@ -188,6 +188,7 @@ class AemCommandHandler
     /// Set only the GET_COUNTERS provider, without disturbing the others
     /// (set_callbacks replaces the whole struct, which would clear send_response
     /// wired by the net layer). The application owns the dynamic counters.
+    void set_send_response(SendAemResponseFn fn) { callbacks_.send_response = std::move(fn); }
     void set_get_counters(GetCountersFn fn) { callbacks_.get_counters = std::move(fn); }
 
     /// Emit descriptors at their IEEE 1722.1-2013/2016 wire sizes in

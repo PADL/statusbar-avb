@@ -478,15 +478,17 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
             return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
         }});
 
-    // AECP AEM: send responses unicast to controller (unlike ADP/ACMP which use multicast)
-    components.aem_handler.set_callbacks(AemCommandHandlerCallbacks{
-        .send_response = [&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
-            auto& atdecc = handlers.atdecc_handler();
-            if (!atdecc.valid()) {
-                return false;
-            }
-            return atdecc.send(dest_mac, response).has_value();
-        }});
+    // AECP AEM: send responses unicast to controller (unlike ADP/ACMP which use
+    // multicast). Field setter, NOT set_callbacks: replacing the whole struct
+    // would wipe callbacks installed before start (identify_changed,
+    // get_counters, get_stream_info).
+    components.aem_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
+        auto& atdecc = handlers.atdecc_handler();
+        if (!atdecc.valid()) {
+            return false;
+        }
+        return atdecc.send(dest_mac, response).has_value();
+    });
 
     // Unsolicited notifications are addressed FROM us: seed the handler's entity_id
     // from the advertiser so they carry the right target even before the first
