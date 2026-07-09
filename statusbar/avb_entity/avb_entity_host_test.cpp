@@ -234,6 +234,21 @@ TEST(avb_entity_host_symbol, identify_control_value_set_get)
     EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, 0, on), AEM_STATUS_NOT_IMPLEMENTED);
 }
 
+TEST(avb_entity_host_symbol, local_identify_trigger)
+{
+    // The host-level GPIO/front-panel path: with an identify control in the
+    // blob, set_local_identify applies the value through the storage handler
+    // and reports success; without one it reports failure.
+    auto blob = make_blob_with_identify_control();
+    auto host = make_host_from_blob(blob);
+    EXPECT_TRUE(host->set_local_identify(true));
+    EXPECT_TRUE(host->set_local_identify(false));
+
+    auto plain = make_entity_blob();
+    auto no_identify = make_host_from_blob(plain);
+    EXPECT_FALSE(no_identify->set_local_identify(true));
+}
+
 TEST(avb_entity_host_symbol, legacy_parsed_model_path_has_no_storage)
 {
     // The legacy (EntityModel) ctor leaves the host with no backing blob, so the

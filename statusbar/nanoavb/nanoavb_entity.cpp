@@ -769,6 +769,20 @@ void AemCommandHandler::send_unsolicited_to(
     (void)callbacks_.send_response(dest_mac, {buffer.data(), AemDu::LENGTH + body.size()});
 }
 
+auto AemCommandHandler::set_local_identify(bool const on) -> uint8_t
+{
+    if (!identify_control_index_valid_) {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+    std::array<uint8_t, 5> const body{
+        static_cast<uint8_t>((DESCRIPTOR_CONTROL >> 8) & 0xFF),
+        static_cast<uint8_t>(DESCRIPTOR_CONTROL & 0xFF),
+        static_cast<uint8_t>((identify_control_index_ >> 8) & 0xFF),
+        static_cast<uint8_t>(identify_control_index_ & 0xFF),
+        on ? uint8_t{0xFF} : uint8_t{0x00}};
+    return apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body);
+}
+
 auto AemCommandHandler::targets_identify_control(uint16_t const command_type, std::span<uint8_t const> body) const noexcept -> bool
 {
     // Body header: descriptor_type(2) + descriptor_index(2), big-endian.

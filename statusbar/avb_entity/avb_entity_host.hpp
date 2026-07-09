@@ -132,6 +132,16 @@ class AvbEntityHost
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return running_; }
 
+    /// Drive this entity's OWN identify control (front-panel button, GPIO,
+    /// software trigger): applies the value as a controller's SET_CONTROL would
+    /// and multicasts the unsolicited IDENTIFY notification. Call from the
+    /// entity's event loop. Returns false when the model has no identify
+    /// control (or the value was refused).
+    auto set_local_identify(bool const on) -> bool
+    {
+        return components_.aem_handler.set_local_identify(on) == nanoavb::AEM_STATUS_SUCCESS;
+    }
+
     // --- Event handlers (forward the entity's events into the SM stack) --------
     void on_link_up(TimePoint time);
     void on_link_down(TimePoint time);
@@ -222,6 +232,14 @@ class AvbEntityHost
     /// ADP advertiser (identify_control_index + the
     /// AEM_IDENTIFY_CONTROL_INDEX_VALID capability). Symbol-aware path only —
     /// no-op without a descriptor storage.
+    ///
+    /// Identify customization points for entities:
+    ///  - INBOUND indicator (a controller identified us): replace the default
+    ///    journal log via components().aem_handler.set_identify_changed(fn) —
+    ///    e.g. blink a real LED. The callback also fires for local triggers.
+    ///  - OUTBOUND trigger (front-panel button / GPIO): call
+    ///    set_local_identify(on) from the entity's event loop; it applies the
+    ///    control and multicasts the unsolicited IDENTIFY notification.
     void wire_identify_control();
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.

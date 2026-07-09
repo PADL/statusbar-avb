@@ -293,6 +293,26 @@ class AemCommandHandler
         identify_control_index_valid_ = true;
     }
 
+    /// The CONTROL descriptor index of the entity's IDENTIFY control, when one
+    /// has been wired (AvbEntityHost does this automatically for blob-backed
+    /// entities whose model carries an IDENTIFY-typed control).
+    [[nodiscard]] auto identify_control_index() const noexcept -> std::optional<uint16_t>
+    {
+        if (!identify_control_index_valid_) {
+            return std::nullopt;
+        }
+        return identify_control_index_;
+    }
+
+    /// Drive the entity's OWN identify control (e.g. from a GPIO button, a
+    /// front-panel event, or software). Applies the value exactly as a
+    /// controller's SET_CONTROL would, then fans out the unsolicited
+    /// notifications — every registered controller plus the IDENTIFY multicast —
+    /// and fires the identify_changed callback. Call from the entity's event
+    /// loop (this class is single-threaded). Returns the AEM status;
+    /// AEM_STATUS_NOT_IMPLEMENTED when no identify control has been wired.
+    [[nodiscard]] auto set_local_identify(bool on) -> uint8_t;
+
     /// Apply a descriptor-value change originated by the entity ITSELF (the
     /// developer's code), as if a controller had sent the SET command, then
     /// notify every registered controller via an unsolicited response. This is

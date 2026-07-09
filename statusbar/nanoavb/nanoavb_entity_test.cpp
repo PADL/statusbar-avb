@@ -1452,6 +1452,42 @@ TEST(nanoavb_entity_unsolicited_notify, non_identify_control_skips_multicast)
     EXPECT_EQ(sends.size(), size_t{0});
 }
 
+TEST(nanoavb_entity_unsolicited_notify, set_local_identify_convenience)
+{
+    // The GPIO/front-panel entry point: set_local_identify builds the
+    // SET_CONTROL for the wired identify control, multicasts the unsolicited
+    // notification, and fires the identify_changed observer.
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x06};
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_entity_id(entity_id);
+
+    // Without a wired identify control the trigger reports NOT_IMPLEMENTED.
+    EXPECT_EQ(handler.set_local_identify(true), AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_FALSE(handler.identify_control_index().has_value());
+
+    handler.set_identify_control_index(3);
+    EXPECT_EQ(handler.identify_control_index().value_or(0xFFFF), 3);
+
+    std::vector<CapturedSend> sends;
+    std::vector<bool> identify_changes;
+    handler.set_send_response([&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return true;
+    });
+    handler.set_identify_changed([&](bool const active) { identify_changes.push_back(active); });
+
+    EXPECT_EQ(handler.set_local_identify(true), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(handler.set_local_identify(false), AEM_STATUS_SUCCESS);
+
+    EXPECT_EQ(sends.size(), size_t{2});  // IDENTIFY multicast, on + off
+    EXPECT_EQ(sends[0].dest, atdecc::ATDECC_IDENTIFY_MULTICAST_MAC);
+    EXPECT_EQ(sends[1].dest, atdecc::ATDECC_IDENTIFY_MULTICAST_MAC);
+    EXPECT_EQ(identify_changes.size(), size_t{2});
+    EXPECT_TRUE(identify_changes[0]);
+    EXPECT_FALSE(identify_changes[1]);
+}
+
 TEST(nanoavb_entity_acquire, identify_control_exempt_from_acquire)
 {
     // Milan: SET_CONTROL of the IDENTIFY control works even while another
