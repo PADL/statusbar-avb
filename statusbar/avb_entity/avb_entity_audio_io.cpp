@@ -358,6 +358,7 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
     // attach this entity's stream-specific callbacks (hooks + ACMP + AEM handlers).
     gate_.set_logger(host_.ctl_log());
     listener_->set_logger(host_.ctl_log());
+    udptun_->set_ctl_logger(host_.ctl_log());
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }

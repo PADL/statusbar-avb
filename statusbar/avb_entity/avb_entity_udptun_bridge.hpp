@@ -24,6 +24,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/itc/itc_spin_lock.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/net/net_address.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/udptun/udptun_aaf_v1_codec.hpp"
@@ -100,6 +101,11 @@ struct EntityUdptunBridge : public StreamRxAudioSink
     }
 
     // --- Operations (run on the entity's threads; reach into the state below) --
+    /// Inject the main/reactor-thread logger (setup + rendezvous lines).
+    void set_ctl_logger(logging::Logger const log) noexcept { ctl_log_ = log; }
+    /// The punch worker's log channel — register with the tool's LogCollector.
+    [[nodiscard]] auto worker_log_channel() noexcept -> logging::LogChannelBase& { return worker_log_channel_; }
+
     [[nodiscard]] auto setup_udptun_ingest() -> bool;
     void udptun_ingest_audio(std::span<uint8_t const> audio, bool real_source = true, bool rt_caller = false);
     void udptun_ingest_am824_as_int32(std::span<uint8_t const> mbla);
@@ -218,6 +224,14 @@ struct EntityUdptunBridge : public StreamRxAudioSink
     std::vector<uint8_t> rxbuf_{};       ///< one-datagram recv scratch
     std::vector<uint8_t> egress_pcm_{};  ///< per-tick playout scratch (int32)
     std::optional<statusbar::colbin::Writer> egress_colbin_{};
+
+    // --- Logging ---------------------------------------------------------------
+    // ctl_log_: main/reactor-thread lines (setup, rendezvous) — injected by the
+    // owning entity (set_ctl_logger). worker_log_channel_: the punch worker is
+    // its OWN producer thread context, so it gets its own SPSC channel; the
+    // tool registers it with the LogCollector like the host's channels.
+    std::optional<logging::Logger> ctl_log_{};
+    logging::LogChannel<64> worker_log_channel_{logging::lit("udptun")};
 
     // --- Async punch-retry worker + media-thread install/watchdog -------------
     std::thread punch_thread_{};

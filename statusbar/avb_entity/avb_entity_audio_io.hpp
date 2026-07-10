@@ -185,7 +185,13 @@ class AvbEntityAudioIO
     // --- Logging (see AvbEntityHost) --------------------------------------------
     [[nodiscard]] auto ctl_log_channel() noexcept -> logging::LogChannelBase& { return host_.ctl_log_channel(); }
     [[nodiscard]] auto media_log_channel() noexcept -> logging::LogChannelBase& { return host_.media_log_channel(); }
-    void set_log_verbosity(logging::LogLevel const v) noexcept { host_.set_log_verbosity(v); }
+    void set_log_verbosity(logging::LogLevel const v) noexcept
+    {
+        host_.set_log_verbosity(v);
+        udptun_->worker_log_channel().set_verbosity(v);
+    }
+    /// The udptun punch worker's log channel (its own producer thread).
+    [[nodiscard]] auto udptun_log_channel() noexcept -> logging::LogChannelBase& { return udptun_->worker_log_channel(); }
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
 

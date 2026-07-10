@@ -12,6 +12,7 @@
 #include "statusbar/avb_entity/avb_entity_udptun_egress.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_ingest.hpp"
 #include "statusbar/buffer/buffer.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/net/net_util.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -39,18 +40,25 @@ auto EntityUdptunBridge::setup_udptun_ingest() -> bool
     }
     auto addr = net::SocketAddress::from_string(config_.udptun_peer_host, std::to_string(config_.udptun_peer_port));
     if (!addr) {
-        std::print(stderr, "[udptun] cannot resolve peer {}:{}\n", config_.udptun_peer_host, config_.udptun_peer_port);
+        if (ctl_log_) {
+            ctl_log_->error(
+                "udptun: cannot resolve peer {}:{}", logging::embed<40>(config_.udptun_peer_host), config_.udptun_peer_port);
+        }
         return false;
     }
     peer_ = *addr;
     int const fd = ::socket(peer_.family(), SOCK_DGRAM, 0);
     if (fd < 0) {
-        std::print(stderr, "[udptun] socket() failed\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: socket() failed");
+        }
         return false;
     }
     fd_ = net::FileDescriptor{fd};
     if (auto const s = net::set_nonblocking(fd); !s) {
-        std::print(stderr, "[udptun] set_nonblocking failed: {}\n", s.error().message());
+        if (ctl_log_) {
+            ctl_log_->error("udptun: set_nonblocking failed: errno {}", s.error().value());
+        }
         fd_ = net::FileDescriptor{};
         return false;
     }
@@ -68,28 +76,39 @@ auto EntityUdptunBridge::setup_udptun_direct_shared() -> bool
     // when direct mode has BOTH ingest and egress enabled.
     auto addr = net::SocketAddress::from_string(config_.udptun_peer_host, std::to_string(config_.udptun_peer_port));
     if (!addr) {
-        std::print(stderr, "[udptun] cannot resolve peer {}:{}\n", config_.udptun_peer_host, config_.udptun_peer_port);
+        if (ctl_log_) {
+            ctl_log_->error(
+                "udptun: cannot resolve peer {}:{}", logging::embed<40>(config_.udptun_peer_host), config_.udptun_peer_port);
+        }
         return false;
     }
     peer_ = *addr;
     int const fd = ::socket(peer_.family(), SOCK_DGRAM, 0);
     if (fd < 0) {
-        std::print(stderr, "[udptun] shared socket() failed\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: shared socket() failed");
+        }
         return false;
     }
     fd_ = net::FileDescriptor{fd};
     if (auto const s = net::set_reuse_addr(fd); !s) {
-        std::print(stderr, "[udptun] set_reuse_addr failed (continuing): {}\n", s.error().message());
+        if (ctl_log_) {
+            ctl_log_->warning("udptun: set_reuse_addr failed (continuing): errno {}", s.error().value());
+        }
     }
     auto const bind_addr = (peer_.family() == AF_INET6) ? net::SocketAddress::ipv6_any(config_.udptun_listen_port)
                                                         : net::SocketAddress::ipv4_any(config_.udptun_listen_port);
     if (::bind(fd, bind_addr.sockaddr(), bind_addr.length()) != 0) {
-        std::print(stderr, "[udptun] shared bind :{} failed\n", config_.udptun_listen_port);
+        if (ctl_log_) {
+            ctl_log_->error("udptun: shared bind :{} failed", config_.udptun_listen_port);
+        }
         fd_ = net::FileDescriptor{};
         return false;
     }
     if (auto const s = net::set_nonblocking(fd); !s) {
-        std::print(stderr, "[udptun] set_nonblocking failed: {}\n", s.error().message());
+        if (ctl_log_) {
+            ctl_log_->error("udptun: set_nonblocking failed: errno {}", s.error().value());
+        }
         fd_ = net::FileDescriptor{};
         return false;
     }
@@ -107,10 +126,12 @@ auto EntityUdptunBridge::setup_udptun_direct_shared() -> bool
     last_rx_ns_ = tai;
     rx_baseline_ = telemetry_->any_rx.load();
     saw_data_ = true;  // shared socket is "up" at bind; no STUN first-data grace
-    std::print(
-        "Inter-site UDPTUN: direct-peer shared socket :{} <-> {} (bidirectional hole-punch, no STUN)\n",
-        config_.udptun_listen_port,
-        peer_.to_string());
+    if (ctl_log_) {
+        ctl_log_->status(
+            "udptun: direct-peer shared socket :{} <-> {} (bidirectional hole-punch, no STUN)",
+            config_.udptun_listen_port,
+            logging::embed<48>(peer_.to_string()));
+    }
     build_udptun_ingest_state();
     build_udptun_egress_state();
     return true;
@@ -234,22 +255,26 @@ void EntityUdptunBridge::build_udptun_ingest_state()
             s.pcm.assign(pcm_bytes, 0);
         }
         redun_head_ = 0;
-        std::print(
-            "Inter-site UDPTUN redundancy: temporal_shift {} ms ({} packets), redundant stream_id 0x{:016x}\n",
-            config_.udptun_temporal_shift_ms,
-            redun_depth_,
-            redundant_id_.to_uint64());
+        if (ctl_log_) {
+            ctl_log_->status(
+                "udptun: redundancy temporal_shift {} ms ({} packets), redundant stream_id 0x{:016x}",
+                config_.udptun_temporal_shift_ms,
+                redun_depth_,
+                redundant_id_.to_uint64());
+        }
     }
     // 1472 = 1500 MTU - 20 (IPv4) - 8 (UDP). A datagram above this IP-fragments.
     char const* const frag = (datagram > 1472) ? "  *** > MTU: WILL IP-FRAGMENT ***" : "";
-    std::print(
-        "Inter-site UDPTUN ingest: AAF int32 ({} ch)  ({} frames / {} us, {}-byte datagram{})  TAI = realtime + {} ns\n",
-        channels_,
-        frames,
-        interval_us,
-        datagram,
-        frag,
-        config_.udptun_tai_offset_ns);
+    if (ctl_log_) {
+        ctl_log_->status(
+            "udptun: ingest AAF int32 ({} ch)  ({} frames / {} us, {}-byte datagram{})  TAI = realtime + {} ns",
+            channels_,
+            frames,
+            interval_us,
+            datagram,
+            logging::static_str(frag),
+            config_.udptun_tai_offset_ns);
+    }
 }
 
 void EntityUdptunBridge::udptun_send_encoded(
@@ -300,21 +325,29 @@ auto EntityUdptunBridge::setup_udptun_egress() -> bool
     }
     int const fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        std::print(stderr, "[udptun] egress socket() failed\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: egress socket() failed");
+        }
         return false;
     }
     rx_fd_ = net::FileDescriptor{fd};
     if (auto const s = net::set_reuse_addr(fd); !s) {
-        std::print(stderr, "[udptun] egress set_reuse_addr failed (continuing): {}\n", s.error().message());
+        if (ctl_log_) {
+            ctl_log_->warning("udptun: egress set_reuse_addr failed (continuing): errno {}", s.error().value());
+        }
     }
     auto const bind_addr = net::SocketAddress::ipv4_any(config_.udptun_listen_port);
     if (::bind(fd, bind_addr.sockaddr(), bind_addr.length()) != 0) {
-        std::print(stderr, "[udptun] egress bind :{} failed\n", config_.udptun_listen_port);
+        if (ctl_log_) {
+            ctl_log_->error("udptun: egress bind :{} failed", config_.udptun_listen_port);
+        }
         rx_fd_ = net::FileDescriptor{};
         return false;
     }
     if (auto const s = net::set_nonblocking(fd); !s) {
-        std::print(stderr, "[udptun] egress set_nonblocking failed: {}\n", s.error().message());
+        if (ctl_log_) {
+            ctl_log_->error("udptun: egress set_nonblocking failed: errno {}", s.error().value());
+        }
         rx_fd_ = net::FileDescriptor{};
         return false;
     }
@@ -356,15 +389,21 @@ void EntityUdptunBridge::build_udptun_egress_state()
         if (w) {
             egress_colbin_.emplace(std::move(*w));
         } else {
-            std::print(
-                stderr, "[udptun] egress colbin '{}' open failed: {}\n", config_.udptun_egress_colbin_path, w.error().message());
+            if (ctl_log_) {
+                ctl_log_->error(
+                    "udptun: egress colbin '{}' open failed: errno {}",
+                    logging::embed<40>(config_.udptun_egress_colbin_path),
+                    w.error().value());
+            }
         }
     }
-    std::print(
-        "Inter-site UDPTUN egress: WCL {} ns  ({} frames/packet) -> local AVB talkers{}\n",
-        config_.udptun_wcl_ns,
-        frames,
-        egress_colbin_ ? "  [+colbin timing]" : "");
+    if (ctl_log_) {
+        ctl_log_->status(
+            "udptun: egress WCL {} ns  ({} frames/packet) -> local AVB talkers{}",
+            config_.udptun_wcl_ns,
+            frames,
+            egress_colbin_ ? logging::lit("  [+colbin timing]") : logging::lit(""));
+    }
 }
 
 auto EntityUdptunBridge::setup_udptun_rendezvous() -> bool
@@ -373,28 +412,38 @@ auto EntityUdptunBridge::setup_udptun_rendezvous() -> bool
         return false;
     }
     if (!config_.udptun_enable && !config_.udptun_egress) {
-        std::print(stderr, "[udptun] rendezvous set but neither --udptun.enable nor --udptun.egress -- skipping\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: rendezvous set but neither --udptun.enable nor --udptun.egress -- skipping");
+        }
         return false;
     }
     statusbar::crypto::Aes128SivKey key{};
     if (!net::parse_hex_into(config_.udptun_rendezvous_key, std::span<uint8_t>{key.data})) {
-        std::print(stderr, "[udptun] rendezvous-key must be 64 hex chars\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: rendezvous-key must be 64 hex chars");
+        }
         return false;
     }
     stun::SessionId session_id{};
     if (!net::parse_hex_into(config_.udptun_rendezvous_session_id, std::span<uint8_t>{session_id.bytes})) {
-        std::print(stderr, "[udptun] rendezvous-session-id must be 32 hex chars\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: rendezvous-session-id must be 32 hex chars");
+        }
         return false;
     }
     std::string host{};
     std::string port{};
     if (!net::split_host_port(config_.udptun_rendezvous_server, host, port)) {
-        std::print(stderr, "[udptun] rendezvous-server must be HOST:PORT\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: rendezvous-server must be HOST:PORT");
+        }
         return false;
     }
     auto server_addr = net::SocketAddress::from_string(host, port, net::SocketDatagram);
     if (!server_addr) {
-        std::print(stderr, "[udptun] cannot resolve rendezvous server '{}:{}'\n", host, port);
+        if (ctl_log_) {
+            ctl_log_->error("udptun: cannot resolve rendezvous server '{}:{}'", logging::embed<40>(host), logging::embed<8>(port));
+        }
         return false;
     }
     bool const responder = (config_.udptun_rendezvous_role == "responder");
@@ -425,29 +474,40 @@ auto EntityUdptunBridge::setup_udptun_rendezvous() -> bool
         .local_interface = config_.interface_name,
         .timeout_ms = 60'000,
     };
-    std::print(
-        "Inter-site UDPTUN: STUN rendezvous against {} as {}...\n", server_addr->to_string(), config_.udptun_rendezvous_role);
+    if (ctl_log_) {
+        ctl_log_->status(
+            "udptun: STUN rendezvous against {} as {}...",
+            logging::embed<40>(server_addr->to_string()),
+            logging::embed<12>(config_.udptun_rendezvous_role));
+    }
     auto result = stun::perform_rendezvous(rcfg);
     if (!result) {
-        std::print(stderr, "[udptun] rendezvous failed: {}\n", result.error().message());
+        if (ctl_log_) {
+            ctl_log_->error("udptun: rendezvous failed: errno {}", result.error().value());
+        }
         return false;
     }
     // Adopt the hole-punched socket as the SHARED TX+RX socket and the peer's
     // reflexive address as the data peer.
     fd_ = std::move(result->socket);
     if (auto const s = net::set_nonblocking(fd_.get()); !s) {
-        std::print(stderr, "[udptun] rendezvous set_nonblocking failed: {}\n", s.error().message());
+        if (ctl_log_) {
+            ctl_log_->error("udptun: rendezvous set_nonblocking failed: errno {}", s.error().value());
+        }
         fd_ = net::FileDescriptor{};
         return false;
     }
     peer_ = result->peer_reflexive_address;
     rendezvous_active_ = true;
     shared_socket_ = true;
-    std::print(
-        "Inter-site UDPTUN: rendezvous done. local={} my reflexive={} peer={}\n",
-        result->local_address.to_string(),
-        result->my_reflexive_address.to_string(),
-        peer_.to_string());
+    if (ctl_log_) {
+        // Two lines: three embedded addresses exceed the 64-byte payload.
+        ctl_log_->status(
+            "udptun: rendezvous done. local={} reflexive={}",
+            logging::embed<28>(result->local_address.to_string()),
+            logging::embed<28>(result->my_reflexive_address.to_string()));
+        ctl_log_->status("udptun: rendezvous peer={}", logging::embed<48>(peer_.to_string()));
+    }
 
     if (config_.udptun_enable) {
         build_udptun_ingest_state();
@@ -464,7 +524,9 @@ auto EntityUdptunBridge::start_udptun_punch_worker() -> bool
         return false;
     }
     if (!config_.udptun_enable && !config_.udptun_egress) {
-        std::print(stderr, "[udptun] punch: rendezvous set but neither enable nor egress -- skipping\n");
+        if (ctl_log_) {
+            ctl_log_->error("udptun: punch: rendezvous set but neither enable nor egress -- skipping");
+        }
         return false;
     }
     // Build codec/buffer state up front (no socket) so the entity's local AVB runs
@@ -478,10 +540,12 @@ auto EntityUdptunBridge::start_udptun_punch_worker() -> bool
     }
     punch_run_.publish(true);
     punch_thread_ = std::thread([this] { statusbar::run_guarded("udptun-punch", [this] { udptun_punch_loop(); }); });
-    std::print(
-        "Inter-site UDPTUN: STUN punch-retry worker started ({} as {}); local AVB runs now, tunnel comes up async\n",
-        config_.udptun_rendezvous_server,
-        config_.udptun_rendezvous_role);
+    if (ctl_log_) {
+        ctl_log_->status(
+            "udptun: STUN punch-retry worker started ({} as {}); local AVB runs now, tunnel comes up async",
+            logging::embed<40>(config_.udptun_rendezvous_server),
+            logging::embed<12>(config_.udptun_rendezvous_role));
+    }
     return true;
 }
 
@@ -497,26 +561,30 @@ void EntityUdptunBridge::udptun_punch_loop()
 {
     using namespace std::chrono_literals;
 
+    // The punch worker is its own producer thread context: log through the
+    // bridge's dedicated channel, never the ctl channel (SPSC contract).
+    auto wlog = worker_log_channel_.logger();
+
     // Parse the static rendezvous inputs once.
     stun::SessionId base{};
     if (!net::parse_hex_into(config_.udptun_rendezvous_session_id, std::span<uint8_t>{base.bytes})) {
-        std::print(stderr, "[udptun] punch: rendezvous-session-id must be 32 hex chars\n");
+        wlog.error("punch: rendezvous-session-id must be 32 hex chars");
         return;
     }
     statusbar::crypto::Aes128SivKey key{};
     if (!net::parse_hex_into(config_.udptun_rendezvous_key, std::span<uint8_t>{key.data})) {
-        std::print(stderr, "[udptun] punch: rendezvous-key must be 64 hex chars\n");
+        wlog.error("punch: rendezvous-key must be 64 hex chars");
         return;
     }
     std::string host{};
     std::string port{};
     if (!net::split_host_port(config_.udptun_rendezvous_server, host, port)) {
-        std::print(stderr, "[udptun] punch: rendezvous-server must be HOST:PORT\n");
+        wlog.error("punch: rendezvous-server must be HOST:PORT");
         return;
     }
     auto server_addr = net::SocketAddress::from_string(host, port, net::SocketDatagram);
     if (!server_addr) {
-        std::print(stderr, "[udptun] punch: cannot resolve rendezvous server '{}:{}'\n", host, port);
+        wlog.error("punch: cannot resolve rendezvous server '{}:{}'", logging::embed<40>(host), logging::embed<8>(port));
         return;
     }
     bool const responder = (config_.udptun_rendezvous_role == "responder");
@@ -569,7 +637,7 @@ void EntityUdptunBridge::udptun_punch_loop()
             // thread, before handing it to the media thread — so the RT path never
             // touches socket options.
             if (auto const s = net::set_nonblocking(result->socket.get()); !s) {
-                std::print(stderr, "[udptun] set_nonblocking(staged socket) failed: {}\n", s.error().message());
+                wlog.error("punch: set_nonblocking(staged socket) failed: errno {}", s.error().value());
             }
             {
                 std::scoped_lock const lk(stage_mutex_);
@@ -578,10 +646,10 @@ void EntityUdptunBridge::udptun_punch_loop()
                 staged_ready_ = true;
             }
             punch_retry_.publish(false);
-            std::print(
-                "[udptun] punch: paired (window {}) peer={} -- handing socket to media thread\n",
+            wlog.status(
+                "punch: paired (window {}) peer={} -- handing socket to media thread",
                 window,
-                result->peer_reflexive_address.to_string());
+                logging::embed<48>(result->peer_reflexive_address.to_string()));
             // Hold while the tunnel is up; the media thread sets punch_retry_
             // if RX never starts or a live stream stalls, prompting a fresh punch.
             while (punch_run_.load() && !punch_retry_.load()) {
@@ -589,7 +657,7 @@ void EntityUdptunBridge::udptun_punch_loop()
             }
             punch_retry_.publish(false);
         } else {
-            std::print(stderr, "[udptun] punch: window {} no pair ({}) -- retry next window\n", window, result.error().message());
+            wlog.status("punch: window {} no pair (errno {}) -- retry next window", window, result.error().value());
         }
 
         // Align the next attempt to the next window boundary so both peers fire

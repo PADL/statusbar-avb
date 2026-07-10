@@ -654,6 +654,7 @@ MainLoopResult run_main_loop(
     logging::StderrSink log_sink;
     (void)log_collector.add(entity.ctl_log_channel());
     (void)log_collector.add(entity.media_log_channel());
+    (void)log_collector.add(entity.udptun_log_channel());
     entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
     while (!realtime::is_shutdown_requested()) {
