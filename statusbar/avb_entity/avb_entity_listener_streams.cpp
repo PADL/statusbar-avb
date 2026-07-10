@@ -231,13 +231,15 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     auto const result = components_.msrp_handler.listener_ready(sid, now);
     // Join the talker's stream group so the NIC delivers its frames to us.
     bool const joined = rx_sock_ != nullptr && rx_sock_->join_multicast(dest_mac).has_value();
-    std::print(
-        "[acmp] listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}\n",
-        stream_index,
-        stream_index == AAF_STREAM_INDEX ? "AAF" : "AM824",
-        dest_mac.to_uint64(),
-        result.has_value() ? "declared" : "failed",
-        joined ? "ok" : "FAILED");
+    if (logger_) {
+        logger_->status(
+            "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}",
+            stream_index,
+            stream_index == AAF_STREAM_INDEX ? logging::lit("AAF") : logging::lit("AM824"),
+            dest_mac.to_uint64(),
+            result.has_value() ? logging::lit("declared") : logging::lit("failed"),
+            joined ? logging::lit("ok") : logging::lit("FAILED"));
+    }
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
@@ -252,10 +254,12 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
             (void)rx_sock_->leave_multicast(stream->stream_dest_mac);
         }
     }
-    std::print(
-        "[acmp] listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener withdrawn\n",
-        stream_index,
-        stream_index == AAF_STREAM_INDEX ? "AAF" : "AM824");
+    if (logger_) {
+        logger_->status(
+            "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener withdrawn",
+            stream_index,
+            stream_index == AAF_STREAM_INDEX ? logging::lit("AAF") : logging::lit("AM824"));
+    }
 }
 
 }  // namespace statusbar::avb_entity

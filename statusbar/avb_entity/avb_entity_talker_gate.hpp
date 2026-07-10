@@ -26,6 +26,7 @@
 /// bound at construction.
 
 #include "statusbar/itc/itc_published.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 
 #include <array>
@@ -47,6 +48,9 @@ struct TalkerGate
             started.store(true, std::memory_order_relaxed);
         }
     }
+
+    /// Install the reactor-thread logger for gate-transition status lines.
+    void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
     /// One per talker stream: 0=AM824, 1=AAF, 2=CRF.
     static constexpr size_t STREAM_COUNT = 3;
@@ -92,6 +96,7 @@ struct TalkerGate
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
     nanoavb::NanoAvbComponents const& components_;  ///< reads acmp_talker connection state
+    std::optional<logging::Logger> logger_{};       ///< reactor-thread gate-transition logging
 
     // --- Owned gate state (cross-thread) ---------------------------------------
     /// "A listener permits transmit" (MSRP Listener Ready), per stream. Written by

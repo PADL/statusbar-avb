@@ -199,8 +199,8 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
 
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} CONNECTED by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} CONNECTED by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -209,8 +209,8 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -272,7 +272,7 @@ auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor
             assign(crf_idx_, crf_idx_, talker_->crf_dest_mac_);
         }
         maap_addresses_ready_.store(true, std::memory_order_release);
-        std::print(stderr, "MAAP: acquired {} stream address(es) from {}\n", block_count, ieee::to_string(block_start).view());
+        host_.ctl_log().status("maap: acquired {} stream address(es) from {:012x}", block_count, block_start.to_uint64());
         if (host_.is_ready()) {
             advertise_talker_streams(sm::Clock::now());
         }
@@ -280,12 +280,12 @@ auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor
 
     maap_handler_->set_on_lost([this](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
         maap_addresses_ready_.store(false, std::memory_order_release);
-        std::print(stderr, "Warning: MAAP address lost to a conflict; re-acquiring\n");
+        host_.ctl_log().warning("maap: address lost to a conflict; re-acquiring");
     });
 
     auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(config_.interface_name, *maap_handler_);
     if (!net_handler->valid()) {
-        std::print(stderr, "Warning: MAAP socket open failed on {}; using static stream dest MACs\n", config_.interface_name);
+        host_.ctl_log().warning("maap: socket open failed; using static stream dest MACs");
         maap_handler_.reset();
         maap_addresses_ready_.store(true, std::memory_order_release);
         return {};
@@ -298,6 +298,7 @@ auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor
 
 auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
 {
+    gate_.set_logger(host_.ctl_log());
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
@@ -440,7 +441,7 @@ void AvbEntityToneGenerator::advertise_talker_streams(TimePoint const time)
     for (uint16_t const idx : active_stream_indices()) {
         auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(idx), time);
         if (!result) {
-            std::print(stderr, "Warning: MSRP talker_advertise (stream {}) failed: {}\n", idx, result.error().message());
+            host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", idx, result.error().value());
         }
     }
 }

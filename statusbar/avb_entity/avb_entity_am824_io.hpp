@@ -287,6 +287,11 @@ class AvbEntityAm824IO
     /// Get access to network handlers (for advanced use)
     [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
 
+    // --- Logging (see AvbEntityHost) --------------------------------------------
+    [[nodiscard]] auto ctl_log_channel() noexcept -> logging::LogChannelBase& { return host_.ctl_log_channel(); }
+    [[nodiscard]] auto media_log_channel() noexcept -> logging::LogChannelBase& { return host_.media_log_channel(); }
+    void set_log_verbosity(logging::LogLevel const v) noexcept { host_.set_log_verbosity(v); }
+
     /// Get the configuration
     [[nodiscard]] auto config() const noexcept -> AvbEntityAm824IOConfig const& { return config_; }
 

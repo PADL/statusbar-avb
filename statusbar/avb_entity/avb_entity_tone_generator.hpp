@@ -160,6 +160,11 @@ class AvbEntityToneGenerator
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
     [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
     [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
+
+    // --- Logging (see AvbEntityHost) --------------------------------------------
+    [[nodiscard]] auto ctl_log_channel() noexcept -> logging::LogChannelBase& { return host_.ctl_log_channel(); }
+    [[nodiscard]] auto media_log_channel() noexcept -> logging::LogChannelBase& { return host_.media_log_channel(); }
+    void set_log_verbosity(logging::LogLevel const v) noexcept { host_.set_log_verbosity(v); }
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
 

@@ -47,6 +47,7 @@
 /// components() (ACMP/MSRP/AEM) and the three typed stream hooks below.
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
@@ -157,6 +158,32 @@ class AvbEntityHost
     [[nodiscard]] auto components() const noexcept -> nanoavb::NanoAvbComponents const& { return components_; }
     [[nodiscard]] auto net_handlers() noexcept -> nanoavb::NanoAvbNetHandlers* { return net_handlers_.get(); }
 
+    // --- Logging -----------------------------------------------------------------
+    //
+    // The host owns two SPSC log channels, one per producer thread context:
+    //   ctl   — the reactor/main thread (control plane: ACMP/MSRP/MAAP/identify,
+    //           supervisor events, periodic status).
+    //   media — the real-time media-timer thread. Deferred formatting makes
+    //           logging from process_audio() safe (see statusbar/logging).
+    // The entity's tool registers both with its LogCollector and drains them
+    // from its main loop. Verbosity per channel at runtime; Debug lines under
+    // --verbose is the tools' convention.
+
+    /// Producer facade for reactor/main-thread code (single thread only).
+    [[nodiscard]] auto ctl_log() noexcept -> logging::Logger { return ctl_log_channel_.logger(); }
+    /// Producer facade for the RT media-timer thread (single thread only).
+    [[nodiscard]] auto media_log() noexcept -> logging::Logger { return media_log_channel_.logger(); }
+
+    [[nodiscard]] auto ctl_log_channel() noexcept -> logging::LogChannelBase& { return ctl_log_channel_; }
+    [[nodiscard]] auto media_log_channel() noexcept -> logging::LogChannelBase& { return media_log_channel_; }
+
+    /// Set both channels' verbosity (any thread).
+    void set_log_verbosity(logging::LogLevel const v) noexcept
+    {
+        ctl_log_channel_.set_verbosity(v);
+        media_log_channel_.set_verbosity(v);
+    }
+
     // --- Symbol <-> descriptor lookups (symbol-aware construction only) ---------
     // These let entity command-handling code reference descriptors by the designer's
     // well-known symbol instead of the blob's (volatile) descriptor index. All return
@@ -249,6 +276,9 @@ class AvbEntityHost
     void wire_mvrp_callbacks();
     void wire_srp_callbacks();  ///< MSRP talker/listener SM drive + the talker-listener bridge (uses the hooks)
     void wire_engine_callbacks();
+
+    logging::LogChannel<256> ctl_log_channel_{logging::lit("ctl")};
+    logging::LogChannel<64> media_log_channel_{logging::lit("media")};
 
     nanoavb::gptp_sm::Context gptp_ctx_{};
     nanoavb::msrp_talker_sm::Context msrp_talker_ctx_{};

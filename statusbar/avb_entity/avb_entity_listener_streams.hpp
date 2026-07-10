@@ -115,6 +115,9 @@ struct ListenerStreams
     /// talker's multicast group. Wired as the acmp_listener disconnect callback.
     void on_listener_disconnected(uint16_t stream_index);
 
+    /// Install the reactor-thread logger for connect/disconnect status lines.
+    void set_logger(logging::Logger const log) noexcept { logger_ = log; }
+
     // --- References / collaborators (bound at construction) --------------------
     uint32_t lock_tolerance_ns_;              ///< MEDIA_LOCKED step tolerance
     uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
@@ -127,6 +130,8 @@ struct ListenerStreams
     /// Set by the entity in start() before the handler is moved into the reactor;
     /// used to join/leave a remote talker's stream multicast group on connect/disconnect.
     net::RawnetContext* rx_sock_{nullptr};
+    /// Reactor-thread connect/disconnect logging (nullable).
+    std::optional<logging::Logger> logger_{};
     /// Receive scratch for drain_rx (was owned by the StreamRxHandler). 2 KB covers a
     /// full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
     std::array<uint8_t, 2048> rx_buf_{};

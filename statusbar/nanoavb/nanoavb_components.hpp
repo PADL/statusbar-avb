@@ -14,6 +14,7 @@
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_acmp.hpp"
 #include "statusbar/nanoavb/nanoavb_adp.hpp"
 #include "statusbar/nanoavb/nanoavb_base.hpp"
@@ -32,6 +33,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -254,7 +256,10 @@ class AtdeccNetHandler : public net::Pollable
 {
   public:
     static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
-    static constexpr int STATUS_PRINT_INTERVAL = 100;  // Every 100 ticks = 1 second
+    /// Periodic-status interval, wall clock. (Was a tick-count modulus that
+    /// assumed a 10 ms tick — reactors tick ~1 kHz, which made this line spam
+    /// journald ~10x/second.)
+    static constexpr int64_t STATUS_INTERVAL_NS = 1'000'000'000;
 
     /// @param interface_name The network interface name
     /// @param adp_advertiser Reference to the ADP advertiser
@@ -294,6 +299,11 @@ class AtdeccNetHandler : public net::Pollable
     /// @param counter Pointer to the TelemetryCounter for PTP wake telemetry
     void set_ptp_wake_counter(statusbar::itc::TelemetryCounter<int64_t>* counter) noexcept { ptp_wake_count_ = counter; }
 
+    /// Install the reactor-thread logger. The once-per-second status line is
+    /// emitted (at Status level) only when a logger is set — the handler is a
+    /// library and owns no output destination of its own.
+    void set_logger(logging::Logger const log) noexcept { logger_ = log; }
+
     // -- Pollable interface --
 
     [[nodiscard]] auto fd() const noexcept -> int override { return context_.fd(); }
@@ -306,7 +316,7 @@ class AtdeccNetHandler : public net::Pollable
 
   private:
     void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload);
-    void print_status() const;
+    void log_status();
 
     net::RawnetContext context_{};
     NanoAvbAdpAdvertiser& adp_advertiser_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
@@ -315,7 +325,9 @@ class AtdeccNetHandler : public net::Pollable
     AemCommandHandler& aem_handler_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAdpDiscovery* adp_discovery_{nullptr};
     statusbar::itc::TelemetryCounter<int64_t>* ptp_wake_count_{nullptr};
+    std::optional<logging::Logger> logger_{};
     int64_t tick_count_{0};
+    int64_t last_status_ns_{0};
     std::array<uint8_t, 2048> payload_buf_{};
 };
 

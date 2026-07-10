@@ -22,6 +22,8 @@
 #include "statusbar/itc/itc_published.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
+#include "statusbar/logging/logging_collector.hpp"
+#include "statusbar/logging/logging_sink.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/net/net_link_monitor.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -397,7 +399,17 @@ MainLoopResult run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppCont
                 }});
     }
 
+    // Drain the entity's SPSC log channels (ctl = reactor thread, media = RT
+    // media timer) here on the main thread — the entities/libraries only ever
+    // enqueue; formatting and stderr I/O happen in this loop.
+    logging::LogCollector<4> log_collector;
+    logging::StderrSink log_sink;
+    (void)log_collector.add(entity.ctl_log_channel());
+    (void)log_collector.add(entity.media_log_channel());
+    entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
+
     while (!realtime::is_shutdown_requested()) {
+        (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(100);
 
         if (entity.tx_pcap_ready_to_write()) {
@@ -461,6 +473,9 @@ MainLoopResult run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppCont
                 timer_error_count.load());
         }
     }
+
+    // Final drain: flush log entries produced during shutdown.
+    (void)log_collector.poll(log_sink);
 
     timer.stop();
     if (auto const errs = timer_error_count.load(); errs > 0) {

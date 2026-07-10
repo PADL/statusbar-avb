@@ -177,7 +177,7 @@ void AvbEntityAm824IO::wire_stream_callbacks()
     host_.set_advertise_streams([this](TimePoint time) {
         auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(), time);
         if (!result) {
-            std::print(stderr, "Warning: MSRP talker_advertise failed: {}\n", result.error().message());
+            host_.ctl_log().warning("msrp: talker_advertise failed: errno {}", result.error().value());
         }
     });
     host_.set_withdraw_streams(
@@ -186,16 +186,16 @@ void AvbEntityAm824IO::wire_stream_callbacks()
     // ACMP: observe controller-initiated connections to our talker (diagnostic;
     // streaming is gated by MSRP listener-ready + gPTP).
     host_.components().acmp_talker.set_connection_callbacks(
-        [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
+        [log = host_.ctl_log()](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) mutable {
+            log.status(
+                "acmp: talker stream {} CONNECTED  by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
         },
-        [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+        [log = host_.ctl_log()](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) mutable {
+            log.status(
+                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -210,6 +210,8 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
 {
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks.
+    gate_.set_logger(host_.ctl_log());
+    listener_.set_logger(host_.ctl_log());
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
@@ -264,8 +266,8 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} CONNECTED  by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -273,8 +275,8 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);

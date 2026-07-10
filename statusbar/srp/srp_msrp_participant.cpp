@@ -821,7 +821,9 @@ void MsrpParticipantT<Limits>::decode_vector_attribute(
             // Diagnostic: a LeaveAll on the Listener type drives EVERY listener
             // registrar to Leaving (registrar_in -> false) until the next Join
             // re-registers it -- a prime suspect for the listener-ready flap.
-            std::print(stderr, "[srp-mrp] Listener LeaveAll (num_values={}) -> all listener registrars leave\n", num_values);
+            if (logger_) {
+                logger_->debug("msrp: Listener LeaveAll (num_values={}) -> all listener registrars leave", num_values);
+            }
         }
         auto drive_leaveall = [&](auto& records) {
             for (auto& rec : records) {
@@ -1002,7 +1004,7 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     // LeaveAll refresh (benign once the gate accepts Lv); reaching Mt = the peer
     // truly de-registered (re-declaration / relay problem). `is_interesting`
     // keeps this to our streams.
-    if (is_interesting(rec.first_value.stream_id)) {
+    if (logger_ && logger_->enabled(logging::LogLevel::Debug) && is_interesting(rec.first_value.stream_id)) {
         auto const state_name = [](registrar_sm::Def::State s) -> char const* {
             switch (s) {
                 case registrar_sm::Def::State::In:
@@ -1017,14 +1019,13 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
                     return "?";
             }
         };
-        std::print(
-            stderr,
-            "[srp-mrp] listener rx sid={:016x} wire_event={} decl={} reg {}->{} lvtimer={}\n",
+        logger_->debug(
+            "msrp: listener rx sid={:016x} wire_event={} decl={} reg {}->{} lvtimer={}",
             rec.first_value.stream_id.to_uint64(),
-            attribute_event_name(wire_event),
-            listener_declaration_name(decl),
-            state_name(state_before),
-            state_name(rec.registrar_sm.current_state()),
+            logging::static_str(attribute_event_name(wire_event)),
+            logging::static_str(listener_declaration_name(decl)),
+            logging::static_str(state_name(state_before)),
+            logging::static_str(state_name(rec.registrar_sm.current_state())),
             rec.registrar_ctx.lvtimer_request);
     }
     if (rec.registrar_ctx.lvtimer_request) {

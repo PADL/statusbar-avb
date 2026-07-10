@@ -209,7 +209,7 @@ void AvbEntityStereoIO::wire_stream_callbacks()
     host_.set_advertise_streams([this](TimePoint time) {
         auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(), time);
         if (!result) {
-            std::print(stderr, "Warning: MSRP talker_advertise failed: {}\n", result.error().message());
+            host_.ctl_log().warning("msrp: talker_advertise failed: errno {}", result.error().value());
         }
     });
     host_.set_withdraw_streams(
@@ -218,16 +218,16 @@ void AvbEntityStereoIO::wire_stream_callbacks()
     // ACMP: observe controller-initiated connections to our talker (diagnostic;
     // streaming is gated by MSRP listener-ready + gPTP).
     host_.components().acmp_talker.set_connection_callbacks(
-        [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
+        [log = host_.ctl_log()](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) mutable {
+            log.status(
+                "acmp: talker stream {} CONNECTED  by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
         },
-        [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+        [log = host_.ctl_log()](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) mutable {
+            log.status(
+                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -243,6 +243,7 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks. The host has no data plane of
     // its own to set up here -- this entity's TX/RX runs through the nanoavb handlers.
+    gate_.set_logger(host_.ctl_log());
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
@@ -295,8 +296,8 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} CONNECTED  by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -304,8 +305,8 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} DISCONNECTED by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
@@ -321,12 +322,12 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
             (void)statusbar::tsn::load_unchecked(stream_id.span(), &lsid);
             auto const result = host_.components().msrp_handler.listener_ready(lsid, sm::Clock::now());
             bool const joined = rx_sock_ != nullptr && rx_sock_->join_multicast(dest_mac).has_value();
-            std::print(
-                "[acmp] listener stream {} CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}\n",
+            host_.ctl_log().status(
+                "acmp: listener stream {} CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}",
                 stream_index,
                 dest_mac.to_uint64(),
-                result.has_value() ? "declared" : "failed",
-                joined ? "ok" : "FAILED");
+                result.has_value() ? logging::lit("declared") : logging::lit("failed"),
+                joined ? logging::lit("ok") : logging::lit("FAILED"));
         },
         [this](uint16_t stream_index) {
             if (auto const* stream = host_.components().acmp_listener.get_stream(stream_index); stream != nullptr) {
@@ -337,7 +338,7 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
                     (void)rx_sock_->leave_multicast(stream->stream_dest_mac);
                 }
             }
-            std::print("[acmp] listener stream {} DISCONNECTED from talker -> MSRP Listener withdrawn\n", stream_index);
+            host_.ctl_log().status("acmp: listener stream {} DISCONNECTED from talker -> MSRP Listener withdrawn", stream_index);
         });
 
     // AECP GET_COUNTERS: expose the IEEE 1722.1 STREAM_INPUT health counters

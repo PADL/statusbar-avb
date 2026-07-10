@@ -38,6 +38,7 @@
 
 #include "statusbar/buffer/buffer_mutable_buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/srp/srp_mrp_attribute.hpp"
@@ -235,6 +236,11 @@ class MsrpParticipantT
   public:
     using SubscriptionId = uint32_t;
     using SendPduFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t const>), 64>;
+
+    /// Install the (single caller-thread) logger; the MRP event diagnostics
+    /// ([srp-mrp] listener registrar traces, LeaveAll) are emitted at Debug
+    /// level only when a logger is set.
+    void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
     /// Conservative upper bound on the size of a single outgoing
     /// MSRPDU. The participant allocates one fixed-size buffer of
@@ -744,6 +750,8 @@ class MsrpParticipantT
     // learned from peer PDUs.
     //
     [[nodiscard]] auto is_interesting(tsn::StreamId const& id) const noexcept -> bool;
+
+    std::optional<logging::Logger> logger_{};
 };
 
 // ============================================================

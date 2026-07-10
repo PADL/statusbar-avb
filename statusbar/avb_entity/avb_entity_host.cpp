@@ -65,8 +65,9 @@ void AvbEntityHost::wire_identify_control()
             // Default identify indicator: these entities have no LED, so log to
             // the journal. Entities with a real indicator can override via
             // components().aem_handler.set_identify_changed().
-            components_.aem_handler.set_identify_changed([](bool const active) {
-                std::print(stderr, "[identify] {}\n", active ? "ON — a controller is identifying this entity" : "off");
+            components_.aem_handler.set_identify_changed([log = ctl_log()](bool const active) mutable {
+                log.status(
+                    "identify {}", active ? logging::lit("ON — a controller is identifying this entity") : logging::lit("off"));
             });
             return;
         }
@@ -87,6 +88,10 @@ auto AvbEntityHost::start_control_plane(net::MessageReactor& reactor, std::strin
     net_handlers_ = std::make_unique<nanoavb::NanoAvbNetHandlers>(interface_name_, components_);
     net_handlers_->add_to_reactor(reactor);
     net_handlers_->print_warnings(interface_name_);
+    // Reactor-thread logging for the ATDECC handler's once-per-second status
+    // and the MSRP participant's Debug-level MRP diagnostics.
+    net_handlers_->atdecc_handler().set_logger(ctl_log());
+    components_.msrp_handler.set_logger(ctl_log());
 
     nanoavb::setup_nanoavb_callbacks(components_, *net_handlers_);
     wire_callbacks();
@@ -189,7 +194,7 @@ void AvbEntityHost::wire_supervisor_callbacks()
         gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
         auto result = components_.adp_advertiser.start(time);
         if (!result) {
-            std::print(stderr, "Warning: ADP start failed: {}\n", result.error().message());
+            ctl_log().error("ADP start failed: errno {}", result.error().value());
         }
     };
 
@@ -223,8 +228,8 @@ void AvbEntityHost::wire_supervisor_callbacks()
         listener_engine_ctx_.play_allowed = false;
     };
 
-    supervisor_ctx_.callbacks.timeout_gptp = [](auto& /*ctx*/, TimePoint /*time*/) -> void {
-        std::print(stderr, "[supervisor] gPTP lock timeout\n");
+    supervisor_ctx_.callbacks.timeout_gptp = [log = ctl_log()](auto& /*ctx*/, TimePoint /*time*/) mutable -> void {
+        log.warning("supervisor: gPTP lock timeout");
     };
 }
 
@@ -245,8 +250,8 @@ void AvbEntityHost::wire_mvrp_callbacks()
     mvrp_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     mvrp_ctx_.callbacks.send_join = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     mvrp_ctx_.callbacks.mark_joined = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
-    mvrp_ctx_.callbacks.mark_error = [](auto& /*ctx*/, TimePoint /*time*/) -> void {
-        std::print(stderr, "[mvrp] VLAN registration failed\n");
+    mvrp_ctx_.callbacks.mark_error = [log = ctl_log()](auto& /*ctx*/, TimePoint /*time*/) mutable -> void {
+        log.error("mvrp: VLAN registration failed");
     };
     mvrp_ctx_.callbacks.send_leave = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     mvrp_ctx_.callbacks.mark_left = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
@@ -289,14 +294,14 @@ void AvbEntityHost::wire_srp_callbacks()
         // flap is explained -- which of the four conditions (record present,
         // operation==Register, registrar In, Ready substate) is flipping.
         auto const dbg = components_.msrp_handler.listener_permit_debug(stream_id);
-        std::print(
-            "[srp-gate] sid={:016x} permits={} | record={} op={} registrar_in={} substate={}\n",
+        ctl_log().debug(
+            "srp-gate sid={:016x} permits={} | record={} op={} registrar_in={} substate={}",
             stream_id.to_uint64(),
             dbg.permits,
             dbg.has_record,
-            dbg.operation == statusbar::srp::msrp::Operation::Register ? "Register" : "Declare",
+            dbg.operation == statusbar::srp::msrp::Operation::Register ? logging::lit("Register") : logging::lit("Declare"),
             dbg.registrar_in,
-            statusbar::srp::msrp::listener_declaration_name(dbg.substate));
+            logging::static_str(statusbar::srp::msrp::listener_declaration_name(dbg.substate)));
 
         // The entity's transmit gate tracks readiness (TalkerGate::note_listener_ready).
         if (on_listener_ready_) {

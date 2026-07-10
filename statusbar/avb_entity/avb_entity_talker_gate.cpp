@@ -32,8 +32,8 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
                         .count(),
                     std::memory_order_relaxed);
             }
-            if (was != ready) {
-                std::print("[srp] talker stream {} MSRP listener-ready -> {} (ACMP-AND-MSRP gate)\n", idx, ready);
+            if (was != ready && logger_) {
+                logger_->status("srp: talker stream {} MSRP listener-ready -> {} (ACMP-AND-MSRP gate)", idx, ready);
             }
         }
     }

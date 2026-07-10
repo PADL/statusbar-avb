@@ -135,13 +135,14 @@ void AtdeccNetHandler::tick(int64_t now_ns)
 
     ++tick_count_;
 
-    // Print periodic status
-    if (tick_count_ % STATUS_PRINT_INTERVAL == 0) {
-        print_status();
+    // Periodic status (wall-clock gated; emitted only when a logger is set).
+    if (logger_.has_value() && now_ns - last_status_ns_ >= STATUS_INTERVAL_NS) {
+        last_status_ns_ = now_ns;
+        log_status();
     }
 }
 
-void AtdeccNetHandler::print_status() const
+void AtdeccNetHandler::log_status()
 {
     int64_t const wakes = ptp_wake_count_ != nullptr ? ptp_wake_count_->load() : 0;
 
@@ -159,11 +160,11 @@ void AtdeccNetHandler::print_status() const
         }
     }
 
-    std::print(
-        "Ticks: {:6}  PTP Wakes: {:8}  ADP: {}  ACMP T:{} L:{}\n",
+    logger_->status(
+        "ticks={} ptp_wakes={} adp={} acmp_t={} acmp_l={}",
         tick_count_,
         wakes,
-        adp_advertiser_.state() == AdpAdvertiserState::Advertising ? "Advertising" : "Stopped    ",
+        adp_advertiser_.state() == AdpAdvertiserState::Advertising ? logging::lit("Advertising") : logging::lit("Stopped"),
         talker_connections,
         listener_connections);
 }

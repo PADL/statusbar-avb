@@ -28,6 +28,8 @@
 #include "statusbar/itc/itc_published.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
+#include "statusbar/logging/logging_collector.hpp"
+#include "statusbar/logging/logging_sink.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
@@ -378,7 +380,17 @@ MainLoopResult run_main_loop(
     }
 
     // Poll reactor for network I/O until shutdown
+    // Drain the entity's SPSC log channels (ctl = reactor thread, media = RT
+    // media timer) here on the main thread — the entities/libraries only ever
+    // enqueue; formatting and stderr I/O happen in this loop.
+    logging::LogCollector<4> log_collector;
+    logging::StderrSink log_sink;
+    (void)log_collector.add(entity.ctl_log_channel());
+    (void)log_collector.add(entity.media_log_channel());
+    entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
+
     while (!realtime::is_shutdown_requested()) {
+        (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(100);
 
         // Check for state changes to reset watchdog
@@ -468,6 +480,9 @@ MainLoopResult run_main_loop(
             rx_timer.recovery_count(),
             rx_timer.missed_cycles());
     }
+
+    // Final drain: flush log entries produced during shutdown.
+    (void)log_collector.poll(log_sink);
 
     // Stop timer and capture statistics
     timer.stop();

@@ -228,10 +228,10 @@ void AvbEntityAudioIO::wire_stream_callbacks()
     // join) on listener connect/disconnect. See ListenerStreams.
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} ({}) CONNECTED by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} ({}) CONNECTED by listener {:012x} unique_id {}",
                 stream_index,
-                stream_index == AAF_STREAM_INDEX ? "AAF" : "AM824",
+                stream_index == AAF_STREAM_INDEX ? logging::lit("AAF") : logging::lit("AM824"),
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
             // Publish the fresh connection count for the media-timer gate.
@@ -239,10 +239,10 @@ void AvbEntityAudioIO::wire_stream_callbacks()
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            std::print(
-                "[acmp] talker stream {} ({}) DISCONNECTED by listener {:012x} unique_id {}\n",
+            host_.ctl_log().status(
+                "acmp: talker stream {} ({}) DISCONNECTED by listener {:012x} unique_id {}",
                 stream_index,
-                stream_index == AAF_STREAM_INDEX ? "AAF" : "AM824",
+                stream_index == AAF_STREAM_INDEX ? logging::lit("AAF") : logging::lit("AM824"),
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
             gate_.note_acmp_connections(
@@ -317,7 +317,7 @@ auto AvbEntityAudioIO::acquire_maap_addresses(net::MessageReactor& reactor) -> S
         assign(AAF_STREAM_INDEX, 1, talker_->aaf_dest_mac_);
         assign(CRF_STREAM_INDEX, 2, talker_->crf_dest_mac_);
         maap_addresses_ready_.store(true, std::memory_order_release);
-        std::print(stderr, "MAAP: acquired 3 stream addresses from {}\n", ieee::to_string(block_start).view());
+        host_.ctl_log().status("maap: acquired 3 stream addresses from {:012x}", block_start.to_uint64());
         // (Re)declare the MSRP Talker Advertise now that the dest MACs are final, so
         // listeners reserve against the MAAP address (not the stale static dest the
         // gPTP-lock advertise may have skipped). Only once the SR-class domain is
@@ -333,12 +333,12 @@ auto AvbEntityAudioIO::acquire_maap_addresses(net::MessageReactor& reactor) -> S
         // already re-probing; on_acquired re-opens it). Full re-advertise/reconnect
         // handling is Phase 4.
         maap_addresses_ready_.store(false, std::memory_order_release);
-        std::print(stderr, "Warning: MAAP address lost to a conflict; re-acquiring\n");
+        host_.ctl_log().warning("maap: address lost to a conflict; re-acquiring");
     });
 
     auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(config_.interface_name, *maap_handler_);
     if (!net_handler->valid()) {
-        std::print(stderr, "Warning: MAAP socket open failed on {}; using static stream dest MACs\n", config_.interface_name);
+        host_.ctl_log().warning("maap: socket open failed; using static stream dest MACs");
         maap_handler_.reset();
         maap_addresses_ready_.store(true, std::memory_order_release);  // fall back: do not gate
         return {};
@@ -356,6 +356,8 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
 {
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks (hooks + ACMP + AEM handlers).
+    gate_.set_logger(host_.ctl_log());
+    listener_->set_logger(host_.ctl_log());
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
@@ -554,7 +556,7 @@ void AvbEntityAudioIO::advertise_talker_streams(TimePoint const time)
     for (uint16_t const idx : {AM824_STREAM_INDEX, AAF_STREAM_INDEX, CRF_STREAM_INDEX}) {
         auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(idx), time);
         if (!result) {
-            std::print(stderr, "Warning: MSRP talker_advertise (stream {}) failed: {}\n", idx, result.error().message());
+            host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", idx, result.error().value());
         }
     }
 }
@@ -789,12 +791,12 @@ void AvbEntityAudioIO::update_gps_ratio(uint64_t gptp_now_ns)
         // GPS. A slope pinned at ~0.000 ppm with a flat offset means the PHC and
         // CLOCK_REALTIME are coupled (e.g. phc2sys is running) and the media clock
         // is NOT actually GPS-locked -- see umbrella docs/MEDIA_CLOCK_TIMING.md.
-        std::print(
-            stderr,
-            "[media-clock] r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb\n",
+        // RT media thread: deferred-formatting logger — never std::print here.
+        host_.media_log().status(
+            "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb",
             est.r,
             est.ppm(),
-            static_cast<long long>(est.filtered_offset_ns),
+            static_cast<int64_t>(est.filtered_offset_ns),
             est.freq_uncertainty_ppb);
         rate_tracker_.mark_logged(gptp_now_ns);
     }

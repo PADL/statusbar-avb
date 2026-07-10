@@ -246,6 +246,10 @@ class MsrpHandler
 
     void set_callbacks(MsrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
 
+    /// Forward a reactor-thread logger to the MSRP participant (Debug-level
+    /// MRP event diagnostics).
+    void set_logger(logging::Logger const log) noexcept { participant_.set_logger(log); }
+
     /// Set just the on_talker_listener hook without disturbing the others
     /// (set_callbacks replaces the whole struct; this updates one field).
     void set_on_talker_listener(statusbar::sg14::inplace_function<void(StreamId const&, bool), 64> cb)
