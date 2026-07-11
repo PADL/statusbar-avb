@@ -45,13 +45,17 @@
 /// without subclassing.
 
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
+#include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -292,10 +296,14 @@ class DescriptorStorageHandler : public AemEntityHandler
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR) {
             return set_signal_selector(id.ref, value);
         }
+        if (command_type == atdecc::AEM_COMMAND_SET_MATRIX && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX) {
+            return set_matrix(id.ref, value);
+        }
         return AemEntityHandler::on_set_descriptor_value(command_type, id, value);
     }
 
-    auto on_get_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t> out) -> size_t override
+    auto on_get_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t const> request, std::span<uint8_t> out)
+        -> size_t override
     {
         if (command_type == atdecc::AEM_COMMAND_GET_CONTROL && is_identify_control(id.ref) && !out.empty()) {
             out[0] = identify_value_;
@@ -311,7 +319,10 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
             return 0;  // no such selector in the blob
         }
-        return AemEntityHandler::on_get_descriptor_value(command_type, id, out);
+        if (command_type == atdecc::AEM_COMMAND_GET_MATRIX && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX) {
+            return get_matrix(id.ref, request, out);
+        }
+        return AemEntityHandler::on_get_descriptor_value(command_type, id, request, out);
     }
 
     /// The stored identify value (0 = off, non-zero = identifying).
@@ -359,6 +370,54 @@ class DescriptorStorageHandler : public AemEntityHandler
             return std::nullopt;
         }
         return load_signal_source(blob->subspan(CURRENT_SIGNAL_OFFSET));
+    }
+
+    // ---- Built-in MATRIX (automatic when the blob has one) -----------------
+    //
+    // SET_MATRIX applies region writes (rep / direction / value_count /
+    // item_offset per Clause 7.4.33) to an in-RAM width x height value grid
+    // seeded from the descriptor's authored current value; GET_MATRIX reads
+    // regions back. Only linear control_value_types are supported, and the
+    // grid must fit MAX_MATRIX_VALUE_BYTES. The change callback is where the
+    // application applies the new crosspoint values to its DSP; returning
+    // any status other than SUCCESS rejects the write.
+
+    /// A rectangular subregion of a matrix (columns x rows).
+    struct MatrixRegion
+    {
+        uint16_t column{0};
+        uint16_t row{0};
+        uint16_t width{0};
+        uint16_t height{0};
+    };
+
+    /// Called when SET_MATRIX requests a region write (already validated
+    /// against the descriptor's dimensions). Return AEM_STATUS_SUCCESS to
+    /// accept, any other AEM_STATUS_* to reject. Unset => accept (in-memory
+    /// only). Query the new values afterwards via matrix_cell().
+    void set_on_matrix_changed(
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, MatrixRegion const&), 64> fn)
+    {
+        on_matrix_changed_ = std::move(fn);
+    }
+
+    /// Read one matrix cell's current value bytes (element size = the
+    /// matrix's control_value_type element). Returns the number of bytes
+    /// written to @p out (0 if the matrix/cell is unknown or out is small).
+    [[nodiscard]] auto matrix_cell(DescriptorRef ref, uint16_t const column, uint16_t const row, std::span<uint8_t> out) noexcept
+        -> size_t
+    {
+        auto* const state = find_or_init_matrix_state(ref);
+        if (state == nullptr || column >= state->width || row >= state->height) {
+            return 0;
+        }
+        size_t const elem = state->elem_size;
+        size_t const off = ((size_t{row} * state->width) + column) * elem;
+        if (out.size() < elem) {
+            return 0;
+        }
+        std::copy_n(state->values.data() + off, elem, out.begin());
+        return elem;
     }
 
     /// Access the underlying storage (useful for derived handlers that
@@ -487,6 +546,217 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     statusbar::sg14::inplace_vector<SelectorState, MAX_SELECTOR_STATES> selector_states_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, SignalSourceRef const&), 64> on_signal_selector_changed_{};
+
+    // MATRIX built-in machinery. DescriptorMatrix wire offsets and the
+    // SET/GET_MATRIX region header (after the 4-byte descriptor header).
+    static constexpr size_t MATRIX_CONTROL_VALUE_TYPE_FIELD = 80;
+    static constexpr size_t MATRIX_WIDTH_FIELD = 90;
+    static constexpr size_t MATRIX_HEIGHT_FIELD = 92;
+    static constexpr size_t MATRIX_VALUES_OFFSET_FIELD = 94;
+    static constexpr size_t MATRIX_REGION_HEADER_SIZE = atdecc::aem::AemMatrixPayloadHeader::LENGTH - 4;
+
+    static constexpr size_t MAX_MATRIX_VALUE_BYTES = 512;
+    static constexpr size_t MAX_MATRIX_STATES = 4;
+
+    /// The in-RAM value grid for one MATRIX descriptor (row-major).
+    struct MatrixState
+    {
+        uint16_t descriptor_index{0};
+        uint16_t width{0};
+        uint16_t height{0};
+        uint8_t elem_size{0};
+        std::array<uint8_t, MAX_MATRIX_VALUE_BYTES> values{};
+    };
+
+    [[nodiscard]] static auto read_u16(std::span<uint8_t const> const bytes, size_t const off) noexcept -> uint16_t
+    {
+        atdecc::doublet_t v{};
+        span_load(v, bytes.subspan(off, 2));
+        return v.get();
+    }
+
+    static void write_u16(std::span<uint8_t> const bytes, size_t const off, uint16_t const value) noexcept
+    {
+        atdecc::doublet_t const v{value};
+        span_store(bytes.subspan(off, 2), v);
+    }
+
+    /// Find (or lazily create from the blob) the value grid for @p ref.
+    /// Returns nullptr when the blob has no such MATRIX, its value type is
+    /// not linear, or the grid exceeds MAX_MATRIX_VALUE_BYTES. New grids
+    /// seed every cell from the authored linear entry's `current` field.
+    [[nodiscard]] auto find_or_init_matrix_state(DescriptorRef ref) noexcept -> MatrixState*
+    {
+        for (auto& s : matrix_states_) {
+            if (s.descriptor_index == ref.descriptor_index) {
+                return &s;
+            }
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorMatrix::LENGTH) {
+            return nullptr;
+        }
+        auto const value_type =
+            static_cast<uint16_t>(read_u16(*blob, MATRIX_CONTROL_VALUE_TYPE_FIELD) & atdecc::aem::CONTROL_VALUE_TYPE_MASK);
+        auto const elem = atdecc::aem::control_value_element_size(value_type);
+        uint16_t const width = read_u16(*blob, MATRIX_WIDTH_FIELD);
+        uint16_t const height = read_u16(*blob, MATRIX_HEIGHT_FIELD);
+        size_t const cells = size_t{width} * height;
+        if (!atdecc::aem::is_linear_value_type(value_type) || elem == 0 || cells == 0 || cells * elem > MAX_MATRIX_VALUE_BYTES) {
+            return nullptr;
+        }
+        MatrixState state{
+            .descriptor_index = ref.descriptor_index,
+            .width = width,
+            .height = height,
+            .elem_size = static_cast<uint8_t>(elem),
+            .values = {}};
+        // Seed every cell from the authored linear entry's `current` field
+        // (entry layout: min, max, step, default, current, unit, string).
+        size_t const values_offset = read_u16(*blob, MATRIX_VALUES_OFFSET_FIELD);
+        size_t const current_offset = values_offset + (4 * elem);
+        if (current_offset + elem <= blob->size()) {
+            for (size_t cell = 0; cell < cells; ++cell) {
+                std::copy_n(blob->data() + current_offset, elem, state.values.data() + (cell * elem));
+            }
+        }
+        return matrix_states_.try_push_back(state);
+    }
+
+    /// Enumerate the region's cell grid offsets in `direction` order,
+    /// starting after `item_offset` skipped cells, calling @p apply with
+    /// (enumeration_index, byte_offset_into_values) for each remaining cell.
+    template <typename Fn>
+    static void for_each_region_cell(
+        MatrixState const& state, MatrixRegion const& region, uint16_t const direction, uint16_t const item_offset, Fn apply)
+    {
+        size_t enumerated = 0;
+        size_t applied = 0;
+        size_t const total = size_t{region.width} * region.height;
+        for (size_t i = 0; i < total; ++i) {
+            uint16_t col{};
+            uint16_t row{};
+            if (direction == atdecc::aem::AemMatrixPayloadHeader::DIRECTION_VERTICAL) {
+                col = static_cast<uint16_t>(region.column + (i / region.height));
+                row = static_cast<uint16_t>(region.row + (i % region.height));
+            } else {
+                col = static_cast<uint16_t>(region.column + (i % region.width));
+                row = static_cast<uint16_t>(region.row + (i / region.width));
+            }
+            if (enumerated++ < item_offset) {
+                continue;
+            }
+            size_t const cell_off = ((size_t{row} * state.width) + col) * state.elem_size;
+            if (!apply(applied, cell_off)) {
+                return;
+            }
+            ++applied;
+        }
+    }
+
+    /// Apply a SET_MATRIX region write (Clause 7.4.33). @p value is the
+    /// payload after the 4-byte descriptor header: the 12-byte region header
+    /// followed by value_count matrix point values.
+    [[nodiscard]] auto set_matrix(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        if (value.size() < MATRIX_REGION_HEADER_SIZE) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        auto* const state = find_or_init_matrix_state(ref);
+        if (state == nullptr) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        MatrixRegion const region{
+            .column = read_u16(value, 0), .row = read_u16(value, 2), .width = read_u16(value, 4), .height = read_u16(value, 6)};
+        uint16_t const rep_dir_count = read_u16(value, 8);
+        uint16_t const item_offset = read_u16(value, 10);
+        bool const rep = (rep_dir_count & atdecc::aem::AemMatrixPayloadHeader::REP_FLAG) != 0;
+        uint16_t const direction = static_cast<uint16_t>(
+            (rep_dir_count >> atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) &
+            atdecc::aem::AemMatrixPayloadHeader::DIRECTION_MASK);
+        uint16_t const value_count = static_cast<uint16_t>(rep_dir_count & atdecc::aem::AemMatrixPayloadHeader::VALUE_COUNT_MASK);
+
+        size_t const region_cells = size_t{region.width} * region.height;
+        size_t const elem = state->elem_size;
+        auto const values = value.subspan(MATRIX_REGION_HEADER_SIZE);
+        if (region.width == 0 || region.height == 0 || region.column + region.width > state->width ||
+            region.row + region.height > state->height || direction > atdecc::aem::AemMatrixPayloadHeader::DIRECTION_VERTICAL ||
+            value_count == 0 || item_offset >= region_cells || values.size() < size_t{value_count} * elem) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+
+        if (on_matrix_changed_) {
+            if (auto const status = on_matrix_changed_(ref.descriptor_index, region); status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+
+        size_t const writes = rep ? (region_cells - item_offset) : std::min<size_t>(value_count, region_cells - item_offset);
+        for_each_region_cell(*state, region, direction, item_offset, [&](size_t const n, size_t const cell_off) {
+            if (n >= writes) {
+                return false;
+            }
+            size_t const src = (n % value_count) * elem;
+            std::copy_n(values.data() + src, elem, state->values.data() + cell_off);
+            return true;
+        });
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    /// Serve a GET_MATRIX region read (Clause 7.4.34). @p request is the
+    /// command payload after the 4-byte descriptor header; the response
+    /// value written to @p out echoes the 12-byte region header (with the
+    /// actual returned count) followed by the region's current values.
+    [[nodiscard]] auto get_matrix(DescriptorRef ref, std::span<uint8_t const> request, std::span<uint8_t> out) noexcept -> size_t
+    {
+        if (request.size() < MATRIX_REGION_HEADER_SIZE || out.size() < MATRIX_REGION_HEADER_SIZE) {
+            return 0;
+        }
+        auto* const state = find_or_init_matrix_state(ref);
+        if (state == nullptr) {
+            return 0;
+        }
+        MatrixRegion const region{
+            .column = read_u16(request, 0),
+            .row = read_u16(request, 2),
+            .width = read_u16(request, 4),
+            .height = read_u16(request, 6)};
+        uint16_t const rep_dir_count = read_u16(request, 8);
+        uint16_t const item_offset = read_u16(request, 10);
+        uint16_t const direction = static_cast<uint16_t>(
+            (rep_dir_count >> atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) &
+            atdecc::aem::AemMatrixPayloadHeader::DIRECTION_MASK);
+        uint16_t const requested = static_cast<uint16_t>(rep_dir_count & atdecc::aem::AemMatrixPayloadHeader::VALUE_COUNT_MASK);
+
+        size_t const region_cells = size_t{region.width} * region.height;
+        size_t const elem = state->elem_size;
+        if (region.width == 0 || region.height == 0 || region.column + region.width > state->width ||
+            region.row + region.height > state->height || direction > atdecc::aem::AemMatrixPayloadHeader::DIRECTION_VERTICAL ||
+            item_offset >= region_cells) {
+            return 0;
+        }
+        // value_count 0 reads the whole (remaining) region.
+        size_t const remaining = region_cells - item_offset;
+        size_t const count = (requested == 0) ? remaining : std::min<size_t>(requested, remaining);
+        if (out.size() < MATRIX_REGION_HEADER_SIZE + (count * elem)) {
+            return 0;
+        }
+
+        std::copy_n(request.data(), MATRIX_REGION_HEADER_SIZE, out.begin());
+        write_u16(out, 8, static_cast<uint16_t>((direction << atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) | count));
+        auto const values_out = out.subspan(MATRIX_REGION_HEADER_SIZE);
+        for_each_region_cell(*state, region, direction, item_offset, [&](size_t const n, size_t const cell_off) {
+            if (n >= count) {
+                return false;
+            }
+            std::copy_n(state->values.data() + cell_off, elem, values_out.data() + (n * elem));
+            return true;
+        });
+        return MATRIX_REGION_HEADER_SIZE + (count * elem);
+    }
+
+    statusbar::sg14::inplace_vector<MatrixState, MAX_MATRIX_STATES> matrix_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, MatrixRegion const&), 64> on_matrix_changed_{};
 
     /// Load the descriptor bytes for `ref` into `desc` via
     /// span_load_padded. Returns false if the storage doesn't have a

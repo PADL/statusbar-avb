@@ -413,7 +413,14 @@ class Mixer:
 
 @dataclass
 class Matrix:
-    """MATRIX descriptor data."""
+    """MATRIX descriptor data.
+
+    When `matrix_signals` is non-empty (JSON authoring), flatten emits those
+    MATRIX_SIGNAL descriptors contiguously and fills number_of_sources /
+    base_source automatically; the two count fields are only honored as-is
+    when `matrix_signals` is empty (legacy XML authoring with hand-managed
+    indices).
+    """
 
     object_name: str = ""
     localized_description: LocalizedStringRef = field(
@@ -430,6 +437,7 @@ class Matrix:
     number_of_sources: int = 0
     base_source: int = 0
     value_details: bytes = b""
+    matrix_signals: list[MatrixSignal] = field(default_factory=list)
     symbol: str | None = None
 
 

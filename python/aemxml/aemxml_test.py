@@ -2039,6 +2039,116 @@ def test_json_signal_selector_and_control_grouping():
     print("  [+] json signal selector + control grouping: OK")
 
 
+def test_json_matrix():
+    """MATRIX + MATRIX_SIGNAL authoring: typed values, derived
+    number_of_values, and contiguous MATRIX_SIGNAL indices with derived
+    number_of_sources/base_source across multiple matrices."""
+    import struct
+
+    from aemxml.flatten import flatten
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "V",
+                "model": "M",
+                "name": "N",
+                "configuration": {
+                    "name": "C",
+                    "matrices": [
+                        {
+                            "name": "Mix A",
+                            "control_type": "GAIN",
+                            "value_type": "LINEAR_INT32",
+                            "width": 2,
+                            "height": 2,
+                            "values": [
+                                {"min": -60, "max": 12, "step": 1, "default": 0}
+                            ],
+                            "signals": [
+                                [{"signal_type": "AUDIO_CLUSTER", "signal_index": 0}],
+                                [{"signal_type": "AUDIO_CLUSTER", "signal_index": 1}],
+                            ],
+                        },
+                        {
+                            "name": "Mix B",
+                            "control_type": "GAIN",
+                            "value_type": "LINEAR_INT32",
+                            "width": 1,
+                            "height": 1,
+                            "values": [
+                                {"min": -60, "max": 12, "step": 1, "default": 0}
+                            ],
+                            "signals": [
+                                {
+                                    "signals": [
+                                        {
+                                            "signal_type": "AUDIO_CLUSTER",
+                                            "signal_index": 2,
+                                        }
+                                    ],
+                                    "symbol": "mix_b_src",
+                                }
+                            ],
+                        },
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    config = entity.configurations[0]
+    assert len(config.matrices) == 2
+    assert config.matrices[0].width == 2 and config.matrices[0].height == 2
+    assert config.matrices[0].number_of_values == 1  # one LINEAR entry
+    assert len(config.matrices[0].matrix_signals) == 2
+    assert config.matrices[1].matrix_signals[0].symbol == "mix_b_src"
+
+    descs, symbols = flatten(entity)
+    by_type = {}
+    for d in descs:
+        by_type.setdefault(d.descriptor_type, []).append(d)
+
+    # MATRIX A: number_of_values @96 = 1, number_of_sources @98 = 2,
+    # base_source @100 = 0. MATRIX B: 1 source at base 2.
+    matrices = sorted(by_type[0x001D], key=lambda d: d.descriptor_index)
+    assert struct.unpack_from(">HHH", matrices[0].wire_bytes, 96) == (1, 2, 0)
+    assert struct.unpack_from(">HHH", matrices[1].wire_bytes, 96) == (1, 1, 2)
+    # value_details follow at values_offset 102: LINEAR_INT32 entry = 24 bytes.
+    assert struct.unpack_from(">H", matrices[0].wire_bytes, 94) == (102,)
+    assert len(matrices[0].wire_bytes) == 102 + 24
+
+    # Three MATRIX_SIGNAL descriptors, indices 0..2, each with one source.
+    signals = sorted(by_type[0x001E], key=lambda d: d.descriptor_index)
+    assert [d.descriptor_index for d in signals] == [0, 1, 2]
+    assert struct.unpack_from(">HH", signals[2].wire_bytes, 4) == (8, 1)
+    assert struct.unpack_from(">HHH", signals[2].wire_bytes, 8) == (0x0014, 2, 0)
+
+    # The matrix-signal symbol landed in the symbol table.
+    assert any(s.descriptor_type == 0x001E and s.descriptor_index == 2 for s in symbols)
+
+    # A matrix without positive dimensions is rejected.
+    try:
+        read_json(
+            json.dumps(
+                {
+                    "entity": {
+                        "vendor": "V",
+                        "configuration": {
+                            "name": "C",
+                            "matrices": [{"name": "Bad", "value_type": "LINEAR_INT32"}],
+                        },
+                    }
+                }
+            )
+        )
+        raise AssertionError("dimensionless matrix not rejected")
+    except ValueError:
+        pass
+    print("  [+] json matrix + matrix_signal: OK")
+
+
 def test_upgrade_2013_to_2021():
     """Upgrade a 2013 AEMXML file to 2021 schema."""
     aemxml_path = str(
@@ -2220,6 +2330,7 @@ def main():
         test_json_localized_dict,
         test_json_control_values,
         test_json_signal_selector_and_control_grouping,
+        test_json_matrix,
         test_upgrade_2013_to_2021,
         test_downgrade_2021_to_2013,
         test_upgrade_is_idempotent,

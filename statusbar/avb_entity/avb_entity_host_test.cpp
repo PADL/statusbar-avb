@@ -229,7 +229,7 @@ TEST(avb_entity_host_symbol, identify_control_value_set_get)
     EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, identify, on), AEM_STATUS_SUCCESS);
     EXPECT_EQ(handler.identify_value(), 0xFF);
     std::array<uint8_t, 8> out{};
-    EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, identify, out), 1u);
+    EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, identify, {}, out), 1u);
     EXPECT_EQ(out[0], 0xFF);
     EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, on), AEM_STATUS_NOT_IMPLEMENTED);
 }

@@ -1106,7 +1106,8 @@ class ValueHandler : public DescriptorStorageHandler
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
-    auto on_get_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t> out) -> size_t override
+    auto on_get_descriptor_value(
+        uint16_t command_type, DescriptorId id, std::span<uint8_t const> /*request*/, std::span<uint8_t> out) -> size_t override
     {
         last_get_command = command_type;
         last_get_symbol = id.symbol;
@@ -1541,6 +1542,213 @@ TEST(signal_selector, change_callback_gates_and_observes)
     EXPECT_EQ(accepted.status, AEM_STATUS_SUCCESS);
     EXPECT_EQ(seen_index, static_cast<uint16_t>(0));
     EXPECT_EQ(seen_signal_index, static_cast<uint16_t>(1));
+}
+
+// ===========================================================================
+// Built-in MATRIX (DescriptorStorageHandler).
+//
+// A blob-backed handler seeds a width x height value grid from the MATRIX
+// descriptor's authored current value, applies SET_MATRIX region writes
+// (rep / direction / value_count / item_offset), and serves GET_MATRIX
+// region reads.
+// ===========================================================================
+
+namespace {
+
+using atdecc::aem::DESCRIPTOR_MATRIX;
+using atdecc::aem::DescriptorMatrix;
+
+/// Build a blob with one 2x2 MATRIX descriptor (index 0), LINEAR_INT32
+/// points, one authored value entry with current = 7.
+auto make_blob_with_matrix() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr uint32_t entry_size = 24;  // LINEAR_INT32: 5*4 + 4
+    constexpr uint32_t desc_size = DescriptorMatrix::LENGTH + entry_size;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    blob[0] = 0x41;  // "AEM1"
+    blob[1] = 0x45;
+    blob[2] = 0x4D;
+    blob[3] = 0x31;
+    blob[7] = 0x01;  // toc_count = 1
+    blob[11] = static_cast<uint8_t>(toc_offset);
+    blob[19] = static_cast<uint8_t>(desc_offset);  // symbol_offset (0 symbols)
+
+    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_MATRIX >> 8) & 0xFF);
+    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_MATRIX & 0xFF);
+    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
+    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
+    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+
+    DescriptorMatrix desc{};
+    desc.descriptor_type = DESCRIPTOR_MATRIX;
+    desc.control_value_type = 0x0004;  // CONTROL_LINEAR_INT32
+    desc.width = 2;
+    desc.height = 2;
+    desc.values_offset = DescriptorMatrix::LENGTH;
+    desc.number_of_values = 1;
+    std::memcpy(blob.data() + desc_offset, &desc, sizeof(desc));
+
+    // Value entry: min=-60, max=12, step=1, default=0, current=7, unit, string.
+    size_t const entry = desc_offset + DescriptorMatrix::LENGTH;
+    auto put_i32 = [&blob](size_t off, int32_t v) {
+        auto const u = static_cast<uint32_t>(v);
+        blob[off + 0] = static_cast<uint8_t>((u >> 24) & 0xFF);
+        blob[off + 1] = static_cast<uint8_t>((u >> 16) & 0xFF);
+        blob[off + 2] = static_cast<uint8_t>((u >> 8) & 0xFF);
+        blob[off + 3] = static_cast<uint8_t>(u & 0xFF);
+    };
+    put_i32(entry + 0, -60);
+    put_i32(entry + 4, 12);
+    put_i32(entry + 8, 1);
+    put_i32(entry + 12, 0);
+    put_i32(entry + 16, 7);  // current -> grid seed
+    return blob;
+}
+
+/// SET_MATRIX / GET_MATRIX command body: descriptor header + region header
+/// (+ int32 values for SET).
+auto make_matrix_body(
+    uint16_t descriptor_index,
+    uint16_t column,
+    uint16_t row,
+    uint16_t width,
+    uint16_t height,
+    bool rep,
+    uint16_t direction,
+    uint16_t value_count,
+    uint16_t item_offset,
+    std::vector<int32_t> const& values = {}) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> body;
+    auto push_u16 = [&body](uint16_t v) {
+        body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        body.push_back(static_cast<uint8_t>(v & 0xFF));
+    };
+    push_u16(DESCRIPTOR_MATRIX);
+    push_u16(descriptor_index);
+    push_u16(column);
+    push_u16(row);
+    push_u16(width);
+    push_u16(height);
+    push_u16(static_cast<uint16_t>((rep ? 0x8000U : 0U) | ((direction & 0x3U) << 13) | (value_count & 0x1FFFU)));
+    push_u16(item_offset);
+    for (auto const v : values) {
+        auto const u = static_cast<uint32_t>(v);
+        body.push_back(static_cast<uint8_t>((u >> 24) & 0xFF));
+        body.push_back(static_cast<uint8_t>((u >> 16) & 0xFF));
+        body.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
+        body.push_back(static_cast<uint8_t>(u & 0xFF));
+    }
+    return body;
+}
+
+/// Decode the int32 values from a GET/SET_MATRIX response (after the 4-byte
+/// descriptor header + 12-byte region header).
+auto response_matrix_values(std::span<uint8_t const> bytes) -> std::vector<int32_t>
+{
+    std::vector<int32_t> out;
+    for (size_t off = 16; off + 4 <= bytes.size(); off += 4) {
+        out.push_back(static_cast<int32_t>(
+            (uint32_t{bytes[off]} << 24) | (uint32_t{bytes[off + 1]} << 16) | (uint32_t{bytes[off + 2]} << 8) |
+            uint32_t{bytes[off + 3]}));
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(matrix, get_serves_seeded_grid_and_set_region_writes)
+{
+    auto blob = make_blob_with_matrix();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET the whole 2x2 region (value_count 0 = all): every cell seeded to 7.
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, false, 0, 0, 0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(get0.bytes.size(), size_t{16 + (4 * 4)});
+    EXPECT_TRUE(response_matrix_values(get0.bytes) == (std::vector<int32_t>{7, 7, 7, 7}));
+    // The echoed region header carries the actual returned count (4).
+    EXPECT_EQ(get0.bytes[13], uint8_t{4});
+
+    // SET the right column (1,0)-(1,1) to a repeating -5, filling vertically.
+    auto const set1 = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_MATRIX,
+        make_matrix_body(0, 1, 0, 1, 2, /*rep=*/true, /*direction=*/1, /*value_count=*/1, /*item_offset=*/0, {-5}));
+    EXPECT_EQ(set1.status, AEM_STATUS_SUCCESS);
+
+    // Row-major read-back: (0,0)=7 (1,0)=-5 (0,1)=7 (1,1)=-5.
+    auto const get1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, false, 0, 0, 0));
+    EXPECT_TRUE(response_matrix_values(get1.bytes) == (std::vector<int32_t>{7, -5, 7, -5}));
+
+    // Non-repeating horizontal list with item_offset 1: cells #1 and #2 in
+    // row-major order get 21 and 22.
+    auto const set2 = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_MATRIX,
+        make_matrix_body(0, 0, 0, 2, 2, /*rep=*/false, /*direction=*/0, /*value_count=*/2, /*item_offset=*/1, {21, 22}));
+    EXPECT_EQ(set2.status, AEM_STATUS_SUCCESS);
+    auto const get2 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, false, 0, 0, 0));
+    EXPECT_TRUE(response_matrix_values(get2.bytes) == (std::vector<int32_t>{7, 21, 22, -5}));
+
+    // The matrix_cell accessor sees the same values.
+    std::array<uint8_t, 4> cell{};
+    DescriptorRef const mref{.configuration_index = 0, .descriptor_type = DESCRIPTOR_MATRIX, .descriptor_index = 0};
+    EXPECT_EQ(handler.matrix_cell(mref, 0, 1, cell), size_t{4});
+    EXPECT_EQ(static_cast<int32_t>((uint32_t{cell[0]} << 24) | (cell[1] << 16) | (cell[2] << 8) | cell[3]), 22);
+}
+
+TEST(matrix, invalid_regions_and_callback_veto)
+{
+    auto blob = make_blob_with_matrix();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // Region exceeding the matrix bounds, reserved direction, zero-size
+    // region, and truncated values are all rejected.
+    for (auto const& bad :
+         {make_matrix_body(0, 1, 0, 2, 2, false, 0, 1, 0, {1}),     // col 1 + width 2 > 2
+          make_matrix_body(0, 0, 0, 2, 2, false, 2, 1, 0, {1}),     // direction 2 reserved
+          make_matrix_body(0, 0, 0, 0, 2, false, 0, 1, 0, {1}),     // zero width
+          make_matrix_body(0, 0, 0, 2, 2, false, 0, 4, 0, {1})}) {  // 4 values claimed, 1 sent
+        auto const r = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MATRIX, bad);
+        EXPECT_EQ(r.status, AEM_STATUS_BAD_ARGUMENTS);
+    }
+
+    // Unknown matrix index: SET names the missing descriptor, GET is 0/not-implemented.
+    auto const set_missing =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MATRIX, make_matrix_body(7, 0, 0, 1, 1, false, 0, 1, 0, {1}));
+    EXPECT_EQ(set_missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    auto const get_missing =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(7, 0, 0, 1, 1, false, 0, 0, 0));
+    EXPECT_EQ(get_missing.status, AEM_STATUS_NOT_IMPLEMENTED);
+
+    // A vetoing change callback rejects the write and the grid is untouched.
+    static uint16_t seen_matrix_index = 0xFFFF;
+    static uint16_t seen_region_width = 0;
+    handler.set_on_matrix_changed(
+        [](uint16_t const descriptor_index, DescriptorStorageHandler::MatrixRegion const& region) -> uint8_t {
+            seen_matrix_index = descriptor_index;
+            seen_region_width = region.width;
+            return atdecc::AEM_STATUS_NOT_SUPPORTED;
+        });
+    auto const vetoed =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, true, 0, 1, 0, {99}));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(seen_matrix_index, static_cast<uint16_t>(0));
+    EXPECT_EQ(seen_region_width, static_cast<uint16_t>(2));
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, false, 0, 0, 0));
+    EXPECT_TRUE(response_matrix_values(get.bytes) == (std::vector<int32_t>{7, 7, 7, 7}));
 }
 
 //

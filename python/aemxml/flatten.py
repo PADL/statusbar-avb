@@ -601,8 +601,22 @@ def _serialize_mixer(mixer: Mixer, desc_index: int) -> bytes:
     return b"".join(parts)
 
 
-def _serialize_matrix(matrix: Matrix, desc_index: int) -> bytes:
-    """Serialize MATRIX descriptor (102 + L bytes)."""
+def _serialize_matrix(
+    matrix: Matrix,
+    desc_index: int,
+    number_of_sources: int | None = None,
+    base_source: int | None = None,
+) -> bytes:
+    """Serialize MATRIX descriptor (102 + L bytes).
+
+    number_of_sources / base_source override the dataclass fields when the
+    flatten walk assigned MATRIX_SIGNAL indices for inline
+    `matrix.matrix_signals`.
+    """
+    n_sources = (
+        matrix.number_of_sources if number_of_sources is None else number_of_sources
+    )
+    base = matrix.base_source if base_source is None else base_source
     val_len = len(matrix.value_details)
     parts = [
         pack_u16(DESCRIPTOR_MATRIX),
@@ -618,8 +632,8 @@ def _serialize_matrix(matrix: Matrix, desc_index: int) -> bytes:
         pack_u16(matrix.height),
         pack_u16(102),  # values_offset
         pack_u16(matrix.number_of_values),
-        pack_u16(matrix.number_of_sources),
-        pack_u16(matrix.base_source),
+        pack_u16(n_sources),
+        pack_u16(base),
     ]
     if val_len > 0:
         parts.append(matrix.value_details)
@@ -1154,6 +1168,10 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
         add_count(DESCRIPTOR_SIGNAL_SELECTOR, len(config.signal_selectors))
         add_count(DESCRIPTOR_MIXER, len(config.mixers))
         add_count(DESCRIPTOR_MATRIX, len(config.matrices))
+        add_count(
+            DESCRIPTOR_MATRIX_SIGNAL,
+            sum(len(m.matrix_signals) for m in config.matrices),
+        )
         add_count(DESCRIPTOR_SIGNAL_SPLITTER, len(config.splitters))
         add_count(DESCRIPTOR_SIGNAL_COMBINER, len(config.combiners))
         add_count(DESCRIPTOR_SIGNAL_DEMULTIPLEXER, len(config.demultiplexers))
@@ -1419,14 +1437,45 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
             )
             _add_symbol(symbols, config_idx, DESCRIPTOR_MIXER, i, mixer.symbol)
 
-        # Matrices
+        # Matrices (inline matrix_signals get contiguous MATRIX_SIGNAL
+        # indices; the matrix's number_of_sources/base_source point at them)
+        matrix_signal_index = 0
         for i, matrix in enumerate(config.matrices):
+            matrix_base_source = matrix_signal_index
+            for ms in matrix.matrix_signals:
+                descriptors.append(
+                    FlatDescriptor(
+                        config_idx,
+                        DESCRIPTOR_MATRIX_SIGNAL,
+                        matrix_signal_index,
+                        _serialize_matrix_signal(ms, matrix_signal_index),
+                    )
+                )
+                _add_symbol(
+                    symbols,
+                    config_idx,
+                    DESCRIPTOR_MATRIX_SIGNAL,
+                    matrix_signal_index,
+                    ms.symbol,
+                )
+                matrix_signal_index += 1
             descriptors.append(
                 FlatDescriptor(
                     config_idx,
                     DESCRIPTOR_MATRIX,
                     i,
-                    _serialize_matrix(matrix, i),
+                    _serialize_matrix(
+                        matrix,
+                        i,
+                        number_of_sources=(
+                            len(matrix.matrix_signals)
+                            if matrix.matrix_signals
+                            else None
+                        ),
+                        base_source=(
+                            matrix_base_source if matrix.matrix_signals else None
+                        ),
+                    ),
                 )
             )
             _add_symbol(symbols, config_idx, DESCRIPTOR_MATRIX, i, matrix.symbol)

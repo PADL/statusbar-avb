@@ -24,6 +24,8 @@ from .model import (
     Jack,
     Locale,
     LocalizedStringRef,
+    Matrix,
+    MatrixSignal,
     SignalSelector,
     SignalSource,
     Stream,
@@ -45,6 +47,7 @@ from .control_values import (
     SelectorValue,
     UnitsCode,
     Utf8Value,
+    count_values,
     is_linear_type,
     is_selector_type,
     linear_item_size,
@@ -526,6 +529,60 @@ def _parse_signal_selector(
     )
 
 
+def _parse_matrix_signal(ms, context: str) -> MatrixSignal:
+    """Parse one MATRIX_SIGNAL: a plain list of signal sources, or an object
+    {"signals": [...], "symbol": ...}."""
+    symbol = None
+    if isinstance(ms, dict):
+        symbol = ms.get("symbol")
+        sources = ms.get("signals", [])
+    else:
+        sources = ms
+    if not isinstance(sources, list) or not sources:
+        raise ValueError(
+            f"{context}: a matrix signal is a non-empty list of signal "
+            f"sources (or an object with a 'signals' list)"
+        )
+    return MatrixSignal(
+        signals=[
+            _parse_signal_source(sig, f"{context}.signals[{i}]")
+            for i, sig in enumerate(sources)
+        ],
+        symbol=symbol,
+    )
+
+
+def _parse_matrix(m: dict, strings: _LocalizedStrings, context: str) -> Matrix:
+    """Parse a MATRIX descriptor from JSON. Its MATRIX_SIGNAL descriptors are
+    authored inline under 'signals'; flatten assigns their indices and fills
+    number_of_sources / base_source."""
+    width = m.get("width", 0)
+    height = m.get("height", 0)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"{context}: a matrix needs positive 'width' and 'height'")
+    value_type = _parse_control_value_type(m, context)
+    value_details = _parse_control_values(m, value_type, strings, context)
+    matrix_signals = [
+        _parse_matrix_signal(ms, f"{context}.signals[{i}]")
+        for i, ms in enumerate(m.get("signals", []))
+    ]
+    return Matrix(
+        object_name=m.get("name", ""),
+        localized_description=_parse_localized(m, strings, context=context),
+        block_latency=m.get("block_latency", 0),
+        control_latency=m.get("control_latency", 0),
+        control_domain=m.get("control_domain", 0),
+        control_value_type=value_type,
+        control_type=_parse_control_type(m, context),
+        width=width,
+        height=height,
+        number_of_values=count_values(value_type, value_details),
+        value_details=value_details,
+        matrix_signals=matrix_signals,
+        symbol=m.get("symbol"),
+    )
+
+
 def _parse_control_block(
     cb: dict, strings: _LocalizedStrings, context: str
 ) -> ControlBlock:
@@ -757,6 +814,13 @@ def _parse_configuration(
         for i, cb in enumerate(cb_list)
     ]
 
+    # Matrices (singular/plural)
+    matrix_list = _get_list(config_obj, "matrix", "matrices")
+    matrices = [
+        _parse_matrix(m, loc, f"{context}.matrices[{i}]")
+        for i, m in enumerate(matrix_list)
+    ]
+
     # Strings infrastructure: dict-form localized strings own the table when
     # present; otherwise an explicit 'strings' array (with hand-managed integer
     # references), or the legacy vendor/model/config-name fallback.
@@ -789,6 +853,7 @@ def _parse_configuration(
         controls=controls,
         signal_selectors=signal_selectors,
         control_blocks=control_blocks,
+        matrices=matrices,
         locales=locales,
         symbol=config_obj.get("symbol"),
     )

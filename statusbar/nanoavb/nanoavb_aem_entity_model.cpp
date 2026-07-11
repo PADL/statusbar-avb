@@ -282,8 +282,8 @@ auto AemEntityModel::get_descriptor_value_for_wire(
     DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
 
     std::copy(command_body.begin(), command_body.begin() + 4, out.begin());
-    auto const n =
-        handler_->on_get_descriptor_value(command_type, DescriptorId{.ref = ref, .symbol = symbol_for(ref)}, out.subspan(4));
+    auto const n = handler_->on_get_descriptor_value(
+        command_type, DescriptorId{.ref = ref, .symbol = symbol_for(ref)}, command_body.subspan(4), out.subspan(4));
     if (n == 0) {
         return 0;  // no such descriptor / not implemented
     }

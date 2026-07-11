@@ -752,6 +752,72 @@ struct AemGetSignalSelectorCommandPayload
 static_assert(sizeof(AemGetSignalSelectorCommandPayload) == 4, "AemGetSignalSelectorCommandPayload must be 4 bytes");
 
 //
+// SET_MATRIX / GET_MATRIX - Clause 7.4.33 / 7.4.34
+//
+/// Fixed header of the SET_MATRIX / GET_MATRIX command and response
+/// payloads (Figure 7-56 / 7-57). Followed on the wire by the region's
+/// matrix point values (SET command, SET/GET responses; each value is
+/// one element of the matrix's control_value_type).
+struct AemMatrixPayloadHeader
+{
+    static constexpr size_t LENGTH = 16;
+
+    /// rep_direction_value_count bit layout: rep (bit 15, reserved/zero in
+    /// GET), direction (bits 14-13, Table 7-146), value_count (bits 12-0).
+    static constexpr uint16_t REP_FLAG = 0x8000;
+    static constexpr uint16_t DIRECTION_SHIFT = 13;
+    static constexpr uint16_t DIRECTION_MASK = 0x3;
+    static constexpr uint16_t VALUE_COUNT_MASK = 0x1FFF;
+
+    static constexpr uint16_t DIRECTION_HORIZONTAL = 0;
+    static constexpr uint16_t DIRECTION_VERTICAL = 1;
+
+    /// Bytes 0-1: Descriptor type (MATRIX)
+    doublet_t descriptor_type{0};
+
+    /// Bytes 2-3: Descriptor index
+    doublet_t descriptor_index{0};
+
+    /// Bytes 4-5: Starting column of the subregion
+    doublet_t matrix_column{0};
+
+    /// Bytes 6-7: Starting row of the subregion
+    doublet_t matrix_row{0};
+
+    /// Bytes 8-9: Column count of the subregion
+    doublet_t region_width{0};
+
+    /// Bytes 10-11: Row count of the subregion
+    doublet_t region_height{0};
+
+    /// Bytes 12-13: rep | direction | value_count (see bit layout above)
+    doublet_t rep_direction_value_count{0};
+
+    /// Bytes 14-15: Items in the subregion to skip (in `direction` order)
+    /// before applying/reading values
+    doublet_t item_offset{0};
+
+    [[nodiscard]] auto rep() const noexcept -> bool { return (rep_direction_value_count.get() & REP_FLAG) != 0; }
+    [[nodiscard]] auto direction() const noexcept -> uint16_t
+    {
+        return static_cast<uint16_t>((rep_direction_value_count.get() >> DIRECTION_SHIFT) & DIRECTION_MASK);
+    }
+    [[nodiscard]] auto value_count() const noexcept -> uint16_t
+    {
+        return static_cast<uint16_t>(rep_direction_value_count.get() & VALUE_COUNT_MASK);
+    }
+    void set_rep_direction_value_count(bool const rep_flag, uint16_t const direction, uint16_t const value_count) noexcept
+    {
+        rep_direction_value_count = static_cast<uint16_t>(
+            (rep_flag ? REP_FLAG : 0) | ((direction & DIRECTION_MASK) << DIRECTION_SHIFT) | (value_count & VALUE_COUNT_MASK));
+    }
+
+    auto operator<=>(AemMatrixPayloadHeader const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemMatrixPayloadHeader) == 16, "AemMatrixPayloadHeader must be 16 bytes");
+
+//
 // GET_AUDIO_MAP / ADD_AUDIO_MAPPINGS / REMOVE_AUDIO_MAPPINGS
 // Clause 7.4.44 / 7.4.45 / 7.4.46
 //
@@ -1301,6 +1367,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemGetMaxTransitTimeCommandPayload>
     : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemMatrixPayloadHeader> : std::true_type
 {};
 
 template <>

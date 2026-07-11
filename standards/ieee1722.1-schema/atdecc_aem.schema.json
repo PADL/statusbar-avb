@@ -1181,6 +1181,110 @@
       ],
       "additionalProperties": false
     },
+    "matrix_signal": {
+      "description": "One MATRIX_SIGNAL descriptor: a non-empty list of signal sources, or an object with a 'signals' list and optional symbol.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signal_source"
+          },
+          "minItems": 1
+        },
+        {
+          "type": "object",
+          "properties": {
+            "signals": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/signal_source"
+              },
+              "minItems": 1
+            },
+            "symbol": {
+              "$ref": "#/$defs/symbol"
+            }
+          },
+          "required": [
+            "signals"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "matrix": {
+      "type": "object",
+      "description": "MATRIX descriptor: a width x height grid of control points (SET/GET_MATRIX at runtime). MATRIX_SIGNAL descriptors are authored inline under 'signals'; number_of_sources/base_source derive automatically.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Matrix name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "control_type": {
+          "$ref": "#/$defs/control_type_name",
+          "description": "Standard control type of the matrix points (e.g. GAIN)."
+        },
+        "value_type": {
+          "$ref": "#/$defs/control_value_type_name",
+          "description": "Control value type of the matrix points (e.g. LINEAR_INT32)."
+        },
+        "read_only": {
+          "type": "boolean",
+          "default": false
+        },
+        "unsettable": {
+          "type": "boolean",
+          "default": false
+        },
+        "values": {
+          "description": "Typed control values (same forms as a control's 'values')."
+        },
+        "value_details": {
+          "$ref": "#/$defs/hex_string",
+          "description": "Raw value_details bytes (alternative to typed 'values')."
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of columns."
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of rows."
+        },
+        "signals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/matrix_signal"
+          },
+          "description": "Inline MATRIX_SIGNAL descriptors (the matrix's sources)."
+        },
+        "block_latency": {
+          "type": "integer",
+          "default": 0
+        },
+        "control_latency": {
+          "type": "integer",
+          "default": 0
+        },
+        "control_domain": {
+          "type": "integer",
+          "default": 0
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
     "configuration": {
       "type": "object",
       "description": "Configuration descriptor. Contains all child descriptors.",
@@ -1355,6 +1459,27 @@
             "$ref": "#/$defs/control_block"
           },
           "description": "Control blocks (array form)."
+        },
+        "matrix": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/matrix"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/matrix"
+              }
+            }
+          ],
+          "description": "Matrix (singular) or matrices (array)."
+        },
+        "matrices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/matrix"
+          },
+          "description": "Matrices (array form)."
         },
         "strings": {
           "type": "array",
