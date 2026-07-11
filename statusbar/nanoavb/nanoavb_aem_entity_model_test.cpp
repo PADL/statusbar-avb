@@ -51,7 +51,7 @@ namespace {
 class TestHandler : public AemEntityHandler
 {
   public:
-    auto on_get_entity(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorEntity& desc) -> bool override
+    auto on_get_entity(DescriptorId /*id*/, DescriptorEntity& desc) -> bool override
     {
         desc.entity_name = AtdeccString{"TestEntity"};
         desc.configurations_count = 1;
@@ -59,9 +59,9 @@ class TestHandler : public AemEntityHandler
         return true;
     }
 
-    auto on_get_configuration(DescriptorRef ref, uint32_t /*symbol*/, DescriptorConfiguration& desc) -> bool override
+    auto on_get_configuration(DescriptorId id, DescriptorConfiguration& desc) -> bool override
     {
-        if (ref.descriptor_index != 0) {
+        if (id.ref.descriptor_index != 0) {
             return false;
         }
         desc.object_name = AtdeccString{"Config0"};
@@ -73,15 +73,15 @@ class TestHandler : public AemEntityHandler
         return true;
     }
 
-    auto on_get_stream(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStream& desc) -> bool override
+    auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override
     {
-        // Distinguish direction by ref.descriptor_type, same handler method.
-        if (ref.descriptor_index != 0) {
+        // Distinguish direction by id.ref.descriptor_type, same handler method.
+        if (id.ref.descriptor_index != 0) {
             return false;
         }
-        if (ref.descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_INPUT) {
             desc.object_name = AtdeccString{"StreamIn0"};
-        } else if (ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
+        } else if (id.ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
             desc.object_name = AtdeccString{"StreamOut0"};
         } else {
             return false;
@@ -91,9 +91,9 @@ class TestHandler : public AemEntityHandler
         return true;
     }
 
-    auto on_get_audio_map(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioMap& desc) -> bool override
+    auto on_get_audio_map(DescriptorId id, DescriptorAudioMap& desc) -> bool override
     {
-        if (ref.descriptor_index != 0) {
+        if (id.ref.descriptor_index != 0) {
             return false;
         }
         desc.number_of_mappings = 2;
@@ -105,22 +105,22 @@ class TestHandler : public AemEntityHandler
     }
 
     // GET_NAME: entity_name at name_index 0, group_name at name_index 1.
-    auto on_get_name(NameRef ref, uint32_t /*symbol*/) const -> std::optional<AtdeccString> override
+    auto on_get_name(DescriptorId id, uint16_t const name_index) const -> std::optional<AtdeccString> override
     {
-        if (ref.descriptor.descriptor_type == DESCRIPTOR_ENTITY && ref.descriptor.descriptor_index == 0) {
-            if (ref.name_index == 0) {
+        if (id.ref.descriptor_type == DESCRIPTOR_ENTITY && id.ref.descriptor_index == 0) {
+            if (name_index == 0) {
                 return AtdeccString{"TestEntity"};
             }
-            if (ref.name_index == 1) {
+            if (name_index == 1) {
                 return set_group_name_;  // initially empty
             }
         }
         return std::nullopt;
     }
 
-    auto on_set_name(NameRef ref, uint32_t /*symbol*/, AtdeccString const& name) -> uint8_t override
+    auto on_set_name(DescriptorId id, uint16_t const name_index, AtdeccString const& name) -> uint8_t override
     {
-        if (ref.descriptor.descriptor_type == DESCRIPTOR_ENTITY && ref.descriptor.descriptor_index == 0 && ref.name_index == 1) {
+        if (id.ref.descriptor_type == DESCRIPTOR_ENTITY && id.ref.descriptor_index == 0 && name_index == 1) {
             set_group_name_ = name;
             return AEM_STATUS_SUCCESS;
         }
@@ -470,10 +470,10 @@ class SymbolRecordingHandler : public DescriptorStorageHandler
 {
   public:
     using DescriptorStorageHandler::DescriptorStorageHandler;
-    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
+    auto on_get_entity(DescriptorId id, DescriptorEntity& desc) -> bool override
     {
-        last_entity_symbol = symbol;
-        return DescriptorStorageHandler::on_get_entity(ref, symbol, desc);
+        last_entity_symbol = id.symbol;
+        return DescriptorStorageHandler::on_get_entity(id, desc);
     }
     uint32_t last_entity_symbol{0xFFFFFFFF};
 };
@@ -535,9 +535,9 @@ class PatchingHandler : public DescriptorStorageHandler
         , entity_id_{eid}
     {}
 
-    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
+    auto on_get_entity(DescriptorId id, DescriptorEntity& desc) -> bool override
     {
-        if (!DescriptorStorageHandler::on_get_entity(ref, symbol, desc)) {
+        if (!DescriptorStorageHandler::on_get_entity(id, desc)) {
             return false;
         }
         desc.entity_id = entity_id_;
@@ -684,18 +684,18 @@ auto make_single_descriptor_blob(TocInput entry) -> std::vector<uint8_t>
 }
 
 template <typename DescT>
-void verify_sh(uint16_t dtype, uint16_t dlen, bool (AemEntityHandler::*method)(DescriptorRef, uint32_t, DescT&))
+void verify_sh(uint16_t dtype, uint16_t dlen, bool (AemEntityHandler::*method)(DescriptorId, DescT&))
 {
     auto blob = make_single_descriptor_blob({dtype, 0, 0, dlen});
     auto sr = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
     EXPECT_TRUE(sr.has_value());
     DescriptorStorageHandler handler{*sr};
-    DescriptorRef ref_ok{.configuration_index = 0, .descriptor_type = dtype, .descriptor_index = 0};
+    DescriptorId const id_ok{.ref = {.configuration_index = 0, .descriptor_type = dtype, .descriptor_index = 0}, .symbol = 0};
     DescT desc{};
-    EXPECT_TRUE((handler.*method)(ref_ok, 0, desc));
-    DescriptorRef ref_bad{.configuration_index = 0, .descriptor_type = dtype, .descriptor_index = 99};
+    EXPECT_TRUE((handler.*method)(id_ok, desc));
+    DescriptorId const id_bad{.ref = {.configuration_index = 0, .descriptor_type = dtype, .descriptor_index = 99}, .symbol = 0};
     DescT desc2{};
-    EXPECT_FALSE((handler.*method)(ref_bad, 0, desc2));
+    EXPECT_FALSE((handler.*method)(id_bad, desc2));
 }
 
 }  // namespace
@@ -999,100 +999,41 @@ using statusbar::atdecc::aem::DESCRIPTOR_VIDEO_UNIT;
 class AllDescriptorsHandler : public AemEntityHandler
 {
   public:
-    auto on_get_audio_unit(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorAudioUnit& /*d*/) -> bool override { return true; }
-    auto on_get_video_unit(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorVideoUnit& /*d*/) -> bool override { return true; }
-    auto on_get_sensor_unit(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSensorUnit& /*d*/) -> bool override
+    auto on_get_audio_unit(DescriptorId /*id*/, DescriptorAudioUnit& /*d*/) -> bool override { return true; }
+    auto on_get_video_unit(DescriptorId /*id*/, DescriptorVideoUnit& /*d*/) -> bool override { return true; }
+    auto on_get_sensor_unit(DescriptorId /*id*/, DescriptorSensorUnit& /*d*/) -> bool override { return true; }
+    auto on_get_jack(DescriptorId /*id*/, DescriptorJack& /*d*/) -> bool override { return true; }
+    auto on_get_avb_interface(DescriptorId /*id*/, DescriptorAvbInterface& /*d*/) -> bool override { return true; }
+    auto on_get_clock_source(DescriptorId /*id*/, DescriptorClockSource& /*d*/) -> bool override { return true; }
+    auto on_get_clock_domain(DescriptorId /*id*/, DescriptorClockDomain& /*d*/) -> bool override { return true; }
+    auto on_get_memory_object(DescriptorId /*id*/, DescriptorMemoryObject& /*d*/) -> bool override { return true; }
+    auto on_get_locale(DescriptorId /*id*/, DescriptorLocale& /*d*/) -> bool override { return true; }
+    auto on_get_strings(DescriptorId /*id*/, DescriptorStrings& /*d*/) -> bool override { return true; }
+    auto on_get_stream_port(DescriptorId /*id*/, DescriptorStreamPort& /*d*/) -> bool override { return true; }
+    auto on_get_external_port(DescriptorId /*id*/, DescriptorExternalPort& /*d*/) -> bool override { return true; }
+    auto on_get_internal_port(DescriptorId /*id*/, DescriptorInternalPort& /*d*/) -> bool override { return true; }
+    auto on_get_audio_cluster(DescriptorId /*id*/, statusbar::atdecc::aem::DescriptorAudioCluster& /*d*/) -> bool override
     {
         return true;
     }
-    auto on_get_jack(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorJack& /*d*/) -> bool override { return true; }
-    auto on_get_avb_interface(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorAvbInterface& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_clock_source(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorClockSource& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_clock_domain(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorClockDomain& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_memory_object(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMemoryObject& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_locale(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorLocale& /*d*/) -> bool override { return true; }
-    auto on_get_strings(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorStrings& /*d*/) -> bool override { return true; }
-    auto on_get_stream_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorStreamPort& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_external_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorExternalPort& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_internal_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorInternalPort& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_audio_cluster(DescriptorRef /*ref*/, uint32_t /*symbol*/, statusbar::atdecc::aem::DescriptorAudioCluster& /*d*/)
-        -> bool override
-    {
-        return true;
-    }
-    auto on_get_video_cluster(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorVideoCluster& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_sensor_cluster(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSensorCluster& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_video_map(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorVideoMap& /*d*/) -> bool override { return true; }
-    auto on_get_sensor_map(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSensorMap& /*d*/) -> bool override { return true; }
-    auto on_get_control(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorControl& /*d*/) -> bool override { return true; }
-    auto on_get_control_block(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorControlBlock& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_signal_selector(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalSelector& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_mixer(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMixer& /*d*/) -> bool override { return true; }
-    auto on_get_matrix(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMatrix& /*d*/) -> bool override { return true; }
-    auto on_get_matrix_signal(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMatrixSignal& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_signal_splitter(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalSplitter& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_signal_combiner(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalCombiner& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_signal_demultiplexer(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalDemultiplexer& /*d*/)
-        -> bool override
-    {
-        return true;
-    }
-    auto on_get_signal_multiplexer(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalMultiplexer& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_signal_transcoder(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalTranscoder& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_timing(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorTiming& /*d*/) -> bool override { return true; }
-    auto on_get_ptp_instance(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorPtpInstance& /*d*/) -> bool override
-    {
-        return true;
-    }
-    auto on_get_ptp_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorPtpPort& /*d*/) -> bool override { return true; }
+    auto on_get_video_cluster(DescriptorId /*id*/, DescriptorVideoCluster& /*d*/) -> bool override { return true; }
+    auto on_get_sensor_cluster(DescriptorId /*id*/, DescriptorSensorCluster& /*d*/) -> bool override { return true; }
+    auto on_get_video_map(DescriptorId /*id*/, DescriptorVideoMap& /*d*/) -> bool override { return true; }
+    auto on_get_sensor_map(DescriptorId /*id*/, DescriptorSensorMap& /*d*/) -> bool override { return true; }
+    auto on_get_control(DescriptorId /*id*/, DescriptorControl& /*d*/) -> bool override { return true; }
+    auto on_get_control_block(DescriptorId /*id*/, DescriptorControlBlock& /*d*/) -> bool override { return true; }
+    auto on_get_signal_selector(DescriptorId /*id*/, DescriptorSignalSelector& /*d*/) -> bool override { return true; }
+    auto on_get_mixer(DescriptorId /*id*/, DescriptorMixer& /*d*/) -> bool override { return true; }
+    auto on_get_matrix(DescriptorId /*id*/, DescriptorMatrix& /*d*/) -> bool override { return true; }
+    auto on_get_matrix_signal(DescriptorId /*id*/, DescriptorMatrixSignal& /*d*/) -> bool override { return true; }
+    auto on_get_signal_splitter(DescriptorId /*id*/, DescriptorSignalSplitter& /*d*/) -> bool override { return true; }
+    auto on_get_signal_combiner(DescriptorId /*id*/, DescriptorSignalCombiner& /*d*/) -> bool override { return true; }
+    auto on_get_signal_demultiplexer(DescriptorId /*id*/, DescriptorSignalDemultiplexer& /*d*/) -> bool override { return true; }
+    auto on_get_signal_multiplexer(DescriptorId /*id*/, DescriptorSignalMultiplexer& /*d*/) -> bool override { return true; }
+    auto on_get_signal_transcoder(DescriptorId /*id*/, DescriptorSignalTranscoder& /*d*/) -> bool override { return true; }
+    auto on_get_timing(DescriptorId /*id*/, DescriptorTiming& /*d*/) -> bool override { return true; }
+    auto on_get_ptp_instance(DescriptorId /*id*/, DescriptorPtpInstance& /*d*/) -> bool override { return true; }
+    auto on_get_ptp_port(DescriptorId /*id*/, DescriptorPtpPort& /*d*/) -> bool override { return true; }
 };
 
 }  // namespace
@@ -1157,20 +1098,18 @@ class ValueHandler : public DescriptorStorageHandler
   public:
     using DescriptorStorageHandler::DescriptorStorageHandler;
 
-    auto on_set_descriptor_value(uint16_t command_type, DescriptorRef /*ref*/, uint32_t symbol, std::span<uint8_t const> value)
-        -> uint8_t override
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t const> value) -> uint8_t override
     {
         last_set_command = command_type;
-        last_set_symbol = symbol;
+        last_set_symbol = id.symbol;
         store.assign(value.begin(), value.end());
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
-    auto on_get_descriptor_value(uint16_t command_type, DescriptorRef /*ref*/, uint32_t symbol, std::span<uint8_t> out)
-        -> size_t override
+    auto on_get_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t> out) -> size_t override
     {
         last_get_command = command_type;
-        last_get_symbol = symbol;
+        last_get_symbol = id.symbol;
         if (out.size() < store.size()) {
             return 0;
         }

@@ -220,18 +220,18 @@ TEST(avb_entity_host_symbol, identify_control_value_set_get)
     using statusbar::atdecc::AEM_STATUS_SUCCESS;
     using statusbar::atdecc::aem::DESCRIPTOR_CONTROL;
 
-    statusbar::nanoavb::DescriptorRef const identify{
-        .configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 1};
-    statusbar::nanoavb::DescriptorRef const mute{
-        .configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 0};
+    statusbar::nanoavb::DescriptorId const identify{
+        .ref = {.configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 1}, .symbol = 0};
+    statusbar::nanoavb::DescriptorId const mute{
+        .ref = {.configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 0}, .symbol = 0};
 
     std::array<uint8_t, 1> const on{0xFF};
-    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, identify, 0, on), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, identify, on), AEM_STATUS_SUCCESS);
     EXPECT_EQ(handler.identify_value(), 0xFF);
     std::array<uint8_t, 8> out{};
-    EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, identify, 0, out), 1u);
+    EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, identify, out), 1u);
     EXPECT_EQ(out[0], 0xFF);
-    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, 0, on), AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, on), AEM_STATUS_NOT_IMPLEMENTED);
 }
 
 TEST(avb_entity_host_symbol, local_identify_trigger)

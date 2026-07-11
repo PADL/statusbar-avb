@@ -1240,8 +1240,7 @@ namespace {
 class SetAcceptingHandler : public AemEntityHandler
 {
   public:
-    auto on_set_descriptor_value(uint16_t command_type, DescriptorRef /*ref*/, uint32_t /*symbol*/, std::span<uint8_t const> value)
-        -> uint8_t override
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> value) -> uint8_t override
     {
         last_command_type = command_type;
         last_value.assign(value.begin(), value.end());

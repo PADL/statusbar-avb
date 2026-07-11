@@ -15,15 +15,15 @@
 ///
 /// Symbol identifiers
 /// ==================
-/// Each on_get_* method receives a `uint32_t symbol` argument. Symbols
-/// are pre-agreed application-layer identifiers that survive descriptor_index
-/// reshuffling: if the AEM XML tooling is regenerated and the index of a
-/// control changes, its symbol stays the same, so application code keeps
-/// binding to the same abstract "volume control" entry. The AemEntityModel
-/// looks up the symbol from the `DescriptorStorage` symbol table (when one
-/// is attached) and passes it through to the handler; without a storage,
-/// the symbol is 0 and the handler is expected to dispatch on
-/// descriptor_index directly.
+/// Each hook receives a `DescriptorId` by value: the wire address plus the
+/// blob symbol. Symbols are pre-agreed application-layer identifiers that
+/// survive descriptor_index reshuffling: if the AEM tooling is regenerated
+/// and the index of a control changes, its symbol stays the same, so
+/// application code keeps binding to the same abstract "volume control"
+/// entry. The AemEntityModel looks up the symbol from the
+/// `DescriptorStorage` symbol table (when one is attached) and passes it
+/// through to the handler; without a storage, the symbol is 0 and the
+/// handler is expected to dispatch on the wire address directly.
 ///
 /// Default behaviour
 /// =================
@@ -93,6 +93,24 @@ using atdecc::aem::DescriptorVideoMap;
 using atdecc::aem::DescriptorVideoUnit;
 using atdecc::aem::NameRef;
 
+/// Identity of the descriptor a handler hook is being asked about, passed
+/// BY VALUE to every on_get_*/on_set_* hook: the wire address (`ref` —
+/// configuration, descriptor type, descriptor index) plus the blob's
+/// `symbol` for that descriptor.
+///
+/// Descriptor indices depend on the AEM hierarchy — regenerating the entity
+/// model (adding a control, reordering a unit) renumbers everything after
+/// the change. The symbol is the stable application-level identifier that
+/// survives those updates, so handler code should key its dynamic state on
+/// `id.symbol` and treat `id.ref` as the transient wire address. Without an
+/// attached DescriptorStorage the symbol is 0 and handlers fall back to
+/// dispatching on the wire address.
+struct DescriptorId
+{
+    DescriptorRef ref{};  ///< wire address: configuration_index + descriptor_type + descriptor_index
+    uint32_t symbol{0};   ///< blob symbol-table id (stable across model regeneration); 0 = none
+};
+
 /// Abstract base class for AEM descriptor providers.
 ///
 /// Handlers implement only the descriptor types their entity uses.
@@ -105,7 +123,7 @@ using atdecc::aem::NameRef;
 /// One method per C++ struct type is provided. For pairs like
 /// STREAM_INPUT/STREAM_OUTPUT that share a struct but carry different
 /// descriptor_type codes, the handler can branch on
-/// `ref.descriptor_type` inside a single `on_get_stream` override.
+/// `id.ref.descriptor_type` inside a single `on_get_stream` override.
 class AemEntityHandler
 {
   public:
@@ -133,182 +151,102 @@ class AemEntityHandler
 
     // ---- Top-level descriptors -------------------------------------------
 
-    virtual auto on_get_entity(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorEntity& /*desc*/) -> bool { return false; }
+    virtual auto on_get_entity(DescriptorId /*id*/, DescriptorEntity& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_configuration(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorConfiguration& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_configuration(DescriptorId /*id*/, DescriptorConfiguration& /*desc*/) -> bool { return false; }
 
     // ---- Unit descriptors ------------------------------------------------
 
-    virtual auto on_get_audio_unit(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorAudioUnit& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_audio_unit(DescriptorId /*id*/, DescriptorAudioUnit& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_video_unit(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorVideoUnit& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_video_unit(DescriptorId /*id*/, DescriptorVideoUnit& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_sensor_unit(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSensorUnit& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_sensor_unit(DescriptorId /*id*/, DescriptorSensorUnit& /*desc*/) -> bool { return false; }
 
     // ---- Stream / Jack / Interface / Clock -------------------------------
     // Stream input and output share DescriptorStream. Branch on
     // ref.descriptor_type (DESCRIPTOR_STREAM_INPUT / DESCRIPTOR_STREAM_OUTPUT)
     // inside this method to distinguish direction.
 
-    virtual auto on_get_stream(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorStream& /*desc*/) -> bool { return false; }
+    virtual auto on_get_stream(DescriptorId /*id*/, DescriptorStream& /*desc*/) -> bool { return false; }
 
     /// Jack input and output share DescriptorJack. Branch on
     /// ref.descriptor_type (DESCRIPTOR_JACK_INPUT / DESCRIPTOR_JACK_OUTPUT).
-    virtual auto on_get_jack(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorJack& /*desc*/) -> bool { return false; }
+    virtual auto on_get_jack(DescriptorId /*id*/, DescriptorJack& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_avb_interface(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorAvbInterface& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_avb_interface(DescriptorId /*id*/, DescriptorAvbInterface& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_clock_source(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorClockSource& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_clock_source(DescriptorId /*id*/, DescriptorClockSource& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_clock_domain(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorClockDomain& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_clock_domain(DescriptorId /*id*/, DescriptorClockDomain& /*desc*/) -> bool { return false; }
 
     // ---- Memory / Locale / Strings ---------------------------------------
 
-    virtual auto on_get_memory_object(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMemoryObject& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_memory_object(DescriptorId /*id*/, DescriptorMemoryObject& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_locale(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorLocale& /*desc*/) -> bool { return false; }
+    virtual auto on_get_locale(DescriptorId /*id*/, DescriptorLocale& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_strings(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorStrings& /*desc*/) -> bool { return false; }
+    virtual auto on_get_strings(DescriptorId /*id*/, DescriptorStrings& /*desc*/) -> bool { return false; }
 
     // ---- Ports -----------------------------------------------------------
     // Each *_port descriptor has input and output variants sharing one
     // struct; branch on ref.descriptor_type inside the handler.
 
-    virtual auto on_get_stream_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorStreamPort& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_stream_port(DescriptorId /*id*/, DescriptorStreamPort& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_external_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorExternalPort& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_external_port(DescriptorId /*id*/, DescriptorExternalPort& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_internal_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorInternalPort& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_internal_port(DescriptorId /*id*/, DescriptorInternalPort& /*desc*/) -> bool { return false; }
 
     // ---- Clusters --------------------------------------------------------
 
-    virtual auto on_get_audio_cluster(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorAudioCluster& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_audio_cluster(DescriptorId /*id*/, DescriptorAudioCluster& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_video_cluster(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorVideoCluster& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_video_cluster(DescriptorId /*id*/, DescriptorVideoCluster& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_sensor_cluster(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSensorCluster& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_sensor_cluster(DescriptorId /*id*/, DescriptorSensorCluster& /*desc*/) -> bool { return false; }
 
     // ---- Maps ------------------------------------------------------------
 
-    virtual auto on_get_audio_map(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorAudioMap& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_audio_map(DescriptorId /*id*/, DescriptorAudioMap& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_video_map(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorVideoMap& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_video_map(DescriptorId /*id*/, DescriptorVideoMap& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_sensor_map(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSensorMap& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_sensor_map(DescriptorId /*id*/, DescriptorSensorMap& /*desc*/) -> bool { return false; }
 
     // ---- Controls --------------------------------------------------------
 
-    virtual auto on_get_control(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorControl& /*desc*/) -> bool { return false; }
+    virtual auto on_get_control(DescriptorId /*id*/, DescriptorControl& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_control_block(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorControlBlock& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_control_block(DescriptorId /*id*/, DescriptorControlBlock& /*desc*/) -> bool { return false; }
 
     // ---- Signal routing --------------------------------------------------
 
-    virtual auto on_get_signal_selector(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalSelector& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_signal_selector(DescriptorId /*id*/, DescriptorSignalSelector& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_mixer(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMixer& /*desc*/) -> bool { return false; }
+    virtual auto on_get_mixer(DescriptorId /*id*/, DescriptorMixer& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_matrix(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMatrix& /*desc*/) -> bool { return false; }
+    virtual auto on_get_matrix(DescriptorId /*id*/, DescriptorMatrix& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_matrix_signal(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorMatrixSignal& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_matrix_signal(DescriptorId /*id*/, DescriptorMatrixSignal& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_signal_splitter(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalSplitter& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_signal_splitter(DescriptorId /*id*/, DescriptorSignalSplitter& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_signal_combiner(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalCombiner& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_signal_combiner(DescriptorId /*id*/, DescriptorSignalCombiner& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_signal_demultiplexer(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalDemultiplexer& /*desc*/)
-        -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_signal_demultiplexer(DescriptorId /*id*/, DescriptorSignalDemultiplexer& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_signal_multiplexer(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalMultiplexer& /*desc*/)
-        -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_signal_multiplexer(DescriptorId /*id*/, DescriptorSignalMultiplexer& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_signal_transcoder(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorSignalTranscoder& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_signal_transcoder(DescriptorId /*id*/, DescriptorSignalTranscoder& /*desc*/) -> bool { return false; }
 
     // ---- Timing / PTP ----------------------------------------------------
 
-    virtual auto on_get_timing(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorTiming& /*desc*/) -> bool { return false; }
+    virtual auto on_get_timing(DescriptorId /*id*/, DescriptorTiming& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_ptp_instance(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorPtpInstance& /*desc*/) -> bool
-    {
-        return false;
-    }
+    virtual auto on_get_ptp_instance(DescriptorId /*id*/, DescriptorPtpInstance& /*desc*/) -> bool { return false; }
 
-    virtual auto on_get_ptp_port(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorPtpPort& /*desc*/) -> bool { return false; }
+    virtual auto on_get_ptp_port(DescriptorId /*id*/, DescriptorPtpPort& /*desc*/) -> bool { return false; }
 
     // ---- Name get/set (cross-cutting, IEEE 1722.1 Clause 7.4.17/7.4.18) --
 
@@ -316,12 +254,15 @@ class AemEntityHandler
     /// (descriptor, name_index) pair does not exist. Multiple names per
     /// descriptor are common — e.g. ENTITY has entity_name (index 0)
     /// and group_name (index 1).
-    virtual auto on_get_name(NameRef /*ref*/, uint32_t /*symbol*/) const -> std::optional<AtdeccString> { return std::nullopt; }
+    virtual auto on_get_name(DescriptorId /*id*/, uint16_t /*name_index*/) const -> std::optional<AtdeccString>
+    {
+        return std::nullopt;
+    }
 
     /// Apply a SET_NAME command. Return an AEM_STATUS_* code.
     /// AEM_STATUS_NOT_IMPLEMENTED is the appropriate default for read-only
     /// entities; return AEM_STATUS_SUCCESS after persisting the new name.
-    virtual auto on_set_name(NameRef /*ref*/, uint32_t /*symbol*/, AtdeccString const& /*name*/) -> uint8_t
+    virtual auto on_set_name(DescriptorId /*id*/, uint16_t /*name_index*/, AtdeccString const& /*name*/) -> uint8_t
     {
         return AEM_STATUS_NOT_IMPLEMENTED;
     }
@@ -340,8 +281,8 @@ class AemEntityHandler
     /// code). @p value is the command payload after the descriptor_type/index header.
     /// Apply it (e.g. map a CONTROL value to DSP coefficients), optionally clamped to
     /// the descriptor's range, and return an AEM_STATUS_* code. Default: NOT_IMPLEMENTED.
-    virtual auto on_set_descriptor_value(
-        uint16_t /*command_type*/, DescriptorRef /*ref*/, uint32_t /*symbol*/, std::span<uint8_t const> /*value*/) -> uint8_t
+    virtual auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t
     {
         return AEM_STATUS_NOT_IMPLEMENTED;
     }
@@ -350,8 +291,7 @@ class AemEntityHandler
     /// code). Write the current value payload (the bytes that follow the
     /// descriptor_type/index header on the wire) into @p out and return the number of
     /// bytes written, or 0 for NOT_IMPLEMENTED / no such descriptor. Default: 0.
-    virtual auto on_get_descriptor_value(
-        uint16_t /*command_type*/, DescriptorRef /*ref*/, uint32_t /*symbol*/, std::span<uint8_t> /*out*/) -> size_t
+    virtual auto on_get_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t> /*out*/) -> size_t
     {
         return 0;
     }

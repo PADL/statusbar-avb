@@ -62,7 +62,7 @@ auto dispatch_fixed(
     desc.descriptor_index = ref.descriptor_index;
 
     // Delegate to the handler for dynamic fields.
-    if (!(handler.*HandlerMethod)(ref, symbol, desc)) {
+    if (!(handler.*HandlerMethod)(DescriptorId{.ref = ref, .symbol = symbol}, desc)) {
         return 0;
     }
 
@@ -192,7 +192,8 @@ auto AemEntityModel::get_name_for_wire(NameRef ref, std::span<uint8_t> out) cons
         return 0;
     }
 
-    auto name_opt = handler_->on_get_name(ref, symbol_for(ref.descriptor));
+    auto name_opt =
+        handler_->on_get_name(DescriptorId{.ref = ref.descriptor, .symbol = symbol_for(ref.descriptor)}, ref.name_index);
     if (!name_opt) {
         return 0;
     }
@@ -238,7 +239,7 @@ auto AemEntityModel::apply_set_name(std::span<uint8_t const> command_body) -> ui
     auto const name_bytes = command_body.subspan(NAME_HEADER_SIZE, AtdeccString::LENGTH);
     std::memcpy(name.value.data(), name_bytes.data(), AtdeccString::LENGTH);
 
-    return handler_->on_set_name(ref, symbol_for(ref.descriptor), name);
+    return handler_->on_set_name(DescriptorId{.ref = ref.descriptor, .symbol = symbol_for(ref.descriptor)}, ref.name_index, name);
 }
 
 auto AemEntityModel::apply_set_descriptor_value(
@@ -254,7 +255,8 @@ auto AemEntityModel::apply_set_descriptor_value(
     span_load(dindex, command_body.subspan(2, 2));
     DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
 
-    auto const status = handler_->on_set_descriptor_value(command_type, ref, symbol_for(ref), command_body.subspan(4));
+    auto const status = handler_->on_set_descriptor_value(
+        command_type, DescriptorId{.ref = ref, .symbol = symbol_for(ref)}, command_body.subspan(4));
 
     // AECP echoes the SET command (descriptor_type/index + value) as the response body.
     size_t size = 0;
@@ -280,7 +282,8 @@ auto AemEntityModel::get_descriptor_value_for_wire(
     DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
 
     std::copy(command_body.begin(), command_body.begin() + 4, out.begin());
-    auto const n = handler_->on_get_descriptor_value(command_type, ref, symbol_for(ref), out.subspan(4));
+    auto const n =
+        handler_->on_get_descriptor_value(command_type, DescriptorId{.ref = ref, .symbol = symbol_for(ref)}, out.subspan(4));
     if (n == 0) {
         return 0;  // no such descriptor / not implemented
     }

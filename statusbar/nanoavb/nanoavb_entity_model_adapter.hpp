@@ -19,7 +19,7 @@
 /// typed storage directly, so there is no wire-format round-trip cost.
 ///
 /// Descriptor pairs that share a C++ struct are handled by branching
-/// on `ref.descriptor_type`:
+/// on `id.ref.descriptor_type`:
 ///   * STREAM_INPUT / STREAM_OUTPUT -> EntityModel::get_stream_input /
 ///     get_stream_output
 ///   * JACK_INPUT / JACK_OUTPUT -> EntityModel::get_jack_input /
@@ -48,15 +48,15 @@ class EntityModelAdapter : public AemEntityHandler
 
     // ---- Top-level descriptors -------------------------------------------
 
-    auto on_get_entity(DescriptorRef /*ref*/, uint32_t /*symbol*/, DescriptorEntity& desc) -> bool override
+    auto on_get_entity(DescriptorId /*id*/, DescriptorEntity& desc) -> bool override
     {
         desc = model_->get_entity();
         return true;
     }
 
-    auto on_get_configuration(DescriptorRef ref, uint32_t /*symbol*/, DescriptorConfiguration& desc) -> bool override
+    auto on_get_configuration(DescriptorId id, DescriptorConfiguration& desc) -> bool override
     {
-        auto result = model_->get_configuration(ref.descriptor_index);
+        auto result = model_->get_configuration(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -66,9 +66,9 @@ class EntityModelAdapter : public AemEntityHandler
 
     // ---- Unit descriptors ------------------------------------------------
 
-    auto on_get_audio_unit(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioUnit& desc) -> bool override
+    auto on_get_audio_unit(DescriptorId id, DescriptorAudioUnit& desc) -> bool override
     {
-        auto result = model_->get_audio_unit(ref.descriptor_index);
+        auto result = model_->get_audio_unit(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -78,21 +78,21 @@ class EntityModelAdapter : public AemEntityHandler
 
     // ---- Streams / Jacks / Interface / Clock -----------------------------
 
-    auto on_get_stream(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStream& desc) -> bool override
+    auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override
     {
         using atdecc::aem::DESCRIPTOR_STREAM_INPUT;
         using atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
 
-        if (ref.descriptor_type == DESCRIPTOR_STREAM_INPUT) {
-            auto result = model_->get_stream_input(ref.descriptor_index);
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+            auto result = model_->get_stream_input(id.ref.descriptor_index);
             if (!result.has_value()) {
                 return false;
             }
             desc = **result;
             return true;
         }
-        if (ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-            auto result = model_->get_stream_output(ref.descriptor_index);
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
+            auto result = model_->get_stream_output(id.ref.descriptor_index);
             if (!result.has_value()) {
                 return false;
             }
@@ -102,21 +102,21 @@ class EntityModelAdapter : public AemEntityHandler
         return false;
     }
 
-    auto on_get_jack(DescriptorRef ref, uint32_t /*symbol*/, DescriptorJack& desc) -> bool override
+    auto on_get_jack(DescriptorId id, DescriptorJack& desc) -> bool override
     {
         using atdecc::aem::DESCRIPTOR_JACK_INPUT;
         using atdecc::aem::DESCRIPTOR_JACK_OUTPUT;
 
-        if (ref.descriptor_type == DESCRIPTOR_JACK_INPUT) {
-            auto result = model_->get_jack_input(ref.descriptor_index);
+        if (id.ref.descriptor_type == DESCRIPTOR_JACK_INPUT) {
+            auto result = model_->get_jack_input(id.ref.descriptor_index);
             if (!result.has_value()) {
                 return false;
             }
             desc = **result;
             return true;
         }
-        if (ref.descriptor_type == DESCRIPTOR_JACK_OUTPUT) {
-            auto result = model_->get_jack_output(ref.descriptor_index);
+        if (id.ref.descriptor_type == DESCRIPTOR_JACK_OUTPUT) {
+            auto result = model_->get_jack_output(id.ref.descriptor_index);
             if (!result.has_value()) {
                 return false;
             }
@@ -126,9 +126,9 @@ class EntityModelAdapter : public AemEntityHandler
         return false;
     }
 
-    auto on_get_avb_interface(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAvbInterface& desc) -> bool override
+    auto on_get_avb_interface(DescriptorId id, DescriptorAvbInterface& desc) -> bool override
     {
-        auto result = model_->get_avb_interface(ref.descriptor_index);
+        auto result = model_->get_avb_interface(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -136,9 +136,9 @@ class EntityModelAdapter : public AemEntityHandler
         return true;
     }
 
-    auto on_get_clock_source(DescriptorRef ref, uint32_t /*symbol*/, DescriptorClockSource& desc) -> bool override
+    auto on_get_clock_source(DescriptorId id, DescriptorClockSource& desc) -> bool override
     {
-        auto result = model_->get_clock_source(ref.descriptor_index);
+        auto result = model_->get_clock_source(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -146,9 +146,9 @@ class EntityModelAdapter : public AemEntityHandler
         return true;
     }
 
-    auto on_get_clock_domain(DescriptorRef ref, uint32_t /*symbol*/, DescriptorClockDomain& desc) -> bool override
+    auto on_get_clock_domain(DescriptorId id, DescriptorClockDomain& desc) -> bool override
     {
-        auto result = model_->get_clock_domain(ref.descriptor_index);
+        auto result = model_->get_clock_domain(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -158,9 +158,9 @@ class EntityModelAdapter : public AemEntityHandler
 
     // ---- Locale / Strings ------------------------------------------------
 
-    auto on_get_locale(DescriptorRef ref, uint32_t /*symbol*/, DescriptorLocale& desc) -> bool override
+    auto on_get_locale(DescriptorId id, DescriptorLocale& desc) -> bool override
     {
-        auto result = model_->get_locale(ref.descriptor_index);
+        auto result = model_->get_locale(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -168,9 +168,9 @@ class EntityModelAdapter : public AemEntityHandler
         return true;
     }
 
-    auto on_get_strings(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStrings& desc) -> bool override
+    auto on_get_strings(DescriptorId id, DescriptorStrings& desc) -> bool override
     {
-        auto result = model_->get_strings(ref.descriptor_index);
+        auto result = model_->get_strings(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -180,21 +180,21 @@ class EntityModelAdapter : public AemEntityHandler
 
     // ---- Ports -----------------------------------------------------------
 
-    auto on_get_stream_port(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStreamPort& desc) -> bool override
+    auto on_get_stream_port(DescriptorId id, DescriptorStreamPort& desc) -> bool override
     {
         using atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
         using atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
 
-        if (ref.descriptor_type == DESCRIPTOR_STREAM_PORT_INPUT) {
-            auto result = model_->get_stream_port_input(ref.descriptor_index);
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_PORT_INPUT) {
+            auto result = model_->get_stream_port_input(id.ref.descriptor_index);
             if (!result.has_value()) {
                 return false;
             }
             desc = **result;
             return true;
         }
-        if (ref.descriptor_type == DESCRIPTOR_STREAM_PORT_OUTPUT) {
-            auto result = model_->get_stream_port_output(ref.descriptor_index);
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_PORT_OUTPUT) {
+            auto result = model_->get_stream_port_output(id.ref.descriptor_index);
             if (!result.has_value()) {
                 return false;
             }
@@ -206,9 +206,9 @@ class EntityModelAdapter : public AemEntityHandler
 
     // ---- Clusters / Maps / Control ---------------------------------------
 
-    auto on_get_audio_cluster(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioCluster& desc) -> bool override
+    auto on_get_audio_cluster(DescriptorId id, DescriptorAudioCluster& desc) -> bool override
     {
-        auto result = model_->get_audio_cluster(ref.descriptor_index);
+        auto result = model_->get_audio_cluster(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -216,9 +216,9 @@ class EntityModelAdapter : public AemEntityHandler
         return true;
     }
 
-    auto on_get_audio_map(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioMap& desc) -> bool override
+    auto on_get_audio_map(DescriptorId id, DescriptorAudioMap& desc) -> bool override
     {
-        auto result = model_->get_audio_map(ref.descriptor_index);
+        auto result = model_->get_audio_map(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }
@@ -226,9 +226,9 @@ class EntityModelAdapter : public AemEntityHandler
         return true;
     }
 
-    auto on_get_control(DescriptorRef ref, uint32_t /*symbol*/, DescriptorControl& desc) -> bool override
+    auto on_get_control(DescriptorId id, DescriptorControl& desc) -> bool override
     {
-        auto result = model_->get_control(ref.descriptor_index);
+        auto result = model_->get_control(id.ref.descriptor_index);
         if (!result.has_value()) {
             return false;
         }

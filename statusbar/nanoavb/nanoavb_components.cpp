@@ -290,8 +290,9 @@ auto resolve_entity_descriptor(AemEntityHandler& handler) -> DescriptorEntity
 {
     DescriptorEntity desc{};
     (void)handler.on_get_entity(
-        DescriptorRef{.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0},
-        /*symbol=*/0,
+        DescriptorId{
+            .ref = {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0},
+            .symbol = 0},
         desc);
     return desc;
 }

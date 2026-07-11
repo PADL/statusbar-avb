@@ -107,10 +107,10 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
         manage_entity_name(AtdeccString{std::string{entity_name}.c_str()});
     }
 
-    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
+    auto on_get_entity(nanoavb::DescriptorId id, DescriptorEntity& desc) -> bool override
     {
         // Base fills the blob bytes and reflects the managed entity_name.
-        if (!DescriptorStorageHandler::on_get_entity(ref, symbol, desc)) {
+        if (!DescriptorStorageHandler::on_get_entity(id, desc)) {
             return false;
         }
         desc.entity_id = entity_id_;
@@ -119,9 +119,9 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
         return true;
     }
 
-    auto on_get_avb_interface(DescriptorRef ref, uint32_t symbol, DescriptorAvbInterface& desc) -> bool override
+    auto on_get_avb_interface(nanoavb::DescriptorId id, DescriptorAvbInterface& desc) -> bool override
     {
-        if (!DescriptorStorageHandler::on_get_avb_interface(ref, symbol, desc)) {
+        if (!DescriptorStorageHandler::on_get_avb_interface(id, desc)) {
             return false;
         }
         if (!patch_avb_) {

@@ -110,9 +110,9 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // ---- Top-level ------------------------------------------------------
 
-    auto on_get_entity(DescriptorRef ref, uint32_t /*symbol*/, DescriptorEntity& desc) -> bool override
+    auto on_get_entity(DescriptorId id, DescriptorEntity& desc) -> bool override
     {
-        if (!load(ref, desc)) {
+        if (!load(id.ref, desc)) {
             return false;
         }
         // Reflect the (runtime-changeable) managed entity name, if enabled.
@@ -150,17 +150,17 @@ class DescriptorStorageHandler : public AemEntityHandler
         on_entity_name_changed_ = std::move(fn);
     }
 
-    auto on_get_name(NameRef ref, uint32_t /*symbol*/) const -> std::optional<AtdeccString> override
+    auto on_get_name(DescriptorId id, uint16_t const name_index) const -> std::optional<AtdeccString> override
     {
-        if (manages_entity_name_field(ref)) {
+        if (manages_entity_name_field(id.ref, name_index)) {
             return entity_name_;
         }
         return std::nullopt;
     }
 
-    auto on_set_name(NameRef ref, uint32_t /*symbol*/, AtdeccString const& name) -> uint8_t override
+    auto on_set_name(DescriptorId id, uint16_t const name_index, AtdeccString const& name) -> uint8_t override
     {
-        if (!manages_entity_name_field(ref)) {
+        if (!manages_entity_name_field(id.ref, name_index)) {
             return atdecc::AEM_STATUS_NOT_IMPLEMENTED;
         }
         uint8_t const status = on_entity_name_changed_ ? on_entity_name_changed_(name) : atdecc::AEM_STATUS_SUCCESS;
@@ -170,132 +170,72 @@ class DescriptorStorageHandler : public AemEntityHandler
         return status;
     }
 
-    auto on_get_configuration(DescriptorRef ref, uint32_t /*symbol*/, DescriptorConfiguration& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_configuration(DescriptorId id, DescriptorConfiguration& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Unit descriptors -----------------------------------------------
 
-    auto on_get_audio_unit(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioUnit& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_audio_unit(DescriptorId id, DescriptorAudioUnit& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_video_unit(DescriptorRef ref, uint32_t /*symbol*/, DescriptorVideoUnit& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_video_unit(DescriptorId id, DescriptorVideoUnit& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_sensor_unit(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSensorUnit& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_sensor_unit(DescriptorId id, DescriptorSensorUnit& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Streams / Jacks / Interface / Clock ----------------------------
 
-    auto on_get_stream(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStream& desc) -> bool override { return load(ref, desc); }
+    auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_jack(DescriptorRef ref, uint32_t /*symbol*/, DescriptorJack& desc) -> bool override { return load(ref, desc); }
+    auto on_get_jack(DescriptorId id, DescriptorJack& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_avb_interface(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAvbInterface& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_avb_interface(DescriptorId id, DescriptorAvbInterface& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_clock_source(DescriptorRef ref, uint32_t /*symbol*/, DescriptorClockSource& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_clock_source(DescriptorId id, DescriptorClockSource& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_clock_domain(DescriptorRef ref, uint32_t /*symbol*/, DescriptorClockDomain& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_clock_domain(DescriptorId id, DescriptorClockDomain& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Memory / Locale / Strings --------------------------------------
 
-    auto on_get_memory_object(DescriptorRef ref, uint32_t /*symbol*/, DescriptorMemoryObject& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_memory_object(DescriptorId id, DescriptorMemoryObject& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_locale(DescriptorRef ref, uint32_t /*symbol*/, DescriptorLocale& desc) -> bool override { return load(ref, desc); }
+    auto on_get_locale(DescriptorId id, DescriptorLocale& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_strings(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStrings& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_strings(DescriptorId id, DescriptorStrings& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Ports ----------------------------------------------------------
 
-    auto on_get_stream_port(DescriptorRef ref, uint32_t /*symbol*/, DescriptorStreamPort& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_stream_port(DescriptorId id, DescriptorStreamPort& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_external_port(DescriptorRef ref, uint32_t /*symbol*/, DescriptorExternalPort& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_external_port(DescriptorId id, DescriptorExternalPort& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_internal_port(DescriptorRef ref, uint32_t /*symbol*/, DescriptorInternalPort& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_internal_port(DescriptorId id, DescriptorInternalPort& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Clusters / Maps / Controls -------------------------------------
 
-    auto on_get_audio_cluster(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioCluster& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_audio_cluster(DescriptorId id, DescriptorAudioCluster& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_video_cluster(DescriptorRef ref, uint32_t /*symbol*/, DescriptorVideoCluster& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_video_cluster(DescriptorId id, DescriptorVideoCluster& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_sensor_cluster(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSensorCluster& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_sensor_cluster(DescriptorId id, DescriptorSensorCluster& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_audio_map(DescriptorRef ref, uint32_t /*symbol*/, DescriptorAudioMap& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_audio_map(DescriptorId id, DescriptorAudioMap& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_video_map(DescriptorRef ref, uint32_t /*symbol*/, DescriptorVideoMap& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_video_map(DescriptorId id, DescriptorVideoMap& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_sensor_map(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSensorMap& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_sensor_map(DescriptorId id, DescriptorSensorMap& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_control(DescriptorRef ref, uint32_t /*symbol*/, DescriptorControl& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_control(DescriptorId id, DescriptorControl& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_control_block(DescriptorRef ref, uint32_t /*symbol*/, DescriptorControlBlock& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_control_block(DescriptorId id, DescriptorControlBlock& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Signal routing -------------------------------------------------
 
-    auto on_get_signal_selector(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalSelector& desc) -> bool override
+    auto on_get_signal_selector(DescriptorId id, DescriptorSignalSelector& desc) -> bool override
     {
-        if (!load(ref, desc)) {
+        if (!load(id.ref, desc)) {
             return false;
         }
         // READ_DESCRIPTOR agrees with GET_SIGNAL_SELECTOR: reflect a runtime
         // selection over the blob's authored current_signal_* fields.
-        if (auto const* state = find_selector_state(ref.descriptor_index)) {
+        if (auto const* state = find_selector_state(id.ref.descriptor_index)) {
             desc.current_signal_type = state->source.signal_type;
             desc.current_signal_index = state->source.signal_index;
             desc.current_signal_output = state->source.signal_output;
@@ -303,53 +243,35 @@ class DescriptorStorageHandler : public AemEntityHandler
         return true;
     }
 
-    auto on_get_mixer(DescriptorRef ref, uint32_t /*symbol*/, DescriptorMixer& desc) -> bool override { return load(ref, desc); }
+    auto on_get_mixer(DescriptorId id, DescriptorMixer& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_matrix(DescriptorRef ref, uint32_t /*symbol*/, DescriptorMatrix& desc) -> bool override { return load(ref, desc); }
+    auto on_get_matrix(DescriptorId id, DescriptorMatrix& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_matrix_signal(DescriptorRef ref, uint32_t /*symbol*/, DescriptorMatrixSignal& desc) -> bool override
+    auto on_get_matrix_signal(DescriptorId id, DescriptorMatrixSignal& desc) -> bool override { return load(id.ref, desc); }
+
+    auto on_get_signal_splitter(DescriptorId id, DescriptorSignalSplitter& desc) -> bool override { return load(id.ref, desc); }
+
+    auto on_get_signal_combiner(DescriptorId id, DescriptorSignalCombiner& desc) -> bool override { return load(id.ref, desc); }
+
+    auto on_get_signal_demultiplexer(DescriptorId id, DescriptorSignalDemultiplexer& desc) -> bool override
     {
-        return load(ref, desc);
+        return load(id.ref, desc);
     }
 
-    auto on_get_signal_splitter(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalSplitter& desc) -> bool override
+    auto on_get_signal_multiplexer(DescriptorId id, DescriptorSignalMultiplexer& desc) -> bool override
     {
-        return load(ref, desc);
+        return load(id.ref, desc);
     }
 
-    auto on_get_signal_combiner(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalCombiner& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
-
-    auto on_get_signal_demultiplexer(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalDemultiplexer& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
-
-    auto on_get_signal_multiplexer(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalMultiplexer& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
-
-    auto on_get_signal_transcoder(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalTranscoder& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_signal_transcoder(DescriptorId id, DescriptorSignalTranscoder& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Timing / PTP ---------------------------------------------------
 
-    auto on_get_timing(DescriptorRef ref, uint32_t /*symbol*/, DescriptorTiming& desc) -> bool override { return load(ref, desc); }
+    auto on_get_timing(DescriptorId id, DescriptorTiming& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_ptp_instance(DescriptorRef ref, uint32_t /*symbol*/, DescriptorPtpInstance& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_ptp_instance(DescriptorId id, DescriptorPtpInstance& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_ptp_port(DescriptorRef ref, uint32_t /*symbol*/, DescriptorPtpPort& desc) -> bool override
-    {
-        return load(ref, desc);
-    }
+    auto on_get_ptp_port(DescriptorId id, DescriptorPtpPort& desc) -> bool override { return load(id.ref, desc); }
 
     // ---- Built-in IDENTIFY control (automatic when the blob has one) ------
     //
@@ -360,30 +282,28 @@ class DescriptorStorageHandler : public AemEntityHandler
     // AemCommandHandler's identify_changed callback (fired on the successful
     // SET); the stored value keeps GET_CONTROL and polling controllers honest.
 
-    auto on_set_descriptor_value(uint16_t command_type, DescriptorRef ref, uint32_t symbol, std::span<uint8_t const> value)
-        -> uint8_t override
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t const> value) -> uint8_t override
     {
-        if (command_type == atdecc::AEM_COMMAND_SET_CONTROL && is_identify_control(ref) && !value.empty()) {
+        if (command_type == atdecc::AEM_COMMAND_SET_CONTROL && is_identify_control(id.ref) && !value.empty()) {
             identify_value_ = value[0];
             return atdecc::AEM_STATUS_SUCCESS;
         }
         if (command_type == atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR &&
-            ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR) {
-            return set_signal_selector(ref, value);
+            id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR) {
+            return set_signal_selector(id.ref, value);
         }
-        return AemEntityHandler::on_set_descriptor_value(command_type, ref, symbol, value);
+        return AemEntityHandler::on_set_descriptor_value(command_type, id, value);
     }
 
-    auto on_get_descriptor_value(uint16_t command_type, DescriptorRef ref, uint32_t symbol, std::span<uint8_t> out)
-        -> size_t override
+    auto on_get_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t> out) -> size_t override
     {
-        if (command_type == atdecc::AEM_COMMAND_GET_CONTROL && is_identify_control(ref) && !out.empty()) {
+        if (command_type == atdecc::AEM_COMMAND_GET_CONTROL && is_identify_control(id.ref) && !out.empty()) {
             out[0] = identify_value_;
             return 1;
         }
         if (command_type == atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR &&
-            ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR && out.size() >= SELECTOR_VALUE_WIRE_SIZE) {
-            if (auto const current = current_selector_source(ref)) {
+            id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR && out.size() >= SELECTOR_VALUE_WIRE_SIZE) {
+            if (auto const current = current_selector_source(id.ref)) {
                 store_signal_source(*current, out);
                 out[6] = 0;  // reserved doublet completing the
                 out[7] = 0;  // AemSignalSelectorPayload quadlet row
@@ -391,7 +311,7 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
             return 0;  // no such selector in the blob
         }
-        return AemEntityHandler::on_get_descriptor_value(command_type, ref, symbol, out);
+        return AemEntityHandler::on_get_descriptor_value(command_type, id, out);
     }
 
     /// The stored identify value (0 = off, non-zero = identifying).
@@ -584,10 +504,10 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     /// True if @p ref names the entity's single entity_name (ENTITY descriptor,
     /// descriptor_index 0, name_index 0) and built-in management is enabled.
-    [[nodiscard]] auto manages_entity_name_field(NameRef ref) const noexcept -> bool
+    [[nodiscard]] auto manages_entity_name_field(DescriptorRef const ref, uint16_t const name_index) const noexcept -> bool
     {
-        return manage_entity_name_ && ref.descriptor.descriptor_type == atdecc::aem::DESCRIPTOR_ENTITY &&
-            ref.descriptor.descriptor_index == 0 && ref.name_index == 0;
+        return manage_entity_name_ && ref.descriptor_type == atdecc::aem::DESCRIPTOR_ENTITY && ref.descriptor_index == 0 &&
+            name_index == 0;
     }
 
     DescriptorStorage storage_;
