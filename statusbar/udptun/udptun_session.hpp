@@ -691,28 +691,27 @@ class Session
         RxContext const rx_ctx = build_rx_context();
 
         while (!stop.stop_requested()) {
-            std::array<pollfd, 2> fds{};
-            size_t const n_fds = build_session_pollfds(fds);
+            auto fds = build_session_pollfds();
 
             int64_t const now_mraw_pre = monotonic_raw_ns();
             int64_t const earliest = std::min(tx_timer_.next_deadline_ns(), report_timer_.next_deadline_ns());
             int const timeout_ms = deadline_to_poll_timeout_ms(now_mraw_pre, earliest, /*max_ms=*/100);
 
-            int const rv = ::poll(fds.data(), n_fds, timeout_ms);
+            int const rv = ::poll(fds.data(), fds.size(), timeout_ms);
             if (rv < 0 && errno == EINTR) {
                 continue;
             }
 
             auto const now = std::chrono::steady_clock::now();
             bool const synced = gptp_synced();
-            for (size_t i = 0; i < n_fds; ++i) {
-                if ((fds[i].revents & POLLIN) == 0) {
+            for (auto const& pfd : fds) {
+                if ((pfd.revents & POLLIN) == 0) {
                     continue;
                 }
-                if (gptp_dispatch_if_owned(fds[i].fd, now)) {
+                if (gptp_dispatch_if_owned(pfd.fd, now)) {
                     continue;
                 }
-                if (fds[i].fd == udp_.get()) {
+                if (pfd.fd == udp_.get()) {
                     drain_rx(codec_, rx_ctx, synced);
                 }
             }
@@ -841,21 +840,20 @@ class Session
             return (rate_spread <= rate_threshold_ppt) && (offset_spread <= offset_threshold_ns);
         };
         while (!stop.stop_requested() && !bridge_warmed_up()) {
-            std::array<pollfd, 2> fds{};
-            size_t const n_fds = build_session_pollfds(fds);
-            int const rv = ::poll(fds.data(), n_fds, /*timeout_ms*/ 50);
+            auto fds = build_session_pollfds();
+            int const rv = ::poll(fds.data(), fds.size(), /*timeout_ms*/ 50);
             if (rv < 0 && errno == EINTR) {
                 continue;
             }
             auto const now = std::chrono::steady_clock::now();
-            for (size_t i = 0; i < n_fds; ++i) {
-                if ((fds[i].revents & POLLIN) == 0) {
+            for (auto const& pfd : fds) {
+                if ((pfd.revents & POLLIN) == 0) {
                     continue;
                 }
-                if (gptp_dispatch_if_owned(fds[i].fd, now)) {
+                if (gptp_dispatch_if_owned(pfd.fd, now)) {
                     continue;
                 }
-                if (fds[i].fd == udp_.get()) {
+                if (pfd.fd == udp_.get()) {
                     // Drain RX even pre-sync to avoid kernel buffer
                     // backup; process_one_rx_datagram discards
                     // unsynced packets internally.
@@ -901,20 +899,19 @@ class Session
         // me what's ready right now"; we already slept inside the
         // timer's wait_until_deadline. In ptp4l mode the gPTP
         // helpers are no-ops (gptp_session_ is empty).
-        std::array<pollfd, 2> fds{};
-        size_t const n_fds = build_session_pollfds(fds);
-        ::poll(fds.data(), n_fds, /*timeout_ms*/ 0);
+        auto fds = build_session_pollfds();
+        ::poll(fds.data(), fds.size(), /*timeout_ms*/ 0);
 
         auto const now_steady = std::chrono::steady_clock::now();
         bool const synced = gptp_synced();
-        for (size_t i = 0; i < n_fds; ++i) {
-            if ((fds[i].revents & POLLIN) == 0) {
+        for (auto const& pfd : fds) {
+            if ((pfd.revents & POLLIN) == 0) {
                 continue;
             }
-            if (gptp_dispatch_if_owned(fds[i].fd, now_steady)) {
+            if (gptp_dispatch_if_owned(pfd.fd, now_steady)) {
                 continue;
             }
-            if (fds[i].fd == udp_.get()) {
+            if (pfd.fd == udp_.get()) {
                 drain_rx(codec_, rx_ctx, synced);
             }
         }
@@ -1429,12 +1426,12 @@ class Session
         last_tai_shift_ns_.publish(tai_translator_.tai_ns(master) - master);
     }
 
-    [[nodiscard]] auto build_session_pollfds(std::array<pollfd, 2>& fds) noexcept -> size_t
+    [[nodiscard]] auto build_session_pollfds() noexcept -> SessionPollFds
     {
 #if defined(__linux__)
-        return build_pollfds(gptp_session_, udp_.get(), fds);
+        return build_pollfds(gptp_session_, udp_.get());
 #else
-        return build_pollfds_udp_only(udp_.get(), fds);
+        return build_pollfds_udp_only(udp_.get());
 #endif
     }
 

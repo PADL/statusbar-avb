@@ -109,29 +109,24 @@ auto configure_multicast(int fd, std::string const& iface, net::SocketAddress co
 }
 
 #if defined(__linux__)
-auto build_pollfds(std::optional<gptp::SlaveSession> const& session, int udp_fd, std::array<pollfd, 2>& fds) noexcept -> size_t
+auto build_pollfds(std::optional<gptp::SlaveSession> const& session, int udp_fd) noexcept -> SessionPollFds
 {
-    size_t n = 0;
+    SessionPollFds fds;
     if (session.has_value()) {
-        auto const session_fds = session->poll_fds();
-        for (int const gfd : session_fds) {
-            if (n >= fds.size()) {
+        for (int const gfd : session->poll_fds()) {
+            if (fds.try_push_back(pollfd{.fd = gfd, .events = POLLIN, .revents = 0}) == nullptr) {
                 break;
             }
-            fds[n++] = pollfd{.fd = gfd, .events = POLLIN, .revents = 0};
         }
     }
-    if (n < fds.size()) {
-        fds[n++] = pollfd{.fd = udp_fd, .events = POLLIN, .revents = 0};
-    }
-    return n;
+    (void)fds.try_push_back(pollfd{.fd = udp_fd, .events = POLLIN, .revents = 0});
+    return fds;
 }
 #endif
 
-auto build_pollfds_udp_only(int udp_fd, std::array<pollfd, 2>& fds) noexcept -> size_t
+auto build_pollfds_udp_only(int udp_fd) noexcept -> SessionPollFds
 {
-    fds[0] = pollfd{.fd = udp_fd, .events = POLLIN, .revents = 0};
-    return 1;
+    return SessionPollFds{pollfd{.fd = udp_fd, .events = POLLIN, .revents = 0}};
 }
 
 }  // namespace statusbar::udptun

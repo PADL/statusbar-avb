@@ -13,10 +13,10 @@
 /// portable across Linux / macOS / BSD without needing per-OS timer fds.
 
 #include "statusbar/net/net.hpp"
+#include "statusbar/sg14/inplace_vector.h"
 
 #include <poll.h>
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -74,19 +74,20 @@ inline void bind_to_device(int fd, std::string const& iface)
 /// if empty the kernel chooses. Returns true on success.
 [[nodiscard]] auto configure_multicast(int fd, std::string const& iface, net::SocketAddress const& group, int ttl) -> bool;
 
+/// The pollfd set for one session loop iteration. Capped at 2 (gptp +
+/// udp); the templated session loop drives its periodic ticks via
+/// DeadlineTimer rather than additional poll fds.
+using SessionPollFds = sg14::inplace_vector<pollfd, 2>;
+
 #if defined(__linux__)
-/// Build the pollfd array for a session loop iteration. Order is:
-/// gPTP session fds (if any), then udp_fd. Returns the number of fds
-/// populated. Capped at 2 (gptp + udp); the templated session loop
-/// drives its periodic ticks via DeadlineTimer rather than additional
-/// poll fds.
-[[nodiscard]] auto build_pollfds(std::optional<gptp::SlaveSession> const& session, int udp_fd, std::array<pollfd, 2>& fds) noexcept
-    -> size_t;
+/// Build the pollfd set for a session loop iteration. Order is:
+/// gPTP session fds (if any), then udp_fd.
+[[nodiscard]] auto build_pollfds(std::optional<gptp::SlaveSession> const& session, int udp_fd) noexcept -> SessionPollFds;
 #endif
 
 /// gPTP-less variant for non-Linux builds and Linux --no-gptp runs.
-/// Always populates index 0 with udp_fd and returns 1.
-[[nodiscard]] auto build_pollfds_udp_only(int udp_fd, std::array<pollfd, 2>& fds) noexcept -> size_t;
+/// Always returns exactly one entry: udp_fd.
+[[nodiscard]] auto build_pollfds_udp_only(int udp_fd) noexcept -> SessionPollFds;
 
 /// Choose a grace window for "missing" packet accounting based on the
 /// observed max RTT. Two RTTs of headroom catches normal jitter while

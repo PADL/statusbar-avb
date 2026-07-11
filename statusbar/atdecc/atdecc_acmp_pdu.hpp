@@ -13,7 +13,6 @@
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
-#include <array>
 #include <chrono>
 #include <compare>
 #include <cstddef>
@@ -594,82 +593,6 @@ struct ListenerPair
     uint16_t listener_unique_id{0};
 
     auto operator<=>(ListenerPair const&) const noexcept = default;
-};
-
-/// TalkerStreamInfo - Per-stream state for ATDECC Talker (Clause 8.2.2.1.4)
-/// Template parameter MaxConnectedListeners determines fixed capacity
-template <size_t MaxConnectedListeners = 16>
-struct TalkerStreamInfo
-{
-    Eui64 stream_id{};
-    Eui48 stream_dest_mac{};
-    uint16_t connection_count{0};
-    std::array<ListenerPair, MaxConnectedListeners> connected_listeners{};
-    uint16_t stream_vlan_id{0};
-
-    /// Add a listener to the connected_listeners array
-    /// Returns true if added, false if already present or array full
-    /// @param pair Listener entity ID and unique ID pair to add
-    constexpr auto add_listener(ListenerPair const& pair) noexcept -> bool
-    {
-        // Check if already present
-        for (size_t i = 0; i < connection_count; ++i) {
-            if (connected_listeners[i] == pair) {
-                return false;  // Already connected
-            }
-        }
-        // Check capacity
-        if (connection_count >= MaxConnectedListeners) {
-            return false;  // Full
-        }
-        connected_listeners[connection_count++] = pair;
-        return true;
-    }
-
-    /// Remove a listener from the connected_listeners array
-    /// Returns true if removed, false if not found
-    /// @param pair Listener entity ID and unique ID pair to remove
-    constexpr auto remove_listener(ListenerPair const& pair) noexcept -> bool
-    {
-        for (size_t i = 0; i < connection_count; ++i) {
-            if (connected_listeners[i] == pair) {
-                // Shift remaining elements down
-                for (size_t j = i; j + 1 < connection_count; ++j) {
-                    connected_listeners[j] = connected_listeners[j + 1];
-                }
-                --connection_count;
-                connected_listeners[connection_count] = ListenerPair{};  // Clear last
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// Check if a listener is in the connected_listeners array
-    /// @param pair Listener entity ID and unique ID pair to search for
-    [[nodiscard]] constexpr auto contains_listener(ListenerPair const& pair) const noexcept -> bool
-    {
-        for (size_t i = 0; i < connection_count; ++i) {
-            if (connected_listeners[i] == pair) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// Get listener at index (for GET_TX_CONNECTION)
-    /// Returns nullptr if index out of range
-    /// @param index Zero-based index into connected listeners array
-    [[nodiscard]] constexpr auto get_listener(size_t index) const noexcept -> ListenerPair const*
-    {
-        if (index < connection_count) {
-            return &connected_listeners[index];
-        }
-        return nullptr;
-    }
-
-    /// Reset all fields to default state
-    constexpr void reset() noexcept { *this = TalkerStreamInfo{}; }
 };
 
 /// TalkerStreamInfoDynamic - Per-stream state for ATDECC Talker with inline storage
