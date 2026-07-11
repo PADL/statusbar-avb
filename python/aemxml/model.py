@@ -553,7 +553,14 @@ class SignalTranscoder:
 
 @dataclass
 class ControlBlock:
-    """CONTROL_BLOCK descriptor data."""
+    """CONTROL_BLOCK descriptor data.
+
+    When `controls` is non-empty (JSON authoring), flatten emits those
+    CONTROL descriptors contiguously and fills number_of_controls /
+    base_control / final_control_index automatically; the three count
+    fields are only honored as-is when `controls` is empty (legacy XML
+    authoring with hand-managed indices).
+    """
 
     object_name: str = ""
     localized_description: LocalizedStringRef = field(
@@ -565,6 +572,7 @@ class ControlBlock:
     signal_type: int = 0
     signal_index: int = 0
     signal_output: int = 0
+    controls: list[Control] = field(default_factory=list)
     symbol: str | None = None
 
 
@@ -895,6 +903,7 @@ class AvbInterface:
     port_number: int = 0
     number_of_controls: int = 0
     base_control: int = 0
+    controls: list[Control] = field(default_factory=list)
     symbol: str | None = None
 
 

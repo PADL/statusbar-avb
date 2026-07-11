@@ -18,11 +18,14 @@ from .model import (
     ClockSource,
     Configuration,
     Control,
+    ControlBlock,
     Entity,
     ExternalPort,
     Jack,
     Locale,
     LocalizedStringRef,
+    SignalSelector,
+    SignalSource,
     Stream,
     StringsDescriptor,
     DESCRIPTOR_TYPE_NAMES,
@@ -457,6 +460,100 @@ def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control
     )
 
 
+def _parse_signal_source(s: dict, context: str) -> SignalSource:
+    """Parse a {signal_type, signal_index, signal_output} source reference."""
+    if not isinstance(s, dict) or "signal_type" not in s:
+        raise ValueError(
+            f"{context}: a signal source is an object with a "
+            f"'signal_type' (and optional signal_index/signal_output)"
+        )
+    return SignalSource(
+        signal_type=_parse_enum(
+            s["signal_type"], DESCRIPTOR_TYPE_NAMES, f"{context}.signal_type"
+        ),
+        signal_index=s.get("signal_index", 0),
+        signal_output=s.get("signal_output", 0),
+    )
+
+
+def _resolve_source_ref(
+    ref, sources: list[SignalSource], field_name: str, context: str
+) -> SignalSource:
+    """A 'current'/'default' selector position: an integer index into
+    `sources`, or an inline {signal_type, ...} object."""
+    if isinstance(ref, int):
+        if not 0 <= ref < len(sources):
+            raise ValueError(
+                f"{context}.{field_name}: index {ref} is out of range for "
+                f"{len(sources)} sources"
+            )
+        return sources[ref]
+    if isinstance(ref, dict):
+        return _parse_signal_source(ref, f"{context}.{field_name}")
+    raise ValueError(
+        f"{context}.{field_name}: expected a source index or a signal object"
+    )
+
+
+def _parse_signal_selector(
+    sel: dict, strings: _LocalizedStrings, context: str
+) -> SignalSelector:
+    """Parse a SIGNAL_SELECTOR descriptor from JSON."""
+    sources = [
+        _parse_signal_source(s, f"{context}.sources[{i}]")
+        for i, s in enumerate(sel.get("sources", []))
+    ]
+    if not sources:
+        raise ValueError(f"{context}: a signal selector needs at least one source")
+    current = _resolve_source_ref(sel.get("current", 0), sources, "current", context)
+    default = _resolve_source_ref(
+        sel.get("default", sel.get("current", 0)), sources, "default", context
+    )
+    return SignalSelector(
+        object_name=sel.get("name", ""),
+        localized_description=_parse_localized(sel, strings, context=context),
+        block_latency=sel.get("block_latency", 0),
+        control_latency=sel.get("control_latency", 0),
+        control_domain=sel.get("control_domain", 0),
+        current_signal_type=current.signal_type,
+        current_signal_index=current.signal_index,
+        current_signal_output=current.signal_output,
+        default_signal_type=default.signal_type,
+        default_signal_index=default.signal_index,
+        default_signal_output=default.signal_output,
+        sources=sources,
+        symbol=sel.get("symbol"),
+    )
+
+
+def _parse_control_block(
+    cb: dict, strings: _LocalizedStrings, context: str
+) -> ControlBlock:
+    """Parse a CONTROL_BLOCK descriptor from JSON. Member controls are
+    authored inline; flatten assigns their indices and fills the
+    number_of_controls / base_control / final_control_index fields."""
+    controls = [
+        _parse_control(c, strings, f"{context}.controls[{i}]")
+        for i, c in enumerate(cb.get("controls", []))
+    ]
+    if not controls:
+        raise ValueError(f"{context}: a control block needs at least one control")
+    sig_type = _parse_enum(
+        cb.get("signal_type", "ENTITY"),
+        DESCRIPTOR_TYPE_NAMES,
+        f"{context}.signal_type",
+    )
+    return ControlBlock(
+        object_name=cb.get("name", ""),
+        localized_description=_parse_localized(cb, strings, context=context),
+        signal_type=sig_type,
+        signal_index=cb.get("signal_index", 0),
+        signal_output=cb.get("signal_output", 0),
+        controls=controls,
+        symbol=cb.get("symbol"),
+    )
+
+
 def _parse_audio_unit(au: dict, strings: _LocalizedStrings, context: str) -> AudioUnit:
     """Parse an audio unit from JSON."""
     rates = [_encode_sampling_rate(r) for r in au.get("rates", [])]
@@ -500,10 +597,15 @@ def _parse_avb_interface(
     flags = _parse_flags(
         iface.get("flags", []), INTERFACE_FLAGS_NAMES, f"{context}.flags"
     )
+    controls = [
+        _parse_control(c, strings, f"{context}.controls[{i}]")
+        for i, c in enumerate(iface.get("controls", []))
+    ]
     return AvbInterface(
         object_name=iface.get("name", ""),
         localized_description=_parse_localized(iface, strings, context=context),
         interface_flags=flags,
+        controls=controls,
         symbol=iface.get("symbol"),
     )
 
@@ -641,6 +743,20 @@ def _parse_configuration(
         for i, c in enumerate(config_obj.get("controls", []))
     ]
 
+    # Signal selectors (singular/plural)
+    sel_list = _get_list(config_obj, "signal_selector", "signal_selectors")
+    signal_selectors = [
+        _parse_signal_selector(s, loc, f"{context}.signal_selectors[{i}]")
+        for i, s in enumerate(sel_list)
+    ]
+
+    # Control blocks (singular/plural)
+    cb_list = _get_list(config_obj, "control_block", "control_blocks")
+    control_blocks = [
+        _parse_control_block(cb, loc, f"{context}.control_blocks[{i}]")
+        for i, cb in enumerate(cb_list)
+    ]
+
     # Strings infrastructure: dict-form localized strings own the table when
     # present; otherwise an explicit 'strings' array (with hand-managed integer
     # references), or the legacy vendor/model/config-name fallback.
@@ -671,6 +787,8 @@ def _parse_configuration(
         jacks_input=jacks_in,
         jacks_output=jacks_out,
         controls=controls,
+        signal_selectors=signal_selectors,
+        control_blocks=control_blocks,
         locales=locales,
         symbol=config_obj.get("symbol"),
     )

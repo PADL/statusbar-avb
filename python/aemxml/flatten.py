@@ -307,8 +307,21 @@ def _serialize_jack(jack: Jack, desc_type: int, desc_index: int) -> bytes:
     )
 
 
-def _serialize_avb_interface(intf: AvbInterface, desc_index: int) -> bytes:
-    """Serialize AVB_INTERFACE descriptor (102 bytes)."""
+def _serialize_avb_interface(
+    intf: AvbInterface,
+    desc_index: int,
+    number_of_controls: int | None = None,
+    base_control: int | None = None,
+) -> bytes:
+    """Serialize AVB_INTERFACE descriptor (102 bytes).
+
+    number_of_controls / base_control override the dataclass fields when
+    the flatten walk assigned indices for inline `intf.controls`.
+    """
+    n_controls = (
+        intf.number_of_controls if number_of_controls is None else number_of_controls
+    )
+    base = intf.base_control if base_control is None else base_control
     return b"".join(
         [
             pack_u16(DESCRIPTOR_AVB_INTERFACE),
@@ -328,8 +341,8 @@ def _serialize_avb_interface(intf: AvbInterface, desc_index: int) -> bytes:
             pack_u8(intf.log_announce_interval),
             pack_u8(intf.log_pdelay_interval),
             pack_u16(intf.port_number),
-            pack_u16(intf.number_of_controls),
-            pack_u16(intf.base_control),
+            pack_u16(n_controls),
+            pack_u16(base),
         ]
     )
 
@@ -763,17 +776,32 @@ def _serialize_signal_transcoder(tc: SignalTranscoder, desc_index: int) -> bytes
     return b"".join(parts)
 
 
-def _serialize_control_block(cb: ControlBlock, desc_index: int) -> bytes:
-    """Serialize CONTROL_BLOCK descriptor (82 bytes)."""
+def _serialize_control_block(
+    cb: ControlBlock,
+    desc_index: int,
+    number_of_controls: int | None = None,
+    base_control: int | None = None,
+) -> bytes:
+    """Serialize CONTROL_BLOCK descriptor (82 bytes).
+
+    number_of_controls / base_control override the dataclass fields when
+    the flatten walk assigned indices for inline `cb.controls`; the
+    final_control_index then derives as base + count.
+    """
+    n_controls = (
+        cb.number_of_controls if number_of_controls is None else number_of_controls
+    )
+    base = cb.base_control if base_control is None else base_control
+    final = cb.final_control_index if number_of_controls is None else base + n_controls
     return b"".join(
         [
             pack_u16(DESCRIPTOR_CONTROL_BLOCK),
             pack_u16(desc_index),
             pack_string64(cb.object_name),
             _pack_localized_desc(cb.localized_description),
-            pack_u16(cb.number_of_controls),
-            pack_u16(cb.base_control),
-            pack_u16(cb.final_control_index),
+            pack_u16(n_controls),
+            pack_u16(base),
+            pack_u16(final),
             pack_u16(cb.signal_type),
             pack_u16(cb.signal_index),
             pack_u16(cb.signal_output),
@@ -1282,14 +1310,36 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
             )
             _add_symbol(symbols, config_idx, DESCRIPTOR_JACK_OUTPUT, i, jack.symbol)
 
-        # AVB Interfaces
+        # AVB Interfaces (inline controls get contiguous CONTROL indices;
+        # the interface's number_of_controls/base_control point at them)
         for i, intf in enumerate(config.avb_interfaces):
+            intf_base_control = control_index
+            for ctrl in intf.controls:
+                descriptors.append(
+                    FlatDescriptor(
+                        config_idx,
+                        DESCRIPTOR_CONTROL,
+                        control_index,
+                        _serialize_control(ctrl, control_index),
+                    )
+                )
+                _add_symbol(
+                    symbols, config_idx, DESCRIPTOR_CONTROL, control_index, ctrl.symbol
+                )
+                control_index += 1
             descriptors.append(
                 FlatDescriptor(
                     config_idx,
                     DESCRIPTOR_AVB_INTERFACE,
                     i,
-                    _serialize_avb_interface(intf, i),
+                    _serialize_avb_interface(
+                        intf,
+                        i,
+                        number_of_controls=(
+                            len(intf.controls) if intf.controls else None
+                        ),
+                        base_control=intf_base_control if intf.controls else None,
+                    ),
                 )
             )
             _add_symbol(symbols, config_idx, DESCRIPTOR_AVB_INTERFACE, i, intf.symbol)
@@ -1445,14 +1495,34 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
             )
             _add_symbol(symbols, config_idx, DESCRIPTOR_SIGNAL_TRANSCODER, i, tc.symbol)
 
-        # Control Blocks
+        # Control Blocks (inline controls get contiguous CONTROL indices;
+        # the block's number_of_controls/base_control point at them)
         for i, cb in enumerate(config.control_blocks):
+            cb_base_control = control_index
+            for ctrl in cb.controls:
+                descriptors.append(
+                    FlatDescriptor(
+                        config_idx,
+                        DESCRIPTOR_CONTROL,
+                        control_index,
+                        _serialize_control(ctrl, control_index),
+                    )
+                )
+                _add_symbol(
+                    symbols, config_idx, DESCRIPTOR_CONTROL, control_index, ctrl.symbol
+                )
+                control_index += 1
             descriptors.append(
                 FlatDescriptor(
                     config_idx,
                     DESCRIPTOR_CONTROL_BLOCK,
                     i,
-                    _serialize_control_block(cb, i),
+                    _serialize_control_block(
+                        cb,
+                        i,
+                        number_of_controls=len(cb.controls) if cb.controls else None,
+                        base_control=cb_base_control if cb.controls else None,
+                    ),
                 )
             )
             _add_symbol(symbols, config_idx, DESCRIPTOR_CONTROL_BLOCK, i, cb.symbol)
@@ -2718,6 +2788,8 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
 def _count_all_controls(config: Configuration) -> int:
     """Count total controls across all levels in a configuration."""
     count = len(config.controls)
+    count += sum(len(intf.controls) for intf in config.avb_interfaces)
+    count += sum(len(cb.controls) for cb in config.control_blocks)
     for unit in config.audio_units:
         count += len(unit.controls)
         for port in unit.input_stream_ports + unit.output_stream_ports:

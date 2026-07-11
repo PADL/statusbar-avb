@@ -958,6 +958,13 @@
           },
           "description": "Interface flags."
         },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/control"
+          },
+          "description": "Controls attached to this interface (e.g. INTERFACE_* / FQTSS_* control types). CONTROL descriptor indices and the interface's number_of_controls/base_control fields are assigned automatically."
+        },
         "symbol": {
           "$ref": "#/$defs/symbol"
         }
@@ -1047,6 +1054,131 @@
           "$ref": "#/$defs/symbol"
         }
       },
+      "additionalProperties": false
+    },
+    "signal_source": {
+      "type": "object",
+      "description": "A signal source reference: which descriptor's output feeds this point in the signal chain.",
+      "properties": {
+        "signal_type": {
+          "$ref": "#/$defs/signal_type"
+        },
+        "signal_index": {
+          "type": "integer",
+          "default": 0,
+          "description": "Descriptor index of the source."
+        },
+        "signal_output": {
+          "type": "integer",
+          "default": 0,
+          "description": "Output index of the source descriptor."
+        }
+      },
+      "required": [
+        "signal_type"
+      ],
+      "additionalProperties": false
+    },
+    "signal_selector": {
+      "type": "object",
+      "description": "SIGNAL_SELECTOR descriptor: selects one of several signal sources (SET/GET_SIGNAL_SELECTOR at runtime).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Selector name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signal_source"
+          },
+          "minItems": 1,
+          "description": "The selectable signal sources."
+        },
+        "current": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "$ref": "#/$defs/signal_source"
+            }
+          ],
+          "default": 0,
+          "description": "Currently selected source: an index into 'sources' or an inline signal reference. Defaults to the first source."
+        },
+        "default": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "$ref": "#/$defs/signal_source"
+            }
+          ],
+          "description": "Default source (index into 'sources' or inline signal reference). Defaults to 'current'."
+        },
+        "block_latency": {
+          "type": "integer",
+          "default": 0
+        },
+        "control_latency": {
+          "type": "integer",
+          "default": 0
+        },
+        "control_domain": {
+          "type": "integer",
+          "default": 0
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
+      },
+      "required": [
+        "sources"
+      ],
+      "additionalProperties": false
+    },
+    "control_block": {
+      "type": "object",
+      "description": "CONTROL_BLOCK descriptor: groups related controls. Member controls are authored inline; their CONTROL descriptor indices and the block's number_of_controls/base_control/final_control_index are assigned automatically.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Block name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/control"
+          },
+          "minItems": 1,
+          "description": "The grouped controls."
+        },
+        "signal_type": {
+          "$ref": "#/$defs/signal_type"
+        },
+        "signal_index": {
+          "type": "integer",
+          "default": 0
+        },
+        "signal_output": {
+          "type": "integer",
+          "default": 0
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
+      },
+      "required": [
+        "controls"
+      ],
       "additionalProperties": false
     },
     "configuration": {
@@ -1181,6 +1313,48 @@
             "$ref": "#/$defs/control"
           },
           "description": "Control descriptors."
+        },
+        "signal_selector": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/signal_selector"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/signal_selector"
+              }
+            }
+          ],
+          "description": "Signal selector (singular) or signal_selectors (array)."
+        },
+        "signal_selectors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signal_selector"
+          },
+          "description": "Signal selectors (array form)."
+        },
+        "control_block": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/control_block"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/control_block"
+              }
+            }
+          ],
+          "description": "Control block (singular) or control_blocks (array)."
+        },
+        "control_blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/control_block"
+          },
+          "description": "Control blocks (array form)."
         },
         "strings": {
           "type": "array",

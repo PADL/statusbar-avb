@@ -1895,6 +1895,150 @@ def test_json_control_values():
     print("  [+] json control values: OK")
 
 
+def test_json_signal_selector_and_control_grouping():
+    """SIGNAL_SELECTOR authoring, controls attached to an AVB_INTERFACE, and
+    CONTROL_BLOCK inline grouping: CONTROL indices are assigned contiguously
+    (config-level first, then per-interface, then per-block) and every
+    number_of_controls/base_control/final_control_index field is derived."""
+    import struct
+
+    from aemxml.flatten import flatten
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "V",
+                "model": "M",
+                "name": "N",
+                "configuration": {
+                    "name": "C",
+                    "avb_interface": {
+                        "name": "eth0",
+                        "controls": [
+                            {
+                                "name": "Interface Up",
+                                "control_type": "INTERFACE_OPERATIONAL",
+                                "value_type": "LINEAR_UINT8",
+                                "read_only": True,
+                                "values": [
+                                    {"min": 0, "max": 255, "step": 255, "default": 255}
+                                ],
+                            }
+                        ],
+                    },
+                    "controls": [
+                        {
+                            "name": "Identify",
+                            "control_type": "IDENTIFY",
+                            "value_type": "LINEAR_UINT8",
+                            "values": [
+                                {"min": 0, "max": 255, "step": 255, "default": 0}
+                            ],
+                        }
+                    ],
+                    "signal_selectors": [
+                        {
+                            "name": "Input Select",
+                            "sources": [
+                                {"signal_type": "AUDIO_CLUSTER", "signal_index": 0},
+                                {
+                                    "signal_type": "AUDIO_CLUSTER",
+                                    "signal_index": 1,
+                                    "signal_output": 0,
+                                },
+                            ],
+                            "current": 1,
+                            "default": 0,
+                        }
+                    ],
+                    "control_blocks": [
+                        {
+                            "name": "Tone Block",
+                            "controls": [
+                                {
+                                    "name": "Mute",
+                                    "control_type": "MUTE",
+                                    "value_type": "LINEAR_UINT8",
+                                    "values": [
+                                        {"min": 0, "max": 1, "step": 1, "default": 0}
+                                    ],
+                                },
+                                {
+                                    "name": "Gain",
+                                    "control_type": "GAIN",
+                                    "value_type": "LINEAR_INT32",
+                                    "values": [
+                                        {"min": -60, "max": 12, "step": 1, "default": 0}
+                                    ],
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    config = entity.configurations[0]
+
+    sel = config.signal_selectors[0]
+    assert len(sel.sources) == 2
+    assert sel.current_signal_index == 1 and sel.default_signal_index == 0
+    assert sel.current_signal_type == 0x0014  # AUDIO_CLUSTER
+
+    assert len(config.avb_interfaces[0].controls) == 1
+    assert len(config.control_blocks[0].controls) == 2
+
+    descs, _ = flatten(entity)
+    by_type = {}
+    for d in descs:
+        by_type.setdefault(d.descriptor_type, []).append(d)
+
+    # Four CONTROL descriptors total: config Identify (0), interface (1),
+    # block members (2, 3).
+    controls = sorted(by_type[0x001A], key=lambda d: d.descriptor_index)
+    assert [d.descriptor_index for d in controls] == [0, 1, 2, 3]
+
+    # AVB_INTERFACE: number_of_controls @98, base_control @100.
+    intf_wire = by_type[0x0009][0].wire_bytes
+    assert struct.unpack_from(">HH", intf_wire, 98) == (1, 1)
+
+    # CONTROL_BLOCK: number/base/final @70/72/74 -> 2 controls at base 2,
+    # final = base + count = 4.
+    cb_wire = by_type[0x0025][0].wire_bytes
+    assert struct.unpack_from(">HHH", cb_wire, 70) == (2, 2, 4)
+
+    # SIGNAL_SELECTOR: sources_offset(96) @80, count @82, current triple
+    # @84, default triple @90, then the two 6-byte sources.
+    sel_wire = by_type[0x001B][0].wire_bytes
+    assert struct.unpack_from(">HH", sel_wire, 80) == (96, 2)
+    assert struct.unpack_from(">HHH", sel_wire, 84) == (0x0014, 1, 0)
+    assert struct.unpack_from(">HHH", sel_wire, 90) == (0x0014, 0, 0)
+    assert len(sel_wire) == 96 + 2 * 6
+
+    # An empty selector or block is rejected.
+    for bad_key, bad_val in (
+        ("signal_selectors", [{"name": "S", "sources": []}]),
+        ("control_blocks", [{"name": "B"}]),
+    ):
+        try:
+            read_json(
+                json.dumps(
+                    {
+                        "entity": {
+                            "vendor": "V",
+                            "configuration": {"name": "C", bad_key: bad_val},
+                        }
+                    }
+                )
+            )
+            raise AssertionError(f"not rejected: {bad_key}={bad_val}")
+        except ValueError:
+            pass
+    print("  [+] json signal selector + control grouping: OK")
+
+
 def test_upgrade_2013_to_2021():
     """Upgrade a 2013 AEMXML file to 2021 schema."""
     aemxml_path = str(
@@ -2075,6 +2219,7 @@ def main():
         test_json_pull_rates,
         test_json_localized_dict,
         test_json_control_values,
+        test_json_signal_selector_and_control_grouping,
         test_upgrade_2013_to_2021,
         test_downgrade_2021_to_2013,
         test_upgrade_is_idempotent,
