@@ -16,6 +16,8 @@
 //   --command=set-clock-source --entity NAME --clock-source S [--clock-domain D]
 //   --command=get-clock-source --entity NAME             [--clock-domain D]
 //   --command=identify        --entity NAME [--state on|off]
+//   --command=set-signal-selector --entity NAME [--descriptor N] --signal-type TYPE [--signal-index I] [--signal-output O]
+//   --command=get-signal-selector --entity NAME [--descriptor N]
 //   --command=batch           --file ops.toml
 //   --command=supervise       --file ops.toml  [--watch-ms N]
 //                             ensure each declared connection exists (idempotent:
@@ -77,9 +79,13 @@ struct Config
     std::string entity;       // NAME (clock-source target / list detail)
     std::string file;         // batch TOML path
     std::string state{"on"};  // identify: desired state (on|off)
+    std::string signal_type;  // set-signal-selector: source descriptor type (name or integer)
     int64_t discover_ms{1500};
     int64_t clock_domain{0};
     int64_t clock_source{0};
+    int64_t descriptor{0};     // signal-selector ops: SIGNAL_SELECTOR descriptor index
+    int64_t signal_index{0};   // set-signal-selector: source signal_index
+    int64_t signal_output{0};  // set-signal-selector: source signal_output
     int64_t interval_ms{700};  // deprecated/ignored (was the supervise counter-sample gap; supervise is now connection-state based)
     int64_t watch_ms{0};       // supervise: >0 => loop forever, sleeping this long between passes
     bool once{true};           // supervise: single pass (default); watch-ms>0 overrides
@@ -92,7 +98,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add_choice(
         "command",
         "Action: list, validate, connect, disconnect, get-rx-state, get-tx-state, set-clock-source, get-clock-source, "
-        "identify, batch, supervise",
+        "set-signal-selector, get-signal-selector, identify, batch, supervise",
         {"list",
          "validate",
          "connect",
@@ -101,6 +107,8 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
          "get-tx-state",
          "set-clock-source",
          "get-clock-source",
+         "set-signal-selector",
+         "get-signal-selector",
          "identify",
          "batch",
          "supervise"},
@@ -120,6 +128,14 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<int64_t>("discover-ms", "Discovery window in ms", 1500, [&](auto v) { config.discover_ms = v; });
     specs.add<int64_t>("clock-domain", "CLOCK_DOMAIN index (clock-source ops)", 0, [&](auto v) { config.clock_domain = v; });
     specs.add<int64_t>("clock-source", "CLOCK_SOURCE index (set-clock-source)", 0, [&](auto v) { config.clock_source = v; });
+    specs.add<int64_t>(
+        "descriptor", "SIGNAL_SELECTOR descriptor index (signal-selector ops)", 0, [&](auto v) { config.descriptor = v; });
+    specs.add<std::string>(
+        "signal-type", "set-signal-selector: source descriptor type (name like AUDIO_CLUSTER, or integer)", "", [&](auto v) {
+            config.signal_type = std::string{v};
+        });
+    specs.add<int64_t>("signal-index", "set-signal-selector: source signal_index", 0, [&](auto v) { config.signal_index = v; });
+    specs.add<int64_t>("signal-output", "set-signal-selector: source signal_output", 0, [&](auto v) { config.signal_output = v; });
     specs.add<int64_t>("interval-ms", "deprecated/ignored (supervise is now connection-state based)", 700, [&](auto v) {
         config.interval_ms = v;
     });
@@ -136,10 +152,11 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
 
 void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
-    static constexpr std::array<std::string_view, 6> examples{
+    static constexpr std::array<std::string_view, 7> examples{
         "--interface=eth0 --command=list",
         "--interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0",
         "--interface=eth0 --command=set-clock-source --entity=node-a --clock-source=1",
+        "--interface=eth0 --command=set-signal-selector --entity=node-a --signal-type=AUDIO_CLUSTER --signal-index=1",
         "--interface=eth0 --command=identify --entity=node-a --state=on",
         "--interface=eth0 --command=batch --file=ops.toml",
         "--interface=eth0 --command=supervise --file=ops.toml",
@@ -364,6 +381,56 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
                         auto const lower = atdecc_tools::detail::to_lower(text);
                         ok = lower.find("success") != std::string::npos;
                         done = true;
+                    }
+                });
+            std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
+            return done && ok;
+        }
+        case OpKind::SetSignalSelector:
+        case OpKind::GetSignalSelector: {
+            auto const eid = resolve_or_report(op.entity, snap);
+            if (!eid) {
+                return false;
+            }
+            bool const is_set = (op.kind == OpKind::SetSignalSelector);
+            ControllerAction action{};
+            action.kind = is_set ? ControllerActionKind::SetSignalSelector : ControllerActionKind::GetSignalSelector;
+            action.request.talker_entity_id = *eid;
+            action.request.desc_index = op.descriptor;
+            action.request.signal_type = op.signal_type;
+            action.request.signal_index = op.signal_index;
+            action.request.signal_output = op.signal_output;
+            std::println(
+                "{} {} descriptor={}{} ...",
+                is_set ? "set-signal-selector" : "get-signal-selector",
+                op.entity,
+                op.descriptor,
+                is_set ? std::format(
+                             " signal_type={} signal_index={} signal_output={}",
+                             atdecc::aem::descriptor_type_name(op.signal_type),
+                             op.signal_index,
+                             op.signal_output)
+                       : std::string{});
+            ctrl.dispatch(action, elapsed_ns());
+            bool done = false;
+            bool ok = false;
+            std::string text;
+            (void)pump(
+                reactor,
+                ctrl,
+                5000,
+                [&] { return done; },
+                [&](auto const& ev) {
+                    if (auto const* s = std::get_if<StatusChangedEvent>(&ev)) {
+                        auto const lower = atdecc_tools::detail::to_lower(s->status);
+                        if (lower.find("failed") != std::string::npos) {
+                            text = s->status;
+                            done = true;
+                        } else if (lower.find("signal_selector") != std::string::npos) {
+                            text = s->status;
+                            ok = lower.find("success") != std::string::npos;
+                            done = true;
+                        }
                     }
                 });
             std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
@@ -778,6 +845,35 @@ int main(int argc, char* argv[])
             .entity = config.entity,
             .clock_domain = static_cast<uint16_t>(config.clock_domain),
             .clock_source = static_cast<uint16_t>(config.clock_source)};
+        return execute_op(reactor, *ctrl, op) ? 0 : 1;
+    }
+
+    if (config.command == "set-signal-selector" || config.command == "get-signal-selector") {
+        if (config.entity.empty()) {
+            std::println(stderr, "Error: --entity is required");
+            return 1;
+        }
+        if (config.descriptor < 0 || config.descriptor > 0xFFFF || config.signal_index < 0 || config.signal_index > 0xFFFF ||
+            config.signal_output < 0 || config.signal_output > 0xFFFF) {
+            std::println(stderr, "Error: --descriptor, --signal-index, and --signal-output must be 0..65535");
+            return 1;
+        }
+        Op op{};
+        op.entity = config.entity;
+        op.descriptor = static_cast<uint16_t>(config.descriptor);
+        if (config.command == "set-signal-selector") {
+            auto const sig_type = atdecc_tools::parse_descriptor_type(config.signal_type);
+            if (!sig_type) {
+                std::println(stderr, "Error: --signal-type must be a descriptor type name (e.g. AUDIO_CLUSTER) or integer");
+                return 1;
+            }
+            op.kind = OpKind::SetSignalSelector;
+            op.signal_type = *sig_type;
+            op.signal_index = static_cast<uint16_t>(config.signal_index);
+            op.signal_output = static_cast<uint16_t>(config.signal_output);
+        } else {
+            op.kind = OpKind::GetSignalSelector;
+        }
         return execute_op(reactor, *ctrl, op) ? 0 : 1;
     }
 

@@ -1398,6 +1398,212 @@ TEST(entity_name, unmanaged_handler_does_not_serve_entity_name)
     EXPECT_EQ(get0.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
 
+// ===========================================================================
+// Built-in SIGNAL_SELECTOR (DescriptorStorageHandler).
+//
+// A blob-backed handler accepts SET_SIGNAL_SELECTOR for sources authored in
+// the descriptor, stores the selection, and reflects it in
+// GET_SIGNAL_SELECTOR and READ_DESCRIPTOR. Sources not in the descriptor's
+// list are rejected; the change callback can veto.
+// ===========================================================================
+
+namespace {
+
+using atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER;
+using atdecc::aem::DESCRIPTOR_JACK_INPUT;
+using atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR;
+using atdecc::aem::DescriptorSignalSelector;
+
+/// Build a blob with one SIGNAL_SELECTOR descriptor (index 0) offering two
+/// sources: AUDIO_CLUSTER 0 and AUDIO_CLUSTER 1. Current/default = cluster 0.
+auto make_blob_with_signal_selector() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr uint32_t desc_size = DescriptorSignalSelector::LENGTH + (size_t{2} * 6);  // 96 + sources
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    blob[0] = 0x41;  // "AEM1"
+    blob[1] = 0x45;
+    blob[2] = 0x4D;
+    blob[3] = 0x31;
+    blob[7] = 0x01;  // toc_count = 1
+    blob[11] = static_cast<uint8_t>(toc_offset);
+    // symbol_count = 0; symbol_offset points just past the TOC.
+    blob[19] = static_cast<uint8_t>(desc_offset);
+
+    // TOC entry: type=SIGNAL_SELECTOR, index=0, config=0, length, offset.
+    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
+    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
+    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
+    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
+    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+
+    DescriptorSignalSelector desc{};
+    desc.descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR;
+    desc.sources_offset = DescriptorSignalSelector::LENGTH;
+    desc.number_of_sources = 2;
+    desc.current_signal_type = DESCRIPTOR_AUDIO_CLUSTER;
+    desc.current_signal_index = 0;
+    desc.current_signal_output = 0;
+    desc.default_signal_type = DESCRIPTOR_AUDIO_CLUSTER;
+    std::memcpy(blob.data() + desc_offset, &desc, sizeof(desc));
+
+    // Two 6-byte sources: AUDIO_CLUSTER 0 and AUDIO_CLUSTER 1.
+    size_t const src0 = desc_offset + DescriptorSignalSelector::LENGTH;
+    blob[src0 + 0] = static_cast<uint8_t>((DESCRIPTOR_AUDIO_CLUSTER >> 8) & 0xFF);
+    blob[src0 + 1] = static_cast<uint8_t>(DESCRIPTOR_AUDIO_CLUSTER & 0xFF);
+    blob[src0 + 6] = blob[src0 + 0];
+    blob[src0 + 7] = blob[src0 + 1];
+    blob[src0 + 9] = 0x01;  // second source: signal_index = 1
+    return blob;
+}
+
+/// SET_SIGNAL_SELECTOR / GET_SIGNAL_SELECTOR command body.
+auto make_signal_selector_body(uint16_t descriptor_index, std::optional<std::array<uint16_t, 3>> const source = std::nullopt)
+    -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> body;
+    auto push_u16 = [&body](uint16_t v) {
+        body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        body.push_back(static_cast<uint8_t>(v & 0xFF));
+    };
+    push_u16(DESCRIPTOR_SIGNAL_SELECTOR);
+    push_u16(descriptor_index);
+    if (source) {
+        for (auto const v : *source) {
+            push_u16(v);
+        }
+    }
+    return body;
+}
+
+/// The {signal_type, signal_index, signal_output} triple in a
+/// SET/GET_SIGNAL_SELECTOR response (after the 4-byte descriptor header).
+auto response_source(std::span<uint8_t const> bytes) -> std::array<uint16_t, 3>
+{
+    std::array<uint16_t, 3> out{};
+    for (size_t i = 0; i < 3; ++i) {
+        out[i] = static_cast<uint16_t>((bytes[4 + (2 * i)] << 8) | bytes[5 + (2 * i)]);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(signal_selector, get_serves_blob_default_and_set_round_trips)
+{
+    auto blob = make_blob_with_signal_selector();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET before any SET: the blob's authored current (cluster 0).
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    // 4-byte descriptor header + source triple + reserved doublet.
+    EXPECT_EQ(get0.bytes.size(), size_t{12});
+    EXPECT_TRUE(response_source(get0.bytes) == (std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}));
+
+    // SET to the second authored source (cluster 1) succeeds and echoes.
+    auto const set1 = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
+        make_signal_selector_body(0, std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 1, 0}));
+    EXPECT_EQ(set1.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(response_source(set1.bytes) == (std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 1, 0}));
+
+    // GET reflects the new selection.
+    auto const get1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(0));
+    EXPECT_EQ(get1.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(response_source(get1.bytes) == (std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 1, 0}));
+
+    // READ_DESCRIPTOR agrees: the served descriptor carries the runtime current.
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR, .descriptor_index = 0},
+        make_span(buf));
+    EXPECT_TRUE(n >= DescriptorSignalSelector::LENGTH);
+    DescriptorSignalSelector parsed{};
+    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    EXPECT_EQ(parsed.current_signal_index.get(), static_cast<uint16_t>(1));
+}
+
+TEST(signal_selector, source_not_in_descriptor_is_rejected)
+{
+    auto blob = make_blob_with_signal_selector();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // JACK_INPUT 0 is not one of the authored sources.
+    auto const set = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
+        make_signal_selector_body(0, std::array<uint16_t, 3>{DESCRIPTOR_JACK_INPUT, 0, 0}));
+    EXPECT_EQ(set.status, AEM_STATUS_BAD_ARGUMENTS);
+
+    // A truncated value (no source triple) is also rejected.
+    auto const short_set = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR, make_signal_selector_body(0));
+    EXPECT_EQ(short_set.status, AEM_STATUS_BAD_ARGUMENTS);
+
+    // Selection is unchanged.
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(0));
+    EXPECT_TRUE(response_source(get.bytes) == (std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}));
+
+    // A selector index the blob doesn't have: SET names the missing
+    // descriptor, GET reports not-implemented.
+    auto const set_missing = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
+        make_signal_selector_body(7, std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}));
+    EXPECT_EQ(set_missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    auto const get_missing = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(7));
+    EXPECT_EQ(get_missing.status, AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+TEST(signal_selector, change_callback_gates_and_observes)
+{
+    auto blob = make_blob_with_signal_selector();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // A vetoing callback: the status propagates and the selection stays.
+    handler.set_on_signal_selector_changed(
+        [](uint16_t, DescriptorStorageHandler::SignalSourceRef const&) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
+        make_signal_selector_body(0, std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 1, 0}));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(0));
+    EXPECT_TRUE(response_source(get0.bytes) == (std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}));
+
+    // An accepting callback observes the validated request.
+    static uint16_t seen_index = 0xFFFF;
+    static uint16_t seen_signal_index = 0xFFFF;
+    handler.set_on_signal_selector_changed(
+        [](uint16_t const descriptor_index, DescriptorStorageHandler::SignalSourceRef const& src) -> uint8_t {
+            seen_index = descriptor_index;
+            seen_signal_index = src.signal_index;
+            return AEM_STATUS_SUCCESS;
+        });
+    auto const accepted = run_aem_command(
+        cmd_handler,
+        atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
+        make_signal_selector_body(0, std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 1, 0}));
+    EXPECT_EQ(accepted.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(seen_index, static_cast<uint16_t>(0));
+    EXPECT_EQ(seen_signal_index, static_cast<uint16_t>(1));
+}
+
 //
 // Test Runner
 //

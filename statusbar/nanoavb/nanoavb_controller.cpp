@@ -270,6 +270,34 @@ auto NanoAvbAemController::get_clock_source(Eui64 target, uint16_t desc_index) -
     return send_aem_command(target, AEM_COMMAND_GET_CLOCK_SOURCE, payload);
 }
 
+auto NanoAvbAemController::set_signal_selector(
+    Eui64 target, uint16_t desc_index, uint16_t signal_type, uint16_t signal_index, uint16_t signal_output) -> bool
+{
+    // AemSignalSelectorPayload: descriptor header + source triple + reserved.
+    std::array<uint8_t, 12> payload{};
+    payload[0] = static_cast<uint8_t>((DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
+    payload[1] = static_cast<uint8_t>(DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
+    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
+    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    payload[4] = static_cast<uint8_t>((signal_type >> 8) & 0xFF);
+    payload[5] = static_cast<uint8_t>(signal_type & 0xFF);
+    payload[6] = static_cast<uint8_t>((signal_index >> 8) & 0xFF);
+    payload[7] = static_cast<uint8_t>(signal_index & 0xFF);
+    payload[8] = static_cast<uint8_t>((signal_output >> 8) & 0xFF);
+    payload[9] = static_cast<uint8_t>(signal_output & 0xFF);
+    return send_aem_command(target, AEM_COMMAND_SET_SIGNAL_SELECTOR, payload);
+}
+
+auto NanoAvbAemController::get_signal_selector(Eui64 target, uint16_t desc_index) -> bool
+{
+    std::array<uint8_t, 4> payload{};
+    payload[0] = static_cast<uint8_t>((DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
+    payload[1] = static_cast<uint8_t>(DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
+    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
+    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    return send_aem_command(target, AEM_COMMAND_GET_SIGNAL_SELECTOR, payload);
+}
+
 auto NanoAvbAemController::get_counters(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool
 {
     std::array<uint8_t, 4> payload{};

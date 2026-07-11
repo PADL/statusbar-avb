@@ -305,6 +305,22 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
                 emit_status("Get counters failed: entity not found or queue full");
             }
             break;
+        case ControllerActionKind::SetSignalSelector:
+            // desc_index = SIGNAL_SELECTOR index; signal_* = the source to select.
+            if (!controller_.set_signal_selector(
+                    action.request.talker_entity_id,
+                    action.request.desc_index,
+                    action.request.signal_type,
+                    action.request.signal_index,
+                    action.request.signal_output)) {
+                emit_status("Set signal selector failed: entity not found or queue full");
+            }
+            break;
+        case ControllerActionKind::GetSignalSelector:
+            if (!controller_.get_signal_selector(action.request.talker_entity_id, action.request.desc_index)) {
+                emit_status("Get signal selector failed: entity not found or queue full");
+            }
+            break;
     }
 }
 
@@ -778,6 +794,23 @@ void ControllerSimple::handle_aem_response(
             aem_status_name(status),
             csp.descriptor_index.get(),
             csp.clock_source_index.get()));
+        return;
+    }
+    // GET/SET_SIGNAL_SELECTOR: report the (current) source triple the entity
+    // echoes back so a scriptable caller can read the active selection.
+    if ((cmd == AEM_COMMAND_GET_SIGNAL_SELECTOR || cmd == AEM_COMMAND_SET_SIGNAL_SELECTOR) && status == AEM_STATUS_SUCCESS &&
+        data.size() >= AemSignalSelectorPayload::LENGTH - 2) {  // reserved doublet may be absent
+        AemSignalSelectorPayload ssp{};
+        span_load_padded(ssp, data);
+        emit_status(std::format(
+            "{} {}: {} signal_selector={} signal_type={} signal_index={} signal_output={}",
+            aem_command_name(cmd),
+            name,
+            aem_status_name(status),
+            ssp.descriptor_index.get(),
+            descriptor_type_name(ssp.signal_type.get()),
+            ssp.signal_index.get(),
+            ssp.signal_output.get()));
         return;
     }
     // Show status for other commands (identify, start/stop streaming, etc.)

@@ -153,6 +153,15 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_GET_CONTROL:
             return handle_get_descriptor_value(AEM_COMMAND_GET_CONTROL, command_data, out_buffer);
 
+        case AEM_COMMAND_SET_SIGNAL_SELECTOR:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_descriptor_value(AEM_COMMAND_SET_SIGNAL_SELECTOR, command_data, out_buffer);
+
+        case AEM_COMMAND_GET_SIGNAL_SELECTOR:
+            return handle_get_descriptor_value(AEM_COMMAND_GET_SIGNAL_SELECTOR, command_data, out_buffer);
+
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
 

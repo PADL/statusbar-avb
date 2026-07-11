@@ -137,6 +137,14 @@ class NanoAvbAemController
     /// Send SET_CLOCK_SOURCE command
     auto set_clock_source(Eui64 target, uint16_t desc_index, uint16_t clock_source_index) -> bool;
 
+    /// Send SET_SIGNAL_SELECTOR command (SIGNAL_SELECTOR descriptor):
+    /// select the {signal_type, signal_index, signal_output} source.
+    auto set_signal_selector(Eui64 target, uint16_t desc_index, uint16_t signal_type, uint16_t signal_index, uint16_t signal_output)
+        -> bool;
+
+    /// Send GET_SIGNAL_SELECTOR command (SIGNAL_SELECTOR descriptor)
+    auto get_signal_selector(Eui64 target, uint16_t desc_index = 0) -> bool;
+
     /// Send SET_SAMPLING_RATE command
     auto set_sampling_rate(Eui64 target, uint16_t desc_type, uint16_t desc_index, uint32_t sampling_rate) -> bool;
 

@@ -122,6 +122,54 @@ namespace detail {
     return matches.front()->entity_id;
 }
 
+/// Resolve a descriptor-type token: an unsigned integer (decimal or 0x hex)
+/// or a standard descriptor type name (e.g. "AUDIO_CLUSTER",
+/// case-insensitive). Returns nullopt for unknown names / bad numbers.
+[[nodiscard]] inline auto parse_descriptor_type(std::string_view token) -> std::optional<uint16_t>
+{
+    if (token.empty()) {
+        return std::nullopt;
+    }
+    if (std::isdigit(static_cast<unsigned char>(token.front())) != 0) {
+        uint32_t v = 0;
+        auto const base = token.starts_with("0x") || token.starts_with("0X") ? 16 : 10;
+        auto const digits = (base == 16) ? token.substr(2) : token;
+        for (char const c : digits) {
+            int digit = -1;
+            if (c >= '0' && c <= '9') {
+                digit = c - '0';
+            } else if (base == 16 && std::isxdigit(static_cast<unsigned char>(c)) != 0) {
+                digit = 10 + (std::tolower(static_cast<unsigned char>(c)) - 'a');
+            }
+            if (digit < 0) {
+                return std::nullopt;
+            }
+            v = (v * static_cast<uint32_t>(base)) + static_cast<uint32_t>(digit);
+            if (v > 0xFFFF) {
+                return std::nullopt;
+            }
+        }
+        return static_cast<uint16_t>(v);
+    }
+    // Name lookup against the standard descriptor-type name table. The table
+    // holds display names ("Audio Cluster"); normalize both sides to
+    // UPPER_SNAKE so authors can write the standard's AUDIO_CLUSTER spelling.
+    auto to_upper_snake = [](std::string_view s) {
+        std::string out{s};
+        for (char& c : out) {
+            c = (c == ' ') ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        return out;
+    };
+    auto const wanted = to_upper_snake(token);
+    for (uint16_t t = 0; t <= atdecc::aem::DESCRIPTOR_CONTROL_BLOCK; ++t) {
+        if (wanted == to_upper_snake(atdecc::aem::descriptor_type_name(t))) {
+            return t;
+        }
+    }
+    return std::nullopt;
+}
+
 /// A single batch operation parsed from the TOML file.
 enum class OpKind : uint8_t
 {
@@ -130,6 +178,8 @@ enum class OpKind : uint8_t
     SetClockSource,
     GetClockSource,
     Identify,
+    SetSignalSelector,
+    GetSignalSelector,
 };
 
 struct Op
@@ -137,10 +187,14 @@ struct Op
     OpKind kind{OpKind::Connect};
     Endpoint talker{};     ///< connect/disconnect
     Endpoint listener{};   ///< connect/disconnect
-    std::string entity{};  ///< clock-source / identify ops: target entity name
+    std::string entity{};  ///< clock-source / identify / signal-selector ops: target entity name
     uint16_t clock_domain{0};
     uint16_t clock_source{0};
-    bool identify_on{true};  ///< identify: desired state
+    bool identify_on{true};     ///< identify: desired state
+    uint16_t descriptor{0};     ///< signal-selector ops: SIGNAL_SELECTOR descriptor index
+    uint16_t signal_type{0};    ///< set_signal_selector: source signal_type
+    uint16_t signal_index{0};   ///< set_signal_selector: source signal_index
+    uint16_t signal_output{0};  ///< set_signal_selector: source signal_output
 };
 
 namespace detail {
@@ -218,6 +272,62 @@ namespace detail {
     return op;
 }
 
+/// Parse a `[[set_signal_selector]]` / `[[get_signal_selector]]` table into an
+/// Op. Requires `entity` (string); `descriptor` optional (int, default 0).
+/// For set: `signal_type` required (descriptor-type name or integer),
+/// `signal_index` / `signal_output` optional ints (default 0).
+[[nodiscard]] inline auto parse_signal_selector_op(toml::Table const& t, bool const is_set, std::string& err) -> std::optional<Op>
+{
+    auto const* ent = t.get("entity");
+    auto const ents = (ent != nullptr) ? ent->as_string() : std::nullopt;
+    if (!ents) {
+        err = "set_signal_selector/get_signal_selector requires string 'entity'";
+        return std::nullopt;
+    }
+    Op op{};
+    op.kind = is_set ? OpKind::SetSignalSelector : OpKind::GetSignalSelector;
+    op.entity = std::string{*ents};
+
+    auto read_u16 = [&t, &err](std::string_view key, uint16_t& out) -> bool {
+        auto const* v = t.get(key);
+        if (v == nullptr) {
+            return true;
+        }
+        auto const i = v->as_integer();
+        if (!i || *i < 0 || *i > 0xFFFF) {
+            err = std::format("'{}' must be an integer 0-65535", key);
+            return false;
+        }
+        out = static_cast<uint16_t>(*i);
+        return true;
+    };
+    if (!read_u16("descriptor", op.descriptor)) {
+        return std::nullopt;
+    }
+    if (!is_set) {
+        return op;
+    }
+
+    auto const* st = t.get("signal_type");
+    std::optional<uint16_t> sig_type;
+    if (st != nullptr) {
+        if (auto const s = st->as_string()) {
+            sig_type = parse_descriptor_type(*s);
+        } else if (auto const i = st->as_integer(); i && *i >= 0 && *i <= 0xFFFF) {
+            sig_type = static_cast<uint16_t>(*i);
+        }
+    }
+    if (!sig_type) {
+        err = "set_signal_selector requires 'signal_type' (descriptor type name or integer)";
+        return std::nullopt;
+    }
+    op.signal_type = *sig_type;
+    if (!read_u16("signal_index", op.signal_index) || !read_u16("signal_output", op.signal_output)) {
+        return std::nullopt;
+    }
+    return op;
+}
+
 /// Append every table in `root[key]` (a TOML array-of-tables) parsed via `fn`.
 template <typename Fn>
 [[nodiscard]] inline auto parse_array_of_tables(toml::Table const& root, std::string_view key, std::vector<Op>& out, Fn fn)
@@ -248,9 +358,9 @@ template <typename Fn>
 }  // namespace detail
 
 /// Parse a batch-ops TOML document into a flat op list. Connections are applied
-/// first, then clock-source sets, then identifies, then disconnects
-/// (deterministic ordering independent of key order in the file). On error,
-/// returns nullopt and fills `err`.
+/// first, then clock-source sets, then signal-selector sets/gets, then
+/// identifies, then disconnects (deterministic ordering independent of key
+/// order in the file). On error, returns nullopt and fills `err`.
 [[nodiscard]] inline auto parse_batch_ops(toml::Table const& root, std::string& err) -> std::optional<std::vector<Op>>
 {
     std::vector<Op> ops;
@@ -262,6 +372,18 @@ template <typename Fn>
     }
     if (auto e = detail::parse_array_of_tables(
             root, "set_clock_source", ops, [](toml::Table const& t, std::string& er) { return detail::parse_clock_op(t, er); })) {
+        err = *e;
+        return std::nullopt;
+    }
+    if (auto e = detail::parse_array_of_tables(root, "set_signal_selector", ops, [](toml::Table const& t, std::string& er) {
+            return detail::parse_signal_selector_op(t, /*is_set=*/true, er);
+        })) {
+        err = *e;
+        return std::nullopt;
+    }
+    if (auto e = detail::parse_array_of_tables(root, "get_signal_selector", ops, [](toml::Table const& t, std::string& er) {
+            return detail::parse_signal_selector_op(t, /*is_set=*/false, er);
+        })) {
         err = *e;
         return std::nullopt;
     }
@@ -277,7 +399,8 @@ template <typename Fn>
         return std::nullopt;
     }
     if (ops.empty()) {
-        err = "batch file contains no [[connect]], [[set_clock_source]], [[identify]], or [[disconnect]] entries";
+        err = "batch file contains no [[connect]], [[set_clock_source]], [[set_signal_selector]], "
+              "[[get_signal_selector]], [[identify]], or [[disconnect]] entries";
         return std::nullopt;
     }
     return ops;

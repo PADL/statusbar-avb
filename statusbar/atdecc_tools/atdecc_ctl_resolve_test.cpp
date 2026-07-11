@@ -170,6 +170,48 @@ TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
     EXPECT_EQ((*ops)[2].listener.name, std::string{"node-e"});
 }
 
+TEST(atdecc_ctl_batch, parses_signal_selector_ops)
+{
+    auto doc = toml::parse("[[set_signal_selector]]\n"
+                           "entity = \"tone\"\n"
+                           "descriptor = 1\n"
+                           "signal_type = \"AUDIO_CLUSTER\"\n"
+                           "signal_index = 2\n"
+                           "[[get_signal_selector]]\n"
+                           "entity = \"tone\"\n");
+    EXPECT_TRUE(doc.has_value());
+    std::string err;
+    auto ops = parse_batch_ops(*doc, err);
+    EXPECT_TRUE(ops.has_value());
+    EXPECT_EQ(ops->size(), 2U);
+    EXPECT_TRUE((*ops)[0].kind == OpKind::SetSignalSelector);
+    EXPECT_EQ((*ops)[0].descriptor, 1U);
+    EXPECT_EQ((*ops)[0].signal_type, uint16_t{0x0014});  // AUDIO_CLUSTER
+    EXPECT_EQ((*ops)[0].signal_index, 2U);
+    EXPECT_EQ((*ops)[0].signal_output, 0U);
+    EXPECT_TRUE((*ops)[1].kind == OpKind::GetSignalSelector);
+    EXPECT_EQ((*ops)[1].descriptor, 0U);
+
+    // signal_type is required for set and must resolve.
+    auto bad = toml::parse("[[set_signal_selector]]\n"
+                           "entity = \"tone\"\n"
+                           "signal_type = \"NOT_A_TYPE\"\n");
+    EXPECT_TRUE(bad.has_value());
+    auto bad_ops = parse_batch_ops(*bad, err);
+    EXPECT_FALSE(bad_ops.has_value());
+}
+
+TEST(atdecc_ctl_batch, parse_descriptor_type_tokens)
+{
+    EXPECT_EQ(parse_descriptor_type("AUDIO_CLUSTER").value_or(0xDEAD), uint16_t{0x0014});
+    EXPECT_EQ(parse_descriptor_type("audio_cluster").value_or(0xDEAD), uint16_t{0x0014});
+    EXPECT_EQ(parse_descriptor_type("21").value_or(0xDEAD), uint16_t{21});
+    EXPECT_EQ(parse_descriptor_type("0x0014").value_or(0xDEAD), uint16_t{0x0014});
+    EXPECT_FALSE(parse_descriptor_type("NOT_A_TYPE").has_value());
+    EXPECT_FALSE(parse_descriptor_type("70000").has_value());
+    EXPECT_FALSE(parse_descriptor_type("").has_value());
+}
+
 TEST(atdecc_ctl_batch, missing_listener_is_error)
 {
     auto doc = toml::parse("[[connect]]\n"

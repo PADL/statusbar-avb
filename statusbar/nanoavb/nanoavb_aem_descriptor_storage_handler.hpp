@@ -50,6 +50,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/sg14/inplace_function.h"
+#include "statusbar/sg14/inplace_vector.h"
 
 #include <cstdint>
 #include <optional>
@@ -289,7 +290,17 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     auto on_get_signal_selector(DescriptorRef ref, uint32_t /*symbol*/, DescriptorSignalSelector& desc) -> bool override
     {
-        return load(ref, desc);
+        if (!load(ref, desc)) {
+            return false;
+        }
+        // READ_DESCRIPTOR agrees with GET_SIGNAL_SELECTOR: reflect a runtime
+        // selection over the blob's authored current_signal_* fields.
+        if (auto const* state = find_selector_state(ref.descriptor_index)) {
+            desc.current_signal_type = state->source.signal_type;
+            desc.current_signal_index = state->source.signal_index;
+            desc.current_signal_output = state->source.signal_output;
+        }
+        return true;
     }
 
     auto on_get_mixer(DescriptorRef ref, uint32_t /*symbol*/, DescriptorMixer& desc) -> bool override { return load(ref, desc); }
@@ -356,6 +367,10 @@ class DescriptorStorageHandler : public AemEntityHandler
             identify_value_ = value[0];
             return atdecc::AEM_STATUS_SUCCESS;
         }
+        if (command_type == atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR &&
+            ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR) {
+            return set_signal_selector(ref, value);
+        }
         return AemEntityHandler::on_set_descriptor_value(command_type, ref, symbol, value);
     }
 
@@ -366,11 +381,65 @@ class DescriptorStorageHandler : public AemEntityHandler
             out[0] = identify_value_;
             return 1;
         }
+        if (command_type == atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR &&
+            ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR && out.size() >= SELECTOR_VALUE_WIRE_SIZE) {
+            if (auto const current = current_selector_source(ref)) {
+                store_signal_source(*current, out);
+                out[6] = 0;  // reserved doublet completing the
+                out[7] = 0;  // AemSignalSelectorPayload quadlet row
+                return SELECTOR_VALUE_WIRE_SIZE;
+            }
+            return 0;  // no such selector in the blob
+        }
         return AemEntityHandler::on_get_descriptor_value(command_type, ref, symbol, out);
     }
 
     /// The stored identify value (0 = off, non-zero = identifying).
     [[nodiscard]] auto identify_value() const noexcept -> uint8_t { return identify_value_; }
+
+    // ---- Built-in SIGNAL_SELECTOR (automatic when the blob has one) --------
+    //
+    // SET_SIGNAL_SELECTOR is accepted when the requested source is one of the
+    // descriptor's authored sources; the current selection lives in RAM
+    // (keyed by descriptor index) and GET_SIGNAL_SELECTOR / READ_DESCRIPTOR
+    // reflect it. The change callback is where the application actually
+    // reroutes its signal path; returning any status other than SUCCESS
+    // rejects the change and keeps the previous selection.
+
+    /// One {signal_type, signal_index, signal_output} source triple.
+    struct SignalSourceRef
+    {
+        uint16_t signal_type{0};
+        uint16_t signal_index{0};
+        uint16_t signal_output{0};
+
+        auto operator==(SignalSourceRef const&) const noexcept -> bool = default;
+    };
+
+    /// Called when SET_SIGNAL_SELECTOR requests a new source (already
+    /// validated against the descriptor's sources list). Return
+    /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.
+    /// Unset => accept (in-memory only).
+    void set_on_signal_selector_changed(
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, SignalSourceRef const&), 64> fn)
+    {
+        on_signal_selector_changed_ = std::move(fn);
+    }
+
+    /// The selector's current source: the runtime selection when one was
+    /// made, otherwise the blob's authored current_signal_* fields.
+    /// nullopt when the blob has no such SIGNAL_SELECTOR descriptor.
+    [[nodiscard]] auto current_selector_source(DescriptorRef ref) const noexcept -> std::optional<SignalSourceRef>
+    {
+        if (auto const* state = find_selector_state(ref.descriptor_index)) {
+            return state->source;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorSignalSelector::LENGTH) {
+            return std::nullopt;
+        }
+        return load_signal_source(blob->subspan(CURRENT_SIGNAL_OFFSET));
+    }
 
     /// Access the underlying storage (useful for derived handlers that
     /// want to look up additional blobs beyond descriptors).
@@ -394,6 +463,110 @@ class DescriptorStorageHandler : public AemEntityHandler
     }
 
     uint8_t identify_value_{0};
+
+    // SIGNAL_SELECTOR wire geometry (DescriptorSignalSelector field offsets
+    // and the 6-byte source triple).
+    static constexpr size_t SIGNAL_SOURCE_WIRE_SIZE = 6;
+    static constexpr size_t SELECTOR_VALUE_WIRE_SIZE = 8;  // triple + reserved doublet
+    static constexpr size_t SOURCES_OFFSET_FIELD = 80;
+    static constexpr size_t NUMBER_OF_SOURCES_FIELD = 82;
+    static constexpr size_t CURRENT_SIGNAL_OFFSET = 84;
+
+    /// A runtime signal-selector selection (descriptor index -> source).
+    struct SelectorState
+    {
+        uint16_t descriptor_index{0};
+        SignalSourceRef source{};
+    };
+
+    static constexpr size_t MAX_SELECTOR_STATES = 8;
+
+    [[nodiscard]] auto find_selector_state(uint16_t const descriptor_index) const noexcept -> SelectorState const*
+    {
+        for (auto const& s : selector_states_) {
+            if (s.descriptor_index == descriptor_index) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] static auto load_signal_source(std::span<uint8_t const> bytes) noexcept -> SignalSourceRef
+    {
+        atdecc::doublet_t t{};
+        atdecc::doublet_t i{};
+        atdecc::doublet_t o{};
+        span_load(t, bytes.subspan(0, 2));
+        span_load(i, bytes.subspan(2, 2));
+        span_load(o, bytes.subspan(4, 2));
+        return SignalSourceRef{.signal_type = t.get(), .signal_index = i.get(), .signal_output = o.get()};
+    }
+
+    static void store_signal_source(SignalSourceRef const& src, std::span<uint8_t> out) noexcept
+    {
+        atdecc::doublet_t const t{src.signal_type};
+        atdecc::doublet_t const i{src.signal_index};
+        atdecc::doublet_t const o{src.signal_output};
+        span_store(out.subspan(0, 2), t);
+        span_store(out.subspan(2, 2), i);
+        span_store(out.subspan(4, 2), o);
+    }
+
+    /// Apply a SET_SIGNAL_SELECTOR value ({signal_type, signal_index,
+    /// signal_output}) to the selector at @p ref.
+    [[nodiscard]] auto set_signal_selector(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        if (value.size() < SIGNAL_SOURCE_WIRE_SIZE) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorSignalSelector::LENGTH) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        auto const requested = load_signal_source(value);
+
+        // The requested source must be one of the descriptor's authored sources.
+        atdecc::doublet_t sources_offset{};
+        atdecc::doublet_t number_of_sources{};
+        span_load(sources_offset, blob->subspan(SOURCES_OFFSET_FIELD, 2));
+        span_load(number_of_sources, blob->subspan(NUMBER_OF_SOURCES_FIELD, 2));
+        bool valid = false;
+        for (uint16_t n = 0; n < number_of_sources.get(); ++n) {
+            size_t const off = sources_offset.get() + (size_t{n} * SIGNAL_SOURCE_WIRE_SIZE);
+            if (off + SIGNAL_SOURCE_WIRE_SIZE > blob->size()) {
+                break;
+            }
+            if (load_signal_source(blob->subspan(off)) == requested) {
+                valid = true;
+                break;
+            }
+        }
+        if (!valid) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+
+        if (on_signal_selector_changed_) {
+            if (auto const status = on_signal_selector_changed_(ref.descriptor_index, requested);
+                status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+
+        for (auto& s : selector_states_) {
+            if (s.descriptor_index == ref.descriptor_index) {
+                s.source = requested;
+                return atdecc::AEM_STATUS_SUCCESS;
+            }
+        }
+        if (selector_states_.try_push_back(SelectorState{.descriptor_index = ref.descriptor_index, .source = requested}) ==
+            nullptr) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    statusbar::sg14::inplace_vector<SelectorState, MAX_SELECTOR_STATES> selector_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, SignalSourceRef const&), 64> on_signal_selector_changed_{};
 
     /// Load the descriptor bytes for `ref` into `desc` via
     /// span_load_padded. Returns false if the storage doesn't have a

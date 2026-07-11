@@ -36,6 +36,9 @@ struct StreamRequest
     uint64_t stream_format{0};       ///< Stream format for SET_STREAM_FORMAT
     uint16_t clock_source_index{0};  ///< Clock source index for SET_CLOCK_SOURCE
     int8_t identify_state{-1};       ///< IdentifyEntity: -1 = toggle, 0 = off, 1 = on
+    uint16_t signal_type{0};         ///< SetSignalSelector: source signal_type
+    uint16_t signal_index{0};        ///< SetSignalSelector: source signal_index
+    uint16_t signal_output{0};       ///< SetSignalSelector: source signal_output
 };
 
 /// Kind of controller action — every command a driver can issue.
@@ -54,6 +57,8 @@ enum class ControllerActionKind : uint8_t
     ConnectTxStream,        ///< ACMP CONNECT_TX_COMMAND (direct to talker; self-heal)
     DisconnectTxStream,     ///< ACMP DISCONNECT_TX_COMMAND (direct to talker; self-heal)
     GetCounters,            ///< AEM GET_COUNTERS (target=talker_entity_id, desc_type + desc_index)
+    SetSignalSelector,      ///< AEM SET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index, signal_type/index/output)
+    GetSignalSelector,      ///< AEM GET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index)
 };
 
 /// An action the driver wants the controller facade to perform.
