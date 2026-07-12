@@ -74,13 +74,13 @@ struct Config
 {
     std::string command;  // list|connect|disconnect|set-clock-source|get-clock-source|batch
     std::string interface_name;
-    std::string talker;          // NAME:UID
-    std::string listener;        // NAME:UID
-    std::string entity;          // NAME (clock-source target / list detail)
-    std::string file;            // batch TOML path
-    std::string state{"on"};     // identify: desired state (on|off)
-    std::string signal_type;     // set-signal-selector: source descriptor type (name or integer)
-    std::string backend{"raw"};  // controller backend: raw (own SMs over 0x22F0) or avb (macOS AVB framework)
+    std::string talker;       // NAME:UID
+    std::string listener;     // NAME:UID
+    std::string entity;       // NAME (clock-source target / list detail)
+    std::string file;         // batch TOML path
+    std::string state{"on"};  // identify: desired state (on|off)
+    std::string signal_type;  // set-signal-selector: source descriptor type (name or integer)
+    std::string backend{atdecc_tools::default_controller_backend()};  // raw (own SMs) or avb (macOS AVB framework)
     int64_t discover_ms{1500};
     int64_t clock_domain{0};
     int64_t clock_source{0};
@@ -119,9 +119,9 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add_choice(
         "backend",
         "Controller backend: raw (own state machines over the 0x22F0 raw socket) or avb (macOS AVB framework; required "
-        "to reach the Mac's own virtual entity)",
+        "to reach the Mac's own virtual entity). Defaults to avb on macOS, raw elsewhere.",
         {"raw", "avb"},
-        "raw",
+        atdecc_tools::default_controller_backend(),
         [&](auto v) { config.backend = std::string{v}; });
     specs.add<std::string>(
         "talker", "Talker endpoint NAME:UID (connect/disconnect)", "", [&](auto v) { config.talker = std::string{v}; });
@@ -584,27 +584,13 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    std::unique_ptr<ControllerSimple> pollable;
-    if (config.backend == "avb") {
-#if defined(__APPLE__)
-        auto service = atdecc_tools::make_macos_avb_controller_service(config.interface_name, *id_result);
-        if (service == nullptr) {
-            std::println(stderr, "Error: no AVB framework support on interface '{}'", config.interface_name);
-            return 1;
-        }
-        pollable = std::make_unique<ControllerSimple>(std::move(service));
-#else
-        std::println(stderr, "Error: --backend=avb is only available on macOS");
+    std::string backend_error;
+    auto service = atdecc_tools::make_controller_service(config.backend, config.interface_name, *id_result, backend_error);
+    if (service == nullptr) {
+        std::println(stderr, "Error: {}", backend_error);
         return 1;
-#endif
-    } else {
-        RawnetContext rawnet;
-        if (!rawnet.open(config.interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC)) {
-            std::println(stderr, "Error: failed to open raw socket on '{}' (root/cap_net_raw required)", config.interface_name);
-            return 1;
-        }
-        pollable = std::make_unique<ControllerSimple>(std::move(rawnet), *id_result);
     }
+    auto pollable = std::make_unique<ControllerSimple>(std::move(service));
     auto* ctrl = pollable.get();
 
     auto& stop = statusbar::itc::install_stop_signal();

@@ -7,6 +7,7 @@
 // Usage: statusbar-atdecc-controller --interface=eth0 [--instance=N] [--controller-entity-id=EUI64]
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/atdecc_tools/atdecc_controller_service.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_simple.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_tui.hpp"
 #include "statusbar/atdecc_tools/atdecc_tools_common.hpp"
@@ -51,10 +52,19 @@ auto elapsed_ns() -> int64_t
 // CLI
 // ---------------------------------------------------------------------------
 
+std::string g_backend{atdecc_tools::default_controller_backend()};
+
 auto build_arg_specs(CommonConfig& config) -> args::ArgumentSpecs
 {
     args::ArgumentSpecs specs;
     atdecc_tools::add_common_arg_specs(specs, config);
+    specs.add_choice(
+        "backend",
+        "Controller backend: raw (own state machines over the 0x22F0 raw socket) or avb (macOS AVB framework; required "
+        "to reach the Mac's own virtual entity). Defaults to avb on macOS, raw elsewhere.",
+        {"raw", "avb"},
+        atdecc_tools::default_controller_backend(),
+        [](auto v) { g_backend = std::string{v}; });
     return specs;
 }
 
@@ -88,16 +98,15 @@ int main(int argc, char* argv[])
     }
     Eui64 const controller_id = *id_result;
 
-    // Open raw socket
-    RawnetContext rawnet;
-    auto open_result = rawnet.open(config.interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC);
-    if (!open_result) {
-        std::println(stderr, "Error: failed to open raw socket on '{}' (root/cap_net_raw required)", config.interface_name);
+    // Create the controller backend (platform default: AVB framework on
+    // macOS, raw socket elsewhere) and the controller pollable on it.
+    std::string backend_error;
+    auto service = atdecc_tools::make_controller_service(g_backend, config.interface_name, controller_id, backend_error);
+    if (service == nullptr) {
+        std::println(stderr, "Error: {}", backend_error);
         return 1;
     }
-
-    // Create controller pollable
-    auto pollable = std::make_unique<atdecc_tools::ControllerSimple>(std::move(rawnet), controller_id);
+    auto pollable = std::make_unique<atdecc_tools::ControllerSimple>(std::move(service));
     auto* pollable_ptr = pollable.get();
     // Interactive UI: keep live RX-state fresh by auto-probing GET_RX_STATE on
     // discovery. (One-shot tools leave this off to avoid in-flight starvation.)

@@ -15,8 +15,10 @@
 
 #include <array>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <span>
+#include <string>
 #include <utility>
 
 namespace statusbar::atdecc_tools {
@@ -304,6 +306,29 @@ class RawnetControllerService final
 auto make_rawnet_controller_service(net::RawnetContext context, Eui64 controller_id) -> std::unique_ptr<ControllerService>
 {
     return std::make_unique<RawnetControllerService>(std::move(context), controller_id);
+}
+
+auto make_controller_service(std::string const& backend, std::string const& interface_name, Eui64 controller_id, std::string& error)
+    -> std::unique_ptr<ControllerService>
+{
+    if (backend == "avb") {
+#if defined(__APPLE__)
+        auto service = make_macos_avb_controller_service(interface_name, controller_id);
+        if (service == nullptr) {
+            error = std::format("no AVB framework support on interface '{}'", interface_name);
+        }
+        return service;
+#else
+        error = "the 'avb' backend is only available on macOS";
+        return nullptr;
+#endif
+    }
+    net::RawnetContext rawnet;
+    if (!rawnet.open(interface_name, avtp::AVTP_ETHERTYPE, &atdecc::ATDECC_MULTICAST_MAC)) {
+        error = std::format("failed to open raw socket on '{}' (root/cap_net_raw required)", interface_name);
+        return nullptr;
+    }
+    return make_rawnet_controller_service(std::move(rawnet), controller_id);
 }
 
 }  // namespace statusbar::atdecc_tools

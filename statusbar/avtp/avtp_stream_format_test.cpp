@@ -58,10 +58,17 @@ TEST(stream_format, unknown_subtype_falls_back_to_hex_only)
     EXPECT_TRUE(s == "0x1234567890abcdef");
 }
 
-TEST(stream_format, crf_formatted_as_crf)
+TEST(stream_format, crf_decodes_milan_media_clock_format)
 {
-    auto const s = stream_format_to_string(0x0400000000000000ULL);
-    EXPECT_TRUE(s == "CRF");
+    // The Milan media-clock CRF format (matching the Meyer Galaxy reference
+    // capture): AUDIO_SAMPLE, 48 kHz base, timestamp_interval 96, one
+    // timestamp per PDU, pull x1.0 (omitted from the string when 1.0).
+    auto const s = stream_format_to_string(0x041060010000BB80ULL);
+    EXPECT_TRUE(s == "CRF Audio Sample 48kHz interval=96 ts/pdu=1");
+
+    // A pulled variant renders the multiplier.
+    auto const pulled = stream_format_to_string(0x041060012000BB80ULL);  // pull=1 (x1/1.001)
+    EXPECT_TRUE(pulled.find("pull=") != std::string::npos);
 }
 
 // nsr in the low nibble = 0x0F (no mapped rate) -> "rate?(15)"

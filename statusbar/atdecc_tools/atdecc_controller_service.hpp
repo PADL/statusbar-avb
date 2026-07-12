@@ -191,4 +191,23 @@ class ControllerService
     -> std::unique_ptr<ControllerService>;
 #endif
 
+/// The platform's default controller backend name: the system AVB framework
+/// on macOS (the only path to the Mac's own virtual entity), our raw-socket
+/// stack everywhere else.
+[[nodiscard]] constexpr auto default_controller_backend() noexcept -> char const*
+{
+#if defined(__APPLE__)
+    return "avb";
+#else
+    return "raw";
+#endif
+}
+
+/// Create a ControllerService by backend name: "raw" opens a raw L2 socket
+/// on @p interface_name (root / cap_net_raw); "avb" uses the macOS AVB
+/// framework. Returns nullptr with the reason in @p error on failure.
+[[nodiscard]] auto make_controller_service(
+    std::string const& backend, std::string const& interface_name, ieee::Eui64 controller_id, std::string& error)
+    -> std::unique_ptr<ControllerService>;
+
 }  // namespace statusbar::atdecc_tools

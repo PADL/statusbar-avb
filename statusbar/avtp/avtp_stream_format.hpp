@@ -13,6 +13,7 @@
 /// description like "AAF 2ch 48kHz 24-bit" or "AM824 MBLA 8ch 48kHz" for
 /// common formats. Unknown formats fall back to a hex string.
 
+#include "statusbar/avtp/avtp_crf.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
 
 #include <array>
@@ -143,8 +144,42 @@ namespace statusbar::avtp {
     return std::format("AM824 {}ch {}.{}kHz", channels, rate / 1000, (rate / 100) % 10);
 }
 
+/// Decode a CRF (Clock Reference Format) stream format — the Milan media
+/// clock stream format. Layout per IEEE 1722-2016 (CRF stream format used
+/// in the 1722.1 stream_format field):
+///   bits 63-56: subtype (0x04)
+///   bits 55-52: type (1 = AUDIO_SAMPLE for a media clock stream)
+///   bits 51-40: timestamp_interval (events per timestamp)
+///   bits 39-32: timestamps_per_pdu
+///   bits 31-29: pull (base_frequency multiplier, Table 28)
+///   bits 28-0 : base_frequency in Hz
+///
+/// Example (Milan media clock, matching the Meyer Galaxy reference
+/// capture): 0x041060010000bb80 = CRF AUDIO_SAMPLE 48 kHz,
+/// timestamp_interval 96, 1 timestamp per PDU, pull x1.0.
+[[nodiscard]] inline auto decode_crf_stream_format(uint64_t fmt) -> std::string
+{
+    uint8_t const type = static_cast<uint8_t>((fmt >> 52) & 0x0FU);
+    uint16_t const timestamp_interval = static_cast<uint16_t>((fmt >> 40) & 0xFFFU);
+    uint8_t const timestamps_per_pdu = static_cast<uint8_t>((fmt >> 32) & 0xFFU);
+    uint8_t const pull = static_cast<uint8_t>((fmt >> 29) & 0x07U);
+    uint32_t const base_frequency = static_cast<uint32_t>(fmt & 0x1FFFFFFFU);
+
+    std::string rate;
+    if (base_frequency % 1000 == 0) {
+        rate = std::format("{}kHz", base_frequency / 1000);
+    } else {
+        rate = std::format("{}Hz", base_frequency);
+    }
+    auto out = std::format("CRF {} {} interval={} ts/pdu={}", crf_type_name(type), rate, timestamp_interval, timestamps_per_pdu);
+    if (pull != 0) {
+        out += std::format(" pull={}", crf_pull_name(pull));
+    }
+    return out;
+}
+
 /// Decode an 8-byte stream format code into a short human-readable string.
-/// Recognises AAF and AM824 (IEC 61883-6). Falls back to hex for others.
+/// Recognises AAF, AM824 (IEC 61883-6), and CRF. Falls back to hex for others.
 [[nodiscard]] inline auto stream_format_to_string(uint64_t fmt) -> std::string
 {
     auto const b = stream_format_bytes(fmt);
@@ -154,7 +189,7 @@ namespace statusbar::avtp {
         case AvtpSubtype::iec_61883_iidc:
             return decode_am824_stream_format(fmt);
         case AvtpSubtype::crf:
-            return "CRF";
+            return decode_crf_stream_format(fmt);
         default:
             return std::format("0x{:016x}", fmt);
     }
