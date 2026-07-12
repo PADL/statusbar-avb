@@ -13,6 +13,22 @@ inline auto ns_to_timepoint(int64_t ns) -> sm::TimePoint
     return sm::TimePoint{std::chrono::nanoseconds{ns}};
 }
 
+namespace {
+
+/// Store one big-endian doublet / quadlet into a payload buffer via the
+/// ieee network-order helpers (no hand-rolled shift/mask packing).
+inline void put_u16(std::span<uint8_t> const out, size_t const offset, uint16_t const v)
+{
+    (void)ieee::store(out.subspan(offset), ieee::doublet_t{v});
+}
+
+inline void put_u32(std::span<uint8_t> const out, size_t const offset, uint32_t const v)
+{
+    (void)ieee::store(out.subspan(offset), ieee::quadlet_t{v});
+}
+
+}  // namespace
+
 using namespace atdecc;
 
 NanoAvbAemController::NanoAvbAemController(Eui64 controller_entity_id, AemControllerEntityCallbacks callbacks)
@@ -172,7 +188,7 @@ auto NanoAvbAemController::acquire_entity(Eui64 target, bool persistent) -> bool
 {
     std::array<uint8_t, 16> payload{};
     if (persistent) {
-        payload[3] = 0x01;  // PERSISTENT flag (network byte order)
+        put_u32(payload, 0, 0x00000001);  // PERSISTENT flag
     }
     return send_aem_command(target, AEM_COMMAND_ACQUIRE_ENTITY, payload);
 }
@@ -180,7 +196,7 @@ auto NanoAvbAemController::acquire_entity(Eui64 target, bool persistent) -> bool
 auto NanoAvbAemController::release_entity(Eui64 target) -> bool
 {
     std::array<uint8_t, 16> payload{};
-    payload[0] = 0x80;  // RELEASE flag (network byte order, bit 31)
+    put_u32(payload, 0, 0x80000000);  // RELEASE flag (bit 31)
     return send_aem_command(target, AEM_COMMAND_ACQUIRE_ENTITY, payload);
 }
 
@@ -193,7 +209,7 @@ auto NanoAvbAemController::lock_entity(Eui64 target) -> bool
 auto NanoAvbAemController::unlock_entity(Eui64 target) -> bool
 {
     std::array<uint8_t, 16> payload{};
-    payload[3] = 0x01;  // UNLOCK flag
+    put_u32(payload, 0, 0x00000001);  // UNLOCK flag
     return send_aem_command(target, AEM_COMMAND_LOCK_ENTITY, payload);
 }
 
@@ -201,10 +217,8 @@ auto NanoAvbAemController::read_descriptor(Eui64 target, uint16_t desc_type, uin
 {
     std::array<uint8_t, 8> payload{};
     // Configuration index (2 bytes) + reserved (2 bytes) + descriptor_type (2 bytes) + descriptor_index (2 bytes)
-    payload[4] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[5] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[6] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[7] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 4, desc_type);
+    put_u16(payload, 6, desc_index);
     return send_aem_command(target, AEM_COMMAND_READ_DESCRIPTOR, payload);
 }
 
@@ -234,10 +248,8 @@ auto NanoAvbAemController::set_identify(Eui64 target, bool on, atdecc::AemComman
     }
     uint16_t const control_index = entity->adpdu.identify_control_index.get();
     std::array<uint8_t, 5> payload{};
-    payload[0] = static_cast<uint8_t>((DESCRIPTOR_CONTROL >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(DESCRIPTOR_CONTROL & 0xFF);
-    payload[2] = static_cast<uint8_t>((control_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(control_index & 0xFF);
+    put_u16(payload, 0, DESCRIPTOR_CONTROL);
+    put_u16(payload, 2, control_index);
     payload[4] = on ? 0xFF : 0x00;  // LINEAR_UINT8 value
     return send_aem_command(target, AEM_COMMAND_SET_CONTROL, payload, std::move(completion));
 }
@@ -245,30 +257,24 @@ auto NanoAvbAemController::set_identify(Eui64 target, bool on, atdecc::AemComman
 auto NanoAvbAemController::get_stream_info(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, desc_type);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_GET_STREAM_INFO, payload);
 }
 
 auto NanoAvbAemController::get_avb_info(Eui64 target, uint16_t desc_index) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((DESCRIPTOR_AVB_INTERFACE >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(DESCRIPTOR_AVB_INTERFACE & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, DESCRIPTOR_AVB_INTERFACE);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_GET_AVB_INFO, payload);
 }
 
 auto NanoAvbAemController::get_clock_source(Eui64 target, uint16_t desc_index, atdecc::AemCommandCompletion completion) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((DESCRIPTOR_CLOCK_DOMAIN >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(DESCRIPTOR_CLOCK_DOMAIN & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, DESCRIPTOR_CLOCK_DOMAIN);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_GET_CLOCK_SOURCE, payload, std::move(completion));
 }
 
@@ -282,69 +288,52 @@ auto NanoAvbAemController::set_signal_selector(
 {
     // AemSignalSelectorPayload: descriptor header + source triple + reserved.
     std::array<uint8_t, 12> payload{};
-    payload[0] = static_cast<uint8_t>((DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
-    payload[4] = static_cast<uint8_t>((signal_type >> 8) & 0xFF);
-    payload[5] = static_cast<uint8_t>(signal_type & 0xFF);
-    payload[6] = static_cast<uint8_t>((signal_index >> 8) & 0xFF);
-    payload[7] = static_cast<uint8_t>(signal_index & 0xFF);
-    payload[8] = static_cast<uint8_t>((signal_output >> 8) & 0xFF);
-    payload[9] = static_cast<uint8_t>(signal_output & 0xFF);
+    put_u16(payload, 0, DESCRIPTOR_SIGNAL_SELECTOR);
+    put_u16(payload, 2, desc_index);
+    put_u16(payload, 4, signal_type);
+    put_u16(payload, 6, signal_index);
+    put_u16(payload, 8, signal_output);
     return send_aem_command(target, AEM_COMMAND_SET_SIGNAL_SELECTOR, payload, std::move(completion));
 }
 
 auto NanoAvbAemController::get_signal_selector(Eui64 target, uint16_t desc_index, atdecc::AemCommandCompletion completion) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, DESCRIPTOR_SIGNAL_SELECTOR);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_GET_SIGNAL_SELECTOR, payload, std::move(completion));
 }
 
 auto NanoAvbAemController::get_counters(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, desc_type);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_GET_COUNTERS, payload);
 }
 
 auto NanoAvbAemController::set_stream_format(Eui64 target, uint16_t desc_type, uint16_t desc_index, uint64_t stream_format) -> bool
 {
     std::array<uint8_t, 12> payload{};
-    payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
-    for (int i = 0; i < 8; ++i) {
-        payload[4 + i] = static_cast<uint8_t>((stream_format >> (56 - (i * 8))) & 0xFF);
-    }
+    put_u16(payload, 0, desc_type);
+    put_u16(payload, 2, desc_index);
+    (void)ieee::store_unchecked(std::span<uint8_t>{payload}.subspan(4), Eui64{}.from_uint64(stream_format));
     return send_aem_command(target, AEM_COMMAND_SET_STREAM_FORMAT, payload);
 }
 
 auto NanoAvbAemController::start_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, desc_type);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_START_STREAMING, payload);
 }
 
 auto NanoAvbAemController::stop_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool
 {
     std::array<uint8_t, 4> payload{};
-    payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, desc_type);
+    put_u16(payload, 2, desc_index);
     return send_aem_command(target, AEM_COMMAND_STOP_STREAMING, payload);
 }
 
@@ -352,26 +341,20 @@ auto NanoAvbAemController::set_clock_source(
     Eui64 target, uint16_t desc_index, uint16_t clock_source_index, atdecc::AemCommandCompletion completion) -> bool
 {
     std::array<uint8_t, 8> payload{};
-    payload[0] = static_cast<uint8_t>((DESCRIPTOR_CLOCK_DOMAIN >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(DESCRIPTOR_CLOCK_DOMAIN & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
-    payload[4] = static_cast<uint8_t>((clock_source_index >> 8) & 0xFF);
-    payload[5] = static_cast<uint8_t>(clock_source_index & 0xFF);
+    put_u16(payload, 0, DESCRIPTOR_CLOCK_DOMAIN);
+    put_u16(payload, 2, desc_index);
+    put_u16(payload, 4, clock_source_index);
     return send_aem_command(target, AEM_COMMAND_SET_CLOCK_SOURCE, payload, std::move(completion));
 }
 
 auto NanoAvbAemController::set_sampling_rate(Eui64 target, uint16_t desc_type, uint16_t desc_index, uint32_t sampling_rate) -> bool
 {
     std::array<uint8_t, 8> payload{};
-    payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-    payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-    payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-    payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+    put_u16(payload, 0, desc_type);
+    put_u16(payload, 2, desc_index);
     payload[4] = static_cast<uint8_t>((sampling_rate >> 24) & 0xFF);
     payload[5] = static_cast<uint8_t>((sampling_rate >> 16) & 0xFF);
-    payload[6] = static_cast<uint8_t>((sampling_rate >> 8) & 0xFF);
-    payload[7] = static_cast<uint8_t>(sampling_rate & 0xFF);
+    put_u16(payload, 6, sampling_rate);
     return send_aem_command(target, AEM_COMMAND_SET_SAMPLING_RATE, payload);
 }
 
