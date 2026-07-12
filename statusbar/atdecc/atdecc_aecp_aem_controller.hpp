@@ -11,6 +11,7 @@
 #include "statusbar/container/container_slot_table.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/sg14/inplace_function.h"
+#include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/sm/sm.hpp"
 
 #include <array>
@@ -28,6 +29,32 @@ using statusbar::container::SlotTable;
 // AEM Inflight Command
 //
 
+/// How a tracked AEM command concluded.
+enum class AemCommandDelivery : uint8_t
+{
+    Responded,   ///< final response received; `status` and `response` are valid
+    TimedOut,    ///< inflight timeout expired with no final response
+    SendFailed,  ///< never went on the wire (inflight table full or tx failed)
+};
+
+/// The outcome of one tracked AEM command, delivered to its completion.
+/// The spans reference the state machine's buffers and are only valid for
+/// the duration of the completion call — copy what must outlive it.
+struct AemCommandResult
+{
+    AemCommandDelivery delivery{AemCommandDelivery::SendFailed};
+    uint8_t status{0};  ///< AEM_STATUS_* (meaningful when delivery == Responded)
+    uint16_t command_type{0};
+    ieee::Eui64 target_entity_id{};
+    std::span<uint8_t const> sent_payload{};  ///< the original request payload
+    std::span<uint8_t const> response{};      ///< response payload (empty unless Responded)
+};
+
+/// Per-command completion: fires exactly once per tracked command — on the
+/// final response, on timeout, or immediately when the send fails. This is
+/// the correlation mechanism; callers never match sequence IDs themselves.
+using AemCommandCompletion = statusbar::sg14::inplace_function<void(AemCommandResult const&), 64>;
+
 /// Tracks a sent AEM command waiting for a response.
 ///
 /// Slot occupancy is tracked by the enclosing SlotTable (whose size()
@@ -36,10 +63,10 @@ struct AemInflightCommand
 {
     static constexpr size_t MAX_PAYLOAD = 512;
 
-    AemDu sent_header{};                         ///< The AemDu header as sent
-    std::array<uint8_t, MAX_PAYLOAD> payload{};  ///< Command payload copy
-    size_t payload_size{0};
-    AemCommandTracker tracker;  ///< IN_PROGRESS timeout tracker
+    AemDu sent_header{};                                            ///< The AemDu header as sent
+    statusbar::sg14::inplace_vector<uint8_t, MAX_PAYLOAD> payload;  ///< Command payload copy
+    AemCommandTracker tracker;                                      ///< IN_PROGRESS timeout tracker
+    AemCommandCompletion completion;                                ///< fires once with the outcome (may be unset)
 };
 
 //
@@ -52,6 +79,7 @@ struct AemCommandParams
     ieee::Eui64 target_entity_id{};
     uint16_t command_code{0};
     std::span<uint8_t const> command_data{};
+    AemCommandCompletion completion{};  ///< optional per-command outcome callback
 };
 
 /// Context for the AEM controller state machine
@@ -115,14 +143,15 @@ struct AemControllerContext
     /// Add a new inflight command. Returns true if added, false if the
     /// table is at capacity. Callers must check this return value before
     /// committing the associated packet to the wire.
-    auto add_inflight(AemDu const& header, std::span<uint8_t const> payload_data, TimePoint now) -> bool
+    auto add_inflight(
+        AemDu const& header, std::span<uint8_t const> payload_data, TimePoint now, AemCommandCompletion completion = {}) -> bool
     {
         AemInflightCommand entry{};
         entry.sent_header = header;
         auto const copy_size = std::min(payload_data.size(), AemInflightCommand::MAX_PAYLOAD);
-        span_copy(make_span(entry.payload).first(copy_size), payload_data.first(copy_size));
-        entry.payload_size = copy_size;
+        entry.payload.assign(payload_data.begin(), payload_data.begin() + static_cast<ptrdiff_t>(copy_size));
         entry.tracker.start(header.sequence_id.get(), header.command_code(), now);
+        entry.completion = std::move(completion);
         return inflight.add(entry);
     }
 

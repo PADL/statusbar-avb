@@ -201,6 +201,166 @@ TEST(aem_controller_sm, unknown_sequence_ignored)
 }
 
 //
+// Per-command completions — the typed correlation surface. A completion
+// fires exactly once per tracked command: final response, timeout, or
+// immediately on send failure. Callers never match sequence IDs.
+//
+
+TEST(aem_controller_completion, fires_once_on_final_response)
+{
+    AemControllerContext ctx;
+    ctx.my_id = CONTROLLER_ID;
+    ctx.tx_command = [](std::span<uint8_t const>) { return true; };
+
+    int fired = 0;
+    AemCommandDelivery delivery{};
+    uint8_t status = 0xFF;
+    uint16_t command_type = 0;
+    Eui64 target{};
+    std::vector<uint8_t> sent_copy;
+    std::vector<uint8_t> response_copy;
+
+    AemControllerStateMachine<> sm;
+    sm.handle_event(ctx, AemControllerEvent::UCT, test_time(0));
+
+    std::array<uint8_t, 4> const payload = {0x00, 0x1B, 0x00, 0x02};
+    ctx.command_params = {
+        .target_entity_id = TARGET_ID,
+        .command_code = AEM_COMMAND_GET_SIGNAL_SELECTOR,
+        .command_data = payload,
+        .completion =
+            [&](AemCommandResult const& r) {
+                ++fired;
+                delivery = r.delivery;
+                status = r.status;
+                command_type = r.command_type;
+                target = r.target_entity_id;
+                sent_copy.assign(r.sent_payload.begin(), r.sent_payload.end());
+                response_copy.assign(r.response.begin(), r.response.end());
+            },
+    };
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+    EXPECT_EQ(fired, 0);  // nothing yet — command is inflight
+
+    // An IN_PROGRESS response extends the deadline and must NOT complete.
+    AemDu in_progress{};
+    in_progress.init_response(AEM_COMMAND_GET_SIGNAL_SELECTOR, AEM_STATUS_IN_PROGRESS, AemDu::AEM_DATA_LENGTH);
+    in_progress.controller_entity_id = CONTROLLER_ID;
+    in_progress.sequence_id = 0;
+    ctx.rcvd_header = in_progress;
+    ctx.rcvd_response_data = {};
+    ctx.current_inflight_index = ctx.find_inflight(0);
+    sm.handle_event(ctx, AemControllerEvent::RcvdResponse, test_time(100));
+    EXPECT_EQ(fired, 0);
+
+    // The final response completes with status + payloads.
+    AemDu resp{};
+    resp.init_response(AEM_COMMAND_GET_SIGNAL_SELECTOR, AEM_STATUS_SUCCESS, AemDu::AEM_DATA_LENGTH);
+    resp.controller_entity_id = CONTROLLER_ID;
+    resp.sequence_id = 0;
+    std::array<uint8_t, 6> const response_data = {0x00, 0x1B, 0x00, 0x02, 0x00, 0x14};
+    ctx.rcvd_header = resp;
+    ctx.rcvd_response_data = response_data;
+    ctx.current_inflight_index = ctx.find_inflight(0);
+    sm.handle_event(ctx, AemControllerEvent::RcvdResponse, test_time(150));
+
+    EXPECT_EQ(fired, 1);
+    EXPECT_TRUE(delivery == AemCommandDelivery::Responded);
+    EXPECT_EQ(status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(command_type, AEM_COMMAND_GET_SIGNAL_SELECTOR);
+    EXPECT_TRUE(target == TARGET_ID);
+    EXPECT_TRUE(sent_copy == std::vector<uint8_t>(payload.begin(), payload.end()));
+    EXPECT_TRUE(response_copy == std::vector<uint8_t>(response_data.begin(), response_data.end()));
+    EXPECT_EQ(ctx.inflight_count(), 0U);
+}
+
+TEST(aem_controller_completion, fires_on_timeout_with_sent_payload)
+{
+    AemControllerContext ctx;
+    ctx.my_id = CONTROLLER_ID;
+    ctx.tx_command = [](std::span<uint8_t const>) { return true; };
+
+    int fired = 0;
+    AemCommandDelivery delivery{};
+    std::vector<uint8_t> sent_copy;
+
+    AemControllerStateMachine<> sm;
+    sm.handle_event(ctx, AemControllerEvent::UCT, test_time(0));
+
+    std::array<uint8_t, 2> const payload = {0xAB, 0xCD};
+    ctx.command_params = {
+        .target_entity_id = TARGET_ID,
+        .command_code = AEM_COMMAND_READ_DESCRIPTOR,
+        .command_data = payload,
+        .completion =
+            [&](AemCommandResult const& r) {
+                ++fired;
+                delivery = r.delivery;
+                sent_copy.assign(r.sent_payload.begin(), r.sent_payload.end());
+            },
+    };
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+
+    ctx.current_inflight_index = ctx.find_timed_out(test_time(260));
+    EXPECT_TRUE(ctx.current_inflight_index < AemControllerContext::MAX_INFLIGHT);
+    sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(260));
+
+    EXPECT_EQ(fired, 1);
+    EXPECT_TRUE(delivery == AemCommandDelivery::TimedOut);
+    EXPECT_TRUE(sent_copy == std::vector<uint8_t>(payload.begin(), payload.end()));
+    EXPECT_EQ(ctx.inflight_count(), 0U);
+}
+
+TEST(aem_controller_completion, fires_immediately_on_send_failure)
+{
+    AemControllerContext ctx;
+    ctx.my_id = CONTROLLER_ID;
+
+    // tx failure (e.g. target MAC unknown / interface down).
+    ctx.tx_command = [](std::span<uint8_t const>) { return false; };
+
+    int fired = 0;
+    AemCommandDelivery delivery{};
+    AemControllerStateMachine<> sm;
+    sm.handle_event(ctx, AemControllerEvent::UCT, test_time(0));
+
+    ctx.command_params = {
+        .target_entity_id = TARGET_ID,
+        .command_code = AEM_COMMAND_READ_DESCRIPTOR,
+        .completion =
+            [&](AemCommandResult const& r) {
+                ++fired;
+                delivery = r.delivery;
+            },
+    };
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+    EXPECT_EQ(fired, 1);
+    EXPECT_TRUE(delivery == AemCommandDelivery::SendFailed);
+    EXPECT_EQ(ctx.inflight_count(), 0U);
+
+    // Inflight table full is also an immediate SendFailed.
+    ctx.tx_command = [](std::span<uint8_t const>) { return true; };
+    for (size_t i = 0; i < AemControllerContext::MAX_INFLIGHT; ++i) {
+        ctx.command_params = {.target_entity_id = TARGET_ID, .command_code = AEM_COMMAND_READ_DESCRIPTOR};
+        sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+    }
+    EXPECT_EQ(ctx.inflight_count(), AemControllerContext::MAX_INFLIGHT);
+    fired = 0;
+    ctx.command_params = {
+        .target_entity_id = TARGET_ID,
+        .command_code = AEM_COMMAND_READ_DESCRIPTOR,
+        .completion =
+            [&](AemCommandResult const& r) {
+                ++fired;
+                delivery = r.delivery;
+            },
+    };
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+    EXPECT_EQ(fired, 1);
+    EXPECT_TRUE(delivery == AemCommandDelivery::SendFailed);
+}
+
+//
 // Test Runner
 //
 

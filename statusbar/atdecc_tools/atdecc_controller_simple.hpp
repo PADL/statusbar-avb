@@ -129,6 +129,16 @@ class ControllerSimple : public net::Pollable
 
   private:
     void wire_controller();
+
+    /// A per-command completion that surfaces the outcome as a typed
+    /// CommandCompletedEvent (the scriptable alternative to matching
+    /// StatusChangedEvent text).
+    [[nodiscard]] auto make_command_completion() -> atdecc::AemCommandCompletion;
+
+    /// Synthesize the SendFailed completion event for a command that was
+    /// refused before reaching the state machine (e.g. entity unknown).
+    void emit_command_send_failure(ieee::Eui64 const& target, uint16_t command_type);
+
     void forget_entity_metadata(ieee::Eui64 const& id);
     void queue_rx_state_for_entity(atdecc::AdpDu const& adp);
     auto make_active_connection(atdecc::AcmpDu const& acmp) -> ActiveConnection;

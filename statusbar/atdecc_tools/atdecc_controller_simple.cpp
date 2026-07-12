@@ -246,11 +246,12 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             auto const target = action.request.talker_entity_id;
             bool const new_on =
                 (action.request.identify_state < 0) ? !entities_[target].identify_on : (action.request.identify_state != 0);
-            if (controller_.set_identify(target, new_on)) {
+            if (controller_.set_identify(target, new_on, make_command_completion())) {
                 entities_[target].identify_on = new_on;
                 emit_status(new_on ? "Identify on" : "Identify off");
             } else {
                 emit_status("Identify failed: entity unknown, no identify control advertised, or queue full");
+                emit_command_send_failure(target, AEM_COMMAND_SET_CONTROL);
             }
             break;
         }
@@ -277,13 +278,19 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
         case ControllerActionKind::SetClockSource:
             // desc_index = CLOCK_DOMAIN index; clock_source_index = which source.
             if (!controller_.set_clock_source(
-                    action.request.talker_entity_id, action.request.desc_index, action.request.clock_source_index)) {
+                    action.request.talker_entity_id,
+                    action.request.desc_index,
+                    action.request.clock_source_index,
+                    make_command_completion())) {
                 emit_status("Set clock source failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_SET_CLOCK_SOURCE);
             }
             break;
         case ControllerActionKind::GetClockSource:
-            if (!controller_.get_clock_source(action.request.talker_entity_id, action.request.desc_index)) {
+            if (!controller_.get_clock_source(
+                    action.request.talker_entity_id, action.request.desc_index, make_command_completion())) {
                 emit_status("Get clock source failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_GET_CLOCK_SOURCE);
             }
             break;
         case ControllerActionKind::ConnectTxStream:
@@ -312,16 +319,43 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
                     action.request.desc_index,
                     action.request.signal_type,
                     action.request.signal_index,
-                    action.request.signal_output)) {
+                    action.request.signal_output,
+                    make_command_completion())) {
                 emit_status("Set signal selector failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_SET_SIGNAL_SELECTOR);
             }
             break;
         case ControllerActionKind::GetSignalSelector:
-            if (!controller_.get_signal_selector(action.request.talker_entity_id, action.request.desc_index)) {
+            if (!controller_.get_signal_selector(
+                    action.request.talker_entity_id, action.request.desc_index, make_command_completion())) {
                 emit_status("Get signal selector failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_GET_SIGNAL_SELECTOR);
             }
             break;
     }
+}
+
+auto ControllerSimple::make_command_completion() -> atdecc::AemCommandCompletion
+{
+    return [this](atdecc::AemCommandResult const& r) {
+        CommandCompletedEvent ev{};
+        ev.entity_id = r.target_entity_id;
+        ev.command_type = r.command_type;
+        ev.delivery = r.delivery;
+        ev.aem_status = r.status;
+        auto const n = std::min(r.response.size(), ev.response.capacity());
+        ev.response.assign(r.response.begin(), r.response.begin() + static_cast<ptrdiff_t>(n));
+        pending_events_.emplace_back(std::move(ev));
+    };
+}
+
+void ControllerSimple::emit_command_send_failure(ieee::Eui64 const& target, uint16_t const command_type)
+{
+    CommandCompletedEvent ev{};
+    ev.entity_id = target;
+    ev.command_type = command_type;
+    ev.delivery = atdecc::AemCommandDelivery::SendFailed;
+    pending_events_.emplace_back(std::move(ev));
 }
 
 void ControllerSimple::EntityDetailBuilder::receive(

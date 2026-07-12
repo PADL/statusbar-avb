@@ -87,7 +87,12 @@ class NanoAvbAemController
     // --- AEM Commands ---
 
     /// Send an AEM command to a target entity (looked up via ADP discovery for MAC)
-    auto send_aem_command(Eui64 target, uint16_t command_code, std::span<uint8_t const> payload = {}) -> bool;
+    /// Send an arbitrary AEM command. The optional @p completion fires
+    /// exactly once with the outcome (final response, timeout, or send
+    /// failure) — the caller never matches sequence IDs itself.
+    auto send_aem_command(
+        Eui64 target, uint16_t command_code, std::span<uint8_t const> payload = {}, atdecc::AemCommandCompletion completion = {})
+        -> bool;
 
     /// Acquire entity
     auto acquire_entity(Eui64 target, bool persistent = false) -> bool;
@@ -111,7 +116,7 @@ class NanoAvbAemController
     /// Sends SET_CONTROL on the CONTROL descriptor whose index is advertised
     /// by the ADPDU's `identify_control_index` field. `on=true` writes 0xFF,
     /// `on=false` writes 0x00.
-    auto set_identify(Eui64 target, bool on) -> bool;
+    auto set_identify(Eui64 target, bool on, atdecc::AemCommandCompletion completion = {}) -> bool;
 
     /// Send GET_STREAM_INFO command
     auto get_stream_info(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
@@ -120,7 +125,7 @@ class NanoAvbAemController
     auto get_avb_info(Eui64 target, uint16_t desc_index = 0) -> bool;
 
     /// Send GET_CLOCK_SOURCE command (CLOCK_DOMAIN descriptor)
-    auto get_clock_source(Eui64 target, uint16_t desc_index = 0) -> bool;
+    auto get_clock_source(Eui64 target, uint16_t desc_index = 0, atdecc::AemCommandCompletion completion = {}) -> bool;
 
     /// Send GET_COUNTERS command
     auto get_counters(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
@@ -135,15 +140,21 @@ class NanoAvbAemController
     auto stop_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
 
     /// Send SET_CLOCK_SOURCE command
-    auto set_clock_source(Eui64 target, uint16_t desc_index, uint16_t clock_source_index) -> bool;
+    auto set_clock_source(
+        Eui64 target, uint16_t desc_index, uint16_t clock_source_index, atdecc::AemCommandCompletion completion = {}) -> bool;
 
     /// Send SET_SIGNAL_SELECTOR command (SIGNAL_SELECTOR descriptor):
     /// select the {signal_type, signal_index, signal_output} source.
-    auto set_signal_selector(Eui64 target, uint16_t desc_index, uint16_t signal_type, uint16_t signal_index, uint16_t signal_output)
-        -> bool;
+    auto set_signal_selector(
+        Eui64 target,
+        uint16_t desc_index,
+        uint16_t signal_type,
+        uint16_t signal_index,
+        uint16_t signal_output,
+        atdecc::AemCommandCompletion completion = {}) -> bool;
 
     /// Send GET_SIGNAL_SELECTOR command (SIGNAL_SELECTOR descriptor)
-    auto get_signal_selector(Eui64 target, uint16_t desc_index = 0) -> bool;
+    auto get_signal_selector(Eui64 target, uint16_t desc_index = 0, atdecc::AemCommandCompletion completion = {}) -> bool;
 
     /// Send SET_SAMPLING_RATE command
     auto set_sampling_rate(Eui64 target, uint16_t desc_type, uint16_t desc_index, uint32_t sampling_rate) -> bool;

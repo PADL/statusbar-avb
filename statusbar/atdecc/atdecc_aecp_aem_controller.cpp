@@ -10,14 +10,35 @@
 
 namespace statusbar::atdecc::aem_controller_actions {
 
+namespace {
+
+/// Report a command that never made it onto the wire, so a completion-based
+/// caller is not stranded waiting for a response that can never arrive.
+void report_send_failure(AemCommandParams& params)
+{
+    if (params.completion) {
+        params.completion(AemCommandResult{
+            .delivery = AemCommandDelivery::SendFailed,
+            .status = 0,
+            .command_type = params.command_code,
+            .target_entity_id = params.target_entity_id,
+            .sent_payload = params.command_data,
+            .response = {}});
+        params.completion = {};
+    }
+}
+
+}  // namespace
+
 void send_aem_command(AemControllerContext& ctx, sm::TimePoint event_time)
 {
-    auto const& params = ctx.command_params;
+    auto& params = ctx.command_params;
 
     // Refuse to send if there's no free inflight slot. Otherwise the packet
     // would go on the wire untracked and its response would be silently
     // dropped, stranding any queued descriptor read that was relying on it.
     if (ctx.inflight.is_full()) {
+        report_send_failure(params);
         return;
     }
 
@@ -38,7 +59,11 @@ void send_aem_command(AemControllerContext& ctx, sm::TimePoint event_time)
     if (ctx.tx_command && ctx.tx_command(out_frame)) {
         // We checked is_full() above; in a single-threaded context the
         // table cannot have filled between then and now.
-        [[maybe_unused]] bool const added = ctx.add_inflight(header, params.command_data.first(payload_size), event_time);
+        [[maybe_unused]] bool const added =
+            ctx.add_inflight(header, params.command_data.first(payload_size), event_time, std::move(params.completion));
+        params.completion = {};
+    } else {
+        report_send_failure(params);
     }
 }
 
@@ -62,9 +87,18 @@ void handle_aem_response(AemControllerContext& ctx, sm::TimePoint event_time)
 
     // Final response — also pass the original request payload (some entities
     // zero out the response's echoed descriptor_type/index on errors).
+    std::span<uint8_t const> const sent_payload{entry->payload.data(), entry->payload.size()};
     if (ctx.on_response) {
-        std::span<uint8_t const> const sent_payload{entry->payload.data(), entry->payload_size};
         ctx.on_response(ctx.rcvd_header, sent_payload, ctx.rcvd_response_data, status);
+    }
+    if (entry->completion) {
+        entry->completion(AemCommandResult{
+            .delivery = AemCommandDelivery::Responded,
+            .status = status,
+            .command_type = entry->sent_header.command_code(),
+            .target_entity_id = entry->sent_header.target_entity_id,
+            .sent_payload = sent_payload,
+            .response = ctx.rcvd_response_data});
     }
     ctx.remove_inflight(idx);
 }
@@ -72,13 +106,22 @@ void handle_aem_response(AemControllerContext& ctx, sm::TimePoint event_time)
 void handle_aem_timeout(AemControllerContext& ctx, sm::TimePoint /*event_time*/)
 {
     auto const idx = ctx.current_inflight_index;
-    auto const* entry = ctx.inflight.get(idx);
+    auto* entry = ctx.inflight.get(idx);
     if (entry == nullptr) {
         return;
     }
 
     if (ctx.on_timeout) {
         ctx.on_timeout(entry->sent_header);
+    }
+    if (entry->completion) {
+        entry->completion(AemCommandResult{
+            .delivery = AemCommandDelivery::TimedOut,
+            .status = 0,
+            .command_type = entry->sent_header.command_code(),
+            .target_entity_id = entry->sent_header.target_entity_id,
+            .sent_payload = std::span<uint8_t const>{entry->payload.data(), entry->payload.size()},
+            .response = {}});
     }
     ctx.remove_inflight(idx);
 }

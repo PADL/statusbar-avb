@@ -258,6 +258,43 @@ void print_trace_verdict(Op const& op, bool is_connect, atdecc_tools::HandshakeL
 
 // Execute a single op. Returns true on success. When `trace` is set (connect/
 // disconnect only), prints a per-leg ACMP handshake verdict for diagnosis.
+/// Format one typed command outcome for the console.
+auto describe_completion(atdecc_tools::CommandCompletedEvent const& ev) -> std::string
+{
+    using atdecc::AemCommandDelivery;
+    switch (ev.delivery) {
+        case AemCommandDelivery::Responded:
+            return std::format("{} {}", aem_command_name(ev.command_type), aem_status_name(ev.aem_status));
+        case AemCommandDelivery::TimedOut:
+            return std::format("{} TIMEOUT (no response)", aem_command_name(ev.command_type));
+        case AemCommandDelivery::SendFailed:
+            break;
+    }
+    return std::format("{} SEND FAILED (entity unknown or queue full)", aem_command_name(ev.command_type));
+}
+
+/// Pump until the CommandCompletedEvent for @p command_type arrives (the
+/// typed completion surface -- no status-string matching).
+auto await_command(MessageReactor& reactor, ControllerSimple& ctrl, uint16_t command_type, atdecc_tools::CommandCompletedEvent& out)
+    -> bool
+{
+    bool done = false;
+    (void)pump(
+        reactor,
+        ctrl,
+        5000,
+        [&] { return done; },
+        [&](auto const& ev) {
+            if (auto const* c = std::get_if<atdecc_tools::CommandCompletedEvent>(&ev)) {
+                if (c->command_type == command_type) {
+                    out = *c;
+                    done = true;
+                }
+            }
+        });
+    return done;
+}
+
 auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, bool trace = false) -> bool
 {
     auto const snap = ctrl.get_display_entities();
@@ -366,25 +403,20 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
                 op.clock_domain,
                 is_set ? std::format(" clock_source={}", op.clock_source) : std::string{});
             ctrl.dispatch(action, elapsed_ns());
-            bool done = false;
-            bool ok = false;
-            std::string text;
-            (void)pump(
-                reactor,
-                ctrl,
-                5000,
-                [&] { return done; },
-                [&](auto const& ev) {
-                    if (auto const* s = std::get_if<StatusChangedEvent>(&ev)) {
-                        text = s->status;
-                        // Success if the AEM status name is SUCCESS (case-insensitive).
-                        auto const lower = atdecc_tools::detail::to_lower(text);
-                        ok = lower.find("success") != std::string::npos;
-                        done = true;
-                    }
-                });
-            std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
-            return done && ok;
+            atdecc_tools::CommandCompletedEvent done_ev{};
+            auto const cmd_code = is_set ? AEM_COMMAND_SET_CLOCK_SOURCE : AEM_COMMAND_GET_CLOCK_SOURCE;
+            if (!await_command(reactor, ctrl, cmd_code, done_ev)) {
+                std::println("  FAILED (no completion within 5s)");
+                return false;
+            }
+            auto text = describe_completion(done_ev);
+            if (done_ev.ok() && done_ev.response.size() >= aem::AemClockSourcePayload::LENGTH) {
+                aem::AemClockSourcePayload csp{};
+                span_load(csp, std::span<uint8_t const>{done_ev.response.data(), aem::AemClockSourcePayload::LENGTH});
+                text += std::format(" clock_domain={} clock_source={}", csp.descriptor_index.get(), csp.clock_source_index.get());
+            }
+            std::println("  {}", text);
+            return done_ev.ok();
         }
         case OpKind::SetSignalSelector:
         case OpKind::GetSignalSelector: {
@@ -412,29 +444,25 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
                              op.signal_output)
                        : std::string{});
             ctrl.dispatch(action, elapsed_ns());
-            bool done = false;
-            bool ok = false;
-            std::string text;
-            (void)pump(
-                reactor,
-                ctrl,
-                5000,
-                [&] { return done; },
-                [&](auto const& ev) {
-                    if (auto const* s = std::get_if<StatusChangedEvent>(&ev)) {
-                        auto const lower = atdecc_tools::detail::to_lower(s->status);
-                        if (lower.find("failed") != std::string::npos) {
-                            text = s->status;
-                            done = true;
-                        } else if (lower.find("signal_selector") != std::string::npos) {
-                            text = s->status;
-                            ok = lower.find("success") != std::string::npos;
-                            done = true;
-                        }
-                    }
-                });
-            std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
-            return done && ok;
+            atdecc_tools::CommandCompletedEvent done_ev{};
+            auto const cmd_code = is_set ? AEM_COMMAND_SET_SIGNAL_SELECTOR : AEM_COMMAND_GET_SIGNAL_SELECTOR;
+            if (!await_command(reactor, ctrl, cmd_code, done_ev)) {
+                std::println("  FAILED (no completion within 5s)");
+                return false;
+            }
+            auto text = describe_completion(done_ev);
+            if (done_ev.ok() && done_ev.response.size() >= aem::AemSignalSelectorPayload::LENGTH - 2) {
+                aem::AemSignalSelectorPayload ssp{};
+                span_load_padded(ssp, std::span<uint8_t const>{done_ev.response.data(), done_ev.response.size()});
+                text += std::format(
+                    " signal_selector={} signal_type={} signal_index={} signal_output={}",
+                    ssp.descriptor_index.get(),
+                    aem::descriptor_type_name(ssp.signal_type.get()),
+                    ssp.signal_index.get(),
+                    ssp.signal_output.get());
+            }
+            std::println("  {}", text);
+            return done_ev.ok();
         }
         case OpKind::Identify: {
             auto const eid = resolve_or_report(op.entity, snap);
@@ -447,31 +475,15 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
             action.request.identify_state = op.identify_on ? int8_t{1} : int8_t{0};
             std::println("identify {} {} ...", op.entity, op.identify_on ? "on" : "off");
             ctrl.dispatch(action, elapsed_ns());
-            bool done = false;
-            bool ok = false;
-            std::string text;
-            (void)pump(
-                reactor,
-                ctrl,
-                5000,
-                [&] { return done; },
-                [&](auto const& ev) {
-                    if (auto const* s = std::get_if<StatusChangedEvent>(&ev)) {
-                        auto const lower = atdecc_tools::detail::to_lower(s->status);
-                        // Dispatch acks immediately ("Identify on/off"); the
-                        // SET_CONTROL response is what proves the entity heard us.
-                        if (lower.find("failed") != std::string::npos) {
-                            text = s->status;
-                            done = true;
-                        } else if (lower.find("set_control") != std::string::npos) {
-                            text = s->status;
-                            ok = lower.find("success") != std::string::npos;
-                            done = true;
-                        }
-                    }
-                });
-            std::println("  {}", done ? text : std::string{"FAILED (no response within 5s)"});
-            return done && ok;
+            // The SET_CONTROL completion is what proves the entity heard us
+            // (a send failure surfaces as SendFailed on the same event).
+            atdecc_tools::CommandCompletedEvent done_ev{};
+            if (!await_command(reactor, ctrl, AEM_COMMAND_SET_CONTROL, done_ev)) {
+                std::println("  FAILED (no completion within 5s)");
+                return false;
+            }
+            std::println("  {}", describe_completion(done_ev));
+            return done_ev.ok();
         }
     }
     return false;

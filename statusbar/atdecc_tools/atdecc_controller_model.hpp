@@ -10,7 +10,9 @@
 /// These types carry no UI state. They are the command/event/data protocol
 /// between the business logic and whatever drives it.
 
+#include "statusbar/atdecc/atdecc_aecp_aem_controller.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/sg14/inplace_vector.h"
 
 #include <array>
 #include <cstdint>
@@ -158,6 +160,25 @@ struct StatusChangedEvent
     std::string status;
 };
 
+/// Outcome of one tracked AEM command — the typed completion surface.
+/// Scriptable callers key on (entity_id, command_type, delivery, aem_status)
+/// instead of matching StatusChangedEvent text. `response` is the response
+/// payload copied out of the state machine's buffer.
+struct CommandCompletedEvent
+{
+    ieee::Eui64 entity_id{};
+    uint16_t command_type{0};
+    atdecc::AemCommandDelivery delivery{atdecc::AemCommandDelivery::SendFailed};
+    uint8_t aem_status{0};  ///< AEM_STATUS_* (meaningful when delivery == Responded)
+    statusbar::sg14::inplace_vector<uint8_t, atdecc::AemInflightCommand::MAX_PAYLOAD> response;
+
+    /// True when the command was answered with AEM_STATUS_SUCCESS.
+    [[nodiscard]] auto ok() const noexcept -> bool
+    {
+        return delivery == atdecc::AemCommandDelivery::Responded && aem_status == atdecc::AEM_STATUS_SUCCESS;
+    }
+};
+
 /// Emitted for every ACMP GET_RX_STATE_RESPONSE received (whether or not the
 /// listener sink is connected), so a diagnostic caller can distinguish "entity
 /// answered" from "timed out" — the exact signal macOS's avbdiagnose reports as
@@ -208,6 +229,7 @@ using ControllerEvent = std::variant<
     ConnectionRemovedEvent,
     EntityDetailReadyEvent,
     StatusChangedEvent,
+    CommandCompletedEvent,
     RxStateEvent,
     CountersReadyEvent,
     AcmpTraceEvent>;
