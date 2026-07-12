@@ -97,19 +97,21 @@ auto snapshot_of(AVB17221Entity* entity) -> EntitySnapshot
     s.association_id = entity.associationID;
     s.local = entity.isLocalEntity;
     if (entity.macAddresses.count > 0) {
-        auto const* bytes = entity.macAddresses[0].bytes;
-        for (size_t i = 0; i < 6; ++i) {
-            s.mac.value[i] = bytes[i];
-        }
+        (void)ieee::load_unchecked(std::span<uint8_t const>{entity.macAddresses[0].bytes, Eui48::LENGTH}, &s.mac);
     }
     return s;
 }
 
 auto eui64_of(uint64_t const v) -> Eui64
 {
-    Eui64 out{};
-    out.from_uint64(v);
-    return out;
+    return Eui64{}.from_uint64(v);
+}
+
+/// Store one big-endian doublet into a payload buffer via the ieee
+/// network-order helpers (no hand-rolled shift/mask packing).
+inline void put_u16(std::span<uint8_t> const out, size_t const offset, uint16_t const v)
+{
+    (void)ieee::store(out.subspan(offset), doublet_t{v});
 }
 
 /// A marshaled AEM outcome: owned copies of the payloads plus the
@@ -218,7 +220,7 @@ class MacAvbControllerService final : public ControllerService
         if (!payload.empty()) {
             msg.commandSpecificData = [NSData dataWithBytes:payload.data() length:payload.size()];
         }
-        AVBMACAddress* mac = [[AVBMACAddress alloc] initWithBytes:it->second.source_mac.value.data()];
+        AVBMACAddress* mac = [[AVBMACAddress alloc] initWithBytes:it->second.source_mac.span().data()];
 
         AemOutcome seed{};
         seed.command_type = command_code;
@@ -274,11 +276,9 @@ class MacAvbControllerService final : public ControllerService
 
     auto read_descriptor(Eui64 const& target, uint16_t desc_type, uint16_t desc_index) -> bool override
     {
-        std::array<uint8_t, 8> payload{};
-        payload[4] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-        payload[5] = static_cast<uint8_t>(desc_type & 0xFF);
-        payload[6] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-        payload[7] = static_cast<uint8_t>(desc_index & 0xFF);
+        std::array<uint8_t, 8> payload{};  // configuration 0 + reserved + descriptor header
+        put_u16(payload, 4, desc_type);
+        put_u16(payload, 6, desc_index);
         return send_aem_command(target, AEM_COMMAND_READ_DESCRIPTOR, payload, {});
     }
 
@@ -291,10 +291,8 @@ class MacAvbControllerService final : public ControllerService
         }
         uint16_t const control_index = entity->adpdu.identify_control_index.get();
         std::array<uint8_t, 5> payload{};
-        payload[0] = static_cast<uint8_t>((aem::DESCRIPTOR_CONTROL >> 8) & 0xFF);
-        payload[1] = static_cast<uint8_t>(aem::DESCRIPTOR_CONTROL & 0xFF);
-        payload[2] = static_cast<uint8_t>((control_index >> 8) & 0xFF);
-        payload[3] = static_cast<uint8_t>(control_index & 0xFF);
+        put_u16(payload, 0, aem::DESCRIPTOR_CONTROL);
+        put_u16(payload, 2, control_index);
         payload[4] = on ? 0xFF : 0x00;
         return send_aem_command(target, AEM_COMMAND_SET_CONTROL, payload, std::move(completion));
     }
@@ -307,13 +305,9 @@ class MacAvbControllerService final : public ControllerService
     auto set_stream_format(Eui64 const& target, uint16_t desc_type, uint16_t desc_index, uint64_t stream_format) -> bool override
     {
         std::array<uint8_t, 12> payload{};
-        payload[0] = static_cast<uint8_t>((desc_type >> 8) & 0xFF);
-        payload[1] = static_cast<uint8_t>(desc_type & 0xFF);
-        payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-        payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
-        for (int i = 0; i < 8; ++i) {
-            payload[4 + static_cast<size_t>(i)] = static_cast<uint8_t>((stream_format >> (56 - (i * 8))) & 0xFF);
-        }
+        put_u16(payload, 0, desc_type);
+        put_u16(payload, 2, desc_index);
+        (void)ieee::store_unchecked(std::span<uint8_t>{payload}.subspan(4), Eui64{}.from_uint64(stream_format));
         return send_aem_command(target, AEM_COMMAND_SET_STREAM_FORMAT, payload, {});
     }
 
@@ -331,22 +325,17 @@ class MacAvbControllerService final : public ControllerService
         -> bool override
     {
         std::array<uint8_t, 8> payload{};
-        payload[0] = static_cast<uint8_t>((aem::DESCRIPTOR_CLOCK_DOMAIN >> 8) & 0xFF);
-        payload[1] = static_cast<uint8_t>(aem::DESCRIPTOR_CLOCK_DOMAIN & 0xFF);
-        payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-        payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
-        payload[4] = static_cast<uint8_t>((clock_source_index >> 8) & 0xFF);
-        payload[5] = static_cast<uint8_t>(clock_source_index & 0xFF);
+        put_u16(payload, 0, aem::DESCRIPTOR_CLOCK_DOMAIN);
+        put_u16(payload, 2, desc_index);
+        put_u16(payload, 4, clock_source_index);
         return send_aem_command(target, AEM_COMMAND_SET_CLOCK_SOURCE, payload, std::move(completion));
     }
 
     auto get_clock_source(Eui64 const& target, uint16_t desc_index, AemCommandCompletion completion) -> bool override
     {
         std::array<uint8_t, 4> payload{};
-        payload[0] = static_cast<uint8_t>((aem::DESCRIPTOR_CLOCK_DOMAIN >> 8) & 0xFF);
-        payload[1] = static_cast<uint8_t>(aem::DESCRIPTOR_CLOCK_DOMAIN & 0xFF);
-        payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-        payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+        put_u16(payload, 0, aem::DESCRIPTOR_CLOCK_DOMAIN);
+        put_u16(payload, 2, desc_index);
         return send_aem_command(target, AEM_COMMAND_GET_CLOCK_SOURCE, payload, std::move(completion));
     }
 
@@ -358,27 +347,20 @@ class MacAvbControllerService final : public ControllerService
         uint16_t signal_output,
         AemCommandCompletion completion) -> bool override
     {
-        std::array<uint8_t, 12> payload{};
-        payload[0] = static_cast<uint8_t>((aem::DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
-        payload[1] = static_cast<uint8_t>(aem::DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
-        payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-        payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
-        payload[4] = static_cast<uint8_t>((signal_type >> 8) & 0xFF);
-        payload[5] = static_cast<uint8_t>(signal_type & 0xFF);
-        payload[6] = static_cast<uint8_t>((signal_index >> 8) & 0xFF);
-        payload[7] = static_cast<uint8_t>(signal_index & 0xFF);
-        payload[8] = static_cast<uint8_t>((signal_output >> 8) & 0xFF);
-        payload[9] = static_cast<uint8_t>(signal_output & 0xFF);
+        std::array<uint8_t, 12> payload{};  // trailing reserved doublet stays zero
+        put_u16(payload, 0, aem::DESCRIPTOR_SIGNAL_SELECTOR);
+        put_u16(payload, 2, desc_index);
+        put_u16(payload, 4, signal_type);
+        put_u16(payload, 6, signal_index);
+        put_u16(payload, 8, signal_output);
         return send_aem_command(target, AEM_COMMAND_SET_SIGNAL_SELECTOR, payload, std::move(completion));
     }
 
     auto get_signal_selector(Eui64 const& target, uint16_t desc_index, AemCommandCompletion completion) -> bool override
     {
         std::array<uint8_t, 4> payload{};
-        payload[0] = static_cast<uint8_t>((aem::DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
-        payload[1] = static_cast<uint8_t>(aem::DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
-        payload[2] = static_cast<uint8_t>((desc_index >> 8) & 0xFF);
-        payload[3] = static_cast<uint8_t>(desc_index & 0xFF);
+        put_u16(payload, 0, aem::DESCRIPTOR_SIGNAL_SELECTOR);
+        put_u16(payload, 2, desc_index);
         return send_aem_command(target, AEM_COMMAND_GET_SIGNAL_SELECTOR, payload, std::move(completion));
     }
 
@@ -454,11 +436,10 @@ class MacAvbControllerService final : public ControllerService
   private:
     static auto desc_header(uint16_t desc_type, uint16_t desc_index) -> std::array<uint8_t, 4>
     {
-        return {
-            static_cast<uint8_t>((desc_type >> 8) & 0xFF),
-            static_cast<uint8_t>(desc_type & 0xFF),
-            static_cast<uint8_t>((desc_index >> 8) & 0xFF),
-            static_cast<uint8_t>(desc_index & 0xFF)};
+        std::array<uint8_t, 4> out{};
+        put_u16(out, 0, desc_type);
+        put_u16(out, 2, desc_index);
+        return out;
     }
 
     /// Fire the SendFailed outcome for a command that never reached the
