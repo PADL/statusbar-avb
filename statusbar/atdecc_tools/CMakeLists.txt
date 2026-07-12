@@ -23,8 +23,25 @@ statusbar_add_module(
   TESTS
   atdecc_controller_tui_test.cpp
   atdecc_controller_service_test.cpp
+  atdecc_reactor_marshal_test.cpp
   atdecc_ctl_resolve_test.cpp
   atdecc_aem_validate_test.cpp)
+
+# macOS backend over the system AVB framework (AudioVideoBridging). The
+# Objective-C++ TU is confined here; the portable build never sees it.
+if(APPLE)
+  enable_language(OBJCXX)
+  target_sources(statusbar-atdecc_tools
+                 PRIVATE atdecc_controller_service_avb.mm)
+  set_source_files_properties(atdecc_controller_service_avb.mm
+                              PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  set_target_properties(
+    statusbar-atdecc_tools PROPERTIES OBJCXX_STANDARD 23
+                                      OBJCXX_STANDARD_REQUIRED ON)
+  target_link_libraries(
+    statusbar-atdecc_tools PUBLIC "-framework AudioVideoBridging"
+                                  "-framework Foundation")
+endif()
 
 add_executable(atdecc_monitor_tool atdecc_monitor_tool.cpp)
 target_link_libraries(atdecc_monitor_tool PRIVATE statusbar)

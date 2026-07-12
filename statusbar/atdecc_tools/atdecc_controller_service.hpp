@@ -46,6 +46,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 
 namespace statusbar::atdecc_tools {
 
@@ -179,5 +180,15 @@ class ControllerService
 /// EtherType 0x22F0 (NanoAvbAemController + RawnetContext).
 [[nodiscard]] auto make_rawnet_controller_service(net::RawnetContext context, ieee::Eui64 controller_id)
     -> std::unique_ptr<ControllerService>;
+
+#if defined(__APPLE__)
+/// The macOS backend over the system AVB framework (AudioVideoBridging):
+/// the framework owns discovery and AECP/ACMP timing, and this is the only
+/// path that reaches an entity hosted by the Mac itself. Returns nullptr
+/// when the interface has no AVB framework support. Controller-only; the
+/// passive on_acmp_observed feed carries only our own command responses.
+[[nodiscard]] auto make_macos_avb_controller_service(std::string const& interface_name, ieee::Eui64 controller_id)
+    -> std::unique_ptr<ControllerService>;
+#endif
 
 }  // namespace statusbar::atdecc_tools
