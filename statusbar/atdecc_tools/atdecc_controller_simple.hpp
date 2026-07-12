@@ -5,10 +5,11 @@
 
 /// ControllerSimple — a reusable ATDECC controller Pollable.
 ///
-/// Wraps a NanoAvbAemController and a raw Ethernet socket (RawnetContext),
-/// tracking discovered entities, per-stream metadata (object_name, stream
-/// format), active stream connections (via passive ACMP observation), and
-/// exposing the data in a form ready for ControllerApp::update_entities().
+/// Sits on a ControllerService backend (by default the raw-socket backend
+/// with our own ADP/ACMP/AECP state machines), tracking discovered
+/// entities, per-stream metadata (object_name, stream format), active
+/// stream connections (via passive ACMP observation), and exposing the
+/// data in a form ready for ControllerApp::update_entities().
 ///
 /// Designed for use in interactive tools such as the controller TUI, but
 /// also reusable by other CLI tools that need an entity-level view of the
@@ -18,14 +19,15 @@
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc_tools/atdecc_aem_validate.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_model.hpp"
+#include "statusbar/atdecc_tools/atdecc_controller_service.hpp"
 #include "statusbar/ieee/ieee.hpp"
-#include "statusbar/nanoavb/nanoavb_controller.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -69,16 +71,17 @@ class ControllerSimple : public net::Pollable
         uint8_t string_offset{0};  ///< Which of the 7 strings to use (0-6)
     };
 
+    /// Convenience: construct on the raw-socket backend.
     ControllerSimple(net::RawnetContext context, ieee::Eui64 controller_id);
+
+    /// Construct on any ControllerService backend (tests, other platforms).
+    explicit ControllerSimple(std::unique_ptr<ControllerService> service);
 
     // Pollable interface
     [[nodiscard]] auto fd() const noexcept -> int override;
     void on_ready(int64_t now_ns) override;
     void tick(int64_t now_ns) override;
     [[nodiscard]] auto finished() const noexcept -> bool override;
-
-    /// Access the underlying AEM controller (for lower-level commands).
-    auto controller() -> nanoavb::NanoAvbAemController&;
 
     /// Build a fresh snapshot of discovered entities.
     auto get_display_entities() -> std::vector<EntityDisplayInfo>;
@@ -128,7 +131,7 @@ class ControllerSimple : public net::Pollable
     void emit_status(std::string_view msg);
 
   private:
-    void wire_controller();
+    void wire_service();
 
     /// A per-command completion that surfaces the outcome as a typed
     /// CommandCompletedEvent (the scriptable alternative to matching
@@ -142,9 +145,7 @@ class ControllerSimple : public net::Pollable
     void forget_entity_metadata(ieee::Eui64 const& id);
     void queue_rx_state_for_entity(atdecc::AdpDu const& adp);
     auto make_active_connection(atdecc::AcmpDu const& acmp) -> ActiveConnection;
-    void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload);
-    void dispatch_adp(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload);
-    void dispatch_acmp(std::span<uint8_t const> payload, int64_t now_ns);
+    void handle_acmp_observed(atdecc::AcmpDu const& acmp);
     void handle_aem_response(
         ieee::Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data);
     void handle_read_descriptor_response(
@@ -174,9 +175,7 @@ class ControllerSimple : public net::Pollable
     /// GET_STREAM_FORMAT for stream descriptors.
     void handle_configuration_descriptor_response(ieee::Eui64 const& target, std::span<uint8_t const> desc_payload);
 
-    net::RawnetContext context_;
-    nanoavb::NanoAvbAemController controller_;
-    std::array<uint8_t, 2048> payload_buf_{};
+    std::unique_ptr<ControllerService> service_;
 
     // Auto GET_RX_STATE probing on discovery. OFF by default so one-shot commands
     // (connect/list) don't saturate the ACMP in-flight window; the TUI opts in.

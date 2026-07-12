@@ -7,6 +7,7 @@ statusbar_add_module(
   SOURCES
   atdecc_controller_tui.cpp
   atdecc_controller_simple.cpp
+  atdecc_controller_service_rawnet.cpp
   atdecc_aem_validate.cpp
   DEPS
   statusbar::atdecc
@@ -21,6 +22,7 @@ statusbar_add_module(
   statusbar::tui
   TESTS
   atdecc_controller_tui_test.cpp
+  atdecc_controller_service_test.cpp
   atdecc_ctl_resolve_test.cpp
   atdecc_aem_validate_test.cpp)
 

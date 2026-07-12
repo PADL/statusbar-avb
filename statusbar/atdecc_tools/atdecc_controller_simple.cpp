@@ -37,39 +37,33 @@ using namespace statusbar::net;
 constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 512;
 
 ControllerSimple::ControllerSimple(RawnetContext context, Eui64 controller_id)
-    : context_{std::move(context)}
-    , controller_{controller_id}
+    : ControllerSimple{make_rawnet_controller_service(std::move(context), controller_id)}
+{}
+
+ControllerSimple::ControllerSimple(std::unique_ptr<ControllerService> service)
+    : service_{std::move(service)}
 {
-    wire_controller();
-    controller_.start();
-    controller_.discover_all();
+    wire_service();
+    service_->start();
+    service_->discover_all();
 }
 
 auto ControllerSimple::fd() const noexcept -> int
 {
-    return context_.fd();
+    auto* const p = service_->pollable();
+    return (p != nullptr) ? p->fd() : -1;
 }
 
 void ControllerSimple::on_ready(int64_t now_ns)
 {
-    Eui48 src_mac{};
-    Eui48 dest_mac{};
-    while (true) {
-        auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
-        if (!result || *result <= 0) {
-            break;
-        }
-        auto const len = static_cast<size_t>(*result);
-        if (len == 0) {
-            break;
-        }
-        dispatch_frame(now_ns, src_mac, {payload_buf_.data(), len});
+    if (auto* const p = service_->pollable(); p != nullptr) {
+        p->on_ready(now_ns);
     }
 }
 
 void ControllerSimple::tick(int64_t now_ns)
 {
-    controller_.tick(now_ns);
+    service_->tick(now_ns);
     // Drain one pending READ_DESCRIPTOR per tick (unified queue for ENTITY,
     // CONFIGURATION, STREAM_INPUT/OUTPUT, STRINGS, and any other descriptor
     // type — populated by per-descriptor reference following).
@@ -77,7 +71,7 @@ void ControllerSimple::tick(int64_t now_ns)
     // Drain one pending GET_RX_STATE query per tick to avoid flooding
     if (!rx_state_query_queue_.empty()) {
         auto const& [listener_id, uid] = rx_state_query_queue_.back();
-        controller_.get_rx_state(listener_id, uid);
+        service_->get_rx_state(listener_id, uid);
         rx_state_query_queue_.pop_back();
     }
     // Send one pending GET_STREAM_FORMAT query per tick
@@ -89,17 +83,12 @@ auto ControllerSimple::finished() const noexcept -> bool
     return false;
 }
 
-auto ControllerSimple::controller() -> nanoavb::NanoAvbAemController&
-{
-    return controller_;
-}
-
 auto ControllerSimple::get_display_entities() -> std::vector<EntityDisplayInfo>
 {
     std::vector<EntityDisplayInfo> result;
     result.reserve(known_entity_ids_.size());
     for (auto const& id : known_entity_ids_) {
-        auto const* entity = controller_.find_entity(id);
+        auto const* entity = service_->find_entity(id);
         if (entity == nullptr) {
             continue;
         }
@@ -150,7 +139,7 @@ auto ControllerSimple::drain_events() -> std::vector<ControllerEvent>
 
 void ControllerSimple::fetch_entity_descriptors(Eui64 entity_id, int64_t /*now_ns*/)
 {
-    auto const* entity = controller_.find_entity(entity_id);
+    auto const* entity = service_->find_entity(entity_id);
     uint16_t n_talkers = 0;
     uint16_t n_listeners = 0;
     if (entity != nullptr) {
@@ -220,18 +209,18 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
 {
     switch (action.kind) {
         case ControllerActionKind::DiscoverAll:
-            controller_.discover_all();
+            service_->discover_all();
             queue_rx_state_for_all();
             break;
         case ControllerActionKind::ConnectStream:
-            controller_.connect_stream(
+            service_->connect_stream(
                 action.request.talker_entity_id,
                 action.request.talker_unique_id,
                 action.request.listener_entity_id,
                 action.request.listener_unique_id);
             break;
         case ControllerActionKind::DisconnectStream:
-            controller_.disconnect_stream(
+            service_->disconnect_stream(
                 action.request.talker_entity_id,
                 action.request.talker_unique_id,
                 action.request.listener_entity_id,
@@ -246,7 +235,7 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             auto const target = action.request.talker_entity_id;
             bool const new_on =
                 (action.request.identify_state < 0) ? !entities_[target].identify_on : (action.request.identify_state != 0);
-            if (controller_.set_identify(target, new_on, make_command_completion())) {
+            if (service_->set_identify(target, new_on, make_command_completion())) {
                 entities_[target].identify_on = new_on;
                 emit_status(new_on ? "Identify on" : "Identify off");
             } else {
@@ -256,18 +245,17 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             break;
         }
         case ControllerActionKind::StartStreaming:
-            if (!controller_.start_streaming(
-                    action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
+            if (!service_->start_streaming(action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
                 emit_status("Start streaming failed: entity not found or queue full");
             }
             break;
         case ControllerActionKind::StopStreaming:
-            if (!controller_.stop_streaming(action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
+            if (!service_->stop_streaming(action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
                 emit_status("Stop streaming failed: entity not found or queue full");
             }
             break;
         case ControllerActionKind::SetStreamFormat:
-            if (!controller_.set_stream_format(
+            if (!service_->set_stream_format(
                     action.request.talker_entity_id,
                     action.request.desc_type,
                     action.request.desc_index,
@@ -277,7 +265,7 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             break;
         case ControllerActionKind::SetClockSource:
             // desc_index = CLOCK_DOMAIN index; clock_source_index = which source.
-            if (!controller_.set_clock_source(
+            if (!service_->set_clock_source(
                     action.request.talker_entity_id,
                     action.request.desc_index,
                     action.request.clock_source_index,
@@ -287,34 +275,34 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             }
             break;
         case ControllerActionKind::GetClockSource:
-            if (!controller_.get_clock_source(
+            if (!service_->get_clock_source(
                     action.request.talker_entity_id, action.request.desc_index, make_command_completion())) {
                 emit_status("Get clock source failed: entity not found or queue full");
                 emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_GET_CLOCK_SOURCE);
             }
             break;
         case ControllerActionKind::ConnectTxStream:
-            controller_.connect_tx_stream(
+            service_->connect_tx_stream(
                 action.request.talker_entity_id,
                 action.request.talker_unique_id,
                 action.request.listener_entity_id,
                 action.request.listener_unique_id);
             break;
         case ControllerActionKind::DisconnectTxStream:
-            controller_.disconnect_tx_stream(
+            service_->disconnect_tx_stream(
                 action.request.talker_entity_id,
                 action.request.talker_unique_id,
                 action.request.listener_entity_id,
                 action.request.listener_unique_id);
             break;
         case ControllerActionKind::GetCounters:
-            if (!controller_.get_counters(action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
+            if (!service_->get_counters(action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
                 emit_status("Get counters failed: entity not found or queue full");
             }
             break;
         case ControllerActionKind::SetSignalSelector:
             // desc_index = SIGNAL_SELECTOR index; signal_* = the source to select.
-            if (!controller_.set_signal_selector(
+            if (!service_->set_signal_selector(
                     action.request.talker_entity_id,
                     action.request.desc_index,
                     action.request.signal_type,
@@ -326,7 +314,7 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             }
             break;
         case ControllerActionKind::GetSignalSelector:
-            if (!controller_.get_signal_selector(
+            if (!service_->get_signal_selector(
                     action.request.talker_entity_id, action.request.desc_index, make_command_completion())) {
                 emit_status("Get signal selector failed: entity not found or queue full");
                 emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_GET_SIGNAL_SELECTOR);
@@ -514,7 +502,7 @@ auto ControllerSimple::EntityDetailBuilder::build() const -> EntityDetail
 void ControllerSimple::queue_rx_state_for_all()
 {
     for (auto const& id : known_entity_ids_) {
-        auto const* entity = controller_.find_entity(id);
+        auto const* entity = service_->find_entity(id);
         if (entity != nullptr) {
             queue_rx_state_for_entity(entity->adpdu);
         }
@@ -525,16 +513,10 @@ void ControllerSimple::queue_rx_state_for_all()
 // Private implementation
 //
 
-void ControllerSimple::wire_controller()
+void ControllerSimple::wire_service()
 {
-    controller_.set_callbacks({
-        .send_atdecc_multicast = [this](std::span<uint8_t const> pkt) -> bool {
-            return context_.send(&ATDECC_MULTICAST_MAC, pkt).has_value();
-        },
-        .send_atdecc_unicast = [this](Eui48 const& dst, std::span<uint8_t const> pkt) -> bool {
-            return context_.send(&dst, pkt).has_value();
-        },
-        .on_entity_available =
+    service_->set_sink({
+        .on_entity_added =
             [this](DiscoveredEntity const& e) {
                 auto const& id = e.adpdu.entity_id;
                 if (std::find(known_entity_ids_.begin(), known_entity_ids_.end(), id) == known_entity_ids_.end()) {
@@ -577,7 +559,7 @@ void ControllerSimple::wire_controller()
                 }
                 enqueue_descriptor_read(id, DESCRIPTOR_ENTITY, 0);
             },
-        .on_entity_departing =
+        .on_entity_departed =
             [this](Eui64 id) {
                 known_entity_ids_.erase(
                     std::remove(known_entity_ids_.begin(), known_entity_ids_.end(), id), known_entity_ids_.end());
@@ -622,6 +604,7 @@ void ControllerSimple::wire_controller()
                 }
             },
         .on_acmp_timeout = [this](AcmpCommandResponse const&) { emit_status("ACMP timeout"); },
+        .on_acmp_observed = [this](AcmpDu const& acmp) { handle_acmp_observed(acmp); },
     });
 }
 
@@ -639,14 +622,14 @@ void ControllerSimple::forget_entity_metadata(Eui64 const& id)
 
 void ControllerSimple::query_rx_state(Eui64 listener_id, uint16_t unique_id, int64_t now_ns)
 {
-    controller_.tick(now_ns);
-    controller_.get_rx_state(listener_id, unique_id);
+    service_->tick(now_ns);
+    service_->get_rx_state(listener_id, unique_id);
 }
 
 void ControllerSimple::query_tx_state(Eui64 talker_id, uint16_t unique_id, int64_t now_ns)
 {
-    controller_.tick(now_ns);
-    controller_.get_tx_state(talker_id, unique_id);
+    service_->tick(now_ns);
+    service_->get_tx_state(talker_id, unique_id);
 }
 
 void ControllerSimple::queue_rx_state_for_entity(AdpDu const& adp)
@@ -685,54 +668,18 @@ auto ControllerSimple::make_active_connection(AcmpDu const& acmp) -> ActiveConne
     return conn;
 }
 
-void ControllerSimple::dispatch_frame(int64_t now_ns, Eui48 const& src_mac, std::span<uint8_t const> payload)
+void ControllerSimple::handle_acmp_observed(AcmpDu const& acmp)
 {
-    if (payload.empty()) {
-        return;
-    }
-    switch (payload[0]) {
-        case avtp::AvtpSubtype::adp:
-            dispatch_adp(now_ns, src_mac, payload);
-            break;
-        case avtp::AvtpSubtype::aecp:
-            controller_.receive_aecp(payload, now_ns);
-            break;
-        case avtp::AvtpSubtype::acmp:
-            dispatch_acmp(payload, now_ns);
-            break;
-        default:
-            break;
-    }
-}
-
-void ControllerSimple::dispatch_adp(int64_t now_ns, Eui48 const& src_mac, std::span<uint8_t const> payload)
-{
-    if (payload.size() < AdpDu::LENGTH) {
-        return;
-    }
-    AdpDu adp{};
-    span_load(adp, payload);
-    controller_.receive_adp(adp, src_mac, now_ns);
-}
-
-void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t now_ns)
-{
-    if (payload.size() < AcmpDu::LENGTH) {
-        return;
-    }
-    AcmpDu acmp{};
-    span_load(acmp, payload);
     if (std::getenv("ACMP_TRACE") != nullptr) {
         std::print(
             stderr,
-            "[acmp-trace] mt={} status={} L={}:{} T={}:{} len={}\n",
+            "[acmp-trace] mt={} status={} L={}:{} T={}:{}\n",
             acmp.message_type(),
             acmp.status(),
             ieee::to_string(acmp.listener_entity_id).view(),
             acmp.listener_unique_id.get(),
             ieee::to_string(acmp.talker_entity_id).view(),
-            acmp.talker_unique_id.get(),
-            payload.size());
+            acmp.talker_unique_id.get());
     }
     // Raw trace: surface EVERY ACMP PDU (commands included) so a diagnostic
     // caller can reconstruct a handshake leg by leg -- in particular the
@@ -778,9 +725,6 @@ void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t n
                 .listener_entity_id = acmp.listener_entity_id, .listener_unique_id = acmp.listener_unique_id.get()});
         }
     }
-
-    auto resp = acmp_command_response_from_pdu(acmp);
-    controller_.receive_acmp(resp, now_ns);
 }
 
 void ControllerSimple::handle_aem_response(
@@ -1173,7 +1117,7 @@ void ControllerSimple::send_next_descriptor_read(int64_t now_ns)
     // a command when no slot is free, the packet goes on the wire untracked
     // and its response is silently dropped — which would strand the queued
     // descriptor read forever.
-    if (controller_.aem_inflight_count() >= atdecc::AemControllerContext::MAX_INFLIGHT) {
+    if (service_->aem_inflight_count() >= atdecc::AemControllerContext::MAX_INFLIGHT) {
         return;
     }
     if (descriptor_read_queue_.empty()) {
@@ -1186,7 +1130,7 @@ void ControllerSimple::send_next_descriptor_read(int64_t now_ns)
         if (req.last_sent_ns != 0 && (now_ns - req.last_sent_ns) < STREAM_QUERY_RETRY_NS) {
             continue;
         }
-        controller_.read_descriptor(req.target, req.descriptor_type, req.descriptor_index);
+        service_->read_descriptor(req.target, req.descriptor_type, req.descriptor_index);
         req.last_sent_ns = now_ns;
         descriptor_read_cursor_ = i + 1;
         return;
@@ -1196,7 +1140,7 @@ void ControllerSimple::send_next_descriptor_read(int64_t now_ns)
 void ControllerSimple::send_next_stream_format_query(int64_t now_ns)
 {
     // Throttle against AEM inflight tracker — see send_next_descriptor_read.
-    if (controller_.aem_inflight_count() >= atdecc::AemControllerContext::MAX_INFLIGHT) {
+    if (service_->aem_inflight_count() >= atdecc::AemControllerContext::MAX_INFLIGHT) {
         return;
     }
     if (stream_format_queries_.empty()) {
@@ -1214,7 +1158,7 @@ void ControllerSimple::send_next_stream_format_query(int64_t now_ns)
         cmd_payload.descriptor_index = ieee::doublet_t{req.desc_index};
         std::array<uint8_t, AemGetStreamFormatCommandPayload::LENGTH> payload_bytes{};
         span_store(std::span{payload_bytes}, cmd_payload);
-        controller_.send_aem_command(req.target, AEM_COMMAND_GET_STREAM_FORMAT, payload_bytes);
+        service_->send_aem_command(req.target, AEM_COMMAND_GET_STREAM_FORMAT, payload_bytes);
         req.last_sent_ns = now_ns;
         stream_format_cursor_ = i + 1;
         return;
