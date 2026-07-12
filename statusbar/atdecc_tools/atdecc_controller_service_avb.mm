@@ -235,8 +235,14 @@ class MacAvbControllerService final : public ControllerService
                   toMACAddress:mac
              completionHandler:^(NSError* error, AVB17221AECPMessage* response) {
                  // Framework thread: capture the outcome as plain values.
+                 // The framework pairs the response with an NSError DERIVED
+                 // FROM THE AEM STATUS (AVBErrorDomain code 0 == SUCCESS), so
+                 // the response's presence — not a nil error — is the success
+                 // signal; a nil response with an IOReturn-style error code is
+                 // the transport timeout.
+                 (void)error;
                  AemOutcome outcome = seed;
-                 if (error == nil && response != nil) {
+                 if (response != nil) {
                      outcome.delivery = AemCommandDelivery::Responded;
                      outcome.status = static_cast<uint8_t>(response.status);
                      if ([response isKindOfClass:[AVB17221AECPAEMMessage class]]) {
@@ -555,9 +561,12 @@ class MacAvbControllerService final : public ControllerService
         BOOL const ok = [interface_.acmp
             sendACMPCommandMessage:msg
                  completionHandler:^(NSError* error, AVB17221ACMPMessage* response) {
-                     // Framework thread: capture into our decoded PDU.
+                     // Framework thread: capture into our decoded PDU. As with
+                     // AECP, the NSError mirrors the ACMP status; only a nil
+                     // response means the exchange timed out.
+                     (void)error;
                      AcmpDu pdu{};
-                     bool const timed_out = (error != nil || response == nil);
+                     bool const timed_out = (response == nil);
                      if (!timed_out) {
                          pdu.init_response(static_cast<uint8_t>(response.messageType), static_cast<uint8_t>(response.status));
                          pdu.stream_id.from_uint64(response.streamID);
