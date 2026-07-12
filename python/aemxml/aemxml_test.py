@@ -2149,6 +2149,74 @@ def test_json_matrix():
     print("  [+] json matrix + matrix_signal: OK")
 
 
+def test_duplicate_symbols_rejected():
+    """flatten() rejects entity models whose symbol table would carry the
+    same 32-bit code twice: the same symbol string on two descriptors, or
+    two different strings whose CRC32 codes collide."""
+    from aemxml.flatten import flatten
+    from aemxml.json_reader import read_json
+
+    def model_with_symbols(sym_a, sym_b):
+        return read_json(
+            json.dumps(
+                {
+                    "entity": {
+                        "vendor": "V",
+                        "model": "M",
+                        "name": "N",
+                        "configuration": {
+                            "name": "C",
+                            "controls": [
+                                {
+                                    "name": "A",
+                                    "control_type": "IDENTIFY",
+                                    "value_type": "LINEAR_UINT8",
+                                    "values": [
+                                        {
+                                            "min": 0,
+                                            "max": 255,
+                                            "step": 255,
+                                            "default": 0,
+                                        }
+                                    ],
+                                    "symbol": sym_a,
+                                },
+                                {
+                                    "name": "B",
+                                    "control_type": "MUTE",
+                                    "value_type": "LINEAR_UINT8",
+                                    "values": [
+                                        {"min": 0, "max": 1, "step": 1, "default": 0}
+                                    ],
+                                    "symbol": sym_b,
+                                },
+                            ],
+                        },
+                    }
+                }
+            )
+        )
+
+    # Unique symbols flatten cleanly.
+    flatten(model_with_symbols("identify", "mute"))
+
+    # The same symbol on two descriptors is rejected.
+    try:
+        flatten(model_with_symbols("identify", "identify"))
+        raise AssertionError("duplicate symbol string not rejected")
+    except ValueError as e:
+        assert "used twice" in str(e) and "identify" in str(e)
+
+    # Two different names whose CRC32 codes collide are also rejected
+    # ("plumless" and "buckeroo" are a known crc32 collision pair).
+    try:
+        flatten(model_with_symbols("plumless", "buckeroo"))
+        raise AssertionError("crc32 collision not rejected")
+    except ValueError as e:
+        assert "collide" in str(e) and "plumless" in str(e) and "buckeroo" in str(e)
+    print("  [+] duplicate symbols rejected: OK")
+
+
 def test_upgrade_2013_to_2021():
     """Upgrade a 2013 AEMXML file to 2021 schema."""
     aemxml_path = str(
@@ -2331,6 +2399,7 @@ def main():
         test_json_control_values,
         test_json_signal_selector_and_control_grouping,
         test_json_matrix,
+        test_duplicate_symbols_rejected,
         test_upgrade_2013_to_2021,
         test_downgrade_2021_to_2013,
         test_upgrade_is_idempotent,

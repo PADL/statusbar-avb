@@ -122,6 +122,7 @@ class FlatSymbol:
     descriptor_type: int
     descriptor_index: int
     symbol_code: int
+    symbol_name: str | None = None  # authoring-time name, for diagnostics
 
 
 def symbol_to_code(symbol: str) -> int:
@@ -1111,7 +1112,9 @@ def _add_symbol(
 ) -> None:
     if symbol is not None:
         symbols.append(
-            FlatSymbol(config_index, desc_type, desc_index, symbol_to_code(symbol))
+            FlatSymbol(
+                config_index, desc_type, desc_index, symbol_to_code(symbol), symbol
+            )
         )
 
 
@@ -2831,7 +2834,41 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
     )
     symbols.sort(key=lambda s: (s.config_index, s.descriptor_type, s.descriptor_index))
 
+    _check_duplicate_symbols(symbols)
+
     return descriptors, symbols
+
+
+def _describe_symbol(s: FlatSymbol) -> str:
+    name = f"'{s.symbol_name}'" if s.symbol_name is not None else "<unnamed>"
+    return (
+        f"{name} (configuration {s.config_index}, descriptor_type "
+        f"0x{s.descriptor_type:04X}, descriptor_index {s.descriptor_index})"
+    )
+
+
+def _check_duplicate_symbols(symbols: list[FlatSymbol]) -> None:
+    """Reject an entity model whose symbol table contains the same 32-bit
+    symbol code twice. Application code binds to descriptors by symbol (the
+    stable identifier that survives descriptor-index renumbering), so a
+    duplicate — either the same symbol string on two descriptors, or two
+    different strings whose CRC32 codes collide — would make the binding
+    ambiguous."""
+    seen: dict[int, FlatSymbol] = {}
+    for s in symbols:
+        prev = seen.get(s.symbol_code)
+        if prev is not None:
+            cause = (
+                "the same symbol is used twice"
+                if prev.symbol_name == s.symbol_name
+                else "two different symbol names collide to the same CRC32 code"
+            )
+            raise ValueError(
+                f"duplicate symbol code 0x{s.symbol_code:08X} in entity model: "
+                f"{_describe_symbol(prev)} and {_describe_symbol(s)} — {cause}; "
+                f"symbols must be unique within the blob"
+            )
+        seen[s.symbol_code] = s
 
 
 def _count_all_controls(config: Configuration) -> int:
