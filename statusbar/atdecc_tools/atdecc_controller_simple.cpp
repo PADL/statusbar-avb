@@ -471,20 +471,10 @@ auto ControllerSimple::EntityDetailBuilder::build() const -> EntityDetail
                 // timing fields when loading.
                 span_load_padded(sd, make_const_span(s_data));
                 auto const name = sd.object_name.as_string_view();
-                auto const fmt_raw = sd.current_format.get();
-                auto const fmt_bytes = make_const_span(sd.current_format);
-                std::string fmt_str = std::format("0x{:016x}", fmt_raw);
-                // Simple format decode
-                if (fmt_bytes[0] == 0x00) {
-                    // AM824
-                    auto const channels = fmt_bytes[3];
-                    fmt_str = std::format("AM824 {}ch", channels);
-                } else if (fmt_bytes[0] == 0x02) {
-                    // AAF
-                    auto const channels = (static_cast<uint16_t>(fmt_bytes[1] & 0x03) << 8) | fmt_bytes[2];
-                    auto const depth = fmt_bytes[3];
-                    fmt_str = std::format("AAF {}ch {}-bit", channels, depth);
-                }
+                // One decoder for every view (avtp_stream_format.hpp): a
+                // hand-rolled copy here once misread the AAF channel field
+                // (8ch displayed as 770ch).
+                std::string fmt_str = avtp::stream_format_to_string(sd.current_format.get());
                 if (name.empty()) {
                     detail.lines.push_back({.text = std::format("  [{}] {}", idx, fmt_str), .bold = false});
                 } else {
