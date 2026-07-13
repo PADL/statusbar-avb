@@ -19,14 +19,10 @@
 /// not expose per-entity (valid_time cadence, some gPTP detail) are
 /// approximations — nothing above the seam may depend on them.
 
-#include "statusbar/atdecc_tools/atdecc_controller_service.hpp"
-
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_acmp.hpp"
+#include "statusbar/atdecc_tools/atdecc_controller_service.hpp"
 #include "statusbar/atdecc_tools/atdecc_reactor_marshal.hpp"
-
-#import <AudioVideoBridging/AudioVideoBridging.h>
-#import <Foundation/Foundation.h>
 
 #include <atomic>
 #include <cstdint>
@@ -36,17 +32,28 @@
 #include <string>
 #include <utility>
 
+#import <AudioVideoBridging/AudioVideoBridging.h>
+#import <Foundation/Foundation.h>
+
 namespace statusbar::atdecc_tools {
 class MacAvbControllerService;
 }
 
-/// Objective-C adapter: receives framework delegate callbacks and forwards
-/// them to the owning C++ service. The owner pointer is cleared before the
-/// service dies (and the service also guards with its `alive` flag).
-@interface StatusbarAvbBridge : NSObject <AVB17221EntityDiscoveryDelegate, AVB17221AECPClient>
+/// Objective-C adapter: receives framework delegate callbacks on framework
+/// threads and forwards them to the reactor. Lifetime model: the bridge
+/// NEVER dereferences `owner` on a framework thread — it only captures the
+/// pointer value and posts a task through the shared marshal; the task
+/// checks `alive` (flipped by the service destructor on the reactor thread,
+/// where tasks also run) before touching the service. `owner` is atomic so
+/// the destructor's clear cannot race the framework-thread reads, and the
+/// shared_ptr ivars keep the marshal and flag alive for callbacks that fire
+/// after the service is gone.
+@interface StatusbarAvbBridge : NSObject<AVB17221EntityDiscoveryDelegate, AVB17221AECPClient>
 {
   @public
-    statusbar::atdecc_tools::MacAvbControllerService* owner;
+    std::atomic<statusbar::atdecc_tools::MacAvbControllerService*> owner;
+    std::shared_ptr<std::atomic<bool>> alive;
+    std::shared_ptr<statusbar::atdecc_tools::ReactorMarshal> marshal;
 }
 @end
 
@@ -132,7 +139,7 @@ class MacAvbControllerService final : public ControllerService
     MacAvbControllerService(std::string const& interface_name, Eui64 controller_id)
         : controller_id_{controller_id}
     {
-        if (!marshal_.valid()) {
+        if (!marshal_->valid()) {
             return;
         }
         NSString* name = [NSString stringWithUTF8String:interface_name.c_str()];
@@ -142,20 +149,30 @@ class MacAvbControllerService final : public ControllerService
             return;
         }
         bridge_ = [[StatusbarAvbBridge alloc] init];
-        bridge_->owner = this;
+        bridge_->owner.store(this);
+        bridge_->alive = alive_;
+        bridge_->marshal = marshal_;
         interface_.entityDiscovery.discoveryDelegate = bridge_;
         valid_ = true;
     }
 
     ~MacAvbControllerService() override
     {
+        // Destruction happens on the reactor thread — the same thread that
+        // runs marshaled tasks — so flipping `alive_` here guarantees any
+        // task that observes alive==true also observes a live service.
+        // Framework completion blocks still in flight hold shared_ptr copies
+        // of the marshal and flag, so their late posts land in a marshal
+        // that outlives us and their tasks no-op on the dead flag. Their
+        // per-command completions are dropped at teardown (documented in
+        // the ControllerService contract).
         alive_->store(false);
         if (interface_ != nil) {
             interface_.entityDiscovery.discoveryDelegate = nil;
             [interface_.aecp removeResponseHandlerForControllerEntityID:controller_id_.to_uint64()];
         }
         if (bridge_ != nil) {
-            bridge_->owner = nullptr;
+            bridge_->owner.store(nullptr);
         }
     }
 
@@ -182,7 +199,7 @@ class MacAvbControllerService final : public ControllerService
         // The framework owns all protocol timing.
     }
 
-    [[nodiscard]] auto pollable() noexcept -> net::Pollable* override { return &marshal_; }
+    [[nodiscard]] auto pollable() noexcept -> net::Pollable* override { return marshal_.get(); }
 
     // ---- Discovery ---------------------------------------------------------
 
@@ -229,42 +246,41 @@ class MacAvbControllerService final : public ControllerService
         seed.sent.assign(payload.begin(), payload.begin() + static_cast<ptrdiff_t>(sent_len));
 
         auto alive = alive_;
-        auto* marshal = &marshal_;
+        auto marshal = marshal_;
         auto* self = this;
         ++inflight_;
-        BOOL const ok = [interface_.aecp
-                   sendCommand:msg
-                  toMACAddress:mac
-             completionHandler:^(NSError* error, AVB17221AECPMessage* response) {
-                 // Framework thread: capture the outcome as plain values.
-                 // The framework pairs the response with an NSError DERIVED
-                 // FROM THE AEM STATUS (AVBErrorDomain code 0 == SUCCESS), so
-                 // the response's presence — not a nil error — is the success
-                 // signal; a nil response with an IOReturn-style error code is
-                 // the transport timeout.
-                 (void)error;
-                 AemOutcome outcome = seed;
-                 if (response != nil) {
-                     outcome.delivery = AemCommandDelivery::Responded;
-                     outcome.status = static_cast<uint8_t>(response.status);
-                     if ([response isKindOfClass:[AVB17221AECPAEMMessage class]]) {
-                         NSData* data = ((AVB17221AECPAEMMessage*)response).commandSpecificData;
-                         if (data != nil) {
-                             auto const n = std::min<size_t>(data.length, outcome.response.capacity());
-                             auto const* bytes = static_cast<uint8_t const*>(data.bytes);
-                             outcome.response.assign(bytes, bytes + n);
-                         }
-                     }
-                 } else {
-                     outcome.delivery = AemCommandDelivery::TimedOut;
-                 }
-                 marshal->post([alive, self, outcome, completion]() {
-                     if (!alive->load()) {
-                         return;
-                     }
-                     self->deliver_aem_outcome(outcome, completion);
-                 });
-             }];
+        BOOL const ok = [interface_.aecp sendCommand:msg
+                                        toMACAddress:mac
+                                   completionHandler:^(NSError* error, AVB17221AECPMessage* response) {
+                                     // Framework thread: capture the outcome as plain values.
+                                     // The framework pairs the response with an NSError DERIVED
+                                     // FROM THE AEM STATUS (AVBErrorDomain code 0 == SUCCESS), so
+                                     // the response's presence — not a nil error — is the success
+                                     // signal; a nil response with an IOReturn-style error code is
+                                     // the transport timeout.
+                                     (void)error;
+                                     AemOutcome outcome = seed;
+                                     if (response != nil) {
+                                         outcome.delivery = AemCommandDelivery::Responded;
+                                         outcome.status = static_cast<uint8_t>(response.status);
+                                         if ([response isKindOfClass:[AVB17221AECPAEMMessage class]]) {
+                                             NSData* data = ((AVB17221AECPAEMMessage*)response).commandSpecificData;
+                                             if (data != nil) {
+                                                 auto const n = std::min<size_t>(data.length, outcome.response.capacity());
+                                                 auto const* bytes = static_cast<uint8_t const*>(data.bytes);
+                                                 outcome.response.assign(bytes, bytes + n);
+                                             }
+                                         }
+                                     } else {
+                                         outcome.delivery = AemCommandDelivery::TimedOut;
+                                     }
+                                     marshal->post([alive, self, outcome, completion]() {
+                                         if (!alive->load()) {
+                                             return;
+                                         }
+                                         self->deliver_aem_outcome(outcome, completion);
+                                     });
+                                   }];
         if (ok == NO) {
             --inflight_;
             fail_send(target, command_code, payload, std::move(completion));
@@ -397,40 +413,59 @@ class MacAvbControllerService final : public ControllerService
         return send_acmp(ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, talker, talker_uid, Eui64{}, 0);
     }
 
-    // ---- Framework-thread entry points (called by the ObjC bridge) ---------
+    // ---- Reactor-thread appliers (invoked by tasks the bridge posts) --------
 
-    void on_framework_entity(EntitySnapshot const& snap, bool const removed)
+    /// Reactor thread: fold an entity snapshot into the directory and
+    /// notify the sink.
+    void apply_entity_event(EntitySnapshot const& snap, bool const removed)
     {
-        auto alive = alive_;
-        auto* self = this;
-        marshal_.post([alive, self, snap, removed]() {
-            if (!alive->load()) {
-                return;
+        auto const id = eui64_of(snap.entity_id);
+        if (removed) {
+            entities_.erase(id);
+            if (sink_.on_entity_departed) {
+                sink_.on_entity_departed(id);
             }
-            self->apply_entity_event(snap, removed);
-        });
+            return;
+        }
+        bool const existed = entities_.contains(id);
+        auto& rec = entities_[id];
+        rec.adpdu.entity_id = id;
+        rec.adpdu.entity_model_id = eui64_of(snap.entity_model_id);
+        rec.adpdu.entity_capabilities = snap.entity_capabilities;
+        rec.adpdu.talker_stream_sources = snap.talker_stream_sources;
+        rec.adpdu.talker_capabilities = snap.talker_capabilities;
+        rec.adpdu.listener_stream_sinks = snap.listener_stream_sinks;
+        rec.adpdu.listener_capabilities = snap.listener_capabilities;
+        rec.adpdu.controller_capabilities = snap.controller_capabilities;
+        rec.adpdu.available_index = snap.available_index;
+        rec.adpdu.gptp_grandmaster_id = tsn::ClockIdentity{snap.gptp_grandmaster_id};
+        rec.adpdu.gptp_domain_number = snap.gptp_domain_number;
+        rec.adpdu.identify_control_index = snap.identify_control_index;
+        rec.adpdu.interface_index = snap.interface_index;
+        rec.adpdu.association_id = eui64_of(snap.association_id);
+        rec.source_mac = snap.mac;
+        rec.valid = true;
+        if (!existed) {
+            if (sink_.on_entity_added) {
+                sink_.on_entity_added(rec);
+            }
+        } else if (sink_.on_entity_updated) {
+            sink_.on_entity_updated(rec);
+        }
     }
 
-    void on_framework_unsolicited(uint16_t const command_type, uint8_t const status, Eui64 const target, AemOutcome outcome)
+    /// Reactor thread: surface an unsolicited AEM notification on the
+    /// broadcast response sink.
+    void deliver_unsolicited(AemOutcome const& outcome)
     {
-        (void)command_type;
-        (void)status;
-        (void)target;
-        auto alive = alive_;
-        auto* self = this;
-        marshal_.post([alive, self, outcome]() {
-            if (!alive->load()) {
-                return;
-            }
-            if (self->sink_.on_aem_response) {
-                self->sink_.on_aem_response(
-                    outcome.target,
-                    outcome.command_type,
-                    outcome.status,
-                    std::span<uint8_t const>{},
-                    std::span<uint8_t const>{outcome.response.data(), outcome.response.size()});
-            }
-        });
+        if (sink_.on_aem_response) {
+            sink_.on_aem_response(
+                outcome.target,
+                outcome.command_type,
+                outcome.status,
+                std::span<uint8_t const>{},
+                std::span<uint8_t const>{outcome.response.data(), outcome.response.size()});
+        }
     }
 
   private:
@@ -483,45 +518,6 @@ class MacAvbControllerService final : public ControllerService
         }
     }
 
-    /// Reactor thread: fold an entity snapshot into the directory and
-    /// notify the sink.
-    void apply_entity_event(EntitySnapshot const& snap, bool const removed)
-    {
-        auto const id = eui64_of(snap.entity_id);
-        if (removed) {
-            entities_.erase(id);
-            if (sink_.on_entity_departed) {
-                sink_.on_entity_departed(id);
-            }
-            return;
-        }
-        bool const existed = entities_.contains(id);
-        auto& rec = entities_[id];
-        rec.adpdu.entity_id = id;
-        rec.adpdu.entity_model_id = eui64_of(snap.entity_model_id);
-        rec.adpdu.entity_capabilities = snap.entity_capabilities;
-        rec.adpdu.talker_stream_sources = snap.talker_stream_sources;
-        rec.adpdu.talker_capabilities = snap.talker_capabilities;
-        rec.adpdu.listener_stream_sinks = snap.listener_stream_sinks;
-        rec.adpdu.listener_capabilities = snap.listener_capabilities;
-        rec.adpdu.controller_capabilities = snap.controller_capabilities;
-        rec.adpdu.available_index = snap.available_index;
-        rec.adpdu.gptp_grandmaster_id = tsn::ClockIdentity{snap.gptp_grandmaster_id};
-        rec.adpdu.gptp_domain_number = snap.gptp_domain_number;
-        rec.adpdu.identify_control_index = snap.identify_control_index;
-        rec.adpdu.interface_index = snap.interface_index;
-        rec.adpdu.association_id = eui64_of(snap.association_id);
-        rec.source_mac = snap.mac;
-        rec.valid = true;
-        if (!existed) {
-            if (sink_.on_entity_added) {
-                sink_.on_entity_added(rec);
-            }
-        } else if (sink_.on_entity_updated) {
-            sink_.on_entity_updated(rec);
-        }
-    }
-
     auto send_acmp(uint8_t message_type, Eui64 const& talker, uint16_t talker_uid, Eui64 const& listener, uint16_t listener_uid)
         -> bool
     {
@@ -537,43 +533,60 @@ class MacAvbControllerService final : public ControllerService
         msg.listenerUniqueID = listener_uid;
 
         auto alive = alive_;
-        auto* marshal = &marshal_;
+        auto marshal = marshal_;
         auto* self = this;
         BOOL const ok = [interface_.acmp
             sendACMPCommandMessage:msg
                  completionHandler:^(NSError* error, AVB17221ACMPMessage* response) {
-                     // Framework thread: capture into our decoded PDU. As with
-                     // AECP, the NSError mirrors the ACMP status; only a nil
-                     // response means the exchange timed out.
-                     (void)error;
-                     AcmpDu pdu{};
-                     bool const timed_out = (response == nil);
-                     if (!timed_out) {
-                         pdu.init_response(static_cast<uint8_t>(response.messageType), static_cast<uint8_t>(response.status));
-                         pdu.stream_id.from_uint64(response.streamID);
-                         pdu.controller_entity_id.from_uint64(response.controllerEntityID);
-                         pdu.talker_entity_id.from_uint64(response.talkerEntityID);
-                         pdu.talker_unique_id = response.talkerUniqueID;
-                         pdu.listener_entity_id.from_uint64(response.listenerEntityID);
-                         pdu.listener_unique_id = response.listenerUniqueID;
-                         pdu.connection_count = response.connectionCount;
-                         pdu.flags = static_cast<uint16_t>(response.flags);
-                         pdu.stream_vlan_id = response.vlanID;
-                     } else {
-                         pdu.init_command(static_cast<uint8_t>(message_type));
-                         pdu.talker_entity_id = talker;
-                         pdu.talker_unique_id = talker_uid;
-                         pdu.listener_entity_id = listener;
-                         pdu.listener_unique_id = listener_uid;
-                     }
-                     marshal->post([alive, self, pdu, timed_out]() {
-                         if (!alive->load()) {
-                             return;
-                         }
-                         self->deliver_acmp(pdu, timed_out);
-                     });
+                   // Framework thread: capture into our decoded PDU. As with
+                   // AECP, the NSError mirrors the ACMP status; only a nil
+                   // response means the exchange timed out.
+                   (void)error;
+                   AcmpDu pdu{};
+                   bool const timed_out = (response == nil);
+                   if (!timed_out) {
+                       pdu.init_response(static_cast<uint8_t>(response.messageType), static_cast<uint8_t>(response.status));
+                       pdu.stream_id.from_uint64(response.streamID);
+                       pdu.controller_entity_id.from_uint64(response.controllerEntityID);
+                       pdu.talker_entity_id.from_uint64(response.talkerEntityID);
+                       pdu.talker_unique_id = response.talkerUniqueID;
+                       pdu.listener_entity_id.from_uint64(response.listenerEntityID);
+                       pdu.listener_unique_id = response.listenerUniqueID;
+                       pdu.connection_count = response.connectionCount;
+                       pdu.flags = static_cast<uint16_t>(response.flags);
+                       pdu.stream_vlan_id = response.vlanID;
+                   } else {
+                       pdu.init_command(static_cast<uint8_t>(message_type));
+                       pdu.talker_entity_id = talker;
+                       pdu.talker_unique_id = talker_uid;
+                       pdu.listener_entity_id = listener;
+                       pdu.listener_unique_id = listener_uid;
+                   }
+                   marshal->post([alive, self, pdu, timed_out]() {
+                       if (!alive->load()) {
+                           return;
+                       }
+                       self->deliver_acmp(pdu, timed_out);
+                   });
                  }];
-        return ok == YES;
+        if (ok == NO) {
+            // Framework refused the send: the completion block will never
+            // fire, so synthesize the timeout outcome ourselves — the sink
+            // sees exactly one outcome per command on this backend too.
+            AcmpDu pdu{};
+            pdu.init_command(message_type);
+            pdu.talker_entity_id = talker;
+            pdu.talker_unique_id = talker_uid;
+            pdu.listener_entity_id = listener;
+            pdu.listener_unique_id = listener_uid;
+            marshal->post([alive, self, pdu]() {
+                if (!alive->load()) {
+                    return;
+                }
+                self->deliver_acmp(pdu, /*timed_out=*/true);
+            });
+        }
+        return true;
     }
 
     /// Reactor thread: an ACMP outcome. Responses feed both the response
@@ -598,7 +611,9 @@ class MacAvbControllerService final : public ControllerService
     }
 
     Eui64 controller_id_{};
-    ReactorMarshal marshal_;
+    // Shared with the bridge and every framework completion block, so late
+    // callbacks can post safely after this service is destroyed.
+    std::shared_ptr<ReactorMarshal> marshal_{std::make_shared<ReactorMarshal>()};
     AVBEthernetInterface* interface_{nil};
     StatusbarAvbBridge* bridge_{nil};
     ControllerServiceSink sink_{};
@@ -624,64 +639,67 @@ auto make_macos_avb_controller_service(std::string const& interface_name, ieee::
 
 @implementation StatusbarAvbBridge
 
+/// Framework thread: post a guarded task that applies @p snap on the
+/// reactor thread. `owner` is only captured by value here; the task
+/// dereferences it only after the alive check on the reactor thread.
+- (void)postEntitySnapshot:(statusbar::atdecc_tools::EntitySnapshot const&)snap removed:(bool)removed
+{
+    auto alive_copy = alive;
+    auto marshal_copy = marshal;
+    auto* svc = owner.load();
+    if (alive_copy == nullptr || marshal_copy == nullptr || svc == nullptr) {
+        return;
+    }
+    marshal_copy->post([alive_copy, svc, snap, removed]() {
+        if (!alive_copy->load()) {
+            return;
+        }
+        svc->apply_entity_event(snap, removed);
+    });
+}
+
 - (void)didAddRemoteEntity:(AVB17221Entity*)newEntity on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(newEntity), /*removed=*/false);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(newEntity) removed:false];
 }
 
 - (void)didRemoveRemoteEntity:(AVB17221Entity*)oldEntity on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(oldEntity), /*removed=*/true);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(oldEntity) removed:true];
 }
 
 - (void)didRediscoverRemoteEntity:(AVB17221Entity*)entity on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(entity), /*removed=*/false);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(entity) removed:false];
 }
 
 - (void)didUpdateRemoteEntity:(AVB17221Entity*)entity
             changedProperties:(AVB17221EntityPropertyChanged)changedProperties
-      on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
+       on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(entity), /*removed=*/false);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(entity) removed:false];
 }
 
 - (void)didAddLocalEntity:(AVB17221Entity*)newEntity on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(newEntity), /*removed=*/false);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(newEntity) removed:false];
 }
 
 - (void)didRemoveLocalEntity:(AVB17221Entity*)oldEntity on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(oldEntity), /*removed=*/true);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(oldEntity) removed:true];
 }
 
 - (void)didRediscoverLocalEntity:(AVB17221Entity*)entity on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(entity), /*removed=*/false);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(entity) removed:false];
 }
 
 - (void)didUpdateLocalEntity:(AVB17221Entity*)entity
            changedProperties:(AVB17221EntityPropertyChanged)changedProperties
-     on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
+      on17221EntityDiscovery:(AVB17221EntityDiscovery*)entityDiscovery
 {
-    if (owner != nullptr) {
-        owner->on_framework_entity(statusbar::atdecc_tools::snapshot_of(entity), /*removed=*/false);
-    }
+    [self postEntitySnapshot:statusbar::atdecc_tools::snapshot_of(entity) removed:false];
 }
 
 - (BOOL)AECPDidReceiveCommand:(AVB17221AECPMessage*)message onInterface:(AVB17221AECPInterface*)anInterface
@@ -694,11 +712,17 @@ auto make_macos_avb_controller_service(std::string const& interface_name, ieee::
 {
     // Responses matched to our commands arrive via completion handlers;
     // forward only unsolicited AEM notifications.
-    if (owner == nullptr || ![message isKindOfClass:[AVB17221AECPAEMMessage class]]) {
+    if (![message isKindOfClass:[AVB17221AECPAEMMessage class]]) {
         return NO;
     }
     AVB17221AECPAEMMessage* aem = (AVB17221AECPAEMMessage*)message;
     if (!aem.isUnsolicited) {
+        return NO;
+    }
+    auto alive_copy = alive;
+    auto marshal_copy = marshal;
+    auto* svc = owner.load();
+    if (alive_copy == nullptr || marshal_copy == nullptr || svc == nullptr) {
         return NO;
     }
     statusbar::atdecc_tools::AemOutcome outcome{};
@@ -711,7 +735,12 @@ auto make_macos_avb_controller_service(std::string const& interface_name, ieee::
         auto const* bytes = static_cast<uint8_t const*>(aem.commandSpecificData.bytes);
         outcome.response.assign(bytes, bytes + n);
     }
-    owner->on_framework_unsolicited(outcome.command_type, outcome.status, outcome.target, outcome);
+    marshal_copy->post([alive_copy, svc, outcome]() {
+        if (!alive_copy->load()) {
+            return;
+        }
+        svc->deliver_unsolicited(outcome);
+    });
     return YES;
 }
 

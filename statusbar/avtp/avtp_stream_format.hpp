@@ -132,6 +132,12 @@ namespace statusbar::avtp {
 [[nodiscard]] inline auto decode_am824_stream_format(uint64_t fmt) -> std::string
 {
     auto const b = stream_format_bytes(fmt);
+    // Byte 1 must actually indicate IEC 61883-6 AM824 (sf=1, fmt=0x10 ->
+    // 0xA0 in bits 7:1); other 61883 formats (e.g. 61883-4 MPEG-TS) fall
+    // back to hex rather than being mislabeled as AM824.
+    if ((b[1] & 0xFEU) != 0xA0U) {
+        return std::format("0x{:016x}", fmt);
+    }
     uint8_t const sfc = b[2];
     uint8_t const channels = b[3];
     uint32_t const rate = am824_sfc_to_hz(sfc);

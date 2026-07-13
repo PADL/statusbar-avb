@@ -48,6 +48,7 @@ from aemxml.model import (
     VideoUnit,
 )
 from aemxml.wire import (
+    pack_u8,
     pack_u16,
     pack_u32,
     pack_u64,
@@ -130,6 +131,38 @@ def test_wire_pack_unpack():
     assert off == 5
     assert idx == 3
     print("  [+] wire pack/unpack: OK")
+
+
+def test_wire_pack_range_checks():
+    """Out-of-width values raise instead of silently truncating; signed
+    values within the field's two's-complement range still pack (fields
+    like log_sync_interval are signed on the wire)."""
+    for pack, bits in (
+        (pack_u8, 8),
+        (pack_u16, 16),
+        (pack_u32, 32),
+        (pack_u64, 64),
+    ):
+        assert pack(0) == bytes(bits // 8)
+        assert pack((1 << bits) - 1) == b"\xff" * (bits // 8)
+        # Two's-complement negatives within the width are allowed.
+        assert pack(-1) == b"\xff" * (bits // 8)
+        assert pack(-(1 << (bits - 1))) == b"\x80" + bytes(bits // 8 - 1)
+        for bad in ((1 << bits), -(1 << (bits - 1)) - 1):
+            try:
+                pack(bad)
+                assert False, f"pack_u{bits}({bad}) should have raised"
+            except ValueError:
+                pass
+
+    # An authoring typo like signal_index=70000 must fail the build
+    # rather than truncate to 4464.
+    try:
+        pack_u16(70000)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "16-bit" in str(e)
+    print("  [+] wire pack range checks: OK")
 
 
 def test_model_creation():
@@ -1898,8 +1931,9 @@ def test_json_control_values():
 def test_json_signal_selector_and_control_grouping():
     """SIGNAL_SELECTOR authoring, controls attached to an AVB_INTERFACE, and
     CONTROL_BLOCK inline grouping: CONTROL indices are assigned contiguously
-    (config-level first, then per-interface, then per-block) and every
-    number_of_controls/base_control/final_control_index field is derived."""
+    (config-level first, then per-interface, then per-block) and the
+    number_of_controls/base_control fields are derived. final_control_index
+    stays author-owned (spec default 0 = no internal signal chain)."""
     import struct
 
     from aemxml.flatten import flatten
@@ -2004,10 +2038,12 @@ def test_json_signal_selector_and_control_grouping():
     intf_wire = by_type[0x0009][0].wire_bytes
     assert struct.unpack_from(">HH", intf_wire, 98) == (1, 1)
 
-    # CONTROL_BLOCK: number/base/final @70/72/74 -> 2 controls at base 2,
-    # final = base + count = 4.
+    # CONTROL_BLOCK: number/base/final @70/72/74 -> 2 controls at base 2.
+    # final_control_index is author-owned and defaults to 0 (no internal
+    # signal chain, IEEE 1722.1-2021 Table 7-62) -- it does not derive
+    # from the control count.
     cb_wire = by_type[0x0025][0].wire_bytes
-    assert struct.unpack_from(">HHH", cb_wire, 70) == (2, 2, 4)
+    assert struct.unpack_from(">HHH", cb_wire, 70) == (2, 2, 0)
 
     # SIGNAL_SELECTOR: sources_offset(96) @80, count @82, current triple
     # @84, default triple @90, then the two 6-byte sources.
@@ -2370,6 +2406,7 @@ def test_downgrade_strip_removes_2021_only_descriptors():
 def main():
     tests = [
         test_wire_pack_unpack,
+        test_wire_pack_range_checks,
         test_model_creation,
         test_flatten_minimal,
         test_flatten_with_audio,

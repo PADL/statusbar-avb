@@ -17,12 +17,16 @@ namespace {
 void report_send_failure(AemCommandParams& params)
 {
     if (params.completion) {
+        // Truncate to what the wire frame would have carried, so a
+        // SendFailed result reports the same sent_payload a Responded /
+        // TimedOut result would.
+        auto const sent_len = std::min(params.command_data.size(), AemInflightCommand::MAX_PAYLOAD);
         params.completion(AemCommandResult{
             .delivery = AemCommandDelivery::SendFailed,
             .status = 0,
             .command_type = params.command_code,
             .target_entity_id = params.target_entity_id,
-            .sent_payload = params.command_data,
+            .sent_payload = params.command_data.first(sent_len),
             .response = {}});
         params.completion = {};
     }
@@ -91,6 +95,11 @@ void handle_aem_response(AemControllerContext& ctx, sm::TimePoint event_time)
     if (ctx.on_response) {
         ctx.on_response(ctx.rcvd_header, sent_payload, ctx.rcvd_response_data, status);
     }
+    // NOTE: `idx` is held across the callbacks below and then passed to
+    // remove_inflight (SlotTable removal is swap-with-last, so indices are
+    // not stable across mutations). This relies on the SM driver being
+    // non-reentrant: completions must not synchronously drive further SM
+    // events. All current drivers (reactor loop) satisfy this.
     if (entry->completion) {
         entry->completion(AemCommandResult{
             .delivery = AemCommandDelivery::Responded,

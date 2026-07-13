@@ -604,9 +604,11 @@ struct TalkerStreamInfoDynamic
     Eui48 stream_dest_mac{};
     uint16_t stream_vlan_id{0};
 
-    /// Construct with specified max connected listeners (logical limit, must be <= MaxConnectedListeners)
+    /// Construct with the logical connected-listener limit, clamped to the
+    /// compile-time MaxConnectedListeners capacity — a larger request would
+    /// otherwise let add_listener() push past the inplace_vector.
     explicit TalkerStreamInfoDynamic(size_t max_connected_listeners = 16)
-        : max_connected_listeners_{max_connected_listeners}
+        : max_connected_listeners_{std::min(max_connected_listeners, MaxConnectedListeners)}
     {}
 
     /// Get connection count

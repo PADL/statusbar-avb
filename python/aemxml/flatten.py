@@ -800,14 +800,17 @@ def _serialize_control_block(
     """Serialize CONTROL_BLOCK descriptor (82 bytes).
 
     number_of_controls / base_control override the dataclass fields when
-    the flatten walk assigned indices for inline `cb.controls`; the
-    final_control_index then derives as base + count.
+    the flatten walk assigned indices for inline `cb.controls`.
+    final_control_index is always author-owned: per IEEE 1722.1-2021
+    Table 7-62 it is the index of the final CONTROL descriptor in the
+    block's internal signal chain, and zero when there is no internal
+    signal chain -- it does not derive from the control count.
     """
     n_controls = (
         cb.number_of_controls if number_of_controls is None else number_of_controls
     )
     base = cb.base_control if base_control is None else base_control
-    final = cb.final_control_index if number_of_controls is None else base + n_controls
+    final = cb.final_control_index
     return b"".join(
         [
             pack_u16(DESCRIPTOR_CONTROL_BLOCK),

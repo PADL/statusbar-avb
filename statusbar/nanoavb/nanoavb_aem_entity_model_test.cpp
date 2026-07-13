@@ -1734,12 +1734,18 @@ TEST(matrix, invalid_regions_and_callback_veto)
     EXPECT_EQ(get_missing.status, AEM_STATUS_NOT_IMPLEMENTED);
 
     // A vetoing change callback rejects the write and the grid is untouched.
+    // The callback sees the full pending write, including the incoming value.
     static uint16_t seen_matrix_index = 0xFFFF;
     static uint16_t seen_region_width = 0;
+    static int32_t seen_value = 0;
     handler.set_on_matrix_changed(
-        [](uint16_t const descriptor_index, DescriptorStorageHandler::MatrixRegion const& region) -> uint8_t {
+        [](uint16_t const descriptor_index, DescriptorStorageHandler::MatrixWrite const& write) -> uint8_t {
             seen_matrix_index = descriptor_index;
-            seen_region_width = region.width;
+            seen_region_width = write.region.width;
+            if (write.values.size() >= 4) {
+                seen_value = static_cast<int32_t>(
+                    (uint32_t{write.values[0]} << 24) | (write.values[1] << 16) | (write.values[2] << 8) | write.values[3]);
+            }
             return atdecc::AEM_STATUS_NOT_SUPPORTED;
         });
     auto const vetoed =
@@ -1747,6 +1753,7 @@ TEST(matrix, invalid_regions_and_callback_veto)
     EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
     EXPECT_EQ(seen_matrix_index, static_cast<uint16_t>(0));
     EXPECT_EQ(seen_region_width, static_cast<uint16_t>(2));
+    EXPECT_EQ(seen_value, 99);
     auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, false, 0, 0, 0));
     EXPECT_TRUE(response_matrix_values(get.bytes) == (std::vector<int32_t>{7, 7, 7, 7}));
 }

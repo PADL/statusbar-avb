@@ -29,7 +29,12 @@
 ///  - The backend owns protocol timing: inflight tracking, retry, and
 ///    timeouts. Command outcomes surface through per-command
 ///    AemCommandCompletion closures (see atdecc_aecp_aem_controller.hpp),
-///    which fire exactly once — response, timeout, or send failure.
+///    which fire exactly once — response, timeout, or send failure — with
+///    one exception: completions still in flight when the service is
+///    destroyed are dropped. The send methods' bool means "request
+///    accepted for outcome delivery", not "succeeded": failures arrive
+///    through the completion/sink, so a send that immediately reports
+///    SendFailed may still return true.
 ///  - on_acmp_observed is backend-dependent: the raw-socket backend
 ///    reports every ACMP PDU seen on the bus (passive connection
 ///    tracking, handshake tracing); a framework backend may not be able

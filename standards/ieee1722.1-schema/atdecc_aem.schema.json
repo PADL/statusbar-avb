@@ -702,10 +702,14 @@
         },
         "signal_index": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0
         },
         "signal_output": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0
         },
         "block_latency": {
@@ -743,10 +747,14 @@
         },
         "signal_index": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0
         },
         "signal_output": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0
         },
         "jack_index": {
@@ -1065,11 +1073,15 @@
         },
         "signal_index": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0,
           "description": "Descriptor index of the source."
         },
         "signal_output": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0,
           "description": "Output index of the source descriptor."
         }
@@ -1144,7 +1156,7 @@
     },
     "control_block": {
       "type": "object",
-      "description": "CONTROL_BLOCK descriptor: groups related controls. Member controls are authored inline; their CONTROL descriptor indices and the block's number_of_controls/base_control/final_control_index are assigned automatically.",
+      "description": "CONTROL_BLOCK descriptor: groups related controls. Member controls are authored inline; their CONTROL descriptor indices and the block's number_of_controls/base_control are assigned automatically.",
       "properties": {
         "name": {
           "type": "string",
@@ -1161,15 +1173,26 @@
           "minItems": 1,
           "description": "The grouped controls."
         },
+        "final_control_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 0,
+          "description": "Index of the final CONTROL descriptor in the block's internal signal chain (IEEE 1722.1-2021 Table 7-62). Zero when the block has no internal signal chain."
+        },
         "signal_type": {
           "$ref": "#/$defs/signal_type"
         },
         "signal_index": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0
         },
         "signal_output": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0
         },
         "symbol": {
@@ -1249,11 +1272,13 @@
         "width": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 65535,
           "description": "Number of columns."
         },
         "height": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 65535,
           "description": "Number of rows."
         },
         "signals": {

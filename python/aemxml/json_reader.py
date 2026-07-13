@@ -588,7 +588,8 @@ def _parse_control_block(
 ) -> ControlBlock:
     """Parse a CONTROL_BLOCK descriptor from JSON. Member controls are
     authored inline; flatten assigns their indices and fills the
-    number_of_controls / base_control / final_control_index fields."""
+    number_of_controls / base_control fields. final_control_index is
+    author-supplied (default 0 = no internal signal chain)."""
     controls = [
         _parse_control(c, strings, f"{context}.controls[{i}]")
         for i, c in enumerate(cb.get("controls", []))
@@ -603,6 +604,10 @@ def _parse_control_block(
     return ControlBlock(
         object_name=cb.get("name", ""),
         localized_description=_parse_localized(cb, strings, context=context),
+        # Per IEEE 1722.1-2021 Table 7-62: the index of the final CONTROL in
+        # the block's internal signal chain, 0 when there is none. Not
+        # derivable from the control count, so it is author-supplied.
+        final_control_index=cb.get("final_control_index", 0),
         signal_type=sig_type,
         signal_index=cb.get("signal_index", 0),
         signal_output=cb.get("signal_output", 0),

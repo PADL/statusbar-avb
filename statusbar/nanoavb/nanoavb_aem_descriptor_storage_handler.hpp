@@ -378,9 +378,9 @@ class DescriptorStorageHandler : public AemEntityHandler
     // item_offset per Clause 7.4.33) to an in-RAM width x height value grid
     // seeded from the descriptor's authored current value; GET_MATRIX reads
     // regions back. Only linear control_value_types are supported, and the
-    // grid must fit MAX_MATRIX_VALUE_BYTES. The change callback is where the
-    // application applies the new crosspoint values to its DSP; returning
-    // any status other than SUCCESS rejects the write.
+    // grid must fit MAX_MATRIX_VALUE_BYTES. The change callback receives the
+    // full pending MatrixWrite (region + incoming values) before the grid is
+    // touched; returning any status other than SUCCESS rejects the write.
 
     /// A rectangular subregion of a matrix (columns x rows).
     struct MatrixRegion
@@ -391,12 +391,28 @@ class DescriptorStorageHandler : public AemEntityHandler
         uint16_t height{0};
     };
 
+    /// One pending SET_MATRIX region write, handed to the change callback
+    /// BEFORE the grid is modified so it can be vetoed. The incoming
+    /// values ride along (the grid still holds the old values during the
+    /// callback; matrix_cell() reflects the new state only after the SET
+    /// completes).
+    struct MatrixWrite
+    {
+        MatrixRegion region{};
+        uint16_t direction{0};              ///< Table 7-146: 0 horizontal, 1 vertical
+        uint16_t item_offset{0};            ///< cells skipped before applying, in `direction` order
+        uint16_t value_count{0};            ///< elements in `values`
+        bool rep{false};                    ///< values repeat to fill the region
+        uint8_t elem_size{0};               ///< bytes per matrix point value
+        std::span<uint8_t const> values{};  ///< value_count * elem_size bytes (valid only during the call)
+    };
+
     /// Called when SET_MATRIX requests a region write (already validated
-    /// against the descriptor's dimensions). Return AEM_STATUS_SUCCESS to
-    /// accept, any other AEM_STATUS_* to reject. Unset => accept (in-memory
-    /// only). Query the new values afterwards via matrix_cell().
-    void set_on_matrix_changed(
-        statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, MatrixRegion const&), 64> fn)
+    /// against the descriptor's dimensions) — this is where the
+    /// application applies the incoming crosspoint values to its DSP.
+    /// Return AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to
+    /// reject (the grid is then left untouched).
+    void set_on_matrix_changed(statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, MatrixWrite const&), 64> fn)
     {
         on_matrix_changed_ = std::move(fn);
     }
@@ -686,7 +702,15 @@ class DescriptorStorageHandler : public AemEntityHandler
         }
 
         if (on_matrix_changed_) {
-            if (auto const status = on_matrix_changed_(ref.descriptor_index, region); status != atdecc::AEM_STATUS_SUCCESS) {
+            MatrixWrite const write{
+                .region = region,
+                .direction = direction,
+                .item_offset = item_offset,
+                .value_count = value_count,
+                .rep = rep,
+                .elem_size = static_cast<uint8_t>(elem),
+                .values = values.first(size_t{value_count} * elem)};
+            if (auto const status = on_matrix_changed_(ref.descriptor_index, write); status != atdecc::AEM_STATUS_SUCCESS) {
                 return status;
             }
         }
@@ -756,7 +780,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     }
 
     statusbar::sg14::inplace_vector<MatrixState, MAX_MATRIX_STATES> matrix_states_;
-    statusbar::sg14::inplace_function<uint8_t(uint16_t, MatrixRegion const&), 64> on_matrix_changed_{};
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, MatrixWrite const&), 64> on_matrix_changed_{};
 
     /// Load the descriptor bytes for `ref` into `desc` via
     /// span_load_padded. Returns false if the storage doesn't have a

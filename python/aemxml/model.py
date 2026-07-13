@@ -565,9 +565,11 @@ class ControlBlock:
 
     When `controls` is non-empty (JSON authoring), flatten emits those
     CONTROL descriptors contiguously and fills number_of_controls /
-    base_control / final_control_index automatically; the three count
-    fields are only honored as-is when `controls` is empty (legacy XML
-    authoring with hand-managed indices).
+    base_control automatically; the two count fields are only honored
+    as-is when `controls` is empty (legacy XML authoring with
+    hand-managed indices). final_control_index is always author-owned:
+    per IEEE 1722.1-2021 Table 7-62 it names the final CONTROL of the
+    block's internal signal chain and is zero when there is none.
     """
 
     object_name: str = ""

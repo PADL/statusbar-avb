@@ -292,16 +292,19 @@ void AvbEntityHost::wire_srp_callbacks()
         // Diagnostic: log the EXACT reason behind every gate decision (fires on each
         // listener register/leave for one of our talker streams), so a listener-ready
         // flap is explained -- which of the four conditions (record present,
-        // operation==Register, registrar In, Ready substate) is flipping.
-        auto const dbg = components_.msrp_handler.listener_permit_debug(stream_id);
-        ctl_log().debug(
-            "srp-gate sid={:016x} permits={} | record={} op={} registrar_in={} substate={}",
-            stream_id.to_uint64(),
-            dbg.permits,
-            dbg.has_record,
-            dbg.operation == statusbar::srp::msrp::Operation::Register ? logging::lit("Register") : logging::lit("Declare"),
-            dbg.registrar_in,
-            logging::static_str(statusbar::srp::msrp::listener_declaration_name(dbg.substate)));
+        // operation==Register, registrar In, Ready substate) is flipping. The
+        // enabled() gate skips the permit-debug computation when Debug is off.
+        if (ctl_log().enabled(logging::LogLevel::Debug)) {
+            auto const dbg = components_.msrp_handler.listener_permit_debug(stream_id);
+            ctl_log().debug(
+                "srp-gate sid={:016x} permits={} | record={} op={} registrar_in={} substate={}",
+                stream_id.to_uint64(),
+                dbg.permits,
+                dbg.has_record,
+                dbg.operation == statusbar::srp::msrp::Operation::Register ? logging::lit("Register") : logging::lit("Declare"),
+                dbg.registrar_in,
+                logging::static_str(statusbar::srp::msrp::listener_declaration_name(dbg.substate)));
+        }
 
         // The entity's transmit gate tracks readiness (TalkerGate::note_listener_ready).
         if (on_listener_ready_) {

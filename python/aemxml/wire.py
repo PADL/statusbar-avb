@@ -7,20 +7,33 @@ from __future__ import annotations
 import struct
 
 
+def _checked(val: int, bits: int) -> int:
+    """Range-check a wire integer instead of silently masking it.
+
+    Accepts the unsigned range [0, 2^bits) plus two's-complement negatives
+    down to -2^(bits-1) (fields such as log_sync_interval are signed on the
+    wire). Anything wider raises, so an authoring typo like signal_index
+    70000 fails the build rather than silently truncating to 4464.
+    """
+    if val < -(1 << (bits - 1)) or val >= (1 << bits):
+        raise ValueError(f"value {val} does not fit a {bits}-bit wire field")
+    return val & ((1 << bits) - 1)
+
+
 def pack_u8(val: int) -> bytes:
-    return struct.pack("!B", val & 0xFF)
+    return struct.pack("!B", _checked(val, 8))
 
 
 def pack_u16(val: int) -> bytes:
-    return struct.pack("!H", val & 0xFFFF)
+    return struct.pack("!H", _checked(val, 16))
 
 
 def pack_u32(val: int) -> bytes:
-    return struct.pack("!I", val & 0xFFFFFFFF)
+    return struct.pack("!I", _checked(val, 32))
 
 
 def pack_u64(val: int) -> bytes:
-    return struct.pack("!Q", val & 0xFFFFFFFFFFFFFFFF)
+    return struct.pack("!Q", _checked(val, 64))
 
 
 def pack_string64(s: str) -> bytes:

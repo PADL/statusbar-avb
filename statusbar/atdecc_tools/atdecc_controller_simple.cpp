@@ -233,10 +233,15 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             // identify_state 0/1 sets an explicit state (scriptable callers need
             // determinism); -1 toggles the per-entity state (the TUI's 'i' key).
             auto const target = action.request.talker_entity_id;
-            bool const new_on =
-                (action.request.identify_state < 0) ? !entities_[target].identify_on : (action.request.identify_state != 0);
+            // find(), not operator[]: an unknown target must not default-insert
+            // a phantom EntityRecord that find_entity() would then serve.
+            auto const rec_it = entities_.find(target);
+            bool const current_on = (rec_it != entities_.end()) && rec_it->second.identify_on;
+            bool const new_on = (action.request.identify_state < 0) ? !current_on : (action.request.identify_state != 0);
             if (service_->set_identify(target, new_on, make_command_completion())) {
-                entities_[target].identify_on = new_on;
+                if (rec_it != entities_.end()) {
+                    rec_it->second.identify_on = new_on;
+                }
                 emit_status(new_on ? "Identify on" : "Identify off");
             } else {
                 emit_status("Identify failed: entity unknown, no identify control advertised, or queue full");
