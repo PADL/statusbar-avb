@@ -43,7 +43,8 @@ byte-equivalent at the descriptor level, then deleted.)
 Four ctests keep the pipeline honest: `statusbar/avb/aem_json_models_compile`
 (`verify_models.py` — every model compiles and parses back),
 `statusbar/avb/aem_json_models_schema` (`validate_schema.py` — every model matches the
-authoring schema; skips without python3-jsonschema),
+authoring schema; skips without jsonschema — `uv sync --group validate` in `../python/`,
+or Debian python3-jsonschema, activates it),
 `statusbar/avb/aem_descriptor_storage_cross_check` (`descriptor_storage_cross_check.py` —
 the C++ DescriptorStorage parser reads a Python-written blob and sees the same
 descriptor/symbol tables), and `statusbar/avb/aemxml_python_unit` (the aemxml unit

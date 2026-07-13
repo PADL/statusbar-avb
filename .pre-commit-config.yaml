@@ -1,10 +1,12 @@
 # Auto-format C++, CMake, and Python on commit.
 #
-# clang-format is pinned to the exact version in requirements-format.txt (19.1.7)
-# via the pre-commit mirror, which downloads the same standalone wheel used on the
-# host and in the dev container — so commit-time formatting is identical on every
-# build context (no version drift, no churn). cmake-format/ruff are system tools.
-# Keep the rev below in lockstep with CLANG_FORMAT_VERSION in reformat.sh.
+# clang-format is pinned to the exact version in python/pyproject.toml + uv.lock
+# (19.1.7) via the pre-commit mirror, which downloads the same standalone wheel
+# used on the host and in the dev container — so commit-time formatting is
+# identical on every build context (no version drift, no churn). cmake-format/
+# ruff are system tools (`uv sync --group dev` in python/ installs the locked
+# versions). Keep the rev below in lockstep with CLANG_FORMAT_VERSION in
+# reformat.sh.
 #
 # Setup (once per checkout):
 #     pre-commit install

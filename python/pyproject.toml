@@ -1,0 +1,50 @@
+# Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+# SPDX-License-Identifier: MIT
+#
+# Dev-tooling project for the Python code in this directory. The aemxml
+# package itself is deliberately pure-stdlib: the C++ build invokes it with a
+# bare python3 interpreter (CMake ${Python3_EXECUTABLE}) for entity-blob
+# generation, so it must never grow runtime dependencies, and nothing in the
+# build requires uv. uv is a developer convenience only:
+#
+#     uv sync --group dev          # formatters + linters + jsonschema
+#     uv run python -m aemxml.aemxml_test
+#     uv run --group validate python ../examples/validate_schema.py
+#
+# The committed uv.lock pins the formatting toolchain to the exact same
+# versions on every build context (host, dev container, CI) so reformat.sh
+# never produces different output depending on where it ran (this replaces
+# the old requirements-format.txt).
+
+[project]
+name = "aemxml"
+version = "1.0.0"
+description = "IEEE 1722.1 AEM entity-model authoring pipeline (JSON/XML to descriptor-storage blob)"
+authors = [{ name = "Jeff Koftinoff", email = "jeff.koftinoff@statusbar.com" }]
+license = "MIT"
+requires-python = ">=3.10"
+# Build-critical constraint: keep this empty (see header comment).
+dependencies = []
+
+[dependency-groups]
+# Enables the aem_json_models_schema ctest (it skips when jsonschema is
+# absent) and editor-side validation of the authoring schema.
+validate = ["jsonschema>=4.21"]
+dev = [
+    { include-group = "validate" },
+    # clang-format 19.1.7 matches the trixie/arm64 clang the Raspberry Pi
+    # target builds with; reformat.sh enforces this exact version.
+    "clang-format==19.1.7",
+    "ruff==0.15.2",
+    # cmakelang provides cmake-format.
+    "cmakelang==0.6.13",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Flat layout: the aemxml package sits next to this file, not under src/.
+module-root = ""
+module-name = "aemxml"
