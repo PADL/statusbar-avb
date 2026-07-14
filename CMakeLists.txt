@@ -186,6 +186,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
       COMPONENT runtime
       FILES_MATCHING
       PATTERN "*.py"
+      PATTERN "*_test.py" EXCLUDE
       PATTERN "__pycache__" EXCLUDE)
     install(
       PROGRAMS python/aemxml/aemxml_tool.py
