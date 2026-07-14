@@ -184,6 +184,14 @@ def _serialize_configuration(
     return b"".join(parts)
 
 
+def _pack_count_base(count: int, base: int) -> bytes:
+    """Pack a number_of_<x> / base_<x> field pair. When the count is zero the
+    base index is meaningless, so emit 0 rather than the walk's running index
+    -- a strict controller cross-checking base indices would otherwise chase a
+    dangling reference."""
+    return pack_u16(count) + pack_u16(base if count else 0)
+
+
 def _serialize_audio_unit(
     unit: AudioUnit,
     desc_index: int,
@@ -210,20 +218,13 @@ def _serialize_audio_unit(
         pack_string64(unit.object_name),
         _pack_localized_desc(unit.localized_description),
         pack_u16(unit.clock_domain_index),
-        pack_u16(num_stream_input_ports),
-        pack_u16(base_stream_input_port),
-        pack_u16(num_stream_output_ports),
-        pack_u16(base_stream_output_port),
-        pack_u16(num_external_input_ports),
-        pack_u16(base_external_input_port),
-        pack_u16(num_external_output_ports),
-        pack_u16(base_external_output_port),
-        pack_u16(num_internal_input_ports),
-        pack_u16(base_internal_input_port),
-        pack_u16(num_internal_output_ports),
-        pack_u16(base_internal_output_port),
-        pack_u16(num_controls),
-        pack_u16(base_control),
+        _pack_count_base(num_stream_input_ports, base_stream_input_port),
+        _pack_count_base(num_stream_output_ports, base_stream_output_port),
+        _pack_count_base(num_external_input_ports, base_external_input_port),
+        _pack_count_base(num_external_output_ports, base_external_output_port),
+        _pack_count_base(num_internal_input_ports, base_internal_input_port),
+        _pack_count_base(num_internal_output_ports, base_internal_output_port),
+        _pack_count_base(num_controls, base_control),
         pack_u16(0),
         pack_u16(0),  # signal selectors
         pack_u16(0),
@@ -342,8 +343,7 @@ def _serialize_avb_interface(
             pack_u8(intf.log_announce_interval),
             pack_u8(intf.log_pdelay_interval),
             pack_u16(intf.port_number),
-            pack_u16(n_controls),
-            pack_u16(base),
+            _pack_count_base(n_controls, base),
         ]
     )
 
@@ -425,12 +425,9 @@ def _serialize_stream_port(
             pack_u16(desc_index),
             pack_u16(port.clock_domain_index),
             pack_u16(port.port_flags),
-            pack_u16(num_controls),
-            pack_u16(base_control),
-            pack_u16(num_clusters),
-            pack_u16(base_cluster),
-            pack_u16(num_maps),
-            pack_u16(base_map),
+            _pack_count_base(num_controls, base_control),
+            _pack_count_base(num_clusters, base_cluster),
+            _pack_count_base(num_maps, base_map),
         ]
     )
 
@@ -449,8 +446,7 @@ def _serialize_external_port(
             pack_u16(desc_index),
             pack_u16(port.clock_domain_index),
             pack_u16(port.port_flags),
-            pack_u16(num_controls),
-            pack_u16(base_control),
+            _pack_count_base(num_controls, base_control),
             pack_u16(port.signal_type),
             pack_u16(port.signal_index),
             pack_u16(port.signal_output),
@@ -474,8 +470,7 @@ def _serialize_internal_port(
             pack_u16(desc_index),
             pack_u16(port.clock_domain_index),
             pack_u16(port.port_flags),
-            pack_u16(num_controls),
-            pack_u16(base_control),
+            _pack_count_base(num_controls, base_control),
             pack_u16(port.signal_type),
             pack_u16(port.signal_index),
             pack_u16(port.signal_output),
@@ -817,8 +812,7 @@ def _serialize_control_block(
             pack_u16(desc_index),
             pack_string64(cb.object_name),
             _pack_localized_desc(cb.localized_description),
-            pack_u16(n_controls),
-            pack_u16(base),
+            _pack_count_base(n_controls, base),
             pack_u16(final),
             pack_u16(cb.signal_type),
             pack_u16(cb.signal_index),
@@ -871,20 +865,13 @@ def _serialize_video_unit(
         pack_string64(unit.object_name),
         _pack_localized_desc(unit.localized_description),
         pack_u16(unit.clock_domain_index),
-        pack_u16(num_stream_input_ports),
-        pack_u16(base_stream_input_port),
-        pack_u16(num_stream_output_ports),
-        pack_u16(base_stream_output_port),
-        pack_u16(num_external_input_ports),
-        pack_u16(base_external_input_port),
-        pack_u16(num_external_output_ports),
-        pack_u16(base_external_output_port),
-        pack_u16(num_internal_input_ports),
-        pack_u16(base_internal_input_port),
-        pack_u16(num_internal_output_ports),
-        pack_u16(base_internal_output_port),
-        pack_u16(num_controls),
-        pack_u16(base_control),
+        _pack_count_base(num_stream_input_ports, base_stream_input_port),
+        _pack_count_base(num_stream_output_ports, base_stream_output_port),
+        _pack_count_base(num_external_input_ports, base_external_input_port),
+        _pack_count_base(num_external_output_ports, base_external_output_port),
+        _pack_count_base(num_internal_input_ports, base_internal_input_port),
+        _pack_count_base(num_internal_output_ports, base_internal_output_port),
+        _pack_count_base(num_controls, base_control),
         pack_u16(0),
         pack_u16(0),  # signal selectors
         pack_u16(0),
@@ -932,20 +919,13 @@ def _serialize_sensor_unit(
         pack_string64(unit.object_name),
         _pack_localized_desc(unit.localized_description),
         pack_u16(unit.clock_domain_index),
-        pack_u16(num_stream_input_ports),
-        pack_u16(base_stream_input_port),
-        pack_u16(num_stream_output_ports),
-        pack_u16(base_stream_output_port),
-        pack_u16(num_external_input_ports),
-        pack_u16(base_external_input_port),
-        pack_u16(num_external_output_ports),
-        pack_u16(base_external_output_port),
-        pack_u16(num_internal_input_ports),
-        pack_u16(base_internal_input_port),
-        pack_u16(num_internal_output_ports),
-        pack_u16(base_internal_output_port),
-        pack_u16(num_controls),
-        pack_u16(base_control),
+        _pack_count_base(num_stream_input_ports, base_stream_input_port),
+        _pack_count_base(num_stream_output_ports, base_stream_output_port),
+        _pack_count_base(num_external_input_ports, base_external_input_port),
+        _pack_count_base(num_external_output_ports, base_external_output_port),
+        _pack_count_base(num_internal_input_ports, base_internal_input_port),
+        _pack_count_base(num_internal_output_ports, base_internal_output_port),
+        _pack_count_base(num_controls, base_control),
         pack_u16(0),
         pack_u16(0),  # signal selectors
         pack_u16(0),
@@ -2839,7 +2819,44 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
 
     _check_duplicate_symbols(symbols)
 
+    _derive_identify_capability(descriptors)
+
     return descriptors, symbols
+
+
+# Standard IDENTIFY control_type EUI-64 (IEEE 1722.1 Clause 7.3.4) and the
+# ENTITY/ADP capability bit that says "identify_control_index is valid".
+_CONTROL_TYPE_IDENTIFY = (0x90E0F00000000001).to_bytes(8, "big")
+_AEM_IDENTIFY_CONTROL_INDEX_VALID = 0x00004000
+
+
+def _derive_identify_capability(descriptors: list[FlatDescriptor]) -> None:
+    """OR AEM_IDENTIFY_CONTROL_INDEX_VALID into ENTITY.entity_capabilities
+    when configuration 0 carries an IDENTIFY control.
+
+    The runtime ADP advertiser (avb_entity_host.cpp wire_identify_control)
+    scans configuration 0's CONTROL descriptors for control_type IDENTIFY
+    (EUI-64 at wire offset 82) and sets the bit in the ADPDU; the ENTITY
+    descriptor must agree or controllers that cross-check ADP against the
+    entity model see a capability mismatch."""
+    has_identify = any(
+        d.descriptor_type == DESCRIPTOR_CONTROL
+        and d.config_index == 0
+        and len(d.wire_bytes) >= 90
+        and d.wire_bytes[82:90] == _CONTROL_TYPE_IDENTIFY
+        for d in descriptors
+    )
+    if not has_identify:
+        return
+    for i, d in enumerate(descriptors):
+        if d.descriptor_type == DESCRIPTOR_ENTITY:
+            caps = int.from_bytes(d.wire_bytes[20:24], "big")
+            caps |= _AEM_IDENTIFY_CONTROL_INDEX_VALID
+            wire = d.wire_bytes[:20] + caps.to_bytes(4, "big") + d.wire_bytes[24:]
+            descriptors[i] = FlatDescriptor(
+                d.config_index, d.descriptor_type, d.descriptor_index, wire
+            )
+            return
 
 
 def _describe_symbol(s: FlatSymbol) -> str:

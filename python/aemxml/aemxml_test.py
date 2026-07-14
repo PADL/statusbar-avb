@@ -298,6 +298,74 @@ def test_flatten_with_audio():
     print("  [+] flatten with audio: OK")
 
 
+def test_identify_capability_and_base_control_zeroing():
+    """A configuration-0 IDENTIFY control must set
+    AEM_IDENTIFY_CONTROL_INDEX_VALID in ENTITY.entity_capabilities (the ADP
+    advertiser sets it in the ADPDU; controllers cross-check the two), and a
+    descriptor with number_of_controls == 0 must emit base_control 0, not the
+    walk's running control index."""
+    import struct
+
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "V",
+                "model": "M",
+                "name": "N",
+                "capabilities": ["AEM_SUPPORTED"],
+                "configuration": {
+                    "name": "C",
+                    "controls": [
+                        {
+                            "name": "Identify",
+                            "control_type": "IDENTIFY",
+                            "value_type": "LINEAR_UINT8",
+                            "values": [
+                                {"min": 0, "max": 255, "step": 255, "default": 0}
+                            ],
+                        }
+                    ],
+                    "audio_units": [
+                        {
+                            "name": "AudioUnit",
+                            "rates": [48000],
+                            "output_ports": [
+                                {"clusters": [{"name": "Out", "channels": 2}]}
+                            ],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    descs, _ = flatten(read_json(json_str))
+    by_type = {}
+    for d in descs:
+        by_type.setdefault(d.descriptor_type, d)
+
+    ent_caps = struct.unpack_from(">I", by_type[DESCRIPTOR_ENTITY].wire_bytes, 20)[0]
+    assert ent_caps & 0x00004000, "AEM_IDENTIFY_CONTROL_INDEX_VALID not derived"
+
+    # The audio unit and its port own no controls; base_control must be 0
+    # even though the config-level identify control advanced the running
+    # control index to 1 before they were serialized.
+    au = by_type[DESCRIPTOR_AUDIO_UNIT].wire_bytes
+    assert struct.unpack_from(">HH", au, 98) == (0, 0)  # num/base controls
+    spo = by_type[DESCRIPTOR_STREAM_PORT_OUTPUT].wire_bytes
+    assert struct.unpack_from(">HH", spo, 8) == (0, 0)  # num/base controls
+
+    # No identify control -> bit stays clear.
+    plain = json.loads(json_str)
+    plain["entity"]["configuration"].pop("controls")
+    descs2, _ = flatten(read_json(json.dumps(plain)))
+    ent2 = next(d for d in descs2 if d.descriptor_type == DESCRIPTOR_ENTITY)
+    assert not struct.unpack_from(">I", ent2.wire_bytes, 20)[0] & 0x00004000
+
+    print("  [+] identify capability + base_control zeroing: OK")
+
+
 def test_blob_round_trip():
     """Test blob write -> read round-trip preserves all data."""
     entity = Entity(
@@ -2417,6 +2485,7 @@ def main():
         test_model_creation,
         test_flatten_minimal,
         test_flatten_with_audio,
+        test_identify_capability_and_base_control_zeroing,
         test_blob_round_trip,
         test_read_bareminimum,
         test_read_bareminimum_2021,
