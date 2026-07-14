@@ -274,6 +274,10 @@ class AvbEntityAm824IO
     /// @param callback Function called with interleaved N-channel samples for processing
     auto set_audio_callback(Am824AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }
 
+    /// Register a per-stream RX consumer (decoded floats + PTS, kit phase 2).
+    /// Menu/selection: an index the model never declares stays inert.
+    void set_consume(uint16_t stream_index, StreamConsumeFn fn) { listener_.set_consume(stream_index, std::move(fn)); }
+
     /// Reconfigure DSP filter parameters (applies to all per-channel biquad filters)
     /// @param freq_hz Filter center frequency in Hz
     /// @param gain_db Filter gain in dB (negative for cut, positive for boost)

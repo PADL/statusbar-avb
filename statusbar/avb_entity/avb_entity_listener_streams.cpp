@@ -59,6 +59,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             auto& slot = slots_.emplace_back();  // in place: the slot holds atomics
             slot.spec = spec;
             slot.am824.emplace(*rate, static_cast<uint8_t>(spec.format.channels));
+            bind_pending_consume(slot);
             return success();
         }
         case StreamKind::aaf: {
@@ -69,12 +70,43 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             auto& slot = slots_.emplace_back();
             slot.spec = spec;
             slot.aaf.emplace(spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth);
+            bind_pending_consume(slot);
             return success();
         }
         case StreamKind::crf:  // CRF input = media-clock recovery (kit phase 3)
         case StreamKind::other:
         default:
             return failure(std::errc::not_supported);
+    }
+}
+
+void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn fn)
+{
+    if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        slot->consume = std::move(fn);
+        return;
+    }
+    // No slot (yet): keep it pending. open_stream() binds it when the model
+    // declares the index; otherwise it stays here, inert (menu/selection).
+    for (auto& pending : pending_consume_) {
+        if (pending.stream_index == stream_index) {
+            pending.fn = std::move(fn);
+            return;
+        }
+    }
+    if (pending_consume_.size() < MAX_ENTITY_STREAMS) {
+        pending_consume_.push_back(PendingConsume{.stream_index = stream_index, .fn = std::move(fn)});
+    }
+}
+
+void ListenerStreams::bind_pending_consume(ListenerStreamSlot& slot)
+{
+    for (auto& pending : pending_consume_) {
+        if (pending.stream_index == slot.spec.index && pending.fn) {
+            slot.consume = std::move(pending.fn);
+            pending.fn = {};  // consumed; entry stays (never erased, slots are stable)
+            return;
+        }
     }
 }
 
@@ -186,8 +218,13 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             pdu,
             audio,
             static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
+            [&samples_this, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
                 samples_this = s.size();
+                // Kit phase 2: decoded floats + reconstructed PTS reach the
+                // registered per-stream consumer (previously discarded).
+                if (slot->consume) {
+                    slot->consume(ch, s, pts, period);
+                }
             });
         slot->rx_packets.add(1);
         slot->rx_samples.add(samples_this);
@@ -225,8 +262,11 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             *pdu_opt,
             audio,
             static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
+            [&samples_this, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
                 samples_this = s.size();
+                if (slot->consume) {
+                    slot->consume(ch, s, pts, period);
+                }
             });
         slot->rx_packets.add(1);
         slot->rx_samples.add(samples_this);

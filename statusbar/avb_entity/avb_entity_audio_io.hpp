@@ -176,6 +176,10 @@ class AvbEntityAudioIO
     [[nodiscard]] auto talker_should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
     auto set_audio_callback(AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }
+
+    /// Register a per-stream RX consumer (decoded floats + PTS, kit phase 2).
+    /// Menu/selection: an index the model never declares stays inert.
+    void set_consume(uint16_t stream_index, StreamConsumeFn fn) { listener_->set_consume(stream_index, std::move(fn)); }
     auto configure_filter(double freq_hz, double gain_db, double q) -> void;
 
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }

@@ -56,6 +56,11 @@ struct ListenerStreamSlot
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
 
+    /// Per-stream RX consumer (kit phase 2): receives each decoded channel
+    /// (floats + reconstructed 64-bit PTS) on the reactor/RX thread. Empty =
+    /// decode for counters only (and the raw-byte StreamRxAudioSink, if any).
+    StreamConsumeFn consume{};
+
     /// Per-slot data-plane counters (written on the reactor/RX thread, read for status).
     itc::TelemetryCounter<uint64_t> rx_packets{};
     itc::TelemetryCounter<uint64_t> rx_samples{};
@@ -87,9 +92,17 @@ struct ListenerStreams
     {}
 
     /// Add an RX slot shaped by @p spec, constructing the kind-matching
-    /// deserializer. Errors: unsupported kind (CRF input is kit phase 3;
+    /// deserializer. A pending set_consume() registration for spec.index is
+    /// bound here. Errors: unsupported kind (CRF input is kit phase 3;
     /// `other` never), unknown rate, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec) -> Status;
+
+    /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:
+    /// each decoded channel is delivered as floats with its reconstructed
+    /// presentation time. Callable before or after the slot exists — the code
+    /// is a menu, the model is the selection: an index the model never
+    /// declares stays pending and inert (never an error). RX-thread callback.
+    void set_consume(uint16_t stream_index, StreamConsumeFn fn);
 
     /// The slot whose spec.index == @p stream_index (the STREAM_INPUT
     /// descriptor index == ACMP listener unique id), or nullptr.
@@ -157,6 +170,9 @@ struct ListenerStreams
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
+    /// Move a pending set_consume registration into its newly-opened slot.
+    void bind_pending_consume(ListenerStreamSlot& slot);
+
     // --- References / collaborators (bound at construction) --------------------
     uint32_t lock_tolerance_ns_;              ///< MEDIA_LOCKED step tolerance
     uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
@@ -178,6 +194,15 @@ struct ListenerStreams
     // --- Owned RX state --------------------------------------------------------
     /// The RX slots (atomics inside: constructed in place, never moved/erased).
     sg14::inplace_vector<ListenerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
+
+    /// Consume registrations made before their slot exists (bound in
+    /// open_stream; indexes the model never declares stay here, inert).
+    struct PendingConsume
+    {
+        uint16_t stream_index{0};
+        StreamConsumeFn fn{};
+    };
+    sg14::inplace_vector<PendingConsume, MAX_ENTITY_STREAMS> pending_consume_{};
 };
 
 }  // namespace statusbar::avb_entity
