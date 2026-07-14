@@ -213,12 +213,47 @@ INTERNAL_PORT_IN/OUT, TIMING, PTP_INSTANCE, PTP_PORT. Partial gaps:
 controls on units/ports, multiple audio maps per port, non-MBLA cluster
 formats, stream redundancy/backup fields.
 
+## Design principle: the code is a menu, the model is the selection
+
+Symbol-keyed registrations (controls, stream render/consume bindings,
+selector/matrix hooks) must be **legal and inert when the blob does not
+declare the symbol**. One binary can then register every capability it
+implements — dozens of controls, alternate stream renderers, DSP options —
+and each deployment ships a minimal JSON model that activates only the
+subset it wants. Concretely:
+
+- `kit.on_control("gain", ...)` / `kit.render("aux_out", ...)` for a symbol
+  absent from the loaded blob is NOT an error: the binding is recorded and
+  simply never fires. Binding resolution is lazy (at dispatch/start time,
+  keyed by the blob's symbol table), never an eager create-time rejection.
+- The reverse direction is tolerant too: a blob symbol with no registered
+  callback falls back to generic built-in handling (serve/store/clamp from
+  the blob's own value_details) rather than NOT_IMPLEMENTED, so a minimal
+  program still enumerates correctly.
+- Diagnostics, not errors: at start the kit logs the registrations left
+  unbound ("registered but not in model: aux_out, phantom_1 ...") and the
+  model symbols left ungoverned, at info level, so typos are findable
+  without breaking the menu/selection pattern.
+- The existing plumbing already leans this way — symbols are CRC32 codes of
+  authored names (`flatten.py symbol_to_code`), `DescriptorId.symbol` is
+  attached at dispatch time from the blob's symbol table, and callbacks
+  registered for absent symbols naturally never match. The rule here is a
+  constraint on future API layers: do not add eager symbol validation that
+  would reject a registration merely because the current model omits it.
+
+Validation stays loud where it protects correctness (stream format vs
+cluster mismatch, unknown format words, over-capacity tables) — the
+menu/selection tolerance applies to *optional capability bindings*, not to
+shape contradictions.
+
 ## Target developer experience
 
 ```cpp
 // ~40 lines instead of ~1,500
 auto kit = AvbEntityKit::from_blob("mixer8.aem");        // topology, formats, counts,
                                                           // controls, clocking — all derived
+// Registrations for symbols the model omits are recorded but inert — the
+// same binary serves maximal and minimal models alike.
 kit.render("main_out", [&](AudioBlock b) { synth.fill(b); });       // per-stream TX, pts/first_index
 kit.consume("aes_in", [&](AudioBlockConst b) { recorder.push(b); });// decoded floats + pts
 kit.on_control("gain",  [&](auto v) { gain.store(v.as<float>()); });
