@@ -242,7 +242,9 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
     if (auto status = talker_.open_stream(am824_spec, sid, stream_dest_mac_); !status) {
         return status;
     }
-    listener_.am824_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
+    if (auto status = listener_.open_stream(am824_spec); !status) {  // RX slot mirrors the TX spec
+        return status;
+    }
 
     // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
     // our own stream frames on this host.
@@ -335,9 +337,9 @@ void AvbEntityAm824IO::print_state() const
         host_.components().acmp_talker.connection_count(0),
         channels_,
         talker_.slot_for(0) != nullptr ? talker_.slot_for(0)->tx_packets : 0,
-        listener_.am824_rx_packets_.load(),
-        listener_.am824_rx_samples_.load(),
-        listener_.am824_rx_bad_.load());
+        listener_.slot_for(0) != nullptr ? listener_.slot_for(0)->rx_packets.load() : 0,
+        listener_.slot_for(0) != nullptr ? listener_.slot_for(0)->rx_samples.load() : 0,
+        listener_.slot_for(0) != nullptr ? listener_.slot_for(0)->rx_bad.load() : 0);
 }
 
 //

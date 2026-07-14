@@ -419,8 +419,13 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
             return status;
         }
     }
-    listener_->am824_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
-    listener_->aaf_in_.emplace(AAF_FORMAT, AAF_SAMPLE_RATE, static_cast<uint16_t>(channels_), AAF_BIT_DEPTH);
+    // RX slots for the fixed 2-input topology (AM824@0, AAF@1), mirroring the
+    // TX slots above.
+    for (auto const& spec : {make_spec(AM824_STREAM_INDEX, StreamKind::am824), make_spec(AAF_STREAM_INDEX, StreamKind::aaf)}) {
+        if (auto status = listener_->open_stream(spec); !status) {
+            return status;
+        }
+    }
 
     // One TX socket (qdisc-bypass so our own egress is not re-received here).
     (void)talker_->stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
@@ -502,6 +507,10 @@ auto AvbEntityAudioIO::stop() -> Status
 
 void AvbEntityAudioIO::print_state() const
 {
+    auto const* tx_am824 = talker_->slot_of(StreamKind::am824);
+    auto const* tx_aaf = talker_->slot_of(StreamKind::aaf);
+    auto const* rx_am824 = listener_->slot_of(StreamKind::am824);
+    auto const* rx_aaf = listener_->slot_of(StreamKind::aaf);
     std::print(
         "State: supervisor={} gptp={} mvrp={} acmp[am824={} aaf={}] channels={} | "
         "AM824 tx={} rx={} rx_samples={} rx_bad={} | AAF tx={} rx={} rx_samples={} rx_bad={} | "
@@ -512,14 +521,14 @@ void AvbEntityAudioIO::print_state() const
         host_.components().acmp_talker.connection_count(AM824_STREAM_INDEX),
         host_.components().acmp_talker.connection_count(AAF_STREAM_INDEX),
         channels_,
-        talker_->slot_of(StreamKind::am824) != nullptr ? talker_->slot_of(StreamKind::am824)->tx_packets : 0,
-        listener_->am824_rx_packets_.load(),
-        listener_->am824_rx_samples_.load(),
-        listener_->am824_rx_bad_.load(),
-        talker_->slot_of(StreamKind::aaf) != nullptr ? talker_->slot_of(StreamKind::aaf)->tx_packets : 0,
-        listener_->aaf_rx_packets_.load(),
-        listener_->aaf_rx_samples_.load(),
-        listener_->aaf_rx_bad_.load(),
+        tx_am824 != nullptr ? tx_am824->tx_packets : 0,
+        rx_am824 != nullptr ? rx_am824->rx_packets.load() : 0,
+        rx_am824 != nullptr ? rx_am824->rx_samples.load() : 0,
+        rx_am824 != nullptr ? rx_am824->rx_bad.load() : 0,
+        tx_aaf != nullptr ? tx_aaf->tx_packets : 0,
+        rx_aaf != nullptr ? rx_aaf->rx_packets.load() : 0,
+        rx_aaf != nullptr ? rx_aaf->rx_samples.load() : 0,
+        rx_aaf != nullptr ? rx_aaf->rx_bad.load() : 0,
         udptun_->telemetry_->egress_reset_count.load(),
         udptun_->telemetry_->egress_repunch_count.load());
 }

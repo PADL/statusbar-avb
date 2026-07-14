@@ -1,12 +1,10 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// ListenerStreams methods — the local AVB stream RX path, moved out of
-// avb_entity_audio_io.cpp (god-object phase 3, RX half). Bodies unchanged except
-// the method qualifier (AvbEntityAudioIO:: -> ListenerStreams::), the RX counters
-// now being itc::TelemetryCounter (.fetch_add(n,order) -> .add(n)), and the sink
-// member name (rx_audio_sink_ -> audio_sink_). The listener owns the deserialize
-// contexts / counters and holds same-named refs (config_/components_/last_gptp_ns_).
+// ListenerStreams methods — the local AVB stream RX path. Slots are shaped by
+// StreamSpecs (kit phase 1); the per-kind deserialize bodies are unchanged
+// from the fixed-two-context era, but a frame now finds its slot by the
+// connected stream_id rather than by a hardcoded subtype->index mapping.
 
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 
@@ -18,10 +16,107 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <print>
 #include <span>
+#include <system_error>
 
 namespace statusbar::avb_entity {
+
+namespace {
+
+/// StreamKind name as a static-storage log token (the deferred-formatting
+/// logger rejects transient pointers; stream_kind_name() returns char const*).
+auto kind_lit(ListenerStreamSlot const* slot)
+{
+    if (slot == nullptr) {
+        return logging::lit("?");
+    }
+    switch (slot->spec.format.kind) {
+        case StreamKind::am824:
+            return logging::lit("AM824");
+        case StreamKind::aaf:
+            return logging::lit("AAF");
+        case StreamKind::crf:
+            return logging::lit("CRF");
+        case StreamKind::other:
+        default:
+            return logging::lit("other");
+    }
+}
+
+}  // namespace
+
+auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
+{
+    if (slots_.size() == MAX_ENTITY_STREAMS) {
+        return failure(std::errc::result_out_of_range);
+    }
+    switch (spec.format.kind) {
+        case StreamKind::am824: {
+            auto const rate = avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
+            if (!rate || spec.format.channels == 0) {
+                return failure(std::errc::invalid_argument);
+            }
+            auto& slot = slots_.emplace_back();  // in place: the slot holds atomics
+            slot.spec = spec;
+            slot.am824.emplace(*rate, static_cast<uint8_t>(spec.format.channels));
+            return success();
+        }
+        case StreamKind::aaf: {
+            auto const rate = avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz);
+            if (!rate || spec.format.channels == 0) {
+                return failure(std::errc::invalid_argument);
+            }
+            auto& slot = slots_.emplace_back();
+            slot.spec = spec;
+            slot.aaf.emplace(spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth);
+            return success();
+        }
+        case StreamKind::crf:  // CRF input = media-clock recovery (kit phase 3)
+        case StreamKind::other:
+        default:
+            return failure(std::errc::not_supported);
+    }
+}
+
+auto ListenerStreams::slot_for(uint16_t const stream_index) noexcept -> ListenerStreamSlot*
+{
+    for (auto& slot : slots_) {
+        if (slot.spec.index == stream_index) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+auto ListenerStreams::slot_for(uint16_t const stream_index) const noexcept -> ListenerStreamSlot const*
+{
+    for (auto const& slot : slots_) {
+        if (slot.spec.index == stream_index) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+auto ListenerStreams::slot_of(StreamKind const kind) noexcept -> ListenerStreamSlot*
+{
+    for (auto& slot : slots_) {
+        if (slot.spec.format.kind == kind) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerStreamSlot const*
+{
+    for (auto const& slot : slots_) {
+        if (slot.spec.format.kind == kind) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
 
 auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
 {
@@ -51,38 +146,53 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         return;
     }
 
-    if (frame[0] == avtp::AvtpSubtype::iec_61883_iidc) {
-        // --- AM824 (stream 0) ---
-        if (!am824_in_ || frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
-            return;
+    // Find the slot this frame belongs to: kind must match the AVTP subtype and
+    // the frame's stream_id must match the stream connected to that input (the
+    // promiscuous socket also sees our own TX and any other stream on the
+    // segment). Stream_ids are unique, so the first match is the only match.
+    auto const subtype_kind = frame[0] == avtp::AvtpSubtype::iec_61883_iidc ? StreamKind::am824
+        : frame[0] == avtp::AvtpSubtype::aaf                                ? StreamKind::aaf
+                                                                            : StreamKind::other;
+    if (subtype_kind == StreamKind::other) {
+        return;
+    }
+    ListenerStreamSlot* slot = nullptr;
+    for (auto& s : slots_) {
+        if (s.spec.format.kind == subtype_kind && frame_is_for_listener(s.spec.index, frame)) {
+            slot = &s;
+            break;
         }
-        // Only ingest the stream connected to this input; the promiscuous socket
-        // also sees our own TX and any other AVB stream on the segment.
-        if (!frame_is_for_listener(AM824_STREAM_INDEX, frame)) {
+    }
+    if (slot == nullptr) {
+        return;
+    }
+
+    if (slot->am824) {
+        // --- AM824 ---
+        if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
             return;
         }
         avtp::Am824Pdu pdu{};
         span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
         if (!pdu.is_valid()) {
-            am824_rx_bad_.add(1);
-            update_stream_input_counters(
-                AM824_STREAM_INDEX, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
+            slot->rx_bad.add(1);
+            update_stream_input_counters(*slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
             return;
         }
         std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
         uint64_t samples_this = 0;
         avtp::am824_deserialize_mbla(
-            *am824_in_,
+            *slot->am824,
             pdu,
             audio,
             static_cast<uint64_t>(gptp_now_ns),
             [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
                 samples_this = s.size();
             });
-        am824_rx_packets_.add(1);
-        am824_rx_samples_.add(samples_this);
+        slot->rx_packets.add(1);
+        slot->rx_samples.add(samples_this);
         update_stream_input_counters(
-            AM824_STREAM_INDEX,
+            *slot,
             pdu.stream_header.sequence_num.get(),
             pdu.avtp_timestamp(),
             pdu.stream_header.tv(),
@@ -97,37 +207,31 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         // decides whether to consume it -- e.g. only when this is the configured
         // tunnel source). The listener does not know what the sink does with it.
         if (audio_sink_ != nullptr) {
-            audio_sink_->on_listener_audio(AM824_STREAM_INDEX, StreamAudioFormat::am824_mbla, audio);
+            audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::am824_mbla, audio);
         }
-    } else if (frame[0] == avtp::AvtpSubtype::aaf) {
-        // --- AAF (stream 1) ---
-        if (!aaf_in_) {
-            return;
-        }
-        if (!frame_is_for_listener(AAF_STREAM_INDEX, frame)) {
-            return;
-        }
+    } else if (slot->aaf) {
+        // --- AAF ---
         auto pdu_opt = avtp::aaf_parse_header(frame);
         if (!pdu_opt) {
-            aaf_rx_bad_.add(1);
+            slot->rx_bad.add(1);
             update_stream_input_counters(
-                AAF_STREAM_INDEX, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
+                *slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
             return;
         }
         std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);
         uint64_t samples_this = 0;
         avtp::aaf_stream_deserialize(
-            *aaf_in_,
+            *slot->aaf,
             *pdu_opt,
             audio,
             static_cast<uint64_t>(gptp_now_ns),
             [&samples_this](uint8_t /*ch*/, std::span<float> s, uint64_t /*pts*/, uint64_t /*period*/) {
                 samples_this = s.size();
             });
-        aaf_rx_packets_.add(1);
-        aaf_rx_samples_.add(samples_this);
+        slot->rx_packets.add(1);
+        slot->rx_samples.add(samples_this);
         update_stream_input_counters(
-            AAF_STREAM_INDEX,
+            *slot,
             pdu_opt->get_sequence_num(),
             pdu_opt->get_avtp_timestamp(),
             pdu_opt->tv(),
@@ -141,7 +245,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         // Hand the accepted audio to the RX sink (today the WAN tunnel). Symmetric
         // to the AM824 path above; the sink ignores it unless AAF is its source.
         if (audio_sink_ != nullptr) {
-            audio_sink_->on_listener_audio(AAF_STREAM_INDEX, StreamAudioFormat::aaf_int32, audio);
+            audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::aaf_int32, audio);
         }
     }
 }
@@ -162,7 +266,7 @@ auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::sp
 }
 
 void ListenerStreams::update_stream_input_counters(
-    uint16_t const stream_index,
+    ListenerStreamSlot& slot,
     uint8_t const seq,
     uint32_t const avtp_ts,
     bool const tv,
@@ -173,15 +277,12 @@ void ListenerStreams::update_stream_input_counters(
     bool const ts_sparse,
     int64_t const gptp_now_ns)
 {
-    if (stream_index >= stream_in_counters_.size()) {
-        return;
-    }
     // The bookkeeping itself lives in avb_entity_stream_counters.* (unit-tested); feed
     // it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs). gptp_now_ns
     // is the caller's fresh receive time -- the reactor path passes current_gptp_ns()
     // (the media-timer wake), the RT-timer path passes its own wake time.
     tally_stream_input_packet(
-        stream_in_counters_[stream_index],
+        slot.counters,
         seq,
         avtp_ts,
         tv,
@@ -198,10 +299,11 @@ void ListenerStreams::update_stream_input_counters(
 auto ListenerStreams::fill_stream_input_counters(
     uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
 {
-    if (descriptor_index >= stream_in_counters_.size()) {
+    auto const* slot = slot_for(descriptor_index);
+    if (slot == nullptr) {
         return false;
     }
-    auto const& c = stream_in_counters_[descriptor_index];
+    auto const& c = slot->counters;
     auto const relaxed = std::memory_order_relaxed;
     // IEEE 1722.1 STREAM_INPUT counter bit positions (Clause 7.4.42). counters[bit]
     // holds the value for the bit set in `valid`.
@@ -235,7 +337,7 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
         logger_->status(
             "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}",
             stream_index,
-            stream_index == AAF_STREAM_INDEX ? logging::lit("AAF") : logging::lit("AM824"),
+            kind_lit(slot_for(stream_index)),
             dest_mac.to_uint64(),
             result.has_value() ? logging::lit("declared") : logging::lit("failed"),
             joined ? logging::lit("ok") : logging::lit("FAILED"));
@@ -258,7 +360,7 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
         logger_->status(
             "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener withdrawn",
             stream_index,
-            stream_index == AAF_STREAM_INDEX ? logging::lit("AAF") : logging::lit("AM824"));
+            kind_lit(slot_for(stream_index)));
     }
 }
 
