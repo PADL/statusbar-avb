@@ -15,6 +15,7 @@
 
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
+#include "statusbar/avb_entity/avb_entity_version.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
@@ -111,7 +112,7 @@ struct Config
         .media_lock_to_gptp = true,
         .tone_amplitude = 0.1F,  // -20 dBFS
         .entity_name = "",
-        .firmware_version = "1.0.0",
+        .firmware_version = statusbar::avb_entity::build_version,
     };
 
     /// Lowest white-key tone (MIDI note number). Default 60 = C4; each channel

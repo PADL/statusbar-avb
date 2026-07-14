@@ -29,6 +29,13 @@ IMAGE="localhost/statusbar-deb-builder:$DEBIAN_VERSION-$TARGET_ARCH"
 # value per run so a multi-package build gets a consistent revision.
 DEB_REVISION="${STATUSBAR_DEB_REVISION:-$(date -u +%Y%m%d%H%M%S)}"
 
+# Package version = the tree's latest release tag, resolved HERE on the host:
+# the container mounts the tree read-only and a submodule's .git is a gitfile
+# pointing outside the mount, so git describe cannot work in the container.
+# Empty when git/tags are unavailable -- CMake then falls back to its baked
+# default (see CMakeLists.txt version block).
+PKG_VERSION="${STATUSBAR_PKG_VERSION:-$(git -C "$TREE_DIR" describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)}"
+
 # Cross-arch builds (e.g. linux/arm64 on an x86_64 host) need qemu-user-static
 # registered with the kernel's binfmt_misc. Detect and explain instead of
 # letting the container die with a cryptic "exec format error".
@@ -116,6 +123,7 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
   -e "DEPS=$DEPS" \
   -e "PKG=$PKG" \
   -e "DEB_REVISION=$DEB_REVISION" \
+  -e "PKG_VERSION=$PKG_VERSION" \
   "$IMAGE" bash -euo pipefail -c '
     debs=()
     for d in $DEPS; do
@@ -129,6 +137,7 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
       --toolchain /src/cmake/toolchain-clang.cmake \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DENABLE_FUZZING=OFF \
+      ${PKG_VERSION:+-DSTATUSBAR_AVB_VERSION=$PKG_VERSION} \
       -DCMAKE_C_COMPILER_LAUNCHER=ccache \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
     cmake --build /build

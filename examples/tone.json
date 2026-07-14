@@ -4,6 +4,7 @@
     "vendor": "Statusbar",
     "model": "Tone Generator",
     "name": "Statusbar Tone Generator",
+    "firmware": "${version}",
     "capabilities": [
       "AEM_SUPPORTED",
       "CLASS_A_SUPPORTED",

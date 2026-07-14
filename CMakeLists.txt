@@ -1,8 +1,34 @@
 cmake_minimum_required(VERSION 3.31)
+
+# ---- version --------------------------------------------------------------
+# Single source of truth: the repo's latest release tag. Resolution order: 1.
+# -DSTATUSBAR_AVB_VERSION=x.y.z  (scripts/container-build.sh resolves the tag on
+# the host -- the container mounts the tree read-only without a usable .git, so
+# git describe cannot run in there) 2. git describe on this tree (developer
+# builds) 3. the fallback literal below (tarball builds; bump on release only if
+# neither of the above is available) The version flows from here into the
+# package metadata, the entities' firmware_version (STATUSBAR_AVB_VERSION
+# compile definition), and the AEM blob models (json2bin --set version=...).
+if(NOT STATUSBAR_AVB_VERSION)
+  execute_process(
+    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" describe --tags --abbrev=0
+            --match "[0-9]*.[0-9]*.[0-9]*"
+    OUTPUT_VARIABLE STATUSBAR_AVB_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+if(NOT STATUSBAR_AVB_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  set(STATUSBAR_AVB_VERSION 1.8.0)
+endif()
+
 project(
   statusbar-avb
-  VERSION 1.6.1
+  VERSION ${STATUSBAR_AVB_VERSION}
   LANGUAGES CXX)
+message(STATUS "statusbar-avb version: ${PROJECT_VERSION}")
+
+# Baked into the entities' ENTITY descriptor firmware_version (see
+# statusbar/avb_entity/avb_entity_version.hpp).
+add_compile_definitions(STATUSBAR_AVB_VERSION="${PROJECT_VERSION}")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -99,7 +125,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/statusbar-avb)
   write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfigVersion.cmake
-    VERSION 1.6.1
+    VERSION ${PROJECT_VERSION}
     COMPATIBILITY AnyNewerVersion)
   install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfig.cmake
@@ -191,7 +217,7 @@ endif()
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_PACKAGE_NAME "statusbar-avb")
   set(CPACK_PACKAGE_VENDOR "Jeff Koftinoff")
-  set(CPACK_PACKAGE_VERSION "1.6.1")
+  set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "AVB/TSN protocol stack — SRP, AVTP, gPTP, ATDECC, NanoAVB, and AVTP crypto — with ATDECC controller and AVTP command-line tools."
   )

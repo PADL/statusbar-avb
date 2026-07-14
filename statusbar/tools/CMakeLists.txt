@@ -50,12 +50,16 @@ set(_aem_examples "${CMAKE_CURRENT_LIST_DIR}/../../examples")
 set(_aemxml_tool "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_tool.py")
 
 # _statusbar_avb_entity_blob(<out-abspath> <json-model> <label>) Emit an
-# add_custom_command producing <out> from json2bin <json-model>.json.
+# add_custom_command producing <out> from json2bin <json-model>.json. --set
+# version stamps the models' "firmware": "${version}" with the build version so
+# the blob's ENTITY descriptor matches the package.
 function(_statusbar_avb_entity_blob out json_model label)
   add_custom_command(
     OUTPUT "${out}"
-    COMMAND ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
-            "${_aem_examples}/${json_model}.json" "${out}"
+    COMMAND
+      ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
+      "${_aem_examples}/${json_model}.json" "${out}" --set
+      "version=${PROJECT_VERSION}"
     DEPENDS "${_aem_examples}/${json_model}.json" "${_aemxml_tool}"
     COMMENT "Generating ${label} from examples/${json_model}.json (json2bin)"
     VERBATIM)
@@ -127,6 +131,7 @@ foreach(_m bridge dual tone tone-aaf tone-aaf-crf simple_stereo)
     COMMAND
       ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
       "${_aem_examples}/${_m}.json" "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
+      --set "version=${PROJECT_VERSION}"
     DEPENDS "${_aem_examples}/${_m}.json" "${_aemxml_tool}"
     COMMENT "AEM blob (json2bin): ${_m}.aem <- examples/${_m}.json"
     VERBATIM)

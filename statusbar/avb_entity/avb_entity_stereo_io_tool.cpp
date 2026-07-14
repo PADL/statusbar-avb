@@ -21,6 +21,7 @@
 
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_stereo_io.hpp"
+#include "statusbar/avb_entity/avb_entity_version.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -78,7 +79,7 @@ struct Config
         .filter_gain_db = 0.0,  // Unity gain by default
         .filter_q = 0.707,      // Butterworth Q
         .entity_name = "AVB Stereo IO Tool",
-        .firmware_version = "1.0.0",
+        .firmware_version = statusbar::avb_entity::build_version,
     };
 
     // Runtime options

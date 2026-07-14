@@ -14,6 +14,7 @@
 
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_version.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
@@ -107,7 +108,7 @@ struct Config
         .filter_gain_db = 0.0,
         .filter_q = 0.707,
         .entity_name = "",
-        .firmware_version = "1.0.0",
+        .firmware_version = statusbar::avb_entity::build_version,
     };
 
     // Defaults to the descriptor blob shipped by the package (see

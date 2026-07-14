@@ -34,9 +34,12 @@ from aemxml.json_reader import read_json  # noqa: E402
 
 def main() -> int:
     failures = 0
+    # Variables the models may reference (the build passes the real values via
+    # json2bin --set); any OTHER unset ${...} reference still fails the model.
+    variables = {"version": "0.0.0-verify"}
     for path in sorted(HERE.glob("*.json")):
         try:
-            descs, syms = flatten(read_json(str(path)))
+            descs, syms = flatten(read_json(str(path), variables=variables))
             blob = write_blob(descs, syms)
             parsed_descs, parsed_syms = read_blob(blob)
             if len(parsed_descs) != len(descs) or len(parsed_syms) != len(syms):

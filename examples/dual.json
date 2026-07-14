@@ -4,6 +4,7 @@
     "vendor": "Statusbar",
     "model": "Audio IO",
     "name": "AVB Audio IO",
+    "firmware": "${version}",
     "capabilities": [
       "AEM_SUPPORTED",
       "CLASS_A_SUPPORTED",
