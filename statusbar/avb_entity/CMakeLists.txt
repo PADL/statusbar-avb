@@ -11,6 +11,7 @@ statusbar_add_module(
   avb_entity_tone_generator.cpp
   avb_entity_host.cpp
   avb_entity_stream_counters.cpp
+  avb_entity_stream_spec.cpp
   avb_entity_listener_streams.cpp
   avb_entity_talker_streams.cpp
   avb_entity_talker_gate.cpp
@@ -42,6 +43,7 @@ statusbar_add_module(
   avb_entity_audio_io_test.cpp
   avb_entity_tone_generator_test.cpp
   avb_entity_stream_counters_test.cpp
+  avb_entity_stream_spec_test.cpp
   avb_entity_media_rate_test.cpp
   avb_entity_udptun_egress_test.cpp
   avb_entity_udptun_ingest_test.cpp
