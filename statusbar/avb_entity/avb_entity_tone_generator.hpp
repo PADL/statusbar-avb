@@ -4,26 +4,26 @@
 // SPDX-License-Identifier: MIT
 
 /// AVB Entity Tone Generator (talker-only)
-/// A standalone AVB talker entity that transmits three stream sources, no
-/// listeners and no inter-site tunnel:
-///   - stream 0: AM824 (IEC 61883-6, MBLA 24-in-32), N-channel 96 kHz
-///   - stream 1: AAF (IEEE 1722 AVTP Audio Format, 32-bit PCM), N-channel 96 kHz
-///   - stream 2: CRF (Clock Reference Format, Milan 48 kHz media clock)
-/// Each audio channel carries a continuous sine tone; by default the 8 channels
-/// are the white piano keys C4..C5 (C4, D4, E4, F4, G4, A4, B4, C5). The media
-/// clock is locked to gPTP at ratio r = 1.0 (no GPS-rate tracking). The entity
-/// model is loaded from a descriptor-storage blob declaring 0 stream inputs and
-/// 3 stream outputs (examples/tone.json, compiled by aemxml json2bin).
+/// A standalone AVB talker entity whose stream topology is derived from its
+/// descriptor-storage blob (Entity Construction Kit phase 1): each
+/// STREAM_OUTPUT descriptor's current_format decides the stream kind — AM824
+/// (IEC 61883-6 MBLA), AAF (32-bit PCM), or CRF (media clock) — so the same
+/// C++ serves examples/tone.json (AM824+AAF+CRF), tone-aaf.json (AAF only),
+/// tone-aaf-crf.json (AAF+CRF), or any other talker-only model without code
+/// changes. Each audio channel carries a continuous sine tone; by default the
+/// channels are the white piano keys upward from the base MIDI note. The media
+/// clock is locked to gPTP at ratio r = 1.0 (no GPS-rate tracking); the audio
+/// sample rate follows the blob's stream formats.
 ///
-/// This reuses the shared AVB control plane (AvbEntityHost), the stream TX path
-/// (TalkerStreams: AM824 + AAF + CRF), the per-stream transmit gate (TalkerGate),
-/// the deterministic presentation-timestamp generator (MediaClockGenerator) and
-/// the AAF reframer. It deliberately omits the listener / UDPTUN halves of
-/// AvbEntityAudioIO.
+/// This reuses the shared AVB control plane (AvbEntityHost), the spec-driven
+/// stream TX path (TalkerStreams), the per-stream transmit gate (TalkerGate),
+/// and the deterministic presentation-timestamp generator
+/// (MediaClockGenerator). It deliberately omits the listener / UDPTUN halves
+/// of AvbEntityAudioIO.
 
-#include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
@@ -61,55 +61,31 @@ inline constexpr uint8_t TONE_DEFAULT_BASE_MIDI_NOTE = 60;
 /// white_index 0..7 yields C2, D2, E2, F2, G2, A2, B2, C3.
 [[nodiscard]] auto white_key_frequency_hz(uint8_t base_midi_note, size_t white_index) noexcept -> double;
 
-/// Talker-only AVB tone generator (AM824 + AAF audio + CRF media clock).
+/// Talker-only AVB tone generator; stream kinds/count/rate from the blob.
 class AvbEntityToneGenerator
 {
   public:
     using TimePoint = sm::TimePoint;
 
-    /// 96 kHz, SR class A (125 us interval = 8000 packets/s) -> 12 samples/packet.
-    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
-    static constexpr uint32_t SAMPLE_RATE = 96000;
-    static constexpr size_t SAMPLES_PER_PACKET = SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC;
+    /// SR class A wire cadence (125 us interval = 8000 packets/s/stream). The
+    /// samples-per-packet follows the blob's audio rate (12 @ 96k, 6 @ 48k).
+    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = avb_entity::CLASS_A_PACKETS_PER_SEC;
 
-    /// CRF base frequency. Milan mandates a 48 kHz CRF media clock; both 48 kHz
-    /// and 96 kHz clients lock to it. Must divide SAMPLE_RATE evenly.
-    static constexpr uint32_t CRF_BASE_FREQUENCY = 48000;
-    static_assert(SAMPLE_RATE % CRF_BASE_FREQUENCY == 0, "CRF base must divide the audio sample rate");
-
-    /// AAF wire format: 32-bit signed PCM at 96 kHz.
-    static constexpr avtp::AafFormat AAF_FORMAT = avtp::AafFormat::int_32bit;
-    static constexpr avtp::AafSampleRate AAF_SAMPLE_RATE = avtp::AafSampleRate::rate_96_khz;
-    static constexpr uint8_t AAF_BIT_DEPTH = 32;
-
-    /// Stream (STREAM_OUTPUT) descriptor indices for the full (All) model.
-    static constexpr uint16_t AM824_STREAM_INDEX = 0;
-    static constexpr uint16_t AAF_STREAM_INDEX = 1;
-    static constexpr uint16_t CRF_STREAM_INDEX = 2;
-
-    /// Which stream set this entity exposes + transmits.
-    ///   All     = AM824 (idx 0) + AAF (idx 1) + CRF (idx 2) — the full generator.
-    ///   AafOnly = a single AAF stream at index 0 — a clean 8-ch AAF device, for a
-    ///             listener that stalls on the mixed AM824+AAF 16-ch aggregate.
-    ///             Pairs with the examples/tone-aaf.json model.
-    ///   AafCrf  = AAF (idx 0) + CRF (idx 1) — a clean 8-ch AAF device PLUS a CRF
-    ///             media-clock stream, so a listener (e.g. macOS) has a clock
-    ///             reference to recover. Pairs with examples/tone-aaf-crf.json.
-    enum class StreamSet
-    {
-        All,
-        AafOnly,
-        AafCrf
-    };
+    /// Audio sample rate assumed when the blob declares no audio stream (a
+    /// CRF-only model still needs a media-clock rate to pace itself).
+    static constexpr uint32_t DEFAULT_SAMPLE_RATE = 96000;
 
     /// Factory — constructs and validates the entity from configuration. Parses
-    /// the descriptor-storage blob (channel count + model) and exposes the
-    /// requested `streams` set. `base_midi_note` selects the lowest white-key tone
-    /// (default C2); each channel takes the next white key up.
+    /// the descriptor-storage blob: the STREAM_OUTPUT descriptors shape the
+    /// stream slots (kind/format/rate per current_format), the first
+    /// AUDIO_CLUSTER supplies the channel count, and every audio stream must
+    /// agree on one sample rate and the cluster channel count (loud create-time
+    /// failure instead of silent blob/C++ divergence). `base_midi_note` selects
+    /// the lowest white-key tone (default C4); each channel takes the next
+    /// white key up.
     [[nodiscard]] static auto create(
         AvbEntityAudioIOConfig config,
         uint8_t base_midi_note = TONE_DEFAULT_BASE_MIDI_NOTE,
-        StreamSet streams = StreamSet::All,
         std::pmr::memory_resource* memory_resource = nullptr) -> StatusValue<std::unique_ptr<AvbEntityToneGenerator>>;
 
     ~AvbEntityToneGenerator();
@@ -130,9 +106,10 @@ class AvbEntityToneGenerator
         CreateKey,
         AvbEntityAudioIOConfig config,
         std::unique_ptr<nanoavb::AemEntityHandler> handler,
+        StreamSpecs specs,
+        uint32_t sample_rate,
         size_t channels,
         uint8_t base_midi_note,
-        StreamSet streams,
         std::pmr::memory_resource* memory_resource);
 
     [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
@@ -149,13 +126,18 @@ class AvbEntityToneGenerator
     auto on_timeout(TimePoint time) -> void;
 
     /// Process one media-timer wake (8000 Hz): generate the per-channel tones and
-    /// transmit an AM824 + AAF packet (gated), plus the decimated CRF media clock.
+    /// transmit each blob-declared stream (gated per stream).
     auto process_audio(TimePoint time) -> void;
 
-    /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
-    /// stream on the wire this tick (gating disabled, or a downstream listener is
-    /// ready/connected). Also gated on MAAP-address readiness in "maap" mode.
+    /// Whether talker stream `idx` (a STREAM_OUTPUT descriptor index) should put
+    /// its AVTP stream on the wire this tick (gating disabled, or a downstream
+    /// listener is ready/connected). Also gated on MAAP-address readiness in
+    /// "maap" mode.
     [[nodiscard]] auto talker_should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+
+    /// The blob-derived stream table (kind/format/rate per STREAM_OUTPUT).
+    [[nodiscard]] auto stream_specs() const noexcept -> StreamSpecs const& { return specs_; }
+    [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
 
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
     [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
@@ -175,9 +157,7 @@ class AvbEntityToneGenerator
 
   private:
     auto wire_stream_callbacks() -> void;
-    /// The active STREAM_OUTPUT indices: {0,1,2} in All mode, {0} (AAF) in AafOnly.
-    [[nodiscard]] auto active_stream_indices() const -> std::vector<uint16_t>;
-    [[nodiscard]] auto make_talker_srp_info(uint16_t stream_index) const -> nanoavb::TalkerStreamSrpInfo;
+    [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
     [[nodiscard]] auto fill_stream_output_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
@@ -187,21 +167,18 @@ class AvbEntityToneGenerator
 
     AvbEntityAudioIOConfig config_;
 
-    /// Reusable AVB control plane: N talker streams (3 for All, 1 for AafOnly),
-    /// 4 max listeners each, 0 listener streams (talker-only).
-    AvbEntityHost host_;
+    /// Blob-derived stream table; drives every per-stream decision below.
+    StreamSpecs specs_;
 
-    /// Active stream kinds + their descriptor/ACMP indices. AAF is always present.
-    ///   All:     AM824@0, AAF@1, CRF@2.   AafCrf: AAF@0, CRF@1.   AafOnly: AAF@0.
-    bool has_am824_{true};
-    bool has_crf_{true};
-    uint16_t am824_idx_{AM824_STREAM_INDEX};
-    uint16_t aaf_idx_{AAF_STREAM_INDEX};
-    uint16_t crf_idx_{CRF_STREAM_INDEX};
+    /// Reusable AVB control plane: talker stream count from the blob, 4 max
+    /// listeners each, 0 listener streams (talker-only).
+    AvbEntityHost host_;
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 
+    uint32_t sample_rate_{DEFAULT_SAMPLE_RATE};  ///< from the blob's audio formats
+    uint32_t samples_per_packet_{DEFAULT_SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC};
     size_t channels_{0};
 
     //
@@ -218,15 +195,10 @@ class AvbEntityToneGenerator
     /// media clock is locked to gPTP, no GPS-rate tracking).
     ptpclient::MediaClockGenerator media_clock_;
 
-    /// Stream TX path: qdisc-bypass socket + AM824/AAF/CRF serializers + dest MACs
-    /// + TX counters + capture recorder. Declared after the members it references.
+    /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
+    /// counters + capture recorder. Declared after the members it references.
     std::unique_ptr<TalkerStreams> talker_{std::make_unique<TalkerStreams>(
-        TalkerStreamsConfig{
-            .sample_rate = SAMPLE_RATE,
-            .crf_timestamp_interval = config_.crf_timestamp_interval,
-            .crf_timestamps_per_packet = config_.crf_timestamps_per_packet,
-            .vlan_id = config_.vlan_id,
-            .stream_pcp = config_.stream_pcp},
+        TalkerStreamsConfig{.sample_rate = sample_rate_, .vlan_id = config_.vlan_id, .stream_pcp = config_.stream_pcp},
         media_clock_,
         audio_buffer_,
         channels_,

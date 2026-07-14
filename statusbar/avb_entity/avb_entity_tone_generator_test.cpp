@@ -102,20 +102,25 @@ TEST(tone_notes, white_keys_c2_to_c3)
 }
 
 //
-// Format constants
+// Blob-derived stream topology (kit phase 1): kinds/indices/rate follow the
+// blob's STREAM_OUTPUT formats instead of per-entity C++ constants.
 //
 
-TEST(tone_format, constants)
+TEST(tone_format, specs_follow_the_blob)
 {
-    EXPECT_EQ(AvbEntityToneGenerator::AAF_FORMAT, avtp::AafFormat::int_32bit);
-    EXPECT_EQ(AvbEntityToneGenerator::AAF_BIT_DEPTH, 32U);
-    EXPECT_EQ(AvbEntityToneGenerator::SAMPLE_RATE, 96000U);
-    EXPECT_EQ(AvbEntityToneGenerator::SAMPLES_PER_PACKET, 12U);
-    EXPECT_EQ(AvbEntityToneGenerator::AM824_STREAM_INDEX, 0U);
-    EXPECT_EQ(AvbEntityToneGenerator::AAF_STREAM_INDEX, 1U);
-    EXPECT_EQ(AvbEntityToneGenerator::CRF_STREAM_INDEX, 2U);
-    EXPECT_EQ(AvbEntityToneGenerator::CRF_BASE_FREQUENCY, 48000U);
-    EXPECT_EQ(AvbEntityToneGenerator::SAMPLE_RATE % AvbEntityToneGenerator::CRF_BASE_FREQUENCY, 0U);
+    auto blob = load_file(entity_tone_bin_path());
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    auto const& specs = (*result)->stream_specs();
+    EXPECT_EQ(specs.size(), 3U);  // tone.json: AM824@0, AAF@1, CRF@2
+    EXPECT_EQ(specs[0].format.kind, StreamKind::am824);
+    EXPECT_EQ(specs[1].format.kind, StreamKind::aaf);
+    EXPECT_EQ(specs[1].format.aaf_format, avtp::AafFormat::int_32bit);
+    EXPECT_EQ(specs[1].format.bit_depth, 32U);
+    EXPECT_EQ(specs[2].format.kind, StreamKind::crf);
+    EXPECT_EQ(specs[2].format.crf_base_frequency_hz, 48000U);
+    EXPECT_EQ((*result)->sample_rate(), 96000U);
+    EXPECT_EQ((*result)->sample_rate() % specs[2].format.crf_base_frequency_hz, 0U);
 }
 
 //
@@ -171,7 +176,7 @@ TEST(tone_model, crf_stream_output_is_milan_48k)
     auto blob = load_file(entity_tone_bin_path());
     auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
     EXPECT_TRUE(storage.has_value());
-    auto const desc = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, AvbEntityToneGenerator::CRF_STREAM_INDEX);
+    auto const desc = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 2);
     EXPECT_TRUE(desc.has_value());
     if (!desc.has_value()) {
         return;
@@ -198,9 +203,9 @@ TEST(tone_gate, default_suppresses_all_talkers_without_listener)
     EXPECT_TRUE(config.gate_talker_on_listener);
     auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
-    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityToneGenerator::AM824_STREAM_INDEX, 0));
-    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityToneGenerator::AAF_STREAM_INDEX, 0));
-    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityToneGenerator::CRF_STREAM_INDEX, 0));
+    EXPECT_FALSE((*result)->talker_should_transmit(0, 0));
+    EXPECT_FALSE((*result)->talker_should_transmit(1, 0));
+    EXPECT_FALSE((*result)->talker_should_transmit(2, 0));
 }
 
 TEST(tone_gate, disabled_allows_all_talkers)
@@ -210,9 +215,9 @@ TEST(tone_gate, disabled_allows_all_talkers)
     config.gate_talker_on_listener = false;
     auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityToneGenerator::AM824_STREAM_INDEX, 0));
-    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityToneGenerator::AAF_STREAM_INDEX, 0));
-    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityToneGenerator::CRF_STREAM_INDEX, 0));
+    EXPECT_TRUE((*result)->talker_should_transmit(0, 0));
+    EXPECT_TRUE((*result)->talker_should_transmit(1, 0));
+    EXPECT_TRUE((*result)->talker_should_transmit(2, 0));
 }
 
 // Each talker stream gates INDEPENDENTLY on its own ACMP connection + reservation.
@@ -236,8 +241,8 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     // shared acmp_talker connection state; owns its own listener-ready/started flags.
     TalkerGate gate{/*gate_enabled=*/true, comps};
 
-    constexpr uint16_t k_aaf = AvbEntityToneGenerator::AAF_STREAM_INDEX;
-    constexpr uint16_t k_crf = AvbEntityToneGenerator::CRF_STREAM_INDEX;
+    constexpr uint16_t k_aaf = 1;  // tone.json: AM824@0, AAF@1, CRF@2
+    constexpr uint16_t k_crf = 2;
     auto const* aaf_stream = comps.acmp_talker.get_stream(k_aaf);
     auto const* crf_stream = comps.acmp_talker.get_stream(k_crf);
     EXPECT_NE(aaf_stream, nullptr);
@@ -364,8 +369,7 @@ TEST(tone_aaf_create, aaf_only_builds_and_gates)
 {
     auto blob = load_file(entity_tone_aaf_bin_path());
     auto config = make_config_with_blob(std::move(blob));
-    auto result =
-        AvbEntityToneGenerator::create(std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafOnly);
+    auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;
@@ -382,8 +386,7 @@ TEST(tone_aaf_create, aaf_only_gate_disabled_transmits_index0)
     auto blob = load_file(entity_tone_aaf_bin_path());
     auto config = make_config_with_blob(std::move(blob));
     config.gate_talker_on_listener = false;
-    auto result =
-        AvbEntityToneGenerator::create(std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafOnly);
+    auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;
@@ -429,8 +432,7 @@ TEST(tone_aafcrf_create, aaf_at_0_crf_at_1_transmit_when_ungated)
     auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf_crf.bin");
     auto config = make_config_with_blob(std::move(blob));
     config.gate_talker_on_listener = false;
-    auto result =
-        AvbEntityToneGenerator::create(std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafCrf);
+    auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;

@@ -225,8 +225,6 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
         stream_dest_mac_ = s->stream_dest_mac;
     }
-    talker_.am824_dest_mac_ = stream_dest_mac_;
-
     // Deterministic media clock (r=1.0, gPTP-locked): owns the presentation offset and
     // supplies the smooth avtp_timestamp, so the stream-output context below adds ZERO
     // extra offset -- the timestamp handed to transmit_am824 is already the final
@@ -234,8 +232,16 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
         .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = PRESENTATION_OFFSET_NS}};
 
-    talker_.am824_out_.emplace(
-        sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), /*presentation_offset_ns=*/0);
+    // Single AM824 TX slot (stream 0), shaped by this entity's fixed format.
+    StreamSpec am824_spec{};
+    am824_spec.index = 0;
+    am824_spec.format.kind = StreamKind::am824;
+    am824_spec.format.sample_rate_hz = SAMPLE_RATE;
+    am824_spec.format.channels = static_cast<uint16_t>(channels_);
+    am824_spec.format.bit_depth = 24;
+    if (auto status = talker_.open_stream(am824_spec, sid, stream_dest_mac_); !status) {
+        return status;
+    }
     listener_.am824_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
 
     // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
@@ -328,7 +334,7 @@ void AvbEntityAm824IO::print_state() const
         host_.mvrp_joined() ? "Joined" : "NotJoined",
         host_.components().acmp_talker.connection_count(0),
         channels_,
-        talker_.am824_tx_packets_,
+        talker_.slot_for(0) != nullptr ? talker_.slot_for(0)->tx_packets : 0,
         listener_.am824_rx_packets_.load(),
         listener_.am824_rx_samples_.load(),
         listener_.am824_rx_bad_.load());
@@ -437,7 +443,9 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
     int64_t const now_steady_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (gate_.should_transmit(0, now_steady_ns)) {
-        talker_.transmit_am824(pts, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+        if (auto* slot = talker_.slot_for(0); slot != nullptr) {
+            talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+        }
     }
 }
 

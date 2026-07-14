@@ -257,17 +257,22 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
         stream_dest_mac_ = s->stream_dest_mac;
     }
-    talker_.am824_dest_mac_ = stream_dest_mac_;
-
     // Deterministic media clock (r=1.0, gPTP-locked): supplies the smooth presentation
     // timestamp for the re-transmitted audio. The stream-output context adds ZERO extra
     // offset -- the timestamp handed to it is already the final presentation time.
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
         .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = 1'000'000}};
 
-    // AM824 TX/RX contexts at 48 kHz stereo (single stream; no AAF/CRF).
-    talker_.am824_out_.emplace(
-        sid, avtp::Am824SampleRate::rate_48_khz, static_cast<uint8_t>(CHANNELS), /*presentation_offset_ns=*/0);
+    // Single AM824 TX slot at 48 kHz stereo (stream 0; no AAF/CRF).
+    StreamSpec am824_spec{};
+    am824_spec.index = 0;
+    am824_spec.format.kind = StreamKind::am824;
+    am824_spec.format.sample_rate_hz = SAMPLE_RATE;
+    am824_spec.format.channels = CHANNELS;
+    am824_spec.format.bit_depth = 24;
+    if (auto status = talker_.open_stream(am824_spec, sid, stream_dest_mac_); !status) {
+        return status;
+    }
     listener_in_.emplace(avtp::Am824SampleRate::rate_48_khz, static_cast<uint8_t>(CHANNELS));
 
     // Transmit socket (media-timer egress). qdisc-bypass so we do not re-receive our
@@ -375,7 +380,7 @@ void AvbEntityStereoIO::print_state() const
         host_.gptp_locked() ? "Locked" : "Unlocked",
         host_.mvrp_joined() ? "Joined" : "NotJoined",
         host_.components().acmp_talker.connection_count(0),
-        talker_.am824_tx_packets_,
+        talker_.slot_for(0) != nullptr ? talker_.slot_for(0)->tx_packets : 0,
         rx_packets_.load(),
         rx_bad_.load());
 }
@@ -478,7 +483,9 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
         }
         // Re-transmit the processed audio, gated on an admitted downstream listener.
         if (gate_open) {
-            talker_.transmit_am824(pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+            if (auto* slot = talker_.slot_for(0); slot != nullptr) {
+                talker_.transmit_am824(*slot, pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+            }
         }
     }
 }

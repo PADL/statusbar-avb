@@ -328,12 +328,7 @@ class AvbEntityAudioIO
     /// Declared after the members it references (config_, media_clock_,
     /// audio_buffer_, channels_, last_gptp_ns_). Always allocated.
     std::unique_ptr<TalkerStreams> talker_{std::make_unique<TalkerStreams>(
-        TalkerStreamsConfig{
-            .sample_rate = SAMPLE_RATE,
-            .crf_timestamp_interval = config_.crf_timestamp_interval,
-            .crf_timestamps_per_packet = config_.crf_timestamps_per_packet,
-            .vlan_id = config_.vlan_id,
-            .stream_pcp = config_.stream_pcp},
+        TalkerStreamsConfig{.sample_rate = SAMPLE_RATE, .vlan_id = config_.vlan_id, .stream_pcp = config_.stream_pcp},
         media_clock_,
         audio_buffer_,
         channels_,

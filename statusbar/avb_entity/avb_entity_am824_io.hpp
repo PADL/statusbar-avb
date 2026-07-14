@@ -379,14 +379,9 @@ class AvbEntityAm824IO
 
     /// Shared TX path (96 kHz AM824 via TalkerStreamsConfig). Declared after config_/
     /// media_clock_/audio_buffer_/channels_/last_gptp_ns_/mem_resource_ (all bound by
-    /// reference). TX packet count now lives in talker_.am824_tx_packets_.
+    /// reference). TX packet count lives in the talker slot (talker_.slot_for(0)->tx_packets).
     TalkerStreams talker_{
-        TalkerStreamsConfig{
-            .sample_rate = SAMPLE_RATE,
-            .crf_timestamp_interval = 96,
-            .crf_timestamps_per_packet = 1,
-            .vlan_id = config_.vlan_id,
-            .stream_pcp = 3},
+        TalkerStreamsConfig{.sample_rate = SAMPLE_RATE, .vlan_id = config_.vlan_id, .stream_pcp = 3},
         media_clock_,
         audio_buffer_,
         channels_,

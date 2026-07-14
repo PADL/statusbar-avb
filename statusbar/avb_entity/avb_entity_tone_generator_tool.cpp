@@ -308,7 +308,10 @@ void print_entity_config(Config const& config, Entity const& entity)
         std::print(
             "  ch {}: {:<4} {:8.3f} Hz\n", ch, note_name(midi), avb_entity::white_key_frequency_hz(config.base_midi_note, ch));
     }
-    std::print("Sample Rate:      {} Hz, Samples/Packet: {}\n", Entity::SAMPLE_RATE, Entity::SAMPLES_PER_PACKET);
+    std::print(
+        "Sample Rate:      {} Hz, Samples/Packet: {}\n",
+        entity.sample_rate(),
+        entity.sample_rate() / Entity::CLASS_A_PACKETS_PER_SEC);
     std::print("Media clock rate: r=1.0 PINNED to gPTP\n");
 }
 
@@ -326,8 +329,10 @@ MainLoopResult run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppCont
     MainLoopResult result;
     result.compensation_ns = ctx.compensation_ns;
 
-    int64_t const PACKET_PERIOD_NS = (static_cast<int64_t>(Entity::SAMPLES_PER_PACKET) * 1'000'000'000LL / Entity::SAMPLE_RATE) *
-        static_cast<int64_t>(config.entity.packets_per_wake);
+    // One wake per Class A packet interval (125 us), scaled by packets_per_wake;
+    // the rate is blob-derived so the period comes from the entity.
+    int64_t const PACKET_PERIOD_NS =
+        (1'000'000'000LL / Entity::CLASS_A_PACKETS_PER_SEC) * static_cast<int64_t>(config.entity.packets_per_wake);
 
     auto* net_handlers = entity.net_handlers();
     bool had_grandmaster = net_handlers != nullptr ? net_handlers->gptp_handler().has_grandmaster() : false;
@@ -531,20 +536,18 @@ auto main(int argc, char** argv) -> int
         print_usage(argv[0], specs);
         return EXIT_FAILURE;
     }
-    // Map --streams to the entity's StreamSet, and pick the matching default blob
-    // unless the user gave an explicit --descriptor-storage path.
-    auto const stream_set = (config.streams_mode == "aaf") ? Entity::StreamSet::AafOnly
-        : (config.streams_mode == "aaf+crf")               ? Entity::StreamSet::AafCrf
-                                                           : Entity::StreamSet::All;
+    // --streams only picks the matching default blob (unless the user gave an
+    // explicit --descriptor-storage path); the entity's stream topology is
+    // derived FROM the blob (kit phase 1), not from a C++ stream-set enum.
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
     if (config.descriptor_storage_path == STATUSBAR_AVB_DEFAULT_TONE_BLOB) {
 #    ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB
-        if (stream_set == Entity::StreamSet::AafOnly) {
+        if (config.streams_mode == "aaf") {
             config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB;
         }
 #    endif
 #    ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB
-        if (stream_set == Entity::StreamSet::AafCrf) {
+        if (config.streams_mode == "aaf+crf") {
             config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB;
         }
 #    endif
@@ -573,7 +576,7 @@ auto main(int argc, char** argv) -> int
     realtime::setup_shutdown_signal_handlers();
 
     auto const base_midi_note = config.base_midi_note;
-    auto entity_result = avb_entity::AvbEntityToneGenerator::create(std::move(config.entity), base_midi_note, stream_set);
+    auto entity_result = avb_entity::AvbEntityToneGenerator::create(std::move(config.entity), base_midi_note);
     if (!entity_result) {
         std::print(stderr, "Error: Failed to create entity: {}\n", entity_result.error().message());
         return EXIT_FAILURE;

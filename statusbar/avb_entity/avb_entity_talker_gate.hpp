@@ -25,6 +25,7 @@
 /// are atomic. Reads ACMP connection state + the gate-enable flag through references
 /// bound at construction.
 
+#include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/itc/itc_published.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
@@ -52,8 +53,9 @@ struct TalkerGate
     /// Install the reactor-thread logger for gate-transition status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
-    /// One per talker stream: 0=AM824, 1=AAF, 2=CRF.
-    static constexpr size_t STREAM_COUNT = 3;
+    /// One per talker stream (STREAM_OUTPUT descriptor index); sized for the
+    /// data plane's maximum blob-declared stream table (kit phase 1).
+    static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
     /// Grace window the MSRP Listener Ready is held across a LeaveAll re-registration
     /// blip (Ready momentarily withdrawn for ~1-3 s on the ~10 s leave-all cycle), so
     /// a normal MRP cycle does NOT chop the stream. A genuine listener departure (no

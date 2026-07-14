@@ -4,18 +4,22 @@
 // SPDX-License-Identifier: MIT
 
 /// @file avb_entity_talker_streams.hpp
-/// @brief TalkerStreams — the local AVB stream TX path, extracted from
-/// AvbEntityAudioIO (god-object phase 3).
+/// @brief TalkerStreams — the local AVB stream TX path.
 ///
-/// Owns the qdisc-bypass TX socket, the AM824/AAF/CRF stream serializers, the
-/// destination MACs, the TX packet counters, and the TX-capture recorder, plus
-/// the three transmit_* methods that serialize one packet and put it on the
-/// wire. Runs on the SCHED_FIFO media-timer thread (called from
-/// AvbEntityAudioIO::process_audio). Reads the entity's config / media clock /
-/// audio buffer / gPTP-now through references bound at construction (same names
-/// as the entity's members, so the moved method bodies are unchanged).
+/// Owns the qdisc-bypass TX socket, N per-stream TX slots (each holding the
+/// kind-matching AM824/AAF/CRF serializer shaped by its StreamSpec), the TX
+/// packet counters, and the TX-capture recorder. Runs on the SCHED_FIFO
+/// media-timer thread (called from the entities' process_audio). Reads the
+/// entity's config / media clock / audio buffer / gPTP-now through references
+/// bound at construction.
+///
+/// Entity Construction Kit phase 1: the stream table is no longer three named
+/// AM824/AAF/CRF slots — it is a vector of slots derived from the blob's
+/// STREAM_OUTPUT descriptors (see avb_entity_stream_spec.hpp), so an entity's
+/// TX shape follows its declarative model instead of per-entity C++ enums.
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
@@ -23,6 +27,9 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
+#include "statusbar/sg14/inplace_vector.h"
+#include "statusbar/status/status.hpp"
+#include "statusbar/tsn/tsn.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -38,11 +45,28 @@ namespace statusbar::avb_entity {
 /// a concrete entity config. Destructured at the call site (mirrors ListenerStreams).
 struct TalkerStreamsConfig
 {
-    uint32_t sample_rate;                ///< stream sample rate (Hz), e.g. 96000 or 48000
-    uint16_t crf_timestamp_interval;     ///< CRF events per timestamp (CRF base-freq domain)
-    uint16_t crf_timestamps_per_packet;  ///< CRF timestamps per CRF PDU
-    uint16_t vlan_id;                    ///< AVB VLAN id
-    uint8_t stream_pcp;                  ///< AVB priority code point
+    uint32_t sample_rate;  ///< stream sample rate (Hz), e.g. 96000 or 48000
+    uint16_t vlan_id;      ///< AVB VLAN id
+    uint8_t stream_pcp;    ///< AVB priority code point
+};
+
+/// One TX stream slot: the StreamSpec that shaped it, its destination MAC,
+/// its serializer (exactly one of am824/aaf/crf engaged, per spec.format.kind),
+/// and its counters. AAF slots also own their reframe FIFO (the media clock is
+/// gPTP-paced, so a wake yields a variable sample count; AAF must emit
+/// constant-size blocks).
+struct TalkerStreamSlot
+{
+    StreamSpec spec{};
+    ieee::Eui48 dest_mac{};
+    uint64_t tx_packets{0};
+    /// CRF decimation phase: transmit one PDU every pkts_per_crf audio packets.
+    /// Reset to 0 whenever the CRF gate is closed so a reconnect starts fresh.
+    uint16_t crf_decim{0};
+    std::optional<avtp::Am824StreamOutputContext> am824{};
+    std::optional<avtp::AafStreamOutputContext> aaf{};
+    std::optional<avtp::CrfStreamOutputContext> crf{};
+    std::optional<AafReframer> reframer{};
 };
 
 struct TalkerStreams
@@ -60,64 +84,55 @@ struct TalkerStreams
         , channels_{channels}
         , last_gptp_ns_{last_gptp_ns}
         , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
-        , aaf_reframer_{channels, samples_per_packet_, 4, memory_resource}
+        , mem_resource_{memory_resource}
     {}
 
-    /// Serialize + send one packet of each stream. Media-timer (SCHED_FIFO) thread.
-    void transmit_am824(uint64_t now_ns, uint32_t samples);
-    void transmit_aaf(uint64_t now_ns, uint16_t samples, std::span<float const> src);
-    /// Serialize + send one CRF PDU whose timestamps start at `base_index` in the
-    /// media-clock (SAMPLE_RATE) sample-index domain. The caller passes the LIVE
-    /// media-clock position (see crf_aligned_base) so the CRF conveys gPTP-now and
-    /// not the anchor, regardless of when transmission (re)starts.
-    void transmit_crf(uint64_t base_index);
+    /// Add a TX slot shaped by @p spec, constructing the kind-matching
+    /// serializer for @p stream_id. CRF timing (base frequency, interval,
+    /// timestamps per PDU) comes from the spec's decoded format word — the
+    /// blob is the single source. Errors: unknown/unsupported format kind or
+    /// rate, or more than MAX_ENTITY_STREAMS slots.
+    auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
-    /// Emit this tick's CRF PDU when @p gate_open, decimated to the declared CRF rate
-    /// (one PDU per pkts_per_crf audio packets). Re-bases to the live media-clock
-    /// position each PDU so timestamps track gPTP-now. When @p gate_open is false the
-    /// decimation phase resets so the next emission starts a fresh PDU. Owns the
-    /// decimation counter so both entities share one copy of this logic; the caller
-    /// supplies only the per-stream gate decision (and, for the tone generator, skips
-    /// the call entirely when it has no CRF stream).
-    void transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open);
+    /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
+    /// descriptor index == ACMP talker unique id), or nullptr.
+    [[nodiscard]] auto slot_for(uint16_t stream_index) noexcept -> TalkerStreamSlot*;
+    [[nodiscard]] auto slot_for(uint16_t stream_index) const noexcept -> TalkerStreamSlot const*;
+    /// The first slot of @p kind, or nullptr.
+    [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> TalkerStreamSlot*;
+    [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> TalkerStreamSlot const*;
 
-    /// Push this tick's @p samples of interleaved audio through the AAF reframer and
-    /// emit whole SAMPLES_PER_PACKET blocks (the variable-per-wake sample count is
-    /// buffered to a constant on-wire cadence). When @p gate_open is false the reframer
-    /// is cleared so a reconnect starts from a clean block boundary. Owns the reframer
-    /// so both entities share one copy of the AAF egress logic.
-    void transmit_aaf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
+    /// Emit this tick's traffic for @p slot: AM824 sends the tick's samples
+    /// directly; AAF reframes to constant blocks (gate closed clears the
+    /// FIFO); CRF emits one decimated PDU re-based to the live media-clock
+    /// position (gate closed resets the phase). Media-timer (SCHED_FIFO) thread.
+    void transmit_if_due(TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
+
+    /// Serialize + send one packet on a specific slot. Media-timer thread.
+    /// (Public for entities that drive their own cadence, e.g. the pipe-fed
+    /// AM824 loopback entities.)
+    void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples);
+    void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
+    /// One CRF PDU whose timestamps start at `base_index` in the media-clock
+    /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
+    void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
 
     /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
-    /// sample_rate/8000 (12 @ 96k, 6 @ 48k) -- a runtime value now (samples_per_packet_),
-    /// not a compile-time constant, so the block reframes correctly at either rate.
-    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
-    static constexpr uint32_t CRF_BASE_FREQUENCY = 48000;
+    /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
+    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = avb_entity::CLASS_A_PACKETS_PER_SEC;
 
     // References / values (bound at construction).
-    TalkerStreamsConfig config_;  ///< destructured entity config (rate + CRF/VLAN/PCP), by value
+    TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
     ptpclient::MediaClockGenerator const& media_clock_;
     std::pmr::vector<float>& audio_buffer_;
     size_t const& channels_;
     std::atomic<uint64_t> const& last_gptp_ns_;
     uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
+    std::pmr::memory_resource* mem_resource_;
 
     // Owned TX state.
-    /// AAF reframe FIFO: the media clock is gPTP-paced, so a wake yields a variable
-    /// sample count; AM824 sends it directly, AAF must emit constant-size blocks.
-    AafReframer aaf_reframer_;
+    sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
     net::RawnetContext stream_tx_{};
-    std::optional<avtp::Am824StreamOutputContext> am824_out_{};
-    ieee::Eui48 am824_dest_mac_{};
-    std::optional<avtp::AafStreamOutputContext> aaf_out_{};
-    ieee::Eui48 aaf_dest_mac_{};
-    std::optional<avtp::CrfStreamOutputContext> crf_out_{};
-    ieee::Eui48 crf_dest_mac_{};
-    uint64_t am824_tx_packets_{0};
-    uint64_t aaf_tx_packets_{0};
-    /// CRF decimation phase: transmit one PDU every pkts_per_crf audio packets. Reset
-    /// to 0 whenever the CRF gate is closed so a reconnect starts a fresh PDU.
-    uint16_t crf_decim_{0};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the socket egress tap can stamp the captured frame with the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};

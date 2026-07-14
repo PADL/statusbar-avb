@@ -325,12 +325,7 @@ class AvbEntityStereoIO
     /// Shared TX path (48 kHz via TalkerStreamsConfig). Declared after config_/
     /// media_clock_/audio_buffer_/channels_/last_gptp_ns_/mem_resource_.
     TalkerStreams talker_{
-        TalkerStreamsConfig{
-            .sample_rate = SAMPLE_RATE,
-            .crf_timestamp_interval = 48,
-            .crf_timestamps_per_packet = 1,
-            .vlan_id = config_.vlan_id,
-            .stream_pcp = 3},
+        TalkerStreamsConfig{.sample_rate = SAMPLE_RATE, .vlan_id = config_.vlan_id, .stream_pcp = 3},
         media_clock_,
         audio_buffer_,
         channels_,

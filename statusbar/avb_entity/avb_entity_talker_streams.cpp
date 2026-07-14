@@ -1,11 +1,9 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// TalkerStreams methods — the local AVB stream TX path, moved out of
-// avb_entity_audio_io.cpp (god-object phase 3). Bodies unchanged: the talker
-// owns the serializers/socket/counters and holds same-named refs (config_/
-// media_clock_/audio_buffer_/channels_/last_gptp_ns_), so only the method
-// qualifier changed.
+// TalkerStreams methods — the local AVB stream TX path. Slots are shaped by
+// StreamSpecs derived from the entity blob (kit phase 1); the per-kind
+// serialization bodies are unchanged from the named-slot era.
 
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 
@@ -15,12 +13,101 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <system_error>
 
 namespace statusbar::avb_entity {
 
-void TalkerStreams::transmit_am824(uint64_t now_ns, uint32_t samples)
+auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stream_id, ieee::Eui48 const dest_mac) -> Status
 {
-    if (!am824_out_ || stream_tx_.fd() < 0) {
+    if (slots_.size() == MAX_ENTITY_STREAMS) {
+        return failure(std::errc::result_out_of_range);
+    }
+    TalkerStreamSlot slot{};
+    slot.spec = spec;
+    slot.dest_mac = dest_mac;
+    switch (spec.format.kind) {
+        case StreamKind::am824: {
+            auto const rate = avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
+            if (!rate || spec.format.channels == 0) {
+                return failure(std::errc::invalid_argument);
+            }
+            slot.am824.emplace(stream_id, *rate, static_cast<uint8_t>(spec.format.channels), /*pres_offset=*/0);
+            break;
+        }
+        case StreamKind::aaf: {
+            auto const rate = avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz);
+            if (!rate || spec.format.channels == 0) {
+                return failure(std::errc::invalid_argument);
+            }
+            slot.aaf.emplace(
+                stream_id, spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth, /*pres_offset=*/0);
+            slot.reframer.emplace(spec.format.channels, samples_per_packet_, 4, mem_resource_);
+            break;
+        }
+        case StreamKind::crf: {
+            if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0) {
+                return failure(std::errc::invalid_argument);
+            }
+            slot.crf.emplace(
+                stream_id,
+                static_cast<avtp::CrfType>(spec.format.crf_type),
+                spec.format.crf_base_frequency_hz,
+                static_cast<avtp::CrfPull>(spec.format.crf_pull),
+                spec.format.crf_timestamp_interval,
+                spec.format.crf_timestamps_per_pdu);
+            break;
+        }
+        case StreamKind::other:
+        default:
+            return failure(std::errc::not_supported);
+    }
+    slots_.push_back(std::move(slot));
+    return success();
+}
+
+auto TalkerStreams::slot_for(uint16_t const stream_index) noexcept -> TalkerStreamSlot*
+{
+    for (auto& slot : slots_) {
+        if (slot.spec.index == stream_index) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+auto TalkerStreams::slot_for(uint16_t const stream_index) const noexcept -> TalkerStreamSlot const*
+{
+    for (auto const& slot : slots_) {
+        if (slot.spec.index == stream_index) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+auto TalkerStreams::slot_of(StreamKind const kind) noexcept -> TalkerStreamSlot*
+{
+    for (auto& slot : slots_) {
+        if (slot.spec.format.kind == kind) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+auto TalkerStreams::slot_of(StreamKind const kind) const noexcept -> TalkerStreamSlot const*
+{
+    for (auto const& slot : slots_) {
+        if (slot.spec.format.kind == kind) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+void TalkerStreams::transmit_am824(TalkerStreamSlot& slot, uint64_t const now_ns, uint32_t const samples)
+{
+    if (!slot.am824 || stream_tx_.fd() < 0) {
         return;
     }
     static constexpr size_t MAX_FRAME =
@@ -28,15 +115,15 @@ void TalkerStreams::transmit_am824(uint64_t now_ns, uint32_t samples)
     std::array<uint8_t, MAX_FRAME> frame{};
 
     avtp::Am824Pdu pdu{};
-    // Nominal AM824 rate (CIP FDF) from the configured sample rate: 48 kHz for the stereo
-    // entity, 96 kHz for the audio/tone entities. Hardcoding 96 kHz would mislabel a 48 kHz
-    // stream on the wire; value_or keeps the 96 kHz default for any unmapped rate.
+    // Nominal AM824 rate (CIP FDF) from the configured sample rate: hardcoding
+    // 96 kHz would mislabel a 48 kHz stream on the wire; value_or keeps the
+    // 96 kHz default for any unmapped rate.
     auto const am824_rate = avtp::am824_sample_rate_from_hz(config_.sample_rate).value_or(avtp::Am824SampleRate::rate_96_khz);
-    pdu.init(am824_out_->stream_id, static_cast<uint8_t>(channels_), am824_rate);
+    pdu.init(slot.am824->stream_id, static_cast<uint8_t>(channels_), am824_rate);
 
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::am824_serialize_mbla(
-        *am824_out_, pdu, payload, static_cast<uint8_t>(samples), now_ns, [this](uint8_t ch, std::span<float> dest) {
+        *slot.am824, pdu, payload, static_cast<uint8_t>(samples), now_ns, [this](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
                 dest[s] = audio_buffer_[(s * channels_) + ch];
             }
@@ -55,13 +142,13 @@ void TalkerStreams::transmit_am824(uint64_t now_ns, uint32_t samples)
     // (avtp_ts - wall_clock = presentation_offset).
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     (void)stream_tx_.send_vlan(
-        &am824_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
-    ++am824_tx_packets_;
+        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    ++slot.tx_packets;
 }
 
-void TalkerStreams::transmit_aaf(uint64_t now_ns, uint16_t samples, std::span<float const> src)
+void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
 {
-    if (!aaf_out_ || stream_tx_.fd() < 0) {
+    if (!slot.aaf || stream_tx_.fd() < 0) {
         return;
     }
     static constexpr size_t MAX_FRAME =
@@ -71,7 +158,7 @@ void TalkerStreams::transmit_aaf(uint64_t now_ns, uint16_t samples, std::span<fl
     avtp::AafPdu pdu{};
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
     size_t const audio_bytes =
-        avtp::aaf_stream_serialize(*aaf_out_, pdu, payload, samples, now_ns, [this, src](uint8_t ch, std::span<float> dest) {
+        avtp::aaf_stream_serialize(*slot.aaf, pdu, payload, samples, now_ns, [this, src](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
                 dest[s] = src[(s * channels_) + ch];
             }
@@ -86,8 +173,8 @@ void TalkerStreams::transmit_aaf(uint64_t now_ns, uint16_t samples, std::span<fl
     // is the media-clock PRESENTATION time, also written into the AVTP header.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     (void)stream_tx_.send_vlan(
-        &aaf_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
-    ++aaf_tx_packets_;
+        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    ++slot.tx_packets;
 }
 
 void fill_crf_timestamps(
@@ -107,80 +194,101 @@ void fill_crf_timestamps(
     }
 }
 
-void TalkerStreams::transmit_crf(uint64_t const base_index)
+void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_index)
 {
-    if (!crf_out_ || stream_tx_.fd() < 0 || !media_clock_.anchored()) {
+    if (!slot.crf || stream_tx_.fd() < 0 || !media_clock_.anchored()) {
         return;
     }
-    uint16_t const n_ts = config_.crf_timestamps_per_packet;
-    uint16_t const interval = config_.crf_timestamp_interval;
-    // Convert the DECLARED interval (in CRF base-frequency events) into our audio
-    // SAMPLE_RATE (96 kHz) sample-index domain that media_clock_.timestamp_for()
-    // speaks. With a 48 kHz CRF base and 96 kHz audio, each declared CRF event spans
-    // SAMPLE_RATE/base (= 2) audio samples, so the emitted timestamp VALUES stay
-    // spaced at interval/base seconds regardless of the base we advertise.
-    uint32_t const sample_stride = crf_sample_stride(interval, crf_out_->base_frequency, config_.sample_rate);
+    uint16_t const n_ts = slot.crf->timestamps_per_packet;
+    uint16_t const interval = slot.crf->timestamp_interval;
+    // Convert the DECLARED interval (in CRF base-frequency events) into the audio
+    // sample-index domain that media_clock_.timestamp_for() speaks. With a 48 kHz
+    // CRF base and 96 kHz audio, each declared CRF event spans SAMPLE_RATE/base
+    // (= 2) audio samples, so the emitted timestamp VALUES stay spaced at
+    // interval/base seconds regardless of the base we advertise.
+    uint32_t const sample_stride = crf_sample_stride(interval, slot.crf->base_frequency, config_.sample_rate);
 
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (64 * avtp::CrfPdu::TIMESTAMP_SIZE);
     std::array<uint8_t, MAX_FRAME> frame{};
 
     avtp::CrfPdu pdu{};
-    pdu.init_audio_sample(crf_out_->stream_id, crf_out_->base_frequency, crf_out_->pull, interval, n_ts);
-    pdu.set_sequence_num(crf_out_->sequence_num);
+    pdu.init_audio_sample(slot.crf->stream_id, slot.crf->base_frequency, slot.crf->pull, interval, n_ts);
+    pdu.set_sequence_num(slot.crf->sequence_num);
 
     std::span<uint8_t> const ts_data = std::span<uint8_t>{frame}.subspan(avtp::CrfPdu::HEADER_LENGTH);
     fill_crf_timestamps(media_clock_, base_index, sample_stride, n_ts, ts_data);
-    crf_out_->sequence_num = static_cast<uint8_t>((crf_out_->sequence_num + 1U) & 0xFFU);
-    ++crf_out_->packets_sent;
+    slot.crf->sequence_num = static_cast<uint8_t>((slot.crf->sequence_num + 1U) & 0xFFU);
+    ++slot.crf->packets_sent;
 
     span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);  // gPTP timestamp for the optional TX pcap tap
     (void)stream_tx_.send_vlan(
-        &crf_dest_mac_, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    ++slot.tx_packets;
 }
 
-void TalkerStreams::transmit_aaf_if_due(
-    ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open, size_t const samples)
+void TalkerStreams::transmit_if_due(
+    TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open, size_t const samples)
 {
-    if (!gate_open) {
-        // Gate closed: drop any partial block so a later reconnect starts clean (no
-        // stale samples / stale timestamps).
-        aaf_reframer_.clear();
-        return;
+    switch (slot.spec.format.kind) {
+        case StreamKind::am824: {
+            if (gate_open && samples > 0) {
+                transmit_am824(slot, media_clock_.timestamp_for(tick.first_index), tick.samples);
+            }
+            break;
+        }
+        case StreamKind::aaf: {
+            if (!slot.reframer) {
+                break;
+            }
+            if (!gate_open) {
+                // Gate closed: drop any partial block so a later reconnect starts
+                // clean (no stale samples / stale timestamps).
+                slot.reframer->clear();
+                break;
+            }
+            // AAF must be constant-size: buffer this wake's variable samples and emit
+            // only whole SAMPLES_PER_PACKET blocks (0, 1, or 2+ this wake); the < block
+            // remainder carries to the next wake. Each block's avtp_timestamp is the
+            // jitter-free media-clock time of its first sample.
+            slot.reframer->push(
+                std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
+            slot.reframer->drain([this, &slot](uint64_t first_index, std::span<float const> block) {
+                transmit_aaf(slot, media_clock_.timestamp_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
+            });
+            break;
+        }
+        case StreamKind::crf: {
+            if (!slot.crf) {
+                break;
+            }
+            if (!gate_open) {
+                slot.crf_decim = 0;  // gate closed: next emission starts a fresh PDU phase
+                break;
+            }
+            // One PDU carries timestamps_per_packet timestamps, each spaced
+            // sample_stride audio samples, so a PDU spans pkts_per_crf audio packets
+            // (the Milan 48 kHz/interval-96/1-ts format under 96 kHz audio -> 192
+            // samples = every 16 packets -> 500 PDU/s).
+            uint32_t const sample_stride =
+                crf_sample_stride(slot.crf->timestamp_interval, slot.crf->base_frequency, config_.sample_rate);
+            uint32_t pkts_per_crf = (static_cast<uint32_t>(slot.crf->timestamps_per_packet) * sample_stride) / samples_per_packet_;
+            if (pkts_per_crf == 0) {
+                pkts_per_crf = 1;
+            }
+            if (slot.crf_decim == 0) {
+                // Re-base to the live media-clock position each PDU so CRF timestamps
+                // track gPTP-now, not the (possibly long-past) media-clock anchor.
+                transmit_crf(slot, crf_aligned_base(tick.first_index, sample_stride));
+            }
+            slot.crf_decim = static_cast<uint16_t>((slot.crf_decim + 1U) % pkts_per_crf);
+            break;
+        }
+        case StreamKind::other:
+        default:
+            break;
     }
-    // AAF must be constant-size: buffer this wake's variable samples and emit only
-    // whole SAMPLES_PER_PACKET blocks (0, 1, or 2+ this wake); the < block remainder
-    // carries to the next wake. Each block's avtp_timestamp is the jitter-free
-    // media-clock time of its first sample, so the on-wire cadence stays a clean step.
-    aaf_reframer_.push(
-        std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
-    aaf_reframer_.drain([this](uint64_t first_index, std::span<float const> block) {
-        transmit_aaf(media_clock_.timestamp_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
-    });
-}
-
-void TalkerStreams::transmit_crf_if_due(ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open)
-{
-    if (!gate_open) {
-        crf_decim_ = 0;  // gate closed: next emission starts a fresh PDU phase
-        return;
-    }
-    // One PDU carries crf_timestamps_per_packet timestamps, each spaced sample_stride =
-    // interval * SAMPLE_RATE / CRF_BASE_FREQUENCY of our 96 kHz samples, so a PDU spans
-    // (ts_per_pkt * sample_stride) samples = pkts_per_crf audio packets (e.g. the Milan
-    // 48 kHz/interval-96/1-ts format -> 192 samples = every 16 packets -> 500 PDU/s).
-    uint32_t const sample_stride = crf_sample_stride(config_.crf_timestamp_interval, CRF_BASE_FREQUENCY, config_.sample_rate);
-    uint32_t pkts_per_crf = (static_cast<uint32_t>(config_.crf_timestamps_per_packet) * sample_stride) / samples_per_packet_;
-    if (pkts_per_crf == 0) {
-        pkts_per_crf = 1;
-    }
-    if (crf_decim_ == 0) {
-        // Re-base to the live media-clock position each PDU so CRF timestamps track
-        // gPTP-now, not the (possibly long-past) media-clock anchor.
-        transmit_crf(crf_aligned_base(tick.first_index, sample_stride));
-    }
-    crf_decim_ = static_cast<uint16_t>((crf_decim_ + 1U) % pkts_per_crf);
 }
 
 }  // namespace statusbar::avb_entity

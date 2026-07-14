@@ -306,16 +306,18 @@ auto AvbEntityAudioIO::acquire_maap_addresses(net::MessageReactor& reactor) -> S
         // to BOTH the ACMP stream model (for CONNECT_TX / GET_STREAM_INFO / MSRP) and
         // the live TX cache (talker_), then release the gate so the media thread's
         // acquire-load sees the new MACs before it transmits on them.
-        auto assign = [this, &block_start](uint16_t idx, uint16_t offset, ieee::Eui48& tx_cache) {
+        auto assign = [this, &block_start](uint16_t idx, uint16_t offset) {
             ieee::Eui48 const dest = avtp::maap_block_address(block_start, offset);
             if (auto const* s = host_.components().acmp_talker.get_stream(idx); s != nullptr) {
                 (void)host_.components().acmp_talker.configure_stream(idx, s->stream_id, dest);
             }
-            tx_cache = dest;
+            if (auto* slot = talker_->slot_for(idx); slot != nullptr) {
+                slot->dest_mac = dest;
+            }
         };
-        assign(AM824_STREAM_INDEX, 0, talker_->am824_dest_mac_);
-        assign(AAF_STREAM_INDEX, 1, talker_->aaf_dest_mac_);
-        assign(CRF_STREAM_INDEX, 2, talker_->crf_dest_mac_);
+        assign(AM824_STREAM_INDEX, 0);
+        assign(AAF_STREAM_INDEX, 1);
+        assign(CRF_STREAM_INDEX, 2);
         maap_addresses_ready_.store(true, std::memory_order_release);
         host_.ctl_log().status("maap: acquired 3 stream addresses from {:012x}", block_start.to_uint64());
         // (Re)declare the MSRP Talker Advertise now that the dest MACs are final, so
@@ -374,23 +376,6 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
     }
 
     // --- Stream data plane ---
-    // Resolve both talker stream identities (id + dest MAC) from ACMP.
-    statusbar::tsn::StreamId am824_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(AM824_STREAM_INDEX); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &am824_sid);
-        talker_->am824_dest_mac_ = s->stream_dest_mac;
-    }
-    statusbar::tsn::StreamId aaf_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(AAF_STREAM_INDEX); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &aaf_sid);
-        talker_->aaf_dest_mac_ = s->stream_dest_mac;
-    }
-    statusbar::tsn::StreamId crf_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(CRF_STREAM_INDEX); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &crf_sid);
-        talker_->crf_dest_mac_ = s->stream_dest_mac;
-    }
-
     // The deterministic media clock owns the presentation offset and supplies the
     // avtp_timestamp, so the stream-output contexts add ZERO extra offset -- the
     // timestamp we pass them is already the final presentation time.
@@ -398,22 +383,44 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
         .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = config_.presentation_offset_ns}};
     rate_tracker_.configure(ptpclient::KalmanRatioTracker::Config{.meas_noise_ns = 1000.0, .jerk_psd = 1e-3});
 
-    talker_->am824_out_.emplace(
-        am824_sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), /*presentation_offset_ns=*/0);
+    // TX slots for this entity's fixed 3-stream topology (AM824@0, AAF@1,
+    // CRF@2), each shaped by a StreamSpec built from the entity's constants.
+    // (The tone generator derives its specs from the blob; migrating this
+    // entity's whole shape to the blob is future kit work.)
+    auto const make_spec = [this](uint16_t index, StreamKind kind) {
+        StreamSpec spec{};
+        spec.index = index;
+        spec.format.kind = kind;
+        spec.format.sample_rate_hz = SAMPLE_RATE;
+        spec.format.channels = static_cast<uint16_t>(channels_);
+        spec.format.aaf_format = AAF_FORMAT;
+        spec.format.bit_depth = kind == StreamKind::aaf ? AAF_BIT_DEPTH : uint8_t{24};
+        if (kind == StreamKind::crf) {
+            // Milan 48 kHz audio-sample reference, pull x1.0: both 48 kHz and
+            // 96 kHz clients lock to it; our 96 kHz audio rides as a 2x multiple.
+            spec.format.crf_type = static_cast<uint8_t>(avtp::CrfType::audio_sample);
+            spec.format.crf_base_frequency_hz = CRF_BASE_FREQUENCY;
+            spec.format.crf_timestamp_interval = config_.crf_timestamp_interval;
+            spec.format.crf_timestamps_per_pdu = static_cast<uint8_t>(config_.crf_timestamps_per_packet);
+        }
+        return spec;
+    };
+    for (auto const& spec :
+         {make_spec(AM824_STREAM_INDEX, StreamKind::am824),
+          make_spec(AAF_STREAM_INDEX, StreamKind::aaf),
+          make_spec(CRF_STREAM_INDEX, StreamKind::crf)}) {
+        statusbar::tsn::StreamId sid{};
+        ieee::Eui48 dest{};
+        if (auto const* s = host_.components().acmp_talker.get_stream(spec.index); s != nullptr) {
+            (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
+            dest = s->stream_dest_mac;
+        }
+        if (auto status = talker_->open_stream(spec, sid, dest); !status) {
+            return status;
+        }
+    }
     listener_->am824_in_.emplace(avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_));
-    talker_->aaf_out_.emplace(
-        aaf_sid, AAF_FORMAT, AAF_SAMPLE_RATE, static_cast<uint16_t>(channels_), AAF_BIT_DEPTH, /*presentation_offset_ns=*/0);
     listener_->aaf_in_.emplace(AAF_FORMAT, AAF_SAMPLE_RATE, static_cast<uint16_t>(channels_), AAF_BIT_DEPTH);
-    // CRF media-clock talker: Milan 48 kHz audio-sample reference, pull x1.0. The
-    // declared base is 48 kHz (CRF_BASE_FREQUENCY) so both 48 kHz and 96 kHz Milan
-    // clients lock to it; our 96 kHz audio rides as a 2x multiple of this base.
-    talker_->crf_out_.emplace(
-        crf_sid,
-        avtp::CrfType::audio_sample,
-        CRF_BASE_FREQUENCY,
-        avtp::CrfPull::multiply_1_0,
-        config_.crf_timestamp_interval,
-        config_.crf_timestamps_per_packet);
 
     // One TX socket (qdisc-bypass so our own egress is not re-received here).
     (void)talker_->stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
@@ -434,7 +441,10 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
     // One RX port joined to both stream groups; dispatch by subtype. The handler
     // delivers frames to the listener; the listener borrows the socket for dynamic
     // multicast joins on ACMP connect/disconnect.
-    std::array<ieee::Eui48, 2> const rx_groups{talker_->am824_dest_mac_, talker_->aaf_dest_mac_};
+    auto const* am824_slot = talker_->slot_of(StreamKind::am824);
+    auto const* aaf_slot = talker_->slot_of(StreamKind::aaf);
+    std::array<ieee::Eui48, 2> const rx_groups{
+        am824_slot != nullptr ? am824_slot->dest_mac : ieee::Eui48{}, aaf_slot != nullptr ? aaf_slot->dest_mac : ieee::Eui48{}};
     auto rx = std::make_unique<StreamRxHandler>(
         config_.interface_name, rx_groups, [l = listener_.get()] { l->drain_rx(l->current_gptp_ns()); });
     if (rx->valid()) {
@@ -502,11 +512,11 @@ void AvbEntityAudioIO::print_state() const
         host_.components().acmp_talker.connection_count(AM824_STREAM_INDEX),
         host_.components().acmp_talker.connection_count(AAF_STREAM_INDEX),
         channels_,
-        talker_->am824_tx_packets_,
+        talker_->slot_of(StreamKind::am824) != nullptr ? talker_->slot_of(StreamKind::am824)->tx_packets : 0,
         listener_->am824_rx_packets_.load(),
         listener_->am824_rx_samples_.load(),
         listener_->am824_rx_bad_.load(),
-        talker_->aaf_tx_packets_,
+        talker_->slot_of(StreamKind::aaf) != nullptr ? talker_->slot_of(StreamKind::aaf)->tx_packets : 0,
         listener_->aaf_rx_packets_.load(),
         listener_->aaf_rx_samples_.load(),
         listener_->aaf_rx_bad_.load(),
@@ -742,21 +752,12 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         // on_talker_listener callback stamps msrp_ready_ns_ with).
         int64_t const now_steady_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        bool const tx_am824 = talker_should_transmit(AM824_STREAM_INDEX, now_steady_ns);
-        bool const tx_aaf = talker_should_transmit(AAF_STREAM_INDEX, now_steady_ns);
-        if (tx_am824) {
-            // AM824 tolerates the GPS-paced variable block count directly.
-            talker_->transmit_am824(pts_base, tick.samples);
+        // Each slot gates on ITS OWN ACMP connection + reservation and emits per
+        // its kind (AM824 direct, AAF reframed, CRF decimated).
+        (void)pts_base;
+        for (auto& slot : talker_->slots_) {
+            talker_->transmit_if_due(slot, tick, talker_should_transmit(slot.spec.index, now_steady_ns), samples);
         }
-        // AAF egress (reframer owned by TalkerStreams): buffer the variable-per-wake
-        // samples and emit whole SAMPLES_PER_PACKET blocks; gate closed -> clear.
-        talker_->transmit_aaf_if_due(tick, tx_aaf, samples);
-
-        // CRF media-clock PDU (decimation owned by TalkerStreams). The CRF stream
-        // gates on ITS OWN ACMP connection + reservation (a listener ACMP-connects and
-        // MSRP-reserves the CRF media clock as a separate stream), never on the audio
-        // streams' gate.
-        talker_->transmit_crf_if_due(tick, talker_should_transmit(CRF_STREAM_INDEX, now_steady_ns));
     }
 }
 
@@ -821,20 +822,11 @@ auto AvbEntityAudioIO::fill_stream_output_counters(
     // Our talker (STREAM_OUTPUT) descriptors: 0=AM824, 1=AAF, 2=CRF. Each maps to
     // its on-wire TX packet counter (tx counters are single-threaded with the
     // media timer, read plain like print_state()).
-    uint64_t frames_tx = 0;
-    switch (descriptor_index) {
-        case AM824_STREAM_INDEX:
-            frames_tx = talker_->am824_tx_packets_;
-            break;
-        case AAF_STREAM_INDEX:
-            frames_tx = talker_->aaf_tx_packets_;
-            break;
-        case CRF_STREAM_INDEX:
-            frames_tx = talker_->crf_out_ ? talker_->crf_out_->packets_sent : 0;
-            break;
-        default:
-            return false;
+    auto const* slot = talker_->slot_for(descriptor_index);
+    if (slot == nullptr) {
+        return false;
     }
+    uint64_t const frames_tx = slot->tx_packets;
     // IEEE 1722.1 STREAM_OUTPUT counter bit positions (Clause 7.4.43). We expose
     // FRAMES_TX (bit 6) -- total media frames this talker has put on the wire --
     // which is what tells a reader our actual transmit rate.
