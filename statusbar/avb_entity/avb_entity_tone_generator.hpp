@@ -139,6 +139,20 @@ class AvbEntityToneGenerator
     [[nodiscard]] auto stream_specs() const noexcept -> StreamSpecs const& { return specs_; }
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
 
+    // --- Per-stream TX sources (kit phase 2) -------------------------------------
+    /// Register a render callback for the audio stream whose blob symbol is
+    /// @p symbol (e.g. "aaf_out"). The code is a menu, the model is the
+    /// selection: a registration whose symbol/index the loaded model does not
+    /// declare is recorded but INERT (listed at start(), never an error), so
+    /// one binary can implement every option and a minimal model activates a
+    /// subset. Unbound audio streams fall back to the built-in white-key tone.
+    /// Call before start(); the callback runs on the media-timer RT thread
+    /// (no allocation, no blocking).
+    void set_render(std::string_view symbol, StreamRenderFn fn) { set_render_symbol(symbol_code(symbol), std::move(fn)); }
+    void set_render_symbol(uint32_t symbol_code, StreamRenderFn fn);
+    /// Same, addressed by STREAM_OUTPUT descriptor index.
+    void set_render(uint16_t stream_index, StreamRenderFn fn);
+
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
     [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
     [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
@@ -174,6 +188,15 @@ class AvbEntityToneGenerator
     /// listeners each, 0 listener streams (talker-only).
     AvbEntityHost host_;
 
+    /// Per-stream TX render bindings + their interleaved buffers, parallel to
+    /// specs_ (empty function = default tone; empty buffer = non-audio slot).
+    std::array<StreamRenderFn, MAX_ENTITY_STREAMS> renders_{};
+    sg14::inplace_vector<std::pmr::vector<float>, MAX_ENTITY_STREAMS> render_buffers_{};
+    /// Registrations that matched nothing in the model (menu/selection:
+    /// inert; listed at start() for typo-finding).
+    sg14::inplace_vector<uint32_t, MAX_ENTITY_STREAMS> unbound_render_symbols_{};
+    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> unbound_render_indices_{};
+
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 
@@ -200,8 +223,6 @@ class AvbEntityToneGenerator
     std::unique_ptr<TalkerStreams> talker_{std::make_unique<TalkerStreams>(
         TalkerStreamsConfig{.sample_rate = sample_rate_, .vlan_id = config_.vlan_id, .stream_pcp = config_.stream_pcp},
         media_clock_,
-        audio_buffer_,
-        channels_,
         last_gptp_ns_,
         mem_resource_)};
 

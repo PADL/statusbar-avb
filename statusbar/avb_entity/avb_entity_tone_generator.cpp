@@ -179,6 +179,14 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
         oscillators_[ch].coeffs_.set_amplitude(config_.tone_amplitude, 0);
     }
 
+    // Per-stream render buffers, parallel to specs_: audio slots get an
+    // interleaved tick buffer; CRF/non-audio slots an empty one.
+    for (auto const& spec : specs_) {
+        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        render_buffers_.emplace_back(
+            is_audio ? (static_cast<size_t>(samples_per_packet_) + 1) * channels_ : 0, 0.0F, mem_resource_);
+    }
+
     host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
 
     // Base the talker stream_ids on the NIC MAC (globally unique per box).
@@ -226,6 +234,43 @@ AvbEntityToneGenerator::~AvbEntityToneGenerator()
             return {};
         },
         std::errc::io_error);
+}
+
+//
+// Per-stream TX sources (kit phase 2): the code is a menu, the model is the
+// selection — registrations that match nothing in the loaded model are
+// recorded as inert and listed at start(); they are never an error.
+//
+
+void AvbEntityToneGenerator::set_render(uint16_t const stream_index, StreamRenderFn fn)
+{
+    for (size_t pos = 0; pos < specs_.size(); ++pos) {
+        auto const& spec = specs_[pos];
+        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        if (is_audio && spec.index == stream_index) {
+            renders_[pos] = std::move(fn);
+            return;
+        }
+    }
+    if (unbound_render_indices_.size() < MAX_ENTITY_STREAMS) {
+        unbound_render_indices_.push_back(stream_index);
+    }
+}
+
+void AvbEntityToneGenerator::set_render_symbol(uint32_t const symbol_code, StreamRenderFn fn)
+{
+    for (size_t pos = 0; pos < specs_.size(); ++pos) {
+        auto const& spec = specs_[pos];
+        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        auto const sym = host_.symbol_of(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        if (is_audio && sym.has_value() && *sym == symbol_code) {
+            renders_[pos] = std::move(fn);
+            return;
+        }
+    }
+    if (unbound_render_symbols_.size() < MAX_ENTITY_STREAMS) {
+        unbound_render_symbols_.push_back(symbol_code);
+    }
 }
 
 //
@@ -383,6 +428,15 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
             [this](std::span<uint8_t const> frame) { talker_->tx_pcap_recorder_.record(frame, talker_->last_tx_gptp_ns_); });
     }
 
+    // Menu/selection diagnostics: registrations the model left inert. Info
+    // level -- typo-finding, never an error.
+    for (auto const code : unbound_render_symbols_) {
+        host_.ctl_log().status("render: registered symbol 0x{:08x} not in this model (inert)", code);
+    }
+    for (auto const idx : unbound_render_indices_) {
+        host_.ctl_log().status("render: registered stream index {} not an audio stream in this model (inert)", idx);
+    }
+
     return success();
 }
 
@@ -494,18 +548,31 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
             continue;
         }
 
+        // Default source: the built-in white-key tone fills the shared buffer
+        // (oscillators advance exactly once per tick for phase continuity).
         for (size_t i = 0; i < samples; ++i) {
             for (size_t ch = 0; ch < channels_; ++ch) {
                 audio_buffer_[(i * channels_) + ch] = oscillators_[ch](0.0F);
             }
         }
 
+        uint64_t const pts = media_clock_.timestamp_for(tick.first_index);
         int64_t const now_steady_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        // Each stream gates on ITS OWN ACMP connection + reservation and emits
-        // per its kind (AM824 direct, AAF reframed, CRF decimated).
-        for (auto& slot : talker_->slots_) {
-            talker_->transmit_if_due(slot, tick, talker_should_transmit(slot.spec.index, now_steady_ns), samples);
+        // Each stream renders its own source (bound render callback, else the
+        // shared tone), gates on ITS OWN ACMP connection + reservation, and
+        // emits per its kind (AM824 direct, AAF reframed, CRF decimated).
+        for (size_t pos = 0; pos < specs_.size(); ++pos) {
+            std::span<float const> src{audio_buffer_.data(), samples * channels_};
+            if (renders_[pos]) {
+                auto& buf = render_buffers_[pos];
+                std::span<float> const dest{buf.data(), samples * channels_};
+                renders_[pos](dest, tick.samples, tick.first_index, pts);
+                src = dest;
+            }
+            if (auto* slot = talker_->slot_for(specs_[pos].index); slot != nullptr) {
+                talker_->transmit_if_due(*slot, tick, talker_should_transmit(slot->spec.index, now_steady_ns), samples, src);
+            }
         }
     }
 }

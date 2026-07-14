@@ -31,6 +31,7 @@
         "streams_in": [
           {
             "name": "StreamInputAM824",
+            "symbol": "am824_in",
             "format": "0x00A0040860000800",
             "flags": [
               "CLASS_A"
@@ -38,6 +39,7 @@
           },
           {
             "name": "StreamInputAAF",
+            "symbol": "aaf_in",
             "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
             "flags": [
               "CLASS_A"
@@ -47,6 +49,7 @@
         "streams_out": [
           {
             "name": "StreamOutputAM824",
+            "symbol": "am824_out",
             "format": "0x00A0040860000800",
             "flags": [
               "CLASS_A"
@@ -54,6 +57,7 @@
           },
           {
             "name": "StreamOutputAAF",
+            "symbol": "aaf_out",
             "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
             "flags": [
               "CLASS_A"
@@ -61,6 +65,7 @@
           },
           {
             "name": "StreamOutputCRF",
+            "symbol": "crf_out",
             "format": "0x041060010000BB80",
             "flags": [
               "CLASS_A"

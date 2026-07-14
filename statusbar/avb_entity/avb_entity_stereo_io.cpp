@@ -484,7 +484,7 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
         // Re-transmit the processed audio, gated on an admitted downstream listener.
         if (gate_open) {
             if (auto* slot = talker_.slot_for(0); slot != nullptr) {
-                talker_.transmit_am824(*slot, pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+                talker_.transmit_am824(*slot, pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
             }
         }
     }

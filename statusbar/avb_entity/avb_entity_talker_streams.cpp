@@ -105,7 +105,8 @@ auto TalkerStreams::slot_of(StreamKind const kind) const noexcept -> TalkerStrea
     return nullptr;
 }
 
-void TalkerStreams::transmit_am824(TalkerStreamSlot& slot, uint64_t const now_ns, uint32_t const samples)
+void TalkerStreams::transmit_am824(
+    TalkerStreamSlot& slot, uint64_t const now_ns, uint32_t const samples, std::span<float const> src)
 {
     if (!slot.am824 || stream_tx_.fd() < 0) {
         return;
@@ -114,18 +115,19 @@ void TalkerStreams::transmit_am824(TalkerStreamSlot& slot, uint64_t const now_ns
         avtp::Am824Pdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
     std::array<uint8_t, MAX_FRAME> frame{};
 
+    size_t const channels = slot.spec.format.channels;
     avtp::Am824Pdu pdu{};
     // Nominal AM824 rate (CIP FDF) from the configured sample rate: hardcoding
     // 96 kHz would mislabel a 48 kHz stream on the wire; value_or keeps the
     // 96 kHz default for any unmapped rate.
     auto const am824_rate = avtp::am824_sample_rate_from_hz(config_.sample_rate).value_or(avtp::Am824SampleRate::rate_96_khz);
-    pdu.init(slot.am824->stream_id, static_cast<uint8_t>(channels_), am824_rate);
+    pdu.init(slot.am824->stream_id, static_cast<uint8_t>(channels), am824_rate);
 
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::am824_serialize_mbla(
-        *slot.am824, pdu, payload, static_cast<uint8_t>(samples), now_ns, [this](uint8_t ch, std::span<float> dest) {
+        *slot.am824, pdu, payload, static_cast<uint8_t>(samples), now_ns, [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
-                dest[s] = audio_buffer_[(s * channels_) + ch];
+                dest[s] = src[(s * channels) + ch];
             }
         });
     if (audio_bytes == 0) {
@@ -155,12 +157,13 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
         avtp::AafPdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
     std::array<uint8_t, MAX_FRAME> frame{};
 
+    size_t const channels = slot.spec.format.channels;
     avtp::AafPdu pdu{};
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
     size_t const audio_bytes =
-        avtp::aaf_stream_serialize(*slot.aaf, pdu, payload, samples, now_ns, [this, src](uint8_t ch, std::span<float> dest) {
+        avtp::aaf_stream_serialize(*slot.aaf, pdu, payload, samples, now_ns, [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
-                dest[s] = src[(s * channels_) + ch];
+                dest[s] = src[(s * channels) + ch];
             }
         });
     if (audio_bytes == 0) {
@@ -229,12 +232,16 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
 }
 
 void TalkerStreams::transmit_if_due(
-    TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open, size_t const samples)
+    TalkerStreamSlot& slot,
+    ptpclient::MediaClockGenerator::Emit const& tick,
+    bool const gate_open,
+    size_t const samples,
+    std::span<float const> src)
 {
     switch (slot.spec.format.kind) {
         case StreamKind::am824: {
             if (gate_open && samples > 0) {
-                transmit_am824(slot, media_clock_.timestamp_for(tick.first_index), tick.samples);
+                transmit_am824(slot, media_clock_.timestamp_for(tick.first_index), tick.samples, src);
             }
             break;
         }
@@ -252,8 +259,7 @@ void TalkerStreams::transmit_if_due(
             // only whole SAMPLES_PER_PACKET blocks (0, 1, or 2+ this wake); the < block
             // remainder carries to the next wake. Each block's avtp_timestamp is the
             // jitter-free media-clock time of its first sample.
-            slot.reframer->push(
-                std::span<float const>{audio_buffer_}.first(samples * channels_), static_cast<uint16_t>(samples), tick.first_index);
+            slot.reframer->push(src.first(samples * slot.spec.format.channels), static_cast<uint16_t>(samples), tick.first_index);
             slot.reframer->drain([this, &slot](uint64_t first_index, std::span<float const> block) {
                 transmit_aaf(slot, media_clock_.timestamp_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
             });

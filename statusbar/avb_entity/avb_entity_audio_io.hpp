@@ -330,8 +330,6 @@ class AvbEntityAudioIO
     std::unique_ptr<TalkerStreams> talker_{std::make_unique<TalkerStreams>(
         TalkerStreamsConfig{.sample_rate = SAMPLE_RATE, .vlan_id = config_.vlan_id, .stream_pcp = config_.stream_pcp},
         media_clock_,
-        audio_buffer_,
-        channels_,
         last_gptp_ns_,
         mem_resource_)};
 

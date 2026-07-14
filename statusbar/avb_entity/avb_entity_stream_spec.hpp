@@ -30,12 +30,15 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <string_view>
 
 namespace statusbar::avb_entity {
 
@@ -186,5 +189,38 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
 /// First stream of @p kind in the table, or nullopt. Replaces the per-entity
 /// hardcoded index constants (AM824=0 / AAF=1 / CRF=2 style).
 [[nodiscard]] auto find_stream(StreamSpecs const& specs, StreamKind kind) noexcept -> std::optional<uint16_t>;
+
+/// The 32-bit symbol code of an authored symbol name — zlib/IEEE 802.3 CRC-32,
+/// bit-identical to the blob generator (python/aemxml/flatten.py
+/// symbol_to_code). Constexpr so `set_render("aux_out", ...)`-style
+/// registrations hash at compile time.
+[[nodiscard]] constexpr auto symbol_code(std::string_view name) noexcept -> uint32_t
+{
+    uint32_t crc = 0xFFFFFFFFU;
+    for (char const c : name) {
+        crc ^= static_cast<uint8_t>(c);
+        for (int k = 0; k < 8; ++k) {
+            crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+        }
+    }
+    return crc ^ 0xFFFFFFFFU;
+}
+// Golden vector: the committed tone blobs' "identify" CONTROL symbol.
+static_assert(symbol_code("identify") == 0x12619917U);
+
+/// Per-stream TX audio source: fill @p audio (interleaved, frames x channels
+/// floats) for this media-clock tick. @p first_index is the media-clock
+/// sample index of the first frame; @p pts_ns its presentation time.
+/// Runs on the SCHED_FIFO media-timer thread: no allocation, no blocking.
+/// Registered by blob symbol or stream index (the code is a menu, the model
+/// is the selection: bindings for symbols the model omits stay inert).
+using StreamRenderFn =
+    sg14::inplace_function<void(std::span<float> audio, uint32_t frames, uint64_t first_index, uint64_t pts_ns), 64>;
+
+/// Per-stream RX audio consumer: one decoded channel of @p samples floats
+/// with its reconstructed 64-bit presentation time. Runs on the reactor/RX
+/// thread: keep it cheap and non-blocking.
+using StreamConsumeFn =
+    sg14::inplace_function<void(uint8_t channel, std::span<float const> samples, uint64_t pts_ns, uint64_t period_ns), 64>;
 
 }  // namespace statusbar::avb_entity

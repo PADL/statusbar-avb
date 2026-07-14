@@ -27,6 +27,7 @@
         "streams_out": [
           {
             "name": "StreamOutputAAF",
+            "symbol": "aaf_out",
             "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
             "flags": [
               "CLASS_A"

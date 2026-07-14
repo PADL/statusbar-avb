@@ -765,7 +765,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         // its kind (AM824 direct, AAF reframed, CRF decimated).
         (void)pts_base;
         for (auto& slot : talker_->slots_) {
-            talker_->transmit_if_due(slot, tick, talker_should_transmit(slot.spec.index, now_steady_ns), samples);
+            talker_->transmit_if_due(slot, tick, talker_should_transmit(slot.spec.index, now_steady_ns), samples, audio_buffer_);
         }
     }
 }

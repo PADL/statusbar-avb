@@ -74,14 +74,10 @@ struct TalkerStreams
     TalkerStreams(
         TalkerStreamsConfig const& config,
         ptpclient::MediaClockGenerator const& media_clock,
-        std::pmr::vector<float>& audio_buffer,
-        size_t const& channels,
         std::atomic<uint64_t> const& last_gptp_ns,
         std::pmr::memory_resource* memory_resource) noexcept
         : config_{config}
         , media_clock_{media_clock}
-        , audio_buffer_{audio_buffer}
-        , channels_{channels}
         , last_gptp_ns_{last_gptp_ns}
         , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
         , mem_resource_{memory_resource}
@@ -102,16 +98,24 @@ struct TalkerStreams
     [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> TalkerStreamSlot*;
     [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> TalkerStreamSlot const*;
 
-    /// Emit this tick's traffic for @p slot: AM824 sends the tick's samples
+    /// Emit this tick's traffic for @p slot from @p src (this stream's
+    /// interleaved audio for the tick — per-stream sources are the entity's
+    /// business; CRF slots ignore it): AM824 sends the tick's samples
     /// directly; AAF reframes to constant blocks (gate closed clears the
     /// FIFO); CRF emits one decimated PDU re-based to the live media-clock
     /// position (gate closed resets the phase). Media-timer (SCHED_FIFO) thread.
-    void transmit_if_due(TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
+    void transmit_if_due(
+        TalkerStreamSlot& slot,
+        ptpclient::MediaClockGenerator::Emit const& tick,
+        bool gate_open,
+        size_t samples,
+        std::span<float const> src);
 
-    /// Serialize + send one packet on a specific slot. Media-timer thread.
-    /// (Public for entities that drive their own cadence, e.g. the pipe-fed
-    /// AM824 loopback entities.)
-    void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples);
+    /// Serialize + send one packet on a specific slot from @p src (interleaved,
+    /// slot.spec.format.channels stride). Media-timer thread. (Public for
+    /// entities that drive their own cadence, e.g. the pipe-fed AM824 loopback
+    /// entities.)
+    void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples, std::span<float const> src);
     void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
@@ -124,8 +128,6 @@ struct TalkerStreams
     // References / values (bound at construction).
     TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
     ptpclient::MediaClockGenerator const& media_clock_;
-    std::pmr::vector<float>& audio_buffer_;
-    size_t const& channels_;
     std::atomic<uint64_t> const& last_gptp_ns_;
     uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
     std::pmr::memory_resource* mem_resource_;

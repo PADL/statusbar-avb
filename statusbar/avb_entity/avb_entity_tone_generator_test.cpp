@@ -444,4 +444,81 @@ TEST(tone_aafcrf_create, aaf_at_0_crf_at_1_transmit_when_ungated)
     EXPECT_FALSE((*result)->is_running());
 }
 
+//
+// Per-stream TX render hooks (kit phase 2): registrations bind by blob symbol
+// or stream index; the code is a menu, the model is the selection — bindings
+// the model does not declare stay inert, never error.
+//
+
+TEST(tone_render, symbol_and_index_bindings_fire_with_timing)
+{
+    auto blob = load_file(entity_tone_bin_path());
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    auto& entity = **result;
+
+    struct Seen
+    {
+        size_t calls{0};
+        size_t span_size{0};
+        uint32_t frames{0};
+        uint64_t pts{0};
+    };
+    static Seen by_symbol{};
+    static Seen by_index{};
+    by_symbol = {};
+    by_index = {};
+
+    // tone.json streams carry symbols: am824_out@0, aaf_out@1, crf_out@2.
+    entity.set_render("aaf_out", [](std::span<float> audio, uint32_t frames, uint64_t /*first*/, uint64_t pts) {
+        ++by_symbol.calls;
+        by_symbol.span_size = audio.size();
+        by_symbol.frames = frames;
+        by_symbol.pts = pts;
+        for (auto& s : audio) {
+            s = 0.25F;
+        }
+    });
+    entity.set_render(uint16_t{0}, [](std::span<float> audio, uint32_t frames, uint64_t /*first*/, uint64_t /*pts*/) {
+        ++by_index.calls;
+        by_index.span_size = audio.size();
+        by_index.frames = frames;
+    });
+
+    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    entity.process_audio(now);
+
+    EXPECT_TRUE(by_symbol.calls > 0);                                            // AAF@1 bound via its blob symbol
+    EXPECT_TRUE(by_index.calls > 0);                                             // AM824@0 bound via its index
+    EXPECT_EQ(by_symbol.span_size, static_cast<size_t>(by_symbol.frames) * 8U);  // frames x 8ch interleaved
+    EXPECT_TRUE(by_symbol.frames > 0);
+    EXPECT_TRUE(by_symbol.pts > 0);  // media-clock presentation time supplied
+}
+
+TEST(tone_render, unbound_registrations_are_inert)
+{
+    auto blob = load_file(entity_tone_bin_path());
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    auto& entity = **result;
+
+    static size_t calls = 0;
+    calls = 0;
+    auto const count_call = [](std::span<float>, uint32_t, uint64_t, uint64_t) { ++calls; };
+
+    // The menu is bigger than the model: none of these exist in tone.json's
+    // symbol table as audio STREAM_OUTPUTs, so all must be recorded but inert.
+    entity.set_render("aux_out", count_call);    // symbol not in the model
+    entity.set_render("identify", count_call);   // a CONTROL symbol, not a stream
+    entity.set_render("crf_out", count_call);    // a stream, but not an audio one
+    entity.set_render(uint16_t{2}, count_call);  // CRF index: not an audio stream
+    entity.set_render(uint16_t{7}, count_call);  // index not in the model
+
+    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    entity.process_audio(now);
+    entity.process_audio(now);
+
+    EXPECT_EQ(calls, 0U);  // inert, and creation/processing never errored
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)

@@ -446,7 +446,7 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (gate_.should_transmit(0, now_steady_ns)) {
         if (auto* slot = talker_.slot_for(0); slot != nullptr) {
-            talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET));
+            talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
         }
     }
 }
