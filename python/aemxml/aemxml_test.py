@@ -366,6 +366,70 @@ def test_identify_capability_and_base_control_zeroing():
     print("  [+] identify capability + base_control zeroing: OK")
 
 
+def test_json_variable_expansion():
+    """${name} references in JSON string values expand from the variables
+    dict (CLI --set): whole-string references coerce JSON-literal values
+    (numbers stay numbers), embedded references splice text, $${ escapes,
+    and unset or malformed references are hard errors."""
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "V",
+                "model": "M",
+                "name": "Tone ${site}",
+                "firmware": "${version}",
+                "configuration": {
+                    "name": "C",
+                    "audio_units": [
+                        {
+                            "name": "AudioUnit",
+                            "rates": [48000],
+                            "output_ports": [
+                                {"clusters": [{"name": "Out", "channels": "${nch}"}]}
+                            ],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(
+        json_str, variables={"site": "LA", "version": "1.8.0", "nch": "2"}
+    )
+    assert entity.entity_name == "Tone LA"
+    assert entity.firmware_version == "1.8.0"  # "1.8.0" is not a JSON literal
+    cluster = entity.configurations[0].audio_units[0].output_stream_ports[0].clusters[0]
+    assert cluster.channel_count == 2  # "2" coerced to int via whole-string ref
+
+    # Unset variable -> error naming it and its path.
+    try:
+        read_json(json_str, variables={"site": "LA", "nch": "2"})
+        raise AssertionError("unset variable should raise")
+    except ValueError as e:
+        assert "${version}" in str(e) and "firmware" in str(e)
+
+    # No variables passed at all -> same hard error, not silent passthrough.
+    try:
+        read_json(json_str)
+        raise AssertionError("unset variable should raise")
+    except ValueError as e:
+        assert "${" in str(e)
+
+    # $${ escapes a literal ${; malformed references are rejected.
+    plain = json.dumps({"entity": {"vendor": "V", "model": "M", "name": "a$${b}c"}})
+    assert read_json(plain).entity_name == "a${b}c"
+    bad = json.dumps({"entity": {"vendor": "V", "model": "M", "name": "x${oops"}})
+    try:
+        read_json(bad, variables={"oops": "y"})
+        raise AssertionError("malformed reference should raise")
+    except ValueError as e:
+        assert "malformed" in str(e)
+
+    print("  [+] json variable expansion: OK")
+
+
 def test_blob_round_trip():
     """Test blob write -> read round-trip preserves all data."""
     entity = Entity(
@@ -2486,6 +2550,7 @@ def main():
         test_flatten_minimal,
         test_flatten_with_audio,
         test_identify_capability_and_base_control_zeroing,
+        test_json_variable_expansion,
         test_blob_round_trip,
         test_read_bareminimum,
         test_read_bareminimum_2021,

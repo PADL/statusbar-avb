@@ -117,8 +117,20 @@ def cmd_dump(args: argparse.Namespace) -> None:
             )
 
 
+def _parse_set_vars(pairs: list[str] | None) -> dict[str, str]:
+    """Parse repeated --set NAME=VALUE options into a variables dict for
+    ${name} expansion in the JSON model."""
+    variables: dict[str, str] = {}
+    for pair in pairs or []:
+        name, sep, value = pair.partition("=")
+        if not sep or not name:
+            raise SystemExit(f"error: --set expects NAME=VALUE, got '{pair}'")
+        variables[name] = value
+    return variables
+
+
 def cmd_json2bin(args: argparse.Namespace) -> None:
-    entity = read_json(args.input)
+    entity = read_json(args.input, variables=_parse_set_vars(args.set))
     descs, syms = flatten(entity)
     blob = write_blob(descs, syms)
     with open(args.output, "wb") as f:
@@ -129,7 +141,7 @@ def cmd_json2bin(args: argparse.Namespace) -> None:
 
 
 def cmd_json2xml(args: argparse.Namespace) -> None:
-    entity = read_json(args.input)
+    entity = read_json(args.input, variables=_parse_set_vars(args.set))
     xml_str = write_aemxml(entity)
     with open(args.output, "w") as f:
         f.write(xml_str)
@@ -225,15 +237,26 @@ def main() -> None:
     p_dump = sub.add_parser("dump", help="Dump binary .aem blob contents")
     p_dump.add_argument("input", help="Input .aem file")
 
+    _set_help = (
+        "Define a variable for ${name} references in the JSON model "
+        "(repeatable). A model referencing an unset variable is an error."
+    )
+
     p_json2bin = sub.add_parser(
         "json2bin", help="Convert simplified JSON to binary .aem blob"
     )
     p_json2bin.add_argument("input", help="Input .json file")
     p_json2bin.add_argument("output", help="Output .aem file")
+    p_json2bin.add_argument(
+        "--set", action="append", metavar="NAME=VALUE", help=_set_help
+    )
 
     p_json2xml = sub.add_parser("json2xml", help="Convert simplified JSON to AEMXML")
     p_json2xml.add_argument("input", help="Input .json file")
     p_json2xml.add_argument("output", help="Output .aemxml file")
+    p_json2xml.add_argument(
+        "--set", action="append", metavar="NAME=VALUE", help=_set_help
+    )
 
     p_xml2json = sub.add_parser("xml2json", help="Convert AEMXML to simplified JSON")
     p_xml2json.add_argument("input", help="Input .aemxml file")

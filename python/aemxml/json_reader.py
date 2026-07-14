@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from .model import (
     AudioCluster,
@@ -869,11 +870,77 @@ def _parse_configuration(
     )
 
 
-def read_json(path_or_string: str) -> Entity:
+# ${name} variable reference inside a JSON string value. Names follow the
+# usual identifier shape plus '.' and '-' (e.g. ${version}, ${site.name}).
+_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.\-]*)\}")
+
+
+def _expand_string(
+    s: str, variables: dict[str, str], path: str
+) -> str | int | float | bool | None | list | dict:
+    """Expand ${name} references in one JSON string value.
+
+    - A string that is exactly one reference ("${channels}") takes the
+      variable's value with JSON type coercion when the value parses as a
+      JSON literal (8 -> int, true -> bool, "x" stays str), so variables can
+      feed numeric fields.
+    - Embedded references ("jdk-${site}") splice the value in as text.
+    - "$${" escapes a literal "${".
+    - An unset variable is an error naming the variable and its JSON path.
+    """
+    escaped = s.replace("$${", "\x00")
+
+    def lookup(name: str) -> str:
+        if name not in variables:
+            have = ", ".join(sorted(variables)) or "(none)"
+            raise ValueError(
+                f"{path}: undefined variable '${{{name}}}' "
+                f"(defined: {have}; pass --set {name}=VALUE)"
+            )
+        return str(variables[name])
+
+    m = _VAR_RE.fullmatch(escaped)
+    if m:
+        raw = lookup(m.group(1))
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return raw
+    if "${" in _VAR_RE.sub("", escaped):
+        raise ValueError(
+            f"{path}: malformed variable reference in {s!r} -- "
+            f"references look like ${{name}}; escape a literal with $${{"
+        )
+    expanded = _VAR_RE.sub(lambda m: lookup(m.group(1)), escaped)
+    return expanded.replace("\x00", "${")
+
+
+def _expand_variables(node, variables: dict[str, str], path: str = "$"):
+    """Recursively expand ${name} references in every string value of a
+    parsed JSON tree. Keys are never expanded."""
+    if isinstance(node, str):
+        return _expand_string(node, variables, path)
+    if isinstance(node, list):
+        return [
+            _expand_variables(v, variables, f"{path}[{i}]") for i, v in enumerate(node)
+        ]
+    if isinstance(node, dict):
+        return {
+            k: _expand_variables(v, variables, f"{path}.{k}") for k, v in node.items()
+        }
+    return node
+
+
+def read_json(path_or_string: str, variables: dict[str, str] | None = None) -> Entity:
     """Read a simplified JSON file or string and return an Entity.
 
     Args:
         path_or_string: Either a file path or a JSON string.
+        variables: Values for ${name} references in the model's string
+            values (see _expand_string). References are always expanded --
+            with no variables given, any ${name} in the model is an error,
+            so a model that requires a variable cannot silently compile
+            with the reference text left in place.
 
     Returns:
         Entity data model populated from the JSON.
@@ -887,6 +954,8 @@ def read_json(path_or_string: str) -> Entity:
             data = json.loads(path_or_string)
     else:
         data = json.loads(path_or_string)
+
+    data = _expand_variables(data, variables or {})
 
     entity_obj = data.get("entity", data)
 

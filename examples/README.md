@@ -13,6 +13,22 @@ being the interchange format Hive / la_avdecc speak — so these models are port
 private schema. `../python/aemxml/model.py` is the underlying Python AEM model (IR) that
 all three front-ends (JSON, AEMXML, direct Python) feed.
 
+## Variables
+
+String values in a model may reference build-time variables as `${name}`, supplied with
+repeatable `--set name=value` options:
+
+```
+python3 ../python/aemxml/aemxml_tool.py json2bin tone.json tone.aem --set version=1.8.0
+```
+
+A model that references an unset variable fails to compile (the error names the variable
+and its JSON path), so a `${...}` can never silently reach the wire. A string that is
+exactly one reference takes the value with JSON type coercion (`--set nch=8` +
+`"channels": "${nch}"` → the number 8); embedded references splice as text
+(`"jdk-${site}"`); `$${` escapes a literal `${`. Typical use: `"firmware": "${version}"`
+stamped by the build so the blob's ENTITY descriptor matches the package version.
+
 ## Models
 
 | File | Shape | Entity |
