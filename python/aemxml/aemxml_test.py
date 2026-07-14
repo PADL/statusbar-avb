@@ -1878,6 +1878,9 @@ def test_json_control_values():
     assert ident.control_type == CONTROL_TYPE_NAMES["IDENTIFY"]
     assert ident.control_value_type == 0x0001  # LINEAR_UINT8
     assert len(ident.value_details) == 9  # 5x1 + unit + string_ref
+    # Byte-exact spec order (min, max, step, default, current, unit, string) —
+    # macOS rejects the entity if these are permuted.
+    assert ident.value_details == bytes.fromhex("00ffff0000" + "0000" + "ffff")
     iv = parse_value_details(ident.control_value_type, ident.value_details, 1)[0]
     assert (iv.minimum, iv.maximum, iv.step) == (0, 255, 255)
     assert iv.string_ref == 0xFFFF  # absent -> NO_STRING
@@ -1890,16 +1893,20 @@ def test_json_control_values():
     assert vv.string_ref == (0 << 3) | 2  # collector slot 2 (after vendor/model)
 
     assert sel.control_value_type == 0x800D  # SELECTOR_UINT16 | read-only
-    sv = parse_value_details(sel.control_value_type, sel.value_details, 1)[0]
+    # For SELECTOR types number_of_values is the OPTION count (3 here).
+    sv = parse_value_details(sel.control_value_type, sel.value_details, 3)[0]
     assert sv.options == [0, 1, 2] and sv.current == 1
+    # current, default, options[3], unit — no embedded count, no string_ref.
+    assert sel.value_details == bytes.fromhex("0001" + "0000" + "000000010002" + "0001")
 
-    # number_of_values on the wire is the item COUNT (offset 96), not bytes.
+    # number_of_values on the wire (offset 96): item count for LINEAR/UTF8,
+    # option count for SELECTOR.
     descs, _ = flatten(entity)
     controls_wire = [d for d in descs if d.descriptor_type == 0x001A]
     assert [struct.unpack_from(">H", d.wire_bytes, 96)[0] for d in controls_wire] == [
         1,
         1,
-        1,
+        3,
         1,
     ]
     assert count_values(url.control_value_type, url.value_details) == 1

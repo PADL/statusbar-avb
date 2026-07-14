@@ -107,14 +107,59 @@ def test_selector_uint16_roundtrip():
             default_value=48000,
             options=[44100, 48000, 32000],
             unit=0x10,
-            string_ref=0,
         )
     ]
     data = serialize_selector_values(ControlValueType.SELECTOR_UINT16, values)
-    parsed = parse_selector_values(ControlValueType.SELECTOR_UINT16, data, 1)
+    # number_of_values for SELECTOR types is the option count.
+    parsed = parse_selector_values(ControlValueType.SELECTOR_UINT16, data, 3)
     assert len(parsed) == 1
     assert parsed[0].current == 48000
     assert parsed[0].options == [44100, 48000, 32000]
+
+
+def test_linear_wire_field_order():
+    """Byte-exact spec order (IEEE 1722.1-2021 Table 7-14): min, max, step,
+    default, current, unit, string. Round-trip tests alone cannot catch a
+    symmetric order bug — this is what made macOS reject the IDENTIFY
+    control (it parsed max=0, default=255)."""
+    identify = [
+        LinearValue(
+            minimum=0,
+            maximum=255,
+            step=255,
+            default_value=0,
+            current=0,
+            unit=0x0000,
+            string_ref=0xFFFF,
+        )
+    ]
+    data = serialize_linear_values(ControlValueType.LINEAR_UINT8, identify)
+    assert data == bytes.fromhex("00 ff ff 00 00 00 00 ff ff".replace(" ", ""))
+    wide = [
+        LinearValue(
+            minimum=1,
+            maximum=2,
+            step=3,
+            default_value=4,
+            current=5,
+            unit=0xB0,
+            string_ref=0x1234,
+        )
+    ]
+    data = serialize_linear_values(ControlValueType.LINEAR_UINT16, wide)
+    assert data == bytes.fromhex("00010002000300040005" + "00b0" + "1234")
+
+
+def test_selector_wire_layout():
+    """Byte-exact spec layout (IEEE 1722.1-2021 Table 7-15): current, default,
+    options..., unit — no embedded option count and no string_ref field; the
+    CONTROL descriptor's number_of_values carries the option count."""
+    values = [SelectorValue(current=1, default_value=0, options=[0, 1, 2], unit=0x01)]
+    data = serialize_selector_values(ControlValueType.SELECTOR_UINT16, values)
+    assert data == bytes.fromhex("0001" + "0000" + "000000010002" + "0001")
+    # (N + 2) * V + 2, matching the C++ side's length formula.
+    assert len(data) == (3 + 2) * 2 + 2
+    assert count_values(ControlValueType.SELECTOR_UINT16, data) == 3
 
 
 def test_parse_value_details_linear():
@@ -204,12 +249,12 @@ def test_count_values():
     assert count_values(ControlValueType.LINEAR_INT64, one64) == 1
     # Flag bits are masked off.
     assert count_values(0x8000 | ControlValueType.LINEAR_UINT8, two) == 2
-    # SELECTOR: variable-length items are walked.
+    # SELECTOR: number_of_values is the option count, recovered from length.
     sel = serialize_selector_values(
         ControlValueType.SELECTOR_UINT16,
-        [SelectorValue(options=[1, 2, 3]), SelectorValue(options=[4])],
+        [SelectorValue(options=[1, 2, 3])],
     )
-    assert count_values(ControlValueType.SELECTOR_UINT16, sel) == 2
+    assert count_values(ControlValueType.SELECTOR_UINT16, sel) == 3
     # UTF8 / VENDOR payloads are one value; empty payloads are zero.
     assert count_values(ControlValueType.UTF8, b"hi\x00") == 1
     assert count_values(ControlValueType.VENDOR, b"\x01\x02") == 1
@@ -222,6 +267,8 @@ def main():
         test_linear_float_roundtrip,
         test_linear_uint32_roundtrip,
         test_selector_uint16_roundtrip,
+        test_linear_wire_field_order,
+        test_selector_wire_layout,
         test_parse_value_details_linear,
         test_parse_value_details_utf8,
         test_parse_value_details_vendor,

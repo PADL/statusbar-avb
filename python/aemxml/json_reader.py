@@ -381,9 +381,9 @@ def _parse_control_values(
 ) -> bytes:
     """Encode a control's value payload. The typed 'values' form covers the
     LINEAR_* types (list of {current/min/max/step/default/unit/string_ref}),
-    the numeric SELECTOR_* types ({current/default/options/unit/string_ref}),
-    and UTF8 (a plain string); anything else is authored as raw hex bytes in
-    'value_details'."""
+    the numeric SELECTOR_* types ({current/default/options/unit} — selector
+    wire items have no string_ref), and UTF8 (a plain string); anything else
+    is authored as raw hex bytes in 'value_details'."""
     values = c.get("values")
     if values is None:
         if "value_details" not in c:
@@ -417,13 +417,18 @@ def _parse_control_values(
         return serialize_value_details(value_type, linear)
     if is_selector_type(value_type):
         items = values if isinstance(values, list) else [values]
+        for i in items:
+            if "string_ref" in i:
+                raise ValueError(
+                    f"{context}.values: SELECTOR value items have no string_ref "
+                    f"field on the wire (IEEE 1722.1-2021 Table 7-15)"
+                )
         selector = [
             SelectorValue(
                 current=i.get("current", i.get("default", 0)),
                 default_value=i.get("default", i.get("default_value", 0)),
                 options=i.get("options", []),
                 unit=_parse_unit(i.get("unit", 0), f"{context}.values"),
-                string_ref=_parse_value_string_ref(i, strings, f"{context}.values"),
             )
             for i in items
         ]

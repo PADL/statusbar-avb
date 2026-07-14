@@ -8,13 +8,20 @@ field-level serialization/deserialization. The value_details field
 in Control, Mixer, Matrix, and SignalTranscoder descriptors can be
 parsed/serialized via these types.
 
-Wire format for LINEAR types (per item):
-  current (N bytes) | minimum (N bytes) | maximum (N bytes) | step (N bytes) |
-  default_value (N bytes) | unit (2 bytes) | string_ref (2 bytes)
+Wire format for LINEAR types (per item), IEEE 1722.1-2021 Table 7-13/7-14:
+  minimum (N bytes) | maximum (N bytes) | step (N bytes) |
+  default_value (N bytes) | current (N bytes) | unit (2 bytes) |
+  string_ref (2 bytes)
 
-Wire format for SELECTOR types (per item):
-  current (N bytes) | default_value (N bytes) | number_of_options (2 bytes) |
-  options[...] (N bytes each) | unit (2 bytes) | string_ref (2 bytes)
+Wire format for SELECTOR types (one item per control; the CONTROL
+descriptor's number_of_values field is the OPTION count), IEEE
+1722.1-2021 Table 7-15:
+  current (V bytes) | default_value (V bytes) |
+  options[number_of_values] (V bytes each) | unit (2 bytes)
+
+Keep in lockstep with statusbar/atdecc/atdecc_aem_control_values.hpp — a
+field-order mismatch here writes blobs that spec-compliant controllers
+(e.g. macOS) reject, even though our own round-trips still pass.
 """
 
 from __future__ import annotations
@@ -247,13 +254,13 @@ class LinearValue:
 
 @dataclass
 class SelectorValue:
-    """A single SELECTOR control value item."""
+    """A single SELECTOR control value item. Unlike LINEAR items, the wire
+    format has no string_ref field (IEEE 1722.1-2021 Table 7-15)."""
 
     current: int | float = 0
     default_value: int | float = 0
     options: list[int | float] = field(default_factory=list)
     unit: int = 0
-    string_ref: int = 0
 
 
 @dataclass
@@ -292,11 +299,11 @@ def parse_linear_values(
     for _ in range(number_of_values):
         if offset + item_size > len(data):
             break
-        current = struct.unpack_from(fmt, data, offset)[0]
-        minimum = struct.unpack_from(fmt, data, offset + val_size)[0]
-        maximum = struct.unpack_from(fmt, data, offset + val_size * 2)[0]
-        step = struct.unpack_from(fmt, data, offset + val_size * 3)[0]
-        default_value = struct.unpack_from(fmt, data, offset + val_size * 4)[0]
+        minimum = struct.unpack_from(fmt, data, offset)[0]
+        maximum = struct.unpack_from(fmt, data, offset + val_size)[0]
+        step = struct.unpack_from(fmt, data, offset + val_size * 2)[0]
+        default_value = struct.unpack_from(fmt, data, offset + val_size * 3)[0]
+        current = struct.unpack_from(fmt, data, offset + val_size * 4)[0]
         unit = struct.unpack_from(">H", data, offset + val_size * 5)[0]
         string_ref = struct.unpack_from(">H", data, offset + val_size * 5 + 2)[0]
         values.append(
@@ -318,11 +325,11 @@ def serialize_linear_values(
     fmt, _ = info
     parts: list[bytes] = []
     for v in values:
-        parts.append(struct.pack(fmt, v.current))
         parts.append(struct.pack(fmt, v.minimum))
         parts.append(struct.pack(fmt, v.maximum))
         parts.append(struct.pack(fmt, v.step))
         parts.append(struct.pack(fmt, v.default_value))
+        parts.append(struct.pack(fmt, v.current))
         parts.append(struct.pack(">HH", v.unit, v.string_ref))
     return b"".join(parts)
 
@@ -330,53 +337,51 @@ def serialize_linear_values(
 def parse_selector_values(
     control_value_type: int, data: bytes, number_of_values: int
 ) -> list[SelectorValue]:
-    """Parse SELECTOR control value items from wire bytes."""
+    """Parse a SELECTOR control's value_details from wire bytes.
+
+    number_of_values is the CONTROL descriptor field, which for SELECTOR
+    types is the number of OPTIONS; the wire holds exactly one selector
+    item (current, default, options[number_of_values], unit). A one-element
+    list is returned to keep the parse_*_values API shape."""
     info = _SELECTOR_TYPE_INFO.get(control_value_type)
     if info is None:
         return []
     fmt, val_size = info
-    values = []
-    offset = 0
-    for _ in range(number_of_values):
-        if offset + val_size * 2 + 2 > len(data):
-            break
-        current = struct.unpack_from(fmt, data, offset)[0]
-        default_value = struct.unpack_from(fmt, data, offset + val_size)[0]
-        num_options = struct.unpack_from(">H", data, offset + val_size * 2)[0]
-        offset += val_size * 2 + 2
-        options = []
-        for _ in range(num_options):
-            if offset + val_size > len(data):
-                break
-            options.append(struct.unpack_from(fmt, data, offset)[0])
-            offset += val_size
-        # unit + string_ref after options
-        unit = 0
-        string_ref = 0
-        if offset + 4 <= len(data):
-            unit = struct.unpack_from(">H", data, offset)[0]
-            string_ref = struct.unpack_from(">H", data, offset + 2)[0]
-            offset += 4
-        values.append(SelectorValue(current, default_value, options, unit, string_ref))
-    return values
+    if len(data) < (number_of_values + 2) * val_size + 2:
+        return []
+    current = struct.unpack_from(fmt, data, 0)[0]
+    default_value = struct.unpack_from(fmt, data, val_size)[0]
+    options = [
+        struct.unpack_from(fmt, data, val_size * (2 + k))[0]
+        for k in range(number_of_values)
+    ]
+    unit = struct.unpack_from(">H", data, val_size * (2 + number_of_values))[0]
+    return [SelectorValue(current, default_value, options, unit)]
 
 
 def serialize_selector_values(
     control_value_type: int, values: list[SelectorValue]
 ) -> bytes:
-    """Serialize SELECTOR control value items to wire bytes."""
+    """Serialize a SELECTOR control's value_details to wire bytes.
+
+    The wire carries one selector item per control; values must be a
+    one-element list (kept as a list for API symmetry with LINEAR)."""
     info = _SELECTOR_TYPE_INFO.get(control_value_type)
     if info is None:
         return b""
+    if len(values) != 1:
+        raise ValueError(
+            f"a SELECTOR control holds exactly one value item, got {len(values)}"
+        )
     fmt, _ = info
-    parts: list[bytes] = []
-    for v in values:
-        parts.append(struct.pack(fmt, v.current))
-        parts.append(struct.pack(fmt, v.default_value))
-        parts.append(struct.pack(">H", len(v.options)))
-        for opt in v.options:
-            parts.append(struct.pack(fmt, opt))
-        parts.append(struct.pack(">HH", v.unit, v.string_ref))
+    v = values[0]
+    parts: list[bytes] = [
+        struct.pack(fmt, v.current),
+        struct.pack(fmt, v.default_value),
+    ]
+    for opt in v.options:
+        parts.append(struct.pack(fmt, opt))
+    parts.append(struct.pack(">H", v.unit))
     return b"".join(parts)
 
 
@@ -398,10 +403,11 @@ def is_selector_type(control_value_type: int) -> bool:
 
 
 def count_values(control_value_type: int, data: bytes) -> int:
-    """Number of value items encoded in value_details wire bytes — the CONTROL
-    descriptor's number_of_values field. LINEAR items are fixed-size; SELECTOR
-    items are walked (variable-length options list); UTF8 and VENDOR/unknown
-    payloads count as one value when non-empty."""
+    """The CONTROL descriptor's number_of_values field for the given
+    value_details wire bytes. LINEAR items are fixed-size; for SELECTOR
+    types the field is the OPTION count, recovered from the payload length
+    ((N + 2) * V + 2); UTF8 and VENDOR/unknown payloads count as one value
+    when non-empty."""
     if not data:
         return 0
     base_type = control_value_type & 0x3FFF
@@ -412,13 +418,9 @@ def count_values(control_value_type: int, data: bytes) -> int:
     info = _SELECTOR_TYPE_INFO.get(base_type)
     if info is not None:
         val_size = info[1]
-        count = 0
-        offset = 0
-        while offset + val_size * 2 + 2 <= len(data):
-            num_options = struct.unpack_from(">H", data, offset + val_size * 2)[0]
-            offset += val_size * 2 + 2 + num_options * val_size + 4
-            count += 1
-        return count
+        if len(data) < val_size * 2 + 2:
+            return 0
+        return (len(data) - val_size * 2 - 2) // val_size
     return 1
 
 

@@ -561,7 +561,7 @@
     },
     "linear_value": {
       "type": "object",
-      "description": "One LINEAR_* control value item. Wire encoding (current/min/max/step/default + unit + string_ref) is generated.",
+      "description": "One LINEAR_* control value item. Wire encoding (min/max/step/default/current + unit + string_ref, IEEE 1722.1-2021 Table 7-14) is generated.",
       "properties": {
         "current": {
           "type": "number",
@@ -595,7 +595,7 @@
     },
     "selector_value": {
       "type": "object",
-      "description": "One numeric SELECTOR_* control value item. Wire encoding (current/default/options + unit + string_ref) is generated.",
+      "description": "One numeric SELECTOR_* control value item. Wire encoding (current/default/options + unit, IEEE 1722.1-2021 Table 7-15; the descriptor's number_of_values is the option count and selector items carry no string_ref) is generated.",
       "properties": {
         "current": {
           "type": "number",
@@ -614,10 +614,6 @@
         },
         "unit": {
           "$ref": "#/$defs/unit"
-        },
-        "string_ref": {
-          "$ref": "#/$defs/localized_string_ref",
-          "description": "Localized name for this value item (dict form supported); omitted = NO_STRING."
         }
       },
       "additionalProperties": false
