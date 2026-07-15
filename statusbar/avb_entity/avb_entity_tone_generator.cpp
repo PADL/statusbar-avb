@@ -4,48 +4,26 @@
 /// AVB Entity Tone Generator implementation (talker-only).
 /// A blob-loaded model, a per-channel continuous sine source (white piano keys
 /// by default), and N talker streams shaped by the blob's STREAM_OUTPUT
-/// descriptors (Entity Construction Kit phase 1). The media clock is locked to
-/// gPTP (r = 1.0); there is no listener, no GPS-rate tracking and no
-/// inter-site tunnel. The control-plane wiring mirrors AvbEntityAudioIO's
-/// talker half.
+/// descriptors (Entity Construction Kit phase 1). All control-plane wiring
+/// lives in AvbEntityKit (refactor phase D); this file is blob validation,
+/// the sine source, the render bindings, and process_audio().
 
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
 
 #include "statusbar/atdecc/atdecc.hpp"
-#include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
-#include "statusbar/avb_entity/avb_entity_identity.hpp"
-#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
-#include "statusbar/avtp/avtp.hpp"
-#include "statusbar/avtp/avtp_crf.hpp"
-#include "statusbar/buffer/span_utils.hpp"
-#include "statusbar/dsp/dsp.hpp"
-#include "statusbar/ieee/ieee.hpp"
-#include "statusbar/nanoavb/nanoavb.hpp"
-#include "statusbar/nanoavb/nanoavb_acmp.hpp"
-#include "statusbar/nanoavb/nanoavb_adp.hpp"
-#include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
-#include "statusbar/nanoavb/nanoavb_components.hpp"
-#include "statusbar/nanoavb/nanoavb_entity.hpp"
-#include "statusbar/nanoavb/nanoavb_srp.hpp"
-#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_posix_util.hpp"
-#include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
-#include "statusbar/status/status.hpp"
-#include "statusbar/tsn/tsn.hpp"
 
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <memory>
 #include <print>
 #include <span>
-#include <string_view>
 #include <utility>
 
 namespace statusbar::avb_entity {
@@ -174,15 +152,25 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     uint8_t base_midi_note,
     std::pmr::memory_resource* memory_resource)
     : config_{std::move(config)}
-    , specs_{specs}                    // Talker/listener stream counts from the blob; 4 max listeners
-    , listener_specs_{listener_specs}  // per talker stream. Inputs are CRF-only (validated in create).
-    , host_{std::move(handler), default_adp_advertiser_config(), specs.size(), 4, listener_specs.size()}
     , sample_rate_{sample_rate}
     , samples_per_packet_{sample_rate / CLASS_A_PACKETS_PER_SEC}
     , channels_{channels}
     , mem_resource_{memory_resource}
     , audio_buffer_((static_cast<size_t>(samples_per_packet_) + 1) * channels, 0.0F, mem_resource_)  // +1: gPTP pacing
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
+    , kit_{
+          config_,
+          std::move(handler),
+          storage_handler,
+          specs,
+          listener_specs,
+          sample_rate,
+          initial_clock_source,
+          crf_clock_source_index,
+          media_clock_,
+          last_gptp_ns_,
+          /*audio_sink=*/nullptr,
+          mem_resource_}
 {
     // Per-channel continuous sine: each channel is the next white piano key up
     // from base_midi_note (default C4). Amplitude is shared (config tone level).
@@ -195,84 +183,20 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
         oscillators_[ch].coeffs_.set_amplitude(config_.tone_amplitude, 0);
     }
 
-    storage_handler_ = storage_handler;
-
-    // CRF-input clock slaving (kit phase 3c pattern): assigned here rather
-    // than the init list (these members are declared after the DSP members).
-    active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
-    crf_clock_source_index_ = crf_clock_source_index;
-    if (!listener_specs_.empty()) {
-        listener_ = std::make_unique<ListenerStreams>(
-            config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns_, /*audio_sink=*/nullptr);
-    }
-
-    // Per-control dispatch (kit phase 4): the generic CONTROL built-in calls
-    // back with each accepted SET_CONTROL; bound symbols get their handler's
-    // verdict, everything else is accepted (store/serve only).
-    if (storage_handler_ != nullptr) {
-        storage_handler_->set_on_control_changed([this](uint16_t control_index, std::span<uint8_t const> value) -> uint8_t {
-            for (auto& binding : control_bindings_) {
-                if (binding.resolved && binding.control_index == control_index && binding.fn) {
-                    return binding.fn(value);
-                }
-            }
-            return atdecc::AEM_STATUS_SUCCESS;
-        });
-        // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
-        // (the media thread treats it as a closed SRP gate); START reopens.
-        storage_handler_->set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
-            if (type == DESCRIPTOR_STREAM_OUTPUT) {
-                talker_->set_stream_stopped(index, !streaming);
-            }
-            return atdecc::AEM_STATUS_SUCCESS;
-        });
-    }
-
-    // Per-stream render buffers, parallel to specs_: audio slots get an
-    // interleaved tick buffer; CRF/non-audio slots an empty one.
-    for (auto const& spec : specs_) {
+    // Per-stream render buffers, parallel to the talker specs: audio slots get
+    // an interleaved tick buffer; CRF/non-audio slots an empty one.
+    for (auto const& spec : kit_.talker_specs()) {
         bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
         render_buffers_.emplace_back(
             is_audio ? (static_cast<size_t>(samples_per_packet_) + 1) * channels_ : 0, 0.0F, mem_resource_);
     }
-
-    host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
-
-    // Base the talker stream_ids on the NIC MAC (globally unique per box).
-    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_name, config_.entity_id);
-
-    // Static dest MACs by kind (MAAP mode reassigns after acquisition).
-    for (auto const& spec : specs_) {
-        ieee::Eui48 dest{};
-        switch (spec.format.kind) {
-            case StreamKind::am824:
-                dest = config_.am824_talker_dest_mac;
-                break;
-            case StreamKind::aaf:
-                dest = config_.aaf_talker_dest_mac;
-                break;
-            case StreamKind::crf:
-                dest = config_.crf_talker_dest_mac;
-                break;
-            case StreamKind::other:
-            default:
-                break;
-        }
-        (void)host_.components().acmp_talker.configure_stream(spec.index, stream_id_for(stream_base_mac, spec.index), dest);
-    }
-
-    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
-    host_.components().msrp_handler.set_domain(
-        DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id});
-    host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
-    host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
 }
 
 AvbEntityToneGenerator::~AvbEntityToneGenerator()
 {
     (void)statusbar::catch_or_status(
         [&]() -> statusbar::Status {
-            if (host_.is_running()) {
+            if (is_running()) {
                 (void)stop();
             }
             return {};
@@ -288,8 +212,9 @@ AvbEntityToneGenerator::~AvbEntityToneGenerator()
 
 void AvbEntityToneGenerator::set_render(uint16_t const stream_index, StreamRenderFn fn)
 {
-    for (size_t pos = 0; pos < specs_.size(); ++pos) {
-        auto const& spec = specs_[pos];
+    auto const& specs = kit_.talker_specs();
+    for (size_t pos = 0; pos < specs.size(); ++pos) {
+        auto const& spec = specs[pos];
         bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
         if (is_audio && spec.index == stream_index) {
             renders_[pos] = std::move(fn);
@@ -303,10 +228,11 @@ void AvbEntityToneGenerator::set_render(uint16_t const stream_index, StreamRende
 
 void AvbEntityToneGenerator::set_render_symbol(uint32_t const symbol_code, StreamRenderFn fn)
 {
-    for (size_t pos = 0; pos < specs_.size(); ++pos) {
-        auto const& spec = specs_[pos];
+    auto const& specs = kit_.talker_specs();
+    for (size_t pos = 0; pos < specs.size(); ++pos) {
+        auto const& spec = specs[pos];
         bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
-        auto const sym = host_.symbol_of(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        auto const sym = kit_.host().symbol_of(DESCRIPTOR_STREAM_OUTPUT, spec.index);
         if (is_audio && sym.has_value() && *sym == symbol_code) {
             renders_[pos] = std::move(fn);
             return;
@@ -317,207 +243,33 @@ void AvbEntityToneGenerator::set_render_symbol(uint32_t const symbol_code, Strea
     }
 }
 
-void AvbEntityToneGenerator::on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn)
-{
-    ControlBinding binding{};
-    binding.symbol = symbol_code;
-    binding.fn = std::move(fn);
-    if (auto const entry = host_.descriptor_for_symbol(symbol_code);
-        entry.has_value() && entry->descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL) {
-        binding.control_index = entry->descriptor_index;
-        binding.resolved = true;
-    }
-    for (auto& existing : control_bindings_) {
-        if (existing.symbol == symbol_code) {
-            existing = std::move(binding);
-            return;
-        }
-    }
-    if (control_bindings_.size() < MAX_CONTROL_BINDINGS) {
-        control_bindings_.push_back(std::move(binding));
-    }
-}
-
 //
-// Stream-specific control-plane wiring (talker-only)
+// Start
 //
-
-void AvbEntityToneGenerator::wire_stream_callbacks()
-{
-    host_.set_advertise_streams([this](TimePoint time) { advertise_talker_streams(time); });
-    host_.set_withdraw_streams([this](TimePoint time) {
-        for (auto const& spec : specs_) {
-            (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info(spec).stream_id, time);
-        }
-    });
-    host_.set_on_listener_ready(
-        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
-
-    host_.components().acmp_talker.set_connection_callbacks(
-        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            host_.ctl_log().status(
-                "acmp: talker stream {} CONNECTED by listener {:012x} unique_id {}",
-                stream_index,
-                listener_entity_id.to_uint64(),
-                listener_unique_id);
-            // Publish the fresh connection count for the media-timer gate.
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
-        },
-        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            host_.ctl_log().status(
-                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
-                stream_index,
-                listener_entity_id.to_uint64(),
-                listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
-        });
-
-    // AECP GET_COUNTERS + GET_STREAM_INFO: talker outputs always; the CRF
-    // input's health/identity when the blob declares one.
-    host_.components().aem_handler.set_get_counters(
-        [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
-            if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
-            }
-            if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
-            }
-            return false;
-        });
-    host_.components().aem_handler.set_get_stream_info(
-        [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
-            if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_talker_stream_info(host_, descriptor_index, config_.presentation_offset_ns, out);
-            }
-            return false;
-        });
-}
-
-//
-// Start / Stop
-//
-
-auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor) -> Status
-{
-    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices{};
-    for (auto const& spec : specs_) {
-        (void)indices.try_push_back(spec.index);
-    }
-    // On (re)defend: re-declare the MSRP Talker Advertise so listeners
-    // reserve against the MAAP address, once the SR-class domain is up.
-    return maap_.acquire(
-        reactor,
-        config_.interface_name,
-        stream_base_mac_for(config_.interface_name, config_.entity_id),
-        host_.components(),
-        *talker_,
-        indices,
-        host_.ctl_log(),
-        [this]() {
-            if (host_.is_ready()) {
-                advertise_talker_streams(sm::Clock::now());
-            }
-        });
-}
 
 auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
 {
-    gate_.set_logger(host_.ctl_log());
-    if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
-        return status;
-    }
-    wire_stream_callbacks();
-
-    if (config_.stream_address_mode == "maap") {
-        if (auto status = acquire_maap_addresses(reactor); !status) {
-            return status;
-        }
-    }
-
     // Deterministic media clock owns the presentation offset; the stream-output
-    // contexts add zero extra offset.
+    // contexts add zero extra offset. Assigned before kit_.start() opens the
+    // TX slots (the kit's talker holds a reference to it).
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
         .sample_rate_hz = static_cast<double>(sample_rate_), .presentation_offset_ns = config_.presentation_offset_ns}};
 
-    // One TX slot per blob-declared stream, shaped by its format word.
-    for (auto const& spec : specs_) {
-        statusbar::tsn::StreamId sid{};
-        ieee::Eui48 dest{};
-        if (auto const* s = host_.components().acmp_talker.get_stream(spec.index); s != nullptr) {
-            (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
-            dest = s->stream_dest_mac;
-        }
-        if (auto status = talker_->open_stream(spec, sid, dest); !status) {
-            return status;
-        }
+    if (auto status = kit_.start(reactor); !status) {
+        return status;
     }
 
-    // CRF input(s) (kit phase 3c pattern): open the listener slot(s), feed the
-    // recovery from the CRF timestamps, honor SET_CLOCK_SOURCE, and bring up
-    // the RX socket. The media thread reads active_clock_source_ per tick.
-    if (listener_ != nullptr) {
-        for (auto const& spec : listener_specs_) {
-            if (auto status = listener_->open_stream(spec); !status) {
-                return status;
-            }
-            listener_->set_crf(spec.index, crf_recovery_.make_consumer());
-        }
-        if (storage_handler_ != nullptr) {
-            storage_handler_->set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
-                if (domain == 0) {
-                    active_clock_source_.store(source, std::memory_order_release);
-                }
-                return atdecc::AEM_STATUS_SUCCESS;
-            });
-        }
-        // ACMP connect/disconnect drives the MSRP listener attach + the
-        // multicast join for the talker's CRF group.
-        host_.components().acmp_listener.set_connection_callbacks(
-            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
-                listener_->on_listener_connected(stream_index, stream_id, dest_mac);
-            },
-            [this](uint16_t stream_index) { listener_->on_listener_disconnected(stream_index); });
-        // A placeholder group opens the socket; the real join happens on
-        // ACMP connect (on_listener_connected above).
-        std::array<ieee::Eui48, 1> const rx_groups{ieee::Eui48{}};
-        (void)listener_->attach_rx(config_.interface_name, rx_groups, reactor);
-        // Persisted fast-connect bindings (kit phase 5b): a restarted tone
-        // generator re-connects its CRF clock input without a controller.
-        host_.enable_listener_binding_persistence(config_.listener_bindings_path);
-    }
-
-    // TX socket + optional pcap capture (TalkerStreams assembles its own I/O).
-    (void)talker_->open_tx(
-        config_.interface_name,
-        TalkerStreams::TxPcapConfig{
-            .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
-
-    // Menu/selection diagnostics: registrations the model left inert. Info
-    // level -- typo-finding, never an error.
+    // Menu/selection diagnostics: render registrations the model left inert
+    // (the kit lists inert CONTROL registrations itself). Typo-finding, never
+    // an error.
     for (auto const code : unbound_render_symbols_) {
-        host_.ctl_log().status("render: registered symbol 0x{:08x} not in this model (inert)", code);
+        kit_.host().ctl_log().status("render: registered symbol 0x{:08x} not in this model (inert)", code);
     }
     for (auto const idx : unbound_render_indices_) {
-        host_.ctl_log().status("render: registered stream index {} not an audio stream in this model (inert)", idx);
-    }
-    for (auto const& binding : control_bindings_) {
-        if (!binding.resolved) {
-            host_.ctl_log().status("control: registered symbol 0x{:08x} not a CONTROL in this model (inert)", binding.symbol);
-        }
+        kit_.host().ctl_log().status("render: registered stream index {} not an audio stream in this model (inert)", idx);
     }
 
     return success();
-}
-
-auto AvbEntityToneGenerator::stop() -> Status
-{
-    if (!host_.is_running()) {
-        return failure(std::make_error_code(std::errc::not_connected));
-    }
-    auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    return host_.stop_control_plane(now);
 }
 
 void AvbEntityToneGenerator::print_state() const
@@ -525,76 +277,20 @@ void AvbEntityToneGenerator::print_state() const
     std::print(
         "State: supervisor={} gptp={} mvrp={} channels={} rate={}",
         state_string(),
-        host_.gptp_locked() ? "Locked" : "Unlocked",
-        host_.mvrp_joined() ? "Joined" : "NotJoined",
+        kit_.host().gptp_locked() ? "Locked" : "Unlocked",
+        kit_.host().mvrp_joined() ? "Joined" : "NotJoined",
         channels_,
         sample_rate_);
-    for (auto const& spec : specs_) {
-        auto const* slot = talker_->slot_for(spec.index);
+    for (auto const& spec : kit_.talker_specs()) {
+        auto const* slot = kit_.talker().slot_for(spec.index);
         std::print(
             " | {}[{}] acmp={} tx={}",
             stream_kind_name(spec.format.kind),
             spec.index,
-            host_.components().acmp_talker.connection_count(spec.index),
+            kit_.host().components().acmp_talker.connection_count(spec.index),
             slot != nullptr ? slot->tx_packets : 0);
     }
     std::print("\n");
-}
-
-//
-// MSRP talker reservation
-//
-
-auto AvbEntityToneGenerator::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo
-{
-    nanoavb::TalkerStreamSrpInfo info{};
-    if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
-        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
-        info.dest_address = stream->stream_dest_mac;
-        info.vlan_id = stream->stream_vlan_id;
-    } else {
-        info.vlan_id = config_.vlan_id;
-    }
-    info.max_interval_frames = 1;
-    // TSpec frame size from the blob's format word (kit phase 1) — no more
-    // per-entity byte math to keep in step with the model.
-    info.max_frame_size = srp_max_frame_size(spec.format);
-    info.accumulated_latency = 0;
-    return info;
-}
-
-void AvbEntityToneGenerator::advertise_talker_streams(TimePoint const time)
-{
-    if (!maap_.ready()) {
-        return;
-    }
-    for (auto const& spec : specs_) {
-        auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(spec), time);
-        if (!result) {
-            host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", spec.index, result.error().value());
-        }
-    }
-}
-
-//
-// Event handlers (drive the shared SM stack)
-//
-
-void AvbEntityToneGenerator::on_link_up(TimePoint time)
-{
-    host_.on_link_up(time);
-}
-void AvbEntityToneGenerator::on_link_down(TimePoint time)
-{
-    host_.on_link_down(time);
-}
-void AvbEntityToneGenerator::on_gptp_announce(TimePoint time, bool has_grandmaster)
-{
-    host_.on_gptp_announce(time, has_grandmaster);
-}
-void AvbEntityToneGenerator::on_timeout(TimePoint time)
-{
-    host_.on_timeout(time);
 }
 
 //
@@ -611,15 +307,11 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         last_gptp_ns_.store(wake_ns, std::memory_order_relaxed);
 
         // Media clock rate: 1.0 (locked to gPTP) unless the CRF-input clock
-        // source is active, in which case the recovered remote rate slaves
-        // this entity's media clock to the far talker's (nominal 1.0 until
-        // the recovery locks). The avtp_timestamp comes from the
+        // source is active and locked, in which case the recovered remote
+        // rate slaves this entity's media clock to the far talker's (see
+        // AvbEntityKit::media_rate). The avtp_timestamp comes from the
         // deterministic generator, not the jittery wake time.
-        double r = 1.0;
-        if (crf_clock_source_index_ && active_clock_source_.load(std::memory_order_acquire) == *crf_clock_source_index_) {
-            auto const est = crf_recovery_.estimate();
-            r = est.locked ? est.r : 1.0;
-        }
+        double const r = kit_.media_rate(1.0);
         auto const tick = media_clock_.advance(wake_ns, r, samples_per_packet_);
         auto const samples = static_cast<size_t>(tick.samples);
         if (samples == 0) {
@@ -640,7 +332,8 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         // Each stream renders its own source (bound render callback, else the
         // shared tone), gates on ITS OWN ACMP connection + reservation, and
         // emits per its kind (AM824 direct, AAF reframed, CRF decimated).
-        for (size_t pos = 0; pos < specs_.size(); ++pos) {
+        auto const& specs = kit_.talker_specs();
+        for (size_t pos = 0; pos < specs.size(); ++pos) {
             std::span<float const> src{audio_buffer_.data(), samples * channels_};
             if (renders_[pos]) {
                 auto& buf = render_buffers_[pos];
@@ -648,19 +341,12 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
                 renders_[pos](dest, tick.samples, tick.first_index, pts);
                 src = dest;
             }
-            if (auto* slot = talker_->slot_for(specs_[pos].index); slot != nullptr) {
-                talker_->transmit_if_due(*slot, tick, talker_should_transmit(slot->spec.index, now_steady_ns), samples, src);
+            if (auto* slot = kit_.talker().slot_for(specs[pos].index); slot != nullptr) {
+                kit_.talker().transmit_if_due(
+                    *slot, tick, kit_.talker_should_transmit(slot->spec.index, now_steady_ns), samples, src);
             }
         }
     }
-}
-
-auto AvbEntityToneGenerator::talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
-{
-    if (!maap_.ready()) {
-        return false;
-    }
-    return gate_.should_transmit(idx, now_ns);
 }
 
 }  // namespace statusbar::avb_entity

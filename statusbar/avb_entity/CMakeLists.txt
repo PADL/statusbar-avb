@@ -10,6 +10,7 @@ statusbar_add_module(
   avb_entity_audio_io.cpp
   avb_entity_tone_generator.cpp
   avb_entity_host.cpp
+  avb_entity_kit.cpp
   avb_entity_stream_counters.cpp
   avb_entity_stream_spec.cpp
   avb_entity_listener_streams.cpp

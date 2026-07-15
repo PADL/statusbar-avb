@@ -21,23 +21,15 @@
 /// generator can phase-follow another node's media clock. Audio stream
 /// inputs remain unsupported (a tone generator has no audio RX path).
 ///
-/// This reuses the shared AVB control plane (AvbEntityHost), the spec-driven
-/// stream TX path (TalkerStreams), the CRF listener slot + clock recovery
-/// (ListenerStreams + CrfClockRecovery, kit phase 3), the per-stream
-/// transmit gate (TalkerGate), and the deterministic
-/// presentation-timestamp generator (MediaClockGenerator). It deliberately
-/// omits the audio-listener / UDPTUN halves of AvbEntityAudioIO.
+/// Built on AvbEntityKit (refactor phase D): the kit owns the control plane,
+/// the spec-shaped talker/listener stream paths, the transmit gate, MAAP,
+/// CRF-input clock slaving and the CONTROL registry; this class keeps only
+/// what is genuinely a tone generator — blob validation, the white-key sine
+/// source, the per-stream render bindings, and process_audio().
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
-#include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
-#include "statusbar/avb_entity/avb_entity_host.hpp"
-#include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
-#include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
-#include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
-#include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
-#include "statusbar/avtp/avtp.hpp"
-#include "statusbar/avtp/avtp_maap_handler.hpp"
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
@@ -52,9 +44,9 @@
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
-#include <string>
+#include <optional>
 #include <string_view>
-#include <vector>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -77,6 +69,7 @@ class AvbEntityToneGenerator
 {
   public:
     using TimePoint = sm::TimePoint;
+    using ControlChangedFn = AvbEntityKit::ControlChangedFn;
 
     /// SR class A wire cadence (125 us interval = 8000 packets/s/stream). The
     /// samples-per-packet follows the blob's audio rate (12 @ 96k, 6 @ 48k).
@@ -128,46 +121,39 @@ class AvbEntityToneGenerator
         std::pmr::memory_resource* memory_resource);
 
     [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
-    [[nodiscard]] auto stop() -> Status;
+    [[nodiscard]] auto stop() -> Status { return kit_.stop(); }
 
-    [[nodiscard]] auto is_running() const noexcept -> bool { return host_.is_running(); }
-    [[nodiscard]] auto is_ready() const noexcept -> bool { return host_.is_ready(); }
-    [[nodiscard]] auto state_string() const -> std::string_view { return host_.state_string(); }
+    [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
+    [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
+    [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;
 
-    auto on_link_up(TimePoint time) -> void;
-    auto on_link_down(TimePoint time) -> void;
-    auto on_gptp_announce(TimePoint time, bool has_grandmaster) -> void;
-    auto on_timeout(TimePoint time) -> void;
+    auto on_link_up(TimePoint time) -> void { kit_.on_link_up(time); }
+    auto on_link_down(TimePoint time) -> void { kit_.on_link_down(time); }
+    auto on_gptp_announce(TimePoint time, bool has_grandmaster) -> void { kit_.on_gptp_announce(time, has_grandmaster); }
+    auto on_timeout(TimePoint time) -> void { kit_.on_timeout(time); }
 
     /// Process one media-timer wake (8000 Hz): generate the per-channel tones and
     /// transmit each blob-declared stream (gated per stream).
     auto process_audio(TimePoint time) -> void;
 
     /// Whether talker stream `idx` (a STREAM_OUTPUT descriptor index) should put
-    /// its AVTP stream on the wire this tick (gating disabled, or a downstream
-    /// listener is ready/connected). Also gated on MAAP-address readiness in
-    /// "maap" mode.
-    [[nodiscard]] auto talker_should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+    /// its AVTP stream on the wire this tick (see AvbEntityKit).
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+    {
+        return kit_.talker_should_transmit(idx, now_ns);
+    }
 
     /// The blob-derived stream table (kind/format/rate per STREAM_OUTPUT).
-    [[nodiscard]] auto stream_specs() const noexcept -> StreamSpecs const& { return specs_; }
+    [[nodiscard]] auto stream_specs() const noexcept -> StreamSpecs const& { return kit_.talker_specs(); }
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
 
-    // --- CRF-input media-clock slaving (kit phase 3c pattern) ----------------
-    /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
-    /// state; the blob's authored default until a controller changes it).
-    [[nodiscard]] auto active_clock_source() const noexcept -> uint16_t
-    {
-        return active_clock_source_.load(std::memory_order_acquire);
-    }
-    /// The clock-source index backed by the blob's CRF stream input, or
-    /// nullopt when the model declares none (gPTP-only pacing).
-    [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return crf_clock_source_index_; }
-    /// The CRF media-clock recovery (rate/lock telemetry).
-    [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
+    // --- CRF-input media-clock slaving (kit phase 3c; owned by the kit) -------
+    [[nodiscard]] auto active_clock_source() const noexcept -> uint16_t { return kit_.active_clock_source(); }
+    [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return kit_.crf_clock_source_index(); }
+    [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return kit_.crf_recovery(); }
     /// The blob-derived listener stream table (CRF inputs only).
-    [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
+    [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return kit_.listener_specs(); }
 
     // --- Per-stream TX sources (kit phase 2) -------------------------------------
     /// Register a render callback for the audio stream whose blob symbol is
@@ -183,78 +169,32 @@ class AvbEntityToneGenerator
     /// Same, addressed by STREAM_OUTPUT descriptor index.
     void set_render(uint16_t stream_index, StreamRenderFn fn);
 
-    // --- Per-control value handlers (kit phase 4) ---------------------------
-    /// A bound control's value-changed handler: receives the SET_CONTROL
-    /// current-values payload (size-validated for linear types). Return
-    /// AEM_STATUS_SUCCESS to accept (the built-in stores + notifies), any
-    /// other AEM_STATUS_* to reject. Reactor thread.
-    using ControlChangedFn = sg14::inplace_function<uint8_t(std::span<uint8_t const> value), 64>;
-
+    // --- Per-control value handlers (kit phase 4; owned by the kit) -----------
     /// Register a handler for the CONTROL whose blob symbol is @p symbol.
     /// The code is a menu, the model is the selection: an unknown symbol is
     /// recorded but inert (listed at start()); controls with no handler still
     /// get the generic store/serve built-in.
     void on_control(std::string_view symbol, ControlChangedFn fn) { on_control_symbol(symbol_code(symbol), std::move(fn)); }
-    void on_control_symbol(uint32_t symbol_code, ControlChangedFn fn);
+    void on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn) { kit_.on_control_symbol(symbol_code, std::move(fn)); }
 
-    [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
-    [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
-    [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
+    [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return kit_.host().components(); }
+    [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return kit_.host().components(); }
+    [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return kit_.host().net_handlers(); }
 
     // --- Logging (see AvbEntityHost) --------------------------------------------
-    [[nodiscard]] auto ctl_log_channel() noexcept -> logging::LogChannelBase& { return host_.ctl_log_channel(); }
-    [[nodiscard]] auto media_log_channel() noexcept -> logging::LogChannelBase& { return host_.media_log_channel(); }
-    void set_log_verbosity(logging::LogLevel const v) noexcept { host_.set_log_verbosity(v); }
+    [[nodiscard]] auto ctl_log_channel() noexcept -> logging::LogChannelBase& { return kit_.host().ctl_log_channel(); }
+    [[nodiscard]] auto media_log_channel() noexcept -> logging::LogChannelBase& { return kit_.host().media_log_channel(); }
+    void set_log_verbosity(logging::LogLevel const v) noexcept { kit_.host().set_log_verbosity(v); }
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
 
     /// TX stream capture (diagnostic; see AvbEntityAudioIOConfig::tx_pcap_path).
-    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return talker_->tx_pcap_ready_to_write(); }
-    [[nodiscard]] auto flush_tx_pcap() -> Status { return talker_->flush_tx_pcap(); }
-    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return talker_->tx_pcap_frame_count(); }
+    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return kit_.talker().tx_pcap_ready_to_write(); }
+    [[nodiscard]] auto flush_tx_pcap() -> Status { return kit_.talker().flush_tx_pcap(); }
+    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return kit_.talker().tx_pcap_frame_count(); }
 
   private:
-    auto wire_stream_callbacks() -> void;
-    [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
-    void advertise_talker_streams(TimePoint time);
-    [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
-
     AvbEntityAudioIOConfig config_;
-
-    /// Blob-derived stream tables; drive every per-stream decision below.
-    StreamSpecs specs_;
-    StreamSpecs listener_specs_;  ///< CRF inputs only (audio inputs rejected at create)
-
-    /// Reusable AVB control plane: talker/listener stream counts from the
-    /// blob, 4 max listeners per talker stream.
-    AvbEntityHost host_;
-
-    /// Per-stream TX render bindings + their interleaved buffers, parallel to
-    /// specs_ (empty function = default tone; empty buffer = non-audio slot).
-    std::array<StreamRenderFn, MAX_ENTITY_STREAMS> renders_{};
-    sg14::inplace_vector<std::pmr::vector<float>, MAX_ENTITY_STREAMS> render_buffers_{};
-    /// Registrations that matched nothing in the model (menu/selection:
-    /// inert; listed at start() for typo-finding).
-    sg14::inplace_vector<uint32_t, MAX_ENTITY_STREAMS> unbound_render_symbols_{};
-    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> unbound_render_indices_{};
-
-    /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
-    /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).
-    struct ControlBinding
-    {
-        uint32_t symbol{0};
-        uint16_t control_index{0};
-        bool resolved{false};
-        ControlChangedFn fn{};
-    };
-    static constexpr size_t MAX_CONTROL_BINDINGS = 8;
-    sg14::inplace_vector<ControlBinding, MAX_CONTROL_BINDINGS> control_bindings_{};
-    /// The blob-backed descriptor handler (owned by host_); carries the
-    /// generic CONTROL built-in this registry dispatches from.
-    nanoavb::DescriptorStorageHandler* storage_handler_{nullptr};
-
-    /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
-    TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 
     uint32_t sample_rate_{DEFAULT_SAMPLE_RATE};  ///< from the blob's audio formats
     uint32_t samples_per_packet_{DEFAULT_SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC};
@@ -267,43 +207,30 @@ class AvbEntityToneGenerator
     std::pmr::vector<float> audio_buffer_;
     std::pmr::vector<dsp::Oscillator<float>> oscillators_;
 
-    /// Latest gPTP time (ns) seen by the media timer (TalkerStreams reads it).
+    /// Latest gPTP time (ns) seen by the media timer (the kit's TalkerStreams
+    /// reads it). Declared before kit_ (the kit binds it).
     std::atomic<uint64_t> last_gptp_ns_{0};
 
     /// Deterministic presentation-timestamp generator. r is 1.0 (locked to
-    /// gPTP) unless the CRF-input clock source is active and locked, in
-    /// which case it follows the recovered remote rate (see process_audio).
+    /// gPTP) unless the CRF-input clock source is active and locked (see
+    /// AvbEntityKit::media_rate). Declared before kit_ (the kit binds it).
     ptpclient::MediaClockGenerator media_clock_;
 
-    /// CRF-input media-clock recovery: fed by the CRF stream input's
-    /// timestamps on the RX/reactor thread; consulted for the media-clock
-    /// rate on the media thread when the CRF clock source is active.
-    CrfClockRecovery crf_recovery_{};
-    /// The CLOCK_DOMAIN's active clock-source index. Written by the
-    /// SET_CLOCK_SOURCE apply callback (reactor thread), read per tick by
-    /// the media thread. Assigned in the ctor body (declaration order).
-    std::atomic<uint16_t> active_clock_source_{0};
-    /// The clock-source index whose CLOCK_SOURCE descriptor is the CRF
-    /// stream input (resolved from the blob at create; nullopt = not modeled).
-    std::optional<uint16_t> crf_clock_source_index_{};
+    /// The Entity Construction Kit: control plane, talker/listener stream
+    /// paths, transmit gate, MAAP, CRF clock slaving, CONTROL registry.
+    /// Declared after the members it references (config_, media_clock_,
+    /// last_gptp_ns_, mem_resource_).
+    AvbEntityKit kit_;
 
-    /// The CRF listener RX path (only allocated when the blob declares a CRF
-    /// input): the CRF deserialize slot + counters + the borrowed RX socket
-    /// (the socket's handler is owned by the reactor after start()).
-    /// Declared after host_/config_/last_gptp_ns_ (binds components).
-    std::unique_ptr<ListenerStreams> listener_{};
-
-    /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
-    /// counters + capture recorder. Declared after the members it references.
-    std::unique_ptr<TalkerStreams> talker_{std::make_unique<TalkerStreams>(
-        TalkerStreamsConfig{.sample_rate = sample_rate_, .vlan_id = config_.vlan_id, .stream_pcp = config_.stream_pcp},
-        media_clock_,
-        last_gptp_ns_,
-        mem_resource_)};
-
-    /// MAAP dynamic-address acquisition (active only in "maap"
-    /// stream_address_mode; ready() defaults true for static MACs).
-    MaapAddressAcquirer maap_{};
+    /// Per-stream TX render bindings + their interleaved buffers, parallel to
+    /// the kit's talker specs (empty function = default tone; empty buffer =
+    /// non-audio slot).
+    std::array<StreamRenderFn, MAX_ENTITY_STREAMS> renders_{};
+    sg14::inplace_vector<std::pmr::vector<float>, MAX_ENTITY_STREAMS> render_buffers_{};
+    /// Registrations that matched nothing in the model (menu/selection:
+    /// inert; listed at start() for typo-finding).
+    sg14::inplace_vector<uint32_t, MAX_ENTITY_STREAMS> unbound_render_symbols_{};
+    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> unbound_render_indices_{};
 };
 
 }  // namespace statusbar::avb_entity
