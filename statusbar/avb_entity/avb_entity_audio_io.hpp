@@ -83,11 +83,12 @@ class AvbEntityAudioIO
   public:
     using TimePoint = sm::TimePoint;
 
-    /// Stream format constants. 96 kHz, SR class A (125 us interval = 8000
-    /// packets/s), so samples-per-packet = 96000/8000 = 12.
-    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
-    static constexpr uint32_t SAMPLE_RATE = 96000;
-    static constexpr size_t SAMPLES_PER_PACKET = SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC;
+    /// Stream format constants — the shared Class-A 96 kHz format (one
+    /// definition, avb_entity_udptun_format.hpp: the inter-site tunnel carries
+    /// this entity's audio, so the two formats are literally one fact).
+    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = ClassA96k::CLASS_A_PACKETS_PER_SEC;
+    static constexpr uint32_t SAMPLE_RATE = ClassA96k::SAMPLE_RATE;
+    static constexpr size_t SAMPLES_PER_PACKET = ClassA96k::SAMPLES_PER_PACKET;
 
     /// CRF (media-clock reference) base frequency. Milan mandates a 48 kHz CRF
     /// media clock; 48 kHz AND 96 kHz clients both lock to it. Our audio runs at
@@ -97,27 +98,16 @@ class AvbEntityAudioIO
     static constexpr uint32_t CRF_BASE_FREQUENCY = 48000;
     static_assert(SAMPLE_RATE % CRF_BASE_FREQUENCY == 0, "CRF base must divide the audio sample rate");
 
-    /// Redundancy flag bit in the tunnel stream_id: the redundant copy is sent with
-    /// `primary | UDPTUN_REDUN_BIT`, so the egress tells primary from redundant. It
-    /// MUST sit in the modified-EUI-64 middle bytes (b3/b4 = the inserted 0xFF:0xFE,
-    /// uint64 bits 24..39) — the bytes owlm_analyze masks when grouping primary +
-    /// redundant into one logical sender — otherwise the two copies land in different
-    /// pair_ids and recovery accounting breaks. Bit 24 (LSB of b4 = 0xFE) is reliably
-    /// clear in a MAC-derived id and inside owlm's mask. (A NIC-half bit like 1<<23
-    /// would be wrong on both counts: it can be set in the MAC, and lies outside
-    /// owlm's mask.) The primary id force-clears this bit so the redundant id is always
-    /// distinct. The b3/b4 mask owlm applies for pairing is OWLM_PAIR_MASK_MIDBYTES.
-    static constexpr uint64_t UDPTUN_REDUN_BIT = (1ULL << 24);
-    static constexpr uint64_t OWLM_PAIR_MASK_MIDBYTES = 0x000000FF'FF000000ULL;
-    static_assert((UDPTUN_REDUN_BIT & (UDPTUN_REDUN_BIT - 1)) == 0, "REDUN_BIT must be a single bit");
-    static_assert(
-        (UDPTUN_REDUN_BIT & ~OWLM_PAIR_MASK_MIDBYTES) == 0,
-        "REDUN_BIT must live in the EUI-64 b3/b4 bytes that owlm masks for pair grouping");
+    /// Tunnel stream_id redundancy constants (canonical definition + full
+    /// rationale: avb_entity_udptun_format.hpp; re-exported for the tests that
+    /// pin the invariants through the entity API).
+    static constexpr uint64_t UDPTUN_REDUN_BIT = avb_entity::UDPTUN_REDUN_BIT;
+    static constexpr uint64_t OWLM_PAIR_MASK_MIDBYTES = avb_entity::OWLM_PAIR_MASK_MIDBYTES;
 
-    /// AAF stream wire format: 32-bit signed PCM at 96 kHz.
-    static constexpr avtp::AafFormat AAF_FORMAT = avtp::AafFormat::int_32bit;
-    static constexpr avtp::AafSampleRate AAF_SAMPLE_RATE = avtp::AafSampleRate::rate_96_khz;
-    static constexpr uint8_t AAF_BIT_DEPTH = 32;
+    /// AAF stream wire format: 32-bit signed PCM at 96 kHz (shared ClassA96k).
+    static constexpr avtp::AafFormat AAF_FORMAT = ClassA96k::AAF_FORMAT;
+    static constexpr avtp::AafSampleRate AAF_SAMPLE_RATE = ClassA96k::AAF_SAMPLE_RATE;
+    static constexpr uint8_t AAF_BIT_DEPTH = ClassA96k::AAF_BIT_DEPTH;
 
     /// Stream descriptor indices.
     static constexpr uint16_t AM824_STREAM_INDEX = 0;
@@ -337,9 +327,10 @@ class AvbEntityAudioIO
     /// media = producer, reactor = sole consumer.
     itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot> tai_snapshot_{};
 
-    /// The inter-site WAN tunnel collaborator (god-object phase 2): owns all tunnel
-    /// state + the ingest/egress/send/punch-worker/watchdog methods; the entity
-    /// forwards into it (udptun_->...). Declared AFTER the members it references
+    /// The inter-site WAN tunnel facade (transport / ingest / egress
+    /// collaborators behind it; refactor phase C): the entity talks to it only
+    /// through methods (start/stop, punch_service, egress drain+fill,
+    /// should_emit_silence, source_tick). Declared AFTER the members it references
     /// (config_, rate_tracker_, tai_snapshot_, audio_buffer_, channels_, last_gptp_ns_)
     /// so those bind constructed and outlive it (it destructs first). Always allocated.
     std::unique_ptr<EntityUdptunBridge> udptun_{

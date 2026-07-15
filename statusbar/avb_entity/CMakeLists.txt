@@ -16,6 +16,9 @@ statusbar_add_module(
   avb_entity_talker_streams.cpp
   avb_entity_talker_gate.cpp
   avb_entity_udptun_bridge.cpp
+  avb_entity_udptun_transport.cpp
+  avb_entity_udptun_ingest_path.cpp
+  avb_entity_udptun_egress_path.cpp
   DEPS
   statusbar::atdecc
   statusbar::avtp

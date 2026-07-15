@@ -39,4 +39,33 @@ inline auto udptun_am824_mbla_to_int32(std::span<uint8_t const> mbla, std::span<
     return quads * 4;
 }
 
+/// True while real (listener-sourced) tunnel audio is flowing: the last real
+/// ingest happened within @p window_ns of @p now_tai_ns. Shared by the punch
+/// keepalive (stands down while streaming) and the media thread's
+/// silence-source gate (which MUST mirror the keepalive so real audio always
+/// wins) — one definition so the two predicates can never drift apart. A zero
+/// last/now (no sample yet / no clock) reads as not streaming.
+[[nodiscard]] constexpr auto udptun_source_streaming(
+    int64_t const last_real_ingest_tai_ns, int64_t const now_tai_ns, int64_t const window_ns = 100'000'000) noexcept -> bool
+{
+    return last_real_ingest_tai_ns != 0 && now_tai_ns != 0 && (now_tai_ns - last_real_ingest_tai_ns) < window_ns;
+}
+
+/// Sweep pacing: how many frames to emit this tick so the cumulative emitted
+/// count tracks elapsed TAI at @p sample_rate exactly — the ingest
+/// avtp_timestamp stays locked to TAI with zero drift and the far egress
+/// (playing on the same GPS-TAI clock) never under/over-runs. Bounded by
+/// @p cap per call so a stall never bursts unbounded catch-up.
+[[nodiscard]] constexpr auto udptun_sweep_frames_due(
+    int64_t const elapsed_ns, uint64_t const frames_emitted, uint32_t const sample_rate, size_t const cap) noexcept -> size_t
+{
+    auto const target =
+        (elapsed_ns > 0) ? static_cast<uint64_t>((elapsed_ns * static_cast<int64_t>(sample_rate)) / 1'000'000'000LL) : uint64_t{0};
+    if (target <= frames_emitted) {
+        return 0;
+    }
+    auto const n = static_cast<size_t>(target - frames_emitted);
+    return (n > cap) ? cap : n;
+}
+
 }  // namespace statusbar::avb_entity

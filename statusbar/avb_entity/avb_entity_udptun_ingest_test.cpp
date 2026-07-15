@@ -66,6 +66,44 @@ TEST(udptun_ingest, bounded_by_smaller_span)
     EXPECT_EQ(static_cast<int>(out[0]), 0x01);
 }
 
+//
+// udptun_source_streaming — the ONE predicate behind both the punch keepalive
+// and the silence-source gate (they must mirror or the two threads double-feed
+// the reframer; refactor phase C pinned them to this shared definition).
+//
+
+TEST(udptun_ingest, source_streaming_within_window)
+{
+    using statusbar::avb_entity::udptun_source_streaming;
+    int64_t const now = 10'000'000'000;
+    EXPECT_TRUE(udptun_source_streaming(now - 50'000'000, now));    // 50 ms ago: streaming
+    EXPECT_FALSE(udptun_source_streaming(now - 150'000'000, now));  // 150 ms ago: idle
+    EXPECT_FALSE(udptun_source_streaming(0, now));                  // never ingested
+    EXPECT_FALSE(udptun_source_streaming(now - 50'000'000, 0));     // no clock -> not streaming
+}
+
+//
+// udptun_sweep_frames_due — TAI-locked sweep pacing (moved out of the entity's
+// process_audio in refactor phase C): cumulative frames track elapsed TAI at
+// the sample rate exactly, with catch-up bursts bounded by the cap.
+//
+
+TEST(udptun_ingest, sweep_pacing_tracks_elapsed_tai)
+{
+    using statusbar::avb_entity::udptun_sweep_frames_due;
+    constexpr uint32_t RATE = 96000;
+    // 1 ms elapsed @ 96 kHz = 96 frames due; none emitted yet.
+    EXPECT_EQ(udptun_sweep_frames_due(1'000'000, 0, RATE, 1000), size_t{96});
+    // Already caught up -> nothing due.
+    EXPECT_EQ(udptun_sweep_frames_due(1'000'000, 96, RATE, 1000), size_t{0});
+    // Emitted ahead of the clock (anchor just moved) -> nothing due, no underflow.
+    EXPECT_EQ(udptun_sweep_frames_due(1'000'000, 200, RATE, 1000), size_t{0});
+    // Negative elapsed (clock step) -> nothing due.
+    EXPECT_EQ(udptun_sweep_frames_due(-5'000'000, 0, RATE, 1000), size_t{0});
+    // A long stall is capped, not burst all at once: 1 s behind but cap 48.
+    EXPECT_EQ(udptun_sweep_frames_due(1'000'000'000, 0, RATE, 48), size_t{48});
+}
+
 // Test runner
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_udptun_ingest_test)

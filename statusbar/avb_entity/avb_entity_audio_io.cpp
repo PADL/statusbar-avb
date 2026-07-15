@@ -15,8 +15,6 @@
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
-#include "statusbar/avb_entity/avb_entity_udptun_egress.hpp"
-#include "statusbar/avb_entity/avb_entity_udptun_ingest.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/dsp/dsp.hpp"
@@ -45,8 +43,6 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
-#include "statusbar/udptun/udptun_aaf_v1_codec.hpp"
-#include "statusbar/udptun/udptun_audio_ingest.hpp"
 
 #include <algorithm>
 #include <array>
@@ -422,25 +418,11 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
         rt_rx_handler_ = std::move(*rx);
     }
 
-    // Inter-site UDPTUN (optional; any failure is non-fatal -- the entity runs its
-    // local AVB streams normally without the tunnel). With a rendezvous server,
-    // STUN traversal yields one shared socket for both directions; otherwise the
-    // ingest/egress each open their own direct socket.
-    if (!config_.udptun_rendezvous_server.empty()) {
-        // Async punch-RETRY worker (not the one-shot blocking rendezvous): the two
-        // sites' entities can't coordinate a single startup handshake, so retry
-        // with a clock-derived rotating session id until data flows. See
-        // udptun_->start_udptun_punch_worker(). udptun_->setup_udptun_rendezvous() remains for the
-        // (unused) one-shot path / reference.
-        (void)udptun_->start_udptun_punch_worker();
-    } else if (config_.udptun_enable && config_.udptun_egress && !config_.udptun_peer_host.empty()) {
-        // Bidirectional direct peer: one shared socket so both ends transmitting
-        // hole-punches both NAT pinholes without STUN.
-        (void)udptun_->setup_udptun_direct_shared();
-    } else {
-        (void)udptun_->setup_udptun_ingest();
-        (void)udptun_->setup_udptun_egress();
-    }
+    // Inter-site UDPTUN (optional; any failure is non-fatal -- the entity runs
+    // its local AVB streams normally without the tunnel). The bridge selects
+    // the establishment path (STUN punch worker / direct-shared / per-direction
+    // direct sockets) from the config.
+    udptun_->start();
 
     return success();
 }
@@ -453,11 +435,7 @@ auto AvbEntityAudioIO::stop() -> Status
 
     // Tear down our data plane, then the shared control plane (host stops ADP +
     // releases the net handlers + clears running_).
-    udptun_->stop_udptun_punch_worker();
-    if (udptun_->egress_colbin_) {
-        (void)udptun_->egress_colbin_->commit();
-        udptun_->egress_colbin_.reset();
-    }
+    udptun_->stop();
     auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     return host_.stop_control_plane(now);
 }
@@ -486,8 +464,8 @@ void AvbEntityAudioIO::print_state() const
         rx_aaf != nullptr ? rx_aaf->rx_packets.load() : 0,
         rx_aaf != nullptr ? rx_aaf->rx_samples.load() : 0,
         rx_aaf != nullptr ? rx_aaf->rx_bad.load() : 0,
-        udptun_->telemetry_->egress_reset_count.load(),
-        udptun_->telemetry_->egress_repunch_count.load());
+        udptun_->telemetry().egress_reset_count.load(),
+        udptun_->telemetry().egress_repunch_count.load());
 }
 
 //
@@ -589,15 +567,15 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
     // hole-punched socket staged by the worker and watchdog the RX. Runs before
     // the drain so a just-installed socket is drained this same wake.
     if (udptun_->punch_service_active()) {
-        udptun_->udptun_punch_service(realtime_tai_ns(config_.udptun_tai_offset_ns));
+        udptun_->punch_service(realtime_tai_ns(config_.udptun_tai_offset_ns));
     }
 
     // Inter-site egress: drain the UDP socket and snapshot the TAI playout clock
     // once per wake (CLOCK_REALTIME + offset). Done on this (media-timer) thread so
     // AudioEgress stays single-threaded.
     int64_t udptun_now_tai_ns = 0;
-    if (udptun_->egress_active_) {
-        udptun_->udptun_egress_drain_rx();
+    if (udptun_->egress_active()) {
+        udptun_->egress_drain_rx();
         // Tunnel playout clock = GPS-TAI derived from the gPTP master via the TAI
         // translator (NOT raw CLOCK_REALTIME): the gPTP PHC gives a smooth,
         // jitter-free rate and the Kalman offset pins it to absolute GPS-TAI, so
@@ -610,25 +588,11 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         }
     }
 
-    // Inter-site ingest silence-source gate (decided once per wake). The silence
-    // source keeps the tunnel TX (and its NAT pinhole) alive ONLY while no real
-    // AVTP audio is arriving. The instant the listener source delivers packets,
-    // the reactor thread feeds those frames straight into the ingest
-    // (on_stream_rx_frame -> udptun_ingest_audio); this media-timer thread MUST
-    // stand down, or the two threads would both submit to the same reframer --
-    // double-feeding it (2x frame rate, TAI running ahead) and racing its
-    // non-thread-safe state. Mirrors the keepalive `streaming` predicate so real
-    // audio always wins and is forwarded cleanly to the peer.
-    bool udptun_emit_silence = false;
-    if (udptun_->enable_ && config_.udptun_silence_source) {
-        int64_t now_tai = udptun_now_tai_ns;
-        if (now_tai == 0) {
-            now_tai = realtime_tai_ns(config_.udptun_tai_offset_ns);
-        }
-        int64_t const last_audio = udptun_->telemetry_->last_real_ingest_tai.load();
-        bool const streaming = (last_audio != 0) && (now_tai != 0) && (now_tai - last_audio < 100'000'000LL);
-        udptun_emit_silence = !streaming;
-    }
+    // Inter-site ingest silence-source gate (decided once per wake): keeps the
+    // tunnel TX alive only while no real AVTP audio flows -- the moment real
+    // audio arrives on the reactor thread, this media thread must stand down.
+    // See EntityUdptunBridge::should_emit_silence for the full contract.
+    bool const udptun_emit_silence = udptun_->should_emit_silence(udptun_now_tai_ns);
 
     for (size_t p = 0; p < config_.packets_per_wake; ++p) {
         uint64_t const wake_ns = base_now_ns + (static_cast<uint64_t>(p) * PACKET_INTERVAL_NS);
@@ -668,47 +632,17 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
             }
         }
 
-        // Inter-site egress: if active, replace the oscillator content with the
-        // de-tunneled audio for this packet's presentation time (now + p*125us).
-        // The talkers below then emit the received stream instead of the test tone.
-        if (udptun_->egress_active_ && udptun_now_tai_ns != 0) {
-            int64_t const pkt_tai = udptun_now_tai_ns + (static_cast<int64_t>(p) * static_cast<int64_t>(PACKET_INTERVAL_NS));
-            udptun_->udptun_egress_fill(pkt_tai, samples);
+        // Inter-site tunnel, this packet's slot on the TAI timeline (now + p*125us).
+        // Egress: replace the oscillator content with the de-tunneled audio for
+        // this presentation time (the talkers below then emit the received stream
+        // instead of the test tone). Source: the TAI-paced test sweep or the
+        // silence filler -- the pacing/gating lives in the bridge (phase C).
+        int64_t const udptun_pkt_tai =
+            (udptun_now_tai_ns != 0) ? udptun_now_tai_ns + (static_cast<int64_t>(p) * static_cast<int64_t>(PACKET_INTERVAL_NS)) : 0;
+        if (udptun_->egress_active() && udptun_pkt_tai != 0) {
+            udptun_->egress_fill(udptun_pkt_tai, samples);
         }
-
-        // Inter-site ingest silence source: emit zero PCM at the media cadence so
-        // the entity transmits silence as if its listener source were sending
-        // zeros (no real talker). Keeps the reverse tunnel + its NAT pinhole warm.
-        // Gated (udptun_emit_silence, decided once per wake) to stand down the
-        // instant real AVTP audio arrives -- otherwise the silence would
-        // double-feed and race the reactor thread's real-audio ingest.
-        if (udptun_->enable_ && config_.sweep_enable && udptun_now_tai_ns != 0) {
-            // Test-signal mode: the logarithmic sweep IS the tunnel source. Pace it
-            // by the GPS-TAI tunnel clock (udptun_now_tai_ns = rate_tracker_ TAI,
-            // gPTP-rate / GPS-epoch) -- exactly SAMPLE_RATE frames per second of TAI.
-            // Emit the cumulative frame count implied by elapsed TAI, so the ingest
-            // avtp_timestamp stays locked to TAI with zero drift and the far egress
-            // (playing on the same GPS-TAI clock) never under/over-runs.
-            int64_t const pkt_tai = udptun_now_tai_ns + (static_cast<int64_t>(p) * static_cast<int64_t>(PACKET_INTERVAL_NS));
-            if (udptun_->sweep_tai_anchor_ns_ == 0) {
-                udptun_->sweep_tai_anchor_ns_ = pkt_tai;
-            }
-            int64_t const elapsed = pkt_tai - udptun_->sweep_tai_anchor_ns_;
-            auto const target = (elapsed > 0)
-                ? static_cast<uint64_t>((elapsed * static_cast<int64_t>(SAMPLE_RATE)) / 1'000'000'000LL)
-                : uint64_t{0};
-            if (target > udptun_->sweep_frames_emitted_) {
-                size_t n = static_cast<size_t>(target - udptun_->sweep_frames_emitted_);
-                size_t const cap = static_cast<size_t>(SAMPLES_PER_PACKET) * 4;  // bound catch-up bursts
-                if (n > cap) {
-                    n = cap;
-                }
-                udptun_->udptun_ingest_sweep(n);
-                udptun_->sweep_frames_emitted_ += n;
-            }
-        } else if (udptun_emit_silence) {
-            udptun_->udptun_ingest_silence(samples);
-        }
+        udptun_->source_tick(udptun_pkt_tai, samples, udptun_emit_silence);
 
         if (audio_callback_) {
             audio_callback_(std::span{audio_buffer_}.first(samples * channels_), samples);
