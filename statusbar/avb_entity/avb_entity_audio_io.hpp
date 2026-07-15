@@ -25,6 +25,7 @@
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
@@ -222,9 +223,9 @@ class AvbEntityAudioIO
     /// itself runs RT-safe on the media thread; the FILE write must happen off the
     /// RT path, so the non-RT main loop polls tx_pcap_ready_to_write() after each
     /// poll and calls flush_tx_pcap() once to persist the file.
-    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return talker_->tx_pcap_recorder_.ready_to_write(); }
-    [[nodiscard]] auto flush_tx_pcap() -> Status { return talker_->tx_pcap_recorder_.write_to_file(); }
-    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return talker_->tx_pcap_recorder_.frame_count(); }
+    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return talker_->tx_pcap_ready_to_write(); }
+    [[nodiscard]] auto flush_tx_pcap() -> Status { return talker_->flush_tx_pcap(); }
+    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return talker_->tx_pcap_frame_count(); }
 
     /// Batch-drain the AM824/AAF RX socket, stamping frames with @p wake_gptp_ns. Called
     /// from the tool's dedicated SCHED_FIFO RX timer when config.stream_rx_rt_timer is
@@ -371,39 +372,13 @@ class AvbEntityAudioIO
         last_gptp_ns_,
         mem_resource_)};
 
-    /// MAAP protocol handler, allocated by acquire_maap_addresses() only in "maap"
-    /// stream_address_mode (null otherwise). Owned here so it outlives the
-    /// MaapNetHandler moved into the reactor, which references it. See
-    /// avtp_maap_handler.hpp.
-    std::unique_ptr<avtp::MaapHandler> maap_handler_;
-
-    /// TX-address readiness gate. true (default) = stream dest MACs are usable
-    /// (static mode, or MAAP block defended). In "maap" mode it is set false until
-    /// the MAAP handler's on_acquired fires. Written (release) by the reactor thread
-    /// in on_acquired/on_lost after publishing the dest MACs into talker_; read
-    /// (acquire) by the media thread's talker_should_transmit so the freshly-written
-    /// MACs are visible before any packet is sent on them.
-    std::atomic<bool> maap_addresses_ready_{true};
+    /// MAAP dynamic-address acquisition (active only in "maap"
+    /// stream_address_mode; ready() defaults true for static MACs).
+    MaapAddressAcquirer maap_{};
 
     /// Fill the GET_COUNTERS bitmap + values for a STREAM_OUTPUT (talker) index
     /// (true if it is one of our talker streams). Exposes FRAMES_TX so a reader
     /// can see our actual transmit rate.
-    [[nodiscard]] auto fill_stream_output_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
-        -> bool;
-
-    /// Fill the GET_STREAM_INFO response for a STREAM_OUTPUT (talker) index from
-    /// the live ACMP stream identity + the descriptor's current_format (true if
-    /// it is one of our talker streams). A Milan listener (e.g. the DSP processor) queries
-    /// this to verify the stream before sustaining a connection. STREAM_INPUT
-    /// routes to fill_stream_input_info (kit phase 5).
-    [[nodiscard]] auto fill_stream_output_info(
-        uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool;
-
-    /// Fill the GET_STREAM_INFO response for a STREAM_INPUT (listener) index
-    /// from the ACMP listener sink state: the connected talker's stream_id /
-    /// dest MAC when bound, plus the descriptor's current_format — so a
-    /// controller can finally read what an input is connected to.
-    [[nodiscard]] auto fill_stream_input_info(uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool;
 };
 
 }  // namespace statusbar::avb_entity

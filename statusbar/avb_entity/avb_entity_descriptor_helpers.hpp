@@ -75,6 +75,42 @@ template <typename T>
     return channels;
 }
 
+/// Find the clock-source index whose CLOCK_SOURCE descriptor is the
+/// INPUT_STREAM at STREAM_INPUT @p stream_input_index — i.e. the blob's CRF
+/// clock input (kit phase 3c). nullopt when the model declares none.
+[[nodiscard]] inline auto find_input_stream_clock_source(
+    nanoavb::DescriptorStorage const& storage, uint16_t const stream_input_index) -> std::optional<uint16_t>
+{
+    using statusbar::atdecc::aem::CLOCK_SOURCE_TYPE_INPUT_STREAM;
+    using statusbar::atdecc::aem::DESCRIPTOR_CLOCK_SOURCE;
+    using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    using statusbar::atdecc::aem::DescriptorClockSource;
+
+    for (uint16_t index = 0;; ++index) {
+        auto const cs = load_descriptor<DescriptorClockSource>(storage, 0, DESCRIPTOR_CLOCK_SOURCE, index);
+        if (!cs) {
+            return std::nullopt;
+        }
+        if (cs->clock_source_type == CLOCK_SOURCE_TYPE_INPUT_STREAM && cs->clock_source_location_type == DESCRIPTOR_STREAM_INPUT &&
+            cs->clock_source_location_index == stream_input_index) {
+            return index;
+        }
+    }
+}
+
+/// The CLOCK_DOMAIN 0 authored default clock-source selection (0 when the
+/// model declares no clock domain).
+[[nodiscard]] inline auto authored_clock_source(nanoavb::DescriptorStorage const& storage) -> uint16_t
+{
+    using statusbar::atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
+    using statusbar::atdecc::aem::DescriptorClockDomain;
+
+    if (auto const cd = load_descriptor<DescriptorClockDomain>(storage, 0, DESCRIPTOR_CLOCK_DOMAIN, 0)) {
+        return cd->clock_source_index;
+    }
+    return 0;
+}
+
 /// Serves an entity's descriptors from its .aem blob (symbol-aware), patching the
 /// runtime-only seams that cannot live in a static blob: the ENTITY identity
 /// (entity_id/model_id/name/firmware, from config) and — when patch_avb_interface

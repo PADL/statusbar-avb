@@ -16,7 +16,8 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
-#include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -63,22 +64,6 @@ auto white_key_frequency_hz(uint8_t const base_midi_note, size_t const white_ind
     return 440.0 * std::pow(2.0, (static_cast<double>(midi) - 69.0) / 12.0);
 }
 
-namespace {
-
-/// Globally-unique IEEE 1722 stream_id from the talker's NIC MAC (high 6 bytes)
-/// plus a per-stream index in the low byte.
-auto stream_id_for(ieee::Eui48 const& base_mac, uint16_t index) -> ieee::Eui64
-{
-    ieee::Eui64 sid{};
-    auto const mac_bytes = make_const_span(base_mac);
-    span_copy(sid.span().first(6), mac_bytes.first(6));
-    sid.span()[6] = 0;
-    sid.span()[7] = static_cast<uint8_t>(index & 0xFFU);
-    return sid;
-}
-
-}  // namespace
-
 //
 // Factory
 //
@@ -122,30 +107,13 @@ auto AvbEntityToneGenerator::create(
         }
     }
 
-    // Kit phase 3c pattern: find the clock source backed by the (first) CRF
+    // Kit phase 3c pattern: the clock source backed by the (first) CRF
     // stream input, and the CLOCK_DOMAIN's authored default selection.
     std::optional<uint16_t> crf_clock_source{};
     if (!listener_specs->empty()) {
-        uint16_t const crf_input_index = listener_specs->front().index;
-        for (uint16_t index = 0;; ++index) {
-            auto const cs = load_descriptor<atdecc::aem::DescriptorClockSource>(
-                *storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, index);
-            if (!cs) {
-                break;
-            }
-            if (cs->clock_source_type == atdecc::aem::CLOCK_SOURCE_TYPE_INPUT_STREAM &&
-                cs->clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
-                cs->clock_source_location_index == crf_input_index) {
-                crf_clock_source = index;
-                break;
-            }
-        }
+        crf_clock_source = find_input_stream_clock_source(*storage_result, listener_specs->front().index);
     }
-    uint16_t initial_clock_source = 0;
-    if (auto const cd =
-            load_descriptor<atdecc::aem::DescriptorClockDomain>(*storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0)) {
-        initial_clock_source = cd->clock_source_index;
-    }
+    uint16_t const initial_clock_source = authored_clock_source(*storage_result);
 
     auto const rate = common_audio_sample_rate(specs, DEFAULT_SAMPLE_RATE);
     if (!rate) {
@@ -271,12 +239,7 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
 
     // Base the talker stream_ids on the NIC MAC (globally unique per box).
-    ieee::Eui48 stream_base_mac{};
-    if (auto const mac = net::read_interface_mac(config_.interface_name)) {
-        stream_base_mac = *mac;
-    } else {
-        span_copy(stream_base_mac.span(), config_.entity_id.span().first(6));
-    }
+    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_name, config_.entity_id);
 
     // Static dest MACs by kind (MAAP mode reassigns after acquisition).
     for (auto const& spec : specs_) {
@@ -416,7 +379,7 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_stream_output_counters(descriptor_index, valid, counters);
+                return fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
@@ -425,7 +388,10 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
         });
     host_.components().aem_handler.set_get_stream_info(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
-            return fill_stream_output_info(descriptor_type, descriptor_index, out);
+            if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
+                return fill_talker_stream_info(host_, descriptor_index, config_.presentation_offset_ns, out);
+            }
+            return false;
         });
 }
 
@@ -435,57 +401,25 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
 
 auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor) -> Status
 {
-    ieee::Eui48 our_mac{};
-    if (auto const mac = net::read_interface_mac(config_.interface_name)) {
-        our_mac = *mac;
-    } else {
-        span_copy(our_mac.span(), config_.entity_id.span().first(6));
+    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices{};
+    for (auto const& spec : specs_) {
+        (void)indices.try_push_back(spec.index);
     }
-
-    statusbar::tsn::StreamId maap_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(specs_.front().index); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &maap_sid);
-    }
-    maap_handler_ = std::make_unique<avtp::MaapHandler>(our_mac, maap_sid, our_mac.to_uint64());
-
-    auto const block_count = static_cast<uint16_t>(specs_.size());
-    maap_addresses_ready_.store(false, std::memory_order_release);
-
-    maap_handler_->set_on_acquired([this, block_count](ieee::Eui48 const& block_start, uint16_t /*count*/) {
-        // Assign a block address per stream, ordered by table position.
-        for (size_t pos = 0; pos < specs_.size(); ++pos) {
-            auto const& spec = specs_[pos];
-            ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
-            if (auto const* s = host_.components().acmp_talker.get_stream(spec.index); s != nullptr) {
-                (void)host_.components().acmp_talker.configure_stream(spec.index, s->stream_id, dest);
+    // On (re)defend: re-declare the MSRP Talker Advertise so listeners
+    // reserve against the MAAP address, once the SR-class domain is up.
+    return maap_.acquire(
+        reactor,
+        config_.interface_name,
+        stream_base_mac_for(config_.interface_name, config_.entity_id),
+        host_.components(),
+        *talker_,
+        indices,
+        host_.ctl_log(),
+        [this]() {
+            if (host_.is_ready()) {
+                advertise_talker_streams(sm::Clock::now());
             }
-            if (auto* slot = talker_->slot_for(spec.index); slot != nullptr) {
-                slot->dest_mac = dest;
-            }
-        }
-        maap_addresses_ready_.store(true, std::memory_order_release);
-        host_.ctl_log().status("maap: acquired {} stream address(es) from {:012x}", block_count, block_start.to_uint64());
-        if (host_.is_ready()) {
-            advertise_talker_streams(sm::Clock::now());
-        }
-    });
-
-    maap_handler_->set_on_lost([this](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
-        maap_addresses_ready_.store(false, std::memory_order_release);
-        host_.ctl_log().warning("maap: address lost to a conflict; re-acquiring");
-    });
-
-    auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(config_.interface_name, *maap_handler_);
-    if (!net_handler->valid()) {
-        host_.ctl_log().warning("maap: socket open failed; using static stream dest MACs");
-        maap_handler_.reset();
-        maap_addresses_ready_.store(true, std::memory_order_release);
-        return {};
-    }
-
-    reactor.add(std::move(net_handler));
-    maap_handler_->acquire(block_count, net::monotonic_ns());
-    return {};
+        });
 }
 
 auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
@@ -548,29 +482,17 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
         // A placeholder group opens the socket; the real join happens on
         // ACMP connect (on_listener_connected above).
         std::array<ieee::Eui48, 1> const rx_groups{ieee::Eui48{}};
-        auto rx = std::make_unique<StreamRxHandler>(
-            config_.interface_name, rx_groups, [l = listener_.get()] { l->drain_rx(l->current_gptp_ns()); });
-        if (rx->valid()) {
-            listener_->rx_sock_ = rx->socket();  // borrow before the move; used for dynamic joins
-            reactor.add(std::move(rx));
-        }
+        (void)listener_->attach_rx(config_.interface_name, rx_groups, reactor);
         // Persisted fast-connect bindings (kit phase 5b): a restarted tone
         // generator re-connects its CRF clock input without a controller.
         host_.enable_listener_binding_persistence(config_.listener_bindings_path);
     }
 
-    // One TX socket (qdisc-bypass so our own egress is not re-received).
-    (void)talker_->stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
-
-    if (!config_.tx_pcap_path.empty()) {
-        talker_->tx_pcap_recorder_.configure(
-            config_.tx_pcap_path,
-            config_.tx_pcap_max_bytes,
-            /*snaplen=*/1522,
-            static_cast<uint64_t>(config_.tx_pcap_seconds) * 1'000'000'000ULL);
-        talker_->stream_tx_.set_tx_tap(
-            [this](std::span<uint8_t const> frame) { talker_->tx_pcap_recorder_.record(frame, talker_->last_tx_gptp_ns_); });
-    }
+    // TX socket + optional pcap capture (TalkerStreams assembles its own I/O).
+    (void)talker_->open_tx(
+        config_.interface_name,
+        TalkerStreams::TxPcapConfig{
+            .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
 
     // Menu/selection diagnostics: registrations the model left inert. Info
     // level -- typo-finding, never an error.
@@ -643,7 +565,7 @@ auto AvbEntityToneGenerator::make_talker_srp_info(StreamSpec const& spec) const 
 
 void AvbEntityToneGenerator::advertise_talker_streams(TimePoint const time)
 {
-    if (!maap_addresses_ready_.load(std::memory_order_acquire)) {
+    if (!maap_.ready()) {
         return;
     }
     for (auto const& spec : specs_) {
@@ -735,55 +657,10 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
 
 auto AvbEntityToneGenerator::talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
 {
-    if (!maap_addresses_ready_.load(std::memory_order_acquire)) {
+    if (!maap_.ready()) {
         return false;
     }
     return gate_.should_transmit(idx, now_ns);
-}
-
-auto AvbEntityToneGenerator::fill_stream_output_counters(
-    uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
-{
-    auto const* slot = talker_->slot_for(descriptor_index);
-    if (slot == nullptr) {
-        return false;
-    }
-    valid |= (1U << 6U);  // FRAMES_TX (IEEE 1722.1 Clause 7.4.43)
-    out[6] = static_cast<uint32_t>(slot->tx_packets);
-    return true;
-}
-
-auto AvbEntityToneGenerator::fill_stream_output_info(
-    uint16_t const descriptor_type, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool
-{
-    if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
-        return false;
-    }
-    auto const* stream = host_.components().acmp_talker.get_stream(descriptor_index);
-    if (stream == nullptr) {
-        return false;
-    }
-
-    uint32_t flags = stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID |
-        stream_info_flags::STREAM_VLAN_ID_VALID | stream_info_flags::MSRP_ACC_LAT_VALID;
-
-    if (auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_OUTPUT, descriptor_index); desc.has_value()) {
-        atdecc::aem::DescriptorStream stream_desc{};
-        span_load_padded(stream_desc, *desc);
-        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
-        flags |= stream_info_flags::STREAM_FORMAT_VALID;
-    }
-
-    out.stream_id = stream->stream_id;
-    span_copy(make_span(out.stream_dest_mac), stream->stream_dest_mac.span());
-    out.stream_vlan_id = ieee::doublet_t{stream->stream_vlan_id};
-    out.msrp_accumulated_latency = ieee::quadlet_t{static_cast<uint32_t>(config_.presentation_offset_ns)};
-
-    if (host_.components().acmp_talker.connection_count(descriptor_index) > 0) {
-        flags |= stream_info_flags::CONNECTED;
-    }
-    out.flags = ieee::quadlet_t{flags};
-    return true;
 }
 
 }  // namespace statusbar::avb_entity

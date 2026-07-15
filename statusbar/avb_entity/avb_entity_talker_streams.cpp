@@ -231,6 +231,23 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     ++slot.tx_packets;
 }
 
+auto TalkerStreams::open_tx(std::string_view const interface_name, TxPcapConfig const& pcap) -> Status
+{
+    // qdisc-bypass: our own egress must not be re-received by our RX socket.
+    auto status = stream_tx_.open(interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
+    if (!status) {
+        return status;
+    }
+    // Optional TX stream capture: qdisc-bypass egress is invisible to any
+    // local capture, so tap the frames at the socket, gPTP-timestamped.
+    if (!pcap.path.empty()) {
+        tx_pcap_recorder_.configure(
+            std::string{pcap.path}, pcap.max_bytes, /*snaplen=*/1522, static_cast<uint64_t>(pcap.seconds) * 1'000'000'000ULL);
+        stream_tx_.set_tx_tap([this](std::span<uint8_t const> frame) { tx_pcap_recorder_.record(frame, last_tx_gptp_ns_); });
+    }
+    return success();
+}
+
 void TalkerStreams::transmit_if_due(
     TalkerStreamSlot& slot,
     ptpclient::MediaClockGenerator::Emit const& tick,

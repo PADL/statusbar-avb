@@ -34,6 +34,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -122,6 +123,20 @@ struct ListenerStreams
     /// The first slot of @p kind, or nullptr.
     [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> ListenerStreamSlot*;
     [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> ListenerStreamSlot const*;
+
+    /// Open the RX socket on @p interface_name — joined to @p static_groups
+    /// up front (pass zero MACs when every join is dynamic, i.e. made on ACMP
+    /// connect) — borrow it for those dynamic joins, and hand its drain
+    /// handler to @p reactor. When @p keep_handler is true the handler is
+    /// returned instead of added, so the entity can drain it from a dedicated
+    /// SCHED_FIFO RX timer (drain_rx with the timer's wake time). One call
+    /// from the owning entity's start() — the socket borrow is THIS class's
+    /// concern, so this class assembles it (refactor phase A).
+    [[nodiscard]] auto attach_rx(
+        std::string_view interface_name,
+        std::span<ieee::Eui48 const> static_groups,
+        net::MessageReactor& reactor,
+        bool keep_handler = false) -> StatusValue<std::unique_ptr<net::Pollable>>;
 
     /// Non-blocking-drain every queued frame from the RX socket and process each via
     /// on_stream_rx_frame, stamping them all with @p gptp_now_ns (the caller's fresh

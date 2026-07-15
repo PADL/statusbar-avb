@@ -32,6 +32,7 @@
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
@@ -208,19 +209,15 @@ class AvbEntityToneGenerator
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
 
     /// TX stream capture (diagnostic; see AvbEntityAudioIOConfig::tx_pcap_path).
-    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return talker_->tx_pcap_recorder_.ready_to_write(); }
-    [[nodiscard]] auto flush_tx_pcap() -> Status { return talker_->tx_pcap_recorder_.write_to_file(); }
-    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return talker_->tx_pcap_recorder_.frame_count(); }
+    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return talker_->tx_pcap_ready_to_write(); }
+    [[nodiscard]] auto flush_tx_pcap() -> Status { return talker_->flush_tx_pcap(); }
+    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return talker_->tx_pcap_frame_count(); }
 
   private:
     auto wire_stream_callbacks() -> void;
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
-    [[nodiscard]] auto fill_stream_output_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
-        -> bool;
-    [[nodiscard]] auto fill_stream_output_info(
-        uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool;
 
     AvbEntityAudioIOConfig config_;
 
@@ -304,12 +301,9 @@ class AvbEntityToneGenerator
         last_gptp_ns_,
         mem_resource_)};
 
-    /// MAAP handler, allocated only in "maap" stream_address_mode (null otherwise).
-    std::unique_ptr<avtp::MaapHandler> maap_handler_;
-
-    /// TX-address readiness gate. true (default/static). In "maap" mode it is held
-    /// false until the block is defended.
-    std::atomic<bool> maap_addresses_ready_{true};
+    /// MAAP dynamic-address acquisition (active only in "maap"
+    /// stream_address_mode; ready() defaults true for static MACs).
+    MaapAddressAcquirer maap_{};
 };
 
 }  // namespace statusbar::avb_entity

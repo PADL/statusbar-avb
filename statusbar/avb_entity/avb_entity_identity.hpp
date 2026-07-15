@@ -8,6 +8,7 @@
 /// forget — a hardcoded entity_id makes two nodes running the same descriptor
 /// blob collide).
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/net/net_posix_util.hpp"
 
@@ -29,6 +30,32 @@ namespace statusbar::avb_entity {
 ///
 /// Idempotent: an already-set id / non-empty name (e.g. from `--entity.id` /
 /// `--entity.name`) is left untouched.
+/// Globally-unique IEEE 1722 stream_id: the talker's NIC MAC (unique per
+/// interface) in the high 6 bytes plus the per-stream index in the low 16
+/// bits. MAC-based — NOT entity_id-based — so two entities whose ids share
+/// their high 48 bits still get distinct stream_ids (identical stream_ids
+/// are indistinguishable to a listener's RX demux and MSRP reservations).
+[[nodiscard]] inline auto stream_id_for(ieee::Eui48 const& base_mac, uint16_t const index) -> ieee::Eui64
+{
+    ieee::Eui64 sid{};
+    span_copy(sid.span().first(6), make_const_span(base_mac).first(6));
+    sid.span()[6] = 0;
+    sid.span()[7] = static_cast<uint8_t>(index & 0xFFU);
+    return sid;
+}
+
+/// The NIC MAC for @p interface_name, falling back to @p entity_id's high
+/// 6 bytes when the interface can't be read (the stream-id / MAAP base).
+[[nodiscard]] inline auto stream_base_mac_for(std::string_view const interface_name, ieee::Eui64 const& entity_id) -> ieee::Eui48
+{
+    if (auto const mac = net::read_interface_mac(interface_name)) {
+        return *mac;
+    }
+    ieee::Eui48 fallback{};
+    span_copy(fallback.span(), make_const_span(entity_id).first(6));
+    return fallback;
+}
+
 inline void apply_node_identity_defaults(
     std::string_view interface_name,
     ieee::Eui64& entity_id,

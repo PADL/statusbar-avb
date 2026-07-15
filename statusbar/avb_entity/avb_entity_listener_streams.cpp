@@ -8,6 +8,7 @@
 
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 
+#include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -188,6 +189,24 @@ auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerS
         }
     }
     return nullptr;
+}
+
+auto ListenerStreams::attach_rx(
+    std::string_view const interface_name,
+    std::span<ieee::Eui48 const> const static_groups,
+    net::MessageReactor& reactor,
+    bool const keep_handler) -> StatusValue<std::unique_ptr<net::Pollable>>
+{
+    auto rx = std::make_unique<StreamRxHandler>(interface_name, static_groups, [this] { drain_rx(current_gptp_ns()); });
+    if (!rx->valid()) {
+        return failure(std::errc::io_error);
+    }
+    rx_sock_ = rx->socket();  // borrow before any move; used for dynamic ACMP-connect joins
+    if (keep_handler) {
+        return success(std::unique_ptr<net::Pollable>{std::move(rx)});
+    }
+    reactor.add(std::move(rx));
+    return success(std::unique_ptr<net::Pollable>{});
 }
 
 auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t

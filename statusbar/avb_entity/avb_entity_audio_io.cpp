@@ -12,6 +12,8 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_egress.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_ingest.hpp"
@@ -72,28 +74,6 @@ using namespace statusbar::atdecc;
 using namespace statusbar::atdecc::aem;
 using namespace statusbar::nanoavb;
 
-namespace {
-
-/// Derive a stream id from the entity id, with the low byte set to the stream
-/// index so the two talker streams have distinct ids.
-// Derive a globally-unique IEEE 1722 stream_id from the talker's NIC MAC (high 6
-// bytes, unique per interface) plus a per-stream unique_id in the low 16 bits.
-// Basing it on the MAC -- not the entity_id -- guarantees two entities never get
-// colliding stream_ids even when their entity_ids share their high 48 bits (which
-// otherwise silently broke RX stream demux + MSRP reservations: two AAF streams
-// with the same stream_id are indistinguishable to a listener).
-auto stream_id_for(ieee::Eui48 const& base_mac, uint16_t index) -> ieee::Eui64
-{
-    ieee::Eui64 sid{};
-    auto const mac_bytes = make_const_span(base_mac);
-    span_copy(sid.span().first(6), mac_bytes.first(6));
-    sid.span()[6] = 0;
-    sid.span()[7] = static_cast<uint8_t>(index & 0xFFU);
-    return sid;
-}
-
-}  // namespace
-
 //
 // Factory method
 //
@@ -123,25 +103,8 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
     // Kit phase 3c: find the clock source backed by the CRF stream input
     // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
     // CLOCK_DOMAIN's authored default selection.
-    std::optional<uint16_t> crf_clock_source{};
-    for (uint16_t index = 0;; ++index) {
-        auto const cs =
-            load_descriptor<atdecc::aem::DescriptorClockSource>(*storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, index);
-        if (!cs) {
-            break;
-        }
-        if (cs->clock_source_type == atdecc::aem::CLOCK_SOURCE_TYPE_INPUT_STREAM &&
-            cs->clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
-            cs->clock_source_location_index == CRF_INPUT_STREAM_INDEX) {
-            crf_clock_source = index;
-            break;
-        }
-    }
-    uint16_t initial_clock_source = 0;
-    if (auto const cd =
-            load_descriptor<atdecc::aem::DescriptorClockDomain>(*storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0)) {
-        initial_clock_source = cd->clock_source_index;
-    }
+    auto const crf_clock_source = find_input_stream_clock_source(*storage_result, CRF_INPUT_STREAM_INDEX);
+    uint16_t const initial_clock_source = authored_clock_source(*storage_result);
 
     auto* const storage_handler = handler.get();
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
@@ -210,12 +173,7 @@ AvbEntityAudioIO::AvbEntityAudioIO(
     // back to the config entity_id's high 6 bytes only when the interface MAC can't
     // be read (e.g. unit tests with a dummy interface). The parsed EntityModel is no
     // longer populated (descriptors come from the handler), so use config_ directly.
-    ieee::Eui48 stream_base_mac{};
-    if (auto const mac = net::read_interface_mac(config_.interface_name)) {
-        stream_base_mac = *mac;
-    } else {
-        span_copy(stream_base_mac.span(), config_.entity_id.span().first(6));
-    }
+    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_name, config_.entity_id);
 
     // Configure talker stream 0 (AM824) and stream 1 (AAF) with distinct stream
     // ids and destination multicast MACs, so MSRP/ACMP/AVTP agree per stream.
@@ -304,13 +262,19 @@ void AvbEntityAudioIO::wire_stream_callbacks()
                 return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_stream_output_counters(descriptor_index, valid, counters);
+                return fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
             }
             return false;
         });
     host_.components().aem_handler.set_get_stream_info(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
-            return fill_stream_output_info(descriptor_type, descriptor_index, out);
+            if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+                return fill_listener_stream_info(host_, descriptor_index, out);
+            }
+            if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
+                return fill_talker_stream_info(host_, descriptor_index, config_.presentation_offset_ns, out);
+            }
+            return false;
         });
 }
 
@@ -320,79 +284,22 @@ void AvbEntityAudioIO::wire_stream_callbacks()
 
 auto AvbEntityAudioIO::acquire_maap_addresses(net::MessageReactor& reactor) -> Status
 {
-    // Our station MAC drives the MAAP conflict tie-break and filters our own frames.
-    ieee::Eui48 our_mac{};
-    if (auto const mac = net::read_interface_mac(config_.interface_name)) {
-        our_mac = *mac;
-    } else {
-        span_copy(our_mac.span(), config_.entity_id.span().first(6));
-    }
-
-    // One allocation covering all three talker streams; the PDUs carry the AM824
-    // stream's id, and the seed spreads our initial random pick per station.
-    statusbar::tsn::StreamId maap_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(AM824_STREAM_INDEX); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &maap_sid);
-    }
-    maap_handler_ = std::make_unique<avtp::MaapHandler>(our_mac, maap_sid, our_mac.to_uint64());
-
-    constexpr uint16_t kBlockCount = 3;  // AM824 (+0), AAF (+1), CRF (+2)
-
-    // Gate stream TX until the block is defended. ADP/gPTP/SRP/ACMP are unaffected --
-    // they keep running independently in the reactor; only the talker waits.
-    maap_addresses_ready_.store(false, std::memory_order_release);
-
-    maap_handler_->set_on_acquired([this](ieee::Eui48 const& block_start, uint16_t /*count*/) {
-        // Reactor thread, once the block is defended. Publish each per-stream dest MAC
-        // to BOTH the ACMP stream model (for CONNECT_TX / GET_STREAM_INFO / MSRP) and
-        // the live TX cache (talker_), then release the gate so the media thread's
-        // acquire-load sees the new MACs before it transmits on them.
-        auto assign = [this, &block_start](uint16_t idx, uint16_t offset) {
-            ieee::Eui48 const dest = avtp::maap_block_address(block_start, offset);
-            if (auto const* s = host_.components().acmp_talker.get_stream(idx); s != nullptr) {
-                (void)host_.components().acmp_talker.configure_stream(idx, s->stream_id, dest);
+    std::array<uint16_t, 3> const indices{AM824_STREAM_INDEX, AAF_STREAM_INDEX, CRF_STREAM_INDEX};
+    // On (re)defend: re-declare the MSRP Talker Advertise so listeners
+    // reserve against the MAAP address, once the SR-class domain is up.
+    return maap_.acquire(
+        reactor,
+        config_.interface_name,
+        stream_base_mac_for(config_.interface_name, config_.entity_id),
+        host_.components(),
+        *talker_,
+        indices,
+        host_.ctl_log(),
+        [this]() {
+            if (host_.is_ready()) {
+                advertise_talker_streams(sm::Clock::now());
             }
-            if (auto* slot = talker_->slot_for(idx); slot != nullptr) {
-                slot->dest_mac = dest;
-            }
-        };
-        assign(AM824_STREAM_INDEX, 0);
-        assign(AAF_STREAM_INDEX, 1);
-        assign(CRF_STREAM_INDEX, 2);
-        maap_addresses_ready_.store(true, std::memory_order_release);
-        host_.ctl_log().status("maap: acquired 3 stream addresses from {:012x}", block_start.to_uint64());
-        // (Re)declare the MSRP Talker Advertise now that the dest MACs are final, so
-        // listeners reserve against the MAAP address (not the stale static dest the
-        // gPTP-lock advertise may have skipped). Only once the SR-class domain is
-        // declared (supervisor Ready); otherwise the gPTP-lock advertise hook fires
-        // it -- it now sees maap_addresses_ready_ and uses the MAAP dest.
-        if (host_.is_ready()) {
-            advertise_talker_streams(sm::Clock::now());
-        }
-    });
-
-    maap_handler_->set_on_lost([this](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
-        // Conflict: close the TX gate until a new block is defended (the handler is
-        // already re-probing; on_acquired re-opens it). Full re-advertise/reconnect
-        // handling is Phase 4.
-        maap_addresses_ready_.store(false, std::memory_order_release);
-        host_.ctl_log().warning("maap: address lost to a conflict; re-acquiring");
-    });
-
-    auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(config_.interface_name, *maap_handler_);
-    if (!net_handler->valid()) {
-        host_.ctl_log().warning("maap: socket open failed; using static stream dest MACs");
-        maap_handler_.reset();
-        maap_addresses_ready_.store(true, std::memory_order_release);  // fall back: do not gate
-        return {};
-    }
-
-    // Hand the handler to the reactor: acquisition runs ASYNCHRONOUSLY alongside
-    // ADP/gPTP/SRP/ACMP -- start() never blocks. The talker stays gated until
-    // on_acquired fires; the handler then keeps the block defended (announce/DEFEND).
-    reactor.add(std::move(net_handler));
-    maap_handler_->acquire(kBlockCount, net::monotonic_ns());
-    return {};
+        });
 }
 
 auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
@@ -495,21 +402,11 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
     // the host loads, remembers and mirrors them; see AvbEntityHost).
     host_.enable_listener_binding_persistence(config_.listener_bindings_path);
 
-    // One TX socket (qdisc-bypass so our own egress is not re-received here).
-    (void)talker_->stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
-
-    // Optional TX stream capture: because the socket is qdisc-bypass its egress is
-    // invisible to any local capture, so tap it at the socket and record our own
-    // transmitted frames (gPTP-timestamped) to a pcap for offline inspection.
-    if (!config_.tx_pcap_path.empty()) {
-        talker_->tx_pcap_recorder_.configure(
-            config_.tx_pcap_path,
-            config_.tx_pcap_max_bytes,
-            /*snaplen=*/1522,
-            static_cast<uint64_t>(config_.tx_pcap_seconds) * 1'000'000'000ULL);
-        talker_->stream_tx_.set_tx_tap(
-            [this](std::span<uint8_t const> frame) { talker_->tx_pcap_recorder_.record(frame, talker_->last_tx_gptp_ns_); });
-    }
+    // TX socket + optional pcap capture (TalkerStreams assembles its own I/O).
+    (void)talker_->open_tx(
+        config_.interface_name,
+        TalkerStreams::TxPcapConfig{
+            .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
 
     // One RX port joined to both stream groups; dispatch by subtype. The handler
     // delivers frames to the listener; the listener borrows the socket for dynamic
@@ -518,19 +415,11 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
     auto const* aaf_slot = talker_->slot_of(StreamKind::aaf);
     std::array<ieee::Eui48, 2> const rx_groups{
         am824_slot != nullptr ? am824_slot->dest_mac : ieee::Eui48{}, aaf_slot != nullptr ? aaf_slot->dest_mac : ieee::Eui48{}};
-    auto rx = std::make_unique<StreamRxHandler>(
-        config_.interface_name, rx_groups, [l = listener_.get()] { l->drain_rx(l->current_gptp_ns()); });
-    if (rx->valid()) {
-        listener_->rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
-        if (config_.stream_rx_rt_timer) {
-            // Dedicated RT RX timer mode: keep the handler (its socket) alive here; the
-            // tool's SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake
-            // gPTP time. The reactor never polls it, so RX can't be starved by the
-            // control plane. (net_handlers still add the gPTP fd to the reactor.)
-            rt_rx_handler_ = std::move(rx);
-        } else {
-            reactor.add(std::move(rx));  // default: drained on the shared reactor thread
-        }
+    // In RT-timer mode the returned handler (its socket) is kept alive here;
+    // the tool's SCHED_FIFO RX timer drains it via drain_stream_rx() with its
+    // wake gPTP time, so RX can't be starved by the control plane.
+    if (auto rx = listener_->attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+        rt_rx_handler_ = std::move(*rx);
     }
 
     // Inter-site UDPTUN (optional; any failure is non-fatal -- the entity runs its
@@ -638,7 +527,7 @@ void AvbEntityAudioIO::advertise_talker_streams(TimePoint const time)
     // acquired asynchronously after gPTP lock (which first triggers this), so
     // advertising a pre-MAAP dest would not match the MAAP address ACMP hands the
     // listener -> AskingFailed. on_acquired re-calls this once the block is defended.
-    if (!maap_addresses_ready_.load(std::memory_order_acquire)) {
+    if (!maap_.ready()) {
         return;
     }
     for (uint16_t const idx : {AM824_STREAM_INDEX, AAF_STREAM_INDEX, CRF_STREAM_INDEX}) {
@@ -896,101 +785,10 @@ auto AvbEntityAudioIO::talker_should_transmit(uint16_t const idx, int64_t const 
     // (independent of the listener gate). Static mode leaves this flag set, so this
     // is a no-op there. Acquire-load pairs with the release-store in on_acquired so
     // the freshly-published dest MACs are visible before the first packet.
-    if (!maap_addresses_ready_.load(std::memory_order_acquire)) {
+    if (!maap_.ready()) {
         return false;
     }
     return gate_.should_transmit(idx, now_ns);
-}
-
-auto AvbEntityAudioIO::fill_stream_output_counters(
-    uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
-{
-    // Our talker (STREAM_OUTPUT) descriptors: 0=AM824, 1=AAF, 2=CRF. Each maps to
-    // its on-wire TX packet counter (tx counters are single-threaded with the
-    // media timer, read plain like print_state()).
-    auto const* slot = talker_->slot_for(descriptor_index);
-    if (slot == nullptr) {
-        return false;
-    }
-    uint64_t const frames_tx = slot->tx_packets;
-    // IEEE 1722.1 STREAM_OUTPUT counter bit positions (Clause 7.4.43). We expose
-    // FRAMES_TX (bit 6) -- total media frames this talker has put on the wire --
-    // which is what tells a reader our actual transmit rate.
-    valid |= (1U << 6U);
-    out[6] = static_cast<uint32_t>(frames_tx);
-    return true;
-}
-
-auto AvbEntityAudioIO::fill_stream_output_info(
-    uint16_t const descriptor_type, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool
-{
-    if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
-        return fill_stream_input_info(descriptor_index, out);
-    }
-    if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
-        return false;
-    }
-    auto const* stream = host_.components().acmp_talker.get_stream(descriptor_index);
-    if (stream == nullptr) {
-        return false;
-    }
-
-    uint32_t flags = stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID |
-        stream_info_flags::STREAM_VLAN_ID_VALID | stream_info_flags::MSRP_ACC_LAT_VALID;
-
-    // Stream format from the STREAM_OUTPUT descriptor's current_format (8 bytes),
-    // read from the blob via the symbol-aware host (the parsed model is unused now).
-    if (auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_OUTPUT, descriptor_index); desc.has_value()) {
-        atdecc::aem::DescriptorStream stream_desc{};
-        span_load_padded(stream_desc, *desc);
-        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
-        flags |= stream_info_flags::STREAM_FORMAT_VALID;
-    }
-
-    out.stream_id = stream->stream_id;
-    span_copy(make_span(out.stream_dest_mac), stream->stream_dest_mac.span());
-    out.stream_vlan_id = ieee::doublet_t{stream->stream_vlan_id};
-    out.msrp_accumulated_latency = ieee::quadlet_t{static_cast<uint32_t>(config_.presentation_offset_ns)};
-
-    // SR class A is the entity's only class, so CLASS_B stays clear. Report the
-    // live ACMP connection state so a controller/listener sees CONNECTED.
-    if (host_.components().acmp_talker.connection_count(descriptor_index) > 0) {
-        flags |= stream_info_flags::CONNECTED;
-    }
-    out.flags = ieee::quadlet_t{flags};
-    return true;
-}
-
-auto AvbEntityAudioIO::fill_stream_input_info(uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool
-{
-    auto const* sink = host_.components().acmp_listener.get_stream(descriptor_index);
-    if (sink == nullptr) {
-        return false;
-    }
-
-    uint32_t flags = 0;
-
-    // Stream format from the STREAM_INPUT descriptor's current_format.
-    if (auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_INPUT, descriptor_index); desc.has_value()) {
-        atdecc::aem::DescriptorStream stream_desc{};
-        span_load_padded(stream_desc, *desc);
-        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
-        flags |= stream_info_flags::STREAM_FORMAT_VALID;
-    }
-
-    // A connected sink knows the talker's stream identity — the thing a
-    // controller could never read from this entity before.
-    if (sink->connected) {
-        flags |= stream_info_flags::CONNECTED | stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID;
-        out.stream_id = sink->stream_id;
-        span_copy(make_span(out.stream_dest_mac), sink->stream_dest_mac.span());
-        if (sink->stream_vlan_id != 0) {
-            flags |= stream_info_flags::STREAM_VLAN_ID_VALID;
-            out.stream_vlan_id = ieee::doublet_t{sink->stream_vlan_id};
-        }
-    }
-    out.flags = ieee::quadlet_t{flags};
-    return true;
 }
 
 void AvbEntityAudioIO::configure_filter(double const freq_hz, double const gain_db, double const q)

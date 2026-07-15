@@ -84,6 +84,29 @@ struct TalkerStreams
         , mem_resource_{memory_resource}
     {}
 
+    /// TX pcap capture knobs for open_tx (see TxPcapRecorder). Empty path =
+    /// capture disabled.
+    struct TxPcapConfig
+    {
+        std::string_view path{};
+        size_t max_bytes{0};
+        uint32_t seconds{0};
+    };
+
+    /// Open the qdisc-bypass TX socket on @p interface_name and (optionally)
+    /// arm the TX pcap capture with its socket egress tap. One call from the
+    /// owning entity's start() — the socket, the recorder and the tap are
+    /// THIS class's state, so this class assembles them (refactor phase A:
+    /// entities no longer reach into stream_tx_/tx_pcap_recorder_).
+    auto open_tx(std::string_view interface_name, TxPcapConfig const& pcap) -> Status;
+    auto open_tx(std::string_view const interface_name) -> Status { return open_tx(interface_name, TxPcapConfig{}); }
+
+    /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
+    /// the file awaits the non-RT flush.
+    [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return tx_pcap_recorder_.ready_to_write(); }
+    [[nodiscard]] auto flush_tx_pcap() -> Status { return tx_pcap_recorder_.write_to_file(); }
+    [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return tx_pcap_recorder_.frame_count(); }
+
     /// Add a TX slot shaped by @p spec, constructing the kind-matching
     /// serializer for @p stream_id. CRF timing (base frequency, interval,
     /// timestamps per PDU) comes from the spec's decoded format word — the
