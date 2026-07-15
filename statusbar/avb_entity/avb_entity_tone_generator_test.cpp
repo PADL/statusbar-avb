@@ -150,10 +150,10 @@ TEST(tone_channels, extracts_8_channels)
 }
 
 //
-// Descriptor model shape: talker-only (no listener sinks), 3 outputs, Milan CRF.
+// Descriptor model shape: 3 outputs + one CRF clock input, Milan CRF.
 //
 
-TEST(tone_model, declares_three_outputs_no_inputs)
+TEST(tone_model, declares_three_outputs_and_crf_input)
 {
     auto blob = load_file(entity_tone_bin_path());
     auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
@@ -165,7 +165,7 @@ TEST(tone_model, declares_three_outputs_no_inputs)
         }
         return n;
     };
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 0u);   // talker-only: no listener sinks
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);   // the CRF clock input
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 3u);  // AM824 + AAF + CRF
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 2u);  // AM824 + AAF output clusters
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 2u);
@@ -398,7 +398,7 @@ TEST(tone_aaf_create, aaf_only_gate_disabled_transmits_index0)
 // AAF + CRF variant (AAF audio idx0 + CRF media clock idx1).
 //
 
-TEST(tone_aafcrf_model, declares_aaf_plus_crf_no_inputs)
+TEST(tone_aafcrf_model, declares_aaf_plus_crf_and_crf_input)
 {
     auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf_crf.bin");
     auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
@@ -410,7 +410,7 @@ TEST(tone_aafcrf_model, declares_aaf_plus_crf_no_inputs)
         }
         return n;
     };
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 0u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);   // the CRF clock input
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 2u);  // AAF + CRF
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 1u);  // AAF audio only
     // STREAM_OUTPUT[0] = AAF, STREAM_OUTPUT[1] = Milan CRF.
@@ -570,6 +570,60 @@ TEST(tone_control, on_control_binds_by_symbol_and_can_veto)
     // A vetoing handler propagates its status over the wire.
     entity.on_control("identify", [](std::span<uint8_t const>) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
     EXPECT_EQ(run_set_control(0, 0x00), atdecc::AEM_STATUS_NOT_SUPPORTED);
+}
+
+//
+// CRF clock input: the blob's CRF STREAM_INPUT resolves to a selectable
+// INPUT_STREAM clock source; SET_CLOCK_SOURCE switches the active source
+// (the media clock then slaves to the recovered CRF rate — see
+// process_audio). Audio inputs remain a loud create-time rejection.
+//
+
+TEST(tone_clocking, crf_input_resolves_and_set_clock_source_switches)
+{
+    auto blob = load_file(entity_tone_bin_path());
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    auto& entity = **result;
+
+    // One CRF listener spec from the blob; its clock source is index 1
+    // (Internal=0, CRFInput=1); the authored default selection is Internal.
+    EXPECT_EQ(entity.listener_specs().size(), size_t{1});
+    EXPECT_EQ(entity.listener_specs().front().format.kind, StreamKind::crf);
+    EXPECT_TRUE(entity.crf_clock_source_index().has_value());
+    EXPECT_EQ(*entity.crf_clock_source_index(), static_cast<uint16_t>(1));
+    EXPECT_EQ(entity.active_clock_source(), static_cast<uint16_t>(0));
+
+    auto const run_set = [&entity](uint16_t clock_source) -> uint8_t {
+        atdecc::aem::AemClockSourcePayload const payload{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN,
+            .descriptor_index = 0,
+            .clock_source_index = clock_source,
+            .reserved = 0};
+        std::vector<uint8_t> body(atdecc::aem::AemClockSourcePayload::LENGTH, 0);
+        span_store(make_span(body), payload);
+        atdecc::AemDu header{};
+        header.init_command(
+            atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        std::array<uint8_t, 128> out{};
+        auto const resp = entity.components().aem_handler.handle_command(header, body, std::span<uint8_t>{out});
+        return resp.status;
+    };
+
+    // The apply callback that flips active_clock_source_ registers in start()
+    // (needs a network interface); the built-in's validate/store/reflect runs
+    // regardless, which is what this exercises end-to-end over real AECP.
+    EXPECT_EQ(run_set(1), atdecc::AEM_STATUS_SUCCESS);  // CRFInput: authored, accepted
+    EXPECT_EQ(run_set(5), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+}
+
+TEST(tone_clocking, audio_inputs_still_rejected)
+{
+    // The dual-entity blob declares AUDIO stream inputs — a tone generator
+    // has no audio RX path, so create() refuses it loudly.
+    auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_audio.bin");
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(!result.has_value());
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)

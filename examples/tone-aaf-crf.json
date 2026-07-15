@@ -19,8 +19,10 @@
       "stream_sources": 2
     },
     "listener": {
-      "capabilities": [],
-      "stream_sinks": 0
+      "capabilities": [
+        "IMPLEMENTED"
+      ],
+      "stream_sinks": 1
     },
     "configurations": [
       {
@@ -44,6 +46,17 @@
               "CLASS_A"
             ],
             "localized_description": { "en-US": "CRF Media Clock", "de-DE": "CRF-Medientakt" }
+          }
+        ],
+        "streams_in": [
+          {
+            "name": "StreamInputCRF",
+            "symbol": "crf_in",
+            "format": "0x041060010000BB80",
+            "flags": [
+              "CLASS_A"
+            ],
+            "localized_description": { "en-US": "CRF Clock Input", "de-DE": "CRF-Takteingang" }
           }
         ],
         "audio_units": [
@@ -103,6 +116,14 @@
             "type": "INTERNAL",
             "location_type": 2,
             "location_index": 0
+          },
+          {
+            "name": "CRFInput",
+            "symbol": "crf_clock_in",
+            "localized_description": { "en-US": "CRF Input", "de-DE": "CRF-Eingang" },
+            "type": "INPUT_STREAM",
+            "location_type": 5,
+            "location_index": 0
           }
         ],
         "clock_domains": [
@@ -111,7 +132,8 @@
             "localized_description": { "en-US": "Clock Domain", "de-DE": "Taktdomäne" },
             "source": 0,
             "sources": [
-              0
+              0,
+              1
             ]
           }
         ]

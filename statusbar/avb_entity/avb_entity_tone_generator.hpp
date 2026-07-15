@@ -3,7 +3,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// AVB Entity Tone Generator (talker-only)
+/// AVB Entity Tone Generator
 /// A standalone AVB talker entity whose stream topology is derived from its
 /// descriptor-storage blob (Entity Construction Kit phase 1): each
 /// STREAM_OUTPUT descriptor's current_format decides the stream kind — AM824
@@ -11,18 +11,27 @@
 /// C++ serves examples/tone.json (AM824+AAF+CRF), tone-aaf.json (AAF only),
 /// tone-aaf-crf.json (AAF+CRF), or any other talker-only model without code
 /// changes. Each audio channel carries a continuous sine tone; by default the
-/// channels are the white piano keys upward from the base MIDI note. The media
-/// clock is locked to gPTP at ratio r = 1.0 (no GPS-rate tracking); the audio
-/// sample rate follows the blob's stream formats.
+/// channels are the white piano keys upward from the base MIDI note.
+///
+/// The media clock is locked to gPTP at ratio r = 1.0 by default. When the
+/// blob additionally declares a CRF STREAM_INPUT with a matching
+/// INPUT_STREAM CLOCK_SOURCE (the menu/selection pattern: the code supports
+/// it, the model opts in), a controller can SET_CLOCK_SOURCE onto it and the
+/// media clock slaves to the recovered remote CRF rate instead — so a tone
+/// generator can phase-follow another node's media clock. Audio stream
+/// inputs remain unsupported (a tone generator has no audio RX path).
 ///
 /// This reuses the shared AVB control plane (AvbEntityHost), the spec-driven
-/// stream TX path (TalkerStreams), the per-stream transmit gate (TalkerGate),
-/// and the deterministic presentation-timestamp generator
-/// (MediaClockGenerator). It deliberately omits the listener / UDPTUN halves
-/// of AvbEntityAudioIO.
+/// stream TX path (TalkerStreams), the CRF listener slot + clock recovery
+/// (ListenerStreams + CrfClockRecovery, kit phase 3), the per-stream
+/// transmit gate (TalkerGate), and the deterministic
+/// presentation-timestamp generator (MediaClockGenerator). It deliberately
+/// omits the audio-listener / UDPTUN halves of AvbEntityAudioIO.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
@@ -109,6 +118,9 @@ class AvbEntityToneGenerator
         std::unique_ptr<nanoavb::AemEntityHandler> handler,
         nanoavb::DescriptorStorageHandler* storage_handler,
         StreamSpecs specs,
+        StreamSpecs listener_specs,
+        uint16_t initial_clock_source,
+        std::optional<uint16_t> crf_clock_source_index,
         uint32_t sample_rate,
         size_t channels,
         uint8_t base_midi_note,
@@ -140,6 +152,21 @@ class AvbEntityToneGenerator
     /// The blob-derived stream table (kind/format/rate per STREAM_OUTPUT).
     [[nodiscard]] auto stream_specs() const noexcept -> StreamSpecs const& { return specs_; }
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
+
+    // --- CRF-input media-clock slaving (kit phase 3c pattern) ----------------
+    /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
+    /// state; the blob's authored default until a controller changes it).
+    [[nodiscard]] auto active_clock_source() const noexcept -> uint16_t
+    {
+        return active_clock_source_.load(std::memory_order_acquire);
+    }
+    /// The clock-source index backed by the blob's CRF stream input, or
+    /// nullopt when the model declares none (gPTP-only pacing).
+    [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return crf_clock_source_index_; }
+    /// The CRF media-clock recovery (rate/lock telemetry).
+    [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
+    /// The blob-derived listener stream table (CRF inputs only).
+    [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
 
     // --- Per-stream TX sources (kit phase 2) -------------------------------------
     /// Register a render callback for the audio stream whose blob symbol is
@@ -197,11 +224,12 @@ class AvbEntityToneGenerator
 
     AvbEntityAudioIOConfig config_;
 
-    /// Blob-derived stream table; drives every per-stream decision below.
+    /// Blob-derived stream tables; drive every per-stream decision below.
     StreamSpecs specs_;
+    StreamSpecs listener_specs_;  ///< CRF inputs only (audio inputs rejected at create)
 
-    /// Reusable AVB control plane: talker stream count from the blob, 4 max
-    /// listeners each, 0 listener streams (talker-only).
+    /// Reusable AVB control plane: talker/listener stream counts from the
+    /// blob, 4 max listeners per talker stream.
     AvbEntityHost host_;
 
     /// Per-stream TX render bindings + their interleaved buffers, parallel to
@@ -245,9 +273,28 @@ class AvbEntityToneGenerator
     /// Latest gPTP time (ns) seen by the media timer (TalkerStreams reads it).
     std::atomic<uint64_t> last_gptp_ns_{0};
 
-    /// Deterministic presentation-timestamp generator (r is pinned to 1.0: the
-    /// media clock is locked to gPTP, no GPS-rate tracking).
+    /// Deterministic presentation-timestamp generator. r is 1.0 (locked to
+    /// gPTP) unless the CRF-input clock source is active and locked, in
+    /// which case it follows the recovered remote rate (see process_audio).
     ptpclient::MediaClockGenerator media_clock_;
+
+    /// CRF-input media-clock recovery: fed by the CRF stream input's
+    /// timestamps on the RX/reactor thread; consulted for the media-clock
+    /// rate on the media thread when the CRF clock source is active.
+    CrfClockRecovery crf_recovery_{};
+    /// The CLOCK_DOMAIN's active clock-source index. Written by the
+    /// SET_CLOCK_SOURCE apply callback (reactor thread), read per tick by
+    /// the media thread. Assigned in the ctor body (declaration order).
+    std::atomic<uint16_t> active_clock_source_{0};
+    /// The clock-source index whose CLOCK_SOURCE descriptor is the CRF
+    /// stream input (resolved from the blob at create; nullopt = not modeled).
+    std::optional<uint16_t> crf_clock_source_index_{};
+
+    /// The CRF listener RX path (only allocated when the blob declares a CRF
+    /// input): the CRF deserialize slot + counters + the borrowed RX socket
+    /// (the socket's handler is owned by the reactor after start()).
+    /// Declared after host_/config_/last_gptp_ns_ (binds components).
+    std::unique_ptr<ListenerStreams> listener_{};
 
     /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
     /// counters + capture recorder. Declared after the members it references.

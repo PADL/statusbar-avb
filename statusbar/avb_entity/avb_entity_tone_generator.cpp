@@ -16,6 +16,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -107,12 +108,43 @@ auto AvbEntityToneGenerator::create(
             return failure(std::errc::not_supported);  // unrecognized stream format word
         }
     }
+    // Stream inputs: a tone generator has no audio RX path, but a CRF input
+    // is welcome — it lets the media clock slave to a remote CRF (the code is
+    // a menu, the model is the selection). Any AUDIO input is still a loud
+    // create-time rejection.
     auto listener_specs = listener_stream_specs(*storage_result, 0);
     if (!listener_specs) {
         return failure(listener_specs.error());
     }
+    for (auto const& spec : *listener_specs) {
+        if (spec.format.kind != StreamKind::crf) {
+            return failure(std::errc::invalid_argument);  // audio inputs unsupported here
+        }
+    }
+
+    // Kit phase 3c pattern: find the clock source backed by the (first) CRF
+    // stream input, and the CLOCK_DOMAIN's authored default selection.
+    std::optional<uint16_t> crf_clock_source{};
     if (!listener_specs->empty()) {
-        return failure(std::errc::invalid_argument);  // talker-only entity, blob declares inputs
+        uint16_t const crf_input_index = listener_specs->front().index;
+        for (uint16_t index = 0;; ++index) {
+            auto const cs = load_descriptor<atdecc::aem::DescriptorClockSource>(
+                *storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, index);
+            if (!cs) {
+                break;
+            }
+            if (cs->clock_source_type == atdecc::aem::CLOCK_SOURCE_TYPE_INPUT_STREAM &&
+                cs->clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
+                cs->clock_source_location_index == crf_input_index) {
+                crf_clock_source = index;
+                break;
+            }
+        }
+    }
+    uint16_t initial_clock_source = 0;
+    if (auto const cd =
+            load_descriptor<atdecc::aem::DescriptorClockDomain>(*storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0)) {
+        initial_clock_source = cd->clock_source_index;
     }
 
     auto const rate = common_audio_sample_rate(specs, DEFAULT_SAMPLE_RATE);
@@ -146,6 +178,9 @@ auto AvbEntityToneGenerator::create(
         std::move(handler),
         storage_handler,
         specs,
+        *listener_specs,
+        initial_clock_source,
+        crf_clock_source,
         *rate,
         channels,
         base_midi_note,
@@ -163,14 +198,17 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     std::unique_ptr<nanoavb::AemEntityHandler> handler,
     nanoavb::DescriptorStorageHandler* storage_handler,
     StreamSpecs specs,
+    StreamSpecs listener_specs,
+    uint16_t initial_clock_source,
+    std::optional<uint16_t> crf_clock_source_index,
     uint32_t sample_rate,
     size_t channels,
     uint8_t base_midi_note,
     std::pmr::memory_resource* memory_resource)
     : config_{std::move(config)}
-    , specs_{specs}  // Talker stream count from the blob; 4 max listeners each, 0 listener
-    // streams (talker-only).
-    , host_{std::move(handler), default_adp_advertiser_config(), specs.size(), 4, 0}
+    , specs_{specs}                    // Talker/listener stream counts from the blob; 4 max listeners
+    , listener_specs_{listener_specs}  // per talker stream. Inputs are CRF-only (validated in create).
+    , host_{std::move(handler), default_adp_advertiser_config(), specs.size(), 4, listener_specs.size()}
     , sample_rate_{sample_rate}
     , samples_per_packet_{sample_rate / CLASS_A_PACKETS_PER_SEC}
     , channels_{channels}
@@ -190,6 +228,15 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     }
 
     storage_handler_ = storage_handler;
+
+    // CRF-input clock slaving (kit phase 3c pattern): assigned here rather
+    // than the init list (these members are declared after the DSP members).
+    active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
+    crf_clock_source_index_ = crf_clock_source_index;
+    if (!listener_specs_.empty()) {
+        listener_ = std::make_unique<ListenerStreams>(
+            config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns_, /*audio_sink=*/nullptr);
+    }
 
     // Per-control dispatch (kit phase 4): the generic CONTROL built-in calls
     // back with each accepted SET_CONTROL; bound symbols get their handler's
@@ -364,12 +411,15 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         });
 
-    // AECP GET_COUNTERS (STREAM_OUTPUT talker rate) + GET_STREAM_INFO. No
-    // STREAM_INPUT branch: this entity has no listener sinks.
+    // AECP GET_COUNTERS + GET_STREAM_INFO: talker outputs always; the CRF
+    // input's health/identity when the blob declares one.
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 return fill_stream_output_counters(descriptor_index, valid, counters);
+            }
+            if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
+                return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
             return false;
         });
@@ -468,6 +518,45 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
         if (auto status = talker_->open_stream(spec, sid, dest); !status) {
             return status;
         }
+    }
+
+    // CRF input(s) (kit phase 3c pattern): open the listener slot(s), feed the
+    // recovery from the CRF timestamps, honor SET_CLOCK_SOURCE, and bring up
+    // the RX socket. The media thread reads active_clock_source_ per tick.
+    if (listener_ != nullptr) {
+        for (auto const& spec : listener_specs_) {
+            if (auto status = listener_->open_stream(spec); !status) {
+                return status;
+            }
+            listener_->set_crf(spec.index, crf_recovery_.make_consumer());
+        }
+        if (storage_handler_ != nullptr) {
+            storage_handler_->set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
+                if (domain == 0) {
+                    active_clock_source_.store(source, std::memory_order_release);
+                }
+                return atdecc::AEM_STATUS_SUCCESS;
+            });
+        }
+        // ACMP connect/disconnect drives the MSRP listener attach + the
+        // multicast join for the talker's CRF group.
+        host_.components().acmp_listener.set_connection_callbacks(
+            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
+                listener_->on_listener_connected(stream_index, stream_id, dest_mac);
+            },
+            [this](uint16_t stream_index) { listener_->on_listener_disconnected(stream_index); });
+        // A placeholder group opens the socket; the real join happens on
+        // ACMP connect (on_listener_connected above).
+        std::array<ieee::Eui48, 1> const rx_groups{ieee::Eui48{}};
+        auto rx = std::make_unique<StreamRxHandler>(
+            config_.interface_name, rx_groups, [l = listener_.get()] { l->drain_rx(l->current_gptp_ns()); });
+        if (rx->valid()) {
+            listener_->rx_sock_ = rx->socket();  // borrow before the move; used for dynamic joins
+            reactor.add(std::move(rx));
+        }
+        // Persisted fast-connect bindings (kit phase 5b): a restarted tone
+        // generator re-connects its CRF clock input without a controller.
+        host_.enable_listener_binding_persistence(config_.listener_bindings_path);
     }
 
     // One TX socket (qdisc-bypass so our own egress is not re-received).
@@ -599,10 +688,17 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         uint64_t const wake_ns = base_now_ns + (static_cast<uint64_t>(p) * packet_interval_ns);
         last_gptp_ns_.store(wake_ns, std::memory_order_relaxed);
 
-        // Media clock locked to gPTP: r = 1.0 (no GPS-rate tracking). The
-        // avtp_timestamp comes from the deterministic generator, not the jittery
-        // wake time, so a recovering listener stays steady.
-        auto const tick = media_clock_.advance(wake_ns, /*r=*/1.0, samples_per_packet_);
+        // Media clock rate: 1.0 (locked to gPTP) unless the CRF-input clock
+        // source is active, in which case the recovered remote rate slaves
+        // this entity's media clock to the far talker's (nominal 1.0 until
+        // the recovery locks). The avtp_timestamp comes from the
+        // deterministic generator, not the jittery wake time.
+        double r = 1.0;
+        if (crf_clock_source_index_ && active_clock_source_.load(std::memory_order_acquire) == *crf_clock_source_index_) {
+            auto const est = crf_recovery_.estimate();
+            r = est.locked ? est.r : 1.0;
+        }
+        auto const tick = media_clock_.advance(wake_ns, r, samples_per_packet_);
         auto const samples = static_cast<size_t>(tick.samples);
         if (samples == 0) {
             continue;

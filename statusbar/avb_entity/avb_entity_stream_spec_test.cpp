@@ -119,10 +119,13 @@ TEST(stream_spec_derive, tone_aaf_crf_blob)
     EXPECT_EQ((*talkers)[1].format.kind, StreamKind::crf);
     EXPECT_EQ((*talkers)[1].format.crf_base_frequency_hz, 48'000U);
 
-    // Talker-only entity: no stream inputs.
+    // One CRF clock input (the media clock can slave to a remote CRF).
     auto const listeners = listener_stream_specs(storage, 0);
     EXPECT_TRUE(listeners.has_value());
-    EXPECT_TRUE(listeners->empty());
+    EXPECT_EQ(listeners->size(), 1U);
+    EXPECT_EQ(listeners->front().index, 0);
+    EXPECT_EQ(listeners->front().format.kind, StreamKind::crf);
+    EXPECT_EQ(listeners->front().format.crf_base_frequency_hz, 48'000U);
 
     // The hardcoded index constants this layer replaces.
     EXPECT_EQ(find_stream(*talkers, StreamKind::aaf), std::optional<uint16_t>{0});
