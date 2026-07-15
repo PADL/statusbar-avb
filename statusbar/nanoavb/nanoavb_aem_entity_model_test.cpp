@@ -2328,6 +2328,99 @@ TEST(stream_lifecycle, set_sampling_rate_validates_and_round_trips)
         96000u);
 }
 
+// ===========================================================================
+// SET/GET_CONFIGURATION (kit phase 5c): validated against the ENTITY's
+// configurations_count; a real switch needs the application hook (the data
+// plane must re-shape); idempotent SETs and GET always succeed.
+// ===========================================================================
+
+namespace {
+
+/// Blob with one ENTITY descriptor advertising two configurations.
+auto make_blob_with_two_configurations() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr uint32_t desc_size = DescriptorEntity::LENGTH;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_ENTITY, desc_size, desc_offset);
+
+    DescriptorEntity desc{};
+    desc.configurations_count = 2;
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+    return blob;
+}
+
+/// SET_CONFIGURATION command body.
+auto make_set_configuration_body(uint16_t configuration_index) -> std::vector<uint8_t>
+{
+    atdecc::aem::AemSetConfigurationPayload const payload{.reserved = 0, .configuration_index = configuration_index};
+    std::vector<uint8_t> body(atdecc::aem::AemSetConfigurationPayload::LENGTH, 0);
+    span_store(make_span(body), payload);
+    return body;
+}
+
+/// The configuration_index in a SET/GET_CONFIGURATION response.
+auto response_configuration(std::span<uint8_t const> bytes) -> uint16_t
+{
+    atdecc::aem::AemSetConfigurationPayload payload{};
+    span_load(payload, bytes.first(atdecc::aem::AemSetConfigurationPayload::LENGTH));
+    return payload.configuration_index.get();
+}
+
+}  // namespace
+
+TEST(configuration, set_validates_switches_and_round_trips)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET: configuration 0 by default.
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CONFIGURATION, {});
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_configuration(get0.bytes), uint16_t{0});
+
+    // SET to the current configuration is an idempotent SUCCESS, no hook needed.
+    auto const same = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(0));
+    EXPECT_EQ(same.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_configuration(same.bytes), uint16_t{0});
+
+    // A real switch without an application hook is refused: the data plane
+    // cannot re-shape, so the entity must not claim the new configuration.
+    auto const unhooked = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(unhooked.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+
+    // Out of range is BAD_ARGUMENTS (the ENTITY advertises 2 configurations).
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(5));
+    EXPECT_EQ(bad.status, AEM_STATUS_BAD_ARGUMENTS);
+
+    // With an accepting hook the switch lands and GET reflects it.
+    static uint16_t seen_configuration = 0xFFFF;
+    cmd_handler.set_on_configuration_changed([](uint16_t configuration) -> uint8_t {
+        seen_configuration = configuration;
+        return AEM_STATUS_SUCCESS;
+    });
+    auto const ok = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_configuration(ok.bytes), uint16_t{1});
+    EXPECT_EQ(seen_configuration, uint16_t{1});
+    auto const get1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CONFIGURATION, {});
+    EXPECT_EQ(response_configuration(get1.bytes), uint16_t{1});
+
+    // A vetoing hook keeps the configuration.
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(0));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    auto const still1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CONFIGURATION, {});
+    EXPECT_EQ(response_configuration(still1.bytes), uint16_t{1});
+}
+
 //
 // Test Runner
 //

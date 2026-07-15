@@ -134,6 +134,12 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_GET_CONFIGURATION:
             return handle_get_configuration(header, out_buffer);
 
+        case AEM_COMMAND_SET_CONFIGURATION:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_configuration(command_data, out_buffer);
+
         case AEM_COMMAND_CONTROLLER_AVAILABLE:
             return handle_controller_available(header);
 
@@ -371,6 +377,7 @@ auto AemCommandHandler::handle_set_descriptor_value(
     // Per-call model (handler_ resolves the descriptor symbol via its storage). The
     // handler applies the value by (command_type, symbol); the response echoes the command.
     AemEntityModel aem_model{*handler_};
+    aem_model.set_configuration(current_configuration_);
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_data, out_buffer);
 
     // A controller changed a control: notify every registered controller (IEEE
@@ -386,7 +393,8 @@ auto AemCommandHandler::handle_set_descriptor_value(
 auto AemCommandHandler::handle_get_descriptor_value(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    AemEntityModel const aem_model{*handler_};
+    AemEntityModel aem_model{*handler_};
+    aem_model.set_configuration(current_configuration_);
     auto const n = aem_model.get_descriptor_value_for_wire(command_type, command_data, out_buffer);
     if (n == 0) {
         // The handler served no value: the entity does not implement this GET (the
@@ -416,7 +424,8 @@ auto AemCommandHandler::handle_get_stream_format(
     // Read the STREAM descriptor (current configuration) and lift its current_format.
     std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
     AemEntityModel const aem_model{*handler_};
-    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
+    DescriptorRef const ref{
+        .configuration_index = current_configuration_, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
     auto const n = aem_model.get_descriptor_for_wire(ref, desc);
     constexpr size_t FORMAT_OFFSET = offsetof(DescriptorStream, current_format);  // 74
     if (n < FORMAT_OFFSET + 8) {
@@ -450,7 +459,8 @@ auto AemCommandHandler::handle_get_sampling_rate(
     }
     std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
     AemEntityModel const aem_model{*handler_};
-    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
+    DescriptorRef const ref{
+        .configuration_index = current_configuration_, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
     auto const n = aem_model.get_descriptor_for_wire(ref, desc);
     constexpr size_t SR_OFFSET = offsetof(DescriptorAudioUnit, current_sampling_rate);  // 136
     if (n < SR_OFFSET + 4) {
@@ -719,6 +729,57 @@ auto AemCommandHandler::handle_get_configuration(AemDu const& /*header*/, std::s
     resp.configuration_index = current_configuration_;
     span_store(out_buffer, resp);
 
+    return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
+}
+
+auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    using namespace atdecc::aem;
+    if (command_data.size() < AemSetConfigurationPayload::LENGTH || out_buffer.size() < AemSetConfigurationPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemSetConfigurationPayload cmd{};
+    span_load(cmd, command_data);
+    uint16_t const requested = cmd.configuration_index;
+
+    // Validate against the ENTITY descriptor's configurations_count.
+    std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
+    AemEntityModel const aem_model{*handler_};
+    auto const n = aem_model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0}, make_span(desc));
+    constexpr size_t CFG_COUNT_OFFSET = offsetof(DescriptorEntity, configurations_count);
+    uint16_t configurations_count = 1;
+    if (n >= CFG_COUNT_OFFSET + 2) {
+        doublet_t count{};
+        span_load(count, make_const_span(desc, {.start = CFG_COUNT_OFFSET, .length = 2}));
+        configurations_count = count.get();
+    }
+    if (requested >= configurations_count) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+
+    bool const switching = requested != current_configuration_;
+    if (switching) {
+        // Without an application hook the data plane cannot actually
+        // re-shape itself; refuse the switch rather than claim a
+        // configuration the streams are not built for.
+        if (!on_configuration_changed_) {
+            return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+        }
+        if (auto const status = on_configuration_changed_(requested); status != AEM_STATUS_SUCCESS) {
+            return {.status = status, .size = 0};
+        }
+        current_configuration_ = requested;
+    }
+
+    AemSetConfigurationPayload resp{};
+    resp.configuration_index = current_configuration_;
+    span_store(out_buffer, resp);
+    if (switching) {
+        emit_unsolicited(
+            AEM_COMMAND_SET_CONFIGURATION, std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
+    }
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
 

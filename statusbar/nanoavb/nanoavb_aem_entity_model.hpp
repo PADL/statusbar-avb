@@ -75,6 +75,12 @@ class AemEntityModel
     auto operator=(AemEntityModel&&) noexcept -> AemEntityModel& = default;
     ~AemEntityModel() = default;
 
+    /// The configuration index used for descriptor refs whose command
+    /// payloads carry none on the wire (the SET/GET_*_VALUE dispatch).
+    /// Defaults to configuration 0; the command handler sets the entity's
+    /// current configuration here (kit phase 5c).
+    void set_configuration(uint16_t const configuration) noexcept { configuration_ = configuration; }
+
     /// Populate `out` with the on-wire bytes of a single descriptor.
     /// Returns the number of bytes written, or 0 if the descriptor type
     /// is not dispatched, the handler returned false (no such descriptor),
@@ -138,6 +144,7 @@ class AemEntityModel
 
     AemEntityHandler* handler_{nullptr};
     std::optional<DescriptorStorage> storage_;
+    uint16_t configuration_{0};  ///< see set_configuration
 };
 
 }  // namespace statusbar::nanoavb

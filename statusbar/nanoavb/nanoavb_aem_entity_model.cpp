@@ -245,7 +245,8 @@ auto AemEntityModel::apply_set_descriptor_value(
     doublet_t dindex{};
     span_load(dtype, command_body.subspan(0, 2));
     span_load(dindex, command_body.subspan(2, 2));
-    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
+    DescriptorRef const ref{
+        .configuration_index = configuration_, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
 
     auto const status = handler_->on_set_descriptor_value(
         command_type, DescriptorId{.ref = ref, .symbol = symbol_for(ref)}, command_body.subspan(4));
@@ -271,7 +272,8 @@ auto AemEntityModel::get_descriptor_value_for_wire(
     doublet_t dindex{};
     span_load(dtype, command_body.subspan(0, 2));
     span_load(dindex, command_body.subspan(2, 2));
-    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
+    DescriptorRef const ref{
+        .configuration_index = configuration_, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
 
     span_copy(out.first(4), command_body.first(4));
     auto const n = handler_->on_get_descriptor_value(

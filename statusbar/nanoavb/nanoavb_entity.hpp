@@ -202,6 +202,18 @@ class AemCommandHandler
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
     void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
 
+    /// Called when SET_CONFIGURATION asks to switch to a different (valid)
+    /// configuration — this is where the application re-shapes its data
+    /// plane. Return AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_*
+    /// to reject. Without a registered callback a configuration SWITCH is
+    /// refused (NOT_SUPPORTED) — the entity must not claim a configuration
+    /// its streams are not actually built for; a SET to the current
+    /// configuration is always an idempotent SUCCESS.
+    void set_on_configuration_changed(statusbar::sg14::inplace_function<uint8_t(uint16_t /*configuration*/), 64> fn)
+    {
+        on_configuration_changed_ = std::move(fn);
+    }
+
     /// Callback to send CONTROLLER_AVAILABLE command to the current owner.
     /// Set this to enable the CONTROLLER_AVAILABLE handshake on acquire contention.
     /// Signature: send_controller_available(owner_entity_id) -> bool.
@@ -410,6 +422,14 @@ class AemCommandHandler
     /// Handle GET_CONFIGURATION command.
     [[nodiscard]] auto handle_get_configuration(AemDu const& header, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
 
+    /// Handle SET_CONFIGURATION command (kit phase 5c): validate against
+    /// the ENTITY descriptor's configurations_count; an actual switch runs
+    /// the on_configuration_changed veto/apply hook (refused NOT_SUPPORTED
+    /// when no hook is registered); a SET to the current configuration is
+    /// an idempotent SUCCESS.
+    [[nodiscard]] auto handle_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
     /// Handle CONTROLLER_AVAILABLE command (always SUCCESS, no body).
     [[nodiscard]] static auto handle_controller_available(AemDu const& /*header*/) -> AemCommandResponse
     {
@@ -522,6 +542,7 @@ class AemCommandHandler
 
     // Current configuration
     uint16_t current_configuration_ = 0;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t), 64> on_configuration_changed_{};
 
     // Unsolicited notification registrations.
     // Slot occupancy is tracked by the enclosing SlotTable (its size() is
