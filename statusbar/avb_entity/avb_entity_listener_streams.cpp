@@ -432,16 +432,22 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
     auto const now = sm::Clock::now();
-    auto const result = components_.msrp_handler.listener_ready(sid, now);
+    // Attach (kit phase 5d): declares Ready when the talker's Advertise is
+    // registered, AskingFailed until then (e.g. a fast-connect racing the
+    // talker's boot) — the handler upgrades to Ready when it appears.
+    auto const result = components_.msrp_handler.listener_attach(sid, now);
+    bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
     // Join the talker's stream group so the NIC delivers its frames to us.
     bool const joined = rx_sock_ != nullptr && rx_sock_->join_multicast(dest_mac).has_value();
     if (logger_) {
         logger_->status(
-            "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener Ready {}, mcast join {}",
+            "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener {}, mcast join {}",
             stream_index,
             kind_lit(slot_for(stream_index)),
             dest_mac.to_uint64(),
-            result.has_value() ? logging::lit("declared") : logging::lit("failed"),
+            !result.has_value() ? logging::lit("declare FAILED")
+                : ready         ? logging::lit("Ready")
+                                : logging::lit("AskingFailed (talker not advertising yet)"),
             joined ? logging::lit("ok") : logging::lit("FAILED"));
     }
 }

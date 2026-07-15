@@ -233,6 +233,19 @@ class MsrpHandler
         // Safe: MsrpHandler lives in the non-movable NanoAvbComponents, so
         // `this` is stable for the lifetime of the captured observer.
         (void)participant_.subscribe(statusbar::srp::msrp::Observer{
+            .on_talker_advertise =
+                [this](statusbar::srp::msrp::TalkerAdvertiseFirstValue const& fv, statusbar::srp::msrp::Operation op) {
+                    if (op == statusbar::srp::msrp::Operation::Register) {
+                        on_remote_talker_changed(fv.stream_id);
+                    }
+                },
+            .on_talker_failed =
+                [this](statusbar::srp::msrp::TalkerFailedFirstValue const& fv, statusbar::srp::msrp::Operation op) {
+                    if (op == statusbar::srp::msrp::Operation::Register) {
+                        on_remote_talker_changed(fv.advertise.stream_id);
+                    }
+                },
+            .on_talker_leave = [this](tsn::StreamId const& sid) { on_remote_talker_changed(sid); },
             .on_listener = [this](
                                tsn::StreamId const& sid,
                                statusbar::srp::msrp::ListenerDeclaration /*decl*/,
@@ -451,6 +464,36 @@ class MsrpHandler
         return nullptr;
     }
 
+    /// True when the talker's Advertise is registered from the wire and no
+    /// Talker Failed has replaced it — the 802.1Q condition for a listener
+    /// to declare Ready rather than Asking Failed.
+    [[nodiscard]] auto talker_advertise_registered(StreamId const& stream_id) const noexcept -> bool
+    {
+        return participant_.find_talker_advertise(stream_id) != nullptr && participant_.find_talker_failed(stream_id) == nullptr;
+    }
+
+    /// Attach this listener to @p stream_id (kit phase 5d, IEEE 802.1Q
+    /// 35.2.4.4): declare Listener Ready when the talker's Advertise is
+    /// registered, Listener Asking Failed otherwise (the talker is not
+    /// advertising yet, or registered Talker Failed). While attached, the
+    /// declaration is upgraded/downgraded automatically as the talker's
+    /// registration changes (see on_remote_talker_changed). Returns the
+    /// state actually declared. Use instead of listener_ready() when the
+    /// talker may not be up yet — e.g. an ACMP fast-connect at boot.
+    [[nodiscard]] auto listener_attach(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>
+    {
+        if (talker_advertise_registered(stream_id)) {
+            if (auto const r = listener_ready(stream_id, now); !r) {
+                return failure(r.error());
+            }
+            return success(ListenerReservationState::Ready);
+        }
+        if (auto const r = listener_asking_failed(stream_id, now); !r) {
+            return failure(r.error());
+        }
+        return success(ListenerReservationState::AskingFailed);
+    }
+
     auto receive_packet(std::span<uint8_t const> packet, TimePoint now) -> void
     {
         if (packet.size() < 3) {
@@ -460,6 +503,7 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
+        last_event_time_ = now;
         participant_.receive_pdu(packet, now);
     }
 
@@ -469,6 +513,7 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
+        last_event_time_ = now;
         participant_.tick(now);
         if (callbacks_.send_packet) {
             participant_.set_send_pdu(callbacks_.send_packet);
@@ -488,11 +533,44 @@ class MsrpHandler
         }
     }
 
+    /// The remote talker's registration for @p sid changed (Advertise or
+    /// Failed registered, or the talker left): re-derive the declaration of
+    /// an attached listener stream — AskingFailed -> Ready when the
+    /// Advertise appears, Ready -> AskingFailed when it goes away — and
+    /// surface the change through on_listener_state_change. Fires from
+    /// receive_packet()/tick() via the participant observer.
+    void on_remote_talker_changed(tsn::StreamId const& sid)
+    {
+        for (auto& stream : listener_streams_) {
+            if (stream.stream_id != sid) {
+                continue;
+            }
+            bool const ready = talker_advertise_registered(sid);
+            ListenerReservationState const want = ready ? ListenerReservationState::Ready : ListenerReservationState::AskingFailed;
+            if (stream.state != ListenerReservationState::Ready && stream.state != ListenerReservationState::AskingFailed) {
+                return;  // not attached (Idle/withdrawn): nothing to re-declare
+            }
+            if (stream.state == want) {
+                return;
+            }
+            stream.state = want;
+            (void)participant_.declare_listener(
+                sid,
+                ready ? statusbar::srp::msrp::ListenerDeclaration::Ready : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
+                last_event_time_);
+            if (callbacks_.on_listener_state_change) {
+                callbacks_.on_listener_state_change(sid, stream.state);
+            }
+            return;
+        }
+    }
+
     MsrpCallbacks callbacks_;
     DomainInfo domain_;
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipant participant_;
+    TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)
     bool started_{false};
 };
 

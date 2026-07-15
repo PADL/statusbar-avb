@@ -316,6 +316,86 @@ TEST(nanoavb_srp_msrp, on_talker_listener_fires_when_listener_ready)
     EXPECT_FALSE(fired_for_other);
 }
 
+// Kit phase 5d: listener_attach declares AskingFailed until the talker's
+// Advertise is registered from the wire, then upgrades to Ready
+// automatically (802.1Q 35.2.4.4) — the MSRP half of a fast-connect
+// racing a talker's boot.
+TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
+{
+    using statusbar::srp::msrp::MsrpConfig;
+
+    TimePoint now{std::chrono::seconds{1}};
+
+    std::vector<std::vector<uint8_t>> talker_out;
+    std::vector<std::vector<uint8_t>> listener_out;
+
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(7);
+
+    std::vector<ListenerReservationState> state_changes;
+    MsrpHandler<> talker{MsrpConfig{}, MsrpCallbacks{.send_packet = [&talker_out](std::span<uint8_t const> p) {
+                             talker_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+    MsrpHandler<> listener{
+        MsrpConfig{},
+        MsrpCallbacks{
+            .send_packet =
+                [&listener_out](std::span<uint8_t const> p) {
+                    listener_out.emplace_back(p.begin(), p.end());
+                    return true;
+                },
+            .on_listener_state_change =
+                [&](StreamId const& s, ListenerReservationState state) {
+                    if (s == sid) {
+                        state_changes.push_back(state);
+                    }
+                }}};
+
+    // Attach before the talker exists on the wire: AskingFailed.
+    auto const attached = listener.listener_attach(sid, now);
+    EXPECT_TRUE(attached.has_value());
+    EXPECT_EQ(*attached, ListenerReservationState::AskingFailed);
+    EXPECT_TRUE(!listener.talker_advertise_registered(sid));
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::AskingFailed);
+
+    // The talker boots and advertises; pump PDUs both ways.
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+    info.max_frame_size = 416;
+    info.max_interval_frames = 1;
+    (void)talker.talker_advertise(info, now);
+
+    auto pump = [&now](std::vector<std::vector<uint8_t>>& out, MsrpHandler<>& dst) {
+        for (auto const& p : out) {
+            dst.receive_packet(p, now);
+        }
+        out.clear();
+    };
+    for (int round = 0; round < 12; ++round) {
+        now += std::chrono::milliseconds{120};
+        talker.tick(now);
+        listener.tick(now);
+        pump(talker_out, listener);
+        pump(listener_out, talker);
+    }
+
+    // The Advertise registered and the attached listener upgraded to Ready,
+    // surfacing the change through on_listener_state_change.
+    EXPECT_TRUE(listener.talker_advertise_registered(sid));
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
+    EXPECT_TRUE(!state_changes.empty());
+    EXPECT_EQ(state_changes.back(), ListenerReservationState::Ready);
+
+    // A fresh attach while the talker is advertising is immediately Ready.
+    statusbar::tsn::StreamId sid2 = sid;
+    (void)sid2;  // same stream: re-attach is idempotent Ready
+    auto const reattached = listener.listener_attach(sid, now);
+    EXPECT_TRUE(reattached.has_value());
+    EXPECT_EQ(*reattached, ListenerReservationState::Ready);
+}
+
 //
 // MSRP Handler Listener Tests
 //
