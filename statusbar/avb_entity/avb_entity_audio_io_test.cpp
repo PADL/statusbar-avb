@@ -496,15 +496,13 @@ TEST(audio_io_clocking, set_clock_source_switches_active_rate_source)
     EXPECT_EQ(entity.active_clock_source(), static_cast<uint16_t>(0));
 
     auto const run_set = [&entity](uint16_t clock_source) -> uint8_t {
-        std::vector<uint8_t> body;
-        auto const push_u16 = [&body](uint16_t v) {
-            body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-            body.push_back(static_cast<uint8_t>(v & 0xFF));
-        };
-        push_u16(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN);
-        push_u16(0);  // descriptor_index
-        push_u16(clock_source);
-        push_u16(0);  // reserved
+        atdecc::aem::AemClockSourcePayload const payload{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN,
+            .descriptor_index = 0,
+            .clock_source_index = clock_source,
+            .reserved = 0};
+        std::vector<uint8_t> body(atdecc::aem::AemClockSourcePayload::LENGTH, 0);
+        span_store(std::span<uint8_t>{body}, payload);
         atdecc::AemDu header{};
         header.init_command(
             atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));

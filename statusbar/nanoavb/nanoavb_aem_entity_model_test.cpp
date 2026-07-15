@@ -1808,30 +1808,31 @@ auto make_blob_with_clock_domain() -> std::vector<uint8_t>
     return blob;
 }
 
-/// SET/GET_CLOCK_SOURCE command body: descriptor type/index (+ the requested
-/// clock_source_index and reserved doublet on SET).
+/// SET/GET_CLOCK_SOURCE command body via the wire struct
+/// (atdecc::aem::AemClockSourcePayload): descriptor type/index, plus the
+/// requested clock_source_index + reserved on SET.
 auto make_clock_source_body(uint16_t descriptor_index, std::optional<uint16_t> const clock_source = std::nullopt)
     -> std::vector<uint8_t>
 {
-    std::vector<uint8_t> body;
-    auto push_u16 = [&body](uint16_t v) {
-        body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-        body.push_back(static_cast<uint8_t>(v & 0xFF));
-    };
-    push_u16(DESCRIPTOR_CLOCK_DOMAIN);
-    push_u16(descriptor_index);
-    if (clock_source) {
-        push_u16(*clock_source);
-        push_u16(0);  // reserved
+    atdecc::aem::AemClockSourcePayload payload{
+        .descriptor_type = DESCRIPTOR_CLOCK_DOMAIN,
+        .descriptor_index = descriptor_index,
+        .clock_source_index = clock_source.value_or(0),
+        .reserved = 0};
+    std::vector<uint8_t> body(atdecc::aem::AemClockSourcePayload::LENGTH, 0);
+    span_store(make_span(body), payload);
+    if (!clock_source) {
+        body.resize(atdecc::aem::AemControlPayloadHeader::LENGTH);  // GET: type/index only
     }
     return body;
 }
 
-/// The clock_source_index in a SET/GET_CLOCK_SOURCE response (after the
-/// 4-byte descriptor header).
+/// The clock_source_index in a SET/GET_CLOCK_SOURCE response.
 auto response_clock_source(std::span<uint8_t const> bytes) -> uint16_t
 {
-    return static_cast<uint16_t>((bytes[4] << 8) | bytes[5]);
+    atdecc::aem::AemClockSourcePayload payload{};
+    span_load(payload, bytes.first(atdecc::aem::AemClockSourcePayload::LENGTH));
+    return payload.clock_source_index;
 }
 
 }  // namespace

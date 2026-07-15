@@ -31,6 +31,7 @@
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sm/sm.hpp"
@@ -106,6 +107,7 @@ class AvbEntityToneGenerator
         CreateKey,
         AvbEntityAudioIOConfig config,
         std::unique_ptr<nanoavb::AemEntityHandler> handler,
+        nanoavb::DescriptorStorageHandler* storage_handler,
         StreamSpecs specs,
         uint32_t sample_rate,
         size_t channels,
@@ -153,6 +155,20 @@ class AvbEntityToneGenerator
     /// Same, addressed by STREAM_OUTPUT descriptor index.
     void set_render(uint16_t stream_index, StreamRenderFn fn);
 
+    // --- Per-control value handlers (kit phase 4) ---------------------------
+    /// A bound control's value-changed handler: receives the SET_CONTROL
+    /// current-values payload (size-validated for linear types). Return
+    /// AEM_STATUS_SUCCESS to accept (the built-in stores + notifies), any
+    /// other AEM_STATUS_* to reject. Reactor thread.
+    using ControlChangedFn = sg14::inplace_function<uint8_t(std::span<uint8_t const> value), 64>;
+
+    /// Register a handler for the CONTROL whose blob symbol is @p symbol.
+    /// The code is a menu, the model is the selection: an unknown symbol is
+    /// recorded but inert (listed at start()); controls with no handler still
+    /// get the generic store/serve built-in.
+    void on_control(std::string_view symbol, ControlChangedFn fn) { on_control_symbol(symbol_code(symbol), std::move(fn)); }
+    void on_control_symbol(uint32_t symbol_code, ControlChangedFn fn);
+
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
     [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
     [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
@@ -196,6 +212,21 @@ class AvbEntityToneGenerator
     /// inert; listed at start() for typo-finding).
     sg14::inplace_vector<uint32_t, MAX_ENTITY_STREAMS> unbound_render_symbols_{};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> unbound_render_indices_{};
+
+    /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
+    /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).
+    struct ControlBinding
+    {
+        uint32_t symbol{0};
+        uint16_t control_index{0};
+        bool resolved{false};
+        ControlChangedFn fn{};
+    };
+    static constexpr size_t MAX_CONTROL_BINDINGS = 8;
+    sg14::inplace_vector<ControlBinding, MAX_CONTROL_BINDINGS> control_bindings_{};
+    /// The blob-backed descriptor handler (owned by host_); carries the
+    /// generic CONTROL built-in this registry dispatches from.
+    nanoavb::DescriptorStorageHandler* storage_handler_{nullptr};
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};

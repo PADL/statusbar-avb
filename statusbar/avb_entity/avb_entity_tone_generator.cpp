@@ -138,9 +138,18 @@ auto AvbEntityToneGenerator::create(
         iface_mac,
         /*patch_avb_interface=*/true);
 
+    auto* const storage_handler = handler.get();
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity = std::make_unique<AvbEntityToneGenerator>(
-        AvbEntityToneGenerator::CreateKey{}, std::move(config), std::move(handler), specs, *rate, channels, base_midi_note, mr);
+        AvbEntityToneGenerator::CreateKey{},
+        std::move(config),
+        std::move(handler),
+        storage_handler,
+        specs,
+        *rate,
+        channels,
+        base_midi_note,
+        mr);
     return success(std::move(entity));
 }
 
@@ -152,6 +161,7 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     CreateKey,
     AvbEntityAudioIOConfig config,
     std::unique_ptr<nanoavb::AemEntityHandler> handler,
+    nanoavb::DescriptorStorageHandler* storage_handler,
     StreamSpecs specs,
     uint32_t sample_rate,
     size_t channels,
@@ -177,6 +187,22 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
                 .sample_rate_recip = sr_recip, .frequency = white_key_frequency_hz(base_midi_note, ch), .phase_in_radians = 0.0},
             0);
         oscillators_[ch].coeffs_.set_amplitude(config_.tone_amplitude, 0);
+    }
+
+    storage_handler_ = storage_handler;
+
+    // Per-control dispatch (kit phase 4): the generic CONTROL built-in calls
+    // back with each accepted SET_CONTROL; bound symbols get their handler's
+    // verdict, everything else is accepted (store/serve only).
+    if (storage_handler_ != nullptr) {
+        storage_handler_->set_on_control_changed([this](uint16_t control_index, std::span<uint8_t const> value) -> uint8_t {
+            for (auto& binding : control_bindings_) {
+                if (binding.resolved && binding.control_index == control_index && binding.fn) {
+                    return binding.fn(value);
+                }
+            }
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
     }
 
     // Per-stream render buffers, parallel to specs_: audio slots get an
@@ -270,6 +296,27 @@ void AvbEntityToneGenerator::set_render_symbol(uint32_t const symbol_code, Strea
     }
     if (unbound_render_symbols_.size() < MAX_ENTITY_STREAMS) {
         unbound_render_symbols_.push_back(symbol_code);
+    }
+}
+
+void AvbEntityToneGenerator::on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn)
+{
+    ControlBinding binding{};
+    binding.symbol = symbol_code;
+    binding.fn = std::move(fn);
+    if (auto const entry = host_.descriptor_for_symbol(symbol_code);
+        entry.has_value() && entry->descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL) {
+        binding.control_index = entry->descriptor_index;
+        binding.resolved = true;
+    }
+    for (auto& existing : control_bindings_) {
+        if (existing.symbol == symbol_code) {
+            existing = std::move(binding);
+            return;
+        }
+    }
+    if (control_bindings_.size() < MAX_CONTROL_BINDINGS) {
+        control_bindings_.push_back(std::move(binding));
     }
 }
 
@@ -435,6 +482,11 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
     }
     for (auto const idx : unbound_render_indices_) {
         host_.ctl_log().status("render: registered stream index {} not an audio stream in this model (inert)", idx);
+    }
+    for (auto const& binding : control_bindings_) {
+        if (!binding.resolved) {
+            host_.ctl_log().status("control: registered symbol 0x{:08x} not a CONTROL in this model (inert)", binding.symbol);
+        }
     }
 
     return success();

@@ -521,4 +521,55 @@ TEST(tone_render, unbound_registrations_are_inert)
     EXPECT_EQ(calls, 0U);  // inert, and creation/processing never errored
 }
 
+//
+// Per-control value handlers (kit phase 4): on_control("symbol", fn) binds via
+// the blob symbol table; the handler sees each accepted SET_CONTROL payload
+// and can veto; unknown symbols are inert (menu/selection).
+//
+
+TEST(tone_control, on_control_binds_by_symbol_and_can_veto)
+{
+    auto blob = load_file(entity_tone_bin_path());
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    auto& entity = **result;
+
+    static uint8_t seen = 0;
+    static int calls = 0;
+    seen = 0;
+    calls = 0;
+    // tone.json authors the identify control with symbol "identify".
+    entity.on_control("identify", [](std::span<uint8_t const> value) -> uint8_t {
+        ++calls;
+        seen = value.empty() ? 0 : value[0];
+        return atdecc::AEM_STATUS_SUCCESS;
+    });
+    entity.on_control("phantom_power", [](std::span<uint8_t const>) -> uint8_t {
+        ++calls;  // not in the model: must never fire
+        return atdecc::AEM_STATUS_SUCCESS;
+    });
+
+    auto const run_set_control = [&entity](uint16_t control_index, uint8_t value) -> uint8_t {
+        atdecc::aem::AemControlPayloadHeader const payload{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_CONTROL, .descriptor_index = control_index};
+        std::vector<uint8_t> body(atdecc::aem::AemControlPayloadHeader::LENGTH, 0);
+        span_store(std::span<uint8_t>{body}, payload);
+        body.push_back(value);  // the control's current values: LINEAR_UINT8 x 1
+        atdecc::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_SET_CONTROL, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        std::array<uint8_t, 128> out{};
+        auto const resp = entity.components().aem_handler.handle_command(header, body, std::span<uint8_t>{out});
+        return resp.status;
+    };
+
+    // The identify control is CONTROL[0] in tone.json.
+    EXPECT_EQ(run_set_control(0, 0xFF), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(calls, 1);    // only the bound symbol fired
+    EXPECT_EQ(seen, 0xFF);  // with the delivered payload
+
+    // A vetoing handler propagates its status over the wire.
+    entity.on_control("identify", [](std::span<uint8_t const>) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    EXPECT_EQ(run_set_control(0, 0x00), atdecc::AEM_STATUS_NOT_SUPPORTED);
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)

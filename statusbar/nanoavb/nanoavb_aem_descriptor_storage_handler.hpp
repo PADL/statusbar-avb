@@ -299,9 +299,15 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     auto on_set_descriptor_value(uint16_t command_type, DescriptorId id, std::span<uint8_t const> value) -> uint8_t override
     {
-        if (command_type == atdecc::AEM_COMMAND_SET_CONTROL && is_identify_control(id.ref) && !value.empty()) {
-            identify_value_ = value[0];
-            return atdecc::AEM_STATUS_SUCCESS;
+        if (command_type == atdecc::AEM_COMMAND_SET_CONTROL && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL) {
+            // Generic CONTROL built-in (kit phase 4): validate, offer to the
+            // change callback, store. IDENTIFY additionally mirrors into
+            // identify_value_ (the identify_changed indicator + accessor).
+            auto const status = set_control(id.ref, value);
+            if (status == atdecc::AEM_STATUS_SUCCESS && is_identify_control(id.ref) && !value.empty()) {
+                identify_value_ = value[0];
+            }
+            return status;
         }
         if (command_type == atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR &&
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR) {
@@ -340,13 +346,18 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (command_type == atdecc::AEM_COMMAND_GET_CLOCK_SOURCE &&
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN && out.size() >= CLOCK_SOURCE_VALUE_WIRE_SIZE) {
             if (auto const current = current_clock_source(id.ref)) {
+                // The clock_source_index + reserved tail of AemClockSourcePayload
+                // (the generic framing supplies the descriptor type/index head).
                 atdecc::doublet_t const cs{*current};
+                atdecc::doublet_t const reserved{0};
                 span_store(out.subspan(0, 2), cs);
-                out[2] = 0;  // reserved doublet completing the
-                out[3] = 0;  // AemClockSourcePayload quadlet row
+                span_store(out.subspan(2, 2), reserved);
                 return CLOCK_SOURCE_VALUE_WIRE_SIZE;
             }
             return 0;  // no such CLOCK_DOMAIN in the blob
+        }
+        if (command_type == atdecc::AEM_COMMAND_GET_CONTROL && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL) {
+            return get_control(id.ref, out);  // generic CONTROL built-in (kit phase 4)
         }
         return AemEntityHandler::on_get_descriptor_value(command_type, id, request, out);
     }
@@ -433,6 +444,28 @@ class DescriptorStorageHandler : public AemEntityHandler
         atdecc::doublet_t cs{};
         span_load(cs, blob->subspan(CLOCK_DOMAIN_SOURCE_INDEX_FIELD, 2));
         return cs.get();
+    }
+
+    // ---- Built-in generic CONTROL values (automatic; kit phase 4) ----------
+    //
+    // ANY CONTROL descriptor in the blob gets SET_CONTROL / GET_CONTROL
+    // handling out of the box (previously only IDENTIFY): the SET payload
+    // (the control's CURRENT values) is size-validated against the
+    // descriptor's value type and count, stored in RAM keyed by descriptor
+    // index, and served by GET_CONTROL / a controller poll; before any SET,
+    // GET falls back to the current values authored in the blob's
+    // value_details. The change callback is the veto/apply hook where the
+    // application consumes the value (e.g. a gain into its DSP); returning
+    // any status other than SUCCESS rejects and keeps the previous value.
+
+    /// Called when SET_CONTROL delivers a new value payload for a
+    /// non-IDENTIFY CONTROL (size already validated for linear types).
+    /// Return AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to
+    /// reject. Unset => accept (in-memory only).
+    void set_on_control_changed(
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*control_index*/, std::span<uint8_t const> /*value*/), 64> fn)
+    {
+        on_control_changed_ = std::move(fn);
     }
 
     // ---- Built-in MATRIX (automatic when the blob has one) -----------------
@@ -710,6 +743,137 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     statusbar::sg14::inplace_vector<ClockDomainState, MAX_CLOCK_DOMAIN_STATES> clock_domain_states_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t), 64> on_clock_source_changed_{};
+
+    // Generic CONTROL built-in machinery. CONTROL descriptor wire offsets
+    // (same layout is_identify_control() reads) and the RAM value store.
+    static constexpr size_t CONTROL_VALUE_TYPE_FIELD = 80;
+    static constexpr size_t CONTROL_VALUES_OFFSET_FIELD = 94;
+    static constexpr size_t CONTROL_NUMBER_OF_VALUES_FIELD = 96;
+    static constexpr size_t MAX_CONTROL_VALUE_BYTES = 64;
+    static constexpr size_t MAX_CONTROL_STATES = 8;
+
+    /// The stored current-values payload for one CONTROL descriptor.
+    struct ControlState
+    {
+        uint16_t descriptor_index{0};
+        statusbar::sg14::inplace_vector<uint8_t, MAX_CONTROL_VALUE_BYTES> value{};
+    };
+
+    [[nodiscard]] auto find_control_state(uint16_t const descriptor_index) const noexcept -> ControlState const*
+    {
+        for (auto const& s : control_states_) {
+            if (s.descriptor_index == descriptor_index) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /// The expected SET/GET_CONTROL value payload size for the CONTROL at
+    /// @p blob: number_of_values x element size for linear types; nullopt for
+    /// non-linear types (accepted un-validated up to the store's capacity).
+    [[nodiscard]] static auto expected_control_value_size(std::span<uint8_t const> blob) noexcept -> std::optional<size_t>
+    {
+        atdecc::doublet_t vt{};
+        atdecc::doublet_t n{};
+        span_load(vt, blob.subspan(CONTROL_VALUE_TYPE_FIELD, 2));
+        span_load(n, blob.subspan(CONTROL_NUMBER_OF_VALUES_FIELD, 2));
+        uint16_t const base = static_cast<uint16_t>(vt.get() & atdecc::aem::CONTROL_VALUE_TYPE_MASK);
+        if (!atdecc::aem::is_linear_value_type(base)) {
+            return std::nullopt;
+        }
+        return static_cast<size_t>(n.get()) * atdecc::aem::control_value_element_size(base);
+    }
+
+    /// Apply a SET_CONTROL current-values payload to the CONTROL at @p ref.
+    [[nodiscard]] auto set_control(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorControl::LENGTH) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        if (auto const expected = expected_control_value_size(*blob); expected.has_value() && value.size() != *expected) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        if (value.size() > MAX_CONTROL_VALUE_BYTES) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
+
+        if (on_control_changed_) {
+            if (auto const status = on_control_changed_(ref.descriptor_index, value); status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+
+        auto const store = [&value](ControlState& s) {
+            s.value.clear();
+            for (auto const b : value) {
+                s.value.push_back(b);
+            }
+        };
+        for (auto& s : control_states_) {
+            if (s.descriptor_index == ref.descriptor_index) {
+                store(s);
+                return atdecc::AEM_STATUS_SUCCESS;
+            }
+        }
+        auto* s = control_states_.try_push_back(ControlState{.descriptor_index = ref.descriptor_index, .value = {}});
+        if (s == nullptr) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
+        store(*s);
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    /// Serve GET_CONTROL for the CONTROL at @p ref: the stored value when a
+    /// SET happened, otherwise the CURRENT fields extracted from the blob's
+    /// authored value_details (linear types). Returns bytes written (0 =>
+    /// not implemented for this control).
+    [[nodiscard]] auto get_control(DescriptorRef ref, std::span<uint8_t> out) const -> size_t
+    {
+        if (auto const* state = find_control_state(ref.descriptor_index)) {
+            if (out.size() < state->value.size()) {
+                return 0;
+            }
+            for (size_t i = 0; i < state->value.size(); ++i) {
+                out[i] = state->value[i];
+            }
+            return state->value.size();
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorControl::LENGTH) {
+            return 0;
+        }
+        atdecc::doublet_t vt{};
+        atdecc::doublet_t n{};
+        atdecc::doublet_t values_offset{};
+        span_load(vt, blob->subspan(CONTROL_VALUE_TYPE_FIELD, 2));
+        span_load(n, blob->subspan(CONTROL_NUMBER_OF_VALUES_FIELD, 2));
+        span_load(values_offset, blob->subspan(CONTROL_VALUES_OFFSET_FIELD, 2));
+        uint16_t const base = static_cast<uint16_t>(vt.get() & atdecc::aem::CONTROL_VALUE_TYPE_MASK);
+        if (!atdecc::aem::is_linear_value_type(base)) {
+            return 0;  // non-linear defaults need type-specific extraction
+        }
+        size_t const elem = atdecc::aem::control_value_element_size(base);
+        size_t const item = (elem * 5) + 4;  // min,max,step,default,current + unit + string
+        size_t const total = static_cast<size_t>(n.get()) * elem;
+        if (out.size() < total) {
+            return 0;
+        }
+        for (uint16_t i = 0; i < n.get(); ++i) {
+            size_t const current_off = values_offset.get() + (size_t{i} * item) + (elem * 4);
+            if (current_off + elem > blob->size()) {
+                return 0;
+            }
+            for (size_t b = 0; b < elem; ++b) {
+                out[(size_t{i} * elem) + b] = (*blob)[current_off + b];
+            }
+        }
+        return total;
+    }
+
+    statusbar::sg14::inplace_vector<ControlState, MAX_CONTROL_STATES> control_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, std::span<uint8_t const>), 64> on_control_changed_{};
 
     // MATRIX built-in machinery. DescriptorMatrix wire offsets and the
     // SET/GET_MATRIX region header (after the 4-byte descriptor header).

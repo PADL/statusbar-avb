@@ -130,11 +130,17 @@ auto make_blob_with_identify_control() -> std::vector<uint8_t>
     DescriptorControl mute{};
     mute.descriptor_index = 0;
     mute.control_type = statusbar::atdecc::aem::CONTROL_TYPE_MUTE;
+    // A realistic one-value LINEAR_UINT8 control (a default-constructed
+    // number_of_values = 0 would make every SET payload size-invalid).
+    mute.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8
+    mute.number_of_values = 1;
     std::memcpy(blob.data() + control0_offset, &mute, control_size);
 
     DescriptorControl identify{};
     identify.descriptor_index = 1;
     identify.control_type = statusbar::atdecc::aem::CONTROL_TYPE_IDENTIFY;
+    identify.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8 (the standard identify shape)
+    identify.number_of_values = 1;
     std::memcpy(blob.data() + control1_offset, &identify, control_size);
     return blob;
 }
@@ -207,8 +213,9 @@ TEST(avb_entity_host_symbol, no_identify_control_leaves_adp_untouched)
 TEST(avb_entity_host_symbol, identify_control_value_set_get)
 {
     // The storage handler itself accepts SET_CONTROL for the blob's IDENTIFY
-    // control and serves the stored value back on GET_CONTROL; other controls
-    // keep the conservative NOT_IMPLEMENTED default.
+    // control and serves the stored value back on GET_CONTROL; since kit
+    // phase 4 EVERY blob CONTROL gets the same treatment (generic value
+    // store), so the mute control accepts a size-valid SET too.
     auto blob = make_blob_with_identify_control();
     auto storage = DescriptorStorage::create(std::span<uint8_t const>(blob));
     EXPECT_TRUE(storage.has_value());
@@ -231,7 +238,14 @@ TEST(avb_entity_host_symbol, identify_control_value_set_get)
     std::array<uint8_t, 8> out{};
     EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, identify, {}, out), 1u);
     EXPECT_EQ(out[0], 0xFF);
-    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, on), AEM_STATUS_NOT_IMPLEMENTED);
+
+    // Kit phase 4: the generic CONTROL built-in accepts the (size-valid) mute
+    // value and serves it back — a JSON-authored control no longer answers
+    // NOT_IMPLEMENTED with zero per-entity code.
+    EXPECT_EQ(handler.on_set_descriptor_value(AEM_COMMAND_SET_CONTROL, mute, on), AEM_STATUS_SUCCESS);
+    std::array<uint8_t, 8> mute_out{};
+    EXPECT_EQ(handler.on_get_descriptor_value(AEM_COMMAND_GET_CONTROL, mute, {}, mute_out), 1u);
+    EXPECT_EQ(mute_out[0], 0xFF);
 }
 
 TEST(avb_entity_host_symbol, local_identify_trigger)
