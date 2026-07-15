@@ -491,6 +491,10 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
         });
     }
 
+    // Kit phase 5b: persisted listener bindings + fast-connect (generic —
+    // the host loads, remembers and mirrors them; see AvbEntityHost).
+    host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+
     // One TX socket (qdisc-bypass so our own egress is not re-received here).
     (void)talker_->stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
 

@@ -10,6 +10,7 @@
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_bindings.hpp"
 #include "statusbar/srp/srp_msrp.hpp"
 
 #include <chrono>
@@ -343,6 +344,39 @@ void AvbEntityHost::wire_engine_callbacks()
     listener_engine_ctx_.callbacks.resync = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     listener_engine_ctx_.callbacks.mute_out = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     listener_engine_ctx_.callbacks.unmute_out = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+}
+
+void AvbEntityHost::enable_listener_binding_persistence(std::string path)
+{
+    if (path.empty()) {
+        return;
+    }
+    listener_bindings_path_ = std::move(path);
+    auto& listener = components_.acmp_listener;
+
+    // Reload yesterday's bindings as fast-connect goals: the listener's
+    // reactor tick re-connects each remembered talker until it answers,
+    // healing the half-open state an entity or talker restart leaves.
+    if (auto loaded = load_listener_bindings(listener_bindings_path_)) {
+        for (auto const& binding : *loaded) {
+            listener.set_fast_connect_goal(binding.listener_unique_id, binding.talker_entity_id, binding.talker_unique_id);
+        }
+        if (!loaded->empty()) {
+            ctl_log().status("acmp: {} persisted listener binding(s) loaded; fast-connect armed", loaded->size());
+        }
+    } else {
+        ctl_log().status("acmp: listener bindings file unreadable; starting with no fast-connect goals");
+    }
+
+    // Sticky from here on: every successful connect is remembered, every
+    // goal change (connect, retarget, controller DISCONNECT) mirrors to disk.
+    listener.enable_sticky_bindings();
+    listener.set_on_goals_changed([this]() {
+        auto const goals = components_.acmp_listener.fast_connect_goals();
+        if (auto const st = save_listener_bindings(listener_bindings_path_, goals); !st) {
+            ctl_log().status("acmp: could not persist {} listener binding(s)", goals.size());
+        }
+    });
 }
 
 }  // namespace statusbar::avb_entity

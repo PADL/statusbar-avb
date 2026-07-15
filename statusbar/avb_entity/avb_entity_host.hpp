@@ -158,6 +158,15 @@ class AvbEntityHost
     [[nodiscard]] auto components() const noexcept -> nanoavb::NanoAvbComponents const& { return components_; }
     [[nodiscard]] auto net_handlers() noexcept -> nanoavb::NanoAvbNetHandlers* { return net_handlers_.get(); }
 
+    /// Kit phase 5b: persist listener fast-connect bindings at @p path.
+    /// Loads any saved bindings as fast-connect goals (the ACMP listener's
+    /// reactor tick then re-connects each remembered talker until it
+    /// answers), turns on sticky bindings (every successful connect is
+    /// remembered; a controller DISCONNECT forgets it) and mirrors every
+    /// goal change back to the file. One call from any kit entity's start
+    /// path; empty @p path disables. Reactor thread only.
+    void enable_listener_binding_persistence(std::string path);
+
     // --- Logging -----------------------------------------------------------------
     //
     // The host owns two SPSC log channels, one per producer thread context:
@@ -309,6 +318,7 @@ class AvbEntityHost
     statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> on_listener_ready_{};
 
     std::string interface_name_{};
+    std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
     bool running_{false};
 };
 

@@ -10,6 +10,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/sg14/inplace_function.h"
+#include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -244,6 +245,56 @@ class NanoAvbAcmpListener
     /// Check if there is a pending command (waiting for talker response)
     [[nodiscard]] auto has_pending() const noexcept -> bool { return ctx_.has_pending; }
 
+    // Fast connect (kit phase 5b)
+
+    /// A remembered (sink -> talker) binding the listener keeps trying to
+    /// fast-connect while disconnected.
+    struct FastConnectGoal
+    {
+        uint16_t listener_unique_id{0};
+        Eui64 talker_entity_id{};
+        uint16_t talker_unique_id{0};
+    };
+
+    /// How often tick() re-attempts a disconnected fast-connect goal.
+    static constexpr auto FAST_CONNECT_RETRY = std::chrono::seconds{2};
+    static constexpr size_t MAX_FAST_CONNECT_GOALS = 16;
+
+    /// IEEE 1722.1 Clause 8.2.2.1.1 fast connect: the listener originates a
+    /// connection to a remembered talker with itself as the controller (no
+    /// external controller involved). Feeds the normal CONNECT_RX path, so
+    /// the CONNECT_TX handshake, SRP attach and on_connect all behave as if
+    /// a controller had asked. Returns false when a command is already
+    /// pending, the sink is connected, or the index is out of range.
+    auto fast_connect(uint16_t listener_unique_id, Eui64 const& talker_id, uint16_t talker_unique_id, TimePoint now) -> bool;
+
+    /// Remember a binding and keep fast-connecting until it succeeds —
+    /// tick() retries every FAST_CONNECT_RETRY while the sink is
+    /// disconnected (talker rebooted, we rebooted, response lost...). A
+    /// controller DISCONNECT_RX for the sink clears the goal (an operator
+    /// tore the connection down on purpose); a talker departure does NOT
+    /// (that is exactly the case fast connect exists to heal).
+    void set_fast_connect_goal(uint16_t listener_unique_id, Eui64 const& talker_id, uint16_t talker_unique_id);
+
+    /// Forget the goal for @p listener_unique_id (no-op if absent).
+    void clear_fast_connect_goal(uint16_t listener_unique_id);
+
+    /// The remembered goals (for persistence).
+    [[nodiscard]] auto fast_connect_goals() const noexcept -> std::span<FastConnectGoal const>
+    {
+        return {fast_connect_goals_.data(), fast_connect_goals_.size()};
+    }
+
+    /// Opt-in: automatically record every successful connect (controller-
+    /// or fast-connect-made) as a fast-connect goal, so the sink keeps
+    /// re-connecting its talker after either side restarts. Combine with
+    /// set_on_goals_changed to persist the goals across our own restarts.
+    void enable_sticky_bindings() noexcept { sticky_bindings_ = true; }
+
+    /// Called after the goal table actually changes (recorded, retargeted
+    /// or cleared) — the persistence hook. Not called for no-op updates.
+    void set_on_goals_changed(statusbar::sg14::inplace_function<void(), 64> fn) { on_goals_changed_ = std::move(fn); }
+
     /// Tear down any sink connected to a departed talker (ADP ENTITY_DEPARTING or a
     /// discovery ageout). Clears each matching sink's connection state and fires the
     /// on_disconnect callback so SRP/MSRP is released. Returns the number torn down.
@@ -270,19 +321,30 @@ class NanoAvbAcmpListener
     /// @return true if a timeout was processed
     auto check_timeout(TimePoint current_time) -> bool;
 
-    /// Periodic tick - call regularly to check for timeouts
+    /// Periodic tick - call regularly to check for timeouts and to retry
+    /// disconnected fast-connect goals.
     /// @param current_time Current time for timeout processing
-    void tick(TimePoint current_time) { check_timeout(current_time); }
+    void tick(TimePoint current_time)
+    {
+        check_timeout(current_time);
+        fast_connect_tick(current_time);
+    }
 
     /// Get the current state machine state
     [[nodiscard]] auto current_state() const noexcept -> ListenerState { return sm_.current_state(); }
 
   private:
     void wire_listener_callbacks();
+    void fast_connect_tick(TimePoint now);
 
     AcmpListenerCallbacks callbacks_;
     ListenerContext<> ctx_;
     AcmpListenerStateMachine<> sm_;
+    statusbar::sg14::inplace_vector<FastConnectGoal, MAX_FAST_CONNECT_GOALS> fast_connect_goals_{};
+    statusbar::sg14::inplace_function<void(), 64> on_goals_changed_{};
+    TimePoint next_fast_connect_attempt_{};
+    uint16_t fast_connect_sequence_{0};
+    bool sticky_bindings_{false};
 };
 
 //

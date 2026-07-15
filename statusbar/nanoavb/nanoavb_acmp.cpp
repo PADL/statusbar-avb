@@ -101,11 +101,15 @@ void NanoAvbAcmpListener::wire_listener_callbacks()
     ctx_.tx_response = [this](AcmpCommandResponse const& resp) -> bool {
         if (resp.status() == ACMP_STATUS_SUCCESS) {
             if (resp.message_type() == ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE) {
-                if (callbacks_.on_connect) {
-                    auto const* stream = ctx_.get_stream(resp.listener_unique_id.get());
-                    if (stream != nullptr) {
-                        callbacks_.on_connect(resp.listener_unique_id.get(), stream->stream_id, stream->stream_dest_mac);
-                    }
+                auto const* stream = ctx_.get_stream(resp.listener_unique_id.get());
+                if (stream != nullptr && sticky_bindings_) {
+                    // Sticky bindings: every successful connect becomes a
+                    // fast-connect goal (a fast connect re-recording its own
+                    // goal is a no-op upsert).
+                    set_fast_connect_goal(resp.listener_unique_id.get(), stream->talker_entity_id, stream->talker_unique_id);
+                }
+                if (callbacks_.on_connect && stream != nullptr) {
+                    callbacks_.on_connect(resp.listener_unique_id.get(), stream->stream_id, stream->stream_dest_mac);
                 }
             } else if (resp.message_type() == ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE) {
                 if (callbacks_.on_disconnect) {
@@ -128,6 +132,14 @@ auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& 
         return false;
     }
 
+    // A controller DISCONNECT is deliberate: forget any fast-connect goal
+    // for the sink so we do not immediately re-connect what an operator
+    // just tore down. (A talker departure keeps the goal — that is the
+    // half-open case fast connect exists to heal.)
+    if (*event == ListenerEvent::RcvdDisconnectRx) {
+        clear_fast_connect_goal(cmd.listener_unique_id.get());
+    }
+
     // Store the command in context
     ctx_.rcvd_cmd_resp = cmd;
 
@@ -135,6 +147,86 @@ auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& 
     sm_.handle_event(ctx_, *event, event_time);
 
     return true;
+}
+
+auto NanoAvbAcmpListener::fast_connect(
+    uint16_t const listener_unique_id, Eui64 const& talker_id, uint16_t const talker_unique_id, TimePoint const now) -> bool
+{
+    if (ctx_.has_pending || listener_unique_id >= ctx_.max_streams() || is_connected(listener_unique_id)) {
+        return false;
+    }
+    // Clause 8.2.2.1.1: the listener acts as its own controller. The
+    // synthesized CONNECT_RX_COMMAND drives the normal state machine, so
+    // the CONNECT_TX handshake with the talker, the SRP attach and the
+    // on_connect callback all run exactly as for a controller connect;
+    // the CONNECT_RX_RESPONSE the machine emits is addressed to ourselves
+    // on the ACMP multicast and ignored like any other foreign response.
+    AcmpCommandResponse cmd{};
+    cmd.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    cmd.controller_entity_id = ctx_.my_id;
+    cmd.talker_entity_id = talker_id;
+    cmd.talker_unique_id = talker_unique_id;
+    cmd.listener_entity_id = ctx_.my_id;
+    cmd.listener_unique_id = listener_unique_id;
+    cmd.sequence_id = fast_connect_sequence_++;
+    cmd.flags = acmp_flags::FAST_CONNECT;
+    return receive_controller_command(cmd, now);
+}
+
+void NanoAvbAcmpListener::set_fast_connect_goal(
+    uint16_t const listener_unique_id, Eui64 const& talker_id, uint16_t const talker_unique_id)
+{
+    for (auto& goal : fast_connect_goals_) {
+        if (goal.listener_unique_id == listener_unique_id) {
+            if (goal.talker_entity_id == talker_id && goal.talker_unique_id == talker_unique_id) {
+                return;  // no-op upsert: don't churn the persistence hook
+            }
+            goal.talker_entity_id = talker_id;
+            goal.talker_unique_id = talker_unique_id;
+            if (on_goals_changed_) {
+                on_goals_changed_();
+            }
+            return;
+        }
+    }
+    if (fast_connect_goals_.try_push_back(FastConnectGoal{
+            .listener_unique_id = listener_unique_id, .talker_entity_id = talker_id, .talker_unique_id = talker_unique_id}) !=
+            nullptr &&
+        on_goals_changed_) {
+        on_goals_changed_();
+    }
+}
+
+void NanoAvbAcmpListener::clear_fast_connect_goal(uint16_t const listener_unique_id)
+{
+    for (auto* it = fast_connect_goals_.begin(); it != fast_connect_goals_.end(); ++it) {
+        if (it->listener_unique_id == listener_unique_id) {
+            fast_connect_goals_.erase(it);
+            if (on_goals_changed_) {
+                on_goals_changed_();
+            }
+            return;
+        }
+    }
+}
+
+void NanoAvbAcmpListener::fast_connect_tick(TimePoint const now)
+{
+    if (fast_connect_goals_.empty() || ctx_.has_pending) {
+        return;
+    }
+    if (next_fast_connect_attempt_ != TimePoint{} && now < next_fast_connect_attempt_) {
+        return;
+    }
+    next_fast_connect_attempt_ = now + FAST_CONNECT_RETRY;
+    // One attempt in flight at a time (the state machine is single-pending);
+    // the next disconnected goal gets its turn on a later tick.
+    for (auto const& goal : fast_connect_goals_) {
+        if (!is_connected(goal.listener_unique_id)) {
+            (void)fast_connect(goal.listener_unique_id, goal.talker_entity_id, goal.talker_unique_id, now);
+            return;
+        }
+    }
 }
 
 auto NanoAvbAcmpListener::receive_talker_response(AcmpCommandResponse const& resp, TimePoint event_time) -> bool

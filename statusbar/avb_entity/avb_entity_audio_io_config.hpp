@@ -224,6 +224,14 @@ struct AvbEntityAudioIOConfig
     /// streams for 10 s. The window also stops if this fills.
     size_t tx_pcap_max_bytes{size_t{64} * 1024 * 1024};
 
+    /// Persisted listener fast-connect bindings (kit phase 5b). When set,
+    /// every controller-made stream-input connection is remembered in this
+    /// file, and on start the entity fast-connects (IEEE 1722.1 8.2.2.1.1)
+    /// each remembered talker — retrying until it answers — so connections
+    /// survive an entity or talker restart without a controller. A
+    /// controller DISCONNECT removes the binding. Empty = disabled.
+    std::string listener_bindings_path{};
+
     /// Test-signal generator: a repeating logarithmic sine sweep (chirp) on ONE
     /// channel of the UDP tunnel source. When enabled, the sweep REPLACES the
     /// tunnel's normal source (the AVB listener stream / silence keepalive) so the

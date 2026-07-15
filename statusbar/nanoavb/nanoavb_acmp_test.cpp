@@ -461,6 +461,185 @@ TEST(nanoavb_acmp_listener, connect_rx_response_success)
     EXPECT_TRUE(listener.is_connected(0));
 }
 
+// Fast connect (kit phase 5b, IEEE 1722.1 Clause 8.2.2.1.1): the listener
+// originates the connection to a remembered talker with itself as the
+// controller — no external controller in the loop.
+TEST(nanoavb_acmp_listener, fast_connect_connects_without_controller)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+
+    AcmpCommandResponse captured_command{};
+    bool command_sent = false;
+    bool connected_cb = false;
+
+    AcmpListenerCallbacks callbacks;
+    callbacks.tx_command = [&](AcmpCommandResponse const& cmd) {
+        captured_command = cmd;
+        command_sent = true;
+        return true;
+    };
+    callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
+    callbacks.on_connect = [&](uint16_t, Eui64 const&, Eui48) { connected_cb = true; };
+
+    NanoAvbAcmpListener listener{listener_id, callbacks};
+    listener.start();
+    auto now = statusbar::sm::TimePoint{};
+
+    // The fast connect sends a CONNECT_TX_COMMAND to the talker with the
+    // FAST_CONNECT flag and ourselves as the controller.
+    EXPECT_TRUE(listener.fast_connect(0, talker_id, 0, now));
+    EXPECT_TRUE(command_sent);
+    EXPECT_EQ(captured_command.message_type(), ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    EXPECT_EQ(captured_command.talker_entity_id, talker_id);
+    EXPECT_EQ(captured_command.controller_entity_id, listener_id);
+    EXPECT_TRUE(captured_command.is_fast_connect());
+    EXPECT_TRUE(listener.has_pending());
+
+    // Busy: a second fast connect while one is pending is refused.
+    EXPECT_FALSE(listener.fast_connect(1, talker_id, 1, now));
+
+    // The talker's SUCCESS response completes the connection like any other.
+    AcmpCommandResponse talker_resp{};
+    talker_resp.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    talker_resp.set_status(ACMP_STATUS_SUCCESS);
+    talker_resp.talker_entity_id = talker_id;
+    talker_resp.talker_unique_id = 0;
+    talker_resp.listener_entity_id = listener_id;
+    talker_resp.listener_unique_id = 0;
+    talker_resp.sequence_id = captured_command.sequence_id;
+    talker_resp.stream_id = make_stream_id(talker_id, 0);
+    talker_resp.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};
+    EXPECT_TRUE(listener.receive_talker_response(talker_resp, now));
+    EXPECT_TRUE(listener.is_connected(0));
+    EXPECT_TRUE(connected_cb);
+
+    // Connected: another fast connect for the same sink is a no-op.
+    EXPECT_FALSE(listener.fast_connect(0, talker_id, 0, now));
+}
+
+// A fast-connect goal retries from tick() while disconnected, stops once
+// connected, and is forgotten on a deliberate controller DISCONNECT_RX.
+TEST(nanoavb_acmp_listener, fast_connect_goal_retries_and_clears_on_disconnect)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+
+    AcmpCommandResponse captured_command{};
+    size_t commands_sent = 0;
+
+    AcmpListenerCallbacks callbacks;
+    callbacks.tx_command = [&](AcmpCommandResponse const& cmd) {
+        captured_command = cmd;
+        ++commands_sent;
+        return true;
+    };
+    callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
+
+    NanoAvbAcmpListener listener{listener_id, callbacks};
+    listener.start();
+    listener.set_fast_connect_goal(0, talker_id, 0);
+    EXPECT_EQ(listener.fast_connect_goals().size(), size_t{1});
+
+    // First tick attempts immediately.
+    auto t0 = statusbar::sm::TimePoint{std::chrono::seconds{100}};
+    listener.tick(t0);
+    EXPECT_EQ(commands_sent, size_t{1});
+
+    // The talker refuses (e.g. still booting): not connected, goal kept.
+    AcmpCommandResponse refuse{};
+    refuse.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    refuse.set_status(ACMP_STATUS_TALKER_MISBEHAVING);
+    refuse.talker_entity_id = talker_id;
+    refuse.listener_entity_id = listener_id;
+    refuse.listener_unique_id = 0;
+    refuse.sequence_id = captured_command.sequence_id;
+    (void)listener.receive_talker_response(refuse, t0);
+    EXPECT_FALSE(listener.is_connected(0));
+
+    // Within the retry window nothing happens; past it the goal retries.
+    listener.tick(t0 + std::chrono::milliseconds{100});
+    EXPECT_EQ(commands_sent, size_t{1});
+    auto t1 = t0 + std::chrono::seconds{3};
+    listener.tick(t1);
+    EXPECT_EQ(commands_sent, size_t{2});
+
+    // This time the talker answers: connected; further ticks stay quiet.
+    AcmpCommandResponse ok{};
+    ok.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    ok.set_status(ACMP_STATUS_SUCCESS);
+    ok.talker_entity_id = talker_id;
+    ok.listener_entity_id = listener_id;
+    ok.listener_unique_id = 0;
+    ok.sequence_id = captured_command.sequence_id;
+    ok.stream_id = make_stream_id(talker_id, 0);
+    ok.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x02};
+    (void)listener.receive_talker_response(ok, t1);
+    EXPECT_TRUE(listener.is_connected(0));
+    listener.tick(t1 + std::chrono::seconds{3});
+    EXPECT_EQ(commands_sent, size_t{2});
+
+    // A controller DISCONNECT_RX is deliberate: the goal is forgotten and
+    // no tick ever re-connects it.
+    auto disconnect = make_connect_rx_command(talker_id, 0, listener_id, 0);
+    disconnect.set_message_type(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    (void)listener.receive_controller_command(disconnect, t1 + std::chrono::seconds{4});
+    EXPECT_TRUE(listener.fast_connect_goals().empty());
+}
+
+// Sticky bindings: with enable_sticky_bindings(), a controller-made connect is
+// recorded as a fast-connect goal automatically and the goals-changed hook
+// fires (the persistence seam) — including for the clearing DISCONNECT_RX.
+TEST(nanoavb_acmp_listener, sticky_bindings_record_controller_connects)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+
+    AcmpCommandResponse captured_command{};
+    AcmpListenerCallbacks callbacks;
+    callbacks.tx_command = [&](AcmpCommandResponse const& cmd) {
+        captured_command = cmd;
+        return true;
+    };
+    callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
+
+    NanoAvbAcmpListener listener{listener_id, callbacks};
+    listener.enable_sticky_bindings();
+    size_t goals_changed = 0;
+    listener.set_on_goals_changed([&]() { ++goals_changed; });
+    listener.start();
+    auto now = statusbar::sm::TimePoint{};
+
+    // A normal controller connect...
+    auto cmd = make_connect_rx_command(talker_id, 3, listener_id, 0);
+    (void)listener.receive_controller_command(cmd, now);
+    AcmpCommandResponse ok{};
+    ok.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    ok.set_status(ACMP_STATUS_SUCCESS);
+    ok.talker_entity_id = talker_id;
+    ok.talker_unique_id = 3;
+    ok.listener_entity_id = listener_id;
+    ok.listener_unique_id = 0;
+    ok.sequence_id = captured_command.sequence_id;
+    ok.stream_id = make_stream_id(talker_id, 3);
+    ok.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x03};
+    (void)listener.receive_talker_response(ok, now);
+    EXPECT_TRUE(listener.is_connected(0));
+
+    // ...is remembered as a goal, and the persistence hook fired once.
+    EXPECT_EQ(listener.fast_connect_goals().size(), size_t{1});
+    EXPECT_EQ(listener.fast_connect_goals()[0].talker_entity_id, talker_id);
+    EXPECT_EQ(listener.fast_connect_goals()[0].talker_unique_id, uint16_t{3});
+    EXPECT_EQ(goals_changed, size_t{1});
+
+    // A controller DISCONNECT clears the goal and fires the hook again.
+    auto disconnect = make_connect_rx_command(talker_id, 3, listener_id, 0);
+    disconnect.set_message_type(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    (void)listener.receive_controller_command(disconnect, now);
+    EXPECT_TRUE(listener.fast_connect_goals().empty());
+    EXPECT_EQ(goals_changed, size_t{2});
+}
+
 // Regression (acmp#3): ACMP only clears a sink on an explicit DISCONNECT_RX, so a
 // sink stays connected forever after its talker leaves. on_talker_departed() (wired
 // to ADP ENTITY_DEPARTING) tears down only the sinks bound to the departed talker
