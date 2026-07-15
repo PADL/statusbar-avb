@@ -183,23 +183,8 @@ void AvbEntityAm824IO::wire_stream_callbacks()
     host_.set_withdraw_streams(
         [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time); });
 
-    // ACMP: observe controller-initiated connections to our talker (diagnostic;
-    // streaming is gated by MSRP listener-ready + gPTP).
-    host_.components().acmp_talker.set_connection_callbacks(
-        [log = host_.ctl_log()](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) mutable {
-            log.status(
-                "acmp: talker stream {} CONNECTED  by listener {:012x} unique_id {}",
-                stream_index,
-                listener_entity_id.to_uint64(),
-                listener_unique_id);
-        },
-        [log = host_.ctl_log()](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) mutable {
-            log.status(
-                "acmp: talker stream {} DISCONNECTED by listener {:012x} unique_id {}",
-                stream_index,
-                listener_entity_id.to_uint64(),
-                listener_unique_id);
-        });
+    // ACMP talker connection callbacks are wired once, in start(): the log +
+    // gate-publish pair (a second registration here would just be overwritten).
 }
 
 //
@@ -248,21 +233,13 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
 
     // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
     // our own stream frames on this host.
-    (void)talker_.stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
+    (void)talker_.open_tx(config_.interface_name);
 
-    // Receive port: join the stream multicast group; the shared ListenerStreams decodes
-    // + tallies incoming AM824 (STREAM_INPUT health counters). Same handler shape as
-    // AvbEntityAudioIO: a thin socket owner delegating the batch drain to drain_rx.
+    // Receive port: join the stream multicast group; the shared ListenerStreams owns
+    // the socket + drain (decode, STREAM_INPUT health counters).
     std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
-    auto rx = std::make_unique<StreamRxHandler>(
-        config_.interface_name, rx_groups, [this] { listener_.drain_rx(listener_.current_gptp_ns()); });
-    if (rx->valid()) {
-        listener_.rx_sock_ = rx->socket();  // borrow before the move; used for dynamic listener joins
-        if (config_.stream_rx_rt_timer) {
-            rt_rx_handler_ = std::move(rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
-        } else {
-            reactor.add(std::move(rx));  // default: drained on the shared reactor thread
-        }
+    if (auto rx = listener_.attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+        rt_rx_handler_ = std::move(*rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
     }
 
     // The per-stream transmit gate tracks MSRP Listener Ready + the ACMP connection

@@ -10,7 +10,7 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
-#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
@@ -232,13 +232,9 @@ class AvbEntityStereoIO
     /// Batch-drain the AM824 RX socket, decoding + publishing each block to the loopback
     /// pipe stamped with @p wake_gptp_ns. Called from the tool's dedicated SCHED_FIFO RX
     /// timer when stream_rx_rt_timer is set; a no-op when RX is on the reactor instead.
-    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t { return (rt_rx_handler_ != nullptr) ? drain_rx(wake_gptp_ns) : 0; }
-
-    /// Reactor-path RX drain: stamp frames with the media-timer gPTP (last_gptp_ns_).
-    /// Called by the reactor StreamRxHandler when stream_rx_rt_timer is off.
-    auto drain_stream_rx_reactor() -> size_t
+    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t
     {
-        return drain_rx(static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed)));
+        return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
     }
 
     /// Set custom audio processing callback (in addition to biquad filter)
@@ -281,20 +277,6 @@ class AvbEntityStereoIO
     /// stream 0 so MSRP, ACMP, and the AVTP stream share one identity.
     [[nodiscard]] auto make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo;
 
-    /// Batch-drain the RX socket: for each AM824 frame, deserialize to interleaved stereo
-    /// samples + their gPTP presentation time, publish the block to the loopback pipe at
-    /// that presentation time, and tally STREAM_INPUT health counters against @p gptp_now_ns.
-    /// Runs on the reactor / RX-timer thread (the pipe's producer). Returns frames drained.
-    auto drain_rx(int64_t gptp_now_ns) -> size_t;
-
-    /// Feed one decoded packet's inputs to the pure tally_stream_input_packet.
-    void update_stream_input_counters(
-        uint8_t seq, uint32_t avtp_ts, bool tv, bool tu, bool mr, bool format_ok, uint64_t samples_per_ch, int64_t gptp_now_ns);
-
-    /// Fill the GET_COUNTERS bitmap + values for our single STREAM_INPUT (index 0).
-    [[nodiscard]] auto fill_stream_input_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
-        -> bool;
-
     // --- Members (declaration order carries init dependencies) ------------------
     /// Configuration (declared first: host_ + talker_ read it).
     AvbEntityStereoIOConfig config_;
@@ -333,18 +315,17 @@ class AvbEntityStereoIO
     /// Per-stream transmit gate (ACMP connection + MSRP Listener Ready). After host_.
     TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 
-    /// RX AM824 deserialize context (emplaced in start() with the channel count).
-    std::optional<avtp::Am824StreamInputContext> listener_in_{};
+    /// The AM824 listener RX path (shared ListenerStreams: socket, deserialize,
+    /// STREAM_INPUT health counters, MSRP listener attach). Allocated in start()
+    /// (binds host_.components(), which outlives it).
+    std::unique_ptr<ListenerStreams> listener_{};
 
-    /// IEEE 1722.1 STREAM_INPUT health counters for the single listener stream.
-    StreamInputCounters stream_in_counters_{};
+    /// RX-thread scratch: the loopback block being assembled from the per-channel
+    /// consume callbacks; published to the pipe on the last channel of each packet.
+    LoopbackBlock rx_block_{};
 
     /// Presentation-time compensation buffer (RX producer -> media-timer consumer).
     LoopbackPipe loopback_pipe_{};
-
-    /// Borrowed RX socket (owned by the StreamRxHandler) + drain scratch. Set in start().
-    net::RawnetContext* rx_sock_{nullptr};
-    std::array<uint8_t, 2048> rx_buf_{};
 
     /// The stream RX socket handler. Default: moved into the reactor by start(). With
     /// stream_rx_rt_timer set it is kept HERE + drained by the tool's RX timer via
@@ -353,10 +334,6 @@ class AvbEntityStereoIO
 
     /// Resolved stream destination MAC (from ACMP talker stream 0).
     ieee::Eui48 stream_dest_mac_{};
-
-    /// RX data-plane counters (published for status).
-    itc::TelemetryCounter<uint64_t> rx_packets_{};
-    itc::TelemetryCounter<uint64_t> rx_bad_{};
 
     // --- DSP -------------------------------------------------------------------
     dsp::BiQuad<float> biquad_left_{};
