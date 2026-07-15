@@ -22,6 +22,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_media_rate.hpp"
@@ -35,6 +36,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
@@ -120,6 +122,8 @@ class AvbEntityAudioIO
     static constexpr uint16_t AM824_STREAM_INDEX = 0;
     static constexpr uint16_t AAF_STREAM_INDEX = 1;
     static constexpr uint16_t CRF_STREAM_INDEX = 2;  // media-clock (no audio, no listener sink)
+    /// STREAM_INPUT index of the CRF media-clock input (kit phase 3c).
+    static constexpr uint16_t CRF_INPUT_STREAM_INDEX = 2;
 
     /// Factory method — constructs and validates the entity from configuration.
     /// Parses the descriptor storage blob (which must declare >=2 stream inputs
@@ -145,8 +149,23 @@ class AvbEntityAudioIO
         CreateKey,
         AvbEntityAudioIOConfig config,
         std::unique_ptr<nanoavb::AemEntityHandler> handler,
+        nanoavb::DescriptorStorageHandler* storage_handler,
+        uint16_t initial_clock_source,
+        std::optional<uint16_t> crf_clock_source_index,
         size_t channels,
         std::pmr::memory_resource* memory_resource);
+
+    /// The CLOCK_DOMAIN's active clock-source index (blob default until a
+    /// controller SET_CLOCK_SOURCE changes it).
+    [[nodiscard]] auto active_clock_source() const noexcept -> uint16_t
+    {
+        return active_clock_source_.load(std::memory_order_acquire);
+    }
+    /// The clock-source index backed by the CRF stream input, when the model
+    /// declares one (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX).
+    [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return crf_clock_source_index_; }
+    /// The CRF-input media-clock recovery (rate/phase of the remote clock).
+    [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
 
     /// Start the entity and add handlers to reactor
     [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
@@ -295,6 +314,21 @@ class AvbEntityAudioIO
     /// playout all ride this single cross-site-common clock). Fed by
     /// update_gps_ratio on the media thread. See avb_entity_media_rate.hpp.
     MediaClockRateTracker rate_tracker_{};
+
+    /// CRF-input media-clock recovery (kit phase 3c): fed by the CRF stream
+    /// input's timestamps on the RX thread; consulted for the media-clock rate
+    /// on the media thread when the CRF clock source is active.
+    CrfClockRecovery crf_recovery_{};
+    /// The CLOCK_DOMAIN's active clock-source index. Written by the
+    /// SET_CLOCK_SOURCE apply callback (reactor thread), read per tick by the
+    /// media thread.
+    std::atomic<uint16_t> active_clock_source_{0};
+    /// The clock-source index whose CLOCK_SOURCE descriptor is the CRF stream
+    /// input (resolved from the blob at create; nullopt when not modeled).
+    std::optional<uint16_t> crf_clock_source_index_{};
+    /// The blob-backed descriptor handler (owned by host_); used to register
+    /// the clock-source apply callback.
+    nanoavb::DescriptorStorageHandler* storage_handler_{nullptr};
 
     /// Latest GPS-TAI translator snapshot, published by update_gps_ratio on the
     /// media thread and consumed by the tunnel bridge's reactor-thread ingest

@@ -135,7 +135,7 @@ TEST(stream_spec_derive, tone_aaf_crf_blob)
     EXPECT_EQ(*rate, 96'000U);
 }
 
-TEST(stream_spec_derive, audio_blob_three_out_two_in)
+TEST(stream_spec_derive, audio_blob_three_out_three_in)
 {
     auto const blob = testdata("entity_audio.bin");
     EXPECT_FALSE(blob.empty());
@@ -150,9 +150,10 @@ TEST(stream_spec_derive, audio_blob_three_out_two_in)
 
     auto const listeners = listener_stream_specs(storage, 0);
     EXPECT_TRUE(listeners.has_value());
-    EXPECT_EQ(listeners->size(), 2U);
+    EXPECT_EQ(listeners->size(), 3U);
     EXPECT_EQ((*listeners)[0].format.kind, StreamKind::am824);
     EXPECT_EQ((*listeners)[1].format.kind, StreamKind::aaf);
+    EXPECT_EQ((*listeners)[2].format.kind, StreamKind::crf);  // media-clock input (kit 3c)
 
     // All audio streams in this model run 96 kHz.
     auto const rate = common_audio_sample_rate(*talkers);

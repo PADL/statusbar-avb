@@ -23,7 +23,7 @@
         "IMPLEMENTED",
         "AUDIO_SINK"
       ],
-      "stream_sinks": 2
+      "stream_sinks": 3
     },
     "configurations": [
       {
@@ -40,7 +40,20 @@
           {
             "name": "StreamInputAAF",
             "symbol": "aaf_in",
-            "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
+            "format": {
+              "type": "AAF",
+              "rate": 96000,
+              "channels": 8,
+              "depth": 32
+            },
+            "flags": [
+              "CLASS_A"
+            ]
+          },
+          {
+            "name": "StreamInputCRF",
+            "symbol": "crf_in",
+            "format": "0x041060010000BB80",
             "flags": [
               "CLASS_A"
             ]
@@ -58,7 +71,12 @@
           {
             "name": "StreamOutputAAF",
             "symbol": "aaf_out",
-            "format": { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
+            "format": {
+              "type": "AAF",
+              "rate": 96000,
+              "channels": 8,
+              "depth": 32
+            },
             "flags": [
               "CLASS_A"
             ]
@@ -87,14 +105,54 @@
                   }
                 ],
                 "maps": [
-                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
-                  { "stream": 0, "stream_ch": 1, "cluster": 0, "cluster_ch": 1 },
-                  { "stream": 0, "stream_ch": 2, "cluster": 0, "cluster_ch": 2 },
-                  { "stream": 0, "stream_ch": 3, "cluster": 0, "cluster_ch": 3 },
-                  { "stream": 0, "stream_ch": 4, "cluster": 0, "cluster_ch": 4 },
-                  { "stream": 0, "stream_ch": 5, "cluster": 0, "cluster_ch": 5 },
-                  { "stream": 0, "stream_ch": 6, "cluster": 0, "cluster_ch": 6 },
-                  { "stream": 0, "stream_ch": 7, "cluster": 0, "cluster_ch": 7 }
+                  {
+                    "stream": 0,
+                    "stream_ch": 0,
+                    "cluster": 0,
+                    "cluster_ch": 0
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 1,
+                    "cluster": 0,
+                    "cluster_ch": 1
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 2,
+                    "cluster": 0,
+                    "cluster_ch": 2
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 3,
+                    "cluster": 0,
+                    "cluster_ch": 3
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 4,
+                    "cluster": 0,
+                    "cluster_ch": 4
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 5,
+                    "cluster": 0,
+                    "cluster_ch": 5
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 6,
+                    "cluster": 0,
+                    "cluster_ch": 6
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 7,
+                    "cluster": 0,
+                    "cluster_ch": 7
+                  }
                 ]
               },
               {
@@ -105,14 +163,54 @@
                   }
                 ],
                 "maps": [
-                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
-                  { "stream": 0, "stream_ch": 1, "cluster": 0, "cluster_ch": 1 },
-                  { "stream": 0, "stream_ch": 2, "cluster": 0, "cluster_ch": 2 },
-                  { "stream": 0, "stream_ch": 3, "cluster": 0, "cluster_ch": 3 },
-                  { "stream": 0, "stream_ch": 4, "cluster": 0, "cluster_ch": 4 },
-                  { "stream": 0, "stream_ch": 5, "cluster": 0, "cluster_ch": 5 },
-                  { "stream": 0, "stream_ch": 6, "cluster": 0, "cluster_ch": 6 },
-                  { "stream": 0, "stream_ch": 7, "cluster": 0, "cluster_ch": 7 }
+                  {
+                    "stream": 0,
+                    "stream_ch": 0,
+                    "cluster": 0,
+                    "cluster_ch": 0
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 1,
+                    "cluster": 0,
+                    "cluster_ch": 1
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 2,
+                    "cluster": 0,
+                    "cluster_ch": 2
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 3,
+                    "cluster": 0,
+                    "cluster_ch": 3
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 4,
+                    "cluster": 0,
+                    "cluster_ch": 4
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 5,
+                    "cluster": 0,
+                    "cluster_ch": 5
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 6,
+                    "cluster": 0,
+                    "cluster_ch": 6
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 7,
+                    "cluster": 0,
+                    "cluster_ch": 7
+                  }
                 ]
               }
             ],
@@ -125,14 +223,54 @@
                   }
                 ],
                 "maps": [
-                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
-                  { "stream": 0, "stream_ch": 1, "cluster": 0, "cluster_ch": 1 },
-                  { "stream": 0, "stream_ch": 2, "cluster": 0, "cluster_ch": 2 },
-                  { "stream": 0, "stream_ch": 3, "cluster": 0, "cluster_ch": 3 },
-                  { "stream": 0, "stream_ch": 4, "cluster": 0, "cluster_ch": 4 },
-                  { "stream": 0, "stream_ch": 5, "cluster": 0, "cluster_ch": 5 },
-                  { "stream": 0, "stream_ch": 6, "cluster": 0, "cluster_ch": 6 },
-                  { "stream": 0, "stream_ch": 7, "cluster": 0, "cluster_ch": 7 }
+                  {
+                    "stream": 0,
+                    "stream_ch": 0,
+                    "cluster": 0,
+                    "cluster_ch": 0
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 1,
+                    "cluster": 0,
+                    "cluster_ch": 1
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 2,
+                    "cluster": 0,
+                    "cluster_ch": 2
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 3,
+                    "cluster": 0,
+                    "cluster_ch": 3
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 4,
+                    "cluster": 0,
+                    "cluster_ch": 4
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 5,
+                    "cluster": 0,
+                    "cluster_ch": 5
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 6,
+                    "cluster": 0,
+                    "cluster_ch": 6
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 7,
+                    "cluster": 0,
+                    "cluster_ch": 7
+                  }
                 ]
               },
               {
@@ -143,14 +281,54 @@
                   }
                 ],
                 "maps": [
-                  { "stream": 0, "stream_ch": 0, "cluster": 0, "cluster_ch": 0 },
-                  { "stream": 0, "stream_ch": 1, "cluster": 0, "cluster_ch": 1 },
-                  { "stream": 0, "stream_ch": 2, "cluster": 0, "cluster_ch": 2 },
-                  { "stream": 0, "stream_ch": 3, "cluster": 0, "cluster_ch": 3 },
-                  { "stream": 0, "stream_ch": 4, "cluster": 0, "cluster_ch": 4 },
-                  { "stream": 0, "stream_ch": 5, "cluster": 0, "cluster_ch": 5 },
-                  { "stream": 0, "stream_ch": 6, "cluster": 0, "cluster_ch": 6 },
-                  { "stream": 0, "stream_ch": 7, "cluster": 0, "cluster_ch": 7 }
+                  {
+                    "stream": 0,
+                    "stream_ch": 0,
+                    "cluster": 0,
+                    "cluster_ch": 0
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 1,
+                    "cluster": 0,
+                    "cluster_ch": 1
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 2,
+                    "cluster": 0,
+                    "cluster_ch": 2
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 3,
+                    "cluster": 0,
+                    "cluster_ch": 3
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 4,
+                    "cluster": 0,
+                    "cluster_ch": 4
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 5,
+                    "cluster": 0,
+                    "cluster_ch": 5
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 6,
+                    "cluster": 0,
+                    "cluster_ch": 6
+                  },
+                  {
+                    "stream": 0,
+                    "stream_ch": 7,
+                    "cluster": 0,
+                    "cluster_ch": 7
+                  }
                 ]
               }
             ]
@@ -188,6 +366,12 @@
             "type": "INPUT_STREAM",
             "location_type": 5,
             "location_index": 0
+          },
+          {
+            "name": "CRFInput",
+            "type": "INPUT_STREAM",
+            "location_type": 5,
+            "location_index": 2
           }
         ],
         "clock_domains": [
@@ -196,7 +380,8 @@
             "source": 0,
             "sources": [
               0,
-              1
+              1,
+              2
             ]
           }
         ]

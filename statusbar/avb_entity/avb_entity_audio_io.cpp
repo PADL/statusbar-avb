@@ -120,9 +120,40 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
         iface_mac,
         /*patch_avb_interface=*/true);
 
+    // Kit phase 3c: find the clock source backed by the CRF stream input
+    // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
+    // CLOCK_DOMAIN's authored default selection.
+    std::optional<uint16_t> crf_clock_source{};
+    for (uint16_t index = 0;; ++index) {
+        auto const cs =
+            load_descriptor<atdecc::aem::DescriptorClockSource>(*storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, index);
+        if (!cs) {
+            break;
+        }
+        if (cs->clock_source_type == atdecc::aem::CLOCK_SOURCE_TYPE_INPUT_STREAM &&
+            cs->clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
+            cs->clock_source_location_index == CRF_INPUT_STREAM_INDEX) {
+            crf_clock_source = index;
+            break;
+        }
+    }
+    uint16_t initial_clock_source = 0;
+    if (auto const cd =
+            load_descriptor<atdecc::aem::DescriptorClockDomain>(*storage_result, 0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0)) {
+        initial_clock_source = cd->clock_source_index;
+    }
+
+    auto* const storage_handler = handler.get();
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
-    auto entity =
-        std::make_unique<AvbEntityAudioIO>(AvbEntityAudioIO::CreateKey{}, std::move(config), std::move(handler), channels, mr);
+    auto entity = std::make_unique<AvbEntityAudioIO>(
+        AvbEntityAudioIO::CreateKey{},
+        std::move(config),
+        std::move(handler),
+        storage_handler,
+        initial_clock_source,
+        crf_clock_source,
+        channels,
+        mr);
 
     entity->configure_filter(entity->config_.filter_freq_hz, entity->config_.filter_gain_db, entity->config_.filter_q);
 
@@ -137,17 +168,27 @@ AvbEntityAudioIO::AvbEntityAudioIO(
     CreateKey,
     AvbEntityAudioIOConfig config,
     std::unique_ptr<nanoavb::AemEntityHandler> handler,
+    nanoavb::DescriptorStorageHandler* storage_handler,
+    uint16_t initial_clock_source,
+    std::optional<uint16_t> crf_clock_source_index,
     size_t channels,
     std::pmr::memory_resource* memory_resource)
-    : config_{std::move(config)}  // 3 talker streams (AM824, AAF, CRF), 4 max listeners each; 2 listener streams.
-    // Symbol-aware: the host serves descriptors through the handler (retains the blob).
-    , host_{std::move(handler), default_adp_advertiser_config(), 3, 4, 2}
+    : config_{std::move(config)}  // 3 talker streams (AM824, AAF, CRF), 4 max listeners each; 3 listener
+    // streams (AM824, AAF, CRF media-clock input). Symbol-aware: the host
+    // serves descriptors through the handler (retains the blob).
+    , host_{std::move(handler), default_adp_advertiser_config(), 3, 4, 3}
     , channels_{channels}
     , mem_resource_{memory_resource}
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)
     , audio_buffer_((SAMPLES_PER_PACKET + 1) * channels, 0.0f, mem_resource_)  // +1: GPS pacing may emit nominal+1
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
 {
+    // Kit phase 3c clock-source state (declared after the DSP members, so
+    // assigned here rather than in the init list).
+    active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
+    crf_clock_source_index_ = crf_clock_source_index;
+    storage_handler_ = storage_handler;
+
     // Per-channel sine source: identical frequency, distinct initial phase.
     double const sr_recip = 1.0 / static_cast<double>(SAMPLE_RATE);
     for (size_t ch = 0; ch < channels_; ++ch) {
@@ -419,12 +460,27 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
             return status;
         }
     }
-    // RX slots for the fixed 2-input topology (AM824@0, AAF@1), mirroring the
-    // TX slots above.
-    for (auto const& spec : {make_spec(AM824_STREAM_INDEX, StreamKind::am824), make_spec(AAF_STREAM_INDEX, StreamKind::aaf)}) {
+    // RX slots for the fixed 3-input topology (AM824@0, AAF@1, CRF@2 — the
+    // media-clock input), mirroring the TX slots above.
+    for (auto const& spec :
+         {make_spec(AM824_STREAM_INDEX, StreamKind::am824),
+          make_spec(AAF_STREAM_INDEX, StreamKind::aaf),
+          make_spec(CRF_INPUT_STREAM_INDEX, StreamKind::crf)}) {
         if (auto status = listener_->open_stream(spec); !status) {
             return status;
         }
+    }
+    // Kit phase 3c: the CRF input's timestamps feed the media-clock recovery,
+    // and a controller's SET_CLOCK_SOURCE switches the active source (the
+    // media thread reads active_clock_source_ per tick).
+    listener_->set_crf(CRF_INPUT_STREAM_INDEX, crf_recovery_.make_consumer());
+    if (storage_handler_ != nullptr) {
+        storage_handler_->set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
+            if (domain == 0) {
+                active_clock_source_.store(source, std::memory_order_release);
+            }
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
     }
 
     // One TX socket (qdisc-bypass so our own egress is not re-received here).
@@ -683,7 +739,16 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         // this tick (nominal +/- 1, paced to GPS) and the jitter-free presentation
         // timestamp of the packet's first sample. The wake time only paces the
         // count; the timestamp does NOT carry its jitter.
-        auto const tick = media_clock_.advance(wake_ns, rate_tracker_.r(), static_cast<uint32_t>(SAMPLES_PER_PACKET));
+        // Rate source per the active CLOCK_DOMAIN selection (kit phase 3c):
+        // the CRF-input clock source slaves the media clock to the recovered
+        // remote rate (nominal 1.0 until the recovery locks); otherwise the
+        // GPS-pinned tracker (or 1.0 when locked to gPTP) as before.
+        double r = rate_tracker_.r();
+        if (crf_clock_source_index_ && active_clock_source_.load(std::memory_order_acquire) == *crf_clock_source_index_) {
+            auto const est = crf_recovery_.estimate();
+            r = est.locked ? est.r : 1.0;
+        }
+        auto const tick = media_clock_.advance(wake_ns, r, static_cast<uint32_t>(SAMPLES_PER_PACKET));
         auto const samples = static_cast<size_t>(tick.samples);
         if (samples == 0) {
             continue;

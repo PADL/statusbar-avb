@@ -216,7 +216,7 @@ TEST(audio_io_model, declares_streams_and_ports)
         }
         return n;
     };
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 2u);   // AM824 + AAF
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 3u);   // AM824 + AAF + CRF media-clock input
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 3u);  // AM824 + AAF + CRF media clock
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 4u);
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 4u);
@@ -472,6 +472,54 @@ TEST(audio_io_acmp, connect_rx_full_handshake_connects_sink)
     EXPECT_EQ(to_controller.status(), atdecc::ACMP_STATUS_SUCCESS);
     EXPECT_FALSE(listener.has_pending());
     EXPECT_TRUE(listener.is_connected(kSink));
+}
+
+//
+// Media-clock source selection (kit phase 3c): the model authors three clock
+// sources (Internal, InputStream@0, CRFInput = INPUT_STREAM at the CRF stream
+// input); a controller's SET_CLOCK_SOURCE — via the real AECP command path —
+// switches the entity's active rate source, and invalid selections leave it
+// untouched. The CRF recovery itself is unit-tested in
+// avb_entity_crf_clock_recovery_test.
+//
+
+TEST(audio_io_clocking, set_clock_source_switches_active_rate_source)
+{
+    auto blob = load_file(entity_audio_bin_path());
+    auto result = AvbEntityAudioIO::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    auto& entity = **result;
+
+    // The blob's CRF-input clock source resolved at create; default = Internal (0).
+    EXPECT_TRUE(entity.crf_clock_source_index().has_value());
+    EXPECT_EQ(*entity.crf_clock_source_index(), static_cast<uint16_t>(2));
+    EXPECT_EQ(entity.active_clock_source(), static_cast<uint16_t>(0));
+
+    auto const run_set = [&entity](uint16_t clock_source) -> uint8_t {
+        std::vector<uint8_t> body;
+        auto const push_u16 = [&body](uint16_t v) {
+            body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+            body.push_back(static_cast<uint8_t>(v & 0xFF));
+        };
+        push_u16(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN);
+        push_u16(0);  // descriptor_index
+        push_u16(clock_source);
+        push_u16(0);  // reserved
+        atdecc::AemDu header{};
+        header.init_command(
+            atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        std::array<uint8_t, 128> out{};
+        auto const resp = entity.components().aem_handler.handle_command(header, body, std::span<uint8_t>{out});
+        return resp.status;
+    };
+
+    // The apply callback that flips active_clock_source_ registers in start()
+    // (needs a network interface); the built-in's validate/store/reflect runs
+    // regardless, which is what this exercises end-to-end over real AECP.
+    EXPECT_EQ(run_set(2), atdecc::AEM_STATUS_SUCCESS);  // CRFInput: authored, accepted
+
+    // Invalid selection: not one of the domain's authored sources.
+    EXPECT_EQ(run_set(5), atdecc::AEM_STATUS_BAD_ARGUMENTS);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_audio_io_test)
