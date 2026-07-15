@@ -12,6 +12,7 @@
 #include "statusbar/avb_entity/avb_entity_udptun_egress.hpp"
 #include "statusbar/avb_entity/avb_entity_udptun_ingest.hpp"
 #include "statusbar/buffer/buffer.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/net/net_util.hpp"
 #include "statusbar/status/catch_or_status.hpp"
@@ -288,7 +289,7 @@ void EntityUdptunBridge::udptun_send_encoded(
     if (total > txbuf_.size()) {
         return;
     }
-    std::memcpy(txbuf_.data() + hdr, pcm.data(), pcm.size());
+    span_copy(make_span(txbuf_, {.start = hdr}), pcm);
     (void)::sendto(fd_.get(), txbuf_.data(), total, MSG_DONTWAIT, peer_.sockaddr(), peer_.length());
     telemetry_->tx_packets.add(1);
 }
@@ -307,7 +308,7 @@ void EntityUdptunBridge::udptun_send(int64_t const tai_ns, std::span<uint8_t con
         cur.tai = tai_ns;
         cur.valid = true;
         if (cur.pcm.size() >= pcm.size()) {
-            std::memcpy(cur.pcm.data(), pcm.data(), pcm.size());
+            span_copy(make_span(cur.pcm), pcm);
         }
         size_t const back = (redun_head_ + redun_ring_.size() - redun_depth_) % redun_ring_.size();
         auto const& rep = redun_ring_[back];
@@ -886,7 +887,7 @@ void EntityUdptunBridge::udptun_egress_drain_rx()
                     ._pad = {},
                 };
                 std::array<uint8_t, sizeof(udptun::UdpTunCsvRecord)> row{};
-                std::memcpy(row.data(), &rec, sizeof(rec));
+                span_store(row, rec);
                 (void)egress_colbin_->write_row(row);
             }
         }

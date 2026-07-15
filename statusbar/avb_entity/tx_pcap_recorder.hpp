@@ -3,6 +3,7 @@
 #ifndef STATUSBAR_AVB_ENTITY_TX_PCAP_RECORDER_HPP
 #define STATUSBAR_AVB_ENTITY_TX_PCAP_RECORDER_HPP
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/pcap/pcap_writer.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -88,7 +89,7 @@ class TxPcapRecorder
         store_u64(p, gptp_ns);
         store_u32(p + 8, cap_len);
         store_u32(p + 12, static_cast<uint32_t>(frame.size()));  // original (untruncated) length
-        std::memcpy(p + REC_HDR, frame.data(), cap_len);
+        span_copy(std::span<uint8_t>{p + REC_HDR, cap_len}, frame.first(cap_len));
         used_ += need;
         ++frames_;
     }

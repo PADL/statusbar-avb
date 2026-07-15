@@ -4,6 +4,7 @@
 #include "statusbar/nanoavb/nanoavb_aem_entity_model.hpp"
 
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <algorithm>
@@ -198,17 +199,14 @@ auto AemEntityModel::get_name_for_wire(NameRef ref, std::span<uint8_t> out) cons
         return 0;
     }
 
-    // Serialize GET_NAME response body: 8-byte header + 64-byte name.
-    doublet_t const dtype{ref.descriptor.descriptor_type};
-    doublet_t const dindex{ref.descriptor.descriptor_index};
-    doublet_t const nindex{ref.name_index};
-    doublet_t const cindex{ref.descriptor.configuration_index};
-
-    span_store(out.subspan(0, 2), dtype);
-    span_store(out.subspan(2, 2), dindex);
-    span_store(out.subspan(4, 2), nindex);
-    span_store(out.subspan(6, 2), cindex);
-    span_copy(out.subspan(NAME_HEADER_SIZE, AtdeccString::LENGTH), make_const_span(*name_opt));
+    // Serialize the GET_NAME response body via the wire struct.
+    atdecc::aem::AemNamePayload payload{
+        .descriptor_type = ref.descriptor.descriptor_type,
+        .descriptor_index = ref.descriptor.descriptor_index,
+        .name_index = ref.name_index,
+        .configuration_index = ref.descriptor.configuration_index};
+    span_copy(make_span(payload.name), make_const_span(name_opt->value));
+    span_store(out, payload);
     return NAME_RESPONSE_SIZE;
 }
 
@@ -218,26 +216,20 @@ auto AemEntityModel::apply_set_name(std::span<uint8_t const> command_body) -> ui
         return AEM_STATUS_BAD_ARGUMENTS;
     }
 
-    // Parse the 8-byte SET_NAME command header. Layout matches the
-    // GET_NAME response header above: type, index, name_index, config.
-    doublet_t dtype{};
-    doublet_t dindex{};
-    doublet_t nindex{};
-    doublet_t cindex{};
-    span_load(dtype, command_body.subspan(0, 2));
-    span_load(dindex, command_body.subspan(2, 2));
-    span_load(nindex, command_body.subspan(4, 2));
-    span_load(cindex, command_body.subspan(6, 2));
+    // Parse the whole SET_NAME command body via the wire struct.
+    atdecc::aem::AemNamePayload payload{};
+    span_load(payload, command_body);
 
     NameRef const ref{
         .descriptor =
-            DescriptorRef{.configuration_index = cindex.get(), .descriptor_type = dtype.get(), .descriptor_index = dindex.get()},
-        .name_index = nindex.get()};
+            DescriptorRef{
+                .configuration_index = payload.configuration_index.get(),
+                .descriptor_type = payload.descriptor_type.get(),
+                .descriptor_index = payload.descriptor_index.get()},
+        .name_index = payload.name_index.get()};
 
-    // Extract the 64-byte name payload.
     AtdeccString name{};
-    auto const name_bytes = command_body.subspan(NAME_HEADER_SIZE, AtdeccString::LENGTH);
-    std::memcpy(name.value.data(), name_bytes.data(), AtdeccString::LENGTH);
+    span_copy(make_span(name.value), make_const_span(payload.name));
 
     return handler_->on_set_name(DescriptorId{.ref = ref.descriptor, .symbol = symbol_for(ref.descriptor)}, ref.name_index, name);
 }

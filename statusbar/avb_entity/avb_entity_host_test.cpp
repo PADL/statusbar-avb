@@ -11,6 +11,7 @@
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -67,7 +68,7 @@ auto make_entity_blob() -> std::vector<uint8_t>
     // A real DescriptorEntity in the slot.
     DescriptorEntity desc{};
     desc.configurations_count = 1;
-    std::memcpy(blob.data() + desc_offset, &desc, sizeof(desc));
+    statusbar::span_store(statusbar::make_span(blob, {.start = desc_offset}), desc);
     return blob;
 }
 
@@ -125,7 +126,7 @@ auto make_blob_with_identify_control() -> std::vector<uint8_t>
 
     DescriptorEntity entity{};
     entity.configurations_count = 1;
-    std::memcpy(blob.data() + entity_offset, &entity, entity_size);
+    statusbar::span_store(statusbar::make_span(blob, {.start = entity_offset}), entity);
 
     DescriptorControl mute{};
     mute.descriptor_index = 0;
@@ -134,14 +135,18 @@ auto make_blob_with_identify_control() -> std::vector<uint8_t>
     // number_of_values = 0 would make every SET payload size-invalid).
     mute.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8
     mute.number_of_values = 1;
-    std::memcpy(blob.data() + control0_offset, &mute, control_size);
+    // Blob slots hold the 104-byte wire header only; span_copy truncates the
+    // 508-byte in-memory struct to the destination range.
+    statusbar::span_copy(
+        statusbar::make_span(blob, {.start = control0_offset, .length = control_size}), statusbar::make_const_span(mute));
 
     DescriptorControl identify{};
     identify.descriptor_index = 1;
     identify.control_type = statusbar::atdecc::aem::CONTROL_TYPE_IDENTIFY;
     identify.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8 (the standard identify shape)
     identify.number_of_values = 1;
-    std::memcpy(blob.data() + control1_offset, &identify, control_size);
+    statusbar::span_copy(
+        statusbar::make_span(blob, {.start = control1_offset, .length = control_size}), statusbar::make_const_span(identify));
     return blob;
 }
 

@@ -315,8 +315,8 @@ TEST(aem_model_names, set_name_persists_and_round_trips_through_get)
     cmd[5] = 0x01;  // name_index = 1
     cmd[6] = 0x00;
     cmd[7] = 0x00;  // configuration_index = 0
-    char const* new_name = "HelloGroup";
-    std::memcpy(cmd.data() + 8, new_name, std::strlen(new_name));
+    std::string_view const new_name = "HelloGroup";
+    span_copy(make_span(cmd, {.start = 8}), make_const_span(new_name));
 
     auto const status = model.apply_set_name(std::span<uint8_t const>{cmd});
     EXPECT_EQ(status, AEM_STATUS_SUCCESS);
@@ -328,7 +328,7 @@ TEST(aem_model_names, set_name_persists_and_round_trips_through_get)
     auto const n = model.get_name_for_wire(ref, make_span(resp));
     EXPECT_EQ(n, static_cast<size_t>(72));
 
-    auto const parsed_view = statusbar::as_string_view(std::span<uint8_t const>{resp.data() + 8, std::strlen(new_name)});
+    auto const parsed_view = statusbar::as_string_view(std::span<uint8_t const>{resp.data() + 8, new_name.size()});
     EXPECT_EQ(std::string{parsed_view}, std::string{new_name});
 }
 
@@ -417,7 +417,7 @@ auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::
     DescriptorEntity desc{};
     desc.entity_name = AtdeccString{std::string{entity_name}.c_str()};
     desc.configurations_count = 1;
-    std::memcpy(blob.data() + desc_offset, &desc, sizeof(desc));
+    span_store(make_span(blob, {.start = desc_offset}), desc);
 
     return blob;
 }
@@ -1226,7 +1226,7 @@ auto make_set_name_body(uint16_t descriptor_type, uint16_t descriptor_index, uin
         .descriptor_index = descriptor_index,
         .name_index = name_index,
         .configuration_index = 0};
-    std::memcpy(payload.name.data(), name.data(), std::min<size_t>(name.size(), payload.name.size()));
+    span_copy(make_span(payload.name, {.start = 0}), make_const_span(name));
     std::vector<uint8_t> body(atdecc::aem::AemNamePayload::LENGTH, 0);
     span_store(make_span(body), payload);
     return body;
@@ -1389,7 +1389,7 @@ auto make_blob_with_signal_selector() -> std::vector<uint8_t>
     desc.current_signal_index = 0;
     desc.current_signal_output = 0;
     desc.default_signal_type = DESCRIPTOR_AUDIO_CLUSTER;
-    std::memcpy(blob.data() + desc_offset, &desc, sizeof(desc));
+    span_store(make_span(blob, {.start = desc_offset}), desc);
 
     // Two 6-byte sources: AUDIO_CLUSTER 0 and AUDIO_CLUSTER 1.
     size_t const src0 = desc_offset + DescriptorSignalSelector::LENGTH;
@@ -1591,7 +1591,7 @@ auto make_blob_with_matrix() -> std::vector<uint8_t>
     desc.height = 2;
     desc.values_offset = DescriptorMatrix::LENGTH;
     desc.number_of_values = 1;
-    std::memcpy(blob.data() + desc_offset, &desc, sizeof(desc));
+    span_store(make_span(blob, {.start = desc_offset}), desc);
 
     // Value entry: min=-60, max=12, step=1, default=0, current=7, unit, string.
     size_t const entry = desc_offset + DescriptorMatrix::LENGTH;
@@ -1800,7 +1800,9 @@ auto make_blob_with_clock_domain() -> std::vector<uint8_t>
     desc.clock_source_index = 0;
     desc.clock_sources_offset = DescriptorClockDomain::LENGTH;
     desc.clock_sources_count = 2;
-    std::memcpy(blob.data() + desc_offset, &desc, DescriptorClockDomain::LENGTH);
+    // Only the 76-byte fixed header goes in the blob; the source doublets are
+    // authored by hand below, so truncate the in-memory struct via span_copy.
+    span_copy(make_span(blob, {.start = desc_offset, .length = DescriptorClockDomain::LENGTH}), make_const_span(desc));
 
     // Two clock-source doublets: 0 and 1.
     size_t const src0 = desc_offset + DescriptorClockDomain::LENGTH;

@@ -6,6 +6,7 @@
 /// without any network access.
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_controller.hpp"
@@ -102,7 +103,7 @@ static auto send_raw(LoopbackPortContext& port, std::span<uint8_t const> payload
     }
     auto slot = *slot_result;
     auto const len = std::min(payload.size(), slot.buffer.size());
-    std::memcpy(slot.buffer.data(), payload.data(), len);
+    span_copy(slot.buffer, payload);
     return port.tx_commit(slot.handle, len).has_value();
 }
 
