@@ -226,9 +226,12 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
 
             // Diagnostic: trace listener-directed commands (CONNECT_RX=6,
             // DISCONNECT_RX=8, GET_RX_STATE=10) so a silent listener can be
-            // distinguished from a misaddressed/unhandled one. These are rare
-            // (only on a controller connect/probe), so the log is not hot.
-            if (auto const mt = cmd_resp.message_type(); mt == 6 || mt == 8 || mt == 10) {
+            // distinguished from an unhandled one. Only for commands addressed
+            // to OUR listener — the ACMP multicast carries every entity's
+            // traffic, and a controller polling some OTHER listener's RX state
+            // (seen ~1/s in the LA install) would otherwise flood the journal.
+            if (auto const mt = cmd_resp.message_type();
+                (mt == 6 || mt == 8 || mt == 10) && cmd_resp.listener_entity_id == acmp_listener_.entity_id()) {
                 std::print(
                     stderr,
                     "[acmp-rx] mt={} target_listener={} my_listener={} handled={} state={}\n",
