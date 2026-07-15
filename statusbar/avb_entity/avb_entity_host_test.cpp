@@ -45,25 +45,30 @@ auto make_entity_blob() -> std::vector<uint8_t>
     constexpr uint32_t desc_offset = symbol_offset + symbol_entry_size;
     constexpr uint32_t total = desc_offset + desc_size;
 
+    using statusbar::atdecc::aem::DescriptorStorageHeader;
+    using statusbar::atdecc::aem::DescriptorStorageSymbolEntry;
+    using statusbar::atdecc::aem::DescriptorStorageTocEntry;
+
     std::vector<uint8_t> blob(total, 0);
-    blob[0] = 0x41;  // "AEM1"
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    blob[7] = 0x01;                                  // toc_count = 1
-    blob[11] = static_cast<uint8_t>(toc_offset);     // toc_offset = 20
-    blob[15] = 0x01;                                 // symbol_count = 1
-    blob[19] = static_cast<uint8_t>(symbol_offset);  // symbol_offset = 32
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC,
+        .toc_count = 1,
+        .toc_offset = toc_offset,
+        .symbol_count = 1,
+        .symbol_offset = symbol_offset};
+    statusbar::span_store(statusbar::make_span(blob), header);
 
-    // TOC entry: type=ENTITY(0), index=0, config=0, length=312, offset=desc_offset
-    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
-    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+    DescriptorStorageTocEntry const toc{
+        .descriptor_type = DESCRIPTOR_ENTITY,
+        .descriptor_index = 0,
+        .configuration_index = 0,
+        .length = desc_size,
+        .offset = desc_offset};
+    statusbar::span_store(statusbar::make_span(blob, {.start = toc_offset}), toc);
 
-    // Symbol entry: type=ENTITY, index=0, config=0, symbol=0x00C0FFEE
-    blob[symbol_offset + 7] = 0xC0;
-    blob[symbol_offset + 8] = 0xFF;
-    blob[symbol_offset + 9] = 0xEE;
+    DescriptorStorageSymbolEntry const sym{
+        .descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0, .configuration_index = 0, .symbol = 0x00C0FFEE};
+    statusbar::span_store(statusbar::make_span(blob, {.start = symbol_offset}), sym);
 
     // A real DescriptorEntity in the slot.
     DescriptorEntity desc{};
@@ -98,27 +103,22 @@ auto make_blob_with_identify_control() -> std::vector<uint8_t>
     constexpr uint32_t control1_offset = control0_offset + control_size;
     constexpr uint32_t total = control1_offset + control_size;
 
-    std::vector<uint8_t> blob(total, 0);
-    blob[0] = 0x41;  // "AEM1"
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    blob[7] = 0x03;                               // toc_count = 3
-    blob[11] = static_cast<uint8_t>(toc_offset);  // toc_offset = 20 (no symbols)
+    using statusbar::atdecc::aem::DescriptorStorageHeader;
+    using statusbar::atdecc::aem::DescriptorStorageTocEntry;
 
-    // TOC entry: type(2) index(2) config(2) length(2) offset(4), big-endian.
+    std::vector<uint8_t> blob(total, 0);
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC,
+        .toc_count = 3,
+        .toc_offset = toc_offset,
+        .symbol_count = 0,
+        .symbol_offset = toc_offset};  // no symbols
+    statusbar::span_store(statusbar::make_span(blob), header);
+
     auto put_toc = [&](uint32_t slot, uint16_t type, uint16_t index, uint16_t length, uint32_t offset) {
-        auto const base = toc_offset + (slot * toc_entry_size);
-        blob[base + 0] = static_cast<uint8_t>(type >> 8);
-        blob[base + 1] = static_cast<uint8_t>(type & 0xFF);
-        blob[base + 2] = static_cast<uint8_t>(index >> 8);
-        blob[base + 3] = static_cast<uint8_t>(index & 0xFF);
-        blob[base + 6] = static_cast<uint8_t>(length >> 8);
-        blob[base + 7] = static_cast<uint8_t>(length & 0xFF);
-        blob[base + 8] = static_cast<uint8_t>(offset >> 24);
-        blob[base + 9] = static_cast<uint8_t>((offset >> 16) & 0xFF);
-        blob[base + 10] = static_cast<uint8_t>((offset >> 8) & 0xFF);
-        blob[base + 11] = static_cast<uint8_t>(offset & 0xFF);
+        DescriptorStorageTocEntry const toc{
+            .descriptor_type = type, .descriptor_index = index, .configuration_index = 0, .length = length, .offset = offset};
+        statusbar::span_store(statusbar::make_span(blob, {.start = toc_offset + (slot * toc_entry_size)}), toc);
     };
     put_toc(0, DESCRIPTOR_ENTITY, 0, entity_size, entity_offset);
     put_toc(1, DESCRIPTOR_CONTROL, 0, control_size, control0_offset);

@@ -51,23 +51,13 @@ TEST(descriptor_storage_symbol_entry, struct_layout)
 static auto make_minimal_blob() -> std::array<uint8_t, 20>
 {
     std::array<uint8_t, 20> blob{};
-    // magic "AEM1" = 0x41454d31 in network byte order
-    blob[0] = 0x41;
-    blob[1] = 0x45;
-    blob[2] = 0x4d;
-    blob[3] = 0x31;
-    // toc_count = 0
-    // toc_offset = 20 (right after header)
-    blob[8] = 0x00;
-    blob[9] = 0x00;
-    blob[10] = 0x00;
-    blob[11] = 0x14;
-    // symbol_count = 0
-    // symbol_offset = 20
-    blob[16] = 0x00;
-    blob[17] = 0x00;
-    blob[18] = 0x00;
-    blob[19] = 0x14;
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC,
+        .toc_count = 0,
+        .toc_offset = 20,  // right after header
+        .symbol_count = 0,
+        .symbol_offset = 20};
+    span_store(blob, header);
     return blob;
 }
 
@@ -114,25 +104,17 @@ static auto make_blob_with_entity() -> std::vector<uint8_t>
 
     std::vector<uint8_t> blob(total, 0);
 
-    // Header
-    blob[0] = 0x41;
-    blob[1] = 0x45;
-    blob[2] = 0x4d;
-    blob[3] = 0x31;  // magic
-    // toc_count = 1
-    blob[7] = 0x01;
-    // toc_offset = 20
-    blob[11] = 0x14;
-    // symbol_count = 0, symbol_offset = total
-    blob[16] = static_cast<uint8_t>((total >> 24) & 0xff);
-    blob[17] = static_cast<uint8_t>((total >> 16) & 0xff);
-    blob[18] = static_cast<uint8_t>((total >> 8) & 0xff);
-    blob[19] = static_cast<uint8_t>(total & 0xff);
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC, .toc_count = 1, .toc_offset = toc_offset, .symbol_count = 0, .symbol_offset = total};
+    span_store(make_span(blob), header);
 
-    // TOC entry at offset 20: type=0x0000(ENTITY), index=0, config=0, length=312, offset=32
-    blob[toc_offset + 6] = 0x01;
-    blob[toc_offset + 7] = 0x38;   // length=312
-    blob[toc_offset + 11] = 0x20;  // offset=32
+    DescriptorStorageTocEntry const toc{
+        .descriptor_type = DESCRIPTOR_ENTITY,
+        .descriptor_index = 0,
+        .configuration_index = 0,
+        .length = desc_size,
+        .offset = desc_offset};
+    span_store(make_span(blob, {.start = toc_offset}), toc);
 
     // Put a marker byte in the descriptor data so we can verify the span
     blob[desc_offset] = 0xAB;
@@ -193,34 +175,25 @@ static auto make_blob_with_symbol() -> std::vector<uint8_t>
 
     std::vector<uint8_t> blob(total, 0);
 
-    // Header
-    blob[0] = 0x41;
-    blob[1] = 0x45;
-    blob[2] = 0x4d;
-    blob[3] = 0x31;
-    blob[7] = 0x01;                               // toc_count = 1
-    blob[11] = static_cast<uint8_t>(toc_offset);  // toc_offset
-    // symbol_count = 1
-    blob[15] = 0x01;
-    // symbol_offset
-    blob[16] = static_cast<uint8_t>((symbol_offset >> 24) & 0xff);
-    blob[17] = static_cast<uint8_t>((symbol_offset >> 16) & 0xff);
-    blob[18] = static_cast<uint8_t>((symbol_offset >> 8) & 0xff);
-    blob[19] = static_cast<uint8_t>(symbol_offset & 0xff);
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC,
+        .toc_count = 1,
+        .toc_offset = toc_offset,
+        .symbol_count = 1,
+        .symbol_offset = symbol_offset};
+    span_store(make_span(blob), header);
 
-    // TOC entry: type=0, index=0, config=0, length=312, offset=desc_offset
-    blob[toc_offset + 6] = 0x01;
-    blob[toc_offset + 7] = 0x38;  // length=312
-    blob[toc_offset + 8] = static_cast<uint8_t>((desc_offset >> 24) & 0xff);
-    blob[toc_offset + 9] = static_cast<uint8_t>((desc_offset >> 16) & 0xff);
-    blob[toc_offset + 10] = static_cast<uint8_t>((desc_offset >> 8) & 0xff);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset & 0xff);
+    DescriptorStorageTocEntry const toc{
+        .descriptor_type = DESCRIPTOR_ENTITY,
+        .descriptor_index = 0,
+        .configuration_index = 0,
+        .length = desc_size,
+        .offset = desc_offset};
+    span_store(make_span(blob, {.start = toc_offset}), toc);
 
-    // Symbol entry: type=0, index=0, config=0, symbol=0xDEADBEEF
-    blob[symbol_offset + 6] = 0xDE;
-    blob[symbol_offset + 7] = 0xAD;
-    blob[symbol_offset + 8] = 0xBE;
-    blob[symbol_offset + 9] = 0xEF;
+    DescriptorStorageSymbolEntry const sym{
+        .descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0, .configuration_index = 0, .symbol = 0xDEADBEEF};
+    span_store(make_span(blob, {.start = symbol_offset}), sym);
 
     return blob;
 }

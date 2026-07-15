@@ -176,10 +176,7 @@ void EntityUdptunBridge::udptun_ingest_sweep(size_t const frames)
         for (size_t ch = 0; ch < channels_; ++ch) {
             int32_t const s = (ch == sweep_ch) ? v : 0;
             size_t const off = ((f * static_cast<size_t>(channels_)) + ch) * 4;
-            out[off + 0] = static_cast<uint8_t>((static_cast<uint32_t>(s) >> 24) & 0xFFU);  // big-endian (MSB first)
-            out[off + 1] = static_cast<uint8_t>((static_cast<uint32_t>(s) >> 16) & 0xFFU);
-            out[off + 2] = static_cast<uint8_t>((static_cast<uint32_t>(s) >> 8) & 0xFFU);
-            out[off + 3] = static_cast<uint8_t>(static_cast<uint32_t>(s) & 0xFFU);
+            span_store(std::span<uint8_t>{out + off, 4}, ieee::quadlet_t{static_cast<uint32_t>(s)});
         }
     }
     udptun_ingest_audio(std::span<uint8_t const>{sweep_buf_}.first(need), /*real_source=*/true, /*rt_caller=*/true);

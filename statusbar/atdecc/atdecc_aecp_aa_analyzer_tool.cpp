@@ -283,15 +283,15 @@ static auto handle_aem_packet(AnalysisState& state, std::span<uint8_t const> pay
         return false;
     }
 
-    auto const op = payload.subspan(AemDu::LENGTH, OP_PAYLOAD_LEN);
-    uint16_t const desc_type = static_cast<uint16_t>((op[0] << 8) | op[1]);
-    if (desc_type != DESCRIPTOR_MEMORY_OBJECT) {
+    aem::AemStartOperationCommandPayload op_payload{};
+    span_load(op_payload, payload.subspan(AemDu::LENGTH, OP_PAYLOAD_LEN));
+    if (op_payload.descriptor_type.get() != DESCRIPTOR_MEMORY_OBJECT) {
         return false;
     }
 
-    uint16_t const desc_index = static_cast<uint16_t>((op[2] << 8) | op[3]);
-    uint16_t const op_id = static_cast<uint16_t>((op[4] << 8) | op[5]);
-    uint16_t const op_field = static_cast<uint16_t>((op[6] << 8) | op[7]);
+    uint16_t const desc_index = op_payload.descriptor_index.get();
+    uint16_t const op_id = op_payload.operation_id.get();
+    uint16_t const op_field = op_payload.operation_type.get();
     uint16_t const cmd_code = aem.command_code();
     uint16_t const seq = aem.sequence_id.get();
 

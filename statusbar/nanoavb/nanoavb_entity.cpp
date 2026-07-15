@@ -38,8 +38,7 @@ namespace {
                 return n;
             }
             size_t const trailer = n - L2021;
-            out[FORMATS_OFFSET_POS] = static_cast<uint8_t>((L2016 >> 8) & 0xFFU);
-            out[FORMATS_OFFSET_POS + 1] = static_cast<uint8_t>(L2016 & 0xFFU);
+            span_store(out.subspan(FORMATS_OFFSET_POS, 2), doublet_t{L2016});
             if (trailer != 0) {
                 std::memmove(out.data() + L2016, out.data() + L2021, trailer);
             }
@@ -437,9 +436,7 @@ auto AemCommandHandler::handle_get_sampling_rate(
     resp.descriptor_type = descriptor_type;
     resp.descriptor_index = descriptor_index;
     // current_sampling_rate is a network-order quadlet in the wire descriptor.
-    resp.sampling_rate = static_cast<uint32_t>(
-        (static_cast<uint32_t>(desc[SR_OFFSET]) << 24) | (static_cast<uint32_t>(desc[SR_OFFSET + 1]) << 16) |
-        (static_cast<uint32_t>(desc[SR_OFFSET + 2]) << 8) | static_cast<uint32_t>(desc[SR_OFFSET + 3]));
+    span_load(resp.sampling_rate, make_const_span(desc, {.start = SR_OFFSET, .length = 4}));
     span_store(out_buffer, resp);
     return {.status = AEM_STATUS_SUCCESS, .size = AemSamplingRatePayload::LENGTH};
 }
@@ -810,24 +807,22 @@ auto AemCommandHandler::set_local_identify(bool const on) -> uint8_t
     if (!identify_control_index_valid_) {
         return AEM_STATUS_NOT_IMPLEMENTED;
     }
-    std::array<uint8_t, 5> const body{
-        static_cast<uint8_t>((DESCRIPTOR_CONTROL >> 8) & 0xFF),
-        static_cast<uint8_t>(DESCRIPTOR_CONTROL & 0xFF),
-        static_cast<uint8_t>((identify_control_index_ >> 8) & 0xFF),
-        static_cast<uint8_t>(identify_control_index_ & 0xFF),
-        on ? uint8_t{0xFF} : uint8_t{0x00}};
+    aem::AemControlPayloadHeader const header{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = identify_control_index_};
+    std::array<uint8_t, aem::AemControlPayloadHeader::LENGTH + 1> body{};
+    span_store(body, header);
+    body[aem::AemControlPayloadHeader::LENGTH] = on ? uint8_t{0xFF} : uint8_t{0x00};
     return apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body);
 }
 
 auto AemCommandHandler::targets_identify_control(uint16_t const command_type, std::span<uint8_t const> body) const noexcept -> bool
 {
-    // Body header: descriptor_type(2) + descriptor_index(2), big-endian.
-    if (!identify_control_index_valid_ || command_type != AEM_COMMAND_SET_CONTROL || body.size() < 4) {
+    if (!identify_control_index_valid_ || command_type != AEM_COMMAND_SET_CONTROL ||
+        body.size() < aem::AemControlPayloadHeader::LENGTH) {
         return false;
     }
-    auto const descriptor_type = static_cast<uint16_t>((static_cast<uint16_t>(body[0]) << 8) | body[1]);
-    auto const descriptor_index = static_cast<uint16_t>((static_cast<uint16_t>(body[2]) << 8) | body[3]);
-    return descriptor_type == DESCRIPTOR_CONTROL && descriptor_index == identify_control_index_;
+    aem::AemControlPayloadHeader header{};
+    span_load(header, body);
+    return header.descriptor_type.get() == DESCRIPTOR_CONTROL && header.descriptor_index.get() == identify_control_index_;
 }
 
 void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<uint8_t const> body)

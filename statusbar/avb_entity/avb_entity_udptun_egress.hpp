@@ -13,6 +13,9 @@
 /// destination as an out-span, so the later egress move doesn't reach into
 /// entity state directly.
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -34,11 +37,9 @@ inline void udptun_egress_deinterleave_to_float(
         return;
     }
     for (size_t n = 0; n < count; ++n) {
-        size_t const off = n * 4;
-        auto const v = static_cast<int32_t>(
-            (static_cast<uint32_t>(pcm_be[off]) << 24) | (static_cast<uint32_t>(pcm_be[off + 1]) << 16) |
-            (static_cast<uint32_t>(pcm_be[off + 2]) << 8) | static_cast<uint32_t>(pcm_be[off + 3]));
-        out[n] = static_cast<float>(v) / 2147483648.0F;
+        ieee::quadlet_t sample{0};
+        span_load(sample, pcm_be.subspan(n * 4, 4));
+        out[n] = static_cast<float>(static_cast<int32_t>(sample.get())) / 2147483648.0F;
     }
 }
 

@@ -47,20 +47,12 @@ auto aa_status_name(uint8_t const status) noexcept -> char const*
 
 void AaTlvBuilder::append_tlv(uint8_t const mode, uint64_t const address, uint16_t const length, std::span<uint8_t const> data)
 {
-    // Mode (4 bits) | Length (12 bits) — 2 bytes big-endian
-    uint16_t const mode_length = static_cast<uint16_t>((static_cast<uint16_t>(mode & 0x0F) << 12) | (length & 0x0FFF));
-    payload_.push_back(static_cast<uint8_t>(mode_length >> 8));
-    payload_.push_back(static_cast<uint8_t>(mode_length & 0xFF));
-
-    // Address — 8 bytes big-endian
-    payload_.push_back(static_cast<uint8_t>(address >> 56));
-    payload_.push_back(static_cast<uint8_t>(address >> 48));
-    payload_.push_back(static_cast<uint8_t>(address >> 40));
-    payload_.push_back(static_cast<uint8_t>(address >> 32));
-    payload_.push_back(static_cast<uint8_t>(address >> 24));
-    payload_.push_back(static_cast<uint8_t>(address >> 16));
-    payload_.push_back(static_cast<uint8_t>(address >> 8));
-    payload_.push_back(static_cast<uint8_t>(address));
+    AaTlvHeader header{};
+    header.set_mode_length(mode, length);
+    header.address = address;
+    auto const base = payload_.size();
+    payload_.resize(base + AaTlvHeader::LENGTH);
+    span_store(std::span<uint8_t>{payload_.data() + base, AaTlvHeader::LENGTH}, header);
 
     // Memory data
     if (!data.empty()) {

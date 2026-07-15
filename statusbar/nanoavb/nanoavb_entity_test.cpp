@@ -192,8 +192,9 @@ TEST(nanoavb_entity_legacy_2016, stream_input_descriptor_truncated_to_2016)
     // so a 2016 controller finds the (empty) stream_formats array correctly.
     auto const resp = result.response_data();
     size_t const fo = AemReadDescriptorResponsePayload::LENGTH + 82;
-    auto const formats_offset = static_cast<uint16_t>((static_cast<uint16_t>(resp[fo]) << 8) | resp[fo + 1]);
-    EXPECT_EQ(formats_offset, static_cast<uint16_t>(DescriptorStream::MINIMUM_LENGTH));
+    ieee::doublet_t formats_offset{0};
+    span_load(formats_offset, resp.subspan(fo, 2));
+    EXPECT_EQ(formats_offset.get(), static_cast<uint16_t>(DescriptorStream::MINIMUM_LENGTH));
 }
 
 TEST(nanoavb_entity_legacy_2016, default_emits_2021_stream_length)
@@ -1221,10 +1222,9 @@ TEST(nanoavb_entity_commands, get_sampling_rate_implemented)
     EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // GET_STREAM_INFO is implemented (not NOT_IMPLEMENTED)
     EXPECT_EQ(result.response_data().size(), AemSamplingRatePayload::LENGTH);  // 8
     auto const r = result.response_data();
-    auto const sr = static_cast<uint32_t>(
-        (static_cast<uint32_t>(r[4]) << 24) | (static_cast<uint32_t>(r[5]) << 16) | (static_cast<uint32_t>(r[6]) << 8) |
-        static_cast<uint32_t>(r[7]));
-    EXPECT_EQ(sr, 96000u);
+    atdecc::aem::AemSamplingRatePayload parsed{};
+    span_load(parsed, r);
+    EXPECT_EQ(parsed.sampling_rate.get(), 96000u);
 }
 
 //

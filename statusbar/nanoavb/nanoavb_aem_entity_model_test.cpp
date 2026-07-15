@@ -285,13 +285,12 @@ TEST(aem_model_names, get_name_entity_name_round_trips)
     auto const n = model.get_name_for_wire(ref, make_span(buf));
     EXPECT_EQ(n, static_cast<size_t>(72));
 
-    // Parse the response header.
-    uint16_t const wire_type = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
-    uint16_t const wire_index = (static_cast<uint16_t>(buf[2]) << 8) | buf[3];
-    uint16_t const wire_name_index = (static_cast<uint16_t>(buf[4]) << 8) | buf[5];
-    EXPECT_EQ(wire_type, DESCRIPTOR_ENTITY);
-    EXPECT_EQ(wire_index, static_cast<uint16_t>(0));
-    EXPECT_EQ(wire_name_index, static_cast<uint16_t>(0));
+    // Parse the response header via the wire struct.
+    atdecc::aem::AemNameCommandPayload parsed{};
+    span_load(parsed, std::span<uint8_t const>{buf});
+    EXPECT_EQ(parsed.descriptor_type.get(), DESCRIPTOR_ENTITY);
+    EXPECT_EQ(parsed.descriptor_index.get(), static_cast<uint16_t>(0));
+    EXPECT_EQ(parsed.name_index.get(), static_cast<uint16_t>(0));
 
     // Parse the 64-byte name bytes as a string_view via the project helper
     // (avoids a raw reinterpret_cast) and compare the "TestEntity" prefix.
@@ -367,11 +366,43 @@ namespace {
 
 /// Build a minimal .aem blob containing one ENTITY descriptor (312 bytes)
 /// with a distinctive entity_name, plus one symbol (42) for that descriptor.
+/// Author the .aem container scaffolding for a single-descriptor test blob
+/// (header + one TOC entry, no symbols) via the DescriptorStorage wire
+/// structs. The blob is laid out header(20) + TOC(12) + descriptor.
+void store_single_descriptor_container(
+    std::span<uint8_t> blob, uint16_t const descriptor_type, uint16_t const length, uint32_t const desc_offset)
+{
+    using atdecc::aem::DescriptorStorage;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageTocEntry;
+
+    constexpr uint32_t toc_offset = DescriptorStorageHeader::LENGTH;
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC,
+        .toc_count = 1,
+        .toc_offset = toc_offset,
+        .symbol_count = 0,
+        .symbol_offset = desc_offset};
+    span_store(blob, header);
+
+    DescriptorStorageTocEntry const toc{
+        .descriptor_type = descriptor_type,
+        .descriptor_index = 0,
+        .configuration_index = 0,
+        .length = length,
+        .offset = desc_offset};
+    span_store(blob.subspan(toc_offset), toc);
+}
+
 auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::vector<uint8_t>
 {
     using atdecc::aem::AtdeccString;
     using atdecc::aem::DESCRIPTOR_ENTITY;
     using atdecc::aem::DescriptorEntity;
+    using atdecc::aem::DescriptorStorage;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageSymbolEntry;
+    using atdecc::aem::DescriptorStorageTocEntry;
 
     constexpr uint32_t header_size = 20;
     constexpr uint32_t toc_entry_size = 12;
@@ -385,32 +416,25 @@ auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::
 
     std::vector<uint8_t> blob(total, 0);
 
-    // Header: "AEM1" magic + toc_count=1 + toc_offset=20 + symbol_count=1 + symbol_offset
-    blob[0] = 0x41;
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    // toc_count (uint32 network byte order) = 1
-    blob[7] = 0x01;
-    // toc_offset (uint32 NBO) = 20
-    blob[11] = 0x14;
-    // symbol_count = 1
-    blob[15] = 0x01;
-    // symbol_offset = 32 (header 20 + 1 TOC entry 12)
-    blob[19] = static_cast<uint8_t>(symbol_offset);
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC,
+        .toc_count = 1,
+        .toc_offset = toc_offset,
+        .symbol_count = 1,
+        .symbol_offset = symbol_offset};
+    span_store(make_span(blob), header);
 
-    // TOC entry: type=0x0000 (ENTITY), index=0, config=0, length=312, offset=desc_offset
-    // offsets within the TOC entry: type:2, index:2, config:2, length:2, offset:4
-    blob[toc_offset + 0] = 0x00;
-    blob[toc_offset + 1] = 0x00;  // descriptor_type = ENTITY
-    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
-    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+    DescriptorStorageTocEntry const toc{
+        .descriptor_type = DESCRIPTOR_ENTITY,
+        .descriptor_index = 0,
+        .configuration_index = 0,
+        .length = desc_size,
+        .offset = desc_offset};
+    span_store(make_span(blob, {.start = toc_offset}), toc);
 
-    // Symbol entry: type=ENTITY, index=0, config=0, symbol=42
-    blob[symbol_offset + 0] = 0x00;
-    blob[symbol_offset + 1] = 0x00;  // descriptor_type = ENTITY
-    blob[symbol_offset + 9] = 0x2A;  // symbol = 42 (LSB of big-endian uint32)
+    DescriptorStorageSymbolEntry const sym{
+        .descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0, .configuration_index = 0, .symbol = 42};
+    span_store(make_span(blob, {.start = symbol_offset}), sym);
 
     // Write a real DescriptorEntity into the descriptor slot so the
     // struct round-trips through span_load_padded.
@@ -658,35 +682,35 @@ struct TocInput
 
 auto make_single_descriptor_blob(TocInput entry) -> std::vector<uint8_t>
 {
+    using atdecc::aem::DescriptorStorage;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageTocEntry;
+
     constexpr uint32_t hdr = 20;
     constexpr uint32_t toc = 12;
     uint32_t const desc_off = hdr + toc;
     uint32_t const total = desc_off + entry.length;
     std::vector<uint8_t> b(total, 0);
-    b[0] = 0x41;
-    b[1] = 0x45;
-    b[2] = 0x4D;
-    b[3] = 0x31;
-    b[7] = 0x01;
-    b[11] = 0x14;
-    b[19] = static_cast<uint8_t>(desc_off);
-    uint32_t const t = hdr;
-    b[t + 0] = static_cast<uint8_t>((entry.descriptor_type >> 8) & 0xFF);
-    b[t + 1] = static_cast<uint8_t>(entry.descriptor_type & 0xFF);
-    b[t + 2] = static_cast<uint8_t>((entry.descriptor_index >> 8) & 0xFF);
-    b[t + 3] = static_cast<uint8_t>(entry.descriptor_index & 0xFF);
-    b[t + 4] = static_cast<uint8_t>((entry.configuration_index >> 8) & 0xFF);
-    b[t + 5] = static_cast<uint8_t>(entry.configuration_index & 0xFF);
-    b[t + 6] = static_cast<uint8_t>((entry.length >> 8) & 0xFF);
-    b[t + 7] = static_cast<uint8_t>(entry.length & 0xFF);
-    b[t + 11] = static_cast<uint8_t>(desc_off);
+
+    DescriptorStorageHeader const header{
+        .magic = DescriptorStorage::MAGIC, .toc_count = 1, .toc_offset = hdr, .symbol_count = 0, .symbol_offset = desc_off};
+    span_store(make_span(b), header);
+
+    DescriptorStorageTocEntry const toc_entry{
+        .descriptor_type = entry.descriptor_type,
+        .descriptor_index = entry.descriptor_index,
+        .configuration_index = entry.configuration_index,
+        .length = entry.length,
+        .offset = desc_off};
+    span_store(make_span(b, {.start = hdr}), toc_entry);
     return b;
 }
 
 template <typename DescT>
 void verify_sh(uint16_t dtype, uint16_t dlen, bool (AemEntityHandler::*method)(DescriptorId, DescT&))
 {
-    auto blob = make_single_descriptor_blob({dtype, 0, 0, dlen});
+    auto blob =
+        make_single_descriptor_blob({.descriptor_type = dtype, .descriptor_index = 0, .configuration_index = 0, .length = dlen});
     auto sr = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
     EXPECT_TRUE(sr.has_value());
     DescriptorStorageHandler handler{*sr};
@@ -1365,21 +1389,7 @@ auto make_blob_with_signal_selector() -> std::vector<uint8_t>
     constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
 
     std::vector<uint8_t> blob(desc_offset + desc_size, 0);
-    blob[0] = 0x41;  // "AEM1"
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    blob[7] = 0x01;  // toc_count = 1
-    blob[11] = static_cast<uint8_t>(toc_offset);
-    // symbol_count = 0; symbol_offset points just past the TOC.
-    blob[19] = static_cast<uint8_t>(desc_offset);
-
-    // TOC entry: type=SIGNAL_SELECTOR, index=0, config=0, length, offset.
-    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_SIGNAL_SELECTOR >> 8) & 0xFF);
-    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_SIGNAL_SELECTOR & 0xFF);
-    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
-    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_SIGNAL_SELECTOR, desc_size, desc_offset);
 
     DescriptorSignalSelector desc{};
     desc.descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR;
@@ -1393,42 +1403,47 @@ auto make_blob_with_signal_selector() -> std::vector<uint8_t>
 
     // Two 6-byte sources: AUDIO_CLUSTER 0 and AUDIO_CLUSTER 1.
     size_t const src0 = desc_offset + DescriptorSignalSelector::LENGTH;
-    blob[src0 + 0] = static_cast<uint8_t>((DESCRIPTOR_AUDIO_CLUSTER >> 8) & 0xFF);
-    blob[src0 + 1] = static_cast<uint8_t>(DESCRIPTOR_AUDIO_CLUSTER & 0xFF);
-    blob[src0 + 6] = blob[src0 + 0];
-    blob[src0 + 7] = blob[src0 + 1];
-    blob[src0 + 9] = 0x01;  // second source: signal_index = 1
+    auto const put_source = [&blob](size_t off, uint16_t type, uint16_t index, uint16_t output) {
+        span_store(make_span(blob, {.start = off, .length = 2}), ieee::doublet_t{type});
+        span_store(make_span(blob, {.start = off + 2, .length = 2}), ieee::doublet_t{index});
+        span_store(make_span(blob, {.start = off + 4, .length = 2}), ieee::doublet_t{output});
+    };
+    put_source(src0, DESCRIPTOR_AUDIO_CLUSTER, 0, 0);
+    put_source(src0 + 6, DESCRIPTOR_AUDIO_CLUSTER, 1, 0);
     return blob;
 }
 
-/// SET_SIGNAL_SELECTOR / GET_SIGNAL_SELECTOR command body.
+/// SET_SIGNAL_SELECTOR / GET_SIGNAL_SELECTOR command body via the wire
+/// structs: the full AemSignalSelectorPayload on SET, header only on GET.
 auto make_signal_selector_body(uint16_t descriptor_index, std::optional<std::array<uint16_t, 3>> const source = std::nullopt)
     -> std::vector<uint8_t>
 {
-    std::vector<uint8_t> body;
-    auto push_u16 = [&body](uint16_t v) {
-        body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-        body.push_back(static_cast<uint8_t>(v & 0xFF));
-    };
-    push_u16(DESCRIPTOR_SIGNAL_SELECTOR);
-    push_u16(descriptor_index);
     if (source) {
-        for (auto const v : *source) {
-            push_u16(v);
-        }
+        atdecc::aem::AemSignalSelectorPayload const payload{
+            .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR,
+            .descriptor_index = descriptor_index,
+            .signal_type = (*source)[0],
+            .signal_index = (*source)[1],
+            .signal_output = (*source)[2],
+            .reserved = 0};
+        std::vector<uint8_t> body(atdecc::aem::AemSignalSelectorPayload::LENGTH, 0);
+        span_store(make_span(body), payload);
+        return body;
     }
+    atdecc::aem::AemGetSignalSelectorCommandPayload const payload{
+        .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR, .descriptor_index = descriptor_index};
+    std::vector<uint8_t> body(atdecc::aem::AemGetSignalSelectorCommandPayload::LENGTH, 0);
+    span_store(make_span(body), payload);
     return body;
 }
 
 /// The {signal_type, signal_index, signal_output} triple in a
-/// SET/GET_SIGNAL_SELECTOR response (after the 4-byte descriptor header).
+/// SET/GET_SIGNAL_SELECTOR response.
 auto response_source(std::span<uint8_t const> bytes) -> std::array<uint16_t, 3>
 {
-    std::array<uint16_t, 3> out{};
-    for (size_t i = 0; i < 3; ++i) {
-        out[i] = static_cast<uint16_t>((bytes[4 + (2 * i)] << 8) | bytes[5 + (2 * i)]);
-    }
-    return out;
+    atdecc::aem::AemSignalSelectorPayload payload{};
+    span_load(payload, bytes.first(atdecc::aem::AemSignalSelectorPayload::LENGTH));
+    return {payload.signal_type.get(), payload.signal_index.get(), payload.signal_output.get()};
 }
 
 }  // namespace
@@ -1570,19 +1585,7 @@ auto make_blob_with_matrix() -> std::vector<uint8_t>
     constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
 
     std::vector<uint8_t> blob(desc_offset + desc_size, 0);
-    blob[0] = 0x41;  // "AEM1"
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    blob[7] = 0x01;  // toc_count = 1
-    blob[11] = static_cast<uint8_t>(toc_offset);
-    blob[19] = static_cast<uint8_t>(desc_offset);  // symbol_offset (0 symbols)
-
-    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_MATRIX >> 8) & 0xFF);
-    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_MATRIX & 0xFF);
-    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
-    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_MATRIX, desc_size, desc_offset);
 
     DescriptorMatrix desc{};
     desc.descriptor_type = DESCRIPTOR_MATRIX;
@@ -1596,11 +1599,8 @@ auto make_blob_with_matrix() -> std::vector<uint8_t>
     // Value entry: min=-60, max=12, step=1, default=0, current=7, unit, string.
     size_t const entry = desc_offset + DescriptorMatrix::LENGTH;
     auto put_i32 = [&blob](size_t off, int32_t v) {
-        auto const u = static_cast<uint32_t>(v);
-        blob[off + 0] = static_cast<uint8_t>((u >> 24) & 0xFF);
-        blob[off + 1] = static_cast<uint8_t>((u >> 16) & 0xFF);
-        blob[off + 2] = static_cast<uint8_t>((u >> 8) & 0xFF);
-        blob[off + 3] = static_cast<uint8_t>(u & 0xFF);
+        ieee::quadlet_t const q{static_cast<uint32_t>(v)};
+        span_store(make_span(blob, {.start = off, .length = 4}), q);
     };
     put_i32(entry + 0, -60);
     put_i32(entry + 4, 12);
@@ -1624,38 +1624,37 @@ auto make_matrix_body(
     uint16_t item_offset,
     std::vector<int32_t> const& values = {}) -> std::vector<uint8_t>
 {
-    std::vector<uint8_t> body;
-    auto push_u16 = [&body](uint16_t v) {
-        body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-        body.push_back(static_cast<uint8_t>(v & 0xFF));
-    };
-    push_u16(DESCRIPTOR_MATRIX);
-    push_u16(descriptor_index);
-    push_u16(column);
-    push_u16(row);
-    push_u16(width);
-    push_u16(height);
-    push_u16(static_cast<uint16_t>((rep ? 0x8000U : 0U) | ((direction & 0x3U) << 13) | (value_count & 0x1FFFU)));
-    push_u16(item_offset);
+    using atdecc::aem::AemMatrixPayloadHeader;
+
+    std::vector<uint8_t> body(AemMatrixPayloadHeader::LENGTH + (4 * values.size()), 0);
+    AemMatrixPayloadHeader header{
+        .descriptor_type = DESCRIPTOR_MATRIX,
+        .descriptor_index = descriptor_index,
+        .matrix_column = column,
+        .matrix_row = row,
+        .region_width = width,
+        .region_height = height,
+        .rep_direction_value_count = 0,
+        .item_offset = item_offset};
+    header.set_rep_direction_value_count(rep, direction, value_count);
+    span_store(make_span(body), header);
+    size_t off = AemMatrixPayloadHeader::LENGTH;
     for (auto const v : values) {
-        auto const u = static_cast<uint32_t>(v);
-        body.push_back(static_cast<uint8_t>((u >> 24) & 0xFF));
-        body.push_back(static_cast<uint8_t>((u >> 16) & 0xFF));
-        body.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
-        body.push_back(static_cast<uint8_t>(u & 0xFF));
+        span_store(make_span(body, {.start = off, .length = 4}), ieee::quadlet_t{static_cast<uint32_t>(v)});
+        off += 4;
     }
     return body;
 }
 
-/// Decode the int32 values from a GET/SET_MATRIX response (after the 4-byte
-/// descriptor header + 12-byte region header).
+/// Decode the int32 values from a GET/SET_MATRIX response (after the
+/// 16-byte AemMatrixPayloadHeader).
 auto response_matrix_values(std::span<uint8_t const> bytes) -> std::vector<int32_t>
 {
     std::vector<int32_t> out;
-    for (size_t off = 16; off + 4 <= bytes.size(); off += 4) {
-        out.push_back(static_cast<int32_t>(
-            (uint32_t{bytes[off]} << 24) | (uint32_t{bytes[off + 1]} << 16) | (uint32_t{bytes[off + 2]} << 8) |
-            uint32_t{bytes[off + 3]}));
+    for (size_t off = atdecc::aem::AemMatrixPayloadHeader::LENGTH; off + 4 <= bytes.size(); off += 4) {
+        ieee::quadlet_t q{0};
+        span_load(q, bytes.subspan(off, 4));
+        out.push_back(static_cast<int32_t>(q.get()));
     }
     return out;
 }
@@ -1703,7 +1702,9 @@ TEST(matrix, get_serves_seeded_grid_and_set_region_writes)
     std::array<uint8_t, 4> cell{};
     DescriptorRef const mref{.configuration_index = 0, .descriptor_type = DESCRIPTOR_MATRIX, .descriptor_index = 0};
     EXPECT_EQ(handler.matrix_cell(mref, 0, 1, cell), size_t{4});
-    EXPECT_EQ(static_cast<int32_t>((uint32_t{cell[0]} << 24) | (cell[1] << 16) | (cell[2] << 8) | cell[3]), 22);
+    ieee::quadlet_t cell_value{0};
+    span_load(cell_value, cell);
+    EXPECT_EQ(static_cast<int32_t>(cell_value.get()), 22);
 }
 
 TEST(matrix, invalid_regions_and_callback_veto)
@@ -1743,8 +1744,9 @@ TEST(matrix, invalid_regions_and_callback_veto)
             seen_matrix_index = descriptor_index;
             seen_region_width = write.region.width;
             if (write.values.size() >= 4) {
-                seen_value = static_cast<int32_t>(
-                    (uint32_t{write.values[0]} << 24) | (write.values[1] << 16) | (write.values[2] << 8) | write.values[3]);
+                ieee::quadlet_t q{0};
+                span_load(q, write.values.first(4));
+                seen_value = static_cast<int32_t>(q.get());
             }
             return atdecc::AEM_STATUS_NOT_SUPPORTED;
         });
@@ -1781,19 +1783,7 @@ auto make_blob_with_clock_domain() -> std::vector<uint8_t>
     constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
 
     std::vector<uint8_t> blob(desc_offset + desc_size, 0);
-    blob[0] = 0x41;  // "AEM1"
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    blob[7] = 0x01;  // toc_count = 1
-    blob[11] = static_cast<uint8_t>(toc_offset);
-    blob[19] = static_cast<uint8_t>(desc_offset);  // symbol_offset past the TOC
-
-    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_CLOCK_DOMAIN >> 8) & 0xFF);
-    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_CLOCK_DOMAIN & 0xFF);
-    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
-    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_CLOCK_DOMAIN, desc_size, desc_offset);
 
     DescriptorClockDomain desc{};
     desc.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN;
@@ -1944,19 +1934,7 @@ auto make_blob_with_mixer() -> std::vector<uint8_t>
     constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
 
     std::vector<uint8_t> blob(desc_offset + desc_size, 0);
-    blob[0] = 0x41;  // "AEM1"
-    blob[1] = 0x45;
-    blob[2] = 0x4D;
-    blob[3] = 0x31;
-    blob[7] = 0x01;  // toc_count = 1
-    blob[11] = static_cast<uint8_t>(toc_offset);
-    blob[19] = static_cast<uint8_t>(desc_offset);  // symbol_offset past the TOC
-
-    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_MIXER >> 8) & 0xFF);
-    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_MIXER & 0xFF);
-    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
-    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
-    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_MIXER, desc_size, desc_offset);
 
     DescriptorMixer desc{};
     desc.descriptor_type = DESCRIPTOR_MIXER;

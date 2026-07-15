@@ -8,6 +8,8 @@
 
 #include "statusbar/avb_entity/avb_entity_udptun_egress.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -25,8 +27,9 @@ auto approx(float a, float b, float eps = 1e-6F) -> bool
 // big-endian int32 bytes for a value
 auto be(int32_t v) -> std::array<uint8_t, 4>
 {
-    auto u = static_cast<uint32_t>(v);
-    return {static_cast<uint8_t>(u >> 24), static_cast<uint8_t>(u >> 16), static_cast<uint8_t>(u >> 8), static_cast<uint8_t>(u)};
+    std::array<uint8_t, 4> out{};
+    statusbar::span_store(out, statusbar::ieee::quadlet_t{static_cast<uint32_t>(v)});
+    return out;
 }
 }  // namespace
 

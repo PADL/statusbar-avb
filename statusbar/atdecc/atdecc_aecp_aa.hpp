@@ -19,6 +19,7 @@
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
 #include "statusbar/atdecc/atdecc_error.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -34,6 +35,7 @@ namespace statusbar::atdecc {
 using ieee::doublet_t;
 using ieee::Eui64;
 using ieee::octet_t;
+using ieee::octlet_t;
 using statusbar::Status;
 using statusbar::StatusValue;
 
@@ -122,6 +124,41 @@ static_assert(offsetof(AecpAaDu, tlv_count) == 22, "tlv_count must be at offset 
 // Address Access TLV
 // ---------------------------------------------------------------------------
 
+/// Fixed wire header of one Address Access TLV (Clause 9.2.1.3):
+/// mode/length word + 64-bit base address, followed on the wire by
+/// `length()` octets of memory_data.
+struct AaTlvHeader
+{
+    static constexpr size_t LENGTH = AA_TLV_HEADER_SIZE;
+
+    static constexpr uint16_t MODE_SHIFT = 12;
+    static constexpr uint16_t MODE_MASK = 0x0F;
+    static constexpr uint16_t LENGTH_MASK = 0x0FFF;
+
+    /// Bytes 0-1: mode (bits 15-12) | length (bits 11-0)
+    doublet_t mode_length{0};
+
+    /// Bytes 2-9: base address
+    octlet_t address{0};
+
+    [[nodiscard]] constexpr auto mode() const noexcept -> uint8_t
+    {
+        return static_cast<uint8_t>((mode_length.get() >> MODE_SHIFT) & MODE_MASK);
+    }
+    [[nodiscard]] constexpr auto length() const noexcept -> uint16_t
+    {
+        return static_cast<uint16_t>(mode_length.get() & LENGTH_MASK);
+    }
+    constexpr void set_mode_length(uint8_t const mode, uint16_t const length) noexcept
+    {
+        mode_length = static_cast<uint16_t>((static_cast<uint16_t>(mode & MODE_MASK) << MODE_SHIFT) | (length & LENGTH_MASK));
+    }
+
+    auto operator<=>(AaTlvHeader const&) const noexcept = default;
+};
+
+static_assert(sizeof(AaTlvHeader) == AA_TLV_HEADER_SIZE, "AaTlvHeader must be exactly 10 bytes");
+
 /// Parsed Address Access TLV (not a wire-format struct).
 struct AaTlv
 {
@@ -150,31 +187,22 @@ auto aa_parse_tlvs(uint16_t tlv_count, std::span<uint8_t const> tlv_data, Func c
     size_t offset = 0;
 
     for (uint16_t i = 0; i < tlv_count; ++i) {
-        // Need at least 10 bytes for TLV header (2 mode/length + 8 address)
-        if (offset + AA_TLV_HEADER_SIZE > tlv_data.size()) {
+        if (offset + AaTlvHeader::LENGTH > tlv_data.size()) {
             return failure(make_error_code(AtdeccError::truncated));
         }
 
-        // Parse mode (4 bits) and length (12 bits) from first 2 bytes
-        uint8_t const mode = (tlv_data[offset] >> 4) & 0x0F;
-        uint16_t const length = static_cast<uint16_t>(((tlv_data[offset] & 0x0F) << 8) | tlv_data[offset + 1]);
-
-        // Parse 64-bit address (big-endian)
-        uint64_t const address = (static_cast<uint64_t>(tlv_data[offset + 2]) << 56) |
-            (static_cast<uint64_t>(tlv_data[offset + 3]) << 48) | (static_cast<uint64_t>(tlv_data[offset + 4]) << 40) |
-            (static_cast<uint64_t>(tlv_data[offset + 5]) << 32) | (static_cast<uint64_t>(tlv_data[offset + 6]) << 24) |
-            (static_cast<uint64_t>(tlv_data[offset + 7]) << 16) | (static_cast<uint64_t>(tlv_data[offset + 8]) << 8) |
-            static_cast<uint64_t>(tlv_data[offset + 9]);
-
-        offset += AA_TLV_HEADER_SIZE;
+        AaTlvHeader header{};
+        span_load(header, tlv_data.subspan(offset));
+        offset += AaTlvHeader::LENGTH;
 
         // Validate memory_data fits in remaining buffer
+        auto const length = header.length();
         if (offset + length > tlv_data.size()) {
             return failure(make_error_code(AtdeccError::truncated));
         }
 
         auto const data = tlv_data.subspan(offset, length);
-        on_tlv(i, mode, address, data);
+        on_tlv(i, header.mode(), header.address.get(), data);
 
         offset += length;
     }
@@ -253,6 +281,10 @@ class AaTlvBuilder
 // Serialization traits
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::AecpAaDu> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::AaTlvHeader> : std::true_type
 {};
 
 namespace statusbar::atdecc {

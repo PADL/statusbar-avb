@@ -1036,8 +1036,7 @@ template <uint16_t DescType>
 void expect_dispatch_non_empty(size_t min_len)
 {
     std::vector<uint8_t> buf(min_len, 0);
-    buf[0] = static_cast<uint8_t>(DescType >> 8);
-    buf[1] = static_cast<uint8_t>(DescType & 0xff);
+    statusbar::span_store(statusbar::make_span(buf, {.start = 0, .length = 2}), statusbar::ieee::doublet_t{DescType});
     auto parsed = aem::parse_descriptor(std::span<uint8_t const>(buf));
     EXPECT_TRUE(parsed.has_value());
     std::string out;

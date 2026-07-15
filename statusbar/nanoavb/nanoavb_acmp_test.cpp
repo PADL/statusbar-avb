@@ -31,6 +31,7 @@ static Eui64 make_entity_id(uint8_t id)
 static Eui64 make_stream_id(Eui64 entity_id, uint16_t unique_id)
 {
     // Stream ID is entity MAC + unique ID in network byte order
+    statusbar::ieee::doublet_t const uid{unique_id};
     return Eui64{
         entity_id.span()[2],
         entity_id.span()[3],
@@ -38,8 +39,8 @@ static Eui64 make_stream_id(Eui64 entity_id, uint16_t unique_id)
         entity_id.span()[5],
         entity_id.span()[6],
         entity_id.span()[7],
-        static_cast<uint8_t>(unique_id >> 8),
-        static_cast<uint8_t>(unique_id & 0xFF)};
+        uid.span()[0],
+        uid.span()[1]};
 }
 
 static AcmpCommandResponse make_connect_tx_command(
