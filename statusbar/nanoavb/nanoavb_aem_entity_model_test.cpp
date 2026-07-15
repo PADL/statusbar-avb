@@ -1915,6 +1915,157 @@ TEST(clock_source, invalid_source_rejected_and_callback_gates)
         static_cast<uint16_t>(1));
 }
 
+// ===========================================================================
+// MIXER built-in (kit phase 4b): SET_MIXER validates the incoming value size
+// against the mixer's linear control_value_type, offers it to the change
+// callback, stores it in RAM (seeded from the authored `current`); GET_MIXER
+// serves the stored value back.
+// ===========================================================================
+
+namespace {
+
+using atdecc::aem::DESCRIPTOR_MIXER;
+using atdecc::aem::DescriptorMixer;
+
+constexpr int32_t MIXER_AUTHORED_CURRENT = 7;
+
+/// Build a blob with one MIXER descriptor (index 0): LINEAR_INT32 value,
+/// two sources, one value entry (min=-60, max=12, step=1, default=0,
+/// current=MIXER_AUTHORED_CURRENT, unit, string).
+auto make_blob_with_mixer() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr size_t elem = 4;                            // LINEAR_INT32
+    constexpr size_t sources_bytes = size_t{2} * 6;       // two signal triples
+    constexpr size_t value_entry_bytes = (5 * elem) + 4;  // min..current + unit + string
+    constexpr uint32_t desc_size = DescriptorMixer::LENGTH + sources_bytes + value_entry_bytes;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    blob[0] = 0x41;  // "AEM1"
+    blob[1] = 0x45;
+    blob[2] = 0x4D;
+    blob[3] = 0x31;
+    blob[7] = 0x01;  // toc_count = 1
+    blob[11] = static_cast<uint8_t>(toc_offset);
+    blob[19] = static_cast<uint8_t>(desc_offset);  // symbol_offset past the TOC
+
+    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_MIXER >> 8) & 0xFF);
+    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_MIXER & 0xFF);
+    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
+    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
+    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+
+    DescriptorMixer desc{};
+    desc.descriptor_type = DESCRIPTOR_MIXER;
+    desc.control_value_type = 0x0004;  // CONTROL_LINEAR_INT32
+    desc.sources_offset = DescriptorMixer::LENGTH;
+    desc.number_of_sources = 2;
+    desc.value_offset = DescriptorMixer::LENGTH + sources_bytes;
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+
+    // Value entry after the (zeroed) source triples.
+    size_t const entry = desc_offset + DescriptorMixer::LENGTH + sources_bytes;
+    auto const put_i32 = [&blob](size_t off, int32_t v) {
+        ieee::quadlet_t const q{static_cast<uint32_t>(v)};
+        span_store(make_span(blob, {.start = off, .length = 4}), q);
+    };
+    put_i32(entry + (0 * elem), -60);                     // min
+    put_i32(entry + (1 * elem), 12);                      // max
+    put_i32(entry + (2 * elem), 1);                       // step
+    put_i32(entry + (3 * elem), 0);                       // default
+    put_i32(entry + (4 * elem), MIXER_AUTHORED_CURRENT);  // current
+    return blob;
+}
+
+/// SET/GET_MIXER command body via the wire structs: the 4-byte
+/// AemMixerPayloadHeader, plus the new LINEAR_INT32 value on SET.
+auto make_mixer_body(uint16_t descriptor_index, std::optional<int32_t> const value = std::nullopt) -> std::vector<uint8_t>
+{
+    atdecc::aem::AemMixerPayloadHeader header{.descriptor_type = DESCRIPTOR_MIXER, .descriptor_index = descriptor_index};
+    std::vector<uint8_t> body(atdecc::aem::AemMixerPayloadHeader::LENGTH + (value ? 4 : 0), 0);
+    span_store(make_span(body), header);
+    if (value) {
+        ieee::quadlet_t const q{static_cast<uint32_t>(*value)};
+        span_store(make_span(body, {.start = atdecc::aem::AemMixerPayloadHeader::LENGTH}), q);
+    }
+    return body;
+}
+
+/// The mixer value in a SET/GET_MIXER response.
+auto response_mixer_value(std::span<uint8_t const> bytes) -> int32_t
+{
+    ieee::quadlet_t q{};
+    span_load(q, bytes.subspan(atdecc::aem::AemMixerPayloadHeader::LENGTH, 4));
+    return static_cast<int32_t>(q.get());
+}
+
+}  // namespace
+
+TEST(mixer, get_serves_authored_current_and_set_round_trips)
+{
+    auto blob = make_blob_with_mixer();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET before any SET: the blob's authored current value.
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MIXER, make_mixer_body(0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(get0.bytes.size(), size_t{8});  // 4-byte descriptor header + int32 value
+    EXPECT_EQ(response_mixer_value(get0.bytes), MIXER_AUTHORED_CURRENT);
+
+    // SET a new value succeeds and GET reflects it.
+    auto const set1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MIXER, make_mixer_body(0, int32_t{-42}));
+    EXPECT_EQ(set1.status, AEM_STATUS_SUCCESS);
+    auto const get1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MIXER, make_mixer_body(0));
+    EXPECT_EQ(get1.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_mixer_value(get1.bytes), int32_t{-42});
+}
+
+TEST(mixer, invalid_writes_rejected_and_callback_gates)
+{
+    auto blob = make_blob_with_mixer();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // A missing MIXER index names the missing descriptor.
+    auto const missing = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MIXER, make_mixer_body(7, int32_t{1}));
+    EXPECT_EQ(missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+
+    // An undersized value (header only) is rejected.
+    auto const undersized = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MIXER, make_mixer_body(0));
+    EXPECT_EQ(undersized.status, AEM_STATUS_BAD_ARGUMENTS);
+
+    // A vetoing callback: the status propagates and the value stays authored.
+    handler.set_on_mixer_changed([](uint16_t, std::span<uint8_t const>) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MIXER, make_mixer_body(0, int32_t{3}));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MIXER, make_mixer_body(0));
+    EXPECT_EQ(response_mixer_value(get0.bytes), MIXER_AUTHORED_CURRENT);
+
+    // An accepting callback observes the validated value bytes — the hook
+    // where the entity applies the new mix value to its DSP.
+    static uint16_t seen_index = 0xFFFF;
+    static int32_t seen_value = 0;
+    handler.set_on_mixer_changed([](uint16_t index, std::span<uint8_t const> value) -> uint8_t {
+        seen_index = index;
+        ieee::quadlet_t q{};
+        span_load(q, value.first(4));
+        seen_value = static_cast<int32_t>(q.get());
+        return AEM_STATUS_SUCCESS;
+    });
+    auto const ok = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MIXER, make_mixer_body(0, int32_t{-9}));
+    EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(seen_index, static_cast<uint16_t>(0));
+    EXPECT_EQ(seen_value, int32_t{-9});
+}
+
 //
 // Test Runner
 //

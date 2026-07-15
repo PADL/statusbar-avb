@@ -27,6 +27,7 @@ from .model import (
     LocalizedStringRef,
     Matrix,
     MatrixSignal,
+    Mixer,
     SignalSelector,
     SignalSource,
     Stream,
@@ -268,8 +269,15 @@ def _parse_port(
             _parse_mapping(m, f"{context}.maps[{i}]") for i, m in enumerate(maps_data)
         ]
         audio_maps = [AudioMap(mappings=mappings)]
+    controls = [
+        _parse_control(c, strings, f"{context}.controls[{i}]")
+        for i, c in enumerate(port_obj.get("controls", []))
+    ]
     return AudioStreamPort(
-        clusters=clusters, maps=audio_maps, symbol=port_obj.get("symbol")
+        clusters=clusters,
+        maps=audio_maps,
+        controls=controls,
+        symbol=port_obj.get("symbol"),
     )
 
 
@@ -589,6 +597,30 @@ def _parse_matrix(m: dict, strings: _LocalizedStrings, context: str) -> Matrix:
     )
 
 
+def _parse_mixer(m: dict, strings: _LocalizedStrings, context: str) -> Mixer:
+    """Parse a MIXER descriptor from JSON: a list of signal sources mixed
+    under a single control value (authored like a control's values entry)."""
+    sources = [
+        _parse_signal_source(s, f"{context}.sources[{i}]")
+        for i, s in enumerate(m.get("sources", []))
+    ]
+    if not sources:
+        raise ValueError(f"{context}: a mixer needs at least one source")
+    value_type = _parse_control_value_type(m, context)
+    value_details = _parse_control_values(m, value_type, strings, context)
+    return Mixer(
+        object_name=m.get("name", ""),
+        localized_description=_parse_localized(m, strings, context=context),
+        block_latency=m.get("block_latency", 0),
+        control_latency=m.get("control_latency", 0),
+        control_domain=m.get("control_domain", 0),
+        control_value_type=value_type,
+        sources=sources,
+        value_details=value_details,
+        symbol=m.get("symbol"),
+    )
+
+
 def _parse_control_block(
     cb: dict, strings: _LocalizedStrings, context: str
 ) -> ControlBlock:
@@ -645,6 +677,11 @@ def _parse_audio_unit(au: dict, strings: _LocalizedStrings, context: str) -> Aud
         for i, ep in enumerate(au.get("external_ports_out", []))
     ]
 
+    controls = [
+        _parse_control(c, strings, f"{context}.controls[{i}]")
+        for i, c in enumerate(au.get("controls", []))
+    ]
+
     return AudioUnit(
         object_name=au.get("name", ""),
         localized_description=_parse_localized(au, strings, context=context),
@@ -654,6 +691,7 @@ def _parse_audio_unit(au: dict, strings: _LocalizedStrings, context: str) -> Aud
         output_stream_ports=output_ports,
         input_external_ports=ext_in,
         output_external_ports=ext_out,
+        controls=controls,
         symbol=au.get("symbol"),
     )
 
@@ -832,6 +870,12 @@ def _parse_configuration(
         for i, m in enumerate(matrix_list)
     ]
 
+    # Mixers (singular/plural)
+    mixer_list = _get_list(config_obj, "mixer", "mixers")
+    mixers = [
+        _parse_mixer(m, loc, f"{context}.mixers[{i}]") for i, m in enumerate(mixer_list)
+    ]
+
     # Strings infrastructure: dict-form localized strings own the table when
     # present; otherwise an explicit 'strings' array (with hand-managed integer
     # references), or the legacy vendor/model/config-name fallback.
@@ -865,6 +909,7 @@ def _parse_configuration(
         signal_selectors=signal_selectors,
         control_blocks=control_blocks,
         matrices=matrices,
+        mixers=mixers,
         locales=locales,
         symbol=config_obj.get("symbol"),
     )

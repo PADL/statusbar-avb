@@ -818,6 +818,31 @@ struct AemMatrixPayloadHeader
 static_assert(sizeof(AemMatrixPayloadHeader) == 16, "AemMatrixPayloadHeader must be 16 bytes");
 
 //
+// SET_MIXER / GET_MIXER - Clause 7.4.35 / 7.4.36
+//
+/// Fixed header of the SET_MIXER / GET_MIXER command and response
+/// payloads (Figure 7-58 / 7-59). Followed on the wire by the mixer's
+/// single control value (one element of the mixer's control_value_type)
+/// in the SET command and in both responses; the GET command is the
+/// header alone.
+struct AemMixerPayloadHeader
+{
+    static constexpr size_t LENGTH = 4;
+
+    /// Bytes 0-1: Descriptor type (MIXER)
+    doublet_t descriptor_type{0};
+
+    /// Bytes 2-3: Descriptor index
+    doublet_t descriptor_index{0};
+
+    // Followed by the mixer value bytes
+
+    auto operator<=>(AemMixerPayloadHeader const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemMixerPayloadHeader) == 4, "AemMixerPayloadHeader must be 4 bytes");
+
+//
 // GET_AUDIO_MAP / ADD_AUDIO_MAPPINGS / REMOVE_AUDIO_MAPPINGS
 // Clause 7.4.44 / 7.4.45 / 7.4.46
 //

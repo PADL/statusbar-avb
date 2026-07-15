@@ -316,6 +316,9 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (command_type == atdecc::AEM_COMMAND_SET_MATRIX && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX) {
             return set_matrix(id.ref, value);
         }
+        if (command_type == atdecc::AEM_COMMAND_SET_MIXER && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MIXER) {
+            return set_mixer(id.ref, value);
+        }
         if (command_type == atdecc::AEM_COMMAND_SET_CLOCK_SOURCE &&
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN) {
             return set_clock_source(id.ref, value);
@@ -342,6 +345,9 @@ class DescriptorStorageHandler : public AemEntityHandler
         }
         if (command_type == atdecc::AEM_COMMAND_GET_MATRIX && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX) {
             return get_matrix(id.ref, request, out);
+        }
+        if (command_type == atdecc::AEM_COMMAND_GET_MIXER && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MIXER) {
+            return get_mixer(id.ref, out);
         }
         if (command_type == atdecc::AEM_COMMAND_GET_CLOCK_SOURCE &&
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN && out.size() >= CLOCK_SOURCE_VALUE_WIRE_SIZE) {
@@ -530,6 +536,37 @@ class DescriptorStorageHandler : public AemEntityHandler
         }
         std::copy_n(state->values.data() + off, elem, out.begin());
         return elem;
+    }
+
+    // ---- Built-in MIXER (automatic when the blob has one) ------------------
+    //
+    // A MIXER carries ONE control value (of its linear control_value_type)
+    // governing the mix of its sources. SET_MIXER validates the incoming
+    // value size, offers it to the change callback, and stores it in RAM
+    // (seeded from the descriptor's authored `current` field); GET_MIXER
+    // serves the stored value back.
+
+    /// Called when SET_MIXER carries a size-valid value for a MIXER the
+    /// blob authors — this is where the application applies the new mix
+    /// value to its DSP. Return AEM_STATUS_SUCCESS to accept, any other
+    /// AEM_STATUS_* to reject (the stored value is then left untouched).
+    void set_on_mixer_changed(
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, std::span<uint8_t const> /*value*/), 64> fn)
+    {
+        on_mixer_changed_ = std::move(fn);
+    }
+
+    /// Read the mixer's current value bytes (element size = the mixer's
+    /// control_value_type element). Returns the number of bytes written
+    /// to @p out (0 if the mixer is unknown or out is small).
+    [[nodiscard]] auto mixer_value(DescriptorRef ref, std::span<uint8_t> out) noexcept -> size_t
+    {
+        auto* const state = find_or_init_mixer_state(ref);
+        if (state == nullptr || out.size() < state->elem_size) {
+            return 0;
+        }
+        span_copy(out.first(state->elem_size), std::span<uint8_t const>{state->value.data(), state->elem_size});
+        return state->elem_size;
     }
 
     /// Access the underlying storage (useful for derived handlers that
@@ -1093,6 +1130,83 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     statusbar::sg14::inplace_vector<MatrixState, MAX_MATRIX_STATES> matrix_states_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, MatrixWrite const&), 64> on_matrix_changed_{};
+
+    // MIXER built-in machinery. DescriptorMixer wire offsets (the value
+    // trailer entry layout matches CONTROL/MATRIX: min, max, step,
+    // default, current, unit, string).
+    static constexpr size_t MIXER_CONTROL_VALUE_TYPE_FIELD = 80;
+    static constexpr size_t MIXER_VALUE_OFFSET_FIELD = 86;
+
+    static constexpr size_t MAX_MIXER_VALUE_BYTES = 8;
+    static constexpr size_t MAX_MIXER_STATES = 8;
+
+    /// The in-RAM value for one MIXER descriptor.
+    struct MixerState
+    {
+        uint16_t descriptor_index{0};
+        uint8_t elem_size{0};
+        std::array<uint8_t, MAX_MIXER_VALUE_BYTES> value{};
+    };
+
+    /// Find (or lazily create from the blob) the value state for @p ref.
+    /// Returns nullptr when the blob has no such MIXER or its value type
+    /// is not linear. New states seed from the authored linear entry's
+    /// `current` field.
+    [[nodiscard]] auto find_or_init_mixer_state(DescriptorRef ref) noexcept -> MixerState*
+    {
+        for (auto& s : mixer_states_) {
+            if (s.descriptor_index == ref.descriptor_index) {
+                return &s;
+            }
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorMixer::LENGTH) {
+            return nullptr;
+        }
+        auto const value_type =
+            static_cast<uint16_t>(read_u16(*blob, MIXER_CONTROL_VALUE_TYPE_FIELD) & atdecc::aem::CONTROL_VALUE_TYPE_MASK);
+        auto const elem = atdecc::aem::control_value_element_size(value_type);
+        if (!atdecc::aem::is_linear_value_type(value_type) || elem == 0 || elem > MAX_MIXER_VALUE_BYTES) {
+            return nullptr;
+        }
+        MixerState state{.descriptor_index = ref.descriptor_index, .elem_size = static_cast<uint8_t>(elem), .value = {}};
+        // Seed from the authored linear entry's `current` field
+        // (entry layout: min, max, step, default, current, unit, string).
+        size_t const value_offset = read_u16(*blob, MIXER_VALUE_OFFSET_FIELD);
+        size_t const current_offset = value_offset + (4 * elem);
+        if (current_offset + elem <= blob->size()) {
+            span_copy(std::span<uint8_t>{state.value.data(), elem}, blob->subspan(current_offset, elem));
+        }
+        return mixer_states_.try_push_back(state);
+    }
+
+    /// Apply a SET_MIXER value write (Clause 7.4.35). @p value is the
+    /// payload after the 4-byte AemMixerPayloadHeader: the mixer's new
+    /// value (one element of its control_value_type).
+    [[nodiscard]] auto set_mixer(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        auto* const state = find_or_init_mixer_state(ref);
+        if (state == nullptr) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        if (value.size() < state->elem_size) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        auto const incoming = value.first(state->elem_size);
+        if (on_mixer_changed_) {
+            if (auto const status = on_mixer_changed_(ref.descriptor_index, incoming); status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+        span_copy(std::span<uint8_t>{state->value.data(), state->elem_size}, incoming);
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    /// Serve a GET_MIXER value read (Clause 7.4.36): the stored value.
+    [[nodiscard]] auto get_mixer(DescriptorRef ref, std::span<uint8_t> out) noexcept -> size_t { return mixer_value(ref, out); }
+
+    statusbar::sg14::inplace_vector<MixerState, MAX_MIXER_STATES> mixer_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, std::span<uint8_t const>), 64> on_mixer_changed_{};
 
     /// Load the descriptor bytes for `ref` into `desc` via
     /// span_load_padded. Returns false if the storage doesn't have a

@@ -2324,6 +2324,148 @@ def test_json_matrix():
     print("  [+] json matrix + matrix_signal: OK")
 
 
+def test_json_mixer_and_inline_controls():
+    """MIXER authoring (sources + a single typed value) and controls
+    authored inline on audio units and stream ports: flatten derives the
+    CONTROL indices and the unit/port number_of_controls / base_control."""
+    import struct
+
+    from aemxml.flatten import flatten
+    from aemxml.json_reader import read_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "vendor": "V",
+                "model": "M",
+                "name": "N",
+                "configuration": {
+                    "name": "C",
+                    "audio_units": [
+                        {
+                            "name": "Main",
+                            "rates": [48000],
+                            "controls": [
+                                {
+                                    "name": "Master",
+                                    "control_type": "GAIN",
+                                    "value_type": "LINEAR_INT32",
+                                    "values": [
+                                        {"min": -60, "max": 12, "step": 1, "default": 0}
+                                    ],
+                                    "symbol": "master_gain",
+                                }
+                            ],
+                            "output_ports": [
+                                {
+                                    "clusters": [{"name": "Out", "channels": 2}],
+                                    "controls": [
+                                        {
+                                            "name": "PortMute",
+                                            "control_type": "MUTE",
+                                            "value_type": "LINEAR_UINT8",
+                                            "values": [
+                                                {
+                                                    "min": 0,
+                                                    "max": 1,
+                                                    "step": 1,
+                                                    "default": 0,
+                                                }
+                                            ],
+                                            "symbol": "port_mute",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                    "mixers": [
+                        {
+                            "name": "Monitor Mix",
+                            "value_type": "LINEAR_INT32",
+                            "values": [
+                                {
+                                    "min": -60,
+                                    "max": 12,
+                                    "step": 1,
+                                    "default": 0,
+                                    "current": 7,
+                                }
+                            ],
+                            "sources": [
+                                {"signal_type": "AUDIO_CLUSTER", "signal_index": 0},
+                                {"signal_type": "AUDIO_CLUSTER", "signal_index": 1},
+                            ],
+                            "symbol": "monitor_mix",
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    config = entity.configurations[0]
+    assert len(config.mixers) == 1
+    assert len(config.mixers[0].sources) == 2
+    assert config.audio_units[0].controls[0].object_name == "Master"
+    assert (
+        config.audio_units[0].output_stream_ports[0].controls[0].symbol == "port_mute"
+    )
+
+    descs, symbols = flatten(entity)
+    by_type = {}
+    for d in descs:
+        by_type.setdefault(d.descriptor_type, []).append(d)
+
+    # MIXER wire: control_value_type @80, sources_offset @82 = 88,
+    # number_of_sources @84 = 2, value_offset @86 = 88 + 2*6 = 100.
+    (mixer,) = by_type[0x001C]
+    assert struct.unpack_from(">HHHH", mixer.wire_bytes, 80) == (0x0004, 88, 2, 100)
+    # Sources: two AUDIO_CLUSTER triples.
+    assert struct.unpack_from(">HHH", mixer.wire_bytes, 88) == (0x0014, 0, 0)
+    assert struct.unpack_from(">HHH", mixer.wire_bytes, 94) == (0x0014, 1, 0)
+    # Value entry (min, max, step, default, current) at value_offset.
+    assert struct.unpack_from(">iiiii", mixer.wire_bytes, 100) == (-60, 12, 1, 0, 7)
+
+    # Two CONTROL descriptors: the unit's (index 0), then the port's (1).
+    controls = sorted(by_type[0x001A], key=lambda d: d.descriptor_index)
+    assert [d.descriptor_index for d in controls] == [0, 1]
+
+    # AUDIO_UNIT: number_of_controls @96 = 1, base_control @98 = 0.
+    (unit,) = by_type[0x0002]
+    assert struct.unpack_from(">HH", unit.wire_bytes, 96) == (1, 0)
+
+    # STREAM_PORT_OUTPUT: number_of_controls @8 = 1, base_control @10 = 1.
+    (port,) = by_type[0x000F]
+    assert struct.unpack_from(">HH", port.wire_bytes, 8) == (1, 1)
+
+    # All three symbols landed in the symbol table.
+    sym_types = {(s.descriptor_type, s.descriptor_index) for s in symbols}
+    assert (0x001C, 0) in sym_types  # monitor_mix
+    assert (0x001A, 0) in sym_types  # master_gain
+    assert (0x001A, 1) in sym_types  # port_mute
+
+    # A mixer without sources is rejected.
+    try:
+        read_json(
+            json.dumps(
+                {
+                    "entity": {
+                        "vendor": "V",
+                        "configuration": {
+                            "name": "C",
+                            "mixers": [{"name": "Bad", "value_type": "LINEAR_INT32"}],
+                        },
+                    }
+                }
+            )
+        )
+        raise AssertionError("sourceless mixer not rejected")
+    except ValueError:
+        pass
+    print("  [+] json mixer + inline unit/port controls: OK")
+
+
 def test_duplicate_symbols_rejected():
     """flatten() rejects entity models whose symbol table would carry the
     same 32-bit code twice: the same symbol string on two descriptors, or
@@ -2577,6 +2719,7 @@ def main():
         test_json_control_values,
         test_json_signal_selector_and_control_grouping,
         test_json_matrix,
+        test_json_mixer_and_inline_controls,
         test_duplicate_symbols_rejected,
         test_upgrade_2013_to_2021,
         test_downgrade_2021_to_2013,
