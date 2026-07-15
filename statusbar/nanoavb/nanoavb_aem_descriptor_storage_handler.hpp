@@ -178,7 +178,18 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // ---- Unit descriptors -----------------------------------------------
 
-    auto on_get_audio_unit(DescriptorId id, DescriptorAudioUnit& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_audio_unit(DescriptorId id, DescriptorAudioUnit& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        // READ_DESCRIPTOR agrees with GET_SAMPLING_RATE: reflect a runtime
+        // sampling-rate selection over the blob's authored current rate.
+        if (auto const* state = find_sampling_rate_state(id.ref.descriptor_index)) {
+            desc.current_sampling_rate = state->rate;
+        }
+        return true;
+    }
 
     auto on_get_video_unit(DescriptorId id, DescriptorVideoUnit& desc) -> bool override { return load(id.ref, desc); }
 
@@ -186,7 +197,19 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // ---- Streams / Jacks / Interface / Clock ----------------------------
 
-    auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        // READ_DESCRIPTOR agrees with GET_STREAM_FORMAT: reflect a runtime
+        // SET_STREAM_FORMAT over the blob's authored current_format.
+        if (auto const* state = find_stream_state(id.ref.descriptor_type, id.ref.descriptor_index);
+            state != nullptr && state->has_format) {
+            desc.current_format = state->format;
+        }
+        return true;
+    }
 
     auto on_get_jack(DescriptorId id, DescriptorJack& desc) -> bool override { return load(id.ref, desc); }
 
@@ -322,6 +345,16 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (command_type == atdecc::AEM_COMMAND_SET_CLOCK_SOURCE &&
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN) {
             return set_clock_source(id.ref, value);
+        }
+        if (command_type == atdecc::AEM_COMMAND_SET_STREAM_FORMAT && is_stream_descriptor(id.ref.descriptor_type)) {
+            return set_stream_format(id.ref, value);
+        }
+        if (command_type == atdecc::AEM_COMMAND_SET_SAMPLING_RATE && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_AUDIO_UNIT) {
+            return set_sampling_rate(id.ref, value);
+        }
+        if ((command_type == atdecc::AEM_COMMAND_START_STREAMING || command_type == atdecc::AEM_COMMAND_STOP_STREAMING) &&
+            is_stream_descriptor(id.ref.descriptor_type)) {
+            return set_streaming(id.ref, command_type == atdecc::AEM_COMMAND_START_STREAMING);
         }
         return AemEntityHandler::on_set_descriptor_value(command_type, id, value);
     }
@@ -534,7 +567,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (out.size() < elem) {
             return 0;
         }
-        std::copy_n(state->values.data() + off, elem, out.begin());
+        span_copy(out.first(elem), make_const_span(state->values, {.start = off, .length = elem}));
         return elem;
     }
 
@@ -565,8 +598,88 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (state == nullptr || out.size() < state->elem_size) {
             return 0;
         }
-        span_copy(out.first(state->elem_size), std::span<uint8_t const>{state->value.data(), state->elem_size});
+        span_copy(out.first(state->elem_size), make_const_span(state->value, {.start = 0, .length = state->elem_size}));
         return state->elem_size;
+    }
+
+    // ---- Built-in STREAM lifecycle (kit phase 5) ---------------------------
+    //
+    // SET_STREAM_FORMAT validates the requested format against the STREAM
+    // descriptor's authored formats (current_format + the stream_formats
+    // trailer), offers it to a veto/apply callback, and stores it in RAM;
+    // GET_STREAM_FORMAT and READ_DESCRIPTOR then serve the runtime value.
+    // START/STOP_STREAMING latch a per-stream streaming/stopped state the
+    // data plane can honor via the change callback. SET_SAMPLING_RATE does
+    // the same for AUDIO_UNIT against its authored sampling_rates.
+
+    /// Called when SET_STREAM_FORMAT carries a supported format — this is
+    /// where the application re-configures its serializers. Return
+    /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.
+    void set_on_stream_format_changed(statusbar::sg14::inplace_function<
+                                      uint8_t(uint16_t /*descriptor_type*/, uint16_t /*descriptor_index*/, uint64_t /*format*/),
+                                      64> fn)
+    {
+        on_stream_format_changed_ = std::move(fn);
+    }
+
+    /// The stream's runtime current_format (falls back to the blob's
+    /// authored current_format; nullopt if the blob has no such stream).
+    [[nodiscard]] auto current_stream_format(DescriptorRef ref) noexcept -> std::optional<ieee::Eui64>
+    {
+        if (auto const* state = find_stream_state(ref.descriptor_type, ref.descriptor_index);
+            state != nullptr && state->has_format) {
+            return state->format;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < STREAM_CURRENT_FORMAT_FIELD + 8) {
+            return std::nullopt;
+        }
+        ieee::Eui64 authored{};
+        span_load(authored, blob->subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
+        return authored;
+    }
+
+    /// Called when START/STOP_STREAMING flips a stream's streaming state —
+    /// this is where the application gates its transmitter. Return
+    /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.
+    void set_on_streaming_changed(statusbar::sg14::inplace_function<
+                                  uint8_t(uint16_t /*descriptor_type*/, uint16_t /*descriptor_index*/, bool /*streaming*/),
+                                  64> fn)
+    {
+        on_streaming_changed_ = std::move(fn);
+    }
+
+    /// False only after a STOP_STREAMING on this stream (streams default
+    /// to streaming; unknown streams report streaming too).
+    [[nodiscard]] auto is_streaming(uint16_t const descriptor_type, uint16_t const descriptor_index) const noexcept -> bool
+    {
+        auto const* state = find_stream_state(descriptor_type, descriptor_index);
+        return state == nullptr || !state->stopped;
+    }
+
+    /// Called when SET_SAMPLING_RATE carries an authored rate for an
+    /// AUDIO_UNIT — this is where the application re-clocks. Return
+    /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.
+    void set_on_sampling_rate_changed(
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*audio_unit_index*/, uint32_t /*rate*/), 64> fn)
+    {
+        on_sampling_rate_changed_ = std::move(fn);
+    }
+
+    /// The audio unit's runtime sampling rate (falls back to the blob's
+    /// authored current_sampling_rate; nullopt if no such AUDIO_UNIT).
+    [[nodiscard]] auto current_sampling_rate(DescriptorRef ref) noexcept -> std::optional<uint32_t>
+    {
+        if (auto const* state = find_sampling_rate_state(ref.descriptor_index)) {
+            return state->rate;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < AUDIO_UNIT_CURRENT_RATE_FIELD + 4) {
+            return std::nullopt;
+        }
+        ieee::quadlet_t rate{0};
+        span_load(rate, blob->subspan(AUDIO_UNIT_CURRENT_RATE_FIELD, 4));
+        return rate.get();
     }
 
     /// Access the underlying storage (useful for derived handlers that
@@ -982,7 +1095,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         size_t const current_offset = values_offset + (4 * elem);
         if (current_offset + elem <= blob->size()) {
             for (size_t cell = 0; cell < cells; ++cell) {
-                std::copy_n(blob->data() + current_offset, elem, state.values.data() + (cell * elem));
+                span_copy(make_span(state.values, {.start = cell * elem, .length = elem}), blob->subspan(current_offset, elem));
             }
         }
         return matrix_states_.try_push_back(state);
@@ -1070,7 +1183,7 @@ class DescriptorStorageHandler : public AemEntityHandler
                 return false;
             }
             size_t const src = (n % value_count) * elem;
-            std::copy_n(values.data() + src, elem, state->values.data() + cell_off);
+            span_copy(make_span(state->values, {.start = cell_off, .length = elem}), values.subspan(src, elem));
             return true;
         });
         return atdecc::AEM_STATUS_SUCCESS;
@@ -1115,14 +1228,14 @@ class DescriptorStorageHandler : public AemEntityHandler
             return 0;
         }
 
-        std::copy_n(request.data(), MATRIX_REGION_HEADER_SIZE, out.begin());
+        span_copy(out.first(MATRIX_REGION_HEADER_SIZE), request.first(MATRIX_REGION_HEADER_SIZE));
         write_u16(out, 8, static_cast<uint16_t>((direction << atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) | count));
         auto const values_out = out.subspan(MATRIX_REGION_HEADER_SIZE);
         for_each_region_cell(*state, region, direction, item_offset, [&](size_t const n, size_t const cell_off) {
             if (n >= count) {
                 return false;
             }
-            std::copy_n(state->values.data() + cell_off, elem, values_out.data() + (n * elem));
+            span_copy(values_out.subspan(n * elem, elem), make_const_span(state->values, {.start = cell_off, .length = elem}));
             return true;
         });
         return MATRIX_REGION_HEADER_SIZE + (count * elem);
@@ -1175,7 +1288,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         size_t const value_offset = read_u16(*blob, MIXER_VALUE_OFFSET_FIELD);
         size_t const current_offset = value_offset + (4 * elem);
         if (current_offset + elem <= blob->size()) {
-            span_copy(std::span<uint8_t>{state.value.data(), elem}, blob->subspan(current_offset, elem));
+            span_copy(make_span(state.value, {.start = 0, .length = elem}), blob->subspan(current_offset, elem));
         }
         return mixer_states_.try_push_back(state);
     }
@@ -1198,7 +1311,7 @@ class DescriptorStorageHandler : public AemEntityHandler
                 return status;
             }
         }
-        span_copy(std::span<uint8_t>{state->value.data(), state->elem_size}, incoming);
+        span_copy(make_span(state->value, {.start = 0, .length = state->elem_size}), incoming);
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
@@ -1207,6 +1320,212 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     statusbar::sg14::inplace_vector<MixerState, MAX_MIXER_STATES> mixer_states_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, std::span<uint8_t const>), 64> on_mixer_changed_{};
+
+    // STREAM lifecycle machinery (kit phase 5). DescriptorStream wire offsets.
+    static constexpr size_t STREAM_CURRENT_FORMAT_FIELD = 74;
+    static constexpr size_t STREAM_FORMATS_OFFSET_FIELD = 82;
+    static constexpr size_t STREAM_NUMBER_OF_FORMATS_FIELD = 84;
+    static constexpr size_t MAX_STREAM_STATES = 16;
+
+    /// Runtime state for one STREAM_INPUT/OUTPUT descriptor.
+    struct StreamRuntimeState
+    {
+        uint16_t descriptor_type{0};
+        uint16_t descriptor_index{0};
+        bool has_format{false};
+        ieee::Eui64 format{};  ///< runtime current_format (valid when has_format)
+        bool stopped{false};   ///< STOP_STREAMING latched
+    };
+
+    [[nodiscard]] static auto is_stream_descriptor(uint16_t const descriptor_type) noexcept -> bool
+    {
+        return descriptor_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT || descriptor_type == atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
+    }
+
+    [[nodiscard]] auto find_stream_state(uint16_t const descriptor_type, uint16_t const descriptor_index) const noexcept
+        -> StreamRuntimeState const*
+    {
+        for (auto const& s : stream_states_) {
+            if (s.descriptor_type == descriptor_type && s.descriptor_index == descriptor_index) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /// Find (or lazily create) the runtime state for @p ref. Returns
+    /// nullptr when the blob has no such stream or the table is full.
+    [[nodiscard]] auto find_or_init_stream_state(DescriptorRef ref) noexcept -> StreamRuntimeState*
+    {
+        for (auto& s : stream_states_) {
+            if (s.descriptor_type == ref.descriptor_type && s.descriptor_index == ref.descriptor_index) {
+                return &s;
+            }
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorStream::MINIMUM_LENGTH) {
+            return nullptr;
+        }
+        return stream_states_.try_push_back(
+            StreamRuntimeState{.descriptor_type = ref.descriptor_type, .descriptor_index = ref.descriptor_index});
+    }
+
+    /// True when @p format is the descriptor's authored current_format or
+    /// appears in its stream_formats trailer.
+    [[nodiscard]] static auto stream_format_supported(std::span<uint8_t const> const blob, ieee::Eui64 const& format) noexcept
+        -> bool
+    {
+        ieee::Eui64 authored{};
+        span_load(authored, blob.subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
+        if (authored == format) {
+            return true;
+        }
+        size_t const formats_offset = read_u16(blob, STREAM_FORMATS_OFFSET_FIELD);
+        size_t const count = read_u16(blob, STREAM_NUMBER_OF_FORMATS_FIELD);
+        for (size_t i = 0; i < count; ++i) {
+            size_t const off = formats_offset + (i * sizeof(ieee::Eui64));
+            if (off + sizeof(ieee::Eui64) > blob.size()) {
+                break;
+            }
+            ieee::Eui64 candidate{};
+            span_load(candidate, blob.subspan(off, sizeof(ieee::Eui64)));
+            if (candidate == format) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Apply a SET_STREAM_FORMAT (Clause 7.4.9). @p value is the payload
+    /// after the 4-byte descriptor header: the requested 8-byte format.
+    [[nodiscard]] auto set_stream_format(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        if (value.size() < sizeof(ieee::Eui64)) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorStream::MINIMUM_LENGTH) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        ieee::Eui64 format{};
+        span_load(format, value.first(sizeof(ieee::Eui64)));
+        if (!stream_format_supported(*blob, format)) {
+            return atdecc::AEM_STATUS_NOT_SUPPORTED;
+        }
+        auto* const state = find_or_init_stream_state(ref);
+        if (state == nullptr) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        if (on_stream_format_changed_) {
+            if (auto const status = on_stream_format_changed_(ref.descriptor_type, ref.descriptor_index, format.to_uint64());
+                status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+        state->format = format;
+        state->has_format = true;
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    /// Apply a START/STOP_STREAMING (Clause 7.4.35/7.4.36 of -2013
+    /// numbering; streaming defaults to on, both directions idempotent).
+    [[nodiscard]] auto set_streaming(DescriptorRef ref, bool const streaming) -> uint8_t
+    {
+        auto* const state = find_or_init_stream_state(ref);
+        if (state == nullptr) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        if (on_streaming_changed_) {
+            if (auto const status = on_streaming_changed_(ref.descriptor_type, ref.descriptor_index, streaming);
+                status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+        state->stopped = !streaming;
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    statusbar::sg14::inplace_vector<StreamRuntimeState, MAX_STREAM_STATES> stream_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t, uint64_t), 64> on_stream_format_changed_{};
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t, bool), 64> on_streaming_changed_{};
+
+    // AUDIO_UNIT sampling-rate machinery. DescriptorAudioUnit wire offsets.
+    static constexpr size_t AUDIO_UNIT_CURRENT_RATE_FIELD = 136;
+    static constexpr size_t AUDIO_UNIT_RATES_OFFSET_FIELD = 140;
+    static constexpr size_t AUDIO_UNIT_RATES_COUNT_FIELD = 142;
+    static constexpr size_t MAX_AUDIO_UNIT_STATES = 4;
+
+    /// The runtime sampling rate for one AUDIO_UNIT descriptor.
+    struct SamplingRateState
+    {
+        uint16_t descriptor_index{0};
+        uint32_t rate{0};
+    };
+
+    [[nodiscard]] auto find_sampling_rate_state(uint16_t const descriptor_index) const noexcept -> SamplingRateState const*
+    {
+        for (auto const& s : sampling_rate_states_) {
+            if (s.descriptor_index == descriptor_index) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /// Apply a SET_SAMPLING_RATE (Clause 7.4.21). @p value is the payload
+    /// after the 4-byte descriptor header: the requested 4-byte rate,
+    /// validated against the AUDIO_UNIT's authored sampling_rates.
+    [[nodiscard]] auto set_sampling_rate(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        if (value.size() < 4) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorAudioUnit::LENGTH) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        ieee::quadlet_t requested{0};
+        span_load(requested, value.first(4));
+
+        ieee::quadlet_t authored{0};
+        span_load(authored, blob->subspan(AUDIO_UNIT_CURRENT_RATE_FIELD, 4));
+        bool supported = authored.get() == requested.get();
+        size_t const rates_offset = read_u16(*blob, AUDIO_UNIT_RATES_OFFSET_FIELD);
+        size_t const count = read_u16(*blob, AUDIO_UNIT_RATES_COUNT_FIELD);
+        for (size_t i = 0; !supported && i < count; ++i) {
+            size_t const off = rates_offset + (i * 4);
+            if (off + 4 > blob->size()) {
+                break;
+            }
+            ieee::quadlet_t candidate{0};
+            span_load(candidate, blob->subspan(off, 4));
+            supported = candidate.get() == requested.get();
+        }
+        if (!supported) {
+            return atdecc::AEM_STATUS_NOT_SUPPORTED;
+        }
+
+        if (on_sampling_rate_changed_) {
+            if (auto const status = on_sampling_rate_changed_(ref.descriptor_index, requested.get());
+                status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+        for (auto& s : sampling_rate_states_) {
+            if (s.descriptor_index == ref.descriptor_index) {
+                s.rate = requested.get();
+                return atdecc::AEM_STATUS_SUCCESS;
+            }
+        }
+        if (sampling_rate_states_.try_push_back(
+                SamplingRateState{.descriptor_index = ref.descriptor_index, .rate = requested.get()}) == nullptr) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    statusbar::sg14::inplace_vector<SamplingRateState, MAX_AUDIO_UNIT_STATES> sampling_rate_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, uint32_t), 64> on_sampling_rate_changed_{};
 
     /// Load the descriptor bytes for `ref` into `desc` via
     /// span_load_padded. Returns false if the storage doesn't have a

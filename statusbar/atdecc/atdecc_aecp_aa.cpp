@@ -52,7 +52,7 @@ void AaTlvBuilder::append_tlv(uint8_t const mode, uint64_t const address, uint16
     header.address = address;
     auto const base = payload_.size();
     payload_.resize(base + AaTlvHeader::LENGTH);
-    span_store(std::span<uint8_t>{payload_.data() + base, AaTlvHeader::LENGTH}, header);
+    span_store(make_span(payload_, {.start = base}), header);
 
     // Memory data
     if (!data.empty()) {

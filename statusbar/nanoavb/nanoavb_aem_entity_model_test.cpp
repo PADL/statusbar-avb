@@ -171,7 +171,7 @@ TEST(aem_model_dispatch, entity_descriptor_round_trips)
 
     // The written bytes should deserialize back to an equivalent struct.
     DescriptorEntity parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     EXPECT_EQ(parsed.configurations_count.get(), static_cast<uint16_t>(1));
     EXPECT_EQ(parsed.current_configuration.get(), static_cast<uint16_t>(0));
     EXPECT_EQ(parsed.descriptor_type.get(), DESCRIPTOR_ENTITY);
@@ -190,7 +190,7 @@ TEST(aem_model_dispatch, configuration_round_trips_with_inline_trailer)
 
     // Deserialize and verify the trailer made it onto the wire.
     DescriptorConfiguration parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     EXPECT_EQ(parsed.descriptor_counts_count.get(), static_cast<uint16_t>(2));
     EXPECT_EQ(parsed.descriptor_counts[0].descriptor_type.get(), DESCRIPTOR_STREAM_INPUT);
     EXPECT_EQ(parsed.descriptor_counts[0].count.get(), static_cast<uint16_t>(1));
@@ -238,7 +238,7 @@ TEST(aem_model_dispatch, variable_trailer_audio_map)
     EXPECT_EQ(n, DescriptorAudioMap::LENGTH + (2 * sizeof(statusbar::atdecc::aem::AudioMapping)));
 
     DescriptorAudioMap parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     EXPECT_EQ(parsed.number_of_mappings.get(), static_cast<uint16_t>(2));
     EXPECT_EQ(parsed.mappings[0].mapping_cluster_channel.get(), static_cast<uint16_t>(1));
     EXPECT_EQ(parsed.mappings[1].mapping_cluster_channel.get(), static_cast<uint16_t>(2));
@@ -294,7 +294,7 @@ TEST(aem_model_names, get_name_entity_name_round_trips)
 
     // Parse the 64-byte name bytes as a string_view via the project helper
     // (avoids a raw reinterpret_cast) and compare the "TestEntity" prefix.
-    auto const name_view = statusbar::as_string_view(std::span<uint8_t const>{buf.data() + 8, 10});
+    auto const name_view = statusbar::as_string_view(make_const_span(buf, {.start = 8, .length = 10}));
     EXPECT_EQ(std::string{name_view}, std::string{"TestEntity"});
 }
 
@@ -327,7 +327,7 @@ TEST(aem_model_names, set_name_persists_and_round_trips_through_get)
     auto const n = model.get_name_for_wire(ref, make_span(resp));
     EXPECT_EQ(n, static_cast<size_t>(72));
 
-    auto const parsed_view = statusbar::as_string_view(std::span<uint8_t const>{resp.data() + 8, new_name.size()});
+    auto const parsed_view = statusbar::as_string_view(make_const_span(resp, {.start = 8, .length = new_name.size()}));
     EXPECT_EQ(std::string{parsed_view}, std::string{new_name});
 }
 
@@ -464,7 +464,7 @@ TEST(descriptor_storage_handler, approves_descriptor_that_exists_in_storage)
 
     // Round-trip: the preloaded struct should carry the entity_name we wrote.
     DescriptorEntity parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     EXPECT_EQ(parsed.configurations_count.get(), static_cast<uint16_t>(1));
     auto const name_view = parsed.entity_name.as_string_view();
     // as_string_view trims trailing NULs so the length equals "StorageTest".
@@ -590,7 +590,7 @@ TEST(descriptor_storage_handler, derived_handler_patches_runtime_fields)
     EXPECT_EQ(n, DescriptorEntity::wire_size());
 
     DescriptorEntity parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     // The runtime-patched entity_id should be on the wire, not whatever
     // was in the blob (which defaulted to zero).
     EXPECT_TRUE(parsed.entity_id == runtime_eid);
@@ -1484,7 +1484,7 @@ TEST(signal_selector, get_serves_blob_default_and_set_round_trips)
         make_span(buf));
     EXPECT_TRUE(n >= DescriptorSignalSelector::LENGTH);
     DescriptorSignalSelector parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     EXPECT_EQ(parsed.current_signal_index.get(), static_cast<uint16_t>(1));
 }
 
@@ -1859,7 +1859,7 @@ TEST(clock_source, get_serves_blob_default_and_set_round_trips)
         DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0}, make_span(buf));
     EXPECT_TRUE(n >= DescriptorClockDomain::LENGTH);
     DescriptorClockDomain parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
     EXPECT_EQ(parsed.clock_source_index.get(), static_cast<uint16_t>(1));
 }
 
@@ -2042,6 +2042,290 @@ TEST(mixer, invalid_writes_rejected_and_callback_gates)
     EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
     EXPECT_EQ(seen_index, static_cast<uint16_t>(0));
     EXPECT_EQ(seen_value, int32_t{-9});
+}
+
+// ===========================================================================
+// STREAM lifecycle built-ins (kit phase 5): SET_STREAM_FORMAT validated
+// against the authored formats, START/STOP_STREAMING latched per stream,
+// SET_SAMPLING_RATE validated against the AUDIO_UNIT's authored rates —
+// all veto-able, all reflected by the GET twins and READ_DESCRIPTOR.
+// ===========================================================================
+
+namespace {
+
+using atdecc::aem::DescriptorAudioUnit;
+using atdecc::aem::DescriptorStream;
+
+constexpr uint64_t STREAM_FMT_A = 0x0205022002006000ULL;  // authored current
+constexpr uint64_t STREAM_FMT_B = 0x0205041802006000ULL;  // in the formats trailer
+constexpr uint64_t STREAM_FMT_X = 0x1111111111111111ULL;  // not authored anywhere
+
+/// Blob with one STREAM_OUTPUT (index 0): current_format = FMT_A, formats
+/// trailer = {FMT_A, FMT_B}.
+auto make_blob_with_stream_output() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr size_t formats_bytes = size_t{2} * 8;
+    constexpr uint32_t desc_size = DescriptorStream::LENGTH + formats_bytes;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_STREAM_OUTPUT, desc_size, desc_offset);
+
+    DescriptorStream desc{};
+    desc.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+    desc.formats_offset = DescriptorStream::LENGTH;
+    desc.number_of_formats = 2;
+    // Only the fixed wire header goes in the blob; the formats trailer is
+    // authored by hand below.
+    span_copy(make_span(blob, {.start = desc_offset, .length = DescriptorStream::LENGTH}), make_const_span(desc));
+    span_store(
+        make_span(blob, {.start = desc_offset + offsetof(DescriptorStream, current_format), .length = 8}),
+        ieee::octlet_t{STREAM_FMT_A});
+    span_store(make_span(blob, {.start = desc_offset + DescriptorStream::LENGTH, .length = 8}), ieee::octlet_t{STREAM_FMT_A});
+    span_store(make_span(blob, {.start = desc_offset + DescriptorStream::LENGTH + 8, .length = 8}), ieee::octlet_t{STREAM_FMT_B});
+    return blob;
+}
+
+/// SET/GET_STREAM_FORMAT command body via the wire structs.
+auto make_stream_format_body(uint16_t descriptor_index, std::optional<uint64_t> const format = std::nullopt) -> std::vector<uint8_t>
+{
+    if (format) {
+        atdecc::aem::AemStreamFormatPayload const header{
+            .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = descriptor_index};
+        std::vector<uint8_t> body(atdecc::aem::AemStreamFormatPayload::LENGTH, 0);
+        span_store(make_span(body), header);
+        span_store(
+            make_span(body, {.start = offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)}), ieee::octlet_t{*format});
+        return body;
+    }
+    atdecc::aem::AemGetStreamFormatCommandPayload const cmd{
+        .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = descriptor_index};
+    std::vector<uint8_t> body(atdecc::aem::AemGetStreamFormatCommandPayload::LENGTH, 0);
+    span_store(make_span(body), cmd);
+    return body;
+}
+
+/// The format word in a SET/GET_STREAM_FORMAT response.
+auto response_stream_format(std::span<uint8_t const> bytes) -> uint64_t
+{
+    ieee::octlet_t fmt{0};
+    span_load(fmt, bytes.subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format), 8));
+    return fmt.get();
+}
+
+/// START/STOP_STREAMING command body (AemStreamingPayload: type + index).
+auto make_streaming_body(uint16_t descriptor_index) -> std::vector<uint8_t>
+{
+    atdecc::aem::AemStreamingPayload const cmd{.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = descriptor_index};
+    std::vector<uint8_t> body(atdecc::aem::AemStreamingPayload::LENGTH, 0);
+    span_store(make_span(body), cmd);
+    return body;
+}
+
+/// Blob with one AUDIO_UNIT (index 0): current rate 48000, authored rates
+/// trailer = {48000, 96000}.
+auto make_blob_with_audio_unit() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr size_t rates_bytes = size_t{2} * 4;
+    constexpr uint32_t desc_size = DescriptorAudioUnit::LENGTH + rates_bytes;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_AUDIO_UNIT, desc_size, desc_offset);
+
+    DescriptorAudioUnit desc{};
+    desc.descriptor_type = DESCRIPTOR_AUDIO_UNIT;
+    desc.current_sampling_rate = 48000;
+    desc.sampling_rates_offset = DescriptorAudioUnit::LENGTH;
+    desc.sampling_rates_count = 2;
+    span_copy(make_span(blob, {.start = desc_offset, .length = DescriptorAudioUnit::LENGTH}), make_const_span(desc));
+    span_store(make_span(blob, {.start = desc_offset + DescriptorAudioUnit::LENGTH, .length = 4}), ieee::quadlet_t{48000});
+    span_store(make_span(blob, {.start = desc_offset + DescriptorAudioUnit::LENGTH + 4, .length = 4}), ieee::quadlet_t{96000});
+    return blob;
+}
+
+/// SET/GET_SAMPLING_RATE command body via the wire structs.
+auto make_sampling_rate_body(uint16_t descriptor_index, std::optional<uint32_t> const rate = std::nullopt) -> std::vector<uint8_t>
+{
+    if (rate) {
+        atdecc::aem::AemSamplingRatePayload const payload{
+            .descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = descriptor_index, .sampling_rate = *rate};
+        std::vector<uint8_t> body(atdecc::aem::AemSamplingRatePayload::LENGTH, 0);
+        span_store(make_span(body), payload);
+        return body;
+    }
+    atdecc::aem::AemGetSamplingRateCommandPayload const cmd{
+        .descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = descriptor_index};
+    std::vector<uint8_t> body(atdecc::aem::AemGetSamplingRateCommandPayload::LENGTH, 0);
+    span_store(make_span(body), cmd);
+    return body;
+}
+
+/// The rate in a SET/GET_SAMPLING_RATE response.
+auto response_sampling_rate(std::span<uint8_t const> bytes) -> uint32_t
+{
+    atdecc::aem::AemSamplingRatePayload payload{};
+    span_load(payload, bytes.first(atdecc::aem::AemSamplingRatePayload::LENGTH));
+    return payload.sampling_rate.get();
+}
+
+}  // namespace
+
+TEST(stream_lifecycle, set_stream_format_validates_and_round_trips)
+{
+    auto blob = make_blob_with_stream_output();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET before any SET: the blob's authored current_format.
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_stream_format(get0.bytes), STREAM_FMT_A);
+
+    // SET to the other authored format succeeds and GET reflects it.
+    auto const set_b =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_B));
+    EXPECT_EQ(set_b.status, AEM_STATUS_SUCCESS);
+    auto const get_b = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(get_b.bytes), STREAM_FMT_B);
+
+    // READ_DESCRIPTOR agrees: the served STREAM carries the runtime format.
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0},
+        make_span(buf));
+    EXPECT_TRUE(n >= DescriptorStream::MINIMUM_LENGTH);
+    DescriptorStream parsed{};
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
+    EXPECT_EQ(parsed.current_format.to_uint64(), STREAM_FMT_B);
+
+    // A format the blob does not author is refused and the state keeps FMT_B.
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_X));
+    EXPECT_EQ(bad.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    auto const still_b = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(still_b.bytes), STREAM_FMT_B);
+
+    // A missing stream index names the missing descriptor.
+    auto const missing =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(7, STREAM_FMT_A));
+    EXPECT_EQ(missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+
+    // A vetoing callback: the status propagates and the format is unchanged.
+    handler.set_on_stream_format_changed([](uint16_t, uint16_t, uint64_t) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_A));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+
+    // An accepting callback observes the validated request — the hook where
+    // the entity re-configures its serializers.
+    static uint64_t seen_format = 0;
+    handler.set_on_stream_format_changed([](uint16_t, uint16_t, uint64_t format) -> uint8_t {
+        seen_format = format;
+        return AEM_STATUS_SUCCESS;
+    });
+    auto const ok = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_A));
+    EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(seen_format, STREAM_FMT_A);
+}
+
+TEST(stream_lifecycle, start_stop_streaming_latches_and_gates)
+{
+    auto blob = make_blob_with_stream_output();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // Streams default to streaming.
+    EXPECT_TRUE(handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));
+
+    // STOP latches; a second STOP is an idempotent SUCCESS.
+    auto const stop = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_STOP_STREAMING, make_streaming_body(0));
+    EXPECT_EQ(stop.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(!handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));
+    auto const stop2 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_STOP_STREAMING, make_streaming_body(0));
+    EXPECT_EQ(stop2.status, AEM_STATUS_SUCCESS);
+
+    // START restores streaming.
+    auto const start = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_START_STREAMING, make_streaming_body(0));
+    EXPECT_EQ(start.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));
+
+    // A missing stream index names the missing descriptor.
+    auto const missing = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_STOP_STREAMING, make_streaming_body(7));
+    EXPECT_EQ(missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+
+    // The change callback sees the transition and can veto it — the hook
+    // where the data plane gates its transmitter.
+    static bool seen_streaming = true;
+    handler.set_on_streaming_changed([](uint16_t, uint16_t, bool streaming) -> uint8_t {
+        seen_streaming = streaming;
+        return AEM_STATUS_SUCCESS;
+    });
+    auto const stop3 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_STOP_STREAMING, make_streaming_body(0));
+    EXPECT_EQ(stop3.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(!seen_streaming);
+    EXPECT_TRUE(!handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));
+
+    handler.set_on_streaming_changed([](uint16_t, uint16_t, bool) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_START_STREAMING, make_streaming_body(0));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(!handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));  // still stopped
+}
+
+TEST(stream_lifecycle, set_sampling_rate_validates_and_round_trips)
+{
+    auto blob = make_blob_with_audio_unit();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET before any SET: the blob's authored current rate.
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, make_sampling_rate_body(0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_sampling_rate(get0.bytes), 48000u);
+
+    // SET to the other authored rate succeeds; GET and READ_DESCRIPTOR agree.
+    auto const set96 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 96000u));
+    EXPECT_EQ(set96.status, AEM_STATUS_SUCCESS);
+    auto const get96 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, make_sampling_rate_body(0));
+    EXPECT_EQ(response_sampling_rate(get96.bytes), 96000u);
+
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0}, make_span(buf));
+    EXPECT_TRUE(n >= DescriptorAudioUnit::LENGTH);
+    DescriptorAudioUnit parsed{};
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
+    EXPECT_EQ(parsed.current_sampling_rate.get(), 96000u);
+
+    // A rate the blob does not author is refused; the runtime rate stays.
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 44100u));
+    EXPECT_EQ(bad.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    auto const still96 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, make_sampling_rate_body(0));
+    EXPECT_EQ(response_sampling_rate(still96.bytes), 96000u);
+
+    // A missing AUDIO_UNIT names the missing descriptor; a veto propagates.
+    auto const missing = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(7, 48000u));
+    EXPECT_EQ(missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    handler.set_on_sampling_rate_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 48000u));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(
+        *handler.current_sampling_rate(
+            DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0}),
+        96000u);
 }
 
 //

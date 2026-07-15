@@ -394,9 +394,16 @@ class AvbEntityAudioIO
     /// Fill the GET_STREAM_INFO response for a STREAM_OUTPUT (talker) index from
     /// the live ACMP stream identity + the descriptor's current_format (true if
     /// it is one of our talker streams). A Milan listener (e.g. the DSP processor) queries
-    /// this to verify the stream before sustaining a connection.
+    /// this to verify the stream before sustaining a connection. STREAM_INPUT
+    /// routes to fill_stream_input_info (kit phase 5).
     [[nodiscard]] auto fill_stream_output_info(
         uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool;
+
+    /// Fill the GET_STREAM_INFO response for a STREAM_INPUT (listener) index
+    /// from the ACMP listener sink state: the connected talker's stream_id /
+    /// dest MAC when bound, plus the descriptor's current_format — so a
+    /// controller can finally read what an input is connected to.
+    [[nodiscard]] auto fill_stream_input_info(uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool;
 };
 
 }  // namespace statusbar::avb_entity

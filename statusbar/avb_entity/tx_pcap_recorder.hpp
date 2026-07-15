@@ -89,7 +89,7 @@ class TxPcapRecorder
         store_u64(p, gptp_ns);
         store_u32(p + 8, cap_len);
         store_u32(p + 12, static_cast<uint32_t>(frame.size()));  // original (untruncated) length
-        span_copy(std::span<uint8_t>{p + REC_HDR, cap_len}, frame.first(cap_len));
+        span_copy(make_span(arena_, {.start = used_ + REC_HDR, .length = cap_len}), frame.first(cap_len));
         used_ += need;
         ++frames_;
     }

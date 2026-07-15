@@ -203,6 +203,14 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
             }
             return atdecc::AEM_STATUS_SUCCESS;
         });
+        // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
+        // (the media thread treats it as a closed SRP gate); START reopens.
+        storage_handler_->set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
+            if (type == DESCRIPTOR_STREAM_OUTPUT) {
+                talker_->set_stream_stopped(index, !streaming);
+            }
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
     }
 
     // Per-stream render buffers, parallel to specs_: audio slots get an
@@ -666,14 +674,12 @@ auto AvbEntityToneGenerator::fill_stream_output_info(
     if (auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_OUTPUT, descriptor_index); desc.has_value()) {
         atdecc::aem::DescriptorStream stream_desc{};
         span_load_padded(stream_desc, *desc);
-        auto const fspan = stream_desc.current_format.span();
-        std::copy(fspan.begin(), fspan.end(), out.stream_format.begin());
+        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
         flags |= stream_info_flags::STREAM_FORMAT_VALID;
     }
 
     out.stream_id = stream->stream_id;
-    auto const mspan = stream->stream_dest_mac.span();
-    std::copy(mspan.begin(), mspan.end(), out.stream_dest_mac.begin());
+    span_copy(make_span(out.stream_dest_mac), stream->stream_dest_mac.span());
     out.stream_vlan_id = ieee::doublet_t{stream->stream_vlan_id};
     out.msrp_accumulated_latency = ieee::quadlet_t{static_cast<uint32_t>(config_.presentation_offset_ns)};
 

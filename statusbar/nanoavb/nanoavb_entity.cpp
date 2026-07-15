@@ -188,6 +188,30 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_GET_CLOCK_SOURCE:
             return handle_get_descriptor_value(AEM_COMMAND_GET_CLOCK_SOURCE, command_data, out_buffer);
 
+        case AEM_COMMAND_SET_STREAM_FORMAT:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_descriptor_value(AEM_COMMAND_SET_STREAM_FORMAT, command_data, out_buffer);
+
+        case AEM_COMMAND_SET_SAMPLING_RATE:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_descriptor_value(AEM_COMMAND_SET_SAMPLING_RATE, command_data, out_buffer);
+
+        case AEM_COMMAND_START_STREAMING:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_descriptor_value(AEM_COMMAND_START_STREAMING, command_data, out_buffer);
+
+        case AEM_COMMAND_STOP_STREAMING:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_descriptor_value(AEM_COMMAND_STOP_STREAMING, command_data, out_buffer);
+
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
 
@@ -320,7 +344,7 @@ auto AemCommandHandler::reject_command(uint8_t const status, std::span<uint8_t c
 {
     size_t size = 0;
     if (out_buffer.size() >= command_data.size()) {
-        std::copy(command_data.begin(), command_data.end(), out_buffer.begin());
+        span_copy(out_buffer, command_data);
         size = command_data.size();
     }
     return {.status = status, .size = size};

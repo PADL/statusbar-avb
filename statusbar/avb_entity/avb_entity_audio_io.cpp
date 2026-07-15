@@ -481,6 +481,14 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
             }
             return atdecc::AEM_STATUS_SUCCESS;
         });
+        // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
+        // (the media thread treats it as a closed SRP gate); START reopens.
+        storage_handler_->set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
+            if (type == DESCRIPTOR_STREAM_OUTPUT) {
+                talker_->set_stream_stopped(index, !streaming);
+            }
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
     }
 
     // One TX socket (qdisc-bypass so our own egress is not re-received here).
@@ -912,7 +920,9 @@ auto AvbEntityAudioIO::fill_stream_output_counters(
 auto AvbEntityAudioIO::fill_stream_output_info(
     uint16_t const descriptor_type, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool
 {
-    // Only our talker (STREAM_OUTPUT) streams carry GET_STREAM_INFO here.
+    if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+        return fill_stream_input_info(descriptor_index, out);
+    }
     if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
         return false;
     }
@@ -929,14 +939,12 @@ auto AvbEntityAudioIO::fill_stream_output_info(
     if (auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_OUTPUT, descriptor_index); desc.has_value()) {
         atdecc::aem::DescriptorStream stream_desc{};
         span_load_padded(stream_desc, *desc);
-        auto const fspan = stream_desc.current_format.span();
-        std::copy(fspan.begin(), fspan.end(), out.stream_format.begin());
+        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
         flags |= stream_info_flags::STREAM_FORMAT_VALID;
     }
 
     out.stream_id = stream->stream_id;
-    auto const mspan = stream->stream_dest_mac.span();
-    std::copy(mspan.begin(), mspan.end(), out.stream_dest_mac.begin());
+    span_copy(make_span(out.stream_dest_mac), stream->stream_dest_mac.span());
     out.stream_vlan_id = ieee::doublet_t{stream->stream_vlan_id};
     out.msrp_accumulated_latency = ieee::quadlet_t{static_cast<uint32_t>(config_.presentation_offset_ns)};
 
@@ -944,6 +952,38 @@ auto AvbEntityAudioIO::fill_stream_output_info(
     // live ACMP connection state so a controller/listener sees CONNECTED.
     if (host_.components().acmp_talker.connection_count(descriptor_index) > 0) {
         flags |= stream_info_flags::CONNECTED;
+    }
+    out.flags = ieee::quadlet_t{flags};
+    return true;
+}
+
+auto AvbEntityAudioIO::fill_stream_input_info(uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) const -> bool
+{
+    auto const* sink = host_.components().acmp_listener.get_stream(descriptor_index);
+    if (sink == nullptr) {
+        return false;
+    }
+
+    uint32_t flags = 0;
+
+    // Stream format from the STREAM_INPUT descriptor's current_format.
+    if (auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_INPUT, descriptor_index); desc.has_value()) {
+        atdecc::aem::DescriptorStream stream_desc{};
+        span_load_padded(stream_desc, *desc);
+        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
+        flags |= stream_info_flags::STREAM_FORMAT_VALID;
+    }
+
+    // A connected sink knows the talker's stream identity — the thing a
+    // controller could never read from this entity before.
+    if (sink->connected) {
+        flags |= stream_info_flags::CONNECTED | stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID;
+        out.stream_id = sink->stream_id;
+        span_copy(make_span(out.stream_dest_mac), sink->stream_dest_mac.span());
+        if (sink->stream_vlan_id != 0) {
+            flags |= stream_info_flags::STREAM_VLAN_ID_VALID;
+            out.stream_vlan_id = ieee::doublet_t{sink->stream_vlan_id};
+        }
     }
     out.flags = ieee::quadlet_t{flags};
     return true;

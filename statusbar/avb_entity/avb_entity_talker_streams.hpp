@@ -31,6 +31,7 @@
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -111,6 +112,21 @@ struct TalkerStreams
         size_t samples,
         std::span<float const> src);
 
+    /// STOP_STREAMING gate for one STREAM_OUTPUT descriptor index (kit
+    /// phase 5): a stopped stream is treated as gate-closed by
+    /// transmit_if_due (AAF FIFO cleared, CRF phase reset). Reactor thread
+    /// writes, media thread reads; streams default to streaming.
+    void set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+    {
+        if (stream_index < stream_stopped_.size()) {
+            stream_stopped_[stream_index].store(stopped, std::memory_order_release);
+        }
+    }
+    [[nodiscard]] auto stream_stopped(uint16_t const stream_index) const noexcept -> bool
+    {
+        return stream_index < stream_stopped_.size() && stream_stopped_[stream_index].load(std::memory_order_acquire);
+    }
+
     /// Serialize + send one packet on a specific slot from @p src (interleaved,
     /// slot.spec.format.channels stride). Media-timer thread. (Public for
     /// entities that drive their own cadence, e.g. the pipe-fed AM824 loopback
@@ -134,6 +150,8 @@ struct TalkerStreams
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
+    /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     net::RawnetContext stream_tx_{};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the socket egress tap can stamp the captured frame with the gPTP TX time.

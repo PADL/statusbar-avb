@@ -234,10 +234,13 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
 void TalkerStreams::transmit_if_due(
     TalkerStreamSlot& slot,
     ptpclient::MediaClockGenerator::Emit const& tick,
-    bool const gate_open,
+    bool const srp_gate_open,
     size_t const samples,
     std::span<float const> src)
 {
+    // A STOP_STREAMING'd stream behaves exactly like a closed SRP gate:
+    // no emission, AAF FIFO cleared, CRF phase reset for a clean restart.
+    bool const gate_open = srp_gate_open && !stream_stopped(slot.spec.index);
     switch (slot.spec.format.kind) {
         case StreamKind::am824: {
             if (gate_open && samples > 0) {
