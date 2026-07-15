@@ -1758,6 +1758,160 @@ TEST(matrix, invalid_regions_and_callback_veto)
     EXPECT_TRUE(response_matrix_values(get.bytes) == (std::vector<int32_t>{7, 7, 7, 7}));
 }
 
+// ===========================================================================
+// CLOCK_SOURCE built-in (kit phase 3c): SET_CLOCK_SOURCE validated against the
+// CLOCK_DOMAIN's authored clock_sources, selection in RAM, reflected by
+// GET_CLOCK_SOURCE and READ_DESCRIPTOR; the change callback can veto — the
+// hook where an entity actually re-clocks (e.g. onto a CRF recovery).
+// ===========================================================================
+
+namespace {
+
+using atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
+using atdecc::aem::DescriptorClockDomain;
+
+/// Build a blob with one CLOCK_DOMAIN descriptor (index 0) offering two clock
+/// sources: indices 0 and 1. Authored current = 0.
+auto make_blob_with_clock_domain() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr uint32_t desc_size = DescriptorClockDomain::LENGTH + (size_t{2} * 2);  // 76 + two source doublets
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    blob[0] = 0x41;  // "AEM1"
+    blob[1] = 0x45;
+    blob[2] = 0x4D;
+    blob[3] = 0x31;
+    blob[7] = 0x01;  // toc_count = 1
+    blob[11] = static_cast<uint8_t>(toc_offset);
+    blob[19] = static_cast<uint8_t>(desc_offset);  // symbol_offset past the TOC
+
+    blob[toc_offset + 0] = static_cast<uint8_t>((DESCRIPTOR_CLOCK_DOMAIN >> 8) & 0xFF);
+    blob[toc_offset + 1] = static_cast<uint8_t>(DESCRIPTOR_CLOCK_DOMAIN & 0xFF);
+    blob[toc_offset + 6] = static_cast<uint8_t>((desc_size >> 8) & 0xFF);
+    blob[toc_offset + 7] = static_cast<uint8_t>(desc_size & 0xFF);
+    blob[toc_offset + 11] = static_cast<uint8_t>(desc_offset);
+
+    DescriptorClockDomain desc{};
+    desc.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN;
+    desc.clock_source_index = 0;
+    desc.clock_sources_offset = DescriptorClockDomain::LENGTH;
+    desc.clock_sources_count = 2;
+    std::memcpy(blob.data() + desc_offset, &desc, DescriptorClockDomain::LENGTH);
+
+    // Two clock-source doublets: 0 and 1.
+    size_t const src0 = desc_offset + DescriptorClockDomain::LENGTH;
+    blob[src0 + 3] = 0x01;  // second entry: clock source index 1
+    return blob;
+}
+
+/// SET/GET_CLOCK_SOURCE command body: descriptor type/index (+ the requested
+/// clock_source_index and reserved doublet on SET).
+auto make_clock_source_body(uint16_t descriptor_index, std::optional<uint16_t> const clock_source = std::nullopt)
+    -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> body;
+    auto push_u16 = [&body](uint16_t v) {
+        body.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        body.push_back(static_cast<uint8_t>(v & 0xFF));
+    };
+    push_u16(DESCRIPTOR_CLOCK_DOMAIN);
+    push_u16(descriptor_index);
+    if (clock_source) {
+        push_u16(*clock_source);
+        push_u16(0);  // reserved
+    }
+    return body;
+}
+
+/// The clock_source_index in a SET/GET_CLOCK_SOURCE response (after the
+/// 4-byte descriptor header).
+auto response_clock_source(std::span<uint8_t const> bytes) -> uint16_t
+{
+    return static_cast<uint16_t>((bytes[4] << 8) | bytes[5]);
+}
+
+}  // namespace
+
+TEST(clock_source, get_serves_blob_default_and_set_round_trips)
+{
+    auto blob = make_blob_with_clock_domain();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // GET before any SET: the blob's authored clock_source_index (0).
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CLOCK_SOURCE, make_clock_source_body(0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(get0.bytes.size(), size_t{8});  // 4-byte descriptor header + index + reserved
+    EXPECT_EQ(response_clock_source(get0.bytes), static_cast<uint16_t>(0));
+
+    // SET to the second authored source succeeds and echoes.
+    auto const set1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(0, uint16_t{1}));
+    EXPECT_EQ(set1.status, AEM_STATUS_SUCCESS);
+
+    // GET reflects the new selection.
+    auto const get1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CLOCK_SOURCE, make_clock_source_body(0));
+    EXPECT_EQ(get1.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(response_clock_source(get1.bytes), static_cast<uint16_t>(1));
+
+    // READ_DESCRIPTOR agrees: the served CLOCK_DOMAIN carries the runtime current.
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0}, make_span(buf));
+    EXPECT_TRUE(n >= DescriptorClockDomain::LENGTH);
+    DescriptorClockDomain parsed{};
+    span_load_padded(parsed, std::span<uint8_t const>{buf.data(), n});
+    EXPECT_EQ(parsed.clock_source_index.get(), static_cast<uint16_t>(1));
+}
+
+TEST(clock_source, invalid_source_rejected_and_callback_gates)
+{
+    auto blob = make_blob_with_clock_domain();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // Index 5 is not one of the domain's authored sources.
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(0, uint16_t{5}));
+    EXPECT_EQ(bad.status, AEM_STATUS_BAD_ARGUMENTS);
+
+    // A missing CLOCK_DOMAIN index names the missing descriptor.
+    auto const missing = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(7, uint16_t{0}));
+    EXPECT_EQ(missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+
+    // A vetoing callback: the status propagates and the selection stays 0.
+    handler.set_on_clock_source_changed([](uint16_t, uint16_t) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(0, uint16_t{1}));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CLOCK_SOURCE, make_clock_source_body(0));
+    EXPECT_EQ(response_clock_source(get0.bytes), static_cast<uint16_t>(0));
+
+    // An accepting callback observes the validated request — the hook where
+    // the entity swaps its media clock's rate source (e.g. CRF recovery).
+    static uint16_t seen_domain = 0xFFFF;
+    static uint16_t seen_source = 0xFFFF;
+    handler.set_on_clock_source_changed([](uint16_t domain, uint16_t source) -> uint8_t {
+        seen_domain = domain;
+        seen_source = source;
+        return AEM_STATUS_SUCCESS;
+    });
+    auto const ok = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(0, uint16_t{1}));
+    EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(seen_domain, static_cast<uint16_t>(0));
+    EXPECT_EQ(seen_source, static_cast<uint16_t>(1));
+    EXPECT_EQ(
+        *handler.current_clock_source(
+            DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0}),
+        static_cast<uint16_t>(1));
+}
+
 //
 // Test Runner
 //

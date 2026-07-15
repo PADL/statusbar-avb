@@ -194,7 +194,18 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     auto on_get_clock_source(DescriptorId id, DescriptorClockSource& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_clock_domain(DescriptorId id, DescriptorClockDomain& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_clock_domain(DescriptorId id, DescriptorClockDomain& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        // READ_DESCRIPTOR agrees with GET_CLOCK_SOURCE: reflect a runtime
+        // clock-source selection over the blob's authored clock_source_index.
+        if (auto const* state = find_clock_domain_state(id.ref.descriptor_index)) {
+            desc.clock_source_index = state->clock_source_index;
+        }
+        return true;
+    }
 
     // ---- Memory / Locale / Strings --------------------------------------
 
@@ -299,6 +310,10 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (command_type == atdecc::AEM_COMMAND_SET_MATRIX && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX) {
             return set_matrix(id.ref, value);
         }
+        if (command_type == atdecc::AEM_COMMAND_SET_CLOCK_SOURCE &&
+            id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN) {
+            return set_clock_source(id.ref, value);
+        }
         return AemEntityHandler::on_set_descriptor_value(command_type, id, value);
     }
 
@@ -321,6 +336,17 @@ class DescriptorStorageHandler : public AemEntityHandler
         }
         if (command_type == atdecc::AEM_COMMAND_GET_MATRIX && id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX) {
             return get_matrix(id.ref, request, out);
+        }
+        if (command_type == atdecc::AEM_COMMAND_GET_CLOCK_SOURCE &&
+            id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN && out.size() >= CLOCK_SOURCE_VALUE_WIRE_SIZE) {
+            if (auto const current = current_clock_source(id.ref)) {
+                atdecc::doublet_t const cs{*current};
+                span_store(out.subspan(0, 2), cs);
+                out[2] = 0;  // reserved doublet completing the
+                out[3] = 0;  // AemClockSourcePayload quadlet row
+                return CLOCK_SOURCE_VALUE_WIRE_SIZE;
+            }
+            return 0;  // no such CLOCK_DOMAIN in the blob
         }
         return AemEntityHandler::on_get_descriptor_value(command_type, id, request, out);
     }
@@ -370,6 +396,43 @@ class DescriptorStorageHandler : public AemEntityHandler
             return std::nullopt;
         }
         return load_signal_source(blob->subspan(CURRENT_SIGNAL_OFFSET));
+    }
+
+    // ---- Built-in CLOCK_SOURCE selection (automatic; kit phase 3) ----------
+    //
+    // SET_CLOCK_SOURCE is accepted when the requested clock_source_index is
+    // one of the CLOCK_DOMAIN's authored clock_sources; the current selection
+    // lives in RAM (keyed by descriptor index) and GET_CLOCK_SOURCE /
+    // READ_DESCRIPTOR reflect it. The change callback is where the
+    // application actually re-clocks (e.g. swap the media clock's rate source
+    // to a CRF recovery); returning any status other than SUCCESS rejects the
+    // change and keeps the previous selection.
+
+    /// Called when SET_CLOCK_SOURCE requests a new source (already validated
+    /// against the CLOCK_DOMAIN's clock_sources list). Return
+    /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.
+    /// Unset => accept (in-memory only).
+    void set_on_clock_source_changed(
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*clock_domain_index*/, uint16_t /*clock_source_index*/), 64> fn)
+    {
+        on_clock_source_changed_ = std::move(fn);
+    }
+
+    /// The CLOCK_DOMAIN's current clock source index: the runtime selection
+    /// when one was made, otherwise the blob's authored clock_source_index.
+    /// nullopt when the blob has no such CLOCK_DOMAIN descriptor.
+    [[nodiscard]] auto current_clock_source(DescriptorRef ref) const noexcept -> std::optional<uint16_t>
+    {
+        if (auto const* state = find_clock_domain_state(ref.descriptor_index)) {
+            return state->clock_source_index;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorClockDomain::LENGTH) {
+            return std::nullopt;
+        }
+        atdecc::doublet_t cs{};
+        span_load(cs, blob->subspan(CLOCK_DOMAIN_SOURCE_INDEX_FIELD, 2));
+        return cs.get();
     }
 
     // ---- Built-in MATRIX (automatic when the blob has one) -----------------
@@ -562,6 +625,91 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     statusbar::sg14::inplace_vector<SelectorState, MAX_SELECTOR_STATES> selector_states_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, SignalSourceRef const&), 64> on_signal_selector_changed_{};
+
+    // CLOCK_SOURCE built-in machinery. DescriptorClockDomain wire offsets and
+    // the SET/GET_CLOCK_SOURCE value shape (clock_source_index + reserved,
+    // after the 4-byte descriptor header).
+    static constexpr size_t CLOCK_DOMAIN_SOURCE_INDEX_FIELD = 70;
+    static constexpr size_t CLOCK_DOMAIN_SOURCES_OFFSET_FIELD = 72;
+    static constexpr size_t CLOCK_DOMAIN_SOURCES_COUNT_FIELD = 74;
+    static constexpr size_t CLOCK_SOURCE_VALUE_WIRE_SIZE = 4;
+    static constexpr size_t MAX_CLOCK_DOMAIN_STATES = 4;
+
+    /// The runtime clock-source selection for one CLOCK_DOMAIN descriptor.
+    struct ClockDomainState
+    {
+        uint16_t descriptor_index{0};
+        uint16_t clock_source_index{0};
+    };
+
+    [[nodiscard]] auto find_clock_domain_state(uint16_t const descriptor_index) const noexcept -> ClockDomainState const*
+    {
+        for (auto const& s : clock_domain_states_) {
+            if (s.descriptor_index == descriptor_index) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /// Apply a SET_CLOCK_SOURCE value (clock_source_index doublet) to the
+    /// CLOCK_DOMAIN at @p ref.
+    [[nodiscard]] auto set_clock_source(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
+    {
+        if (value.size() < 2) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorClockDomain::LENGTH) {
+            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        }
+        atdecc::doublet_t requested{};
+        span_load(requested, value.subspan(0, 2));
+
+        // The requested index must be one of the domain's authored clock sources.
+        atdecc::doublet_t sources_offset{};
+        atdecc::doublet_t sources_count{};
+        span_load(sources_offset, blob->subspan(CLOCK_DOMAIN_SOURCES_OFFSET_FIELD, 2));
+        span_load(sources_count, blob->subspan(CLOCK_DOMAIN_SOURCES_COUNT_FIELD, 2));
+        bool valid = false;
+        for (uint16_t n = 0; n < sources_count.get(); ++n) {
+            size_t const off = sources_offset.get() + (size_t{n} * 2);
+            if (off + 2 > blob->size()) {
+                break;
+            }
+            atdecc::doublet_t entry{};
+            span_load(entry, blob->subspan(off, 2));
+            if (entry.get() == requested.get()) {
+                valid = true;
+                break;
+            }
+        }
+        if (!valid) {
+            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+        }
+
+        if (on_clock_source_changed_) {
+            if (auto const status = on_clock_source_changed_(ref.descriptor_index, requested.get());
+                status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
+
+        for (auto& s : clock_domain_states_) {
+            if (s.descriptor_index == ref.descriptor_index) {
+                s.clock_source_index = requested.get();
+                return atdecc::AEM_STATUS_SUCCESS;
+            }
+        }
+        if (clock_domain_states_.try_push_back(
+                ClockDomainState{.descriptor_index = ref.descriptor_index, .clock_source_index = requested.get()}) == nullptr) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    statusbar::sg14::inplace_vector<ClockDomainState, MAX_CLOCK_DOMAIN_STATES> clock_domain_states_;
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t), 64> on_clock_source_changed_{};
 
     // MATRIX built-in machinery. DescriptorMatrix wire offsets and the
     // SET/GET_MATRIX region header (after the 4-byte descriptor header).

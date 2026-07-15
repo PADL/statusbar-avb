@@ -171,6 +171,15 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_GET_MATRIX:
             return handle_get_descriptor_value(AEM_COMMAND_GET_MATRIX, command_data, out_buffer);
 
+        case AEM_COMMAND_SET_CLOCK_SOURCE:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_descriptor_value(AEM_COMMAND_SET_CLOCK_SOURCE, command_data, out_buffer);
+
+        case AEM_COMMAND_GET_CLOCK_SOURCE:
+            return handle_get_descriptor_value(AEM_COMMAND_GET_CLOCK_SOURCE, command_data, out_buffer);
+
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
 
