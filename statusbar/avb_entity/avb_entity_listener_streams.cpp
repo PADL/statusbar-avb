@@ -73,7 +73,23 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             bind_pending_consume(slot);
             return success();
         }
-        case StreamKind::crf:  // CRF input = media-clock recovery (kit phase 3)
+        case StreamKind::crf: {
+            // CRF input (kit phase 3): a media-clock reference stream. The
+            // context tracks sequence/mr and delivers each 64-bit timestamp
+            // to the slot's on_crf consumer (see set_crf).
+            if (spec.format.crf_base_frequency_hz == 0) {
+                return failure(std::errc::invalid_argument);
+            }
+            auto& slot = slots_.emplace_back();
+            slot.spec = spec;
+            slot.crf.emplace(
+                static_cast<avtp::CrfType>(spec.format.crf_type),
+                spec.format.crf_base_frequency_hz,
+                static_cast<avtp::CrfPull>(spec.format.crf_pull),
+                spec.format.crf_timestamp_interval);
+            bind_pending_consume(slot);
+            return success();
+        }
         case StreamKind::other:
         default:
             return failure(std::errc::not_supported);
@@ -99,13 +115,37 @@ void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn f
     }
 }
 
+void ListenerStreams::set_crf(uint16_t const stream_index, StreamCrfFn fn)
+{
+    if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        slot->on_crf = std::move(fn);
+        return;
+    }
+    for (auto& pending : pending_crf_) {
+        if (pending.stream_index == stream_index) {
+            pending.fn = std::move(fn);
+            return;
+        }
+    }
+    if (pending_crf_.size() < MAX_ENTITY_STREAMS) {
+        pending_crf_.push_back(PendingCrf{.stream_index = stream_index, .fn = std::move(fn)});
+    }
+}
+
 void ListenerStreams::bind_pending_consume(ListenerStreamSlot& slot)
 {
     for (auto& pending : pending_consume_) {
         if (pending.stream_index == slot.spec.index && pending.fn) {
             slot.consume = std::move(pending.fn);
             pending.fn = {};  // consumed; entry stays (never erased, slots are stable)
-            return;
+            break;
+        }
+    }
+    for (auto& pending : pending_crf_) {
+        if (pending.stream_index == slot.spec.index && pending.fn) {
+            slot.on_crf = std::move(pending.fn);
+            pending.fn = {};
+            break;
         }
     }
 }
@@ -184,6 +224,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
     // segment). Stream_ids are unique, so the first match is the only match.
     auto const subtype_kind = frame[0] == avtp::AvtpSubtype::iec_61883_iidc ? StreamKind::am824
         : frame[0] == avtp::AvtpSubtype::aaf                                ? StreamKind::aaf
+        : frame[0] == avtp::AvtpSubtype::crf                                ? StreamKind::crf
                                                                             : StreamKind::other;
     if (subtype_kind == StreamKind::other) {
         return;
@@ -287,6 +328,27 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         if (audio_sink_ != nullptr) {
             audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::aaf_int32, audio);
         }
+    } else if (slot->crf) {
+        // --- CRF (kit phase 3): media-clock reference, no audio payload ---
+        if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
+            return;
+        }
+        avtp::CrfPdu pdu{};
+        span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+        if (!pdu.is_valid()) {
+            slot->rx_bad.add(1);
+            return;
+        }
+        std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
+        slot->crf->process_packet(pdu, ts_data, [slot, gptp_now_ns](uint64_t ts_ns, uint16_t index) {
+            // Each (CRF timestamp, local receive time) pair feeds media-clock
+            // recovery via the registered consumer.
+            if (slot->on_crf) {
+                slot->on_crf(ts_ns, index, gptp_now_ns);
+            }
+        });
+        slot->rx_packets.add(1);
+        slot->rx_samples.add(slot->crf->last_timestamp_count);
     }
 }
 

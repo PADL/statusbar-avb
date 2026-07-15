@@ -223,4 +223,10 @@ using StreamRenderFn =
 using StreamConsumeFn =
     sg14::inplace_function<void(uint8_t channel, std::span<float const> samples, uint64_t pts_ns, uint64_t period_ns), 64>;
 
+/// Per-stream CRF ingest (kit phase 3): one received CRF timestamp — a full
+/// 64-bit gPTP-domain media-clock event time — with its index within the PDU
+/// and the local gPTP receive time. The (crf_timestamp − rx_gptp) pairs are
+/// the raw material for media-clock recovery. Runs on the reactor/RX thread.
+using StreamCrfFn = sg14::inplace_function<void(uint64_t crf_timestamp_ns, uint16_t index_in_pdu, int64_t rx_gptp_ns), 64>;
+
 }  // namespace statusbar::avb_entity

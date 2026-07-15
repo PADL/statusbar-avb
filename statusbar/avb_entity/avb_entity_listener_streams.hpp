@@ -30,6 +30,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_input.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
+#include "statusbar/avtp/avtp_crf_stream_input.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
@@ -55,11 +56,16 @@ struct ListenerStreamSlot
     StreamSpec spec{};
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
+    std::optional<avtp::CrfStreamInputContext> crf{};
 
     /// Per-stream RX consumer (kit phase 2): receives each decoded channel
     /// (floats + reconstructed 64-bit PTS) on the reactor/RX thread. Empty =
     /// decode for counters only (and the raw-byte StreamRxAudioSink, if any).
     StreamConsumeFn consume{};
+
+    /// Per-stream CRF ingest (kit phase 3): receives each CRF timestamp with
+    /// the local receive time — feed for media-clock recovery. CRF slots only.
+    StreamCrfFn on_crf{};
 
     /// Per-slot data-plane counters (written on the reactor/RX thread, read for status).
     itc::TelemetryCounter<uint64_t> rx_packets{};
@@ -103,6 +109,11 @@ struct ListenerStreams
     /// is a menu, the model is the selection: an index the model never
     /// declares stays pending and inert (never an error). RX-thread callback.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn);
+
+    /// Register a per-stream CRF timestamp consumer for STREAM_INPUT
+    /// @p stream_index (a CRF input slot). Same menu/selection + pending
+    /// semantics as set_consume. RX-thread callback.
+    void set_crf(uint16_t stream_index, StreamCrfFn fn);
 
     /// The slot whose spec.index == @p stream_index (the STREAM_INPUT
     /// descriptor index == ACMP listener unique id), or nullptr.
@@ -203,6 +214,12 @@ struct ListenerStreams
         StreamConsumeFn fn{};
     };
     sg14::inplace_vector<PendingConsume, MAX_ENTITY_STREAMS> pending_consume_{};
+    struct PendingCrf
+    {
+        uint16_t stream_index{0};
+        StreamCrfFn fn{};
+    };
+    sg14::inplace_vector<PendingCrf, MAX_ENTITY_STREAMS> pending_crf_{};
 };
 
 }  // namespace statusbar::avb_entity

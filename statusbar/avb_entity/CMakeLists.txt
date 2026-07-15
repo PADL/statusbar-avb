@@ -45,6 +45,7 @@ statusbar_add_module(
   avb_entity_stream_counters_test.cpp
   avb_entity_stream_spec_test.cpp
   avb_entity_listener_streams_test.cpp
+  avb_entity_crf_clock_recovery_test.cpp
   avb_entity_media_rate_test.cpp
   avb_entity_udptun_egress_test.cpp
   avb_entity_udptun_ingest_test.cpp

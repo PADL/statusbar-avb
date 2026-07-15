@@ -93,7 +93,7 @@ TEST(listener_consume, pending_binds_on_open_unknown_stays_inert)
     EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume));
 }
 
-TEST(listener_consume, slot_shapes_follow_specs_and_crf_is_phase3)
+TEST(listener_consume, slot_shapes_follow_specs)
 {
     auto donor = make_donor();
     std::atomic<uint64_t> gptp{0};
@@ -104,16 +104,45 @@ TEST(listener_consume, slot_shapes_follow_specs_and_crf_is_phase3)
     EXPECT_TRUE(ls.slot_of(StreamKind::aaf)->aaf.has_value());
     EXPECT_FALSE(ls.slot_of(StreamKind::aaf)->am824.has_value());
 
-    // CRF input = media-clock recovery, kit phase 3: rejected for now.
-    StreamSpec crf{};
-    crf.index = 1;
-    crf.format = decode_stream_format(CRF_MILAN_48K);
-    EXPECT_FALSE(ls.open_stream(crf).has_value());
-
     // Unknown format words never build a slot.
     StreamSpec other{};
     other.index = 2;
     EXPECT_FALSE(ls.open_stream(other).has_value());
+}
+
+TEST(listener_crf, crf_input_slot_delivers_timestamps)
+{
+    auto donor = make_donor();
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+
+    // Register the CRF consumer BEFORE the slot exists (pending), plus one
+    // for an index the model never declares (menu/selection: inert).
+    static uint64_t last_ts = 0;
+    static int calls = 0;
+    last_ts = 0;
+    calls = 0;
+    ls.set_crf(1, [](uint64_t ts, uint16_t /*idx*/, int64_t /*rx*/) {
+        last_ts = ts;
+        ++calls;
+    });
+    ls.set_crf(9, [](uint64_t, uint16_t, int64_t) { ++calls; });
+
+    StreamSpec crf{};
+    crf.index = 1;
+    crf.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(crf).has_value());  // CRF input supported (phase 3a)
+    auto* slot = ls.slot_for(1);
+    EXPECT_NE(slot, nullptr);
+    EXPECT_TRUE(slot->crf.has_value());
+    EXPECT_TRUE(static_cast<bool>(slot->on_crf));  // pending registration bound
+    EXPECT_EQ(ls.slot_for(9), nullptr);            // inert registration: no slot, no error
+
+    // The bound consumer is the slot's delivery path (frame->consume delivery
+    // itself requires a connected ACMP listener; covered on hardware).
+    slot->on_crf(123456789ULL, 0, 1000);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(last_ts, 123456789ULL);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)
