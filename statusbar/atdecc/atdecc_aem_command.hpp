@@ -22,6 +22,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 
 namespace statusbar::atdecc::aem {
 
@@ -952,7 +953,7 @@ constexpr uint16_t UPLOAD = 0x0004;            ///< Upload new contents, ready f
 constexpr uint16_t VENDOR_SPECIFIC_START = 0x8000;
 
 /// Get human-readable name for an operation type
-[[nodiscard]] inline auto name(uint16_t op) noexcept -> char const*
+[[nodiscard]] inline auto name(uint16_t op) noexcept -> std::string_view
 {
     switch (op) {
         case STORE:

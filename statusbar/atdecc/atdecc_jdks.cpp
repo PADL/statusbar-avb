@@ -3,9 +3,11 @@
 
 #include "statusbar/atdecc/atdecc_jdks.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc::jdks {
 
-auto log_priority_name(uint8_t const priority) noexcept -> char const*
+auto log_priority_name(uint8_t const priority) noexcept -> std::string_view
 {
     switch (priority) {
         case log_priority::ERROR:

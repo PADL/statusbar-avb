@@ -3,9 +3,11 @@
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc {
 
-auto aecp_message_type_name(uint8_t const type) noexcept -> char const*
+auto aecp_message_type_name(uint8_t const type) noexcept -> std::string_view
 {
     switch (type) {
         case AECP_MESSAGE_TYPE_AEM_COMMAND:
@@ -37,7 +39,7 @@ auto aecp_message_type_name(uint8_t const type) noexcept -> char const*
     }
 }
 
-auto aecp_status_name(uint8_t const status) noexcept -> char const*
+auto aecp_status_name(uint8_t const status) noexcept -> std::string_view
 {
     switch (status) {
         case AECP_STATUS_SUCCESS:

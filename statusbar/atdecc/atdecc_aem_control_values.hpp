@@ -38,6 +38,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::atdecc::aem {
@@ -165,7 +166,7 @@ constexpr uint16_t CONTROL_VALUE_TYPE_EXPANSION = 0x3FFF;
 /// "CONTROL_BODE_PLOT"). Returns "Reserved" for undefined values, and
 /// "EXPANSION" for CONTROL_VALUE_TYPE_EXPANSION.
 /// @param vt One of the 14-bit CONTROL_* value_type constants
-[[nodiscard]] auto control_value_type_name(uint16_t vt) noexcept -> char const*;
+[[nodiscard]] auto control_value_type_name(uint16_t vt) noexcept -> std::string_view;
 
 /// Compute the on-wire length of a CONTROL descriptor's value_details
 /// trailer for the given control_value_type and number_of_values.

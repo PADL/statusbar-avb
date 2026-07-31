@@ -5,6 +5,8 @@
 
 #include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc::aem {
 
 auto DescriptorControl::value_details_length() const noexcept -> size_t
@@ -13,7 +15,7 @@ auto DescriptorControl::value_details_length() const noexcept -> size_t
     return len > MAX_VALUE_DETAILS ? MAX_VALUE_DETAILS : len;
 }
 
-auto descriptor_type_name(uint16_t const type) noexcept -> char const*
+auto descriptor_type_name(uint16_t const type) noexcept -> std::string_view
 {
     switch (type) {
         case DESCRIPTOR_ENTITY:

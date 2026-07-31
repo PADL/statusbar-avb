@@ -784,7 +784,7 @@ auto format_start_operation(OutputIt out, AemStartOperationCommandPayload const&
 {
     out = format_aem_descriptor(out, p.descriptor_type.get(), static_cast<uint16_t>(p.descriptor_index));
     uint16_t const op_type = p.operation_type.get();
-    char const* op_name = operation_type::name(op_type);
+    std::string_view const op_name = operation_type::name(op_type);
     out = std::format_to(out, "        operation_id={} operation_type={} ({:#06x})\n", p.operation_id.get(), op_name, op_type);
     auto op_data = payload.subspan(AemStartOperationCommandPayload::LENGTH);
     if (!op_data.empty()) {

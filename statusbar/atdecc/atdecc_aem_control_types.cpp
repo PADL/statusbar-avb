@@ -3,6 +3,8 @@
 
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc::aem {
 
 auto is_standard_control_type(Eui64 const& t) noexcept -> bool
@@ -11,7 +13,7 @@ auto is_standard_control_type(Eui64 const& t) noexcept -> bool
     return s[0] == STANDARD_CONTROL_TYPE_OUI_B0 && s[1] == STANDARD_CONTROL_TYPE_OUI_B1 && s[2] == STANDARD_CONTROL_TYPE_OUI_B2;
 }
 
-auto control_type_name(Eui64 const& t) noexcept -> char const*
+auto control_type_name(Eui64 const& t) noexcept -> std::string_view
 {
     if (!is_standard_control_type(t)) {
         return "VENDOR_DEFINED";

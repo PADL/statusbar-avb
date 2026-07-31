@@ -4,6 +4,7 @@
 #include "statusbar/atdecc/atdecc_aecp_aa_analysis.hpp"
 
 #include <format>
+#include <string_view>
 
 namespace statusbar::atdecc {
 
@@ -29,7 +30,7 @@ void UploadSession::log_issue(uint64_t time_us, uint64_t capture_start_us, std::
 // upload_phase_name
 // ---------------------------------------------------------------------------
 
-auto upload_phase_name(UploadPhase p) -> char const*
+auto upload_phase_name(UploadPhase p) -> std::string_view
 {
     switch (p) {
         case UploadPhase::Idle:
@@ -59,7 +60,7 @@ auto upload_phase_name(UploadPhase p) -> char const*
 // ---------------------------------------------------------------------------
 
 static void record_backward(
-    AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, char const* mode_name, uint64_t address)
+    AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, std::string_view mode_name, uint64_t address)
 {
     double const time_s = static_cast<double>(time_us - capture_start_us) / 1e6;
     trk.issues.push_back(std::format(
@@ -73,7 +74,7 @@ static void record_backward(
 }
 
 static void record_overlap(
-    AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, char const* mode_name, uint64_t address)
+    AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, std::string_view mode_name, uint64_t address)
 {
     double const time_s = static_cast<double>(time_us - capture_start_us) / 1e6;
     trk.issues.push_back(std::format(
@@ -87,7 +88,7 @@ static void record_overlap(
 }
 
 static void record_gap(
-    AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, char const* mode_name, uint64_t address)
+    AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, std::string_view mode_name, uint64_t address)
 {
     double const time_s = static_cast<double>(time_us - capture_start_us) / 1e6;
     trk.issues.push_back(std::format(
@@ -107,7 +108,7 @@ void update_address_tracker(
     uint16_t seq_id,
     uint64_t time_us,
     uint64_t capture_start_us,
-    char const* mode_name)
+    std::string_view mode_name)
 {
     trk.total_bytes += length;
     if (!trk.has_first) {

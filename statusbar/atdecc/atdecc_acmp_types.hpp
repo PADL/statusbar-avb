@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string_view>
 
 namespace statusbar::atdecc {
 
@@ -36,7 +37,7 @@ constexpr uint8_t ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_RESPONSE = 13;
 
 /// Get human-readable name for ACMP message type
 /// @param type ACMP message type code (0-13)
-[[nodiscard]] auto acmp_message_type_name(uint8_t type) noexcept -> char const*;
+[[nodiscard]] auto acmp_message_type_name(uint8_t type) noexcept -> std::string_view;
 
 //
 // ACMP Status Codes - Clause 8.2.1.6
@@ -65,7 +66,7 @@ constexpr uint8_t ACMP_STATUS_NOT_SUPPORTED = 31;
 
 /// Get human-readable name for ACMP status code
 /// @param status ACMP status code
-[[nodiscard]] auto acmp_status_name(uint8_t status) noexcept -> char const*;
+[[nodiscard]] auto acmp_status_name(uint8_t status) noexcept -> std::string_view;
 
 //
 // ACMP Flags - Clause 8.2.1.16 (IEEE 1722.1-2021)

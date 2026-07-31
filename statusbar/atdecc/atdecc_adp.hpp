@@ -19,6 +19,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 
 namespace statusbar::atdecc {
 
@@ -44,7 +45,7 @@ constexpr uint8_t ADP_MESSAGE_TYPE_ENTITY_DISCOVER = 2;
 
 /// Get human-readable name for ADP message type
 /// @param type ADP message type code (0-2)
-[[nodiscard]] auto adp_message_type_name(uint8_t type) noexcept -> char const*;
+[[nodiscard]] auto adp_message_type_name(uint8_t type) noexcept -> std::string_view;
 
 //
 // Entity Capabilities - Clause 6.2.1.10

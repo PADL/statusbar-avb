@@ -2608,9 +2608,8 @@ TEST(atdecc_aem_names, descriptor_type_name_known)
 
 TEST(atdecc_aem_names, descriptor_type_name_unknown)
 {
-    auto const* name = aem::descriptor_type_name(0xFFFF);
-    EXPECT_TRUE(name != nullptr);
-    EXPECT_TRUE(std::string(name).size() > 0);
+    auto const name = aem::descriptor_type_name(0xFFFF);
+    EXPECT_TRUE(!name.empty());
 }
 
 TEST(atdecc_aem_string, spaceship_operator)
@@ -2685,8 +2684,8 @@ TEST(atdecc_jdks_names, log_priority_name_known)
 
 TEST(atdecc_jdks_names, log_priority_name_unknown)
 {
-    auto const* name = jdks::log_priority_name(42);
-    EXPECT_TRUE(name != nullptr);
+    auto const name = jdks::log_priority_name(42);
+    EXPECT_TRUE(!name.empty());
 }
 
 // ===========================================================================

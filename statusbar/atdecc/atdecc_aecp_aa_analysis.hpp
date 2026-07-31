@@ -19,6 +19,7 @@
 #include <memory_resource>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace statusbar::atdecc {
@@ -232,7 +233,7 @@ struct AemOperationFields
 // ---------------------------------------------------------------------------
 
 /// Get human-readable name for an upload phase.
-auto upload_phase_name(UploadPhase p) -> char const*;
+auto upload_phase_name(UploadPhase p) -> std::string_view;
 
 /// Update an address tracker with a new access, detecting gaps/overlaps/backward moves.
 void update_address_tracker(
@@ -242,7 +243,7 @@ void update_address_tracker(
     uint16_t seq_id,
     uint64_t time_us,
     uint64_t capture_start_us,
-    char const* mode_name);
+    std::string_view mode_name);
 
 /// Build a human-readable string from a PendingCommand's modes and addresses.
 /// Example output: "READ 0x0000000000001000, WRITE 0x0000000000002000"

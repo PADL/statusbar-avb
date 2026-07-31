@@ -17,6 +17,7 @@
 
 #include <compare>
 #include <cstdint>
+#include <string_view>
 
 namespace statusbar::atdecc::aem {
 
@@ -215,12 +216,12 @@ constexpr uint8_t UNIT_CODE_DB_A = 0xBD;
 /// Returns "Reserved" for undefined codes within a group sub-range,
 /// and "Reserved (>= 0xc0)" for codes above the last defined group.
 /// @param code Unit code from byte 1 of the wire encoding
-[[nodiscard]] auto control_unit_code_name(uint8_t code) noexcept -> char const*;
+[[nodiscard]] auto control_unit_code_name(uint8_t code) noexcept -> std::string_view;
 
 /// Short printable suffix for a unit code (e.g. "Hz", "dB", "%", "s").
 /// Returns the empty string for codes that have no suffix ("---" in
 /// the spec table) or for reserved codes. @see control_unit_code_name.
 /// @param code Unit code from byte 1 of the wire encoding
-[[nodiscard]] auto control_unit_code_suffix(uint8_t code) noexcept -> char const*;
+[[nodiscard]] auto control_unit_code_suffix(uint8_t code) noexcept -> std::string_view;
 
 }  // namespace statusbar::atdecc::aem

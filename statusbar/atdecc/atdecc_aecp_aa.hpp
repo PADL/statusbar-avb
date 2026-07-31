@@ -28,6 +28,7 @@
 #include <functional>
 #include <memory_resource>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace statusbar::atdecc {
@@ -65,10 +66,10 @@ constexpr uint32_t AA_TIMEOUT_MS = 250;
 constexpr size_t AA_TLV_HEADER_SIZE = 10;
 
 /// Get human-readable name for AA mode
-[[nodiscard]] auto aa_mode_name(uint8_t mode) noexcept -> char const*;
+[[nodiscard]] auto aa_mode_name(uint8_t mode) noexcept -> std::string_view;
 
 /// Get human-readable name for AA status code
-[[nodiscard]] auto aa_status_name(uint8_t status) noexcept -> char const*;
+[[nodiscard]] auto aa_status_name(uint8_t status) noexcept -> std::string_view;
 
 // ---------------------------------------------------------------------------
 // Address Access PDU header (fixed part after AECP common)

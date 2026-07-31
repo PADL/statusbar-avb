@@ -18,6 +18,7 @@
 #include "statusbar/ieee/ieee_ethernet.hpp"
 
 #include <cstdint>
+#include <string_view>
 
 namespace statusbar::atdecc::aem {
 
@@ -163,6 +164,6 @@ inline constexpr Eui64 CONTROL_TYPE_FQTSS_LOCK_CLASS_BANDWIDTH{0x90, 0xE0, 0xF0,
 /// for non-IEEE OUIs, or "UNKNOWN" for reserved ranges inside the IEEE
 /// OUI. Matches the names in IEEE 1722.1-2021 Table 7.4.
 /// @param t Control type EUI-64 from a CONTROL descriptor
-[[nodiscard]] auto control_type_name(Eui64 const& t) noexcept -> char const*;
+[[nodiscard]] auto control_type_name(Eui64 const& t) noexcept -> std::string_view;
 
 }  // namespace statusbar::atdecc::aem

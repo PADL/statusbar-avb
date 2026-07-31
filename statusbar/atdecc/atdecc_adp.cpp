@@ -3,9 +3,11 @@
 
 #include "statusbar/atdecc/atdecc_adp.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc {
 
-auto adp_message_type_name(uint8_t const type) noexcept -> char const*
+auto adp_message_type_name(uint8_t const type) noexcept -> std::string_view
 {
     switch (type) {
         case ADP_MESSAGE_TYPE_ENTITY_AVAILABLE:

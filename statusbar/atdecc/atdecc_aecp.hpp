@@ -18,6 +18,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 
 namespace statusbar::atdecc {
 
@@ -53,7 +54,7 @@ constexpr uint8_t AECP_MESSAGE_TYPE_EXTENDED_RESPONSE = 15;
 
 /// Get human-readable name for AECP message type
 /// @param type AECP message type code
-[[nodiscard]] auto aecp_message_type_name(uint8_t type) noexcept -> char const*;
+[[nodiscard]] auto aecp_message_type_name(uint8_t type) noexcept -> std::string_view;
 
 //
 // AECP Status Codes - Clause 9.2.1.1.6
@@ -63,7 +64,7 @@ constexpr uint8_t AECP_STATUS_NOT_IMPLEMENTED = 1;
 
 /// Get human-readable name for AECP status code
 /// @param status AECP status code
-[[nodiscard]] auto aecp_status_name(uint8_t status) noexcept -> char const*;
+[[nodiscard]] auto aecp_status_name(uint8_t status) noexcept -> std::string_view;
 
 //
 // AECPDU Common Header - Clause 9.2.1.1

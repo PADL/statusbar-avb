@@ -3,9 +3,11 @@
 
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc {
 
-auto aem_status_name(uint8_t const status) noexcept -> char const*
+auto aem_status_name(uint8_t const status) noexcept -> std::string_view
 {
     switch (status) {
         case AEM_STATUS_SUCCESS:
@@ -39,7 +41,7 @@ auto aem_status_name(uint8_t const status) noexcept -> char const*
     }
 }
 
-auto aem_command_name(uint16_t const cmd) noexcept -> char const*
+auto aem_command_name(uint16_t const cmd) noexcept -> std::string_view
 {
     switch (cmd & 0x7FFF) {  // Mask off U bit
         case AEM_COMMAND_ACQUIRE_ENTITY:

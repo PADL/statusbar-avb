@@ -62,7 +62,7 @@ constexpr uint8_t CONSOLE = 0xFF;
 
 /// Get human-readable name for log priority
 /// @param priority Log priority level
-[[nodiscard]] auto log_priority_name(uint8_t priority) noexcept -> char const*;
+[[nodiscard]] auto log_priority_name(uint8_t priority) noexcept -> std::string_view;
 
 //
 // JDKS Well-Known Addresses and Control Types

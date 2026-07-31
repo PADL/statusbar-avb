@@ -19,6 +19,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 
 namespace statusbar::atdecc {
 
@@ -50,7 +51,7 @@ constexpr uint8_t AEM_STATUS_STREAM_IS_RUNNING = 12;
 
 /// Get human-readable name for AEM status code
 /// @param status AEM status code
-[[nodiscard]] auto aem_status_name(uint8_t status) noexcept -> char const*;
+[[nodiscard]] auto aem_status_name(uint8_t status) noexcept -> std::string_view;
 
 //
 // AEM Timeouts - Clause 9.2.1.2.5
@@ -186,7 +187,7 @@ constexpr uint16_t AEM_COMMAND_EXPANSION = 0x3FFF;
 
 /// Get human-readable name for AEM command code
 /// @param cmd AEM command code (15-bit)
-[[nodiscard]] auto aem_command_name(uint16_t cmd) noexcept -> char const*;
+[[nodiscard]] auto aem_command_name(uint16_t cmd) noexcept -> std::string_view;
 
 //
 // AECPDU AEM Header - Clause 9.2.1.2

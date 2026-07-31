@@ -3,6 +3,8 @@
 
 #include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc::aem {
 
 auto control_value_element_size(uint16_t const vt) noexcept -> size_t
@@ -65,7 +67,7 @@ auto control_value_element_size(uint16_t const vt) noexcept -> size_t
     }
 }
 
-auto control_value_type_name(uint16_t const vt) noexcept -> char const*
+auto control_value_type_name(uint16_t const vt) noexcept -> std::string_view
 {
     switch (vt) {
         case CONTROL_LINEAR_INT8:

@@ -5,9 +5,11 @@
 
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc {
 
-auto aa_mode_name(uint8_t const mode) noexcept -> char const*
+auto aa_mode_name(uint8_t const mode) noexcept -> std::string_view
 {
     switch (mode) {
         case AA_MODE_READ:
@@ -21,7 +23,7 @@ auto aa_mode_name(uint8_t const mode) noexcept -> char const*
     }
 }
 
-auto aa_status_name(uint8_t const status) noexcept -> char const*
+auto aa_status_name(uint8_t const status) noexcept -> std::string_view
 {
     switch (status) {
         case AA_STATUS_SUCCESS:

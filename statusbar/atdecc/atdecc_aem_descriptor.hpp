@@ -89,7 +89,7 @@ constexpr uint16_t NUM_DESCRIPTOR_TYPES = 0x0029;
 
 /// Get human-readable name for descriptor type
 /// @param type AEM descriptor type code
-[[nodiscard]] auto descriptor_type_name(uint16_t type) noexcept -> char const*;
+[[nodiscard]] auto descriptor_type_name(uint16_t type) noexcept -> std::string_view;
 
 //
 // Jack Types - Clause 7.2.7.2

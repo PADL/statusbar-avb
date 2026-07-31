@@ -3,9 +3,11 @@
 
 #include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc {
 
-auto acmp_message_type_name(uint8_t const type) noexcept -> char const*
+auto acmp_message_type_name(uint8_t const type) noexcept -> std::string_view
 {
     switch (type) {
         case ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND:
@@ -41,7 +43,7 @@ auto acmp_message_type_name(uint8_t const type) noexcept -> char const*
     }
 }
 
-auto acmp_status_name(uint8_t const status) noexcept -> char const*
+auto acmp_status_name(uint8_t const status) noexcept -> std::string_view
 {
     switch (status) {
         case ACMP_STATUS_SUCCESS:

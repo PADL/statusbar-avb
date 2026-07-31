@@ -63,11 +63,11 @@ TEST(aem_control_values, family_predicates)
 
 TEST(aem_control_values, value_type_names)
 {
-    EXPECT_EQ(std::strcmp(control_value_type_name(CONTROL_LINEAR_UINT16), "CONTROL_LINEAR_UINT16"), 0);
-    EXPECT_EQ(std::strcmp(control_value_type_name(CONTROL_UTF8), "CONTROL_UTF8"), 0);
-    EXPECT_EQ(std::strcmp(control_value_type_name(CONTROL_VENDOR), "CONTROL_VENDOR"), 0);
-    EXPECT_EQ(std::strcmp(control_value_type_name(CONTROL_VALUE_TYPE_EXPANSION), "EXPANSION"), 0);
-    EXPECT_EQ(std::strcmp(control_value_type_name(0x1000), "Reserved"), 0);
+    EXPECT_EQ(control_value_type_name(CONTROL_LINEAR_UINT16), "CONTROL_LINEAR_UINT16");
+    EXPECT_EQ(control_value_type_name(CONTROL_UTF8), "CONTROL_UTF8");
+    EXPECT_EQ(control_value_type_name(CONTROL_VENDOR), "CONTROL_VENDOR");
+    EXPECT_EQ(control_value_type_name(CONTROL_VALUE_TYPE_EXPANSION), "EXPANSION");
+    EXPECT_EQ(control_value_type_name(0x1000), "Reserved");
 }
 
 TEST(aem_control_values, linear_entry_uint8_accessors)

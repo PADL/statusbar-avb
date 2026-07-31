@@ -3,9 +3,11 @@
 
 #include "statusbar/atdecc/atdecc_aem_units.hpp"
 
+#include <string_view>
+
 namespace statusbar::atdecc::aem {
 
-auto control_unit_code_name(uint8_t const code) noexcept -> char const*
+auto control_unit_code_name(uint8_t const code) noexcept -> std::string_view
 {
     switch (code) {
         // Unitless
@@ -197,7 +199,7 @@ auto control_unit_code_name(uint8_t const code) noexcept -> char const*
     }
 }
 
-auto control_unit_code_suffix(uint8_t const code) noexcept -> char const*
+auto control_unit_code_suffix(uint8_t const code) noexcept -> std::string_view
 {
     switch (code) {
         case UNIT_CODE_PERCENT:
