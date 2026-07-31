@@ -465,9 +465,9 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
                 text += std::format(
                     " signal_selector={} signal_type={} signal_index={} signal_output={}",
                     ssp.descriptor_index.get(),
-                    aem::descriptor_type_name(ssp.signal_type.get()),
-                    ssp.signal_index.get(),
-                    ssp.signal_output.get());
+                    aem::descriptor_type_name(ssp.source.signal_type.get()),
+                    ssp.source.signal_index.get(),
+                    ssp.source.signal_output.get());
             }
             std::println("  {}", text);
             return done_ev.ok();

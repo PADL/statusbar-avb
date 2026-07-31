@@ -408,8 +408,8 @@ auto format_to(OutputIt out, DescriptorExternalPort const& d) -> OutputIt
     out = std::format_to(out, "          port_flags: {:#06x}\n", d.port_flags.get());
     out = std::format_to(out, "          controls: count={} base={}\n", d.number_of_controls.get(), d.base_control.get());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          block_latency: {}\n", d.block_latency.get());
     out = std::format_to(out, "          jack_index: {}\n", d.jack_index.get());
     return out;
@@ -427,8 +427,8 @@ auto format_to(OutputIt out, DescriptorInternalPort const& d) -> OutputIt
     out = std::format_to(out, "          port_flags: {:#06x}\n", d.port_flags.get());
     out = std::format_to(out, "          controls: count={} base={}\n", d.number_of_controls.get(), d.base_control.get());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          block_latency: {}\n", d.block_latency.get());
     out = std::format_to(out, "          internal_index: {}\n", d.internal_index.get());
     return out;
@@ -444,8 +444,8 @@ auto format_to(OutputIt out, DescriptorAudioCluster const& d) -> OutputIt
     out = std::format_to(out, "          channel_count: {}\n", d.channel_count.get());
     out = std::format_to(out, "          format: {:#04x}\n", d.format.get());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     return out;
 }
 
@@ -457,8 +457,8 @@ auto format_to(OutputIt out, DescriptorVideoCluster const& d) -> OutputIt
     out = std::format_to(out, "        VIDEO_CLUSTER Descriptor [{}]:\n", d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          format: {:#04x}\n", d.format.get());
     out = std::format_to(out, "          current_sampling_rate: {}\n", d.current_sampling_rate.get());
     out = std::format_to(out, "          current_aspect_ratio: {}\n", d.current_aspect_ratio.get());
@@ -475,8 +475,8 @@ auto format_to(OutputIt out, DescriptorSensorCluster const& d) -> OutputIt
     out = std::format_to(out, "        SENSOR_CLUSTER Descriptor [{}]:\n", d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          current_format: ");
     for (size_t i = 0; i < 8; ++i) {
         out = std::format_to(out, "{:02x} ", d.current_format.span()[i]);
@@ -556,11 +556,11 @@ auto format_to(OutputIt out, DescriptorSignalSelector const& d) -> OutputIt
     out = std::format_to(out, "        SIGNAL_SELECTOR Descriptor [{}]:\n", d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          current_signal: type=");
-    out = format_descriptor_type_ref(out, d.current_signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.current_signal_index.get(), d.current_signal_output.get());
+    out = format_descriptor_type_ref(out, d.current_signal.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.current_signal.signal_index.get(), d.current_signal.signal_output.get());
     out = std::format_to(out, "          default_signal: type=");
-    out = format_descriptor_type_ref(out, d.default_signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.default_signal_index.get(), d.default_signal_output.get());
+    out = format_descriptor_type_ref(out, d.default_signal.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.default_signal.signal_index.get(), d.default_signal.signal_output.get());
     out = std::format_to(out, "          sources: count={} offset={}\n", d.number_of_sources.get(), d.sources_offset.get());
     return out;
 }
@@ -612,8 +612,8 @@ auto format_to(OutputIt out, DescriptorSignalSplitter const& d) -> OutputIt
     out = std::format_to(out, "        SIGNAL_SPLITTER Descriptor [{}]:\n", d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          number_of_outputs: {}\n", d.number_of_outputs.get());
     out = std::format_to(
         out, "          splitter_map: count={} offset={}\n", d.splitter_map_count.get(), d.splitter_map_offset.get());
@@ -641,8 +641,8 @@ auto format_to(OutputIt out, DescriptorSignalDemultiplexer const& d) -> OutputIt
     out = std::format_to(out, "        SIGNAL_DEMULTIPLEXER Descriptor [{}]:\n", d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          number_of_outputs: {}\n", d.number_of_outputs.get());
     out = std::format_to(
         out,
@@ -684,8 +684,8 @@ auto format_to(OutputIt out, DescriptorSignalTranscoder const& d, size_t data_si
         out = std::format_to(out, "          transcoder_type: <none (pre-2021)>\n");
     }
     out = std::format_to(out, "          signal: type=");
-    out = format_descriptor_type_ref(out, d.signal_type.get());
-    out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+    out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+    out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     out = std::format_to(out, "          values: count={} offset={}\n", d.number_of_values.get(), d.values_offset.get());
     return out;
 }
@@ -722,8 +722,8 @@ auto format_to(OutputIt out, DescriptorControlBlock const& d, size_t data_size =
     out = std::format_to(out, "          final_control_index: {}\n", d.final_control_index.get());
     if (data_size >= DescriptorControlBlock::LENGTH) {
         out = std::format_to(out, "          signal: type=");
-        out = format_descriptor_type_ref(out, d.signal_type.get());
-        out = std::format_to(out, " index={} output={}\n", d.signal_index.get(), d.signal_output.get());
+        out = format_descriptor_type_ref(out, d.signal_source.signal_type.get());
+        out = std::format_to(out, " index={} output={}\n", d.signal_source.signal_index.get(), d.signal_source.signal_output.get());
     } else {
         out = std::format_to(out, "          signal: <none (pre-2021)>\n");
     }

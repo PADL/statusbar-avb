@@ -431,7 +431,7 @@ TEST(aem_print, format_audio_cluster_descriptor)
     cluster.descriptor_index = 0;
     cluster.channel_count = 2;
     cluster.format = 0x40;
-    cluster.signal_type = 0x0005;
+    cluster.signal_source.signal_type = 0x0005;
 
     std::string result;
     format_to(std::back_inserter(result), cluster);
@@ -474,7 +474,7 @@ TEST(aem_print, format_signal_selector_descriptor)
     DescriptorSignalSelector sel{};
     sel.descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR;
     sel.descriptor_index = 0;
-    sel.current_signal_type = 0x0005;
+    sel.current_signal.signal_type = 0x0005;
     sel.number_of_sources = 3;
 
     std::string result;

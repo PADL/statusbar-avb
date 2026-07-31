@@ -9,6 +9,7 @@
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/status/status.hpp"
@@ -307,7 +308,7 @@ struct AemStreamInfoPayload
     quadlet_t msrp_accumulated_latency{0};
 
     /// Bytes 28-33: Stream destination MAC
-    std::array<octet_t, 6> stream_dest_mac{};
+    Eui48 stream_dest_mac{};
 
     /// Bytes 34: MSRP failure code
     octet_t msrp_failure_code{0};
@@ -718,14 +719,8 @@ struct AemSignalSelectorPayload
     /// Bytes 2-3: Descriptor index
     doublet_t descriptor_index{0};
 
-    /// Bytes 4-5: Signal type
-    doublet_t signal_type{0};
-
-    /// Bytes 6-7: Signal index
-    doublet_t signal_index{0};
-
-    /// Bytes 8-9: Signal output
-    doublet_t signal_output{0};
+    /// Bytes 4-9: The {signal_type, signal_index, signal_output} source triple
+    SignalSource source{};
 
     /// Bytes 10-11: Reserved
     doublet_t reserved{0};

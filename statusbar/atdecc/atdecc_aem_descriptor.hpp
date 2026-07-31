@@ -1062,6 +1062,28 @@ static_assert(sizeof(DescriptorStreamPort) == 20, "DescriptorStreamPort must be 
 static_assert(offsetof(DescriptorStreamPort, base_map) == 18);
 
 //
+// Signal Source triple - Clause 7.2.14 onward
+//
+/// One {signal_type, signal_index, signal_output} signal-source triple —
+/// the recurring 6-byte wire unit naming the object a signal comes from.
+/// Used by the port, cluster, and signal-processing descriptors'
+/// signal_source field, SIGNAL_SELECTOR's current/default selection and
+/// sources trailer (Clause 7.2.23), and the tail of the
+/// SET/GET_SIGNAL_SELECTOR payloads (Clause 7.4.29/7.4.30).
+struct SignalSource
+{
+    static constexpr size_t LENGTH = 6;
+
+    doublet_t signal_type{0};    // 0
+    doublet_t signal_index{0};   // 2
+    doublet_t signal_output{0};  // 4
+
+    auto operator<=>(SignalSource const&) const noexcept = default;
+};
+
+static_assert(sizeof(SignalSource) == SignalSource::LENGTH, "SignalSource must be exactly 6 bytes");
+
+//
 // External Port Descriptor - Clause 7.2.14
 //
 /// EXTERNAL_PORT_INPUT/EXTERNAL_PORT_OUTPUT Descriptor - Clause 7.2.14
@@ -1075,9 +1097,7 @@ struct DescriptorExternalPort
     doublet_t port_flags{0};          // 6
     doublet_t number_of_controls{0};  // 8
     doublet_t base_control{0};        // 10
-    doublet_t signal_type{0};         // 12
-    doublet_t signal_index{0};        // 14
-    doublet_t signal_output{0};       // 16
+    SignalSource signal_source{};     // 12
     quadlet_t block_latency{0};       // 18
     doublet_t jack_index{0};          // 22
 
@@ -1104,9 +1124,7 @@ struct DescriptorInternalPort
     doublet_t port_flags{0};          // 6
     doublet_t number_of_controls{0};  // 8
     doublet_t base_control{0};        // 10
-    doublet_t signal_type{0};         // 12
-    doublet_t signal_index{0};        // 14
-    doublet_t signal_output{0};       // 16
+    SignalSource signal_source{};     // 12
     quadlet_t block_latency{0};       // 18
     doublet_t internal_index{0};      // 22
 
@@ -1132,9 +1150,7 @@ struct DescriptorAudioCluster
     doublet_t descriptor_index{0};                        // 2
     AtdeccString object_name{};                           // 4
     doublet_t localized_description{0};                   // 68
-    doublet_t signal_type{0};                             // 70
-    doublet_t signal_index{0};                            // 72
-    doublet_t signal_output{0};                           // 74
+    SignalSource signal_source{};                         // 70
     quadlet_t path_latency{0};                            // 76
     quadlet_t block_latency{0};                           // 80
     doublet_t channel_count{0};                           // 84
@@ -1168,9 +1184,7 @@ struct DescriptorVideoCluster
     doublet_t descriptor_index{0};                        // 2
     AtdeccString object_name{};                           // 4
     doublet_t localized_description{0};                   // 68
-    doublet_t signal_type{0};                             // 70
-    doublet_t signal_index{0};                            // 72
-    doublet_t signal_output{0};                           // 74
+    SignalSource signal_source{};                         // 70
     quadlet_t path_latency{0};                            // 76
     quadlet_t block_latency{0};                           // 80
     octet_t format{0};                                    // 84
@@ -1211,9 +1225,7 @@ struct DescriptorSensorCluster
     doublet_t descriptor_index{0};                         // 2
     AtdeccString object_name{};                            // 4
     doublet_t localized_description{0};                    // 68
-    doublet_t signal_type{0};                              // 70
-    doublet_t signal_index{0};                             // 72
-    doublet_t signal_output{0};                            // 74
+    SignalSource signal_source{};                          // 70
     quadlet_t path_latency{0};                             // 76
     quadlet_t block_latency{0};                            // 80
     Eui64 current_format{};                                // 84
@@ -1517,9 +1529,7 @@ struct DescriptorControl
     quadlet_t reset_time{0};                        // 90
     doublet_t values_offset{LENGTH};                // 94 — always LENGTH on output
     doublet_t number_of_values{0};                  // 96
-    doublet_t signal_type{0};                       // 98
-    doublet_t signal_index{0};                      // 100
-    doublet_t signal_output{0};                     // 102
+    SignalSource signal_source{};                   // 98
 
     /// Variable-length value_details trailer (value_type-specific layout).
     /// Only the first `value_details_length()` bytes are populated.
@@ -1549,7 +1559,7 @@ struct DescriptorControl
 };
 
 static_assert(sizeof(DescriptorControl) == 508, "DescriptorControl must be exactly 508 bytes (104 header + 404 trailer)");
-static_assert(offsetof(DescriptorControl, signal_output) == 102);
+static_assert(offsetof(DescriptorControl, signal_source) == 98);
 static_assert(
     offsetof(DescriptorControl, value_details) == DescriptorControl::LENGTH,
     "DescriptorControl.value_details must start immediately after the 104-byte header");
@@ -1571,12 +1581,8 @@ struct DescriptorSignalSelector
     doublet_t control_domain{0};                            // 78
     doublet_t sources_offset{0};                            // 80
     doublet_t number_of_sources{0};                         // 82
-    doublet_t current_signal_type{0};                       // 84
-    doublet_t current_signal_index{0};                      // 86
-    doublet_t current_signal_output{0};                     // 88
-    doublet_t default_signal_type{0};                       // 90
-    doublet_t default_signal_index{0};                      // 92
-    doublet_t default_signal_output{0};                     // 94
+    SignalSource current_signal{};                          // 84
+    SignalSource default_signal{};                          // 90
 
     auto operator<=>(DescriptorSignalSelector const&) const noexcept = default;
 
@@ -1587,7 +1593,8 @@ struct DescriptorSignalSelector
 };
 
 static_assert(sizeof(DescriptorSignalSelector) == 96, "DescriptorSignalSelector must be exactly 96 bytes");
-static_assert(offsetof(DescriptorSignalSelector, default_signal_output) == 94);
+static_assert(offsetof(DescriptorSignalSelector, current_signal) == 84);
+static_assert(offsetof(DescriptorSignalSelector, default_signal) == 90);
 
 //
 // Mixer Descriptor - Clause 7.2.24
@@ -1692,9 +1699,7 @@ struct DescriptorSignalSplitter
     quadlet_t block_latency{0};                             // 70
     quadlet_t control_latency{0};                           // 74
     doublet_t control_domain{0};                            // 78
-    doublet_t signal_type{0};                               // 80
-    doublet_t signal_index{0};                              // 82
-    doublet_t signal_output{0};                             // 84
+    SignalSource signal_source{};                           // 80
     doublet_t number_of_outputs{0};                         // 86
     doublet_t splitter_map_count{0};                        // 88
     doublet_t splitter_map_offset{0};                       // 90
@@ -1756,9 +1761,7 @@ struct DescriptorSignalDemultiplexer
     quadlet_t block_latency{0};                                  // 70
     quadlet_t control_latency{0};                                // 74
     doublet_t control_domain{0};                                 // 78
-    doublet_t signal_type{0};                                    // 80
-    doublet_t signal_index{0};                                   // 82
-    doublet_t signal_output{0};                                  // 84
+    SignalSource signal_source{};                                // 80
     doublet_t number_of_outputs{0};                              // 86
     doublet_t demultiplexer_map_count{0};                        // 88
     doublet_t demultiplexer_map_offset{0};                       // 90
@@ -1824,9 +1827,7 @@ struct DescriptorSignalTranscoder
     doublet_t control_value_type{0};                          // 80
     doublet_t values_offset{0};                               // 82
     doublet_t number_of_values{0};                            // 84
-    doublet_t signal_type{0};                                 // 86
-    doublet_t signal_index{0};                                // 88
-    doublet_t signal_output{0};                               // 90
+    SignalSource signal_source{};                             // 86
     Eui64 transcoder_type{};                                  // 92 - new in 2021
 
     auto operator<=>(DescriptorSignalTranscoder const&) const noexcept = default;
@@ -1838,7 +1839,7 @@ struct DescriptorSignalTranscoder
 };
 
 static_assert(sizeof(DescriptorSignalTranscoder) == 100, "DescriptorSignalTranscoder must be exactly 100 bytes");
-static_assert(offsetof(DescriptorSignalTranscoder, signal_output) == 90);
+static_assert(offsetof(DescriptorSignalTranscoder, signal_source) == 86);
 static_assert(
     offsetof(DescriptorSignalTranscoder, transcoder_type) == DescriptorSignalTranscoder::MINIMUM_LENGTH,
     "transcoder_type is the first 2021-only field. Its offset must equal MINIMUM_LENGTH so "
@@ -1931,9 +1932,7 @@ struct DescriptorControlBlock
     doublet_t number_of_controls{0};                      // 70
     doublet_t base_control{0};                            // 72
     doublet_t final_control_index{0};                     // 74
-    doublet_t signal_type{0};                             // 76 - new in 2021
-    doublet_t signal_index{0};                            // 78 - new in 2021
-    doublet_t signal_output{0};                           // 80 - new in 2021
+    SignalSource signal_source{};                         // 76 - new in 2021
 
     auto operator<=>(DescriptorControlBlock const&) const noexcept = default;
 
@@ -1945,11 +1944,10 @@ static_assert(sizeof(DescriptorControlBlock) == 82, "DescriptorControlBlock must
 static_assert(offsetof(DescriptorControlBlock, localized_description) == 68);
 static_assert(offsetof(DescriptorControlBlock, final_control_index) == 74);
 static_assert(
-    offsetof(DescriptorControlBlock, signal_type) == DescriptorControlBlock::MINIMUM_LENGTH,
-    "signal_type is the first 2021-only field. Its offset must equal MINIMUM_LENGTH so "
+    offsetof(DescriptorControlBlock, signal_source) == DescriptorControlBlock::MINIMUM_LENGTH,
+    "signal_source is the first 2021-only field. Its offset must equal MINIMUM_LENGTH so "
     "format_to(descriptor, data_size) can gate the read on data_size >= LENGTH — see "
     "docs/ATDECC_DESCRIPTOR_2013_COMPAT.md");
-static_assert(offsetof(DescriptorControlBlock, signal_output) == 80);
 
 //
 // Timing Descriptor - Clause 7.2.34
@@ -2139,6 +2137,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::DescriptorControl> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::SignalSource> : std::true_type
 {};
 
 template <>

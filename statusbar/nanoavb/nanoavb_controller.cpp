@@ -275,9 +275,7 @@ auto NanoAvbAemController::set_signal_selector(
     aem::AemSignalSelectorPayload const payload{
         .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR,
         .descriptor_index = desc_index,
-        .signal_type = signal_type,
-        .signal_index = signal_index,
-        .signal_output = signal_output,
+        .source = {.signal_type = signal_type, .signal_index = signal_index, .signal_output = signal_output},
         .reserved = 0};
     return send_aem_command(target, AEM_COMMAND_SET_SIGNAL_SELECTOR, pack(payload), std::move(completion));
 }

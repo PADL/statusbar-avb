@@ -1395,21 +1395,18 @@ auto make_blob_with_signal_selector() -> std::vector<uint8_t>
     desc.descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR;
     desc.sources_offset = DescriptorSignalSelector::LENGTH;
     desc.number_of_sources = 2;
-    desc.current_signal_type = DESCRIPTOR_AUDIO_CLUSTER;
-    desc.current_signal_index = 0;
-    desc.current_signal_output = 0;
-    desc.default_signal_type = DESCRIPTOR_AUDIO_CLUSTER;
+    desc.current_signal = {.signal_type = DESCRIPTOR_AUDIO_CLUSTER, .signal_index = 0, .signal_output = 0};
+    desc.default_signal = {.signal_type = DESCRIPTOR_AUDIO_CLUSTER, .signal_index = 0, .signal_output = 0};
     span_store(make_span(blob, {.start = desc_offset}), desc);
 
     // Two 6-byte sources: AUDIO_CLUSTER 0 and AUDIO_CLUSTER 1.
     size_t const src0 = desc_offset + DescriptorSignalSelector::LENGTH;
     auto const put_source = [&blob](size_t off, uint16_t type, uint16_t index, uint16_t output) {
-        span_store(make_span(blob, {.start = off, .length = 2}), ieee::doublet_t{type});
-        span_store(make_span(blob, {.start = off + 2, .length = 2}), ieee::doublet_t{index});
-        span_store(make_span(blob, {.start = off + 4, .length = 2}), ieee::doublet_t{output});
+        atdecc::aem::SignalSource const src{.signal_type = type, .signal_index = index, .signal_output = output};
+        span_store(make_span(blob, {.start = off, .length = atdecc::aem::SignalSource::LENGTH}), src);
     };
     put_source(src0, DESCRIPTOR_AUDIO_CLUSTER, 0, 0);
-    put_source(src0 + 6, DESCRIPTOR_AUDIO_CLUSTER, 1, 0);
+    put_source(src0 + atdecc::aem::SignalSource::LENGTH, DESCRIPTOR_AUDIO_CLUSTER, 1, 0);
     return blob;
 }
 
@@ -1422,9 +1419,7 @@ auto make_signal_selector_body(uint16_t descriptor_index, std::optional<std::arr
         atdecc::aem::AemSignalSelectorPayload const payload{
             .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR,
             .descriptor_index = descriptor_index,
-            .signal_type = (*source)[0],
-            .signal_index = (*source)[1],
-            .signal_output = (*source)[2],
+            .source = {.signal_type = (*source)[0], .signal_index = (*source)[1], .signal_output = (*source)[2]},
             .reserved = 0};
         std::vector<uint8_t> body(atdecc::aem::AemSignalSelectorPayload::LENGTH, 0);
         span_store(make_span(body), payload);
@@ -1443,7 +1438,7 @@ auto response_source(std::span<uint8_t const> bytes) -> std::array<uint16_t, 3>
 {
     atdecc::aem::AemSignalSelectorPayload payload{};
     span_load(payload, bytes.first(atdecc::aem::AemSignalSelectorPayload::LENGTH));
-    return {payload.signal_type.get(), payload.signal_index.get(), payload.signal_output.get()};
+    return {payload.source.signal_type.get(), payload.source.signal_index.get(), payload.source.signal_output.get()};
 }
 
 }  // namespace
@@ -1485,7 +1480,7 @@ TEST(signal_selector, get_serves_blob_default_and_set_round_trips)
     EXPECT_TRUE(n >= DescriptorSignalSelector::LENGTH);
     DescriptorSignalSelector parsed{};
     span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
-    EXPECT_EQ(parsed.current_signal_index.get(), static_cast<uint16_t>(1));
+    EXPECT_EQ(parsed.current_signal.signal_index.get(), static_cast<uint16_t>(1));
 }
 
 TEST(signal_selector, source_not_in_descriptor_is_rejected)
@@ -1532,7 +1527,7 @@ TEST(signal_selector, change_callback_gates_and_observes)
 
     // A vetoing callback: the status propagates and the selection stays.
     handler.set_on_signal_selector_changed(
-        [](uint16_t, DescriptorStorageHandler::SignalSourceRef const&) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+        [](uint16_t, atdecc::aem::SignalSource const&) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
     auto const vetoed = run_aem_command(
         cmd_handler,
         atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
@@ -1544,12 +1539,11 @@ TEST(signal_selector, change_callback_gates_and_observes)
     // An accepting callback observes the validated request.
     static uint16_t seen_index = 0xFFFF;
     static uint16_t seen_signal_index = 0xFFFF;
-    handler.set_on_signal_selector_changed(
-        [](uint16_t const descriptor_index, DescriptorStorageHandler::SignalSourceRef const& src) -> uint8_t {
-            seen_index = descriptor_index;
-            seen_signal_index = src.signal_index;
-            return AEM_STATUS_SUCCESS;
-        });
+    handler.set_on_signal_selector_changed([](uint16_t const descriptor_index, atdecc::aem::SignalSource const& src) -> uint8_t {
+        seen_index = descriptor_index;
+        seen_signal_index = src.signal_index.get();
+        return AEM_STATUS_SUCCESS;
+    });
     auto const accepted = run_aem_command(
         cmd_handler,
         atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,

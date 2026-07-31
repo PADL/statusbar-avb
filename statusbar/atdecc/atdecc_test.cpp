@@ -179,14 +179,12 @@ TEST(aem_descriptor_control_block, struct_size_2021)
     EXPECT_EQ(sizeof(DescriptorControlBlock), 82u);
     EXPECT_EQ(DescriptorControlBlock::LENGTH, 82u);
     EXPECT_EQ(DescriptorControlBlock::MINIMUM_LENGTH, 76u);
-    EXPECT_EQ(offsetof(DescriptorControlBlock, signal_type), 76u);
-    EXPECT_EQ(offsetof(DescriptorControlBlock, signal_index), 78u);
-    EXPECT_EQ(offsetof(DescriptorControlBlock, signal_output), 80u);
+    EXPECT_EQ(offsetof(DescriptorControlBlock, signal_source), 76u);
 
     DescriptorControlBlock d{};
-    EXPECT_EQ(static_cast<uint16_t>(d.signal_type), 0u);
-    EXPECT_EQ(static_cast<uint16_t>(d.signal_index), 0u);
-    EXPECT_EQ(static_cast<uint16_t>(d.signal_output), 0u);
+    EXPECT_EQ(static_cast<uint16_t>(d.signal_source.signal_type), 0u);
+    EXPECT_EQ(static_cast<uint16_t>(d.signal_source.signal_index), 0u);
+    EXPECT_EQ(static_cast<uint16_t>(d.signal_source.signal_output), 0u);
 }
 
 TEST(aem_descriptor_signal_transcoder, struct_size_2021)

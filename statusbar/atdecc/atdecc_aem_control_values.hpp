@@ -278,6 +278,28 @@ struct LinearValueEntry
     constexpr auto set_current(T v) noexcept -> void { detail::encode_linear_field(v, current_bytes); }
 };
 
+/// Byte size of one linear value_details entry for an element of
+/// @p element_size bytes: min, max, step, default, current + unit
+/// doublet + localized-string doublet (Table 7.13). The runtime
+/// counterpart of sizeof(LinearValueEntry<T>).
+[[nodiscard]] constexpr auto linear_entry_size(size_t const element_size) noexcept -> size_t
+{
+    return (element_size * 5) + 4;
+}
+
+/// Byte offset of the `current` field within a linear value_details
+/// entry. The runtime counterpart of offsetof(LinearValueEntry<T>,
+/// current_bytes).
+[[nodiscard]] constexpr auto linear_entry_current_offset(size_t const element_size) noexcept -> size_t
+{
+    return element_size * 4;
+}
+
+static_assert(linear_entry_size(sizeof(uint8_t)) == sizeof(LinearValueEntry<uint8_t>));
+static_assert(linear_entry_size(sizeof(uint32_t)) == sizeof(LinearValueEntry<uint32_t>));
+static_assert(linear_entry_current_offset(sizeof(uint8_t)) == offsetof(LinearValueEntry<uint8_t>, current_bytes));
+static_assert(linear_entry_current_offset(sizeof(uint32_t)) == offsetof(LinearValueEntry<uint32_t>, current_bytes));
+
 //
 // Selector and Array families use variable-length layouts; the wire
 // bytes are read/written via helpers in commit 4 (they need the

@@ -63,6 +63,7 @@
 namespace statusbar::nanoavb {
 
 using atdecc::aem::DescriptorStorage;
+using atdecc::aem::SignalSource;
 
 /// Handler that serves descriptors out of an attached DescriptorStorage
 /// blob. Each on_get_<type> override looks up the (configuration, type,
@@ -272,11 +273,9 @@ class DescriptorStorageHandler : public AemEntityHandler
             return false;
         }
         // READ_DESCRIPTOR agrees with GET_SIGNAL_SELECTOR: reflect a runtime
-        // selection over the blob's authored current_signal_* fields.
+        // selection over the blob's authored current_signal triple.
         if (auto const* state = find_selector_state(id.ref.descriptor_index)) {
-            desc.current_signal_type = state->source.signal_type;
-            desc.current_signal_index = state->source.signal_index;
-            desc.current_signal_output = state->source.signal_output;
+            desc.current_signal = state->source;
         }
         return true;
     }
@@ -369,9 +368,10 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (command_type == atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR &&
             id.ref.descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR && out.size() >= SELECTOR_VALUE_WIRE_SIZE) {
             if (auto const current = current_selector_source(id.ref)) {
-                store_signal_source(*current, out);
-                out[6] = 0;  // reserved doublet completing the
-                out[7] = 0;  // AemSignalSelectorPayload quadlet row
+                // The source triple + reserved tail of AemSignalSelectorPayload
+                // (the generic framing supplies the descriptor type/index head).
+                span_store(out.first(SignalSource::LENGTH), *current);
+                span_store(out.subspan(SignalSource::LENGTH, 2), atdecc::doublet_t{0});
                 return SELECTOR_VALUE_WIRE_SIZE;
             }
             return 0;  // no such selector in the blob
@@ -413,30 +413,20 @@ class DescriptorStorageHandler : public AemEntityHandler
     // reroutes its signal path; returning any status other than SUCCESS
     // rejects the change and keeps the previous selection.
 
-    /// One {signal_type, signal_index, signal_output} source triple.
-    struct SignalSourceRef
-    {
-        uint16_t signal_type{0};
-        uint16_t signal_index{0};
-        uint16_t signal_output{0};
-
-        auto operator==(SignalSourceRef const&) const noexcept -> bool = default;
-    };
-
     /// Called when SET_SIGNAL_SELECTOR requests a new source (already
     /// validated against the descriptor's sources list). Return
     /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.
     /// Unset => accept (in-memory only).
     void set_on_signal_selector_changed(
-        statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, SignalSourceRef const&), 64> fn)
+        statusbar::sg14::inplace_function<uint8_t(uint16_t /*descriptor_index*/, SignalSource const&), 64> fn)
     {
         on_signal_selector_changed_ = std::move(fn);
     }
 
     /// The selector's current source: the runtime selection when one was
-    /// made, otherwise the blob's authored current_signal_* fields.
+    /// made, otherwise the blob's authored current_signal triple.
     /// nullopt when the blob has no such SIGNAL_SELECTOR descriptor.
-    [[nodiscard]] auto current_selector_source(DescriptorRef ref) const noexcept -> std::optional<SignalSourceRef>
+    [[nodiscard]] auto current_selector_source(DescriptorRef ref) const noexcept -> std::optional<SignalSource>
     {
         if (auto const* state = find_selector_state(ref.descriptor_index)) {
             return state->source;
@@ -445,7 +435,9 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorSignalSelector::LENGTH) {
             return std::nullopt;
         }
-        return load_signal_source(blob->subspan(CURRENT_SIGNAL_OFFSET));
+        SignalSource current{};
+        span_load(current, blob->subspan(CURRENT_SIGNAL_OFFSET, SignalSource::LENGTH));
+        return current;
     }
 
     // ---- Built-in CLOCK_SOURCE selection (automatic; kit phase 3) ----------
@@ -687,8 +679,87 @@ class DescriptorStorageHandler : public AemEntityHandler
     [[nodiscard]] auto storage() const noexcept -> DescriptorStorage const& { return storage_; }
 
   private:
-    /// True if @p ref names a CONTROL descriptor whose control_type (the
-    /// EUI-64 at offset 82) is the standard IDENTIFY type.
+    // ---- Shared wire / state-table helpers --------------------------------
+
+    [[nodiscard]] static auto read_u16(std::span<uint8_t const> const bytes, size_t const off) noexcept -> uint16_t
+    {
+        atdecc::doublet_t v{};
+        span_load(v, bytes.subspan(off, 2));
+        return v.get();
+    }
+
+    static void write_u16(std::span<uint8_t> const bytes, size_t const off, uint16_t const value) noexcept
+    {
+        atdecc::doublet_t const v{value};
+        span_store(bytes.subspan(off, 2), v);
+    }
+
+    /// True when @p wanted appears in the blob's authored list of T
+    /// entries; the list's byte offset and entry count are read from the
+    /// doublet fields at @p offset_field / @p count_field. Entries that
+    /// would run past the blob's end are ignored.
+    template <typename T>
+    [[nodiscard]] static auto blob_list_contains(
+        std::span<uint8_t const> const blob, size_t const offset_field, size_t const count_field, T const& wanted) noexcept -> bool
+    {
+        size_t const offset = read_u16(blob, offset_field);
+        size_t const count = read_u16(blob, count_field);
+        for (size_t i = 0; i < count; ++i) {
+            size_t const off = offset + (i * sizeof(T));
+            if (off + sizeof(T) > blob.size()) {
+                break;
+            }
+            T candidate{};
+            span_load(candidate, blob.subspan(off, sizeof(T)));
+            if (candidate == wanted) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The first entry in the runtime state table matching @p pred, or
+    /// nullptr.
+    template <typename Table, typename Pred>
+    [[nodiscard]] static auto find_state(Table& states, Pred const pred) noexcept -> decltype(states.data())
+    {
+        for (auto& s : states) {
+            if (pred(s)) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /// The entry matching @p pred, appending @p fresh when absent.
+    /// nullptr when the table is full.
+    template <typename Table, typename Pred>
+    [[nodiscard]] static auto find_or_push_state(Table& states, Pred const pred, typename Table::value_type const& fresh) noexcept
+        -> decltype(states.data())
+    {
+        if (auto* const s = find_state(states, pred)) {
+            return s;
+        }
+        return states.try_push_back(fresh);
+    }
+
+    /// Predicate matching a runtime state entry by its descriptor_index.
+    [[nodiscard]] static constexpr auto by_index(uint16_t const descriptor_index) noexcept
+    {
+        return [descriptor_index](auto const& s) noexcept { return s.descriptor_index == descriptor_index; };
+    }
+
+    /// Predicate matching a runtime state entry by descriptor type + index
+    /// (streams come in INPUT and OUTPUT flavours sharing one table).
+    [[nodiscard]] static constexpr auto by_stream(uint16_t const descriptor_type, uint16_t const descriptor_index) noexcept
+    {
+        return [descriptor_type, descriptor_index](auto const& s) noexcept {
+            return s.descriptor_type == descriptor_type && s.descriptor_index == descriptor_index;
+        };
+    }
+
+    /// True if @p ref names a CONTROL descriptor whose control_type EUI-64
+    /// is the standard IDENTIFY type.
     [[nodiscard]] auto is_identify_control(DescriptorRef ref) const noexcept -> bool
     {
         if (ref.descriptor_type != atdecc::aem::DESCRIPTOR_CONTROL) {
@@ -699,90 +770,49 @@ class DescriptorStorageHandler : public AemEntityHandler
             return false;
         }
         ieee::Eui64 control_type{};
-        span_load(control_type, blob->subspan(82));
+        span_load(control_type, blob->subspan(CONTROL_TYPE_FIELD, sizeof(ieee::Eui64)));
         return control_type == atdecc::aem::CONTROL_TYPE_IDENTIFY;
     }
 
     uint8_t identify_value_{0};
 
-    // SIGNAL_SELECTOR wire geometry (DescriptorSignalSelector field offsets
-    // and the 6-byte source triple).
-    static constexpr size_t SIGNAL_SOURCE_WIRE_SIZE = 6;
-    static constexpr size_t SELECTOR_VALUE_WIRE_SIZE = 8;  // triple + reserved doublet
-    static constexpr size_t SOURCES_OFFSET_FIELD = 80;
-    static constexpr size_t NUMBER_OF_SOURCES_FIELD = 82;
-    static constexpr size_t CURRENT_SIGNAL_OFFSET = 84;
+    // SIGNAL_SELECTOR wire geometry, derived from the shared wire structs.
+    static constexpr size_t SELECTOR_VALUE_WIRE_SIZE = atdecc::aem::AemSignalSelectorPayload::LENGTH -
+        offsetof(atdecc::aem::AemSignalSelectorPayload, source);  // triple + reserved doublet
+    static constexpr size_t SOURCES_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorSignalSelector, sources_offset);
+    static constexpr size_t NUMBER_OF_SOURCES_FIELD = offsetof(atdecc::aem::DescriptorSignalSelector, number_of_sources);
+    static constexpr size_t CURRENT_SIGNAL_OFFSET = offsetof(atdecc::aem::DescriptorSignalSelector, current_signal);
 
     /// A runtime signal-selector selection (descriptor index -> source).
     struct SelectorState
     {
         uint16_t descriptor_index{0};
-        SignalSourceRef source{};
+        SignalSource source{};
     };
 
     static constexpr size_t MAX_SELECTOR_STATES = 8;
 
     [[nodiscard]] auto find_selector_state(uint16_t const descriptor_index) const noexcept -> SelectorState const*
     {
-        for (auto const& s : selector_states_) {
-            if (s.descriptor_index == descriptor_index) {
-                return &s;
-            }
-        }
-        return nullptr;
-    }
-
-    [[nodiscard]] static auto load_signal_source(std::span<uint8_t const> bytes) noexcept -> SignalSourceRef
-    {
-        atdecc::doublet_t t{};
-        atdecc::doublet_t i{};
-        atdecc::doublet_t o{};
-        span_load(t, bytes.subspan(0, 2));
-        span_load(i, bytes.subspan(2, 2));
-        span_load(o, bytes.subspan(4, 2));
-        return SignalSourceRef{.signal_type = t.get(), .signal_index = i.get(), .signal_output = o.get()};
-    }
-
-    static void store_signal_source(SignalSourceRef const& src, std::span<uint8_t> out) noexcept
-    {
-        atdecc::doublet_t const t{src.signal_type};
-        atdecc::doublet_t const i{src.signal_index};
-        atdecc::doublet_t const o{src.signal_output};
-        span_store(out.subspan(0, 2), t);
-        span_store(out.subspan(2, 2), i);
-        span_store(out.subspan(4, 2), o);
+        return find_state(selector_states_, by_index(descriptor_index));
     }
 
     /// Apply a SET_SIGNAL_SELECTOR value ({signal_type, signal_index,
     /// signal_output}) to the selector at @p ref.
     [[nodiscard]] auto set_signal_selector(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
     {
-        if (value.size() < SIGNAL_SOURCE_WIRE_SIZE) {
+        if (value.size() < SignalSource::LENGTH) {
             return atdecc::AEM_STATUS_BAD_ARGUMENTS;
         }
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorSignalSelector::LENGTH) {
             return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
         }
-        auto const requested = load_signal_source(value);
+        SignalSource requested{};
+        span_load(requested, value.first(SignalSource::LENGTH));
 
         // The requested source must be one of the descriptor's authored sources.
-        atdecc::doublet_t sources_offset{};
-        atdecc::doublet_t number_of_sources{};
-        span_load(sources_offset, blob->subspan(SOURCES_OFFSET_FIELD, 2));
-        span_load(number_of_sources, blob->subspan(NUMBER_OF_SOURCES_FIELD, 2));
-        bool valid = false;
-        for (uint16_t n = 0; n < number_of_sources.get(); ++n) {
-            size_t const off = sources_offset.get() + (size_t{n} * SIGNAL_SOURCE_WIRE_SIZE);
-            if (off + SIGNAL_SOURCE_WIRE_SIZE > blob->size()) {
-                break;
-            }
-            if (load_signal_source(blob->subspan(off)) == requested) {
-                valid = true;
-                break;
-            }
-        }
-        if (!valid) {
+        if (!blob_list_contains(*blob, SOURCES_OFFSET_FIELD, NUMBER_OF_SOURCES_FIELD, requested)) {
             return atdecc::AEM_STATUS_BAD_ARGUMENTS;
         }
 
@@ -793,29 +823,26 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
         }
 
-        for (auto& s : selector_states_) {
-            if (s.descriptor_index == ref.descriptor_index) {
-                s.source = requested;
-                return atdecc::AEM_STATUS_SUCCESS;
-            }
-        }
-        if (selector_states_.try_push_back(SelectorState{.descriptor_index = ref.descriptor_index, .source = requested}) ==
-            nullptr) {
+        auto* const state = find_or_push_state(
+            selector_states_, by_index(ref.descriptor_index), SelectorState{.descriptor_index = ref.descriptor_index});
+        if (state == nullptr) {
             return atdecc::AEM_STATUS_NO_RESOURCES;
         }
+        state->source = requested;
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
     statusbar::sg14::inplace_vector<SelectorState, MAX_SELECTOR_STATES> selector_states_;
-    statusbar::sg14::inplace_function<uint8_t(uint16_t, SignalSourceRef const&), 64> on_signal_selector_changed_{};
+    statusbar::sg14::inplace_function<uint8_t(uint16_t, SignalSource const&), 64> on_signal_selector_changed_{};
 
     // CLOCK_SOURCE built-in machinery. DescriptorClockDomain wire offsets and
     // the SET/GET_CLOCK_SOURCE value shape (clock_source_index + reserved,
     // after the 4-byte descriptor header).
-    static constexpr size_t CLOCK_DOMAIN_SOURCE_INDEX_FIELD = 70;
-    static constexpr size_t CLOCK_DOMAIN_SOURCES_OFFSET_FIELD = 72;
-    static constexpr size_t CLOCK_DOMAIN_SOURCES_COUNT_FIELD = 74;
-    static constexpr size_t CLOCK_SOURCE_VALUE_WIRE_SIZE = 4;
+    static constexpr size_t CLOCK_DOMAIN_SOURCE_INDEX_FIELD = offsetof(atdecc::aem::DescriptorClockDomain, clock_source_index);
+    static constexpr size_t CLOCK_DOMAIN_SOURCES_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorClockDomain, clock_sources_offset);
+    static constexpr size_t CLOCK_DOMAIN_SOURCES_COUNT_FIELD = offsetof(atdecc::aem::DescriptorClockDomain, clock_sources_count);
+    static constexpr size_t CLOCK_SOURCE_VALUE_WIRE_SIZE =
+        atdecc::aem::AemClockSourcePayload::LENGTH - offsetof(atdecc::aem::AemClockSourcePayload, clock_source_index);
     static constexpr size_t MAX_CLOCK_DOMAIN_STATES = 4;
 
     /// The runtime clock-source selection for one CLOCK_DOMAIN descriptor.
@@ -827,12 +854,7 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     [[nodiscard]] auto find_clock_domain_state(uint16_t const descriptor_index) const noexcept -> ClockDomainState const*
     {
-        for (auto const& s : clock_domain_states_) {
-            if (s.descriptor_index == descriptor_index) {
-                return &s;
-            }
-        }
-        return nullptr;
+        return find_state(clock_domain_states_, by_index(descriptor_index));
     }
 
     /// Apply a SET_CLOCK_SOURCE value (clock_source_index doublet) to the
@@ -850,24 +872,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         span_load(requested, value.subspan(0, 2));
 
         // The requested index must be one of the domain's authored clock sources.
-        atdecc::doublet_t sources_offset{};
-        atdecc::doublet_t sources_count{};
-        span_load(sources_offset, blob->subspan(CLOCK_DOMAIN_SOURCES_OFFSET_FIELD, 2));
-        span_load(sources_count, blob->subspan(CLOCK_DOMAIN_SOURCES_COUNT_FIELD, 2));
-        bool valid = false;
-        for (uint16_t n = 0; n < sources_count.get(); ++n) {
-            size_t const off = sources_offset.get() + (size_t{n} * 2);
-            if (off + 2 > blob->size()) {
-                break;
-            }
-            atdecc::doublet_t entry{};
-            span_load(entry, blob->subspan(off, 2));
-            if (entry.get() == requested.get()) {
-                valid = true;
-                break;
-            }
-        }
-        if (!valid) {
+        if (!blob_list_contains(*blob, CLOCK_DOMAIN_SOURCES_OFFSET_FIELD, CLOCK_DOMAIN_SOURCES_COUNT_FIELD, requested)) {
             return atdecc::AEM_STATUS_BAD_ARGUMENTS;
         }
 
@@ -878,27 +883,24 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
         }
 
-        for (auto& s : clock_domain_states_) {
-            if (s.descriptor_index == ref.descriptor_index) {
-                s.clock_source_index = requested.get();
-                return atdecc::AEM_STATUS_SUCCESS;
-            }
-        }
-        if (clock_domain_states_.try_push_back(
-                ClockDomainState{.descriptor_index = ref.descriptor_index, .clock_source_index = requested.get()}) == nullptr) {
+        auto* const state = find_or_push_state(
+            clock_domain_states_, by_index(ref.descriptor_index), ClockDomainState{.descriptor_index = ref.descriptor_index});
+        if (state == nullptr) {
             return atdecc::AEM_STATUS_NO_RESOURCES;
         }
+        state->clock_source_index = requested.get();
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
     statusbar::sg14::inplace_vector<ClockDomainState, MAX_CLOCK_DOMAIN_STATES> clock_domain_states_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t), 64> on_clock_source_changed_{};
 
-    // Generic CONTROL built-in machinery. CONTROL descriptor wire offsets
+    // Generic CONTROL built-in machinery. DescriptorControl wire offsets
     // (same layout is_identify_control() reads) and the RAM value store.
-    static constexpr size_t CONTROL_VALUE_TYPE_FIELD = 80;
-    static constexpr size_t CONTROL_VALUES_OFFSET_FIELD = 94;
-    static constexpr size_t CONTROL_NUMBER_OF_VALUES_FIELD = 96;
+    static constexpr size_t CONTROL_VALUE_TYPE_FIELD = offsetof(atdecc::aem::DescriptorControl, control_value_type);
+    static constexpr size_t CONTROL_TYPE_FIELD = offsetof(atdecc::aem::DescriptorControl, control_type);
+    static constexpr size_t CONTROL_VALUES_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorControl, values_offset);
+    static constexpr size_t CONTROL_NUMBER_OF_VALUES_FIELD = offsetof(atdecc::aem::DescriptorControl, number_of_values);
     static constexpr size_t MAX_CONTROL_VALUE_BYTES = 64;
     static constexpr size_t MAX_CONTROL_STATES = 8;
 
@@ -911,12 +913,7 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     [[nodiscard]] auto find_control_state(uint16_t const descriptor_index) const noexcept -> ControlState const*
     {
-        for (auto const& s : control_states_) {
-            if (s.descriptor_index == descriptor_index) {
-                return &s;
-            }
-        }
-        return nullptr;
+        return find_state(control_states_, by_index(descriptor_index));
     }
 
     /// The expected SET/GET_CONTROL value payload size for the CONTROL at
@@ -955,23 +952,15 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
         }
 
-        auto const store = [&value](ControlState& s) {
-            s.value.clear();
-            for (auto const b : value) {
-                s.value.push_back(b);
-            }
-        };
-        for (auto& s : control_states_) {
-            if (s.descriptor_index == ref.descriptor_index) {
-                store(s);
-                return atdecc::AEM_STATUS_SUCCESS;
-            }
-        }
-        auto* s = control_states_.try_push_back(ControlState{.descriptor_index = ref.descriptor_index, .value = {}});
-        if (s == nullptr) {
+        auto* const state = find_or_push_state(
+            control_states_, by_index(ref.descriptor_index), ControlState{.descriptor_index = ref.descriptor_index, .value = {}});
+        if (state == nullptr) {
             return atdecc::AEM_STATUS_NO_RESOURCES;
         }
-        store(*s);
+        state->value.clear();
+        for (auto const b : value) {
+            state->value.push_back(b);
+        }
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
@@ -1005,13 +994,13 @@ class DescriptorStorageHandler : public AemEntityHandler
             return 0;  // non-linear defaults need type-specific extraction
         }
         size_t const elem = atdecc::aem::control_value_element_size(base);
-        size_t const item = (elem * 5) + 4;  // min,max,step,default,current + unit + string
+        size_t const item = atdecc::aem::linear_entry_size(elem);
         size_t const total = static_cast<size_t>(n.get()) * elem;
         if (out.size() < total) {
             return 0;
         }
         for (uint16_t i = 0; i < n.get(); ++i) {
-            size_t const current_off = values_offset.get() + (size_t{i} * item) + (elem * 4);
+            size_t const current_off = values_offset.get() + (size_t{i} * item) + atdecc::aem::linear_entry_current_offset(elem);
             if (current_off + elem > blob->size()) {
                 return 0;
             }
@@ -1027,11 +1016,23 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // MATRIX built-in machinery. DescriptorMatrix wire offsets and the
     // SET/GET_MATRIX region header (after the 4-byte descriptor header).
-    static constexpr size_t MATRIX_CONTROL_VALUE_TYPE_FIELD = 80;
-    static constexpr size_t MATRIX_WIDTH_FIELD = 90;
-    static constexpr size_t MATRIX_HEIGHT_FIELD = 92;
-    static constexpr size_t MATRIX_VALUES_OFFSET_FIELD = 94;
-    static constexpr size_t MATRIX_REGION_HEADER_SIZE = atdecc::aem::AemMatrixPayloadHeader::LENGTH - 4;
+    static constexpr size_t MATRIX_CONTROL_VALUE_TYPE_FIELD = offsetof(atdecc::aem::DescriptorMatrix, control_value_type);
+    static constexpr size_t MATRIX_WIDTH_FIELD = offsetof(atdecc::aem::DescriptorMatrix, width);
+    static constexpr size_t MATRIX_HEIGHT_FIELD = offsetof(atdecc::aem::DescriptorMatrix, height);
+    static constexpr size_t MATRIX_VALUES_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorMatrix, values_offset);
+    // Region-header field offsets within the value span (the
+    // AemMatrixPayloadHeader fields shifted by the 4-byte descriptor head
+    // the generic framing strips).
+    static constexpr size_t MATRIX_REGION_BASE = offsetof(atdecc::aem::AemMatrixPayloadHeader, matrix_column);
+    static constexpr size_t REGION_COLUMN_FIELD = offsetof(atdecc::aem::AemMatrixPayloadHeader, matrix_column) - MATRIX_REGION_BASE;
+    static constexpr size_t REGION_ROW_FIELD = offsetof(atdecc::aem::AemMatrixPayloadHeader, matrix_row) - MATRIX_REGION_BASE;
+    static constexpr size_t REGION_WIDTH_FIELD = offsetof(atdecc::aem::AemMatrixPayloadHeader, region_width) - MATRIX_REGION_BASE;
+    static constexpr size_t REGION_HEIGHT_FIELD = offsetof(atdecc::aem::AemMatrixPayloadHeader, region_height) - MATRIX_REGION_BASE;
+    static constexpr size_t REGION_REP_DIR_COUNT_FIELD =
+        offsetof(atdecc::aem::AemMatrixPayloadHeader, rep_direction_value_count) - MATRIX_REGION_BASE;
+    static constexpr size_t REGION_ITEM_OFFSET_FIELD =
+        offsetof(atdecc::aem::AemMatrixPayloadHeader, item_offset) - MATRIX_REGION_BASE;
+    static constexpr size_t MATRIX_REGION_HEADER_SIZE = atdecc::aem::AemMatrixPayloadHeader::LENGTH - MATRIX_REGION_BASE;
 
     static constexpr size_t MAX_MATRIX_VALUE_BYTES = 512;
     static constexpr size_t MAX_MATRIX_STATES = 4;
@@ -1046,29 +1047,14 @@ class DescriptorStorageHandler : public AemEntityHandler
         std::array<uint8_t, MAX_MATRIX_VALUE_BYTES> values{};
     };
 
-    [[nodiscard]] static auto read_u16(std::span<uint8_t const> const bytes, size_t const off) noexcept -> uint16_t
-    {
-        atdecc::doublet_t v{};
-        span_load(v, bytes.subspan(off, 2));
-        return v.get();
-    }
-
-    static void write_u16(std::span<uint8_t> const bytes, size_t const off, uint16_t const value) noexcept
-    {
-        atdecc::doublet_t const v{value};
-        span_store(bytes.subspan(off, 2), v);
-    }
-
     /// Find (or lazily create from the blob) the value grid for @p ref.
     /// Returns nullptr when the blob has no such MATRIX, its value type is
     /// not linear, or the grid exceeds MAX_MATRIX_VALUE_BYTES. New grids
     /// seed every cell from the authored linear entry's `current` field.
     [[nodiscard]] auto find_or_init_matrix_state(DescriptorRef ref) noexcept -> MatrixState*
     {
-        for (auto& s : matrix_states_) {
-            if (s.descriptor_index == ref.descriptor_index) {
-                return &s;
-            }
+        if (auto* const s = find_state(matrix_states_, by_index(ref.descriptor_index))) {
+            return s;
         }
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorMatrix::LENGTH) {
@@ -1089,10 +1075,9 @@ class DescriptorStorageHandler : public AemEntityHandler
             .height = height,
             .elem_size = static_cast<uint8_t>(elem),
             .values = {}};
-        // Seed every cell from the authored linear entry's `current` field
-        // (entry layout: min, max, step, default, current, unit, string).
+        // Seed every cell from the authored linear entry's `current` field.
         size_t const values_offset = read_u16(*blob, MATRIX_VALUES_OFFSET_FIELD);
-        size_t const current_offset = values_offset + (4 * elem);
+        size_t const current_offset = values_offset + atdecc::aem::linear_entry_current_offset(elem);
         if (current_offset + elem <= blob->size()) {
             for (size_t cell = 0; cell < cells; ++cell) {
                 span_copy(make_span(state.values, {.start = cell * elem, .length = elem}), blob->subspan(current_offset, elem));
@@ -1145,9 +1130,12 @@ class DescriptorStorageHandler : public AemEntityHandler
             return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
         }
         MatrixRegion const region{
-            .column = read_u16(value, 0), .row = read_u16(value, 2), .width = read_u16(value, 4), .height = read_u16(value, 6)};
-        uint16_t const rep_dir_count = read_u16(value, 8);
-        uint16_t const item_offset = read_u16(value, 10);
+            .column = read_u16(value, REGION_COLUMN_FIELD),
+            .row = read_u16(value, REGION_ROW_FIELD),
+            .width = read_u16(value, REGION_WIDTH_FIELD),
+            .height = read_u16(value, REGION_HEIGHT_FIELD)};
+        uint16_t const rep_dir_count = read_u16(value, REGION_REP_DIR_COUNT_FIELD);
+        uint16_t const item_offset = read_u16(value, REGION_ITEM_OFFSET_FIELD);
         bool const rep = (rep_dir_count & atdecc::aem::AemMatrixPayloadHeader::REP_FLAG) != 0;
         uint16_t const direction = static_cast<uint16_t>(
             (rep_dir_count >> atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) &
@@ -1203,12 +1191,12 @@ class DescriptorStorageHandler : public AemEntityHandler
             return 0;
         }
         MatrixRegion const region{
-            .column = read_u16(request, 0),
-            .row = read_u16(request, 2),
-            .width = read_u16(request, 4),
-            .height = read_u16(request, 6)};
-        uint16_t const rep_dir_count = read_u16(request, 8);
-        uint16_t const item_offset = read_u16(request, 10);
+            .column = read_u16(request, REGION_COLUMN_FIELD),
+            .row = read_u16(request, REGION_ROW_FIELD),
+            .width = read_u16(request, REGION_WIDTH_FIELD),
+            .height = read_u16(request, REGION_HEIGHT_FIELD)};
+        uint16_t const rep_dir_count = read_u16(request, REGION_REP_DIR_COUNT_FIELD);
+        uint16_t const item_offset = read_u16(request, REGION_ITEM_OFFSET_FIELD);
         uint16_t const direction = static_cast<uint16_t>(
             (rep_dir_count >> atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) &
             atdecc::aem::AemMatrixPayloadHeader::DIRECTION_MASK);
@@ -1229,7 +1217,10 @@ class DescriptorStorageHandler : public AemEntityHandler
         }
 
         span_copy(out.first(MATRIX_REGION_HEADER_SIZE), request.first(MATRIX_REGION_HEADER_SIZE));
-        write_u16(out, 8, static_cast<uint16_t>((direction << atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) | count));
+        write_u16(
+            out,
+            REGION_REP_DIR_COUNT_FIELD,
+            static_cast<uint16_t>((direction << atdecc::aem::AemMatrixPayloadHeader::DIRECTION_SHIFT) | count));
         auto const values_out = out.subspan(MATRIX_REGION_HEADER_SIZE);
         for_each_region_cell(*state, region, direction, item_offset, [&](size_t const n, size_t const cell_off) {
             if (n >= count) {
@@ -1247,8 +1238,8 @@ class DescriptorStorageHandler : public AemEntityHandler
     // MIXER built-in machinery. DescriptorMixer wire offsets (the value
     // trailer entry layout matches CONTROL/MATRIX: min, max, step,
     // default, current, unit, string).
-    static constexpr size_t MIXER_CONTROL_VALUE_TYPE_FIELD = 80;
-    static constexpr size_t MIXER_VALUE_OFFSET_FIELD = 86;
+    static constexpr size_t MIXER_CONTROL_VALUE_TYPE_FIELD = offsetof(atdecc::aem::DescriptorMixer, control_value_type);
+    static constexpr size_t MIXER_VALUE_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorMixer, value_offset);
 
     static constexpr size_t MAX_MIXER_VALUE_BYTES = 8;
     static constexpr size_t MAX_MIXER_STATES = 8;
@@ -1267,10 +1258,8 @@ class DescriptorStorageHandler : public AemEntityHandler
     /// `current` field.
     [[nodiscard]] auto find_or_init_mixer_state(DescriptorRef ref) noexcept -> MixerState*
     {
-        for (auto& s : mixer_states_) {
-            if (s.descriptor_index == ref.descriptor_index) {
-                return &s;
-            }
+        if (auto* const s = find_state(mixer_states_, by_index(ref.descriptor_index))) {
+            return s;
         }
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorMixer::LENGTH) {
@@ -1283,10 +1272,9 @@ class DescriptorStorageHandler : public AemEntityHandler
             return nullptr;
         }
         MixerState state{.descriptor_index = ref.descriptor_index, .elem_size = static_cast<uint8_t>(elem), .value = {}};
-        // Seed from the authored linear entry's `current` field
-        // (entry layout: min, max, step, default, current, unit, string).
+        // Seed from the authored linear entry's `current` field.
         size_t const value_offset = read_u16(*blob, MIXER_VALUE_OFFSET_FIELD);
-        size_t const current_offset = value_offset + (4 * elem);
+        size_t const current_offset = value_offset + atdecc::aem::linear_entry_current_offset(elem);
         if (current_offset + elem <= blob->size()) {
             span_copy(make_span(state.value, {.start = 0, .length = elem}), blob->subspan(current_offset, elem));
         }
@@ -1322,9 +1310,9 @@ class DescriptorStorageHandler : public AemEntityHandler
     statusbar::sg14::inplace_function<uint8_t(uint16_t, std::span<uint8_t const>), 64> on_mixer_changed_{};
 
     // STREAM lifecycle machinery (kit phase 5). DescriptorStream wire offsets.
-    static constexpr size_t STREAM_CURRENT_FORMAT_FIELD = 74;
-    static constexpr size_t STREAM_FORMATS_OFFSET_FIELD = 82;
-    static constexpr size_t STREAM_NUMBER_OF_FORMATS_FIELD = 84;
+    static constexpr size_t STREAM_CURRENT_FORMAT_FIELD = offsetof(atdecc::aem::DescriptorStream, current_format);
+    static constexpr size_t STREAM_FORMATS_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorStream, formats_offset);
+    static constexpr size_t STREAM_NUMBER_OF_FORMATS_FIELD = offsetof(atdecc::aem::DescriptorStream, number_of_formats);
     static constexpr size_t MAX_STREAM_STATES = 16;
 
     /// Runtime state for one STREAM_INPUT/OUTPUT descriptor.
@@ -1345,22 +1333,15 @@ class DescriptorStorageHandler : public AemEntityHandler
     [[nodiscard]] auto find_stream_state(uint16_t const descriptor_type, uint16_t const descriptor_index) const noexcept
         -> StreamRuntimeState const*
     {
-        for (auto const& s : stream_states_) {
-            if (s.descriptor_type == descriptor_type && s.descriptor_index == descriptor_index) {
-                return &s;
-            }
-        }
-        return nullptr;
+        return find_state(stream_states_, by_stream(descriptor_type, descriptor_index));
     }
 
     /// Find (or lazily create) the runtime state for @p ref. Returns
     /// nullptr when the blob has no such stream or the table is full.
     [[nodiscard]] auto find_or_init_stream_state(DescriptorRef ref) noexcept -> StreamRuntimeState*
     {
-        for (auto& s : stream_states_) {
-            if (s.descriptor_type == ref.descriptor_type && s.descriptor_index == ref.descriptor_index) {
-                return &s;
-            }
+        if (auto* const s = find_state(stream_states_, by_stream(ref.descriptor_type, ref.descriptor_index))) {
+            return s;
         }
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorStream::MINIMUM_LENGTH) {
@@ -1377,23 +1358,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     {
         ieee::Eui64 authored{};
         span_load(authored, blob.subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
-        if (authored == format) {
-            return true;
-        }
-        size_t const formats_offset = read_u16(blob, STREAM_FORMATS_OFFSET_FIELD);
-        size_t const count = read_u16(blob, STREAM_NUMBER_OF_FORMATS_FIELD);
-        for (size_t i = 0; i < count; ++i) {
-            size_t const off = formats_offset + (i * sizeof(ieee::Eui64));
-            if (off + sizeof(ieee::Eui64) > blob.size()) {
-                break;
-            }
-            ieee::Eui64 candidate{};
-            span_load(candidate, blob.subspan(off, sizeof(ieee::Eui64)));
-            if (candidate == format) {
-                return true;
-            }
-        }
-        return false;
+        return authored == format || blob_list_contains(blob, STREAM_FORMATS_OFFSET_FIELD, STREAM_NUMBER_OF_FORMATS_FIELD, format);
     }
 
     /// Apply a SET_STREAM_FORMAT (Clause 7.4.9). @p value is the payload
@@ -1450,9 +1415,9 @@ class DescriptorStorageHandler : public AemEntityHandler
     statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t, bool), 64> on_streaming_changed_{};
 
     // AUDIO_UNIT sampling-rate machinery. DescriptorAudioUnit wire offsets.
-    static constexpr size_t AUDIO_UNIT_CURRENT_RATE_FIELD = 136;
-    static constexpr size_t AUDIO_UNIT_RATES_OFFSET_FIELD = 140;
-    static constexpr size_t AUDIO_UNIT_RATES_COUNT_FIELD = 142;
+    static constexpr size_t AUDIO_UNIT_CURRENT_RATE_FIELD = offsetof(atdecc::aem::DescriptorAudioUnit, current_sampling_rate);
+    static constexpr size_t AUDIO_UNIT_RATES_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorAudioUnit, sampling_rates_offset);
+    static constexpr size_t AUDIO_UNIT_RATES_COUNT_FIELD = offsetof(atdecc::aem::DescriptorAudioUnit, sampling_rates_count);
     static constexpr size_t MAX_AUDIO_UNIT_STATES = 4;
 
     /// The runtime sampling rate for one AUDIO_UNIT descriptor.
@@ -1464,12 +1429,7 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     [[nodiscard]] auto find_sampling_rate_state(uint16_t const descriptor_index) const noexcept -> SamplingRateState const*
     {
-        for (auto const& s : sampling_rate_states_) {
-            if (s.descriptor_index == descriptor_index) {
-                return &s;
-            }
-        }
-        return nullptr;
+        return find_state(sampling_rate_states_, by_index(descriptor_index));
     }
 
     /// Apply a SET_SAMPLING_RATE (Clause 7.4.21). @p value is the payload
@@ -1489,19 +1449,8 @@ class DescriptorStorageHandler : public AemEntityHandler
 
         ieee::quadlet_t authored{0};
         span_load(authored, blob->subspan(AUDIO_UNIT_CURRENT_RATE_FIELD, 4));
-        bool supported = authored.get() == requested.get();
-        size_t const rates_offset = read_u16(*blob, AUDIO_UNIT_RATES_OFFSET_FIELD);
-        size_t const count = read_u16(*blob, AUDIO_UNIT_RATES_COUNT_FIELD);
-        for (size_t i = 0; !supported && i < count; ++i) {
-            size_t const off = rates_offset + (i * 4);
-            if (off + 4 > blob->size()) {
-                break;
-            }
-            ieee::quadlet_t candidate{0};
-            span_load(candidate, blob->subspan(off, 4));
-            supported = candidate.get() == requested.get();
-        }
-        if (!supported) {
+        if (authored != requested &&
+            !blob_list_contains(*blob, AUDIO_UNIT_RATES_OFFSET_FIELD, AUDIO_UNIT_RATES_COUNT_FIELD, requested)) {
             return atdecc::AEM_STATUS_NOT_SUPPORTED;
         }
 
@@ -1511,16 +1460,12 @@ class DescriptorStorageHandler : public AemEntityHandler
                 return status;
             }
         }
-        for (auto& s : sampling_rate_states_) {
-            if (s.descriptor_index == ref.descriptor_index) {
-                s.rate = requested.get();
-                return atdecc::AEM_STATUS_SUCCESS;
-            }
-        }
-        if (sampling_rate_states_.try_push_back(
-                SamplingRateState{.descriptor_index = ref.descriptor_index, .rate = requested.get()}) == nullptr) {
+        auto* const state = find_or_push_state(
+            sampling_rate_states_, by_index(ref.descriptor_index), SamplingRateState{.descriptor_index = ref.descriptor_index});
+        if (state == nullptr) {
             return atdecc::AEM_STATUS_NO_RESOURCES;
         }
+        state->rate = requested.get();
         return atdecc::AEM_STATUS_SUCCESS;
     }
 

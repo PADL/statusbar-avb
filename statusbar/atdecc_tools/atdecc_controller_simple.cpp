@@ -781,9 +781,9 @@ void ControllerSimple::handle_aem_response(
             name,
             aem_status_name(status),
             ssp.descriptor_index.get(),
-            descriptor_type_name(ssp.signal_type.get()),
-            ssp.signal_index.get(),
-            ssp.signal_output.get()));
+            descriptor_type_name(ssp.source.signal_type.get()),
+            ssp.source.signal_index.get(),
+            ssp.source.signal_output.get()));
         return;
     }
     // Show status for other commands (identify, start/stop streaming, etc.)

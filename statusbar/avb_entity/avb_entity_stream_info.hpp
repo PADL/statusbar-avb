@@ -51,7 +51,7 @@ namespace statusbar::avb_entity {
     }
 
     out.stream_id = stream->stream_id;
-    span_copy(make_span(out.stream_dest_mac), stream->stream_dest_mac.span());
+    out.stream_dest_mac = stream->stream_dest_mac;
     out.stream_vlan_id = ieee::doublet_t{stream->stream_vlan_id};
     out.msrp_accumulated_latency = ieee::quadlet_t{static_cast<uint32_t>(presentation_offset_ns)};
 
@@ -92,7 +92,7 @@ namespace statusbar::avb_entity {
     if (sink->connected) {
         flags |= stream_info_flags::CONNECTED | stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID;
         out.stream_id = sink->stream_id;
-        span_copy(make_span(out.stream_dest_mac), sink->stream_dest_mac.span());
+        out.stream_dest_mac = sink->stream_dest_mac;
         if (sink->stream_vlan_id != 0) {
             flags |= stream_info_flags::STREAM_VLAN_ID_VALID;
             out.stream_vlan_id = ieee::doublet_t{sink->stream_vlan_id};

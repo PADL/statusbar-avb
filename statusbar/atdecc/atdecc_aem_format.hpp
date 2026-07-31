@@ -729,7 +729,11 @@ auto format_to(OutputIt out, AemSignalSelectorPayload const& p) -> OutputIt
 {
     out = format_aem_descriptor(out, p.descriptor_type.get(), static_cast<uint16_t>(p.descriptor_index));
     return std::format_to(
-        out, "        signal: type={:#06x} index={} output={}\n", p.signal_type.get(), p.signal_index.get(), p.signal_output.get());
+        out,
+        "        signal: type={:#06x} index={} output={}\n",
+        p.source.signal_type.get(),
+        p.source.signal_index.get(),
+        p.source.signal_output.get());
 }
 
 /// @param out Output iterator to write formatted text to
