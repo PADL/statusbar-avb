@@ -140,7 +140,7 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
         // name 0): seed it from config; the base then serves get/set and reflects
         // the current value here in on_get_entity. In-memory only (resets on
         // restart) unless a caller wires set_on_entity_name_changed for NV storage.
-        manage_entity_name(AtdeccString{std::string{entity_name}.c_str()});
+        manage_entity_name(AtdeccString{entity_name});
     }
 
     auto on_get_entity(nanoavb::DescriptorId id, DescriptorEntity& desc) -> bool override
@@ -151,7 +151,7 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
         }
         desc.entity_id = entity_id_;
         desc.entity_model_id = entity_model_id_;
-        desc.firmware_version = AtdeccString{firmware_version_.c_str()};
+        desc.firmware_version = AtdeccString{firmware_version_};
         return true;
     }
 

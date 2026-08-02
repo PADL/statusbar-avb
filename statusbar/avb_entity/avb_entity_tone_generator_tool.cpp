@@ -71,7 +71,7 @@ struct Config
         .media_lock_to_gptp = true,
         .tone_amplitude = 0.1F,  // -20 dBFS
         .entity_name = "",
-        .firmware_version = statusbar::avb_entity::build_version,
+        .firmware_version = std::string{statusbar::avb_entity::build_version},
     };
 
     /// Lowest white-key tone (MIDI note number). Default 60 = C4; each channel

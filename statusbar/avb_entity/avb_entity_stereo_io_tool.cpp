@@ -79,7 +79,7 @@ struct Config
         .filter_gain_db = 0.0,  // Unity gain by default
         .filter_q = 0.707,      // Butterworth Q
         .entity_name = "AVB Stereo IO Tool",
-        .firmware_version = statusbar::avb_entity::build_version,
+        .firmware_version = std::string{statusbar::avb_entity::build_version},
     };
 
     // Runtime options

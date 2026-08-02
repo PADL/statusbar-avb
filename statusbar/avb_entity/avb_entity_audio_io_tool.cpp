@@ -71,7 +71,7 @@ struct Config
         .filter_gain_db = 0.0,
         .filter_q = 0.707,
         .entity_name = "",
-        .firmware_version = statusbar::avb_entity::build_version,
+        .firmware_version = std::string{statusbar::avb_entity::build_version},
     };
 };
 

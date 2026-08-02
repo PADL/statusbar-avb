@@ -139,8 +139,8 @@ auto AvbEntityStereoIO::create_entity_model() const -> nanoavb::EntityModel
     entity.talker_capabilities = atdecc::talker_capabilities::IMPLEMENTED | atdecc::talker_capabilities::AUDIO_SOURCE;
     entity.listener_stream_sinks.set(1);
     entity.listener_capabilities = atdecc::listener_capabilities::IMPLEMENTED | atdecc::listener_capabilities::AUDIO_SINK;
-    entity.entity_name = AtdeccString{config_.entity_name.c_str()};
-    entity.firmware_version = AtdeccString{config_.firmware_version.c_str()};
+    entity.entity_name = AtdeccString{config_.entity_name};
+    entity.firmware_version = AtdeccString{config_.firmware_version};
     entity.group_name = AtdeccString{"Stereo I/O"};
     entity.serial_number = AtdeccString{"000001"};
     entity.current_configuration.set(0);

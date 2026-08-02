@@ -439,7 +439,7 @@ auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::
     // Write a real DescriptorEntity into the descriptor slot so the
     // struct round-trips through span_load_padded.
     DescriptorEntity desc{};
-    desc.entity_name = AtdeccString{std::string{entity_name}.c_str()};
+    desc.entity_name = AtdeccString{entity_name};
     desc.configurations_count = 1;
     span_store(make_span(blob, {.start = desc_offset}), desc);
 
