@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::avtp {
@@ -41,7 +42,7 @@ enum class EecfEncMode : uint8_t
 
 /// Get human-readable name for EECF encryption mode
 /// @param enc The EECF encryption mode value
-[[nodiscard]] auto eecf_enc_mode_name(uint8_t enc) noexcept -> char const*;
+[[nodiscard]] auto eecf_enc_mode_name(uint8_t enc) noexcept -> std::string_view;
 
 //
 // EecfPdu - IEEE 1722-2016 Clause 17

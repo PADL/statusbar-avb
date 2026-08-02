@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::avtp {
@@ -43,7 +44,7 @@ enum class AefEncMode : uint8_t
 
 /// Get human-readable name for AEF encryption mode
 /// @param enc The AEF encryption mode value
-[[nodiscard]] auto aef_enc_mode_name(uint8_t enc) noexcept -> char const*;
+[[nodiscard]] auto aef_enc_mode_name(uint8_t enc) noexcept -> std::string_view;
 
 //
 // AefContinuousPdu - IEEE 1722-2016 Clause 13, continuous stream variant

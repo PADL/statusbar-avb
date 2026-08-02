@@ -21,6 +21,7 @@
 #include <expected>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::avtp {
@@ -68,7 +69,7 @@ enum class Am824SampleRate : uint8_t
 
 /// Get human-readable name for AM824 sample rate
 /// @param rate The AM824 sample rate code
-[[nodiscard]] auto am824_sample_rate_name(Am824SampleRate rate) noexcept -> char const*;
+[[nodiscard]] auto am824_sample_rate_name(Am824SampleRate rate) noexcept -> std::string_view;
 
 /// Get numeric sample rate value in Hz
 /// @param rate The AM824 sample rate code

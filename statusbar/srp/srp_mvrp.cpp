@@ -3,9 +3,11 @@
 
 #include "statusbar/srp/srp_mvrp.hpp"
 
+#include <string_view>
+
 namespace statusbar::srp::mvrp {
 
-auto attribute_type_name(AttributeType type) noexcept -> char const*
+auto attribute_type_name(AttributeType type) noexcept -> std::string_view
 {
     switch (type) {
         case AttributeType::VlanIdentifier:

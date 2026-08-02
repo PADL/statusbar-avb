@@ -3,9 +3,11 @@
 
 #include "statusbar/gptp/gptp_base.hpp"
 
+#include <string_view>
+
 namespace statusbar::gptp {
 
-auto message_type_name(uint8_t msg_type) noexcept -> char const*
+auto message_type_name(uint8_t msg_type) noexcept -> std::string_view
 {
     switch (msg_type) {
         case MESSAGE_TYPE_SYNC:

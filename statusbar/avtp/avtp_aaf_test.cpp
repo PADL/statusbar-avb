@@ -91,25 +91,25 @@ TEST(aaf_names, sample_rate_name)
 TEST(aaf_format, name_float_32bit)
 {
     auto const name = aaf_format_name(AafFormat::float_32bit);
-    EXPECT_TRUE(std::strcmp(name, "32-bit float") == 0);
+    EXPECT_EQ(name, "32-bit float");
 }
 
 TEST(aaf_format, name_int_32bit)
 {
     auto const name = aaf_format_name(AafFormat::int_32bit);
-    EXPECT_TRUE(std::strcmp(name, "32-bit integer") == 0);
+    EXPECT_EQ(name, "32-bit integer");
 }
 
 TEST(aaf_format, name_int_24bit)
 {
     auto const name = aaf_format_name(AafFormat::int_24bit);
-    EXPECT_TRUE(std::strcmp(name, "24-bit integer") == 0);
+    EXPECT_EQ(name, "24-bit integer");
 }
 
 TEST(aaf_format, name_int_16bit)
 {
     auto const name = aaf_format_name(AafFormat::int_16bit);
-    EXPECT_TRUE(std::strcmp(name, "16-bit integer") == 0);
+    EXPECT_EQ(name, "16-bit integer");
 }
 
 TEST(aaf_format, bytes_per_sample_16bit)
@@ -147,7 +147,7 @@ TEST(aaf_format, default_bit_depth)
 TEST(aaf_sample_rate, name_48khz)
 {
     auto const name = aaf_sample_rate_name(AafSampleRate::rate_48_khz);
-    EXPECT_TRUE(std::strcmp(name, "48 kHz") == 0);
+    EXPECT_EQ(name, "48 kHz");
 }
 
 TEST(aaf_sample_rate, hz_48khz)

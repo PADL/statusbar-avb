@@ -14,6 +14,7 @@
 #include "statusbar/status/status.hpp"
 
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace statusbar::gptp {
@@ -51,7 +52,7 @@ enum class GptpError : int
 };
 
 /// Human-readable name for a GptpError value.
-[[nodiscard]] auto gptp_error_name(GptpError e) noexcept -> char const*;
+[[nodiscard]] auto gptp_error_name(GptpError e) noexcept -> std::string_view;
 
 /// Error category for gPTP errors.
 class GptpErrorCategory : public std::error_category
@@ -59,7 +60,10 @@ class GptpErrorCategory : public std::error_category
   public:
     [[nodiscard]] auto name() const noexcept -> char const* override { return "statusbar.gptp"; }
 
-    [[nodiscard]] auto message(int ev) const -> std::string override { return gptp_error_name(static_cast<GptpError>(ev)); }
+    [[nodiscard]] auto message(int ev) const -> std::string override
+    {
+        return std::string{gptp_error_name(static_cast<GptpError>(ev))};
+    }
 };
 
 /// Get the gPTP error category singleton.

@@ -3,9 +3,11 @@
 
 #include "statusbar/srp/srp_mrp.hpp"
 
+#include <string_view>
+
 namespace statusbar::srp::mrp {
 
-auto attribute_event_name(AttributeEvent event) noexcept -> char const*
+auto attribute_event_name(AttributeEvent event) noexcept -> std::string_view
 {
     switch (event) {
         case AttributeEvent::New:

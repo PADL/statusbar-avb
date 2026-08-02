@@ -511,10 +511,10 @@ TEST(avtp_maap_names, message_type_name_known)
 
 TEST(avtp_maap_names, message_type_name_unknown)
 {
-    auto const* name = statusbar::avtp::maap_message_type_name(0);
-    EXPECT_TRUE(name != nullptr);
-    auto const* name2 = statusbar::avtp::maap_message_type_name(255);
-    EXPECT_TRUE(name2 != nullptr);
+    auto const name = statusbar::avtp::maap_message_type_name(0);
+    EXPECT_TRUE(!name.empty());
+    auto const name2 = statusbar::avtp::maap_message_type_name(255);
+    EXPECT_TRUE(!name2.empty());
 }
 
 //

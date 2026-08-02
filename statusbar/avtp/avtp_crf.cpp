@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace statusbar::avtp {
 
@@ -75,7 +76,7 @@ auto crf_set_timestamp(std::span<uint8_t> const timestamp_data, size_t const ind
     return true;
 }
 
-auto crf_type_name(uint8_t const type) noexcept -> char const*
+auto crf_type_name(uint8_t const type) noexcept -> std::string_view
 {
     switch (static_cast<CrfType>(type)) {
         case CrfType::user:
@@ -93,12 +94,12 @@ auto crf_type_name(uint8_t const type) noexcept -> char const*
     }
 }
 
-auto crf_type_name(CrfType const type) noexcept -> char const*
+auto crf_type_name(CrfType const type) noexcept -> std::string_view
 {
     return crf_type_name(static_cast<uint8_t>(type));
 }
 
-auto crf_pull_name(uint8_t const pull) noexcept -> char const*
+auto crf_pull_name(uint8_t const pull) noexcept -> std::string_view
 {
     switch (static_cast<CrfPull>(pull)) {
         case CrfPull::multiply_1_0:
@@ -118,7 +119,7 @@ auto crf_pull_name(uint8_t const pull) noexcept -> char const*
     }
 }
 
-auto crf_pull_name(CrfPull const pull) noexcept -> char const*
+auto crf_pull_name(CrfPull const pull) noexcept -> std::string_view
 {
     return crf_pull_name(static_cast<uint8_t>(pull));
 }

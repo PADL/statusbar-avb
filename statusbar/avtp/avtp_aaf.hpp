@@ -53,7 +53,7 @@ enum class AafFormat : uint8_t
 
 /// Get human-readable name for AAF format
 /// @param format The AAF sample format code
-[[nodiscard]] auto aaf_format_name(AafFormat format) noexcept -> char const*;
+[[nodiscard]] auto aaf_format_name(AafFormat format) noexcept -> std::string_view;
 
 /// Get bytes per sample for a given format
 /// @param format The AAF sample format code
@@ -114,7 +114,7 @@ enum class AafSampleRate : uint8_t
 
 /// Get human-readable name for AAF sample rate
 /// @param rate The AAF nominal sample rate code
-[[nodiscard]] auto aaf_sample_rate_name(AafSampleRate rate) noexcept -> char const*;
+[[nodiscard]] auto aaf_sample_rate_name(AafSampleRate rate) noexcept -> std::string_view;
 
 /// Get numeric sample rate value in Hz
 /// @param rate The AAF nominal sample rate code

@@ -3,9 +3,11 @@
 
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 
+#include <string_view>
+
 namespace statusbar::nanoavb {
 
-auto nanoavb_error_name(NanoAvbError e) noexcept -> char const*
+auto nanoavb_error_name(NanoAvbError e) noexcept -> std::string_view
 {
     switch (e) {
         case NanoAvbError::Success:

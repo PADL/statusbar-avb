@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <string_view>
+
 // Build version baked into the entities' ENTITY descriptor firmware_version
 // -- what controllers (macOS box info, Hive-style tools) display as the
 // device firmware, and what the runtime patches into the served descriptor
@@ -15,6 +17,6 @@
 
 namespace statusbar::avb_entity {
 
-inline constexpr char const* build_version = STATUSBAR_AVB_VERSION;
+inline constexpr std::string_view build_version = STATUSBAR_AVB_VERSION;
 
 }  // namespace statusbar::avb_entity

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 
@@ -76,7 +77,7 @@ enum class NanoAvbError : int
 
 /// Get human-readable name for NanoAvbError
 /// @param e The error code to convert to a string
-[[nodiscard]] auto nanoavb_error_name(NanoAvbError e) noexcept -> char const*;
+[[nodiscard]] auto nanoavb_error_name(NanoAvbError e) noexcept -> std::string_view;
 
 /// Error category for NanoAvb errors
 class NanoAvbErrorCategory : public std::error_category
@@ -85,7 +86,10 @@ class NanoAvbErrorCategory : public std::error_category
     [[nodiscard]] auto name() const noexcept -> char const* override { return "statusbar.nanoavb"; }
 
     /// @param ev The error code value to convert to a message string
-    [[nodiscard]] auto message(int ev) const -> std::string override { return nanoavb_error_name(static_cast<NanoAvbError>(ev)); }
+    [[nodiscard]] auto message(int ev) const -> std::string override
+    {
+        return std::string{nanoavb_error_name(static_cast<NanoAvbError>(ev))};
+    }
 };
 
 /// Get the NanoAvb error category singleton

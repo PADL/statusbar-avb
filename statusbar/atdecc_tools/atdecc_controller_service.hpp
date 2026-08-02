@@ -52,6 +52,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace statusbar::atdecc_tools {
 
@@ -199,7 +200,7 @@ class ControllerService
 /// The platform's default controller backend name: the system AVB framework
 /// on macOS (the only path to the Mac's own virtual entity), our raw-socket
 /// stack everywhere else.
-[[nodiscard]] constexpr auto default_controller_backend() noexcept -> char const*
+[[nodiscard]] constexpr auto default_controller_backend() noexcept -> std::string_view
 {
 #if defined(__APPLE__)
     return "avb";

@@ -3,9 +3,11 @@
 
 #include "statusbar/gptp/gptp_error.hpp"
 
+#include <string_view>
+
 namespace statusbar::gptp {
 
-auto gptp_error_name(GptpError e) noexcept -> char const*
+auto gptp_error_name(GptpError e) noexcept -> std::string_view
 {
     switch (e) {
         case GptpError::Success:

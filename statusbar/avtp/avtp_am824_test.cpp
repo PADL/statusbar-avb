@@ -65,7 +65,7 @@ TEST(am824_names, sample_rate_name)
 TEST(am824_sample_rate, name_48khz)
 {
     auto const name = am824_sample_rate_name(Am824SampleRate::rate_48_khz);
-    EXPECT_TRUE(std::strcmp(name, "48 kHz") == 0);
+    EXPECT_EQ(name, "48 kHz");
 }
 
 TEST(am824_sample_rate, hz_48khz)

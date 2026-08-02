@@ -51,7 +51,7 @@ enum class StreamKind : uint8_t
     other,  ///< unrecognized subtype / non-AM824 61883 format
 };
 
-[[nodiscard]] constexpr auto stream_kind_name(StreamKind kind) noexcept -> char const*
+[[nodiscard]] constexpr auto stream_kind_name(StreamKind kind) noexcept -> std::string_view
 {
     switch (kind) {
         case StreamKind::am824:

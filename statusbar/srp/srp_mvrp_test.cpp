@@ -62,8 +62,8 @@ TEST(mvrp_attribute_type, name_runtime)
 {
     // Use volatile to prevent compile-time evaluation of constexpr function
     uint8_t volatile vlan_id_v = 1, unknown_v = 99;
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(vlan_id_v)), "VlanIdentifier"), 0);
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(unknown_v)), "Unknown"), 0);
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(vlan_id_v)), "VlanIdentifier");
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(unknown_v)), "Unknown");
 }
 
 //

@@ -7,6 +7,7 @@
 /// Complete list of AVTP subtype values and header format classification
 
 #include <cstdint>
+#include <string_view>
 
 namespace statusbar::avtp {
 
@@ -33,7 +34,7 @@ enum class AvtpHeaderType : uint8_t
 
 /// Get human-readable name for header type
 /// @param type The AVTP header type to name
-[[nodiscard]] auto avtp_header_type_name(AvtpHeaderType type) noexcept -> char const*;
+[[nodiscard]] auto avtp_header_type_name(AvtpHeaderType type) noexcept -> std::string_view;
 
 //
 // AVTP Encapsulation Styles - IEEE 1722-2016 Section 4.4
@@ -50,7 +51,7 @@ enum class AvtpEncapsulation : uint8_t
 
 /// Get human-readable name for encapsulation style
 /// @param encap The AVTP encapsulation style to name
-[[nodiscard]] auto avtp_encapsulation_name(AvtpEncapsulation encap) noexcept -> char const*;
+[[nodiscard]] auto avtp_encapsulation_name(AvtpEncapsulation encap) noexcept -> std::string_view;
 
 //
 // AVTP Subtype Values - IEEE 1722-2016 Table 6
@@ -109,8 +110,8 @@ constexpr uint8_t ef_control = 0xFFU;  ///< Experimental Format Control (Clause 
 struct AvtpSubtypeInfo
 {
     uint8_t subtype;                  ///< The subtype value
-    char const* name;                 ///< Short name (e.g., "AAF", "MAAP")
-    char const* description;          ///< Full description
+    std::string_view name;            ///< Short name (e.g., "AAF", "MAAP")
+    std::string_view description;     ///< Full description
     AvtpHeaderType header_type;       ///< Which header format to use
     AvtpEncapsulation encapsulation;  ///< Continuous or discrete
 };
@@ -199,12 +200,12 @@ struct AvtpSubtypeInfo
 /// Get the short name for a subtype value
 /// \param subtype The AVTP subtype value (0x00-0xFF)
 /// \return Short name string (e.g., "AAF", "MAAP", "Reserved")
-[[nodiscard]] auto avtp_subtype_name(uint8_t subtype) noexcept -> char const*;
+[[nodiscard]] auto avtp_subtype_name(uint8_t subtype) noexcept -> std::string_view;
 
 /// Get a full description for a subtype value
 /// \param subtype The AVTP subtype value (0x00-0xFF)
 /// \return Full description string
-[[nodiscard]] constexpr auto avtp_subtype_description(uint8_t const subtype) noexcept -> char const*
+[[nodiscard]] constexpr auto avtp_subtype_description(uint8_t const subtype) noexcept -> std::string_view
 {
     switch (subtype) {
         case AvtpSubtype::iec_61883_iidc:

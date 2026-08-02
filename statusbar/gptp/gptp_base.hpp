@@ -15,6 +15,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 
 namespace statusbar::gptp {
 
@@ -188,7 +189,7 @@ struct ClockQuality
 static_assert(sizeof(ClockQuality) == 4, "ClockQuality must be exactly 4 bytes");
 
 /// Get human-readable name for gPTP message type
-[[nodiscard]] auto message_type_name(uint8_t msg_type) noexcept -> char const*;
+[[nodiscard]] auto message_type_name(uint8_t msg_type) noexcept -> std::string_view;
 
 }  // namespace statusbar::gptp
 

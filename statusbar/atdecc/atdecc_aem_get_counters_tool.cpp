@@ -54,7 +54,7 @@ constexpr Eui64 MY_CONTROLLER_ENTITY_ID(0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00
 // streaming problem (vs. the healthy MEDIA_LOCKED / TIMESTAMP_VALID / FRAMES_RX).
 struct CounterDef
 {
-    char const* name;
+    std::string_view name;
     bool is_error;
 };
 constexpr std::array<CounterDef, 13> STREAM_INPUT_COUNTERS{{
@@ -90,7 +90,7 @@ constexpr std::array<CounterDef, 7> STREAM_OUTPUT_COUNTERS{{
     auto const& table =
         is_output ? std::span<CounterDef const>{STREAM_OUTPUT_COUNTERS} : std::span<CounterDef const>{STREAM_INPUT_COUNTERS};
     if (bit < table.size()) {
-        return table[bit].name;
+        return std::string{table[bit].name};
     }
     if (bit >= 24) {
         return std::format("ENTITY_SPECIFIC_{}", bit - 23);

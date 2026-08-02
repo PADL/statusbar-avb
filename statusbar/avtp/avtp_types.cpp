@@ -3,9 +3,11 @@
 
 #include "statusbar/avtp/avtp_types.hpp"
 
+#include <string_view>
+
 namespace statusbar::avtp {
 
-auto avtp_header_type_name(AvtpHeaderType const type) noexcept -> char const*
+auto avtp_header_type_name(AvtpHeaderType const type) noexcept -> std::string_view
 {
     switch (type) {
         case AvtpHeaderType::stream:
@@ -20,7 +22,7 @@ auto avtp_header_type_name(AvtpHeaderType const type) noexcept -> char const*
     }
 }
 
-auto avtp_encapsulation_name(AvtpEncapsulation const encap) noexcept -> char const*
+auto avtp_encapsulation_name(AvtpEncapsulation const encap) noexcept -> std::string_view
 {
     switch (encap) {
         case AvtpEncapsulation::continuous:
@@ -33,7 +35,7 @@ auto avtp_encapsulation_name(AvtpEncapsulation const encap) noexcept -> char con
     }
 }
 
-auto avtp_subtype_name(uint8_t const subtype) noexcept -> char const*
+auto avtp_subtype_name(uint8_t const subtype) noexcept -> std::string_view
 {
     switch (subtype) {
         case AvtpSubtype::iec_61883_iidc:

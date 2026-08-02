@@ -19,6 +19,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::avtp {
@@ -46,7 +47,7 @@ constexpr uint8_t MAAP_VERSION = 1;
 
 /// Get human-readable name for MAAP message type
 /// @param type The MAAP message type value (1-3)
-[[nodiscard]] auto maap_message_type_name(uint8_t type) noexcept -> char const*;
+[[nodiscard]] auto maap_message_type_name(uint8_t type) noexcept -> std::string_view;
 
 //
 // MAAP Timing Constants - IEEE 1722 Annex B.3.3

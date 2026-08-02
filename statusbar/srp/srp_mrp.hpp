@@ -12,6 +12,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::srp::mrp {
@@ -55,7 +56,7 @@ enum class AttributeEvent : uint8_t
 };
 
 /// Get the name of an AttributeEvent for debugging/logging
-[[nodiscard]] auto attribute_event_name(AttributeEvent event) noexcept -> char const*;
+[[nodiscard]] auto attribute_event_name(AttributeEvent event) noexcept -> std::string_view;
 
 //
 // MRP Vector Header - IEEE 802.1Q-2014 Clause 10.8.2.6

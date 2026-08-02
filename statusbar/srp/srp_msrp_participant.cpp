@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdio>  // stderr (diagnostic [srp-mrp] logging)
 #include <print>
+#include <string_view>
 
 namespace statusbar::srp::msrp {
 

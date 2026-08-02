@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 #include <print>
+#include <string_view>
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -222,7 +223,7 @@ namespace {
     return std::string{buf, 16};
 }
 
-[[nodiscard]] auto plan_label(ReplyKind kind) -> char const*
+[[nodiscard]] auto plan_label(ReplyKind kind) -> std::string_view
 {
     switch (kind) {
         case ReplyKind::SuccessWaiting:

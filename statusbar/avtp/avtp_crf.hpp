@@ -20,6 +20,7 @@
 #include <expected>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::avtp {
@@ -57,11 +58,11 @@ constexpr uint8_t CRF_TYPE_MACHINE_CYCLE = 0x04U;
 
 /// Get human-readable name for CRF type
 /// @param type The CRF type value (0x00-0x04)
-[[nodiscard]] auto crf_type_name(uint8_t type) noexcept -> char const*;
+[[nodiscard]] auto crf_type_name(uint8_t type) noexcept -> std::string_view;
 
 /// Get human-readable name for CRF type enum
 /// @param type The CRF type enum value
-[[nodiscard]] auto crf_type_name(CrfType type) noexcept -> char const*;
+[[nodiscard]] auto crf_type_name(CrfType type) noexcept -> std::string_view;
 
 //
 // CRF Pull Field Values - IEEE 1722-2016 Table 27
@@ -88,11 +89,11 @@ constexpr uint8_t CRF_PULL_MULT_1_DIV_8 = 0x05U;
 
 /// Get human-readable name for pull field value
 /// @param pull The CRF pull field value (0x00-0x05)
-[[nodiscard]] auto crf_pull_name(uint8_t pull) noexcept -> char const*;
+[[nodiscard]] auto crf_pull_name(uint8_t pull) noexcept -> std::string_view;
 
 /// Get human-readable name for CrfPull enum
 /// @param pull The CRF pull enum value
-[[nodiscard]] auto crf_pull_name(CrfPull pull) noexcept -> char const*;
+[[nodiscard]] auto crf_pull_name(CrfPull pull) noexcept -> std::string_view;
 
 /// Calculate actual frequency from base_frequency and pull field
 /// Returns the nominal frequency in Hz as a double

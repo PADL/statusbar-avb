@@ -3,11 +3,13 @@
 
 #include "statusbar/stun/stun_error.hpp"
 
+#include <string_view>
+
 namespace statusbar::stun {
 
 namespace {
 
-[[nodiscard]] auto stun_error_message(StunError e) -> char const*
+[[nodiscard]] auto stun_error_message(StunError e) -> std::string_view
 {
     switch (e) {
         case StunError::DatagramTooShort:
@@ -72,7 +74,7 @@ namespace {
 
 auto StunErrorCategory::message(int ev) const -> std::string
 {
-    return stun_error_message(static_cast<StunError>(ev));
+    return std::string{stun_error_message(static_cast<StunError>(ev))};
 }
 
 auto stun_error_category() noexcept -> std::error_category const&

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace statusbar::avtp {
 
@@ -283,7 +284,7 @@ auto am824_get_audio_payload(std::span<uint8_t const> packet) noexcept -> std::s
     return packet.subspan(Am824Pdu::HEADER_LENGTH, std::min(declared, available));
 }
 
-auto am824_sample_rate_name(Am824SampleRate const rate) noexcept -> char const*
+auto am824_sample_rate_name(Am824SampleRate const rate) noexcept -> std::string_view
 {
     switch (rate) {
         case Am824SampleRate::rate_32_khz:

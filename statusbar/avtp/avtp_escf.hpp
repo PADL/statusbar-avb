@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::avtp {
@@ -41,7 +42,7 @@ enum class EscfSigMode : uint8_t
 
 /// Get human-readable name for ESCF signature mode
 /// @param sig The ESCF signature mode value
-[[nodiscard]] auto escf_sig_mode_name(uint8_t sig) noexcept -> char const*;
+[[nodiscard]] auto escf_sig_mode_name(uint8_t sig) noexcept -> std::string_view;
 
 //
 // EscfPdu - IEEE 1722-2016 Clause 16

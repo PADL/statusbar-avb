@@ -5,11 +5,13 @@
 
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <string_view>
+
 namespace statusbar::avtp {
 
 using statusbar::span_load;
 
-auto escf_sig_mode_name(uint8_t const sig) noexcept -> char const*
+auto escf_sig_mode_name(uint8_t const sig) noexcept -> std::string_view
 {
     switch (sig) {
         case 0x00:

@@ -3,9 +3,11 @@
 
 #include "statusbar/srp/srp_msrp.hpp"
 
+#include <string_view>
+
 namespace statusbar::srp::msrp {
 
-auto attribute_type_name(AttributeType type) noexcept -> char const*
+auto attribute_type_name(AttributeType type) noexcept -> std::string_view
 {
     switch (type) {
         case AttributeType::TalkerAdvertise:
@@ -21,7 +23,7 @@ auto attribute_type_name(AttributeType type) noexcept -> char const*
     }
 }
 
-auto listener_declaration_name(ListenerDeclaration decl) noexcept -> char const*
+auto listener_declaration_name(ListenerDeclaration decl) noexcept -> std::string_view
 {
     switch (decl) {
         case ListenerDeclaration::Ignore:
@@ -37,7 +39,7 @@ auto listener_declaration_name(ListenerDeclaration decl) noexcept -> char const*
     }
 }
 
-auto failure_code_name(FailureCode code) noexcept -> char const*
+auto failure_code_name(FailureCode code) noexcept -> std::string_view
 {
     switch (code) {
         case FailureCode::NoFailure:

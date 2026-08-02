@@ -14,6 +14,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::srp::mvrp {
@@ -46,7 +47,7 @@ enum class AttributeType : uint8_t
 };
 
 /// Get the name of an AttributeType for debugging/logging
-[[nodiscard]] auto attribute_type_name(AttributeType type) noexcept -> char const*;
+[[nodiscard]] auto attribute_type_name(AttributeType type) noexcept -> std::string_view;
 
 //
 // MVRP Attribute Lengths - IEEE 802.1Q-2014 Clause 11.2.3.1.5

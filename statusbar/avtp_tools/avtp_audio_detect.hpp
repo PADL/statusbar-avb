@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace statusbar::avtp_tools {
 
@@ -25,7 +26,7 @@ enum class StreamKind : uint8_t
     am824_mbla,
 };
 
-[[nodiscard]] constexpr auto kind_name(StreamKind k) noexcept -> char const*
+[[nodiscard]] constexpr auto kind_name(StreamKind k) noexcept -> std::string_view
 {
     switch (k) {
         case StreamKind::aaf:

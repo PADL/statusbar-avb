@@ -5,11 +5,13 @@
 
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <string_view>
+
 namespace statusbar::avtp {
 
 using statusbar::span_load;
 
-auto eecf_enc_mode_name(uint8_t const enc) noexcept -> char const*
+auto eecf_enc_mode_name(uint8_t const enc) noexcept -> std::string_view
 {
     switch (enc) {
         case 0x00:

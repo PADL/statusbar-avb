@@ -14,6 +14,7 @@
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace statusbar::srp::msrp {
@@ -53,7 +54,7 @@ enum class AttributeType : uint8_t
 };
 
 /// Get the name of an AttributeType for debugging/logging
-[[nodiscard]] auto attribute_type_name(AttributeType type) noexcept -> char const*;
+[[nodiscard]] auto attribute_type_name(AttributeType type) noexcept -> std::string_view;
 
 //
 // MSRP Attribute Lengths - IEEE 802.1Q-2014 Clause 35.2.2.5, Table 35-2
@@ -90,7 +91,7 @@ enum class ListenerDeclaration : uint8_t
 };
 
 /// Get the name of a ListenerDeclaration for debugging/logging
-[[nodiscard]] auto listener_declaration_name(ListenerDeclaration decl) noexcept -> char const*;
+[[nodiscard]] auto listener_declaration_name(ListenerDeclaration decl) noexcept -> std::string_view;
 
 //
 // MSRP Talker Failure Codes - IEEE 802.1Q-2014 Clause 35.2.2.8.7, Table 35-6
@@ -120,7 +121,7 @@ enum class FailureCode : uint8_t
 };
 
 /// Get the name of a FailureCode for debugging/logging
-[[nodiscard]] auto failure_code_name(FailureCode code) noexcept -> char const*;
+[[nodiscard]] auto failure_code_name(FailureCode code) noexcept -> std::string_view;
 
 //
 // MSRP Talker Rank - IEEE 802.1Q-2014 Clause 35.2.2.8.5

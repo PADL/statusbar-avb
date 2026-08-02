@@ -92,11 +92,11 @@ TEST(msrp_attribute_type, name_runtime)
 {
     // Use volatile to prevent compile-time evaluation of constexpr function
     uint8_t volatile talker_advertise_v = 1, talker_failed_v = 2, listener_v = 3, domain_v = 4, unknown_v = 99;
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(talker_advertise_v)), "TalkerAdvertise"), 0);
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(talker_failed_v)), "TalkerFailed"), 0);
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(listener_v)), "Listener"), 0);
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(domain_v)), "Domain"), 0);
-    EXPECT_EQ(std::strcmp(attribute_type_name(static_cast<AttributeType>(unknown_v)), "Unknown"), 0);
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(talker_advertise_v)), "TalkerAdvertise");
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(talker_failed_v)), "TalkerFailed");
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(listener_v)), "Listener");
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(domain_v)), "Domain");
+    EXPECT_EQ(attribute_type_name(static_cast<AttributeType>(unknown_v)), "Unknown");
 }
 
 //
@@ -127,11 +127,11 @@ TEST(msrp_listener_declaration, name_runtime)
 {
     // Use volatile to prevent compile-time evaluation of constexpr function
     uint8_t volatile ignore_v = 0, asking_failed_v = 1, ready_v = 2, ready_failed_v = 3, unknown_v = 99;
-    EXPECT_EQ(std::strcmp(listener_declaration_name(static_cast<ListenerDeclaration>(ignore_v)), "Ignore"), 0);
-    EXPECT_EQ(std::strcmp(listener_declaration_name(static_cast<ListenerDeclaration>(asking_failed_v)), "AskingFailed"), 0);
-    EXPECT_EQ(std::strcmp(listener_declaration_name(static_cast<ListenerDeclaration>(ready_v)), "Ready"), 0);
-    EXPECT_EQ(std::strcmp(listener_declaration_name(static_cast<ListenerDeclaration>(ready_failed_v)), "ReadyFailed"), 0);
-    EXPECT_EQ(std::strcmp(listener_declaration_name(static_cast<ListenerDeclaration>(unknown_v)), "Unknown"), 0);
+    EXPECT_EQ(listener_declaration_name(static_cast<ListenerDeclaration>(ignore_v)), "Ignore");
+    EXPECT_EQ(listener_declaration_name(static_cast<ListenerDeclaration>(asking_failed_v)), "AskingFailed");
+    EXPECT_EQ(listener_declaration_name(static_cast<ListenerDeclaration>(ready_v)), "Ready");
+    EXPECT_EQ(listener_declaration_name(static_cast<ListenerDeclaration>(ready_failed_v)), "ReadyFailed");
+    EXPECT_EQ(listener_declaration_name(static_cast<ListenerDeclaration>(unknown_v)), "Unknown");
 }
 
 //
@@ -149,10 +149,10 @@ TEST(msrp_failure_code, name_runtime)
 {
     // Use volatile to prevent compile-time evaluation of constexpr function
     uint8_t volatile no_failure_v = 0, insufficient_bandwidth_v = 1, sr_class_mismatch_v = 19, unknown_v = 99;
-    EXPECT_EQ(std::strcmp(failure_code_name(static_cast<FailureCode>(no_failure_v)), "NoFailure"), 0);
-    EXPECT_EQ(std::strcmp(failure_code_name(static_cast<FailureCode>(insufficient_bandwidth_v)), "InsufficientBandwidth"), 0);
-    EXPECT_EQ(std::strcmp(failure_code_name(static_cast<FailureCode>(sr_class_mismatch_v)), "SrClassPriorityMismatch"), 0);
-    EXPECT_EQ(std::strcmp(failure_code_name(static_cast<FailureCode>(unknown_v)), "Unknown"), 0);
+    EXPECT_EQ(failure_code_name(static_cast<FailureCode>(no_failure_v)), "NoFailure");
+    EXPECT_EQ(failure_code_name(static_cast<FailureCode>(insufficient_bandwidth_v)), "InsufficientBandwidth");
+    EXPECT_EQ(failure_code_name(static_cast<FailureCode>(sr_class_mismatch_v)), "SrClassPriorityMismatch");
+    EXPECT_EQ(failure_code_name(static_cast<FailureCode>(unknown_v)), "Unknown");
 }
 
 //

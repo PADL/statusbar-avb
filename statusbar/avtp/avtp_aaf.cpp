@@ -10,6 +10,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace statusbar::avtp {
 
@@ -351,7 +352,7 @@ auto aaf_get_audio_payload(std::span<uint8_t const> const packet) noexcept -> st
     return packet.subspan(AafPdu::HEADER_LENGTH, std::min(declared, available));
 }
 
-auto aaf_format_name(AafFormat const format) noexcept -> char const*
+auto aaf_format_name(AafFormat const format) noexcept -> std::string_view
 {
     switch (format) {
         case AafFormat::user_specified:
@@ -371,7 +372,7 @@ auto aaf_format_name(AafFormat const format) noexcept -> char const*
     }
 }
 
-auto aaf_sample_rate_name(AafSampleRate const rate) noexcept -> char const*
+auto aaf_sample_rate_name(AafSampleRate const rate) noexcept -> std::string_view
 {
     switch (rate) {
         case AafSampleRate::user_specified:

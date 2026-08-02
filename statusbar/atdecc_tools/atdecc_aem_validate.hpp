@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace statusbar::atdecc_tools {
@@ -22,7 +23,7 @@ enum class Severity : uint8_t
     Error,
 };
 
-[[nodiscard]] inline auto severity_name(Severity s) -> char const*
+[[nodiscard]] inline auto severity_name(Severity s) -> std::string_view
 {
     switch (s) {
         case Severity::Error:

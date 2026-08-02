@@ -73,13 +73,13 @@ TEST(mrp_attribute_event, name_runtime)
 {
     // Use volatile to prevent compile-time evaluation of constexpr function
     uint8_t volatile new_v = 0, joinin_v = 1, in_v = 2, joinmt_v = 3, mt_v = 4, lv_v = 5, unknown_v = 99;
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(new_v)), "New"), 0);
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(joinin_v)), "JoinIn"), 0);
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(in_v)), "In"), 0);
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(joinmt_v)), "JoinMt"), 0);
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(mt_v)), "Mt"), 0);
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(lv_v)), "Lv"), 0);
-    EXPECT_EQ(std::strcmp(attribute_event_name(static_cast<AttributeEvent>(unknown_v)), "Unknown"), 0);
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(new_v)), "New");
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(joinin_v)), "JoinIn");
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(in_v)), "In");
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(joinmt_v)), "JoinMt");
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(mt_v)), "Mt");
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(lv_v)), "Lv");
+    EXPECT_EQ(attribute_event_name(static_cast<AttributeEvent>(unknown_v)), "Unknown");
 }
 
 //

@@ -250,12 +250,12 @@ struct AtdeccString
 
     constexpr AtdeccString() noexcept = default;
 
-    constexpr explicit AtdeccString(char const* s) noexcept { assign(s); }
+    constexpr explicit AtdeccString(std::string_view const s) noexcept { assign(s); }
 
-    constexpr void assign(char const* s) noexcept
+    constexpr void assign(std::string_view const s) noexcept
     {
         size_t i = 0;
-        for (; i < LENGTH && s[i] != '\0'; ++i) {
+        for (; i < LENGTH && i < s.size(); ++i) {
             value[i] = static_cast<uint8_t>(s[i]);
         }
         for (; i < LENGTH; ++i) {
