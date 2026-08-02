@@ -18,6 +18,7 @@
 #include "statusbar/ieee/ieee_ethernet.hpp"
 
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace statusbar::atdecc::aem {
@@ -160,10 +161,35 @@ inline constexpr Eui64 CONTROL_TYPE_FQTSS_LOCK_CLASS_BANDWIDTH{0x90, 0xE0, 0xF0,
 /// Vendor-defined control types return false.
 [[nodiscard]] auto is_standard_control_type(Eui64 const& t) noexcept -> bool;
 
+/// One control-type naming entry: a control_type EUI-64 and its
+/// human-readable name. `name` must reference storage that outlives
+/// every lookup (string literals / constexpr tables) — lookups return
+/// it as a view and it may be retained by logging::StaticStr.
+struct ControlTypeEntry
+{
+    Eui64 type;
+    std::string_view name;
+};
+
+/// The standard control types of IEEE 1722.1-2021 Table 7.4, sorted
+/// ascending by EUI-64 — for enumeration (tooling, docs) or binary
+/// search.
+[[nodiscard]] auto standard_control_type_entries() noexcept -> std::span<ControlTypeEntry const>;
+
 /// Human-readable name of a standard control type, or "VENDOR_DEFINED"
 /// for non-IEEE OUIs, or "UNKNOWN" for reserved ranges inside the IEEE
 /// OUI. Matches the names in IEEE 1722.1-2021 Table 7.4.
 /// @param t Control type EUI-64 from a CONTROL descriptor
 [[nodiscard]] auto control_type_name(Eui64 const& t) noexcept -> std::string_view;
+
+/// Like control_type_name(t), but consults @p vendor first: an
+/// application-supplied table naming its vendor-defined control types
+/// (entries are checked in order — a handful of entries beats any map,
+/// so no sorting is required). Unmatched types fall back to the
+/// standard names / "VENDOR_DEFINED" / "UNKNOWN".
+/// @param t Control type EUI-64 from a CONTROL descriptor
+/// @param vendor Application-owned naming entries; the span and the
+///        names it references must outlive the returned view
+[[nodiscard]] auto control_type_name(Eui64 const& t, std::span<ControlTypeEntry const> vendor) noexcept -> std::string_view;
 
 }  // namespace statusbar::atdecc::aem

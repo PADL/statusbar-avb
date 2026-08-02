@@ -5,6 +5,9 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <array>
+#include <span>
+
 using namespace statusbar;
 using namespace statusbar::atdecc::aem;
 
@@ -46,6 +49,42 @@ TEST(aem_control_types, reserved_in_ieee_oui_returns_unknown)
     // general category per Table 7.4.
     Eui64 const reserved{0x90, 0xE0, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x1D};
     EXPECT_EQ(control_type_name(reserved), "UNKNOWN");
+}
+
+TEST(aem_control_types, standard_entries_enumerable_and_sorted)
+{
+    auto const entries = standard_control_type_entries();
+    EXPECT_EQ(entries.size(), size_t{82});
+    for (size_t i = 1; i < entries.size(); ++i) {
+        EXPECT_TRUE(entries[i - 1].type < entries[i].type);
+    }
+    // Every enumerated entry names itself through the lookup.
+    for (auto const& e : entries) {
+        EXPECT_EQ(control_type_name(e.type), e.name);
+    }
+}
+
+TEST(aem_control_types, vendor_table_names_vendor_types)
+{
+    constexpr Eui64 acme_special{0x70, 0xB3, 0xD5, 0x00, 0x00, 0x00, 0x12, 0x34};
+    constexpr Eui64 acme_other{0x70, 0xB3, 0xD5, 0x00, 0x00, 0x00, 0x56, 0x78};
+    constexpr std::array<ControlTypeEntry, 2> vendor{{
+        {.type = acme_special, .name = "ACME_SPECIAL"},
+        {.type = acme_other, .name = "ACME_OTHER"},
+    }};
+
+    EXPECT_EQ(control_type_name(acme_special, vendor), "ACME_SPECIAL");
+    EXPECT_EQ(control_type_name(acme_other, vendor), "ACME_OTHER");
+
+    // Standard types still resolve through the fallback.
+    EXPECT_EQ(control_type_name(CONTROL_TYPE_GAIN, vendor), "GAIN");
+
+    // Unlisted vendor types keep the generic label.
+    Eui64 const unlisted{0x70, 0xB3, 0xD5, 0x00, 0x00, 0x00, 0xFF, 0xFF};
+    EXPECT_EQ(control_type_name(unlisted, vendor), "VENDOR_DEFINED");
+
+    // An empty table behaves exactly like the single-argument lookup.
+    EXPECT_EQ(control_type_name(acme_special, {}), "VENDOR_DEFINED");
 }
 
 TEST_MAIN(statusbar_atdecc, atdecc_aem_control_types_test)
