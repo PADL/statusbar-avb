@@ -5,9 +5,9 @@
 
 #include "statusbar/avtp_crypto/p256_wire.hpp"
 
-#include "statusbar/avtp_crypto/p256_wire_constants.hpp"
 #include "statusbar/crypto/p256/p256.hpp"
 #include "statusbar/crypto/p256/p256_ecdsa.hpp"
+#include "statusbar/crypto/p256/p256_wire_constants.hpp"
 #include "statusbar/crypto/util/crypto_util_internal.hpp"
 
 namespace statusbar::crypto::avtp {
