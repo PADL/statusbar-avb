@@ -27,6 +27,7 @@
 #include "statusbar/crypto/polyval/polyval_hw.hpp"
 #include "statusbar/crypto/sha/sha256_hw.hpp"
 #include "statusbar/crypto/sha/sha512_hw.hpp"
+#include "statusbar/crypto/util/crypto_backend.hpp"
 #include "statusbar/crypto/util/crypto_util_internal.hpp"
 
 #include <algorithm>
@@ -155,6 +156,7 @@ static void usage()
         "  ecies_decrypt        <seed> <ciphertext>         -> ok|fail plaintext\n"
         "  x25519_ecies_encrypt <pubkey> <entropy> <pt>     -> V||C||T (hex)\n"
         "  x25519_ecies_decrypt <seed> <ciphertext>         -> ok|fail plaintext\n"
+        "  backend                                          -> resolved hw/sw backend per primitive\n"
         "\n"
         "All arguments are hex-encoded. Empty string \"\" = zero-length data.");
 }
@@ -1219,6 +1221,8 @@ int main(int argc, char** argv)
         cmd_pkcs8_export_ed25519(argc, argv);
     } else if (cmd == "pkcs8_import_ed25519") {
         cmd_pkcs8_import_ed25519(argc, argv);
+    } else if (cmd == "backend") {
+        std::println("{}", statusbar::crypto::crypto_backend_summary());
     } else if (cmd == "--help" || cmd == "-h") {
         usage();
     } else {

@@ -10,6 +10,7 @@
 #include "statusbar/args/args_spec.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/crypto/aes_siv/aes128_siv.hpp"
+#include "statusbar/crypto/util/crypto_backend.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/net/net.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -100,6 +101,9 @@ auto main(int argc, char** argv) -> int
     }
 
     std::println(stderr, "STUN rendezvous server listening on port {}", server->port());
+    // One-line downgrade canary: a "sw" where "hw" is expected means the
+    // platform is hiding CPU crypto features from this process.
+    std::println(stderr, "Crypto backends: {}", statusbar::crypto::crypto_backend_summary());
     std::println(
         stderr, "Refresh interval: {}ms, session expiry: {}ms", server_cfg.refresh_interval_ms, server_cfg.session_expiry_ms);
     std::println(stderr, "Press Ctrl+C to stop");

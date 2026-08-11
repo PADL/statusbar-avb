@@ -10,6 +10,7 @@
 #include "statusbar/args/args_spec.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/crypto/aes_siv/aes128_siv.hpp"
+#include "statusbar/crypto/util/crypto_backend.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/net/net.hpp"
@@ -151,6 +152,10 @@ auto main(int argc, char** argv) -> int
         }
         std::println(stderr, "");
     }
+
+    // One-line downgrade canary: a "sw" where "hw" is expected means the
+    // platform is hiding CPU crypto features from this process.
+    std::println(stderr, "Crypto backends: {}", statusbar::crypto::crypto_backend_summary());
 
     auto const role = (cli.role == "responder") ? stun::Role::Responder : stun::Role::Initiator;
 
