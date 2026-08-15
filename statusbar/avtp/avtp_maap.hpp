@@ -107,11 +107,8 @@ struct MaapDu
     /// Byte 1: sv[7] | version[6:4] | message_type[3:0]
     octet_t sv_version_msgtype;
 
-    /// Byte 2: maap_version[7:3] | maap_data_length[10:8]
-    octet_t maap_version_datalen_h;
-
-    /// Byte 3: maap_data_length[7:0]
-    octet_t maap_data_length_l;
+    /// Bytes 2-3: maap_version[15:11] | maap_data_length[10:0]
+    doublet_t maap_version_datalen;
 
     /// Bytes 4-11: Stream ID
     StreamId stream_id_;
@@ -149,28 +146,24 @@ struct MaapDu
     }
 
     /// Get the MAAP version field
-    [[nodiscard]] constexpr auto maap_version() const noexcept -> uint8_t { return (maap_version_datalen_h.get() >> 3) & 0x1F; }
+    [[nodiscard]] constexpr auto maap_version() const noexcept -> uint8_t
+    {
+        return maap_version_datalen.get_bits<uint8_t>(0xF800, 11);
+    }
 
     /// Set the MAAP version field
     /// @param ver The MAAP version value (5 bits)
-    constexpr void set_maap_version(uint8_t ver) noexcept
-    {
-        maap_version_datalen_h = static_cast<uint8_t>((maap_version_datalen_h.get() & 0x07) | ((ver & 0x1F) << 3));
-    }
+    constexpr void set_maap_version(uint8_t ver) noexcept { maap_version_datalen.set_bits(0xF800, 11, ver); }
 
     /// Get the MAAP data length (11-bit field, should be 16 for MAAP)
     [[nodiscard]] constexpr auto maap_data_length() const noexcept -> uint16_t
     {
-        return static_cast<uint16_t>(((maap_version_datalen_h.get() & 0x07) << 8) | maap_data_length_l.get());
+        return maap_version_datalen.get_bits<uint16_t>(0x07FF);
     }
 
     /// Set the MAAP data length
     /// @param len The MAAP data length in bytes (11-bit field)
-    constexpr void set_maap_data_length(uint16_t len) noexcept
-    {
-        maap_version_datalen_h = static_cast<uint8_t>((maap_version_datalen_h.get() & 0xF8) | ((len >> 8) & 0x07));
-        maap_data_length_l = static_cast<uint8_t>(len & 0xFF);
-    }
+    constexpr void set_maap_data_length(uint16_t len) noexcept { maap_version_datalen.set_bits(0x07FF, 0, len); }
 
     /// Get the stream ID
     [[nodiscard]] constexpr auto stream_id() const noexcept -> StreamId { return stream_id_; }
@@ -276,8 +269,7 @@ static_assert(sizeof(MaapDu) == 28, "MaapDu must be exactly 28 bytes");
 static_assert(alignof(MaapDu) <= 4, "MaapDu alignment must not exceed 4 bytes");
 static_assert(offsetof(MaapDu, subtype) == 0, "subtype must be at offset 0");
 static_assert(offsetof(MaapDu, sv_version_msgtype) == 1, "sv_version_msgtype must be at offset 1");
-static_assert(offsetof(MaapDu, maap_version_datalen_h) == 2, "maap_version_datalen_h must be at offset 2");
-static_assert(offsetof(MaapDu, maap_data_length_l) == 3, "maap_data_length_l must be at offset 3");
+static_assert(offsetof(MaapDu, maap_version_datalen) == 2, "maap_version_datalen must be at offset 2");
 static_assert(offsetof(MaapDu, stream_id_) == 4, "stream_id_ must be at offset 4");
 static_assert(offsetof(MaapDu, requested_start_address) == 12, "requested_start_address must be at offset 12");
 static_assert(offsetof(MaapDu, requested_count) == 18, "requested_count must be at offset 18");

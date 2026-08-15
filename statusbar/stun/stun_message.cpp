@@ -3,6 +3,9 @@
 
 #include "statusbar/stun/stun_message.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
+
 #include <array>
 #include <cstring>
 #include <string_view>
@@ -13,29 +16,33 @@ namespace statusbar::stun {
 
 namespace {
 
+// Byte marshalling goes through the ieee network-ordered types — these thin
+// wrappers only adapt them to the parser's raw-pointer cursor style.
+
 void write_u16_be(uint8_t* p, uint16_t v) noexcept
 {
-    p[0] = static_cast<uint8_t>(v >> 8);
-    p[1] = static_cast<uint8_t>(v & 0xFFU);
+    ieee::doublet_t const d{v};
+    statusbar::span_copy(std::span<uint8_t, 2>{p, 2}, d.span());
 }
 
 void write_u32_be(uint8_t* p, uint32_t v) noexcept
 {
-    p[0] = static_cast<uint8_t>(v >> 24);
-    p[1] = static_cast<uint8_t>((v >> 16) & 0xFFU);
-    p[2] = static_cast<uint8_t>((v >> 8) & 0xFFU);
-    p[3] = static_cast<uint8_t>(v & 0xFFU);
+    ieee::quadlet_t const q{v};
+    statusbar::span_copy(std::span<uint8_t, 4>{p, 4}, q.span());
 }
 
 [[nodiscard]] auto read_u16_be(uint8_t const* p) noexcept -> uint16_t
 {
-    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]));
+    ieee::doublet_t d{};
+    statusbar::span_copy(d.span(), std::span<uint8_t const, 2>{p, 2});
+    return d.get();
 }
 
 [[nodiscard]] auto read_u32_be(uint8_t const* p) noexcept -> uint32_t
 {
-    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) | (static_cast<uint32_t>(p[2]) << 8) |
-        static_cast<uint32_t>(p[3]);
+    ieee::quadlet_t q{};
+    statusbar::span_copy(q.span(), std::span<uint8_t const, 4>{p, 4});
+    return q.get();
 }
 
 /// Encode method+class into the 16-bit STUN type field per RFC 8489 §5.
@@ -93,7 +100,7 @@ auto encode_header(MessageHeader const& h, std::span<uint8_t> buf) -> std::error
     write_u16_be(d + 0, raw_type);
     write_u16_be(d + 2, h.body_length);
     write_u32_be(d + 4, MAGIC_COOKIE);
-    std::memcpy(d + 8, h.transaction_id.bytes.data(), TRANSACTION_ID_SIZE);
+    statusbar::span_copy(std::span<uint8_t>{d + 8, TRANSACTION_ID_SIZE}, statusbar::make_const_span(h.transaction_id.bytes));
     return {};
 }
 
@@ -118,7 +125,7 @@ auto decode_header(std::span<uint8_t const> buf, MessageHeader& out) -> std::err
         return make_error_code(StunError::InvalidMagicCookie);
     }
 
-    std::memcpy(out.transaction_id.bytes.data(), d + 8, TRANSACTION_ID_SIZE);
+    statusbar::span_copy(statusbar::make_span(out.transaction_id.bytes), std::span<uint8_t const>{d + 8, TRANSACTION_ID_SIZE});
     return {};
 }
 
@@ -163,10 +170,10 @@ auto append_attribute(std::span<uint8_t> buf, size_t& cursor, uint16_t attr_type
     write_u16_be(p + 0, attr_type);
     write_u16_be(p + 2, static_cast<uint16_t>(value.size()));
     if (!value.empty()) {
-        std::memcpy(p + ATTRIBUTE_HEADER_SIZE, value.data(), value.size());
+        statusbar::span_copy(std::span<uint8_t>{p + ATTRIBUTE_HEADER_SIZE, value.size()}, value);
     }
     if (padded > value.size()) {
-        std::memset(p + ATTRIBUTE_HEADER_SIZE + value.size(), 0, padded - value.size());
+        statusbar::span_zero(std::span<uint8_t>{p + ATTRIBUTE_HEADER_SIZE + value.size(), padded - value.size()});
     }
     cursor += total;
     return {};
@@ -322,7 +329,7 @@ auto append_error_code(std::span<uint8_t> buf, size_t& cursor, uint16_t code, st
     value_buf[1] = 0;
     value_buf[2] = class_byte & 0x07U;
     value_buf[3] = number_byte;
-    std::memcpy(value_buf.data() + 4, reason.data(), reason.size());
+    statusbar::span_copy(std::span<uint8_t>{value_buf.data() + 4, reason.size()}, statusbar::make_const_span(reason));
 
     return append_attribute(
         buf, cursor, static_cast<uint16_t>(AttributeType::ErrorCode), std::span<uint8_t const>{value_buf.data(), value_len});

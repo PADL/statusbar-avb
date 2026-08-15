@@ -201,6 +201,16 @@ constexpr uint16_t CONTROL_VALUE_TYPE_EXPANSION = 0x3FFF;
 
 namespace detail {
 
+/// The ieee network-ordered storage type matching T's size: the wire
+/// marshalling for every linear element goes through IeeeOrderedUInt
+/// rather than hand-rolled shifting; signed and floating-point semantic
+/// types are bit_cast through the same-size unsigned carrier.
+template <typename T>
+using LinearFieldCarrier = ieee::IeeeOrderedUInt<std::conditional_t<
+    sizeof(T) == 1,
+    uint8_t,
+    std::conditional_t<sizeof(T) == 2, uint16_t, std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>>>;
+
 /// Decode a big-endian wire buffer into the semantic type T. T may be an
 /// integer type (signed or unsigned, 1/2/4/8 bytes) or a floating-point
 /// type (float, double). The bytes are always interpreted in network
@@ -208,32 +218,15 @@ namespace detail {
 template <typename T>
 [[nodiscard]] constexpr auto decode_linear_field(std::array<uint8_t, sizeof(T)> const& bytes) noexcept -> T
 {
-    if constexpr (sizeof(T) == 1) {
-        return std::bit_cast<T>(bytes[0]);
-    } else {
-        using U = std::conditional_t<sizeof(T) == 2, uint16_t, std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>;
-        U raw = 0;
-        for (size_t i = 0; i < sizeof(T); ++i) {
-            raw = static_cast<U>((raw << 8) | static_cast<U>(bytes[i]));
-        }
-        return std::bit_cast<T>(raw);
-    }
+    return std::bit_cast<T>(std::bit_cast<LinearFieldCarrier<T>>(bytes).get());
 }
 
 /// Encode T into a big-endian wire buffer (inverse of decode_linear_field).
 template <typename T>
 constexpr auto encode_linear_field(T value, std::array<uint8_t, sizeof(T)>& bytes) noexcept -> void
 {
-    if constexpr (sizeof(T) == 1) {
-        bytes[0] = std::bit_cast<uint8_t>(value);
-    } else {
-        using U = std::conditional_t<sizeof(T) == 2, uint16_t, std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>>;
-        U raw = std::bit_cast<U>(value);
-        for (size_t i = sizeof(T); i-- > 0;) {
-            bytes[i] = static_cast<uint8_t>(raw & 0xFFU);
-            raw >>= 8;
-        }
-    }
+    using U = decltype(std::declval<LinearFieldCarrier<T>>().get());
+    bytes = std::bit_cast<std::array<uint8_t, sizeof(T)>>(LinearFieldCarrier<T>{std::bit_cast<U>(value)});
 }
 
 }  // namespace detail
@@ -348,26 +341,13 @@ static_assert(sizeof(SampleRateValue) == 16, "SampleRateValue must be exactly 16
 /// 10 bytes: 48-bit gptp_seconds followed by 32-bit gptp_nanoseconds.
 struct GptpTimeValue
 {
-    std::array<uint8_t, 6> gptp_seconds{};
+    ieee::sextlet_t gptp_seconds{0};
     quadlet_t gptp_nanoseconds{0};
 
     /// Read the 48-bit seconds field as a uint64_t in host byte order.
-    [[nodiscard]] constexpr auto seconds() const noexcept -> uint64_t
-    {
-        return (static_cast<uint64_t>(gptp_seconds[0]) << 40) | (static_cast<uint64_t>(gptp_seconds[1]) << 32) |
-            (static_cast<uint64_t>(gptp_seconds[2]) << 24) | (static_cast<uint64_t>(gptp_seconds[3]) << 16) |
-            (static_cast<uint64_t>(gptp_seconds[4]) << 8) | static_cast<uint64_t>(gptp_seconds[5]);
-    }
+    [[nodiscard]] constexpr auto seconds() const noexcept -> uint64_t { return gptp_seconds.get(); }
 
-    constexpr auto set_seconds(uint64_t v) noexcept
-    {
-        gptp_seconds[0] = static_cast<uint8_t>((v >> 40) & 0xFF);
-        gptp_seconds[1] = static_cast<uint8_t>((v >> 32) & 0xFF);
-        gptp_seconds[2] = static_cast<uint8_t>((v >> 24) & 0xFF);
-        gptp_seconds[3] = static_cast<uint8_t>((v >> 16) & 0xFF);
-        gptp_seconds[4] = static_cast<uint8_t>((v >> 8) & 0xFF);
-        gptp_seconds[5] = static_cast<uint8_t>(v & 0xFF);
-    }
+    constexpr auto set_seconds(uint64_t v) noexcept { gptp_seconds = v; }
 };
 
 static_assert(sizeof(GptpTimeValue) == 10, "GptpTimeValue must be exactly 10 bytes on the wire");

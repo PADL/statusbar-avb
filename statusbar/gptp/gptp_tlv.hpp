@@ -52,51 +52,31 @@ struct ScaledNs
 {
     static constexpr size_t LENGTH = 12;
 
-    /// Raw network-byte-order 12-byte wire format.
-    /// Layout (per Clause 6.4.3.1):
-    ///   bytes[0..9]  = 80-bit signed integer nanoseconds, big-endian
-    ///   bytes[10..11] = 16-bit unsigned fractional nanoseconds
-    std::array<uint8_t, LENGTH> raw{};
+    /// Wire layout (per Clause 6.4.3.1), all network byte order:
+    ///   integer_high — top 16 bits of the 80-bit signed integer ns
+    ///                  (sign extension in practice)
+    ///   integer_low  — low 64 bits of the 80-bit signed integer ns
+    ///   fraction     — 16-bit unsigned fractional ns (2^-16 ns units)
+    doublet_t integer_high{0};
+    octlet_t integer_low{0};
+    doublet_t fraction{0};
 
     constexpr ScaledNs() noexcept = default;
 
     /// Construct from a plain int64_t integer ns (no fraction).
     constexpr explicit ScaledNs(int64_t integer_ns) noexcept
-    {
-        // Sign-extend int64_t into the 10-byte integer region.
-        auto const v = static_cast<uint64_t>(integer_ns);
-        uint8_t const sign = (integer_ns < 0) ? 0xFF : 0x00;
-        raw[0] = sign;
-        raw[1] = sign;
-        raw[2] = static_cast<uint8_t>(v >> 56);
-        raw[3] = static_cast<uint8_t>(v >> 48);
-        raw[4] = static_cast<uint8_t>(v >> 40);
-        raw[5] = static_cast<uint8_t>(v >> 32);
-        raw[6] = static_cast<uint8_t>(v >> 24);
-        raw[7] = static_cast<uint8_t>(v >> 16);
-        raw[8] = static_cast<uint8_t>(v >> 8);
-        raw[9] = static_cast<uint8_t>(v);
-        raw[10] = 0;
-        raw[11] = 0;
-    }
+        : integer_high{integer_ns < 0 ? uint16_t{0xFFFF} : uint16_t{0}}
+        , integer_low{static_cast<uint64_t>(integer_ns)}
+    {}
 
     /// Read the low 64 bits of the 80-bit integer ns portion.
     /// Returns sign-extended int64_t. The two MSB bytes of the 80-bit
     /// integer are discarded; callers needing the full range should
-    /// consult `raw` directly.
-    [[nodiscard]] constexpr auto integer_ns() const noexcept -> int64_t
-    {
-        uint64_t const v = (static_cast<uint64_t>(raw[2]) << 56) | (static_cast<uint64_t>(raw[3]) << 48) |
-            (static_cast<uint64_t>(raw[4]) << 40) | (static_cast<uint64_t>(raw[5]) << 32) | (static_cast<uint64_t>(raw[6]) << 24) |
-            (static_cast<uint64_t>(raw[7]) << 16) | (static_cast<uint64_t>(raw[8]) << 8) | static_cast<uint64_t>(raw[9]);
-        return static_cast<int64_t>(v);
-    }
+    /// consult `integer_high` directly.
+    [[nodiscard]] constexpr auto integer_ns() const noexcept -> int64_t { return static_cast<int64_t>(integer_low.get()); }
 
     /// Read the 16-bit fractional nanoseconds (unsigned, 2^-16 ns units).
-    [[nodiscard]] constexpr auto fractional_ns() const noexcept -> uint16_t
-    {
-        return static_cast<uint16_t>((static_cast<uint16_t>(raw[10]) << 8) | raw[11]);
-    }
+    [[nodiscard]] constexpr auto fractional_ns() const noexcept -> uint16_t { return fraction.get(); }
 
     [[nodiscard]] static constexpr auto size() noexcept -> size_t { return LENGTH; }
 

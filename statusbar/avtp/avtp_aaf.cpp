@@ -4,8 +4,10 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -18,27 +20,26 @@ auto decode_aaf_sample(std::span<uint8_t const> payload, size_t offset, AafForma
 {
     switch (format) {
         case AafFormat::int_16bit: {
-            int16_t const sample =
-                static_cast<int16_t>((static_cast<uint16_t>(payload[offset]) << 8) | static_cast<uint16_t>(payload[offset + 1]));
-            return aaf_int16_to_float(sample);
+            ieee::doublet_t raw{};
+            span_load(raw, payload.subspan(offset, sizeof(raw)));
+            return aaf_int16_to_float(std::bit_cast<int16_t>(raw.get()));
         }
         case AafFormat::int_24bit: {
+            // 24-bit samples have no ieee ordered type; assemble + sign-extend manually.
             uint32_t const raw = (static_cast<uint32_t>(payload[offset]) << 16) |
                 (static_cast<uint32_t>(payload[offset + 1]) << 8) | static_cast<uint32_t>(payload[offset + 2]);
             int32_t const sample = (raw & 0x800000U) != 0 ? static_cast<int32_t>(raw | 0xFF000000U) : static_cast<int32_t>(raw);
             return aaf_int24_to_float(sample);
         }
         case AafFormat::int_32bit: {
-            int32_t const sample = static_cast<int32_t>(
-                (static_cast<uint32_t>(payload[offset]) << 24) | (static_cast<uint32_t>(payload[offset + 1]) << 16) |
-                (static_cast<uint32_t>(payload[offset + 2]) << 8) | static_cast<uint32_t>(payload[offset + 3]));
-            return aaf_int32_to_float(sample);
+            ieee::quadlet_t raw{};
+            span_load(raw, payload.subspan(offset, sizeof(raw)));
+            return aaf_int32_to_float(std::bit_cast<int32_t>(raw.get()));
         }
         case AafFormat::float_32bit: {
-            uint32_t const bits = (static_cast<uint32_t>(payload[offset]) << 24) |
-                (static_cast<uint32_t>(payload[offset + 1]) << 16) | (static_cast<uint32_t>(payload[offset + 2]) << 8) |
-                static_cast<uint32_t>(payload[offset + 3]);
-            return bits_to_float(bits);
+            ieee::quadlet_t raw{};
+            span_load(raw, payload.subspan(offset, sizeof(raw)));
+            return bits_to_float(raw.get());
         }
         default:
             return 0.0F;
@@ -49,12 +50,12 @@ auto encode_aaf_sample(float sample_float, std::span<uint8_t> payload, size_t of
 {
     switch (format) {
         case AafFormat::int_16bit: {
-            int16_t const sample = float_to_aaf_int16(sample_float);
-            payload[offset] = static_cast<uint8_t>((static_cast<uint16_t>(sample) >> 8) & 0xFFU);
-            payload[offset + 1] = static_cast<uint8_t>(static_cast<uint16_t>(sample) & 0xFFU);
+            ieee::doublet_t const raw{std::bit_cast<uint16_t>(float_to_aaf_int16(sample_float))};
+            span_copy(payload.subspan(offset, sizeof(raw)), raw.span());
             return 2;
         }
         case AafFormat::int_24bit: {
+            // 24-bit samples have no ieee ordered type; split manually.
             int32_t const sample = float_to_aaf_int24(sample_float);
             uint32_t const raw = static_cast<uint32_t>(sample) & 0xFFFFFFU;
             payload[offset] = static_cast<uint8_t>((raw >> 16) & 0xFFU);
@@ -63,20 +64,13 @@ auto encode_aaf_sample(float sample_float, std::span<uint8_t> payload, size_t of
             return 3;
         }
         case AafFormat::int_32bit: {
-            int32_t const sample = float_to_aaf_int32(sample_float);
-            uint32_t const raw = static_cast<uint32_t>(sample);
-            payload[offset] = static_cast<uint8_t>((raw >> 24) & 0xFFU);
-            payload[offset + 1] = static_cast<uint8_t>((raw >> 16) & 0xFFU);
-            payload[offset + 2] = static_cast<uint8_t>((raw >> 8) & 0xFFU);
-            payload[offset + 3] = static_cast<uint8_t>(raw & 0xFFU);
+            ieee::quadlet_t const raw{std::bit_cast<uint32_t>(float_to_aaf_int32(sample_float))};
+            span_copy(payload.subspan(offset, sizeof(raw)), raw.span());
             return 4;
         }
         case AafFormat::float_32bit: {
-            uint32_t const bits = float_to_bits(sample_float);
-            payload[offset] = static_cast<uint8_t>((bits >> 24) & 0xFFU);
-            payload[offset + 1] = static_cast<uint8_t>((bits >> 16) & 0xFFU);
-            payload[offset + 2] = static_cast<uint8_t>((bits >> 8) & 0xFFU);
-            payload[offset + 3] = static_cast<uint8_t>(bits & 0xFFU);
+            ieee::quadlet_t const raw{float_to_bits(sample_float)};
+            span_copy(payload.subspan(offset, sizeof(raw)), raw.span());
             return 4;
         }
         default:

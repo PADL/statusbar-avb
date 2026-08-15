@@ -93,14 +93,13 @@ struct StreamFormatFields
     auto const b = avtp::stream_format_bytes(fmt);
     switch (b[0]) {
         case avtp::AvtpSubtype::aaf: {
+            auto const aaf = avtp::AafStreamFormat::from_u64(fmt);
             f.kind = StreamKind::aaf;
-            f.sample_rate_hz = avtp::aaf_nsr_to_hz(b[1] & 0x0FU);
-            f.aaf_format = static_cast<avtp::AafFormat>(b[2]);
-            f.bit_depth = b[3];
-            uint32_t const tail = (static_cast<uint32_t>(b[4]) << 24) | (static_cast<uint32_t>(b[5]) << 16) |
-                (static_cast<uint32_t>(b[6]) << 8) | static_cast<uint32_t>(b[7]);
-            f.channels = static_cast<uint16_t>((tail >> 22) & 0x3FFU);
-            f.aaf_samples_per_frame = static_cast<uint16_t>((tail >> 12) & 0x3FFU);
+            f.sample_rate_hz = avtp::aaf_nsr_to_hz(aaf.nsr());
+            f.aaf_format = static_cast<avtp::AafFormat>(aaf.format.get());
+            f.bit_depth = aaf.bit_depth.get();
+            f.channels = aaf.channels_per_frame();
+            f.aaf_samples_per_frame = aaf.samples_per_frame();
             break;
         }
         case avtp::AvtpSubtype::iec_61883_iidc: {

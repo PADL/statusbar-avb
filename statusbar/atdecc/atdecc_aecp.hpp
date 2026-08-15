@@ -92,11 +92,8 @@ struct AecpDuCommon
     /// Byte 1: sv[7] | version[6:4] | message_type[3:0]
     octet_t sv_version_msgtype{0};
 
-    /// Byte 2: status[7:3] | control_data_length[10:8]
-    octet_t status_cdl_h{0};
-
-    /// Byte 3: control_data_length[7:0]
-    octet_t control_data_length_l{0};
+    /// Bytes 2-3: status[15:11] | control_data_length[10:0]
+    doublet_t status_cdl{0};
 
     /// Bytes 4-11: Target Entity ID (8 bytes)
     Eui64 target_entity_id{};
@@ -128,28 +125,18 @@ struct AecpDuCommon
     }
 
     /// Get the status field
-    [[nodiscard]] constexpr auto status() const noexcept -> uint8_t { return (status_cdl_h.get() >> 3) & 0x1F; }
+    [[nodiscard]] constexpr auto status() const noexcept -> uint8_t { return status_cdl.get_bits<uint8_t>(0xF800, 11); }
 
     /// Set the status field
     /// @param stat AECP status code
-    constexpr void set_status(uint8_t const stat) noexcept
-    {
-        status_cdl_h = static_cast<uint8_t>((status_cdl_h.get() & 0x07) | ((stat & 0x1F) << 3));
-    }
+    constexpr void set_status(uint8_t const stat) noexcept { status_cdl.set_bits(0xF800, 11, stat); }
 
     /// Get the control data length (11-bit field)
-    [[nodiscard]] constexpr auto control_data_length() const noexcept -> uint16_t
-    {
-        return static_cast<uint16_t>(((status_cdl_h.get() & 0x07) << 8) | control_data_length_l.get());
-    }
+    [[nodiscard]] constexpr auto control_data_length() const noexcept -> uint16_t { return status_cdl.get_bits<uint16_t>(0x07FF); }
 
     /// Set the control data length
     /// @param len Control data length value (11-bit)
-    constexpr void set_control_data_length(uint16_t const len) noexcept
-    {
-        status_cdl_h = static_cast<uint8_t>((status_cdl_h.get() & 0xF8) | ((len >> 8) & 0x07));
-        control_data_length_l = static_cast<uint8_t>(len & 0xFF);
-    }
+    constexpr void set_control_data_length(uint16_t const len) noexcept { status_cdl.set_bits(0x07FF, 0, len); }
 
     // Message type helpers
 
@@ -252,8 +239,7 @@ static_assert(sizeof(AecpDuCommon) == 22, "AecpDuCommon must be exactly 22 bytes
 static_assert(alignof(AecpDuCommon) <= 4, "AecpDuCommon alignment must not exceed 4 bytes");
 static_assert(offsetof(AecpDuCommon, subtype) == 0, "subtype must be at offset 0");
 static_assert(offsetof(AecpDuCommon, sv_version_msgtype) == 1, "sv_version_msgtype must be at offset 1");
-static_assert(offsetof(AecpDuCommon, status_cdl_h) == 2, "status_cdl_h must be at offset 2");
-static_assert(offsetof(AecpDuCommon, control_data_length_l) == 3, "control_data_length_l must be at offset 3");
+static_assert(offsetof(AecpDuCommon, status_cdl) == 2, "status_cdl must be at offset 2");
 static_assert(offsetof(AecpDuCommon, target_entity_id) == 4, "target_entity_id must be at offset 4");
 static_assert(offsetof(AecpDuCommon, controller_entity_id) == 12, "controller_entity_id must be at offset 12");
 static_assert(offsetof(AecpDuCommon, sequence_id) == 20, "sequence_id must be at offset 20");

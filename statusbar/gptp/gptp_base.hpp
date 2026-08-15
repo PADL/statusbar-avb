@@ -23,6 +23,7 @@ using ieee::doublet_t;
 using ieee::octet_t;
 using ieee::octlet_t;
 using ieee::quadlet_t;
+using ieee::sextlet_t;
 using statusbar::BufferError;
 using statusbar::failure;
 using statusbar::StatusValue;
@@ -97,62 +98,30 @@ struct Timestamp
 {
     static constexpr size_t LENGTH = 10;
 
-    // Stored as 6-byte (48-bit) seconds field in network byte order
-    std::array<uint8_t, 6> seconds_bytes;
-    // Stored as 4-byte nanoseconds field in network byte order (raw bytes to avoid alignment)
-    std::array<uint8_t, 4> nanoseconds_bytes;
+    // 48-bit seconds + 32-bit nanoseconds, both network byte order
+    // (ieee ordered types: byte-backed, alignment 1, no padding).
+    sextlet_t seconds_field;
+    quadlet_t nanoseconds_field;
 
     constexpr Timestamp() noexcept
-        : seconds_bytes{}
-        , nanoseconds_bytes{}
+        : seconds_field{0}
+        , nanoseconds_field{0}
     {}
 
-    // clang-format off
-    // Wide brace-initialiser on the seconds_bytes line — clang-19 leaves
-    // it as a single line, clang-22+ wants to wrap each cast onto its own
-    // line. Wrap-off keeps the two versions in sync.
     constexpr Timestamp(uint64_t secs, uint32_t nsecs) noexcept
-        : seconds_bytes{static_cast<uint8_t>((secs >> 40) & 0xFF), static_cast<uint8_t>((secs >> 32) & 0xFF), static_cast<uint8_t>((secs >> 24) & 0xFF), static_cast<uint8_t>((secs >> 16) & 0xFF), static_cast<uint8_t>((secs >> 8) & 0xFF), static_cast<uint8_t>(secs & 0xFF)}
-        , nanoseconds_bytes{
-              static_cast<uint8_t>((nsecs >> 24) & 0xFF),
-              static_cast<uint8_t>((nsecs >> 16) & 0xFF),
-              static_cast<uint8_t>((nsecs >> 8) & 0xFF),
-              static_cast<uint8_t>(nsecs & 0xFF)}
+        : seconds_field{secs}
+        , nanoseconds_field{nsecs}
     {}
-    // clang-format on
 
     [[nodiscard]] static constexpr auto size() noexcept -> size_t { return LENGTH; }
 
-    [[nodiscard]] constexpr auto seconds() const noexcept -> uint64_t
-    {
-        return (static_cast<uint64_t>(seconds_bytes[0]) << 40) | (static_cast<uint64_t>(seconds_bytes[1]) << 32) |
-            (static_cast<uint64_t>(seconds_bytes[2]) << 24) | (static_cast<uint64_t>(seconds_bytes[3]) << 16) |
-            (static_cast<uint64_t>(seconds_bytes[4]) << 8) | static_cast<uint64_t>(seconds_bytes[5]);
-    }
+    [[nodiscard]] constexpr auto seconds() const noexcept -> uint64_t { return seconds_field.get(); }
 
-    constexpr void set_seconds(uint64_t secs) noexcept
-    {
-        seconds_bytes[0] = static_cast<uint8_t>((secs >> 40) & 0xFF);
-        seconds_bytes[1] = static_cast<uint8_t>((secs >> 32) & 0xFF);
-        seconds_bytes[2] = static_cast<uint8_t>((secs >> 24) & 0xFF);
-        seconds_bytes[3] = static_cast<uint8_t>((secs >> 16) & 0xFF);
-        seconds_bytes[4] = static_cast<uint8_t>((secs >> 8) & 0xFF);
-        seconds_bytes[5] = static_cast<uint8_t>(secs & 0xFF);
-    }
+    constexpr void set_seconds(uint64_t secs) noexcept { seconds_field = secs; }
 
-    [[nodiscard]] constexpr auto nanos() const noexcept -> uint32_t
-    {
-        return (static_cast<uint32_t>(nanoseconds_bytes[0]) << 24) | (static_cast<uint32_t>(nanoseconds_bytes[1]) << 16) |
-            (static_cast<uint32_t>(nanoseconds_bytes[2]) << 8) | static_cast<uint32_t>(nanoseconds_bytes[3]);
-    }
+    [[nodiscard]] constexpr auto nanos() const noexcept -> uint32_t { return nanoseconds_field.get(); }
 
-    constexpr void set_nanos(uint32_t nsecs) noexcept
-    {
-        nanoseconds_bytes[0] = static_cast<uint8_t>((nsecs >> 24) & 0xFF);
-        nanoseconds_bytes[1] = static_cast<uint8_t>((nsecs >> 16) & 0xFF);
-        nanoseconds_bytes[2] = static_cast<uint8_t>((nsecs >> 8) & 0xFF);
-        nanoseconds_bytes[3] = static_cast<uint8_t>(nsecs & 0xFF);
-    }
+    constexpr void set_nanos(uint32_t nsecs) noexcept { nanoseconds_field = nsecs; }
 
     auto operator<=>(Timestamp const& rhs) const noexcept -> std::strong_ordering = default;
 };

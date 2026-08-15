@@ -15,8 +15,10 @@
 
 #include "statusbar/avtp/avtp_crf.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
+#include "statusbar/ieee/ieee.hpp"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -26,17 +28,47 @@ namespace statusbar::avtp {
 /// Convert a u64 stream format code to an 8-byte array (big-endian on wire).
 [[nodiscard]] constexpr auto stream_format_bytes(uint64_t fmt) noexcept -> std::array<uint8_t, 8>
 {
-    return {
-        static_cast<uint8_t>((fmt >> 56) & 0xFFU),
-        static_cast<uint8_t>((fmt >> 48) & 0xFFU),
-        static_cast<uint8_t>((fmt >> 40) & 0xFFU),
-        static_cast<uint8_t>((fmt >> 32) & 0xFFU),
-        static_cast<uint8_t>((fmt >> 24) & 0xFFU),
-        static_cast<uint8_t>((fmt >> 16) & 0xFFU),
-        static_cast<uint8_t>((fmt >> 8) & 0xFFU),
-        static_cast<uint8_t>(fmt & 0xFFU),
-    };
+    return std::bit_cast<std::array<uint8_t, 8>>(ieee::octlet_t{fmt});
 }
+
+/// AAF stream-format wire layout (IEEE 1722-2016 Clause 7.3.4), viewed over
+/// the 8-byte format code:
+///   octet 0:    subtype (0x02 AAF)
+///   octet 1:    reserved[7:4] | nsr[3:0]
+///   octet 2:    format (AAF sample format code: INT_32=0x02, ...)
+///   octet 3:    bit_depth
+///   octets 4-7: channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
+struct AafStreamFormat
+{
+    ieee::octet_t subtype{0};
+    ieee::octet_t nsr_field{0};
+    ieee::octet_t format{0};
+    ieee::octet_t bit_depth{0};
+    ieee::quadlet_t packing{0};
+
+    static constexpr uint32_t CHANNELS_MASK = 0xFFC0'0000U;
+    static constexpr unsigned CHANNELS_SHIFT = 22;
+    static constexpr uint32_t SAMPLES_MASK = 0x003F'F000U;
+    static constexpr unsigned SAMPLES_SHIFT = 12;
+
+    [[nodiscard]] constexpr auto nsr() const noexcept -> uint8_t { return nsr_field.get_bits<uint8_t>(0x0FU); }
+    [[nodiscard]] constexpr auto channels_per_frame() const noexcept -> uint16_t
+    {
+        return packing.get_bits<uint16_t>(CHANNELS_MASK, CHANNELS_SHIFT);
+    }
+    [[nodiscard]] constexpr auto samples_per_frame() const noexcept -> uint16_t
+    {
+        return packing.get_bits<uint16_t>(SAMPLES_MASK, SAMPLES_SHIFT);
+    }
+
+    /// View a u64 stream-format code as its AAF wire fields.
+    [[nodiscard]] static constexpr auto from_u64(uint64_t fmt) noexcept -> AafStreamFormat
+    {
+        return std::bit_cast<AafStreamFormat>(ieee::octlet_t{fmt});
+    }
+};
+
+static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
 
 /// AAF nsr (nominal sample rate) codes → Hz (IEEE 1722-2016 Table 11)
 [[nodiscard]] constexpr auto aaf_nsr_to_hz(uint8_t nsr) noexcept -> uint32_t
@@ -100,12 +132,10 @@ namespace statusbar::avtp {
 ///   Bytes 4-7 (32-bit BE): channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
 [[nodiscard]] inline auto decode_aaf_stream_format(uint64_t fmt) -> std::string
 {
-    auto const b = stream_format_bytes(fmt);
-    uint8_t const nsr = b[1] & 0x0FU;
-    uint32_t const tail = (static_cast<uint32_t>(b[4]) << 24) | (static_cast<uint32_t>(b[5]) << 16) |
-        (static_cast<uint32_t>(b[6]) << 8) | static_cast<uint32_t>(b[7]);
-    uint16_t const channels = static_cast<uint16_t>((tail >> 22) & 0x3FFU);
-    uint8_t const depth = b[3];
+    auto const f = AafStreamFormat::from_u64(fmt);
+    uint8_t const nsr = f.nsr();
+    uint16_t const channels = f.channels_per_frame();
+    uint8_t const depth = f.bit_depth.get();
     uint32_t const rate = aaf_nsr_to_hz(nsr);
     if (rate == 0) {
         return std::format("AAF rate?({}) {}ch {}-bit", nsr, channels, depth);

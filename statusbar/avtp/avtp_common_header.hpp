@@ -19,8 +19,11 @@
 ///   12-15   avtp_timestamp
 
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -105,8 +108,8 @@ inline constexpr size_t AVTP_STREAM_HEADER_MIN_LENGTH = 16;
     if (payload.size() < AVTP_STREAM_HEADER_MIN_LENGTH) {
         return std::nullopt;
     }
-    return static_cast<uint32_t>(payload[12]) << 24 | static_cast<uint32_t>(payload[13]) << 16 |
-        static_cast<uint32_t>(payload[14]) << 8 | static_cast<uint32_t>(payload[15]);
+    std::array<uint8_t, 4> const be{payload[12], payload[13], payload[14], payload[15]};
+    return std::bit_cast<ieee::quadlet_t>(be).get();
 }
 
 /// Check if a payload's stream_id matches the expected value.

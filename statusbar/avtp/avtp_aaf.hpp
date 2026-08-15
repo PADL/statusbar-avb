@@ -254,11 +254,8 @@ struct AafPdu
     // Byte 18: channels_per_frame[7:0]
     // Byte 19: bit_depth[7:0]
 
-    /// Byte 17: nsr[7:4] | rsv[3:2] | channels_hi[1:0]
-    octet_t nsr_rsv_channels_hi;
-
-    /// Byte 18: channels_lo[7:0]
-    octet_t channels_lo;
+    /// Bytes 17-18: nsr[15:12] | rsv[11:10] | channels_per_frame[9:0]
+    doublet_t nsr_rsv_channels;
 
     /// Byte 19: bit_depth[7:0]
     octet_t bit_depth;
@@ -333,34 +330,28 @@ struct AafPdu
     /// Get the nominal sample rate (nsr) field (bits 7:4 of byte 17)
     [[nodiscard]] constexpr auto nsr() const noexcept -> AafSampleRate
     {
-        return static_cast<AafSampleRate>(nsr_rsv_channels_hi.get_bits(0xF0U, 4));
+        return static_cast<AafSampleRate>(nsr_rsv_channels.get_bits(0xF000U, 12));
     }
 
     /// Set the nominal sample rate (nsr) field (bits 7:4 of byte 17)
     /// @param rate The nominal sample rate code
     constexpr void set_nsr(AafSampleRate const rate) noexcept
     {
-        nsr_rsv_channels_hi.set_bits(0xF0U, 4, static_cast<uint8_t>(rate));
+        nsr_rsv_channels.set_bits(0xF000U, 12, static_cast<uint16_t>(rate));
     }
 
     /// Get channels_per_frame (10-bit field: bits 1:0 of byte 17 + all 8 bits of byte 18)
     [[nodiscard]] constexpr auto channels_per_frame() const noexcept -> uint16_t
     {
-        uint16_t const hi = nsr_rsv_channels_hi.get_bits<uint16_t>(0x03U, 0);
-        uint16_t const lo = static_cast<uint16_t>(channels_lo.get());
-        return static_cast<uint16_t>((hi << 8) | lo);
+        return nsr_rsv_channels.get_bits<uint16_t>(0x03FFU);
     }
 
     /// Set channels_per_frame (10-bit field, max 1023)
     /// @param channels Number of channels per frame (clamped to 10 bits)
     constexpr void set_channels_per_frame(uint16_t channels) noexcept
     {
-        // Clamp to 10 bits
-        channels = static_cast<uint16_t>(channels & 0x03FFU);
-        // Set high 2 bits in byte 17 (bits 1:0), preserving nsr (bits 7:4) and rsv (bits 3:2)
-        nsr_rsv_channels_hi.set_bits(0x03U, 0, static_cast<uint8_t>((channels >> 8) & 0x03U));
-        // Set low 8 bits in byte 18
-        channels_lo = static_cast<uint8_t>(channels & 0xFFU);
+        // set_bits masks to the 10-bit field, preserving nsr and rsv
+        nsr_rsv_channels.set_bits(0x03FFU, 0, channels);
     }
 
     /// Get bit_depth field

@@ -138,8 +138,8 @@ TEST(aem_control_values, gptp_time_value_seconds_roundtrip)
     EXPECT_EQ(g.seconds(), 0x0123456789ABULL);
     EXPECT_EQ(g.gptp_nanoseconds.get(), 500'000'000U);
     // Wire bytes are MSB-first
-    EXPECT_EQ(g.gptp_seconds[0], 0x01);
-    EXPECT_EQ(g.gptp_seconds[5], 0xAB);
+    EXPECT_EQ(g.gptp_seconds.span()[0], 0x01);
+    EXPECT_EQ(g.gptp_seconds.span()[5], 0xAB);
 }
 
 TEST(aem_control_values, smpte_time_value_sizeof)

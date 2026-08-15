@@ -3,6 +3,8 @@
 
 #include "statusbar/stun/stun_auth.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
 #include "statusbar/stun/stun_message.hpp"
 
 #include <cstring>
@@ -11,15 +13,19 @@ namespace statusbar::stun {
 
 namespace {
 
+// Byte marshalling via the ieee network-ordered types, adapted to the
+// raw-pointer cursor style used here.
 void write_u16_be(uint8_t* p, uint16_t v) noexcept
 {
-    p[0] = static_cast<uint8_t>(v >> 8);
-    p[1] = static_cast<uint8_t>(v & 0xFFU);
+    ieee::doublet_t const d{v};
+    statusbar::span_copy(std::span<uint8_t, 2>{p, 2}, d.span());
 }
 
 [[nodiscard]] auto read_u16_be(uint8_t const* p) noexcept -> uint16_t
 {
-    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]));
+    ieee::doublet_t d{};
+    statusbar::span_copy(d.span(), std::span<uint8_t const, 2>{p, 2});
+    return d.get();
 }
 
 /// Compute the deterministic AES-128-SIV tag over `aad` with empty
@@ -29,7 +35,7 @@ void write_u16_be(uint8_t* p, uint16_t v) noexcept
     std::span<uint8_t> const empty_plaintext{};
     auto const tag = statusbar::crypto::aes128_siv_encrypt(key, empty_plaintext, aad);
     MicTag out{};
-    std::memcpy(out.data(), tag.data(), MIC_SIZE);
+    statusbar::span_copy(statusbar::make_span(out), statusbar::make_const_span(tag));
     return out;
 }
 
@@ -61,7 +67,7 @@ auto append_mic(std::span<uint8_t> buf, size_t& cursor, statusbar::crypto::Aes12
     auto* p = buf.data() + cursor;
     write_u16_be(p + 0, static_cast<uint16_t>(AttributeType::Mic));
     write_u16_be(p + 2, static_cast<uint16_t>(MIC_SIZE));
-    std::memcpy(p + ATTRIBUTE_HEADER_SIZE, tag.data(), MIC_SIZE);
+    statusbar::span_copy(std::span<uint8_t>{p + ATTRIBUTE_HEADER_SIZE, MIC_SIZE}, statusbar::make_const_span(tag));
     cursor += mic_tlv_size;
     return {};
 }

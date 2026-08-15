@@ -3,6 +3,8 @@
 
 #include "statusbar/stun/stun_register.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
 #include "statusbar/stun/stun_auth.hpp"
 #include "statusbar/stun/stun_message.hpp"
 
@@ -12,18 +14,19 @@ namespace statusbar::stun {
 
 namespace {
 
+// Byte marshalling via the ieee network-ordered types, adapted to the
+// raw-pointer cursor style used here.
 void write_u32_be(uint8_t* p, uint32_t v) noexcept
 {
-    p[0] = static_cast<uint8_t>(v >> 24);
-    p[1] = static_cast<uint8_t>((v >> 16) & 0xFFU);
-    p[2] = static_cast<uint8_t>((v >> 8) & 0xFFU);
-    p[3] = static_cast<uint8_t>(v & 0xFFU);
+    ieee::quadlet_t const q{v};
+    statusbar::span_copy(std::span<uint8_t, 4>{p, 4}, q.span());
 }
 
 [[nodiscard]] auto read_u32_be(uint8_t const* p) noexcept -> uint32_t
 {
-    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) | (static_cast<uint32_t>(p[2]) << 8) |
-        static_cast<uint32_t>(p[3]);
+    ieee::quadlet_t q{};
+    statusbar::span_copy(q.span(), std::span<uint8_t const, 4>{p, 4});
+    return q.get();
 }
 
 [[nodiscard]] auto write_session_id(std::span<uint8_t> buf, size_t& cursor, SessionId const& sid) -> std::error_code
@@ -212,7 +215,7 @@ struct ParsedRegisterRequest
         if (auto ec = enforce_unique_with_size(parsed.have_session_id, value, SESSION_ID_SIZE); ec) {
             return ec;
         }
-        std::memcpy(parsed.session_id.bytes.data(), value.data(), SESSION_ID_SIZE);
+        statusbar::span_copy(statusbar::make_span(parsed.session_id.bytes), value.first(SESSION_ID_SIZE));
         return {};
     }
     if (known == AttributeType::ClientEui64) {
@@ -326,7 +329,7 @@ struct ParsedRegisterResponseSuccess
         if (auto ec = enforce_unique_with_size(parsed.have_session_id, value, SESSION_ID_SIZE); ec) {
             return ec;
         }
-        std::memcpy(parsed.session_id.bytes.data(), value.data(), SESSION_ID_SIZE);
+        statusbar::span_copy(statusbar::make_span(parsed.session_id.bytes), value.first(SESSION_ID_SIZE));
         return {};
     }
     if (known == AttributeType::XorMappedAddress) {

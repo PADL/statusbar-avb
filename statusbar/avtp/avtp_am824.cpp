@@ -39,9 +39,9 @@ auto am824_deserialize_interleaved(
     for (uint8_t s = 0; s < sample_count; ++s) {
         for (uint8_t ch = 0; ch < channel_count; ++ch) {
             // Read 4-byte AM824 quadlet in network byte order
-            uint32_t const quadlet = (static_cast<uint32_t>(payload[payload_offset]) << 24) |
-                (static_cast<uint32_t>(payload[payload_offset + 1]) << 16) |
-                (static_cast<uint32_t>(payload[payload_offset + 2]) << 8) | static_cast<uint32_t>(payload[payload_offset + 3]);
+            ieee::quadlet_t q{};
+            span_load(q, payload.subspan(payload_offset, sizeof(q)));
+            uint32_t const quadlet = q.get();
 
             int32_t const sample = parse_am824_quadlet(quadlet);
             output[output_idx] = am824_sample_to_float(sample);
@@ -84,9 +84,9 @@ auto am824_deserialize_planar(
     for (uint8_t s = 0; s < sample_count; ++s) {
         for (uint8_t ch = 0; ch < channel_count; ++ch) {
             // Read 4-byte AM824 quadlet in network byte order
-            uint32_t const quadlet = (static_cast<uint32_t>(payload[payload_offset]) << 24) |
-                (static_cast<uint32_t>(payload[payload_offset + 1]) << 16) |
-                (static_cast<uint32_t>(payload[payload_offset + 2]) << 8) | static_cast<uint32_t>(payload[payload_offset + 3]);
+            ieee::quadlet_t q{};
+            span_load(q, payload.subspan(payload_offset, sizeof(q)));
+            uint32_t const quadlet = q.get();
 
             int32_t const sample = parse_am824_quadlet(quadlet);
             channel_buffers[ch][s] = am824_sample_to_float(sample);
@@ -128,9 +128,9 @@ auto am824_deserialize_channel(
         size_t const payload_offset = (s * block_size) + (channel_index * Am824Pdu::BYTES_PER_SAMPLE);
 
         // Read 4-byte AM824 quadlet in network byte order
-        uint32_t const quadlet = (static_cast<uint32_t>(payload[payload_offset]) << 24) |
-            (static_cast<uint32_t>(payload[payload_offset + 1]) << 16) | (static_cast<uint32_t>(payload[payload_offset + 2]) << 8) |
-            static_cast<uint32_t>(payload[payload_offset + 3]);
+        ieee::quadlet_t q{};
+        span_load(q, payload.subspan(payload_offset, sizeof(q)));
+        uint32_t const quadlet = q.get();
 
         int32_t const sample = parse_am824_quadlet(quadlet);
         output[s] = am824_sample_to_float(sample);
@@ -165,10 +165,8 @@ auto am824_serialize_interleaved(
             uint32_t const quadlet = create_am824_quadlet(sample);
 
             // Write in network byte order
-            payload[payload_offset] = static_cast<uint8_t>((quadlet >> 24) & 0xFFU);
-            payload[payload_offset + 1] = static_cast<uint8_t>((quadlet >> 16) & 0xFFU);
-            payload[payload_offset + 2] = static_cast<uint8_t>((quadlet >> 8) & 0xFFU);
-            payload[payload_offset + 3] = static_cast<uint8_t>(quadlet & 0xFFU);
+            ieee::quadlet_t const q{quadlet};
+            span_copy(payload.subspan(payload_offset, sizeof(q)), q.span());
 
             payload_offset += 4;
             ++input_idx;
@@ -203,10 +201,8 @@ auto am824_serialize_planar(
             uint32_t const quadlet = create_am824_quadlet(sample);
 
             // Write in network byte order
-            payload[payload_offset] = static_cast<uint8_t>((quadlet >> 24) & 0xFFU);
-            payload[payload_offset + 1] = static_cast<uint8_t>((quadlet >> 16) & 0xFFU);
-            payload[payload_offset + 2] = static_cast<uint8_t>((quadlet >> 8) & 0xFFU);
-            payload[payload_offset + 3] = static_cast<uint8_t>(quadlet & 0xFFU);
+            ieee::quadlet_t const q{quadlet};
+            span_copy(payload.subspan(payload_offset, sizeof(q)), q.span());
 
             payload_offset += 4;
         }

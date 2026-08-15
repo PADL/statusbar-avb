@@ -50,12 +50,9 @@ auto crf_get_timestamp(std::span<uint8_t const> const timestamp_data, size_t con
         return std::nullopt;
     }
     // Timestamps are 64-bit big-endian values
-    uint64_t const value = (static_cast<uint64_t>(timestamp_data[offset]) << 56) |
-        (static_cast<uint64_t>(timestamp_data[offset + 1]) << 48) | (static_cast<uint64_t>(timestamp_data[offset + 2]) << 40) |
-        (static_cast<uint64_t>(timestamp_data[offset + 3]) << 32) | (static_cast<uint64_t>(timestamp_data[offset + 4]) << 24) |
-        (static_cast<uint64_t>(timestamp_data[offset + 5]) << 16) | (static_cast<uint64_t>(timestamp_data[offset + 6]) << 8) |
-        static_cast<uint64_t>(timestamp_data[offset + 7]);
-    return value;
+    ieee::octlet_t value{};
+    span_load(value, timestamp_data.subspan(offset, CrfPdu::TIMESTAMP_SIZE));
+    return value.get();
 }
 
 auto crf_set_timestamp(std::span<uint8_t> const timestamp_data, size_t const index, uint64_t const timestamp) noexcept -> bool
@@ -65,14 +62,8 @@ auto crf_set_timestamp(std::span<uint8_t> const timestamp_data, size_t const ind
         return false;
     }
     // Store as 64-bit big-endian
-    timestamp_data[offset] = static_cast<uint8_t>((timestamp >> 56) & 0xFFU);
-    timestamp_data[offset + 1] = static_cast<uint8_t>((timestamp >> 48) & 0xFFU);
-    timestamp_data[offset + 2] = static_cast<uint8_t>((timestamp >> 40) & 0xFFU);
-    timestamp_data[offset + 3] = static_cast<uint8_t>((timestamp >> 32) & 0xFFU);
-    timestamp_data[offset + 4] = static_cast<uint8_t>((timestamp >> 24) & 0xFFU);
-    timestamp_data[offset + 5] = static_cast<uint8_t>((timestamp >> 16) & 0xFFU);
-    timestamp_data[offset + 6] = static_cast<uint8_t>((timestamp >> 8) & 0xFFU);
-    timestamp_data[offset + 7] = static_cast<uint8_t>(timestamp & 0xFFU);
+    ieee::octlet_t const value{timestamp};
+    statusbar::span_copy(timestamp_data.subspan(offset, CrfPdu::TIMESTAMP_SIZE), value.span());
     return true;
 }
 

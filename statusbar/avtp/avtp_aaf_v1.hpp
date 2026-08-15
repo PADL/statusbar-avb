@@ -102,11 +102,8 @@ struct AafV1Pdu
     /// Byte 32: format field (Table 10)
     octet_t format;
 
-    /// Byte 33: nsr[7:4] | rsv[3:2] | channels_hi[1:0]
-    octet_t nsr_rsv_channels_hi;
-
-    /// Byte 34: channels_lo[7:0]
-    octet_t channels_lo;
+    /// Bytes 33-34: nsr[15:12] | rsv[11:10] | channels_per_frame[9:0]
+    doublet_t nsr_rsv_channels;
 
     /// Byte 35: bit_depth[7:0]
     octet_t bit_depth;
@@ -195,29 +192,26 @@ struct AafV1Pdu
     /// Get the nominal sample rate (nsr) field
     [[nodiscard]] constexpr auto nsr() const noexcept -> AafSampleRate
     {
-        return static_cast<AafSampleRate>(nsr_rsv_channels_hi.get_bits(0xF0U, 4));
+        return static_cast<AafSampleRate>(nsr_rsv_channels.get_bits(0xF000U, 12));
     }
 
     /// Set the nominal sample rate (nsr) field
     constexpr void set_nsr(AafSampleRate const rate) noexcept
     {
-        nsr_rsv_channels_hi.set_bits(0xF0U, 4, static_cast<uint8_t>(rate));
+        nsr_rsv_channels.set_bits(0xF000U, 12, static_cast<uint16_t>(rate));
     }
 
     /// Get channels_per_frame (10-bit field)
     [[nodiscard]] constexpr auto channels_per_frame() const noexcept -> uint16_t
     {
-        uint16_t const hi = nsr_rsv_channels_hi.get_bits<uint16_t>(0x03U, 0);
-        uint16_t const lo = static_cast<uint16_t>(channels_lo.get());
-        return static_cast<uint16_t>((hi << 8) | lo);
+        return nsr_rsv_channels.get_bits<uint16_t>(0x03FFU);
     }
 
     /// Set channels_per_frame (10-bit field, max 1023)
     constexpr void set_channels_per_frame(uint16_t channels) noexcept
     {
-        channels = static_cast<uint16_t>(channels & 0x03FFU);
-        nsr_rsv_channels_hi.set_bits(0x03U, 0, static_cast<uint8_t>((channels >> 8) & 0x03U));
-        channels_lo = static_cast<uint8_t>(channels & 0xFFU);
+        // set_bits masks to the 10-bit field, preserving nsr and rsv
+        nsr_rsv_channels.set_bits(0x03FFU, 0, channels);
     }
 
     /// Get bit_depth field

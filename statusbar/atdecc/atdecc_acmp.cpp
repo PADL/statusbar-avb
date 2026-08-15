@@ -118,8 +118,7 @@ auto acmp_command_response_from_pdu(AcmpDu const& pdu) noexcept -> AcmpCommandRe
     AcmpCommandResponse resp{};
     resp.subtype = pdu.subtype;
     resp.sv_version_msgtype = pdu.sv_version_msgtype;
-    resp.status_cdl_h = pdu.status_cdl_h;
-    resp.control_data_length_l = pdu.control_data_length_l;
+    resp.status_cdl = pdu.status_cdl;
     resp.stream_id = pdu.stream_id;
     resp.controller_entity_id = pdu.controller_entity_id;
     resp.talker_entity_id = pdu.talker_entity_id;
@@ -140,8 +139,7 @@ auto acmp_command_response_to_pdu(AcmpCommandResponse const& resp, AcmpDu& pdu) 
 {
     pdu.subtype = resp.subtype;
     pdu.sv_version_msgtype = resp.sv_version_msgtype;
-    pdu.status_cdl_h = resp.status_cdl_h;
-    pdu.control_data_length_l = resp.control_data_length_l;
+    pdu.status_cdl = resp.status_cdl;
     pdu.stream_id = resp.stream_id;
     pdu.controller_entity_id = resp.controller_entity_id;
     pdu.talker_entity_id = resp.talker_entity_id;

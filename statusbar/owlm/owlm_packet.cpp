@@ -5,6 +5,7 @@
 // Include order differs between clang-19 and clang-22 here — wrap-off
 // pins it so both versions produce the same layout.
 #include "statusbar/owlm/owlm_packet.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/status/statusbar_assert.hpp"
 
 #include <cstring>
@@ -14,48 +15,26 @@ namespace statusbar::owlm {
 
 namespace {
 
-void write_u32_be(uint8_t* p, uint32_t v) noexcept
-{
-    p[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
-    p[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    p[2] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    p[3] = static_cast<uint8_t>(v & 0xFF);
-}
+using ieee::doublet_t;
+using ieee::octlet_t;
+using ieee::quadlet_t;
 
-void write_u16_be(uint8_t* p, uint16_t v) noexcept
+/// The 32-byte OWLM header as it appears on the wire — every multi-byte
+/// field is an ieee network-ordered type, so encode/decode are a single
+/// struct copy with no per-field byte marshalling.
+struct OwlmWireHeader
 {
-    p[0] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    p[1] = static_cast<uint8_t>(v & 0xFF);
-}
+    quadlet_t magic{0};
+    doublet_t version{0};
+    doublet_t flags{0};
+    ieee::Eui64 sender_eui64{};
+    quadlet_t sequence{0};
+    octlet_t tx_gptp_ns{0};  ///< int64 carried in two's-complement bits
+    quadlet_t tx_interval_us{0};
+};
 
-void write_i64_be(uint8_t* p, int64_t v) noexcept
-{
-    auto u = static_cast<uint64_t>(v);
-    for (int i = 7; i >= 0; --i) {
-        p[i] = static_cast<uint8_t>(u & 0xFF);
-        u >>= 8;
-    }
-}
-
-[[nodiscard]] auto read_u32_be(uint8_t const* p) noexcept -> uint32_t
-{
-    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) | (static_cast<uint32_t>(p[2]) << 8) |
-        static_cast<uint32_t>(p[3]);
-}
-
-[[nodiscard]] auto read_u16_be(uint8_t const* p) noexcept -> uint16_t
-{
-    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]));
-}
-
-[[nodiscard]] auto read_i64_be(uint8_t const* p) noexcept -> int64_t
-{
-    uint64_t u = 0;
-    for (int i = 0; i < 8; ++i) {
-        u = (u << 8) | static_cast<uint8_t>(p[i]);
-    }
-    return static_cast<int64_t>(u);
-}
+static_assert(sizeof(OwlmWireHeader) == OwlmPacket::HEADER_SIZE, "OwlmWireHeader must match the wire header size");
+static_assert(alignof(OwlmWireHeader) == 1);
 
 }  // namespace
 
@@ -63,20 +42,17 @@ auto encode_owlm_packet(OwlmPacket const& p, std::span<uint8_t> buf) -> size_t
 {
     auto const buf_size = buf.size();
     STATUSBAR_ASSERT(buf_size >= OwlmPacket::HEADER_SIZE);
-    auto* d = buf.data();
-    write_u32_be(d + 0, OwlmPacket::MAGIC);
-    write_u16_be(d + 4, OwlmPacket::VERSION);
-    write_u16_be(d + 6, 0);
 
-    // Eui64 stores bytes already in network byte order via IeeeOrderedUInt.
-    auto const eui_span = p.sender_eui64.span();
-    for (size_t i = 0; i < 8; ++i) {
-        d[8 + i] = eui_span[i];
-    }
+    OwlmWireHeader hdr{};
+    hdr.magic = OwlmPacket::MAGIC;
+    hdr.version = OwlmPacket::VERSION;
+    hdr.flags = 0;
+    hdr.sender_eui64 = p.sender_eui64;
+    hdr.sequence = p.sequence;
+    hdr.tx_gptp_ns = static_cast<uint64_t>(p.tx_gptp_ns);
+    hdr.tx_interval_us = p.tx_interval_us;
 
-    write_u32_be(d + 16, p.sequence);
-    write_i64_be(d + 20, p.tx_gptp_ns);
-    write_u32_be(d + 28, p.tx_interval_us);
+    statusbar::span_copy(buf.first(OwlmPacket::HEADER_SIZE), statusbar::make_const_span(hdr));
     return OwlmPacket::HEADER_SIZE;
 }
 
@@ -85,26 +61,24 @@ auto decode_owlm_packet(std::span<uint8_t const> buf, OwlmPacket& out) -> std::e
     if (buf.size() < OwlmPacket::HEADER_SIZE) {
         return make_error_code(OwlmError::DatagramTooShort);
     }
-    auto const* d = buf.data();
 
-    if (read_u32_be(d + 0) != OwlmPacket::MAGIC) {
+    OwlmWireHeader hdr{};
+    statusbar::span_load(hdr, buf.first(OwlmPacket::HEADER_SIZE));
+
+    if (hdr.magic != OwlmPacket::MAGIC) {
         return make_error_code(OwlmError::InvalidMagic);
     }
-    if (read_u16_be(d + 4) != OwlmPacket::VERSION) {
+    if (hdr.version != OwlmPacket::VERSION) {
         return make_error_code(OwlmError::UnsupportedVersion);
     }
-    if (read_u16_be(d + 6) != 0) {
+    if (hdr.flags != 0) {
         return make_error_code(OwlmError::ReservedFlagsSet);
     }
 
-    auto eui_span = out.sender_eui64.span();
-    for (size_t i = 0; i < 8; ++i) {
-        eui_span[i] = d[8 + i];
-    }
-
-    out.sequence = read_u32_be(d + 16);
-    out.tx_gptp_ns = read_i64_be(d + 20);
-    out.tx_interval_us = read_u32_be(d + 28);
+    out.sender_eui64 = hdr.sender_eui64;
+    out.sequence = hdr.sequence.get();
+    out.tx_gptp_ns = static_cast<int64_t>(hdr.tx_gptp_ns.get());
+    out.tx_interval_us = hdr.tx_interval_us.get();
 
     if (out.tx_interval_us == 0 || out.tx_interval_us > OwlmPacket::max_interval_us) {
         return make_error_code(OwlmError::InvalidInterval);

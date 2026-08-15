@@ -154,11 +154,8 @@ struct AdpDu
     /// Byte 1: sv[7] | version[6:4] | message_type[3:0]
     octet_t sv_version_msgtype{0};
 
-    /// Byte 2: valid_time[7:3] | control_data_length[10:8]
-    octet_t valid_time_cdl_h{0};
-
-    /// Byte 3: control_data_length[7:0]
-    octet_t control_data_length_l{0};
+    /// Bytes 2-3: valid_time[15:11] | control_data_length[10:0]
+    doublet_t valid_time_cdl{0};
 
     /// Bytes 4-11: Entity ID (8 bytes)
     Eui64 entity_id{};
@@ -233,28 +230,21 @@ struct AdpDu
     }
 
     /// Get the valid time in 2-second units (0-31)
-    [[nodiscard]] constexpr auto valid_time() const noexcept -> uint8_t { return (valid_time_cdl_h.get() >> 3) & 0x1F; }
+    [[nodiscard]] constexpr auto valid_time() const noexcept -> uint8_t { return valid_time_cdl.get_bits<uint8_t>(0xF800, 11); }
 
     /// Set the valid time in 2-second units (0-31)
     /// @param time Valid time value in 2-second units
-    constexpr void set_valid_time(uint8_t const time) noexcept
-    {
-        valid_time_cdl_h = static_cast<uint8_t>((valid_time_cdl_h.get() & 0x07) | ((time & 0x1F) << 3));
-    }
+    constexpr void set_valid_time(uint8_t const time) noexcept { valid_time_cdl.set_bits(0xF800, 11, time); }
 
     /// Get the control data length (11-bit field, should be 56 for ADP)
     [[nodiscard]] constexpr auto control_data_length() const noexcept -> uint16_t
     {
-        return static_cast<uint16_t>(((valid_time_cdl_h.get() & 0x07) << 8) | control_data_length_l.get());
+        return valid_time_cdl.get_bits<uint16_t>(0x07FF);
     }
 
     /// Set the control data length
     /// @param len Control data length value (11-bit)
-    constexpr void set_control_data_length(uint16_t const len) noexcept
-    {
-        valid_time_cdl_h = static_cast<uint8_t>((valid_time_cdl_h.get() & 0xF8) | ((len >> 8) & 0x07));
-        control_data_length_l = static_cast<uint8_t>(len & 0xFF);
-    }
+    constexpr void set_control_data_length(uint16_t const len) noexcept { valid_time_cdl.set_bits(0x07FF, 0, len); }
 
     // Capability flag helpers
 
@@ -346,8 +336,7 @@ static_assert(sizeof(AdpDu) == 68, "AdpDu must be exactly 68 bytes");
 static_assert(alignof(AdpDu) <= 4, "AdpDu alignment must not exceed 4 bytes");
 static_assert(offsetof(AdpDu, subtype) == 0, "subtype must be at offset 0");
 static_assert(offsetof(AdpDu, sv_version_msgtype) == 1, "sv_version_msgtype must be at offset 1");
-static_assert(offsetof(AdpDu, valid_time_cdl_h) == 2, "valid_time_cdl_h must be at offset 2");
-static_assert(offsetof(AdpDu, control_data_length_l) == 3, "control_data_length_l must be at offset 3");
+static_assert(offsetof(AdpDu, valid_time_cdl) == 2, "valid_time_cdl must be at offset 2");
 static_assert(offsetof(AdpDu, entity_id) == 4, "entity_id must be at offset 4");
 static_assert(offsetof(AdpDu, entity_model_id) == 12, "entity_model_id must be at offset 12");
 static_assert(offsetof(AdpDu, entity_capabilities) == 20, "entity_capabilities must be at offset 20");
