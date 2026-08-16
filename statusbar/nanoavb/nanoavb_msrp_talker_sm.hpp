@@ -80,17 +80,21 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
 
     t.at(S::Start, E::UCT) = T::action<init>(S::Idle);
 
-    t.at(S::Idle, E::StartAdvertise) = T::action<msrp_talker_advertise>(S::Advertising);
+    t.at(S::Idle, E::StartAdvertise) = T::transition(S::Advertising);
 
     t.at(S::Advertising, E::Ready) = T::action<mark_ready>(S::Ready);
     t.at(S::Advertising, E::Failed) = T::action<mark_failed>(S::Failed);
 
-    t.at(S::Ready, E::Lost) = T::action<msrp_talker_advertise>(S::Advertising);
+    t.at(S::Ready, E::Lost) = T::transition(S::Advertising);
 
-    t.at(S::Ready, E::StopAdvertise) = T::action<msrp_talker_withdraw>(S::Withdrawing);
-    t.at(S::Failed, E::StopAdvertise) = T::action<msrp_talker_withdraw>(S::Withdrawing);
+    t.at(S::Ready, E::StopAdvertise) = T::transition(S::Withdrawing);
+    t.at(S::Failed, E::StopAdvertise) = T::transition(S::Withdrawing);
 
     t.at(S::Withdrawing, E::Withdrawn) = T::action<mark_idle>(S::Idle);
+
+    // Entry hooks: Advertising/Withdrawing always issue their MSRP declaration.
+    t.on_entry(S::Advertising) = T::hook<msrp_talker_advertise>();
+    t.on_entry(S::Withdrawing) = T::hook<msrp_talker_withdraw>();
 
     return t;
 }();

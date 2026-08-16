@@ -75,11 +75,12 @@ TEST(nanoavb_supervisor_sm, gptp_locked_to_ready)
     // Down -> Init -> Ready (gPTP lock alone enables SRP+streaming; no VLAN gate)
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
+    machine.last_action = "";
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
     EXPECT_TRUE(ready_called);
-    EXPECT_EQ(machine.last_action, "enter_ready");
+    EXPECT_EQ(machine.last_action, "");  // enter_ready moved to the Ready entry hook
 }
 
 TEST(nanoavb_supervisor_sm, gptp_lost_then_relock_is_dynamic)
@@ -482,12 +483,13 @@ TEST(nanoavb_mvrp_sm, join_fail_to_error)
 
     machine.handle_event(ctx, mvrp::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, mvrp::Def::Event::Acquire, TimePoint{});
+    machine.last_action = "";
     machine.handle_event(ctx, mvrp::Def::Event::JoinFail, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Error);
     EXPECT_TRUE(mark_error_called);
     EXPECT_FALSE(ctx.joined);
-    EXPECT_EQ(machine.last_action, "mark_error");
+    EXPECT_EQ(machine.last_action, "");  // mark_error moved to the Error entry hook
 }
 
 TEST(nanoavb_mvrp_sm, leave_fail_to_error)
@@ -508,12 +510,13 @@ TEST(nanoavb_mvrp_sm, leave_fail_to_error)
     machine.handle_event(ctx, mvrp::Def::Event::ReleaseLast, TimePoint{});
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Leaving);
 
+    machine.last_action = "";
     machine.handle_event(ctx, mvrp::Def::Event::LeaveFail, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Error);
     EXPECT_TRUE(mark_error_called);
     EXPECT_FALSE(ctx.joined);
-    EXPECT_EQ(machine.last_action, "mark_error");
+    EXPECT_EQ(machine.last_action, "");  // mark_error moved to the Error entry hook
 }
 
 TEST(nanoavb_mvrp_sm, reset_from_error_to_not_joined)

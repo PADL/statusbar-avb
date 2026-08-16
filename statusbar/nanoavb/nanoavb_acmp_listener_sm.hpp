@@ -88,10 +88,14 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Connecting, E::ConnectFail) = T::action<mark_failed>(S::Idle);
 
     t.at(S::Connected, E::DisconnectReq) = T::action<send_disconnect_tx>(S::Disconnecting);
-    t.at(S::Disconnecting, E::DisconnectOk) = T::action<mark_disconnected>(S::Idle);
-    t.at(S::Disconnecting, E::LinkDown) = T::action<mark_disconnected>(S::Idle);
+    t.at(S::Disconnecting, E::DisconnectOk) = T::transition(S::Idle);
+    t.at(S::Disconnecting, E::LinkDown) = T::transition(S::Idle);
 
     t.at(S::Connected, E::LinkDown) = T::action<mark_disconnected>(S::Idle);
+
+    // Exit hook: leaving Disconnecting always records the disconnect,
+    // however the exchange ended.
+    t.on_exit(S::Disconnecting) = T::hook<mark_disconnected>();
 
     return t;
 }();

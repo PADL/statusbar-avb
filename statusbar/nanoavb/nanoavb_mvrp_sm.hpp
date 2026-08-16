@@ -91,14 +91,17 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::NotJoined, E::Acquire) = T::action<send_join>(S::Joining);
 
     t.at(S::Joining, E::JoinOk) = T::action<mark_joined>(S::Joined);
-    t.at(S::Joining, E::JoinFail) = T::action<mark_error>(S::Error);
+    t.at(S::Joining, E::JoinFail) = T::transition(S::Error);
 
     t.at(S::Joined, E::ReleaseLast) = T::action<send_leave>(S::Leaving);
 
     t.at(S::Leaving, E::LeaveOk) = T::action<mark_left>(S::NotJoined);
-    t.at(S::Leaving, E::LeaveFail) = T::action<mark_error>(S::Error);
+    t.at(S::Leaving, E::LeaveFail) = T::transition(S::Error);
 
     t.at(S::Error, E::Reset) = T::action<reset>(S::NotJoined);
+
+    // Entry hook: any arrival in Error records the failure.
+    t.on_entry(S::Error) = T::hook<mark_error>();
 
     return t;
 }();

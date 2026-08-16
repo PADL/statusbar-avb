@@ -71,12 +71,15 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
 
     t.at(S::Start, E::UCT) = T::action<init>(S::Unlocked);
 
-    t.at(S::Unlocked, E::AsCapableUp) = T::action<start_servo>(S::Acquiring);
+    t.at(S::Unlocked, E::AsCapableUp) = T::transition(S::Acquiring);
     t.at(S::Acquiring, E::LockedStable) = T::action<report_locked>(S::Locked);
     t.at(S::Acquiring, E::AsCapableDown) = T::action<report_unlocked>(S::Unlocked);
 
     t.at(S::Locked, E::AsCapableDown) = T::action<report_unlocked>(S::Unlocked);
-    t.at(S::Locked, E::LockLost) = T::action<start_servo>(S::Acquiring);
+    t.at(S::Locked, E::LockLost) = T::transition(S::Acquiring);
+
+    // Entry hook: entering Acquiring always (re)starts the servo.
+    t.on_entry(S::Acquiring) = T::hook<start_servo>();
 
     return t;
 }();

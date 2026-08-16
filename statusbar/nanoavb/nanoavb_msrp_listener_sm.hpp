@@ -80,17 +80,21 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
 
     t.at(S::Start, E::UCT) = T::action<init>(S::Idle);
 
-    t.at(S::Idle, E::StartJoin) = T::action<msrp_listener_ready>(S::Joining);
+    t.at(S::Idle, E::StartJoin) = T::transition(S::Joining);
 
     t.at(S::Joining, E::Ready) = T::action<mark_ready>(S::Ready);
     t.at(S::Joining, E::Failed) = T::action<mark_failed>(S::Failed);
 
-    t.at(S::Ready, E::Lost) = T::action<msrp_listener_ready>(S::Joining);
+    t.at(S::Ready, E::Lost) = T::transition(S::Joining);
 
-    t.at(S::Ready, E::StopJoin) = T::action<msrp_listener_leave>(S::Leaving);
-    t.at(S::Failed, E::StopJoin) = T::action<msrp_listener_leave>(S::Leaving);
+    t.at(S::Ready, E::StopJoin) = T::transition(S::Leaving);
+    t.at(S::Failed, E::StopJoin) = T::transition(S::Leaving);
 
     t.at(S::Leaving, E::Left) = T::action<mark_idle>(S::Idle);
+
+    // Entry hooks: Joining/Leaving always issue their MSRP declaration.
+    t.on_entry(S::Joining) = T::hook<msrp_listener_ready>();
+    t.on_entry(S::Leaving) = T::hook<msrp_listener_leave>();
 
     return t;
 }();

@@ -108,24 +108,29 @@ inline constexpr auto client_table = [] {
 
     // Registering: any response moves us forward.
     t.at(State::Registering, Event::ResponseWaiting) = T::action<enter_waiting>(State::Waiting);
-    t.at(State::Registering, Event::ResponsePaired) = T::action<enter_paired>(State::Paired);
-    t.at(State::Registering, Event::ResponseError) = T::action<enter_failed>(State::Failed);
+    t.at(State::Registering, Event::ResponsePaired) = T::transition(State::Paired);
+    t.at(State::Registering, Event::ResponseError) = T::transition(State::Failed);
     t.at(State::Registering, Event::ResponseSessionExpired) = T::action<mark_send>(State::Registering);
     t.at(State::Registering, Event::Rto) = T::action<mark_retransmit>(State::Registering);
-    t.at(State::Registering, Event::RetryBudgetExhausted) = T::action<enter_failed>(State::Failed);
+    t.at(State::Registering, Event::RetryBudgetExhausted) = T::transition(State::Failed);
 
     // Waiting: a refresh tick causes us to re-send.
     t.at(State::Waiting, Event::RefreshTick) = T::action<mark_send>(State::Registering);
     // (We can also receive an unsolicited paired notification if the
     // server happens to push one out as a response to a refresh that
     // crossed in flight; treated as paired arrival.)
-    t.at(State::Waiting, Event::ResponsePaired) = T::action<enter_paired>(State::Paired);
-    t.at(State::Waiting, Event::ResponseError) = T::action<enter_failed>(State::Failed);
+    t.at(State::Waiting, Event::ResponsePaired) = T::transition(State::Paired);
+    t.at(State::Waiting, Event::ResponseError) = T::transition(State::Failed);
 
     // Paired: the Pollable may keep refreshing as a NAT keepalive. A
     // refresh tick re-sends; a "paired" response is idempotent.
     t.at(State::Paired, Event::RefreshTick) = T::action<mark_send>(State::Registering);
-    t.at(State::Paired, Event::ResponsePaired) = T::action<enter_paired>(State::Paired);
+    t.at(State::Paired, Event::ResponsePaired) = T::transition(State::Paired);
+
+    // Entry hooks: arriving in Paired or Failed always runs the same
+    // bookkeeping, wherever the transition came from (self-loops included).
+    t.on_entry(State::Paired) = T::hook<enter_paired>();
+    t.on_entry(State::Failed) = T::hook<enter_failed>();
 
     return t;
 }();

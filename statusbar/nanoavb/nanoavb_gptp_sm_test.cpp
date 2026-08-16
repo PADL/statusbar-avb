@@ -68,11 +68,12 @@ TEST(nanoavb_gptp_sm, as_capable_up_to_acquiring)
     machine.handle_event(ctx, gptp::Def::Event::UCT, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
 
+    machine.last_action = "";
     machine.handle_event(ctx, gptp::Def::Event::AsCapableUp, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
     EXPECT_TRUE(servo_called);
-    EXPECT_EQ(machine.last_action, "start_servo");
+    EXPECT_EQ(machine.last_action, "");  // start_servo moved to the Acquiring entry hook
     EXPECT_FALSE(ctx.time_locked);
 }
 
@@ -166,11 +167,12 @@ TEST(nanoavb_gptp_sm, lock_lost_to_acquiring)
     machine.handle_event(ctx, gptp::Def::Event::LockedStable, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Locked);
 
+    machine.last_action = "";
     machine.handle_event(ctx, gptp::Def::Event::LockLost, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
     EXPECT_EQ(servo_count, 2);
-    EXPECT_EQ(machine.last_action, "start_servo");
+    EXPECT_EQ(machine.last_action, "");  // start_servo moved to the Acquiring entry hook
     EXPECT_FALSE(ctx.time_locked);
 }
 

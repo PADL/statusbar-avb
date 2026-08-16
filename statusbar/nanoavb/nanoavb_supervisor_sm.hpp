@@ -89,7 +89,7 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Down, E::LinkDown) = T::transition(S::Down);
 
     // gPTP lock alone enables SRP + streaming (no VLAN-registration gate).
-    t.at(S::Init, E::GptpLocked) = T::action<enter_ready>(S::Ready);
+    t.at(S::Init, E::GptpLocked) = T::transition(S::Ready);
     t.at(S::Init, E::LinkDown) = T::action<stop_all>(S::Down);
     t.at(S::Init, E::Timeout) = T::action<timeout_gptp>(S::Down);  // gPTP lock timeout
 
@@ -97,8 +97,11 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Ready, E::LinkDown) = T::action<stop_all>(S::Down);
 
     // gPTP came back: restart SRP + streaming.
-    t.at(S::Degraded, E::GptpLocked) = T::action<enter_ready>(S::Ready);
+    t.at(S::Degraded, E::GptpLocked) = T::transition(S::Ready);
     t.at(S::Degraded, E::LinkDown) = T::action<stop_all>(S::Down);
+
+    // Entry hook: reaching Ready runs the same bring-up from Init or Degraded.
+    t.on_entry(S::Ready) = T::hook<enter_ready>();
 
     return t;
 }();

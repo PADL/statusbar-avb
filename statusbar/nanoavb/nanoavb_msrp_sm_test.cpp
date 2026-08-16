@@ -90,10 +90,11 @@ TEST(nanoavb_msrp_listener_sm, join_then_ready_declares_and_reserves)
     wire(ctx, c);
 
     machine.handle_event(ctx, listener::Def::Event::UCT, TimePoint{});
+    machine.last_action = "";
     machine.handle_event(ctx, listener::Def::Event::StartJoin, TimePoint{});
     EXPECT_EQ(machine.current_state(), listener::Def::State::Joining);
-    EXPECT_EQ(c.declare, 1);  // ListenerReady declared
-    EXPECT_EQ(machine.last_action, "msrp_listener_ready");
+    EXPECT_EQ(c.declare, 1);             // ListenerReady declared
+    EXPECT_EQ(machine.last_action, "");  // msrp_listener_ready moved to the Joining entry hook
 
     machine.handle_event(ctx, listener::Def::Event::Ready, TimePoint{});
     EXPECT_EQ(machine.current_state(), listener::Def::State::Ready);
@@ -210,10 +211,11 @@ TEST(nanoavb_msrp_talker_sm, advertise_then_ready_declares_and_reserves)
     EXPECT_EQ(machine.current_state(), talker::Def::State::Idle);
     EXPECT_EQ(c.init, 1);
 
+    machine.last_action = "";
     machine.handle_event(ctx, talker::Def::Event::StartAdvertise, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Advertising);
-    EXPECT_EQ(c.declare, 1);  // TalkerAdvertise declared
-    EXPECT_EQ(machine.last_action, "msrp_talker_advertise");
+    EXPECT_EQ(c.declare, 1);             // TalkerAdvertise declared
+    EXPECT_EQ(machine.last_action, "");  // msrp_talker_advertise moved to the Advertising entry hook
 
     machine.handle_event(ctx, talker::Def::Event::Ready, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Ready);

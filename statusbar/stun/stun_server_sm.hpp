@@ -83,17 +83,23 @@ inline constexpr auto server_table = [] {
 
     statusbar::sm::TransitionTable<ServerDef> t{};
 
-    t.at(State::Empty, Event::FirstRegister) = T::action<touch>(State::OneRegistered);
+    t.at(State::Empty, Event::FirstRegister) = T::transition(State::OneRegistered);
 
-    t.at(State::OneRegistered, Event::SecondRegister) = T::action<touch>(State::Paired);
-    t.at(State::OneRegistered, Event::RefreshOne) = T::action<touch>(State::OneRegistered);
-    t.at(State::OneRegistered, Event::DuplicateEui64) = T::action<touch>(State::OneRegistered);
-    t.at(State::OneRegistered, Event::ExpireTick) = T::action<mark_expired>(State::Expired);
+    t.at(State::OneRegistered, Event::SecondRegister) = T::transition(State::Paired);
+    t.at(State::OneRegistered, Event::RefreshOne) = T::transition(State::OneRegistered);
+    t.at(State::OneRegistered, Event::DuplicateEui64) = T::transition(State::OneRegistered);
+    t.at(State::OneRegistered, Event::ExpireTick) = T::transition(State::Expired);
 
-    t.at(State::Paired, Event::RefreshOne) = T::action<touch>(State::Paired);
-    t.at(State::Paired, Event::RefreshTwo) = T::action<touch>(State::Paired);
-    t.at(State::Paired, Event::DuplicateEui64) = T::action<touch>(State::Paired);
-    t.at(State::Paired, Event::ExpireTick) = T::action<mark_expired>(State::Expired);
+    t.at(State::Paired, Event::RefreshOne) = T::transition(State::Paired);
+    t.at(State::Paired, Event::RefreshTwo) = T::transition(State::Paired);
+    t.at(State::Paired, Event::DuplicateEui64) = T::transition(State::Paired);
+    t.at(State::Paired, Event::ExpireTick) = T::transition(State::Expired);
+
+    // Entry hooks: any arrival in a registered state refreshes the session
+    // timestamp; any arrival in Expired marks the session dead.
+    t.on_entry(State::OneRegistered) = T::hook<touch>();
+    t.on_entry(State::Paired) = T::hook<touch>();
+    t.on_entry(State::Expired) = T::hook<mark_expired>();
 
     return t;
 }();

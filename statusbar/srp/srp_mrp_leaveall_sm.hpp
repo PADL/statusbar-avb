@@ -107,8 +107,14 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Active, E::RLeaveAll) = T::action<a_restart_timer>(S::Passive);
 
     // LvaTimer — mrp.c:474-478 — timer fired; enter Active and rearm.
-    t.at(S::Passive, E::LvaTimer) = T::action<a_restart_timer>(S::Active);
-    t.at(S::Active, E::LvaTimer) = T::action<a_restart_timer>(S::Active);  // self
+    t.at(S::Passive, E::LvaTimer) = T::transition(S::Active);
+    t.at(S::Active, E::LvaTimer) = T::transition(S::Active);  // self
+
+    // Entry hook: arriving in Active (fresh or via the self-loop) restarts
+    // the LeaveAll timer. The RLeaveAll edges keep their explicit restart
+    // actions: Active->Passive is covered by neither hook, and a Passive
+    // exit hook would double-fire on the LvaTimer edge.
+    t.on_entry(S::Active) = T::hook<a_restart_timer>();
 
     return t;
 }();

@@ -108,8 +108,8 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Start, E::UCT) = T::action<init>(S::Initial);
 
     // Initial: Begin and PortOperational start acquisition
-    t.at(S::Initial, E::Begin) = T::action<begin_acquire>(S::Probe);
-    t.at(S::Initial, E::PortOperational) = T::action<begin_acquire>(S::Probe);
+    t.at(S::Initial, E::Begin) = T::transition(S::Probe);
+    t.at(S::Initial, E::PortOperational) = T::transition(S::Probe);
 
     // Probe state transitions
     t.at(S::Probe, E::Release) = T::action<release>(S::Initial);
@@ -127,6 +127,9 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Defend, E::rAnnounce) = T::action<restart_probing>(S::Probe);
     t.at(S::Defend, E::AnnounceTimer) = T::action<announce_tick>(S::Defend);
     t.at(S::Defend, E::PortOperational) = T::action<restart_probing>(S::Probe);
+
+    // Exit hook: leaving Initial always begins address acquisition.
+    t.on_exit(S::Initial) = T::hook<begin_acquire>();
 
     return t;
 }();
