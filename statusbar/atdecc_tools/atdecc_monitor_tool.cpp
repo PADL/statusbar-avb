@@ -634,7 +634,12 @@ void print_active_streams(StreamMap const& streams, int64_t now_ns)
 
 [[nodiscard]] auto be16_at(std::span<uint8_t const> b, size_t off) -> uint16_t
 {
-    return (off + 1 < b.size()) ? static_cast<uint16_t>((static_cast<uint16_t>(b[off]) << 8) | b[off + 1]) : uint16_t{0};
+    if (off + 1 >= b.size()) {
+        return 0;
+    }
+    ieee::doublet_t v{};
+    statusbar::span_load(v, b.subspan(off, sizeof(v)));
+    return v.get();
 }
 
 class Enumerator

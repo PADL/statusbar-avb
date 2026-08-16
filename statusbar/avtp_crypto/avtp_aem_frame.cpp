@@ -194,8 +194,11 @@ auto parse_aem_frame(span<uint8_t const> frame) -> std::optional<ParsedAemFrame>
     result.ethertype = ethertype;
     result.subtype = subtype;
     result.message_type = static_cast<uint8_t>(frame[15] & 0x0F);
-    result.status = static_cast<uint8_t>((frame[16] >> 3) & 0x1F);
-    result.control_data_length = static_cast<uint16_t>(((frame[16] & 0x07) << 8) | frame[17]);
+    // Bytes 16-17: status[15:11] | control_data_length[10:0]
+    ieee::doublet_t status_cdl{};
+    span_load(status_cdl, frame.subspan(16, sizeof(status_cdl)));
+    result.status = status_cdl.get_bits<uint8_t>(0xF800, 11);
+    result.control_data_length = status_cdl.get_bits<uint16_t>(0x07FF);
     span_load(result.target_entity_id, frame.subspan(18, 8));
     span_load(result.controller_entity_id, frame.subspan(26, 8));
     statusbar::ieee::doublet_t sequence_id{};

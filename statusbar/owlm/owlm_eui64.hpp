@@ -5,6 +5,8 @@
 
 #include "statusbar/ieee/ieee.hpp"
 
+#include <array>
+#include <bit>
 #include <cstdint>
 
 namespace statusbar::owlm {
@@ -34,7 +36,8 @@ inline constexpr uint16_t REDUNDANT_MID_BYTES = 0x0001;
 [[nodiscard]] constexpr auto eui64_mid_bytes(ieee::Eui64 const& e) noexcept -> uint16_t
 {
     auto const s = e.span();
-    return static_cast<uint16_t>((static_cast<uint16_t>(s[3]) << 8) | static_cast<uint16_t>(s[4]));
+    std::array<uint8_t, 2> const be{s[3], s[4]};
+    return std::bit_cast<ieee::doublet_t>(be).get();
 }
 
 /// Pair identifier — EUI-64 with the middle two bytes zeroed. Primary

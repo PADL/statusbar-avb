@@ -307,7 +307,7 @@ class MvrpParticipantT
         }
         size_t pos = 1;
         while (pos + 2 <= pdu.size()) {
-            uint16_t const end_check = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
+            uint16_t const end_check = mrp::read_doublet_at(pdu, pos);
             if (end_check == mrp::END_MARK) {
                 break;
             }
@@ -324,7 +324,7 @@ class MvrpParticipantT
                 // must be followed immediately by an EndMark; consume it and move on.
                 // Any non-EndMark word there is malformed -> bail.
                 if (pos + 2 <= pdu.size()) {
-                    uint16_t const v = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
+                    uint16_t const v = mrp::read_doublet_at(pdu, pos);
                     if (v != mrp::END_MARK) {
                         return;
                     }
@@ -334,7 +334,7 @@ class MvrpParticipantT
             }
 
             while (pos + 2 <= pdu.size()) {
-                uint16_t const end_check2 = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
+                uint16_t const end_check2 = mrp::read_doublet_at(pdu, pos);
                 if (end_check2 == mrp::END_MARK) {
                     pos += 2;
                     break;

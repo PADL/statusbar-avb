@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -1055,10 +1056,7 @@ void ControllerSimple::handle_get_stream_format_response(Eui64 target, uint8_t s
     }
 
     if (status == AEM_STATUS_SUCCESS) {
-        uint64_t fmt = 0;
-        for (auto b : resp.stream_format) {
-            fmt = (fmt << 8) | b;
-        }
+        uint64_t const fmt = std::bit_cast<ieee::octlet_t>(resp.stream_format).get();
         vec[idx] = avtp::stream_format_to_string(fmt);
     } else {
         vec[idx] = std::format("({})", aem_status_name(status));

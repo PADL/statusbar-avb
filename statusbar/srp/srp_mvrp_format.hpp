@@ -79,7 +79,7 @@ auto format_mvrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
     // Parse messages until we hit the final EndMark
     while (pos + 2 <= payload.size()) {
         // Check for EndMark (end of all messages)
-        uint16_t const end_check = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+        uint16_t const end_check = mrp::read_doublet_at(payload, pos);
         if (end_check == END_MARK) {
             out = std::format_to(out, "  [EndMark]\n");
             break;
@@ -102,7 +102,7 @@ auto format_mvrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
 
         // Parse VectorAttributes until EndMark
         while (pos + 2 <= payload.size()) {
-            uint16_t const vec_end_check = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+            uint16_t const vec_end_check = mrp::read_doublet_at(payload, pos);
             if (vec_end_check == END_MARK) {
                 pos += 2;
                 break;

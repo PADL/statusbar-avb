@@ -21,6 +21,16 @@ using ieee::doublet_t;
 using ieee::octet_t;
 using ieee::quadlet_t;
 
+/// Read a 16-bit big-endian value at byte position @p pos of an MRP PDU
+/// (endmarks, AttributeListLength, VLAN first values). MRP parsing is
+/// cursor-driven, so bounds are checked by the caller before reading.
+[[nodiscard]] inline auto read_doublet_at(std::span<uint8_t const> pdu, size_t pos) noexcept -> uint16_t
+{
+    doublet_t v{};
+    statusbar::span_load(v, pdu.subspan(pos, sizeof(v)));
+    return v.get();
+}
+
 //
 // MRP Constants - IEEE 802.1Q-2014 Clause 10
 //

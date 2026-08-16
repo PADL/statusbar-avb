@@ -733,7 +733,7 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
     rx_leaveall_seen_ = false;
     size_t pos = 1;
     while (pos + 2 <= pdu.size()) {
-        uint16_t const end_check = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
+        uint16_t const end_check = mrp::read_doublet_at(pdu, pos);
         if (end_check == mrp::END_MARK) {
             break;
         }
@@ -749,7 +749,7 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
         // octets of the AttributeList (vectors + trailing EndMark). Consumed
         // here and used to bound the per-message decode scope so a malformed
         // length can't make us read past the message.
-        uint16_t const attr_list_length = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
+        uint16_t const attr_list_length = mrp::read_doublet_at(pdu, pos);
         pos += 2;
 
         size_t const attr_list_end = pos + attr_list_length;
@@ -791,7 +791,7 @@ void MsrpParticipantT<Limits>::decode_attribute_list(
     AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
 {
     while (pos + 2 <= payload.size()) {
-        uint16_t const end_check = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+        uint16_t const end_check = mrp::read_doublet_at(payload, pos);
         if (end_check == mrp::END_MARK) {
             pos += 2;
             return;

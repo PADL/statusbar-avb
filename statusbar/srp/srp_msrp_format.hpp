@@ -178,7 +178,7 @@ auto format_msrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
     // Parse messages until we hit the final EndMark
     while (pos + 2 <= payload.size()) {
         // Check for EndMark (end of all messages)
-        uint16_t const end_check = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+        uint16_t const end_check = mrp::read_doublet_at(payload, pos);
         if (end_check == END_MARK) {
             out = std::format_to(out, "  [EndMark]\n");
             break;
@@ -202,7 +202,7 @@ auto format_msrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
         // between AttributeLength and the first VectorHeader; skipping it shifts
         // every subsequent field by two bytes and turns the whole decode to
         // garbage. Consume it and use it to bound this message's vector walk.
-        uint16_t const attr_list_length = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+        uint16_t const attr_list_length = mrp::read_doublet_at(payload, pos);
         pos += 2;
         size_t const attr_list_end = std::min(pos + attr_list_length, payload.size());
 
@@ -214,7 +214,7 @@ auto format_msrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
 
         // Parse VectorAttributes until EndMark (bounded by AttributeListLength)
         while (pos + 2 <= attr_list_end) {
-            uint16_t const vec_end_check = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+            uint16_t const vec_end_check = mrp::read_doublet_at(payload, pos);
             if (vec_end_check == END_MARK) {
                 pos += 2;
                 break;

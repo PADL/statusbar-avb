@@ -5,11 +5,13 @@
 
 #include "statusbar/avtp_crypto/avtp_crypto_pdu.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/crypto/aes_gcm_siv/aes128_gcm_siv.hpp"
 #include "statusbar/crypto/aes_gcm_siv/aes256_gcm_siv.hpp"
 #include "statusbar/crypto/aes_siv/aes128_siv.hpp"
 #include "statusbar/crypto/aes_siv/aes256_siv.hpp"
 #include "statusbar/crypto/util/crypto_util_internal.hpp"
+#include "statusbar/ieee/ieee.hpp"
 
 namespace statusbar::crypto::avtp {
 
@@ -141,11 +143,12 @@ auto deserialize_auth_add_key_nonce_header(span<uint8_t const, auth_add_key_nonc
     offset += nonce_size;
     span_copy(header.key_id.data, in.subspan(offset, key_id_size));
     offset += key_id_size;
-    header.key_type = static_cast<KeyType>((in[offset] >> 4) & 0x0F);
-    uint16_t const key_length_high = static_cast<uint16_t>(in[offset] & 0x0F);
-    offset++;
-    header.key_length = static_cast<uint16_t>((key_length_high << 8) | in[offset]);
-    offset++;
+    // key_type[15:12] | key_length[11:0]
+    ieee::doublet_t key_field{};
+    span_load(key_field, in.subspan(offset, sizeof(key_field)));
+    header.key_type = static_cast<KeyType>(key_field.get_bits<uint8_t>(0xF000, 12));
+    header.key_length = key_field.get_bits<uint16_t>(0x0FFF);
+    offset += 2;
     // Skip 2 reserved bytes (no validation needed)
     return header;
 }
