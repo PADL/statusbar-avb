@@ -15,7 +15,7 @@
 // with a custom PTP hardware clock, or on software-only systems for
 // testing.
 //
-// Every field is a std::function so the caller can bind lambdas
+// Every field is an inplace_function so the caller can bind lambdas
 // capturing their own state (e.g. a PHC fd, a ring buffer of tx
 // timestamp requests, a soft-clock driver state).
 //
@@ -59,7 +59,7 @@ struct TxResult
 
 /// User-supplied clock / timestamping interface for GptpSlavePort.
 ///
-/// All functions are std::function-based to make the callbacks
+/// All functions are inplace_function-based to make the callbacks
 /// trivially lambda-friendly — the user binds them to whatever
 /// underlying implementation (Linux raw socket + PHC, bare-metal
 /// hardware timer, software-only for tests, etc.).

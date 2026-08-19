@@ -9,7 +9,7 @@
 // Scope: local endpoint only (not bridge capable). One MsrpParticipant
 // instance per NIC (per 802.1Q "port"). In-process API: no daemon
 // sockets, no notification wire protocol. Observers subscribe via
-// std::function callbacks and receive per-attribute notifications as
+// inplace_function callbacks and receive per-attribute notifications as
 // the Registrar FSMs fire.
 //
 // PDU I/O is via a user-supplied callback (`set_send_pdu`) for
@@ -194,7 +194,7 @@ struct MsrpConfig
 //
 // Observer callback interface.
 //
-// Each callback is optional (nullable std::function). Notifications
+// Each callback is optional (nullable inplace_function). Notifications
 // are delivered synchronously from within tick(), receive_pdu(), or
 // the declare_* / withdraw_* API entry points, on the calling thread.
 //

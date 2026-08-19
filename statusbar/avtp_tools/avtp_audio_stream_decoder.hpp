@@ -11,7 +11,7 @@
 // deserializer and pushes interleaved float samples to the caller's
 // sink callback.
 //
-// The decoder owns no I/O. The output sink is a std::function that the
+// The decoder owns no I/O. The output sink is an inplace_function that the
 // caller wires to wherever the samples should land — Bw64Writer for the
 // avtp-to-wav tool, an AudioStream for live monitoring, a network
 // pipe for retransmit, etc. Keeping the decoder free of any one sink is

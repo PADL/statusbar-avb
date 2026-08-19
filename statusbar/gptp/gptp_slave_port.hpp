@@ -17,7 +17,7 @@
 // subscription, frame ingress, link up/down, tick / next_deadline,
 // and query methods. Follows the same in-process pattern as
 // MsrpParticipant: config-driven fixed capacities, zero-allocation
-// steady state, std::function-based Observer callbacks.
+// steady state, inplace_function-based Observer callbacks.
 //
 
 #include "statusbar/gptp/gptp_base.hpp"
@@ -92,7 +92,7 @@ struct SyncQuality
 }
 
 /// Observer callback surface. Every callback is a nullable
-/// std::function so subscribers can opt in to only the events they
+/// inplace_function so subscribers can opt in to only the events they
 /// care about. Called synchronously from within receive_frame() or
 /// tick() on the caller's thread.
 struct Observer

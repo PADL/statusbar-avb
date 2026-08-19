@@ -33,6 +33,7 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/stats/stats_atomic_histogram.hpp"
 #include "statusbar/stats/stats_atomic_wake_stats.hpp"
@@ -43,7 +44,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <iterator>
 #include <memory>
 #include <print>
@@ -254,11 +254,13 @@ struct MainLoopResult
 struct EntityRunnerHooks
 {
     /// Register extra SPSC log channels (beyond ctl + media).
-    std::function<void(logging::LogCollector<4>&)> add_log_channels{};
+    /// Allocation-free inplace_function; captures must fit in 128 bytes
+    /// (the tools bind by-reference lambdas over several telemetry locals).
+    statusbar::sg14::inplace_function<void(logging::LogCollector<4>&), 128> add_log_channels{};
     /// Called once per loop iteration, after the reactor poll.
-    std::function<void()> poll{};
+    statusbar::sg14::inplace_function<void(), 128> poll{};
     /// Called once per verbose telemetry tick, after the bridge line.
-    std::function<void()> extra_telemetry{};
+    statusbar::sg14::inplace_function<void(), 128> extra_telemetry{};
 };
 
 /// The shared main loop: PTP media timer -> Entity::process_audio on the
