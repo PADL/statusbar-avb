@@ -126,29 +126,33 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     // true, immediately dispatches AsCapableAcquired which takes us
     // Listening -> Uncalibrated).
     t.at(S::Initializing, E::AsCapableAcquired) = T::action<a_enter_listening>(S::Listening);
-    t.at(S::Initializing, E::LinkDown) = T::action<a_enter_disabled>(S::Disabled);
+    t.at(S::Initializing, E::LinkDown) = T::transition(S::Disabled);
 
     // Listening: waiting for asCapable (dynamic in Standard profile).
     t.at(S::Listening, E::AsCapableAcquired) = T::action<a_enter_uncalibrated>(S::Uncalibrated);
-    t.at(S::Listening, E::LinkDown) = T::action<a_enter_disabled>(S::Disabled);
+    t.at(S::Listening, E::LinkDown) = T::transition(S::Disabled);
 
     // Uncalibrated: asCapable, waiting for first sync lock.
     t.at(S::Uncalibrated, E::FirstSyncLocked) = T::action<a_enter_slave>(S::Slave);
     t.at(S::Uncalibrated, E::AsCapableLost) = T::action<a_drop_as_capable>(S::Listening);
-    t.at(S::Uncalibrated, E::LinkDown) = T::action<a_enter_disabled>(S::Disabled);
+    t.at(S::Uncalibrated, E::LinkDown) = T::transition(S::Disabled);
 
     // Slave: synchronized. Sync loss drops us back to Uncalibrated;
     // asCapable loss takes us all the way back to Listening.
     t.at(S::Slave, E::SyncLost) = T::action<a_lose_sync>(S::Uncalibrated);
     t.at(S::Slave, E::AsCapableLost) = T::action<a_drop_as_capable>(S::Listening);
-    t.at(S::Slave, E::LinkDown) = T::action<a_enter_disabled>(S::Disabled);
+    t.at(S::Slave, E::LinkDown) = T::transition(S::Disabled);
 
     // AdministrativeDisable applies from any state. Express it for
     // the states that are worth supporting.
-    t.at(S::Initializing, E::AdministrativeDisable) = T::action<a_enter_disabled>(S::Disabled);
-    t.at(S::Listening, E::AdministrativeDisable) = T::action<a_enter_disabled>(S::Disabled);
-    t.at(S::Uncalibrated, E::AdministrativeDisable) = T::action<a_enter_disabled>(S::Disabled);
-    t.at(S::Slave, E::AdministrativeDisable) = T::action<a_enter_disabled>(S::Disabled);
+    t.at(S::Initializing, E::AdministrativeDisable) = T::transition(S::Disabled);
+    t.at(S::Listening, E::AdministrativeDisable) = T::transition(S::Disabled);
+    t.at(S::Uncalibrated, E::AdministrativeDisable) = T::transition(S::Disabled);
+    t.at(S::Slave, E::AdministrativeDisable) = T::transition(S::Disabled);
+
+    // Entry hook: every arrival in Disabled quiesces the port. Also fires
+    // after a_init on the initial UCT edge (a no-op on a fresh context).
+    t.on_entry(S::Disabled) = T::hook<a_enter_disabled>();
 
     return t;
 }();

@@ -47,11 +47,10 @@ void stop_all(Context& ctx, TimePoint time)
 
 void timeout_gptp(Context& ctx, TimePoint time)
 {
+    // Stopping is handled by the Down entry hook (stop_all runs after this
+    // action, preserving the original notify-then-stop order).
     if (ctx.callbacks.timeout_gptp) {
         ctx.callbacks.timeout_gptp(ctx, time);
-    }
-    if (ctx.callbacks.stop_all) {
-        ctx.callbacks.stop_all(ctx, time);
     }
 }
 

@@ -84,7 +84,11 @@ inline void start_audio_sink(Context& ctx, TimePoint time)
 
 inline void stop_all(Context& ctx, TimePoint time)
 {
-    ctx.callbacks.stop_all(ctx, time);
+    // Runs as the Off entry hook, including on the initial UCT edge before a
+    // driver may have wired callbacks - nothing wired means nothing to stop.
+    if (ctx.callbacks.stop_all) {
+        ctx.callbacks.stop_all(ctx, time);
+    }
 }
 
 inline void resync(Context& ctx, TimePoint time)
@@ -113,19 +117,24 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Off, E::GateListen) = T::action<enable_rx_filter>(S::Listening);
 
     t.at(S::Listening, E::FirstPacket) = T::action<start_sync>(S::Syncing);
-    t.at(S::Listening, E::GateStop) = T::action<stop_all>(S::Off);  // Allow stop from Listening
+    t.at(S::Listening, E::GateStop) = T::transition(S::Off);
 
     t.at(S::Syncing, E::Synced) = T::action<start_audio_sink>(S::Playing);
-    t.at(S::Syncing, E::GateStop) = T::action<stop_all>(S::Off);     // Allow stop from Syncing
+    t.at(S::Syncing, E::GateStop) = T::transition(S::Off);           // Allow stop from Syncing
     t.at(S::Syncing, E::PacketGap) = T::action<resync>(S::Syncing);  // Handle gap during sync
 
-    t.at(S::Playing, E::GateStop) = T::action<stop_all>(S::Off);
+    t.at(S::Playing, E::GateStop) = T::transition(S::Off);
     t.at(S::Playing, E::PacketGap) = T::action<resync>(S::Syncing);
     t.at(S::Playing, E::Underrun) = T::action<mute_out>(S::Muted);
 
     t.at(S::Muted, E::Recovered) = T::action<unmute_out>(S::Playing);
-    t.at(S::Muted, E::GateStop) = T::action<stop_all>(S::Off);
+    t.at(S::Muted, E::GateStop) = T::transition(S::Off);
     t.at(S::Muted, E::PacketGap) = T::action<resync>(S::Syncing);  // Handle gap while muted
+
+    // Entry hook: every arrival in Off (GateStop from any active state)
+    // stops everything. Also fires after init on the initial UCT edge
+    // (a no-op on a fresh context).
+    t.on_entry(S::Off) = T::hook<stop_all>();
 
     return t;
 }();

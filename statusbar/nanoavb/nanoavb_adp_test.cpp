@@ -675,6 +675,7 @@ TEST(nanoavb_adp_adv_sm, full_cycle)
     ctx.callbacks.maybe_announce = [](adp_adv::Context&, TimePoint) {};
 
     machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
+    stops = 0;  // the Off entry hook fires stop_adp on the initial UCT
     machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
     EXPECT_EQ(starts, 1);
     machine.handle_event(ctx, adp_adv::Def::Event::Tick, TimePoint{});

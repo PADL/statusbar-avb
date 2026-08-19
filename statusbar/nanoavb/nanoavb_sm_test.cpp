@@ -149,6 +149,7 @@ TEST(nanoavb_supervisor_sm, link_down_from_any_state_to_down)
 
     // Get to Ready (gPTP lock alone)
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
+    stop_count = 0;  // the Down entry hook fires stop_all on the initial UCT
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
@@ -256,11 +257,12 @@ TEST(nanoavb_listener_sm, gate_stop_from_listening_to_off)
     EXPECT_EQ(machine.current_state(), listener::Def::State::Listening);
 
     // GateStop from Listening -> Off
+    machine.last_action = "";
     machine.handle_event(ctx, listener::Def::Event::GateStop, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Off);
     EXPECT_TRUE(stop_called);
-    EXPECT_EQ(machine.last_action, "stop_all");
+    EXPECT_EQ(machine.last_action, "");  // stop_all moved to the Off entry hook
 }
 
 TEST(nanoavb_listener_sm, gate_stop_from_syncing_to_off)
@@ -280,11 +282,12 @@ TEST(nanoavb_listener_sm, gate_stop_from_syncing_to_off)
     EXPECT_EQ(machine.current_state(), listener::Def::State::Syncing);
 
     // GateStop from Syncing -> Off
+    machine.last_action = "";
     machine.handle_event(ctx, listener::Def::Event::GateStop, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Off);
     EXPECT_TRUE(stop_called);
-    EXPECT_EQ(machine.last_action, "stop_all");
+    EXPECT_EQ(machine.last_action, "");  // stop_all moved to the Off entry hook
 }
 
 TEST(nanoavb_listener_sm, packet_gap_in_syncing_resyncs)

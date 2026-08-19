@@ -66,7 +66,11 @@ inline void start_adp(Context& ctx, TimePoint time)
 inline void stop_adp(Context& ctx, TimePoint time)
 {
     ctx.enabled = false; /* adp_stop() */
-    ctx.callbacks.stop_adp(ctx, time);
+    // Runs as the Off entry hook, including on the initial UCT edge before a
+    // driver may have wired callbacks - nothing wired means nothing to stop.
+    if (ctx.callbacks.stop_adp) {
+        ctx.callbacks.stop_adp(ctx, time);
+    }
 }
 
 inline void maybe_announce(Context& ctx, TimePoint time)
@@ -83,9 +87,14 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
 
     t.at(S::Off, E::Enable) = T::action<start_adp>(S::Advertising);
 
-    t.at(S::Advertising, E::Disable) = T::action<stop_adp>(S::Off);
+    t.at(S::Advertising, E::Disable) = T::transition(S::Off);
     t.at(S::Advertising, E::Tick) = T::action<maybe_announce>(S::Advertising);
-    t.at(S::Advertising, E::Error) = T::action<stop_adp>(S::Off);
+    t.at(S::Advertising, E::Error) = T::transition(S::Off);
+
+    // Entry hook: arriving in Off (Disable or Error) stops advertising.
+    // Also fires after init on the initial UCT edge (a no-op on a fresh
+    // context).
+    t.on_entry(S::Off) = T::hook<stop_adp>();
 
     return t;
 }();

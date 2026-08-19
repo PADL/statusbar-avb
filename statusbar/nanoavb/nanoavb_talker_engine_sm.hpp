@@ -100,7 +100,11 @@ inline void unmute_tx(Context& ctx, TimePoint time)
 
 inline void stop_all(Context& ctx, TimePoint time)
 {
-    ctx.callbacks.stop_all(ctx, time);
+    // Runs as the Off entry hook, including on the initial UCT edge before a
+    // driver may have wired callbacks - nothing wired means nothing to stop.
+    if (ctx.callbacks.stop_all) {
+        ctx.callbacks.stop_all(ctx, time);
+    }
 }
 
 inline constexpr auto table = []() -> TransitionTable<Def> {
@@ -123,11 +127,16 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Muted, E::GateStop) = T::action<stop_tx>(S::Armed);
 
     // Fatal from any operational state: keep explicit ones (your table doesn't support wildcards)
-    t.at(S::Off, E::Fatal) = T::action<stop_all>(S::Off);
-    t.at(S::Priming, E::Fatal) = T::action<stop_all>(S::Off);
-    t.at(S::Armed, E::Fatal) = T::action<stop_all>(S::Off);
-    t.at(S::Running, E::Fatal) = T::action<stop_all>(S::Off);
-    t.at(S::Muted, E::Fatal) = T::action<stop_all>(S::Off);
+    t.at(S::Off, E::Fatal) = T::transition(S::Off);
+    t.at(S::Priming, E::Fatal) = T::transition(S::Off);
+    t.at(S::Armed, E::Fatal) = T::transition(S::Off);
+    t.at(S::Running, E::Fatal) = T::transition(S::Off);
+    t.at(S::Muted, E::Fatal) = T::transition(S::Off);
+
+    // Entry hook: every arrival in Off (Fatal from anywhere, including the
+    // Off self-loop) stops everything. Also fires after init on the initial
+    // UCT edge (a no-op on a fresh context).
+    t.on_entry(S::Off) = T::hook<stop_all>();
 
     return t;
 }();
