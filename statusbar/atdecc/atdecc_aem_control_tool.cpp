@@ -234,6 +234,14 @@ class AemControlHandler : public net::Pollable
             sent_read_ = true;
             (void)controller_.read_descriptor(config_.target_entity_id, DESCRIPTOR_CONTROL, config_.descriptor_index);
         }
+        // Follow-up commands are queued by the response callback and sent
+        // here: send_aem_command re-enters handle_aem_response, so sending
+        // from inside on_aem_response recurses until the stack dies.
+        if (pending_cmd_ != 0) {
+            auto const cmd = pending_cmd_;
+            pending_cmd_ = 0;
+            (void)controller_.send_aem_command(config_.target_entity_id, cmd, pending_payload_);
+        }
         if (!done_ && (now_ns - start_ns_) > config_.timeout_ms * 1'000'000) {
             std::print(stderr, "timed out ({} ms) — entity not discovered or no response\n", config_.timeout_ms);
             finish(EXIT_FAILURE);
@@ -289,7 +297,8 @@ class AemControlHandler : public net::Pollable
         span_store(std::span{payload.data(), AemControlPayloadHeader::LENGTH}, header);
 
         if (!config_.do_set) {
-            (void)controller_.send_aem_command(config_.target_entity_id, AEM_COMMAND_GET_CONTROL, payload);
+            pending_payload_ = std::move(payload);
+            pending_cmd_ = AEM_COMMAND_GET_CONTROL;
             return;
         }
 
@@ -312,7 +321,8 @@ class AemControlHandler : public net::Pollable
         for (auto v : values) {
             encode_element(value_type_, v, payload);
         }
-        (void)controller_.send_aem_command(config_.target_entity_id, AEM_COMMAND_SET_CONTROL, payload);
+        pending_payload_ = std::move(payload);
+        pending_cmd_ = AEM_COMMAND_SET_CONTROL;
     }
 
     void print_values(uint16_t cmd, std::span<uint8_t const> data)
@@ -348,6 +358,8 @@ class AemControlHandler : public net::Pollable
     size_t element_size_{0};
     std::string object_name_;
     int64_t start_ns_{0};
+    uint16_t pending_cmd_{0};
+    std::vector<uint8_t> pending_payload_;
     bool sent_read_{false};
     bool done_{false};
 };
