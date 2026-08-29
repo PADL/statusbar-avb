@@ -1034,7 +1034,10 @@ class DescriptorStorageHandler : public AemEntityHandler
         offsetof(atdecc::aem::AemMatrixPayloadHeader, item_offset) - MATRIX_REGION_BASE;
     static constexpr size_t MATRIX_REGION_HEADER_SIZE = atdecc::aem::AemMatrixPayloadHeader::LENGTH - MATRIX_REGION_BASE;
 
-    static constexpr size_t MAX_MATRIX_VALUE_BYTES = 512;
+    // Sized for a 32x16 grid of 4-byte linear values with headroom for
+    // 8-byte elements (a DSP routing matrix the size of a GALAXY 816's);
+    // grids beyond this are rejected at state-init time, not truncated.
+    static constexpr size_t MAX_MATRIX_VALUE_BYTES = 4096;
     static constexpr size_t MAX_MATRIX_STATES = 4;
 
     /// The in-RAM value grid for one MATRIX descriptor (row-major).
