@@ -71,6 +71,12 @@ set_target_properties(aem_get_counters_tool
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     aem_get_counters_tool)
 
+add_executable(aem_control_tool atdecc_aem_control_tool.cpp)
+target_link_libraries(aem_control_tool PRIVATE statusbar)
+set_target_properties(aem_control_tool PROPERTIES OUTPUT_NAME
+                                                  statusbar-aem-control)
+set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS aem_control_tool)
+
 add_executable(descriptor_storage_tool atdecc_descriptor_storage_tool.cpp)
 target_link_libraries(descriptor_storage_tool PRIVATE statusbar)
 set_target_properties(descriptor_storage_tool
