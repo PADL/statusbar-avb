@@ -901,8 +901,13 @@ class DescriptorStorageHandler : public AemEntityHandler
     static constexpr size_t CONTROL_TYPE_FIELD = offsetof(atdecc::aem::DescriptorControl, control_type);
     static constexpr size_t CONTROL_VALUES_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorControl, values_offset);
     static constexpr size_t CONTROL_NUMBER_OF_VALUES_FIELD = offsetof(atdecc::aem::DescriptorControl, number_of_values);
-    static constexpr size_t MAX_CONTROL_VALUE_BYTES = 64;
-    static constexpr size_t MAX_CONTROL_STATES = 8;
+    // Sized for a full DSP control surface (a GALAXY-816-scale proxy has
+    // 1021 CONTROLs; its widest ARRAY control carries 32 floats = 128
+    // value bytes). ~170 KB of state when every slot is used — fine for
+    // hosted entities; embedded models with a handful of controls only
+    // touch the slots they set.
+    static constexpr size_t MAX_CONTROL_VALUE_BYTES = 160;
+    static constexpr size_t MAX_CONTROL_STATES = 1024;
 
     /// The stored current-values payload for one CONTROL descriptor.
     struct ControlState

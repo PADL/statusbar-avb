@@ -54,8 +54,8 @@ using namespace statusbar::net;
 // Defensive caps against a hostile/corrupt CONFIGURATION descriptor: real entities
 // have at most tens of any descriptor type and far fewer than 108 types, so these
 // bound enumeration hard (a raw 65535 x 65535 would otherwise be ~4 billion enqueues).
-constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 512;
-constexpr uint16_t MAX_DESCRIPTOR_TYPES = 108;  // total AVDECC descriptor types
+constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 1536;  // GALAXY-scale: 1021 CONTROLs is a real model
+constexpr uint16_t MAX_DESCRIPTOR_TYPES = 108;       // total AVDECC descriptor types
 
 using atdecc_tools::CommonConfig;
 

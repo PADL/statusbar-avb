@@ -35,7 +35,7 @@ using namespace statusbar::net;
 // descriptor types would otherwise drive millions of set inserts + queue pushes
 // (hundreds of MB) -- a DoS from a single discovered entity. Real AVDECC entities
 // have at most tens of any descriptor type, so this is far above anything genuine.
-constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 512;
+constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 1536;  // GALAXY-scale: 1021 CONTROLs is a real model
 
 ControllerSimple::ControllerSimple(RawnetContext context, Eui64 controller_id)
     : ControllerSimple{make_rawnet_controller_service(std::move(context), controller_id)}
