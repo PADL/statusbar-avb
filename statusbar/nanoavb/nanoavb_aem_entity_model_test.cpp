@@ -448,6 +448,42 @@ auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::
 
 }  // namespace
 
+TEST(descriptor_storage_handler, matrix_signal_serves_blob_trailer)
+{
+    // MATRIX_SIGNAL's signals trailer is not modeled inline in the wire
+    // struct, so the dispatch must append the blob's authored trailer
+    // bytes verbatim instead of truncating at the 8-byte fixed part.
+    using atdecc::aem::DESCRIPTOR_MATRIX_SIGNAL;
+    using atdecc::aem::DescriptorMatrixSignal;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageTocEntry;
+
+    constexpr uint32_t desc_offset = DescriptorStorageHeader::LENGTH + DescriptorStorageTocEntry::LENGTH;
+    constexpr uint16_t desc_len = DescriptorMatrixSignal::LENGTH + 6;  // one 6-byte SignalSource
+    std::vector<uint8_t> blob(desc_offset + desc_len, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_MATRIX_SIGNAL, desc_len, desc_offset);
+
+    DescriptorMatrixSignal desc{};
+    desc.signals_offset = 8;
+    desc.signals_count = 1;
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+    // The trailer: signal_type=0x1234, signal_index=5, signal_output=6.
+    std::array<uint8_t, 6> const trailer{0x12, 0x34, 0x00, 0x05, 0x00, 0x06};
+    std::copy(trailer.begin(), trailer.end(), blob.begin() + desc_offset + DescriptorMatrixSignal::LENGTH);
+
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemEntityModel model{handler, *storage_result};
+
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_MATRIX_SIGNAL, .descriptor_index = 0},
+        make_span(buf));
+    EXPECT_EQ(n, size_t(desc_len));
+    EXPECT_TRUE(std::equal(trailer.begin(), trailer.end(), buf.begin() + DescriptorMatrixSignal::LENGTH));
+}
+
 TEST(descriptor_storage_handler, approves_descriptor_that_exists_in_storage)
 {
     auto blob = make_blob_with_entity("StorageTest");

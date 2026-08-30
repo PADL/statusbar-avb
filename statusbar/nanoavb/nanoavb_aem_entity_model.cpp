@@ -85,6 +85,43 @@ auto dispatch_fixed(
     return n;
 }
 
+/// Like dispatch_fixed, but for descriptors whose variable trailer is not
+/// modeled inline in the wire struct (MATRIX's values trailer,
+/// MATRIX_SIGNAL's signals list — see their wire_size() notes): the fixed
+/// part goes through the struct and the handler exactly as dispatch_fixed,
+/// then the blob's authored trailer bytes beyond the struct are appended
+/// verbatim, so READ_DESCRIPTOR serves the full authored descriptor
+/// instead of silently truncating it at the fixed length.
+template <typename T, auto HandlerMethod>
+auto dispatch_fixed_with_raw_trailer(
+    AemEntityHandler& handler, DescriptorRef ref, uint32_t symbol, DescriptorStorage const* storage, std::span<uint8_t> out)
+    -> size_t
+{
+    T desc{};
+    std::span<uint8_t const> trailer{};
+    if (storage != nullptr) {
+        auto blob_result = storage->get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        if (blob_result.has_value()) {
+            span_load_padded(desc, *blob_result);
+            if (blob_result->size() > T::LENGTH) {
+                trailer = blob_result->subspan(T::LENGTH);
+            }
+        }
+    }
+    desc.descriptor_type = ref.descriptor_type;
+    desc.descriptor_index = ref.descriptor_index;
+    if (!(handler.*HandlerMethod)(DescriptorId{.ref = ref, .symbol = symbol}, desc)) {
+        return 0;
+    }
+    auto const n = T::LENGTH + trailer.size();
+    if (out.size() < n) {
+        return 0;
+    }
+    span_store_wire(out.first(T::LENGTH), desc);
+    std::copy(trailer.begin(), trailer.end(), out.begin() + long(T::LENGTH));
+    return n;
+}
+
 /// Dispatch table size. AEM descriptor_type codes occupy 0x0000..~0x0027
 /// in IEEE 1722.1, plus the 2016/2021 extensions. 0x80 leaves plenty of
 /// headroom without bloating the table.
@@ -130,8 +167,9 @@ constexpr size_t DISPATCH_TABLE_SIZE = 0x80;
     table[DESCRIPTOR_CONTROL] = &dispatch_fixed<DescriptorControl, &AemEntityHandler::on_get_control>;
     table[DESCRIPTOR_SIGNAL_SELECTOR] = &dispatch_fixed<DescriptorSignalSelector, &AemEntityHandler::on_get_signal_selector>;
     table[DESCRIPTOR_MIXER] = &dispatch_fixed<DescriptorMixer, &AemEntityHandler::on_get_mixer>;
-    table[DESCRIPTOR_MATRIX] = &dispatch_fixed<DescriptorMatrix, &AemEntityHandler::on_get_matrix>;
-    table[DESCRIPTOR_MATRIX_SIGNAL] = &dispatch_fixed<DescriptorMatrixSignal, &AemEntityHandler::on_get_matrix_signal>;
+    table[DESCRIPTOR_MATRIX] = &dispatch_fixed_with_raw_trailer<DescriptorMatrix, &AemEntityHandler::on_get_matrix>;
+    table[DESCRIPTOR_MATRIX_SIGNAL] =
+        &dispatch_fixed_with_raw_trailer<DescriptorMatrixSignal, &AemEntityHandler::on_get_matrix_signal>;
     table[DESCRIPTOR_SIGNAL_SPLITTER] = &dispatch_fixed<DescriptorSignalSplitter, &AemEntityHandler::on_get_signal_splitter>;
     table[DESCRIPTOR_SIGNAL_COMBINER] = &dispatch_fixed<DescriptorSignalCombiner, &AemEntityHandler::on_get_signal_combiner>;
     table[DESCRIPTOR_SIGNAL_DEMULTIPLEXER] =
