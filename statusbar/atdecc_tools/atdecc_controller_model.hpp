@@ -41,6 +41,12 @@ struct StreamRequest
     uint16_t signal_type{0};         ///< SetSignalSelector: source signal_type
     uint16_t signal_index{0};        ///< SetSignalSelector: source signal_index
     uint16_t signal_output{0};       ///< SetSignalSelector: source signal_output
+
+    /// SetControl: the raw value payload (the bytes after the 4-byte
+    /// descriptor_type/descriptor_index control header), encoded in the
+    /// CONTROL's own element format. The caller reads the descriptor
+    /// first — the facade does not re-validate against value_details.
+    statusbar::sg14::inplace_vector<uint8_t, 508> control_values{};
 };
 
 /// Kind of controller action — every command a driver can issue.
@@ -61,6 +67,9 @@ enum class ControllerActionKind : uint8_t
     GetCounters,            ///< AEM GET_COUNTERS (target=talker_entity_id, desc_type + desc_index)
     SetSignalSelector,      ///< AEM SET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index, signal_type/index/output)
     GetSignalSelector,      ///< AEM GET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index)
+    GetControl,             ///< AEM GET_CONTROL (target=talker_entity_id, desc_index = CONTROL index)
+    SetControl,             ///< AEM SET_CONTROL (target=talker_entity_id, desc_index, control_values)
+    RegisterUnsolicited,    ///< AEM REGISTER_UNSOLICITED_NOTIFICATION (target=talker_entity_id)
 };
 
 /// An action the driver wants the controller facade to perform.
@@ -223,6 +232,18 @@ struct AcmpTraceEvent
     uint16_t listener_unique_id{0};
 };
 
+/// An unsolicited AEM response (U bit set): a change made by another
+/// controller or by the entity itself, delivered after RegisterUnsolicited.
+/// `response` is the response payload after the AemDu header (e.g. a
+/// SET_CONTROL response body: 4-byte control header + values).
+struct UnsolicitedEvent
+{
+    ieee::Eui64 entity_id{};
+    uint16_t command_type{0};
+    uint8_t aem_status{0};
+    statusbar::sg14::inplace_vector<uint8_t, atdecc::AemInflightCommand::MAX_PAYLOAD> response;
+};
+
 /// Variant covering every event the controller facade can emit.
 using ControllerEvent = std::variant<
     ConnectionAddedEvent,
@@ -232,6 +253,7 @@ using ControllerEvent = std::variant<
     CommandCompletedEvent,
     RxStateEvent,
     CountersReadyEvent,
-    AcmpTraceEvent>;
+    AcmpTraceEvent,
+    UnsolicitedEvent>;
 
 }  // namespace statusbar::atdecc_tools

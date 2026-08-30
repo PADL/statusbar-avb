@@ -84,6 +84,13 @@ struct ControllerServiceSink
         on_aem_response;
     Cb<void(ieee::Eui64 target, uint16_t command_type)> on_aem_timeout;
 
+    // Unsolicited AEM responses (U bit set): value changes made by other
+    // controllers or by the entity itself, delivered after a successful
+    // register_unsolicited(). `response` is the payload after the AemDu
+    // header. Backend-dependent: a backend that cannot register never
+    // calls it.
+    Cb<void(ieee::Eui64 target, uint16_t command_type, uint8_t status, std::span<uint8_t const> response)> on_unsolicited;
+
     // ACMP responses to OUR commands (and their timeouts).
     Cb<void(atdecc::AcmpCommandResponse const&)> on_acmp_response;
     Cb<void(atdecc::AcmpCommandResponse const&)> on_acmp_timeout;
@@ -147,6 +154,16 @@ class ControllerService
     [[nodiscard]] virtual auto aem_inflight_count() const -> size_t = 0;
 
     virtual auto read_descriptor(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index) -> bool = 0;
+
+    /// REGISTER_UNSOLICITED_NOTIFICATION: ask @p target to send this
+    /// controller unsolicited responses (delivered via the sink's
+    /// on_unsolicited). Default: unsupported by this backend (false).
+    virtual auto register_unsolicited(ieee::Eui64 const& target, atdecc::AemCommandCompletion completion = {}) -> bool
+    {
+        (void)target, (void)completion;
+        return false;
+    }
+
     virtual auto set_identify(ieee::Eui64 const& target, bool on, atdecc::AemCommandCompletion completion = {}) -> bool = 0;
     virtual auto get_counters(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index) -> bool = 0;
     virtual auto set_stream_format(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index, uint64_t stream_format)

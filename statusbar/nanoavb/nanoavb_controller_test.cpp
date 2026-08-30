@@ -5,6 +5,7 @@
 
 #include "statusbar/nanoavb/nanoavb_controller.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <chrono>
@@ -176,6 +177,64 @@ TEST(nanoavb_controller, send_aem_after_discovery)
     controller.read_descriptor(TARGET_ID, 0x0000, 0x0000);
     EXPECT_EQ(unicast_sent.size(), 1U);
     EXPECT_EQ(controller.aem_inflight_count(), 1U);
+}
+
+TEST(nanoavb_controller, unsolicited_response_reaches_callback)
+{
+    std::vector<uint8_t> body_seen;
+    Eui64 from{};
+    uint16_t cmd_seen = 0;
+    uint8_t status_seen = 0xFF;
+    AemControllerEntityCallbacks callbacks;
+    callbacks.on_unsolicited = [&](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
+        from = target;
+        cmd_seen = cmd;
+        status_seen = status;
+        body_seen.assign(data.begin(), data.end());
+    };
+    bool solicited_response_seen = false;
+    callbacks.on_aem_response = [&](Eui64, uint16_t, uint8_t, std::span<uint8_t const>, std::span<uint8_t const>) {
+        solicited_response_seen = true;
+    };
+
+    NanoAvbAemController controller{CONTROLLER_ID, callbacks};
+    controller.start();
+
+    // An unsolicited SET_CONTROL response: the entity's own sequence
+    // counter (no matching in-flight command), U bit set.
+    AemDu du{};
+    du.init_response(AEM_COMMAND_SET_CONTROL, AEM_STATUS_SUCCESS, 20, /*unsolicited=*/true);
+    du.controller_entity_id = CONTROLLER_ID;
+    du.target_entity_id = TARGET_ID;
+    du.sequence_id = 0x1234;
+    std::array<uint8_t, 6> const body{0x00, 0x1A, 0x00, 0x03, 0xAB, 0xCD};
+
+    std::vector<uint8_t> frame;
+    auto const header = make_const_span(du);
+    frame.assign(header.begin(), header.end());
+    frame.insert(frame.end(), body.begin(), body.end());
+    controller.receive_aecp(frame, test_time(10));
+
+    EXPECT_TRUE(from == TARGET_ID);
+    EXPECT_EQ(cmd_seen, AEM_COMMAND_SET_CONTROL);
+    EXPECT_EQ(status_seen, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(body_seen.size(), body.size());
+    EXPECT_TRUE(!body_seen.empty() && body_seen[4] == 0xAB);
+    // It must not masquerade as a solicited response.
+    EXPECT_FALSE(solicited_response_seen);
+
+    // A NON-unsolicited response with an unknown sequence stays dropped.
+    body_seen.clear();
+    du.init_response(AEM_COMMAND_SET_CONTROL, AEM_STATUS_SUCCESS, 20, /*unsolicited=*/false);
+    du.controller_entity_id = CONTROLLER_ID;
+    du.target_entity_id = TARGET_ID;
+    du.sequence_id = 0x4321;
+    auto const header2 = make_const_span(du);
+    frame.assign(header2.begin(), header2.end());
+    frame.insert(frame.end(), body.begin(), body.end());
+    controller.receive_aecp(frame, test_time(20));
+    EXPECT_TRUE(body_seen.empty());
+    EXPECT_FALSE(solicited_response_seen);
 }
 
 TEST(nanoavb_controller, tick_expires_entities)

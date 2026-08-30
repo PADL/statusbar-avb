@@ -42,6 +42,7 @@ class FakeControllerService final : public ControllerService
         uint16_t a{0};
         uint16_t b{0};
         atdecc::AemCommandCompletion completion{};
+        std::vector<uint8_t> payload{};
     };
 
     void set_sink(ControllerServiceSink sink) override { sink_ = std::move(sink); }
@@ -60,10 +61,24 @@ class FakeControllerService final : public ControllerService
         return nullptr;
     }
 
-    auto send_aem_command(Eui64 const& target, uint16_t command_code, std::span<uint8_t const>, atdecc::AemCommandCompletion c)
+    auto send_aem_command(
+        Eui64 const& target, uint16_t command_code, std::span<uint8_t const> payload, atdecc::AemCommandCompletion c)
         -> bool override
     {
-        calls_.push_back({.op = "send", .target = target, .a = command_code, .b = 0, .completion = std::move(c)});
+        calls_.push_back(
+            {.op = "send",
+             .target = target,
+             .a = command_code,
+             .b = 0,
+             .completion = std::move(c),
+             .payload = {payload.begin(), payload.end()}});
+        return true;
+    }
+
+    auto register_unsolicited(Eui64 const& target, atdecc::AemCommandCompletion c) -> bool override
+    {
+        calls_.push_back(
+            {.op = "register_unsolicited", .target = target, .a = 0, .b = 0, .completion = std::move(c), .payload = {}});
         return true;
     }
     [[nodiscard]] auto aem_inflight_count() const -> size_t override { return 0; }
@@ -257,6 +272,98 @@ TEST(controller_service_seam, dispatched_command_completes_as_typed_event)
         }
     }
     EXPECT_TRUE(completed);
+}
+
+TEST(controller_service_seam, get_and_set_control_actions)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    (void)h.ctrl->drain_events();
+
+    ControllerAction get{};
+    get.kind = ControllerActionKind::GetControl;
+    get.request.talker_entity_id = ENTITY_A;
+    get.request.desc_index = 3;
+    h.ctrl->dispatch(get, 0);
+
+    ControllerAction set{};
+    set.kind = ControllerActionKind::SetControl;
+    set.request.talker_entity_id = ENTITY_A;
+    set.request.desc_index = 3;
+    set.request.control_values.assign({0x12, 0x34});
+    h.ctrl->dispatch(set, 0);
+
+    FakeControllerService::AemCall* get_call = nullptr;
+    FakeControllerService::AemCall* set_call = nullptr;
+    for (auto& c : h.fake->calls()) {
+        if (c.op == "send" && c.a == AEM_COMMAND_GET_CONTROL) {
+            get_call = &c;
+        }
+        if (c.op == "send" && c.a == AEM_COMMAND_SET_CONTROL) {
+            set_call = &c;
+        }
+    }
+    EXPECT_TRUE(get_call != nullptr && set_call != nullptr);
+    if (get_call == nullptr || set_call == nullptr) {
+        return;
+    }
+    // GET: just the 4-byte control header (type CONTROL, index 3).
+    std::vector<uint8_t> const get_payload{0x00, 0x1A, 0x00, 0x03};
+    EXPECT_TRUE(get_call->payload == get_payload);
+    // SET: header + the caller's encoded values.
+    std::vector<uint8_t> const set_payload{0x00, 0x1A, 0x00, 0x03, 0x12, 0x34};
+    EXPECT_TRUE(set_call->payload == set_payload);
+    EXPECT_TRUE(static_cast<bool>(set_call->completion));
+
+    // The SET completion surfaces as a typed CommandCompletedEvent.
+    std::array<uint8_t, 6> const response{0x00, 0x1A, 0x00, 0x03, 0x12, 0x34};
+    set_call->completion(atdecc::AemCommandResult{
+        .delivery = atdecc::AemCommandDelivery::Responded,
+        .status = AEM_STATUS_SUCCESS,
+        .command_type = AEM_COMMAND_SET_CONTROL,
+        .target_entity_id = ENTITY_A,
+        .sent_payload = {},
+        .response = response});
+    bool completed = false;
+    for (auto const& ev : h.ctrl->drain_events()) {
+        if (auto const* c = std::get_if<CommandCompletedEvent>(&ev)) {
+            completed = c->ok() && c->command_type == AEM_COMMAND_SET_CONTROL && c->response.size() == response.size();
+        }
+    }
+    EXPECT_TRUE(completed);
+}
+
+TEST(controller_service_seam, unsolicited_responses_surface_as_events)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    (void)h.ctrl->drain_events();
+
+    // Registration flows through the dedicated backend hook.
+    ControllerAction reg{};
+    reg.kind = ControllerActionKind::RegisterUnsolicited;
+    reg.request.talker_entity_id = ENTITY_A;
+    h.ctrl->dispatch(reg, 0);
+    bool registered = false;
+    for (auto const& c : h.fake->calls()) {
+        registered = registered || (c.op == "register_unsolicited" && c.target == ENTITY_A);
+    }
+    EXPECT_TRUE(registered);
+
+    // An unsolicited SET_CONTROL response fans out as UnsolicitedEvent.
+    auto& sink = h.fake->sink();
+    EXPECT_TRUE(static_cast<bool>(sink.on_unsolicited));
+    std::array<uint8_t, 6> const body{0x00, 0x1A, 0x00, 0x03, 0xAB, 0xCD};
+    sink.on_unsolicited(ENTITY_A, AEM_COMMAND_SET_CONTROL, AEM_STATUS_SUCCESS, body);
+
+    bool surfaced = false;
+    for (auto const& ev : h.ctrl->drain_events()) {
+        if (auto const* u = std::get_if<UnsolicitedEvent>(&ev)) {
+            surfaced = u->entity_id == ENTITY_A && u->command_type == AEM_COMMAND_SET_CONTROL &&
+                u->aem_status == AEM_STATUS_SUCCESS && u->response.size() == body.size() && u->response[4] == 0xAB;
+        }
+    }
+    EXPECT_TRUE(surfaced);
 }
 
 //

@@ -215,9 +215,9 @@ auto NanoAvbAemController::read_descriptor(Eui64 target, uint16_t desc_type, uin
     return send_aem_command(target, AEM_COMMAND_READ_DESCRIPTOR, pack(payload));
 }
 
-auto NanoAvbAemController::register_unsolicited(Eui64 target) -> bool
+auto NanoAvbAemController::register_unsolicited(Eui64 target, atdecc::AemCommandCompletion completion) -> bool
 {
-    return send_aem_command(target, AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION);
+    return send_aem_command(target, AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {}, std::move(completion));
 }
 
 auto NanoAvbAemController::set_identify(Eui64 target, bool on, atdecc::AemCommandCompletion completion) -> bool
@@ -386,6 +386,17 @@ void NanoAvbAemController::receive_aecp(std::span<uint8_t const> payload, int64_
 
     // Only process responses targeted at us
     if (!header.is_response() || header.controller_entity_id != controller_entity_id_) {
+        return;
+    }
+
+    // Unsolicited responses carry the entity's own sequence counter and
+    // never match an in-flight command — route them out before the
+    // in-flight lookup would drop them.
+    if (header.is_unsolicited()) {
+        if (callbacks_.on_unsolicited) {
+            callbacks_.on_unsolicited(
+                header.target_entity_id, header.command_code(), header.status(), payload.subspan(AemDu::LENGTH));
+        }
         return;
     }
 

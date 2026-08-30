@@ -100,6 +100,11 @@ class RawnetControllerService final
         return controller_.read_descriptor(target, desc_type, desc_index);
     }
 
+    auto register_unsolicited(Eui64 const& target, AemCommandCompletion completion) -> bool override
+    {
+        return controller_.register_unsolicited(target, std::move(completion));
+    }
+
     auto set_identify(Eui64 const& target, bool on, AemCommandCompletion completion) -> bool override
     {
         return controller_.set_identify(target, on, std::move(completion));
@@ -228,6 +233,12 @@ class RawnetControllerService final
                 [this](Eui64 target, uint16_t cmd) {
                     if (sink_.on_aem_timeout) {
                         sink_.on_aem_timeout(target, cmd);
+                    }
+                },
+            .on_unsolicited =
+                [this](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
+                    if (sink_.on_unsolicited) {
+                        sink_.on_unsolicited(target, cmd, status, data);
                     }
                 },
             .on_acmp_response =

@@ -326,6 +326,43 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
                 emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_GET_SIGNAL_SELECTOR);
             }
             break;
+        case ControllerActionKind::GetControl: {
+            std::array<uint8_t, AemControlPayloadHeader::LENGTH> buf{};
+            AemControlPayloadHeader const hdr{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = action.request.desc_index};
+            span_store(buf, hdr);
+            if (!service_->send_aem_command(
+                    action.request.talker_entity_id, AEM_COMMAND_GET_CONTROL, buf, make_command_completion())) {
+                emit_status("Get control failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_GET_CONTROL);
+            }
+            break;
+        }
+        case ControllerActionKind::SetControl: {
+            // 4-byte control header + the caller's pre-encoded values (the
+            // caller knows the CONTROL's value type from its descriptor).
+            // control_values caps at 508, so header + values fit MAX_PAYLOAD.
+            std::array<uint8_t, atdecc::AemInflightCommand::MAX_PAYLOAD> buf{};
+            AemControlPayloadHeader const hdr{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = action.request.desc_index};
+            span_store(buf, hdr);
+            std::copy(
+                action.request.control_values.begin(),
+                action.request.control_values.end(),
+                buf.begin() + AemControlPayloadHeader::LENGTH);
+            auto const payload =
+                std::span<uint8_t const>{buf.data(), AemControlPayloadHeader::LENGTH + action.request.control_values.size()};
+            if (!service_->send_aem_command(
+                    action.request.talker_entity_id, AEM_COMMAND_SET_CONTROL, payload, make_command_completion())) {
+                emit_status("Set control failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_SET_CONTROL);
+            }
+            break;
+        }
+        case ControllerActionKind::RegisterUnsolicited:
+            if (!service_->register_unsolicited(action.request.talker_entity_id, make_command_completion())) {
+                emit_status("Register unsolicited failed: unsupported backend, entity not found, or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION);
+            }
+            break;
     }
 }
 
@@ -568,6 +605,16 @@ void ControllerSimple::wire_service()
                 handle_aem_response(target, cmd, status, sent_payload, data);
             },
         .on_aem_timeout = [](Eui64, uint16_t) {},
+        .on_unsolicited =
+            [this](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
+                UnsolicitedEvent ev{};
+                ev.entity_id = target;
+                ev.command_type = cmd;
+                ev.aem_status = status;
+                auto const n = std::min(data.size(), ev.response.capacity());
+                ev.response.assign(data.begin(), data.begin() + static_cast<ptrdiff_t>(n));
+                pending_events_.emplace_back(std::move(ev));
+            },
         .on_acmp_response =
             [this](AcmpCommandResponse const& resp) {
                 auto const mt = resp.message_type();

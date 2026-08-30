@@ -48,6 +48,15 @@ struct AemControllerEntityCallbacks
         on_aem_response;
     statusbar::sg14::inplace_function<void(Eui64 target, uint16_t cmd), 64> on_aem_timeout;
 
+    /// Unsolicited AEM response (U bit set): a change made by another
+    /// controller or by the entity itself, delivered to controllers that
+    /// sent register_unsolicited(). `data` is the response payload after
+    /// the AemDu header (e.g. a SET_CONTROL response body). Without this
+    /// callback unsolicited responses are dropped — they never match an
+    /// in-flight sequence ID.
+    statusbar::sg14::inplace_function<void(Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data), 64>
+        on_unsolicited;
+
     // ACMP response notifications
     statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64> on_acmp_response;
     statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64> on_acmp_timeout;
@@ -109,8 +118,9 @@ class NanoAvbAemController
     /// Read descriptor
     auto read_descriptor(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
 
-    /// Register for unsolicited notifications
-    auto register_unsolicited(Eui64 target) -> bool;
+    /// Register for unsolicited notifications. The optional @p completion
+    /// reports whether the entity accepted the registration.
+    auto register_unsolicited(Eui64 target, atdecc::AemCommandCompletion completion = {}) -> bool;
 
     /// Set the identify state on a target entity (flashes/stops the LED).
     /// Sends SET_CONTROL on the CONTROL descriptor whose index is advertised
