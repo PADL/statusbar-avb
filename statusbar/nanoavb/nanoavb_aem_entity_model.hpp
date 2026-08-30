@@ -51,11 +51,22 @@ using atdecc::aem::DescriptorStorage;
 class AemEntityModel
 {
   public:
-    /// Construct with a handler alone (no static descriptor store).
-    /// The handler is fully responsible for populating every descriptor.
+    /// Construct with a handler alone. When the handler exposes a backing
+    /// DescriptorStorage (descriptor_storage() non-null — the
+    /// DescriptorStorageHandler family), the model self-wires to it, so
+    /// blob preloads, symbol resolution, and raw-trailer serving (MATRIX /
+    /// MATRIX_SIGNAL) work exactly as with the two-argument constructor —
+    /// the command handler builds models through this constructor, and a
+    /// null storage here silently truncated served MATRIX trailers.
+    /// Otherwise the handler is fully responsible for populating every
+    /// descriptor.
     explicit AemEntityModel(AemEntityHandler& handler) noexcept
         : handler_{&handler}
-    {}
+    {
+        if (auto const* backing = handler.descriptor_storage()) {
+            storage_ = *backing;
+        }
+    }
 
     /// Construct with a handler and a DescriptorStorage.
     /// Before each handler call, the model preloads the descriptor struct

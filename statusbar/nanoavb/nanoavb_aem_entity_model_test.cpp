@@ -482,6 +482,17 @@ TEST(descriptor_storage_handler, matrix_signal_serves_blob_trailer)
         make_span(buf));
     EXPECT_EQ(n, size_t(desc_len));
     EXPECT_TRUE(std::equal(trailer.begin(), trailer.end(), buf.begin() + DescriptorMatrixSignal::LENGTH));
+
+    // The handler-only construction — the command handler's live
+    // READ_DESCRIPTOR path — must self-wire to the handler's backing
+    // storage and serve the identical full descriptor.
+    AemEntityModel handler_only{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf2{};
+    auto const n2 = handler_only.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_MATRIX_SIGNAL, .descriptor_index = 0},
+        make_span(buf2));
+    EXPECT_EQ(n2, size_t(desc_len));
+    EXPECT_TRUE(std::equal(buf.begin(), buf.begin() + long(n), buf2.begin()));
 }
 
 TEST(descriptor_storage_handler, approves_descriptor_that_exists_in_storage)
