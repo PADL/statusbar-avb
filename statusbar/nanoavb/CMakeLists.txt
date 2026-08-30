@@ -7,6 +7,10 @@ statusbar_add_module(
   SOURCES
   nanoavb_base.cpp
   nanoavb_acmp.cpp
+  nanoavb_aem_blob_writer.cpp
+  nanoavb_aem_fingerprint.cpp
+  nanoavb_aem_model_store.cpp
+  nanoavb_aem_symbols.cpp
   nanoavb_acmp_listener_sm.cpp
   nanoavb_acmp_talker_sm.cpp
   nanoavb_adp.cpp
@@ -25,6 +29,7 @@ statusbar_add_module(
   statusbar::atdecc
   statusbar::avtp
   statusbar::buffer
+  statusbar::crypto
   statusbar::container
   statusbar::gptp
   statusbar::ieee
@@ -37,6 +42,10 @@ statusbar_add_module(
   TESTS
   nanoavb_acmp_test.cpp
   nanoavb_adp_test.cpp
+  nanoavb_aem_blob_writer_test.cpp
+  nanoavb_aem_fingerprint_test.cpp
+  nanoavb_aem_model_store_test.cpp
+  nanoavb_aem_symbols_test.cpp
   nanoavb_aem_entity_model_test.cpp
   nanoavb_base_test.cpp
   nanoavb_entity_model_test.cpp
