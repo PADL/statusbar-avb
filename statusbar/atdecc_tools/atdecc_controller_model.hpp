@@ -70,6 +70,8 @@ enum class ControllerActionKind : uint8_t
     GetControl,             ///< AEM GET_CONTROL (target=talker_entity_id, desc_index = CONTROL index)
     SetControl,             ///< AEM SET_CONTROL (target=talker_entity_id, desc_index, control_values)
     RegisterUnsolicited,    ///< AEM REGISTER_UNSOLICITED_NOTIFICATION (target=talker_entity_id)
+    GetMatrix,              ///< AEM GET_MATRIX (target=talker_entity_id, desc_index, control_values = region request)
+    SetMatrix,              ///< AEM SET_MATRIX (target=talker_entity_id, desc_index, control_values = region write)
 };
 
 /// An action the driver wants the controller facade to perform.

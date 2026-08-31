@@ -363,6 +363,28 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
                 emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION);
             }
             break;
+        case ControllerActionKind::GetMatrix:
+        case ControllerActionKind::SetMatrix: {
+            // 4-byte descriptor header + the caller's pre-encoded region
+            // payload (Clause 7.4.33/7.4.34: a 12-byte region header, plus
+            // values for SET). The facade passes the region through raw,
+            // like SetControl's values.
+            auto const command = action.kind == ControllerActionKind::GetMatrix ? AEM_COMMAND_GET_MATRIX : AEM_COMMAND_SET_MATRIX;
+            std::array<uint8_t, atdecc::AemInflightCommand::MAX_PAYLOAD> buf{};
+            AemControlPayloadHeader const hdr{.descriptor_type = DESCRIPTOR_MATRIX, .descriptor_index = action.request.desc_index};
+            span_store(buf, hdr);
+            std::copy(
+                action.request.control_values.begin(),
+                action.request.control_values.end(),
+                buf.begin() + AemControlPayloadHeader::LENGTH);
+            auto const payload =
+                std::span<uint8_t const>{buf.data(), AemControlPayloadHeader::LENGTH + action.request.control_values.size()};
+            if (!service_->send_aem_command(action.request.talker_entity_id, command, payload, make_command_completion())) {
+                emit_status("Matrix command failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, command);
+            }
+            break;
+        }
     }
 }
 

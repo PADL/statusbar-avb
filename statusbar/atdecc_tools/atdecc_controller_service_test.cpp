@@ -333,6 +333,53 @@ TEST(controller_service_seam, get_and_set_control_actions)
     EXPECT_TRUE(completed);
 }
 
+TEST(controller_service_seam, matrix_actions_pass_region_payloads_through)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    (void)h.ctrl->drain_events();
+
+    // GET: header {MATRIX, 2} + a 12-byte region request (whole region:
+    // column 0, row 0, 16x32, count 0, offset 0).
+    ControllerAction get{};
+    get.kind = ControllerActionKind::GetMatrix;
+    get.request.talker_entity_id = ENTITY_A;
+    get.request.desc_index = 2;
+    get.request.control_values.assign({0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00});
+    h.ctrl->dispatch(get, 0);
+
+    // SET: header + region (1x1 at column 4, row 2, count 1) + one float.
+    ControllerAction set{};
+    set.kind = ControllerActionKind::SetMatrix;
+    set.request.talker_entity_id = ENTITY_A;
+    set.request.desc_index = 0;
+    set.request.control_values.assign(
+        {0x00, 0x04, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xC0, 0x40, 0x00, 0x00});
+    h.ctrl->dispatch(set, 0);
+
+    FakeControllerService::AemCall* get_call = nullptr;
+    FakeControllerService::AemCall* set_call = nullptr;
+    for (auto& c : h.fake->calls()) {
+        if (c.op == "send" && c.a == AEM_COMMAND_GET_MATRIX) {
+            get_call = &c;
+        }
+        if (c.op == "send" && c.a == AEM_COMMAND_SET_MATRIX) {
+            set_call = &c;
+        }
+    }
+    EXPECT_TRUE(get_call != nullptr && set_call != nullptr);
+    if (get_call == nullptr || set_call == nullptr) {
+        return;
+    }
+    // MATRIX descriptor type 0x001d in the header, region verbatim after.
+    std::vector<uint8_t> const get_head{0x00, 0x1D, 0x00, 0x02};
+    EXPECT_TRUE(get_call->payload.size() == 16 && std::equal(get_head.begin(), get_head.end(), get_call->payload.begin()));
+    std::vector<uint8_t> const set_head{0x00, 0x1D, 0x00, 0x00};
+    EXPECT_TRUE(set_call->payload.size() == 20 && std::equal(set_head.begin(), set_head.end(), set_call->payload.begin()));
+    EXPECT_TRUE(set_call->payload.back() == 0x00 && set_call->payload[16] == 0xC0);
+    EXPECT_TRUE(static_cast<bool>(get_call->completion) && static_cast<bool>(set_call->completion));
+}
+
 TEST(controller_service_seam, unsolicited_responses_surface_as_events)
 {
     Harness h;
