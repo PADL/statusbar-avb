@@ -165,7 +165,11 @@ constexpr size_t DISPATCH_TABLE_SIZE = 0x80;
     table[DESCRIPTOR_VIDEO_MAP] = &dispatch_fixed<DescriptorVideoMap, &AemEntityHandler::on_get_video_map>;
     table[DESCRIPTOR_SENSOR_MAP] = &dispatch_fixed<DescriptorSensorMap, &AemEntityHandler::on_get_sensor_map>;
     table[DESCRIPTOR_CONTROL] = &dispatch_fixed<DescriptorControl, &AemEntityHandler::on_get_control>;
-    table[DESCRIPTOR_SIGNAL_SELECTOR] = &dispatch_fixed<DescriptorSignalSelector, &AemEntityHandler::on_get_signal_selector>;
+    // SIGNAL_SELECTOR's sources list is a trailer wire_size() does not model
+    // inline (like MATRIX / MATRIX_SIGNAL): serve the authored trailer
+    // verbatim or READ_DESCRIPTOR truncates the source list away.
+    table[DESCRIPTOR_SIGNAL_SELECTOR] =
+        &dispatch_fixed_with_raw_trailer<DescriptorSignalSelector, &AemEntityHandler::on_get_signal_selector>;
     table[DESCRIPTOR_MIXER] = &dispatch_fixed<DescriptorMixer, &AemEntityHandler::on_get_mixer>;
     table[DESCRIPTOR_MATRIX] = &dispatch_fixed_with_raw_trailer<DescriptorMatrix, &AemEntityHandler::on_get_matrix>;
     table[DESCRIPTOR_MATRIX_SIGNAL] =

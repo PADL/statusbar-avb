@@ -495,6 +495,65 @@ TEST(descriptor_storage_handler, matrix_signal_serves_blob_trailer)
     EXPECT_TRUE(std::equal(buf.begin(), buf.begin() + long(n), buf2.begin()));
 }
 
+TEST(descriptor_storage_handler, signal_selector_serves_blob_trailer)
+{
+    // SIGNAL_SELECTOR's sources list is a trailer wire_size() does not
+    // model inline — READ_DESCRIPTOR must serve the authored source list
+    // verbatim, with the fixed head still carrying the handler's runtime
+    // current_signal.
+    using atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR;
+    using atdecc::aem::DescriptorSignalSelector;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageTocEntry;
+
+    constexpr uint32_t desc_offset = DescriptorStorageHeader::LENGTH + DescriptorStorageTocEntry::LENGTH;
+    constexpr uint16_t desc_len = DescriptorSignalSelector::LENGTH + 12;  // two 6-byte sources
+    std::vector<uint8_t> blob(desc_offset + desc_len, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_SIGNAL_SELECTOR, desc_len, desc_offset);
+
+    DescriptorSignalSelector desc{};
+    desc.sources_offset = DescriptorSignalSelector::LENGTH;
+    desc.number_of_sources = 2;
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+    // Two authored sources: {0xffff, 0, 0} and {0xffff, 4, 0}.
+    std::array<uint8_t, 12> const trailer{0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x04, 0x00, 0x00};
+    std::copy(trailer.begin(), trailer.end(), blob.begin() + desc_offset + DescriptorSignalSelector::LENGTH);
+
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemEntityModel model{handler, *storage_result};
+
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR, .descriptor_index = 0},
+        make_span(buf));
+    EXPECT_EQ(n, size_t(desc_len));
+    EXPECT_TRUE(std::equal(trailer.begin(), trailer.end(), buf.begin() + DescriptorSignalSelector::LENGTH));
+
+    // A runtime selection (validated against the authored list) must show
+    // in the served head while the trailer stays authored.
+    std::array<uint8_t, 6> const select_second{0xFF, 0xFF, 0x00, 0x04, 0x00, 0x00};
+    EXPECT_EQ(
+        handler.on_set_descriptor_value(
+            atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
+            DescriptorId{
+                .ref =
+                    DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR, .descriptor_index = 0},
+                .symbol = 0},
+            select_second),
+        atdecc::AEM_STATUS_SUCCESS);
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf2{};
+    auto const n2 = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_SIGNAL_SELECTOR, .descriptor_index = 0},
+        make_span(buf2));
+    EXPECT_EQ(n2, size_t(desc_len));
+    atdecc::aem::SignalSource current{};
+    span_load(current, std::span<uint8_t const>(buf2).subspan(84, 6));  // current_signal offset
+    EXPECT_EQ(current.signal_index.get(), 4);
+    EXPECT_TRUE(std::equal(trailer.begin(), trailer.end(), buf2.begin() + DescriptorSignalSelector::LENGTH));
+}
+
 TEST(descriptor_storage_handler, approves_descriptor_that_exists_in_storage)
 {
     auto blob = make_blob_with_entity("StorageTest");
