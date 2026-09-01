@@ -44,10 +44,18 @@ std::vector<AemRawDescriptor> model_for_unit(std::uint64_t serial_ish)
     c.control_value_type = CONTROL_LINEAR_FLOAT;
     c.number_of_values = 1;
 
+    // current_signal is runtime state — which source the unit has selected
+    // right now — and must not leak into identity.
+    DescriptorSignalSelector s;
+    s.number_of_sources = 3;
+    s.current_signal = SignalSource{.signal_type = 0xFFFF, .signal_index = std::uint16_t(serial_ish % 3), .signal_output = 0};
+    s.default_signal = SignalSource{.signal_type = 0xFFFF, .signal_index = 0, .signal_output = 0};
+
     std::vector<AemRawDescriptor> out;
     out.push_back(raw_of(0, DESCRIPTOR_ENTITY, 0, make_const_span(e)));
     out.push_back(raw_of(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(i)));
     out.push_back(raw_of(0, DESCRIPTOR_CONTROL, 0, make_const_span(c).first(c.wire_size())));
+    out.push_back(raw_of(0, DESCRIPTOR_SIGNAL_SELECTOR, 0, make_const_span(s).first(DescriptorSignalSelector::LENGTH)));
     return out;
 }
 

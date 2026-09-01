@@ -39,6 +39,12 @@ std::vector<std::uint8_t> canonical_bytes(AemRawDescriptor const& d)
         zero_range(bytes, offsetof(DescriptorAvbInterface, mac_address), 6);
         zero_range(bytes, offsetof(DescriptorAvbInterface, interface_flags), 2);
         zero_range(bytes, offsetof(DescriptorAvbInterface, clock_identity), 8);
+    } else if (d.descriptor_type == DESCRIPTOR_SIGNAL_SELECTOR) {
+        // current_signal is runtime state (which source is selected NOW),
+        // served back through READ_DESCRIPTOR by entities that track it in
+        // their descriptor state — the GALAXY proxy's live input modes made
+        // two crawls of one unit fingerprint differently.
+        zero_range(bytes, offsetof(DescriptorSignalSelector, current_signal), SignalSource::LENGTH);
     }
     return bytes;
 }
