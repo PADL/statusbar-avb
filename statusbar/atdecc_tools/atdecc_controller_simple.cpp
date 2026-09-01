@@ -929,6 +929,24 @@ void ControllerSimple::handle_read_descriptor_response(
         handle_strings_descriptor_response(target, status, desc_index, desc_payload);
         return;
     }
+
+    // LOCALE chases its STRINGS. Real devices (the GALAXY, JOYNED
+    // interfaces) list LOCALE in descriptor_counts but not the STRINGS
+    // behind it — the standard reaches those only through base_strings —
+    // so a counts-driven crawl alone never sees the string table that
+    // carries most of their naming (localized_description with empty
+    // object_names). The unified queue dedupes against models that do
+    // count their STRINGS.
+    if (desc_type == DESCRIPTOR_LOCALE && status == AEM_STATUS_SUCCESS && desc_payload.size() >= DescriptorLocale::LENGTH) {
+        DescriptorLocale locale{};
+        span_load_padded(locale, desc_payload);
+        auto const base = locale.base_strings.get();
+        auto const count = std::min<uint16_t>(locale.number_of_strings.get(), MAX_DESCRIPTORS_PER_TYPE);
+        for (uint16_t i = 0; i < count; ++i) {
+            enqueue_descriptor_read(target, DESCRIPTOR_STRINGS, uint16_t(base + i));
+        }
+        return;
+    }
 }
 
 void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& target, std::span<uint8_t const> desc_payload)
