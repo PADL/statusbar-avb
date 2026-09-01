@@ -155,24 +155,57 @@ class DescriptorStorageHandler : public AemEntityHandler
         on_entity_name_changed_ = std::move(fn);
     }
 
+    // ---- Managed per-descriptor object_names (Clause 7.4.17/7.4.18) ------
+    //
+    // Opt-in like the entity name: call manage_object_names(), and this
+    // handler serves GET_NAME and applies SET_NAME (name_index 0) for the
+    // renameable widget descriptors — CONTROL, SIGNAL_SELECTOR, MATRIX,
+    // CONTROL_BLOCK — with READ_DESCRIPTOR reflecting the override (the
+    // on_get_* loads below patch object_name in). Overrides live in RAM
+    // and reset to the blob's authored object_name on restart; SET_NAME
+    // with an empty name clears back to the authored name.
+
+    void manage_object_names() noexcept { manage_object_names_ = true; }
+
+    /// The RAM override for (type, index), or nullptr when unset.
+    [[nodiscard]] auto object_name_override(uint16_t const descriptor_type, uint16_t const descriptor_index) const noexcept
+        -> AtdeccString const*
+    {
+        for (auto const& s : object_names_) {
+            if (s.descriptor_type == descriptor_type && s.descriptor_index == descriptor_index) {
+                return &s.name;
+            }
+        }
+        return nullptr;
+    }
+
     auto on_get_name(DescriptorId id, uint16_t const name_index) const -> std::optional<AtdeccString> override
     {
         if (manages_entity_name_field(id.ref, name_index)) {
             return entity_name_;
+        }
+        if (manages_object_name_field(id.ref, name_index)) {
+            if (auto const* over = object_name_override(id.ref.descriptor_type, id.ref.descriptor_index)) {
+                return *over;
+            }
+            return authored_object_name(id.ref);
         }
         return std::nullopt;
     }
 
     auto on_set_name(DescriptorId id, uint16_t const name_index, AtdeccString const& name) -> uint8_t override
     {
-        if (!manages_entity_name_field(id.ref, name_index)) {
-            return atdecc::AEM_STATUS_NOT_IMPLEMENTED;
+        if (manages_entity_name_field(id.ref, name_index)) {
+            uint8_t const status = on_entity_name_changed_ ? on_entity_name_changed_(name) : atdecc::AEM_STATUS_SUCCESS;
+            if (status == atdecc::AEM_STATUS_SUCCESS) {
+                entity_name_ = name;
+            }
+            return status;
         }
-        uint8_t const status = on_entity_name_changed_ ? on_entity_name_changed_(name) : atdecc::AEM_STATUS_SUCCESS;
-        if (status == atdecc::AEM_STATUS_SUCCESS) {
-            entity_name_ = name;
+        if (manages_object_name_field(id.ref, name_index)) {
+            return apply_object_name_override(id.ref, name);
         }
-        return status;
+        return atdecc::AEM_STATUS_NOT_IMPLEMENTED;
     }
 
     auto on_get_configuration(DescriptorId id, DescriptorConfiguration& desc) -> bool override { return load(id.ref, desc); }
@@ -261,9 +294,23 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     auto on_get_sensor_map(DescriptorId id, DescriptorSensorMap& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_control(DescriptorId id, DescriptorControl& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_control(DescriptorId id, DescriptorControl& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);  // READ_DESCRIPTOR agrees with SET_NAME
+        return true;
+    }
 
-    auto on_get_control_block(DescriptorId id, DescriptorControlBlock& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_control_block(DescriptorId id, DescriptorControlBlock& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
     // ---- Signal routing -------------------------------------------------
 
@@ -277,12 +324,20 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (auto const* state = find_selector_state(id.ref.descriptor_index)) {
             desc.current_signal = state->source;
         }
+        apply_object_name(id.ref, desc.object_name);
         return true;
     }
 
     auto on_get_mixer(DescriptorId id, DescriptorMixer& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_matrix(DescriptorId id, DescriptorMatrix& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_matrix(DescriptorId id, DescriptorMatrix& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
     auto on_get_matrix_signal(DescriptorId id, DescriptorMatrixSignal& desc) -> bool override { return load(id.ref, desc); }
 
@@ -1502,9 +1557,85 @@ class DescriptorStorageHandler : public AemEntityHandler
             name_index == 0;
     }
 
+    // ---- Managed object_names (see the public section) --------------------
+
+    /// The four widget descriptor types whose object_name (offset 4) the
+    /// built-in management renames.
+    [[nodiscard]] static constexpr auto object_name_renameable(uint16_t const descriptor_type) noexcept -> bool
+    {
+        return descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL || descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR ||
+            descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX || descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL_BLOCK;
+    }
+
+    /// True when built-in object-name management answers for @p ref's
+    /// name_index — a renameable type, name_index 0, and the descriptor
+    /// actually exists in storage.
+    [[nodiscard]] auto manages_object_name_field(DescriptorRef const ref, uint16_t const name_index) const noexcept -> bool
+    {
+        return manage_object_names_ && name_index == 0 && object_name_renameable(ref.descriptor_type) &&
+            storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index).has_value();
+    }
+
+    /// The blob's authored object_name for @p ref (offset 4 in every
+    /// renameable type).
+    [[nodiscard]] auto authored_object_name(DescriptorRef const ref) const noexcept -> std::optional<AtdeccString>
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        constexpr size_t OBJECT_NAME_AT = 4;
+        if (!blob.has_value() || blob->size() < OBJECT_NAME_AT + AtdeccString::LENGTH) {
+            return std::nullopt;
+        }
+        AtdeccString name{};
+        std::copy(blob->begin() + OBJECT_NAME_AT, blob->begin() + OBJECT_NAME_AT + AtdeccString::LENGTH, name.value.begin());
+        return name;
+    }
+
+    /// Overlay the RAM override (when set) onto a loaded descriptor's name.
+    void apply_object_name(DescriptorRef const ref, AtdeccString& name) const noexcept
+    {
+        if (auto const* over = object_name_override(ref.descriptor_type, ref.descriptor_index)) {
+            name = *over;
+        }
+    }
+
+    auto apply_object_name_override(DescriptorRef const ref, AtdeccString const& name) -> uint8_t
+    {
+        auto* const it = std::find_if(object_names_.begin(), object_names_.end(), [&](ObjectNameState const& s) {
+            return s.descriptor_type == ref.descriptor_type && s.descriptor_index == ref.descriptor_index;
+        });
+        if (name.length() == 0) {
+            // Empty name: clear back to the authored object_name.
+            if (it != object_names_.end()) {
+                object_names_.erase(it);
+            }
+            return atdecc::AEM_STATUS_SUCCESS;
+        }
+        if (it != object_names_.end()) {
+            it->name = name;
+            return atdecc::AEM_STATUS_SUCCESS;
+        }
+        if (object_names_.size() >= MAX_OBJECT_NAMES) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
+        object_names_.push_back({.descriptor_type = ref.descriptor_type, .descriptor_index = ref.descriptor_index, .name = name});
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    struct ObjectNameState
+    {
+        uint16_t descriptor_type{0};
+        uint16_t descriptor_index{0};
+        AtdeccString name{};
+    };
+    // GALAXY-816-scale rename surface: 1021 CONTROLs + 8 selectors + 4
+    // matrices + 36 blocks, with headroom. ~74 KB when every slot is used.
+    static constexpr size_t MAX_OBJECT_NAMES = 1088;
+
     DescriptorStorage storage_;
     AtdeccString entity_name_{};
     bool manage_entity_name_{false};
+    bool manage_object_names_{false};
+    statusbar::sg14::inplace_vector<ObjectNameState, MAX_OBJECT_NAMES> object_names_;
     statusbar::sg14::inplace_function<uint8_t(AtdeccString const&), 64> on_entity_name_changed_{};
 };
 

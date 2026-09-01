@@ -367,6 +367,9 @@ auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, s
     if (status == AEM_STATUS_SUCCESS && out_buffer.size() >= command_data.size()) {
         std::copy(command_data.begin(), command_data.end(), out_buffer.begin());
         size = command_data.size();
+        // A controller renamed a descriptor: notify every registered
+        // controller, like handle_set_descriptor_value does for values.
+        emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size});
     }
     return {.status = status, .size = size};
 }

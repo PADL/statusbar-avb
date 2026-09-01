@@ -357,6 +357,23 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             }
             break;
         }
+        case ControllerActionKind::SetName: {
+            // 8-byte name header (type, index, name_index 0, configuration 0)
+            // + the 64-byte AtdeccString; control_values carries the raw
+            // UTF-8 name bytes (truncated at 64, zero-padded).
+            std::array<uint8_t, AemNameCommandPayload::LENGTH + AtdeccString::LENGTH> buf{};
+            AemNameCommandPayload const hdr{
+                .descriptor_type = action.request.desc_type, .descriptor_index = action.request.desc_index};
+            span_store(std::span{buf}.first<AemNameCommandPayload::LENGTH>(), hdr);
+            auto const n = std::min<size_t>(action.request.control_values.size(), AtdeccString::LENGTH);
+            std::copy_n(action.request.control_values.begin(), n, buf.begin() + AemNameCommandPayload::LENGTH);
+            if (!service_->send_aem_command(
+                    action.request.talker_entity_id, AEM_COMMAND_SET_NAME, buf, make_command_completion())) {
+                emit_status("Set name failed: entity not found or queue full");
+                emit_command_send_failure(action.request.talker_entity_id, AEM_COMMAND_SET_NAME);
+            }
+            break;
+        }
         case ControllerActionKind::RegisterUnsolicited:
             if (!service_->register_unsolicited(action.request.talker_entity_id, make_command_completion())) {
                 emit_status("Register unsolicited failed: unsupported backend, entity not found, or queue full");
