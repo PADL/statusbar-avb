@@ -28,6 +28,7 @@
 /// source, the per-stream render bindings, and process_audio().
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/dsp/dsp.hpp"
@@ -109,8 +110,7 @@ class AvbEntityToneGenerator
     AvbEntityToneGenerator(
         CreateKey,
         AvbEntityAudioIOConfig config,
-        std::unique_ptr<nanoavb::AemEntityHandler> handler,
-        nanoavb::DescriptorStorageHandler* storage_handler,
+        EntityIdentityDescriptorHandler handler,
         StreamSpecs specs,
         StreamSpecs listener_specs,
         uint16_t initial_clock_source,
@@ -216,10 +216,15 @@ class AvbEntityToneGenerator
     /// AvbEntityKit::media_rate). Declared before kit_ (the kit binds it).
     ptpclient::MediaClockGenerator media_clock_;
 
+    /// The blob-backed descriptor handler: serves the entity model, patches
+    /// the runtime ENTITY / AVB_INTERFACE identity, carries the built-ins the
+    /// kit's hooks dispatch from. Declared before kit_ (the kit binds it).
+    EntityIdentityDescriptorHandler handler_;
+
     /// The Entity Construction Kit: control plane, talker/listener stream
     /// paths, transmit gate, MAAP, CRF clock slaving, CONTROL registry.
-    /// Declared after the members it references (config_, media_clock_,
-    /// last_gptp_ns_, mem_resource_).
+    /// Declared after the members it references (config_, handler_,
+    /// media_clock_, last_gptp_ns_, mem_resource_).
     AvbEntityKit kit_;
 
     /// Per-stream TX render bindings + their interleaved buffers, parallel to

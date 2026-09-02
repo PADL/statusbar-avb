@@ -65,16 +65,14 @@ class AvbEntityKit
     /// any other AEM_STATUS_* to reject. Reactor thread.
     using ControlChangedFn = sg14::inplace_function<uint8_t(std::span<uint8_t const> value), 64>;
 
-    /// @p handler serves the blob's descriptors (the host takes ownership);
-    /// @p storage_handler is its non-owning storage-handler view (nullptr when
-    /// the model has no built-ins). @p media_clock and @p last_gptp_ns are the
-    /// OWNING ENTITY's media clock + media-thread gPTP publication — the kit's
-    /// talker binds both, so they must outlive the kit (declare them before it).
+    /// @p handler serves the blob's descriptors and carries the built-ins the
+    /// kit's lifecycle/CONTROL hooks dispatch from. It, @p media_clock and
+    /// @p last_gptp_ns are the OWNING ENTITY's — the kit binds all three, so
+    /// they must outlive the kit (declare them before it).
     /// @p audio_sink receives accepted listener stream audio (nullptr = none).
     AvbEntityKit(
         AvbEntityAudioIOConfig const& config,
-        std::unique_ptr<nanoavb::AemEntityHandler> handler,
-        nanoavb::DescriptorStorageHandler* storage_handler,
+        nanoavb::DescriptorStorageHandler& handler,
         StreamSpecs talker_specs,
         StreamSpecs listener_specs,
         uint32_t sample_rate,
@@ -186,9 +184,9 @@ class AvbEntityKit
     StreamSpecs talker_specs_;
     StreamSpecs listener_specs_;
     uint32_t sample_rate_;
-    /// The blob-backed descriptor handler (owned by host_); carries the
+    /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
-    nanoavb::DescriptorStorageHandler* storage_handler_;
+    nanoavb::DescriptorStorageHandler& storage_handler_;
 
     /// Reusable AVB control plane: talker/listener stream counts from the
     /// blob, 4 max listeners per talker stream.

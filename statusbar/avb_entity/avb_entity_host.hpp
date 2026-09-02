@@ -99,15 +99,15 @@ class AvbEntityHost
         size_t talker_max_listeners,
         size_t listener_max_streams);
 
-    /// Symbol-aware construction. The host takes ownership of a caller-built
-    /// @p handler (typically a DescriptorStorageHandler subclass that serves the
-    /// entity's .aem blob and patches dynamic fields) and serves descriptors +
-    /// resolves their well-known **symbols** through it instead of a parsed model.
-    /// Enables symbol_of() / descriptor_for_symbol() / get_descriptor(). The handler
-    /// is owned by the host so it outlives the components that reference it.
-    /// @param handler  the entity's descriptor/command handler (must be non-null).
+    /// Symbol-aware construction. The host serves descriptors and resolves their
+    /// well-known **symbols** through a caller-built @p handler (typically a
+    /// DescriptorStorageHandler subclass that serves the entity's .aem blob and
+    /// patches dynamic fields) instead of a parsed model. Enables symbol_of() /
+    /// descriptor_for_symbol() / get_descriptor(). The host neither owns nor
+    /// copies the handler: it must outlive the host (declare it before the host).
+    /// @param handler  the entity's descriptor/command handler.
     AvbEntityHost(
-        std::unique_ptr<nanoavb::AemEntityHandler> handler,
+        nanoavb::AemEntityHandler& handler,
         nanoavb::AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
@@ -201,7 +201,7 @@ class AvbEntityHost
     /// The backing descriptor blob, or nullptr on the legacy path.
     [[nodiscard]] auto descriptor_storage() const noexcept -> atdecc::aem::DescriptorStorage const*
     {
-        return handler_ ? handler_->descriptor_storage() : nullptr;
+        return handler_ != nullptr ? handler_->descriptor_storage() : nullptr;
     }
 
     /// Forward: the well-known symbol assigned to descriptor (@p type, @p index) in
@@ -297,10 +297,10 @@ class AvbEntityHost
     nanoavb::talker_engine_sm::Context talker_engine_ctx_{};
     nanoavb::listener_engine_sm::Context listener_engine_ctx_{};
 
-    /// Symbol-aware path only: the owned descriptor/command handler. Declared BEFORE
-    /// components_ so it is constructed first and outlives the components that
-    /// reference it. Null on the legacy (parsed-EntityModel) construction path.
-    std::unique_ptr<nanoavb::AemEntityHandler> handler_{};
+    /// Symbol-aware path only: the caller's descriptor/command handler (not owned;
+    /// it outlives the host by construction contract). Null on the legacy
+    /// (parsed-EntityModel) construction path.
+    nanoavb::AemEntityHandler* handler_{nullptr};
 
     nanoavb::NanoAvbComponents components_;
     std::unique_ptr<nanoavb::NanoAvbNetHandlers> net_handlers_;

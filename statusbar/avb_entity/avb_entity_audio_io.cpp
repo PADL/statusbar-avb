@@ -75,14 +75,14 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
     // patches the runtime ENTITY identity + AVB_INTERFACE network/gPTP fields.
     size_t const channels = channels_from_storage(*storage_result, 2);
     auto const iface_mac = net::read_interface_mac(config.interface_name);
-    auto handler = std::make_unique<EntityIdentityDescriptorHandler>(
+    EntityIdentityDescriptorHandler handler{
         *storage_result,
         config.entity_id,
         config.entity_model_id,
         config.firmware_version,
         config.entity_name,
         iface_mac,
-        /*patch_avb_interface=*/true);
+        /*patch_avb_interface=*/true};
 
     // Kit phase 3c: find the clock source backed by the CRF stream input
     // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
@@ -123,13 +123,11 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
         (void)listener_specs.try_push_back(make_spec(index, kind));
     }
 
-    auto* const storage_handler = handler.get();
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity = std::make_unique<AvbEntityAudioIO>(
         AvbEntityAudioIO::CreateKey{},
         std::move(config),
         std::move(handler),
-        storage_handler,
         talker_specs,
         listener_specs,
         initial_clock_source,
@@ -149,8 +147,7 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
 AvbEntityAudioIO::AvbEntityAudioIO(
     CreateKey,
     AvbEntityAudioIOConfig config,
-    std::unique_ptr<nanoavb::AemEntityHandler> handler,
-    nanoavb::DescriptorStorageHandler* storage_handler,
+    EntityIdentityDescriptorHandler handler,
     StreamSpecs talker_specs,
     StreamSpecs listener_specs,
     uint16_t initial_clock_source,
@@ -163,12 +160,11 @@ AvbEntityAudioIO::AvbEntityAudioIO(
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)
     , audio_buffer_((SAMPLES_PER_PACKET + 1) * channels, 0.0f, mem_resource_)  // +1: GPS pacing may emit nominal+1
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
-    // The kit owns the control plane + stream paths + their wiring; the
+    , handler_{std::move(handler)}  // The kit owns the control plane + stream paths + their wiring; the
     // listener delivers accepted stream audio to the tunnel (StreamRxAudioSink).
     , kit_{
           config_,
-          std::move(handler),
-          storage_handler,
+          handler_,
           talker_specs,
           listener_specs,
           SAMPLE_RATE,

@@ -23,6 +23,7 @@
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
@@ -140,8 +141,7 @@ class AvbEntityAudioIO
     AvbEntityAudioIO(
         CreateKey,
         AvbEntityAudioIOConfig config,
-        std::unique_ptr<nanoavb::AemEntityHandler> handler,
-        nanoavb::DescriptorStorageHandler* storage_handler,
+        EntityIdentityDescriptorHandler handler,
         StreamSpecs talker_specs,
         StreamSpecs listener_specs,
         uint16_t initial_clock_source,
@@ -281,12 +281,17 @@ class AvbEntityAudioIO
     std::unique_ptr<EntityUdptunBridge> udptun_{
         std::make_unique<EntityUdptunBridge>(config_, rate_tracker_, tai_snapshot_, audio_buffer_, channels_, last_gptp_ns_)};
 
+    /// The blob-backed descriptor handler: serves the entity model, patches
+    /// the runtime ENTITY / AVB_INTERFACE identity, carries the built-ins the
+    /// kit's hooks dispatch from. Declared before kit_ (the kit binds it).
+    EntityIdentityDescriptorHandler handler_;
+
     /// The Entity Construction Kit (refactor phase D): control plane, the
     /// spec-shaped talker/listener stream paths, transmit gate, MAAP, CRF
     /// clock slaving, CONTROL registry, and all their wiring. Declared after
-    /// the members it references (config_, media_clock_, last_gptp_ns_,
-    /// mem_resource_, udptun_ = the listener's audio sink); initialized in
-    /// the constructor's member-init list.
+    /// the members it references (config_, handler_, media_clock_,
+    /// last_gptp_ns_, mem_resource_, udptun_ = the listener's audio sink);
+    /// initialized in the constructor's member-init list.
     AvbEntityKit kit_;
 };
 

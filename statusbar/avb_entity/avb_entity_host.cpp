@@ -30,15 +30,13 @@ AvbEntityHost::AvbEntityHost(
 {}
 
 AvbEntityHost::AvbEntityHost(
-    std::unique_ptr<nanoavb::AemEntityHandler> handler,
+    nanoavb::AemEntityHandler& handler,
     nanoavb::AdpAdvertiserConfig adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
     size_t const listener_max_streams)
-    // handler_ is constructed first (declared before components_) so the components,
-    // which reference it on the symbol-aware path, outlive nothing.
-    : handler_{std::move(handler)}
-    , components_{*handler_, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+    : handler_{&handler}
+    , components_{handler, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
 {
     wire_identify_control();
 }

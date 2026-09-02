@@ -23,8 +23,7 @@ using statusbar::nanoavb::DomainInfo;
 
 AvbEntityKit::AvbEntityKit(
     AvbEntityAudioIOConfig const& config,
-    std::unique_ptr<nanoavb::AemEntityHandler> handler,
-    nanoavb::DescriptorStorageHandler* storage_handler,
+    nanoavb::DescriptorStorageHandler& handler,
     StreamSpecs talker_specs,
     StreamSpecs listener_specs,
     uint32_t const sample_rate,
@@ -38,8 +37,8 @@ AvbEntityKit::AvbEntityKit(
     , talker_specs_{talker_specs}
     , listener_specs_{listener_specs}
     , sample_rate_{sample_rate}
-    , storage_handler_{storage_handler}
-    , host_{std::move(handler), default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
+    , storage_handler_{handler}
+    , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
     , gate_{config.gate_talker_on_listener, host_.components()}
     , talker_{std::make_unique<TalkerStreams>(
           TalkerStreamsConfig{.sample_rate = sample_rate, .vlan_id = config.vlan_id, .stream_pcp = config.stream_pcp},
@@ -88,35 +87,33 @@ AvbEntityKit::AvbEntityKit(
     host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
 
     // Storage-handler built-in hooks (all reactor thread):
-    if (storage_handler_ != nullptr) {
-        // Per-control dispatch (kit phase 4): the generic CONTROL built-in calls
-        // back with each accepted SET_CONTROL; bound symbols get their handler's
-        // verdict, everything else is accepted (store/serve only).
-        storage_handler_->set_on_control_changed([this](uint16_t control_index, std::span<uint8_t const> value) -> uint8_t {
-            for (auto& binding : control_bindings_) {
-                if (binding.resolved && binding.control_index == control_index && binding.fn) {
-                    return binding.fn(value);
-                }
+    // Per-control dispatch (kit phase 4): the generic CONTROL built-in calls
+    // back with each accepted SET_CONTROL; bound symbols get their handler's
+    // verdict, everything else is accepted (store/serve only).
+    storage_handler_.set_on_control_changed([this](uint16_t control_index, std::span<uint8_t const> value) -> uint8_t {
+        for (auto& binding : control_bindings_) {
+            if (binding.resolved && binding.control_index == control_index && binding.fn) {
+                return binding.fn(value);
             }
-            return atdecc::AEM_STATUS_SUCCESS;
-        });
-        // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
-        // (the media thread treats it as a closed SRP gate); START reopens.
-        storage_handler_->set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
-            if (type == DESCRIPTOR_STREAM_OUTPUT) {
-                talker_->set_stream_stopped(index, !streaming);
-            }
-            return atdecc::AEM_STATUS_SUCCESS;
-        });
-        // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
-        // source; the media thread reads it per tick (media_rate()).
-        storage_handler_->set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
-            if (domain == 0) {
-                active_clock_source_.store(source, std::memory_order_release);
-            }
-            return atdecc::AEM_STATUS_SUCCESS;
-        });
-    }
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
+    });
+    // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
+    // (the media thread treats it as a closed SRP gate); START reopens.
+    storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
+        if (type == DESCRIPTOR_STREAM_OUTPUT) {
+            talker_->set_stream_stopped(index, !streaming);
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
+    });
+    // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
+    // source; the media thread reads it per tick (media_rate()).
+    storage_handler_.set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
+        if (domain == 0) {
+            active_clock_source_.store(source, std::memory_order_release);
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
+    });
 }
 
 void AvbEntityKit::on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn)

@@ -77,12 +77,28 @@ auto make_entity_blob() -> std::vector<uint8_t>
     return blob;
 }
 
-auto make_host_from_blob(std::vector<uint8_t> const& blob) -> std::unique_ptr<AvbEntityHost>
+/// A symbol-aware host together with the handler it serves through (the host
+/// binds the handler, so the handler is declared first and outlives it).
+class SymbolAwareHost
+{
+  public:
+    explicit SymbolAwareHost(DescriptorStorage storage)
+        : handler_{storage}
+        , host_{handler_, AdpAdvertiserConfig{}, 1, 4, 1}
+    {}
+
+    auto operator->() noexcept -> AvbEntityHost* { return &host_; }
+
+  private:
+    DescriptorStorageHandler handler_;
+    AvbEntityHost host_;
+};
+
+auto make_host_from_blob(std::vector<uint8_t> const& blob) -> SymbolAwareHost
 {
     auto storage = DescriptorStorage::create(std::span<uint8_t const>(blob));
     EXPECT_TRUE(storage.has_value());
-    auto handler = std::make_unique<DescriptorStorageHandler>(*storage);
-    return std::make_unique<AvbEntityHost>(std::move(handler), AdpAdvertiserConfig{}, 1, 4, 1);
+    return SymbolAwareHost{*storage};
 }
 
 /// Blob with an ENTITY descriptor plus two CONTROL descriptors: index 0 a MUTE,

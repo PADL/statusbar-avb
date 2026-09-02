@@ -10,6 +10,7 @@
 /// Audio flows from listener through DSP biquad filters to talker.
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
@@ -210,12 +211,12 @@ class AvbEntityAm824IO
     /// entity model by value and constructs `components_` in place
     /// (NanoAvbComponents is non-movable, so it cannot be passed pre-built).
     /// @param config       Validated configuration
-    /// @param entity_model Entity model to hand to NanoAvbComponents
+    /// @param handler      The blob-backed descriptor handler the host serves through
     /// @param channels     Number of audio channels derived from descriptor blob
     AvbEntityAm824IO(
         CreateKey,
         AvbEntityAm824IOConfig config,
-        std::unique_ptr<nanoavb::AemEntityHandler> handler,
+        EntityIdentityDescriptorHandler handler,
         size_t channels,
         std::pmr::memory_resource* memory_resource);
 
@@ -323,10 +324,15 @@ class AvbEntityAm824IO
     /// Custom audio callback (optional)
     Am824AudioProcessCallback audio_callback_;
 
+    /// The blob-backed descriptor handler the host serves the entity model
+    /// through (patches the runtime ENTITY identity). Declared before host_
+    /// (the host binds it).
+    EntityIdentityDescriptorHandler handler_;
+
     /// The reusable AVB control plane: state machines + NanoAvbComponents + net
     /// handlers + lifecycle. This entity supplies only its single AM824 stream + DSP
     /// and attaches them via host_.components() + the typed hooks. Declared after
-    /// config_ (the model is built from config_ and passed in at construction).
+    /// handler_ (the host serves descriptors through it).
     AvbEntityHost host_;
 
     /// Number of audio channels (determined from descriptor blob at construction)

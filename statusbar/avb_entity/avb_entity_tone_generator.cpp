@@ -107,22 +107,20 @@ auto AvbEntityToneGenerator::create(
     }
 
     auto const iface_mac = net::read_interface_mac(config.interface_name);
-    auto handler = std::make_unique<EntityIdentityDescriptorHandler>(
+    EntityIdentityDescriptorHandler handler{
         *storage_result,
         config.entity_id,
         config.entity_model_id,
         config.firmware_version,
         config.entity_name,
         iface_mac,
-        /*patch_avb_interface=*/true);
+        /*patch_avb_interface=*/true};
 
-    auto* const storage_handler = handler.get();
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity = std::make_unique<AvbEntityToneGenerator>(
         AvbEntityToneGenerator::CreateKey{},
         std::move(config),
         std::move(handler),
-        storage_handler,
         specs,
         *listener_specs,
         initial_clock_source,
@@ -141,8 +139,7 @@ auto AvbEntityToneGenerator::create(
 AvbEntityToneGenerator::AvbEntityToneGenerator(
     CreateKey,
     AvbEntityAudioIOConfig config,
-    std::unique_ptr<nanoavb::AemEntityHandler> handler,
-    nanoavb::DescriptorStorageHandler* storage_handler,
+    EntityIdentityDescriptorHandler handler,
     StreamSpecs specs,
     StreamSpecs listener_specs,
     uint16_t initial_clock_source,
@@ -158,10 +155,10 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     , mem_resource_{memory_resource}
     , audio_buffer_((static_cast<size_t>(samples_per_packet_) + 1) * channels, 0.0F, mem_resource_)  // +1: gPTP pacing
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
+    , handler_{std::move(handler)}
     , kit_{
           config_,
-          std::move(handler),
-          storage_handler,
+          handler_,
           specs,
           listener_specs,
           sample_rate,

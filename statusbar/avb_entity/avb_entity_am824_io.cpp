@@ -76,18 +76,18 @@ auto AvbEntityAm824IO::create(AvbEntityAm824IOConfig config, std::pmr::memory_re
     // DescriptorStorageHandler (retains the blob + symbol table) instead of a parsed
     // EntityModel; extract the channel count for the data plane.
     size_t const channels = channels_from_storage(*storage_result, 2);
-    auto handler = std::make_unique<EntityIdentityDescriptorHandler>(
+    EntityIdentityDescriptorHandler handler{
         *storage_result,
         config.entity_id,
         config.entity_model_id,
         config.firmware_version,
         config.entity_name,
         /*iface_mac=*/std::nullopt,
-        /*patch_avb_interface=*/false);
+        /*patch_avb_interface=*/false};
 
-    // Step 3: Construct entity via make_unique (gated by CreateKey). The entity owns
-    // the handler (through the host) and builds NanoAvbComponents in place (it is
-    // non-movable), then wires the talker stream / VLAN / MSRP domain.
+    // Step 3: Construct entity via make_unique (gated by CreateKey). The entity holds
+    // the handler and builds NanoAvbComponents in place (it is non-movable), then
+    // wires the talker stream / VLAN / MSRP domain.
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity =
         std::make_unique<AvbEntityAm824IO>(AvbEntityAm824IO::CreateKey{}, std::move(config), std::move(handler), channels, mr);
@@ -105,14 +105,15 @@ auto AvbEntityAm824IO::create(AvbEntityAm824IOConfig config, std::pmr::memory_re
 AvbEntityAm824IO::AvbEntityAm824IO(
     CreateKey,
     AvbEntityAm824IOConfig config,
-    std::unique_ptr<nanoavb::AemEntityHandler> handler,
+    EntityIdentityDescriptorHandler handler,
     size_t channels,
     std::pmr::memory_resource* memory_resource)
     // Build the control plane host in place: 1 talker stream (4 max listeners), 1
     // listener stream. Symbol-aware: the host serves descriptors through the handler
     // (retains the blob); NanoAvbComponents is non-movable, built in place.
     : config_{std::move(config)}
-    , host_{std::move(handler), default_adp_advertiser_config(), 1, 4, 1}
+    , handler_{std::move(handler)}
+    , host_{handler_, default_adp_advertiser_config(), 1, 4, 1}
     , channels_{channels}
     , mem_resource_{memory_resource}
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)
