@@ -26,7 +26,6 @@
 #include <atomic>
 #include <cstdint>
 #include <ctime>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -54,7 +53,7 @@ class UdptunEgressPath;  // service() consults its self-heal; full type in the .
 class UdptunTransport
 {
   public:
-    UdptunTransport(AvbEntityAudioIOConfig const& config, std::shared_ptr<UdptunTelemetry> telemetry) noexcept
+    UdptunTransport(AvbEntityAudioIOConfig const& config, UdptunTelemetry telemetry) noexcept
         : config_{config}
         , telemetry_{std::move(telemetry)}
     {}
@@ -138,7 +137,7 @@ class UdptunTransport
     void teardown_for_repunch();
 
     AvbEntityAudioIOConfig const& config_;
-    std::shared_ptr<UdptunTelemetry> telemetry_;
+    UdptunTelemetry telemetry_;
 
     net::FileDescriptor fd_{};  ///< TX socket (also RX in shared mode)
     net::SocketAddress peer_{};

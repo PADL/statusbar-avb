@@ -23,7 +23,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <memory_resource>
 #include <optional>
 #include <utility>
@@ -41,7 +40,7 @@ class UdptunEgressPath
         size_t const& channels,
         std::pmr::vector<float>& audio_buffer,
         UdptunTransport& transport,
-        std::shared_ptr<UdptunTelemetry> telemetry) noexcept
+        UdptunTelemetry telemetry) noexcept
         : config_{config}
         , channels_{channels}
         , audio_buffer_{audio_buffer}
@@ -102,7 +101,7 @@ class UdptunEgressPath
     size_t const& channels_;
     std::pmr::vector<float>& audio_buffer_;
     UdptunTransport& transport_;
-    std::shared_ptr<UdptunTelemetry> telemetry_;
+    UdptunTelemetry telemetry_;
     std::optional<logging::Logger> ctl_log_{};
 
     bool active_{false};

@@ -105,7 +105,7 @@ auto UdptunTransport::open_shared_socket() -> bool
     int64_t const tai = realtime_tai_ns(config_.udptun_tai_offset_ns, 1);
     install_tai_ns_ = tai;
     last_rx_ns_ = tai;
-    rx_baseline_ = telemetry_->any_rx.load();
+    rx_baseline_ = telemetry_.any_rx().load();
     saw_data_ = true;  // shared socket is "up" at bind; no STUN first-data grace
     if (ctl_log_) {
         ctl_log_->status(
@@ -312,7 +312,7 @@ void UdptunTransport::udptun_punch_loop()
 
 void UdptunTransport::teardown_for_repunch()
 {
-    telemetry_->egress_repunch_count.add(1);
+    telemetry_.egress_repunch_count().add(1);
     {
         std::scoped_lock const ig(tx_lock_);  // no close while the reactor may sendto
         fd_ = net::FileDescriptor{};          // close -> forces a fresh punch
@@ -341,7 +341,7 @@ void UdptunTransport::service(int64_t now_tai_ns)
             shared_socket_ = true;
             rendezvous_active_ = true;
             install_tai_ns_ = now_tai_ns;
-            rx_baseline_ = telemetry_->any_rx.load();
+            rx_baseline_ = telemetry_.any_rx().load();
             last_rx_ns_ = now_tai_ns;
             saw_data_ = false;
             // Fresh tunnel: the bridge's hook re-anchors the ingest TAI and resets
@@ -367,7 +367,7 @@ void UdptunTransport::service(int64_t now_tai_ns)
     // open and stay warm; real audio takes over seamlessly when it arrives. The far
     // end drops the bad decode but still counts it as tunnel liveness (any_rx).
     if (!config_.udptun_silence_source) {
-        int64_t const last_audio = telemetry_->last_real_ingest_tai.load();
+        int64_t const last_audio = telemetry_.last_real_ingest_tai().load();
         bool const streaming = udptun_source_streaming(last_audio, now_tai_ns);
         // ~1 ms cadence (matches owlm's proven punch rate + the ~2000 pkt/s real
         // audio that opened the pinhole on hardware). A slow keepalive (e.g. 50 ms)
@@ -385,7 +385,7 @@ void UdptunTransport::service(int64_t now_tai_ns)
     // starts it flows immediately instead of waiting on a fresh punch. No first
     // packet within the grace window, or a live tunnel going silent, tears the
     // socket down and asks the worker to re-punch.
-    uint64_t const rx = telemetry_->any_rx.load();
+    uint64_t const rx = telemetry_.any_rx().load();
     if (rx != rx_baseline_) {
         rx_baseline_ = rx;
         last_rx_ns_ = now_tai_ns;

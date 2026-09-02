@@ -29,7 +29,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
@@ -49,7 +48,7 @@ class UdptunIngestPath
         itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot,
         std::atomic<uint64_t> const& last_gptp_ns,
         UdptunTransport& transport,
-        std::shared_ptr<UdptunTelemetry> telemetry) noexcept
+        UdptunTelemetry telemetry) noexcept
         : config_{config}
         , channels_{channels}
         , rate_tracker_{rate_tracker}
@@ -127,7 +126,7 @@ class UdptunIngestPath
     itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot_;
     std::atomic<uint64_t> const& last_gptp_ns_;
     UdptunTransport& transport_;
-    std::shared_ptr<UdptunTelemetry> telemetry_;
+    UdptunTelemetry telemetry_;
     std::optional<logging::Logger> ctl_log_{};
 
     bool enable_{false};

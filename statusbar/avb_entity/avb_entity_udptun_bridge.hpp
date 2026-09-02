@@ -33,7 +33,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <memory_resource>
 #include <span>
 #include <vector>
@@ -113,7 +112,7 @@ class EntityUdptunBridge : public StreamRxAudioSink
     void source_tick(int64_t pkt_tai_ns, size_t samples, bool emit_silence);
 
     /// Tunnel telemetry (print_state).
-    [[nodiscard]] auto telemetry() const noexcept -> UdptunTelemetry const& { return *telemetry_; }
+    [[nodiscard]] auto telemetry() const noexcept -> UdptunTelemetry const& { return telemetry_; }
 
     /// The ingest path (tests / diagnostics).
     [[nodiscard]] auto ingest() noexcept -> UdptunIngestPath& { return ingest_; }
@@ -129,7 +128,7 @@ class EntityUdptunBridge : public StreamRxAudioSink
   private:
     AvbEntityAudioIOConfig const& config_;
     /// Tunnel telemetry counters; shared with the entity's print_state.
-    std::shared_ptr<UdptunTelemetry> telemetry_{std::make_shared<UdptunTelemetry>()};
+    UdptunTelemetry telemetry_{};
     UdptunTransport transport_;
     UdptunIngestPath ingest_;
     UdptunEgressPath egress_;

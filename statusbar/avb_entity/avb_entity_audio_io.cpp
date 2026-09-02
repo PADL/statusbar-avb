@@ -273,8 +273,8 @@ void AvbEntityAudioIO::print_state() const
         rx_aaf != nullptr ? rx_aaf->rx_packets.load() : 0,
         rx_aaf != nullptr ? rx_aaf->rx_samples.load() : 0,
         rx_aaf != nullptr ? rx_aaf->rx_bad.load() : 0,
-        udptun_->telemetry().egress_reset_count.load(),
-        udptun_->telemetry().egress_repunch_count.load());
+        udptun_->telemetry().egress_reset_count().load(),
+        udptun_->telemetry().egress_repunch_count().load());
 }
 
 //

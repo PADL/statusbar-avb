@@ -131,7 +131,7 @@ void UdptunIngestPath::send_encoded(
     }
     span_copy(make_span(txbuf_, {.start = hdr}), pcm);
     transport_.send(std::span<uint8_t const>{txbuf_}.first(total));
-    telemetry_->tx_packets.add(1);
+    telemetry_.tx_packets().add(1);
 }
 
 void UdptunIngestPath::send(int64_t const tai_ns, std::span<uint8_t const> const pcm)
@@ -182,7 +182,7 @@ void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool c
     // thread's checks read.
     if (real_source) {
         if (int64_t const rx_tai = realtime_tai_ns(config_.udptun_tai_offset_ns); rx_tai != 0) {
-            telemetry_->last_real_ingest_tai.publish(rx_tai);
+            telemetry_.last_real_ingest_tai().publish(rx_tai);
         }
     }
 

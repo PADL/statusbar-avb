@@ -54,7 +54,7 @@ auto EntityUdptunBridge::should_emit_silence(int64_t const now_tai_ns) const -> 
         return false;
     }
     int64_t const now_tai = (now_tai_ns != 0) ? now_tai_ns : realtime_tai_ns(config_.udptun_tai_offset_ns);
-    return !udptun_source_streaming(telemetry_->last_real_ingest_tai.load(), now_tai);
+    return !udptun_source_streaming(telemetry_.last_real_ingest_tai().load(), now_tai);
 }
 
 void EntityUdptunBridge::source_tick(int64_t const pkt_tai_ns, size_t const samples, bool const emit_silence)

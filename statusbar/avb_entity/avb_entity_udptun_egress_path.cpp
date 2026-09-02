@@ -85,7 +85,7 @@ void UdptunEgressPath::drain_rx()
         }
         // Count EVERY datagram (decodable audio or a bare keepalive) for the punch
         // watchdog's tunnel-liveness check -- a keepalive proves the pinhole is open.
-        telemetry_->any_rx.add(1);
+        telemetry_.any_rx().add(1);
         auto const dec = egress_codec_->decode(std::span<uint8_t const>{rxbuf_.data(), static_cast<size_t>(n)});
         if (!dec) {
             continue;
@@ -97,7 +97,7 @@ void UdptunEgressPath::drain_rx()
         auto const nf = static_cast<uint16_t>(pcm_bytes / frame_bytes);
         int64_t const pt_ns = egress_codec_->tx_gptp_ns(*dec);
         (void)egress_->submit(pt_ns, dec->audio.first(static_cast<size_t>(nf) * frame_bytes), nf);
-        telemetry_->rx_packets.add(1);
+        telemetry_.rx_packets().add(1);
 
         // Per-packet timing: latency = local rx TAI - the packet's TAI
         // presentation time. Same TAI basis (CLOCK_REALTIME + tai_offset) the
@@ -160,7 +160,7 @@ auto UdptunEgressPath::self_heal(int64_t const now_tai_ns, bool const allow_esca
     if (!egress_) {
         return false;
     }
-    uint64_t const audio_rx = telemetry_->rx_packets.load();
+    uint64_t const audio_rx = telemetry_.rx_packets().load();
     if (audio_rx != audio_rx_baseline_) {
         audio_rx_baseline_ = audio_rx;
         last_audio_ns_ = now_tai_ns;
@@ -197,7 +197,7 @@ auto UdptunEgressPath::self_heal(int64_t const now_tai_ns, bool const allow_esca
             reset_streak_ = 0;
             return true;  // transport tears down + re-punches
         }
-        telemetry_->egress_reset_count.add(1);
+        telemetry_.egress_reset_count().add(1);
         egress_->reset();
     }
     return false;
