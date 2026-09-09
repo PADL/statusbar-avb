@@ -27,10 +27,20 @@
 // The generator is versioned; store the version with every generated
 // table and project file so an old project resolves through the table it
 // was authored against.
+//
+// Version history:
+//   1  AUDIO_UNIT trees only (blocks, controls, selectors, matrices).
+//   2  Every owner in the standard: AUDIO/VIDEO/SENSOR_UNIT trees gain
+//      ports (spin/spout/extin/extout/intin/intout), the ports' controls,
+//      clusters and maps, and mixers; JACK, AVB_INTERFACE (2021) and
+//      PTP_INSTANCE controls scope under their owner; the controls the
+//      CONFIGURATION declares in descriptor_counts become
+//      cfgN/ctl:<type>/<ordinal>. Port/cluster/map descriptors no unit
+//      reaches are orphans (v1 enumerated them per type).
 
 namespace statusbar::nanoavb {
 
-inline constexpr std::uint32_t AEM_SYMBOL_GENERATOR_VERSION = 1;
+inline constexpr std::uint32_t AEM_SYMBOL_GENERATOR_VERSION = 2;
 
 struct AemSymbol
 {
