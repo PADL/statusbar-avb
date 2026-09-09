@@ -37,10 +37,14 @@
 //      CONFIGURATION declares in descriptor_counts become
 //      cfgN/ctl:<type>/<ordinal>. Port/cluster/map descriptors no unit
 //      reaches are orphans (v1 enumerated them per type).
+//   3  Known vendor control types (atdecc_aem_control_types.hpp: Meyer,
+//      JDKS) take their registry name as the segment —
+//      ctl:meyer_erase_identity/0 where v2 wrote ctl:001cab000010002f/0.
+//      Unregistered vendor types keep the EUI-64.
 
 namespace statusbar::nanoavb {
 
-inline constexpr std::uint32_t AEM_SYMBOL_GENERATOR_VERSION = 2;
+inline constexpr std::uint32_t AEM_SYMBOL_GENERATOR_VERSION = 3;
 
 struct AemSymbol
 {

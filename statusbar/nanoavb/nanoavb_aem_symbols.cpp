@@ -64,15 +64,16 @@ std::string type_segment(std::uint16_t type)
     }
 }
 
-/// A control_type as a symbol segment: the standard name lowercased when
-/// the registry knows it, else the EUI-64 as 16 hex digits — never a
-/// non-identifying placeholder.
+/// A control_type as a symbol segment: the registry name lowercased when
+/// it knows the type (Table 7.4 or a known vendor type such as
+/// MEYER_FAN_STATUS / JDKS_IPV4_PARAMETERS), else the EUI-64 as 16 hex
+/// digits — never a non-identifying placeholder.
 std::string control_type_segment(ieee::Eui64 const& type)
 {
     auto name = control_type_name(type);
     bool identifying = !name.empty();
     for (char c : name) {
-        if (!(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') && c != '_') {
+        if (!(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '_') {
             identifying = false;
             break;
         }

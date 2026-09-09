@@ -3,8 +3,10 @@
 
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 
+#include "statusbar/atdecc/atdecc_jdks.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <span>
 
@@ -85,6 +87,68 @@ TEST(aem_control_types, vendor_table_names_vendor_types)
 
     // An empty table behaves exactly like the single-argument lookup.
     EXPECT_EQ(control_type_name(acme_special, {}), "VENDOR_DEFINED");
+}
+
+TEST(aem_control_types, known_vendor_types_name_themselves)
+{
+    // The Meyer telemetry the Q1 / RZ expose at configuration level, and
+    // the JDKS types atdecc_jdks.hpp defines — vendor-prefixed, Table 7.4
+    // style, through the plain lookup.
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_ERASE_IDENTITY), "MEYER_ERASE_IDENTITY");
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_HARDWARE_INFO), "MEYER_HARDWARE_INFO");
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_FAN_STATUS), "MEYER_FAN_STATUS");
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_LOGGER), "MEYER_LOGGER");
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_ENGINE_LOGGER), "MEYER_ENGINE_LOGGER");
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_LED_INDICATOR_FIRMWARE_VERSION), "MEYER_LED_INDICATOR_FIRMWARE_VERSION");
+    EXPECT_EQ(control_type_name(atdecc::jdks::CONTROL_LOG_TEXT), "JDKS_LOG_TEXT");
+    EXPECT_EQ(control_type_name(atdecc::jdks::CONTROL_IPV4_PARAMETERS), "JDKS_IPV4_PARAMETERS");
+
+    // The exact wire values the devices report.
+    EXPECT_EQ(meyer::CONTROL_TYPE_ERASE_IDENTITY, (Eui64{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x2F}));
+    EXPECT_EQ(meyer::CONTROL_TYPE_ENGINE_CODE, (Eui64{0x00, 0x1C, 0xAB, 0x00, 0x00, 0xF0, 0x00, 0x0C}));
+    EXPECT_EQ(atdecc::jdks::CONTROL_LOG_TEXT, (Eui64{0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00, 0x00}));
+
+    // Neither vendor's OUI is the standard one; a sibling value in the
+    // same vendor range that nobody registered stays generic.
+    EXPECT_FALSE(is_standard_control_type(meyer::CONTROL_TYPE_ERASE_IDENTITY));
+    EXPECT_FALSE(is_standard_control_type(atdecc::jdks::CONTROL_LOG_TEXT));
+    EXPECT_EQ(control_type_name(Eui64{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x30}), "VENDOR_DEFINED");
+    EXPECT_EQ(control_type_name(Eui64{0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00, 0x02}), "VENDOR_DEFINED");
+}
+
+TEST(aem_control_types, known_vendor_entries_enumerable_sorted_and_distinct)
+{
+    auto const vendor = known_vendor_control_type_entries();
+    auto const standard = standard_control_type_entries();
+    EXPECT_EQ(vendor.size(), size_t{13});
+    for (size_t i = 1; i < vendor.size(); ++i) {
+        EXPECT_TRUE(vendor[i - 1].type < vendor[i].type);
+    }
+    for (auto const& e : vendor) {
+        // Every entry names itself, is vendor-owned, and its name is an
+        // identifier (the symbol generator lowercases it into a path
+        // segment) that no standard or other vendor entry uses.
+        EXPECT_EQ(control_type_name(e.type), e.name);
+        EXPECT_FALSE(is_standard_control_type(e.type));
+        for (char c : e.name) {
+            EXPECT_TRUE((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_');
+        }
+        EXPECT_EQ(std::ranges::count(vendor, e.name, &ControlTypeEntry::name), 1);
+        for (auto const& s : standard) {
+            EXPECT_NE(s.name, e.name);
+        }
+    }
+}
+
+TEST(aem_control_types, application_table_overrides_known_vendor_names)
+{
+    constexpr std::array<ControlTypeEntry, 1> vendor{{
+        {.type = meyer::CONTROL_TYPE_FAN_STATUS, .name = "FANS"},
+    }};
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_FAN_STATUS, vendor), "FANS");
+    // Everything the table does not mention still reaches the built-ins.
+    EXPECT_EQ(control_type_name(meyer::CONTROL_TYPE_TEMPERATURE, vendor), "MEYER_TEMPERATURE");
+    EXPECT_EQ(control_type_name(CONTROL_TYPE_GAIN, vendor), "GAIN");
 }
 
 TEST_MAIN(statusbar_atdecc, atdecc_aem_control_types_test)

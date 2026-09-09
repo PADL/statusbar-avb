@@ -11,6 +11,7 @@
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/atdecc/atdecc_jdks.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -316,11 +317,12 @@ TEST(aem_symbols, ports_clusters_maps_and_mixers_walk_under_the_unit)
     expect(DESCRIPTOR_STREAM_PORT_INPUT, 7, "orphan/000e/7", true);
 }
 
-TEST(aem_symbols, vendor_control_types_keep_their_eui64)
+TEST(aem_symbols, unregistered_vendor_control_types_keep_their_eui64)
 {
-    // The registry names every non-standard control_type VENDOR_DEFINED;
-    // that is a placeholder, not an identity — two different vendor
-    // controls must not share a segment (a reorder would renumber them).
+    // The registry names every unregistered non-standard control_type
+    // VENDOR_DEFINED; that is a placeholder, not an identity — two
+    // different vendor controls must not share a segment (a reorder
+    // would renumber them).
     ieee::Eui64 const erase{0x00, 0x1c, 0xab, 0x00, 0x00, 0x00, 0x00, 0x01};
     ieee::Eui64 const info{0x00, 0x1c, 0xab, 0x00, 0x00, 0x00, 0x00, 0x02};
     TestModel m;
@@ -333,11 +335,41 @@ TEST(aem_symbols, vendor_control_types_keep_their_eui64)
     EXPECT_TRUE(ctl[2] == "cfg0/ctl:001cab0000000002/0");
 }
 
+TEST(aem_symbols, known_vendor_control_types_use_their_registry_name)
+{
+    // The Q1's configuration-level controls as crawled, plus the JDKS
+    // types (a digit in the name must survive the identifier check), and
+    // one Meyer value nobody registered.
+    ieee::Eui64 const unregistered{0x00, 0x1c, 0xab, 0x00, 0x00, 0x10, 0x00, 0x30};
+    TestModel m;
+    m.config_control_types = {
+        CONTROL_TYPE_IDENTIFY,
+        meyer::CONTROL_TYPE_LOGGER,
+        meyer::CONTROL_TYPE_ERASE_IDENTITY,
+        meyer::CONTROL_TYPE_HARDWARE_INFO,
+        atdecc::jdks::CONTROL_LOG_TEXT,
+        atdecc::jdks::CONTROL_IPV4_PARAMETERS,
+        unregistered,
+        meyer::CONTROL_TYPE_LOGGER,
+    };
+    m.finish();
+
+    auto ctl = control_symbols(derive_aem_symbols(m.descriptors));
+    EXPECT_TRUE(ctl[0] == "cfg0/ctl:identify/0");
+    EXPECT_TRUE(ctl[1] == "cfg0/ctl:meyer_logger/0");
+    EXPECT_TRUE(ctl[2] == "cfg0/ctl:meyer_erase_identity/0");
+    EXPECT_TRUE(ctl[3] == "cfg0/ctl:meyer_hardware_info/0");
+    EXPECT_TRUE(ctl[4] == "cfg0/ctl:jdks_log_text/0");
+    EXPECT_TRUE(ctl[5] == "cfg0/ctl:jdks_ipv4_parameters/0");
+    EXPECT_TRUE(ctl[6] == "cfg0/ctl:001cab0000100030/0");
+    EXPECT_TRUE(ctl[7] == "cfg0/ctl:meyer_logger/1");
+}
+
 TEST(aem_symbols, generator_version_is_current)
 {
     // Every refinement above bumps the version so stored tables and
     // project files authored against v1 keep resolving through v1.
-    EXPECT_EQ(AEM_SYMBOL_GENERATOR_VERSION, 2U);
+    EXPECT_EQ(AEM_SYMBOL_GENERATOR_VERSION, 3U);
 }
 
 //

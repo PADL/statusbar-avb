@@ -157,6 +157,36 @@ inline constexpr Eui64 CONTROL_TYPE_FQTSS_PORT_TRANSMIT_RATE{0x90, 0xE0, 0xF0, 0
 inline constexpr Eui64 CONTROL_TYPE_FQTSS_CLASS_MEASUREMENT_INTERVAL{0x90, 0xE0, 0xF0, 0x00, 0x00, 0x06, 0x00, 0x08};
 inline constexpr Eui64 CONTROL_TYPE_FQTSS_LOCK_CLASS_BANDWIDTH{0x90, 0xE0, 0xF0, 0x00, 0x00, 0x06, 0x00, 0x09};
 
+//
+// Known vendor control types
+//
+// No vendor publishes a registry for its EUI-64 control types; these
+// are the ones real devices expose, named after the manufacturer's own
+// en-US localized strings (crawled 2026-09-08) with the vendor as a
+// prefix so the names stay unique beside Table 7.4. The JDKS types live
+// in atdecc_jdks.hpp (jdks::CONTROL_LOG_TEXT, jdks::CONTROL_IPV4_PARAMETERS)
+// and are registered under JDKS_LOG_TEXT / JDKS_IPV4_PARAMETERS.
+//
+
+/// Meyer Sound Laboratories (OUI 00:1c:ab). Bytes 3-4 are Meyer's own
+/// sub-range: 0x0010 hardware status, 0x0040 (Q1 logger), 0x00f0 the
+/// GALAXY/RZ processing engine.
+namespace meyer {
+inline constexpr Eui64 CONTROL_TYPE_FAN_STATUS{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x04};
+inline constexpr Eui64 CONTROL_TYPE_TEMPERATURE{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x12};
+inline constexpr Eui64 CONTROL_TYPE_DC_SUPPLY{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x1B};
+inline constexpr Eui64 CONTROL_TYPE_ERASE_IDENTITY{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x2F};
+inline constexpr Eui64 CONTROL_TYPE_HARDWARE_INFO{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x10, 0x00, 0x47};
+/// "Logger" on the Q1 GALAXY.
+inline constexpr Eui64 CONTROL_TYPE_LOGGER{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x40, 0x00, 0x05};
+/// "Logger" on the RZ, in the engine sub-range.
+inline constexpr Eui64 CONTROL_TYPE_ENGINE_LOGGER{0x00, 0x1C, 0xAB, 0x00, 0x00, 0xF0, 0x00, 0x05};
+inline constexpr Eui64 CONTROL_TYPE_ENGINE_LOAD{0x00, 0x1C, 0xAB, 0x00, 0x00, 0xF0, 0x00, 0x09};
+inline constexpr Eui64 CONTROL_TYPE_RESET_ENGINE_COUNTERS{0x00, 0x1C, 0xAB, 0x00, 0x00, 0xF0, 0x00, 0x0A};
+inline constexpr Eui64 CONTROL_TYPE_LED_INDICATOR_FIRMWARE_VERSION{0x00, 0x1C, 0xAB, 0x00, 0x00, 0xF0, 0x00, 0x0B};
+inline constexpr Eui64 CONTROL_TYPE_ENGINE_CODE{0x00, 0x1C, 0xAB, 0x00, 0x00, 0xF0, 0x00, 0x0C};
+}  // namespace meyer
+
 /// True iff `t` starts with the standard 1722-2011 OUI (`90:e0:f0`).
 /// Vendor-defined control types return false.
 [[nodiscard]] auto is_standard_control_type(Eui64 const& t) noexcept -> bool;
@@ -176,17 +206,26 @@ struct ControlTypeEntry
 /// search.
 [[nodiscard]] auto standard_control_type_entries() noexcept -> std::span<ControlTypeEntry const>;
 
-/// Human-readable name of a standard control type, or "VENDOR_DEFINED"
+/// The vendor control types the library knows by name (the meyer::
+/// constants above and the JDKS types of atdecc_jdks.hpp), sorted
+/// ascending by EUI-64. Names are "<VENDOR>_<NAME>" in the Table 7.4
+/// style and never collide with a standard name.
+[[nodiscard]] auto known_vendor_control_type_entries() noexcept -> std::span<ControlTypeEntry const>;
+
+/// Human-readable name of a standard control type (IEEE 1722.1-2021
+/// Table 7.4) or of a known vendor type
+/// (known_vendor_control_type_entries()); otherwise "VENDOR_DEFINED"
 /// for non-IEEE OUIs, or "UNKNOWN" for reserved ranges inside the IEEE
-/// OUI. Matches the names in IEEE 1722.1-2021 Table 7.4.
+/// OUI.
 /// @param t Control type EUI-64 from a CONTROL descriptor
 [[nodiscard]] auto control_type_name(Eui64 const& t) noexcept -> std::string_view;
 
 /// Like control_type_name(t), but consults @p vendor first: an
 /// application-supplied table naming its vendor-defined control types
 /// (entries are checked in order — a handful of entries beats any map,
-/// so no sorting is required). Unmatched types fall back to the
-/// standard names / "VENDOR_DEFINED" / "UNKNOWN".
+/// so no sorting is required), which therefore also overrides the
+/// built-in vendor names. Unmatched types fall back to the standard
+/// and known-vendor names / "VENDOR_DEFINED" / "UNKNOWN".
 /// @param t Control type EUI-64 from a CONTROL descriptor
 /// @param vendor Application-owned naming entries; the span and the
 ///        names it references must outlive the returned view

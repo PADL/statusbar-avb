@@ -3,6 +3,8 @@
 
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 
+#include "statusbar/atdecc/atdecc_jdks.hpp"
+
 #include <algorithm>
 #include <array>
 #include <span>
@@ -105,6 +107,38 @@ static_assert(
         STANDARD_CONTROL_TYPES, [](ControlTypeEntry const& a, ControlTypeEntry const& b) { return a.type < b.type; }),
     "STANDARD_CONTROL_TYPES must be sorted ascending by EUI-64 for the binary search");
 
+/// The vendor types the library knows, sorted ascending by EUI-64
+/// (Meyer's OUI 00:1c:ab sorts before JDKS's 70:b3:d5). Names carry the
+/// vendor as a prefix so they never collide with Table 7.4.
+constexpr std::array<ControlTypeEntry, 13> KNOWN_VENDOR_CONTROL_TYPES{{
+    {.type = meyer::CONTROL_TYPE_FAN_STATUS, .name = "MEYER_FAN_STATUS"},
+    {.type = meyer::CONTROL_TYPE_TEMPERATURE, .name = "MEYER_TEMPERATURE"},
+    {.type = meyer::CONTROL_TYPE_DC_SUPPLY, .name = "MEYER_DC_SUPPLY"},
+    {.type = meyer::CONTROL_TYPE_ERASE_IDENTITY, .name = "MEYER_ERASE_IDENTITY"},
+    {.type = meyer::CONTROL_TYPE_HARDWARE_INFO, .name = "MEYER_HARDWARE_INFO"},
+    {.type = meyer::CONTROL_TYPE_LOGGER, .name = "MEYER_LOGGER"},
+    {.type = meyer::CONTROL_TYPE_ENGINE_LOGGER, .name = "MEYER_ENGINE_LOGGER"},
+    {.type = meyer::CONTROL_TYPE_ENGINE_LOAD, .name = "MEYER_ENGINE_LOAD"},
+    {.type = meyer::CONTROL_TYPE_RESET_ENGINE_COUNTERS, .name = "MEYER_RESET_ENGINE_COUNTERS"},
+    {.type = meyer::CONTROL_TYPE_LED_INDICATOR_FIRMWARE_VERSION, .name = "MEYER_LED_INDICATOR_FIRMWARE_VERSION"},
+    {.type = meyer::CONTROL_TYPE_ENGINE_CODE, .name = "MEYER_ENGINE_CODE"},
+    {.type = jdks::CONTROL_LOG_TEXT, .name = "JDKS_LOG_TEXT"},
+    {.type = jdks::CONTROL_IPV4_PARAMETERS, .name = "JDKS_IPV4_PARAMETERS"},
+}};
+
+static_assert(
+    std::ranges::is_sorted(
+        KNOWN_VENDOR_CONTROL_TYPES, [](ControlTypeEntry const& a, ControlTypeEntry const& b) { return a.type < b.type; }),
+    "KNOWN_VENDOR_CONTROL_TYPES must be sorted ascending by EUI-64 for the binary search");
+
+/// Binary search of a sorted table; nullptr when @p t is absent.
+ControlTypeEntry const* find_sorted(std::span<ControlTypeEntry const> table, Eui64 const& t) noexcept
+{
+    auto const it =
+        std::ranges::lower_bound(table, t, [](Eui64 const& a, Eui64 const& b) { return a < b; }, &ControlTypeEntry::type);
+    return it != table.end() && it->type == t ? &*it : nullptr;
+}
+
 }  // namespace
 
 auto is_standard_control_type(Eui64 const& t) noexcept -> bool
@@ -118,12 +152,18 @@ auto standard_control_type_entries() noexcept -> std::span<ControlTypeEntry cons
     return STANDARD_CONTROL_TYPES;
 }
 
+auto known_vendor_control_type_entries() noexcept -> std::span<ControlTypeEntry const>
+{
+    return KNOWN_VENDOR_CONTROL_TYPES;
+}
+
 auto control_type_name(Eui64 const& t) noexcept -> std::string_view
 {
-    auto const it = std::ranges::lower_bound(
-        STANDARD_CONTROL_TYPES, t, [](Eui64 const& a, Eui64 const& b) { return a < b; }, &ControlTypeEntry::type);
-    if (it != STANDARD_CONTROL_TYPES.end() && it->type == t) {
-        return it->name;
+    if (auto const* e = find_sorted(STANDARD_CONTROL_TYPES, t)) {
+        return e->name;
+    }
+    if (auto const* e = find_sorted(KNOWN_VENDOR_CONTROL_TYPES, t)) {
+        return e->name;
     }
     return is_standard_control_type(t) ? "UNKNOWN" : "VENDOR_DEFINED";
 }
