@@ -92,13 +92,6 @@ void erase_if(Container& c, Pred pred)
     c.erase(std::remove_if(c.begin(), c.end(), pred), c.end());
 }
 
-/// Reset a MutableBuffer's used-data span to zero length, preserving
-/// the underlying storage for reuse across TX passes.
-inline void reset_buffer(MutableBuffer& buf) noexcept
-{
-    buf.set_span(std::span<uint8_t const>(buf.total_buffer_span().data(), 0));
-}
-
 /// Append a single byte to a MutableBuffer. Returns false if the
 /// buffer has no free space (caller should stop appending and emit
 /// whatever has been produced so far).
@@ -126,7 +119,6 @@ inline void reset_buffer(MutableBuffer& buf) noexcept
 using detail_msrp::append_be16;
 using detail_msrp::append_u8;
 using detail_msrp::erase_if;
-using detail_msrp::reset_buffer;
 using detail_msrp::rx_events_for;
 using detail_msrp::translate_sndmsg;
 using mrp::AttributeEvent;
@@ -1338,7 +1330,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     bool la_remaining = leave_all;
 
     // Reuse the participant's pre-allocated PDU buffer; no per-tx heap.
-    reset_buffer(pdu_buffer_);
+    pdu_buffer_.rewind();
     if (!append_u8(pdu_buffer_, PROTOCOL_VERSION)) {
         return;
     }

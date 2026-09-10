@@ -136,11 +136,6 @@ constexpr auto rx_events_for(AttributeEvent event) noexcept -> RxEvents
     }
 }
 
-inline void reset_buffer(MutableBuffer& buf) noexcept
-{
-    buf.set_span(std::span<uint8_t const>(buf.total_buffer_span().data(), 0));
-}
-
 [[nodiscard]] inline auto append_u8(MutableBuffer& buf, uint8_t value) noexcept -> bool
 {
     std::array<uint8_t, 1> const src{value};
@@ -512,7 +507,7 @@ class MvrpParticipantT
             return;
         }
 
-        detail_mvrp::reset_buffer(pdu_buffer_);
+        pdu_buffer_.rewind();
         if (!detail_mvrp::append_u8(pdu_buffer_, PROTOCOL_VERSION)) {
             return;
         }
