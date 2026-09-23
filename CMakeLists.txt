@@ -246,10 +246,20 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_COMPONENTS_ALL runtime devel)
   set(CPACK_DEBIAN_DEVEL_PACKAGE_NAME "statusbar-avb-dev")
   set(CPACK_RPM_DEVEL_PACKAGE_NAME "statusbar-avb-devel")
-  # aemxml is pure stdlib Python; owlm_analyze needs numpy/pandas/matplotlib;
-  # libcap2-bin provides `setcap` for the postinst capability grant.
-  set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS
-      "python3, python3-numpy, python3-pandas, python3-matplotlib, libcap2-bin")
+  # Hard dependencies only: aemxml is pure stdlib Python so it needs just the
+  # interpreter, and libcap2-bin provides `setcap` for the postinst capability
+  # grant (the postinst fails without it).
+  set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS "python3, libcap2-bin")
+  # The numeric stack is needed only by statusbar-owlm-analyze, an optional
+  # post-processing tool for the CSVs that statusbar-owlm-tool emits. Nothing
+  # else in the package touches it, so it is a Recommends: apt still installs it
+  # by default, but the package remains installable where the stack is not
+  # available. That matters concretely for cross-builds -- python3-pandas has no
+  # installable :arm64 multiarch variant on trixie or forky, so as a Depends it
+  # made statusbar-avb (and anything depending on it) impossible to install in
+  # the arm64 cross builder.
+  set(CPACK_DEBIAN_RUNTIME_PACKAGE_RECOMMENDS
+      "python3-numpy, python3-pandas, python3-matplotlib")
   # -dev pulls its own runtime so its cmake config's IMPORTED targets resolve.
   # >= (not =) so an auto-incremented Debian revision (1.3.0-<rev>, see the
   # container-build scripts) still satisfies the cross-dependencies.
