@@ -48,6 +48,19 @@ if [ "$(uname -s)" = "Linux" ]; then
   MOUNT_OPT=",z"
 fi
 
+# Debian package revision: a monotonic build id appended as the package's
+# Debian revision (version becomes x.y.z-<rev>), so every rebuild produces a
+# strictly-newer package and apt always upgrades instead of refusing an
+# equal-or-older version. The umbrella container-build-cross.sh exports one
+# shared STATUSBAR_DEB_REVISION per run so a multi-package build gets a
+# consistent revision.
+DEB_REVISION="${STATUSBAR_DEB_REVISION:-$(date -u +%Y%m%d%H%M%S)}"
+
+# Package version = the tree's latest release tag, resolved HERE on the host:
+# the container mounts the tree read-only, so git describe cannot work
+# inside it and CMake would silently fall back to its baked default.
+PKG_VERSION="${STATUSBAR_PKG_VERSION:-$(git -C "$TREE_DIR" describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)}"
+
 mkdir -p "$DEB_OUTPUT"
 
 # Rebuild the cross builder image when it is missing or its Containerfile
@@ -87,6 +100,8 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
   -e "TARGET_ARCH=$TARGET_ARCH" \
   -e "STATUSBAR_TOOLCHAIN=$STATUSBAR_TOOLCHAIN" \
   -e "STATUSBAR_STATIC_CXX=$STATUSBAR_STATIC_CXX" \
+  -e "DEB_REVISION=$DEB_REVISION" \
+  -e "PKG_VERSION=$PKG_VERSION" \
   "$IMAGE" bash -euo pipefail -c '
     debs=()
     for d in $DEPS; do
@@ -113,9 +128,10 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
       -DENABLE_STATIC_CXX_RUNTIME="$STATUSBAR_STATIC_CXX" \
       -DCMAKE_C_COMPILER_LAUNCHER=ccache \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+      ${PKG_VERSION:+-DSTATUSBAR_AVB_VERSION=$PKG_VERSION} \
       -DCPACK_DEBIAN_PACKAGE_ARCHITECTURE="$TARGET_ARCH"
     cmake --build /build
-    ( cd /build && cpack -G DEB )
+    ( cd /build && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_RELEASE="$DEB_REVISION" )
     rm -f /debs/statusbar-"$PKG"_*_"$TARGET_ARCH".deb \
           /debs/statusbar-"$PKG"-dev_*_"$TARGET_ARCH".deb
     cp -v /build/*.deb /debs/
