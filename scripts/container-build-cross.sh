@@ -96,9 +96,15 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
     if [ "${#debs[@]}" -gt 0 ]; then
       apt-get update -qq
       apt-get install -y --no-install-recommends "${debs[@]}"
-      # Restore clang-scan-deps if apt evicted clang-tools-19.
-      if [ ! -e /usr/lib/llvm-19/bin/clang-scan-deps ] && [ -e /opt/cross-tools/clang-scan-deps ]; then
-        cp /opt/cross-tools/clang-scan-deps /usr/lib/llvm-19/bin/clang-scan-deps
+      # Restore clang-scan-deps if apt evicted the host clang-tools. The
+      # destination is whatever path the image recorded at build time -- it is
+      # version-specific (/usr/lib/llvm-19/... on trixie, /usr/bin/... on
+      # forky), so hardcoding one breaks on the other base.
+      SCAN_DEPS="$(cat /opt/cross-tools/clang-scan-deps.path 2>/dev/null)"
+      if [ -n "$SCAN_DEPS" ] && [ ! -e "$SCAN_DEPS" ] \
+         && [ -e /opt/cross-tools/clang-scan-deps ]; then
+        mkdir -p "$(dirname "$SCAN_DEPS")"
+        cp /opt/cross-tools/clang-scan-deps "$SCAN_DEPS"
       fi
     fi
     cmake -Wno-dev -S /src -B /build -G Ninja \
