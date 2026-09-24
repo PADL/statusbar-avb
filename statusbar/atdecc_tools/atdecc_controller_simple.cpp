@@ -35,7 +35,10 @@ using namespace statusbar::net;
 // descriptor types would otherwise drive millions of set inserts + queue pushes
 // (hundreds of MB) -- a DoS from a single discovered entity. Real AVDECC entities
 // have at most tens of any descriptor type, so this is far above anything genuine.
-constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 1536;  // GALAXY-scale: 1021 CONTROLs is a real model
+// Nadia-CP-scale: 55,268 CONTROLs is a real model (the RZ proxy's full
+// design). Descriptor indices are uint16 on the wire; the cap bounds
+// crafted-response vector growth (M2 DoS) and enumeration effort.
+constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 60000;
 
 ControllerSimple::ControllerSimple(RawnetContext context, Eui64 controller_id)
     : ControllerSimple{make_rawnet_controller_service(std::move(context), controller_id)}
@@ -1209,28 +1212,35 @@ void ControllerSimple::clear_descriptor_read(Eui64 const& target, uint16_t desc_
 
 void ControllerSimple::send_next_descriptor_read(int64_t now_ns)
 {
-    // Throttle against AEM inflight tracker. The AEM controller's inflight
-    // table is bounded by AemControllerContext::MAX_INFLIGHT (8). If we issue
-    // a command when no slot is free, the packet goes on the wire untracked
-    // and its response is silently dropped — which would strand the queued
-    // descriptor read forever.
-    if (service_->aem_inflight_count() >= atdecc::AemControllerContext::MAX_INFLIGHT) {
-        return;
-    }
-    if (descriptor_read_queue_.empty()) {
-        return;
-    }
-    size_t const n = descriptor_read_queue_.size();
-    for (size_t step = 0; step < n; ++step) {
-        size_t const i = (descriptor_read_cursor_ + step) % n;
-        auto& req = descriptor_read_queue_[i];
-        if (req.last_sent_ns != 0 && (now_ns - req.last_sent_ns) < STREAM_QUERY_RETRY_NS) {
-            continue;
+    // Fill the whole AEM inflight window each tick. The controller's
+    // inflight table is bounded by AemControllerContext::MAX_INFLIGHT (8);
+    // issuing a command with no slot free would put an untracked packet on
+    // the wire whose response is silently dropped, stranding the queued
+    // read — so each send is gated on a free slot. One send per tick was
+    // fine at GALAXY scale (~1k descriptors) but makes a jumbo entity
+    // (55k+ CONTROLs on the nadia-CP proxy) take tens of minutes; keeping
+    // the window full turns that into a couple of minutes.
+    while (service_->aem_inflight_count() < atdecc::AemControllerContext::MAX_INFLIGHT) {
+        if (descriptor_read_queue_.empty()) {
+            return;
         }
-        service_->read_descriptor(req.target, req.descriptor_type, req.descriptor_index);
-        req.last_sent_ns = now_ns;
-        descriptor_read_cursor_ = i + 1;
-        return;
+        bool sent = false;
+        size_t const n = descriptor_read_queue_.size();
+        for (size_t step = 0; step < n; ++step) {
+            size_t const i = (descriptor_read_cursor_ + step) % n;
+            auto& req = descriptor_read_queue_[i];
+            if (req.last_sent_ns != 0 && (now_ns - req.last_sent_ns) < STREAM_QUERY_RETRY_NS) {
+                continue;
+            }
+            service_->read_descriptor(req.target, req.descriptor_type, req.descriptor_index);
+            req.last_sent_ns = now_ns;
+            descriptor_read_cursor_ = i + 1;
+            sent = true;
+            break;
+        }
+        if (!sent) {
+            return;  // everything pending is inside its retry window
+        }
     }
 }
 
