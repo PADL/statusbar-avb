@@ -33,7 +33,7 @@ if [ ! -x "$TOOL" ]; then
 fi
 
 if ! command -v dot >/dev/null 2>&1; then
-    echo "Error: graphviz `dot` not found on PATH" >&2
+    echo 'Error: graphviz `dot` not found on PATH' >&2
     exit 1
 fi
 

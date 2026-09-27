@@ -262,12 +262,15 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
       "python3-numpy, python3-pandas, python3-matplotlib")
   # -dev pulls its own runtime so its cmake config's IMPORTED targets resolve.
   # >= (not =) so an auto-incremented Debian revision (1.3.0-<rev>, see the
-  # container-build scripts) still satisfies the cross-dependencies.
+  # container-build scripts) still satisfies the cross-dependencies. Floors
+  # track the versions this build was actually made against (find_package sets
+  # statusbar-<dep>_VERSION), never a hardcoded literal that goes stale on the
+  # next release.
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
-      "statusbar-avb (>= 1.3.0), statusbar-audio-dev (>= 1.3.0), statusbar-core-dev (>= 1.3.0), statusbar-crypto-dev (>= 1.3.0)"
+      "statusbar-avb (>= ${PROJECT_VERSION}), statusbar-audio-dev (>= ${statusbar-audio_VERSION}), statusbar-core-dev (>= ${statusbar-core_VERSION}), statusbar-crypto-dev (>= ${statusbar-crypto_VERSION})"
   )
   set(CPACK_RPM_DEVEL_PACKAGE_REQUIRES
-      "statusbar-avb >= 1.3.0, statusbar-audio-devel >= 1.3.0, statusbar-core-devel >= 1.3.0, statusbar-crypto-devel >= 1.3.0"
+      "statusbar-avb >= ${PROJECT_VERSION}, statusbar-audio-devel >= ${statusbar-audio_VERSION}, statusbar-core-devel >= ${statusbar-core_VERSION}, statusbar-crypto-devel >= ${statusbar-crypto_VERSION}"
   )
   set(CPACK_COMPONENT_DEVEL_DESCRIPTION
       "C++ headers, static libraries and CMake package config")
