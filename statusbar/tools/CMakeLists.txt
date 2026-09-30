@@ -33,6 +33,9 @@ target_link_libraries(stun_client_tool PRIVATE statusbar)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS stun_client_tool)
 
 add_executable(stun_sm_tool stun_sm_tool.cpp)
+# Register for the docs-sm target (statusbar_register_sm_doc in
+# cmake/module.cmake); the docs directory is package-relative.
+statusbar_register_sm_doc(stun_sm_tool ${PROJECT_SOURCE_DIR}/docs/sm/stun)
 target_link_libraries(stun_sm_tool PRIVATE statusbar)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS stun_sm_tool)
 

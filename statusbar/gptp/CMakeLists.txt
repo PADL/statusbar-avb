@@ -55,6 +55,9 @@ endif()
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/gptp_message_fuzzer.cpp)
 
 add_executable(gptp_sm_tool gptp_sm_tool.cpp)
+# Register for the docs-sm target (statusbar_register_sm_doc in
+# cmake/module.cmake); the docs directory is package-relative.
+statusbar_register_sm_doc(gptp_sm_tool ${PROJECT_SOURCE_DIR}/docs/sm/gptp)
 target_link_libraries(gptp_sm_tool PRIVATE statusbar)
 set_target_properties(gptp_sm_tool PROPERTIES OUTPUT_NAME statusbar-gptp-sm)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS gptp_sm_tool)

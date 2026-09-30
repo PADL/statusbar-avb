@@ -62,6 +62,10 @@ target_link_libraries(nanoavb_example PRIVATE statusbar)
 set_target_properties(nanoavb_example PROPERTIES OUTPUT_NAME statusbar-nanoavb)
 
 add_executable(nanoavb_supervisor_sm_tool nanoavb_supervisor_sm_tool.cpp)
+# Register for the docs-sm target (statusbar_register_sm_doc in
+# cmake/module.cmake); the docs directory is package-relative.
+statusbar_register_sm_doc(nanoavb_supervisor_sm_tool
+                          ${PROJECT_SOURCE_DIR}/docs/sm/nanoavb)
 target_link_libraries(nanoavb_supervisor_sm_tool PRIVATE statusbar)
 set_target_properties(nanoavb_supervisor_sm_tool
                       PROPERTIES OUTPUT_NAME statusbar-nanoavb-sm)

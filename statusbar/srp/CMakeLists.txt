@@ -37,6 +37,9 @@ set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     srp_msrp_functional_test_tool)
 
 add_executable(srp_sm_tool srp_sm_tool.cpp)
+# Register for the docs-sm target (statusbar_register_sm_doc in
+# cmake/module.cmake); the docs directory is package-relative.
+statusbar_register_sm_doc(srp_sm_tool ${PROJECT_SOURCE_DIR}/docs/sm/srp)
 target_link_libraries(srp_sm_tool PRIVATE statusbar)
 set_target_properties(srp_sm_tool PROPERTIES OUTPUT_NAME statusbar-srp-sm)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS srp_sm_tool)

@@ -318,27 +318,11 @@ statusbar_register_fuzz_targets()
 statusbar_register_clang_tidy_target()
 
 # docs-sm: regenerate per-state-machine Markdown docs under docs/sm/. Only
-# registered for standalone avb builds; the outer aggregate build provides its
-# own workspace-wide docs-sm.
+# registered for standalone avb builds; the outer aggregate build creates a
+# workspace-wide docs-sm from the same registry. Each SM tool registers itself
+# via statusbar_register_sm_doc() beside its add_executable(), so neither this
+# file nor the umbrella names the tools.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
-  set(_sm_render ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sm-docs-render.sh)
-  add_custom_target(
-    docs-sm
-    COMMAND ${_sm_render} $<TARGET_FILE:atdecc_sm_tool>
-            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/atdecc
-    COMMAND ${_sm_render} $<TARGET_FILE:avtp_sm_tool>
-            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/avtp
-    COMMAND ${_sm_render} $<TARGET_FILE:gptp_sm_tool>
-            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/gptp
-    COMMAND ${_sm_render} $<TARGET_FILE:srp_sm_tool>
-            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/srp
-    COMMAND ${_sm_render} $<TARGET_FILE:nanoavb_supervisor_sm_tool>
-            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/nanoavb
-    COMMAND ${_sm_render} $<TARGET_FILE:stun_sm_tool>
-            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/stun
-    DEPENDS atdecc_sm_tool avtp_sm_tool gptp_sm_tool srp_sm_tool
-            nanoavb_supervisor_sm_tool stun_sm_tool
-    COMMENT
-      "Regenerating per-SM Markdown + SVG under avb/docs/sm/ (needs graphviz)"
-    VERBATIM USES_TERMINAL)
+  statusbar_register_sm_docs_target(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sm-docs-render.sh)
 endif()

@@ -92,6 +92,9 @@ add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aef_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_maap_fuzzer.cpp)
 
 add_executable(avtp_sm_tool avtp_sm_tool.cpp)
+# Register for the docs-sm target (statusbar_register_sm_doc in
+# cmake/module.cmake); the docs directory is package-relative.
+statusbar_register_sm_doc(avtp_sm_tool ${PROJECT_SOURCE_DIR}/docs/sm/avtp)
 target_link_libraries(avtp_sm_tool PRIVATE statusbar)
 set_target_properties(avtp_sm_tool PROPERTIES OUTPUT_NAME statusbar-avtp-sm)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS avtp_sm_tool)

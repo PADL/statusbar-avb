@@ -85,6 +85,9 @@ set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     descriptor_storage_tool)
 
 add_executable(atdecc_sm_tool atdecc_sm_tool.cpp)
+# Register for the docs-sm target (statusbar_register_sm_doc in
+# cmake/module.cmake); the docs directory is package-relative.
+statusbar_register_sm_doc(atdecc_sm_tool ${PROJECT_SOURCE_DIR}/docs/sm/atdecc)
 target_link_libraries(atdecc_sm_tool PRIVATE statusbar)
 set_target_properties(atdecc_sm_tool PROPERTIES OUTPUT_NAME statusbar-atdecc-sm)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS atdecc_sm_tool)
