@@ -163,7 +163,7 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
       apt-get install -y --no-install-recommends "${debs[@]}"
     fi
     cmake -Wno-dev -S /src -B /build -G Ninja \
-      --toolchain /src/cmake/toolchain-"$STATUSBAR_TOOLCHAIN".cmake \
+      --toolchain /usr/local/lib/cmake/statusbar-core/toolchain-"$STATUSBAR_TOOLCHAIN".cmake \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DENABLE_FUZZING=OFF \
       -DENABLE_STATIC_CXX_RUNTIME="$STATUSBAR_STATIC_CXX" \

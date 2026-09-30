@@ -123,7 +123,7 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
       fi
     fi
     cmake -Wno-dev -S /src -B /build -G Ninja \
-      --toolchain /src/cmake/toolchain-"$STATUSBAR_TOOLCHAIN"-aarch64.cmake \
+      --toolchain /usr/local/lib/cmake/statusbar-core/toolchain-"$STATUSBAR_TOOLCHAIN"-aarch64.cmake \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DENABLE_STATIC_CXX_RUNTIME="$STATUSBAR_STATIC_CXX" \
       -DCMAKE_C_COMPILER_LAUNCHER=ccache \

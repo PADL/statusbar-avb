@@ -72,9 +72,18 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
 fi
 
+# The toolchains live in statusbar-core (the single source of truth for the
+# shared cmake files): prefer a sibling core checkout (the umbrella layout),
+# else the installed core-dev package.
+if [ -f ../core/cmake/toolchain-clang.cmake ]; then
+    STATUSBAR_TOOLCHAIN_FILE=../core/cmake/toolchain-clang.cmake
+else
+    STATUSBAR_TOOLCHAIN_FILE=/usr/local/lib/cmake/statusbar-core/toolchain-clang.cmake
+fi
+
 set -x
 cmake -S . -B build -G Ninja \
-    --toolchain cmake/toolchain-clang.cmake \
+    --toolchain "$STATUSBAR_TOOLCHAIN_FILE" \
     "${dep_flags[@]}" \
     "$@"
 cmake --build build
