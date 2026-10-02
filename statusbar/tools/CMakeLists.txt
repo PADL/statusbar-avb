@@ -227,3 +227,35 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                       gps_ratio_tracker)
 endif()
+
+# ---- Wireshark dissectors (wireshark/, GPL; schema in python/wireshark_schema,
+# MIT) ---- The golden tool writes a capture of builder-produced AVTPDUs (built,
+# never installed); the golden test runs tshark with the Lua loader over it and
+# compares every avb.* field with the schema's reference decoder. Skips (77)
+# when tshark is not installed. The drift test regenerates the Lua modules from
+# the schema and fails when the committed ones differ.
+add_executable(wireshark_golden_tool wireshark_golden_tool.cpp)
+target_link_libraries(wireshark_golden_tool PRIVATE statusbar)
+set_target_properties(
+  wireshark_golden_tool PROPERTIES OUTPUT_NAME
+                                   statusbar_avb_wireshark_golden_tool)
+set(_wireshark_dir "${PROJECT_SOURCE_DIR}/wireshark")
+set(_wireshark_schema_dir "${PROJECT_SOURCE_DIR}/python")
+set(_wireshark_golden_pcap "${CMAKE_CURRENT_BINARY_DIR}/wireshark_golden.pcap")
+add_test(NAME statusbar/avb/wireshark_golden_capture
+         COMMAND wireshark_golden_tool "${_wireshark_golden_pcap}")
+set_tests_properties(statusbar/avb/wireshark_golden_capture
+                     PROPERTIES FIXTURES_SETUP wireshark_golden_capture)
+add_test(
+  NAME statusbar/avb/wireshark_golden
+  COMMAND
+    ${Python3_EXECUTABLE}
+    "${_wireshark_schema_dir}/wireshark_schema/golden_test.py" --loader
+    "${_wireshark_dir}/statusbar_avb.lua" --pcap "${_wireshark_golden_pcap}")
+set_tests_properties(
+  statusbar/avb/wireshark_golden
+  PROPERTIES FIXTURES_REQUIRED wireshark_golden_capture SKIP_RETURN_CODE 77)
+add_test(
+  NAME statusbar/avb/wireshark_schema_drift
+  COMMAND ${Python3_EXECUTABLE} -m wireshark_schema check "${_wireshark_dir}"
+  WORKING_DIRECTORY "${_wireshark_schema_dir}")

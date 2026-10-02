@@ -185,6 +185,30 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   )
   set(CPACK_COMPONENT_DEVEL_DESCRIPTION
       "C++ headers, static libraries and CMake package config")
+
+  # ---- Wireshark dissectors: a third component and its own packages ----
+  # wireshark/ is GPL-2.0-or-later (it uses the Wireshark Lua API) and is a
+  # separate work from the MIT code here, so it ships on its own: the
+  # arch-independent Debian package statusbar-avb-wireshark and, through
+  # CPACK_ARCHIVE_COMPONENT_INSTALL, a statusbar-avb-<ver>-<sys>-wireshark
+  # tarball for other platforms. Nothing in the runtime or devel packages
+  # depends on it.
+  install(
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/wireshark/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/statusbar-avb/wireshark
+    COMPONENT wireshark
+    FILES_MATCHING
+    PATTERN "*.lua"
+    PATTERN "LICENSE"
+    PATTERN "README.md")
+  list(APPEND CPACK_COMPONENTS_ALL wireshark)
+  set(CPACK_COMPONENT_WIRESHARK_DESCRIPTION
+      "Wireshark Lua dissectors for IEEE 1722 / IEEE 1722.1 (GPL-2.0-or-later)")
+  set(CPACK_DEBIAN_WIRESHARK_PACKAGE_NAME "statusbar-avb-wireshark")
+  set(CPACK_DEBIAN_WIRESHARK_PACKAGE_ARCHITECTURE "all")
+  set(CPACK_DEBIAN_WIRESHARK_PACKAGE_SHLIBDEPS OFF)
+  set(CPACK_DEBIAN_WIRESHARK_PACKAGE_RECOMMENDS "wireshark | tshark")
+  set(CPACK_DEBIAN_WIRESHARK_PACKAGE_SECTION "net")
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Grant raw-ethernet + realtime capabilities to the installed tools on
     # install, so the L2/RT executables run without root (deploy .deb -> ssh ->
