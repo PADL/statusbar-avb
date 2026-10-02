@@ -13,6 +13,7 @@
 local M = {}
 
 local gen = require("statusbar_avb.gen.avtp_fields")
+local streams = require("statusbar_avb.avtp_streams")
 
 local AVTP_ETHERTYPE = 0x22F0
 local UDP_PORT_CONTINUOUS = 17220
@@ -61,8 +62,12 @@ local function dissect_avtpdu(tvb, pinfo, tree)
     pinfo.cols.protocol = "AVTP"
     local root = tree:add(M.proto, tvb(), "IEEE 1722 AVTP: " .. name)
 
+    -- A (subtype, version) with its own layouts replaces the generic header.
+    local spec = gen.subtype_specs[subtype] and gen.subtype_specs[subtype][version]
     local header_length = COMMON_HEADER_LENGTH
-    if kind == "stream" then
+    if spec ~= nil then
+        header_length = spec.header_length
+    elseif kind == "stream" then
         header_length = version == 1 and STREAM_V1_HEADER_LENGTH or STREAM_V0_HEADER_LENGTH
     end
     if len < header_length then
@@ -71,36 +76,46 @@ local function dissect_avtpdu(tvb, pinfo, tree)
         return len
     end
 
-    if kind == "stream" then
+    local info = name
+    if spec ~= nil then
+        for _, add in ipairs(spec.layouts) do
+            add(root, tvb, 0)
+        end
+        local summary = streams.info[spec.name]
+        if summary ~= nil then
+            info = summary(tvb, version)
+        end
+    elseif kind == "stream" then
         if version == 1 then
             gen.add_stream_v1(root, tvb, 0)
         else
             gen.add_stream_v0(root, tvb, 0)
         end
+        local seq = version == 1 and tvb(12, 4):uint() or tvb(2, 1):uint()
+        info = string.format("%s seq=%d stream_id=0x%s", name, seq, tostring(tvb(4, 8):bytes()):lower())
     elseif kind == "control" then
         gen.add_control(root, tvb, 0)
+        info = string.format("%s message_type=%d", name, tvb(1, 1):bitfield(4, 4))
     elseif kind == "alternative" then
         gen.add_alternative(root, tvb, 0)
     else
         gen.add_common(root, tvb, 0)
         root:add_proto_expert_info(ef_reserved)
     end
-
-    local info = name
-    if kind == "stream" then
-        local seq = version == 1 and tvb(12, 4):uint() or tvb(2, 1):uint()
-        info = string.format("%s seq=%d stream_id=%s", name, seq, tostring(tvb(4, 8):uint64()))
-    elseif kind == "control" then
-        info = string.format("%s message_type=%d", name, tvb(1, 1):bitfield(4, 4))
-    end
     pinfo.cols.info:set(info)
 
-    local header = { subtype = subtype, version = version, kind = kind, header_length = header_length }
+    -- What follows the header: a post hook (CRF timestamps), a registered
+    -- subtype dissector (the ACF and ATDECC modules), or undissected payload.
+    local rest = header_length
+    if spec ~= nil and spec.post ~= nil then
+        rest = streams.post[spec.post](root, tvb, header_length, pinfo)
+    end
+    local header = { subtype = subtype, version = version, kind = kind, header_length = header_length, rest = rest }
     local sub = M.subtype_dissectors[subtype]
     if sub ~= nil then
         sub(tvb, pinfo, root, header)
-    elseif len > header_length then
-        root:add(gen.f.avtp_payload, tvb(header_length))
+    elseif len > rest then
+        root:add(gen.f.avtp_payload, tvb(rest))
     end
     return len
 end

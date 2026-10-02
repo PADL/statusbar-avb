@@ -82,7 +82,7 @@ def generate_avtp_fields() -> str:
     # Unique fields across layouts, definition checked for consistency.
     defs: dict[str, str] = {}
     order: list[str] = []
-    for layout in L.AVTP_LAYOUTS + (L.IP_AVTPDU,):
+    for layout in L.AVTP_LAYOUTS + L.SUBTYPE_LAYOUTS + (L.IP_AVTPDU,):
         for f in layout.fields:
             key = _field_key(layout, f)
             text = _protofield(layout, f)
@@ -96,6 +96,9 @@ def generate_avtp_fields() -> str:
     payload_key = "avtp_payload"
     defs[payload_key] = _protofield(L.AVTP_COMMON, L.PAYLOAD)
     order.append(payload_key)
+    crf_key = _field_key(L.CRF_V0, L.CRF_TIMESTAMP)
+    defs[crf_key] = _protofield(L.CRF_V0, L.CRF_TIMESTAMP)
+    order.append(crf_key)
 
     out.append("M.f = {}")
     for key in order:
@@ -112,7 +115,7 @@ def generate_avtp_fields() -> str:
             out.append(f"    M.f.{key},")
     out += ["}", ""]
 
-    for layout in L.AVTP_LAYOUTS + (L.IP_AVTPDU,):
+    for layout in L.AVTP_LAYOUTS + L.SUBTYPE_LAYOUTS + (L.IP_AVTPDU,):
         out.append(f"--- {layout.doc}")
         fname = "add_ip_avtpdu" if layout is L.IP_AVTPDU else f"add_{layout.name}"
         out.append(f"function M.{fname}(tree, tvb, off)")
@@ -122,5 +125,23 @@ def generate_avtp_fields() -> str:
             )
         out += ["end", ""]
 
+    # Per-(subtype, version) specs: which add_ functions, where the payload
+    # starts, and the post hook (implemented in the hand-written module).
+    out.append(
+        "--- (subtype, version) -> { header_length, layouts = { add fns }, post = name|nil }"
+    )
+    out.append("M.subtype_specs = {}")
+    for spec in L.SUBTYPE_SPECS:
+        adds = ", ".join(f"M.add_{layout.name}" for layout in spec.layouts)
+        post = _lua_string(spec.post) if spec.post else "nil"
+        out.append(
+            f"M.subtype_specs[0x{spec.subtype:02X}] = M.subtype_specs[0x{spec.subtype:02X}] or {{}}"
+        )
+        out.append(
+            f"M.subtype_specs[0x{spec.subtype:02X}][{spec.version}] = "
+            f"{{ name = {_lua_string(spec.name)}, header_length = {spec.header_length}, "
+            f"layouts = {{ {adds} }}, post = {post} }}"
+        )
+    out.append("")
     out.append("return M")
     return "\n".join(out) + "\n"

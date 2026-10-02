@@ -16,11 +16,19 @@
 #include "statusbar/avtp/avtp_acf_can.hpp"
 #include "statusbar/avtp/avtp_acf_checksum.hpp"
 #include "statusbar/avtp/avtp_acf_gpc.hpp"
+#include "statusbar/avtp/avtp_aef.hpp"
+#include "statusbar/avtp/avtp_am824.hpp"
+#include "statusbar/avtp/avtp_am824_v1.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/avtp/avtp_crf_v1.hpp"
+#include "statusbar/avtp/avtp_eecf.hpp"
+#include "statusbar/avtp/avtp_escf.hpp"
 #include "statusbar/avtp/avtp_ip_encap.hpp"
 #include "statusbar/avtp/avtp_maap.hpp"
 #include "statusbar/avtp/avtp_ntscf.hpp"
+#include "statusbar/avtp/avtp_ntscf_v1.hpp"
 #include "statusbar/avtp/avtp_tscf.hpp"
+#include "statusbar/avtp/avtp_tscf_v1.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/ip/ip_ipv4.hpp"
@@ -104,6 +112,7 @@ auto crf() -> std::vector<uint8_t>
     CrfPdu pdu{};
     pdu.init_audio_sample(SID, 48000, CrfPull::multiply_1_0, 160, 2);
     pdu.set_sequence_num(3);
+    pdu.set_crf_data_length(16);
     std::vector<uint8_t> out;
     append(out, pdu);
     for (uint64_t const ts : {0x0000000100000000ULL, 0x0000000100051615ULL}) {
@@ -174,6 +183,171 @@ auto maap_probe() -> std::vector<uint8_t>
     return out;
 }
 
+auto maap_defend() -> std::vector<uint8_t>
+{
+    MaapDu pdu{};
+    pdu.init_defend(SID, Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x00}, 4, Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x02}, 2);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    return out;
+}
+
+auto maap_announce() -> std::vector<uint8_t>
+{
+    MaapDu pdu{};
+    pdu.init_announce(SID, Eui48{0x91, 0xE0, 0xF0, 0x00, 0x10, 0x00}, 8);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    return out;
+}
+
+auto aaf_v0_int16() -> std::vector<uint8_t>
+{
+    AafPdu pdu{};
+    pdu.init(SID, AafFormat::int_16bit, AafSampleRate::rate_96_khz, 8, 16);
+    pdu.set_sequence_num(200);
+    pdu.set_stream_data_length(32);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 32> samples{};
+    samples[1] = 0x7F;
+    append(out, std::span<uint8_t const>(samples));
+    return out;
+}
+
+auto am824_v0() -> std::vector<uint8_t>
+{
+    Am824Pdu pdu{};
+    pdu.init(SID, 2, Am824SampleRate::rate_48_khz);
+    pdu.set_sequence_num(11);
+    pdu.set_stream_data_length(static_cast<uint16_t>(Cip61883Header::LENGTH + 16));
+    pdu.set_syt_timestamp(0x1234);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 16> quadlets{
+        0x40, 0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00, 0x03, 0x40, 0x00, 0x00, 0x04};
+    append(out, std::span<uint8_t const>(quadlets));
+    return out;
+}
+
+auto am824_v1() -> std::vector<uint8_t>
+{
+    Am824V1Pdu pdu{};
+    pdu.init(SID, 2, Am824SampleRate::rate_96_khz);
+    pdu.set_sequence_num(0x00010000U);
+    pdu.set_stream_data_length(static_cast<uint16_t>(Cip61883Header::LENGTH + 8));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 8> quadlets{0x40, 0x00, 0x00, 0x05, 0x40, 0x00, 0x00, 0x06};
+    append(out, std::span<uint8_t const>(quadlets));
+    return out;
+}
+
+auto crf_v1() -> std::vector<uint8_t>
+{
+    CrfV1Pdu pdu{};
+    pdu.init_audio_sample(SID, 96000, CrfPull::multiply_1_div_1001, 192);
+    pdu.set_sequence_num(0x0000ABCDU);
+    pdu.set_crf_data_length(8);
+    pdu.ptp_grandmaster_identity = tsn::ClockIdentity{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01};
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    ieee::octlet_t const ts{0x0000000200000000ULL};
+    append(out, ts);
+    return out;
+}
+
+auto tscf_v1() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 12> acf{};
+    AcfGpcMessage gpc{};
+    gpc.init();
+    gpc.set_gpc_msg_id(Eui48{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x01});
+    std::array<uint8_t, 4> const payload{0x01, 0x02, 0x03, 0x04};
+    (void)acf_gpc_build(std::span<uint8_t>(acf), gpc, std::span<uint8_t const>(payload));
+    TscfV1Pdu pdu{};
+    pdu.init(SID);
+    pdu.set_sequence_num(0x00000101U);
+    pdu.set_stream_data_length(static_cast<uint16_t>(acf.size()));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    append(out, std::span<uint8_t const>(acf));
+    return out;
+}
+
+auto ntscf_v1() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 24> acf{};
+    AcfCanMessage can{};
+    can.init();
+    can.set_can_bus_id(1);
+    can.set_can_identifier(0x123U);
+    std::array<uint8_t, 8> const data{1, 2, 3, 4, 5, 6, 7, 8};
+    (void)acf_can_build(std::span<uint8_t>(acf), can, std::span<uint8_t const>(data));
+    NtscfV1Pdu pdu{};
+    pdu.init(SID);
+    pdu.set_sequence_num(0x00000202U);
+    pdu.set_ntscf_data_length(static_cast<uint16_t>(acf.size()));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    append(out, std::span<uint8_t const>(acf));
+    return out;
+}
+
+Eui64 const KEY_ID{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x42};
+
+auto aef_continuous() -> std::vector<uint8_t>
+{
+    AefContinuousPdu pdu{};
+    pdu.init(static_cast<uint8_t>(AefEncMode::aes_gcm_siv), KEY_ID);
+    pdu.set_stream_data_length(16);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 16> cipher{};
+    cipher[0] = 0xC0;
+    append(out, std::span<uint8_t const>(cipher));
+    return out;
+}
+
+auto aef_discrete() -> std::vector<uint8_t>
+{
+    AefDiscretePdu pdu{};
+    pdu.init(static_cast<uint8_t>(AefEncMode::aes_siv), KEY_ID);
+    pdu.set_control_data_length(8);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 8> cipher{};
+    cipher[7] = 0xD1;
+    append(out, std::span<uint8_t const>(cipher));
+    return out;
+}
+
+auto escf() -> std::vector<uint8_t>
+{
+    EscfPdu pdu{};
+    pdu.init(0, KEY_ID);
+    pdu.set_control_data_length(12);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 12> signed_payload{};
+    signed_payload[0] = 0x51;
+    append(out, std::span<uint8_t const>(signed_payload));
+    return out;
+}
+
+auto eecf() -> std::vector<uint8_t>
+{
+    EecfPdu pdu{};
+    pdu.init(0, KEY_ID);
+    pdu.set_encrypted_payload_length(12);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 12> cipher{};
+    cipher[0] = 0xE1;
+    append(out, std::span<uint8_t const>(cipher));
+    return out;
+}
+
 /// An Ethernet payload carrying IPv4 + UDP + IP AVTPDU header + @p avtpdu
 auto udp_encapsulated(std::span<uint8_t const> const avtpdu, uint16_t const dst_port, uint32_t const sequence)
     -> std::vector<uint8_t>
@@ -207,6 +381,9 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "usage: %s <output.pcap>\n", argv[0]);
         return 2;
     }
+    // The writer appends to an existing file; the test fixture re-runs, so
+    // start from an empty capture every time.
+    (void)std::remove(argv[1]);
     auto writer = pcap::FileWriter::open(argv[1]);
     if (!writer.has_value()) {
         std::fprintf(stderr, "cannot open %s\n", argv[1]);
@@ -230,9 +407,23 @@ int main(int argc, char** argv)
     ethernet(ntscf_with_gpc());
     ethernet(adp_entity_available());
     ethernet(maap_probe());
+    ethernet(maap_defend());
+    ethernet(maap_announce());
+    ethernet(aaf_v0_int16());
+    ethernet(am824_v0());
+    ethernet(am824_v1());
+    ethernet(crf_v1());
+    ethernet(tscf_v1());
+    ethernet(ntscf_v1());
+    ethernet(aef_continuous());
+    ethernet(aef_discrete());
+    ethernet(escf());
+    ethernet(eecf());
     udp(aaf_v0(), IP_AVTPDU_PORT_CONTINUOUS, 42);
     udp(tscf_with_can(), IP_AVTPDU_PORT_CONTINUOUS, 43);
     udp(adp_entity_available(), IP_AVTPDU_PORT_DISCRETE, 44);
+    udp(crf_v1(), IP_AVTPDU_PORT_CONTINUOUS, 45);
+    udp(maap_announce(), IP_AVTPDU_PORT_DISCRETE, 46);
     writer->flush();
     return 0;
 }

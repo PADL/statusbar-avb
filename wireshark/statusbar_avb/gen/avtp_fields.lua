@@ -31,6 +31,65 @@ M.values_avtp_subtype = {
     [0xFF] = "Experimental Format Control",
 }
 
+M.values_aaf_format = {
+    [0x00] = "User specified",
+    [0x01] = "32-bit float",
+    [0x02] = "32-bit integer",
+    [0x03] = "24-bit integer",
+    [0x04] = "16-bit integer",
+    [0x05] = "32-bit AES3",
+}
+
+M.values_aaf_nsr = {
+    [0x00] = "User specified",
+    [0x01] = "8 kHz",
+    [0x02] = "16 kHz",
+    [0x03] = "32 kHz",
+    [0x04] = "44.1 kHz",
+    [0x05] = "48 kHz",
+    [0x06] = "88.2 kHz",
+    [0x07] = "96 kHz",
+    [0x08] = "176.4 kHz",
+    [0x09] = "192 kHz",
+    [0x0A] = "24 kHz",
+}
+
+M.values_crf_type = {
+    [0x00] = "User specified",
+    [0x01] = "Audio sample",
+    [0x02] = "Video frame",
+    [0x03] = "Video line",
+    [0x04] = "Machine cycle",
+}
+
+M.values_crf_pull = {
+    [0x00] = "x 1.0",
+    [0x01] = "x 1/1.001",
+    [0x02] = "x 1.001",
+    [0x03] = "x 24/25",
+    [0x04] = "x 25/24",
+    [0x05] = "x 1/8",
+}
+
+M.values_maap_message_type = {
+    [0x01] = "MAAP_PROBE",
+    [0x02] = "MAAP_DEFEND",
+    [0x03] = "MAAP_ANNOUNCE",
+}
+
+M.values_aef_enc = {
+    [0x00] = "AES-SIV",
+    [0x01] = "AES-GCM-SIV",
+}
+
+M.values_escf_sig = {
+    [0x00] = "ECC1",
+}
+
+M.values_eecf_enc = {
+    [0x00] = "ECC1",
+}
+
 M.subtype_names = M.values_avtp_subtype
 
 M.header_kind = {
@@ -78,8 +137,62 @@ M.f.avtp_status = ProtoField.uint8("avb.avtp.status", "status", base.DEC, nil, 0
 M.f.avtp_control_data_length = ProtoField.uint16("avb.avtp.control_data_length", "control_data_length", base.DEC, nil, 0x7FF, "control_data_length (11 bits)")
 M.f.avtp_subtype_data1 = ProtoField.uint8("avb.avtp.subtype_data1", "subtype_data1", base.HEX, nil, 0xF, "subtype_data_1 (4 bits)")
 M.f.avtp_subtype_data2 = ProtoField.uint16("avb.avtp.subtype_data2", "subtype_data2", base.HEX, nil, nil, "subtype_data_2 (16 bits)")
+M.f.avtp_aaf_format = ProtoField.uint8("avb.avtp.aaf.format", "format", base.DEC, M.values_aaf_format, nil, "sample format (Table 11)")
+M.f.avtp_aaf_nsr = ProtoField.uint8("avb.avtp.aaf.nsr", "nsr", base.DEC, M.values_aaf_nsr, 0xF0, "nominal sample rate (Table 12)")
+M.f.avtp_aaf_channels_per_frame = ProtoField.uint16("avb.avtp.aaf.channels_per_frame", "channels_per_frame", base.DEC, nil, 0x3FF, "channels per frame (10 bits)")
+M.f.avtp_aaf_bit_depth = ProtoField.uint8("avb.avtp.aaf.bit_depth", "bit_depth", base.DEC, nil, nil, "bit depth")
+M.f.avtp_aaf_stream_data_length = ProtoField.uint16("avb.avtp.aaf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets of audio data)")
+M.f.avtp_aaf_sp = ProtoField.bool("avb.avtp.aaf.sp", "sp", 8, nil, 0x10, "sparse timestamp mode")
+M.f.avtp_aaf_evt = ProtoField.uint8("avb.avtp.aaf.evt", "evt", base.DEC, nil, 0xF, "event")
+M.f.avtp_am824_gateway_info = ProtoField.uint32("avb.avtp.am824.gateway_info", "gateway_info", base.HEX, nil, nil, "gateway_info")
+M.f.avtp_am824_stream_data_length = ProtoField.uint16("avb.avtp.am824.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (CIP header + data)")
+M.f.avtp_am824_tag = ProtoField.uint8("avb.avtp.am824.tag", "tag", base.DEC, nil, 0xC0, "tag")
+M.f.avtp_am824_channel = ProtoField.uint8("avb.avtp.am824.channel", "channel", base.DEC, nil, 0x3F, "channel")
+M.f.avtp_am824_tcode = ProtoField.uint8("avb.avtp.am824.tcode", "tcode", base.HEX, nil, 0xF0, "tcode")
+M.f.avtp_am824_sy = ProtoField.uint8("avb.avtp.am824.sy", "sy", base.DEC, nil, 0xF, "sy")
+M.f.avtp_cip_qi_1 = ProtoField.uint8("avb.avtp.cip.qi_1", "qi_1", base.DEC, nil, 0xC0, "CIP quadlet indicator 1")
+M.f.avtp_cip_sid = ProtoField.uint8("avb.avtp.cip.sid", "sid", base.DEC, nil, 0x3F, "CIP source id")
+M.f.avtp_cip_dbs = ProtoField.uint8("avb.avtp.cip.dbs", "dbs", base.DEC, nil, nil, "CIP data block size (quadlets)")
+M.f.avtp_cip_fn = ProtoField.uint8("avb.avtp.cip.fn", "fn", base.DEC, nil, 0xC0, "CIP fraction number")
+M.f.avtp_cip_qpc = ProtoField.uint8("avb.avtp.cip.qpc", "qpc", base.DEC, nil, 0x38, "CIP quadlet padding count")
+M.f.avtp_cip_sph = ProtoField.bool("avb.avtp.cip.sph", "sph", 8, nil, 0x4, "CIP source packet header")
+M.f.avtp_cip_dbc = ProtoField.uint8("avb.avtp.cip.dbc", "dbc", base.DEC, nil, nil, "CIP data block count")
+M.f.avtp_cip_qi_2 = ProtoField.uint8("avb.avtp.cip.qi_2", "qi_2", base.DEC, nil, 0xC0, "CIP quadlet indicator 2")
+M.f.avtp_cip_fmt = ProtoField.uint8("avb.avtp.cip.fmt", "fmt", base.HEX, nil, 0x3F, "CIP format")
+M.f.avtp_cip_fdf = ProtoField.uint8("avb.avtp.cip.fdf", "fdf", base.HEX, nil, nil, "CIP format dependent field (AM824 sample rate)")
+M.f.avtp_cip_syt = ProtoField.uint16("avb.avtp.cip.syt", "syt", base.HEX, nil, nil, "CIP synchronization timestamp")
+M.f.avtp_tscf_sequence_num_lsb = ProtoField.uint8("avb.avtp.tscf.sequence_num_lsb", "sequence_num_lsb", base.DEC, nil, nil, "sequence_num_lsb")
+M.f.avtp_tscf_stream_data_length = ProtoField.uint16("avb.avtp.tscf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (acf_payload_data octets)")
+M.f.avtp_ntscf_r = ProtoField.uint8("avb.avtp.ntscf.r", "ntscf.r", base.DEC, nil, 0x8, "reserved")
+M.f.avtp_ntscf_ntscf_data_length = ProtoField.uint16("avb.avtp.ntscf.ntscf_data_length", "ntscf.ntscf_data_length", base.DEC, nil, 0x7FF, "ntscf_data_length (11 bits)")
+M.f.avtp_ntscf_sequence_num_lsb = ProtoField.uint8("avb.avtp.ntscf.sequence_num_lsb", "ntscf.sequence_num_lsb", base.DEC, nil, nil, "sequence_num_lsb")
+M.f.avtp_crf_fs = ProtoField.bool("avb.avtp.crf.fs", "crf.fs", 8, nil, 0x2, "frame sync")
+M.f.avtp_crf_type = ProtoField.uint8("avb.avtp.crf.type", "crf.type", base.DEC, M.values_crf_type, nil, "CRF type (Table 26)")
+M.f.avtp_crf_pull = ProtoField.uint8("avb.avtp.crf.pull", "crf.pull", base.DEC, M.values_crf_pull, 0xE0000000, "pull (Table 27)")
+M.f.avtp_crf_base_frequency = ProtoField.uint32("avb.avtp.crf.base_frequency", "crf.base_frequency", base.DEC, nil, 0x1FFFFFFF, "base_frequency (Hz, 29 bits)")
+M.f.avtp_crf_crf_data_length = ProtoField.uint16("avb.avtp.crf.crf_data_length", "crf.crf_data_length", base.DEC, nil, nil, "crf_data_length (octets of timestamps)")
+M.f.avtp_crf_timestamp_interval = ProtoField.uint16("avb.avtp.crf.timestamp_interval", "crf.timestamp_interval", base.DEC, nil, nil, "timestamp_interval")
+M.f.avtp_crf_sequence_num_lsb = ProtoField.uint8("avb.avtp.crf.sequence_num_lsb", "crf.sequence_num_lsb", base.DEC, nil, nil, "sequence_num_lsb")
+M.f.avtp_maap_message_type = ProtoField.uint8("avb.avtp.maap.message_type", "maap.message_type", base.DEC, M.values_maap_message_type, 0xF, "message_type")
+M.f.avtp_maap_maap_version = ProtoField.uint8("avb.avtp.maap.maap_version", "maap.maap_version", base.DEC, nil, 0xF800, "maap_version")
+M.f.avtp_maap_maap_data_length = ProtoField.uint16("avb.avtp.maap.maap_data_length", "maap.maap_data_length", base.DEC, nil, 0x7FF, "maap_data_length (11 bits)")
+M.f.avtp_maap_requested_start_address = ProtoField.ether("avb.avtp.maap.requested_start_address", "maap.requested_start_address", base.NONE, "requested_start_address")
+M.f.avtp_maap_requested_count = ProtoField.uint16("avb.avtp.maap.requested_count", "maap.requested_count", base.DEC, nil, nil, "requested_count")
+M.f.avtp_maap_conflict_start_address = ProtoField.ether("avb.avtp.maap.conflict_start_address", "maap.conflict_start_address", base.NONE, "conflict_start_address")
+M.f.avtp_maap_conflict_count = ProtoField.uint16("avb.avtp.maap.conflict_count", "maap.conflict_count", base.DEC, nil, nil, "conflict_count")
+M.f.avtp_aef_enc = ProtoField.uint8("avb.avtp.aef.enc", "aef.enc", base.DEC, M.values_aef_enc, 0xF, "encryption mode")
+M.f.avtp_aef_stream_data_length = ProtoField.uint16("avb.avtp.aef.stream_data_length", "aef.stream_data_length", base.DEC, nil, nil, "stream_data_length")
+M.f.avtp_aef_key_id = ProtoField.uint64("avb.avtp.aef.key_id", "aef.key_id", base.HEX, nil, nil, "key_id (EUI-64)")
+M.f.avtp_aef_control_data_length = ProtoField.uint16("avb.avtp.aef.control_data_length", "aef.control_data_length", base.DEC, nil, 0x7FF, "control_data_length (11 bits)")
+M.f.avtp_escf_sig = ProtoField.uint8("avb.avtp.escf.sig", "escf.sig", base.DEC, M.values_escf_sig, 0xF, "signature algorithm")
+M.f.avtp_escf_control_data_length = ProtoField.uint16("avb.avtp.escf.control_data_length", "escf.control_data_length", base.DEC, nil, 0x7FF, "control_data_length (11 bits)")
+M.f.avtp_escf_key_id = ProtoField.uint64("avb.avtp.escf.key_id", "escf.key_id", base.HEX, nil, nil, "key_id (EUI-64)")
+M.f.avtp_eecf_enc = ProtoField.uint8("avb.avtp.eecf.enc", "eecf.enc", base.DEC, M.values_eecf_enc, 0xF, "encryption algorithm")
+M.f.avtp_eecf_encrypted_payload_length = ProtoField.uint16("avb.avtp.eecf.encrypted_payload_length", "eecf.encrypted_payload_length", base.DEC, nil, 0x7FF, "encrypted_payload_length (11 bits)")
+M.f.avtp_eecf_key_id = ProtoField.uint64("avb.avtp.eecf.key_id", "eecf.key_id", base.HEX, nil, nil, "key_id (EUI-64)")
 M.f.ipavtp_encapsulation_sequence_num = ProtoField.uint32("avb.ipavtp.encapsulation_sequence_num", "encapsulation_sequence_num", base.DEC, nil, nil, "encapsulation_sequence_num")
 M.f.avtp_payload = ProtoField.bytes("avb.avtp.payload", "payload", base.NONE, "undissected AVTPDU payload")
+M.f.avtp_crf_timestamp = ProtoField.uint64("avb.avtp.crf.timestamp", "crf.timestamp", base.DEC, nil, nil, "CRF timestamp (ns)")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -103,7 +216,61 @@ M.avtp_fields = {
     M.f.avtp_control_data_length,
     M.f.avtp_subtype_data1,
     M.f.avtp_subtype_data2,
+    M.f.avtp_aaf_format,
+    M.f.avtp_aaf_nsr,
+    M.f.avtp_aaf_channels_per_frame,
+    M.f.avtp_aaf_bit_depth,
+    M.f.avtp_aaf_stream_data_length,
+    M.f.avtp_aaf_sp,
+    M.f.avtp_aaf_evt,
+    M.f.avtp_am824_gateway_info,
+    M.f.avtp_am824_stream_data_length,
+    M.f.avtp_am824_tag,
+    M.f.avtp_am824_channel,
+    M.f.avtp_am824_tcode,
+    M.f.avtp_am824_sy,
+    M.f.avtp_cip_qi_1,
+    M.f.avtp_cip_sid,
+    M.f.avtp_cip_dbs,
+    M.f.avtp_cip_fn,
+    M.f.avtp_cip_qpc,
+    M.f.avtp_cip_sph,
+    M.f.avtp_cip_dbc,
+    M.f.avtp_cip_qi_2,
+    M.f.avtp_cip_fmt,
+    M.f.avtp_cip_fdf,
+    M.f.avtp_cip_syt,
+    M.f.avtp_tscf_sequence_num_lsb,
+    M.f.avtp_tscf_stream_data_length,
+    M.f.avtp_ntscf_r,
+    M.f.avtp_ntscf_ntscf_data_length,
+    M.f.avtp_ntscf_sequence_num_lsb,
+    M.f.avtp_crf_fs,
+    M.f.avtp_crf_type,
+    M.f.avtp_crf_pull,
+    M.f.avtp_crf_base_frequency,
+    M.f.avtp_crf_crf_data_length,
+    M.f.avtp_crf_timestamp_interval,
+    M.f.avtp_crf_sequence_num_lsb,
+    M.f.avtp_maap_message_type,
+    M.f.avtp_maap_maap_version,
+    M.f.avtp_maap_maap_data_length,
+    M.f.avtp_maap_requested_start_address,
+    M.f.avtp_maap_requested_count,
+    M.f.avtp_maap_conflict_start_address,
+    M.f.avtp_maap_conflict_count,
+    M.f.avtp_aef_enc,
+    M.f.avtp_aef_stream_data_length,
+    M.f.avtp_aef_key_id,
+    M.f.avtp_aef_control_data_length,
+    M.f.avtp_escf_sig,
+    M.f.avtp_escf_control_data_length,
+    M.f.avtp_escf_key_id,
+    M.f.avtp_eecf_enc,
+    M.f.avtp_eecf_encrypted_payload_length,
+    M.f.avtp_eecf_key_id,
     M.f.avtp_payload,
+    M.f.avtp_crf_timestamp,
 }
 
 M.ipavtp_fields = {
@@ -173,9 +340,238 @@ function M.add_alternative(tree, tvb, off)
     tree:add(M.f.avtp_stream_id, tvb(off + 4, 8))
 end
 
+--- AAF format-specific header (IEEE 1722-2025 7.3)
+function M.add_aaf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_aaf_format, tvb(off + 16, 1))
+    tree:add(M.f.avtp_aaf_nsr, tvb(off + 17, 1))
+    tree:add(M.f.avtp_aaf_channels_per_frame, tvb(off + 17, 2))
+    tree:add(M.f.avtp_aaf_bit_depth, tvb(off + 19, 1))
+    tree:add(M.f.avtp_aaf_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_aaf_sp, tvb(off + 22, 1))
+    tree:add(M.f.avtp_aaf_evt, tvb(off + 22, 1))
+end
+
+--- AAF format-specific header, version 1 header
+function M.add_aaf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_aaf_format, tvb(off + 32, 1))
+    tree:add(M.f.avtp_aaf_nsr, tvb(off + 33, 1))
+    tree:add(M.f.avtp_aaf_channels_per_frame, tvb(off + 33, 2))
+    tree:add(M.f.avtp_aaf_bit_depth, tvb(off + 35, 1))
+    tree:add(M.f.avtp_aaf_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_aaf_sp, tvb(off + 38, 1))
+    tree:add(M.f.avtp_aaf_evt, tvb(off + 38, 1))
+end
+
+--- IEC 61883 stream header (IEEE 1722-2025 5.3)
+function M.add_am824_v0(tree, tvb, off)
+    tree:add(M.f.avtp_am824_gateway_info, tvb(off + 16, 4))
+    tree:add(M.f.avtp_am824_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_am824_tag, tvb(off + 22, 1))
+    tree:add(M.f.avtp_am824_channel, tvb(off + 22, 1))
+    tree:add(M.f.avtp_am824_tcode, tvb(off + 23, 1))
+    tree:add(M.f.avtp_am824_sy, tvb(off + 23, 1))
+end
+
+--- IEC 61883 stream header, version 1 header
+function M.add_am824_v1(tree, tvb, off)
+    tree:add(M.f.avtp_am824_gateway_info, tvb(off + 32, 4))
+    tree:add(M.f.avtp_am824_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_am824_tag, tvb(off + 38, 1))
+    tree:add(M.f.avtp_am824_channel, tvb(off + 38, 1))
+    tree:add(M.f.avtp_am824_tcode, tvb(off + 39, 1))
+    tree:add(M.f.avtp_am824_sy, tvb(off + 39, 1))
+end
+
+--- IEC 61883-6 CIP header
+function M.add_cip_v0(tree, tvb, off)
+    tree:add(M.f.avtp_cip_qi_1, tvb(off + 24, 1))
+    tree:add(M.f.avtp_cip_sid, tvb(off + 24, 1))
+    tree:add(M.f.avtp_cip_dbs, tvb(off + 25, 1))
+    tree:add(M.f.avtp_cip_fn, tvb(off + 26, 1))
+    tree:add(M.f.avtp_cip_qpc, tvb(off + 26, 1))
+    tree:add(M.f.avtp_cip_sph, tvb(off + 26, 1))
+    tree:add(M.f.avtp_cip_dbc, tvb(off + 27, 1))
+    tree:add(M.f.avtp_cip_qi_2, tvb(off + 28, 1))
+    tree:add(M.f.avtp_cip_fmt, tvb(off + 28, 1))
+    tree:add(M.f.avtp_cip_fdf, tvb(off + 29, 1))
+    tree:add(M.f.avtp_cip_syt, tvb(off + 30, 2))
+end
+
+--- IEC 61883-6 CIP header, version 1 header
+function M.add_cip_v1(tree, tvb, off)
+    tree:add(M.f.avtp_cip_qi_1, tvb(off + 40, 1))
+    tree:add(M.f.avtp_cip_sid, tvb(off + 40, 1))
+    tree:add(M.f.avtp_cip_dbs, tvb(off + 41, 1))
+    tree:add(M.f.avtp_cip_fn, tvb(off + 42, 1))
+    tree:add(M.f.avtp_cip_qpc, tvb(off + 42, 1))
+    tree:add(M.f.avtp_cip_sph, tvb(off + 42, 1))
+    tree:add(M.f.avtp_cip_dbc, tvb(off + 43, 1))
+    tree:add(M.f.avtp_cip_qi_2, tvb(off + 44, 1))
+    tree:add(M.f.avtp_cip_fmt, tvb(off + 44, 1))
+    tree:add(M.f.avtp_cip_fdf, tvb(off + 45, 1))
+    tree:add(M.f.avtp_cip_syt, tvb(off + 46, 2))
+end
+
+--- TSCF header, version 0 (IEEE 1722-2025 9.3, Figure 60)
+function M.add_tscf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_tscf_sequence_num_lsb, tvb(off + 17, 1))
+    tree:add(M.f.avtp_tscf_stream_data_length, tvb(off + 20, 2))
+end
+
+--- TSCF header, version 1 (IEEE 1722-2025 9.3, Figure 61)
+function M.add_tscf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_tscf_stream_data_length, tvb(off + 36, 2))
+end
+
+--- NTSCF header, version 0 (IEEE 1722-2025 9.2, Figure 58)
+function M.add_ntscf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_sv, tvb(off + 1, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_ntscf_r, tvb(off + 1, 1))
+    tree:add(M.f.avtp_ntscf_ntscf_data_length, tvb(off + 1, 2))
+    tree:add(M.f.avtp_ntscf_sequence_num_lsb, tvb(off + 3, 1))
+    tree:add(M.f.avtp_stream_id, tvb(off + 4, 8))
+end
+
+--- NTSCF header, version 1 (IEEE 1722-2025 9.2, Figure 59)
+function M.add_ntscf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_sv, tvb(off + 1, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_sequence_num32, tvb(off + 4, 4))
+    tree:add(M.f.avtp_ptp_grandmaster_identity, tvb(off + 8, 8))
+    tree:add(M.f.avtp_ntscf_r, tvb(off + 16, 1))
+    tree:add(M.f.avtp_ntscf_ntscf_data_length, tvb(off + 16, 2))
+    tree:add(M.f.avtp_ntscf_sequence_num_lsb, tvb(off + 18, 1))
+    tree:add(M.f.avtp_stream_id, tvb(off + 20, 8))
+end
+
+--- CRF header, version 0 (IEEE 1722-2025 10.4, Figure 98)
+function M.add_crf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_sv, tvb(off + 1, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_mr, tvb(off + 1, 1))
+    tree:add(M.f.avtp_r, tvb(off + 1, 1))
+    tree:add(M.f.avtp_crf_fs, tvb(off + 1, 1))
+    tree:add(M.f.avtp_tu, tvb(off + 1, 1))
+    tree:add(M.f.avtp_sequence_num, tvb(off + 2, 1))
+    tree:add(M.f.avtp_crf_type, tvb(off + 3, 1))
+    tree:add(M.f.avtp_stream_id, tvb(off + 4, 8))
+    tree:add(M.f.avtp_crf_pull, tvb(off + 12, 4))
+    tree:add(M.f.avtp_crf_base_frequency, tvb(off + 12, 4))
+    tree:add(M.f.avtp_crf_crf_data_length, tvb(off + 16, 2))
+    tree:add(M.f.avtp_crf_timestamp_interval, tvb(off + 18, 2))
+end
+
+--- CRF header, version 1 (IEEE 1722-2025 10.4, Figure 99)
+function M.add_crf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_sv, tvb(off + 1, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_sequence_num32, tvb(off + 4, 4))
+    tree:add(M.f.avtp_ptp_grandmaster_identity, tvb(off + 8, 8))
+    tree:add(M.f.avtp_mr, tvb(off + 16, 1))
+    tree:add(M.f.avtp_r, tvb(off + 16, 1))
+    tree:add(M.f.avtp_crf_fs, tvb(off + 16, 1))
+    tree:add(M.f.avtp_tu, tvb(off + 16, 1))
+    tree:add(M.f.avtp_crf_sequence_num_lsb, tvb(off + 17, 1))
+    tree:add(M.f.avtp_crf_type, tvb(off + 18, 1))
+    tree:add(M.f.avtp_stream_id, tvb(off + 20, 8))
+    tree:add(M.f.avtp_crf_pull, tvb(off + 28, 4))
+    tree:add(M.f.avtp_crf_base_frequency, tvb(off + 28, 4))
+    tree:add(M.f.avtp_crf_crf_data_length, tvb(off + 32, 2))
+    tree:add(M.f.avtp_crf_timestamp_interval, tvb(off + 34, 2))
+end
+
+--- MAAP PDU (IEEE 1722-2025 Annex B, Figure B.1)
+function M.add_maap(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_sv, tvb(off + 1, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_maap_message_type, tvb(off + 1, 1))
+    tree:add(M.f.avtp_maap_maap_version, tvb(off + 2, 2))
+    tree:add(M.f.avtp_maap_maap_data_length, tvb(off + 2, 2))
+    tree:add(M.f.avtp_stream_id, tvb(off + 4, 8))
+    tree:add(M.f.avtp_maap_requested_start_address, tvb(off + 12, 6))
+    tree:add(M.f.avtp_maap_requested_count, tvb(off + 18, 2))
+    tree:add(M.f.avtp_maap_conflict_start_address, tvb(off + 20, 6))
+    tree:add(M.f.avtp_maap_conflict_count, tvb(off + 26, 2))
+end
+
+--- AEF continuous header (IEEE 1722-2025 13.3)
+function M.add_aef_continuous(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_aef_enc, tvb(off + 1, 1))
+    tree:add(M.f.avtp_aef_stream_data_length, tvb(off + 2, 2))
+    tree:add(M.f.avtp_aef_key_id, tvb(off + 4, 8))
+end
+
+--- AEF discrete header (IEEE 1722-2025 13.4)
+function M.add_aef_discrete(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_aef_enc, tvb(off + 1, 1))
+    tree:add(M.f.avtp_aef_control_data_length, tvb(off + 2, 2))
+    tree:add(M.f.avtp_aef_key_id, tvb(off + 4, 8))
+end
+
+--- ESCF header (IEEE 1722-2025 16.3)
+function M.add_escf(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_escf_sig, tvb(off + 1, 1))
+    tree:add(M.f.avtp_escf_control_data_length, tvb(off + 2, 2))
+    tree:add(M.f.avtp_escf_key_id, tvb(off + 4, 8))
+end
+
+--- EECF header (IEEE 1722-2025 17.3)
+function M.add_eecf(tree, tvb, off)
+    tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
+    tree:add(M.f.avtp_version, tvb(off + 1, 1))
+    tree:add(M.f.avtp_eecf_enc, tvb(off + 1, 1))
+    tree:add(M.f.avtp_eecf_encrypted_payload_length, tvb(off + 2, 2))
+    tree:add(M.f.avtp_eecf_key_id, tvb(off + 4, 8))
+end
+
 --- IP AVTPDU header (IEEE 1722-2025 Annex J)
 function M.add_ip_avtpdu(tree, tvb, off)
     tree:add(M.f.ipavtp_encapsulation_sequence_num, tvb(off + 0, 4))
 end
+
+--- (subtype, version) -> { header_length, layouts = { add fns }, post = name|nil }
+M.subtype_specs = {}
+M.subtype_specs[0x02] = M.subtype_specs[0x02] or {}
+M.subtype_specs[0x02][0] = { name = "aaf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_aaf_v0 }, post = nil }
+M.subtype_specs[0x02] = M.subtype_specs[0x02] or {}
+M.subtype_specs[0x02][1] = { name = "aaf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_aaf_v1 }, post = nil }
+M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
+M.subtype_specs[0x00][0] = { name = "am824_v0", header_length = 32, layouts = { M.add_stream_v0, M.add_am824_v0, M.add_cip_v0 }, post = nil }
+M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
+M.subtype_specs[0x00][1] = { name = "am824_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_am824_v1, M.add_cip_v1 }, post = nil }
+M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}
+M.subtype_specs[0x05][0] = { name = "tscf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_tscf_v0 }, post = nil }
+M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}
+M.subtype_specs[0x05][1] = { name = "tscf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_tscf_v1 }, post = nil }
+M.subtype_specs[0x82] = M.subtype_specs[0x82] or {}
+M.subtype_specs[0x82][0] = { name = "ntscf_v0", header_length = 12, layouts = { M.add_ntscf_v0 }, post = nil }
+M.subtype_specs[0x82] = M.subtype_specs[0x82] or {}
+M.subtype_specs[0x82][1] = { name = "ntscf_v1", header_length = 28, layouts = { M.add_ntscf_v1 }, post = nil }
+M.subtype_specs[0x04] = M.subtype_specs[0x04] or {}
+M.subtype_specs[0x04][0] = { name = "crf_v0", header_length = 20, layouts = { M.add_crf_v0 }, post = "crf_timestamps" }
+M.subtype_specs[0x04] = M.subtype_specs[0x04] or {}
+M.subtype_specs[0x04][1] = { name = "crf_v1", header_length = 36, layouts = { M.add_crf_v1 }, post = "crf_timestamps" }
+M.subtype_specs[0xFE] = M.subtype_specs[0xFE] or {}
+M.subtype_specs[0xFE][0] = { name = "maap", header_length = 28, layouts = { M.add_maap }, post = nil }
+M.subtype_specs[0x6E] = M.subtype_specs[0x6E] or {}
+M.subtype_specs[0x6E][0] = { name = "aef_continuous", header_length = 12, layouts = { M.add_aef_continuous }, post = nil }
+M.subtype_specs[0xEE] = M.subtype_specs[0xEE] or {}
+M.subtype_specs[0xEE][0] = { name = "aef_discrete", header_length = 12, layouts = { M.add_aef_discrete }, post = nil }
+M.subtype_specs[0xEC] = M.subtype_specs[0xEC] or {}
+M.subtype_specs[0xEC][0] = { name = "escf", header_length = 12, layouts = { M.add_escf }, post = nil }
+M.subtype_specs[0xED] = M.subtype_specs[0xED] or {}
+M.subtype_specs[0xED][0] = { name = "eecf", header_length = 12, layouts = { M.add_eecf }, post = nil }
 
 return M

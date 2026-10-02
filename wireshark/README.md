@@ -27,6 +27,7 @@ repository's C++ wire-format definitions.
 |---|---|
 | `statusbar_avb.lua` | the loader: the one file Wireshark must see; registers the dissectors |
 | `statusbar_avb/avtp.lua` | hand-written AVTP dissector logic (header kinds, dispatch, preferences) |
+| `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps) and info-column summaries for AAF, AM824, CRF, TSCF, NTSCF, MAAP, AEF, ESCF, EECF |
 | `statusbar_avb/gen/*.lua` | **generated** field tables and layout decoders — do not edit; regenerate with `python3 -m wireshark_schema gen-lua wireshark` from `avb/python/` |
 
 The module files have no side effects beyond defining tables, so a plugin

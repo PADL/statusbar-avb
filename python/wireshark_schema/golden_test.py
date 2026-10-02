@@ -46,11 +46,28 @@ def normalise(value: object) -> int | str | None:
 
 def tshark_layers(tshark: str, loader: str, capture: str) -> list[dict]:
     """Per-frame layer dictionaries from tshark -T json."""
-    command = [tshark, "-X", f"lua_script:{loader}", "-r", capture, "-T", "json"]
-    # An isolated HOME keeps the user's personal plugins and preferences out of
-    # the run: a stray plugin that prints at load would corrupt the JSON, and
-    # a preference could re-enable the builtin dissectors.
-    with tempfile.TemporaryDirectory() as home:
+    # Everything tshark reads is staged into one temporary directory that is
+    # also its HOME. The isolated HOME keeps the user's personal plugins and
+    # preferences out of the run (a stray plugin that prints at load would
+    # corrupt the JSON; a preference could re-enable the builtin dissectors),
+    # and staging matters on Ubuntu, whose AppArmor profile for tshark denies
+    # reading files under arbitrary paths such as a CI work tree but allows
+    # the temporary directory.
+    with tempfile.TemporaryDirectory(prefix="statusbar-avb-wireshark-") as home:
+        staged_dir = os.path.join(home, "wireshark")
+        shutil.copytree(os.path.dirname(os.path.abspath(loader)), staged_dir)
+        staged_loader = os.path.join(staged_dir, os.path.basename(loader))
+        staged_capture = os.path.join(home, os.path.basename(capture))
+        shutil.copyfile(capture, staged_capture)
+        command = [
+            tshark,
+            "-X",
+            f"lua_script:{staged_loader}",
+            "-r",
+            staged_capture,
+            "-T",
+            "json",
+        ]
         env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, XDG_DATA_HOME=home)
         result = subprocess.run(
             command, capture_output=True, text=True, check=False, env=env

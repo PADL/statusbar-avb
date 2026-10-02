@@ -92,6 +92,65 @@ VALUE_TABLES: dict[str, ValueTable] = {
     "avtp_subtype": ValueTable(
         "avtp_subtype", {code: title for code, _, title, _ in AVTP_SUBTYPES}
     ),
+    # IEEE 1722-2025 Table 11 (AAF format), Table 12 (nsr)
+    "aaf_format": ValueTable(
+        "aaf_format",
+        {
+            0x00: "User specified",
+            0x01: "32-bit float",
+            0x02: "32-bit integer",
+            0x03: "24-bit integer",
+            0x04: "16-bit integer",
+            0x05: "32-bit AES3",
+        },
+    ),
+    "aaf_nsr": ValueTable(
+        "aaf_nsr",
+        {
+            0x00: "User specified",
+            0x01: "8 kHz",
+            0x02: "16 kHz",
+            0x03: "32 kHz",
+            0x04: "44.1 kHz",
+            0x05: "48 kHz",
+            0x06: "88.2 kHz",
+            0x07: "96 kHz",
+            0x08: "176.4 kHz",
+            0x09: "192 kHz",
+            0x0A: "24 kHz",
+        },
+    ),
+    # IEEE 1722-2025 Table 26 (CRF type), Table 27 (pull)
+    "crf_type": ValueTable(
+        "crf_type",
+        {
+            0x00: "User specified",
+            0x01: "Audio sample",
+            0x02: "Video frame",
+            0x03: "Video line",
+            0x04: "Machine cycle",
+        },
+    ),
+    "crf_pull": ValueTable(
+        "crf_pull",
+        {
+            0x00: "x 1.0",
+            0x01: "x 1/1.001",
+            0x02: "x 1.001",
+            0x03: "x 24/25",
+            0x04: "x 25/24",
+            0x05: "x 1/8",
+        },
+    ),
+    # IEEE 1722-2025 Annex B (MAAP)
+    "maap_message_type": ValueTable(
+        "maap_message_type",
+        {0x01: "MAAP_PROBE", 0x02: "MAAP_DEFEND", 0x03: "MAAP_ANNOUNCE"},
+    ),
+    # IEEE 1722-2025 Clause 13 (AEF), 16 (ESCF), 17 (EECF)
+    "aef_enc": ValueTable("aef_enc", {0x00: "AES-SIV", 0x01: "AES-GCM-SIV"}),
+    "escf_sig": ValueTable("escf_sig", {0x00: "ECC1"}),
+    "eecf_enc": ValueTable("eecf_enc", {0x00: "ECC1"}),
 }
 
 HEADER_KIND: dict[int, str] = {code: kind for code, _, _, kind in AVTP_SUBTYPES}
@@ -246,4 +305,400 @@ AVTP_LAYOUTS: tuple[Layout, ...] = (
     AVTP_STREAM_V1,
     AVTP_CONTROL,
     AVTP_ALTERNATIVE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Subtype-specific layouts (wave 2). A SubtypeSpec replaces the generic header
+# decode for one (subtype, version): its layouts are applied from offset 0 in
+# order, header_length is where the undissected payload (or a post hook's
+# data) starts. Offsets are absolute within the AVTPDU.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SubtypeSpec:
+    """How one (subtype, version) is dissected."""
+
+    name: str
+    subtype: int
+    version: int
+    layouts: tuple[Layout, ...]
+    header_length: int
+    post: str | None = None  # name of a post hook (Lua + decode.py) for the rest
+
+
+def _shift(fields: tuple[Field, ...], by: int) -> tuple[Field, ...]:
+    """The same fields at a different base offset (the v1 headers are 16 longer)."""
+    return tuple(
+        Field(f.name, f.offset + by, f.length, f.kind, f.doc, f.mask, f.base, f.values)
+        for f in fields
+    )
+
+
+# AAF (Clause 7): format-specific part after the stream header.
+_AAF_FIELDS = (
+    Field("format", 16, 1, "u8", "sample format (Table 11)", values="aaf_format"),
+    Field(
+        "nsr",
+        17,
+        1,
+        "u8",
+        "nominal sample rate (Table 12)",
+        mask=0xF0,
+        values="aaf_nsr",
+    ),
+    Field(
+        "channels_per_frame", 17, 2, "u16", "channels per frame (10 bits)", mask=0x03FF
+    ),
+    Field("bit_depth", 19, 1, "u8", "bit depth"),
+    Field(
+        "stream_data_length", 20, 2, "u16", "stream_data_length (octets of audio data)"
+    ),
+    Field("sp", 22, 1, "bool", "sparse timestamp mode", mask=0x10),
+    Field("evt", 22, 1, "u8", "event", mask=0x0F),
+)
+AAF_V0 = Layout(
+    "aaf_v0",
+    "avb.avtp.aaf",
+    "AAF format-specific header (IEEE 1722-2025 7.3)",
+    _AAF_FIELDS,
+)
+AAF_V1 = Layout(
+    "aaf_v1",
+    "avb.avtp.aaf",
+    "AAF format-specific header, version 1 header",
+    _shift(_AAF_FIELDS, 16),
+)
+
+# IEC 61883/IIDC (Clause 5) with the 61883-6 AM824 CIP header.
+_AM824_FIELDS = (
+    Field("gateway_info", 16, 4, "u32", "gateway_info", base="hex"),
+    Field("stream_data_length", 20, 2, "u16", "stream_data_length (CIP header + data)"),
+    Field("tag", 22, 1, "u8", "tag", mask=0xC0),
+    Field("channel", 22, 1, "u8", "channel", mask=0x3F),
+    Field("tcode", 23, 1, "u8", "tcode", mask=0xF0, base="hex"),
+    Field("sy", 23, 1, "u8", "sy", mask=0x0F),
+)
+_CIP_FIELDS = (
+    Field("qi_1", 24, 1, "u8", "CIP quadlet indicator 1", mask=0xC0),
+    Field("sid", 24, 1, "u8", "CIP source id", mask=0x3F),
+    Field("dbs", 25, 1, "u8", "CIP data block size (quadlets)"),
+    Field("fn", 26, 1, "u8", "CIP fraction number", mask=0xC0),
+    Field("qpc", 26, 1, "u8", "CIP quadlet padding count", mask=0x38),
+    Field("sph", 26, 1, "bool", "CIP source packet header", mask=0x04),
+    Field("dbc", 27, 1, "u8", "CIP data block count"),
+    Field("qi_2", 28, 1, "u8", "CIP quadlet indicator 2", mask=0xC0),
+    Field("fmt", 28, 1, "u8", "CIP format", mask=0x3F, base="hex"),
+    Field(
+        "fdf", 29, 1, "u8", "CIP format dependent field (AM824 sample rate)", base="hex"
+    ),
+    Field("syt", 30, 2, "u16", "CIP synchronization timestamp", base="hex"),
+)
+AM824_V0 = Layout(
+    "am824_v0",
+    "avb.avtp.am824",
+    "IEC 61883 stream header (IEEE 1722-2025 5.3)",
+    _AM824_FIELDS,
+)
+AM824_V1 = Layout(
+    "am824_v1",
+    "avb.avtp.am824",
+    "IEC 61883 stream header, version 1 header",
+    _shift(_AM824_FIELDS, 16),
+)
+CIP_V0 = Layout("cip_v0", "avb.avtp.cip", "IEC 61883-6 CIP header", _CIP_FIELDS)
+CIP_V1 = Layout(
+    "cip_v1",
+    "avb.avtp.cip",
+    "IEC 61883-6 CIP header, version 1 header",
+    _shift(_CIP_FIELDS, 16),
+)
+
+# TSCF (9.3): bytes beyond the stream header.
+TSCF_V0 = Layout(
+    "tscf_v0",
+    "avb.avtp.tscf",
+    "TSCF header, version 0 (IEEE 1722-2025 9.3, Figure 60)",
+    (
+        Field("sequence_num_lsb", 17, 1, "u8", "sequence_num_lsb"),
+        Field(
+            "stream_data_length",
+            20,
+            2,
+            "u16",
+            "stream_data_length (acf_payload_data octets)",
+        ),
+    ),
+)
+TSCF_V1 = Layout(
+    "tscf_v1",
+    "avb.avtp.tscf",
+    "TSCF header, version 1 (IEEE 1722-2025 9.3, Figure 61)",
+    (
+        Field(
+            "stream_data_length",
+            36,
+            2,
+            "u16",
+            "stream_data_length (acf_payload_data octets)",
+        ),
+    ),
+)
+
+# NTSCF (9.2): its own alternative-header packing.
+NTSCF_V0 = Layout(
+    "ntscf_v0",
+    "avb.avtp",
+    "NTSCF header, version 0 (IEEE 1722-2025 9.2, Figure 58)",
+    _common()
+    + (
+        Field("ntscf.r", 1, 1, "u8", "reserved", mask=0x08),
+        Field(
+            "ntscf.ntscf_data_length",
+            1,
+            2,
+            "u16",
+            "ntscf_data_length (11 bits)",
+            mask=0x07FF,
+        ),
+        Field("ntscf.sequence_num_lsb", 3, 1, "u8", "sequence_num_lsb"),
+        STREAM_ID,
+    ),
+)
+_ALT_V1 = (
+    Field("sequence_num32", 4, 4, "u32", "sequence_num (32-bit)"),
+    Field(
+        "ptp_grandmaster_identity", 8, 8, "u64", "ptp_grandmaster_identity", base="hex"
+    ),
+)
+_STREAM_ID_20 = Field("stream_id", 20, 8, "u64", "stream_id", base="hex")
+NTSCF_V1 = Layout(
+    "ntscf_v1",
+    "avb.avtp",
+    "NTSCF header, version 1 (IEEE 1722-2025 9.2, Figure 59)",
+    _common()
+    + _ALT_V1
+    + (
+        Field("ntscf.r", 16, 1, "u8", "reserved", mask=0x08),
+        Field(
+            "ntscf.ntscf_data_length",
+            16,
+            2,
+            "u16",
+            "ntscf_data_length (11 bits)",
+            mask=0x07FF,
+        ),
+        Field("ntscf.sequence_num_lsb", 18, 1, "u8", "sequence_num_lsb"),
+        _STREAM_ID_20,
+    ),
+)
+
+# CRF (Clause 10): alternative header with its own byte 1 and byte 3.
+_CRF_TAIL = (
+    Field(
+        "crf.pull", 12, 4, "u8", "pull (Table 27)", mask=0xE0000000, values="crf_pull"
+    ),
+    Field(
+        "crf.base_frequency",
+        12,
+        4,
+        "u32",
+        "base_frequency (Hz, 29 bits)",
+        mask=0x1FFFFFFF,
+    ),
+    Field(
+        "crf.crf_data_length", 16, 2, "u16", "crf_data_length (octets of timestamps)"
+    ),
+    Field("crf.timestamp_interval", 18, 2, "u16", "timestamp_interval"),
+)
+CRF_V0 = Layout(
+    "crf_v0",
+    "avb.avtp",
+    "CRF header, version 0 (IEEE 1722-2025 10.4, Figure 98)",
+    _common()
+    + (
+        Field("mr", 1, 1, "bool", "media clock restart", mask=0x08),
+        Field("r", 1, 1, "u8", "reserved", mask=0x04),
+        Field("crf.fs", 1, 1, "bool", "frame sync", mask=0x02),
+        Field("tu", 1, 1, "bool", "timestamp uncertain", mask=0x01),
+        Field("sequence_num", 2, 1, "u8", "sequence_num (8-bit)"),
+        Field("crf.type", 3, 1, "u8", "CRF type (Table 26)", values="crf_type"),
+        STREAM_ID,
+    )
+    + _CRF_TAIL,
+)
+CRF_V1 = Layout(
+    "crf_v1",
+    "avb.avtp",
+    "CRF header, version 1 (IEEE 1722-2025 10.4, Figure 99)",
+    _common()
+    + _ALT_V1
+    + (
+        Field("mr", 16, 1, "bool", "media clock restart", mask=0x08),
+        Field("r", 16, 1, "u8", "reserved", mask=0x04),
+        Field("crf.fs", 16, 1, "bool", "frame sync", mask=0x02),
+        Field("tu", 16, 1, "bool", "timestamp uncertain", mask=0x01),
+        Field("crf.sequence_num_lsb", 17, 1, "u8", "sequence_num_lsb"),
+        Field("crf.type", 18, 1, "u8", "CRF type (Table 26)", values="crf_type"),
+        _STREAM_ID_20,
+    )
+    + _shift(_CRF_TAIL, 16),
+)
+CRF_TIMESTAMP = Field("crf.timestamp", 0, 8, "u64", "CRF timestamp (ns)")
+
+# MAAP (Annex B): control header with its own names.
+MAAP = Layout(
+    "maap",
+    "avb.avtp",
+    "MAAP PDU (IEEE 1722-2025 Annex B, Figure B.1)",
+    _common()
+    + (
+        Field(
+            "maap.message_type",
+            1,
+            1,
+            "u8",
+            "message_type",
+            mask=0x0F,
+            values="maap_message_type",
+        ),
+        Field("maap.maap_version", 2, 2, "u8", "maap_version", mask=0xF800),
+        Field(
+            "maap.maap_data_length",
+            2,
+            2,
+            "u16",
+            "maap_data_length (11 bits)",
+            mask=0x07FF,
+        ),
+        STREAM_ID,
+        Field(
+            "maap.requested_start_address", 12, 6, "eui48", "requested_start_address"
+        ),
+        Field("maap.requested_count", 18, 2, "u16", "requested_count"),
+        Field("maap.conflict_start_address", 20, 6, "eui48", "conflict_start_address"),
+        Field("maap.conflict_count", 26, 2, "u16", "conflict_count"),
+    ),
+)
+
+# AEF (Clause 13), ESCF (16), EECF (17): r | version | mode, a length, a key id.
+_VERSION_ONLY = (
+    Field(
+        "subtype",
+        0,
+        1,
+        "u8",
+        "AVTP subtype (Table 6)",
+        base="hex",
+        values="avtp_subtype",
+    ),
+    Field("version", 1, 1, "u8", "AVTP version", mask=0x70),
+)
+AEF_CONTINUOUS = Layout(
+    "aef_continuous",
+    "avb.avtp",
+    "AEF continuous header (IEEE 1722-2025 13.3)",
+    _VERSION_ONLY
+    + (
+        Field("aef.enc", 1, 1, "u8", "encryption mode", mask=0x0F, values="aef_enc"),
+        Field("aef.stream_data_length", 2, 2, "u16", "stream_data_length"),
+        Field("aef.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+    ),
+)
+AEF_DISCRETE = Layout(
+    "aef_discrete",
+    "avb.avtp",
+    "AEF discrete header (IEEE 1722-2025 13.4)",
+    _VERSION_ONLY
+    + (
+        Field("aef.enc", 1, 1, "u8", "encryption mode", mask=0x0F, values="aef_enc"),
+        Field(
+            "aef.control_data_length",
+            2,
+            2,
+            "u16",
+            "control_data_length (11 bits)",
+            mask=0x07FF,
+        ),
+        Field("aef.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+    ),
+)
+ESCF = Layout(
+    "escf",
+    "avb.avtp",
+    "ESCF header (IEEE 1722-2025 16.3)",
+    _VERSION_ONLY
+    + (
+        Field(
+            "escf.sig", 1, 1, "u8", "signature algorithm", mask=0x0F, values="escf_sig"
+        ),
+        Field(
+            "escf.control_data_length",
+            2,
+            2,
+            "u16",
+            "control_data_length (11 bits)",
+            mask=0x07FF,
+        ),
+        Field("escf.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+    ),
+)
+EECF = Layout(
+    "eecf",
+    "avb.avtp",
+    "EECF header (IEEE 1722-2025 17.3)",
+    _VERSION_ONLY
+    + (
+        Field(
+            "eecf.enc", 1, 1, "u8", "encryption algorithm", mask=0x0F, values="eecf_enc"
+        ),
+        Field(
+            "eecf.encrypted_payload_length",
+            2,
+            2,
+            "u16",
+            "encrypted_payload_length (11 bits)",
+            mask=0x07FF,
+        ),
+        Field("eecf.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+    ),
+)
+
+SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
+    SubtypeSpec("aaf_v0", 0x02, 0, (AVTP_STREAM_V0, AAF_V0), 24),
+    SubtypeSpec("aaf_v1", 0x02, 1, (AVTP_STREAM_V1, AAF_V1), 40),
+    SubtypeSpec("am824_v0", 0x00, 0, (AVTP_STREAM_V0, AM824_V0, CIP_V0), 32),
+    SubtypeSpec("am824_v1", 0x00, 1, (AVTP_STREAM_V1, AM824_V1, CIP_V1), 48),
+    SubtypeSpec("tscf_v0", 0x05, 0, (AVTP_STREAM_V0, TSCF_V0), 24),
+    SubtypeSpec("tscf_v1", 0x05, 1, (AVTP_STREAM_V1, TSCF_V1), 40),
+    SubtypeSpec("ntscf_v0", 0x82, 0, (NTSCF_V0,), 12),
+    SubtypeSpec("ntscf_v1", 0x82, 1, (NTSCF_V1,), 28),
+    SubtypeSpec("crf_v0", 0x04, 0, (CRF_V0,), 20, post="crf_timestamps"),
+    SubtypeSpec("crf_v1", 0x04, 1, (CRF_V1,), 36, post="crf_timestamps"),
+    SubtypeSpec("maap", 0xFE, 0, (MAAP,), 28),
+    SubtypeSpec("aef_continuous", 0x6E, 0, (AEF_CONTINUOUS,), 12),
+    SubtypeSpec("aef_discrete", 0xEE, 0, (AEF_DISCRETE,), 12),
+    SubtypeSpec("escf", 0xEC, 0, (ESCF,), 12),
+    SubtypeSpec("eecf", 0xED, 0, (EECF,), 12),
+)
+
+SUBTYPE_LAYOUTS: tuple[Layout, ...] = (
+    AAF_V0,
+    AAF_V1,
+    AM824_V0,
+    AM824_V1,
+    CIP_V0,
+    CIP_V1,
+    TSCF_V0,
+    TSCF_V1,
+    NTSCF_V0,
+    NTSCF_V1,
+    CRF_V0,
+    CRF_V1,
+    MAAP,
+    AEF_CONTINUOUS,
+    AEF_DISCRETE,
+    ESCF,
+    EECF,
 )
