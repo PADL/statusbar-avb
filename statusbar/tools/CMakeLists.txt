@@ -234,8 +234,9 @@ endif()
 # compares every avb.* field with the schema's reference decoder. Skips (77)
 # when tshark is not installed. The drift test regenerates the Lua modules from
 # the schema and fails when the committed ones differ.
-add_executable(wireshark_golden_tool wireshark_golden_tool.cpp
-                                     wireshark_golden_acf.cpp)
+add_executable(
+  wireshark_golden_tool wireshark_golden_tool.cpp wireshark_golden_acf.cpp
+                        wireshark_golden_atdecc.cpp)
 target_link_libraries(wireshark_golden_tool PRIVATE statusbar)
 set_target_properties(
   wireshark_golden_tool PROPERTIES OUTPUT_NAME

@@ -38,6 +38,7 @@
 #include "statusbar/tsn/tsn_clock_identity.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 #include "wireshark_golden_acf.hpp"
+#include "wireshark_golden_atdecc.hpp"
 
 #include <array>
 #include <cstdint>
@@ -504,6 +505,17 @@ int main(int argc, char** argv)
     ethernet(ntscf_v1_frame(concat({flexray, gpc}), 0x00000303U));
     udp(tscf_frame(concat({i2c, serial}), 0x55), IP_AVTPDU_PORT_CONTINUOUS, 47);
     udp(ntscf_frame(concat({golden::acf_with_crc(can, AcfCrcType::crc_eth)}), 2), IP_AVTPDU_PORT_DISCRETE, 48);
+
+    // ATDECC: discovery, connection management, enumeration/control (each
+    // command followed by its response so the dissector's pairing is exercised),
+    // Address Access, Vendor Unique, then a few over UDP (1722.1 Annex)
+    auto const atdecc_frames = atdecc::golden::atdecc_golden_frames();
+    for (auto const& frame : atdecc_frames) {
+        ethernet(frame.octets);
+    }
+    udp(atdecc_frames[0].octets, IP_AVTPDU_PORT_DISCRETE, 49);
+    udp(atdecc_frames[3].octets, IP_AVTPDU_PORT_DISCRETE, 50);
+    udp(atdecc_frames[9].octets, IP_AVTPDU_PORT_DISCRETE, 51);
     writer->flush();
     return 0;
 }

@@ -32,6 +32,7 @@ _PROTOFIELD = {
     "bool": "ProtoField.bool",
     "bytes": "ProtoField.bytes",
     "eui48": "ProtoField.ether",
+    "string": "ProtoField.string",
 }
 
 
@@ -55,6 +56,8 @@ def _protofield(layout: L.Layout, f: L.Field) -> str:
         return f"{ctor}({abbr}, {title}, {display}, nil, {mask}, {_lua_string(f.doc)})"
     if f.kind in ("bytes", "eui48"):
         return f"{ctor}({abbr}, {title}, base.NONE, {_lua_string(f.doc)})"
+    if f.kind == "string":
+        return f"{ctor}({abbr}, {title}, base.ASCII, {_lua_string(f.doc)})"
     base = "base.HEX" if f.base == "hex" else "base.DEC"
     values = _value_table_name(f.values) if f.values else "nil"
     return f"{ctor}({abbr}, {title}, {base}, {values}, {mask}, {_lua_string(f.doc)})"
@@ -217,4 +220,154 @@ def generate_acf_fields() -> str:
         "",
         "return M",
     ]
+    return "\n".join(out) + "\n"
+
+
+def _emit_fields_and_adds(
+    out: list[str], layouts: tuple, placeholders: list[tuple] = ()
+) -> list[str]:
+    """Emit M.f entries, the fields list and add_<layout>() for `layouts`; returns the field keys."""
+    defs: dict[str, str] = {}
+    order: list[str] = []
+    for layout in layouts:
+        for f in layout.fields:
+            key = _field_key(layout, f)
+            text = _protofield(layout, f)
+            if key in defs and defs[key] != text:
+                raise ValueError(
+                    f"field {layout.abbr(f)} defined differently in {layout.name}"
+                )
+            if key not in defs:
+                defs[key] = text
+                order.append(key)
+    for layout, f in placeholders:
+        key = _field_key(layout, f)
+        if key not in defs:
+            defs[key] = _protofield(layout, f)
+            order.append(key)
+    out.append("M.f = {}")
+    for key in order:
+        out.append(f"M.f.{key} = {defs[key]}")
+    out += ["", "M.fields = {"]
+    for key in order:
+        out.append(f"    M.f.{key},")
+    out += ["}", ""]
+    for layout in layouts:
+        out.append(f"--- {layout.doc}")
+        out.append(f"function M.add_{layout.name.replace('.', '_')}(tree, tvb, off)")
+        for f in layout.fields:
+            if f.length == 0:
+                continue
+            if f.repeat > 1:
+                out.append(f"    for i = 0, {f.repeat - 1} do")
+                out.append(
+                    f"        tree:add(M.f.{_field_key(layout, f)}, tvb(off + {f.offset} + (i * {f.length}), {f.length}))"
+                )
+                out.append("    end")
+                continue
+            out.append(
+                f"    tree:add(M.f.{_field_key(layout, f)}, tvb(off + {f.offset}, {f.length}))"
+            )
+        out += ["end", ""]
+    return order
+
+
+def generate_atdecc_fields() -> str:
+    """The gen/atdecc_fields.lua module: ADP, ACMP, AECP, AEM payloads, descriptors."""
+    from . import atdecc_layouts as A
+    from . import atdecc_table as TA
+
+    out: list[str] = [GPL_HEADER, "local M = {}", ""]
+    for name in (
+        "aem_command",
+        "descriptor_type",
+        "aem_status",
+        "aecp_message_type",
+        "acmp_message_type",
+        "acmp_status",
+        "adp_message_type",
+        "aa_mode",
+        "aa_status",
+        "jdks_log_priority",
+    ):
+        vt = L.VALUE_TABLES[name]
+        out.append(f"{_value_table_name(vt.name)} = {{")
+        for code, title in sorted(vt.entries.items()):
+            out.append(f"    [0x{code:02X}] = {_lua_string(title)},")
+        out += ["}", ""]
+    placeholders = [
+        (A.AEM, A.AEM_PAYLOAD_RAW),
+        (A.DESCRIPTOR_LAYOUTS["DescriptorControl"], A.DESCRIPTOR_RAW),
+        (A.JDKS_LOG, A.JDKS_LOG_TEXT),
+    ]
+    _emit_fields_and_adds(out, A.ATDECC_LAYOUTS, placeholders)
+
+    def fkey(layout, f):
+        return f"M.f.{_field_key(layout, f)}"
+
+    out.append("M.AEM_PAYLOAD_RAW = " + fkey(A.AEM, A.AEM_PAYLOAD_RAW))
+    out.append("M.AECP_PAYLOAD = " + fkey(A.AECP, A.AECP_PAYLOAD))
+    out.append("M.AA_TLV_DATA = " + fkey(A.AA_TLV, A.AA_TLV_DATA))
+    out.append("M.VU_PAYLOAD = " + fkey(A.VU, A.VU_PAYLOAD))
+    out.append(
+        "M.DESCRIPTOR_RAW = "
+        + fkey(A.DESCRIPTOR_LAYOUTS["DescriptorControl"], A.DESCRIPTOR_RAW)
+    )
+    out.append("M.JDKS_LOG_TEXT = " + fkey(A.JDKS_LOG, A.JDKS_LOG_TEXT))
+    out.append("")
+    out.append(
+        "--- command code -> { cmd = spec, rsp = spec }; spec = { name, length, add, trailer }"
+    )
+    out.append("M.aem_payloads = {}")
+    for code, (cmd, rsp) in sorted(A.AEM_PAYLOADS.items()):
+
+        def spec(p):
+            if p is None:
+                return "nil"
+            trailer = _lua_string(p.trailer) if p.trailer else "nil"
+            return f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = M.add_{p.layout.name.replace('.', '_')}, trailer = {trailer} }}"
+
+        out.append(
+            f"M.aem_payloads[0x{code:04X}] = {{ cmd = {spec(cmd)}, rsp = {spec(rsp)} }}"
+        )
+    out.append("")
+    out.append(
+        "--- descriptor type -> { name, length, add, trailer = { count_field_offset, offset_field_offset, element, element_size, element_add } }"
+    )
+    out.append("M.descriptors = {}")
+    for code, d in sorted(A.DESCRIPTORS.items()):
+        trailer = "nil"
+        if d.trailer is not None:
+            members = {m["name"]: m for m in TA.DESCRIPTOR_STRUCTS[d.struct]["members"]}
+            count_off = members[d.trailer.count_field]["offset"]
+            offset_off = members[d.trailer.offset_field]["offset"]
+            elem_add = (
+                f"M.add_{A.TRAILER_ELEMENTS[d.trailer.element].name.replace('.', '_')}"
+                if d.trailer.element in A.TRAILER_ELEMENTS
+                else "nil"
+            )
+            trailer = (
+                f"{{ count_field_offset = {count_off}, offset_field_offset = {offset_off}, "
+                f"element = {_lua_string(d.trailer.element)}, element_size = {d.trailer.element_size}, element_add = {elem_add} }}"
+            )
+        out.append(
+            f"M.descriptors[0x{code:04X}] = {{ name = {_lua_string(d.name)}, length = {d.length}, "
+            f"add = M.add_{d.layout.name.replace('.', '_')}, trailer = {trailer} }}"
+        )
+    out.append("")
+    out.append(
+        f"M.AUDIO_MAPPING_LENGTH = {TA.AEM_PAYLOAD_STRUCTS['AemAudioMapping']['length']}"
+    )
+    out.append(f"M.JDKS_CONTROL_LOG_TEXT = {_lua_string(TA.JDKS_CONTROL_LOG_TEXT)}")
+    out.append(
+        f"M.JDKS_CONTROL_IPV4_PARAMETERS = {_lua_string(TA.JDKS_CONTROL_IPV4_PARAMETERS)}"
+    )
+    out.append(f"M.JDKS_LOG_BLOB_LENGTH = {TA.JDKS_LOG_BLOB['length']}")
+    out.append(f"M.JDKS_IPV4_PARAMS_LENGTH = {TA.JDKS_IPV4_PARAMS['length']}")
+    out.append(f"M.AECP_HEADER_LENGTH = {A.AECP_HEADER_LENGTH}")
+    out.append(f"M.AEM_HEADER_LENGTH = {A.AEM_HEADER_LENGTH}")
+    out.append(f"M.AA_HEADER_LENGTH = {A.AA_HEADER_LENGTH}")
+    out.append(f"M.VU_HEADER_LENGTH = {A.VU_HEADER_LENGTH}")
+    out.append("")
+    out.append("return M")
     return "\n".join(out) + "\n"

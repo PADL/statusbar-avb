@@ -24,18 +24,26 @@ def decode_layout(layout: L.Layout, data: bytes, off: int = 0) -> dict[str, int 
     for f in layout.fields:
         if f.length == 0:
             continue  # a placeholder the walker fills in itself
-        chunk = data[off + f.offset : off + f.offset + f.length]
-        if len(chunk) != f.length:
-            raise ValueError(
-                f"{layout.abbr(f)}: needs {f.length} octets at {off + f.offset}"
-            )
-        if f.kind in ("bytes", "eui48"):
-            out[layout.abbr(f)] = chunk.hex()
-            continue
-        value = int.from_bytes(chunk, "big")
-        if f.mask is not None:
-            value = (value & f.mask) >> f.shift
-        out[layout.abbr(f)] = value
+        # A repeated field is one tree item per element; the golden test keeps
+        # the LAST occurrence of a key, so the reference does the same.
+        for i in range(f.repeat):
+            start = off + f.offset + i * f.length
+            chunk = data[start : start + f.length]
+            if len(chunk) != f.length:
+                raise ValueError(
+                    f"{layout.abbr(f)}: needs {f.length} octets at {start}"
+                )
+            if f.kind in ("bytes", "eui48"):
+                out[layout.abbr(f)] = chunk.hex()
+            elif f.kind == "string":
+                out[layout.abbr(f)] = chunk.split(b"\0", 1)[0].decode(
+                    "utf-8", "replace"
+                )
+            else:
+                value = int.from_bytes(chunk, "big")
+                if f.mask is not None:
+                    value = (value & f.mask) >> f.shift
+                out[layout.abbr(f)] = value
     return out
 
 
@@ -179,6 +187,9 @@ def _post_acf(data: bytes, start: int, out: dict[str, int | str]) -> None:
 
 POST_HOOKS = {"crf_timestamps": _post_crf_timestamps, "acf": _post_acf}
 
+#: ADP, AECP, ACMP: dissected by atdecc.lua / decode_atdecc
+ATDECC_SUBTYPES = (0xFA, 0xFB, 0xFC)
+
 
 def decode_avtpdu(data: bytes) -> dict[str, int | str]:
     """The fields the dissector shows for one AVTPDU (header + payload)."""
@@ -202,7 +213,11 @@ def decode_avtpdu(data: bytes) -> dict[str, int | str]:
     if len(data) < length:
         return {"avb.avtp.subtype": subtype}
     out = decode_layout(layout, data)
-    if len(data) > length:
+    if subtype in ATDECC_SUBTYPES:
+        from .decode_atdecc import decode_atdecc  # noqa: PLC0415 (circular import)
+
+        decode_atdecc(data, out)
+    elif len(data) > length:
         out["avb.avtp.payload"] = data[length:].hex()
     return out
 

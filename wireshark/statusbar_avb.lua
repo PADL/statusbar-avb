@@ -20,5 +20,7 @@ package.path = base .. "/?.lua;" .. package.path
 
 local avtp = require("statusbar_avb.avtp")
 local acf = require("statusbar_avb.acf")
+local atdecc = require("statusbar_avb.atdecc")
 avtp.register()
 acf.register(avtp)
+atdecc.register(avtp)

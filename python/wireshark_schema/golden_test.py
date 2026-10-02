@@ -148,6 +148,10 @@ def main() -> int:
                 failures += 1
                 continue
             got = normalise(actual[name])
+            if isinstance(want, str):
+                want = (
+                    want.lower()
+                )  # byte values are lowercased hex; strings are compared case-blind too
             if got != want:
                 print(
                     f"frame {frame.number}: {name}: tshark {got!r} != reference {want!r}"

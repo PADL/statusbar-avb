@@ -29,6 +29,7 @@ class Field:
     mask: int | None = None
     base: str = "dec"  # dec hex
     values: str | None = None  # name of a value table in VALUE_TABLES
+    repeat: int = 1  # a fixed array of `repeat` consecutive values of `length` octets
 
     @property
     def shift(self) -> int:

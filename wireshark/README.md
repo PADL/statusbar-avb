@@ -6,8 +6,13 @@ ports 17220 and 17221). They take over from Wireshark's builtin `ieee1722`
 and `ieee17221` dissectors (preference *Take over IEEE 1722/1722.1 from the
 builtin dissectors*, on by default) and expose every field under the
 `avb.*` filter namespace: `avb.avtp.*`, `avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
-TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and in the
-last wave `avb.atdecc.*`.
+TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and
+`avb.atdecc.*` (ADP, ACMP and AECP: every AEM command payload, every
+descriptor a READ_DESCRIPTOR response can carry including its counted
+trailers, control values, the JDKS log/IPv4 vendor blobs, Address Access
+TLVs, Vendor Unique; e.g. `avb.atdecc.aem.command_type == 0x0004`).
+Commands and responses are paired on (controller, sequence) and shown as
+*Response in* / *Response to* / *Response time* generated items.
 
 ## License
 
@@ -18,8 +23,9 @@ of Wireshark.** It is a separate work from the rest of this repository,
 which is MIT; the two are merely aggregated here. The schema and the
 generator that produce the `statusbar_avb/gen/*.lua` files live in
 `python/wireshark_schema/` and remain MIT (the ACF layouts are
-`acf_table.py`, the same table the C++ `avtp_acf_*.hpp` headers came from), as
-does every C++ source. Do
+`acf_table.py`, the same table the C++ `avtp_acf_*.hpp` headers came from;
+the ATDECC layouts are `atdecc_table.py`, extracted from the C++
+`atdecc_*.hpp` wire structs), as does every C++ source. Do
 not copy anything from Wireshark's own sources or dissectors into these
 files: everything here is written from the IEEE standards and from this
 repository's C++ wire-format definitions.
@@ -32,6 +38,7 @@ repository's C++ wire-format definitions.
 | `statusbar_avb/avtp.lua` | hand-written AVTP dissector logic (header kinds, dispatch, preferences) |
 | `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps) and info-column summaries for AAF, AM824, CRF, TSCF, NTSCF, MAAP, AEF, ESCF, EECF |
 | `statusbar_avb/acf.lua` | the ACF message walker inside TSCF/NTSCF: every clause 9.4 type, pad rules, Checksum/CRC trailer verification (preference *Verify ACF Checksum/CRC trailers*) |
+| `statusbar_avb/atdecc.lua` | IEEE 1722.1: ADP, ACMP, AECP (AEM payloads and descriptors by table, control values, Address Access TLVs, Vendor Unique), command/response pairing |
 | `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers; needs Lua 5.3+ (Wireshark 4.4+), otherwise verification is skipped |
 | `statusbar_avb/gen/*.lua` | **generated** field tables and layout decoders — do not edit; regenerate with `python3 -m wireshark_schema gen-lua wireshark` from `avb/python/` |
 
