@@ -63,6 +63,13 @@ statusbar_add_module(
   avtp_acf_most_test.cpp
   avtp_acf_can_xl_test.cpp
   avtp_acf_can_xl_brief_test.cpp
+  avtp_acf_gpc_test.cpp
+  avtp_acf_serial_test.cpp
+  avtp_acf_parallel_test.cpp
+  avtp_acf_sensor_test.cpp
+  avtp_acf_sensor_brief_test.cpp
+  avtp_acf_aecp_test.cpp
+  avtp_acf_ancillary_test.cpp
   avtp_aef_test.cpp
   avtp_am824_test.cpp
   avtp_am824_v1_test.cpp
@@ -107,6 +114,13 @@ add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_lin_v2_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_most_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_can_xl_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_can_xl_brief_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_gpc_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_serial_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_parallel_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_sensor_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_sensor_brief_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_aecp_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_ancillary_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_v1_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_crf_fuzzer.cpp)
