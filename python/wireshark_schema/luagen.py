@@ -36,6 +36,10 @@ _PROTOFIELD = {
     "u16": "ProtoField.uint16",
     "u32": "ProtoField.uint32",
     "u64": "ProtoField.uint64",
+    "i16": "ProtoField.int16",
+    "i24": "ProtoField.int24",
+    "i32": "ProtoField.int32",
+    "f32": "ProtoField.float",
     "bool": "ProtoField.bool",
     "bytes": "ProtoField.bytes",
     "eui48": "ProtoField.ether",
@@ -65,6 +69,8 @@ def _protofield(layout: L.Layout, f: L.Field) -> str:
         return f"{ctor}({abbr}, {title}, base.NONE, {_lua_string(f.doc)})"
     if f.kind == "string":
         return f"{ctor}({abbr}, {title}, base.ASCII, {_lua_string(f.doc)})"
+    if f.kind == "f32":
+        return f"{ctor}({abbr}, {title}, nil, {_lua_string(f.doc)})"
     base = "base.HEX" if f.base == "hex" else "base.DEC"
     values = _value_table_name(f.values) if f.values else "nil"
     return f"{ctor}({abbr}, {title}, {base}, {values}, {mask}, {_lua_string(f.doc)})"
@@ -109,9 +115,12 @@ def generate_avtp_fields() -> str:
     payload_key = "avtp_payload"
     defs[payload_key] = _protofield(L.AVTP_COMMON, L.PAYLOAD)
     order.append(payload_key)
-    crf_key = _field_key(L.CRF_V0, L.CRF_TIMESTAMP)
-    defs[crf_key] = _protofield(L.CRF_V0, L.CRF_TIMESTAMP)
-    order.append(crf_key)
+    for layout in L.EXTRA_FIELD_LAYOUTS:
+        for f in layout.fields:
+            key = _field_key(layout, f)
+            if key not in defs:
+                defs[key] = _protofield(layout, f)
+                order.append(key)
 
     out.append("M.f = {}")
     for key in order:

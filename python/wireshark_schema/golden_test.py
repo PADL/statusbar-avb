@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -40,6 +41,10 @@ def normalise(value: object) -> int | str | None:
         return 1 if lowered == "true" else 0
     try:
         return int(text, 0)
+    except ValueError:
+        pass
+    try:
+        return float(text)
     except ValueError:
         return text.replace(":", "").lower()
 
@@ -185,6 +190,10 @@ def compare(frames: list, layers: list[dict], tag: str) -> tuple[int, int]:
                 want = (
                     want.lower()
                 )  # byte values are lowercased hex; strings are compared case-blind too
+            if isinstance(want, float) and isinstance(got, (int, float)):
+                if math.isclose(float(got), want, rel_tol=1e-6, abs_tol=1e-9):
+                    checked += 1
+                    continue
             if got != want:
                 print(
                     f"{tag}frame {frame.number}: {name}: tshark {got!r} != reference {want!r}"

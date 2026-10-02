@@ -24,7 +24,7 @@ class Field:
     name: str
     offset: int
     length: int
-    kind: str  # u8 u16 u32 u64 bool bytes eui48
+    kind: str  # u8 u16 u32 u64 i16 i24 i32 f32 bool bytes eui48 string
     doc: str = ""
     mask: int | None = None
     base: str = "dec"  # dec hex
@@ -121,6 +121,43 @@ VALUE_TABLES: dict[str, ValueTable] = {
             0x08: "176.4 kHz",
             0x09: "192 kHz",
             0x0A: "24 kHz",
+        },
+    ),
+    # IEEE 1722-2025 Table 17 (aes3_dt_ref)
+    "aaf_aes3_dt_ref": ValueTable(
+        "aaf_aes3_dt_ref",
+        {
+            0: "DT_UNSPECIFIED",
+            1: "DT_PCM",
+            2: "DT_SMPTE338",
+            3: "DT_IEC61937",
+            4: "DT_VENDOR",
+        },
+    ),
+    # IEC 61883-6: the AM824 label octet (exact codes; the ranges are named in
+    # avtp_streams.lua) and the FDF sample-frequency code the CIP header carries
+    "am824_label": ValueTable(
+        "am824_label",
+        {
+            0x40: "MBLA (multi-bit linear audio)",
+            0x80: "MIDI conformant, no data",
+            0x81: "MIDI conformant, 1 byte",
+            0x82: "MIDI conformant, 2 bytes",
+            0x83: "MIDI conformant, 3 bytes",
+            0x88: "SMPTE time code",
+        },
+    ),
+    "am824_fdf": ValueTable(
+        "am824_fdf",
+        {
+            0x00: "32 kHz",
+            0x01: "44.1 kHz",
+            0x02: "48 kHz",
+            0x03: "88.2 kHz",
+            0x04: "96 kHz",
+            0x05: "176.4 kHz",
+            0x06: "192 kHz",
+            0xFF: "No data",
         },
     ),
     # IEEE 1722-2025 Table 26 (CRF type), Table 27 (pull)
@@ -339,9 +376,18 @@ def _shift(fields: tuple[Field, ...], by: int) -> tuple[Field, ...]:
     )
 
 
-# AAF (Clause 7): format-specific part after the stream header.
+# AAF (Clause 7): the common part after the stream header (7.2), then the
+# PCM (7.3) or AES3 (7.4) redefinition of the format-specific octets, chosen
+# by the format field at dissection time (post hook "aaf_audio").
 _AAF_FIELDS = (
     Field("format", 16, 1, "u8", "sample format (Table 11)", values="aaf_format"),
+    Field(
+        "stream_data_length", 20, 2, "u16", "stream_data_length (octets of audio data)"
+    ),
+    Field("sp", 22, 1, "bool", "sparse timestamp mode", mask=0x10),
+    Field("evt", 22, 1, "u8", "event", mask=0x0F),
+)
+_AAF_PCM_FIELDS = (
     Field(
         "nsr",
         17,
@@ -354,24 +400,94 @@ _AAF_FIELDS = (
     Field(
         "channels_per_frame", 17, 2, "u16", "channels per frame (10 bits)", mask=0x03FF
     ),
-    Field("bit_depth", 19, 1, "u8", "bit depth"),
+    Field("bit_depth", 19, 1, "u8", "bit depth (valid bits, MSB-aligned)"),
+)
+_AAF_AES3_FIELDS = (
     Field(
-        "stream_data_length", 20, 2, "u16", "stream_data_length (octets of audio data)"
+        "nfr",
+        17,
+        1,
+        "u8",
+        "nominal AES3 frame rate (Table 16)",
+        mask=0xF0,
+        values="aaf_nsr",
     ),
-    Field("sp", 22, 1, "bool", "sparse timestamp mode", mask=0x10),
-    Field("evt", 22, 1, "u8", "event", mask=0x0F),
+    Field(
+        "streams_per_frame",
+        17,
+        2,
+        "u16",
+        "AES3 streams per frame (10 bits; two subframes each)",
+        mask=0x03FF,
+    ),
+    Field("data_type_h", 19, 1, "u8", "aes3_data_type, high octet", base="hex"),
+    Field(
+        "dt_ref",
+        22,
+        1,
+        "u8",
+        "aes3_data_type reference (Table 17)",
+        mask=0xE0,
+        values="aaf_aes3_dt_ref",
+    ),
+    Field("data_type_l", 23, 1, "u8", "aes3_data_type, low octet", base="hex"),
 )
 AAF_V0 = Layout(
     "aaf_v0",
     "avb.avtp.aaf",
-    "AAF format-specific header (IEEE 1722-2025 7.3)",
+    "AAF common header (IEEE 1722-2025 7.2)",
     _AAF_FIELDS,
 )
 AAF_V1 = Layout(
     "aaf_v1",
     "avb.avtp.aaf",
-    "AAF format-specific header, version 1 header",
+    "AAF common header, version 1 header",
     _shift(_AAF_FIELDS, 16),
+)
+AAF_PCM_V0 = Layout(
+    "aaf_pcm_v0", "avb.avtp.aaf", "AAF PCM fields (IEEE 1722-2025 7.3)", _AAF_PCM_FIELDS
+)
+AAF_PCM_V1 = Layout(
+    "aaf_pcm_v1",
+    "avb.avtp.aaf",
+    "AAF PCM fields, version 1 header",
+    _shift(_AAF_PCM_FIELDS, 16),
+)
+AAF_AES3_V0 = Layout(
+    "aaf_aes3_v0",
+    "avb.avtp.aaf.aes3",
+    "AAF AES3 fields (IEEE 1722-2025 7.4)",
+    _AAF_AES3_FIELDS,
+)
+AAF_AES3_V1 = Layout(
+    "aaf_aes3_v1",
+    "avb.avtp.aaf.aes3",
+    "AAF AES3 fields, version 1 header",
+    _shift(_AAF_AES3_FIELDS, 16),
+)
+
+# The audio payload items the "aaf_audio" post hook adds: one per sample in
+# the format's own width (7.3.5), or per AES3 subframe (7.4.6.2: bits 4-7 are
+# B C U V, bits 8-31 the audio sample word). Offsets are relative to the
+# sample; "frames" is a generated count.
+AAF_AUDIO = Layout(
+    "aaf_audio",
+    "avb.avtp.aaf",
+    "AAF audio samples",
+    (
+        Field("frames", 0, 0, "u16", "audio sample frames in this AVTPDU"),
+        Field("pcm_data_payload", 0, 0, "bytes", "user-specified PCM data"),
+        Field("sample_int16", 0, 2, "i16", "16-bit integer sample"),
+        Field("sample_int24", 0, 3, "i24", "24-bit integer sample"),
+        Field("sample_int32", 0, 4, "i32", "32-bit integer sample"),
+        Field("sample_float32", 0, 4, "f32", "32-bit float sample"),
+        Field("aes3.subframe", 0, 4, "u32", "AAF subframe", base="hex"),
+        Field("aes3.b", 0, 4, "bool", "B (block start)", mask=0x08000000),
+        Field("aes3.c", 0, 4, "bool", "C (channel status)", mask=0x04000000),
+        Field("aes3.u", 0, 4, "bool", "U (user data)", mask=0x02000000),
+        Field("aes3.v", 0, 4, "bool", "V (validity: 1 = not PCM)", mask=0x01000000),
+        Field("aes3.audio_sample_word", 1, 3, "i24", "24-bit audio sample word"),
+    ),
 )
 
 # IEC 61883/IIDC (Clause 5) with the 61883-6 AM824 CIP header.
@@ -394,7 +510,13 @@ _CIP_FIELDS = (
     Field("qi_2", 28, 1, "u8", "CIP quadlet indicator 2", mask=0xC0),
     Field("fmt", 28, 1, "u8", "CIP format", mask=0x3F, base="hex"),
     Field(
-        "fdf", 29, 1, "u8", "CIP format dependent field (AM824 sample rate)", base="hex"
+        "fdf",
+        29,
+        1,
+        "u8",
+        "CIP format dependent field (AM824 sample frequency code)",
+        base="hex",
+        values="am824_fdf",
     ),
     Field("syt", 30, 2, "u16", "CIP synchronization timestamp", base="hex"),
 )
@@ -411,6 +533,23 @@ AM824_V1 = Layout(
     _shift(_AM824_FIELDS, 16),
 )
 CIP_V0 = Layout("cip_v0", "avb.avtp.cip", "IEC 61883-6 CIP header", _CIP_FIELDS)
+
+# The AM824 data the "am824_audio" post hook adds: dbs quadlets per data
+# block, each a label octet and 24 bits of data (IEC 61883-6); MBLA and IEC
+# 60958 labels carry a 24-bit audio sample. Offsets relative to the quadlet.
+AM824_AUDIO = Layout(
+    "am824_audio",
+    "avb.avtp.am824",
+    "AM824 data blocks",
+    (
+        Field("data_blocks", 0, 0, "u16", "data blocks (sample frames) in this AVTPDU"),
+        Field("label", 0, 1, "u8", "AM824 label", base="hex", values="am824_label"),
+        Field("sample", 1, 3, "i24", "24-bit audio sample (MBLA or IEC 60958)"),
+        Field(
+            "data", 0, 4, "u32", "24-bit non-audio data", mask=0x00FFFFFF, base="hex"
+        ),
+    ),
+)
 CIP_V1 = Layout(
     "cip_v1",
     "avb.avtp.cip",
@@ -549,6 +688,7 @@ CRF_V1 = Layout(
     + _shift(_CRF_TAIL, 16),
 )
 CRF_TIMESTAMP = Field("crf.timestamp", 0, 8, "u64", "CRF timestamp (ns)")
+CRF_EXTRA = Layout("crf_extra", "avb.avtp", "CRF timestamps", (CRF_TIMESTAMP,))
 
 # MAAP (Annex B): control header with its own names.
 MAAP = Layout(
@@ -669,10 +809,14 @@ EECF = Layout(
 )
 
 SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
-    SubtypeSpec("aaf_v0", 0x02, 0, (AVTP_STREAM_V0, AAF_V0), 24),
-    SubtypeSpec("aaf_v1", 0x02, 1, (AVTP_STREAM_V1, AAF_V1), 40),
-    SubtypeSpec("am824_v0", 0x00, 0, (AVTP_STREAM_V0, AM824_V0, CIP_V0), 32),
-    SubtypeSpec("am824_v1", 0x00, 1, (AVTP_STREAM_V1, AM824_V1, CIP_V1), 48),
+    SubtypeSpec("aaf_v0", 0x02, 0, (AVTP_STREAM_V0, AAF_V0), 24, post="aaf_audio"),
+    SubtypeSpec("aaf_v1", 0x02, 1, (AVTP_STREAM_V1, AAF_V1), 40, post="aaf_audio"),
+    SubtypeSpec(
+        "am824_v0", 0x00, 0, (AVTP_STREAM_V0, AM824_V0, CIP_V0), 32, post="am824_audio"
+    ),
+    SubtypeSpec(
+        "am824_v1", 0x00, 1, (AVTP_STREAM_V1, AM824_V1, CIP_V1), 48, post="am824_audio"
+    ),
     SubtypeSpec("tscf_v0", 0x05, 0, (AVTP_STREAM_V0, TSCF_V0), 24, post="acf"),
     SubtypeSpec("tscf_v1", 0x05, 1, (AVTP_STREAM_V1, TSCF_V1), 40, post="acf"),
     SubtypeSpec("ntscf_v0", 0x82, 0, (NTSCF_V0,), 12, post="acf"),
@@ -689,6 +833,10 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
 SUBTYPE_LAYOUTS: tuple[Layout, ...] = (
     AAF_V0,
     AAF_V1,
+    AAF_PCM_V0,
+    AAF_PCM_V1,
+    AAF_AES3_V0,
+    AAF_AES3_V1,
     AM824_V0,
     AM824_V1,
     CIP_V0,
@@ -847,3 +995,7 @@ ACF_LAYOUTS: tuple[Layout, ...] = (
     + tuple(spec.layout for spec in ACF_SPECS.values())
     + (ACF_CHECKSUM, ACF_CRC)
 )
+
+#: Fields the post hooks add item by item (no generated add_ function); the
+#: CRF timestamps, the AAF samples/subframes and the AM824 quadlets.
+EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (CRF_EXTRA, AAF_AUDIO, AM824_AUDIO)

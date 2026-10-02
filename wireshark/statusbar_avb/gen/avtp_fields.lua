@@ -61,6 +61,34 @@ M.values_aaf_nsr = {
     [0x0A] = "24 kHz",
 }
 
+M.values_aaf_aes3_dt_ref = {
+    [0x00] = "DT_UNSPECIFIED",
+    [0x01] = "DT_PCM",
+    [0x02] = "DT_SMPTE338",
+    [0x03] = "DT_IEC61937",
+    [0x04] = "DT_VENDOR",
+}
+
+M.values_am824_label = {
+    [0x40] = "MBLA (multi-bit linear audio)",
+    [0x80] = "MIDI conformant, no data",
+    [0x81] = "MIDI conformant, 1 byte",
+    [0x82] = "MIDI conformant, 2 bytes",
+    [0x83] = "MIDI conformant, 3 bytes",
+    [0x88] = "SMPTE time code",
+}
+
+M.values_am824_fdf = {
+    [0x00] = "32 kHz",
+    [0x01] = "44.1 kHz",
+    [0x02] = "48 kHz",
+    [0x03] = "88.2 kHz",
+    [0x04] = "96 kHz",
+    [0x05] = "176.4 kHz",
+    [0x06] = "192 kHz",
+    [0xFF] = "No data",
+}
+
 M.values_crf_type = {
     [0x00] = "User specified",
     [0x01] = "Audio sample",
@@ -178,12 +206,17 @@ M.f.avtp_control_data_length = ProtoField.uint16("avb.avtp.control_data_length",
 M.f.avtp_subtype_data1 = ProtoField.uint8("avb.avtp.subtype_data1", "subtype_data1", base.HEX, nil, 0xF, "subtype_data_1 (4 bits)")
 M.f.avtp_subtype_data2 = ProtoField.uint16("avb.avtp.subtype_data2", "subtype_data2", base.HEX, nil, nil, "subtype_data_2 (16 bits)")
 M.f.avtp_aaf_format = ProtoField.uint8("avb.avtp.aaf.format", "format", base.DEC, M.values_aaf_format, nil, "sample format (Table 11)")
-M.f.avtp_aaf_nsr = ProtoField.uint8("avb.avtp.aaf.nsr", "nsr", base.DEC, M.values_aaf_nsr, 0xF0, "nominal sample rate (Table 12)")
-M.f.avtp_aaf_channels_per_frame = ProtoField.uint16("avb.avtp.aaf.channels_per_frame", "channels_per_frame", base.DEC, nil, 0x3FF, "channels per frame (10 bits)")
-M.f.avtp_aaf_bit_depth = ProtoField.uint8("avb.avtp.aaf.bit_depth", "bit_depth", base.DEC, nil, nil, "bit depth")
 M.f.avtp_aaf_stream_data_length = ProtoField.uint16("avb.avtp.aaf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets of audio data)")
 M.f.avtp_aaf_sp = ProtoField.bool("avb.avtp.aaf.sp", "sp", 8, nil, 0x10, "sparse timestamp mode")
 M.f.avtp_aaf_evt = ProtoField.uint8("avb.avtp.aaf.evt", "evt", base.DEC, nil, 0xF, "event")
+M.f.avtp_aaf_nsr = ProtoField.uint8("avb.avtp.aaf.nsr", "nsr", base.DEC, M.values_aaf_nsr, 0xF0, "nominal sample rate (Table 12)")
+M.f.avtp_aaf_channels_per_frame = ProtoField.uint16("avb.avtp.aaf.channels_per_frame", "channels_per_frame", base.DEC, nil, 0x3FF, "channels per frame (10 bits)")
+M.f.avtp_aaf_bit_depth = ProtoField.uint8("avb.avtp.aaf.bit_depth", "bit_depth", base.DEC, nil, nil, "bit depth (valid bits, MSB-aligned)")
+M.f.avtp_aaf_aes3_nfr = ProtoField.uint8("avb.avtp.aaf.aes3.nfr", "nfr", base.DEC, M.values_aaf_nsr, 0xF0, "nominal AES3 frame rate (Table 16)")
+M.f.avtp_aaf_aes3_streams_per_frame = ProtoField.uint16("avb.avtp.aaf.aes3.streams_per_frame", "streams_per_frame", base.DEC, nil, 0x3FF, "AES3 streams per frame (10 bits; two subframes each)")
+M.f.avtp_aaf_aes3_data_type_h = ProtoField.uint8("avb.avtp.aaf.aes3.data_type_h", "data_type_h", base.HEX, nil, nil, "aes3_data_type, high octet")
+M.f.avtp_aaf_aes3_dt_ref = ProtoField.uint8("avb.avtp.aaf.aes3.dt_ref", "dt_ref", base.DEC, M.values_aaf_aes3_dt_ref, 0xE0, "aes3_data_type reference (Table 17)")
+M.f.avtp_aaf_aes3_data_type_l = ProtoField.uint8("avb.avtp.aaf.aes3.data_type_l", "data_type_l", base.HEX, nil, nil, "aes3_data_type, low octet")
 M.f.avtp_am824_gateway_info = ProtoField.uint32("avb.avtp.am824.gateway_info", "gateway_info", base.HEX, nil, nil, "gateway_info")
 M.f.avtp_am824_stream_data_length = ProtoField.uint16("avb.avtp.am824.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (CIP header + data)")
 M.f.avtp_am824_tag = ProtoField.uint8("avb.avtp.am824.tag", "tag", base.DEC, nil, 0xC0, "tag")
@@ -199,7 +232,7 @@ M.f.avtp_cip_sph = ProtoField.bool("avb.avtp.cip.sph", "sph", 8, nil, 0x4, "CIP 
 M.f.avtp_cip_dbc = ProtoField.uint8("avb.avtp.cip.dbc", "dbc", base.DEC, nil, nil, "CIP data block count")
 M.f.avtp_cip_qi_2 = ProtoField.uint8("avb.avtp.cip.qi_2", "qi_2", base.DEC, nil, 0xC0, "CIP quadlet indicator 2")
 M.f.avtp_cip_fmt = ProtoField.uint8("avb.avtp.cip.fmt", "fmt", base.HEX, nil, 0x3F, "CIP format")
-M.f.avtp_cip_fdf = ProtoField.uint8("avb.avtp.cip.fdf", "fdf", base.HEX, nil, nil, "CIP format dependent field (AM824 sample rate)")
+M.f.avtp_cip_fdf = ProtoField.uint8("avb.avtp.cip.fdf", "fdf", base.HEX, M.values_am824_fdf, nil, "CIP format dependent field (AM824 sample frequency code)")
 M.f.avtp_cip_syt = ProtoField.uint16("avb.avtp.cip.syt", "syt", base.HEX, nil, nil, "CIP synchronization timestamp")
 M.f.avtp_tscf_sequence_num_lsb = ProtoField.uint8("avb.avtp.tscf.sequence_num_lsb", "sequence_num_lsb", base.DEC, nil, nil, "sequence_num_lsb")
 M.f.avtp_tscf_stream_data_length = ProtoField.uint16("avb.avtp.tscf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (acf_payload_data octets)")
@@ -233,6 +266,22 @@ M.f.avtp_eecf_key_id = ProtoField.uint64("avb.avtp.eecf.key_id", "eecf.key_id", 
 M.f.ipavtp_encapsulation_sequence_num = ProtoField.uint32("avb.ipavtp.encapsulation_sequence_num", "encapsulation_sequence_num", base.DEC, nil, nil, "encapsulation_sequence_num")
 M.f.avtp_payload = ProtoField.bytes("avb.avtp.payload", "payload", base.NONE, "undissected AVTPDU payload")
 M.f.avtp_crf_timestamp = ProtoField.uint64("avb.avtp.crf.timestamp", "crf.timestamp", base.DEC, nil, nil, "CRF timestamp (ns)")
+M.f.avtp_aaf_frames = ProtoField.uint16("avb.avtp.aaf.frames", "frames", base.DEC, nil, nil, "audio sample frames in this AVTPDU")
+M.f.avtp_aaf_pcm_data_payload = ProtoField.bytes("avb.avtp.aaf.pcm_data_payload", "pcm_data_payload", base.NONE, "user-specified PCM data")
+M.f.avtp_aaf_sample_int16 = ProtoField.int16("avb.avtp.aaf.sample_int16", "sample_int16", base.DEC, nil, nil, "16-bit integer sample")
+M.f.avtp_aaf_sample_int24 = ProtoField.int24("avb.avtp.aaf.sample_int24", "sample_int24", base.DEC, nil, nil, "24-bit integer sample")
+M.f.avtp_aaf_sample_int32 = ProtoField.int32("avb.avtp.aaf.sample_int32", "sample_int32", base.DEC, nil, nil, "32-bit integer sample")
+M.f.avtp_aaf_sample_float32 = ProtoField.float("avb.avtp.aaf.sample_float32", "sample_float32", nil, "32-bit float sample")
+M.f.avtp_aaf_aes3_subframe = ProtoField.uint32("avb.avtp.aaf.aes3.subframe", "aes3.subframe", base.HEX, nil, nil, "AAF subframe")
+M.f.avtp_aaf_aes3_b = ProtoField.bool("avb.avtp.aaf.aes3.b", "aes3.b", 32, nil, 0x8000000, "B (block start)")
+M.f.avtp_aaf_aes3_c = ProtoField.bool("avb.avtp.aaf.aes3.c", "aes3.c", 32, nil, 0x4000000, "C (channel status)")
+M.f.avtp_aaf_aes3_u = ProtoField.bool("avb.avtp.aaf.aes3.u", "aes3.u", 32, nil, 0x2000000, "U (user data)")
+M.f.avtp_aaf_aes3_v = ProtoField.bool("avb.avtp.aaf.aes3.v", "aes3.v", 32, nil, 0x1000000, "V (validity: 1 = not PCM)")
+M.f.avtp_aaf_aes3_audio_sample_word = ProtoField.int24("avb.avtp.aaf.aes3.audio_sample_word", "aes3.audio_sample_word", base.DEC, nil, nil, "24-bit audio sample word")
+M.f.avtp_am824_data_blocks = ProtoField.uint16("avb.avtp.am824.data_blocks", "data_blocks", base.DEC, nil, nil, "data blocks (sample frames) in this AVTPDU")
+M.f.avtp_am824_label = ProtoField.uint8("avb.avtp.am824.label", "label", base.HEX, M.values_am824_label, nil, "AM824 label")
+M.f.avtp_am824_sample = ProtoField.int24("avb.avtp.am824.sample", "sample", base.DEC, nil, nil, "24-bit audio sample (MBLA or IEC 60958)")
+M.f.avtp_am824_data = ProtoField.uint32("avb.avtp.am824.data", "data", base.HEX, nil, 0xFFFFFF, "24-bit non-audio data")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -257,12 +306,17 @@ M.avtp_fields = {
     M.f.avtp_subtype_data1,
     M.f.avtp_subtype_data2,
     M.f.avtp_aaf_format,
-    M.f.avtp_aaf_nsr,
-    M.f.avtp_aaf_channels_per_frame,
-    M.f.avtp_aaf_bit_depth,
     M.f.avtp_aaf_stream_data_length,
     M.f.avtp_aaf_sp,
     M.f.avtp_aaf_evt,
+    M.f.avtp_aaf_nsr,
+    M.f.avtp_aaf_channels_per_frame,
+    M.f.avtp_aaf_bit_depth,
+    M.f.avtp_aaf_aes3_nfr,
+    M.f.avtp_aaf_aes3_streams_per_frame,
+    M.f.avtp_aaf_aes3_data_type_h,
+    M.f.avtp_aaf_aes3_dt_ref,
+    M.f.avtp_aaf_aes3_data_type_l,
     M.f.avtp_am824_gateway_info,
     M.f.avtp_am824_stream_data_length,
     M.f.avtp_am824_tag,
@@ -311,6 +365,22 @@ M.avtp_fields = {
     M.f.avtp_eecf_key_id,
     M.f.avtp_payload,
     M.f.avtp_crf_timestamp,
+    M.f.avtp_aaf_frames,
+    M.f.avtp_aaf_pcm_data_payload,
+    M.f.avtp_aaf_sample_int16,
+    M.f.avtp_aaf_sample_int24,
+    M.f.avtp_aaf_sample_int32,
+    M.f.avtp_aaf_sample_float32,
+    M.f.avtp_aaf_aes3_subframe,
+    M.f.avtp_aaf_aes3_b,
+    M.f.avtp_aaf_aes3_c,
+    M.f.avtp_aaf_aes3_u,
+    M.f.avtp_aaf_aes3_v,
+    M.f.avtp_aaf_aes3_audio_sample_word,
+    M.f.avtp_am824_data_blocks,
+    M.f.avtp_am824_label,
+    M.f.avtp_am824_sample,
+    M.f.avtp_am824_data,
 }
 
 M.ipavtp_fields = {
@@ -380,26 +450,52 @@ function M.add_alternative(tree, tvb, off)
     tree:add(M.f.avtp_stream_id, tvb(off + 4, 8))
 end
 
---- AAF format-specific header (IEEE 1722-2025 7.3)
+--- AAF common header (IEEE 1722-2025 7.2)
 function M.add_aaf_v0(tree, tvb, off)
     tree:add(M.f.avtp_aaf_format, tvb(off + 16, 1))
-    tree:add(M.f.avtp_aaf_nsr, tvb(off + 17, 1))
-    tree:add(M.f.avtp_aaf_channels_per_frame, tvb(off + 17, 2))
-    tree:add(M.f.avtp_aaf_bit_depth, tvb(off + 19, 1))
     tree:add(M.f.avtp_aaf_stream_data_length, tvb(off + 20, 2))
     tree:add(M.f.avtp_aaf_sp, tvb(off + 22, 1))
     tree:add(M.f.avtp_aaf_evt, tvb(off + 22, 1))
 end
 
---- AAF format-specific header, version 1 header
+--- AAF common header, version 1 header
 function M.add_aaf_v1(tree, tvb, off)
     tree:add(M.f.avtp_aaf_format, tvb(off + 32, 1))
-    tree:add(M.f.avtp_aaf_nsr, tvb(off + 33, 1))
-    tree:add(M.f.avtp_aaf_channels_per_frame, tvb(off + 33, 2))
-    tree:add(M.f.avtp_aaf_bit_depth, tvb(off + 35, 1))
     tree:add(M.f.avtp_aaf_stream_data_length, tvb(off + 36, 2))
     tree:add(M.f.avtp_aaf_sp, tvb(off + 38, 1))
     tree:add(M.f.avtp_aaf_evt, tvb(off + 38, 1))
+end
+
+--- AAF PCM fields (IEEE 1722-2025 7.3)
+function M.add_aaf_pcm_v0(tree, tvb, off)
+    tree:add(M.f.avtp_aaf_nsr, tvb(off + 17, 1))
+    tree:add(M.f.avtp_aaf_channels_per_frame, tvb(off + 17, 2))
+    tree:add(M.f.avtp_aaf_bit_depth, tvb(off + 19, 1))
+end
+
+--- AAF PCM fields, version 1 header
+function M.add_aaf_pcm_v1(tree, tvb, off)
+    tree:add(M.f.avtp_aaf_nsr, tvb(off + 33, 1))
+    tree:add(M.f.avtp_aaf_channels_per_frame, tvb(off + 33, 2))
+    tree:add(M.f.avtp_aaf_bit_depth, tvb(off + 35, 1))
+end
+
+--- AAF AES3 fields (IEEE 1722-2025 7.4)
+function M.add_aaf_aes3_v0(tree, tvb, off)
+    tree:add(M.f.avtp_aaf_aes3_nfr, tvb(off + 17, 1))
+    tree:add(M.f.avtp_aaf_aes3_streams_per_frame, tvb(off + 17, 2))
+    tree:add(M.f.avtp_aaf_aes3_data_type_h, tvb(off + 19, 1))
+    tree:add(M.f.avtp_aaf_aes3_dt_ref, tvb(off + 22, 1))
+    tree:add(M.f.avtp_aaf_aes3_data_type_l, tvb(off + 23, 1))
+end
+
+--- AAF AES3 fields, version 1 header
+function M.add_aaf_aes3_v1(tree, tvb, off)
+    tree:add(M.f.avtp_aaf_aes3_nfr, tvb(off + 33, 1))
+    tree:add(M.f.avtp_aaf_aes3_streams_per_frame, tvb(off + 33, 2))
+    tree:add(M.f.avtp_aaf_aes3_data_type_h, tvb(off + 35, 1))
+    tree:add(M.f.avtp_aaf_aes3_dt_ref, tvb(off + 38, 1))
+    tree:add(M.f.avtp_aaf_aes3_data_type_l, tvb(off + 39, 1))
 end
 
 --- IEC 61883 stream header (IEEE 1722-2025 5.3)
@@ -584,13 +680,13 @@ end
 --- (subtype, version) -> { header_length, layouts = { add fns }, post = name|nil }
 M.subtype_specs = {}
 M.subtype_specs[0x02] = M.subtype_specs[0x02] or {}
-M.subtype_specs[0x02][0] = { name = "aaf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_aaf_v0 }, post = nil }
+M.subtype_specs[0x02][0] = { name = "aaf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_aaf_v0 }, post = "aaf_audio" }
 M.subtype_specs[0x02] = M.subtype_specs[0x02] or {}
-M.subtype_specs[0x02][1] = { name = "aaf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_aaf_v1 }, post = nil }
+M.subtype_specs[0x02][1] = { name = "aaf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_aaf_v1 }, post = "aaf_audio" }
 M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
-M.subtype_specs[0x00][0] = { name = "am824_v0", header_length = 32, layouts = { M.add_stream_v0, M.add_am824_v0, M.add_cip_v0 }, post = nil }
+M.subtype_specs[0x00][0] = { name = "am824_v0", header_length = 32, layouts = { M.add_stream_v0, M.add_am824_v0, M.add_cip_v0 }, post = "am824_audio" }
 M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
-M.subtype_specs[0x00][1] = { name = "am824_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_am824_v1, M.add_cip_v1 }, post = nil }
+M.subtype_specs[0x00][1] = { name = "am824_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_am824_v1, M.add_cip_v1 }, post = "am824_audio" }
 M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}
 M.subtype_specs[0x05][0] = { name = "tscf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_tscf_v0 }, post = "acf" }
 M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}

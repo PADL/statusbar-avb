@@ -10,6 +10,8 @@ be compared with tshark's JSON output after normalisation.
 
 from __future__ import annotations
 
+import struct
+
 from . import layouts as L
 
 COMMON_HEADER_LENGTH = 12
@@ -39,6 +41,10 @@ def decode_layout(layout: L.Layout, data: bytes, off: int = 0) -> dict[str, int 
                 out[layout.abbr(f)] = chunk.split(b"\0", 1)[0].decode(
                     "utf-8", "replace"
                 )
+            elif f.kind in ("i16", "i24", "i32"):
+                out[layout.abbr(f)] = int.from_bytes(chunk, "big", signed=True)
+            elif f.kind == "f32":
+                out[layout.abbr(f)] = struct.unpack(">f", chunk)[0]
             else:
                 value = int.from_bytes(chunk, "big")
                 if f.mask is not None:
@@ -185,7 +191,111 @@ def _post_acf(data: bytes, start: int, out: dict[str, int | str]) -> None:
     decode_acf(data[start : start + min(declared, available)], out)
 
 
-POST_HOOKS = {"crf_timestamps": _post_crf_timestamps, "acf": _post_acf}
+AAF_FORMAT_AES3 = 0x05
+AAF_SAMPLE_FIELD = {
+    0x01: ("sample_float32", 4),
+    0x02: ("sample_int32", 4),
+    0x03: ("sample_int24", 3),
+    0x04: ("sample_int16", 2),
+}
+AES3_SUBFRAME_FIELDS = (
+    "aes3.subframe",
+    "aes3.b",
+    "aes3.c",
+    "aes3.u",
+    "aes3.v",
+    "aes3.audio_sample_word",
+)
+AM824_FDF_NO_DATA = 0xFF
+
+
+def _audio_item(name: str, data: bytes, at: int, out: dict[str, int | str]) -> None:
+    """One AAF_AUDIO field read at ``at`` (the Lua adds it relative to the sample)."""
+    f = next(f for f in L.AAF_AUDIO.fields if f.name == name)
+    out.update(decode_layout(L.Layout("item", L.AAF_AUDIO.prefix, "", (f,)), data, at))
+
+
+def _post_aaf_audio(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """AAF: the PCM or AES3 header fields, then the samples as the Lua adds them.
+
+    The JSON keeps the last occurrence of a repeated field, so the reference
+    records the last sample (last frame, last channel); a trailing partial
+    frame and anything past the declared length stay avb.avtp.payload.
+    """
+    v1 = start == 40
+    base = 32 if v1 else 16
+    fmt = data[base]
+    declared = int.from_bytes(data[base + 4 : base + 6], "big")
+    length = min(declared, len(data) - start)
+    if fmt == AAF_FORMAT_AES3:
+        out.update(decode_layout(L.AAF_AES3_V1 if v1 else L.AAF_AES3_V0, data))
+        channels = 2 * (int.from_bytes(data[base + 1 : base + 3], "big") & 0x3FF)
+        size = 4
+    else:
+        out.update(decode_layout(L.AAF_PCM_V1 if v1 else L.AAF_PCM_V0, data))
+        channels = int.from_bytes(data[base + 1 : base + 3], "big") & 0x3FF
+        size = AAF_SAMPLE_FIELD.get(fmt, ("", 0))[1]
+    if channels == 0 or size == 0:
+        if length > 0:
+            out["avb.avtp.aaf.pcm_data_payload"] = data[start : start + length].hex()
+        rest = start + length
+    else:
+        frame = channels * size
+        frames = length // frame
+        out["avb.avtp.aaf.frames"] = frames
+        if frames > 0:
+            last = start + frames * frame - size
+            if fmt == AAF_FORMAT_AES3:
+                for name in AES3_SUBFRAME_FIELDS:
+                    _audio_item(name, data, last, out)
+            else:
+                _audio_item(AAF_SAMPLE_FIELD[fmt][0], data, last, out)
+        rest = start + frames * frame
+    if rest < len(data):
+        out["avb.avtp.payload"] = data[rest:].hex()
+
+
+def am824_label_is_audio(label: int) -> bool:
+    """IEC 60958 conformant (0x00-0x3F) and MBLA (0x40-0x4F) quadlets carry a sample."""
+    return label < 0x50
+
+
+def _post_am824_audio(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """AM824: the data blocks after the CIP header, as the Lua adds them."""
+    v1 = start == 48
+    base = 36 if v1 else 20
+    dbs = data[start - 7]
+    fdf = data[start - 3]
+    declared = int.from_bytes(data[base : base + 2], "big") - 8
+    length = max(0, min(declared, len(data) - start))
+    rest = start
+    if dbs > 0 and fdf != AM824_FDF_NO_DATA:
+        block = dbs * 4
+        blocks = length // block
+        out["avb.avtp.am824.data_blocks"] = blocks
+        if blocks > 0:
+            last = start + blocks * block - 4
+            label = data[last]
+            out["avb.avtp.am824.label"] = label
+            if am824_label_is_audio(label):
+                out["avb.avtp.am824.sample"] = int.from_bytes(
+                    data[last + 1 : last + 4], "big", signed=True
+                )
+            else:
+                out["avb.avtp.am824.data"] = (
+                    int.from_bytes(data[last : last + 4], "big") & 0x00FFFFFF
+                )
+        rest = start + blocks * block
+    if rest < len(data):
+        out["avb.avtp.payload"] = data[rest:].hex()
+
+
+POST_HOOKS = {
+    "crf_timestamps": _post_crf_timestamps,
+    "acf": _post_acf,
+    "aaf_audio": _post_aaf_audio,
+    "am824_audio": _post_am824_audio,
+}
 
 #: ADP, AECP, ACMP: dissected by atdecc.lua / decode_atdecc
 ATDECC_SUBTYPES = (0xFA, 0xFB, 0xFC)

@@ -40,7 +40,7 @@ local ef_truncated = ProtoExpert.new("avb.avtp.expert.truncated", "AVTPDU shorte
     expert.group.MALFORMED, expert.severity.ERROR)
 local ef_reserved = ProtoExpert.new("avb.avtp.expert.reserved_subtype", "Reserved AVTP subtype",
     expert.group.UNDECODED, expert.severity.NOTE)
-M.proto.experts = { ef_truncated, ef_reserved }
+M.proto.experts = { ef_truncated, ef_reserved, table.unpack(streams.experts) }
 
 local ef_ip_truncated = ProtoExpert.new("avb.ipavtp.expert.truncated", "IP AVTPDU shorter than its header",
     expert.group.MALFORMED, expert.severity.ERROR)
@@ -186,6 +186,17 @@ function M.register()
         "When on, EtherType 0x22F0 and UDP ports 17220/17221 are dissected by the statusbar "
         .. "AVB dissectors instead of Wireshark's builtin ieee1722/ieee17221. When off, the "
         .. "builtin ieee1722 dissector is put back.")
+    M.proto.prefs.audio_grouping = Pref.enum(
+        "Audio sample grouping", streams.GROUP_BY_CHANNEL,
+        "How the AAF samples / AES3 subframes and AM824 quadlets of an audio AVTPDU are arranged "
+        .. "in the tree: one subtree per channel holding that channel's samples in time order, one "
+        .. "subtree per sample frame holding every channel, or a flat list in wire order.",
+        {
+            { 1, "By channel", streams.GROUP_BY_CHANNEL },
+            { 2, "By frame", streams.GROUP_BY_FRAME },
+            { 3, "Flat (wire order)", streams.GROUP_FLAT },
+        }, false)
+    streams.prefs = M.proto.prefs
     M.proto.prefs_changed = apply_registration
     apply_registration()
 end

@@ -5,7 +5,12 @@ Ethernet (EtherType 0x22F0) and over UDP (the Annex J IP encapsulation on
 ports 17220 and 17221). They take over from Wireshark's builtin `ieee1722`
 and `ieee17221` dissectors (preference *Take over IEEE 1722/1722.1 from the
 builtin dissectors*, on by default) and expose every field under the
-`avb.*` filter namespace: `avb.avtp.*`, `avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
+`avb.*` filter namespace: `avb.avtp.*` (headers, and the audio itself: AAF
+PCM samples as `avb.avtp.aaf.sample_int16/int24/int32/float32`, AES3
+subframes with their B/C/U/V bits and `avb.avtp.aaf.aes3.audio_sample_word`,
+AM824 quadlets as `avb.avtp.am824.label` + `.sample` or `.data`; grouped per
+channel, per frame or flat by the preference *Audio sample grouping*),
+`avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
 TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and
 `avb.atdecc.*` (ADP, ACMP and AECP: every AEM command payload, every
 descriptor a READ_DESCRIPTOR response can carry including its counted
@@ -36,7 +41,7 @@ repository's C++ wire-format definitions.
 |---|---|
 | `statusbar_avb.lua` | the loader: the one file Wireshark must see; registers the dissectors |
 | `statusbar_avb/avtp.lua` | hand-written AVTP dissector logic (header kinds, dispatch, preferences) |
-| `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps) and info-column summaries for AAF, AM824, CRF, TSCF, NTSCF, MAAP, AEF, ESCF, EECF |
+| `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps; AAF PCM samples and AES3 subframes; AM824 data blocks, grouped by channel or by frame per the preference *Audio sample grouping*) and info-column summaries for AAF, AM824, CRF, TSCF, NTSCF, MAAP, AEF, ESCF, EECF |
 | `statusbar_avb/acf.lua` | the ACF message walker inside TSCF/NTSCF: every clause 9.4 type, pad rules, Checksum/CRC trailer verification (preference *Verify ACF Checksum/CRC trailers*) |
 | `statusbar_avb/atdecc.lua` | IEEE 1722.1: ADP, ACMP, AECP (AEM payloads and descriptors by table, control values, Address Access TLVs, Vendor Unique), command/response pairing |
 | `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers; needs Lua 5.3+ (Wireshark 4.4+), otherwise verification is skipped |

@@ -43,6 +43,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <span>
 #include <vector>
@@ -215,6 +216,101 @@ auto aaf_v0_int16() -> std::vector<uint8_t>
     std::array<uint8_t, 32> samples{};
     samples[1] = 0x7F;
     append(out, std::span<uint8_t const>(samples));
+    return out;
+}
+
+/// 24-bit PCM, one channel, six samples including negative values
+auto aaf_v0_int24() -> std::vector<uint8_t>
+{
+    AafPdu pdu{};
+    pdu.init(SID, AafFormat::int_24bit, AafSampleRate::rate_48_khz, 1, 24);
+    pdu.set_sequence_num(21);
+    pdu.set_stream_data_length(18);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 18> samples{
+        0x00, 0x00, 0x01, 0x7F, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x12, 0x34, 0x56, 0xED, 0xCB, 0xAA};
+    append(out, std::span<uint8_t const>(samples));
+    return out;
+}
+
+/// 32-bit float, two channels, three frames of exactly representable values
+auto aaf_v0_float32() -> std::vector<uint8_t>
+{
+    AafPdu pdu{};
+    pdu.init(SID, AafFormat::float_32bit, AafSampleRate::rate_96_khz, 2, 32);
+    pdu.set_sequence_num(22);
+    pdu.set_stream_data_length(24);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<float, 6> const values{0.5F, -0.25F, 1.0F, -1.0F, 0.0F, 0.125F};
+    for (auto const value : values) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        quadlet_t sample{};
+        sample = bits;
+        append(out, sample);
+    }
+    return out;
+}
+
+/// 16-bit PCM, two channels, with a trailing partial frame (one odd octet)
+auto aaf_v0_partial_frame() -> std::vector<uint8_t>
+{
+    AafPdu pdu{};
+    pdu.init(SID, AafFormat::int_16bit, AafSampleRate::rate_48_khz, 2, 16);
+    pdu.set_sequence_num(23);
+    pdu.set_stream_data_length(9);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 9> samples{0x00, 0x10, 0xFF, 0xF0, 0x00, 0x20, 0xFF, 0xE0, 0xAB};
+    append(out, std::span<uint8_t const>(samples));
+    return out;
+}
+
+/// AES3: two AES3 streams (four subframes per frame), two frames, with the
+/// B/C/U/V bits exercised and a SMPTE ST 338 data type
+auto aaf_v0_aes3() -> std::vector<uint8_t>
+{
+    AafPdu pdu{};
+    pdu.init(SID, AafFormat::aes3_32bit, AafSampleRate::rate_48_khz, 2, 0);
+    pdu.set_sequence_num(24);
+    pdu.bit_depth = 0x01;                                                     // aes3_data_type_h
+    pdu.rsv_sp_evt = static_cast<uint8_t>(pdu.rsv_sp_evt.get() | (2U << 5));  // DT_SMPTE338
+    pdu.reserved = 0x02;                                                      // aes3_data_type_l
+    pdu.set_stream_data_length(32);
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 32> subframes{
+        0x08, 0x00, 0x01, 0x00,                                                  // stream 0 sf 1: B, sample 0x000100
+        0x04, 0xFF, 0xFF, 0x00,                                                  // stream 0 sf 2: C, sample -256
+        0x02, 0x12, 0x34, 0x56,                                                  // stream 1 sf 1: U
+        0x01, 0x80, 0x00, 0x00,                                                  // stream 1 sf 2: V, sample -8388608
+        0x00, 0x00, 0x02, 0x00,                                                  // frame 1
+        0x00, 0xFF, 0xFE, 0x00, 0x00, 0x65, 0x43, 0x21, 0x0F, 0x7F, 0xFF, 0xFF,  // all four bits, max positive
+    };
+    append(out, std::span<uint8_t const>(subframes));
+    return out;
+}
+
+/// AM824 with three channels of mixed labels: MBLA audio, an IEC 60958
+/// conformant sample and a MIDI conformant quadlet, two data blocks
+auto am824_v0_mixed_labels() -> std::vector<uint8_t>
+{
+    Am824Pdu pdu{};
+    pdu.init(SID, 3, Am824SampleRate::rate_44_1_khz);
+    pdu.set_sequence_num(12);
+    pdu.set_stream_data_length(static_cast<uint16_t>(Cip61883Header::LENGTH + 24));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    std::array<uint8_t, 24> quadlets{
+        0x40, 0xFF, 0xFF, 0xFF,                          // MBLA -1
+        0x00, 0x7F, 0xFF, 0xFF,                          // IEC 60958 conformant, max positive
+        0x81, 0x90, 0x00, 0x00,                          // MIDI, 1 byte (note on)
+        0x40, 0x80, 0x00, 0x00,                          // MBLA min negative
+        0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x00,  // MIDI no data
+    };
+    append(out, std::span<uint8_t const>(quadlets));
     return out;
 }
 
@@ -471,6 +567,11 @@ int main(int argc, char** argv)
     ethernet(aef_discrete());
     ethernet(escf());
     ethernet(eecf());
+    ethernet(aaf_v0_int24());
+    ethernet(aaf_v0_float32());
+    ethernet(aaf_v0_partial_frame());
+    ethernet(aaf_v0_aes3());
+    ethernet(am824_v0_mixed_labels());
     udp(aaf_v0(), IP_AVTPDU_PORT_CONTINUOUS, 42);
     udp(tscf_with_can(), IP_AVTPDU_PORT_CONTINUOUS, 43);
     udp(adp_entity_available(), IP_AVTPDU_PORT_DISCRETE, 44);
