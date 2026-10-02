@@ -19,4 +19,6 @@ local base = script_path:match("^(.*)[/\\]") or "."
 package.path = base .. "/?.lua;" .. package.path
 
 local avtp = require("statusbar_avb.avtp")
+local acf = require("statusbar_avb.acf")
 avtp.register()
+acf.register(avtp)

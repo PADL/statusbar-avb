@@ -49,7 +49,10 @@ def _protofield(layout: L.Layout, f: L.Field) -> str:
     ctor = _PROTOFIELD[f.kind]
     mask = f"0x{f.mask:X}" if f.mask is not None else "nil"
     if f.kind == "bool":
-        return f"{ctor}({abbr}, {title}, {f.length * 8}, nil, {mask}, {_lua_string(f.doc)})"
+        # A flag inside an integer shows that integer's width; a standalone
+        # boolean (no mask) must use base.NONE per the Wireshark Lua API.
+        display = f"{max(f.length, 1) * 8}" if f.mask is not None else "base.NONE"
+        return f"{ctor}({abbr}, {title}, {display}, nil, {mask}, {_lua_string(f.doc)})"
     if f.kind in ("bytes", "eui48"):
         return f"{ctor}({abbr}, {title}, base.NONE, {_lua_string(f.doc)})"
     base = "base.HEX" if f.base == "hex" else "base.DEC"
@@ -144,4 +147,74 @@ def generate_avtp_fields() -> str:
         )
     out.append("")
     out.append("return M")
+    return "\n".join(out) + "\n"
+
+
+def generate_acf_fields() -> str:
+    """The gen/acf_fields.lua module: ACF header, every type, the trailers, specs."""
+    out: list[str] = [GPL_HEADER, "local M = {}", ""]
+    for name in ("acf_msg_type", "acf_crc_type"):
+        vt = L.VALUE_TABLES[name]
+        out.append(f"{_value_table_name(vt.name)} = {{")
+        for code, title in sorted(vt.entries.items()):
+            out.append(f"    [0x{code:02X}] = {_lua_string(title)},")
+        out += ["}", ""]
+
+    defs: dict[str, str] = {}
+    order: list[str] = []
+    for layout in L.ACF_LAYOUTS:
+        for f in layout.fields:
+            key = _field_key(layout, f)
+            text = _protofield(layout, f)
+            if key in defs and defs[key] != text:
+                raise ValueError(
+                    f"field {layout.abbr(f)} defined differently in {layout.name}"
+                )
+            if key not in defs:
+                defs[key] = text
+                order.append(key)
+    out.append("M.f = {}")
+    for key in order:
+        out.append(f"M.f.{key} = {defs[key]}")
+    out += ["", "M.acf_fields = {"]
+    for key in order:
+        out.append(f"    M.f.{key},")
+    out += ["}", ""]
+
+    for layout in L.ACF_LAYOUTS:
+        out.append(f"--- {layout.doc}")
+        out.append(f"function M.add_{layout.name}(tree, tvb, off)")
+        for f in layout.fields:
+            if f.length == 0:
+                continue
+            out.append(
+                f"    tree:add(M.f.{_field_key(layout, f)}, tvb(off + {f.offset}, {f.length}))"
+            )
+        out += ["end", ""]
+
+    out.append(
+        "--- msg_type -> { name, length, add, pad_mode, fixed_only, brief, min_q, max_q, payload }"
+    )
+    out.append("M.specs = {}")
+    for msg_type, spec in sorted(L.ACF_SPECS.items()):
+        max_q = "nil" if spec.max_q is None else str(spec.max_q)
+        payload_key = (
+            _field_key(spec.layout, L.Field("payload", 0, 0, "bytes"))
+            if not spec.fixed_only
+            else None
+        )
+        payload = f"M.f.{payload_key}" if payload_key else "nil"
+        out.append(
+            f"M.specs[0x{msg_type:02X}] = {{ name = {_lua_string(spec.name)}, length = {spec.length}, "
+            f"add = M.add_{spec.layout.name}, pad_mode = {_lua_string(spec.pad_mode)}, "
+            f"fixed_only = {'true' if spec.fixed_only else 'false'}, brief = {'true' if spec.brief else 'false'}, "
+            f"min_q = {spec.min_q}, max_q = {max_q}, payload = {payload} }}"
+        )
+    out += [
+        "",
+        f"M.MSG_TYPE_CHECKSUM = 0x{L.ACF_MSG_TYPE_CHECKSUM:02X}",
+        f"M.MSG_TYPE_CRC = 0x{L.ACF_MSG_TYPE_CRC:02X}",
+        "",
+        "return M",
+    ]
     return "\n".join(out) + "\n"

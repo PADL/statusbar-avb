@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import acf_table as T
+
 
 @dataclass(frozen=True)
 class Field:
@@ -670,10 +672,10 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("aaf_v1", 0x02, 1, (AVTP_STREAM_V1, AAF_V1), 40),
     SubtypeSpec("am824_v0", 0x00, 0, (AVTP_STREAM_V0, AM824_V0, CIP_V0), 32),
     SubtypeSpec("am824_v1", 0x00, 1, (AVTP_STREAM_V1, AM824_V1, CIP_V1), 48),
-    SubtypeSpec("tscf_v0", 0x05, 0, (AVTP_STREAM_V0, TSCF_V0), 24),
-    SubtypeSpec("tscf_v1", 0x05, 1, (AVTP_STREAM_V1, TSCF_V1), 40),
-    SubtypeSpec("ntscf_v0", 0x82, 0, (NTSCF_V0,), 12),
-    SubtypeSpec("ntscf_v1", 0x82, 1, (NTSCF_V1,), 28),
+    SubtypeSpec("tscf_v0", 0x05, 0, (AVTP_STREAM_V0, TSCF_V0), 24, post="acf"),
+    SubtypeSpec("tscf_v1", 0x05, 1, (AVTP_STREAM_V1, TSCF_V1), 40, post="acf"),
+    SubtypeSpec("ntscf_v0", 0x82, 0, (NTSCF_V0,), 12, post="acf"),
+    SubtypeSpec("ntscf_v1", 0x82, 1, (NTSCF_V1,), 28, post="acf"),
     SubtypeSpec("crf_v0", 0x04, 0, (CRF_V0,), 20, post="crf_timestamps"),
     SubtypeSpec("crf_v1", 0x04, 1, (CRF_V1,), 36, post="crf_timestamps"),
     SubtypeSpec("maap", 0xFE, 0, (MAAP,), 28),
@@ -701,4 +703,146 @@ SUBTYPE_LAYOUTS: tuple[Layout, ...] = (
     AEF_DISCRETE,
     ESCF,
     EECF,
+)
+
+
+# ---------------------------------------------------------------------------
+# ACF messages inside TSCF/NTSCF (wave 3): the common header, one layout per
+# clause 9.4 type from acf_table.py, and the Checksum/CRC trailers. Offsets are
+# from the start of the message (its two-octet header included).
+# ---------------------------------------------------------------------------
+
+VALUE_TABLES["acf_msg_type"] = ValueTable("acf_msg_type", dict(T.ACF_MSG_TYPE_NAMES))
+VALUE_TABLES["acf_crc_type"] = ValueTable("acf_crc_type", dict(T.ACF_CRC_TYPE_NAMES))
+
+ACF_HEADER = Layout(
+    "acf_header",
+    "avb.acf",
+    "ACF common message header (IEEE 1722-2025 9.4.1, Figure 62)",
+    (
+        Field(
+            "msg_type",
+            0,
+            2,
+            "u8",
+            "acf_msg_type (Table 23)",
+            mask=0xFE00,
+            base="hex",
+            values="acf_msg_type",
+        ),
+        Field(
+            "msg_length",
+            0,
+            2,
+            "u16",
+            "acf_msg_length (quadlets, header included)",
+            mask=0x01FF,
+        ),
+    ),
+)
+
+
+def _acf_field(f: dict) -> Field:
+    kind = "bool" if f["kind"] == "bool" else (f["ctype"] or "u8")
+    mask = None if f["kind"] == "whole" else f["mask"]
+    return Field(
+        f["name"],
+        f["offset"],
+        f["length"],
+        kind,
+        f["doc"],
+        mask=mask,
+        base="hex" if f["hex"] else "dec",
+    )
+
+
+@dataclass(frozen=True)
+class AcfSpec:
+    """How one ACF message type is dissected."""
+
+    name: str
+    msg_type: int
+    layout: Layout
+    length: int  # octets of the fixed part (header included)
+    pad_mode: str  # field / custom / none
+    fixed_only: bool
+    brief: bool
+    min_q: int
+    max_q: int | None
+
+
+# A zero-length placeholder: the payload with its pad octets removed; added by
+# hand, never by add_<layout>().
+def _payload_field() -> Field:
+    return Field("payload", 0, 0, "bytes", "payload (pad octets removed)")
+
+
+ACF_SPECS: dict[int, AcfSpec] = {}
+for _t in T.ACF_TYPES:
+    _layout = Layout(
+        f"acf_{_t['name']}",
+        f"avb.acf.{_t['name']}",
+        f"{_t['title']} (IEEE 1722-2025 {_t['clause']}, {_t['figure']})",
+        tuple(_acf_field(f) for f in _t["fields"])
+        + ((_payload_field(),) if not _t["fixed_only"] else ()),
+    )
+    ACF_SPECS[_t["msg_type"]] = AcfSpec(
+        _t["name"],
+        _t["msg_type"],
+        _layout,
+        _t["length"],
+        _t["pad_mode"],
+        _t["fixed_only"],
+        _t["brief"],
+        _t["min_q"],
+        _t["max_q"],
+    )
+
+ACF_CHECKSUM = Layout(
+    "acf_checksum",
+    "avb.acf.checksum",
+    "ACF Checksum message (IEEE 1722-2025 9.4.20)",
+    (
+        Field(
+            "checksum",
+            2,
+            2,
+            "u16",
+            "ones-complement checksum of the preceding message",
+            base="hex",
+        ),
+        Field(
+            "valid",
+            0,
+            0,
+            "bool",
+            "the preceding message verifies against this checksum",
+        ),
+    ),
+)
+ACF_CRC = Layout(
+    "acf_crc",
+    "avb.acf.crc",
+    "ACF CRC message (IEEE 1722-2025 9.4.21)",
+    (
+        Field(
+            "crc_type",
+            2,
+            2,
+            "u8",
+            "crc_type (Table 30)",
+            mask=0x000F,
+            values="acf_crc_type",
+        ),
+        Field("crc_data", 0, 0, "bytes", "crc_data quadlets"),
+        Field("valid", 0, 0, "bool", "the preceding message verifies against this CRC"),
+    ),
+)
+ACF_MSG_TYPE_CHECKSUM = 0x76
+ACF_MSG_TYPE_CRC = 0x77
+
+ACF_LAYOUTS: tuple[Layout, ...] = (
+    (ACF_HEADER,)
+    + tuple(spec.layout for spec in ACF_SPECS.values())
+    + (ACF_CHECKSUM, ACF_CRC)
 )

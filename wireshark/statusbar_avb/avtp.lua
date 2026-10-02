@@ -39,10 +39,11 @@ local ef_ip_truncated = ProtoExpert.new("avb.ipavtp.expert.truncated", "IP AVTPD
     expert.group.MALFORMED, expert.severity.ERROR)
 M.ipproto.experts = { ef_ip_truncated }
 
--- Per-subtype dissectors: subtype -> function(tvb, pinfo, tree, header)
--- where header carries subtype, version, kind, header_length. A subtype
--- dissector returns nothing; it adds its own subtrees after the common
--- header. Later waves fill this in.
+-- Per-subtype dissectors: subtype -> function(tvb, pinfo, root, header, tree)
+-- where root is this AVTPDU's subtree, tree the packet tree (for a dissector
+-- that adds its own protocol layer, like the ACF module), and header carries
+-- subtype, version, kind, header_length and rest (where the header ends). A
+-- subtype dissector returns nothing.
 M.subtype_dissectors = {}
 
 -- The header kind by subtype (Table 6): stream, control, alternative or
@@ -106,14 +107,16 @@ local function dissect_avtpdu(tvb, pinfo, tree)
 
     -- What follows the header: a post hook (CRF timestamps), a registered
     -- subtype dissector (the ACF and ATDECC modules), or undissected payload.
+    -- (a post hook the streams module does not implement - "acf" - belongs
+    -- to a subtype dissector registered below instead)
     local rest = header_length
-    if spec ~= nil and spec.post ~= nil then
+    if spec ~= nil and spec.post ~= nil and streams.post[spec.post] ~= nil then
         rest = streams.post[spec.post](root, tvb, header_length, pinfo)
     end
     local header = { subtype = subtype, version = version, kind = kind, header_length = header_length, rest = rest }
     local sub = M.subtype_dissectors[subtype]
     if sub ~= nil then
-        sub(tvb, pinfo, root, header)
+        sub(tvb, pinfo, root, header, tree)
     elseif len > rest then
         root:add(gen.f.avtp_payload, tvb(rest))
     end

@@ -31,7 +31,7 @@ SKIP = 77
 def normalise(value: object) -> int | str | None:
     """A tshark JSON field value as the reference decoder would state it."""
     if isinstance(value, list):
-        value = value[0]
+        value = value[-1]  # a repeated field: the reference records the last occurrence
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -67,6 +67,10 @@ def tshark_layers(tshark: str, loader: str, capture: str) -> list[dict]:
             staged_capture,
             "-T",
             "json",
+            # --no-duplicate-keys: repeated keys (one subtree per ACF message, one entry
+            # per CRF timestamp) become arrays instead of being collapsed to the last
+            # occurrence by the JSON parser
+            "--no-duplicate-keys",
         ]
         env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, XDG_DATA_HOME=home)
         result = subprocess.run(
@@ -82,6 +86,14 @@ def tshark_layers(tshark: str, loader: str, capture: str) -> list[dict]:
     start = text.find("[")
     if start < 0:
         raise RuntimeError("tshark produced no JSON")
+    if "Lua Error" in text:
+        # A runtime error inside a dissector lands in the tree as an expert
+        # item, not on stderr; treat it as a failed run.
+        for line in text.splitlines():
+            if "Lua Error" in line:
+                print(line.strip()[:200], file=sys.stderr)
+                break
+        raise RuntimeError("a dissector raised a Lua error")
     return [entry["_source"]["layers"] for entry in json.loads(text[start:])]
 
 

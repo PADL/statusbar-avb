@@ -16,6 +16,7 @@ from . import luagen
 
 GENERATED: dict[str, object] = {
     "statusbar_avb/gen/avtp_fields.lua": luagen.generate_avtp_fields,
+    "statusbar_avb/gen/acf_fields.lua": luagen.generate_acf_fields,
 }
 
 

@@ -90,6 +90,39 @@ M.values_eecf_enc = {
     [0x00] = "ECC1",
 }
 
+M.values_acf_msg_type = {
+    [0x00] = "ACF_FLEXRAY",
+    [0x01] = "ACF_CAN",
+    [0x02] = "ACF_CAN_BRIEF",
+    [0x03] = "ACF_LIN",
+    [0x04] = "ACF_MOST",
+    [0x05] = "ACF_GPC",
+    [0x06] = "ACF_SERIAL",
+    [0x07] = "ACF_PARALLEL",
+    [0x08] = "ACF_SENSOR",
+    [0x09] = "ACF_SENSOR_BRIEF",
+    [0x0A] = "ACF_AECP",
+    [0x0B] = "ACF_ANCILLARY",
+    [0x0C] = "ACF_GISF",
+    [0x0D] = "ACF_BYTE_BUS",
+    [0x0E] = "ACF_BYTE_BUS_BRIEF",
+    [0x0F] = "ACF_I2C",
+    [0x10] = "ACF_I2C_BRIEF",
+    [0x11] = "ACF_CAN_XL",
+    [0x12] = "ACF_CAN_XL_BRIEF",
+    [0x21] = "ACF_CAN_V2",
+    [0x22] = "ACF_CAN_BRIEF_V2",
+    [0x23] = "ACF_LIN_V2",
+    [0x76] = "ACF_CHECKSUM",
+    [0x77] = "ACF_CRC",
+}
+
+M.values_acf_crc_type = {
+    [0x00] = "CRC_ETH",
+    [0x01] = "CRC_32P4",
+    [0x0F] = "CRC_USER",
+}
+
 M.subtype_names = M.values_avtp_subtype
 
 M.header_kind = {
@@ -552,13 +585,13 @@ M.subtype_specs[0x00][0] = { name = "am824_v0", header_length = 32, layouts = { 
 M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
 M.subtype_specs[0x00][1] = { name = "am824_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_am824_v1, M.add_cip_v1 }, post = nil }
 M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}
-M.subtype_specs[0x05][0] = { name = "tscf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_tscf_v0 }, post = nil }
+M.subtype_specs[0x05][0] = { name = "tscf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_tscf_v0 }, post = "acf" }
 M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}
-M.subtype_specs[0x05][1] = { name = "tscf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_tscf_v1 }, post = nil }
+M.subtype_specs[0x05][1] = { name = "tscf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_tscf_v1 }, post = "acf" }
 M.subtype_specs[0x82] = M.subtype_specs[0x82] or {}
-M.subtype_specs[0x82][0] = { name = "ntscf_v0", header_length = 12, layouts = { M.add_ntscf_v0 }, post = nil }
+M.subtype_specs[0x82][0] = { name = "ntscf_v0", header_length = 12, layouts = { M.add_ntscf_v0 }, post = "acf" }
 M.subtype_specs[0x82] = M.subtype_specs[0x82] or {}
-M.subtype_specs[0x82][1] = { name = "ntscf_v1", header_length = 28, layouts = { M.add_ntscf_v1 }, post = nil }
+M.subtype_specs[0x82][1] = { name = "ntscf_v1", header_length = 28, layouts = { M.add_ntscf_v1 }, post = "acf" }
 M.subtype_specs[0x04] = M.subtype_specs[0x04] or {}
 M.subtype_specs[0x04][0] = { name = "crf_v0", header_length = 20, layouts = { M.add_crf_v0 }, post = "crf_timestamps" }
 M.subtype_specs[0x04] = M.subtype_specs[0x04] or {}

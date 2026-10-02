@@ -37,10 +37,12 @@
 #include "statusbar/pcap/pcap_writer.hpp"
 #include "statusbar/tsn/tsn_clock_identity.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
+#include "wireshark_golden_acf.hpp"
 
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 #include <span>
 #include <vector>
 
@@ -348,6 +350,55 @@ auto eecf() -> std::vector<uint8_t>
     return out;
 }
 
+/// A TSCF version-0 AVTPDU carrying @p acf
+auto tscf_frame(std::span<uint8_t const> const acf, uint8_t const sequence) -> std::vector<uint8_t>
+{
+    TscfPdu pdu{};
+    pdu.init(SID);
+    pdu.set_sequence_num(sequence);
+    pdu.set_stream_data_length(static_cast<uint16_t>(acf.size()));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    append(out, acf);
+    return out;
+}
+
+/// An NTSCF version-0 AVTPDU carrying @p acf
+auto ntscf_frame(std::span<uint8_t const> const acf, uint8_t const sequence) -> std::vector<uint8_t>
+{
+    NtscfPdu pdu{};
+    pdu.init(SID);
+    pdu.set_sequence_num_lsb(sequence);
+    pdu.set_ntscf_data_length(static_cast<uint16_t>(acf.size()));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    append(out, acf);
+    return out;
+}
+
+/// An NTSCF version-1 AVTPDU carrying @p acf
+auto ntscf_v1_frame(std::span<uint8_t const> const acf, uint32_t const sequence) -> std::vector<uint8_t>
+{
+    NtscfV1Pdu pdu{};
+    pdu.init(SID);
+    pdu.set_sequence_num(sequence);
+    pdu.set_ntscf_data_length(static_cast<uint16_t>(acf.size()));
+    std::vector<uint8_t> out;
+    append(out, pdu);
+    append(out, acf);
+    return out;
+}
+
+/// @p parts concatenated
+auto concat(std::initializer_list<std::vector<uint8_t>> const parts) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> out;
+    for (auto const& part : parts) {
+        out.insert(out.end(), part.begin(), part.end());
+    }
+    return out;
+}
+
 /// An Ethernet payload carrying IPv4 + UDP + IP AVTPDU header + @p avtpdu
 auto udp_encapsulated(std::span<uint8_t const> const avtpdu, uint16_t const dst_port, uint32_t const sequence)
     -> std::vector<uint8_t>
@@ -424,6 +475,35 @@ int main(int argc, char** argv)
     udp(adp_entity_available(), IP_AVTPDU_PORT_DISCRETE, 44);
     udp(crf_v1(), IP_AVTPDU_PORT_CONTINUOUS, 45);
     udp(maap_announce(), IP_AVTPDU_PORT_DISCRETE, 46);
+
+    // Every clause 9.4 ACF message type, one per TSCF frame ...
+    auto const messages = golden::acf_golden_messages();
+    uint8_t sequence = 0;
+    for (auto const& message : messages) {
+        ethernet(tscf_frame(std::span<uint8_t const>(message.octets), sequence++));
+    }
+    // ... then trailers, a user type, several messages per frame, both
+    // control formats and versions, a broken trailer, and UDP.
+    auto const& can = messages[1].octets;
+    auto const& lin = messages[5].octets;
+    auto const& most = messages[7].octets;
+    auto const& gpc = messages[10].octets;
+    auto const& flexray = messages[0].octets;
+    auto const& i2c = messages[19].octets;
+    auto const& serial = messages[11].octets;
+    ethernet(ntscf_frame(
+        concat(
+            {golden::acf_with_checksum(can),
+             golden::acf_with_crc(lin, AcfCrcType::crc_eth),
+             golden::acf_with_crc(most, AcfCrcType::crc_32p4),
+             golden::acf_user_message()}),
+        1));
+    auto broken = golden::acf_with_checksum(can);
+    broken[5] ^= 0x40U;
+    ethernet(tscf_frame(concat({broken, serial}), 0x77));
+    ethernet(ntscf_v1_frame(concat({flexray, gpc}), 0x00000303U));
+    udp(tscf_frame(concat({i2c, serial}), 0x55), IP_AVTPDU_PORT_CONTINUOUS, 47);
+    udp(ntscf_frame(concat({golden::acf_with_crc(can, AcfCrcType::crc_eth)}), 2), IP_AVTPDU_PORT_DISCRETE, 48);
     writer->flush();
     return 0;
 }
