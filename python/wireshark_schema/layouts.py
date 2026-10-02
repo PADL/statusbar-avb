@@ -543,6 +543,7 @@ AM824_AUDIO = Layout(
     "AM824 data blocks",
     (
         Field("data_blocks", 0, 0, "u16", "data blocks (sample frames) in this AVTPDU"),
+        Field("quadlet", 0, 4, "u32", "AM824 quadlet: label + 24 bits", base="hex"),
         Field("label", 0, 1, "u8", "AM824 label", base="hex", values="am824_label"),
         Field("sample", 1, 3, "i24", "24-bit audio sample (MBLA or IEC 60958)"),
         Field(

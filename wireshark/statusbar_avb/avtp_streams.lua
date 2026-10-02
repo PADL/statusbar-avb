@@ -227,19 +227,26 @@ function M.post.am824_audio(tree, tvb, start, pinfo)
     local blocks = math.floor(length / block)
     local audio = tree:add(tvb(start, blocks * block), string.format("Audio: %d data blocks x %d channels", blocks, dbs))
     audio:add(gen.f.avtp_am824_data_blocks, tvb(start, blocks * block), blocks):set_generated()
+    -- One item per quadlet, its text carrying the label name and the 24-bit
+    -- content (as a signed sample for audio labels, as hex otherwise), with
+    -- the label, the raw 24 bits and the sample as filterable children.
     local function add(t, at)
         local label = tvb(at, 1):uint()
-        local item
-        if am824_is_audio(label) then
-            item = t:add(gen.f.avtp_am824_sample, tvb(at + 1, 3))
-        else
-            item = t:add(gen.f.avtp_am824_data, tvb(at, 4))
-        end
         local name = am824_label_name(label)
-        item:append_text(string.format(" [%s]", name))
+        local is_audio = am824_is_audio(label)
+        local item = t:add(gen.f.avtp_am824_quadlet, tvb(at, 4))
+        if is_audio then
+            item:append_text(string.format(" = %s sample %d", name, tvb(at + 1, 3):int()))
+        else
+            item:append_text(string.format(" = %s data 0x%06x", name, tvb(at + 1, 3):uint()))
+        end
         local label_item = item:add(gen.f.avtp_am824_label, tvb(at, 1))
         if gen.values_am824_label[label] == nil then
             label_item:append_text(string.format(" (%s)", name))
+        end
+        item:add(gen.f.avtp_am824_data, tvb(at, 4))
+        if is_audio then
+            item:add(gen.f.avtp_am824_sample, tvb(at + 1, 3))
         end
     end
     add_grouped(audio, tvb, start, blocks, dbs, 4, add, function(c)

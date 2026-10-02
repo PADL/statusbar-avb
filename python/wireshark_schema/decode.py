@@ -276,14 +276,13 @@ def _post_am824_audio(data: bytes, start: int, out: dict[str, int | str]) -> Non
         if blocks > 0:
             last = start + blocks * block - 4
             label = data[last]
+            quadlet = int.from_bytes(data[last : last + 4], "big")
+            out["avb.avtp.am824.quadlet"] = quadlet
             out["avb.avtp.am824.label"] = label
+            out["avb.avtp.am824.data"] = quadlet & 0x00FFFFFF
             if am824_label_is_audio(label):
                 out["avb.avtp.am824.sample"] = int.from_bytes(
                     data[last + 1 : last + 4], "big", signed=True
-                )
-            else:
-                out["avb.avtp.am824.data"] = (
-                    int.from_bytes(data[last : last + 4], "big") & 0x00FFFFFF
                 )
         rest = start + blocks * block
     if rest < len(data):

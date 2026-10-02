@@ -279,6 +279,7 @@ M.f.avtp_aaf_aes3_u = ProtoField.bool("avb.avtp.aaf.aes3.u", "aes3.u", 32, nil, 
 M.f.avtp_aaf_aes3_v = ProtoField.bool("avb.avtp.aaf.aes3.v", "aes3.v", 32, nil, 0x1000000, "V (validity: 1 = not PCM)")
 M.f.avtp_aaf_aes3_audio_sample_word = ProtoField.int24("avb.avtp.aaf.aes3.audio_sample_word", "aes3.audio_sample_word", base.DEC, nil, nil, "24-bit audio sample word")
 M.f.avtp_am824_data_blocks = ProtoField.uint16("avb.avtp.am824.data_blocks", "data_blocks", base.DEC, nil, nil, "data blocks (sample frames) in this AVTPDU")
+M.f.avtp_am824_quadlet = ProtoField.uint32("avb.avtp.am824.quadlet", "quadlet", base.HEX, nil, nil, "AM824 quadlet: label + 24 bits")
 M.f.avtp_am824_label = ProtoField.uint8("avb.avtp.am824.label", "label", base.HEX, M.values_am824_label, nil, "AM824 label")
 M.f.avtp_am824_sample = ProtoField.int24("avb.avtp.am824.sample", "sample", base.DEC, nil, nil, "24-bit audio sample (MBLA or IEC 60958)")
 M.f.avtp_am824_data = ProtoField.uint32("avb.avtp.am824.data", "data", base.HEX, nil, 0xFFFFFF, "24-bit non-audio data")
@@ -378,6 +379,7 @@ M.avtp_fields = {
     M.f.avtp_aaf_aes3_v,
     M.f.avtp_aaf_aes3_audio_sample_word,
     M.f.avtp_am824_data_blocks,
+    M.f.avtp_am824_quadlet,
     M.f.avtp_am824_label,
     M.f.avtp_am824_sample,
     M.f.avtp_am824_data,
