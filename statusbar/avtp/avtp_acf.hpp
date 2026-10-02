@@ -20,8 +20,10 @@
 /// is asked to (AcfMessageWalker::next_verified).
 
 #include "statusbar/buffer/buffer_traits.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee_base.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -181,6 +183,79 @@ struct AcfMessageView
 /// caller fills the message-specific fields and payload after it and
 /// zero-pads to the quadlet boundary.
 [[nodiscard]] auto acf_store_header(std::span<uint8_t> out, uint8_t msg_type, uint16_t msg_length_quadlets) noexcept -> bool;
+
+//
+// Typed messages - the shape every per-type avtp_acf_<name>.hpp follows
+//
+
+/// A per-type ACF message located in a buffer: its fixed part (the common
+/// header plus the type's message-info quadlets) and its payload quadlets,
+/// both as carried and with the pad octets removed. Fixed must provide
+/// LENGTH (octets of the fixed part, a quadlet multiple), header, pad(),
+/// set_pad() and is_valid() (type and length bounds).
+template <typename Fixed>
+struct AcfTypedMessageView
+{
+    Fixed fixed{};
+    std::span<uint8_t const> padded_payload;  ///< the payload quadlets as carried, pad included
+    std::span<uint8_t const> payload;         ///< the original data, pad removed (9.4.1.7)
+};
+
+/// Parse a per-type message at the start of @p data (the message's own
+/// span, as yielded by the walker): the fixed part must load, be valid for
+/// its type, declare a length that covers it and fits @p data, and carry a
+/// pad no larger than its payload.
+template <typename Fixed>
+[[nodiscard]] auto acf_parse_typed(std::span<uint8_t const> const data) noexcept -> std::optional<AcfTypedMessageView<Fixed>>
+{
+    if (data.size() < Fixed::LENGTH) {
+        return std::nullopt;
+    }
+    Fixed fixed{};
+    span_load(fixed, data);
+    if (!fixed.is_valid()) {
+        return std::nullopt;
+    }
+    auto const total = fixed.header.msg_length_octets();
+    if (total < Fixed::LENGTH || total > data.size()) {
+        return std::nullopt;
+    }
+    auto const padded = data.subspan(Fixed::LENGTH, total - Fixed::LENGTH);
+    size_t const pad = fixed.pad();
+    if (pad > padded.size()) {
+        return std::nullopt;
+    }
+    return AcfTypedMessageView<Fixed>{.fixed = fixed, .padded_payload = padded, .payload = padded.first(padded.size() - pad)};
+}
+
+/// Build a per-type message into @p out from @p fixed (type and fields set
+/// by the caller through init() and the setters) and the original
+/// @p payload: the length and pad fields are filled in, the payload is
+/// copied and zero-padded to the quadlet (9.4.1.7). Returns the octets
+/// written, or 0 when the message would exceed the 9-bit length, the
+/// type's payload bounds (is_valid()), or @p out.
+template <typename Fixed>
+[[nodiscard]] auto acf_build_typed(std::span<uint8_t> const out, Fixed fixed, std::span<uint8_t const> const payload) noexcept
+    -> size_t
+{
+    size_t const quadlets = acf_quadlets_for_octets(Fixed::LENGTH + payload.size());
+    if (quadlets > ACF_MSG_LENGTH_MAX_QUADLETS) {
+        return 0;
+    }
+    size_t const total = quadlets * ACF_QUADLET_OCTETS;
+    if (out.size() < total) {
+        return 0;
+    }
+    fixed.header.set_msg_length(static_cast<uint16_t>(quadlets));
+    fixed.set_pad(acf_pad_for_octets(payload.size()));
+    if (!fixed.is_valid()) {
+        return 0;
+    }
+    span_copy(out.first(Fixed::LENGTH), make_const_span(fixed));
+    span_copy(out.subspan(Fixed::LENGTH, payload.size()), payload);
+    std::ranges::fill(out.subspan(Fixed::LENGTH + payload.size(), total - Fixed::LENGTH - payload.size()), uint8_t{0});
+    return total;
+}
 
 //
 // AcfMessageWalker - iterate the messages of an acf_payload_data
