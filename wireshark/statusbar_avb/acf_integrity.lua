@@ -9,6 +9,13 @@
 -- module loads this file with pcall and simply skips verification when the
 -- host Lua is older.
 
+-- Wireshark 4.x executes every .lua file it finds under a plugin folder,
+-- including this module, passing it (basename, path); only a require() from
+-- the loader statusbar_avb.lua, which passes the dotted module name, may run it.
+if type((...)) ~= "string" or not (...):find("^statusbar_avb%.") then
+    return
+end
+
 local M = {}
 
 local function make_table(reflected_poly)

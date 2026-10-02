@@ -10,6 +10,13 @@
 -- Written from IEEE Std 1722-2025 and this repository's avtp_*.hpp wire
 -- definitions; nothing here derives from Wireshark's own dissectors.
 
+-- Wireshark 4.x executes every .lua file it finds under a plugin folder,
+-- including this module, passing it (basename, path); only a require() from
+-- the loader statusbar_avb.lua, which passes the dotted module name, may run it.
+if type((...)) ~= "string" or not (...):find("^statusbar_avb%.") then
+    return
+end
+
 local M = {}
 
 local gen = require("statusbar_avb.gen.avtp_fields")

@@ -42,14 +42,19 @@ repository's C++ wire-format definitions.
 | `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers; needs Lua 5.3+ (Wireshark 4.4+), otherwise verification is skipped |
 | `statusbar_avb/gen/*.lua` | **generated** field tables and layout decoders — do not edit; regenerate with `python3 -m wireshark_schema gen-lua wireshark` from `avb/python/` |
 
-The module files have no side effects beyond defining tables, so a plugin
-loader that also scans subdirectories cannot register anything twice;
-only `statusbar_avb.lua` registers, and it is idempotent.
+Wireshark executes every `.lua` under a plugin folder, modules included,
+passing each `(basename, path)`; `require()` from the loader passes the
+dotted module name instead, and every module returns immediately unless it
+sees that, so nothing is defined or registered twice. Only
+`statusbar_avb.lua` registers, and it is idempotent.
 
 ## Installing
 
-Copy or link the whole directory into Wireshark's personal plugin folder
-and the loader does the rest:
+Put the whole directory (or a symlink to it) anywhere under Wireshark's
+personal plugin folder; Wireshark 4.x scans it recursively, finds
+`statusbar_avb.lua`, and the loader does the rest. The other `.lua` files
+are also executed by that scan and return at once, so only the loader
+registers anything.
 
 | platform | personal plugin folder |
 |---|---|
@@ -57,19 +62,47 @@ and the loader does the rest:
 | macOS | `~/.config/wireshark/plugins/` (also `~/.local/lib/wireshark/plugins/`) |
 | Windows | `%APPDATA%\Wireshark\plugins\` |
 
+From a checkout (macOS shown; use the Linux folder there):
+
+    mkdir -p ~/.config/wireshark/plugins
+    ln -s "$PWD/avb/wireshark" ~/.config/wireshark/plugins/statusbar-avb
+
+From the tarball, which carries the tree under
+`usr/local/share/statusbar-avb/wireshark/`:
+
+    mkdir -p ~/.config/wireshark/plugins/statusbar-avb
+    tar xzf statusbar-avb-<ver>-<sys>-wireshark.tar.gz \
+        -C ~/.config/wireshark/plugins/statusbar-avb --strip-components=5
+
+The Debian package `statusbar-avb-wireshark` installs the tree under
+`/usr/local/share/statusbar-avb/wireshark/`, which is not a plugin folder;
+link it for each user who wants it (or into the global plugin folder):
+
+    ln -s /usr/local/share/statusbar-avb/wireshark ~/.local/lib/wireshark/plugins/statusbar-avb
+
+Confirm with `tshark -G plugins | grep statusbar_avb` and restart Wireshark.
 For a one-off run without installing:
 
     tshark -X lua_script:/path/to/wireshark/statusbar_avb.lua -r capture.pcap
 
-The Debian package `statusbar-avb-wireshark` installs the directory under
-`/usr/local/share/statusbar-avb/wireshark/`; the `statusbar-avb-*-wireshark`
-tarball carries the same tree for other platforms.
+### Building the tarball and the deb
+
+Packaging is part of the standalone avb build (not the umbrella build), and
+only the `wireshark` component is needed, so from the umbrella directory:
+
+    cmake -S avb -B avb/build -G Ninja --toolchain core/cmake/toolchain-clang.cmake
+    cmake --build avb/build
+    cpack --config avb/build/CPackConfig.cmake -B avb/build -G TGZ -D CPACK_COMPONENTS_ALL=wireshark
+
+which writes `avb/build/statusbar-avb-<ver>-<sys>-wireshark.tar.gz` (`-G DEB`
+on Linux for the `.deb`; `container-build.sh` produces it for the Pi nodes).
 
 ## Testing
 
 `statusbar_avb_wireshark_golden_tool` (built, not installed) writes a
 capture of frames produced by this repository's own C++ builders;
 `python/wireshark_schema/golden_test.py` runs `tshark -T json` over it with
-the loader and compares every `avb.*` field against the reference decoder
-generated from the same schema. The ctest `statusbar/avb/wireshark_golden`
+the loader (once passed with `-X lua_script`, once found by itself in a
+staged personal plugin folder) and compares every `avb.*` field against
+the reference decoder generated from the same schema. The ctest `statusbar/avb/wireshark_golden`
 skips (exit 77) when `tshark` is not installed.

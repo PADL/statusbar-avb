@@ -22,6 +22,13 @@ GPL_HEADER = """\
 -- edit; regenerate with: python3 -m wireshark_schema gen-lua wireshark
 -- The schema is MIT; this emitted file is distributed under the GPL with the
 -- rest of the wireshark/ directory because it uses the Wireshark Lua API.
+--
+-- Wireshark 4.x executes every .lua file it finds under a plugin folder,
+-- including this module, passing it (basename, path); only a require() from
+-- the loader statusbar_avb.lua, which passes the dotted module name, may run it.
+if type((...)) ~= "string" or not (...):find("^statusbar_avb%.") then
+    return
+end
 """
 
 _PROTOFIELD = {

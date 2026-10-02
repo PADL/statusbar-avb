@@ -44,8 +44,18 @@ def normalise(value: object) -> int | str | None:
         return text.replace(":", "").lower()
 
 
-def tshark_layers(tshark: str, loader: str, capture: str) -> list[dict]:
-    """Per-frame layer dictionaries from tshark -T json."""
+def tshark_layers(
+    tshark: str, loader: str, capture: str, installed: bool
+) -> list[dict]:
+    """Per-frame layer dictionaries from tshark -T json.
+
+    With ``installed`` the plugin tree is staged into the temporary HOME's
+    personal plugin folder and tshark finds it by itself, exactly as a user
+    who unpacked the tarball or installed the deb would; otherwise the loader
+    is passed with -X lua_script. Both must give the same tree: Wireshark 4.x
+    executes every .lua under a plugin folder, so each module must be inert
+    when run outside the loader's require().
+    """
     # Everything tshark reads is staged into one temporary directory that is
     # also its HOME. The isolated HOME keeps the user's personal plugins and
     # preferences out of the run (a stray plugin that prints at load would
@@ -54,15 +64,25 @@ def tshark_layers(tshark: str, loader: str, capture: str) -> list[dict]:
     # reading files under arbitrary paths such as a CI work tree but allows
     # the temporary directory.
     with tempfile.TemporaryDirectory(prefix="statusbar-avb-wireshark-") as home:
-        staged_dir = os.path.join(home, "wireshark")
+        if installed:
+            # ~/.local/lib/wireshark/plugins is the personal plugin folder on
+            # Linux and one of the two on macOS (4.x)
+            staged_dir = os.path.join(
+                home, ".local", "lib", "wireshark", "plugins", "statusbar-avb"
+            )
+            script_args: list[str] = []
+        else:
+            staged_dir = os.path.join(home, "wireshark")
+            script_args = [
+                "-X",
+                f"lua_script:{os.path.join(staged_dir, os.path.basename(loader))}",
+            ]
         shutil.copytree(os.path.dirname(os.path.abspath(loader)), staged_dir)
-        staged_loader = os.path.join(staged_dir, os.path.basename(loader))
         staged_capture = os.path.join(home, os.path.basename(capture))
         shutil.copyfile(capture, staged_capture)
         command = [
             tshark,
-            "-X",
-            f"lua_script:{staged_loader}",
+            *script_args,
             "-r",
             staged_capture,
             "-T",
@@ -128,7 +148,20 @@ def main() -> int:
         return SKIP
 
     frames = pcap.avtp_frames(opts.pcap)
-    layers = tshark_layers(tshark, opts.loader, opts.pcap)
+    failures = 0
+    checked = 0
+    for installed in (False, True):
+        mode = "installed plugin folder" if installed else "-X lua_script"
+        layers = tshark_layers(tshark, opts.loader, opts.pcap, installed)
+        f, c = compare(frames, layers, f"[{mode}] ")
+        failures += f
+        checked += c
+    print(f"{len(frames)} frames, {checked} fields checked, {failures} failures")
+    return 1 if failures else 0
+
+
+def compare(frames: list, layers: list[dict], tag: str) -> tuple[int, int]:
+    """(failures, fields checked) of the reference against tshark's layers."""
     failures = 0
     checked = 0
     for frame in frames:
@@ -139,12 +172,12 @@ def main() -> int:
         )
         actual = collect_avb_fields(layers[frame.number - 1])
         if not actual:
-            print(f"frame {frame.number}: tshark shows no avb.* fields")
+            print(f"{tag}frame {frame.number}: tshark shows no avb.* fields")
             failures += 1
             continue
         for name, want in expected.items():
             if name not in actual:
-                print(f"frame {frame.number}: missing {name} (expected {want!r})")
+                print(f"{tag}frame {frame.number}: missing {name} (expected {want!r})")
                 failures += 1
                 continue
             got = normalise(actual[name])
@@ -154,12 +187,11 @@ def main() -> int:
                 )  # byte values are lowercased hex; strings are compared case-blind too
             if got != want:
                 print(
-                    f"frame {frame.number}: {name}: tshark {got!r} != reference {want!r}"
+                    f"{tag}frame {frame.number}: {name}: tshark {got!r} != reference {want!r}"
                 )
                 failures += 1
             checked += 1
-    print(f"{len(frames)} frames, {checked} fields checked, {failures} failures")
-    return 1 if failures else 0
+    return failures, checked
 
 
 if __name__ == "__main__":
