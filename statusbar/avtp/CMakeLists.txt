@@ -11,6 +11,9 @@ statusbar_add_module(
   avtp_aaf_v1_stream_output.cpp
   avtp_aaf_stream_input.cpp
   avtp_aaf_stream_output.cpp
+  avtp_acf.cpp
+  avtp_acf_checksum.cpp
+  avtp_acf_crc.cpp
   avtp_aef.cpp
   avtp_am824.cpp
   avtp_am824_v1.cpp
@@ -34,6 +37,7 @@ statusbar_add_module(
   avtp_types.cpp
   DEPS
   statusbar::buffer
+  statusbar::checksum
   statusbar::ieee
   statusbar::ip
   statusbar::sm
@@ -46,6 +50,9 @@ statusbar_add_module(
   avtp_aaf_v1_test.cpp
   avtp_aaf_v1_stream_input_test.cpp
   avtp_aaf_v1_stream_output_test.cpp
+  avtp_acf_test.cpp
+  avtp_acf_checksum_test.cpp
+  avtp_acf_crc_test.cpp
   avtp_aef_test.cpp
   avtp_am824_test.cpp
   avtp_am824_v1_test.cpp
@@ -77,6 +84,9 @@ set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
 # Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_v1_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_checksum_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_crc_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_v1_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_crf_fuzzer.cpp)

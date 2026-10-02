@@ -107,7 +107,8 @@ CSV output into plots and stats.
 
 ### Modules
 
-- **`avtp`** — IEEE 1722 transport: AAF (v0 + v1), AM824, CRF, NTSCF/TSCF,
+- **`avtp`** — IEEE 1722 transport: AAF (v0 + v1), AM824, CRF, NTSCF/TSCF
+  with the ACF message walker (Checksum/CRC trailers verified on request),
   AEF, ESCF/EECF, MAAP, IP encapsulation, and stream input/output state
   machines.
 - **`avtp_crypto`** — AVTP control-plane crypto: key exchange, keychain,

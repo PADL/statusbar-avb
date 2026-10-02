@@ -153,6 +153,7 @@ TEST(ntscf, get_acf_payload)
 {
     std::array<uint8_t, 24> buf{};
     buf[0] = AvtpSubtype::ntscf;
+    buf[2] = 12;     // ntscf_data_length: the 12 octets after the header
     buf[12] = 0xCA;  // first byte of ACF payload
 
     auto payload = ntscf_get_acf_payload(std::span<uint8_t const>(buf));
@@ -162,6 +163,14 @@ TEST(ntscf, get_acf_payload)
     // Header-only packet returns empty
     auto empty = ntscf_get_acf_payload(std::span<uint8_t const>(buf.data(), NtscfPdu::HEADER_LENGTH));
     EXPECT_TRUE(empty.empty());
+
+    // A declared ntscf_data_length bounds the payload below the buffer
+    // extent (Ethernet min-frame padding is not ACF data) ...
+    buf[2] = 8;
+    EXPECT_EQ(ntscf_get_acf_payload(std::span<uint8_t const>(buf)).size(), 8U);
+    // ... and a declared length past the buffer clamps to what is there.
+    buf[2] = 200;
+    EXPECT_EQ(ntscf_get_acf_payload(std::span<uint8_t const>(buf)).size(), 12U);
 }
 
 TEST(ntscf, format_to_output)
