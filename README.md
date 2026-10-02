@@ -108,8 +108,11 @@ CSV output into plots and stats.
 ### Modules
 
 - **`avtp`** — IEEE 1722 transport: AAF (v0 + v1), AM824, CRF, NTSCF/TSCF
-  with the ACF message walker (Checksum/CRC trailers verified on request),
-  AEF, ESCF/EECF, MAAP, IP encapsulation, and stream input/output state
+  with the ACF message walker (Checksum/CRC trailers verified on request)
+  and every clause 9.4 ACF message type (`avtp_acf_*.hpp`: FlexRay, CAN
+  and CAN XL with their brief and V2 forms, LIN, MOST, GPC, serial,
+  parallel, sensor, AECP, ancillary data, byte bus and I2C), AEF,
+  ESCF/EECF, MAAP, IP encapsulation, and stream input/output state
   machines.
 - **`avtp_crypto`** — AVTP control-plane crypto: key exchange, keychain,
   AEM-frame authentication, P-256 wire helpers.

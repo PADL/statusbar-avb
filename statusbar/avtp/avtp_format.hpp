@@ -13,6 +13,7 @@
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_aaf_format.hpp"
 #include "statusbar/avtp/avtp_aaf_v1_format.hpp"
+#include "statusbar/avtp/avtp_acf_dispatch_format.hpp"
 #include "statusbar/avtp/avtp_aef_format.hpp"
 #include "statusbar/avtp/avtp_am824_format.hpp"
 #include "statusbar/avtp/avtp_am824_v1_format.hpp"

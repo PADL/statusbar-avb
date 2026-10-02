@@ -5,11 +5,13 @@
 
 /// AVTP Dispatcher - format_avtp() routes to the appropriate subtype
 /// formatter for IEEE 1722 stream data payloads (AM824, AAF, CRF, AEF,
-/// ESCF, EECF). Split from avtp_print.hpp so consumers that do not
-/// need formatting do not pay the compile-time cost of <format>.
+/// ESCF, EECF, and TSCF/NTSCF with their ACF messages). Split from
+/// avtp_print.hpp so consumers that do not need formatting do not pay the
+/// compile-time cost of <format>.
 
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_aaf_format.hpp"
+#include "statusbar/avtp/avtp_acf_dispatch_format.hpp"
 #include "statusbar/avtp/avtp_aef.hpp"
 #include "statusbar/avtp/avtp_aef_format.hpp"
 #include "statusbar/avtp/avtp_am824.hpp"
@@ -20,6 +22,14 @@
 #include "statusbar/avtp/avtp_eecf_format.hpp"
 #include "statusbar/avtp/avtp_escf.hpp"
 #include "statusbar/avtp/avtp_escf_format.hpp"
+#include "statusbar/avtp/avtp_ntscf.hpp"
+#include "statusbar/avtp/avtp_ntscf_format.hpp"
+#include "statusbar/avtp/avtp_ntscf_v1.hpp"
+#include "statusbar/avtp/avtp_ntscf_v1_format.hpp"
+#include "statusbar/avtp/avtp_tscf.hpp"
+#include "statusbar/avtp/avtp_tscf_format.hpp"
+#include "statusbar/avtp/avtp_tscf_v1.hpp"
+#include "statusbar/avtp/avtp_tscf_v1_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
 
 #include <cstdint>
@@ -224,6 +234,45 @@ auto format_avtp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
             auto enc_payload = eecf_get_encrypted_payload(payload);
             if (!enc_payload.empty()) {
                 out = std::format_to(out, "       encrypted payload: {} bytes\n", enc_payload.size());
+            }
+            break;
+        }
+
+        case AvtpSubtype::tscf: {
+            // TSCF (Time-Synchronous Control Format): the header (version 0 or 1),
+            // then the ACF messages it carries (Clause 9.4).
+            if (auto const pdu = tscf_parse_header(payload); pdu.has_value()) {
+                out = std::format_to(out, "  ");
+                out = format_to(out, *pdu);
+                out = std::format_to(out, "\n");
+                out = format_acf_payload(out, tscf_get_acf_payload(payload));
+            } else if (auto const v1 = tscf_v1_parse_header(payload); v1.has_value()) {
+                out = std::format_to(out, "  ");
+                out = format_to(out, *v1);
+                out = std::format_to(out, "\n");
+                out = format_acf_payload(out, tscf_v1_get_acf_payload(payload));
+            } else {
+                out = std::format_to(out, "  AVTP TSCF invalid or truncated header\n");
+                return detail::format_hex_dump(out, payload);
+            }
+            break;
+        }
+
+        case AvtpSubtype::ntscf: {
+            // NTSCF (Non-Time-Synchronous Control Format), likewise.
+            if (auto const pdu = ntscf_parse_header(payload); pdu.has_value()) {
+                out = std::format_to(out, "  ");
+                out = format_to(out, *pdu);
+                out = std::format_to(out, "\n");
+                out = format_acf_payload(out, ntscf_get_acf_payload(payload));
+            } else if (auto const v1 = ntscf_v1_parse_header(payload); v1.has_value()) {
+                out = std::format_to(out, "  ");
+                out = format_to(out, *v1);
+                out = std::format_to(out, "\n");
+                out = format_acf_payload(out, ntscf_v1_get_acf_payload(payload));
+            } else {
+                out = std::format_to(out, "  AVTP NTSCF invalid or truncated header\n");
+                return detail::format_hex_dump(out, payload);
             }
             break;
         }

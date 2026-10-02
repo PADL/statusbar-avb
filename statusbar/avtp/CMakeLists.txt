@@ -70,6 +70,11 @@ statusbar_add_module(
   avtp_acf_sensor_brief_test.cpp
   avtp_acf_aecp_test.cpp
   avtp_acf_ancillary_test.cpp
+  avtp_acf_byte_bus_test.cpp
+  avtp_acf_byte_bus_brief_test.cpp
+  avtp_acf_i2c_test.cpp
+  avtp_acf_i2c_brief_test.cpp
+  avtp_acf_dispatch_format_test.cpp
   avtp_aef_test.cpp
   avtp_am824_test.cpp
   avtp_am824_v1_test.cpp
@@ -121,6 +126,10 @@ add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_sensor_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_sensor_brief_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_aecp_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_ancillary_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_byte_bus_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_byte_bus_brief_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_i2c_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_i2c_brief_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_v1_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_crf_fuzzer.cpp)
