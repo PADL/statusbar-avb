@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: GPL-2.0-or-later
+-- SPDX-License-Identifier: MIT
 -- Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 --
 -- Per-subtype detail for the AVTP stream, clock and control formats whose

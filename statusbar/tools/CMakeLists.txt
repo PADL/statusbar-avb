@@ -228,7 +228,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                                       gps_ratio_tracker)
 endif()
 
-# ---- Wireshark dissectors (wireshark/, GPL; schema in python/wireshark_schema,
+# ---- Wireshark dissectors (wireshark/, MIT; schema in python/wireshark_schema,
 # MIT) ---- The golden tool writes a capture of builder-produced AVTPDUs (built,
 # never installed); the golden test runs tshark with the Lua loader over it and
 # compares every avb.* field with the schema's reference decoder. Skips (77)

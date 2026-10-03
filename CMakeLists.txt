@@ -187,12 +187,11 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
       "C++ headers, static libraries and CMake package config")
 
   # ---- Wireshark dissectors: a third component and its own packages ----
-  # wireshark/ is GPL-2.0-or-later (it uses the Wireshark Lua API) and is a
-  # separate work from the MIT code here, so it ships on its own: the
-  # arch-independent Debian package statusbar-avb-wireshark and, through
-  # CPACK_ARCHIVE_COMPONENT_INSTALL, a statusbar-avb-<ver>-<sys>-wireshark
-  # tarball for other platforms. Nothing in the runtime or devel packages
-  # depends on it.
+  # wireshark/ is Lua for Wireshark rather than part of the library, so it ships
+  # on its own: the arch-independent Debian package statusbar-avb-wireshark and,
+  # through CPACK_ARCHIVE_COMPONENT_INSTALL, a
+  # statusbar-avb-<ver>-<sys>-wireshark tarball for other platforms. Nothing in
+  # the runtime or devel packages depends on it.
   install(
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/wireshark/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/statusbar-avb/wireshark
@@ -203,7 +202,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     PATTERN "README.md")
   list(APPEND CPACK_COMPONENTS_ALL wireshark)
   set(CPACK_COMPONENT_WIRESHARK_DESCRIPTION
-      "Wireshark Lua dissectors for IEEE 1722 / IEEE 1722.1 (GPL-2.0-or-later)")
+      "Wireshark Lua dissectors for IEEE 1722 / IEEE 1722.1 (MIT)")
   set(CPACK_DEBIAN_WIRESHARK_PACKAGE_NAME "statusbar-avb-wireshark")
   set(CPACK_DEBIAN_WIRESHARK_PACKAGE_ARCHITECTURE "all")
   set(CPACK_DEBIAN_WIRESHARK_PACKAGE_SHLIBDEPS OFF)

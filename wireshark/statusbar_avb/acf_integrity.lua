@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: GPL-2.0-or-later
+-- SPDX-License-Identifier: MIT
 -- Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 --
 -- The arithmetic behind the ACF_CHECKSUM (9.4.20) and ACF_CRC (9.4.21)

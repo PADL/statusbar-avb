@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: GPL-2.0-or-later
+-- SPDX-License-Identifier: MIT
 -- Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 --
 -- IEEE 1722-2025 AVTP: the common headers (stream version 0 and 1, control,

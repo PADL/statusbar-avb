@@ -32,20 +32,23 @@ Commands and responses are paired on (controller, sequence) and shown as
 
 ## License
 
-**This directory is licensed under the GNU General Public License,
-version 2 or later (see `LICENSE`), because its contents use the Wireshark
-Lua API and the Wireshark project considers dissectors derivative works
-of Wireshark.** It is a separate work from the rest of this repository,
-which is MIT; the two are merely aggregated here. The schema and the
-generator that produce the `statusbar_avb/gen/*.lua` files live in
-`python/wireshark_schema/` and remain MIT (the ACF layouts are
+This directory is MIT licensed (see `LICENSE`), the same as the rest of
+this repository: the hand-written dissector modules, the generated
+`statusbar_avb/gen/*.lua` tables, and the schema and generator in
+`python/wireshark_schema/` that produce them (the ACF layouts are
 `acf_table.py`, the same table the C++ `avtp_acf_*.hpp` headers came from;
 the ATDECC layouts are `atdecc_table.py` and `atdecc_units.py`, extracted
 from the C++ `atdecc_*.hpp` wire structs, plus `atdecc_std.py` written from
 IEEE Std 1722.1-2021 (`docs/1722.1-2021.pdf`) and the Milan specification
-for what the C++ has no struct for), as does every C++ source. Do
-not copy anything from Wireshark's own sources or dissectors into these
-files: everything here is written from the IEEE standards and from this
+for what the C++ has no struct for).
+
+Note that the Wireshark project regards Lua dissectors that use its API as
+derivative works of Wireshark, which is GPL-2.0-or-later. MIT is
+GPL-compatible, so loading these files into Wireshark raises no conflict,
+and that is the common practice for third-party Lua dissectors; the
+licence stated here is the one these files are offered under. Do not copy
+anything from Wireshark's own sources or dissectors into these files:
+everything here is written from the IEEE standards and from this
 repository's C++ wire-format definitions.
 
 ## Layout

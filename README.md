@@ -142,7 +142,7 @@ CSV output into plots and stats.
 - **`netdump`** — AVB/AVTP-aware packet capture and frame-by-frame dump
   (pcap/pcapng).
 
-**Wireshark:** `wireshark/` holds Lua dissectors for IEEE 1722 and IEEE 1722.1 over Ethernet and UDP that take priority over Wireshark's builtin `ieee1722`/`ieee17221` (filter namespace `avb.*`). They are GPL-2.0-or-later (a separate work, see `wireshark/README.md`), generated from the MIT schema in `python/wireshark_schema/`, and ship as the `statusbar-avb-wireshark` Debian package / a `-wireshark` tarball.
+**Wireshark:** `wireshark/` holds Lua dissectors for IEEE 1722 and IEEE 1722.1 over Ethernet and UDP that take priority over Wireshark's builtin `ieee1722`/`ieee17221` (filter namespace `avb.*`). They are MIT like the rest of the repository (see `wireshark/README.md`), generated from the schema in `python/wireshark_schema/`, and ship as the `statusbar-avb-wireshark` Debian package / a `-wireshark` tarball.
 
 ## Building
 

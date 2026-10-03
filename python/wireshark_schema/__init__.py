@@ -5,6 +5,6 @@
 The tables in ``layouts`` describe the frame formats once; ``luagen`` turns them
 into the generated Lua field tables under ``wireshark/statusbar_avb/gen/``, and
 ``decode`` applies the same tables as a reference decoder that the golden-capture
-test compares against ``tshark`` output. The schema and this package are MIT;
-the Lua they emit is distributed under the GPL with the rest of ``wireshark/``.
+test compares against ``tshark`` output. The schema, this package and the Lua they
+emit are all MIT (see ``wireshark/LICENSE``).
 """
