@@ -15,10 +15,19 @@ headers as `avb.avtp.cvf.mjpeg.*`, `.h264.*`, `.h265.*`, `.jpeg2000.*`; SDI,
 raw video and vendor-specific headers as `avb.avtp.svf.*`, `.rvf.*`, `.vsf.*`),
 `avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
 TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and
-`avb.atdecc.*` (ADP, ACMP and AECP: every AEM command payload, every
-descriptor a READ_DESCRIPTOR response can carry including its counted
-trailers, control values, the JDKS log/IPv4 vendor blobs, Address Access
-TLVs, Vendor Unique; e.g. `avb.atdecc.aem.command_type == 0x0004`).
+`avb.atdecc.*` (ADP, ACMP and AECP: the AEM command payloads the C++
+implements plus, from the standard, video/sensor formats and maps,
+association id, AS path, stream encryption, memory object length and
+stream backup; every descriptor with all of its counted tables; control
+value_details typed per IEEE 1722.1-2021 Table 7.12 as `avb.atdecc.control.*`,
+with SET/GET_CONTROL, MIXER and MATRIX values typed from the descriptor
+already seen in the capture; stream formats as `avb.atdecc.stream_format.*`;
+the JDKS log/IPv4 vendor blobs; Address Access TLVs; AVC; Milan vendor
+unique as `avb.atdecc.mvu.*`; e.g. `avb.atdecc.aem.command_type == 0x0004`).
+Still raw: the AUTH_* / transport security commands, GET_DYNAMIC_INFO,
+SET/GET_SAMPLING_RATE_RANGE, GET_PATH_LATENCY and the 2021 PTP_INSTANCE /
+PTP_PORT family (no payload definitions in this repository), HDCP APM and
+EXTENDED AECP messages.
 Commands and responses are paired on (controller, sequence) and shown as
 *Response in* / *Response to* / *Response time* generated items.
 
@@ -32,8 +41,10 @@ which is MIT; the two are merely aggregated here. The schema and the
 generator that produce the `statusbar_avb/gen/*.lua` files live in
 `python/wireshark_schema/` and remain MIT (the ACF layouts are
 `acf_table.py`, the same table the C++ `avtp_acf_*.hpp` headers came from;
-the ATDECC layouts are `atdecc_table.py`, extracted from the C++
-`atdecc_*.hpp` wire structs), as does every C++ source. Do
+the ATDECC layouts are `atdecc_table.py` and `atdecc_units.py`, extracted
+from the C++ `atdecc_*.hpp` wire structs, plus `atdecc_std.py` written from
+IEEE 1722.1 and the Milan specification for what the C++ has no struct
+for), as does every C++ source. Do
 not copy anything from Wireshark's own sources or dissectors into these
 files: everything here is written from the IEEE standards and from this
 repository's C++ wire-format definitions.
@@ -46,7 +57,7 @@ repository's C++ wire-format definitions.
 | `statusbar_avb/avtp.lua` | hand-written AVTP dissector logic (header kinds, dispatch, preferences) |
 | `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps; AAF PCM samples and AES3 subframes; IEC 61883: IIDC, CIP, AM824 data blocks, IEC 61883-4 MPEG2-TS source packets; CVF: MJPEG, H.264 and H.265 NAL/FU headers, JPEG 2000; audio grouped by channel or by frame per the preference *Audio sample grouping*) and info-column summaries for every stream subtype (IEC 61883, MMA, AAF, CVF, CRF, TSCF, SVF, RVF, VSF, EF, NTSCF) and MAAP, AEF, ESCF, EECF |
 | `statusbar_avb/acf.lua` | the ACF message walker inside TSCF/NTSCF: every clause 9.4 type, pad rules, Checksum/CRC trailer verification (preference *Verify ACF Checksum/CRC trailers*) |
-| `statusbar_avb/atdecc.lua` | IEEE 1722.1: ADP, ACMP, AECP (AEM payloads and descriptors by table, control values, Address Access TLVs, Vendor Unique), command/response pairing |
+| `statusbar_avb/atdecc.lua` | IEEE 1722.1: ADP, ACMP, AECP (AEM payloads and every descriptor's counted tables by table; control value_details typed by control_value_type, and SET/GET_CONTROL / MIXER / MATRIX values typed from the descriptor seen earlier in the capture; stream formats broken into AAF / IEC 61883-6 / CRF fields; Address Access TLVs; AVC; Milan vendor unique (MVU) commands; other Vendor Unique raw), command/response pairing |
 | `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers; needs Lua 5.3+ (Wireshark 4.4+), otherwise verification is skipped |
 | `statusbar_avb/gen/*.lua` | **generated** field tables and layout decoders — do not edit; regenerate with `python3 -m wireshark_schema gen-lua wireshark` from `avb/python/` |
 

@@ -24,7 +24,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wireshark_schema import decode, pcap  # noqa: E402
+from wireshark_schema import decode, decode_atdecc, pcap  # noqa: E402
 
 SKIP = 77
 
@@ -157,6 +157,8 @@ def main() -> int:
     checked = 0
     for installed in (False, True):
         mode = "installed plugin folder" if installed else "-X lua_script"
+        # each tshark run starts with no learned control types; so does the reference
+        decode_atdecc.control_types.clear()
         layers = tshark_layers(tshark, opts.loader, opts.pcap, installed)
         f, c = compare(frames, layers, f"[{mode}] ")
         failures += f

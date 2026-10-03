@@ -21,6 +21,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -91,6 +92,15 @@ template <typename Descriptor>
 auto descriptor_bytes(Descriptor const& descriptor) -> std::vector<uint8_t>
 {
     auto const bytes = make_const_span(descriptor).first(descriptor.wire_size());
+    return {bytes.begin(), bytes.end()};
+}
+
+/// A descriptor's fixed part only (LENGTH octets), for descriptors whose
+/// inline trailer storage is not what the golden frame appends
+template <typename Descriptor>
+auto descriptor_fixed_bytes(Descriptor const& descriptor) -> std::vector<uint8_t>
+{
+    auto const bytes = make_const_span(descriptor).first(Descriptor::LENGTH);
     return {bytes.begin(), bytes.end()};
 }
 
@@ -346,6 +356,309 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
                  std::span<uint8_t const>(bytes_of(header)),
                  std::span<uint8_t const>(mappings))});
         frames.push_back({"aem_entity_available_command", aem(AEM_COMMAND_ENTITY_AVAILABLE, false, 14, {})});
+    }
+
+    // ---- AEM: descriptors with counted tables and typed control values ----
+    {
+        // CONTROL: LINEAR_UINT16 gain, two values, dB x 10^-1, then SET_CONTROL
+        // (typed from the descriptor) and a GET_CONTROL response
+        DescriptorControl control{};
+        control.descriptor_index = 3;
+        control.object_name.assign("Gain");
+        control.control_value_type = 0x0003;  // CONTROL_LINEAR_UINT16
+        control.control_type = Eui64{0x90, 0xE0, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x01};
+        control.values_offset = DescriptorControl::LENGTH;
+        control.number_of_values = 2;
+        auto bytes = descriptor_fixed_bytes(control);
+        std::array<uint8_t, 28> const values{
+            0x00, 0x00, 0x03, 0xE8, 0x00, 0x01, 0x01,
+            0xF4, 0x02, 0x58, 0xFF, 0xB0, 0x00, 0x07,  // 0..1000 step 1 default 500 current 600, dB x10^-1, string 7
+            0x00, 0x00, 0x03, 0xE8, 0x00, 0x01, 0x01,
+            0xF4, 0x00, 0x64, 0xFF, 0xB0, 0x00, 0x08,
+        };
+        bytes.insert(bytes.end(), values.begin(), values.end());
+        frames.push_back({"aem_read_descriptor_control_response", read_descriptor_response(bytes, 20)});
+        AemControlPayloadHeader header{};
+        header.descriptor_type = DESCRIPTOR_CONTROL;
+        header.descriptor_index = 3;
+        std::array<uint8_t, 4> const current{0x02, 0xBC, 0x00, 0x32};
+        frames.push_back(
+            {"aem_set_control_typed_command",
+             aem(AEM_COMMAND_SET_CONTROL,
+                 false,
+                 21,
+                 std::span<uint8_t const>(bytes_of(header)),
+                 std::span<uint8_t const>(current))});
+        frames.push_back(
+            {"aem_get_control_typed_response",
+             aem(AEM_COMMAND_GET_CONTROL,
+                 true,
+                 22,
+                 std::span<uint8_t const>(bytes_of(header)),
+                 std::span<uint8_t const>(current))});
+    }
+    {
+        // CONTROL with a SELECTOR_STRING (3 options) and one with UTF8
+        DescriptorControl selector{};
+        selector.descriptor_index = 4;
+        selector.object_name.assign("Mode");
+        selector.control_value_type = 0x0014;  // CONTROL_SELECTOR_STRING
+        selector.values_offset = DescriptorControl::LENGTH;
+        selector.number_of_values = 3;
+        auto bytes = descriptor_fixed_bytes(selector);
+        std::array<uint8_t, 12> const values{0x00, 0x11, 0x00, 0x10, 0x00, 0x10, 0x00, 0x11, 0x00, 0x12, 0x00, 0x00};
+        bytes.insert(bytes.end(), values.begin(), values.end());
+        frames.push_back({"aem_read_descriptor_control_selector_response", read_descriptor_response(bytes, 23)});
+        DescriptorControl utf8{};
+        utf8.descriptor_index = 5;
+        utf8.object_name.assign("Label");
+        utf8.control_value_type = 0x001F;  // CONTROL_UTF8
+        utf8.values_offset = DescriptorControl::LENGTH;
+        utf8.number_of_values = 1;
+        auto text_bytes = descriptor_fixed_bytes(utf8);
+        std::string_view const text{"Stage left\0"};
+        text_bytes.insert(text_bytes.end(), text.begin(), text.end());
+        frames.push_back({"aem_read_descriptor_control_utf8_response", read_descriptor_response(text_bytes, 24)});
+    }
+    {
+        // MIXER: two sources and one LINEAR_INT32 value; MATRIX: 2x2 LINEAR_INT16
+        DescriptorMixer mixer{};
+        mixer.object_name.assign("Mix");
+        mixer.control_value_type = 0x0004;  // CONTROL_LINEAR_INT32
+        mixer.sources_offset = DescriptorMixer::LENGTH;
+        mixer.number_of_sources = 2;
+        mixer.value_offset = DescriptorMixer::LENGTH + 8;
+        auto bytes = descriptor_bytes(mixer);
+        std::array<uint8_t, 8 + 24> const tail{
+            0x00, 0x1D, 0x00, 0x00, 0x00, 0x1D, 0x00, 0x01,  // AUDIO_CLUSTER 0, 1
+            0xFF, 0xFF, 0xFF, 0x9C, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFA, 0xFF, 0xB0, 0x00, 0x00,
+        };
+        bytes.insert(bytes.end(), tail.begin(), tail.end());
+        frames.push_back({"aem_read_descriptor_mixer_response", read_descriptor_response(bytes, 25)});
+        DescriptorMatrix matrix{};
+        matrix.object_name.assign("Matrix");
+        matrix.control_value_type = 0x0002;  // CONTROL_LINEAR_INT16
+        matrix.width = 2;
+        matrix.height = 2;
+        matrix.values_offset = DescriptorMatrix::LENGTH;
+        matrix.number_of_values = 4;
+        matrix.number_of_sources = 2;
+        auto mbytes = descriptor_bytes(matrix);
+        for (uint8_t i = 0; i < 4; ++i) {
+            std::array<uint8_t, 14> const entry{0x80, 0x00, 0x7F, 0xFF, 0x00, 0x01, 0x00, 0x00, 0x00, i, 0xFF, 0xB0, 0x00, 0x00};
+            mbytes.insert(mbytes.end(), entry.begin(), entry.end());
+        }
+        frames.push_back({"aem_read_descriptor_matrix_response", read_descriptor_response(mbytes, 26)});
+        AemMatrixPayloadHeader set_matrix{};
+        set_matrix.descriptor_type = DESCRIPTOR_MATRIX;
+        set_matrix.descriptor_index = 0;
+        set_matrix.region_width = 2;
+        set_matrix.region_height = 1;
+        set_matrix.rep_direction_value_count = 2;
+        std::array<uint8_t, 4> const matrix_values{0x00, 0x05, 0xFF, 0xFB};
+        frames.push_back(
+            {"aem_set_matrix_typed_command",
+             aem(AEM_COMMAND_SET_MATRIX,
+                 false,
+                 27,
+                 std::span<uint8_t const>(bytes_of(set_matrix)),
+                 std::span<uint8_t const>(matrix_values))});
+    }
+    {
+        // SIGNAL_SELECTOR sources, TIMING ptp instances, SIGNAL_SPLITTER map, MATRIX_SIGNAL signals
+        DescriptorSignalSelector selector{};
+        selector.object_name.assign("Source select");
+        selector.sources_offset = DescriptorSignalSelector::LENGTH;
+        selector.number_of_sources = 2;
+        auto bytes = descriptor_bytes(selector);
+        std::array<uint8_t, 8> const sources{0x00, 0x1D, 0x00, 0x00, 0x00, 0x1D, 0x00, 0x05};
+        bytes.insert(bytes.end(), sources.begin(), sources.end());
+        frames.push_back({"aem_read_descriptor_signal_selector_response", read_descriptor_response(bytes, 28)});
+        DescriptorTiming timing{};
+        timing.object_name.assign("Timing");
+        timing.ptp_instances_offset = DescriptorTiming::LENGTH;
+        timing.number_of_ptp_instances = 2;
+        auto tbytes = descriptor_bytes(timing);
+        std::array<uint8_t, 4> const instances{0x00, 0x00, 0x00, 0x01};
+        tbytes.insert(tbytes.end(), instances.begin(), instances.end());
+        frames.push_back({"aem_read_descriptor_timing_response", read_descriptor_response(tbytes, 29)});
+        DescriptorSignalSplitter splitter{};
+        splitter.object_name.assign("Split");
+        splitter.number_of_outputs = 2;
+        splitter.splitter_map_count = 2;
+        splitter.splitter_map_offset = DescriptorSignalSplitter::LENGTH;
+        auto sbytes = descriptor_bytes(splitter);
+        std::array<uint8_t, 8> const map{0x00, 0x1D, 0x00, 0x02, 0x00, 0x1D, 0x00, 0x03};
+        sbytes.insert(sbytes.end(), map.begin(), map.end());
+        frames.push_back({"aem_read_descriptor_signal_splitter_response", read_descriptor_response(sbytes, 30)});
+        DescriptorMatrixSignal signals{};
+        signals.descriptor_index = 1;
+        signals.signals_offset = DescriptorMatrixSignal::LENGTH;
+        signals.signals_count = 3;
+        auto gbytes = descriptor_bytes(signals);
+        std::array<uint8_t, 12> const sig{0x00, 0x1D, 0x00, 0x00, 0x00, 0x1D, 0x00, 0x01, 0x00, 0x1D, 0x00, 0x02};
+        gbytes.insert(gbytes.end(), sig.begin(), sig.end());
+        frames.push_back({"aem_read_descriptor_matrix_signal_response", read_descriptor_response(gbytes, 31)});
+    }
+    {
+        // VIDEO_CLUSTER with all five tables, SENSOR_CLUSTER with two
+        DescriptorVideoCluster video{};
+        video.object_name.assign("Video in");
+        video.supported_format_specifics_offset = DescriptorVideoCluster::LENGTH;
+        video.supported_format_specifics_count = 1;
+        video.supported_sampling_rates_offset = DescriptorVideoCluster::LENGTH + 4;
+        video.supported_sampling_rates_count = 1;
+        video.supported_aspect_ratios_offset = DescriptorVideoCluster::LENGTH + 8;
+        video.supported_aspect_ratios_count = 2;
+        video.supported_sizes_offset = DescriptorVideoCluster::LENGTH + 12;
+        video.supported_sizes_count = 1;
+        video.supported_color_spaces_offset = DescriptorVideoCluster::LENGTH + 16;
+        video.supported_color_spaces_count = 1;
+        auto bytes = descriptor_bytes(video);
+        std::array<uint8_t, 18> const tables{
+            0x00,
+            0x00,
+            0x00,
+            0x42,  // format specific
+            0x00,
+            0x00,
+            0x00,
+            0x3C,  // 60 Hz
+            0x10,
+            0x09,
+            0x04,
+            0x03,  // 16:9, 4:3
+            0x07,
+            0x80,
+            0x04,
+            0x38,  // 1920x1080
+            0x00,
+            0x02,  // color space
+        };
+        bytes.insert(bytes.end(), tables.begin(), tables.end());
+        frames.push_back({"aem_read_descriptor_video_cluster_response", read_descriptor_response(bytes, 32)});
+        DescriptorSensorCluster sensor{};
+        sensor.object_name.assign("Sensor");
+        sensor.supported_formats_offset = DescriptorSensorCluster::LENGTH;
+        sensor.supported_formats_count = 1;
+        sensor.supported_sampling_rates_offset = DescriptorSensorCluster::LENGTH + 8;
+        sensor.supported_sampling_rates_count = 2;
+        auto sbytes = descriptor_bytes(sensor);
+        std::array<uint8_t, 16> const stables{
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x03, 0xE8};
+        sbytes.insert(sbytes.end(), stables.begin(), stables.end());
+        frames.push_back({"aem_read_descriptor_sensor_cluster_response", read_descriptor_response(sbytes, 33)});
+    }
+    {
+        // STREAM_OUTPUT with a decoded AAF current_format, formats and two redundant streams
+        DescriptorStream stream{};
+        stream.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        stream.descriptor_index = 0;
+        stream.object_name.assign("Output 1");
+        stream.current_format = Eui64{0x02, 0x05, 0x02, 0x18, 0x00, 0x80, 0x60, 0x00};  // AAF 48k int32 24-bit 2ch 6 spf
+        stream.number_of_formats = 2;
+        stream.stream_formats[0] = Eui64{0x02, 0x05, 0x02, 0x18, 0x00, 0x80, 0x60, 0x00};
+        stream.stream_formats[1] = Eui64{0x00, 0xA0, 0x02, 0x02, 0x40, 0x40, 0x00, 0x00};  // IEC 61883-6 AM824 48k 2ch
+        stream.redundant_offset = static_cast<uint16_t>(stream.wire_size());
+        stream.number_of_redundant_streams = 2;
+        auto bytes = descriptor_bytes(stream);
+        std::array<uint8_t, 4> const redundant{0x00, 0x01, 0x00, 0x02};
+        bytes.insert(bytes.end(), redundant.begin(), redundant.end());
+        frames.push_back({"aem_read_descriptor_stream_output_redundant_response", read_descriptor_response(bytes, 34)});
+    }
+
+    // ---- AEM: payloads of commands the C++ stack does not implement (from the standard) ----
+    {
+        std::array<uint8_t, 16> const video_format{
+            0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x10, 0x09, 0x00, 0x02, 0x07, 0x80, 0x04, 0x38};
+        frames.push_back({"aem_get_video_format_response", aem(0x000B, true, 40, std::span<uint8_t const>(video_format))});
+        std::array<uint8_t, 12> const sensor_format{0x00, 0x14, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+        frames.push_back({"aem_set_sensor_format_command", aem(0x000C, false, 41, std::span<uint8_t const>(sensor_format))});
+        std::array<uint8_t, 8> const association{0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0xAA, 0x01};
+        frames.push_back({"aem_set_association_id_command", aem(0x0012, false, 42, std::span<uint8_t const>(association))});
+        std::array<uint8_t, 4 + 16> const as_path{0x00, 0x00, 0x00, 0x02, 0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00,
+                                                  0x00, 0x01, 0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x02};
+        frames.push_back({"aem_get_as_path_response", aem(0x0028, true, 43, std::span<uint8_t const>(as_path))});
+        std::array<uint8_t, 12 + 8> const video_map{0x00, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+                                                    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00};
+        frames.push_back({"aem_get_video_map_response", aem(0x002E, true, 44, std::span<uint8_t const>(video_map))});
+        std::array<uint8_t, 8 + 16> const sensor_mappings{0x00, 0x11, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00};
+        frames.push_back({"aem_add_sensor_mappings_command", aem(0x0032, false, 45, std::span<uint8_t const>(sensor_mappings))});
+        std::array<uint8_t, 12> const encryption{0x00, 0x06, 0x00, 0x00, 0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x07};
+        frames.push_back({"aem_enable_stream_encryption_command", aem(0x0045, false, 46, std::span<uint8_t const>(encryption))});
+        std::array<uint8_t, 12> const memory_length{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00};
+        frames.push_back({"aem_set_memory_object_length_command", aem(0x0047, false, 47, std::span<uint8_t const>(memory_length))});
+        std::array<uint8_t, 52> backup{};
+        backup[1] = 0x05;
+        backup[3] = 0x01;
+        backup[4] = 0x00;
+        backup[5] = 0x1C;
+        backup[6] = 0xAB;
+        backup[11] = 0x11;
+        backup[13] = 0x02;
+        backup[40] = 0x00;
+        backup[41] = 0x1C;
+        backup[47] = 0x22;
+        backup[49] = 0x03;
+        frames.push_back({"aem_set_stream_backup_command", aem(0x0049, false, 48, std::span<uint8_t const>(backup))});
+    }
+
+    // ---- AVC command: an AV/C UNIT INFO status frame ----
+    {
+        AecpDuCommon du{};
+        du.init_command(AECP_MESSAGE_TYPE_AVC_COMMAND, static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 2 + 8));
+        du.target_entity_id = TARGET;
+        du.controller_entity_id = CONTROLLER;
+        du.sequence_id = 50;
+        std::vector<uint8_t> out;
+        append(out, du);
+        std::array<uint8_t, 10> const avc{0x00, 0x08, 0x01, 0xFF, 0x30, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        append(out, std::span<uint8_t const>(avc));
+        frames.push_back({"avc_command", out});
+    }
+
+    // ---- Milan vendor unique: GET_MILAN_INFO, SET_SYSTEM_UNIQUE_ID, MCR info, BIND_STREAM, GET_STREAM_INPUT_INFO_EX ----
+    {
+        auto const mvu = [&](bool const response, uint16_t const sequence, std::span<uint8_t const> const payload) {
+            AecpDuCommon du{};
+            du.init_command(
+                response ? AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE : AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND,
+                static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6 + payload.size()));
+            du.target_entity_id = TARGET;
+            du.controller_entity_id = CONTROLLER;
+            du.sequence_id = sequence;
+            std::vector<uint8_t> out;
+            append(out, du);
+            std::array<uint8_t, 6> const protocol_id{0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00};
+            append(out, std::span<uint8_t const>(protocol_id));
+            append(out, payload);
+            return out;
+        };
+        std::array<uint8_t, 4> const get_info{0x00, 0x00, 0x00, 0x00};
+        frames.push_back({"mvu_get_milan_info_command", mvu(false, 60, std::span<uint8_t const>(get_info))});
+        std::array<uint8_t, 20> const info{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+                                           0x00, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x03, 0x00};
+        frames.push_back({"mvu_get_milan_info_response", mvu(true, 60, std::span<uint8_t const>(info))});
+        std::vector<uint8_t> unique_id{0x00, 0x01, 0x00, 0x00, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x51, 0x1D};
+        std::array<uint8_t, 64> name{};
+        std::string_view const text{"FOH system"};
+        std::copy(text.begin(), text.end(), name.begin());
+        unique_id.insert(unique_id.end(), name.begin(), name.end());
+        frames.push_back({"mvu_set_system_unique_id_command", mvu(false, 61, std::span<uint8_t const>(unique_id))});
+        std::vector<uint8_t> mcr{0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00};
+        std::array<uint8_t, 64> domain{};
+        std::string_view const dtext{"Main clock"};
+        std::copy(dtext.begin(), dtext.end(), domain.begin());
+        mcr.insert(mcr.end(), domain.begin(), domain.end());
+        frames.push_back({"mvu_set_media_clock_reference_info_command", mvu(false, 62, std::span<uint8_t const>(mcr))});
+        std::array<uint8_t, 20> const bind{0x00, 0x05, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00, 0x1C,
+                                           0xAB, 0xFF, 0xFE, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x00, 0x00};
+        frames.push_back({"mvu_bind_stream_command", mvu(false, 63, std::span<uint8_t const>(bind))});
+        std::array<uint8_t, 20> const info_ex{0x00, 0x07, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x1C,
+                                              0xAB, 0xFF, 0xFE, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x02, 0x00};
+        frames.push_back({"mvu_get_stream_input_info_ex_response", mvu(true, 64, std::span<uint8_t const>(info_ex))});
     }
 
     // ---- Address Access: a command with a read and a write TLV ----

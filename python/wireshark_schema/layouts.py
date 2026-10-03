@@ -24,7 +24,7 @@ class Field:
     name: str
     offset: int
     length: int
-    kind: str  # u8 u16 u32 u64 i16 i24 i32 f32 bool bytes eui48 string
+    kind: str  # u8 u16 u24 u32 u64 i8 i16 i24 i32 i64 f32 f64 bool bytes eui48 string
     doc: str = ""
     mask: int | None = None
     base: str = "dec"  # dec hex

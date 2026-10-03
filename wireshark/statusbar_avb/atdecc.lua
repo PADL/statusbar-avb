@@ -33,6 +33,8 @@ local AECP_AEM_COMMAND = 0
 local AECP_AEM_RESPONSE = 1
 local AECP_AA_COMMAND = 2
 local AECP_AA_RESPONSE = 3
+local AECP_AVC_COMMAND = 4
+local AECP_AVC_RESPONSE = 5
 local AECP_VU_COMMAND = 6
 local AECP_VU_RESPONSE = 7
 local AEM_READ_DESCRIPTOR = 0x0004
@@ -144,8 +146,203 @@ end
 
 -- AECP -----------------------------------------------------------------------
 
---- A descriptor at `at` (its descriptor_type leads); returns its name
-local function dissect_descriptor(t, tvb, at, stop)
+-- Control value types seen in descriptors, so SET/GET_CONTROL (and MIXER /
+-- MATRIX / SIGNAL_TRANSCODER value payloads, which carry no type of their
+-- own) can be decoded: "<target entity>:<descriptor_type>:<descriptor_index>"
+-- -> list of { value_type, count, frame }. Learned on the first pass from
+-- READ_DESCRIPTOR responses; a lookup only uses what an EARLIER frame taught,
+-- so a frame dissects the same way on every pass and a SET_CONTROL seen
+-- before its descriptor stays raw.
+local control_types = {}
+
+local function learn_control_type(pinfo, key, value_type, count)
+    if pinfo.visited then
+        return
+    end
+    local list = control_types[key]
+    if list == nil then
+        list = {}
+        control_types[key] = list
+    end
+    list[#list + 1] = { value_type = value_type, count = count, frame = pinfo.number }
+end
+
+local function known_control_type(pinfo, key)
+    local list = control_types[key]
+    if list == nil then
+        return nil
+    end
+    local found = nil
+    for _, entry in ipairs(list) do
+        if entry.frame < pinfo.number then
+            found = entry
+        end
+    end
+    return found
+end
+
+local STREAM_FORMAT_NAMES = { [0x00] = "IEC 61883-6", [0x02] = "AAF", [0x04] = "CRF" }
+
+--- The sub-fields of an 8-octet stream format at `at` (AAF, IEC 61883-6, CRF)
+local function add_stream_format(t, tvb, at)
+    local subtype = tvb(at, 1):uint()
+    local add = gen.stream_format_add[subtype]
+    if add == nil then
+        return
+    end
+    local sf = t:add(tvb(at, 8), string.format("stream format: %s 0x%s", STREAM_FORMAT_NAMES[subtype], tostring(tvb(at, 8):bytes()):lower()))
+    add(sf, tvb, at)
+end
+
+local function add_units(t, tvb, at)
+    local code = tvb(at + 1, 1):uint()
+    local u = t:add(tvb(at, 2), string.format("units: %s x 10^%d", gen.values_control_unit_code[code] or string.format("0x%02x", code),
+        tvb(at, 1):int()))
+    u:add(gen.f.atdecc_control_units_multiplier, tvb(at, 1))
+    u:add(gen.f.atdecc_control_units_code, tvb(at + 1, 1))
+end
+
+--- Control value_details at [at, stop) for a 14-bit control_value_type and
+--- `n` values (IEEE 1722.1-2021 7.3.5.2, Table 7.12). mode "full" is a
+--- descriptor's value_details (ranges, units, strings and current values);
+--- mode "current" is the current-value-only form of SET/GET_CONTROL and the
+--- MIXER/MATRIX/TRANSCODER payloads. `raw_field` shows what is left over.
+--- Returns the offset after the values.
+local function add_control_values(t, tvb, at, stop, value_type, n, mode, raw_field)
+    local fam = gen.control_value_family[value_type]
+    local name = gen.values_control_value_type[value_type] or string.format("value_type 0x%04x", value_type)
+    if fam == nil or fam.family == "vendor" or fam.family == "expansion" then
+        if stop > at then
+            t:add(gen.CONTROL_VENDOR, tvb(at, stop - at)):append_text(" [" .. name .. "]")
+        end
+        return stop
+    end
+    local V = fam.size
+    local function typed(parent, pos, role)
+        local item = parent:add(fam.field, tvb(pos, V))
+        item:append_text(" (" .. role .. ")")
+        return item
+    end
+    if fam.family == "linear" then
+        if mode == "current" then
+            for i = 0, n - 1 do
+                if at + V > stop then break end
+                typed(t, at, "current[" .. i .. "]")
+                at = at + V
+            end
+        else
+            local entry = 5 * V + 4
+            for i = 0, n - 1 do
+                if at + entry > stop then
+                    t:add_proto_expert_info(ef_trailer)
+                    break
+                end
+                local e = t:add(tvb(at, entry), string.format("%s value[%d]", name, i))
+                typed(e, at, "minimum")
+                typed(e, at + V, "maximum")
+                typed(e, at + 2 * V, "step")
+                typed(e, at + 3 * V, "default")
+                typed(e, at + 4 * V, "current")
+                add_units(e, tvb, at + 5 * V)
+                e:add(gen.f.atdecc_control_localized_string, tvb(at + 5 * V + 2, 2))
+                at = at + entry
+            end
+        end
+    elseif fam.family == "selector" then
+        if mode == "current" then
+            if at + V <= stop then
+                typed(t, at, "current")
+                at = at + V
+            end
+        else
+            local total = (n + 2) * V + 2
+            if at + total > stop then
+                t:add_proto_expert_info(ef_trailer)
+            else
+                local e = t:add(tvb(at, total), string.format("%s %d options", name, n))
+                typed(e, at, "current")
+                typed(e, at + V, "default")
+                for i = 0, n - 1 do
+                    typed(e, at + (2 + i) * V, "option[" .. i .. "]")
+                end
+                add_units(e, tvb, at + (n + 2) * V)
+                at = at + total
+            end
+        end
+    elseif fam.family == "array" then
+        if mode == "current" then
+            for i = 0, n - 1 do
+                if at + V > stop then break end
+                typed(t, at, "current[" .. i .. "]")
+                at = at + V
+            end
+        else
+            local total = (n + 4) * V + 4
+            if at + total > stop then
+                t:add_proto_expert_info(ef_trailer)
+            else
+                local e = t:add(tvb(at, total), string.format("%s %d values", name, n))
+                typed(e, at, "minimum")
+                typed(e, at + V, "maximum")
+                typed(e, at + 2 * V, "step")
+                typed(e, at + 3 * V, "default")
+                add_units(e, tvb, at + 4 * V)
+                e:add(gen.f.atdecc_control_localized_string, tvb(at + 4 * V + 2, 2))
+                for i = 0, n - 1 do
+                    typed(e, at + 4 * V + 4 + i * V, "current[" .. i .. "]")
+                end
+                at = at + total
+            end
+        end
+    elseif fam.family == "utf8" then
+        if stop > at then
+            t:add(gen.CONTROL_UTF8, tvb(at, stop - at))
+        end
+        at = stop
+    elseif fam.family == "bode_plot" then
+        if mode ~= "current" then
+            if at + 48 > stop then
+                t:add_proto_expert_info(ef_trailer)
+                return at
+            end
+            gen.add_control_bode(t:add(tvb(at, 48), "bode plot ranges"), tvb, at)
+            at = at + 48
+        end
+        for i = 0, n - 1 do
+            if at + 12 > stop then break end
+            gen.add_control_bode_point(t:add(tvb(at, 12), string.format("point[%d]", i)), tvb, at)
+            at = at + 12
+        end
+    elseif fam.family == "smpte_time" then
+        if at + 10 <= stop then
+            gen.add_control_smpte(t, tvb, at)
+            at = at + 10
+        end
+    elseif fam.family == "sample_rate" then
+        if at + 16 <= stop then
+            gen.add_control_sample_rate(t, tvb, at)
+            at = at + 16
+        elseif at + 4 <= stop then
+            t:add(gen.f.atdecc_control_sample_rate_current_pull, tvb(at, 4))
+            t:add(gen.f.atdecc_control_sample_rate_current_base_frequency, tvb(at, 4))
+            at = at + 4
+        end
+    elseif fam.family == "gptp_time" then
+        if at + 10 <= stop then
+            gen.add_control_gptp(t, tvb, at)
+            at = at + 10
+        end
+    end
+    if raw_field ~= nil and stop > at then
+        t:add(raw_field, tvb(at, stop - at))
+        at = stop
+    end
+    return at
+end
+
+--- A descriptor at `at` (its descriptor_type leads) belonging to `target`;
+--- returns its name
+local function dissect_descriptor(t, tvb, at, stop, target, pinfo)
     local kind = tvb(at, 2):uint()
     local spec = gen.descriptors[kind]
     local name = gen.values_descriptor_type[kind] or string.format("descriptor 0x%04x", kind)
@@ -159,31 +356,39 @@ local function dissect_descriptor(t, tvb, at, stop)
         return name
     end
     spec.add(sub, tvb, at)
-    local trailer = spec.trailer
-    if trailer ~= nil then
-        local count = tvb(at + trailer.count_field_offset, 2):uint()
-        local offset = tvb(at + trailer.offset_field_offset, 2):uint()
-        if trailer.element == "raw" then
-            if at + offset < stop then
-                sub:add(gen.DESCRIPTOR_RAW, tvb(at + offset, stop - at - offset))
+    for _, off in ipairs(gen.stream_format_at[spec.name] or {}) do
+        add_stream_format(sub, tvb, at + off)
+    end
+    for _, tab in ipairs(spec.tables) do
+        local count = tab.count_field_offset and tvb(at + tab.count_field_offset, 2):uint() or 1
+        local offset = tvb(at + tab.offset_field_offset, 2):uint()
+        local start = at + offset
+        if tab.element == "values" then
+            local value_type = tvb(at + tab.value_type_offset, 2):uint() % 0x4000
+            if target ~= nil then
+                learn_control_type(pinfo, string.format("%s:%d:%d", target, kind, tvb(at + 2, 2):uint()), value_type, count)
             end
+            if start < stop then
+                add_control_values(sub, tvb, start, stop, value_type, count, "full", nil)
+            end
+        elseif start + (count * tab.element_size) > stop then
+            sub:add_proto_expert_info(ef_trailer)
         else
-            local start = at + offset
-            if start + (count * trailer.element_size) > stop then
-                sub:add_proto_expert_info(ef_trailer)
-                count = math.max(0, math.floor((stop - start) / trailer.element_size))
-            end
             for i = 0, count - 1 do
-                local element = sub:add(tvb(start + (i * trailer.element_size), trailer.element_size),
-                    string.format("%s[%d]", trailer.element, i))
-                trailer.element_add(element, tvb, start + (i * trailer.element_size))
+                local pos = start + (i * tab.element_size)
+                local element = sub:add(tvb(pos, tab.element_size), string.format("%s[%d]", tab.element, i))
+                tab.element_add(element, tvb, pos)
+                if tab.element == "stream_format" then
+                    add_stream_format(element, tvb, pos)
+                end
             end
         end
     end
     return name
 end
 
---- The SET_CONTROL/GET_CONTROL values: raw, or a JDKS blob when it carries one
+--- The SET_CONTROL/GET_CONTROL values when the control's type is unknown:
+--- raw, or a JDKS blob when it carries one
 local function dissect_control_values(t, tvb, at, stop)
     if stop - at >= gen.JDKS_LOG_BLOB_LENGTH then
         local vendor = tostring(tvb(at, 8):bytes()):lower()
@@ -206,6 +411,28 @@ local function dissect_control_values(t, tvb, at, stop)
     end
 end
 
+local DESCRIPTOR_MATRIX = 0x0010
+
+--- The values after a CONTROL / MIXER / MATRIX / SIGNAL_TRANSCODER payload
+--- header (descriptor_type and index lead the payload), typed from the
+--- descriptor seen earlier when possible
+local function dissect_payload_values(t, tvb, at, stop, target, spec, pinfo)
+    local kind = tvb(gen.AEM_HEADER_LENGTH, 2):uint()
+    local index = tvb(gen.AEM_HEADER_LENGTH + 2, 2):uint()
+    local known = known_control_type(pinfo, string.format("%s:%d:%d", target, kind, index))
+    if known ~= nil and stop > at then
+        local n = known.count
+        if kind == DESCRIPTOR_MATRIX then
+            n = tvb(gen.AEM_HEADER_LENGTH + 12, 2):uint() % 0x4000  -- rep_direction_value_count
+        elseif spec.name:find("mixer") then
+            n = 1
+        end
+        add_control_values(t, tvb, at, stop, known.value_type, n, "current", gen.AEM_PAYLOAD_RAW)
+        return
+    end
+    dissect_control_values(t, tvb, at, stop)
+end
+
 --- AEM command/response after the 24-octet AEM header; returns the summary
 local function dissect_aem(t, tvb, pinfo, stop, is_command)
     gen.add_aem(t, tvb, 0)
@@ -213,29 +440,36 @@ local function dissect_aem(t, tvb, pinfo, stop, is_command)
     local name = gen.values_aem_command[code] or string.format("command 0x%04x", code)
     local specs = gen.aem_payloads[code]
     local spec = specs and (is_command and specs.cmd or specs.rsp)
+    local target = eui64_hex(tvb(4, 8))
     local at = gen.AEM_HEADER_LENGTH
     local extra = ""
     if spec ~= nil and stop - at >= spec.length then
         spec.add(t, tvb, 0)
+        for _, off in ipairs(gen.stream_format_at[spec.name] or {}) do
+            add_stream_format(t, tvb, off)
+        end
         at = at + spec.length
-        if spec.trailer == "descriptor" then
-            if stop - at >= 4 then
-                extra = " " .. dissect_descriptor(t, tvb, at, stop)
-            end
-            at = stop
-        elseif spec.trailer == "values" then
-            dissect_control_values(t, tvb, at, stop)
-            at = stop
-        elseif spec.trailer == "mappings" then
-            local count_at = spec.name == "audio_map_response" and (gen.AEM_HEADER_LENGTH + 6) or (gen.AEM_HEADER_LENGTH + 4)
-            local count = tvb(count_at, 2):uint()
-            for i = 0, count - 1 do
-                if at + gen.AUDIO_MAPPING_LENGTH > stop then
-                    break
+        local trailer = spec.trailer
+        if trailer ~= nil then
+            if trailer.kind == "descriptor" then
+                if stop - at >= 4 then
+                    extra = " " .. dissect_descriptor(t, tvb, at, stop, target, pinfo)
                 end
-                local element = t:add(tvb(at, gen.AUDIO_MAPPING_LENGTH), string.format("mapping[%d]", i))
-                gen.add_aem_audio_mapping(element, tvb, at)
-                at = at + gen.AUDIO_MAPPING_LENGTH
+                at = stop
+            elseif trailer.kind == "values" or trailer.kind == "raw" then
+                dissect_payload_values(t, tvb, at, stop, target, spec, pinfo)
+                at = stop
+            elseif trailer.kind == "elements" then
+                local count = tvb(trailer.count_field_offset, 2):uint()
+                for i = 0, count - 1 do
+                    if at + trailer.element_size > stop then
+                        t:add_proto_expert_info(ef_trailer)
+                        break
+                    end
+                    local element = t:add(tvb(at, trailer.element_size), string.format("%s[%d]", trailer.element, i))
+                    trailer.element_add(element, tvb, at)
+                    at = at + trailer.element_size
+                end
             end
         end
     end
@@ -243,6 +477,37 @@ local function dissect_aem(t, tvb, pinfo, stop, is_command)
         t:add(gen.AEM_PAYLOAD_RAW, tvb(at, stop - at))
     end
     return name .. extra
+end
+
+--- Milan vendor unique command/response after the 28-octet VU header
+local function dissect_mvu(t, tvb, stop, is_command)
+    gen.add_mvu(t, tvb, 0)
+    local code = tvb(28, 2):uint() % 0x8000
+    local name = gen.values_mvu_command[code] or string.format("command 0x%04x", code)
+    local specs = gen.mvu_payloads[code]
+    local spec = specs and (is_command and specs.cmd or specs.rsp)
+    local at = gen.MVU_HEADER_LENGTH
+    if spec ~= nil and stop - at >= spec.length then
+        spec.add(t, tvb, 0)
+        at = at + spec.length
+        if spec.name == "mvu_get_milan_info_response" then
+            for _, f in ipairs(gen.mvu_features_flag_fields) do
+                t:add(f, tvb(gen.MVU_HEADER_LENGTH + 6, 4))
+            end
+        elseif spec.name == "mvu_media_clock_reference_info" then
+            for _, f in ipairs(gen.mvu_mcr_flag_fields) do
+                t:add(f, tvb(gen.MVU_HEADER_LENGTH + 2, 1))
+            end
+        end
+        if spec.name_field ~= nil and stop - at >= 64 then
+            t:add(spec.name_field, tvb(at, 64))
+            at = at + 64
+        end
+    end
+    if stop > at then
+        t:add(gen.VU_PAYLOAD, tvb(at, stop - at))
+    end
+    return "MVU " .. name
 end
 
 local function dissect_aecp(tvb, pinfo, root, header, tree)
@@ -261,7 +526,8 @@ local function dissect_aecp(tvb, pinfo, root, header, tree)
         stop = len
     end
     local kind = gen.values_aecp_message_type[msg_type] or string.format("message_type %d", msg_type)
-    local status = gen.values_aem_status[tvb(2, 2):bitfield(0, 5)] or tostring(tvb(2, 2):bitfield(0, 5))
+    local status_code = tvb(2, 2):bitfield(0, 5)
+    local status = gen.values_aem_status[status_code] or tostring(status_code)
     local seq = tvb(20, 2):uint()
     local summary = kind
     local is_command = msg_type % 2 == 0
@@ -284,13 +550,25 @@ local function dissect_aecp(tvb, pinfo, root, header, tree)
             count = count + 1
         end
         summary = string.format("Address Access %s %d TLV%s", is_command and "command" or "response", count, count == 1 and "" or "s")
+    elseif (msg_type == AECP_AVC_COMMAND or msg_type == AECP_AVC_RESPONSE) and len >= gen.AVC_HEADER_LENGTH then
+        gen.add_avc(t, tvb, 0)
+        local length = math.min(tvb(22, 2):uint(), stop - gen.AVC_HEADER_LENGTH)
+        if length > 0 then
+            t:add(gen.AVC_PAYLOAD, tvb(gen.AVC_HEADER_LENGTH, length))
+        end
+        summary = string.format("AVC %s %d octets", is_command and "command" or "response", length)
     elseif (msg_type == AECP_VU_COMMAND or msg_type == AECP_VU_RESPONSE) and len >= gen.VU_HEADER_LENGTH then
         gen.add_vu(t, tvb, 0)
-        if stop > gen.VU_HEADER_LENGTH then
-            t:add(gen.VU_PAYLOAD, tvb(gen.VU_HEADER_LENGTH, stop - gen.VU_HEADER_LENGTH))
+        local protocol_id = tostring(tvb(22, 6):bytes()):lower()
+        if protocol_id == gen.MVU_PROTOCOL_ID and len >= gen.MVU_HEADER_LENGTH then
+            summary = string.format("%s %s", dissect_mvu(t, tvb, stop, is_command), is_command and "command" or "response")
+            status = gen.values_mvu_status[status_code] or status
+        else
+            if stop > gen.VU_HEADER_LENGTH then
+                t:add(gen.VU_PAYLOAD, tvb(gen.VU_HEADER_LENGTH, stop - gen.VU_HEADER_LENGTH))
+            end
+            summary = string.format("Vendor Unique %s protocol_id=%s", is_command and "command" or "response", protocol_id)
         end
-        summary = string.format("Vendor Unique %s protocol_id=%s", is_command and "command" or "response",
-            tostring(tvb(22, 6):bytes()):lower())
     elseif stop > gen.AECP_HEADER_LENGTH then
         t:add(gen.AECP_PAYLOAD, tvb(gen.AECP_HEADER_LENGTH, stop - gen.AECP_HEADER_LENGTH))
     end

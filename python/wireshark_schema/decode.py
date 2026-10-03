@@ -41,10 +41,12 @@ def decode_layout(layout: L.Layout, data: bytes, off: int = 0) -> dict[str, int 
                 out[layout.abbr(f)] = chunk.split(b"\0", 1)[0].decode(
                     "utf-8", "replace"
                 )
-            elif f.kind in ("i16", "i24", "i32"):
+            elif f.kind in ("i8", "i16", "i24", "i32", "i64"):
                 out[layout.abbr(f)] = int.from_bytes(chunk, "big", signed=True)
             elif f.kind == "f32":
                 out[layout.abbr(f)] = struct.unpack(">f", chunk)[0]
+            elif f.kind == "f64":
+                out[layout.abbr(f)] = struct.unpack(">d", chunk)[0]
             else:
                 value = int.from_bytes(chunk, "big")
                 if f.mask is not None:

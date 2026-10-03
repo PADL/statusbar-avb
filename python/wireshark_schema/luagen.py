@@ -37,10 +37,13 @@ _PROTOFIELD = {
     "u24": "ProtoField.uint24",
     "u32": "ProtoField.uint32",
     "u64": "ProtoField.uint64",
+    "i8": "ProtoField.int8",
     "i16": "ProtoField.int16",
     "i24": "ProtoField.int24",
     "i32": "ProtoField.int32",
+    "i64": "ProtoField.int64",
     "f32": "ProtoField.float",
+    "f64": "ProtoField.double",
     "bool": "ProtoField.bool",
     "bytes": "ProtoField.bytes",
     "eui48": "ProtoField.ether",
@@ -70,7 +73,7 @@ def _protofield(layout: L.Layout, f: L.Field) -> str:
         return f"{ctor}({abbr}, {title}, base.NONE, {_lua_string(f.doc)})"
     if f.kind == "string":
         return f"{ctor}({abbr}, {title}, base.ASCII, {_lua_string(f.doc)})"
-    if f.kind == "f32":
+    if f.kind in ("f32", "f64"):
         return f"{ctor}({abbr}, {title}, nil, {_lua_string(f.doc)})"
     base = "base.HEX" if f.base == "hex" else "base.DEC"
     values = _value_table_name(f.values) if f.values else "nil"
@@ -290,8 +293,10 @@ def _emit_fields_and_adds(
 
 
 def generate_atdecc_fields() -> str:
-    """The gen/atdecc_fields.lua module: ADP, ACMP, AECP, AEM payloads, descriptors."""
+    """The gen/atdecc_fields.lua module: ADP, ACMP, AECP, AEM payloads, descriptors,
+    control values, stream formats, MVU and AVC."""
     from . import atdecc_layouts as A
+    from . import atdecc_std as STD
     from . import atdecc_table as TA
 
     out: list[str] = [GPL_HEADER, "local M = {}", ""]
@@ -306,6 +311,17 @@ def generate_atdecc_fields() -> str:
         "aa_mode",
         "aa_status",
         "jdks_log_priority",
+        "control_value_type",
+        "control_unit_code",
+        "mvu_command",
+        "mvu_status",
+        # referenced by the stream-format sub-fields
+        "aaf_nsr",
+        "aaf_format",
+        "crf_type",
+        "crf_pull",
+        "am824_fdf",
+        "am824_label",
     ):
         vt = L.VALUE_TABLES[name]
         out.append(f"{_value_table_name(vt.name)} = {{")
@@ -316,24 +332,50 @@ def generate_atdecc_fields() -> str:
         (A.AEM, A.AEM_PAYLOAD_RAW),
         (A.DESCRIPTOR_LAYOUTS["DescriptorControl"], A.DESCRIPTOR_RAW),
         (A.JDKS_LOG, A.JDKS_LOG_TEXT),
+        (A.AVC, A.AVC_PAYLOAD),
+        (A.CONTROL_VALUE, A.CONTROL_UTF8),
+        (A.CONTROL_VALUE, A.CONTROL_VENDOR),
     ]
+    for layout in A.MVU_PAYLOAD_LAYOUTS.values():
+        for f in layout.fields:
+            if f.length == 0:
+                placeholders.append((layout, f))
     _emit_fields_and_adds(out, A.ATDECC_LAYOUTS, placeholders)
 
     def fkey(layout, f):
         return f"M.f.{_field_key(layout, f)}"
 
+    def addname(layout):
+        return f"M.add_{layout.name.replace('.', '_')}"
+
     out.append("M.AEM_PAYLOAD_RAW = " + fkey(A.AEM, A.AEM_PAYLOAD_RAW))
     out.append("M.AECP_PAYLOAD = " + fkey(A.AECP, A.AECP_PAYLOAD))
     out.append("M.AA_TLV_DATA = " + fkey(A.AA_TLV, A.AA_TLV_DATA))
     out.append("M.VU_PAYLOAD = " + fkey(A.VU, A.VU_PAYLOAD))
+    out.append("M.AVC_PAYLOAD = " + fkey(A.AVC, A.AVC_PAYLOAD))
+    out.append("M.CONTROL_UTF8 = " + fkey(A.CONTROL_VALUE, A.CONTROL_UTF8))
+    out.append("M.CONTROL_VENDOR = " + fkey(A.CONTROL_VALUE, A.CONTROL_VENDOR))
     out.append(
         "M.DESCRIPTOR_RAW = "
         + fkey(A.DESCRIPTOR_LAYOUTS["DescriptorControl"], A.DESCRIPTOR_RAW)
     )
     out.append("M.JDKS_LOG_TEXT = " + fkey(A.JDKS_LOG, A.JDKS_LOG_TEXT))
     out.append("")
+
+    def trailer_table(trailer, struct_members):
+        if trailer is None:
+            return "nil"
+        if trailer.kind != "elements":
+            return f"{{ kind = {_lua_string(trailer.kind)} }}"
+        count_off = struct_members[trailer.count_field]["offset"]
+        return (
+            f'{{ kind = "elements", element = {_lua_string(trailer.element)}, '
+            f"element_size = {A.ELEMENT_SIZE[trailer.element]}, element_add = {addname(A.TRAILER_ELEMENTS[trailer.element])}, "
+            f"count_field_offset = {A.AEM_HEADER_LENGTH + count_off} }}"
+        )
+
     out.append(
-        "--- command code -> { cmd = spec, rsp = spec }; spec = { name, length, add, trailer }"
+        "--- command code -> { cmd = spec, rsp = spec }; spec = { name, length, add, trailer = nil | { kind, ... } }"
     )
     out.append("M.aem_payloads = {}")
     for code, (cmd, rsp) in sorted(A.AEM_PAYLOADS.items()):
@@ -341,37 +383,105 @@ def generate_atdecc_fields() -> str:
         def spec(p):
             if p is None:
                 return "nil"
-            trailer = _lua_string(p.trailer) if p.trailer else "nil"
-            return f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = M.add_{p.layout.name.replace('.', '_')}, trailer = {trailer} }}"
+            members = {m["name"]: m for m in A.ALL_PAYLOAD_STRUCTS[p.struct]["members"]}
+            return (
+                f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = {addname(p.layout)}, "
+                f"trailer = {trailer_table(p.trailer, members)} }}"
+            )
 
         out.append(
             f"M.aem_payloads[0x{code:04X}] = {{ cmd = {spec(cmd)}, rsp = {spec(rsp)} }}"
         )
     out.append("")
     out.append(
-        "--- descriptor type -> { name, length, add, trailer = { count_field_offset, offset_field_offset, element, element_size, element_add } }"
+        "--- descriptor type -> { name, length, add, tables = { { count_field_offset|nil, offset_field_offset, element, element_size, element_add|nil, value_type_offset|nil } } }"
     )
     out.append("M.descriptors = {}")
     for code, d in sorted(A.DESCRIPTORS.items()):
-        trailer = "nil"
-        if d.trailer is not None:
-            members = {m["name"]: m for m in TA.DESCRIPTOR_STRUCTS[d.struct]["members"]}
-            count_off = members[d.trailer.count_field]["offset"]
-            offset_off = members[d.trailer.offset_field]["offset"]
+        members = {m["name"]: m for m in TA.DESCRIPTOR_STRUCTS[d.struct]["members"]}
+        tables = []
+        for t in d.trailers:
+            count_off = (
+                str(members[t.count_field]["offset"]) if t.count_field else "nil"
+            )
+            offset_off = members[t.offset_field]["offset"]
             elem_add = (
-                f"M.add_{A.TRAILER_ELEMENTS[d.trailer.element].name.replace('.', '_')}"
-                if d.trailer.element in A.TRAILER_ELEMENTS
+                addname(A.TRAILER_ELEMENTS[t.element])
+                if t.element in A.TRAILER_ELEMENTS
                 else "nil"
             )
-            trailer = (
+            vt_off = (
+                str(members[t.value_type_field]["offset"])
+                if t.value_type_field
+                else "nil"
+            )
+            tables.append(
                 f"{{ count_field_offset = {count_off}, offset_field_offset = {offset_off}, "
-                f"element = {_lua_string(d.trailer.element)}, element_size = {d.trailer.element_size}, element_add = {elem_add} }}"
+                f"element = {_lua_string(t.element)}, element_size = {t.element_size}, element_add = {elem_add}, "
+                f"value_type_offset = {vt_off} }}"
             )
         out.append(
             f"M.descriptors[0x{code:04X}] = {{ name = {_lua_string(d.name)}, length = {d.length}, "
-            f"add = M.add_{d.layout.name.replace('.', '_')}, trailer = {trailer} }}"
+            f"add = {addname(d.layout)}, tables = {{ {', '.join(tables)} }} }}"
         )
     out.append("")
+    out.append(
+        "--- control_value_type (14-bit) -> { family, size, field }; field is the typed per-element ProtoField"
+    )
+    out.append("M.control_value_family = {}")
+    kind_field = {
+        k: f"M.f.atdecc_control_value_{k}"
+        for k in ("i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64")
+    }
+    kind_field["string_ref"] = "M.f.atdecc_control_value_string_ref"
+    for vt, (family, size, kind) in sorted(A.CONTROL_VALUE_FAMILY.items()):
+        field = kind_field.get(kind, "nil") if kind else "nil"
+        out.append(
+            f"M.control_value_family[0x{vt:04X}] = {{ family = {_lua_string(family)}, size = {size}, field = {field} }}"
+        )
+    out.append("")
+    out.append(
+        "--- payload / descriptor spec name -> offsets of 8-octet stream formats"
+    )
+    out.append("M.stream_format_at = {")
+    for name, offs in sorted(A.STREAM_FORMAT_AT.items()):
+        out.append(f"    {name} = {{ {', '.join(str(o) for o in offs)} }},")
+    out += [
+        "}",
+        "--- stream format subtype -> add function for its sub-fields",
+        "M.stream_format_add = {",
+    ]
+    for subtype, layout in sorted(A.STREAM_FORMAT_LAYOUTS.items()):
+        out.append(f"    [0x{subtype:02X}] = {addname(layout)},")
+    out += ["}", ""]
+    out.append(
+        "--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, name_field }"
+    )
+    out.append("M.mvu_payloads = {}")
+    for code, (cmd, rsp) in sorted(A.MVU_PAYLOADS.items()):
+
+        def mspec(p):
+            if p is None:
+                return "nil"
+            name_field = "nil"
+            if p.optional_name:
+                f = next(f for f in p.layout.fields if f.name == p.optional_name)
+                name_field = fkey(p.layout, f)
+            return f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = {addname(p.layout)}, name_field = {name_field} }}"
+
+        out.append(
+            f"M.mvu_payloads[0x{code:04X}] = {{ cmd = {mspec(cmd)}, rsp = {mspec(rsp)} }}"
+        )
+    out.append("M.mvu_features_flag_fields = {")
+    for name, _mask in STD.MVU_FEATURES_FLAGS:
+        out.append(f"    M.f.atdecc_mvu_features_flags_{name},")
+    out += ["}", "M.mvu_mcr_flag_fields = {"]
+    for name, _mask in STD.MVU_MCR_FLAGS:
+        out.append(f"    M.f.atdecc_mvu_mcr_flags_{name},")
+    out += ["}", ""]
+    out.append(f"M.MVU_PROTOCOL_ID = {_lua_string(STD.MVU_PROTOCOL_ID)}")
+    out.append(f"M.MVU_HEADER_LENGTH = {A.MVU_HEADER_LENGTH}")
+    out.append(f"M.AVC_HEADER_LENGTH = {A.AVC_HEADER_LENGTH}")
     out.append(
         f"M.AUDIO_MAPPING_LENGTH = {TA.AEM_PAYLOAD_STRUCTS['AemAudioMapping']['length']}"
     )

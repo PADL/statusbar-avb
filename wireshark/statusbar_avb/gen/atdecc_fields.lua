@@ -273,6 +273,198 @@ M.values_jdks_log_priority = {
     [0xFF] = "CONSOLE",
 }
 
+M.values_control_value_type = {
+    [0x00] = "LINEAR_INT8",
+    [0x01] = "LINEAR_UINT8",
+    [0x02] = "LINEAR_INT16",
+    [0x03] = "LINEAR_UINT16",
+    [0x04] = "LINEAR_INT32",
+    [0x05] = "LINEAR_UINT32",
+    [0x06] = "LINEAR_INT64",
+    [0x07] = "LINEAR_UINT64",
+    [0x08] = "LINEAR_FLOAT",
+    [0x09] = "LINEAR_DOUBLE",
+    [0x0A] = "SELECTOR_INT8",
+    [0x0B] = "SELECTOR_UINT8",
+    [0x0C] = "SELECTOR_INT16",
+    [0x0D] = "SELECTOR_UINT16",
+    [0x0E] = "SELECTOR_INT32",
+    [0x0F] = "SELECTOR_UINT32",
+    [0x10] = "SELECTOR_INT64",
+    [0x11] = "SELECTOR_UINT64",
+    [0x12] = "SELECTOR_FLOAT",
+    [0x13] = "SELECTOR_DOUBLE",
+    [0x14] = "SELECTOR_STRING",
+    [0x15] = "ARRAY_INT8",
+    [0x16] = "ARRAY_UINT8",
+    [0x17] = "ARRAY_INT16",
+    [0x18] = "ARRAY_UINT16",
+    [0x19] = "ARRAY_INT32",
+    [0x1A] = "ARRAY_UINT32",
+    [0x1B] = "ARRAY_INT64",
+    [0x1C] = "ARRAY_UINT64",
+    [0x1D] = "ARRAY_FLOAT",
+    [0x1E] = "ARRAY_DOUBLE",
+    [0x1F] = "UTF8",
+    [0x20] = "BODE_PLOT",
+    [0x21] = "SMPTE_TIME",
+    [0x22] = "SAMPLE_RATE",
+    [0x23] = "GPTP_TIME",
+    [0x3FFE] = "VENDOR",
+    [0x3FFF] = "VALUE_TYPE_EXPANSION",
+}
+
+M.values_control_unit_code = {
+    [0x00] = "UNITLESS",
+    [0x01] = "COUNT",
+    [0x02] = "PERCENT",
+    [0x03] = "FSTOP",
+    [0x08] = "SECONDS",
+    [0x09] = "MINUTES",
+    [0x0A] = "HOURS",
+    [0x0B] = "DAYS",
+    [0x0C] = "MONTHS",
+    [0x0D] = "YEARS",
+    [0x0E] = "SAMPLES",
+    [0x0F] = "FRAMES",
+    [0x10] = "HERTZ",
+    [0x11] = "SEMITONES",
+    [0x12] = "CENTS",
+    [0x13] = "OCTAVES",
+    [0x14] = "FPS",
+    [0x18] = "METRES",
+    [0x20] = "KELVIN",
+    [0x28] = "GRAMS",
+    [0x30] = "VOLTS",
+    [0x31] = "DBV",
+    [0x32] = "DBU",
+    [0x38] = "AMPS",
+    [0x40] = "WATTS",
+    [0x41] = "DBM",
+    [0x42] = "DBW",
+    [0x48] = "PASCALS",
+    [0x50] = "BITS",
+    [0x51] = "BYTES",
+    [0x52] = "KIBIBYTES",
+    [0x53] = "MEBIBYTES",
+    [0x54] = "GIBIBYTES",
+    [0x55] = "TEBIBYTES",
+    [0x58] = "BITS_PER_SEC",
+    [0x59] = "BYTES_PER_SEC",
+    [0x5A] = "KIBIBYTES_PER_SEC",
+    [0x5B] = "MEBIBYTES_PER_SEC",
+    [0x5C] = "GIBIBYTES_PER_SEC",
+    [0x5D] = "TEBIBYTES_PER_SEC",
+    [0x60] = "CANDELAS",
+    [0x68] = "JOULES",
+    [0x70] = "RADIANS",
+    [0x78] = "NEWTONS",
+    [0x80] = "OHMS",
+    [0x88] = "METRES_PER_SEC",
+    [0x89] = "RADIANS_PER_SEC",
+    [0x90] = "METRES_PER_SEC_SQUARED",
+    [0x91] = "RADIANS_PER_SEC_SQUARED",
+    [0x98] = "TESLAS",
+    [0x99] = "WEBERS",
+    [0x9A] = "AMPS_PER_METRE",
+    [0xA0] = "METRES_SQUARED",
+    [0xA8] = "METRES_CUBED",
+    [0xA9] = "LITRES",
+    [0xB0] = "DB",
+    [0xB1] = "DB_PEAK",
+    [0xB2] = "DB_RMS",
+    [0xB3] = "DBFS",
+    [0xB4] = "DBFS_PEAK",
+    [0xB5] = "DBFS_RMS",
+    [0xB6] = "DBTP",
+    [0xB7] = "DB_SPL_A",
+    [0xB8] = "DB_Z",
+    [0xB9] = "DB_SPL_C",
+    [0xBA] = "DB_SPL",
+    [0xBB] = "LU",
+    [0xBC] = "LUFS",
+    [0xBD] = "DB_A",
+}
+
+M.values_mvu_command = {
+    [0x00] = "GET_MILAN_INFO",
+    [0x01] = "SET_SYSTEM_UNIQUE_ID",
+    [0x02] = "GET_SYSTEM_UNIQUE_ID",
+    [0x03] = "SET_MEDIA_CLOCK_REFERENCE_INFO",
+    [0x04] = "GET_MEDIA_CLOCK_REFERENCE_INFO",
+    [0x05] = "BIND_STREAM",
+    [0x06] = "UNBIND_STREAM",
+    [0x07] = "GET_STREAM_INPUT_INFO_EX",
+}
+
+M.values_mvu_status = {
+    [0x00] = "SUCCESS",
+    [0x01] = "NOT_IMPLEMENTED",
+    [0x02] = "NO_SUCH_DESCRIPTOR",
+    [0x03] = "ENTITY_LOCKED",
+    [0x07] = "BAD_ARGUMENTS",
+}
+
+M.values_aaf_nsr = {
+    [0x00] = "User specified",
+    [0x01] = "8 kHz",
+    [0x02] = "16 kHz",
+    [0x03] = "32 kHz",
+    [0x04] = "44.1 kHz",
+    [0x05] = "48 kHz",
+    [0x06] = "88.2 kHz",
+    [0x07] = "96 kHz",
+    [0x08] = "176.4 kHz",
+    [0x09] = "192 kHz",
+    [0x0A] = "24 kHz",
+}
+
+M.values_aaf_format = {
+    [0x00] = "User specified",
+    [0x01] = "32-bit float",
+    [0x02] = "32-bit integer",
+    [0x03] = "24-bit integer",
+    [0x04] = "16-bit integer",
+    [0x05] = "32-bit AES3",
+}
+
+M.values_crf_type = {
+    [0x00] = "User specified",
+    [0x01] = "Audio sample",
+    [0x02] = "Video frame",
+    [0x03] = "Video line",
+    [0x04] = "Machine cycle",
+}
+
+M.values_crf_pull = {
+    [0x00] = "x 1.0",
+    [0x01] = "x 1/1.001",
+    [0x02] = "x 1.001",
+    [0x03] = "x 24/25",
+    [0x04] = "x 25/24",
+    [0x05] = "x 1/8",
+}
+
+M.values_am824_fdf = {
+    [0x00] = "32 kHz",
+    [0x01] = "44.1 kHz",
+    [0x02] = "48 kHz",
+    [0x03] = "88.2 kHz",
+    [0x04] = "96 kHz",
+    [0x05] = "176.4 kHz",
+    [0x06] = "192 kHz",
+    [0xFF] = "No data",
+}
+
+M.values_am824_label = {
+    [0x40] = "MBLA (multi-bit linear audio)",
+    [0x80] = "MIDI conformant, no data",
+    [0x81] = "MIDI conformant, 1 byte",
+    [0x82] = "MIDI conformant, 2 bytes",
+    [0x83] = "MIDI conformant, 3 bytes",
+    [0x88] = "SMPTE time code",
+}
+
 M.f = {}
 M.f.atdecc_adp_subtype = ProtoField.uint8("avb.atdecc.adp.subtype", "subtype", base.DEC, nil, nil, "Byte 0: subtype[7:0]")
 M.f.atdecc_adp_message_type = ProtoField.uint8("avb.atdecc.adp.message_type", "message_type", base.DEC, M.values_adp_message_type, 0xF, "ADP message_type")
@@ -395,6 +587,16 @@ M.f.atdecc_aem_audio_mapping_stream_index = ProtoField.uint16("avb.atdecc.aem.au
 M.f.atdecc_aem_audio_mapping_stream_channel = ProtoField.uint16("avb.atdecc.aem.audio_mapping.stream_channel", "stream_channel", base.DEC, nil, nil, "Bytes 2-3: Stream channel")
 M.f.atdecc_aem_audio_mapping_cluster_offset = ProtoField.uint16("avb.atdecc.aem.audio_mapping.cluster_offset", "cluster_offset", base.DEC, nil, nil, "Bytes 4-5: Cluster offset")
 M.f.atdecc_aem_audio_mapping_cluster_channel = ProtoField.uint16("avb.atdecc.aem.audio_mapping.cluster_channel", "cluster_channel", base.DEC, nil, nil, "Bytes 6-7: Cluster channel")
+M.f.atdecc_mvu_u = ProtoField.bool("avb.atdecc.mvu.u", "u", 8, nil, 0x80, "u (unsolicited)")
+M.f.atdecc_mvu_command_type = ProtoField.uint16("avb.atdecc.mvu.command_type", "command_type", base.DEC, M.values_mvu_command, 0x7FFF, "command_type (Table 5.15)")
+M.f.atdecc_mvu_features_flags_redundancy = ProtoField.bool("avb.atdecc.mvu.features_flags.redundancy", "features_flags.redundancy", 32, nil, 0x1, "redundancy")
+M.f.atdecc_mvu_features_flags_talker_dynamic_mappings = ProtoField.bool("avb.atdecc.mvu.features_flags.talker_dynamic_mappings", "features_flags.talker_dynamic_mappings", 32, nil, 0x2, "talker_dynamic_mappings")
+M.f.atdecc_mvu_features_flags_mvu_binding = ProtoField.bool("avb.atdecc.mvu.features_flags.mvu_binding", "features_flags.mvu_binding", 32, nil, 0x4, "mvu_binding")
+M.f.atdecc_mvu_features_flags_talker_signal_presence = ProtoField.bool("avb.atdecc.mvu.features_flags.talker_signal_presence", "features_flags.talker_signal_presence", 32, nil, 0x8, "talker_signal_presence")
+M.f.atdecc_mvu_mcr_flags_media_clock_reference = ProtoField.bool("avb.atdecc.mvu.mcr_flags.media_clock_reference", "mcr_flags.media_clock_reference", 8, nil, 0x1, "media_clock_reference")
+M.f.atdecc_mvu_mcr_flags_media_clock_domain = ProtoField.bool("avb.atdecc.mvu.mcr_flags.media_clock_domain", "mcr_flags.media_clock_domain", 8, nil, 0x2, "media_clock_domain")
+M.f.atdecc_avc_length = ProtoField.uint16("avb.atdecc.avc.length", "length", base.DEC, nil, nil, "avc_length")
+M.f.atdecc_avc_command_response = ProtoField.bytes("avb.atdecc.avc.command_response", "command_response", base.NONE, "AV/C command/response frame")
 M.f.atdecc_aem_acquire_entity_flags = ProtoField.uint32("avb.atdecc.aem.acquire_entity.flags", "flags", base.HEX, nil, nil, "Bytes 0-3: Acquire flags")
 M.f.atdecc_aem_acquire_entity_owner_entity_id = ProtoField.uint64("avb.atdecc.aem.acquire_entity.owner_entity_id", "owner_entity_id", base.HEX, nil, nil, "Bytes 4-11: Owner Entity ID (set by responder in response)")
 M.f.atdecc_aem_acquire_entity_descriptor_type = ProtoField.uint16("avb.atdecc.aem.acquire_entity.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "Bytes 12-13: Descriptor type")
@@ -565,6 +767,76 @@ M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags = ProtoField.uint8("avb
 M.f.atdecc_aem_get_ptp_port_info_response_reserved4 = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.reserved4", "reserved4", base.DEC, nil, nil, "reserved4")
 M.f.atdecc_aem_get_ptp_port_info_response_reserved5 = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.reserved5", "reserved5", base.HEX, nil, nil, "reserved5")
 M.f.atdecc_aem_get_ptp_port_info_response_reserved6 = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.reserved6", "reserved6", base.HEX, nil, nil, "reserved6")
+M.f.atdecc_aem_video_format_descriptor_type = ProtoField.uint16("avb.atdecc.aem.video_format.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_video_format_descriptor_index = ProtoField.uint16("avb.atdecc.aem.video_format.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_video_format_format_specific = ProtoField.uint32("avb.atdecc.aem.video_format.format_specific", "format_specific", base.DEC, nil, nil, "format_specific")
+M.f.atdecc_aem_video_format_aspect_ratio = ProtoField.uint16("avb.atdecc.aem.video_format.aspect_ratio", "aspect_ratio", base.DEC, nil, nil, "aspect_ratio (width:height)")
+M.f.atdecc_aem_video_format_color_space = ProtoField.uint16("avb.atdecc.aem.video_format.color_space", "color_space", base.DEC, nil, nil, "color_space")
+M.f.atdecc_aem_video_format_frame_size = ProtoField.uint32("avb.atdecc.aem.video_format.frame_size", "frame_size", base.DEC, nil, nil, "frame_size (width << 16 | height)")
+M.f.atdecc_aem_get_video_format_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_video_format_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_get_video_format_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_video_format_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_sensor_format_descriptor_type = ProtoField.uint16("avb.atdecc.aem.sensor_format.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_sensor_format_descriptor_index = ProtoField.uint16("avb.atdecc.aem.sensor_format.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_sensor_format_sensor_format = ProtoField.uint64("avb.atdecc.aem.sensor_format.sensor_format", "sensor_format", base.HEX, nil, nil, "sensor_format")
+M.f.atdecc_aem_get_sensor_format_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_sensor_format_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_get_sensor_format_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_sensor_format_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_association_id_association_id = ProtoField.uint64("avb.atdecc.aem.association_id.association_id", "association_id", base.HEX, nil, nil, "association_id")
+M.f.atdecc_aem_get_as_path_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_as_path_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "AVB_INTERFACE descriptor_index")
+M.f.atdecc_aem_get_as_path_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_as_path_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_get_as_path_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_as_path_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "AVB_INTERFACE descriptor_index")
+M.f.atdecc_aem_get_as_path_response_count = ProtoField.uint16("avb.atdecc.aem.get_as_path_response.count", "count", base.DEC, nil, nil, "path_sequence entries")
+M.f.atdecc_aem_get_video_map_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_get_video_map_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_get_video_map_command_map_index = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.map_index", "map_index", base.DEC, nil, nil, "map_index")
+M.f.atdecc_aem_get_video_map_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_video_map_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.video_map_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_video_map_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.video_map_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_video_map_response_map_index = ProtoField.uint16("avb.atdecc.aem.video_map_response.map_index", "map_index", base.DEC, nil, nil, "map_index")
+M.f.atdecc_aem_video_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.video_map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "number_of_maps")
+M.f.atdecc_aem_video_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.video_map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
+M.f.atdecc_aem_video_map_response_reserved = ProtoField.uint16("avb.atdecc.aem.video_map_response.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_video_mappings_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_video_mappings_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_video_mappings_command_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
+M.f.atdecc_aem_video_mappings_command_reserved = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_get_sensor_map_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_get_sensor_map_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_get_sensor_map_command_map_index = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.map_index", "map_index", base.DEC, nil, nil, "map_index")
+M.f.atdecc_aem_get_sensor_map_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_sensor_map_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_sensor_map_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_sensor_map_response_map_index = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.map_index", "map_index", base.DEC, nil, nil, "map_index")
+M.f.atdecc_aem_sensor_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "number_of_maps")
+M.f.atdecc_aem_sensor_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
+M.f.atdecc_aem_sensor_map_response_reserved = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_sensor_mappings_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_sensor_mappings_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_sensor_mappings_command_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
+M.f.atdecc_aem_sensor_mappings_command_reserved = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_stream_encryption_descriptor_type = ProtoField.uint16("avb.atdecc.aem.stream_encryption.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_stream_encryption_descriptor_index = ProtoField.uint16("avb.atdecc.aem.stream_encryption.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_stream_encryption_key_eui = ProtoField.uint64("avb.atdecc.aem.stream_encryption.key_eui", "key_eui", base.HEX, nil, nil, "key_eui")
+M.f.atdecc_aem_memory_object_length_descriptor_index = ProtoField.uint16("avb.atdecc.aem.memory_object_length.descriptor_index", "descriptor_index", base.DEC, nil, nil, "MEMORY_OBJECT descriptor_index")
+M.f.atdecc_aem_memory_object_length_reserved = ProtoField.uint16("avb.atdecc.aem.memory_object_length.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_memory_object_length_length = ProtoField.uint64("avb.atdecc.aem.memory_object_length.length", "length", base.HEX, nil, nil, "length (octets)")
+M.f.atdecc_aem_get_memory_object_length_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_memory_object_length_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "MEMORY_OBJECT descriptor_index")
+M.f.atdecc_aem_get_memory_object_length_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_memory_object_length_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_stream_backup_descriptor_type = ProtoField.uint16("avb.atdecc.aem.stream_backup.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_stream_backup_descriptor_index = ProtoField.uint16("avb.atdecc.aem.stream_backup.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_stream_backup_backup_talker_entity_id_0 = ProtoField.uint64("avb.atdecc.aem.stream_backup.backup_talker_entity_id_0", "backup_talker_entity_id_0", base.HEX, nil, nil, "backup_talker_entity_id_0")
+M.f.atdecc_aem_stream_backup_backup_talker_unique_id_0 = ProtoField.uint16("avb.atdecc.aem.stream_backup.backup_talker_unique_id_0", "backup_talker_unique_id_0", base.DEC, nil, nil, "backup_talker_unique_id_0")
+M.f.atdecc_aem_stream_backup_reserved_0 = ProtoField.uint16("avb.atdecc.aem.stream_backup.reserved_0", "reserved_0", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_stream_backup_backup_talker_entity_id_1 = ProtoField.uint64("avb.atdecc.aem.stream_backup.backup_talker_entity_id_1", "backup_talker_entity_id_1", base.HEX, nil, nil, "backup_talker_entity_id_1")
+M.f.atdecc_aem_stream_backup_backup_talker_unique_id_1 = ProtoField.uint16("avb.atdecc.aem.stream_backup.backup_talker_unique_id_1", "backup_talker_unique_id_1", base.DEC, nil, nil, "backup_talker_unique_id_1")
+M.f.atdecc_aem_stream_backup_reserved_1 = ProtoField.uint16("avb.atdecc.aem.stream_backup.reserved_1", "reserved_1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_stream_backup_backup_talker_entity_id_2 = ProtoField.uint64("avb.atdecc.aem.stream_backup.backup_talker_entity_id_2", "backup_talker_entity_id_2", base.HEX, nil, nil, "backup_talker_entity_id_2")
+M.f.atdecc_aem_stream_backup_backup_talker_unique_id_2 = ProtoField.uint16("avb.atdecc.aem.stream_backup.backup_talker_unique_id_2", "backup_talker_unique_id_2", base.DEC, nil, nil, "backup_talker_unique_id_2")
+M.f.atdecc_aem_stream_backup_reserved_2 = ProtoField.uint16("avb.atdecc.aem.stream_backup.reserved_2", "reserved_2", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_stream_backup_backedup_talker_entity_id = ProtoField.uint64("avb.atdecc.aem.stream_backup.backedup_talker_entity_id", "backedup_talker_entity_id", base.HEX, nil, nil, "backedup_talker_entity_id")
+M.f.atdecc_aem_stream_backup_backedup_talker_unique_id = ProtoField.uint16("avb.atdecc.aem.stream_backup.backedup_talker_unique_id", "backedup_talker_unique_id", base.DEC, nil, nil, "backedup_talker_unique_id")
+M.f.atdecc_aem_stream_backup_reserved_3 = ProtoField.uint16("avb.atdecc.aem.stream_backup.reserved_3", "reserved_3", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_get_stream_backup_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_stream_backup_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_get_stream_backup_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_stream_backup_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_desc_entity_descriptor_type = ProtoField.uint16("avb.atdecc.desc.entity.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_desc_entity_descriptor_index = ProtoField.uint16("avb.atdecc.desc.entity.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_desc_entity_entity_id = ProtoField.uint64("avb.atdecc.desc.entity.entity_id", "entity_id", base.HEX, nil, nil, "entity_id")
@@ -1068,6 +1340,107 @@ M.f.atdecc_desc_sensor_mapping_mapping_stream_index = ProtoField.uint16("avb.atd
 M.f.atdecc_desc_sensor_mapping_mapping_stream_channel = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_stream_channel", "mapping_stream_channel", base.DEC, nil, nil, "mapping_stream_channel")
 M.f.atdecc_desc_sensor_mapping_mapping_cluster_offset = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_cluster_offset", "mapping_cluster_offset", base.DEC, nil, nil, "mapping_cluster_offset")
 M.f.atdecc_desc_sensor_mapping_mapping_cluster_channel = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_cluster_channel", "mapping_cluster_channel", base.DEC, nil, nil, "mapping_cluster_channel")
+M.f.atdecc_desc_signal_signal_type = ProtoField.uint16("avb.atdecc.desc.signal.signal_type", "signal_type", base.HEX, M.values_descriptor_type, nil, "signal descriptor_type")
+M.f.atdecc_desc_signal_signal_index = ProtoField.uint16("avb.atdecc.desc.signal.signal_index", "signal_index", base.DEC, nil, nil, "signal descriptor_index")
+M.f.atdecc_desc_ptp_instance_index_index = ProtoField.uint16("avb.atdecc.desc.ptp_instance_index.index", "index", base.DEC, nil, nil, "PTP_INSTANCE descriptor index")
+M.f.atdecc_desc_redundant_stream_index_index = ProtoField.uint16("avb.atdecc.desc.redundant_stream_index.index", "index", base.DEC, nil, nil, "redundant STREAM descriptor index")
+M.f.atdecc_desc_format_specific_value = ProtoField.uint32("avb.atdecc.desc.format_specific.value", "value", base.HEX, nil, nil, "format_specific")
+M.f.atdecc_desc_aspect_ratio_width = ProtoField.uint8("avb.atdecc.desc.aspect_ratio.width", "width", base.DEC, nil, nil, "aspect width")
+M.f.atdecc_desc_aspect_ratio_height = ProtoField.uint8("avb.atdecc.desc.aspect_ratio.height", "height", base.DEC, nil, nil, "aspect height")
+M.f.atdecc_desc_size_width = ProtoField.uint16("avb.atdecc.desc.size.width", "width", base.DEC, nil, nil, "width (pixels)")
+M.f.atdecc_desc_size_height = ProtoField.uint16("avb.atdecc.desc.size.height", "height", base.DEC, nil, nil, "height (pixels)")
+M.f.atdecc_desc_color_space_value = ProtoField.uint16("avb.atdecc.desc.color_space.value", "value", base.HEX, nil, nil, "color_space")
+M.f.atdecc_desc_sensor_format_value = ProtoField.uint64("avb.atdecc.desc.sensor_format.value", "value", base.HEX, nil, nil, "sensor_format")
+M.f.atdecc_desc_as_path_entry_clock_identity = ProtoField.uint64("avb.atdecc.desc.as_path_entry.clock_identity", "clock_identity", base.HEX, nil, nil, "clock identity")
+M.f.atdecc_control_value_i8 = ProtoField.int8("avb.atdecc.control.value_i8", "value_i8", base.DEC, nil, nil, "INT8 value")
+M.f.atdecc_control_value_u8 = ProtoField.uint8("avb.atdecc.control.value_u8", "value_u8", base.DEC, nil, nil, "UINT8 value")
+M.f.atdecc_control_value_i16 = ProtoField.int16("avb.atdecc.control.value_i16", "value_i16", base.DEC, nil, nil, "INT16 value")
+M.f.atdecc_control_value_u16 = ProtoField.uint16("avb.atdecc.control.value_u16", "value_u16", base.DEC, nil, nil, "UINT16 value")
+M.f.atdecc_control_value_i32 = ProtoField.int32("avb.atdecc.control.value_i32", "value_i32", base.DEC, nil, nil, "INT32 value")
+M.f.atdecc_control_value_u32 = ProtoField.uint32("avb.atdecc.control.value_u32", "value_u32", base.DEC, nil, nil, "UINT32 value")
+M.f.atdecc_control_value_i64 = ProtoField.int64("avb.atdecc.control.value_i64", "value_i64", base.DEC, nil, nil, "INT64 value")
+M.f.atdecc_control_value_u64 = ProtoField.uint64("avb.atdecc.control.value_u64", "value_u64", base.DEC, nil, nil, "UINT64 value")
+M.f.atdecc_control_value_f32 = ProtoField.float("avb.atdecc.control.value_f32", "value_f32", nil, "FLOAT value")
+M.f.atdecc_control_value_f64 = ProtoField.double("avb.atdecc.control.value_f64", "value_f64", nil, "DOUBLE value")
+M.f.atdecc_control_value_string_ref = ProtoField.uint16("avb.atdecc.control.value_string_ref", "value_string_ref", base.HEX, nil, nil, "localized string reference option")
+M.f.atdecc_control_units_multiplier = ProtoField.int8("avb.atdecc.control.units_multiplier", "units_multiplier", base.DEC, nil, nil, "units multiplier (power of ten)")
+M.f.atdecc_control_units_code = ProtoField.uint8("avb.atdecc.control.units_code", "units_code", base.HEX, M.values_control_unit_code, nil, "units code")
+M.f.atdecc_control_localized_string = ProtoField.uint16("avb.atdecc.control.localized_string", "localized_string", base.HEX, nil, nil, "localized string reference")
+M.f.atdecc_control_utf8 = ProtoField.string("avb.atdecc.control.utf8", "utf8", base.ASCII, "UTF-8 value")
+M.f.atdecc_control_vendor_values = ProtoField.bytes("avb.atdecc.control.vendor_values", "vendor_values", base.NONE, "vendor / expansion value_details")
+M.f.atdecc_control_smpte_hours = ProtoField.uint16("avb.atdecc.control.smpte.hours", "hours", base.DEC, nil, nil, "hours")
+M.f.atdecc_control_smpte_minutes = ProtoField.uint8("avb.atdecc.control.smpte.minutes", "minutes", base.DEC, nil, nil, "minutes")
+M.f.atdecc_control_smpte_seconds = ProtoField.uint8("avb.atdecc.control.smpte.seconds", "seconds", base.DEC, nil, nil, "seconds")
+M.f.atdecc_control_smpte_frames = ProtoField.uint8("avb.atdecc.control.smpte.frames", "frames", base.DEC, nil, nil, "frames")
+M.f.atdecc_control_smpte_subframes = ProtoField.uint16("avb.atdecc.control.smpte.subframes", "subframes", base.DEC, nil, nil, "subframes")
+M.f.atdecc_control_smpte_frames_per_second = ProtoField.uint8("avb.atdecc.control.smpte.frames_per_second", "frames_per_second", base.DEC, nil, nil, "frames per second")
+M.f.atdecc_control_smpte_drop_frame = ProtoField.uint8("avb.atdecc.control.smpte.drop_frame", "drop_frame", base.DEC, nil, nil, "drop frame")
+M.f.atdecc_control_smpte_pull = ProtoField.uint8("avb.atdecc.control.smpte.pull", "pull", base.DEC, nil, nil, "pull")
+M.f.atdecc_control_sample_rate_current_pull = ProtoField.uint8("avb.atdecc.control.sample_rate.current_pull", "current_pull", base.DEC, nil, 0xE0000000, "current pull")
+M.f.atdecc_control_sample_rate_current_base_frequency = ProtoField.uint32("avb.atdecc.control.sample_rate.current_base_frequency", "current_base_frequency", base.DEC, nil, 0x1FFFFFFF, "current base_frequency (Hz)")
+M.f.atdecc_control_sample_rate_default_pull = ProtoField.uint8("avb.atdecc.control.sample_rate.default_pull", "default_pull", base.DEC, nil, 0xE0000000, "default pull")
+M.f.atdecc_control_sample_rate_default_base_frequency = ProtoField.uint32("avb.atdecc.control.sample_rate.default_base_frequency", "default_base_frequency", base.DEC, nil, 0x1FFFFFFF, "default base_frequency (Hz)")
+M.f.atdecc_control_sample_rate_minimum_pull = ProtoField.uint8("avb.atdecc.control.sample_rate.minimum_pull", "minimum_pull", base.DEC, nil, 0xE0000000, "minimum pull")
+M.f.atdecc_control_sample_rate_minimum_base_frequency = ProtoField.uint32("avb.atdecc.control.sample_rate.minimum_base_frequency", "minimum_base_frequency", base.DEC, nil, 0x1FFFFFFF, "minimum base_frequency (Hz)")
+M.f.atdecc_control_sample_rate_maximum_pull = ProtoField.uint8("avb.atdecc.control.sample_rate.maximum_pull", "maximum_pull", base.DEC, nil, 0xE0000000, "maximum pull")
+M.f.atdecc_control_sample_rate_maximum_base_frequency = ProtoField.uint32("avb.atdecc.control.sample_rate.maximum_base_frequency", "maximum_base_frequency", base.DEC, nil, 0x1FFFFFFF, "maximum base_frequency (Hz)")
+M.f.atdecc_control_gptp_seconds = ProtoField.uint64("avb.atdecc.control.gptp.seconds", "seconds", base.DEC, nil, nil, "gptp seconds (48-bit)")
+M.f.atdecc_control_gptp_nanoseconds = ProtoField.uint32("avb.atdecc.control.gptp.nanoseconds", "nanoseconds", base.DEC, nil, nil, "gptp nanoseconds")
+M.f.atdecc_control_bode_frequency_minimum = ProtoField.float("avb.atdecc.control.bode.frequency_minimum", "frequency_minimum", nil, "frequency minimum")
+M.f.atdecc_control_bode_frequency_maximum = ProtoField.float("avb.atdecc.control.bode.frequency_maximum", "frequency_maximum", nil, "frequency maximum")
+M.f.atdecc_control_bode_frequency_step = ProtoField.float("avb.atdecc.control.bode.frequency_step", "frequency_step", nil, "frequency step")
+M.f.atdecc_control_bode_frequency_default = ProtoField.float("avb.atdecc.control.bode.frequency_default", "frequency_default", nil, "frequency default")
+M.f.atdecc_control_bode_magnitude_minimum = ProtoField.float("avb.atdecc.control.bode.magnitude_minimum", "magnitude_minimum", nil, "magnitude minimum")
+M.f.atdecc_control_bode_magnitude_maximum = ProtoField.float("avb.atdecc.control.bode.magnitude_maximum", "magnitude_maximum", nil, "magnitude maximum")
+M.f.atdecc_control_bode_magnitude_step = ProtoField.float("avb.atdecc.control.bode.magnitude_step", "magnitude_step", nil, "magnitude step")
+M.f.atdecc_control_bode_magnitude_default = ProtoField.float("avb.atdecc.control.bode.magnitude_default", "magnitude_default", nil, "magnitude default")
+M.f.atdecc_control_bode_phase_minimum = ProtoField.float("avb.atdecc.control.bode.phase_minimum", "phase_minimum", nil, "phase minimum")
+M.f.atdecc_control_bode_phase_maximum = ProtoField.float("avb.atdecc.control.bode.phase_maximum", "phase_maximum", nil, "phase maximum")
+M.f.atdecc_control_bode_phase_step = ProtoField.float("avb.atdecc.control.bode.phase_step", "phase_step", nil, "phase step")
+M.f.atdecc_control_bode_phase_default = ProtoField.float("avb.atdecc.control.bode.phase_default", "phase_default", nil, "phase default")
+M.f.atdecc_control_bode_point_frequency = ProtoField.float("avb.atdecc.control.bode.point.frequency", "frequency", nil, "frequency (Hz)")
+M.f.atdecc_control_bode_point_magnitude = ProtoField.float("avb.atdecc.control.bode.point.magnitude", "magnitude", nil, "magnitude (dB)")
+M.f.atdecc_control_bode_point_phase = ProtoField.float("avb.atdecc.control.bode.point.phase", "phase", nil, "phase (degrees)")
+M.f.atdecc_stream_format_aaf_nsr = ProtoField.uint8("avb.atdecc.stream_format.aaf.nsr", "nsr", base.DEC, M.values_aaf_nsr, 0xF, "nominal sample rate")
+M.f.atdecc_stream_format_aaf_format = ProtoField.uint8("avb.atdecc.stream_format.aaf.format", "format", base.DEC, M.values_aaf_format, nil, "sample format")
+M.f.atdecc_stream_format_aaf_bit_depth = ProtoField.uint8("avb.atdecc.stream_format.aaf.bit_depth", "bit_depth", base.DEC, nil, nil, "bit depth")
+M.f.atdecc_stream_format_aaf_channels_per_frame = ProtoField.uint16("avb.atdecc.stream_format.aaf.channels_per_frame", "channels_per_frame", base.DEC, nil, 0xFFC00000, "channels per frame")
+M.f.atdecc_stream_format_aaf_samples_per_frame = ProtoField.uint16("avb.atdecc.stream_format.aaf.samples_per_frame", "samples_per_frame", base.DEC, nil, 0x3FF000, "samples per frame")
+M.f.atdecc_stream_format_iec61883_sf = ProtoField.bool("avb.atdecc.stream_format.iec61883.sf", "sf", 8, nil, 0x80, "sf (1 = IEC 61883)")
+M.f.atdecc_stream_format_iec61883_fmt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.fmt", "fmt", base.HEX, nil, 0x7E, "FMT")
+M.f.atdecc_stream_format_iec61883_sfc = ProtoField.uint8("avb.atdecc.stream_format.iec61883.sfc", "sfc", base.DEC, M.values_am824_fdf, nil, "sampling frequency code")
+M.f.atdecc_stream_format_iec61883_dbs = ProtoField.uint8("avb.atdecc.stream_format.iec61883.dbs", "dbs", base.DEC, nil, nil, "data block size (channels)")
+M.f.atdecc_stream_format_iec61883_b = ProtoField.bool("avb.atdecc.stream_format.iec61883.b", "b", 8, nil, 0x80, "blocking")
+M.f.atdecc_stream_format_iec61883_nb = ProtoField.bool("avb.atdecc.stream_format.iec61883.nb", "nb", 8, nil, 0x40, "non-blocking")
+M.f.atdecc_stream_format_iec61883_sph = ProtoField.bool("avb.atdecc.stream_format.iec61883.sph", "sph", 8, nil, 0x2, "source packet header")
+M.f.atdecc_stream_format_iec61883_label = ProtoField.uint8("avb.atdecc.stream_format.iec61883.label", "label", base.HEX, M.values_am824_label, nil, "AM824 label")
+M.f.atdecc_stream_format_crf_type = ProtoField.uint8("avb.atdecc.stream_format.crf.type", "type", base.DEC, M.values_crf_type, 0xF0, "CRF type")
+M.f.atdecc_stream_format_crf_timestamp_interval = ProtoField.uint16("avb.atdecc.stream_format.crf.timestamp_interval", "timestamp_interval", base.DEC, nil, 0xFFF, "timestamp interval")
+M.f.atdecc_stream_format_crf_timestamps_per_pdu = ProtoField.uint8("avb.atdecc.stream_format.crf.timestamps_per_pdu", "timestamps_per_pdu", base.DEC, nil, nil, "timestamps per PDU")
+M.f.atdecc_stream_format_crf_pull = ProtoField.uint8("avb.atdecc.stream_format.crf.pull", "pull", base.DEC, M.values_crf_pull, 0xE0000000, "pull")
+M.f.atdecc_stream_format_crf_base_frequency = ProtoField.uint32("avb.atdecc.stream_format.crf.base_frequency", "base_frequency", base.DEC, nil, 0x1FFFFFFF, "base frequency (Hz)")
+M.f.atdecc_mvu_reserved = ProtoField.uint16("avb.atdecc.mvu.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_mvu_protocol_version = ProtoField.uint32("avb.atdecc.mvu.protocol_version", "protocol_version", base.DEC, nil, nil, "protocol_version")
+M.f.atdecc_mvu_features_flags = ProtoField.uint32("avb.atdecc.mvu.features_flags", "features_flags", base.DEC, nil, nil, "features_flags (Table 5.17)")
+M.f.atdecc_mvu_certification_version = ProtoField.uint32("avb.atdecc.mvu.certification_version", "certification_version", base.DEC, nil, nil, "certification_version")
+M.f.atdecc_mvu_specification_version = ProtoField.uint32("avb.atdecc.mvu.specification_version", "specification_version", base.DEC, nil, nil, "specification_version")
+M.f.atdecc_mvu_system_unique_id = ProtoField.uint64("avb.atdecc.mvu.system_unique_id", "system_unique_id", base.HEX, nil, nil, "system_unique_id")
+M.f.atdecc_mvu_system_name = ProtoField.string("avb.atdecc.mvu.system_name", "system_name", base.ASCII, "name (Milan 1.3, 64 octets, optional)")
+M.f.atdecc_mvu_clock_domain_index = ProtoField.uint16("avb.atdecc.mvu.clock_domain_index", "clock_domain_index", base.DEC, nil, nil, "CLOCK_DOMAIN descriptor_index")
+M.f.atdecc_mvu_mcr_flags = ProtoField.uint8("avb.atdecc.mvu.mcr_flags", "mcr_flags", base.DEC, nil, nil, "flags (Table 5.18)")
+M.f.atdecc_mvu_reserved_1 = ProtoField.uint8("avb.atdecc.mvu.reserved_1", "reserved_1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_mvu_default_mcr_prio = ProtoField.uint8("avb.atdecc.mvu.default_mcr_prio", "default_mcr_prio", base.DEC, nil, nil, "default media clock reference priority")
+M.f.atdecc_mvu_user_mcr_prio = ProtoField.uint8("avb.atdecc.mvu.user_mcr_prio", "user_mcr_prio", base.DEC, nil, nil, "user media clock reference priority")
+M.f.atdecc_mvu_reserved_2 = ProtoField.uint32("avb.atdecc.mvu.reserved_2", "reserved_2", base.DEC, nil, nil, "reserved")
+M.f.atdecc_mvu_media_clock_domain_name = ProtoField.string("avb.atdecc.mvu.media_clock_domain_name", "media_clock_domain_name", base.ASCII, "name (Milan 1.3, 64 octets, optional)")
+M.f.atdecc_mvu_bind_flags = ProtoField.uint16("avb.atdecc.mvu.bind_flags", "bind_flags", base.DEC, nil, nil, "flags (Table 5.19)")
+M.f.atdecc_mvu_descriptor_type = ProtoField.uint16("avb.atdecc.mvu.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_mvu_descriptor_index = ProtoField.uint16("avb.atdecc.mvu.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_mvu_talker_entity_id = ProtoField.uint64("avb.atdecc.mvu.talker_entity_id", "talker_entity_id", base.HEX, nil, nil, "talker_entity_id")
+M.f.atdecc_mvu_talker_stream_index = ProtoField.uint16("avb.atdecc.mvu.talker_stream_index", "talker_stream_index", base.DEC, nil, nil, "talker STREAM_OUTPUT index")
+M.f.atdecc_mvu_talker_unique_id = ProtoField.uint16("avb.atdecc.mvu.talker_unique_id", "talker_unique_id", base.DEC, nil, nil, "bound talker unique id")
+M.f.atdecc_mvu_pbsta = ProtoField.uint8("avb.atdecc.mvu.pbsta", "pbsta", base.DEC, nil, nil, "probing status")
+M.f.atdecc_mvu_acmpsta = ProtoField.uint8("avb.atdecc.mvu.acmpsta", "acmpsta", base.DEC, nil, nil, "ACMP status")
 M.f.atdecc_aem_payload = ProtoField.bytes("avb.atdecc.aem.payload", "payload", base.NONE, "undissected AEM payload octets")
 M.f.atdecc_desc_control_value_details = ProtoField.bytes("avb.atdecc.desc.control.value_details", "value_details", base.NONE, "raw descriptor trailer octets")
 M.f.atdecc_jdks_log_text = ProtoField.string("avb.atdecc.jdks.log.text", "text", base.ASCII, "log text")
@@ -1194,6 +1567,16 @@ M.fields = {
     M.f.atdecc_aem_audio_mapping_stream_channel,
     M.f.atdecc_aem_audio_mapping_cluster_offset,
     M.f.atdecc_aem_audio_mapping_cluster_channel,
+    M.f.atdecc_mvu_u,
+    M.f.atdecc_mvu_command_type,
+    M.f.atdecc_mvu_features_flags_redundancy,
+    M.f.atdecc_mvu_features_flags_talker_dynamic_mappings,
+    M.f.atdecc_mvu_features_flags_mvu_binding,
+    M.f.atdecc_mvu_features_flags_talker_signal_presence,
+    M.f.atdecc_mvu_mcr_flags_media_clock_reference,
+    M.f.atdecc_mvu_mcr_flags_media_clock_domain,
+    M.f.atdecc_avc_length,
+    M.f.atdecc_avc_command_response,
     M.f.atdecc_aem_acquire_entity_flags,
     M.f.atdecc_aem_acquire_entity_owner_entity_id,
     M.f.atdecc_aem_acquire_entity_descriptor_type,
@@ -1364,6 +1747,76 @@ M.fields = {
     M.f.atdecc_aem_get_ptp_port_info_response_reserved4,
     M.f.atdecc_aem_get_ptp_port_info_response_reserved5,
     M.f.atdecc_aem_get_ptp_port_info_response_reserved6,
+    M.f.atdecc_aem_video_format_descriptor_type,
+    M.f.atdecc_aem_video_format_descriptor_index,
+    M.f.atdecc_aem_video_format_format_specific,
+    M.f.atdecc_aem_video_format_aspect_ratio,
+    M.f.atdecc_aem_video_format_color_space,
+    M.f.atdecc_aem_video_format_frame_size,
+    M.f.atdecc_aem_get_video_format_command_descriptor_type,
+    M.f.atdecc_aem_get_video_format_command_descriptor_index,
+    M.f.atdecc_aem_sensor_format_descriptor_type,
+    M.f.atdecc_aem_sensor_format_descriptor_index,
+    M.f.atdecc_aem_sensor_format_sensor_format,
+    M.f.atdecc_aem_get_sensor_format_command_descriptor_type,
+    M.f.atdecc_aem_get_sensor_format_command_descriptor_index,
+    M.f.atdecc_aem_association_id_association_id,
+    M.f.atdecc_aem_get_as_path_command_descriptor_index,
+    M.f.atdecc_aem_get_as_path_command_reserved,
+    M.f.atdecc_aem_get_as_path_response_descriptor_index,
+    M.f.atdecc_aem_get_as_path_response_count,
+    M.f.atdecc_aem_get_video_map_command_descriptor_type,
+    M.f.atdecc_aem_get_video_map_command_descriptor_index,
+    M.f.atdecc_aem_get_video_map_command_map_index,
+    M.f.atdecc_aem_get_video_map_command_reserved,
+    M.f.atdecc_aem_video_map_response_descriptor_type,
+    M.f.atdecc_aem_video_map_response_descriptor_index,
+    M.f.atdecc_aem_video_map_response_map_index,
+    M.f.atdecc_aem_video_map_response_number_of_maps,
+    M.f.atdecc_aem_video_map_response_number_of_mappings,
+    M.f.atdecc_aem_video_map_response_reserved,
+    M.f.atdecc_aem_video_mappings_command_descriptor_type,
+    M.f.atdecc_aem_video_mappings_command_descriptor_index,
+    M.f.atdecc_aem_video_mappings_command_number_of_mappings,
+    M.f.atdecc_aem_video_mappings_command_reserved,
+    M.f.atdecc_aem_get_sensor_map_command_descriptor_type,
+    M.f.atdecc_aem_get_sensor_map_command_descriptor_index,
+    M.f.atdecc_aem_get_sensor_map_command_map_index,
+    M.f.atdecc_aem_get_sensor_map_command_reserved,
+    M.f.atdecc_aem_sensor_map_response_descriptor_type,
+    M.f.atdecc_aem_sensor_map_response_descriptor_index,
+    M.f.atdecc_aem_sensor_map_response_map_index,
+    M.f.atdecc_aem_sensor_map_response_number_of_maps,
+    M.f.atdecc_aem_sensor_map_response_number_of_mappings,
+    M.f.atdecc_aem_sensor_map_response_reserved,
+    M.f.atdecc_aem_sensor_mappings_command_descriptor_type,
+    M.f.atdecc_aem_sensor_mappings_command_descriptor_index,
+    M.f.atdecc_aem_sensor_mappings_command_number_of_mappings,
+    M.f.atdecc_aem_sensor_mappings_command_reserved,
+    M.f.atdecc_aem_stream_encryption_descriptor_type,
+    M.f.atdecc_aem_stream_encryption_descriptor_index,
+    M.f.atdecc_aem_stream_encryption_key_eui,
+    M.f.atdecc_aem_memory_object_length_descriptor_index,
+    M.f.atdecc_aem_memory_object_length_reserved,
+    M.f.atdecc_aem_memory_object_length_length,
+    M.f.atdecc_aem_get_memory_object_length_command_descriptor_index,
+    M.f.atdecc_aem_get_memory_object_length_command_reserved,
+    M.f.atdecc_aem_stream_backup_descriptor_type,
+    M.f.atdecc_aem_stream_backup_descriptor_index,
+    M.f.atdecc_aem_stream_backup_backup_talker_entity_id_0,
+    M.f.atdecc_aem_stream_backup_backup_talker_unique_id_0,
+    M.f.atdecc_aem_stream_backup_reserved_0,
+    M.f.atdecc_aem_stream_backup_backup_talker_entity_id_1,
+    M.f.atdecc_aem_stream_backup_backup_talker_unique_id_1,
+    M.f.atdecc_aem_stream_backup_reserved_1,
+    M.f.atdecc_aem_stream_backup_backup_talker_entity_id_2,
+    M.f.atdecc_aem_stream_backup_backup_talker_unique_id_2,
+    M.f.atdecc_aem_stream_backup_reserved_2,
+    M.f.atdecc_aem_stream_backup_backedup_talker_entity_id,
+    M.f.atdecc_aem_stream_backup_backedup_talker_unique_id,
+    M.f.atdecc_aem_stream_backup_reserved_3,
+    M.f.atdecc_aem_get_stream_backup_command_descriptor_type,
+    M.f.atdecc_aem_get_stream_backup_command_descriptor_index,
     M.f.atdecc_desc_entity_descriptor_type,
     M.f.atdecc_desc_entity_descriptor_index,
     M.f.atdecc_desc_entity_entity_id,
@@ -1867,6 +2320,107 @@ M.fields = {
     M.f.atdecc_desc_sensor_mapping_mapping_stream_channel,
     M.f.atdecc_desc_sensor_mapping_mapping_cluster_offset,
     M.f.atdecc_desc_sensor_mapping_mapping_cluster_channel,
+    M.f.atdecc_desc_signal_signal_type,
+    M.f.atdecc_desc_signal_signal_index,
+    M.f.atdecc_desc_ptp_instance_index_index,
+    M.f.atdecc_desc_redundant_stream_index_index,
+    M.f.atdecc_desc_format_specific_value,
+    M.f.atdecc_desc_aspect_ratio_width,
+    M.f.atdecc_desc_aspect_ratio_height,
+    M.f.atdecc_desc_size_width,
+    M.f.atdecc_desc_size_height,
+    M.f.atdecc_desc_color_space_value,
+    M.f.atdecc_desc_sensor_format_value,
+    M.f.atdecc_desc_as_path_entry_clock_identity,
+    M.f.atdecc_control_value_i8,
+    M.f.atdecc_control_value_u8,
+    M.f.atdecc_control_value_i16,
+    M.f.atdecc_control_value_u16,
+    M.f.atdecc_control_value_i32,
+    M.f.atdecc_control_value_u32,
+    M.f.atdecc_control_value_i64,
+    M.f.atdecc_control_value_u64,
+    M.f.atdecc_control_value_f32,
+    M.f.atdecc_control_value_f64,
+    M.f.atdecc_control_value_string_ref,
+    M.f.atdecc_control_units_multiplier,
+    M.f.atdecc_control_units_code,
+    M.f.atdecc_control_localized_string,
+    M.f.atdecc_control_utf8,
+    M.f.atdecc_control_vendor_values,
+    M.f.atdecc_control_smpte_hours,
+    M.f.atdecc_control_smpte_minutes,
+    M.f.atdecc_control_smpte_seconds,
+    M.f.atdecc_control_smpte_frames,
+    M.f.atdecc_control_smpte_subframes,
+    M.f.atdecc_control_smpte_frames_per_second,
+    M.f.atdecc_control_smpte_drop_frame,
+    M.f.atdecc_control_smpte_pull,
+    M.f.atdecc_control_sample_rate_current_pull,
+    M.f.atdecc_control_sample_rate_current_base_frequency,
+    M.f.atdecc_control_sample_rate_default_pull,
+    M.f.atdecc_control_sample_rate_default_base_frequency,
+    M.f.atdecc_control_sample_rate_minimum_pull,
+    M.f.atdecc_control_sample_rate_minimum_base_frequency,
+    M.f.atdecc_control_sample_rate_maximum_pull,
+    M.f.atdecc_control_sample_rate_maximum_base_frequency,
+    M.f.atdecc_control_gptp_seconds,
+    M.f.atdecc_control_gptp_nanoseconds,
+    M.f.atdecc_control_bode_frequency_minimum,
+    M.f.atdecc_control_bode_frequency_maximum,
+    M.f.atdecc_control_bode_frequency_step,
+    M.f.atdecc_control_bode_frequency_default,
+    M.f.atdecc_control_bode_magnitude_minimum,
+    M.f.atdecc_control_bode_magnitude_maximum,
+    M.f.atdecc_control_bode_magnitude_step,
+    M.f.atdecc_control_bode_magnitude_default,
+    M.f.atdecc_control_bode_phase_minimum,
+    M.f.atdecc_control_bode_phase_maximum,
+    M.f.atdecc_control_bode_phase_step,
+    M.f.atdecc_control_bode_phase_default,
+    M.f.atdecc_control_bode_point_frequency,
+    M.f.atdecc_control_bode_point_magnitude,
+    M.f.atdecc_control_bode_point_phase,
+    M.f.atdecc_stream_format_aaf_nsr,
+    M.f.atdecc_stream_format_aaf_format,
+    M.f.atdecc_stream_format_aaf_bit_depth,
+    M.f.atdecc_stream_format_aaf_channels_per_frame,
+    M.f.atdecc_stream_format_aaf_samples_per_frame,
+    M.f.atdecc_stream_format_iec61883_sf,
+    M.f.atdecc_stream_format_iec61883_fmt,
+    M.f.atdecc_stream_format_iec61883_sfc,
+    M.f.atdecc_stream_format_iec61883_dbs,
+    M.f.atdecc_stream_format_iec61883_b,
+    M.f.atdecc_stream_format_iec61883_nb,
+    M.f.atdecc_stream_format_iec61883_sph,
+    M.f.atdecc_stream_format_iec61883_label,
+    M.f.atdecc_stream_format_crf_type,
+    M.f.atdecc_stream_format_crf_timestamp_interval,
+    M.f.atdecc_stream_format_crf_timestamps_per_pdu,
+    M.f.atdecc_stream_format_crf_pull,
+    M.f.atdecc_stream_format_crf_base_frequency,
+    M.f.atdecc_mvu_reserved,
+    M.f.atdecc_mvu_protocol_version,
+    M.f.atdecc_mvu_features_flags,
+    M.f.atdecc_mvu_certification_version,
+    M.f.atdecc_mvu_specification_version,
+    M.f.atdecc_mvu_system_unique_id,
+    M.f.atdecc_mvu_system_name,
+    M.f.atdecc_mvu_clock_domain_index,
+    M.f.atdecc_mvu_mcr_flags,
+    M.f.atdecc_mvu_reserved_1,
+    M.f.atdecc_mvu_default_mcr_prio,
+    M.f.atdecc_mvu_user_mcr_prio,
+    M.f.atdecc_mvu_reserved_2,
+    M.f.atdecc_mvu_media_clock_domain_name,
+    M.f.atdecc_mvu_bind_flags,
+    M.f.atdecc_mvu_descriptor_type,
+    M.f.atdecc_mvu_descriptor_index,
+    M.f.atdecc_mvu_talker_entity_id,
+    M.f.atdecc_mvu_talker_stream_index,
+    M.f.atdecc_mvu_talker_unique_id,
+    M.f.atdecc_mvu_pbsta,
+    M.f.atdecc_mvu_acmpsta,
     M.f.atdecc_aem_payload,
     M.f.atdecc_desc_control_value_details,
     M.f.atdecc_jdks_log_text,
@@ -2030,6 +2584,27 @@ function M.add_aem_audio_mapping(tree, tvb, off)
     tree:add(M.f.atdecc_aem_audio_mapping_stream_channel, tvb(off + 2, 2))
     tree:add(M.f.atdecc_aem_audio_mapping_cluster_offset, tvb(off + 4, 2))
     tree:add(M.f.atdecc_aem_audio_mapping_cluster_channel, tvb(off + 6, 2))
+end
+
+--- Milan vendor unique header (Milan 1.3 Figure 5.4)
+function M.add_mvu(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_u, tvb(off + 28, 1))
+    tree:add(M.f.atdecc_mvu_command_type, tvb(off + 28, 2))
+end
+
+--- MVU flag bits
+function M.add_mvu_flags(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_features_flags_redundancy, tvb(off + 36, 4))
+    tree:add(M.f.atdecc_mvu_features_flags_talker_dynamic_mappings, tvb(off + 36, 4))
+    tree:add(M.f.atdecc_mvu_features_flags_mvu_binding, tvb(off + 36, 4))
+    tree:add(M.f.atdecc_mvu_features_flags_talker_signal_presence, tvb(off + 36, 4))
+    tree:add(M.f.atdecc_mvu_mcr_flags_media_clock_reference, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_mvu_mcr_flags_media_clock_domain, tvb(off + 32, 1))
+end
+
+--- AVC AECP message (IEEE 1722.1-2021 9.2.1.3)
+function M.add_avc(tree, tvb, off)
+    tree:add(M.f.atdecc_avc_length, tvb(off + 22, 2))
 end
 
 --- AEM AemAcquireEntityPayload (IEEE 1722.1-2021 7.4)
@@ -2354,6 +2929,148 @@ function M.add_aem_get_ptp_port_info_response(tree, tvb, off)
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved4, tvb(off + 83, 1))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved5, tvb(off + 84, 8))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved6, tvb(off + 92, 8))
+end
+
+--- AEM AemVideoFormatPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_video_format(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_video_format_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_video_format_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_video_format_format_specific, tvb(off + 28, 4))
+    tree:add(M.f.atdecc_aem_video_format_aspect_ratio, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_aem_video_format_color_space, tvb(off + 34, 2))
+    tree:add(M.f.atdecc_aem_video_format_frame_size, tvb(off + 36, 4))
+end
+
+--- AEM AemGetVideoFormatCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_video_format_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_video_format_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_video_format_command_descriptor_index, tvb(off + 26, 2))
+end
+
+--- AEM AemSensorFormatPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_sensor_format(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_sensor_format_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_sensor_format_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_sensor_format_sensor_format, tvb(off + 28, 8))
+end
+
+--- AEM AemGetSensorFormatCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_sensor_format_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_sensor_format_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_sensor_format_command_descriptor_index, tvb(off + 26, 2))
+end
+
+--- AEM AemAssociationIdPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_association_id(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_association_id_association_id, tvb(off + 24, 8))
+end
+
+--- AEM AemGetAsPathCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_as_path_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_as_path_command_descriptor_index, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_as_path_command_reserved, tvb(off + 26, 2))
+end
+
+--- AEM AemGetAsPathResponseHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_as_path_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_as_path_response_descriptor_index, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_as_path_response_count, tvb(off + 26, 2))
+end
+
+--- AEM AemGetVideoMapCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_video_map_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_video_map_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_video_map_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_get_video_map_command_map_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_get_video_map_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemVideoMapResponseHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_video_map_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_video_map_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_video_map_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_video_map_response_map_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_video_map_response_number_of_maps, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_video_map_response_number_of_mappings, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_aem_video_map_response_reserved, tvb(off + 34, 2))
+end
+
+--- AEM AemVideoMappingsCommandHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_video_mappings_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_video_mappings_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_video_mappings_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_video_mappings_command_number_of_mappings, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_video_mappings_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemGetSensorMapCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_sensor_map_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_sensor_map_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_sensor_map_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_get_sensor_map_command_map_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_get_sensor_map_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemSensorMapResponseHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_sensor_map_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_sensor_map_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_sensor_map_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_sensor_map_response_map_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_sensor_map_response_number_of_maps, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_sensor_map_response_number_of_mappings, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_aem_sensor_map_response_reserved, tvb(off + 34, 2))
+end
+
+--- AEM AemSensorMappingsCommandHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_sensor_mappings_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_sensor_mappings_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_sensor_mappings_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_sensor_mappings_command_number_of_mappings, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_sensor_mappings_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemStreamEncryptionPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_stream_encryption(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_stream_encryption_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_stream_encryption_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_stream_encryption_key_eui, tvb(off + 28, 8))
+end
+
+--- AEM AemMemoryObjectLengthPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_memory_object_length(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_memory_object_length_descriptor_index, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_memory_object_length_reserved, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_memory_object_length_length, tvb(off + 28, 8))
+end
+
+--- AEM AemGetMemoryObjectLengthCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_memory_object_length_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_memory_object_length_command_descriptor_index, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_memory_object_length_command_reserved, tvb(off + 26, 2))
+end
+
+--- AEM AemStreamBackupPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_stream_backup(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_stream_backup_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_backup_talker_entity_id_0, tvb(off + 28, 8))
+    tree:add(M.f.atdecc_aem_stream_backup_backup_talker_unique_id_0, tvb(off + 36, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_reserved_0, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_backup_talker_entity_id_1, tvb(off + 40, 8))
+    tree:add(M.f.atdecc_aem_stream_backup_backup_talker_unique_id_1, tvb(off + 48, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_reserved_1, tvb(off + 50, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_backup_talker_entity_id_2, tvb(off + 52, 8))
+    tree:add(M.f.atdecc_aem_stream_backup_backup_talker_unique_id_2, tvb(off + 60, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_reserved_2, tvb(off + 62, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_backedup_talker_entity_id, tvb(off + 64, 8))
+    tree:add(M.f.atdecc_aem_stream_backup_backedup_talker_unique_id, tvb(off + 72, 2))
+    tree:add(M.f.atdecc_aem_stream_backup_reserved_3, tvb(off + 74, 2))
+end
+
+--- AEM AemGetStreamBackupCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_stream_backup_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_stream_backup_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_stream_backup_command_descriptor_index, tvb(off + 26, 2))
 end
 
 --- DescriptorEntity (IEEE 1722.1-2021 7.2)
@@ -3031,106 +3748,418 @@ function M.add_desc_sensor_mapping(tree, tvb, off)
     tree:add(M.f.atdecc_desc_sensor_mapping_mapping_cluster_channel, tvb(off + 6, 2))
 end
 
+--- signal reference entry (source / map / signal list)
+function M.add_desc_signal(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_signal_signal_type, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_desc_signal_signal_index, tvb(off + 2, 2))
+end
+
+--- PTP_INSTANCE index entry
+function M.add_desc_ptp_instance_index(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_ptp_instance_index_index, tvb(off + 0, 2))
+end
+
+--- redundant stream entry
+function M.add_desc_redundant_stream_index(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_redundant_stream_index_index, tvb(off + 0, 2))
+end
+
+--- video format specific entry
+function M.add_desc_format_specific(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_format_specific_value, tvb(off + 0, 4))
+end
+
+--- video aspect ratio entry
+function M.add_desc_aspect_ratio(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_aspect_ratio_width, tvb(off + 0, 1))
+    tree:add(M.f.atdecc_desc_aspect_ratio_height, tvb(off + 1, 1))
+end
+
+--- video size entry
+function M.add_desc_size(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_size_width, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_desc_size_height, tvb(off + 2, 2))
+end
+
+--- video color space entry
+function M.add_desc_color_space(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_color_space_value, tvb(off + 0, 2))
+end
+
+--- sensor format entry
+function M.add_desc_sensor_format(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_sensor_format_value, tvb(off + 0, 8))
+end
+
+--- gPTP path sequence entry
+function M.add_desc_as_path_entry(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_as_path_entry_clock_identity, tvb(off + 0, 8))
+end
+
+--- control value elements
+function M.add_control(tree, tvb, off)
+    tree:add(M.f.atdecc_control_value_i8, tvb(off + 0, 1))
+    tree:add(M.f.atdecc_control_value_u8, tvb(off + 0, 1))
+    tree:add(M.f.atdecc_control_value_i16, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_control_value_u16, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_control_value_i32, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_value_u32, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_value_i64, tvb(off + 0, 8))
+    tree:add(M.f.atdecc_control_value_u64, tvb(off + 0, 8))
+    tree:add(M.f.atdecc_control_value_f32, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_value_f64, tvb(off + 0, 8))
+    tree:add(M.f.atdecc_control_value_string_ref, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_control_units_multiplier, tvb(off + 0, 1))
+    tree:add(M.f.atdecc_control_units_code, tvb(off + 1, 1))
+    tree:add(M.f.atdecc_control_localized_string, tvb(off + 0, 2))
+end
+
+--- CONTROL_SMPTE_TIME value (Table 7.18)
+function M.add_control_smpte(tree, tvb, off)
+    tree:add(M.f.atdecc_control_smpte_hours, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_control_smpte_minutes, tvb(off + 2, 1))
+    tree:add(M.f.atdecc_control_smpte_seconds, tvb(off + 3, 1))
+    tree:add(M.f.atdecc_control_smpte_frames, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_control_smpte_subframes, tvb(off + 5, 2))
+    tree:add(M.f.atdecc_control_smpte_frames_per_second, tvb(off + 7, 1))
+    tree:add(M.f.atdecc_control_smpte_drop_frame, tvb(off + 8, 1))
+    tree:add(M.f.atdecc_control_smpte_pull, tvb(off + 9, 1))
+end
+
+--- CONTROL_SAMPLE_RATE value (Table 7.19)
+function M.add_control_sample_rate(tree, tvb, off)
+    tree:add(M.f.atdecc_control_sample_rate_current_pull, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_sample_rate_current_base_frequency, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_sample_rate_default_pull, tvb(off + 4, 4))
+    tree:add(M.f.atdecc_control_sample_rate_default_base_frequency, tvb(off + 4, 4))
+    tree:add(M.f.atdecc_control_sample_rate_minimum_pull, tvb(off + 8, 4))
+    tree:add(M.f.atdecc_control_sample_rate_minimum_base_frequency, tvb(off + 8, 4))
+    tree:add(M.f.atdecc_control_sample_rate_maximum_pull, tvb(off + 12, 4))
+    tree:add(M.f.atdecc_control_sample_rate_maximum_base_frequency, tvb(off + 12, 4))
+end
+
+--- CONTROL_GPTP_TIME value (Table 7.20)
+function M.add_control_gptp(tree, tvb, off)
+    tree:add(M.f.atdecc_control_gptp_seconds, tvb(off + 0, 6))
+    tree:add(M.f.atdecc_control_gptp_nanoseconds, tvb(off + 6, 4))
+end
+
+--- CONTROL_BODE_PLOT ranges (Table 7.17)
+function M.add_control_bode(tree, tvb, off)
+    tree:add(M.f.atdecc_control_bode_frequency_minimum, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_bode_frequency_maximum, tvb(off + 4, 4))
+    tree:add(M.f.atdecc_control_bode_frequency_step, tvb(off + 8, 4))
+    tree:add(M.f.atdecc_control_bode_frequency_default, tvb(off + 12, 4))
+    tree:add(M.f.atdecc_control_bode_magnitude_minimum, tvb(off + 16, 4))
+    tree:add(M.f.atdecc_control_bode_magnitude_maximum, tvb(off + 20, 4))
+    tree:add(M.f.atdecc_control_bode_magnitude_step, tvb(off + 24, 4))
+    tree:add(M.f.atdecc_control_bode_magnitude_default, tvb(off + 28, 4))
+    tree:add(M.f.atdecc_control_bode_phase_minimum, tvb(off + 32, 4))
+    tree:add(M.f.atdecc_control_bode_phase_maximum, tvb(off + 36, 4))
+    tree:add(M.f.atdecc_control_bode_phase_step, tvb(off + 40, 4))
+    tree:add(M.f.atdecc_control_bode_phase_default, tvb(off + 44, 4))
+end
+
+--- CONTROL_BODE_PLOT current point
+function M.add_control_bode_point(tree, tvb, off)
+    tree:add(M.f.atdecc_control_bode_point_frequency, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_control_bode_point_magnitude, tvb(off + 4, 4))
+    tree:add(M.f.atdecc_control_bode_point_phase, tvb(off + 8, 4))
+end
+
+--- AAF stream format (IEEE 1722 7.3.4 as carried in AEM)
+function M.add_stream_format_aaf(tree, tvb, off)
+    tree:add(M.f.atdecc_stream_format_aaf_nsr, tvb(off + 1, 1))
+    tree:add(M.f.atdecc_stream_format_aaf_format, tvb(off + 2, 1))
+    tree:add(M.f.atdecc_stream_format_aaf_bit_depth, tvb(off + 3, 1))
+    tree:add(M.f.atdecc_stream_format_aaf_channels_per_frame, tvb(off + 4, 4))
+    tree:add(M.f.atdecc_stream_format_aaf_samples_per_frame, tvb(off + 4, 4))
+end
+
+--- IEC 61883-6 stream format (IEEE 1722.1 Annex A.5)
+function M.add_stream_format_iec61883(tree, tvb, off)
+    tree:add(M.f.atdecc_stream_format_iec61883_sf, tvb(off + 1, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_fmt, tvb(off + 1, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_sfc, tvb(off + 2, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_dbs, tvb(off + 3, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_b, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_nb, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_sph, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_label, tvb(off + 5, 1))
+end
+
+--- CRF stream format (IEEE 1722 10.4 as carried in AEM)
+function M.add_stream_format_crf(tree, tvb, off)
+    tree:add(M.f.atdecc_stream_format_crf_type, tvb(off + 1, 1))
+    tree:add(M.f.atdecc_stream_format_crf_timestamp_interval, tvb(off + 1, 2))
+    tree:add(M.f.atdecc_stream_format_crf_timestamps_per_pdu, tvb(off + 3, 1))
+    tree:add(M.f.atdecc_stream_format_crf_pull, tvb(off + 4, 4))
+    tree:add(M.f.atdecc_stream_format_crf_base_frequency, tvb(off + 4, 4))
+end
+
+--- GET_MILAN_INFO / GET_SYSTEM_UNIQUE_ID command
+function M.add_mvu_mvu_reserved(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
+end
+
+--- GET_MILAN_INFO response (Milan 1.3 Figure 5.6)
+function M.add_mvu_mvu_get_milan_info_response(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_mvu_protocol_version, tvb(off + 32, 4))
+    tree:add(M.f.atdecc_mvu_features_flags, tvb(off + 36, 4))
+    tree:add(M.f.atdecc_mvu_certification_version, tvb(off + 40, 4))
+    tree:add(M.f.atdecc_mvu_specification_version, tvb(off + 44, 4))
+end
+
+--- SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Figure 5.7)
+function M.add_mvu_mvu_system_unique_id(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_mvu_system_unique_id, tvb(off + 32, 8))
+end
+
+--- SET_MEDIA_CLOCK_REFERENCE_INFO command/response, GET_... response (Figure 5.8)
+function M.add_mvu_mvu_media_clock_reference_info(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_clock_domain_index, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_mvu_mcr_flags, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_mvu_reserved_1, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_mvu_default_mcr_prio, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_mvu_user_mcr_prio, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_mvu_reserved_2, tvb(off + 36, 4))
+end
+
+--- GET_MEDIA_CLOCK_REFERENCE_INFO command (Figure 5.9)
+function M.add_mvu_mvu_get_media_clock_reference_info_command(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_clock_domain_index, tvb(off + 30, 2))
+end
+
+--- BIND_STREAM command/response (Figure 5.10)
+function M.add_mvu_mvu_bind_stream(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_bind_flags, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_mvu_descriptor_type, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_mvu_descriptor_index, tvb(off + 34, 2))
+    tree:add(M.f.atdecc_mvu_talker_entity_id, tvb(off + 36, 8))
+    tree:add(M.f.atdecc_mvu_talker_stream_index, tvb(off + 44, 2))
+    tree:add(M.f.atdecc_mvu_reserved, tvb(off + 46, 2))
+end
+
+--- UNBIND_STREAM command/response, GET_STREAM_INPUT_INFO_EX command (Figure 5.11)
+function M.add_mvu_mvu_stream_input_ref(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_mvu_descriptor_type, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_mvu_descriptor_index, tvb(off + 34, 2))
+end
+
+--- GET_STREAM_INPUT_INFO_EX response (Figure 5.12)
+function M.add_mvu_mvu_stream_input_info_ex_response(tree, tvb, off)
+    tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_mvu_descriptor_type, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_mvu_descriptor_index, tvb(off + 34, 2))
+    tree:add(M.f.atdecc_mvu_talker_entity_id, tvb(off + 36, 8))
+    tree:add(M.f.atdecc_mvu_talker_unique_id, tvb(off + 44, 2))
+    tree:add(M.f.atdecc_mvu_pbsta, tvb(off + 46, 1))
+    tree:add(M.f.atdecc_mvu_acmpsta, tvb(off + 47, 1))
+end
+
 M.AEM_PAYLOAD_RAW = M.f.atdecc_aem_payload
 M.AECP_PAYLOAD = M.f.atdecc_aecp_payload
 M.AA_TLV_DATA = M.f.atdecc_aa_tlv_data
 M.VU_PAYLOAD = M.f.atdecc_vu_payload
+M.AVC_PAYLOAD = M.f.atdecc_avc_command_response
+M.CONTROL_UTF8 = M.f.atdecc_control_utf8
+M.CONTROL_VENDOR = M.f.atdecc_control_vendor_values
 M.DESCRIPTOR_RAW = M.f.atdecc_desc_control_value_details
 M.JDKS_LOG_TEXT = M.f.atdecc_jdks_log_text
 
---- command code -> { cmd = spec, rsp = spec }; spec = { name, length, add, trailer }
+--- command code -> { cmd = spec, rsp = spec }; spec = { name, length, add, trailer = nil | { kind, ... } }
 M.aem_payloads = {}
 M.aem_payloads[0x0000] = { cmd = { name = "acquire_entity", length = 16, add = M.add_aem_acquire_entity, trailer = nil }, rsp = { name = "acquire_entity", length = 16, add = M.add_aem_acquire_entity, trailer = nil } }
 M.aem_payloads[0x0001] = { cmd = { name = "lock_entity", length = 16, add = M.add_aem_lock_entity, trailer = nil }, rsp = { name = "lock_entity", length = 16, add = M.add_aem_lock_entity, trailer = nil } }
 M.aem_payloads[0x0002] = { cmd = nil, rsp = nil }
 M.aem_payloads[0x0003] = { cmd = nil, rsp = nil }
-M.aem_payloads[0x0004] = { cmd = { name = "read_descriptor_command", length = 8, add = M.add_aem_read_descriptor_command, trailer = nil }, rsp = { name = "read_descriptor_response", length = 4, add = M.add_aem_read_descriptor_response, trailer = "descriptor" } }
-M.aem_payloads[0x0005] = { cmd = { name = "read_descriptor_response", length = 4, add = M.add_aem_read_descriptor_response, trailer = "descriptor" }, rsp = { name = "read_descriptor_response", length = 4, add = M.add_aem_read_descriptor_response, trailer = "descriptor" } }
+M.aem_payloads[0x0004] = { cmd = { name = "read_descriptor_command", length = 8, add = M.add_aem_read_descriptor_command, trailer = nil }, rsp = { name = "read_descriptor_response", length = 4, add = M.add_aem_read_descriptor_response, trailer = { kind = "descriptor" } } }
+M.aem_payloads[0x0005] = { cmd = { name = "read_descriptor_response", length = 4, add = M.add_aem_read_descriptor_response, trailer = { kind = "descriptor" } }, rsp = { name = "read_descriptor_response", length = 4, add = M.add_aem_read_descriptor_response, trailer = { kind = "descriptor" } } }
 M.aem_payloads[0x0006] = { cmd = { name = "set_configuration", length = 4, add = M.add_aem_set_configuration, trailer = nil }, rsp = { name = "set_configuration", length = 4, add = M.add_aem_set_configuration, trailer = nil } }
 M.aem_payloads[0x0007] = { cmd = nil, rsp = { name = "set_configuration", length = 4, add = M.add_aem_set_configuration, trailer = nil } }
 M.aem_payloads[0x0008] = { cmd = { name = "stream_format", length = 12, add = M.add_aem_stream_format, trailer = nil }, rsp = { name = "stream_format", length = 12, add = M.add_aem_stream_format, trailer = nil } }
 M.aem_payloads[0x0009] = { cmd = { name = "get_stream_format_command", length = 4, add = M.add_aem_get_stream_format_command, trailer = nil }, rsp = { name = "stream_format", length = 12, add = M.add_aem_stream_format, trailer = nil } }
+M.aem_payloads[0x000A] = { cmd = { name = "video_format", length = 16, add = M.add_aem_video_format, trailer = nil }, rsp = { name = "video_format", length = 16, add = M.add_aem_video_format, trailer = nil } }
+M.aem_payloads[0x000B] = { cmd = { name = "get_video_format_command", length = 4, add = M.add_aem_get_video_format_command, trailer = nil }, rsp = { name = "video_format", length = 16, add = M.add_aem_video_format, trailer = nil } }
+M.aem_payloads[0x000C] = { cmd = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil }, rsp = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil } }
+M.aem_payloads[0x000D] = { cmd = { name = "get_sensor_format_command", length = 4, add = M.add_aem_get_sensor_format_command, trailer = nil }, rsp = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil } }
 M.aem_payloads[0x000E] = { cmd = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil } }
 M.aem_payloads[0x000F] = { cmd = { name = "get_stream_info_command", length = 4, add = M.add_aem_get_stream_info_command, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil } }
 M.aem_payloads[0x0010] = { cmd = { name = "name", length = 72, add = M.add_aem_name, trailer = nil }, rsp = { name = "name", length = 72, add = M.add_aem_name, trailer = nil } }
 M.aem_payloads[0x0011] = { cmd = { name = "name_command", length = 8, add = M.add_aem_name_command, trailer = nil }, rsp = { name = "name", length = 72, add = M.add_aem_name, trailer = nil } }
+M.aem_payloads[0x0012] = { cmd = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil }, rsp = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil } }
+M.aem_payloads[0x0013] = { cmd = nil, rsp = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil } }
 M.aem_payloads[0x0014] = { cmd = { name = "sampling_rate", length = 8, add = M.add_aem_sampling_rate, trailer = nil }, rsp = { name = "sampling_rate", length = 8, add = M.add_aem_sampling_rate, trailer = nil } }
 M.aem_payloads[0x0015] = { cmd = { name = "get_sampling_rate_command", length = 4, add = M.add_aem_get_sampling_rate_command, trailer = nil }, rsp = { name = "sampling_rate", length = 8, add = M.add_aem_sampling_rate, trailer = nil } }
 M.aem_payloads[0x0016] = { cmd = { name = "clock_source", length = 8, add = M.add_aem_clock_source, trailer = nil }, rsp = { name = "clock_source", length = 8, add = M.add_aem_clock_source, trailer = nil } }
 M.aem_payloads[0x0017] = { cmd = { name = "get_clock_source_command", length = 4, add = M.add_aem_get_clock_source_command, trailer = nil }, rsp = { name = "clock_source", length = 8, add = M.add_aem_clock_source, trailer = nil } }
-M.aem_payloads[0x0018] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "values" }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "values" } }
-M.aem_payloads[0x0019] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = nil }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "values" } }
-M.aem_payloads[0x001A] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "raw" }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "values" } }
-M.aem_payloads[0x001B] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "raw" }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = "values" } }
+M.aem_payloads[0x0018] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "values" } }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "values" } } }
+M.aem_payloads[0x0019] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = nil }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "values" } } }
+M.aem_payloads[0x001A] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "raw" } }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "values" } } }
+M.aem_payloads[0x001B] = { cmd = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "raw" } }, rsp = { name = "control_payload", length = 4, add = M.add_aem_control_payload, trailer = { kind = "values" } } }
 M.aem_payloads[0x001C] = { cmd = { name = "signal_selector", length = 12, add = M.add_aem_signal_selector, trailer = nil }, rsp = { name = "signal_selector", length = 12, add = M.add_aem_signal_selector, trailer = nil } }
 M.aem_payloads[0x001D] = { cmd = { name = "get_signal_selector_command", length = 4, add = M.add_aem_get_signal_selector_command, trailer = nil }, rsp = { name = "signal_selector", length = 12, add = M.add_aem_signal_selector, trailer = nil } }
-M.aem_payloads[0x001E] = { cmd = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = "raw" }, rsp = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = "raw" } }
-M.aem_payloads[0x001F] = { cmd = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = nil }, rsp = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = "raw" } }
-M.aem_payloads[0x0020] = { cmd = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = "raw" }, rsp = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = "raw" } }
-M.aem_payloads[0x0021] = { cmd = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = nil }, rsp = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = "raw" } }
+M.aem_payloads[0x001E] = { cmd = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = { kind = "raw" } }, rsp = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = { kind = "raw" } } }
+M.aem_payloads[0x001F] = { cmd = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = nil }, rsp = { name = "mixer_payload", length = 4, add = M.add_aem_mixer_payload, trailer = { kind = "raw" } } }
+M.aem_payloads[0x0020] = { cmd = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = { kind = "raw" } }, rsp = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = { kind = "raw" } } }
+M.aem_payloads[0x0021] = { cmd = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = nil }, rsp = { name = "matrix_payload", length = 16, add = M.add_aem_matrix_payload, trailer = { kind = "raw" } } }
 M.aem_payloads[0x0022] = { cmd = { name = "streaming", length = 4, add = M.add_aem_streaming, trailer = nil }, rsp = { name = "streaming", length = 4, add = M.add_aem_streaming, trailer = nil } }
 M.aem_payloads[0x0023] = { cmd = { name = "streaming", length = 4, add = M.add_aem_streaming, trailer = nil }, rsp = { name = "streaming", length = 4, add = M.add_aem_streaming, trailer = nil } }
 M.aem_payloads[0x0024] = { cmd = nil, rsp = nil }
 M.aem_payloads[0x0025] = { cmd = nil, rsp = nil }
 M.aem_payloads[0x0026] = { cmd = { name = "identify", length = 4, add = M.add_aem_identify, trailer = nil }, rsp = { name = "identify", length = 4, add = M.add_aem_identify, trailer = nil } }
-M.aem_payloads[0x0027] = { cmd = { name = "get_avb_info_command", length = 4, add = M.add_aem_get_avb_info_command, trailer = nil }, rsp = { name = "avb_info", length = 20, add = M.add_aem_avb_info, trailer = "raw" } }
+M.aem_payloads[0x0027] = { cmd = { name = "get_avb_info_command", length = 4, add = M.add_aem_get_avb_info_command, trailer = nil }, rsp = { name = "avb_info", length = 20, add = M.add_aem_avb_info, trailer = { kind = "raw" } } }
+M.aem_payloads[0x0028] = { cmd = { name = "get_as_path_command", length = 4, add = M.add_aem_get_as_path_command, trailer = nil }, rsp = { name = "get_as_path_response", length = 4, add = M.add_aem_get_as_path_response, trailer = { kind = "elements", element = "as_path_entry", element_size = 8, element_add = M.add_desc_as_path_entry, count_field_offset = 26 } } }
 M.aem_payloads[0x0029] = { cmd = { name = "get_counters_command", length = 4, add = M.add_aem_get_counters_command, trailer = nil }, rsp = { name = "counters", length = 136, add = M.add_aem_counters, trailer = nil } }
 M.aem_payloads[0x002A] = { cmd = { name = "reboot", length = 4, add = M.add_aem_reboot, trailer = nil }, rsp = { name = "reboot", length = 4, add = M.add_aem_reboot, trailer = nil } }
-M.aem_payloads[0x002B] = { cmd = { name = "get_audio_map_command", length = 8, add = M.add_aem_get_audio_map_command, trailer = nil }, rsp = { name = "audio_map_response", length = 12, add = M.add_aem_audio_map_response, trailer = "mappings" } }
-M.aem_payloads[0x002C] = { cmd = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = "mappings" }, rsp = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = "mappings" } }
-M.aem_payloads[0x002D] = { cmd = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = "mappings" }, rsp = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = "mappings" } }
-M.aem_payloads[0x0034] = { cmd = { name = "start_operation_command", length = 8, add = M.add_aem_start_operation_command, trailer = "raw" }, rsp = { name = "start_operation_response", length = 8, add = M.add_aem_start_operation_response, trailer = "raw" } }
+M.aem_payloads[0x002B] = { cmd = { name = "get_audio_map_command", length = 8, add = M.add_aem_get_audio_map_command, trailer = nil }, rsp = { name = "audio_map_response", length = 12, add = M.add_aem_audio_map_response, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 30 } } }
+M.aem_payloads[0x002C] = { cmd = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } }, rsp = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x002D] = { cmd = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } }, rsp = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x002E] = { cmd = { name = "get_video_map_command", length = 8, add = M.add_aem_get_video_map_command, trailer = nil }, rsp = { name = "video_map_response", length = 12, add = M.add_aem_video_map_response, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 32 } } }
+M.aem_payloads[0x002F] = { cmd = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } }, rsp = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x0030] = { cmd = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } }, rsp = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x0031] = { cmd = { name = "get_sensor_map_command", length = 8, add = M.add_aem_get_sensor_map_command, trailer = nil }, rsp = { name = "sensor_map_response", length = 12, add = M.add_aem_sensor_map_response, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 32 } } }
+M.aem_payloads[0x0032] = { cmd = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } }, rsp = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x0033] = { cmd = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } }, rsp = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x0034] = { cmd = { name = "start_operation_command", length = 8, add = M.add_aem_start_operation_command, trailer = { kind = "raw" } }, rsp = { name = "start_operation_response", length = 8, add = M.add_aem_start_operation_response, trailer = { kind = "raw" } } }
 M.aem_payloads[0x0035] = { cmd = { name = "abort_operation", length = 8, add = M.add_aem_abort_operation, trailer = nil }, rsp = { name = "abort_operation", length = 8, add = M.add_aem_abort_operation, trailer = nil } }
 M.aem_payloads[0x0036] = { cmd = { name = "operation_status", length = 8, add = M.add_aem_operation_status, trailer = nil }, rsp = { name = "operation_status", length = 8, add = M.add_aem_operation_status, trailer = nil } }
+M.aem_payloads[0x0045] = { cmd = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil }, rsp = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil } }
+M.aem_payloads[0x0046] = { cmd = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil }, rsp = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil } }
+M.aem_payloads[0x0047] = { cmd = { name = "memory_object_length", length = 12, add = M.add_aem_memory_object_length, trailer = nil }, rsp = { name = "memory_object_length", length = 12, add = M.add_aem_memory_object_length, trailer = nil } }
+M.aem_payloads[0x0048] = { cmd = { name = "get_memory_object_length_command", length = 4, add = M.add_aem_get_memory_object_length_command, trailer = nil }, rsp = { name = "memory_object_length", length = 12, add = M.add_aem_memory_object_length, trailer = nil } }
+M.aem_payloads[0x0049] = { cmd = { name = "stream_backup", length = 52, add = M.add_aem_stream_backup, trailer = nil }, rsp = { name = "stream_backup", length = 52, add = M.add_aem_stream_backup, trailer = nil } }
+M.aem_payloads[0x004A] = { cmd = { name = "get_stream_backup_command", length = 4, add = M.add_aem_get_stream_backup_command, trailer = nil }, rsp = { name = "stream_backup", length = 52, add = M.add_aem_stream_backup, trailer = nil } }
 M.aem_payloads[0x004C] = { cmd = { name = "set_max_transit_time", length = 12, add = M.add_aem_set_max_transit_time, trailer = nil }, rsp = { name = "set_max_transit_time", length = 12, add = M.add_aem_set_max_transit_time, trailer = nil } }
 M.aem_payloads[0x004D] = { cmd = { name = "get_max_transit_time_command", length = 4, add = M.add_aem_get_max_transit_time_command, trailer = nil }, rsp = { name = "set_max_transit_time", length = 12, add = M.add_aem_set_max_transit_time, trailer = nil } }
 M.aem_payloads[0x005E] = { cmd = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil } }
 M.aem_payloads[0x005F] = { cmd = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "get_ptp_port_info_response", length = 76, add = M.add_aem_get_ptp_port_info_response, trailer = nil } }
 
---- descriptor type -> { name, length, add, trailer = { count_field_offset, offset_field_offset, element, element_size, element_add } }
+--- descriptor type -> { name, length, add, tables = { { count_field_offset|nil, offset_field_offset, element, element_size, element_add|nil, value_type_offset|nil } } }
 M.descriptors = {}
-M.descriptors[0x0000] = { name = "entity", length = 312, add = M.add_desc_entity, trailer = nil }
-M.descriptors[0x0001] = { name = "configuration", length = 74, add = M.add_desc_configuration, trailer = { count_field_offset = 70, offset_field_offset = 72, element = "count_entry", element_size = 4, element_add = M.add_desc_count_entry } }
-M.descriptors[0x0002] = { name = "audio_unit", length = 144, add = M.add_desc_audio_unit, trailer = { count_field_offset = 142, offset_field_offset = 140, element = "sampling_rate", element_size = 4, element_add = M.add_desc_sampling_rate } }
-M.descriptors[0x0003] = { name = "video_unit", length = 136, add = M.add_desc_video_unit, trailer = nil }
-M.descriptors[0x0004] = { name = "sensor_unit", length = 136, add = M.add_desc_sensor_unit, trailer = nil }
-M.descriptors[0x0005] = { name = "stream", length = 138, add = M.add_desc_stream, trailer = { count_field_offset = 84, offset_field_offset = 82, element = "stream_format", element_size = 8, element_add = M.add_desc_stream_format } }
-M.descriptors[0x0006] = { name = "stream", length = 138, add = M.add_desc_stream, trailer = { count_field_offset = 84, offset_field_offset = 82, element = "stream_format", element_size = 8, element_add = M.add_desc_stream_format } }
-M.descriptors[0x0007] = { name = "jack", length = 78, add = M.add_desc_jack, trailer = nil }
-M.descriptors[0x0008] = { name = "jack", length = 78, add = M.add_desc_jack, trailer = nil }
-M.descriptors[0x0009] = { name = "avb_interface", length = 102, add = M.add_desc_avb_interface, trailer = nil }
-M.descriptors[0x000A] = { name = "clock_source", length = 86, add = M.add_desc_clock_source, trailer = nil }
-M.descriptors[0x000B] = { name = "memory_object", length = 108, add = M.add_desc_memory_object, trailer = nil }
-M.descriptors[0x000C] = { name = "locale", length = 72, add = M.add_desc_locale, trailer = nil }
-M.descriptors[0x000D] = { name = "strings", length = 452, add = M.add_desc_strings, trailer = nil }
-M.descriptors[0x000E] = { name = "stream_port", length = 20, add = M.add_desc_stream_port, trailer = nil }
-M.descriptors[0x000F] = { name = "stream_port", length = 20, add = M.add_desc_stream_port, trailer = nil }
-M.descriptors[0x0010] = { name = "external_port", length = 24, add = M.add_desc_external_port, trailer = nil }
-M.descriptors[0x0011] = { name = "external_port", length = 24, add = M.add_desc_external_port, trailer = nil }
-M.descriptors[0x0012] = { name = "internal_port", length = 24, add = M.add_desc_internal_port, trailer = nil }
-M.descriptors[0x0013] = { name = "internal_port", length = 24, add = M.add_desc_internal_port, trailer = nil }
-M.descriptors[0x0014] = { name = "audio_cluster", length = 90, add = M.add_desc_audio_cluster, trailer = nil }
-M.descriptors[0x0015] = { name = "video_cluster", length = 121, add = M.add_desc_video_cluster, trailer = nil }
-M.descriptors[0x0016] = { name = "sensor_cluster", length = 104, add = M.add_desc_sensor_cluster, trailer = nil }
-M.descriptors[0x0017] = { name = "audio_map", length = 8, add = M.add_desc_audio_map, trailer = { count_field_offset = 6, offset_field_offset = 4, element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping } }
-M.descriptors[0x0018] = { name = "video_map", length = 8, add = M.add_desc_video_map, trailer = { count_field_offset = 6, offset_field_offset = 4, element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping } }
-M.descriptors[0x0019] = { name = "sensor_map", length = 8, add = M.add_desc_sensor_map, trailer = { count_field_offset = 6, offset_field_offset = 4, element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping } }
-M.descriptors[0x001A] = { name = "control", length = 104, add = M.add_desc_control, trailer = { count_field_offset = 96, offset_field_offset = 94, element = "raw", element_size = 0, element_add = nil } }
-M.descriptors[0x001B] = { name = "signal_selector", length = 96, add = M.add_desc_signal_selector, trailer = nil }
-M.descriptors[0x001C] = { name = "mixer", length = 88, add = M.add_desc_mixer, trailer = nil }
-M.descriptors[0x001D] = { name = "matrix", length = 102, add = M.add_desc_matrix, trailer = nil }
-M.descriptors[0x001E] = { name = "matrix_signal", length = 8, add = M.add_desc_matrix_signal, trailer = nil }
-M.descriptors[0x001F] = { name = "signal_splitter", length = 92, add = M.add_desc_signal_splitter, trailer = nil }
-M.descriptors[0x0020] = { name = "signal_combiner", length = 88, add = M.add_desc_signal_combiner, trailer = nil }
-M.descriptors[0x0021] = { name = "signal_demultiplexer", length = 92, add = M.add_desc_signal_demultiplexer, trailer = nil }
-M.descriptors[0x0022] = { name = "signal_multiplexer", length = 88, add = M.add_desc_signal_multiplexer, trailer = nil }
-M.descriptors[0x0023] = { name = "signal_transcoder", length = 100, add = M.add_desc_signal_transcoder, trailer = nil }
-M.descriptors[0x0024] = { name = "clock_domain", length = 76, add = M.add_desc_clock_domain, trailer = { count_field_offset = 74, offset_field_offset = 72, element = "clock_source_index", element_size = 2, element_add = M.add_desc_clock_source_index } }
-M.descriptors[0x0025] = { name = "control_block", length = 82, add = M.add_desc_control_block, trailer = nil }
-M.descriptors[0x0026] = { name = "timing", length = 76, add = M.add_desc_timing, trailer = nil }
-M.descriptors[0x0027] = { name = "ptp_instance", length = 90, add = M.add_desc_ptp_instance, trailer = nil }
-M.descriptors[0x0028] = { name = "ptp_port", length = 86, add = M.add_desc_ptp_port, trailer = nil }
+M.descriptors[0x0000] = { name = "entity", length = 312, add = M.add_desc_entity, tables = {  } }
+M.descriptors[0x0001] = { name = "configuration", length = 74, add = M.add_desc_configuration, tables = { { count_field_offset = 70, offset_field_offset = 72, element = "count_entry", element_size = 4, element_add = M.add_desc_count_entry, value_type_offset = nil } } }
+M.descriptors[0x0002] = { name = "audio_unit", length = 144, add = M.add_desc_audio_unit, tables = { { count_field_offset = 142, offset_field_offset = 140, element = "sampling_rate", element_size = 4, element_add = M.add_desc_sampling_rate, value_type_offset = nil } } }
+M.descriptors[0x0003] = { name = "video_unit", length = 136, add = M.add_desc_video_unit, tables = {  } }
+M.descriptors[0x0004] = { name = "sensor_unit", length = 136, add = M.add_desc_sensor_unit, tables = {  } }
+M.descriptors[0x0005] = { name = "stream", length = 138, add = M.add_desc_stream, tables = { { count_field_offset = 84, offset_field_offset = 82, element = "stream_format", element_size = 8, element_add = M.add_desc_stream_format, value_type_offset = nil }, { count_field_offset = 134, offset_field_offset = 132, element = "redundant_stream_index", element_size = 2, element_add = M.add_desc_redundant_stream_index, value_type_offset = nil } } }
+M.descriptors[0x0006] = { name = "stream", length = 138, add = M.add_desc_stream, tables = { { count_field_offset = 84, offset_field_offset = 82, element = "stream_format", element_size = 8, element_add = M.add_desc_stream_format, value_type_offset = nil }, { count_field_offset = 134, offset_field_offset = 132, element = "redundant_stream_index", element_size = 2, element_add = M.add_desc_redundant_stream_index, value_type_offset = nil } } }
+M.descriptors[0x0007] = { name = "jack", length = 78, add = M.add_desc_jack, tables = {  } }
+M.descriptors[0x0008] = { name = "jack", length = 78, add = M.add_desc_jack, tables = {  } }
+M.descriptors[0x0009] = { name = "avb_interface", length = 102, add = M.add_desc_avb_interface, tables = {  } }
+M.descriptors[0x000A] = { name = "clock_source", length = 86, add = M.add_desc_clock_source, tables = {  } }
+M.descriptors[0x000B] = { name = "memory_object", length = 108, add = M.add_desc_memory_object, tables = {  } }
+M.descriptors[0x000C] = { name = "locale", length = 72, add = M.add_desc_locale, tables = {  } }
+M.descriptors[0x000D] = { name = "strings", length = 452, add = M.add_desc_strings, tables = {  } }
+M.descriptors[0x000E] = { name = "stream_port", length = 20, add = M.add_desc_stream_port, tables = {  } }
+M.descriptors[0x000F] = { name = "stream_port", length = 20, add = M.add_desc_stream_port, tables = {  } }
+M.descriptors[0x0010] = { name = "external_port", length = 24, add = M.add_desc_external_port, tables = {  } }
+M.descriptors[0x0011] = { name = "external_port", length = 24, add = M.add_desc_external_port, tables = {  } }
+M.descriptors[0x0012] = { name = "internal_port", length = 24, add = M.add_desc_internal_port, tables = {  } }
+M.descriptors[0x0013] = { name = "internal_port", length = 24, add = M.add_desc_internal_port, tables = {  } }
+M.descriptors[0x0014] = { name = "audio_cluster", length = 90, add = M.add_desc_audio_cluster, tables = {  } }
+M.descriptors[0x0015] = { name = "video_cluster", length = 121, add = M.add_desc_video_cluster, tables = { { count_field_offset = 91, offset_field_offset = 89, element = "format_specific", element_size = 4, element_add = M.add_desc_format_specific, value_type_offset = nil }, { count_field_offset = 99, offset_field_offset = 97, element = "sampling_rate", element_size = 4, element_add = M.add_desc_sampling_rate, value_type_offset = nil }, { count_field_offset = 105, offset_field_offset = 103, element = "aspect_ratio", element_size = 2, element_add = M.add_desc_aspect_ratio, value_type_offset = nil }, { count_field_offset = 113, offset_field_offset = 111, element = "size", element_size = 4, element_add = M.add_desc_size, value_type_offset = nil }, { count_field_offset = 119, offset_field_offset = 117, element = "color_space", element_size = 2, element_add = M.add_desc_color_space, value_type_offset = nil } } }
+M.descriptors[0x0016] = { name = "sensor_cluster", length = 104, add = M.add_desc_sensor_cluster, tables = { { count_field_offset = 94, offset_field_offset = 92, element = "sensor_format", element_size = 8, element_add = M.add_desc_sensor_format, value_type_offset = nil }, { count_field_offset = 102, offset_field_offset = 100, element = "sampling_rate", element_size = 4, element_add = M.add_desc_sampling_rate, value_type_offset = nil } } }
+M.descriptors[0x0017] = { name = "audio_map", length = 8, add = M.add_desc_audio_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, value_type_offset = nil } } }
+M.descriptors[0x0018] = { name = "video_map", length = 8, add = M.add_desc_video_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, value_type_offset = nil } } }
+M.descriptors[0x0019] = { name = "sensor_map", length = 8, add = M.add_desc_sensor_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, value_type_offset = nil } } }
+M.descriptors[0x001A] = { name = "control", length = 104, add = M.add_desc_control, tables = { { count_field_offset = 96, offset_field_offset = 94, element = "values", element_size = 0, element_add = nil, value_type_offset = 80 } } }
+M.descriptors[0x001B] = { name = "signal_selector", length = 96, add = M.add_desc_signal_selector, tables = { { count_field_offset = 82, offset_field_offset = 80, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
+M.descriptors[0x001C] = { name = "mixer", length = 88, add = M.add_desc_mixer, tables = { { count_field_offset = 84, offset_field_offset = 82, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil }, { count_field_offset = nil, offset_field_offset = 86, element = "values", element_size = 0, element_add = nil, value_type_offset = 80 } } }
+M.descriptors[0x001D] = { name = "matrix", length = 102, add = M.add_desc_matrix, tables = { { count_field_offset = 96, offset_field_offset = 94, element = "values", element_size = 0, element_add = nil, value_type_offset = 80 } } }
+M.descriptors[0x001E] = { name = "matrix_signal", length = 8, add = M.add_desc_matrix_signal, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
+M.descriptors[0x001F] = { name = "signal_splitter", length = 92, add = M.add_desc_signal_splitter, tables = { { count_field_offset = 88, offset_field_offset = 90, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
+M.descriptors[0x0020] = { name = "signal_combiner", length = 88, add = M.add_desc_signal_combiner, tables = { { count_field_offset = 80, offset_field_offset = 82, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil }, { count_field_offset = 86, offset_field_offset = 84, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
+M.descriptors[0x0021] = { name = "signal_demultiplexer", length = 92, add = M.add_desc_signal_demultiplexer, tables = { { count_field_offset = 88, offset_field_offset = 90, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
+M.descriptors[0x0022] = { name = "signal_multiplexer", length = 88, add = M.add_desc_signal_multiplexer, tables = { { count_field_offset = 80, offset_field_offset = 82, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil }, { count_field_offset = 86, offset_field_offset = 84, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
+M.descriptors[0x0023] = { name = "signal_transcoder", length = 100, add = M.add_desc_signal_transcoder, tables = { { count_field_offset = 84, offset_field_offset = 82, element = "values", element_size = 0, element_add = nil, value_type_offset = 80 } } }
+M.descriptors[0x0024] = { name = "clock_domain", length = 76, add = M.add_desc_clock_domain, tables = { { count_field_offset = 74, offset_field_offset = 72, element = "clock_source_index", element_size = 2, element_add = M.add_desc_clock_source_index, value_type_offset = nil } } }
+M.descriptors[0x0025] = { name = "control_block", length = 82, add = M.add_desc_control_block, tables = {  } }
+M.descriptors[0x0026] = { name = "timing", length = 76, add = M.add_desc_timing, tables = { { count_field_offset = 74, offset_field_offset = 72, element = "ptp_instance_index", element_size = 2, element_add = M.add_desc_ptp_instance_index, value_type_offset = nil } } }
+M.descriptors[0x0027] = { name = "ptp_instance", length = 90, add = M.add_desc_ptp_instance, tables = {  } }
+M.descriptors[0x0028] = { name = "ptp_port", length = 86, add = M.add_desc_ptp_port, tables = {  } }
 
+--- control_value_type (14-bit) -> { family, size, field }; field is the typed per-element ProtoField
+M.control_value_family = {}
+M.control_value_family[0x0000] = { family = "linear", size = 1, field = M.f.atdecc_control_value_i8 }
+M.control_value_family[0x0001] = { family = "linear", size = 1, field = M.f.atdecc_control_value_u8 }
+M.control_value_family[0x0002] = { family = "linear", size = 2, field = M.f.atdecc_control_value_i16 }
+M.control_value_family[0x0003] = { family = "linear", size = 2, field = M.f.atdecc_control_value_u16 }
+M.control_value_family[0x0004] = { family = "linear", size = 4, field = M.f.atdecc_control_value_i32 }
+M.control_value_family[0x0005] = { family = "linear", size = 4, field = M.f.atdecc_control_value_u32 }
+M.control_value_family[0x0006] = { family = "linear", size = 8, field = M.f.atdecc_control_value_i64 }
+M.control_value_family[0x0007] = { family = "linear", size = 8, field = M.f.atdecc_control_value_u64 }
+M.control_value_family[0x0008] = { family = "linear", size = 4, field = M.f.atdecc_control_value_f32 }
+M.control_value_family[0x0009] = { family = "linear", size = 8, field = M.f.atdecc_control_value_f64 }
+M.control_value_family[0x000A] = { family = "selector", size = 1, field = M.f.atdecc_control_value_i8 }
+M.control_value_family[0x000B] = { family = "selector", size = 1, field = M.f.atdecc_control_value_u8 }
+M.control_value_family[0x000C] = { family = "selector", size = 2, field = M.f.atdecc_control_value_i16 }
+M.control_value_family[0x000D] = { family = "selector", size = 2, field = M.f.atdecc_control_value_u16 }
+M.control_value_family[0x000E] = { family = "selector", size = 4, field = M.f.atdecc_control_value_i32 }
+M.control_value_family[0x000F] = { family = "selector", size = 4, field = M.f.atdecc_control_value_u32 }
+M.control_value_family[0x0010] = { family = "selector", size = 8, field = M.f.atdecc_control_value_i64 }
+M.control_value_family[0x0011] = { family = "selector", size = 8, field = M.f.atdecc_control_value_u64 }
+M.control_value_family[0x0012] = { family = "selector", size = 4, field = M.f.atdecc_control_value_f32 }
+M.control_value_family[0x0013] = { family = "selector", size = 8, field = M.f.atdecc_control_value_f64 }
+M.control_value_family[0x0014] = { family = "selector", size = 2, field = M.f.atdecc_control_value_string_ref }
+M.control_value_family[0x0015] = { family = "array", size = 1, field = M.f.atdecc_control_value_i8 }
+M.control_value_family[0x0016] = { family = "array", size = 1, field = M.f.atdecc_control_value_u8 }
+M.control_value_family[0x0017] = { family = "array", size = 2, field = M.f.atdecc_control_value_i16 }
+M.control_value_family[0x0018] = { family = "array", size = 2, field = M.f.atdecc_control_value_u16 }
+M.control_value_family[0x0019] = { family = "array", size = 4, field = M.f.atdecc_control_value_i32 }
+M.control_value_family[0x001A] = { family = "array", size = 4, field = M.f.atdecc_control_value_u32 }
+M.control_value_family[0x001B] = { family = "array", size = 8, field = M.f.atdecc_control_value_i64 }
+M.control_value_family[0x001C] = { family = "array", size = 8, field = M.f.atdecc_control_value_u64 }
+M.control_value_family[0x001D] = { family = "array", size = 4, field = M.f.atdecc_control_value_f32 }
+M.control_value_family[0x001E] = { family = "array", size = 8, field = M.f.atdecc_control_value_f64 }
+M.control_value_family[0x001F] = { family = "utf8", size = 0, field = nil }
+M.control_value_family[0x0020] = { family = "bode_plot", size = 12, field = nil }
+M.control_value_family[0x0021] = { family = "smpte_time", size = 10, field = nil }
+M.control_value_family[0x0022] = { family = "sample_rate", size = 16, field = nil }
+M.control_value_family[0x0023] = { family = "gptp_time", size = 10, field = nil }
+M.control_value_family[0x3FFE] = { family = "vendor", size = 0, field = nil }
+M.control_value_family[0x3FFF] = { family = "expansion", size = 0, field = nil }
+
+--- payload / descriptor spec name -> offsets of 8-octet stream formats
+M.stream_format_at = {
+    stream = { 74 },
+    stream_format = { 28 },
+    stream_info = { 32 },
+}
+--- stream format subtype -> add function for its sub-fields
+M.stream_format_add = {
+    [0x00] = M.add_stream_format_iec61883,
+    [0x02] = M.add_stream_format_aaf,
+    [0x04] = M.add_stream_format_crf,
+}
+
+--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, name_field }
+M.mvu_payloads = {}
+M.mvu_payloads[0x0000] = { cmd = { name = "mvu_reserved", length = 2, add = M.add_mvu_mvu_reserved, name_field = nil }, rsp = { name = "mvu_get_milan_info_response", length = 18, add = M.add_mvu_mvu_get_milan_info_response, name_field = nil } }
+M.mvu_payloads[0x0001] = { cmd = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, name_field = M.f.atdecc_mvu_system_name }, rsp = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, name_field = M.f.atdecc_mvu_system_name } }
+M.mvu_payloads[0x0002] = { cmd = { name = "mvu_reserved", length = 2, add = M.add_mvu_mvu_reserved, name_field = nil }, rsp = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, name_field = M.f.atdecc_mvu_system_name } }
+M.mvu_payloads[0x0003] = { cmd = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, name_field = M.f.atdecc_mvu_media_clock_domain_name }, rsp = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, name_field = M.f.atdecc_mvu_media_clock_domain_name } }
+M.mvu_payloads[0x0004] = { cmd = { name = "mvu_get_media_clock_reference_info_command", length = 2, add = M.add_mvu_mvu_get_media_clock_reference_info_command, name_field = nil }, rsp = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, name_field = M.f.atdecc_mvu_media_clock_domain_name } }
+M.mvu_payloads[0x0005] = { cmd = { name = "mvu_bind_stream", length = 18, add = M.add_mvu_mvu_bind_stream, name_field = nil }, rsp = { name = "mvu_bind_stream", length = 18, add = M.add_mvu_mvu_bind_stream, name_field = nil } }
+M.mvu_payloads[0x0006] = { cmd = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, name_field = nil }, rsp = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, name_field = nil } }
+M.mvu_payloads[0x0007] = { cmd = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, name_field = nil }, rsp = { name = "mvu_stream_input_info_ex_response", length = 18, add = M.add_mvu_mvu_stream_input_info_ex_response, name_field = nil } }
+M.mvu_features_flag_fields = {
+    M.f.atdecc_mvu_features_flags_redundancy,
+    M.f.atdecc_mvu_features_flags_talker_dynamic_mappings,
+    M.f.atdecc_mvu_features_flags_mvu_binding,
+    M.f.atdecc_mvu_features_flags_talker_signal_presence,
+}
+M.mvu_mcr_flag_fields = {
+    M.f.atdecc_mvu_mcr_flags_media_clock_reference,
+    M.f.atdecc_mvu_mcr_flags_media_clock_domain,
+}
+
+M.MVU_PROTOCOL_ID = "001bc50ac100"
+M.MVU_HEADER_LENGTH = 30
+M.AVC_HEADER_LENGTH = 24
 M.AUDIO_MAPPING_LENGTH = 8
 M.JDKS_CONTROL_LOG_TEXT = "70b3d5edc0000000"
 M.JDKS_CONTROL_IPV4_PARAMETERS = "70b3d5edc0000001"
