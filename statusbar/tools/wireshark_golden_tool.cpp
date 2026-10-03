@@ -40,6 +40,7 @@
 #include "wireshark_golden_acf.hpp"
 #include "wireshark_golden_atdecc.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -217,6 +218,165 @@ auto aaf_v0_int16() -> std::vector<uint8_t>
     samples[1] = 0x7F;
     append(out, std::span<uint8_t const>(samples));
     return out;
+}
+
+/// A version-0 stream header for the formats that have no dedicated PDU
+/// struct in this repository (CVF, SVF, RVF, VSF, MMA, EF, raw IEC 61883):
+/// bytes 16-19 and 22-23 are the format-specific quadlet/doublet, the
+/// payload follows verbatim.
+auto stream_pdu(
+    uint8_t const subtype,
+    uint8_t const sequence,
+    uint32_t const format_specific,
+    uint16_t const data_length,
+    uint16_t const protocol_specific,
+    std::span<uint8_t const> const payload) -> std::vector<uint8_t>
+{
+    AvtpStreamHeader header{};
+    header.subtype = subtype;
+    header.set_sv(true);
+    header.sequence_num = sequence;
+    header.avtp_timestamp = 0x0BADCAFEU;
+    header.format_specific_data = format_specific;
+    header.stream_data_length = data_length;
+    header.protocol_specific_header = protocol_specific;
+    std::span<uint8_t const> const sid_bytes = make_const_span(SID);
+    std::vector<uint8_t> out;
+    append(out, header);
+    std::copy(sid_bytes.begin(), sid_bytes.end(), out.begin() + 4);
+    append(out, payload);
+    return out;
+}
+
+/// IEC 61883/IIDC with tag 0: an IIDC (video) payload, no CIP header
+auto iec61883_iidc() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 8> const video{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04};
+    // tag 0, channel 5, tcode 0xA, sy 0
+    return stream_pdu(0x00, 30, 0, 8, 0x05A0U, std::span<uint8_t const>(video));
+}
+
+/// IEC 61883-4 (FMT 0x20, SPH 1): CIP dbs=6 fn=3 (192-octet source packets),
+/// two source packets each with a 4-octet timestamp and a 188-octet TS packet
+auto iec61883_mpegts() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{
+        0x00,
+        0x06,
+        0xC4,
+        0x10,
+        0xA0,
+        0x80,
+        0x00,
+        0x00};  // CIP: qi1=0 sid=0 dbs=6 fn=3 sph=1 dbc=0x10 | qi2=2 fmt=0x20 fdf=0x800000
+    for (uint8_t packet = 0; packet < 2; ++packet) {
+        std::array<uint8_t, 4> const timestamp{0x12, 0x34, 0x56, static_cast<uint8_t>(0x78U + packet)};
+        payload.insert(payload.end(), timestamp.begin(), timestamp.end());
+        std::array<uint8_t, 188> ts{};
+        ts[0] = 0x47;
+        ts[1] = static_cast<uint8_t>(0x40U | 0x01U);  // PUSI, PID 0x0100
+        ts[2] = 0x00;
+        ts[3] = static_cast<uint8_t>(0x10U | packet);  // payload only, cc
+        ts[4] = 0x00;
+        ts[5] = 0x00;
+        ts[6] = 0x01;
+        ts[7] = 0xE0;  // PES start code, video stream 0
+        payload.insert(payload.end(), ts.begin(), ts.end());
+    }
+    // tag 1, channel 63, tcode 0xA
+    return stream_pdu(0x00, 31, 0, static_cast<uint16_t>(payload.size()), 0x7FA0U, std::span<uint8_t const>(payload));
+}
+
+/// IEC 61883 with a CIP FMT this dissector does not decode (DV, FMT 0x00)
+auto iec61883_dv() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x78, 0x00, 0x05, 0x80, 0x00, 0x00, 0x00, 0x1F, 0x07, 0x00, 0x3F, 0xFF, 0xFF, 0xFF, 0xFF};
+    return stream_pdu(0x00, 32, 0, static_cast<uint16_t>(payload.size()), 0x7FA0U, std::span<uint8_t const>(payload));
+}
+
+/// CVF MJPEG: one fragment at offset 0, type 1 (4:2:0), Q 90, 320x240
+auto cvf_mjpeg() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x00, 0x00, 0x00, 0x01, 0x5A, 0x28, 0x1E, 0xFF, 0xD8, 0xFF, 0xE0};
+    return stream_pdu(0x03, 40, 0x02000000U, static_cast<uint16_t>(payload.size()), 0x1000U, std::span<uint8_t const>(payload));
+}
+
+/// CVF H.264: single NAL unit (SPS) with a valid payload timestamp (ptv), M set
+auto cvf_h264_sps() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x01, 0x86, 0xA0, 0x67, 0x42, 0x00, 0x1E, 0xAB, 0x40};
+    return stream_pdu(0x03, 41, 0x02010000U, static_cast<uint16_t>(payload.size()), 0x3000U, std::span<uint8_t const>(payload));
+}
+
+/// CVF H.264: FU-A fragment, start of an IDR slice
+auto cvf_h264_fu_a() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x01, 0x86, 0xA1, 0x7C, 0x85, 0x88, 0x84, 0x00, 0x33, 0xFF};
+    return stream_pdu(0x03, 42, 0x02010000U, static_cast<uint16_t>(payload.size()), 0x2000U, std::span<uint8_t const>(payload));
+}
+
+/// CVF H.265: aggregation packet (type 48, layer 0, tid 1)
+auto cvf_h265_ap() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x02, 0x00, 0x00, 0x60, 0x01, 0x00, 0x04, 0x40, 0x01, 0x0C, 0x01};
+    return stream_pdu(0x03, 43, 0x02030000U, static_cast<uint16_t>(payload.size()), 0x2000U, std::span<uint8_t const>(payload));
+}
+
+/// CVF H.265: FU (type 49), end of an IDR_W_RADL unit
+auto cvf_h265_fu() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x02, 0x00, 0x01, 0x62, 0x01, 0x53, 0xAA, 0xBB};
+    return stream_pdu(0x03, 44, 0x02030000U, static_cast<uint16_t>(payload.size()), 0x3000U, std::span<uint8_t const>(payload));
+}
+
+/// CVF JPEG 2000: progressive, main header present, tile 3, fragment offset 0x000400
+auto cvf_jpeg2000() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x33, 0x07, 0x00, 0x03, 0x00, 0x00, 0x04, 0x00, 0xFF, 0x4F, 0xFF, 0x51};
+    return stream_pdu(0x03, 45, 0x02020000U, static_cast<uint16_t>(payload.size()), 0x0000U, std::span<uint8_t const>(payload));
+}
+
+/// SVF 1080i/59.94, line 21, guard band, frame 2
+auto svf() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x12, 0x02, 0x1E, 0x05, 0x3F, 0xF0, 0x00, 0x40};
+    // format 3, i_seq_num 7, line_number 21 | stream_data_length 8 | gb | reserved
+    return stream_pdu(0x06, 50, 0x03070015U, static_cast<uint16_t>(payload.size()), 0x4000U, std::span<uint8_t const>(payload));
+}
+
+/// RVF 1920x1080, 10-bit 4:2:2, 60 fps, BT.709, 2 lines starting at 540, interlaced second field
+auto rvf() -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload{0x00, 0x23, 0x18, 0x82, 0x00, 0x09, 0x02, 0x1C, 0xAA, 0xBB, 0xCC, 0xDD};
+    // active_pixels 1920 total_lines 1080 | stream_data_length | f | i
+    return stream_pdu(0x07, 51, 0x07800438U, static_cast<uint16_t>(payload.size()), 0x2040U, std::span<uint8_t const>(payload));
+}
+
+/// Vendor specific stream, vendor id 00:1C:AB:00:00:01
+auto vsf() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 4> const data{0xCA, 0xFE, 0xF0, 0x0D};
+    return stream_pdu(0x6F, 52, 0x001CAB00U, 4, 0x0001U, std::span<uint8_t const>(data));
+}
+
+/// MMA stream (MIDI over AVTP, opaque here)
+auto mma() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 4> const data{0x90, 0x3C, 0x7F, 0x00};
+    return stream_pdu(0x01, 53, 0, 4, 0, std::span<uint8_t const>(data));
+}
+
+/// Experimental stream format
+auto ef_stream() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 2> const data{0xEE, 0xFF};
+    return stream_pdu(0x7F, 54, 0, 2, 0, std::span<uint8_t const>(data));
+}
+
+/// Experimental control format (control header kind)
+auto ef_control() -> std::vector<uint8_t>
+{
+    return {0xFF, 0x80, 0x00, 0x04, 0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD};
 }
 
 /// 24-bit PCM, one channel, six samples including negative values
@@ -572,6 +732,22 @@ int main(int argc, char** argv)
     ethernet(aaf_v0_partial_frame());
     ethernet(aaf_v0_aes3());
     ethernet(am824_v0_mixed_labels());
+    ethernet(iec61883_iidc());
+    ethernet(iec61883_mpegts());
+    ethernet(iec61883_dv());
+    ethernet(cvf_mjpeg());
+    ethernet(cvf_h264_sps());
+    ethernet(cvf_h264_fu_a());
+    ethernet(cvf_h265_ap());
+    ethernet(cvf_h265_fu());
+    ethernet(cvf_jpeg2000());
+    ethernet(svf());
+    ethernet(rvf());
+    ethernet(vsf());
+    ethernet(mma());
+    ethernet(ef_stream());
+    ethernet(ef_control());
+    udp(cvf_h264_fu_a(), IP_AVTPDU_PORT_CONTINUOUS, 52);
     udp(aaf_v0(), IP_AVTPDU_PORT_CONTINUOUS, 42);
     udp(tscf_with_can(), IP_AVTPDU_PORT_CONTINUOUS, 43);
     udp(adp_entity_available(), IP_AVTPDU_PORT_DISCRETE, 44);

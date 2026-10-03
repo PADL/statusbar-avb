@@ -147,6 +147,135 @@ VALUE_TABLES: dict[str, ValueTable] = {
             0x88: "SMPTE time code",
         },
     ),
+    # IEC 61883-1 FMT codes carried in the CIP header
+    "iec61883_fmt": ValueTable(
+        "iec61883_fmt",
+        {
+            0x00: "DV (IEC 61883-2/-3/-5)",
+            0x10: "Audio and music (IEC 61883-6, AM824)",
+            0x20: "MPEG2-TS (IEC 61883-4)",
+            0x21: "ITU-R BO.1294 System B (IEC 61883-7)",
+            0x3F: "No data",
+        },
+    ),
+    # IEEE 1722-2025 Table 20 / Table 21 (CVF format, format_subtype)
+    "cvf_format": ValueTable("cvf_format", {0x02: "RFC"}),
+    "cvf_format_subtype": ValueTable(
+        "cvf_format_subtype",
+        {0x00: "MJPEG", 0x01: "H.264", 0x02: "JPEG 2000", 0x03: "H.265"},
+    ),
+    # RFC 6184 Table 1 / RFC 7798 NAL unit types as they appear in a CVF payload
+    "h264_nal_type": ValueTable(
+        "h264_nal_type",
+        {
+            1: "Coded slice (non-IDR)",
+            5: "Coded slice (IDR)",
+            6: "SEI",
+            7: "SPS",
+            8: "PPS",
+            9: "Access unit delimiter",
+            24: "STAP-A",
+            25: "STAP-B",
+            26: "MTAP16",
+            27: "MTAP24",
+            28: "FU-A",
+            29: "FU-B",
+        },
+    ),
+    "h265_nal_type": ValueTable(
+        "h265_nal_type",
+        {
+            19: "IDR_W_RADL",
+            20: "IDR_N_LP",
+            32: "VPS",
+            33: "SPS",
+            34: "PPS",
+            35: "AUD",
+            39: "PREFIX_SEI",
+            40: "SUFFIX_SEI",
+            48: "Aggregation packet (AP)",
+            49: "Fragmentation unit (FU)",
+            50: "PACI",
+        },
+    ),
+    # IEEE 1722-2025 Table 37 (SVF format)
+    "svf_format": ValueTable(
+        "svf_format",
+        {
+            0x01: "525i/59.94",
+            0x02: "625i/50",
+            0x03: "1080i/59.94",
+            0x04: "1080i/50",
+            0x05: "720p/59.94",
+            0x06: "720p/50",
+            0x07: "1080p/23.98",
+            0x08: "1080p/59.94",
+            0x09: "1080p/50",
+            0xFF: "SVF_USER",
+        },
+    ),
+    # IEEE 1722-2025 Tables 45-48 (RVF)
+    "rvf_pixel_depth": ValueTable(
+        "rvf_pixel_depth", {1: "8", 2: "10", 3: "12", 4: "16", 0xF: "User defined"}
+    ),
+    "rvf_pixel_format": ValueTable(
+        "rvf_pixel_format",
+        {
+            0: "Monochrome",
+            1: "4:1:1",
+            2: "4:2:0",
+            3: "4:2:2",
+            4: "4:4:4",
+            6: "4:2:2:4",
+            7: "4:4:4:4",
+            8: "Bayer grbg",
+            9: "Bayer rggb",
+            0xA: "Bayer bggr",
+            0xB: "Bayer gbrg",
+            0xF: "User defined",
+        },
+    ),
+    "rvf_frame_rate": ValueTable(
+        "rvf_frame_rate",
+        {
+            0x01: "1",
+            0x02: "2",
+            0x03: "5",
+            0x10: "10",
+            0x11: "15",
+            0x12: "20",
+            0x13: "24",
+            0x14: "25",
+            0x15: "30",
+            0x16: "48",
+            0x17: "50",
+            0x18: "60",
+            0x19: "72",
+            0x1A: "85",
+            0x30: "100",
+            0x31: "120",
+            0x32: "150",
+            0x33: "200",
+            0x34: "240",
+            0x35: "300",
+            0xFF: "User defined",
+        },
+    ),
+    "rvf_colorspace": ValueTable(
+        "rvf_colorspace",
+        {
+            1: "YCbCr",
+            2: "sRGB",
+            3: "YCgCo",
+            4: "Grayscale",
+            5: "XYZ",
+            6: "YCM",
+            7: "BT Rec.601",
+            8: "BT Rec.709",
+            9: "ITU BT 2020",
+            0xF: "User defined",
+        },
+    ),
     "am824_fdf": ValueTable(
         "am824_fdf",
         {
@@ -490,14 +619,27 @@ AAF_AUDIO = Layout(
     ),
 )
 
-# IEC 61883/IIDC (Clause 5) with the 61883-6 AM824 CIP header.
-_AM824_FIELDS = (
+# IEC 61883/IIDC (Clause 5): the common header (Figure 15); the post hook
+# "iec61883" adds the CIP header when tag == 1 and dissects by FMT/SPH.
+_IEC61883_FIELDS = (
     Field("gateway_info", 16, 4, "u32", "gateway_info", base="hex"),
     Field("stream_data_length", 20, 2, "u16", "stream_data_length (CIP header + data)"),
-    Field("tag", 22, 1, "u8", "tag", mask=0xC0),
+    Field("tag", 22, 1, "u8", "tag (1 = CIP header present, 0 = IIDC)", mask=0xC0),
     Field("channel", 22, 1, "u8", "channel", mask=0x3F),
     Field("tcode", 23, 1, "u8", "tcode", mask=0xF0, base="hex"),
     Field("sy", 23, 1, "u8", "sy", mask=0x0F),
+)
+IEC61883_V0 = Layout(
+    "iec61883_v0",
+    "avb.avtp.iec61883",
+    "IEC 61883/IIDC common header (IEEE 1722-2025 5.2)",
+    _IEC61883_FIELDS,
+)
+IEC61883_V1 = Layout(
+    "iec61883_v1",
+    "avb.avtp.iec61883",
+    "IEC 61883/IIDC common header, version 1 header",
+    _shift(_IEC61883_FIELDS, 16),
 )
 _CIP_FIELDS = (
     Field("qi_1", 24, 1, "u8", "CIP quadlet indicator 1", mask=0xC0),
@@ -508,7 +650,16 @@ _CIP_FIELDS = (
     Field("sph", 26, 1, "bool", "CIP source packet header", mask=0x04),
     Field("dbc", 27, 1, "u8", "CIP data block count"),
     Field("qi_2", 28, 1, "u8", "CIP quadlet indicator 2", mask=0xC0),
-    Field("fmt", 28, 1, "u8", "CIP format", mask=0x3F, base="hex"),
+    Field(
+        "fmt",
+        28,
+        1,
+        "u8",
+        "CIP format (IEC 61883-1 FMT)",
+        mask=0x3F,
+        base="hex",
+        values="iec61883_fmt",
+    ),
     Field(
         "fdf",
         29,
@@ -520,19 +671,270 @@ _CIP_FIELDS = (
     ),
     Field("syt", 30, 2, "u16", "CIP synchronization timestamp", base="hex"),
 )
-AM824_V0 = Layout(
-    "am824_v0",
-    "avb.avtp.am824",
-    "IEC 61883 stream header (IEEE 1722-2025 5.3)",
-    _AM824_FIELDS,
-)
-AM824_V1 = Layout(
-    "am824_v1",
-    "avb.avtp.am824",
-    "IEC 61883 stream header, version 1 header",
-    _shift(_AM824_FIELDS, 16),
-)
 CIP_V0 = Layout("cip_v0", "avb.avtp.cip", "IEC 61883-6 CIP header", _CIP_FIELDS)
+
+# IEC 61883-4 (FMT 0x20, SPH = 1): source packets of dbs*4*2^fn octets, a
+# 32-bit source packet header timestamp then a 188-octet MPEG2 transport
+# packet. Offsets relative to the source packet; "source_packets" is a count.
+MPEGTS = Layout(
+    "mpegts",
+    "avb.avtp.mpegts",
+    "IEC 61883-4 source packet (MPEG2-TS)",
+    (
+        Field("source_packets", 0, 0, "u16", "source packets in this AVTPDU"),
+        Field("source_packet_timestamp", 0, 4, "u32", "source packet header timestamp"),
+        Field("sync_byte", 4, 1, "u8", "TS sync byte (0x47)", base="hex"),
+        Field("tei", 5, 2, "bool", "transport error indicator", mask=0x8000),
+        Field("pusi", 5, 2, "bool", "payload unit start indicator", mask=0x4000),
+        Field("transport_priority", 5, 2, "bool", "transport priority", mask=0x2000),
+        Field("pid", 5, 2, "u16", "PID", mask=0x1FFF, base="hex"),
+        Field("tsc", 7, 1, "u8", "transport scrambling control", mask=0xC0),
+        Field("afc", 7, 1, "u8", "adaptation field control", mask=0x30),
+        Field("cc", 7, 1, "u8", "continuity counter", mask=0x0F),
+    ),
+)
+
+# Compressed Video Format (Clause 8): the common header (Figure 39), then the
+# RFC payload-type specific header the "cvf" post hook adds by format_subtype
+# (MJPEG Figure 40, H.264 Figure 41 with its NAL unit header per RFC 6184,
+# JPEG 2000 Figure 48, H.265 Figure 51 with its NAL unit header per RFC 7798).
+_CVF_FIELDS = (
+    Field("format", 16, 1, "u8", "format (Table 20)", values="cvf_format"),
+    Field(
+        "format_subtype",
+        17,
+        1,
+        "u8",
+        "format_subtype (Table 21)",
+        values="cvf_format_subtype",
+    ),
+    Field("stream_data_length", 20, 2, "u16", "stream_data_length (octets)"),
+    Field("ptv", 22, 1, "bool", "payload timestamp valid (H.264/H.265)", mask=0x20),
+    Field(
+        "m",
+        22,
+        1,
+        "bool",
+        "M (marker: last AVTPDU of the frame / access unit)",
+        mask=0x10,
+    ),
+    Field("evt", 22, 1, "u8", "event", mask=0x0F),
+)
+CVF_V0 = Layout(
+    "cvf_v0", "avb.avtp.cvf", "CVF header (IEEE 1722-2025 8.3)", _CVF_FIELDS
+)
+CVF_V1 = Layout(
+    "cvf_v1", "avb.avtp.cvf", "CVF header, version 1 header", _shift(_CVF_FIELDS, 16)
+)
+CVF_MJPEG = Layout(
+    "cvf_mjpeg",
+    "avb.avtp.cvf.mjpeg",
+    "MJPEG header (IEEE 1722-2025 8.4, RFC 2435)",
+    (
+        Field("type_specific", 0, 1, "u8", "type-specific"),
+        Field("fragment_offset", 1, 3, "u24", "fragment offset"),
+        Field("type", 4, 1, "u8", "type"),
+        Field("q", 5, 1, "u8", "Q"),
+        Field("width", 6, 1, "u8", "width (in 8-pixel blocks)"),
+        Field("height", 7, 1, "u8", "height (in 8-pixel blocks)"),
+    ),
+)
+CVF_H264 = Layout(
+    "cvf_h264",
+    "avb.avtp.cvf.h264",
+    "H.264 header (IEEE 1722-2025 8.5)",
+    (Field("timestamp", 0, 4, "u32", "h264_timestamp"),),
+)
+CVF_H264_NAL = Layout(
+    "cvf_h264_nal",
+    "avb.avtp.cvf.h264.nal",
+    "H.264 NAL unit header (RFC 6184)",
+    (
+        Field("f", 0, 1, "bool", "forbidden_zero_bit", mask=0x80),
+        Field("nri", 0, 1, "u8", "nal_ref_idc", mask=0x60),
+        Field("type", 0, 1, "u8", "nal_unit_type", mask=0x1F, values="h264_nal_type"),
+    ),
+)
+CVF_H264_FU = Layout(
+    "cvf_h264_fu",
+    "avb.avtp.cvf.h264.fu",
+    "H.264 FU header (RFC 6184 5.8)",
+    (
+        Field("s", 0, 1, "bool", "start of fragmented NAL unit", mask=0x80),
+        Field("e", 0, 1, "bool", "end of fragmented NAL unit", mask=0x40),
+        Field("r", 0, 1, "u8", "reserved", mask=0x20),
+        Field(
+            "type",
+            0,
+            1,
+            "u8",
+            "nal_unit_type of the fragmented unit",
+            mask=0x1F,
+            values="h264_nal_type",
+        ),
+    ),
+)
+CVF_H265 = Layout(
+    "cvf_h265",
+    "avb.avtp.cvf.h265",
+    "H.265 header (IEEE 1722-2025 8.7)",
+    (Field("timestamp", 0, 4, "u32", "h265_timestamp"),),
+)
+CVF_H265_NAL = Layout(
+    "cvf_h265_nal",
+    "avb.avtp.cvf.h265.nal",
+    "H.265 NAL unit header (RFC 7798)",
+    (
+        Field("f", 0, 2, "bool", "forbidden_zero_bit", mask=0x8000),
+        Field(
+            "type", 0, 2, "u16", "nal_unit_type", mask=0x7E00, values="h265_nal_type"
+        ),
+        Field("layer_id", 0, 2, "u16", "nuh_layer_id", mask=0x01F8),
+        Field("tid", 0, 2, "u16", "nuh_temporal_id_plus1", mask=0x0007),
+    ),
+)
+CVF_H265_FU = Layout(
+    "cvf_h265_fu",
+    "avb.avtp.cvf.h265.fu",
+    "H.265 FU header (RFC 7798 4.4.3)",
+    (
+        Field("s", 0, 1, "bool", "start of fragmented NAL unit", mask=0x80),
+        Field("e", 0, 1, "bool", "end of fragmented NAL unit", mask=0x40),
+        Field(
+            "type",
+            0,
+            1,
+            "u8",
+            "nal_unit_type of the fragmented unit",
+            mask=0x3F,
+            values="h265_nal_type",
+        ),
+    ),
+)
+CVF_JPEG2000 = Layout(
+    "cvf_jpeg2000",
+    "avb.avtp.cvf.jpeg2000",
+    "JPEG 2000 payload header (IEEE 1722-2025 8.6, RFC 5371)",
+    (
+        Field("tp", 0, 1, "u8", "type (progressive/interlaced)", mask=0xC0),
+        Field("mhf", 0, 1, "u8", "main header flag", mask=0x30),
+        Field("mh_id", 0, 1, "u8", "main header identification", mask=0x0E),
+        Field("t", 0, 1, "bool", "tile field", mask=0x01),
+        Field("priority", 1, 1, "u8", "priority"),
+        Field("tile_number", 2, 2, "u16", "tile number"),
+        Field("fragment_offset", 5, 3, "u24", "fragment offset"),
+    ),
+)
+
+# SDI Video Format (Clause 11, Figure 102)
+_SVF_FIELDS = (
+    Field("format", 16, 1, "u8", "format (Table 37)", values="svf_format"),
+    Field("i_seq_num", 17, 1, "u8", "i_seq_num"),
+    Field("line_number", 18, 2, "u16", "line number"),
+    Field("stream_data_length", 20, 2, "u16", "stream_data_length (octets)"),
+    Field("gb", 22, 1, "bool", "guard band", mask=0x40),
+    Field("sp", 22, 1, "bool", "RP168 switch point", mask=0x20),
+    Field("ef", 22, 1, "bool", "end of frame", mask=0x10),
+    Field("evt", 22, 1, "u8", "event", mask=0x0F),
+    Field("map", 24, 1, "u8", "map", mask=0xF0),
+    Field("sample", 24, 1, "u8", "sample", mask=0x0F),
+    Field("frame", 25, 1, "u8", "frame"),
+    Field("frate", 26, 1, "u8", "frame rate"),
+    Field("frcount", 27, 1, "u8", "frame count"),
+)
+SVF_V0 = Layout(
+    "svf_v0", "avb.avtp.svf", "SVF header (IEEE 1722-2025 11.2)", _SVF_FIELDS
+)
+SVF_V1 = Layout(
+    "svf_v1", "avb.avtp.svf", "SVF header, version 1 header", _shift(_SVF_FIELDS, 16)
+)
+
+# Raw Video Format (Clause 12, Figure 104)
+_RVF_FIELDS = (
+    Field("active_pixels", 16, 2, "u16", "active pixels per line"),
+    Field("total_lines", 18, 2, "u16", "total lines per frame"),
+    Field("stream_data_length", 20, 2, "u16", "stream_data_length (octets)"),
+    Field("ap", 22, 1, "bool", "active pixels only", mask=0x80),
+    Field("f", 22, 1, "bool", "field (interlaced: 0 = first, 1 = second)", mask=0x20),
+    Field("ef", 22, 1, "bool", "end of frame", mask=0x10),
+    Field("evt", 22, 1, "u8", "event", mask=0x0F),
+    Field("pd", 23, 1, "bool", "pull-down", mask=0x80),
+    Field("i", 23, 1, "bool", "interlaced", mask=0x40),
+    Field(
+        "pixel_depth",
+        25,
+        1,
+        "u8",
+        "pixel depth (Table 45)",
+        mask=0xF0,
+        values="rvf_pixel_depth",
+    ),
+    Field(
+        "pixel_format",
+        25,
+        1,
+        "u8",
+        "pixel format (Table 46)",
+        mask=0x0F,
+        values="rvf_pixel_format",
+    ),
+    Field("frame_rate", 26, 1, "u8", "frame rate (Table 47)", values="rvf_frame_rate"),
+    Field(
+        "colorspace",
+        27,
+        1,
+        "u8",
+        "colorspace (Table 48)",
+        mask=0xF0,
+        values="rvf_colorspace",
+    ),
+    Field("num_lines", 27, 1, "u8", "lines in this AVTPDU", mask=0x0F),
+    Field("i_seq_num", 29, 1, "u8", "i_seq_num"),
+    Field("line_number", 30, 2, "u16", "line number"),
+)
+RVF_V0 = Layout(
+    "rvf_v0", "avb.avtp.rvf", "RVF header (IEEE 1722-2025 12.2)", _RVF_FIELDS
+)
+RVF_V1 = Layout(
+    "rvf_v1", "avb.avtp.rvf", "RVF header, version 1 header", _shift(_RVF_FIELDS, 16)
+)
+
+# Vendor Specific Format (Clause 14, Figure 108), MMA (Clause 6) and the
+# Experimental stream format (Clause 15): common stream header + opaque payload
+_VSF_FIELDS = (
+    Field(
+        "vendor_id_1",
+        16,
+        4,
+        "u32",
+        "vendor_id (first 4 octets of the OUI-based id)",
+        base="hex",
+    ),
+    Field("stream_data_length", 20, 2, "u16", "stream_data_length (octets)"),
+    Field("vendor_id_2", 22, 2, "u16", "vendor_id (last 2 octets)", base="hex"),
+)
+VSF_V0 = Layout(
+    "vsf_v0", "avb.avtp.vsf", "VSF header (IEEE 1722-2025 14.1)", _VSF_FIELDS
+)
+VSF_V1 = Layout(
+    "vsf_v1", "avb.avtp.vsf", "VSF header, version 1 header", _shift(_VSF_FIELDS, 16)
+)
+_SDL_ONLY = (Field("stream_data_length", 20, 2, "u16", "stream_data_length (octets)"),)
+MMA_V0 = Layout(
+    "mma_v0", "avb.avtp.mma", "MMA stream (IEEE 1722-2025 Clause 6)", _SDL_ONLY
+)
+MMA_V1 = Layout(
+    "mma_v1", "avb.avtp.mma", "MMA stream, version 1 header", _shift(_SDL_ONLY, 16)
+)
+EF_STREAM_V0 = Layout(
+    "ef_stream_v0", "avb.avtp.ef", "Experimental stream (Clause 15)", _SDL_ONLY
+)
+EF_STREAM_V1 = Layout(
+    "ef_stream_v1",
+    "avb.avtp.ef",
+    "Experimental stream, version 1 header",
+    _shift(_SDL_ONLY, 16),
+)
 
 # The AM824 data the "am824_audio" post hook adds: dbs quadlets per data
 # block, each a label octet and 24 bits of data (IEC 61883-6); MBLA and IEC
@@ -813,11 +1215,23 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("aaf_v0", 0x02, 0, (AVTP_STREAM_V0, AAF_V0), 24, post="aaf_audio"),
     SubtypeSpec("aaf_v1", 0x02, 1, (AVTP_STREAM_V1, AAF_V1), 40, post="aaf_audio"),
     SubtypeSpec(
-        "am824_v0", 0x00, 0, (AVTP_STREAM_V0, AM824_V0, CIP_V0), 32, post="am824_audio"
+        "iec61883_v0", 0x00, 0, (AVTP_STREAM_V0, IEC61883_V0), 24, post="iec61883"
     ),
     SubtypeSpec(
-        "am824_v1", 0x00, 1, (AVTP_STREAM_V1, AM824_V1, CIP_V1), 48, post="am824_audio"
+        "iec61883_v1", 0x00, 1, (AVTP_STREAM_V1, IEC61883_V1), 40, post="iec61883"
     ),
+    SubtypeSpec("cvf_v0", 0x03, 0, (AVTP_STREAM_V0, CVF_V0), 24, post="cvf"),
+    SubtypeSpec("cvf_v1", 0x03, 1, (AVTP_STREAM_V1, CVF_V1), 40, post="cvf"),
+    SubtypeSpec("svf_v0", 0x06, 0, (AVTP_STREAM_V0, SVF_V0), 28),
+    SubtypeSpec("svf_v1", 0x06, 1, (AVTP_STREAM_V1, SVF_V1), 44),
+    SubtypeSpec("rvf_v0", 0x07, 0, (AVTP_STREAM_V0, RVF_V0), 32),
+    SubtypeSpec("rvf_v1", 0x07, 1, (AVTP_STREAM_V1, RVF_V1), 48),
+    SubtypeSpec("vsf_v0", 0x6F, 0, (AVTP_STREAM_V0, VSF_V0), 24),
+    SubtypeSpec("vsf_v1", 0x6F, 1, (AVTP_STREAM_V1, VSF_V1), 40),
+    SubtypeSpec("mma_v0", 0x01, 0, (AVTP_STREAM_V0, MMA_V0), 24),
+    SubtypeSpec("mma_v1", 0x01, 1, (AVTP_STREAM_V1, MMA_V1), 40),
+    SubtypeSpec("ef_stream_v0", 0x7F, 0, (AVTP_STREAM_V0, EF_STREAM_V0), 24),
+    SubtypeSpec("ef_stream_v1", 0x7F, 1, (AVTP_STREAM_V1, EF_STREAM_V1), 40),
     SubtypeSpec("tscf_v0", 0x05, 0, (AVTP_STREAM_V0, TSCF_V0), 24, post="acf"),
     SubtypeSpec("tscf_v1", 0x05, 1, (AVTP_STREAM_V1, TSCF_V1), 40, post="acf"),
     SubtypeSpec("ntscf_v0", 0x82, 0, (NTSCF_V0,), 12, post="acf"),
@@ -838,10 +1252,30 @@ SUBTYPE_LAYOUTS: tuple[Layout, ...] = (
     AAF_PCM_V1,
     AAF_AES3_V0,
     AAF_AES3_V1,
-    AM824_V0,
-    AM824_V1,
+    IEC61883_V0,
+    IEC61883_V1,
     CIP_V0,
     CIP_V1,
+    CVF_V0,
+    CVF_V1,
+    CVF_MJPEG,
+    CVF_H264,
+    CVF_H264_NAL,
+    CVF_H264_FU,
+    CVF_H265,
+    CVF_H265_NAL,
+    CVF_H265_FU,
+    CVF_JPEG2000,
+    SVF_V0,
+    SVF_V1,
+    RVF_V0,
+    RVF_V1,
+    VSF_V0,
+    VSF_V1,
+    MMA_V0,
+    MMA_V1,
+    EF_STREAM_V0,
+    EF_STREAM_V1,
     TSCF_V0,
     TSCF_V1,
     NTSCF_V0,
@@ -999,4 +1433,4 @@ ACF_LAYOUTS: tuple[Layout, ...] = (
 
 #: Fields the post hooks add item by item (no generated add_ function); the
 #: CRF timestamps, the AAF samples/subframes and the AM824 quadlets.
-EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (CRF_EXTRA, AAF_AUDIO, AM824_AUDIO)
+EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (CRF_EXTRA, AAF_AUDIO, AM824_AUDIO, MPEGTS)

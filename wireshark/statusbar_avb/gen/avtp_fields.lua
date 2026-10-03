@@ -78,6 +78,127 @@ M.values_am824_label = {
     [0x88] = "SMPTE time code",
 }
 
+M.values_iec61883_fmt = {
+    [0x00] = "DV (IEC 61883-2/-3/-5)",
+    [0x10] = "Audio and music (IEC 61883-6, AM824)",
+    [0x20] = "MPEG2-TS (IEC 61883-4)",
+    [0x21] = "ITU-R BO.1294 System B (IEC 61883-7)",
+    [0x3F] = "No data",
+}
+
+M.values_cvf_format = {
+    [0x02] = "RFC",
+}
+
+M.values_cvf_format_subtype = {
+    [0x00] = "MJPEG",
+    [0x01] = "H.264",
+    [0x02] = "JPEG 2000",
+    [0x03] = "H.265",
+}
+
+M.values_h264_nal_type = {
+    [0x01] = "Coded slice (non-IDR)",
+    [0x05] = "Coded slice (IDR)",
+    [0x06] = "SEI",
+    [0x07] = "SPS",
+    [0x08] = "PPS",
+    [0x09] = "Access unit delimiter",
+    [0x18] = "STAP-A",
+    [0x19] = "STAP-B",
+    [0x1A] = "MTAP16",
+    [0x1B] = "MTAP24",
+    [0x1C] = "FU-A",
+    [0x1D] = "FU-B",
+}
+
+M.values_h265_nal_type = {
+    [0x13] = "IDR_W_RADL",
+    [0x14] = "IDR_N_LP",
+    [0x20] = "VPS",
+    [0x21] = "SPS",
+    [0x22] = "PPS",
+    [0x23] = "AUD",
+    [0x27] = "PREFIX_SEI",
+    [0x28] = "SUFFIX_SEI",
+    [0x30] = "Aggregation packet (AP)",
+    [0x31] = "Fragmentation unit (FU)",
+    [0x32] = "PACI",
+}
+
+M.values_svf_format = {
+    [0x01] = "525i/59.94",
+    [0x02] = "625i/50",
+    [0x03] = "1080i/59.94",
+    [0x04] = "1080i/50",
+    [0x05] = "720p/59.94",
+    [0x06] = "720p/50",
+    [0x07] = "1080p/23.98",
+    [0x08] = "1080p/59.94",
+    [0x09] = "1080p/50",
+    [0xFF] = "SVF_USER",
+}
+
+M.values_rvf_pixel_depth = {
+    [0x01] = "8",
+    [0x02] = "10",
+    [0x03] = "12",
+    [0x04] = "16",
+    [0x0F] = "User defined",
+}
+
+M.values_rvf_pixel_format = {
+    [0x00] = "Monochrome",
+    [0x01] = "4:1:1",
+    [0x02] = "4:2:0",
+    [0x03] = "4:2:2",
+    [0x04] = "4:4:4",
+    [0x06] = "4:2:2:4",
+    [0x07] = "4:4:4:4",
+    [0x08] = "Bayer grbg",
+    [0x09] = "Bayer rggb",
+    [0x0A] = "Bayer bggr",
+    [0x0B] = "Bayer gbrg",
+    [0x0F] = "User defined",
+}
+
+M.values_rvf_frame_rate = {
+    [0x01] = "1",
+    [0x02] = "2",
+    [0x03] = "5",
+    [0x10] = "10",
+    [0x11] = "15",
+    [0x12] = "20",
+    [0x13] = "24",
+    [0x14] = "25",
+    [0x15] = "30",
+    [0x16] = "48",
+    [0x17] = "50",
+    [0x18] = "60",
+    [0x19] = "72",
+    [0x1A] = "85",
+    [0x30] = "100",
+    [0x31] = "120",
+    [0x32] = "150",
+    [0x33] = "200",
+    [0x34] = "240",
+    [0x35] = "300",
+    [0xFF] = "User defined",
+}
+
+M.values_rvf_colorspace = {
+    [0x01] = "YCbCr",
+    [0x02] = "sRGB",
+    [0x03] = "YCgCo",
+    [0x04] = "Grayscale",
+    [0x05] = "XYZ",
+    [0x06] = "YCM",
+    [0x07] = "BT Rec.601",
+    [0x08] = "BT Rec.709",
+    [0x09] = "ITU BT 2020",
+    [0x0F] = "User defined",
+}
+
 M.values_am824_fdf = {
     [0x00] = "32 kHz",
     [0x01] = "44.1 kHz",
@@ -217,12 +338,12 @@ M.f.avtp_aaf_aes3_streams_per_frame = ProtoField.uint16("avb.avtp.aaf.aes3.strea
 M.f.avtp_aaf_aes3_data_type_h = ProtoField.uint8("avb.avtp.aaf.aes3.data_type_h", "data_type_h", base.HEX, nil, nil, "aes3_data_type, high octet")
 M.f.avtp_aaf_aes3_dt_ref = ProtoField.uint8("avb.avtp.aaf.aes3.dt_ref", "dt_ref", base.DEC, M.values_aaf_aes3_dt_ref, 0xE0, "aes3_data_type reference (Table 17)")
 M.f.avtp_aaf_aes3_data_type_l = ProtoField.uint8("avb.avtp.aaf.aes3.data_type_l", "data_type_l", base.HEX, nil, nil, "aes3_data_type, low octet")
-M.f.avtp_am824_gateway_info = ProtoField.uint32("avb.avtp.am824.gateway_info", "gateway_info", base.HEX, nil, nil, "gateway_info")
-M.f.avtp_am824_stream_data_length = ProtoField.uint16("avb.avtp.am824.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (CIP header + data)")
-M.f.avtp_am824_tag = ProtoField.uint8("avb.avtp.am824.tag", "tag", base.DEC, nil, 0xC0, "tag")
-M.f.avtp_am824_channel = ProtoField.uint8("avb.avtp.am824.channel", "channel", base.DEC, nil, 0x3F, "channel")
-M.f.avtp_am824_tcode = ProtoField.uint8("avb.avtp.am824.tcode", "tcode", base.HEX, nil, 0xF0, "tcode")
-M.f.avtp_am824_sy = ProtoField.uint8("avb.avtp.am824.sy", "sy", base.DEC, nil, 0xF, "sy")
+M.f.avtp_iec61883_gateway_info = ProtoField.uint32("avb.avtp.iec61883.gateway_info", "gateway_info", base.HEX, nil, nil, "gateway_info")
+M.f.avtp_iec61883_stream_data_length = ProtoField.uint16("avb.avtp.iec61883.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (CIP header + data)")
+M.f.avtp_iec61883_tag = ProtoField.uint8("avb.avtp.iec61883.tag", "tag", base.DEC, nil, 0xC0, "tag (1 = CIP header present, 0 = IIDC)")
+M.f.avtp_iec61883_channel = ProtoField.uint8("avb.avtp.iec61883.channel", "channel", base.DEC, nil, 0x3F, "channel")
+M.f.avtp_iec61883_tcode = ProtoField.uint8("avb.avtp.iec61883.tcode", "tcode", base.HEX, nil, 0xF0, "tcode")
+M.f.avtp_iec61883_sy = ProtoField.uint8("avb.avtp.iec61883.sy", "sy", base.DEC, nil, 0xF, "sy")
 M.f.avtp_cip_qi_1 = ProtoField.uint8("avb.avtp.cip.qi_1", "qi_1", base.DEC, nil, 0xC0, "CIP quadlet indicator 1")
 M.f.avtp_cip_sid = ProtoField.uint8("avb.avtp.cip.sid", "sid", base.DEC, nil, 0x3F, "CIP source id")
 M.f.avtp_cip_dbs = ProtoField.uint8("avb.avtp.cip.dbs", "dbs", base.DEC, nil, nil, "CIP data block size (quadlets)")
@@ -231,9 +352,78 @@ M.f.avtp_cip_qpc = ProtoField.uint8("avb.avtp.cip.qpc", "qpc", base.DEC, nil, 0x
 M.f.avtp_cip_sph = ProtoField.bool("avb.avtp.cip.sph", "sph", 8, nil, 0x4, "CIP source packet header")
 M.f.avtp_cip_dbc = ProtoField.uint8("avb.avtp.cip.dbc", "dbc", base.DEC, nil, nil, "CIP data block count")
 M.f.avtp_cip_qi_2 = ProtoField.uint8("avb.avtp.cip.qi_2", "qi_2", base.DEC, nil, 0xC0, "CIP quadlet indicator 2")
-M.f.avtp_cip_fmt = ProtoField.uint8("avb.avtp.cip.fmt", "fmt", base.HEX, nil, 0x3F, "CIP format")
+M.f.avtp_cip_fmt = ProtoField.uint8("avb.avtp.cip.fmt", "fmt", base.HEX, M.values_iec61883_fmt, 0x3F, "CIP format (IEC 61883-1 FMT)")
 M.f.avtp_cip_fdf = ProtoField.uint8("avb.avtp.cip.fdf", "fdf", base.HEX, M.values_am824_fdf, nil, "CIP format dependent field (AM824 sample frequency code)")
 M.f.avtp_cip_syt = ProtoField.uint16("avb.avtp.cip.syt", "syt", base.HEX, nil, nil, "CIP synchronization timestamp")
+M.f.avtp_cvf_format = ProtoField.uint8("avb.avtp.cvf.format", "format", base.DEC, M.values_cvf_format, nil, "format (Table 20)")
+M.f.avtp_cvf_format_subtype = ProtoField.uint8("avb.avtp.cvf.format_subtype", "format_subtype", base.DEC, M.values_cvf_format_subtype, nil, "format_subtype (Table 21)")
+M.f.avtp_cvf_stream_data_length = ProtoField.uint16("avb.avtp.cvf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets)")
+M.f.avtp_cvf_ptv = ProtoField.bool("avb.avtp.cvf.ptv", "ptv", 8, nil, 0x20, "payload timestamp valid (H.264/H.265)")
+M.f.avtp_cvf_m = ProtoField.bool("avb.avtp.cvf.m", "m", 8, nil, 0x10, "M (marker: last AVTPDU of the frame / access unit)")
+M.f.avtp_cvf_evt = ProtoField.uint8("avb.avtp.cvf.evt", "evt", base.DEC, nil, 0xF, "event")
+M.f.avtp_cvf_mjpeg_type_specific = ProtoField.uint8("avb.avtp.cvf.mjpeg.type_specific", "type_specific", base.DEC, nil, nil, "type-specific")
+M.f.avtp_cvf_mjpeg_fragment_offset = ProtoField.uint24("avb.avtp.cvf.mjpeg.fragment_offset", "fragment_offset", base.DEC, nil, nil, "fragment offset")
+M.f.avtp_cvf_mjpeg_type = ProtoField.uint8("avb.avtp.cvf.mjpeg.type", "type", base.DEC, nil, nil, "type")
+M.f.avtp_cvf_mjpeg_q = ProtoField.uint8("avb.avtp.cvf.mjpeg.q", "q", base.DEC, nil, nil, "Q")
+M.f.avtp_cvf_mjpeg_width = ProtoField.uint8("avb.avtp.cvf.mjpeg.width", "width", base.DEC, nil, nil, "width (in 8-pixel blocks)")
+M.f.avtp_cvf_mjpeg_height = ProtoField.uint8("avb.avtp.cvf.mjpeg.height", "height", base.DEC, nil, nil, "height (in 8-pixel blocks)")
+M.f.avtp_cvf_h264_timestamp = ProtoField.uint32("avb.avtp.cvf.h264.timestamp", "timestamp", base.DEC, nil, nil, "h264_timestamp")
+M.f.avtp_cvf_h264_nal_f = ProtoField.bool("avb.avtp.cvf.h264.nal.f", "f", 8, nil, 0x80, "forbidden_zero_bit")
+M.f.avtp_cvf_h264_nal_nri = ProtoField.uint8("avb.avtp.cvf.h264.nal.nri", "nri", base.DEC, nil, 0x60, "nal_ref_idc")
+M.f.avtp_cvf_h264_nal_type = ProtoField.uint8("avb.avtp.cvf.h264.nal.type", "type", base.DEC, M.values_h264_nal_type, 0x1F, "nal_unit_type")
+M.f.avtp_cvf_h264_fu_s = ProtoField.bool("avb.avtp.cvf.h264.fu.s", "s", 8, nil, 0x80, "start of fragmented NAL unit")
+M.f.avtp_cvf_h264_fu_e = ProtoField.bool("avb.avtp.cvf.h264.fu.e", "e", 8, nil, 0x40, "end of fragmented NAL unit")
+M.f.avtp_cvf_h264_fu_r = ProtoField.uint8("avb.avtp.cvf.h264.fu.r", "r", base.DEC, nil, 0x20, "reserved")
+M.f.avtp_cvf_h264_fu_type = ProtoField.uint8("avb.avtp.cvf.h264.fu.type", "type", base.DEC, M.values_h264_nal_type, 0x1F, "nal_unit_type of the fragmented unit")
+M.f.avtp_cvf_h265_timestamp = ProtoField.uint32("avb.avtp.cvf.h265.timestamp", "timestamp", base.DEC, nil, nil, "h265_timestamp")
+M.f.avtp_cvf_h265_nal_f = ProtoField.bool("avb.avtp.cvf.h265.nal.f", "f", 16, nil, 0x8000, "forbidden_zero_bit")
+M.f.avtp_cvf_h265_nal_type = ProtoField.uint16("avb.avtp.cvf.h265.nal.type", "type", base.DEC, M.values_h265_nal_type, 0x7E00, "nal_unit_type")
+M.f.avtp_cvf_h265_nal_layer_id = ProtoField.uint16("avb.avtp.cvf.h265.nal.layer_id", "layer_id", base.DEC, nil, 0x1F8, "nuh_layer_id")
+M.f.avtp_cvf_h265_nal_tid = ProtoField.uint16("avb.avtp.cvf.h265.nal.tid", "tid", base.DEC, nil, 0x7, "nuh_temporal_id_plus1")
+M.f.avtp_cvf_h265_fu_s = ProtoField.bool("avb.avtp.cvf.h265.fu.s", "s", 8, nil, 0x80, "start of fragmented NAL unit")
+M.f.avtp_cvf_h265_fu_e = ProtoField.bool("avb.avtp.cvf.h265.fu.e", "e", 8, nil, 0x40, "end of fragmented NAL unit")
+M.f.avtp_cvf_h265_fu_type = ProtoField.uint8("avb.avtp.cvf.h265.fu.type", "type", base.DEC, M.values_h265_nal_type, 0x3F, "nal_unit_type of the fragmented unit")
+M.f.avtp_cvf_jpeg2000_tp = ProtoField.uint8("avb.avtp.cvf.jpeg2000.tp", "tp", base.DEC, nil, 0xC0, "type (progressive/interlaced)")
+M.f.avtp_cvf_jpeg2000_mhf = ProtoField.uint8("avb.avtp.cvf.jpeg2000.mhf", "mhf", base.DEC, nil, 0x30, "main header flag")
+M.f.avtp_cvf_jpeg2000_mh_id = ProtoField.uint8("avb.avtp.cvf.jpeg2000.mh_id", "mh_id", base.DEC, nil, 0xE, "main header identification")
+M.f.avtp_cvf_jpeg2000_t = ProtoField.bool("avb.avtp.cvf.jpeg2000.t", "t", 8, nil, 0x1, "tile field")
+M.f.avtp_cvf_jpeg2000_priority = ProtoField.uint8("avb.avtp.cvf.jpeg2000.priority", "priority", base.DEC, nil, nil, "priority")
+M.f.avtp_cvf_jpeg2000_tile_number = ProtoField.uint16("avb.avtp.cvf.jpeg2000.tile_number", "tile_number", base.DEC, nil, nil, "tile number")
+M.f.avtp_cvf_jpeg2000_fragment_offset = ProtoField.uint24("avb.avtp.cvf.jpeg2000.fragment_offset", "fragment_offset", base.DEC, nil, nil, "fragment offset")
+M.f.avtp_svf_format = ProtoField.uint8("avb.avtp.svf.format", "format", base.DEC, M.values_svf_format, nil, "format (Table 37)")
+M.f.avtp_svf_i_seq_num = ProtoField.uint8("avb.avtp.svf.i_seq_num", "i_seq_num", base.DEC, nil, nil, "i_seq_num")
+M.f.avtp_svf_line_number = ProtoField.uint16("avb.avtp.svf.line_number", "line_number", base.DEC, nil, nil, "line number")
+M.f.avtp_svf_stream_data_length = ProtoField.uint16("avb.avtp.svf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets)")
+M.f.avtp_svf_gb = ProtoField.bool("avb.avtp.svf.gb", "gb", 8, nil, 0x40, "guard band")
+M.f.avtp_svf_sp = ProtoField.bool("avb.avtp.svf.sp", "sp", 8, nil, 0x20, "RP168 switch point")
+M.f.avtp_svf_ef = ProtoField.bool("avb.avtp.svf.ef", "ef", 8, nil, 0x10, "end of frame")
+M.f.avtp_svf_evt = ProtoField.uint8("avb.avtp.svf.evt", "evt", base.DEC, nil, 0xF, "event")
+M.f.avtp_svf_map = ProtoField.uint8("avb.avtp.svf.map", "map", base.DEC, nil, 0xF0, "map")
+M.f.avtp_svf_sample = ProtoField.uint8("avb.avtp.svf.sample", "sample", base.DEC, nil, 0xF, "sample")
+M.f.avtp_svf_frame = ProtoField.uint8("avb.avtp.svf.frame", "frame", base.DEC, nil, nil, "frame")
+M.f.avtp_svf_frate = ProtoField.uint8("avb.avtp.svf.frate", "frate", base.DEC, nil, nil, "frame rate")
+M.f.avtp_svf_frcount = ProtoField.uint8("avb.avtp.svf.frcount", "frcount", base.DEC, nil, nil, "frame count")
+M.f.avtp_rvf_active_pixels = ProtoField.uint16("avb.avtp.rvf.active_pixels", "active_pixels", base.DEC, nil, nil, "active pixels per line")
+M.f.avtp_rvf_total_lines = ProtoField.uint16("avb.avtp.rvf.total_lines", "total_lines", base.DEC, nil, nil, "total lines per frame")
+M.f.avtp_rvf_stream_data_length = ProtoField.uint16("avb.avtp.rvf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets)")
+M.f.avtp_rvf_ap = ProtoField.bool("avb.avtp.rvf.ap", "ap", 8, nil, 0x80, "active pixels only")
+M.f.avtp_rvf_f = ProtoField.bool("avb.avtp.rvf.f", "f", 8, nil, 0x20, "field (interlaced: 0 = first, 1 = second)")
+M.f.avtp_rvf_ef = ProtoField.bool("avb.avtp.rvf.ef", "ef", 8, nil, 0x10, "end of frame")
+M.f.avtp_rvf_evt = ProtoField.uint8("avb.avtp.rvf.evt", "evt", base.DEC, nil, 0xF, "event")
+M.f.avtp_rvf_pd = ProtoField.bool("avb.avtp.rvf.pd", "pd", 8, nil, 0x80, "pull-down")
+M.f.avtp_rvf_i = ProtoField.bool("avb.avtp.rvf.i", "i", 8, nil, 0x40, "interlaced")
+M.f.avtp_rvf_pixel_depth = ProtoField.uint8("avb.avtp.rvf.pixel_depth", "pixel_depth", base.DEC, M.values_rvf_pixel_depth, 0xF0, "pixel depth (Table 45)")
+M.f.avtp_rvf_pixel_format = ProtoField.uint8("avb.avtp.rvf.pixel_format", "pixel_format", base.DEC, M.values_rvf_pixel_format, 0xF, "pixel format (Table 46)")
+M.f.avtp_rvf_frame_rate = ProtoField.uint8("avb.avtp.rvf.frame_rate", "frame_rate", base.DEC, M.values_rvf_frame_rate, nil, "frame rate (Table 47)")
+M.f.avtp_rvf_colorspace = ProtoField.uint8("avb.avtp.rvf.colorspace", "colorspace", base.DEC, M.values_rvf_colorspace, 0xF0, "colorspace (Table 48)")
+M.f.avtp_rvf_num_lines = ProtoField.uint8("avb.avtp.rvf.num_lines", "num_lines", base.DEC, nil, 0xF, "lines in this AVTPDU")
+M.f.avtp_rvf_i_seq_num = ProtoField.uint8("avb.avtp.rvf.i_seq_num", "i_seq_num", base.DEC, nil, nil, "i_seq_num")
+M.f.avtp_rvf_line_number = ProtoField.uint16("avb.avtp.rvf.line_number", "line_number", base.DEC, nil, nil, "line number")
+M.f.avtp_vsf_vendor_id_1 = ProtoField.uint32("avb.avtp.vsf.vendor_id_1", "vendor_id_1", base.HEX, nil, nil, "vendor_id (first 4 octets of the OUI-based id)")
+M.f.avtp_vsf_stream_data_length = ProtoField.uint16("avb.avtp.vsf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets)")
+M.f.avtp_vsf_vendor_id_2 = ProtoField.uint16("avb.avtp.vsf.vendor_id_2", "vendor_id_2", base.HEX, nil, nil, "vendor_id (last 2 octets)")
+M.f.avtp_mma_stream_data_length = ProtoField.uint16("avb.avtp.mma.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets)")
+M.f.avtp_ef_stream_data_length = ProtoField.uint16("avb.avtp.ef.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (octets)")
 M.f.avtp_tscf_sequence_num_lsb = ProtoField.uint8("avb.avtp.tscf.sequence_num_lsb", "sequence_num_lsb", base.DEC, nil, nil, "sequence_num_lsb")
 M.f.avtp_tscf_stream_data_length = ProtoField.uint16("avb.avtp.tscf.stream_data_length", "stream_data_length", base.DEC, nil, nil, "stream_data_length (acf_payload_data octets)")
 M.f.avtp_ntscf_r = ProtoField.uint8("avb.avtp.ntscf.r", "ntscf.r", base.DEC, nil, 0x8, "reserved")
@@ -283,6 +473,16 @@ M.f.avtp_am824_quadlet = ProtoField.uint32("avb.avtp.am824.quadlet", "quadlet", 
 M.f.avtp_am824_label = ProtoField.uint8("avb.avtp.am824.label", "label", base.HEX, M.values_am824_label, nil, "AM824 label")
 M.f.avtp_am824_sample = ProtoField.int24("avb.avtp.am824.sample", "sample", base.DEC, nil, nil, "24-bit audio sample (MBLA or IEC 60958)")
 M.f.avtp_am824_data = ProtoField.uint32("avb.avtp.am824.data", "data", base.HEX, nil, 0xFFFFFF, "24-bit non-audio data")
+M.f.avtp_mpegts_source_packets = ProtoField.uint16("avb.avtp.mpegts.source_packets", "source_packets", base.DEC, nil, nil, "source packets in this AVTPDU")
+M.f.avtp_mpegts_source_packet_timestamp = ProtoField.uint32("avb.avtp.mpegts.source_packet_timestamp", "source_packet_timestamp", base.DEC, nil, nil, "source packet header timestamp")
+M.f.avtp_mpegts_sync_byte = ProtoField.uint8("avb.avtp.mpegts.sync_byte", "sync_byte", base.HEX, nil, nil, "TS sync byte (0x47)")
+M.f.avtp_mpegts_tei = ProtoField.bool("avb.avtp.mpegts.tei", "tei", 16, nil, 0x8000, "transport error indicator")
+M.f.avtp_mpegts_pusi = ProtoField.bool("avb.avtp.mpegts.pusi", "pusi", 16, nil, 0x4000, "payload unit start indicator")
+M.f.avtp_mpegts_transport_priority = ProtoField.bool("avb.avtp.mpegts.transport_priority", "transport_priority", 16, nil, 0x2000, "transport priority")
+M.f.avtp_mpegts_pid = ProtoField.uint16("avb.avtp.mpegts.pid", "pid", base.HEX, nil, 0x1FFF, "PID")
+M.f.avtp_mpegts_tsc = ProtoField.uint8("avb.avtp.mpegts.tsc", "tsc", base.DEC, nil, 0xC0, "transport scrambling control")
+M.f.avtp_mpegts_afc = ProtoField.uint8("avb.avtp.mpegts.afc", "afc", base.DEC, nil, 0x30, "adaptation field control")
+M.f.avtp_mpegts_cc = ProtoField.uint8("avb.avtp.mpegts.cc", "cc", base.DEC, nil, 0xF, "continuity counter")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -318,12 +518,12 @@ M.avtp_fields = {
     M.f.avtp_aaf_aes3_data_type_h,
     M.f.avtp_aaf_aes3_dt_ref,
     M.f.avtp_aaf_aes3_data_type_l,
-    M.f.avtp_am824_gateway_info,
-    M.f.avtp_am824_stream_data_length,
-    M.f.avtp_am824_tag,
-    M.f.avtp_am824_channel,
-    M.f.avtp_am824_tcode,
-    M.f.avtp_am824_sy,
+    M.f.avtp_iec61883_gateway_info,
+    M.f.avtp_iec61883_stream_data_length,
+    M.f.avtp_iec61883_tag,
+    M.f.avtp_iec61883_channel,
+    M.f.avtp_iec61883_tcode,
+    M.f.avtp_iec61883_sy,
     M.f.avtp_cip_qi_1,
     M.f.avtp_cip_sid,
     M.f.avtp_cip_dbs,
@@ -335,6 +535,75 @@ M.avtp_fields = {
     M.f.avtp_cip_fmt,
     M.f.avtp_cip_fdf,
     M.f.avtp_cip_syt,
+    M.f.avtp_cvf_format,
+    M.f.avtp_cvf_format_subtype,
+    M.f.avtp_cvf_stream_data_length,
+    M.f.avtp_cvf_ptv,
+    M.f.avtp_cvf_m,
+    M.f.avtp_cvf_evt,
+    M.f.avtp_cvf_mjpeg_type_specific,
+    M.f.avtp_cvf_mjpeg_fragment_offset,
+    M.f.avtp_cvf_mjpeg_type,
+    M.f.avtp_cvf_mjpeg_q,
+    M.f.avtp_cvf_mjpeg_width,
+    M.f.avtp_cvf_mjpeg_height,
+    M.f.avtp_cvf_h264_timestamp,
+    M.f.avtp_cvf_h264_nal_f,
+    M.f.avtp_cvf_h264_nal_nri,
+    M.f.avtp_cvf_h264_nal_type,
+    M.f.avtp_cvf_h264_fu_s,
+    M.f.avtp_cvf_h264_fu_e,
+    M.f.avtp_cvf_h264_fu_r,
+    M.f.avtp_cvf_h264_fu_type,
+    M.f.avtp_cvf_h265_timestamp,
+    M.f.avtp_cvf_h265_nal_f,
+    M.f.avtp_cvf_h265_nal_type,
+    M.f.avtp_cvf_h265_nal_layer_id,
+    M.f.avtp_cvf_h265_nal_tid,
+    M.f.avtp_cvf_h265_fu_s,
+    M.f.avtp_cvf_h265_fu_e,
+    M.f.avtp_cvf_h265_fu_type,
+    M.f.avtp_cvf_jpeg2000_tp,
+    M.f.avtp_cvf_jpeg2000_mhf,
+    M.f.avtp_cvf_jpeg2000_mh_id,
+    M.f.avtp_cvf_jpeg2000_t,
+    M.f.avtp_cvf_jpeg2000_priority,
+    M.f.avtp_cvf_jpeg2000_tile_number,
+    M.f.avtp_cvf_jpeg2000_fragment_offset,
+    M.f.avtp_svf_format,
+    M.f.avtp_svf_i_seq_num,
+    M.f.avtp_svf_line_number,
+    M.f.avtp_svf_stream_data_length,
+    M.f.avtp_svf_gb,
+    M.f.avtp_svf_sp,
+    M.f.avtp_svf_ef,
+    M.f.avtp_svf_evt,
+    M.f.avtp_svf_map,
+    M.f.avtp_svf_sample,
+    M.f.avtp_svf_frame,
+    M.f.avtp_svf_frate,
+    M.f.avtp_svf_frcount,
+    M.f.avtp_rvf_active_pixels,
+    M.f.avtp_rvf_total_lines,
+    M.f.avtp_rvf_stream_data_length,
+    M.f.avtp_rvf_ap,
+    M.f.avtp_rvf_f,
+    M.f.avtp_rvf_ef,
+    M.f.avtp_rvf_evt,
+    M.f.avtp_rvf_pd,
+    M.f.avtp_rvf_i,
+    M.f.avtp_rvf_pixel_depth,
+    M.f.avtp_rvf_pixel_format,
+    M.f.avtp_rvf_frame_rate,
+    M.f.avtp_rvf_colorspace,
+    M.f.avtp_rvf_num_lines,
+    M.f.avtp_rvf_i_seq_num,
+    M.f.avtp_rvf_line_number,
+    M.f.avtp_vsf_vendor_id_1,
+    M.f.avtp_vsf_stream_data_length,
+    M.f.avtp_vsf_vendor_id_2,
+    M.f.avtp_mma_stream_data_length,
+    M.f.avtp_ef_stream_data_length,
     M.f.avtp_tscf_sequence_num_lsb,
     M.f.avtp_tscf_stream_data_length,
     M.f.avtp_ntscf_r,
@@ -383,6 +652,16 @@ M.avtp_fields = {
     M.f.avtp_am824_label,
     M.f.avtp_am824_sample,
     M.f.avtp_am824_data,
+    M.f.avtp_mpegts_source_packets,
+    M.f.avtp_mpegts_source_packet_timestamp,
+    M.f.avtp_mpegts_sync_byte,
+    M.f.avtp_mpegts_tei,
+    M.f.avtp_mpegts_pusi,
+    M.f.avtp_mpegts_transport_priority,
+    M.f.avtp_mpegts_pid,
+    M.f.avtp_mpegts_tsc,
+    M.f.avtp_mpegts_afc,
+    M.f.avtp_mpegts_cc,
 }
 
 M.ipavtp_fields = {
@@ -500,24 +779,24 @@ function M.add_aaf_aes3_v1(tree, tvb, off)
     tree:add(M.f.avtp_aaf_aes3_data_type_l, tvb(off + 39, 1))
 end
 
---- IEC 61883 stream header (IEEE 1722-2025 5.3)
-function M.add_am824_v0(tree, tvb, off)
-    tree:add(M.f.avtp_am824_gateway_info, tvb(off + 16, 4))
-    tree:add(M.f.avtp_am824_stream_data_length, tvb(off + 20, 2))
-    tree:add(M.f.avtp_am824_tag, tvb(off + 22, 1))
-    tree:add(M.f.avtp_am824_channel, tvb(off + 22, 1))
-    tree:add(M.f.avtp_am824_tcode, tvb(off + 23, 1))
-    tree:add(M.f.avtp_am824_sy, tvb(off + 23, 1))
+--- IEC 61883/IIDC common header (IEEE 1722-2025 5.2)
+function M.add_iec61883_v0(tree, tvb, off)
+    tree:add(M.f.avtp_iec61883_gateway_info, tvb(off + 16, 4))
+    tree:add(M.f.avtp_iec61883_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_iec61883_tag, tvb(off + 22, 1))
+    tree:add(M.f.avtp_iec61883_channel, tvb(off + 22, 1))
+    tree:add(M.f.avtp_iec61883_tcode, tvb(off + 23, 1))
+    tree:add(M.f.avtp_iec61883_sy, tvb(off + 23, 1))
 end
 
---- IEC 61883 stream header, version 1 header
-function M.add_am824_v1(tree, tvb, off)
-    tree:add(M.f.avtp_am824_gateway_info, tvb(off + 32, 4))
-    tree:add(M.f.avtp_am824_stream_data_length, tvb(off + 36, 2))
-    tree:add(M.f.avtp_am824_tag, tvb(off + 38, 1))
-    tree:add(M.f.avtp_am824_channel, tvb(off + 38, 1))
-    tree:add(M.f.avtp_am824_tcode, tvb(off + 39, 1))
-    tree:add(M.f.avtp_am824_sy, tvb(off + 39, 1))
+--- IEC 61883/IIDC common header, version 1 header
+function M.add_iec61883_v1(tree, tvb, off)
+    tree:add(M.f.avtp_iec61883_gateway_info, tvb(off + 32, 4))
+    tree:add(M.f.avtp_iec61883_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_iec61883_tag, tvb(off + 38, 1))
+    tree:add(M.f.avtp_iec61883_channel, tvb(off + 38, 1))
+    tree:add(M.f.avtp_iec61883_tcode, tvb(off + 39, 1))
+    tree:add(M.f.avtp_iec61883_sy, tvb(off + 39, 1))
 end
 
 --- IEC 61883-6 CIP header
@@ -548,6 +827,195 @@ function M.add_cip_v1(tree, tvb, off)
     tree:add(M.f.avtp_cip_fmt, tvb(off + 44, 1))
     tree:add(M.f.avtp_cip_fdf, tvb(off + 45, 1))
     tree:add(M.f.avtp_cip_syt, tvb(off + 46, 2))
+end
+
+--- CVF header (IEEE 1722-2025 8.3)
+function M.add_cvf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_format, tvb(off + 16, 1))
+    tree:add(M.f.avtp_cvf_format_subtype, tvb(off + 17, 1))
+    tree:add(M.f.avtp_cvf_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_cvf_ptv, tvb(off + 22, 1))
+    tree:add(M.f.avtp_cvf_m, tvb(off + 22, 1))
+    tree:add(M.f.avtp_cvf_evt, tvb(off + 22, 1))
+end
+
+--- CVF header, version 1 header
+function M.add_cvf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_format, tvb(off + 32, 1))
+    tree:add(M.f.avtp_cvf_format_subtype, tvb(off + 33, 1))
+    tree:add(M.f.avtp_cvf_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_cvf_ptv, tvb(off + 38, 1))
+    tree:add(M.f.avtp_cvf_m, tvb(off + 38, 1))
+    tree:add(M.f.avtp_cvf_evt, tvb(off + 38, 1))
+end
+
+--- MJPEG header (IEEE 1722-2025 8.4, RFC 2435)
+function M.add_cvf_mjpeg(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_mjpeg_type_specific, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_mjpeg_fragment_offset, tvb(off + 1, 3))
+    tree:add(M.f.avtp_cvf_mjpeg_type, tvb(off + 4, 1))
+    tree:add(M.f.avtp_cvf_mjpeg_q, tvb(off + 5, 1))
+    tree:add(M.f.avtp_cvf_mjpeg_width, tvb(off + 6, 1))
+    tree:add(M.f.avtp_cvf_mjpeg_height, tvb(off + 7, 1))
+end
+
+--- H.264 header (IEEE 1722-2025 8.5)
+function M.add_cvf_h264(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_h264_timestamp, tvb(off + 0, 4))
+end
+
+--- H.264 NAL unit header (RFC 6184)
+function M.add_cvf_h264_nal(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_h264_nal_f, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h264_nal_nri, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h264_nal_type, tvb(off + 0, 1))
+end
+
+--- H.264 FU header (RFC 6184 5.8)
+function M.add_cvf_h264_fu(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_h264_fu_s, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h264_fu_e, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h264_fu_r, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h264_fu_type, tvb(off + 0, 1))
+end
+
+--- H.265 header (IEEE 1722-2025 8.7)
+function M.add_cvf_h265(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_h265_timestamp, tvb(off + 0, 4))
+end
+
+--- H.265 NAL unit header (RFC 7798)
+function M.add_cvf_h265_nal(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_h265_nal_f, tvb(off + 0, 2))
+    tree:add(M.f.avtp_cvf_h265_nal_type, tvb(off + 0, 2))
+    tree:add(M.f.avtp_cvf_h265_nal_layer_id, tvb(off + 0, 2))
+    tree:add(M.f.avtp_cvf_h265_nal_tid, tvb(off + 0, 2))
+end
+
+--- H.265 FU header (RFC 7798 4.4.3)
+function M.add_cvf_h265_fu(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_h265_fu_s, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h265_fu_e, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_h265_fu_type, tvb(off + 0, 1))
+end
+
+--- JPEG 2000 payload header (IEEE 1722-2025 8.6, RFC 5371)
+function M.add_cvf_jpeg2000(tree, tvb, off)
+    tree:add(M.f.avtp_cvf_jpeg2000_tp, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_jpeg2000_mhf, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_jpeg2000_mh_id, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_jpeg2000_t, tvb(off + 0, 1))
+    tree:add(M.f.avtp_cvf_jpeg2000_priority, tvb(off + 1, 1))
+    tree:add(M.f.avtp_cvf_jpeg2000_tile_number, tvb(off + 2, 2))
+    tree:add(M.f.avtp_cvf_jpeg2000_fragment_offset, tvb(off + 5, 3))
+end
+
+--- SVF header (IEEE 1722-2025 11.2)
+function M.add_svf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_svf_format, tvb(off + 16, 1))
+    tree:add(M.f.avtp_svf_i_seq_num, tvb(off + 17, 1))
+    tree:add(M.f.avtp_svf_line_number, tvb(off + 18, 2))
+    tree:add(M.f.avtp_svf_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_svf_gb, tvb(off + 22, 1))
+    tree:add(M.f.avtp_svf_sp, tvb(off + 22, 1))
+    tree:add(M.f.avtp_svf_ef, tvb(off + 22, 1))
+    tree:add(M.f.avtp_svf_evt, tvb(off + 22, 1))
+    tree:add(M.f.avtp_svf_map, tvb(off + 24, 1))
+    tree:add(M.f.avtp_svf_sample, tvb(off + 24, 1))
+    tree:add(M.f.avtp_svf_frame, tvb(off + 25, 1))
+    tree:add(M.f.avtp_svf_frate, tvb(off + 26, 1))
+    tree:add(M.f.avtp_svf_frcount, tvb(off + 27, 1))
+end
+
+--- SVF header, version 1 header
+function M.add_svf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_svf_format, tvb(off + 32, 1))
+    tree:add(M.f.avtp_svf_i_seq_num, tvb(off + 33, 1))
+    tree:add(M.f.avtp_svf_line_number, tvb(off + 34, 2))
+    tree:add(M.f.avtp_svf_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_svf_gb, tvb(off + 38, 1))
+    tree:add(M.f.avtp_svf_sp, tvb(off + 38, 1))
+    tree:add(M.f.avtp_svf_ef, tvb(off + 38, 1))
+    tree:add(M.f.avtp_svf_evt, tvb(off + 38, 1))
+    tree:add(M.f.avtp_svf_map, tvb(off + 40, 1))
+    tree:add(M.f.avtp_svf_sample, tvb(off + 40, 1))
+    tree:add(M.f.avtp_svf_frame, tvb(off + 41, 1))
+    tree:add(M.f.avtp_svf_frate, tvb(off + 42, 1))
+    tree:add(M.f.avtp_svf_frcount, tvb(off + 43, 1))
+end
+
+--- RVF header (IEEE 1722-2025 12.2)
+function M.add_rvf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_rvf_active_pixels, tvb(off + 16, 2))
+    tree:add(M.f.avtp_rvf_total_lines, tvb(off + 18, 2))
+    tree:add(M.f.avtp_rvf_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_rvf_ap, tvb(off + 22, 1))
+    tree:add(M.f.avtp_rvf_f, tvb(off + 22, 1))
+    tree:add(M.f.avtp_rvf_ef, tvb(off + 22, 1))
+    tree:add(M.f.avtp_rvf_evt, tvb(off + 22, 1))
+    tree:add(M.f.avtp_rvf_pd, tvb(off + 23, 1))
+    tree:add(M.f.avtp_rvf_i, tvb(off + 23, 1))
+    tree:add(M.f.avtp_rvf_pixel_depth, tvb(off + 25, 1))
+    tree:add(M.f.avtp_rvf_pixel_format, tvb(off + 25, 1))
+    tree:add(M.f.avtp_rvf_frame_rate, tvb(off + 26, 1))
+    tree:add(M.f.avtp_rvf_colorspace, tvb(off + 27, 1))
+    tree:add(M.f.avtp_rvf_num_lines, tvb(off + 27, 1))
+    tree:add(M.f.avtp_rvf_i_seq_num, tvb(off + 29, 1))
+    tree:add(M.f.avtp_rvf_line_number, tvb(off + 30, 2))
+end
+
+--- RVF header, version 1 header
+function M.add_rvf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_rvf_active_pixels, tvb(off + 32, 2))
+    tree:add(M.f.avtp_rvf_total_lines, tvb(off + 34, 2))
+    tree:add(M.f.avtp_rvf_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_rvf_ap, tvb(off + 38, 1))
+    tree:add(M.f.avtp_rvf_f, tvb(off + 38, 1))
+    tree:add(M.f.avtp_rvf_ef, tvb(off + 38, 1))
+    tree:add(M.f.avtp_rvf_evt, tvb(off + 38, 1))
+    tree:add(M.f.avtp_rvf_pd, tvb(off + 39, 1))
+    tree:add(M.f.avtp_rvf_i, tvb(off + 39, 1))
+    tree:add(M.f.avtp_rvf_pixel_depth, tvb(off + 41, 1))
+    tree:add(M.f.avtp_rvf_pixel_format, tvb(off + 41, 1))
+    tree:add(M.f.avtp_rvf_frame_rate, tvb(off + 42, 1))
+    tree:add(M.f.avtp_rvf_colorspace, tvb(off + 43, 1))
+    tree:add(M.f.avtp_rvf_num_lines, tvb(off + 43, 1))
+    tree:add(M.f.avtp_rvf_i_seq_num, tvb(off + 45, 1))
+    tree:add(M.f.avtp_rvf_line_number, tvb(off + 46, 2))
+end
+
+--- VSF header (IEEE 1722-2025 14.1)
+function M.add_vsf_v0(tree, tvb, off)
+    tree:add(M.f.avtp_vsf_vendor_id_1, tvb(off + 16, 4))
+    tree:add(M.f.avtp_vsf_stream_data_length, tvb(off + 20, 2))
+    tree:add(M.f.avtp_vsf_vendor_id_2, tvb(off + 22, 2))
+end
+
+--- VSF header, version 1 header
+function M.add_vsf_v1(tree, tvb, off)
+    tree:add(M.f.avtp_vsf_vendor_id_1, tvb(off + 32, 4))
+    tree:add(M.f.avtp_vsf_stream_data_length, tvb(off + 36, 2))
+    tree:add(M.f.avtp_vsf_vendor_id_2, tvb(off + 38, 2))
+end
+
+--- MMA stream (IEEE 1722-2025 Clause 6)
+function M.add_mma_v0(tree, tvb, off)
+    tree:add(M.f.avtp_mma_stream_data_length, tvb(off + 20, 2))
+end
+
+--- MMA stream, version 1 header
+function M.add_mma_v1(tree, tvb, off)
+    tree:add(M.f.avtp_mma_stream_data_length, tvb(off + 36, 2))
+end
+
+--- Experimental stream (Clause 15)
+function M.add_ef_stream_v0(tree, tvb, off)
+    tree:add(M.f.avtp_ef_stream_data_length, tvb(off + 20, 2))
+end
+
+--- Experimental stream, version 1 header
+function M.add_ef_stream_v1(tree, tvb, off)
+    tree:add(M.f.avtp_ef_stream_data_length, tvb(off + 36, 2))
 end
 
 --- TSCF header, version 0 (IEEE 1722-2025 9.3, Figure 60)
@@ -686,9 +1154,33 @@ M.subtype_specs[0x02][0] = { name = "aaf_v0", header_length = 24, layouts = { M.
 M.subtype_specs[0x02] = M.subtype_specs[0x02] or {}
 M.subtype_specs[0x02][1] = { name = "aaf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_aaf_v1 }, post = "aaf_audio" }
 M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
-M.subtype_specs[0x00][0] = { name = "am824_v0", header_length = 32, layouts = { M.add_stream_v0, M.add_am824_v0, M.add_cip_v0 }, post = "am824_audio" }
+M.subtype_specs[0x00][0] = { name = "iec61883_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_iec61883_v0 }, post = "iec61883" }
 M.subtype_specs[0x00] = M.subtype_specs[0x00] or {}
-M.subtype_specs[0x00][1] = { name = "am824_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_am824_v1, M.add_cip_v1 }, post = "am824_audio" }
+M.subtype_specs[0x00][1] = { name = "iec61883_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_iec61883_v1 }, post = "iec61883" }
+M.subtype_specs[0x03] = M.subtype_specs[0x03] or {}
+M.subtype_specs[0x03][0] = { name = "cvf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_cvf_v0 }, post = "cvf" }
+M.subtype_specs[0x03] = M.subtype_specs[0x03] or {}
+M.subtype_specs[0x03][1] = { name = "cvf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_cvf_v1 }, post = "cvf" }
+M.subtype_specs[0x06] = M.subtype_specs[0x06] or {}
+M.subtype_specs[0x06][0] = { name = "svf_v0", header_length = 28, layouts = { M.add_stream_v0, M.add_svf_v0 }, post = nil }
+M.subtype_specs[0x06] = M.subtype_specs[0x06] or {}
+M.subtype_specs[0x06][1] = { name = "svf_v1", header_length = 44, layouts = { M.add_stream_v1, M.add_svf_v1 }, post = nil }
+M.subtype_specs[0x07] = M.subtype_specs[0x07] or {}
+M.subtype_specs[0x07][0] = { name = "rvf_v0", header_length = 32, layouts = { M.add_stream_v0, M.add_rvf_v0 }, post = nil }
+M.subtype_specs[0x07] = M.subtype_specs[0x07] or {}
+M.subtype_specs[0x07][1] = { name = "rvf_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_rvf_v1 }, post = nil }
+M.subtype_specs[0x6F] = M.subtype_specs[0x6F] or {}
+M.subtype_specs[0x6F][0] = { name = "vsf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_vsf_v0 }, post = nil }
+M.subtype_specs[0x6F] = M.subtype_specs[0x6F] or {}
+M.subtype_specs[0x6F][1] = { name = "vsf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_vsf_v1 }, post = nil }
+M.subtype_specs[0x01] = M.subtype_specs[0x01] or {}
+M.subtype_specs[0x01][0] = { name = "mma_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_mma_v0 }, post = nil }
+M.subtype_specs[0x01] = M.subtype_specs[0x01] or {}
+M.subtype_specs[0x01][1] = { name = "mma_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_mma_v1 }, post = nil }
+M.subtype_specs[0x7F] = M.subtype_specs[0x7F] or {}
+M.subtype_specs[0x7F][0] = { name = "ef_stream_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_ef_stream_v0 }, post = nil }
+M.subtype_specs[0x7F] = M.subtype_specs[0x7F] or {}
+M.subtype_specs[0x7F][1] = { name = "ef_stream_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_ef_stream_v1 }, post = nil }
 M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}
 M.subtype_specs[0x05][0] = { name = "tscf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_tscf_v0 }, post = "acf" }
 M.subtype_specs[0x05] = M.subtype_specs[0x05] or {}

@@ -34,6 +34,7 @@ end
 _PROTOFIELD = {
     "u8": "ProtoField.uint8",
     "u16": "ProtoField.uint16",
+    "u24": "ProtoField.uint24",
     "u32": "ProtoField.uint32",
     "u64": "ProtoField.uint64",
     "i16": "ProtoField.int16",

@@ -260,31 +260,97 @@ def am824_label_is_audio(label: int) -> bool:
     return label < 0x50
 
 
-def _post_am824_audio(data: bytes, start: int, out: dict[str, int | str]) -> None:
-    """AM824: the data blocks after the CIP header, as the Lua adds them."""
-    v1 = start == 48
-    base = 36 if v1 else 20
-    dbs = data[start - 7]
-    fdf = data[start - 3]
-    declared = int.from_bytes(data[base : base + 2], "big") - 8
-    length = max(0, min(declared, len(data) - start))
+IEC61883_FMT_AM824 = 0x10
+IEC61883_FMT_MPEGTS = 0x20
+MPEGTS_SOURCE_PACKET_HEADER = 4
+
+
+def _post_iec61883(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """IEC 61883/IIDC: IIDC (tag 0) is opaque; tag 1 adds the CIP header and
+    dissects AM824 data blocks (FMT 0x10, SPH 0) or IEC 61883-4 source
+    packets (FMT 0x20, SPH 1); other formats stay opaque after the CIP."""
+    v1 = start == 40
+    base = 32 if v1 else 16
+    tag = (data[base + 6] & 0xC0) >> 6
+    declared = int.from_bytes(data[base + 4 : base + 6], "big")
+    if tag != 1 or len(data) < start + 8:
+        if start < len(data):
+            out["avb.avtp.payload"] = data[start:].hex()
+        return
+    out.update(decode_layout(L.CIP_V1 if v1 else L.CIP_V0, data))
+    dbs = data[start + 1]
+    fn = (data[start + 2] & 0xC0) >> 6
+    sph = bool(data[start + 2] & 0x04)
+    fmt = data[start + 4] & 0x3F
+    fdf = data[start + 5]
+    data_start = start + 8
+    length = max(0, min(declared - 8, len(data) - data_start))
+    rest = data_start
+    if fmt == IEC61883_FMT_AM824 and not sph:
+        if dbs > 0 and fdf != AM824_FDF_NO_DATA:
+            block = dbs * 4
+            blocks = length // block
+            out["avb.avtp.am824.data_blocks"] = blocks
+            if blocks > 0:
+                last = data_start + blocks * block - 4
+                label = data[last]
+                quadlet = int.from_bytes(data[last : last + 4], "big")
+                out["avb.avtp.am824.quadlet"] = quadlet
+                out["avb.avtp.am824.label"] = label
+                out["avb.avtp.am824.data"] = quadlet & 0x00FFFFFF
+                if am824_label_is_audio(label):
+                    out["avb.avtp.am824.sample"] = int.from_bytes(
+                        data[last + 1 : last + 4], "big", signed=True
+                    )
+            rest = data_start + blocks * block
+    elif fmt == IEC61883_FMT_MPEGTS and sph and dbs > 0:
+        packet = dbs * 4 * (1 << fn)
+        packets = length // packet
+        out["avb.avtp.mpegts.source_packets"] = packets
+        if packets > 0:
+            last = data_start + (packets - 1) * packet
+            fields = tuple(f for f in L.MPEGTS.fields if f.length > 0)
+            out.update(
+                decode_layout(L.Layout("sp", L.MPEGTS.prefix, "", fields), data, last)
+            )
+        rest = data_start + packets * packet
+    if rest < len(data):
+        out["avb.avtp.payload"] = data[rest:].hex()
+
+
+CVF_FORMAT_RFC = 0x02
+CVF_MJPEG, CVF_H264, CVF_JPEG2000, CVF_H265 = 0, 1, 2, 3
+H264_FU_TYPES = (28, 29)
+H265_FU_TYPE = 49
+
+
+def _post_cvf(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """CVF: the RFC payload header by format_subtype, then the video payload."""
+    v1 = start == 40
+    base = 32 if v1 else 16
+    fmt, subtype = data[base], data[base + 1]
     rest = start
-    if dbs > 0 and fdf != AM824_FDF_NO_DATA:
-        block = dbs * 4
-        blocks = length // block
-        out["avb.avtp.am824.data_blocks"] = blocks
-        if blocks > 0:
-            last = start + blocks * block - 4
-            label = data[last]
-            quadlet = int.from_bytes(data[last : last + 4], "big")
-            out["avb.avtp.am824.quadlet"] = quadlet
-            out["avb.avtp.am824.label"] = label
-            out["avb.avtp.am824.data"] = quadlet & 0x00FFFFFF
-            if am824_label_is_audio(label):
-                out["avb.avtp.am824.sample"] = int.from_bytes(
-                    data[last + 1 : last + 4], "big", signed=True
-                )
-        rest = start + blocks * block
+    if fmt == CVF_FORMAT_RFC:
+        if subtype == CVF_MJPEG and len(data) >= start + 8:
+            out.update(decode_layout(L.CVF_MJPEG, data, start))
+            rest = start + 8
+        elif subtype == CVF_H264 and len(data) >= start + 5:
+            out.update(decode_layout(L.CVF_H264, data, start))
+            out.update(decode_layout(L.CVF_H264_NAL, data, start + 4))
+            rest = start + 5
+            if data[start + 4] & 0x1F in H264_FU_TYPES and len(data) >= start + 6:
+                out.update(decode_layout(L.CVF_H264_FU, data, start + 5))
+                rest = start + 6
+        elif subtype == CVF_H265 and len(data) >= start + 6:
+            out.update(decode_layout(L.CVF_H265, data, start))
+            out.update(decode_layout(L.CVF_H265_NAL, data, start + 4))
+            rest = start + 6
+            if (data[start + 4] & 0x7E) >> 1 == H265_FU_TYPE and len(data) >= start + 7:
+                out.update(decode_layout(L.CVF_H265_FU, data, start + 6))
+                rest = start + 7
+        elif subtype == CVF_JPEG2000 and len(data) >= start + 8:
+            out.update(decode_layout(L.CVF_JPEG2000, data, start))
+            rest = start + 8
     if rest < len(data):
         out["avb.avtp.payload"] = data[rest:].hex()
 
@@ -293,7 +359,8 @@ POST_HOOKS = {
     "crf_timestamps": _post_crf_timestamps,
     "acf": _post_acf,
     "aaf_audio": _post_aaf_audio,
-    "am824_audio": _post_am824_audio,
+    "iec61883": _post_iec61883,
+    "cvf": _post_cvf,
 }
 
 #: ADP, AECP, ACMP: dissected by atdecc.lua / decode_atdecc

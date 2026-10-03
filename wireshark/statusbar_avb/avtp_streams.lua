@@ -4,7 +4,8 @@
 -- Per-subtype detail for the AVTP stream, clock and control formats whose
 -- layouts the generated module carries (AAF, IEC 61883/AM824, CRF, TSCF,
 -- NTSCF, MAAP, AEF, ESCF, EECF): the post hooks that dissect what follows a
--- fixed header (CRF timestamps, AAF samples, AM824 data blocks) and the
+-- fixed header (CRF timestamps, AAF samples, IEC 61883 CIP payloads, CVF
+-- payload headers) and the
 -- info-column summaries. The field tables and layout decoders are generated;
 -- nothing here registers (avtp.lua registers the experts and preferences this
 -- module exports).
@@ -209,20 +210,8 @@ local function am824_is_audio(label)
     return label < 0x50
 end
 
-function M.post.am824_audio(tree, tvb, start, pinfo)
-    local v1 = start == 48
-    local base = v1 and 36 or 20
-    local dbs = tvb(start - 7, 1):uint()
-    local fdf = tvb(start - 3, 1):uint()
-    local declared = tvb(base, 2):uint() - 8  -- stream_data_length counts the CIP header
-    local available = tvb:len() - start
-    local length = math.max(0, math.min(declared, available))
-    if declared > available then
-        tree:add_proto_expert_info(M.ef_audio_truncated)
-    end
-    if dbs == 0 or fdf == AM824_FDF_NO_DATA then
-        return start
-    end
+--- AM824 (IEC 61883-6) data blocks from `start`, `length` octets, dbs quadlets each
+local function add_am824_blocks(tree, tvb, start, length, dbs, pinfo)
     local block = dbs * 4
     local blocks = math.floor(length / block)
     local audio = tree:add(tvb(start, blocks * block), string.format("Audio: %d data blocks x %d channels", blocks, dbs))
@@ -259,6 +248,136 @@ function M.post.am824_audio(tree, tvb, start, pinfo)
     return start + blocks * block
 end
 
+local MPEGTS_SOURCE_PACKET_HEADER = 4
+local MPEGTS_PACKET = 188
+
+--- IEC 61883-4 source packets (SPH = 1): dbs*4*2^fn octets each, a source
+--- packet header timestamp then an MPEG2 transport packet
+local function add_mpegts_source_packets(tree, tvb, start, length, dbs, fn, pinfo)
+    local packet = dbs * 4 * (1 << fn)
+    local packets = math.floor(length / packet)
+    local t = tree:add(tvb(start, packets * packet), string.format("IEC 61883-4: %d source packets x %d octets", packets, packet))
+    t:add(gen.f.avtp_mpegts_source_packets, tvb(start, packets * packet), packets):set_generated()
+    for i = 0, packets - 1 do
+        local at = start + i * packet
+        local sp = t:add(tvb(at, packet), string.format("Source packet %d", i))
+        sp:add(gen.f.avtp_mpegts_source_packet_timestamp, tvb(at, 4))
+        if packet >= MPEGTS_SOURCE_PACKET_HEADER + 4 then
+            local ts = sp:add(tvb(at + 4, packet - 4), string.format("MPEG2-TS packet (PID 0x%04x)", tvb(at + 5, 2):uint() % 0x2000))
+            ts:add(gen.f.avtp_mpegts_sync_byte, tvb(at + 4, 1))
+            ts:add(gen.f.avtp_mpegts_tei, tvb(at + 5, 2))
+            ts:add(gen.f.avtp_mpegts_pusi, tvb(at + 5, 2))
+            ts:add(gen.f.avtp_mpegts_transport_priority, tvb(at + 5, 2))
+            ts:add(gen.f.avtp_mpegts_pid, tvb(at + 5, 2))
+            ts:add(gen.f.avtp_mpegts_tsc, tvb(at + 7, 1))
+            ts:add(gen.f.avtp_mpegts_afc, tvb(at + 7, 1))
+            ts:add(gen.f.avtp_mpegts_cc, tvb(at + 7, 1))
+        end
+    end
+    if length % packet ~= 0 then
+        t:add_proto_expert_info(M.ef_partial_frame)
+    end
+    append_frames(pinfo, "source_packets", packets)
+    return start + packets * packet
+end
+
+local IEC61883_FMT_AM824 = 0x10
+local IEC61883_FMT_MPEGTS = 0x20
+local IEC61883_TAG_CIP = 1
+local CIP_LENGTH = 8
+
+--- IEC 61883/IIDC: tag 0 is IIDC (opaque video payload); tag 1 carries a CIP
+--- header, then AM824 data blocks (FMT 0x10, SPH 0), IEC 61883-4 source
+--- packets (FMT 0x20, SPH 1) or an opaque payload for other formats.
+function M.post.iec61883(tree, tvb, start, pinfo)
+    local v1 = start == 40
+    local base = v1 and 32 or 16
+    local tag = tvb(base + 6, 1):bitfield(0, 2)
+    local declared = tvb(base + 4, 2):uint()
+    local available = tvb:len() - start
+    if declared > available then
+        tree:add_proto_expert_info(M.ef_audio_truncated)
+    end
+    if tag ~= IEC61883_TAG_CIP or available < CIP_LENGTH then
+        return start
+    end
+    if v1 then
+        gen.add_cip_v1(tree, tvb, 0)
+    else
+        gen.add_cip_v0(tree, tvb, 0)
+    end
+    local dbs = tvb(start + 1, 1):uint()
+    local fn = tvb(start + 2, 1):bitfield(0, 2)
+    local sph = tvb(start + 2, 1):bitfield(5, 1) == 1
+    local fmt = tvb(start + 4, 1):uint() % 0x40
+    local fdf = tvb(start + 5, 1):uint()
+    local data_start = start + CIP_LENGTH
+    local length = math.max(0, math.min(declared - CIP_LENGTH, available - CIP_LENGTH))
+    if fmt == IEC61883_FMT_AM824 and not sph then
+        if dbs == 0 or fdf == AM824_FDF_NO_DATA then
+            return data_start
+        end
+        return add_am824_blocks(tree, tvb, data_start, length, dbs, pinfo)
+    elseif fmt == IEC61883_FMT_MPEGTS and sph and dbs > 0 then
+        return add_mpegts_source_packets(tree, tvb, data_start, length, dbs, fn, pinfo)
+    end
+    return data_start
+end
+
+-- Compressed Video Format -------------------------------------------------------
+
+local CVF_FORMAT_RFC = 0x02
+local CVF_MJPEG, CVF_H264, CVF_JPEG2000, CVF_H265 = 0, 1, 2, 3
+local H264_FU_A, H264_FU_B = 28, 29
+local H265_FU = 49
+
+--- CVF: the RFC payload header by format_subtype (and the NAL unit header of
+--- an H.264/H.265 payload), the rest is the video payload
+function M.post.cvf(tree, tvb, start, pinfo)
+    local v1 = start == 40
+    local base = v1 and 32 or 16
+    local format = tvb(base, 1):uint()
+    local subtype = tvb(base + 1, 1):uint()
+    local len = tvb:len()
+    if format ~= CVF_FORMAT_RFC then
+        return start
+    end
+    if subtype == CVF_MJPEG and len >= start + 8 then
+        gen.add_cvf_mjpeg(tree, tvb, start)
+        return start + 8
+    elseif subtype == CVF_H264 and len >= start + 5 then
+        gen.add_cvf_h264(tree, tvb, start)
+        local nal_type = tvb(start + 4, 1):uint() % 0x20
+        local nal = tree:add(tvb(start + 4, 1), string.format("NAL unit header: %s (%d)", gen.values_h264_nal_type[nal_type] or "?", nal_type))
+        gen.add_cvf_h264_nal(nal, tvb, start + 4)
+        if (nal_type == H264_FU_A or nal_type == H264_FU_B) and len >= start + 6 then
+            local fu_type = tvb(start + 5, 1):uint() % 0x20
+            local fu = tree:add(tvb(start + 5, 1), string.format("FU header: %s (%d)%s%s", gen.values_h264_nal_type[fu_type] or "?", fu_type,
+                tvb(start + 5, 1):bitfield(0, 1) == 1 and " start" or "", tvb(start + 5, 1):bitfield(1, 1) == 1 and " end" or ""))
+            gen.add_cvf_h264_fu(fu, tvb, start + 5)
+            return start + 6
+        end
+        return start + 5
+    elseif subtype == CVF_H265 and len >= start + 6 then
+        gen.add_cvf_h265(tree, tvb, start)
+        local nal_type = tvb(start + 4, 2):bitfield(1, 6)
+        local nal = tree:add(tvb(start + 4, 2), string.format("NAL unit header: %s (%d)", gen.values_h265_nal_type[nal_type] or "?", nal_type))
+        gen.add_cvf_h265_nal(nal, tvb, start + 4)
+        if nal_type == H265_FU and len >= start + 7 then
+            local fu_type = tvb(start + 6, 1):uint() % 0x40
+            local fu = tree:add(tvb(start + 6, 1), string.format("FU header: %s (%d)%s%s", gen.values_h265_nal_type[fu_type] or "?", fu_type,
+                tvb(start + 6, 1):bitfield(0, 1) == 1 and " start" or "", tvb(start + 6, 1):bitfield(1, 1) == 1 and " end" or ""))
+            gen.add_cvf_h265_fu(fu, tvb, start + 6)
+            return start + 7
+        end
+        return start + 6
+    elseif subtype == CVF_JPEG2000 and len >= start + 8 then
+        gen.add_cvf_jpeg2000(tree, tvb, start)
+        return start + 8
+    end
+    return start
+end
+
 -- Info-column summaries: spec name -> function(tvb) returning text.
 M.info = {}
 
@@ -285,16 +404,81 @@ end
 M.info.aaf_v1 = function(tvb, version)
     return aaf_summary(tvb, version, 32, "AAF v1")
 end
-local function am824_summary(tvb, version, base, tag)
-    local fdf = tvb(base + 5, 1):uint()
-    return string.format("%s dbs=%d dbc=%d %s %s", tag, tvb(base + 1, 1):uint(), tvb(base + 3, 1):uint(),
-        gen.values_am824_fdf[fdf] or string.format("fdf=0x%02x", fdf), stream_summary(tvb, version))
+local function iec61883_summary(tvb, version, base, tag)
+    local tagbits = tvb(base + 6, 1):bitfield(0, 2)
+    if tagbits ~= 1 then
+        return string.format("%s IIDC channel=%d %s", tag, tvb(base + 6, 1):uint() % 0x40, stream_summary(tvb, version))
+    end
+    local cip = base + 8
+    if tvb:len() < cip + 8 then
+        return string.format("%s (truncated CIP) %s", tag, stream_summary(tvb, version))
+    end
+    local fmt = tvb(cip + 4, 1):uint() % 0x40
+    local dbs = tvb(cip + 1, 1):uint()
+    local dbc = tvb(cip + 3, 1):uint()
+    if fmt == 0x10 then
+        local fdf = tvb(cip + 5, 1):uint()
+        return string.format("%s AM824 dbs=%d dbc=%d %s %s", tag, dbs, dbc,
+            gen.values_am824_fdf[fdf] or string.format("fdf=0x%02x", fdf), stream_summary(tvb, version))
+    end
+    return string.format("%s %s dbs=%d dbc=%d %s", tag, gen.values_iec61883_fmt[fmt] or string.format("fmt=0x%02x", fmt),
+        dbs, dbc, stream_summary(tvb, version))
 end
-M.info.am824_v0 = function(tvb, version)
-    return am824_summary(tvb, version, 24, "AM824")
+M.info.iec61883_v0 = function(tvb, version)
+    return iec61883_summary(tvb, version, 16, "IEC 61883")
 end
-M.info.am824_v1 = function(tvb, version)
-    return am824_summary(tvb, version, 40, "AM824 v1")
+M.info.iec61883_v1 = function(tvb, version)
+    return iec61883_summary(tvb, version, 32, "IEC 61883 v1")
+end
+local function cvf_summary(tvb, version, base, tag)
+    local subtype = gen.values_cvf_format_subtype[tvb(base + 1, 1):uint()] or string.format("subtype 0x%02x", tvb(base + 1, 1):uint())
+    local m = tvb(base + 6, 1):bitfield(3, 1) == 1 and " M" or ""
+    return string.format("%s %s%s %s len=%d", tag, subtype, m, stream_summary(tvb, version), tvb(base + 4, 2):uint())
+end
+M.info.cvf_v0 = function(tvb, version)
+    return cvf_summary(tvb, version, 16, "CVF")
+end
+M.info.cvf_v1 = function(tvb, version)
+    return cvf_summary(tvb, version, 32, "CVF v1")
+end
+local function svf_summary(tvb, version, base, tag)
+    return string.format("%s %s line=%d frame=%d%s %s", tag, gen.values_svf_format[tvb(base, 1):uint()] or string.format("format 0x%02x", tvb(base, 1):uint()),
+        tvb(base + 2, 2):uint(), tvb(base + 9, 1):uint(), tvb(base + 6, 1):bitfield(3, 1) == 1 and " EF" or "", stream_summary(tvb, version))
+end
+M.info.svf_v0 = function(tvb, version)
+    return svf_summary(tvb, version, 16, "SVF")
+end
+M.info.svf_v1 = function(tvb, version)
+    return svf_summary(tvb, version, 32, "SVF v1")
+end
+local function rvf_summary(tvb, version, base, tag)
+    return string.format("%s %dx%d %s %s fps line=%d%s %s", tag, tvb(base, 2):uint(), tvb(base + 2, 2):uint(),
+        gen.values_rvf_pixel_format[tvb(base + 9, 1):uint() % 0x10] or "?", gen.values_rvf_frame_rate[tvb(base + 10, 1):uint()] or "?",
+        tvb(base + 14, 2):uint(), tvb(base + 6, 1):bitfield(3, 1) == 1 and " EF" or "", stream_summary(tvb, version))
+end
+M.info.rvf_v0 = function(tvb, version)
+    return rvf_summary(tvb, version, 16, "RVF")
+end
+M.info.rvf_v1 = function(tvb, version)
+    return rvf_summary(tvb, version, 32, "RVF v1")
+end
+M.info.vsf_v0 = function(tvb, version)
+    return string.format("VSF vendor_id=0x%08x%04x %s", tvb(16, 4):uint(), tvb(22, 2):uint(), stream_summary(tvb, version))
+end
+M.info.vsf_v1 = function(tvb, version)
+    return string.format("VSF v1 vendor_id=0x%08x%04x %s", tvb(32, 4):uint(), tvb(38, 2):uint(), stream_summary(tvb, version))
+end
+M.info.mma_v0 = function(tvb, version)
+    return string.format("MMA %s len=%d", stream_summary(tvb, version), tvb(20, 2):uint())
+end
+M.info.mma_v1 = function(tvb, version)
+    return string.format("MMA v1 %s len=%d", stream_summary(tvb, version), tvb(36, 2):uint())
+end
+M.info.ef_stream_v0 = function(tvb, version)
+    return string.format("Experimental stream %s len=%d", stream_summary(tvb, version), tvb(20, 2):uint())
+end
+M.info.ef_stream_v1 = function(tvb, version)
+    return string.format("Experimental stream v1 %s len=%d", stream_summary(tvb, version), tvb(36, 2):uint())
 end
 M.info.tscf_v0 = function(tvb, version)
     return string.format("TSCF %s acf=%d octets", stream_summary(tvb, version), tvb(20, 2):uint())
