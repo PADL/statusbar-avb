@@ -250,7 +250,7 @@ auto acf_gpc_message() -> std::vector<uint8_t>
 {
     AcfGpcMessage m{};
     m.init();
-    m.set_gpc_msg_id(Eui48{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56});
+    m.set_gpc_msg_id(Eui48{0x70, 0xB3, 0xD5, 0xED, 0xC1, 0x23});
     std::array<uint8_t, 16> buf{};
     auto const octets = acf_gpc_build(std::span<uint8_t>(buf), m, std::span<uint8_t const>(PAYLOAD));
     std::vector<uint8_t> out;

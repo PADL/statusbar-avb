@@ -101,7 +101,7 @@ auto aaf_v1() -> std::vector<uint8_t>
     pdu.sequence_num = 0x01020304U;
     pdu.set_tv(true);
     pdu.avtp_timestamp = 0x1122334455667788ULL;
-    pdu.ptp_grandmaster_identity = tsn::ClockIdentity{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01};
+    pdu.ptp_grandmaster_identity = tsn::ClockIdentity{0x70, 0xB3, 0xD5, 0xED, 0xC3, 0x00, 0x00, 0x01};
     pdu.set_stream_data_length(16);
     std::vector<uint8_t> out;
     append(out, pdu);
@@ -156,7 +156,7 @@ auto ntscf_with_gpc() -> std::vector<uint8_t>
     std::array<uint8_t, 12> acf{};
     AcfGpcMessage gpc{};
     gpc.init();
-    gpc.set_gpc_msg_id(Eui48{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56});
+    gpc.set_gpc_msg_id(Eui48{0x70, 0xB3, 0xD5, 0xED, 0xC1, 0x23});
     std::array<uint8_t, 4> const payload{0xDE, 0xAD, 0xBE, 0xEF};
     (void)acf_gpc_build(std::span<uint8_t>(acf), gpc, std::span<uint8_t const>(payload));
 
@@ -352,11 +352,11 @@ auto rvf() -> std::vector<uint8_t>
     return stream_pdu(0x07, 51, 0x07800438U, static_cast<uint16_t>(payload.size()), 0x2040U, std::span<uint8_t const>(payload));
 }
 
-/// Vendor specific stream, vendor id 00:1C:AB:00:00:01
+/// Vendor specific stream, vendor id 70:B3:D5:ED:C0:00 (the Koftinoff OUI-36)
 auto vsf() -> std::vector<uint8_t>
 {
     std::array<uint8_t, 4> const data{0xCA, 0xFE, 0xF0, 0x0D};
-    return stream_pdu(0x6F, 52, 0x001CAB00U, 4, 0x0001U, std::span<uint8_t const>(data));
+    return stream_pdu(0x6F, 52, 0x70B3D5EDU, 4, 0xC000U, std::span<uint8_t const>(data));
 }
 
 /// MMA stream (MIDI over AVTP, opaque here)
@@ -376,7 +376,7 @@ auto ef_stream() -> std::vector<uint8_t>
 /// Experimental control format (control header kind)
 auto ef_control() -> std::vector<uint8_t>
 {
-    return {0xFF, 0x80, 0x00, 0x04, 0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD};
+    return {0xFF, 0x80, 0x00, 0x04, 0x70, 0xB3, 0xD5, 0xED, 0xC3, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD};
 }
 
 /// 24-bit PCM, one channel, six samples including negative values
@@ -508,7 +508,7 @@ auto crf_v1() -> std::vector<uint8_t>
     pdu.init_audio_sample(SID, 96000, CrfPull::multiply_1_div_1001, 192);
     pdu.set_sequence_num(0x0000ABCDU);
     pdu.set_crf_data_length(8);
-    pdu.ptp_grandmaster_identity = tsn::ClockIdentity{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01};
+    pdu.ptp_grandmaster_identity = tsn::ClockIdentity{0x70, 0xB3, 0xD5, 0xED, 0xC3, 0x00, 0x00, 0x01};
     std::vector<uint8_t> out;
     append(out, pdu);
     ieee::octlet_t const ts{0x0000000200000000ULL};
@@ -521,7 +521,7 @@ auto tscf_v1() -> std::vector<uint8_t>
     std::array<uint8_t, 12> acf{};
     AcfGpcMessage gpc{};
     gpc.init();
-    gpc.set_gpc_msg_id(Eui48{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x01});
+    gpc.set_gpc_msg_id(Eui48{0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x01});
     std::array<uint8_t, 4> const payload{0x01, 0x02, 0x03, 0x04};
     (void)acf_gpc_build(std::span<uint8_t>(acf), gpc, std::span<uint8_t const>(payload));
     TscfV1Pdu pdu{};
@@ -553,7 +553,7 @@ auto ntscf_v1() -> std::vector<uint8_t>
     return out;
 }
 
-Eui64 const KEY_ID{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x42};
+Eui64 const KEY_ID{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x00, 0x42};
 
 auto aef_continuous() -> std::vector<uint8_t>
 {
