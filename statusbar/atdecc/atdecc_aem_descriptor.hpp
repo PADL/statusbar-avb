@@ -1424,36 +1424,38 @@ static_assert(
 //
 
 /// A single mapping entry in a SENSOR_MAP descriptor trailer.
-/// IEEE 1722.1 Clause 7.2.21, 8 bytes on the wire.
+/// IEEE 1722.1-2021 Clause 7.2.21, Table 7-37: 6 bytes on the wire -
+/// stream index, signal channel within the sensor stream, cluster offset.
+/// (Unlike audio and video mappings there is no cluster channel field.)
 struct SensorMapping
 {
-    doublet_t mapping_stream_index{0};     ///< Stream index within the SENSOR_UNIT
-    doublet_t mapping_stream_channel{0};   ///< Channel number within that stream
-    doublet_t mapping_cluster_offset{0};   ///< Offset into the target sensor cluster
-    doublet_t mapping_cluster_channel{0};  ///< Channel number within the target cluster
+    doublet_t mapping_stream_index{0};    ///< STREAM_INPUT/OUTPUT index carrying this signal
+    doublet_t mapping_stream_signal{0};   ///< Signal channel within that sensor stream
+    doublet_t mapping_cluster_offset{0};  ///< Offset from the port's base_cluster
 };
 
-static_assert(sizeof(SensorMapping) == 8, "SensorMapping must be exactly 8 bytes");
+static_assert(sizeof(SensorMapping) == 6, "SensorMapping must be exactly 6 bytes");
 
 /// SENSOR_MAP Descriptor - Clause 7.2.21
 ///
 /// Wire format: 8-byte fixed header followed by `number_of_mappings` ×
-/// 8-byte `SensorMapping` entries. Maximum 62 entries.
+/// 6-byte `SensorMapping` entries. Maximum 82 entries (8 + 82 * 6 = 500
+/// bytes, within MAX_AEM_DESCRIPTOR_SIZE).
 struct DescriptorSensorMap
 {
     static constexpr size_t LENGTH = 8;
-    static constexpr size_t MAX_MAPPINGS = 62;
+    static constexpr size_t MAX_MAPPINGS = 82;
 
     doublet_t descriptor_type{DESCRIPTOR_SENSOR_MAP};    // 0
     doublet_t descriptor_index{0};                       // 2
     doublet_t mappings_offset{LENGTH};                   // 4
     doublet_t number_of_mappings{0};                     // 6
-    std::array<SensorMapping, MAX_MAPPINGS> mappings{};  // 8..504
+    std::array<SensorMapping, MAX_MAPPINGS> mappings{};  // 8..499
 
     // No defaulted operator<=>: unused tail entries in `mappings` would
     // corrupt comparisons. See DescriptorAudioMap for the same rationale.
 
-    /// On-wire size: fixed header plus 8 bytes per populated mapping.
+    /// On-wire size: fixed header plus 6 bytes per populated mapping.
     [[nodiscard]] auto wire_size() const noexcept -> size_t
     {
         return LENGTH + (static_cast<size_t>(number_of_mappings.get()) * sizeof(SensorMapping));

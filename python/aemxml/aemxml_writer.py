@@ -660,9 +660,8 @@ def _write_sensor_map(parent: ET.Element, sm: SensorMap) -> None:
     for m in sm.mappings:
         mel = ET.SubElement(el, "sensor_mapping")
         _hex16(mel, "stream_index", m.stream_index)
-        _hex16(mel, "stream_channel", m.stream_channel)
+        _hex16(mel, "stream_signal", m.stream_signal)
         _hex16(mel, "cluster_offset", m.cluster_offset)
-        _hex16(mel, "cluster_channel", m.cluster_channel)
 
 
 def _write_video_stream_port(parent: ET.Element, port: VideoStreamPort) -> None:

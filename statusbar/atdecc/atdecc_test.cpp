@@ -2918,7 +2918,7 @@ TEST(aem_sensor_map, empty_and_populated_wire_size)
 
     desc.number_of_mappings = 5;
     EXPECT_EQ(desc.wire_size(), aem::DescriptorSensorMap::LENGTH + (5 * sizeof(aem::SensorMapping)));
-    EXPECT_EQ(desc.wire_size(), static_cast<size_t>(48));
+    EXPECT_EQ(desc.wire_size(), static_cast<size_t>(38));
 }
 
 TEST(aem_sensor_map, max_mappings_fits_in_aecp_budget)
@@ -2926,7 +2926,7 @@ TEST(aem_sensor_map, max_mappings_fits_in_aecp_budget)
     aem::DescriptorSensorMap desc{};
     desc.number_of_mappings = aem::DescriptorSensorMap::MAX_MAPPINGS;
     EXPECT_TRUE(desc.wire_size() <= MAX_AEM_DESCRIPTOR_SIZE);
-    EXPECT_EQ(sizeof(aem::SensorMapping), static_cast<size_t>(8));
+    EXPECT_EQ(sizeof(aem::SensorMapping), static_cast<size_t>(6));
 }
 
 TEST(aem_sensor_map, populated_map_round_trips_through_wire_span)
@@ -2935,18 +2935,17 @@ TEST(aem_sensor_map, populated_map_round_trips_through_wire_span)
     src.descriptor_index = 11;
     src.number_of_mappings = 1;
     src.mappings[0].mapping_stream_index = 2;
-    src.mappings[0].mapping_stream_channel = 4;
+    src.mappings[0].mapping_stream_signal = 4;
     src.mappings[0].mapping_cluster_offset = 1;
-    src.mappings[0].mapping_cluster_channel = 3;
 
     auto const view = wire_span(src);
-    EXPECT_EQ(view.size(), static_cast<size_t>(16));
+    EXPECT_EQ(view.size(), static_cast<size_t>(14));
 
     aem::DescriptorSensorMap dst{};
     span_load_padded(dst, view);
     EXPECT_EQ(dst.descriptor_index.get(), static_cast<uint16_t>(11));
-    EXPECT_EQ(dst.mappings[0].mapping_stream_channel.get(), static_cast<uint16_t>(4));
-    EXPECT_EQ(dst.mappings[0].mapping_cluster_channel.get(), static_cast<uint16_t>(3));
+    EXPECT_EQ(dst.mappings[0].mapping_stream_signal.get(), static_cast<uint16_t>(4));
+    EXPECT_EQ(dst.mappings[0].mapping_cluster_offset.get(), static_cast<uint16_t>(1));
     EXPECT_EQ(dst.wire_size(), src.wire_size());
 }
 

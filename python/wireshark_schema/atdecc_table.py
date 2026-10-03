@@ -1428,18 +1428,18 @@ AEM_PAYLOAD_STRUCTS = {
                 "doc": "Bytes 4-5: Map index",
             },
             {
-                "name": "number_of_mappings",
+                "name": "number_of_maps",
                 "offset": 6,
                 "size": 2,
                 "kind": "u16",
-                "doc": "Bytes 6-7: Number of mappings",
+                "doc": "Bytes 6-7: Number of maps",
             },
             {
-                "name": "number_of_maps",
+                "name": "number_of_mappings",
                 "offset": 8,
                 "size": 2,
                 "kind": "u16",
-                "doc": "Bytes 8-9: Number of maps",
+                "doc": "Bytes 8-9: Number of mappings in this response",
             },
             {
                 "name": "reserved",

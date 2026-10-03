@@ -656,11 +656,16 @@ def _parse_video_map(el: ET.Element) -> VideoMap:
 
 
 def _parse_sensor_mapping(el: ET.Element) -> SensorMapping:
+    # stream_channel is the pre-2026-10 spelling of stream_signal
+    signal_tag = (
+        "stream_signal"
+        if el.find(_ns("stream_signal")) is not None
+        else "stream_channel"
+    )
     return SensorMapping(
         stream_index=_hex16(el, "stream_index"),
-        stream_channel=_hex16(el, "stream_channel"),
+        stream_signal=_hex16(el, signal_tag),
         cluster_offset=_hex16(el, "cluster_offset"),
-        cluster_channel=_hex16(el, "cluster_channel"),
     )
 
 

@@ -1404,12 +1404,11 @@ TEST(aem_sensor_map_list, push_view_capacity_clear)
     EXPECT_EQ(d.used_mappings().size(), 0U);
     SensorMapping m{};
     m.mapping_stream_index = 4;
-    m.mapping_stream_channel = 5;
+    m.mapping_stream_signal = 5;
     m.mapping_cluster_offset = 6;
-    m.mapping_cluster_channel = 7;
     EXPECT_TRUE(d.push_mapping(m));
     EXPECT_EQ(d.used_mappings().size(), 1U);
-    EXPECT_EQ(d.used_mappings()[0].mapping_cluster_channel.get(), 7U);
+    EXPECT_EQ(d.used_mappings()[0].mapping_cluster_offset.get(), 6U);
     for (size_t i = d.number_of_mappings.get(); i < DescriptorSensorMap::MAX_MAPPINGS; ++i) {
         EXPECT_TRUE(d.push_mapping(SensorMapping{}));
     }
@@ -1423,14 +1422,13 @@ TEST(aem_sensor_map_list, format_to_emits_each_entry)
     DescriptorSensorMap d{};
     SensorMapping m{};
     m.mapping_stream_index = 4;
-    m.mapping_stream_channel = 5;
+    m.mapping_stream_signal = 5;
     m.mapping_cluster_offset = 6;
-    m.mapping_cluster_channel = 7;
     (void)d.push_mapping(m);
     std::string buf;
     format_to(std::back_inserter(buf), d);
     EXPECT_TRUE(buf.find("mappings: count=1") != std::string::npos);
-    EXPECT_TRUE(buf.find("stream[4]ch5 -> cluster[6]ch7") != std::string::npos);
+    EXPECT_TRUE(buf.find("stream[4]sig5 -> cluster[6]") != std::string::npos);
 }
 
 // Security regression: a GET_CONFIGURATION *command* carries no configuration_index

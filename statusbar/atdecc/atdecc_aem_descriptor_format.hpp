@@ -107,11 +107,10 @@ auto format_to(OutputIt out, SensorMapping const& m) -> OutputIt
 {
     return std::format_to(
         out,
-        "stream[{}]ch{} -> cluster[{}]ch{}",
+        "stream[{}]sig{} -> cluster[{}]",
         m.mapping_stream_index.get(),
-        m.mapping_stream_channel.get(),
-        m.mapping_cluster_offset.get(),
-        m.mapping_cluster_channel.get());
+        m.mapping_stream_signal.get(),
+        m.mapping_cluster_offset.get());
 }
 
 /// @param out Output iterator to write formatted text to

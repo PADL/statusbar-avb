@@ -1016,7 +1016,7 @@ def _serialize_video_map(vm: VideoMap, desc_index: int) -> bytes:
 
 
 def _serialize_sensor_map(sm: SensorMap, desc_index: int) -> bytes:
-    """Serialize SENSOR_MAP descriptor (8 + 8*N bytes)."""
+    """Serialize SENSOR_MAP descriptor (8 + 6*N bytes, IEEE 1722.1-2021 Table 7-37)."""
     n = len(sm.mappings)
     parts = [
         pack_u16(DESCRIPTOR_SENSOR_MAP),
@@ -1026,9 +1026,8 @@ def _serialize_sensor_map(sm: SensorMap, desc_index: int) -> bytes:
     ]
     for m in sm.mappings:
         parts.append(pack_u16(m.stream_index))
-        parts.append(pack_u16(m.stream_channel))
+        parts.append(pack_u16(m.stream_signal))
         parts.append(pack_u16(m.cluster_offset))
-        parts.append(pack_u16(m.cluster_channel))
     return b"".join(parts)
 
 

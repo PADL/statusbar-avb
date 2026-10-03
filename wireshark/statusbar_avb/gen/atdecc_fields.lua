@@ -716,8 +716,8 @@ M.f.atdecc_aem_get_audio_map_command_reserved = ProtoField.uint16("avb.atdecc.ae
 M.f.atdecc_aem_audio_map_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.audio_map_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "Bytes 0-1: Descriptor type")
 M.f.atdecc_aem_audio_map_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.audio_map_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "Bytes 2-3: Descriptor index")
 M.f.atdecc_aem_audio_map_response_map_index = ProtoField.uint16("avb.atdecc.aem.audio_map_response.map_index", "map_index", base.DEC, nil, nil, "Bytes 4-5: Map index")
-M.f.atdecc_aem_audio_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.audio_map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "Bytes 6-7: Number of mappings")
-M.f.atdecc_aem_audio_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.audio_map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "Bytes 8-9: Number of maps")
+M.f.atdecc_aem_audio_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.audio_map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "Bytes 6-7: Number of maps")
+M.f.atdecc_aem_audio_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.audio_map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "Bytes 8-9: Number of mappings in this response")
 M.f.atdecc_aem_audio_map_response_reserved = ProtoField.uint16("avb.atdecc.aem.audio_map_response.reserved", "reserved", base.DEC, nil, nil, "Bytes 10-11: Reserved")
 M.f.atdecc_aem_audio_mappings_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.audio_mappings_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "Bytes 0-1: Descriptor type")
 M.f.atdecc_aem_audio_mappings_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.audio_mappings_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "Bytes 2-3: Descriptor index")
@@ -2009,8 +2009,8 @@ M.fields = {
     M.f.atdecc_aem_audio_map_response_descriptor_type,
     M.f.atdecc_aem_audio_map_response_descriptor_index,
     M.f.atdecc_aem_audio_map_response_map_index,
-    M.f.atdecc_aem_audio_map_response_number_of_mappings,
     M.f.atdecc_aem_audio_map_response_number_of_maps,
+    M.f.atdecc_aem_audio_map_response_number_of_mappings,
     M.f.atdecc_aem_audio_map_response_reserved,
     M.f.atdecc_aem_audio_mappings_command_descriptor_type,
     M.f.atdecc_aem_audio_mappings_command_descriptor_index,
@@ -3477,8 +3477,8 @@ function M.add_aem_audio_map_response(tree, tvb, off)
     tree:add(M.f.atdecc_aem_audio_map_response_descriptor_type, tvb(off + 24, 2))
     tree:add(M.f.atdecc_aem_audio_map_response_descriptor_index, tvb(off + 26, 2))
     tree:add(M.f.atdecc_aem_audio_map_response_map_index, tvb(off + 28, 2))
-    tree:add(M.f.atdecc_aem_audio_map_response_number_of_mappings, tvb(off + 30, 2))
-    tree:add(M.f.atdecc_aem_audio_map_response_number_of_maps, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_aem_audio_map_response_number_of_maps, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_audio_map_response_number_of_mappings, tvb(off + 32, 2))
     tree:add(M.f.atdecc_aem_audio_map_response_reserved, tvb(off + 34, 2))
 end
 

@@ -900,11 +900,12 @@ struct AemAudioMapResponseHeader
     /// Bytes 4-5: Map index
     doublet_t map_index{0};
 
-    /// Bytes 6-7: Number of mappings
-    doublet_t number_of_mappings{0};
-
-    /// Bytes 8-9: Number of maps
+    /// Bytes 6-7: Number of maps (IEEE 1722.1-2021 Figure 7-70 puts the total
+    /// map count BEFORE the count of mappings carried in this response)
     doublet_t number_of_maps{0};
+
+    /// Bytes 8-9: Number of mappings in this response
+    doublet_t number_of_mappings{0};
 
     /// Bytes 10-11: Reserved
     doublet_t reserved{0};

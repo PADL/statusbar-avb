@@ -417,13 +417,12 @@ def _parse_sensor_map(d: bytes) -> SensorMap:
     n = unpack_u16(d, 6)
     mappings = []
     for i in range(n):
-        p = 8 + 8 * i
+        p = 8 + 6 * i
         mappings.append(
             SensorMapping(
                 stream_index=unpack_u16(d, p),
-                stream_channel=unpack_u16(d, p + 2),
+                stream_signal=unpack_u16(d, p + 2),
                 cluster_offset=unpack_u16(d, p + 4),
-                cluster_channel=unpack_u16(d, p + 6),
             )
         )
     return SensorMap(mappings=mappings)

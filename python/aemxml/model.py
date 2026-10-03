@@ -692,12 +692,12 @@ class VideoMap:
 
 @dataclass
 class SensorMapping:
-    """One entry in a SENSOR_MAP descriptor."""
+    """One entry in a SENSOR_MAP descriptor (IEEE 1722.1-2021 Table 7-37: 6 octets;
+    a sensor signal is a single channel, so there is no cluster channel)."""
 
     stream_index: int = 0
-    stream_channel: int = 0
+    stream_signal: int = 0
     cluster_offset: int = 0
-    cluster_channel: int = 0
 
 
 @dataclass
