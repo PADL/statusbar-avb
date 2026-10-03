@@ -405,6 +405,13 @@ M.values_mvu_status = {
     [0x07] = "BAD_ARGUMENTS",
 }
 
+M.values_keychain_id = {
+    [0x00] = "ENTITY_PUBLIC",
+    [0x01] = "ENTITY_PRIVATE",
+    [0x02] = "MANUFACTURER_PUBLIC",
+    [0x03] = "CONTROLLERS",
+}
+
 M.values_aaf_nsr = {
     [0x00] = "User specified",
     [0x01] = "8 kHz",
@@ -597,6 +604,15 @@ M.f.atdecc_mvu_mcr_flags_media_clock_reference = ProtoField.bool("avb.atdecc.mvu
 M.f.atdecc_mvu_mcr_flags_media_clock_domain = ProtoField.bool("avb.atdecc.mvu.mcr_flags.media_clock_domain", "mcr_flags.media_clock_domain", 8, nil, 0x2, "media_clock_domain")
 M.f.atdecc_avc_length = ProtoField.uint16("avb.atdecc.avc.length", "length", base.DEC, nil, nil, "avc_length")
 M.f.atdecc_avc_command_response = ProtoField.bytes("avb.atdecc.avc.command_response", "command_response", base.NONE, "AV/C command/response frame")
+M.f.atdecc_hdcp_apm_length = ProtoField.uint16("avb.atdecc.hdcp_apm.length", "length", base.DEC, nil, nil, "hdcp_apm_length (whole message, octets)")
+M.f.atdecc_hdcp_apm_mf = ProtoField.bool("avb.atdecc.hdcp_apm.mf", "mf", 8, nil, 0x1, "more fragments follow")
+M.f.atdecc_hdcp_apm_fragment_offset = ProtoField.uint16("avb.atdecc.hdcp_apm.fragment_offset", "fragment_offset", base.DEC, nil, nil, "offset of this fragment in the message")
+M.f.atdecc_hdcp_apm_message_data = ProtoField.bytes("avb.atdecc.hdcp_apm.message_data", "message_data", base.NONE, "HDCP IIA message fragment")
+M.f.atdecc_aem_key = ProtoField.bytes("avb.atdecc.aem.key", "key", base.NONE, "key data (key_length octets)")
+M.f.atdecc_aem_authentication_token = ProtoField.bytes("avb.atdecc.aem.authentication_token", "authentication_token", base.NONE, "authentication token (token_length octets)")
+M.f.atdecc_aem_dynamic_info_info_command_specific_data_length = ProtoField.uint16("avb.atdecc.aem.dynamic_info.info_command_specific_data_length", "info_command_specific_data_length", base.DEC, nil, nil, "octets of info_command_specific_data")
+M.f.atdecc_aem_dynamic_info_info_status = ProtoField.uint8("avb.atdecc.aem.dynamic_info.info_status", "info_status", base.DEC, M.values_aem_status, 0xF800, "status of this entry")
+M.f.atdecc_aem_dynamic_info_info_command_type = ProtoField.uint16("avb.atdecc.aem.dynamic_info.info_command_type", "info_command_type", base.HEX, M.values_aem_command, nil, "command of this entry")
 M.f.atdecc_aem_acquire_entity_flags = ProtoField.uint32("avb.atdecc.aem.acquire_entity.flags", "flags", base.HEX, nil, nil, "Bytes 0-3: Acquire flags")
 M.f.atdecc_aem_acquire_entity_owner_entity_id = ProtoField.uint64("avb.atdecc.aem.acquire_entity.owner_entity_id", "owner_entity_id", base.HEX, nil, nil, "Bytes 4-11: Owner Entity ID (set by responder in response)")
 M.f.atdecc_aem_acquire_entity_descriptor_type = ProtoField.uint16("avb.atdecc.aem.acquire_entity.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "Bytes 12-13: Descriptor type")
@@ -789,12 +805,12 @@ M.f.atdecc_aem_get_video_map_command_descriptor_type = ProtoField.uint16("avb.at
 M.f.atdecc_aem_get_video_map_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_get_video_map_command_map_index = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.map_index", "map_index", base.DEC, nil, nil, "map_index")
 M.f.atdecc_aem_get_video_map_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_video_map_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
-M.f.atdecc_aem_video_map_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.video_map_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
-M.f.atdecc_aem_video_map_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.video_map_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
-M.f.atdecc_aem_video_map_response_map_index = ProtoField.uint16("avb.atdecc.aem.video_map_response.map_index", "map_index", base.DEC, nil, nil, "map_index")
-M.f.atdecc_aem_video_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.video_map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "number_of_maps")
-M.f.atdecc_aem_video_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.video_map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
-M.f.atdecc_aem_video_map_response_reserved = ProtoField.uint16("avb.atdecc.aem.video_map_response.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_map_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.map_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_map_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.map_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_map_response_map_index = ProtoField.uint16("avb.atdecc.aem.map_response.map_index", "map_index", base.DEC, nil, nil, "map_index")
+M.f.atdecc_aem_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "number_of_maps")
+M.f.atdecc_aem_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
+M.f.atdecc_aem_map_response_reserved = ProtoField.uint16("avb.atdecc.aem.map_response.reserved", "reserved", base.DEC, nil, nil, "reserved")
 M.f.atdecc_aem_video_mappings_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_video_mappings_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_video_mappings_command_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.video_mappings_command.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
@@ -803,24 +819,18 @@ M.f.atdecc_aem_get_sensor_map_command_descriptor_type = ProtoField.uint16("avb.a
 M.f.atdecc_aem_get_sensor_map_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_get_sensor_map_command_map_index = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.map_index", "map_index", base.DEC, nil, nil, "map_index")
 M.f.atdecc_aem_get_sensor_map_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_sensor_map_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
-M.f.atdecc_aem_sensor_map_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
-M.f.atdecc_aem_sensor_map_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
-M.f.atdecc_aem_sensor_map_response_map_index = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.map_index", "map_index", base.DEC, nil, nil, "map_index")
-M.f.atdecc_aem_sensor_map_response_number_of_maps = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.number_of_maps", "number_of_maps", base.DEC, nil, nil, "number_of_maps")
-M.f.atdecc_aem_sensor_map_response_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
-M.f.atdecc_aem_sensor_map_response_reserved = ProtoField.uint16("avb.atdecc.aem.sensor_map_response.reserved", "reserved", base.DEC, nil, nil, "reserved")
 M.f.atdecc_aem_sensor_mappings_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_sensor_mappings_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_sensor_mappings_command_number_of_mappings = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.number_of_mappings", "number_of_mappings", base.DEC, nil, nil, "number_of_mappings")
 M.f.atdecc_aem_sensor_mappings_command_reserved = ProtoField.uint16("avb.atdecc.aem.sensor_mappings_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
 M.f.atdecc_aem_stream_encryption_descriptor_type = ProtoField.uint16("avb.atdecc.aem.stream_encryption.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_stream_encryption_descriptor_index = ProtoField.uint16("avb.atdecc.aem.stream_encryption.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
-M.f.atdecc_aem_stream_encryption_key_eui = ProtoField.uint64("avb.atdecc.aem.stream_encryption.key_eui", "key_eui", base.HEX, nil, nil, "key_eui")
+M.f.atdecc_aem_stream_encryption_key_id = ProtoField.uint64("avb.atdecc.aem.stream_encryption.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
 M.f.atdecc_aem_memory_object_length_descriptor_index = ProtoField.uint16("avb.atdecc.aem.memory_object_length.descriptor_index", "descriptor_index", base.DEC, nil, nil, "MEMORY_OBJECT descriptor_index")
-M.f.atdecc_aem_memory_object_length_reserved = ProtoField.uint16("avb.atdecc.aem.memory_object_length.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_memory_object_length_configuration_index = ProtoField.uint16("avb.atdecc.aem.memory_object_length.configuration_index", "configuration_index", base.DEC, nil, nil, "CONFIGURATION descriptor_index")
 M.f.atdecc_aem_memory_object_length_length = ProtoField.uint64("avb.atdecc.aem.memory_object_length.length", "length", base.HEX, nil, nil, "length (octets)")
 M.f.atdecc_aem_get_memory_object_length_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_memory_object_length_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "MEMORY_OBJECT descriptor_index")
-M.f.atdecc_aem_get_memory_object_length_command_reserved = ProtoField.uint16("avb.atdecc.aem.get_memory_object_length_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_get_memory_object_length_command_configuration_index = ProtoField.uint16("avb.atdecc.aem.get_memory_object_length_command.configuration_index", "configuration_index", base.DEC, nil, nil, "CONFIGURATION descriptor_index")
 M.f.atdecc_aem_stream_backup_descriptor_type = ProtoField.uint16("avb.atdecc.aem.stream_backup.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_stream_backup_descriptor_index = ProtoField.uint16("avb.atdecc.aem.stream_backup.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_stream_backup_backup_talker_entity_id_0 = ProtoField.uint64("avb.atdecc.aem.stream_backup.backup_talker_entity_id_0", "backup_talker_entity_id_0", base.HEX, nil, nil, "backup_talker_entity_id_0")
@@ -837,6 +847,315 @@ M.f.atdecc_aem_stream_backup_backedup_talker_unique_id = ProtoField.uint16("avb.
 M.f.atdecc_aem_stream_backup_reserved_3 = ProtoField.uint16("avb.atdecc.aem.stream_backup.reserved_3", "reserved_3", base.DEC, nil, nil, "reserved")
 M.f.atdecc_aem_get_stream_backup_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_stream_backup_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_get_stream_backup_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_stream_backup_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_descriptor_ref_descriptor_type = ProtoField.uint16("avb.atdecc.aem.descriptor_ref.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_descriptor_ref_descriptor_index = ProtoField.uint16("avb.atdecc.aem.descriptor_ref.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_auth_key_key_id = ProtoField.uint64("avb.atdecc.aem.auth_key.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
+M.f.atdecc_aem_auth_key_key_type = ProtoField.uint8("avb.atdecc.aem.auth_key.key_type", "key_type", base.DEC, nil, nil, "key type (7.6.1.2)")
+M.f.atdecc_aem_auth_key_key_length = ProtoField.uint16("avb.atdecc.aem.auth_key.key_length", "key_length", base.DEC, nil, nil, "key length (octets)")
+M.f.atdecc_aem_auth_key_reserved = ProtoField.uint8("avb.atdecc.aem.auth_key.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_key_id_key_id = ProtoField.uint64("avb.atdecc.aem.key_id.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
+M.f.atdecc_aem_auth_get_key_list_command_keychain_id = ProtoField.uint16("avb.atdecc.aem.auth_get_key_list_command.keychain_id", "keychain_id", base.DEC, M.values_keychain_id, nil, "keychain (Table 7-184)")
+M.f.atdecc_aem_auth_get_key_list_command_reserved = ProtoField.uint16("avb.atdecc.aem.auth_get_key_list_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_auth_get_key_list_response_keychain_id = ProtoField.uint16("avb.atdecc.aem.auth_get_key_list_response.keychain_id", "keychain_id", base.DEC, M.values_keychain_id, nil, "keychain (Table 7-184)")
+M.f.atdecc_aem_auth_get_key_list_response_number_of_keys = ProtoField.uint16("avb.atdecc.aem.auth_get_key_list_response.number_of_keys", "number_of_keys", base.DEC, nil, nil, "keys in the keychain")
+M.f.atdecc_aem_auth_keychain_key_keychain_id = ProtoField.uint16("avb.atdecc.aem.auth_keychain_key.keychain_id", "keychain_id", base.DEC, M.values_keychain_id, nil, "keychain (Table 7-184)")
+M.f.atdecc_aem_auth_keychain_key_reserved = ProtoField.uint16("avb.atdecc.aem.auth_keychain_key.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_auth_keychain_key_key_id = ProtoField.uint64("avb.atdecc.aem.auth_keychain_key.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
+M.f.atdecc_aem_auth_get_keychain_list_command_keychain_id = ProtoField.uint16("avb.atdecc.aem.auth_get_keychain_list_command.keychain_id", "keychain_id", base.DEC, M.values_keychain_id, nil, "keychain (Table 7-184)")
+M.f.atdecc_aem_auth_get_keychain_list_command_list_index = ProtoField.uint16("avb.atdecc.aem.auth_get_keychain_list_command.list_index", "list_index", base.DEC, nil, nil, "list subset index")
+M.f.atdecc_aem_auth_get_keychain_list_response_keychain_id = ProtoField.uint16("avb.atdecc.aem.auth_get_keychain_list_response.keychain_id", "keychain_id", base.DEC, M.values_keychain_id, nil, "keychain (Table 7-184)")
+M.f.atdecc_aem_auth_get_keychain_list_response_list_index = ProtoField.uint16("avb.atdecc.aem.auth_get_keychain_list_response.list_index", "list_index", base.DEC, nil, nil, "list subset index")
+M.f.atdecc_aem_auth_get_keychain_list_response_number_of_lists = ProtoField.uint16("avb.atdecc.aem.auth_get_keychain_list_response.number_of_lists", "number_of_lists", base.DEC, nil, nil, "list subsets")
+M.f.atdecc_aem_auth_get_keychain_list_response_number_of_keys = ProtoField.uint16("avb.atdecc.aem.auth_get_keychain_list_response.number_of_keys", "number_of_keys", base.DEC, nil, nil, "keys in this subset")
+M.f.atdecc_aem_auth_get_identity_response_key_id = ProtoField.uint64("avb.atdecc.aem.auth_get_identity_response.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
+M.f.atdecc_aem_auth_get_identity_response_ecdsa_signature_c = ProtoField.bytes("avb.atdecc.aem.auth_get_identity_response.ecdsa_signature_c", "ecdsa_signature_c", base.NONE, "ECDSA signature c")
+M.f.atdecc_aem_auth_get_identity_response_ecdsa_signature_d = ProtoField.bytes("avb.atdecc.aem.auth_get_identity_response.ecdsa_signature_d", "ecdsa_signature_d", base.NONE, "ECDSA signature d")
+M.f.atdecc_aem_auth_token_token_length = ProtoField.uint16("avb.atdecc.aem.auth_token.token_length", "token_length", base.DEC, nil, nil, "authentication token length (octets)")
+M.f.atdecc_aem_auth_token_reserved = ProtoField.uint16("avb.atdecc.aem.auth_token.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_authenticate_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.authenticate_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_authenticate_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.authenticate_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_authenticate_command_token_length = ProtoField.uint16("avb.atdecc.aem.authenticate_command.token_length", "token_length", base.DEC, nil, nil, "authentication token length (octets)")
+M.f.atdecc_aem_authenticate_command_reserved = ProtoField.uint16("avb.atdecc.aem.authenticate_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_auth_nonce_command_controller_nonce = ProtoField.uint64("avb.atdecc.aem.auth_nonce_command.controller_nonce", "controller_nonce", base.HEX, nil, nil, "controller nonce")
+M.f.atdecc_aem_auth_nonce_response_controller_nonce = ProtoField.uint64("avb.atdecc.aem.auth_nonce_response.controller_nonce", "controller_nonce", base.HEX, nil, nil, "controller nonce")
+M.f.atdecc_aem_auth_nonce_response_target_nonce = ProtoField.uint64("avb.atdecc.aem.auth_nonce_response.target_nonce", "target_nonce", base.HEX, nil, nil, "target nonce")
+M.f.atdecc_aem_auth_add_key_nonce_controller_nonce = ProtoField.uint64("avb.atdecc.aem.auth_add_key_nonce.controller_nonce", "controller_nonce", base.HEX, nil, nil, "controller nonce")
+M.f.atdecc_aem_auth_add_key_nonce_target_nonce = ProtoField.uint64("avb.atdecc.aem.auth_add_key_nonce.target_nonce", "target_nonce", base.HEX, nil, nil, "target nonce")
+M.f.atdecc_aem_auth_add_key_nonce_key_id = ProtoField.uint64("avb.atdecc.aem.auth_add_key_nonce.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
+M.f.atdecc_aem_auth_add_key_nonce_key_type = ProtoField.uint8("avb.atdecc.aem.auth_add_key_nonce.key_type", "key_type", base.DEC, nil, nil, "key type (7.6.1.2)")
+M.f.atdecc_aem_auth_add_key_nonce_key_length = ProtoField.uint16("avb.atdecc.aem.auth_add_key_nonce.key_length", "key_length", base.DEC, nil, nil, "key length (octets)")
+M.f.atdecc_aem_auth_add_key_nonce_reserved = ProtoField.uint8("avb.atdecc.aem.auth_add_key_nonce.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_auth_add_key_nonce_response_controller_nonce = ProtoField.uint64("avb.atdecc.aem.auth_add_key_nonce_response.controller_nonce", "controller_nonce", base.HEX, nil, nil, "controller nonce")
+M.f.atdecc_aem_auth_add_key_nonce_response_target_nonce = ProtoField.uint64("avb.atdecc.aem.auth_add_key_nonce_response.target_nonce", "target_nonce", base.HEX, nil, nil, "target nonce")
+M.f.atdecc_aem_auth_add_key_nonce_response_key_id = ProtoField.uint64("avb.atdecc.aem.auth_add_key_nonce_response.key_id", "key_id", base.HEX, nil, nil, "key_id (EUI-64 of the key)")
+M.f.atdecc_aem_sampling_rate_range_descriptor_type = ProtoField.uint16("avb.atdecc.aem.sampling_rate_range.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_sampling_rate_range_descriptor_index = ProtoField.uint16("avb.atdecc.aem.sampling_rate_range.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_sampling_rate_range_minimum_pull = ProtoField.uint8("avb.atdecc.aem.sampling_rate_range.minimum_pull", "minimum_pull", base.DEC, nil, 0xE0000000, "minimum pull")
+M.f.atdecc_aem_sampling_rate_range_minimum_base_frequency = ProtoField.uint32("avb.atdecc.aem.sampling_rate_range.minimum_base_frequency", "minimum_base_frequency", base.DEC, nil, 0x1FFFFFFF, "minimum base_frequency (Hz)")
+M.f.atdecc_aem_sampling_rate_range_maximum_pull = ProtoField.uint8("avb.atdecc.aem.sampling_rate_range.maximum_pull", "maximum_pull", base.DEC, nil, 0xE0000000, "maximum pull")
+M.f.atdecc_aem_sampling_rate_range_maximum_base_frequency = ProtoField.uint32("avb.atdecc.aem.sampling_rate_range.maximum_base_frequency", "maximum_base_frequency", base.DEC, nil, 0x1FFFFFFF, "maximum base_frequency (Hz)")
+M.f.atdecc_aem_set_ptp_instance_info_descriptor_type = ProtoField.uint16("avb.atdecc.aem.set_ptp_instance_info.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_set_ptp_instance_info_descriptor_index = ProtoField.uint16("avb.atdecc.aem.set_ptp_instance_info.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_set_ptp_instance_info_reserved1 = ProtoField.uint16("avb.atdecc.aem.set_ptp_instance_info.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_set_ptp_instance_info_flags_ie = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.ie", "flags.ie", 16, nil, 0x8000, "IE: ie contains a value to be set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_ee = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.ee", "flags.ee", 16, nil, 0x4000, "EE: ee contains a value to be set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_so = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.so", "flags.so", 16, nil, 0x2000, "SO: so contains a value to be set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_priority1 = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.priority1", "flags.priority1", 16, nil, 0x80, "PRIORITY1 is being set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_priority2 = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.priority2", "flags.priority2", 16, nil, 0x40, "PRIORITY2 is being set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_domain_number = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.domain_number", "flags.domain_number", 16, nil, 0x20, "DOMAIN_NUMBER is being set")
+M.f.atdecc_aem_set_ptp_instance_info_priority1 = ProtoField.uint8("avb.atdecc.aem.set_ptp_instance_info.priority1", "priority1", base.DEC, nil, nil, "defaultDS.priority1")
+M.f.atdecc_aem_set_ptp_instance_info_priority2 = ProtoField.uint8("avb.atdecc.aem.set_ptp_instance_info.priority2", "priority2", base.DEC, nil, nil, "defaultDS.priority2")
+M.f.atdecc_aem_set_ptp_instance_info_domain_number = ProtoField.uint8("avb.atdecc.aem.set_ptp_instance_info.domain_number", "domain_number", base.DEC, nil, nil, "defaultDS.domainNumber")
+M.f.atdecc_aem_set_ptp_instance_info_so = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.so", "so", 8, nil, 0x4, "defaultDS.slaveOnly")
+M.f.atdecc_aem_set_ptp_instance_info_ee = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.ee", "ee", 8, nil, 0x2, "defaultDS.externalPortConfigurationEnabled")
+M.f.atdecc_aem_set_ptp_instance_info_ie = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.ie", "ie", 8, nil, 0x1, "defaultDS.instanceEnabled")
+M.f.atdecc_aem_ptp_instance_info_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_instance_info_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_instance_info_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_info_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_instance_info_response_clock_class = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.clock_class", "clock_class", base.DEC, nil, nil, "defaultDS.clockQuality.clockClass")
+M.f.atdecc_aem_ptp_instance_info_response_clock_accuracy = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.clock_accuracy", "clock_accuracy", base.DEC, nil, nil, "defaultDS.clockQuality.clockAccuracy")
+M.f.atdecc_aem_ptp_instance_info_response_offset_scaled_log_variance = ProtoField.uint16("avb.atdecc.aem.ptp_instance_info_response.offset_scaled_log_variance", "offset_scaled_log_variance", base.DEC, nil, nil, "defaultDS.clockQuality.offsetScaledLogVariance")
+M.f.atdecc_aem_ptp_instance_info_response_priority1 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.priority1", "priority1", base.DEC, nil, nil, "defaultDS.priority1")
+M.f.atdecc_aem_ptp_instance_info_response_priority2 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.priority2", "priority2", base.DEC, nil, nil, "defaultDS.priority2")
+M.f.atdecc_aem_ptp_instance_info_response_domain_number = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.domain_number", "domain_number", base.DEC, nil, nil, "defaultDS.domainNumber")
+M.f.atdecc_aem_ptp_instance_info_response_time_source = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.time_source", "time_source", base.DEC, nil, nil, "defaultDS.timeSource")
+M.f.atdecc_aem_ptp_instance_info_response_current_utc_offset = ProtoField.int16("avb.atdecc.aem.ptp_instance_info_response.current_utc_offset", "current_utc_offset", base.DEC, nil, nil, "defaultDS.currentUTCOffset")
+M.f.atdecc_aem_ptp_instance_info_response_cv = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.cv", "cv", 16, nil, 0x100, "defaultDS.currentUTCOffsetValid")
+M.f.atdecc_aem_ptp_instance_info_response_l59 = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.l59", "l59", 16, nil, 0x80, "defaultDS.leap59")
+M.f.atdecc_aem_ptp_instance_info_response_l61 = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.l61", "l61", 16, nil, 0x40, "defaultDS.leap61")
+M.f.atdecc_aem_ptp_instance_info_response_tt = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.tt", "tt", 16, nil, 0x20, "defaultDS.timeTraceable")
+M.f.atdecc_aem_ptp_instance_info_response_ft = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.ft", "ft", 16, nil, 0x10, "defaultDS.frequencyTraceable")
+M.f.atdecc_aem_ptp_instance_info_response_pt = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.pt", "pt", 16, nil, 0x8, "defaultDS.ptpTimescale")
+M.f.atdecc_aem_ptp_instance_info_response_so = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.so", "so", 16, nil, 0x4, "defaultDS.slaveOnly")
+M.f.atdecc_aem_ptp_instance_info_response_ee = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.ee", "ee", 16, nil, 0x2, "defaultDS.externalPortConfigurationEnabled")
+M.f.atdecc_aem_ptp_instance_info_response_ie = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.ie", "ie", 16, nil, 0x1, "defaultDS.instanceEnabled")
+M.f.atdecc_aem_ptp_instance_info_response_gm_clock_identity = ProtoField.uint64("avb.atdecc.aem.ptp_instance_info_response.gm_clock_identity", "gm_clock_identity", base.HEX, nil, nil, "parentDS.grandmasterIdentity")
+M.f.atdecc_aem_ptp_instance_info_response_gm_clock_class = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.gm_clock_class", "gm_clock_class", base.DEC, nil, nil, "grandmaster clockClass")
+M.f.atdecc_aem_ptp_instance_info_response_gm_clock_accuracy = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.gm_clock_accuracy", "gm_clock_accuracy", base.DEC, nil, nil, "grandmaster clockAccuracy")
+M.f.atdecc_aem_ptp_instance_info_response_gm_offset_scaled_log_variance = ProtoField.uint16("avb.atdecc.aem.ptp_instance_info_response.gm_offset_scaled_log_variance", "gm_offset_scaled_log_variance", base.DEC, nil, nil, "grandmaster offsetScaledLogVariance")
+M.f.atdecc_aem_ptp_instance_info_response_gm_priority1 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.gm_priority1", "gm_priority1", base.DEC, nil, nil, "grandmaster priority1")
+M.f.atdecc_aem_ptp_instance_info_response_gm_priority2 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.gm_priority2", "gm_priority2", base.DEC, nil, nil, "grandmaster priority2")
+M.f.atdecc_aem_ptp_instance_info_response_gm_time_source = ProtoField.uint8("avb.atdecc.aem.ptp_instance_info_response.gm_time_source", "gm_time_source", base.DEC, nil, nil, "timePropertiesDS.timeSource")
+M.f.atdecc_aem_ptp_instance_info_response_gm_cv = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.gm_cv", "gm_cv", 8, nil, 0x20, "timePropertiesDS.currentUTCOffsetValid")
+M.f.atdecc_aem_ptp_instance_info_response_gm_l59 = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.gm_l59", "gm_l59", 8, nil, 0x10, "timePropertiesDS.leap59")
+M.f.atdecc_aem_ptp_instance_info_response_gm_l61 = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.gm_l61", "gm_l61", 8, nil, 0x8, "timePropertiesDS.leap61")
+M.f.atdecc_aem_ptp_instance_info_response_gm_tt = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.gm_tt", "gm_tt", 8, nil, 0x4, "timePropertiesDS.timeTraceable")
+M.f.atdecc_aem_ptp_instance_info_response_gm_ft = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.gm_ft", "gm_ft", 8, nil, 0x2, "timePropertiesDS.frequencyTraceable")
+M.f.atdecc_aem_ptp_instance_info_response_gm_pt = ProtoField.bool("avb.atdecc.aem.ptp_instance_info_response.gm_pt", "gm_pt", 8, nil, 0x1, "timePropertiesDS.ptpTimescale")
+M.f.atdecc_aem_ptp_instance_info_response_gm_current_utc_offset = ProtoField.int16("avb.atdecc.aem.ptp_instance_info_response.gm_current_utc_offset", "gm_current_utc_offset", base.DEC, nil, nil, "timePropertiesDS.currentUTCOffset")
+M.f.atdecc_aem_ptp_instance_info_response_reserved3 = ProtoField.uint16("avb.atdecc.aem.ptp_instance_info_response.reserved3", "reserved3", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_instance_extended_info_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_instance_extended_info_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_instance_extended_info_response_clock_class = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.clock_class", "clock_class", base.DEC, nil, nil, "defaultDS.clockQuality.clockClass")
+M.f.atdecc_aem_ptp_instance_extended_info_response_clock_accuracy = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.clock_accuracy", "clock_accuracy", base.DEC, nil, nil, "defaultDS.clockQuality.clockAccuracy")
+M.f.atdecc_aem_ptp_instance_extended_info_response_offset_scaled_log_variance = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.offset_scaled_log_variance", "offset_scaled_log_variance", base.DEC, nil, nil, "defaultDS.clockQuality.offsetScaledLogVariance")
+M.f.atdecc_aem_ptp_instance_extended_info_response_priority1 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.priority1", "priority1", base.DEC, nil, nil, "defaultDS.priority1")
+M.f.atdecc_aem_ptp_instance_extended_info_response_priority2 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.priority2", "priority2", base.DEC, nil, nil, "defaultDS.priority2")
+M.f.atdecc_aem_ptp_instance_extended_info_response_domain_number = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.domain_number", "domain_number", base.DEC, nil, nil, "defaultDS.domainNumber")
+M.f.atdecc_aem_ptp_instance_extended_info_response_time_source = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.time_source", "time_source", base.DEC, nil, nil, "defaultDS.timeSource")
+M.f.atdecc_aem_ptp_instance_extended_info_response_current_utc_offset = ProtoField.int16("avb.atdecc.aem.ptp_instance_extended_info_response.current_utc_offset", "current_utc_offset", base.DEC, nil, nil, "defaultDS.currentUTCOffset")
+M.f.atdecc_aem_ptp_instance_extended_info_response_cv = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.cv", "cv", 16, nil, 0x100, "defaultDS.currentUTCOffsetValid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_l59 = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.l59", "l59", 16, nil, 0x80, "defaultDS.leap59")
+M.f.atdecc_aem_ptp_instance_extended_info_response_l61 = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.l61", "l61", 16, nil, 0x40, "defaultDS.leap61")
+M.f.atdecc_aem_ptp_instance_extended_info_response_tt = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.tt", "tt", 16, nil, 0x20, "defaultDS.timeTraceable")
+M.f.atdecc_aem_ptp_instance_extended_info_response_ft = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.ft", "ft", 16, nil, 0x10, "defaultDS.frequencyTraceable")
+M.f.atdecc_aem_ptp_instance_extended_info_response_pt = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.pt", "pt", 16, nil, 0x8, "defaultDS.ptpTimescale")
+M.f.atdecc_aem_ptp_instance_extended_info_response_so = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.so", "so", 16, nil, 0x4, "defaultDS.slaveOnly")
+M.f.atdecc_aem_ptp_instance_extended_info_response_ee = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.ee", "ee", 16, nil, 0x2, "defaultDS.externalPortConfigurationEnabled")
+M.f.atdecc_aem_ptp_instance_extended_info_response_ie = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.ie", "ie", 16, nil, 0x1, "defaultDS.instanceEnabled")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_identity = ProtoField.uint64("avb.atdecc.aem.ptp_instance_extended_info_response.gm_clock_identity", "gm_clock_identity", base.HEX, nil, nil, "parentDS.grandmasterIdentity")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_class = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.gm_clock_class", "gm_clock_class", base.DEC, nil, nil, "grandmaster clockClass")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_accuracy = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.gm_clock_accuracy", "gm_clock_accuracy", base.DEC, nil, nil, "grandmaster clockAccuracy")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_offset_scaled_log_variance = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.gm_offset_scaled_log_variance", "gm_offset_scaled_log_variance", base.DEC, nil, nil, "grandmaster offsetScaledLogVariance")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_priority1 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.gm_priority1", "gm_priority1", base.DEC, nil, nil, "grandmaster priority1")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_priority2 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.gm_priority2", "gm_priority2", base.DEC, nil, nil, "grandmaster priority2")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_time_source = ProtoField.uint8("avb.atdecc.aem.ptp_instance_extended_info_response.gm_time_source", "gm_time_source", base.DEC, nil, nil, "timePropertiesDS.timeSource")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_cv = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.gm_cv", "gm_cv", 8, nil, 0x20, "timePropertiesDS.currentUTCOffsetValid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_l59 = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.gm_l59", "gm_l59", 8, nil, 0x10, "timePropertiesDS.leap59")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_l61 = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.gm_l61", "gm_l61", 8, nil, 0x8, "timePropertiesDS.leap61")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_tt = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.gm_tt", "gm_tt", 8, nil, 0x4, "timePropertiesDS.timeTraceable")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_ft = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.gm_ft", "gm_ft", 8, nil, 0x2, "timePropertiesDS.frequencyTraceable")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_pt = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.gm_pt", "gm_pt", 8, nil, 0x1, "timePropertiesDS.ptpTimescale")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_current_utc_offset = ProtoField.int16("avb.atdecc.aem.ptp_instance_extended_info_response.gm_current_utc_offset", "gm_current_utc_offset", base.DEC, nil, nil, "timePropertiesDS.currentUTCOffset")
+M.f.atdecc_aem_ptp_instance_extended_info_response_reserved3 = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.reserved3", "reserved3", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_instance_extended_info_response_parent_clock_identity = ProtoField.uint64("avb.atdecc.aem.ptp_instance_extended_info_response.parent_clock_identity", "parent_clock_identity", base.HEX, nil, nil, "parentDS.parentPortIdentity.clockIdentity")
+M.f.atdecc_aem_ptp_instance_extended_info_response_parent_port_number = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.parent_port_number", "parent_port_number", base.DEC, nil, nil, "parentDS.parentPortIdentity.portNumber")
+M.f.atdecc_aem_ptp_instance_extended_info_response_steps_removed = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.steps_removed", "steps_removed", base.DEC, nil, nil, "currentDS.stepsRemoved")
+M.f.atdecc_aem_ptp_instance_extended_info_response_cumulative_rate_ratio = ProtoField.int32("avb.atdecc.aem.ptp_instance_extended_info_response.cumulative_rate_ratio", "cumulative_rate_ratio", base.DEC, nil, nil, "parentDS.cumulativeRateRatio")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_offset_from_master = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.offset_from_master", "valid.offset_from_master", 16, nil, 0x8000, "offset_from_master is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_phase_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.last_gm_phase_change", "valid.last_gm_phase_change", 16, nil, 0x4000, "last_gm_phase_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_freq_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.last_gm_freq_change", "valid.last_gm_freq_change", 16, nil, 0x2000, "last_gm_freq_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_gm_change_count = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.gm_change_count", "valid.gm_change_count", 16, nil, 0x1000, "gm_change_count is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_change", "valid.time_of_last_gm_change", 16, nil, 0x800, "time_of_last_gm_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_phase_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_phase_change", "valid.time_of_last_gm_phase_change", 16, nil, 0x400, "time_of_last_gm_phase_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_freq_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_freq_change", "valid.time_of_last_gm_freq_change", 16, nil, 0x200, "time_of_last_gm_freq_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_timebase_indicator = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.gm_timebase_indicator", "gm_timebase_indicator", base.DEC, nil, nil, "currentDS.gmTimebaseIndicator")
+M.f.atdecc_aem_ptp_instance_extended_info_response_offset_from_master = ProtoField.bytes("avb.atdecc.aem.ptp_instance_extended_info_response.offset_from_master", "offset_from_master", base.NONE, "currentDS.offsetFromMaster (ScaledNs)")
+M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_phase_change = ProtoField.bytes("avb.atdecc.aem.ptp_instance_extended_info_response.last_gm_phase_change", "last_gm_phase_change", base.NONE, "currentDS.lastGmPhaseChange (ScaledNs)")
+M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_freq_change = ProtoField.float("avb.atdecc.aem.ptp_instance_extended_info_response.last_gm_freq_change", "last_gm_freq_change", nil, "currentDS.lastGmFreqChange")
+M.f.atdecc_aem_ptp_instance_extended_info_response_gm_change_count = ProtoField.uint32("avb.atdecc.aem.ptp_instance_extended_info_response.gm_change_count", "gm_change_count", base.DEC, nil, nil, "currentDS.gmChangeCount")
+M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_change = ProtoField.uint32("avb.atdecc.aem.ptp_instance_extended_info_response.time_of_last_gm_change", "time_of_last_gm_change", base.DEC, nil, nil, "currentDS.timeOfLastGmChangeEvent")
+M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_phase_change = ProtoField.uint32("avb.atdecc.aem.ptp_instance_extended_info_response.time_of_last_gm_phase_change", "time_of_last_gm_phase_change", base.DEC, nil, nil, "currentDS.timeOfLastGmPhaseChangeEvent")
+M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_freq_change = ProtoField.uint32("avb.atdecc.aem.ptp_instance_extended_info_response.time_of_last_gm_freq_change", "time_of_last_gm_freq_change", base.DEC, nil, nil, "currentDS.timeOfLastGmFreqChangeEvent")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_identity = ProtoField.uint64("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_clock_identity", "gm_clock_identity", base.HEX, nil, nil, "parentDS.grandmasterIdentity")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_class = ProtoField.uint8("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_clock_class", "gm_clock_class", base.DEC, nil, nil, "grandmaster clockClass")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_accuracy = ProtoField.uint8("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_clock_accuracy", "gm_clock_accuracy", base.DEC, nil, nil, "grandmaster clockAccuracy")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_offset_scaled_log_variance = ProtoField.uint16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_offset_scaled_log_variance", "gm_offset_scaled_log_variance", base.DEC, nil, nil, "grandmaster offsetScaledLogVariance")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_priority1 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_priority1", "gm_priority1", base.DEC, nil, nil, "grandmaster priority1")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_priority2 = ProtoField.uint8("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_priority2", "gm_priority2", base.DEC, nil, nil, "grandmaster priority2")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_time_source = ProtoField.uint8("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_time_source", "gm_time_source", base.DEC, nil, nil, "timePropertiesDS.timeSource")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_cv = ProtoField.bool("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_cv", "gm_cv", 8, nil, 0x20, "timePropertiesDS.currentUTCOffsetValid")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_l59 = ProtoField.bool("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_l59", "gm_l59", 8, nil, 0x10, "timePropertiesDS.leap59")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_l61 = ProtoField.bool("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_l61", "gm_l61", 8, nil, 0x8, "timePropertiesDS.leap61")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_tt = ProtoField.bool("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_tt", "gm_tt", 8, nil, 0x4, "timePropertiesDS.timeTraceable")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_ft = ProtoField.bool("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_ft", "gm_ft", 8, nil, 0x2, "timePropertiesDS.frequencyTraceable")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_pt = ProtoField.bool("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_pt", "gm_pt", 8, nil, 0x1, "timePropertiesDS.ptpTimescale")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_current_utc_offset = ProtoField.int16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.gm_current_utc_offset", "gm_current_utc_offset", base.DEC, nil, nil, "timePropertiesDS.currentUTCOffset")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_reserved3 = ProtoField.uint16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.reserved3", "reserved3", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_parent_clock_identity = ProtoField.uint64("avb.atdecc.aem.ptp_instance_grandmaster_info_response.parent_clock_identity", "parent_clock_identity", base.HEX, nil, nil, "parentDS.parentPortIdentity.clockIdentity")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_parent_port_number = ProtoField.uint16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.parent_port_number", "parent_port_number", base.DEC, nil, nil, "parentDS.parentPortIdentity.portNumber")
+M.f.atdecc_aem_ptp_instance_grandmaster_info_response_steps_removed = ProtoField.uint16("avb.atdecc.aem.ptp_instance_grandmaster_info_response.steps_removed", "steps_removed", base.DEC, nil, nil, "currentDS.stepsRemoved")
+M.f.atdecc_aem_ptp_path_count_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_path_count_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_path_count_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_path_count_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_path_count_response_reserved = ProtoField.uint16("avb.atdecc.aem.ptp_path_count_response.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_path_count_response_trace_count = ProtoField.uint16("avb.atdecc.aem.ptp_path_count_response.trace_count", "trace_count", base.DEC, nil, nil, "pathTraceDS.list entries")
+M.f.atdecc_aem_ptp_path_trace_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_path_trace_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_path_trace_command_start_index = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_command.start_index", "start_index", base.DEC, nil, nil, "first pathTraceDS.list entry")
+M.f.atdecc_aem_ptp_path_trace_command_reserved = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_path_trace_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_path_trace_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_path_trace_response_start_index = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_response.start_index", "start_index", base.DEC, nil, nil, "first pathTraceDS.list entry")
+M.f.atdecc_aem_ptp_path_trace_response_entry_count = ProtoField.uint16("avb.atdecc.aem.ptp_path_trace_response.entry_count", "entry_count", base.DEC, nil, nil, "entries in path_trace")
+M.f.atdecc_aem_ptp_perf_mon_count_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_perf_mon_count_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_perf_mon_count_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_perf_mon_count_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_perf_mon_count_response_max_count_of_24h = ProtoField.uint16("avb.atdecc.aem.ptp_perf_mon_count_response.max_count_of_24h", "max_count_of_24h", base.DEC, nil, nil, "24-hour records the list can hold")
+M.f.atdecc_aem_ptp_perf_mon_count_response_count_of_24h = ProtoField.uint16("avb.atdecc.aem.ptp_perf_mon_count_response.count_of_24h", "count_of_24h", base.DEC, nil, nil, "valid 24-hour records")
+M.f.atdecc_aem_ptp_perf_mon_count_response_max_count_of_15m = ProtoField.uint16("avb.atdecc.aem.ptp_perf_mon_count_response.max_count_of_15m", "max_count_of_15m", base.DEC, nil, nil, "15-minute records the list can hold")
+M.f.atdecc_aem_ptp_perf_mon_count_response_count_of_15m = ProtoField.uint16("avb.atdecc.aem.ptp_perf_mon_count_response.count_of_15m", "count_of_15m", base.DEC, nil, nil, "valid 15-minute records")
+M.f.atdecc_aem_ptp_record_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_record_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_record_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_record_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_record_command_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_record_command.record_index", "record_index", base.DEC, nil, nil, "record index")
+M.f.atdecc_aem_ptp_record_command_reserved = ProtoField.uint16("avb.atdecc.aem.ptp_record_command.reserved", "reserved", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_instance_perf_mon_record_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_perf_mon_record_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_perf_mon_record_response.record_index", "record_index", base.DEC, nil, nil, "record index")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x8000, "MEASUREMENT_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.period_complete", "period_complete", 16, nil, 0x4000, "PERIOD_COMPLETE")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_master_slave_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.master_slave_delay_valid", "master_slave_delay_valid", 16, nil, 0x2000, "MASTER_SLAVE_DELAY_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_slave_master_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.slave_master_delay_valid", "slave_master_delay_valid", 16, nil, 0x1000, "SLAVE_MASTER_DELAY_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_mean_path_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.mean_path_delay_valid", "mean_path_delay_valid", 16, nil, 0x800, "MEAN_PATH_DELAY_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_offset_from_master_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.offset_from_master_valid", "offset_from_master_valid", 16, nil, 0x400, "OFFSET_FROM_MASTER_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_timestamp = ProtoField.uint64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.timestamp", "timestamp", base.HEX, nil, nil, "record start (ns, entity epoch)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_master_slave_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.average_master_slave_delay", "average_master_slave_delay", base.DEC, nil, nil, "average master slave delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_master_slave_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.minimum_master_slave_delay", "minimum_master_slave_delay", base.DEC, nil, nil, "minimum master slave delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_master_slave_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.maximum_master_slave_delay", "maximum_master_slave_delay", base.DEC, nil, nil, "maximum master slave delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_master_slave_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.std_dev_master_slave_delay", "std_dev_master_slave_delay", base.DEC, nil, nil, "std_dev master slave delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_slave_master_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.average_slave_master_delay", "average_slave_master_delay", base.DEC, nil, nil, "average slave master delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_slave_master_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.minimum_slave_master_delay", "minimum_slave_master_delay", base.DEC, nil, nil, "minimum slave master delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_slave_master_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.maximum_slave_master_delay", "maximum_slave_master_delay", base.DEC, nil, nil, "maximum slave master delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_slave_master_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.std_dev_slave_master_delay", "std_dev_slave_master_delay", base.DEC, nil, nil, "std_dev slave master delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_mean_path_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.average_mean_path_delay", "average_mean_path_delay", base.DEC, nil, nil, "average mean path delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_mean_path_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.minimum_mean_path_delay", "minimum_mean_path_delay", base.DEC, nil, nil, "minimum mean path delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_mean_path_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.maximum_mean_path_delay", "maximum_mean_path_delay", base.DEC, nil, nil, "maximum mean path delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_mean_path_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.std_dev_mean_path_delay", "std_dev_mean_path_delay", base.DEC, nil, nil, "std_dev mean path delay (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_offset_from_master = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.average_offset_from_master", "average_offset_from_master", base.DEC, nil, nil, "average offset from master (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_offset_from_master = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.minimum_offset_from_master", "minimum_offset_from_master", base.DEC, nil, nil, "minimum offset from master (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_offset_from_master = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.maximum_offset_from_master", "maximum_offset_from_master", base.DEC, nil, nil, "maximum offset from master (TimeInterval)")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_offset_from_master = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.std_dev_offset_from_master", "std_dev_offset_from_master", base.DEC, nil, nil, "std_dev offset from master (TimeInterval)")
+M.f.atdecc_aem_ptp_port_intervals_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_intervals.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_port_intervals_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_intervals.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_port_intervals_reserved1 = ProtoField.uint16("avb.atdecc.aem.ptp_port_intervals.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_port_intervals_announce_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.announce_valid", "announce_valid", 16, nil, 0x8000, "ANNOUNCE_VALID")
+M.f.atdecc_aem_ptp_port_intervals_sync_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.sync_valid", "sync_valid", 16, nil, 0x4000, "SYNC_VALID")
+M.f.atdecc_aem_ptp_port_intervals_pdelay_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.pdelay_valid", "pdelay_valid", 16, nil, 0x2000, "PDELAY_VALID")
+M.f.atdecc_aem_ptp_port_intervals_capable_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.capable_valid", "capable_valid", 16, nil, 0x1000, "CAPABLE_VALID")
+M.f.atdecc_aem_ptp_port_intervals_log_announce_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_announce_interval", "log_announce_interval", base.DEC, nil, nil, "log2 announce interval")
+M.f.atdecc_aem_ptp_port_intervals_log_sync_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_sync_interval", "log_sync_interval", base.DEC, nil, nil, "log2 sync interval")
+M.f.atdecc_aem_ptp_port_intervals_log_pdelay_request_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_pdelay_request_interval", "log_pdelay_request_interval", base.DEC, nil, nil, "log2 pdelay request interval")
+M.f.atdecc_aem_ptp_port_intervals_log_gptp_capable_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_gptp_capable_interval", "log_gptp_capable_interval", base.DEC, nil, nil, "log2 gPTP capable message interval")
+M.f.atdecc_aem_set_ptp_port_overrides_descriptor_type = ProtoField.uint16("avb.atdecc.aem.set_ptp_port_overrides.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_set_ptp_port_overrides_descriptor_index = ProtoField.uint16("avb.atdecc.aem.set_ptp_port_overrides.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_announce_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.announce_interval", "flags.announce_interval", 16, nil, 0x8000, "ANNOUNCE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_sync_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.sync_interval", "flags.sync_interval", 16, nil, 0x4000, "SYNC_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_pdelay_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.pdelay_interval", "flags.pdelay_interval", 16, nil, 0x2000, "PDELAY_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.gptp_capable_interval", "flags.gptp_capable_interval", 16, nil, 0x1000, "GPTP_CAPABLE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_neighbor = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.compute_neighbor", "flags.compute_neighbor", 16, nil, 0x800, "COMPUTE_NEIGHBOR")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.compute_mean_delay", "flags.compute_mean_delay", 16, nil, 0x400, "COMPUTE_MEAN_DELAY")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.onestep_tx_oper", "flags.onestep_tx_oper", 16, nil, 0x200, "ONESTEP_TX_OPER")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_desired_state = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.desired_state", "flags.desired_state", 16, nil, 0x100, "DESIRED_STATE")
+M.f.atdecc_aem_set_ptp_port_overrides_use_announce_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_announce_interval", "use_announce_interval", 16, nil, 0x8000, "USE_ANNOUNCE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_sync_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_sync_interval", "use_sync_interval", 16, nil, 0x4000, "USE_SYNC_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_pdelay_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_pdelay_interval", "use_pdelay_interval", 16, nil, 0x2000, "USE_PDELAY_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_gptp_capable_interval", "use_gptp_capable_interval", 16, nil, 0x1000, "USE_GPTP_CAPABLE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_compute_neighbor = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_compute_neighbor", "use_compute_neighbor", 16, nil, 0x800, "USE_COMPUTE_NEIGHBOR")
+M.f.atdecc_aem_set_ptp_port_overrides_use_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_compute_mean_delay", "use_compute_mean_delay", 16, nil, 0x400, "USE_COMPUTE_MEAN_DELAY")
+M.f.atdecc_aem_set_ptp_port_overrides_use_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_onestep_tx_oper", "use_onestep_tx_oper", 16, nil, 0x200, "USE_ONESTEP_TX_OPER")
+M.f.atdecc_aem_set_ptp_port_overrides_compute_neighbor_rate = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.compute_neighbor_rate", "compute_neighbor_rate", 16, nil, 0x80, "COMPUTE_NEIGHBOR_RATE")
+M.f.atdecc_aem_set_ptp_port_overrides_compute_mean_link_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.compute_mean_link_delay", "compute_mean_link_delay", 16, nil, 0x40, "COMPUTE_MEAN_LINK_DELAY")
+M.f.atdecc_aem_set_ptp_port_overrides_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.onestep_tx_oper", "onestep_tx_oper", 16, nil, 0x20, "ONESTEP_TX_OPER")
+M.f.atdecc_aem_set_ptp_port_overrides_log_announce_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_announce_interval", "log_announce_interval", base.DEC, nil, nil, "log2 announce interval")
+M.f.atdecc_aem_set_ptp_port_overrides_log_sync_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_sync_interval", "log_sync_interval", base.DEC, nil, nil, "log2 sync interval")
+M.f.atdecc_aem_set_ptp_port_overrides_log_pdelay_request_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_pdelay_request_interval", "log_pdelay_request_interval", base.DEC, nil, nil, "log2 pdelay request interval")
+M.f.atdecc_aem_set_ptp_port_overrides_log_gptp_capable_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_gptp_capable_interval", "log_gptp_capable_interval", base.DEC, nil, nil, "log2 gPTP capable message interval")
+M.f.atdecc_aem_set_ptp_port_overrides_desired_state = ProtoField.uint8("avb.atdecc.aem.set_ptp_port_overrides.desired_state", "desired_state", base.DEC, nil, nil, "externalPortConfigurationPortDS.desiredState")
+M.f.atdecc_aem_set_ptp_port_overrides_reserved = ProtoField.bytes("avb.atdecc.aem.set_ptp_port_overrides.reserved", "reserved", base.NONE, "reserved")
+M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_overrides_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_overrides_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_get_ptp_port_overrides_response_reserved1 = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_overrides_response.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_announce_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_announce_interval", "use_announce_interval", 16, nil, 0x8000, "USE_ANNOUNCE_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_sync_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_sync_interval", "use_sync_interval", 16, nil, 0x4000, "USE_SYNC_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_pdelay_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_pdelay_interval", "use_pdelay_interval", 16, nil, 0x2000, "USE_PDELAY_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_gptp_capable_interval", "use_gptp_capable_interval", 16, nil, 0x1000, "USE_GPTP_CAPABLE_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_neighbor = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_compute_neighbor", "use_compute_neighbor", 16, nil, 0x800, "USE_COMPUTE_NEIGHBOR")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_compute_mean_delay", "use_compute_mean_delay", 16, nil, 0x400, "USE_COMPUTE_MEAN_DELAY")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_onestep_tx_oper", "use_onestep_tx_oper", 16, nil, 0x200, "USE_ONESTEP_TX_OPER")
+M.f.atdecc_aem_get_ptp_port_overrides_response_compute_neighbor_rate = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.compute_neighbor_rate", "compute_neighbor_rate", 16, nil, 0x80, "COMPUTE_NEIGHBOR_RATE")
+M.f.atdecc_aem_get_ptp_port_overrides_response_compute_mean_link_delay = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.compute_mean_link_delay", "compute_mean_link_delay", 16, nil, 0x40, "COMPUTE_MEAN_LINK_DELAY")
+M.f.atdecc_aem_get_ptp_port_overrides_response_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.onestep_tx_oper", "onestep_tx_oper", 16, nil, 0x20, "ONESTEP_TX_OPER")
+M.f.atdecc_aem_get_ptp_port_overrides_response_log_announce_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_announce_interval", "log_announce_interval", base.DEC, nil, nil, "log2 announce interval")
+M.f.atdecc_aem_get_ptp_port_overrides_response_log_sync_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_sync_interval", "log_sync_interval", base.DEC, nil, nil, "log2 sync interval")
+M.f.atdecc_aem_get_ptp_port_overrides_response_log_pdelay_request_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_pdelay_request_interval", "log_pdelay_request_interval", base.DEC, nil, nil, "log2 pdelay request interval")
+M.f.atdecc_aem_get_ptp_port_overrides_response_log_gptp_capable_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_gptp_capable_interval", "log_gptp_capable_interval", base.DEC, nil, nil, "log2 gPTP capable message interval")
+M.f.atdecc_aem_get_ptp_port_overrides_response_desired_state = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_overrides_response.desired_state", "desired_state", base.DEC, nil, nil, "externalPortConfigurationPortDS.desiredState")
+M.f.atdecc_aem_get_ptp_port_overrides_response_reserved2 = ProtoField.bytes("avb.atdecc.aem.get_ptp_port_overrides_response.reserved2", "reserved2", base.NONE, "reserved")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.record_index", "record_index", base.DEC, nil, nil, "record index")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x8000, "MEASUREMENT_VALID")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.period_complete", "period_complete", 16, nil, 0x4000, "PERIOD_COMPLETE")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_timestamp = ProtoField.uint64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.timestamp", "timestamp", base.HEX, nil, nil, "record start (ns, entity epoch)")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_average_mean_link_delay = ProtoField.int64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.average_mean_link_delay", "average_mean_link_delay", base.DEC, nil, nil, "average mean link delay (TimeInterval)")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_minimum_mean_link_delay = ProtoField.int64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.minimum_mean_link_delay", "minimum_mean_link_delay", base.DEC, nil, nil, "minimum mean link delay (TimeInterval)")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_maximum_mean_link_delay = ProtoField.int64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.maximum_mean_link_delay", "maximum_mean_link_delay", base.DEC, nil, nil, "maximum mean link delay (TimeInterval)")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_std_dev_mean_link_delay = ProtoField.int64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.std_dev_mean_link_delay", "std_dev_mean_link_delay", base.DEC, nil, nil, "std_dev mean link delay (TimeInterval)")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_perf_mon_record_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_perf_mon_record_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_perf_mon_record_response.record_index", "record_index", base.DEC, nil, nil, "record index")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_perf_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x8000, "MEASUREMENT_VALID")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_port_perf_mon_record_response.period_complete", "period_complete", 16, nil, 0x4000, "PERIOD_COMPLETE")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_timestamp = ProtoField.uint64("avb.atdecc.aem.ptp_port_perf_mon_record_response.timestamp", "timestamp", base.HEX, nil, nil, "record start (ns, entity epoch)")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.announce_tx", "announce_tx", base.DEC, nil, nil, "announce tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.announce_rx", "announce_rx", base.DEC, nil, nil, "announce rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_foreign_master_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.announce_foreign_master_rx", "announce_foreign_master_rx", base.DEC, nil, nil, "announce foreign master rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_sync_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.sync_tx", "sync_tx", base.DEC, nil, nil, "sync tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_sync_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.sync_rx", "sync_rx", base.DEC, nil, nil, "sync rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_followup_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.followup_tx", "followup_tx", base.DEC, nil, nil, "followup tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_followup_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.followup_rx", "followup_rx", base.DEC, nil, nil, "followup rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_req_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.delay_req_tx", "delay_req_tx", base.DEC, nil, nil, "delay req tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_req_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.delay_req_rx", "delay_req_rx", base.DEC, nil, nil, "delay req rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_resp_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.delay_resp_tx", "delay_resp_tx", base.DEC, nil, nil, "delay resp tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_resp_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.delay_resp_rx", "delay_resp_rx", base.DEC, nil, nil, "delay resp rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_req_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.pdelay_req_tx", "pdelay_req_tx", base.DEC, nil, nil, "pdelay req tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_req_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.pdelay_req_rx", "pdelay_req_rx", base.DEC, nil, nil, "pdelay req rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.pdelay_resp_tx", "pdelay_resp_tx", base.DEC, nil, nil, "pdelay resp tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.pdelay_resp_rx", "pdelay_resp_rx", base.DEC, nil, nil, "pdelay resp rx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_followup_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.pdelay_resp_followup_tx", "pdelay_resp_followup_tx", base.DEC, nil, nil, "pdelay resp followup tx count")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_followup_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.pdelay_resp_followup_rx", "pdelay_resp_followup_rx", base.DEC, nil, nil, "pdelay resp followup rx count")
+M.f.atdecc_aem_path_latency_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.path_latency_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
+M.f.atdecc_aem_path_latency_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.path_latency_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
+M.f.atdecc_aem_path_latency_response_path_latency = ProtoField.uint32("avb.atdecc.aem.path_latency_response.path_latency", "path_latency", base.DEC, nil, nil, "path latency (ns)")
 M.f.atdecc_desc_entity_descriptor_type = ProtoField.uint16("avb.atdecc.desc.entity.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_desc_entity_descriptor_index = ProtoField.uint16("avb.atdecc.desc.entity.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_desc_entity_entity_id = ProtoField.uint64("avb.atdecc.desc.entity.entity_id", "entity_id", base.HEX, nil, nil, "entity_id")
@@ -1337,9 +1656,8 @@ M.f.atdecc_desc_video_mapping_mapping_program_stream = ProtoField.uint16("avb.at
 M.f.atdecc_desc_video_mapping_mapping_elementary_stream = ProtoField.uint16("avb.atdecc.desc.video_mapping.mapping_elementary_stream", "mapping_elementary_stream", base.DEC, nil, nil, "mapping_elementary_stream")
 M.f.atdecc_desc_video_mapping_mapping_cluster_offset = ProtoField.uint16("avb.atdecc.desc.video_mapping.mapping_cluster_offset", "mapping_cluster_offset", base.DEC, nil, nil, "mapping_cluster_offset")
 M.f.atdecc_desc_sensor_mapping_mapping_stream_index = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_stream_index", "mapping_stream_index", base.DEC, nil, nil, "mapping_stream_index")
-M.f.atdecc_desc_sensor_mapping_mapping_stream_channel = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_stream_channel", "mapping_stream_channel", base.DEC, nil, nil, "mapping_stream_channel")
+M.f.atdecc_desc_sensor_mapping_mapping_stream_signal = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_stream_signal", "mapping_stream_signal", base.DEC, nil, nil, "mapping_stream_signal")
 M.f.atdecc_desc_sensor_mapping_mapping_cluster_offset = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_cluster_offset", "mapping_cluster_offset", base.DEC, nil, nil, "mapping_cluster_offset")
-M.f.atdecc_desc_sensor_mapping_mapping_cluster_channel = ProtoField.uint16("avb.atdecc.desc.sensor_mapping.mapping_cluster_channel", "mapping_cluster_channel", base.DEC, nil, nil, "mapping_cluster_channel")
 M.f.atdecc_desc_signal_signal_type = ProtoField.uint16("avb.atdecc.desc.signal.signal_type", "signal_type", base.HEX, M.values_descriptor_type, nil, "signal descriptor_type")
 M.f.atdecc_desc_signal_signal_index = ProtoField.uint16("avb.atdecc.desc.signal.signal_index", "signal_index", base.DEC, nil, nil, "signal descriptor_index")
 M.f.atdecc_desc_ptp_instance_index_index = ProtoField.uint16("avb.atdecc.desc.ptp_instance_index.index", "index", base.DEC, nil, nil, "PTP_INSTANCE descriptor index")
@@ -1352,6 +1670,8 @@ M.f.atdecc_desc_size_height = ProtoField.uint16("avb.atdecc.desc.size.height", "
 M.f.atdecc_desc_color_space_value = ProtoField.uint16("avb.atdecc.desc.color_space.value", "value", base.HEX, nil, nil, "color_space")
 M.f.atdecc_desc_sensor_format_value = ProtoField.uint64("avb.atdecc.desc.sensor_format.value", "value", base.HEX, nil, nil, "sensor_format")
 M.f.atdecc_desc_as_path_entry_clock_identity = ProtoField.uint64("avb.atdecc.desc.as_path_entry.clock_identity", "clock_identity", base.HEX, nil, nil, "clock identity")
+M.f.atdecc_desc_clock_identity_value = ProtoField.uint64("avb.atdecc.desc.clock_identity.value", "value", base.HEX, nil, nil, "clock identity")
+M.f.atdecc_desc_key_eui_value = ProtoField.uint64("avb.atdecc.desc.key_eui.value", "value", base.HEX, nil, nil, "key EUI-64")
 M.f.atdecc_control_value_i8 = ProtoField.int8("avb.atdecc.control.value_i8", "value_i8", base.DEC, nil, nil, "INT8 value")
 M.f.atdecc_control_value_u8 = ProtoField.uint8("avb.atdecc.control.value_u8", "value_u8", base.DEC, nil, nil, "UINT8 value")
 M.f.atdecc_control_value_i16 = ProtoField.int16("avb.atdecc.control.value_i16", "value_i16", base.DEC, nil, nil, "INT16 value")
@@ -1577,6 +1897,15 @@ M.fields = {
     M.f.atdecc_mvu_mcr_flags_media_clock_domain,
     M.f.atdecc_avc_length,
     M.f.atdecc_avc_command_response,
+    M.f.atdecc_hdcp_apm_length,
+    M.f.atdecc_hdcp_apm_mf,
+    M.f.atdecc_hdcp_apm_fragment_offset,
+    M.f.atdecc_hdcp_apm_message_data,
+    M.f.atdecc_aem_key,
+    M.f.atdecc_aem_authentication_token,
+    M.f.atdecc_aem_dynamic_info_info_command_specific_data_length,
+    M.f.atdecc_aem_dynamic_info_info_status,
+    M.f.atdecc_aem_dynamic_info_info_command_type,
     M.f.atdecc_aem_acquire_entity_flags,
     M.f.atdecc_aem_acquire_entity_owner_entity_id,
     M.f.atdecc_aem_acquire_entity_descriptor_type,
@@ -1769,12 +2098,12 @@ M.fields = {
     M.f.atdecc_aem_get_video_map_command_descriptor_index,
     M.f.atdecc_aem_get_video_map_command_map_index,
     M.f.atdecc_aem_get_video_map_command_reserved,
-    M.f.atdecc_aem_video_map_response_descriptor_type,
-    M.f.atdecc_aem_video_map_response_descriptor_index,
-    M.f.atdecc_aem_video_map_response_map_index,
-    M.f.atdecc_aem_video_map_response_number_of_maps,
-    M.f.atdecc_aem_video_map_response_number_of_mappings,
-    M.f.atdecc_aem_video_map_response_reserved,
+    M.f.atdecc_aem_map_response_descriptor_type,
+    M.f.atdecc_aem_map_response_descriptor_index,
+    M.f.atdecc_aem_map_response_map_index,
+    M.f.atdecc_aem_map_response_number_of_maps,
+    M.f.atdecc_aem_map_response_number_of_mappings,
+    M.f.atdecc_aem_map_response_reserved,
     M.f.atdecc_aem_video_mappings_command_descriptor_type,
     M.f.atdecc_aem_video_mappings_command_descriptor_index,
     M.f.atdecc_aem_video_mappings_command_number_of_mappings,
@@ -1783,24 +2112,18 @@ M.fields = {
     M.f.atdecc_aem_get_sensor_map_command_descriptor_index,
     M.f.atdecc_aem_get_sensor_map_command_map_index,
     M.f.atdecc_aem_get_sensor_map_command_reserved,
-    M.f.atdecc_aem_sensor_map_response_descriptor_type,
-    M.f.atdecc_aem_sensor_map_response_descriptor_index,
-    M.f.atdecc_aem_sensor_map_response_map_index,
-    M.f.atdecc_aem_sensor_map_response_number_of_maps,
-    M.f.atdecc_aem_sensor_map_response_number_of_mappings,
-    M.f.atdecc_aem_sensor_map_response_reserved,
     M.f.atdecc_aem_sensor_mappings_command_descriptor_type,
     M.f.atdecc_aem_sensor_mappings_command_descriptor_index,
     M.f.atdecc_aem_sensor_mappings_command_number_of_mappings,
     M.f.atdecc_aem_sensor_mappings_command_reserved,
     M.f.atdecc_aem_stream_encryption_descriptor_type,
     M.f.atdecc_aem_stream_encryption_descriptor_index,
-    M.f.atdecc_aem_stream_encryption_key_eui,
+    M.f.atdecc_aem_stream_encryption_key_id,
     M.f.atdecc_aem_memory_object_length_descriptor_index,
-    M.f.atdecc_aem_memory_object_length_reserved,
+    M.f.atdecc_aem_memory_object_length_configuration_index,
     M.f.atdecc_aem_memory_object_length_length,
     M.f.atdecc_aem_get_memory_object_length_command_descriptor_index,
-    M.f.atdecc_aem_get_memory_object_length_command_reserved,
+    M.f.atdecc_aem_get_memory_object_length_command_configuration_index,
     M.f.atdecc_aem_stream_backup_descriptor_type,
     M.f.atdecc_aem_stream_backup_descriptor_index,
     M.f.atdecc_aem_stream_backup_backup_talker_entity_id_0,
@@ -1817,6 +2140,315 @@ M.fields = {
     M.f.atdecc_aem_stream_backup_reserved_3,
     M.f.atdecc_aem_get_stream_backup_command_descriptor_type,
     M.f.atdecc_aem_get_stream_backup_command_descriptor_index,
+    M.f.atdecc_aem_descriptor_ref_descriptor_type,
+    M.f.atdecc_aem_descriptor_ref_descriptor_index,
+    M.f.atdecc_aem_auth_key_key_id,
+    M.f.atdecc_aem_auth_key_key_type,
+    M.f.atdecc_aem_auth_key_key_length,
+    M.f.atdecc_aem_auth_key_reserved,
+    M.f.atdecc_aem_key_id_key_id,
+    M.f.atdecc_aem_auth_get_key_list_command_keychain_id,
+    M.f.atdecc_aem_auth_get_key_list_command_reserved,
+    M.f.atdecc_aem_auth_get_key_list_response_keychain_id,
+    M.f.atdecc_aem_auth_get_key_list_response_number_of_keys,
+    M.f.atdecc_aem_auth_keychain_key_keychain_id,
+    M.f.atdecc_aem_auth_keychain_key_reserved,
+    M.f.atdecc_aem_auth_keychain_key_key_id,
+    M.f.atdecc_aem_auth_get_keychain_list_command_keychain_id,
+    M.f.atdecc_aem_auth_get_keychain_list_command_list_index,
+    M.f.atdecc_aem_auth_get_keychain_list_response_keychain_id,
+    M.f.atdecc_aem_auth_get_keychain_list_response_list_index,
+    M.f.atdecc_aem_auth_get_keychain_list_response_number_of_lists,
+    M.f.atdecc_aem_auth_get_keychain_list_response_number_of_keys,
+    M.f.atdecc_aem_auth_get_identity_response_key_id,
+    M.f.atdecc_aem_auth_get_identity_response_ecdsa_signature_c,
+    M.f.atdecc_aem_auth_get_identity_response_ecdsa_signature_d,
+    M.f.atdecc_aem_auth_token_token_length,
+    M.f.atdecc_aem_auth_token_reserved,
+    M.f.atdecc_aem_authenticate_command_descriptor_type,
+    M.f.atdecc_aem_authenticate_command_descriptor_index,
+    M.f.atdecc_aem_authenticate_command_token_length,
+    M.f.atdecc_aem_authenticate_command_reserved,
+    M.f.atdecc_aem_auth_nonce_command_controller_nonce,
+    M.f.atdecc_aem_auth_nonce_response_controller_nonce,
+    M.f.atdecc_aem_auth_nonce_response_target_nonce,
+    M.f.atdecc_aem_auth_add_key_nonce_controller_nonce,
+    M.f.atdecc_aem_auth_add_key_nonce_target_nonce,
+    M.f.atdecc_aem_auth_add_key_nonce_key_id,
+    M.f.atdecc_aem_auth_add_key_nonce_key_type,
+    M.f.atdecc_aem_auth_add_key_nonce_key_length,
+    M.f.atdecc_aem_auth_add_key_nonce_reserved,
+    M.f.atdecc_aem_auth_add_key_nonce_response_controller_nonce,
+    M.f.atdecc_aem_auth_add_key_nonce_response_target_nonce,
+    M.f.atdecc_aem_auth_add_key_nonce_response_key_id,
+    M.f.atdecc_aem_sampling_rate_range_descriptor_type,
+    M.f.atdecc_aem_sampling_rate_range_descriptor_index,
+    M.f.atdecc_aem_sampling_rate_range_minimum_pull,
+    M.f.atdecc_aem_sampling_rate_range_minimum_base_frequency,
+    M.f.atdecc_aem_sampling_rate_range_maximum_pull,
+    M.f.atdecc_aem_sampling_rate_range_maximum_base_frequency,
+    M.f.atdecc_aem_set_ptp_instance_info_descriptor_type,
+    M.f.atdecc_aem_set_ptp_instance_info_descriptor_index,
+    M.f.atdecc_aem_set_ptp_instance_info_reserved1,
+    M.f.atdecc_aem_set_ptp_instance_info_flags_ie,
+    M.f.atdecc_aem_set_ptp_instance_info_flags_ee,
+    M.f.atdecc_aem_set_ptp_instance_info_flags_so,
+    M.f.atdecc_aem_set_ptp_instance_info_flags_priority1,
+    M.f.atdecc_aem_set_ptp_instance_info_flags_priority2,
+    M.f.atdecc_aem_set_ptp_instance_info_flags_domain_number,
+    M.f.atdecc_aem_set_ptp_instance_info_priority1,
+    M.f.atdecc_aem_set_ptp_instance_info_priority2,
+    M.f.atdecc_aem_set_ptp_instance_info_domain_number,
+    M.f.atdecc_aem_set_ptp_instance_info_so,
+    M.f.atdecc_aem_set_ptp_instance_info_ee,
+    M.f.atdecc_aem_set_ptp_instance_info_ie,
+    M.f.atdecc_aem_ptp_instance_info_response_descriptor_type,
+    M.f.atdecc_aem_ptp_instance_info_response_descriptor_index,
+    M.f.atdecc_aem_ptp_instance_info_response_clock_class,
+    M.f.atdecc_aem_ptp_instance_info_response_clock_accuracy,
+    M.f.atdecc_aem_ptp_instance_info_response_offset_scaled_log_variance,
+    M.f.atdecc_aem_ptp_instance_info_response_priority1,
+    M.f.atdecc_aem_ptp_instance_info_response_priority2,
+    M.f.atdecc_aem_ptp_instance_info_response_domain_number,
+    M.f.atdecc_aem_ptp_instance_info_response_time_source,
+    M.f.atdecc_aem_ptp_instance_info_response_current_utc_offset,
+    M.f.atdecc_aem_ptp_instance_info_response_cv,
+    M.f.atdecc_aem_ptp_instance_info_response_l59,
+    M.f.atdecc_aem_ptp_instance_info_response_l61,
+    M.f.atdecc_aem_ptp_instance_info_response_tt,
+    M.f.atdecc_aem_ptp_instance_info_response_ft,
+    M.f.atdecc_aem_ptp_instance_info_response_pt,
+    M.f.atdecc_aem_ptp_instance_info_response_so,
+    M.f.atdecc_aem_ptp_instance_info_response_ee,
+    M.f.atdecc_aem_ptp_instance_info_response_ie,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_clock_identity,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_clock_class,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_clock_accuracy,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_offset_scaled_log_variance,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_priority1,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_priority2,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_time_source,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_cv,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_l59,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_l61,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_tt,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_ft,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_pt,
+    M.f.atdecc_aem_ptp_instance_info_response_gm_current_utc_offset,
+    M.f.atdecc_aem_ptp_instance_info_response_reserved3,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_descriptor_type,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_descriptor_index,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_clock_class,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_clock_accuracy,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_offset_scaled_log_variance,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_priority1,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_priority2,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_domain_number,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_time_source,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_current_utc_offset,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_cv,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_l59,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_l61,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_tt,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_ft,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_pt,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_so,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_ee,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_ie,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_identity,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_class,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_accuracy,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_offset_scaled_log_variance,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_priority1,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_priority2,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_time_source,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_cv,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_l59,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_l61,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_tt,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_ft,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_pt,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_current_utc_offset,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_reserved3,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_parent_clock_identity,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_parent_port_number,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_steps_removed,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_cumulative_rate_ratio,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_offset_from_master,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_phase_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_freq_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_gm_change_count,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_phase_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_freq_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_timebase_indicator,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_offset_from_master,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_phase_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_freq_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_gm_change_count,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_phase_change,
+    M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_freq_change,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_descriptor_type,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_descriptor_index,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_identity,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_class,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_accuracy,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_offset_scaled_log_variance,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_priority1,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_priority2,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_time_source,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_cv,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_l59,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_l61,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_tt,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_ft,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_pt,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_current_utc_offset,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_reserved3,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_parent_clock_identity,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_parent_port_number,
+    M.f.atdecc_aem_ptp_instance_grandmaster_info_response_steps_removed,
+    M.f.atdecc_aem_ptp_path_count_response_descriptor_type,
+    M.f.atdecc_aem_ptp_path_count_response_descriptor_index,
+    M.f.atdecc_aem_ptp_path_count_response_reserved,
+    M.f.atdecc_aem_ptp_path_count_response_trace_count,
+    M.f.atdecc_aem_ptp_path_trace_command_descriptor_type,
+    M.f.atdecc_aem_ptp_path_trace_command_descriptor_index,
+    M.f.atdecc_aem_ptp_path_trace_command_start_index,
+    M.f.atdecc_aem_ptp_path_trace_command_reserved,
+    M.f.atdecc_aem_ptp_path_trace_response_descriptor_type,
+    M.f.atdecc_aem_ptp_path_trace_response_descriptor_index,
+    M.f.atdecc_aem_ptp_path_trace_response_start_index,
+    M.f.atdecc_aem_ptp_path_trace_response_entry_count,
+    M.f.atdecc_aem_ptp_perf_mon_count_response_descriptor_type,
+    M.f.atdecc_aem_ptp_perf_mon_count_response_descriptor_index,
+    M.f.atdecc_aem_ptp_perf_mon_count_response_max_count_of_24h,
+    M.f.atdecc_aem_ptp_perf_mon_count_response_count_of_24h,
+    M.f.atdecc_aem_ptp_perf_mon_count_response_max_count_of_15m,
+    M.f.atdecc_aem_ptp_perf_mon_count_response_count_of_15m,
+    M.f.atdecc_aem_ptp_record_command_descriptor_type,
+    M.f.atdecc_aem_ptp_record_command_descriptor_index,
+    M.f.atdecc_aem_ptp_record_command_record_index,
+    M.f.atdecc_aem_ptp_record_command_reserved,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_type,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_index,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_record_index,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_measurement_valid,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_period_complete,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_master_slave_delay_valid,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_slave_master_delay_valid,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_mean_path_delay_valid,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_offset_from_master_valid,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_timestamp,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_master_slave_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_master_slave_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_master_slave_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_master_slave_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_slave_master_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_slave_master_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_slave_master_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_slave_master_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_mean_path_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_mean_path_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_mean_path_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_mean_path_delay,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_offset_from_master,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_offset_from_master,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_offset_from_master,
+    M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_offset_from_master,
+    M.f.atdecc_aem_ptp_port_intervals_descriptor_type,
+    M.f.atdecc_aem_ptp_port_intervals_descriptor_index,
+    M.f.atdecc_aem_ptp_port_intervals_reserved1,
+    M.f.atdecc_aem_ptp_port_intervals_announce_valid,
+    M.f.atdecc_aem_ptp_port_intervals_sync_valid,
+    M.f.atdecc_aem_ptp_port_intervals_pdelay_valid,
+    M.f.atdecc_aem_ptp_port_intervals_capable_valid,
+    M.f.atdecc_aem_ptp_port_intervals_log_announce_interval,
+    M.f.atdecc_aem_ptp_port_intervals_log_sync_interval,
+    M.f.atdecc_aem_ptp_port_intervals_log_pdelay_request_interval,
+    M.f.atdecc_aem_ptp_port_intervals_log_gptp_capable_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_descriptor_type,
+    M.f.atdecc_aem_set_ptp_port_overrides_descriptor_index,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_announce_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_sync_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_pdelay_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_gptp_capable_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_neighbor,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_mean_delay,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_onestep_tx_oper,
+    M.f.atdecc_aem_set_ptp_port_overrides_flags_desired_state,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_announce_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_sync_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_pdelay_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_gptp_capable_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_compute_neighbor,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_compute_mean_delay,
+    M.f.atdecc_aem_set_ptp_port_overrides_use_onestep_tx_oper,
+    M.f.atdecc_aem_set_ptp_port_overrides_compute_neighbor_rate,
+    M.f.atdecc_aem_set_ptp_port_overrides_compute_mean_link_delay,
+    M.f.atdecc_aem_set_ptp_port_overrides_onestep_tx_oper,
+    M.f.atdecc_aem_set_ptp_port_overrides_log_announce_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_log_sync_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_log_pdelay_request_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_log_gptp_capable_interval,
+    M.f.atdecc_aem_set_ptp_port_overrides_desired_state,
+    M.f.atdecc_aem_set_ptp_port_overrides_reserved,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_type,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_index,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_reserved1,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_announce_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_sync_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_pdelay_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_gptp_capable_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_neighbor,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_mean_delay,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_use_onestep_tx_oper,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_compute_neighbor_rate,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_compute_mean_link_delay,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_onestep_tx_oper,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_log_announce_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_log_sync_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_log_pdelay_request_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_log_gptp_capable_interval,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_desired_state,
+    M.f.atdecc_aem_get_ptp_port_overrides_response_reserved2,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_type,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_index,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_record_index,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_measurement_valid,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_period_complete,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_timestamp,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_average_mean_link_delay,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_minimum_mean_link_delay,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_maximum_mean_link_delay,
+    M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_std_dev_mean_link_delay,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_type,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_index,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_record_index,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_measurement_valid,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_period_complete,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_timestamp,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_foreign_master_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_sync_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_sync_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_followup_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_followup_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_req_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_req_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_resp_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_resp_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_req_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_req_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_rx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_followup_tx,
+    M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_followup_rx,
+    M.f.atdecc_aem_path_latency_response_descriptor_type,
+    M.f.atdecc_aem_path_latency_response_descriptor_index,
+    M.f.atdecc_aem_path_latency_response_path_latency,
     M.f.atdecc_desc_entity_descriptor_type,
     M.f.atdecc_desc_entity_descriptor_index,
     M.f.atdecc_desc_entity_entity_id,
@@ -2317,9 +2949,8 @@ M.fields = {
     M.f.atdecc_desc_video_mapping_mapping_elementary_stream,
     M.f.atdecc_desc_video_mapping_mapping_cluster_offset,
     M.f.atdecc_desc_sensor_mapping_mapping_stream_index,
-    M.f.atdecc_desc_sensor_mapping_mapping_stream_channel,
+    M.f.atdecc_desc_sensor_mapping_mapping_stream_signal,
     M.f.atdecc_desc_sensor_mapping_mapping_cluster_offset,
-    M.f.atdecc_desc_sensor_mapping_mapping_cluster_channel,
     M.f.atdecc_desc_signal_signal_type,
     M.f.atdecc_desc_signal_signal_index,
     M.f.atdecc_desc_ptp_instance_index_index,
@@ -2332,6 +2963,8 @@ M.fields = {
     M.f.atdecc_desc_color_space_value,
     M.f.atdecc_desc_sensor_format_value,
     M.f.atdecc_desc_as_path_entry_clock_identity,
+    M.f.atdecc_desc_clock_identity_value,
+    M.f.atdecc_desc_key_eui_value,
     M.f.atdecc_control_value_i8,
     M.f.atdecc_control_value_u8,
     M.f.atdecc_control_value_i16,
@@ -2605,6 +3238,24 @@ end
 --- AVC AECP message (IEEE 1722.1-2021 9.2.1.3)
 function M.add_avc(tree, tvb, off)
     tree:add(M.f.atdecc_avc_length, tvb(off + 22, 2))
+end
+
+--- HDCP IIA Authentication Protocol AECP message (IEEE 1722.1-2021 9.7.2)
+function M.add_hdcp_apm(tree, tvb, off)
+    tree:add(M.f.atdecc_hdcp_apm_length, tvb(off + 22, 2))
+    tree:add(M.f.atdecc_hdcp_apm_mf, tvb(off + 24, 1))
+    tree:add(M.f.atdecc_hdcp_apm_fragment_offset, tvb(off + 26, 2))
+end
+
+--- AEM byte-string payload trailers
+function M.add_aem_blobs(tree, tvb, off)
+end
+
+--- dynamic_info entry (IEEE 1722.1-2021 7.4.76)
+function M.add_aem_dynamic_info(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_dynamic_info_info_command_specific_data_length, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_aem_dynamic_info_info_status, tvb(off + 4, 2))
+    tree:add(M.f.atdecc_aem_dynamic_info_info_command_type, tvb(off + 6, 2))
 end
 
 --- AEM AemAcquireEntityPayload (IEEE 1722.1-2021 7.4)
@@ -2985,14 +3636,14 @@ function M.add_aem_get_video_map_command(tree, tvb, off)
     tree:add(M.f.atdecc_aem_get_video_map_command_reserved, tvb(off + 30, 2))
 end
 
---- AEM AemVideoMapResponseHeader (IEEE 1722.1-2021 7.4)
-function M.add_aem_video_map_response(tree, tvb, off)
-    tree:add(M.f.atdecc_aem_video_map_response_descriptor_type, tvb(off + 24, 2))
-    tree:add(M.f.atdecc_aem_video_map_response_descriptor_index, tvb(off + 26, 2))
-    tree:add(M.f.atdecc_aem_video_map_response_map_index, tvb(off + 28, 2))
-    tree:add(M.f.atdecc_aem_video_map_response_number_of_maps, tvb(off + 30, 2))
-    tree:add(M.f.atdecc_aem_video_map_response_number_of_mappings, tvb(off + 32, 2))
-    tree:add(M.f.atdecc_aem_video_map_response_reserved, tvb(off + 34, 2))
+--- AEM AemMapResponseHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_map_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_map_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_map_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_map_response_map_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_map_response_number_of_maps, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_map_response_number_of_mappings, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_aem_map_response_reserved, tvb(off + 34, 2))
 end
 
 --- AEM AemVideoMappingsCommandHeader (IEEE 1722.1-2021 7.4)
@@ -3011,16 +3662,6 @@ function M.add_aem_get_sensor_map_command(tree, tvb, off)
     tree:add(M.f.atdecc_aem_get_sensor_map_command_reserved, tvb(off + 30, 2))
 end
 
---- AEM AemSensorMapResponseHeader (IEEE 1722.1-2021 7.4)
-function M.add_aem_sensor_map_response(tree, tvb, off)
-    tree:add(M.f.atdecc_aem_sensor_map_response_descriptor_type, tvb(off + 24, 2))
-    tree:add(M.f.atdecc_aem_sensor_map_response_descriptor_index, tvb(off + 26, 2))
-    tree:add(M.f.atdecc_aem_sensor_map_response_map_index, tvb(off + 28, 2))
-    tree:add(M.f.atdecc_aem_sensor_map_response_number_of_maps, tvb(off + 30, 2))
-    tree:add(M.f.atdecc_aem_sensor_map_response_number_of_mappings, tvb(off + 32, 2))
-    tree:add(M.f.atdecc_aem_sensor_map_response_reserved, tvb(off + 34, 2))
-end
-
 --- AEM AemSensorMappingsCommandHeader (IEEE 1722.1-2021 7.4)
 function M.add_aem_sensor_mappings_command(tree, tvb, off)
     tree:add(M.f.atdecc_aem_sensor_mappings_command_descriptor_type, tvb(off + 24, 2))
@@ -3033,20 +3674,20 @@ end
 function M.add_aem_stream_encryption(tree, tvb, off)
     tree:add(M.f.atdecc_aem_stream_encryption_descriptor_type, tvb(off + 24, 2))
     tree:add(M.f.atdecc_aem_stream_encryption_descriptor_index, tvb(off + 26, 2))
-    tree:add(M.f.atdecc_aem_stream_encryption_key_eui, tvb(off + 28, 8))
+    tree:add(M.f.atdecc_aem_stream_encryption_key_id, tvb(off + 28, 8))
 end
 
 --- AEM AemMemoryObjectLengthPayload (IEEE 1722.1-2021 7.4)
 function M.add_aem_memory_object_length(tree, tvb, off)
     tree:add(M.f.atdecc_aem_memory_object_length_descriptor_index, tvb(off + 24, 2))
-    tree:add(M.f.atdecc_aem_memory_object_length_reserved, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_memory_object_length_configuration_index, tvb(off + 26, 2))
     tree:add(M.f.atdecc_aem_memory_object_length_length, tvb(off + 28, 8))
 end
 
 --- AEM AemGetMemoryObjectLengthCommandPayload (IEEE 1722.1-2021 7.4)
 function M.add_aem_get_memory_object_length_command(tree, tvb, off)
     tree:add(M.f.atdecc_aem_get_memory_object_length_command_descriptor_index, tvb(off + 24, 2))
-    tree:add(M.f.atdecc_aem_get_memory_object_length_command_reserved, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_get_memory_object_length_command_configuration_index, tvb(off + 26, 2))
 end
 
 --- AEM AemStreamBackupPayload (IEEE 1722.1-2021 7.4)
@@ -3071,6 +3712,447 @@ end
 function M.add_aem_get_stream_backup_command(tree, tvb, off)
     tree:add(M.f.atdecc_aem_get_stream_backup_command_descriptor_type, tvb(off + 24, 2))
     tree:add(M.f.atdecc_aem_get_stream_backup_command_descriptor_index, tvb(off + 26, 2))
+end
+
+--- AEM AemEmptyPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_empty(tree, tvb, off)
+end
+
+--- AEM AemDescriptorRefPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_descriptor_ref(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_descriptor_ref_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_descriptor_ref_descriptor_index, tvb(off + 26, 2))
+end
+
+--- AEM AemAuthKeyPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_key(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_key_key_id, tvb(off + 24, 8))
+    tree:add(M.f.atdecc_aem_auth_key_key_type, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_auth_key_key_length, tvb(off + 33, 2))
+    tree:add(M.f.atdecc_aem_auth_key_reserved, tvb(off + 35, 1))
+end
+
+--- AEM AemKeyIdPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_key_id(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_key_id_key_id, tvb(off + 24, 8))
+end
+
+--- AEM AemAuthGetKeyListCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_get_key_list_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_get_key_list_command_keychain_id, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_auth_get_key_list_command_reserved, tvb(off + 26, 2))
+end
+
+--- AEM AemAuthGetKeyListResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_get_key_list_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_get_key_list_response_keychain_id, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_auth_get_key_list_response_number_of_keys, tvb(off + 26, 2))
+end
+
+--- AEM AemAuthKeychainKeyPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_keychain_key(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_keychain_key_keychain_id, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_auth_keychain_key_reserved, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_auth_keychain_key_key_id, tvb(off + 28, 8))
+end
+
+--- AEM AemAuthGetKeychainListCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_get_keychain_list_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_get_keychain_list_command_keychain_id, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_auth_get_keychain_list_command_list_index, tvb(off + 26, 2))
+end
+
+--- AEM AemAuthGetKeychainListResponseHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_get_keychain_list_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_get_keychain_list_response_keychain_id, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_auth_get_keychain_list_response_list_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_auth_get_keychain_list_response_number_of_lists, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_auth_get_keychain_list_response_number_of_keys, tvb(off + 30, 2))
+end
+
+--- AEM AemAuthGetIdentityResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_get_identity_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_get_identity_response_key_id, tvb(off + 24, 8))
+    tree:add(M.f.atdecc_aem_auth_get_identity_response_ecdsa_signature_c, tvb(off + 32, 32))
+    tree:add(M.f.atdecc_aem_auth_get_identity_response_ecdsa_signature_d, tvb(off + 64, 32))
+end
+
+--- AEM AemAuthTokenPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_token(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_token_token_length, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_auth_token_reserved, tvb(off + 26, 2))
+end
+
+--- AEM AemAuthenticateCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_authenticate_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_authenticate_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_authenticate_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_authenticate_command_token_length, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_authenticate_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemAuthNonceCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_nonce_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_nonce_command_controller_nonce, tvb(off + 24, 8))
+end
+
+--- AEM AemAuthNonceResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_nonce_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_nonce_response_controller_nonce, tvb(off + 24, 8))
+    tree:add(M.f.atdecc_aem_auth_nonce_response_target_nonce, tvb(off + 32, 8))
+end
+
+--- AEM AemAuthAddKeyNoncePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_add_key_nonce(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_controller_nonce, tvb(off + 24, 8))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_target_nonce, tvb(off + 32, 8))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_key_id, tvb(off + 40, 8))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_key_type, tvb(off + 48, 1))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_key_length, tvb(off + 49, 2))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_reserved, tvb(off + 51, 1))
+end
+
+--- AEM AemAuthAddKeyNonceResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_auth_add_key_nonce_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_response_controller_nonce, tvb(off + 24, 8))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_response_target_nonce, tvb(off + 32, 8))
+    tree:add(M.f.atdecc_aem_auth_add_key_nonce_response_key_id, tvb(off + 40, 8))
+end
+
+--- AEM AemSamplingRateRangePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_sampling_rate_range(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_sampling_rate_range_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_sampling_rate_range_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_sampling_rate_range_minimum_pull, tvb(off + 28, 4))
+    tree:add(M.f.atdecc_aem_sampling_rate_range_minimum_base_frequency, tvb(off + 28, 4))
+    tree:add(M.f.atdecc_aem_sampling_rate_range_maximum_pull, tvb(off + 32, 4))
+    tree:add(M.f.atdecc_aem_sampling_rate_range_maximum_base_frequency, tvb(off + 32, 4))
+end
+
+--- AEM AemSetPtpInstanceInfoPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_set_ptp_instance_info(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_reserved1, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_flags_ie, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_flags_ee, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_flags_so, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_flags_priority1, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_flags_priority2, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_flags_domain_number, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_priority1, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_priority2, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_domain_number, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_so, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_ee, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_instance_info_ie, tvb(off + 35, 1))
+end
+
+--- AEM AemPtpInstanceInfoResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_instance_info_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_clock_class, tvb(off + 28, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_clock_accuracy, tvb(off + 29, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_offset_scaled_log_variance, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_priority1, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_priority2, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_domain_number, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_time_source, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_current_utc_offset, tvb(off + 36, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_cv, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_l59, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_l61, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_tt, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_ft, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_pt, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_so, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_ee, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_ie, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_clock_identity, tvb(off + 40, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_clock_class, tvb(off + 48, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_clock_accuracy, tvb(off + 49, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_offset_scaled_log_variance, tvb(off + 50, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_priority1, tvb(off + 52, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_priority2, tvb(off + 53, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_time_source, tvb(off + 54, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_cv, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_l59, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_l61, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_tt, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_ft, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_pt, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_gm_current_utc_offset, tvb(off + 56, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_info_response_reserved3, tvb(off + 58, 2))
+end
+
+--- AEM AemPtpInstanceExtendedInfoResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_instance_extended_info_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_clock_class, tvb(off + 28, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_clock_accuracy, tvb(off + 29, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_offset_scaled_log_variance, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_priority1, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_priority2, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_domain_number, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_time_source, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_current_utc_offset, tvb(off + 36, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_cv, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_l59, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_l61, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_tt, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_ft, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_pt, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_so, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_ee, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_ie, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_identity, tvb(off + 40, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_class, tvb(off + 48, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_clock_accuracy, tvb(off + 49, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_offset_scaled_log_variance, tvb(off + 50, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_priority1, tvb(off + 52, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_priority2, tvb(off + 53, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_time_source, tvb(off + 54, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_cv, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_l59, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_l61, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_tt, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_ft, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_pt, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_current_utc_offset, tvb(off + 56, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_reserved3, tvb(off + 58, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_parent_clock_identity, tvb(off + 60, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_parent_port_number, tvb(off + 68, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_steps_removed, tvb(off + 70, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_cumulative_rate_ratio, tvb(off + 72, 4))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_offset_from_master, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_phase_change, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_freq_change, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_gm_change_count, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_change, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_phase_change, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_freq_change, tvb(off + 76, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_timebase_indicator, tvb(off + 78, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_offset_from_master, tvb(off + 80, 12))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_phase_change, tvb(off + 92, 12))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_freq_change, tvb(off + 104, 4))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_gm_change_count, tvb(off + 108, 4))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_change, tvb(off + 112, 4))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_phase_change, tvb(off + 116, 4))
+    tree:add(M.f.atdecc_aem_ptp_instance_extended_info_response_time_of_last_gm_freq_change, tvb(off + 120, 4))
+end
+
+--- AEM AemPtpInstanceGrandmasterInfoResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_instance_grandmaster_info_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_identity, tvb(off + 28, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_class, tvb(off + 36, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_clock_accuracy, tvb(off + 37, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_offset_scaled_log_variance, tvb(off + 38, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_priority1, tvb(off + 40, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_priority2, tvb(off + 41, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_time_source, tvb(off + 42, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_cv, tvb(off + 43, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_l59, tvb(off + 43, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_l61, tvb(off + 43, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_tt, tvb(off + 43, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_ft, tvb(off + 43, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_pt, tvb(off + 43, 1))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_gm_current_utc_offset, tvb(off + 44, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_reserved3, tvb(off + 46, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_parent_clock_identity, tvb(off + 48, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_parent_port_number, tvb(off + 56, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_grandmaster_info_response_steps_removed, tvb(off + 58, 2))
+end
+
+--- AEM AemPtpPathCountResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_path_count_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_path_count_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_count_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_count_response_reserved, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_count_response_trace_count, tvb(off + 30, 2))
+end
+
+--- AEM AemPtpPathTraceCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_path_trace_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_path_trace_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_trace_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_trace_command_start_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_trace_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemPtpPathTraceResponseHeader (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_path_trace_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_path_trace_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_trace_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_trace_response_start_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_path_trace_response_entry_count, tvb(off + 30, 2))
+end
+
+--- AEM AemPtpPerfMonCountResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_perf_mon_count_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_perf_mon_count_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_perf_mon_count_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_perf_mon_count_response_max_count_of_24h, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_perf_mon_count_response_count_of_24h, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_perf_mon_count_response_max_count_of_15m, tvb(off + 32, 2))
+    tree:add(M.f.atdecc_aem_ptp_perf_mon_count_response_count_of_15m, tvb(off + 34, 2))
+end
+
+--- AEM AemPtpRecordCommandPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_record_command(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_record_command_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_record_command_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_record_command_record_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_record_command_reserved, tvb(off + 30, 2))
+end
+
+--- AEM AemPtpInstancePerfMonRecordResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_instance_perf_mon_record_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_record_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_measurement_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_period_complete, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_master_slave_delay_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_slave_master_delay_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_mean_path_delay_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_offset_from_master_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_timestamp, tvb(off + 32, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_master_slave_delay, tvb(off + 40, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_master_slave_delay, tvb(off + 48, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_master_slave_delay, tvb(off + 56, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_master_slave_delay, tvb(off + 64, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_slave_master_delay, tvb(off + 72, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_slave_master_delay, tvb(off + 80, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_slave_master_delay, tvb(off + 88, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_slave_master_delay, tvb(off + 96, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_mean_path_delay, tvb(off + 104, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_mean_path_delay, tvb(off + 112, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_mean_path_delay, tvb(off + 120, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_mean_path_delay, tvb(off + 128, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_offset_from_master, tvb(off + 136, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_offset_from_master, tvb(off + 144, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_maximum_offset_from_master, tvb(off + 152, 8))
+    tree:add(M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_offset_from_master, tvb(off + 160, 8))
+end
+
+--- AEM AemPtpPortIntervalsPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_port_intervals(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_reserved1, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_announce_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_sync_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_pdelay_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_capable_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_log_announce_interval, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_log_sync_interval, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_log_pdelay_request_interval, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_intervals_log_gptp_capable_interval, tvb(off + 35, 1))
+end
+
+--- AEM AemSetPtpPortOverridesPayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_set_ptp_port_overrides(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_announce_interval, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_sync_interval, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_pdelay_interval, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_gptp_capable_interval, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_neighbor, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_mean_delay, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_onestep_tx_oper, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_flags_desired_state, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_announce_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_sync_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_pdelay_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_gptp_capable_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_compute_neighbor, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_compute_mean_delay, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_use_onestep_tx_oper, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_compute_neighbor_rate, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_compute_mean_link_delay, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_onestep_tx_oper, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_log_announce_interval, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_log_sync_interval, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_log_pdelay_request_interval, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_log_gptp_capable_interval, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_desired_state, tvb(off + 36, 1))
+    tree:add(M.f.atdecc_aem_set_ptp_port_overrides_reserved, tvb(off + 37, 3))
+end
+
+--- AEM AemGetPtpPortOverridesResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_get_ptp_port_overrides_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_reserved1, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_announce_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_sync_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_pdelay_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_gptp_capable_interval, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_neighbor, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_mean_delay, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_use_onestep_tx_oper, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_compute_neighbor_rate, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_compute_mean_link_delay, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_onestep_tx_oper, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_log_announce_interval, tvb(off + 32, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_log_sync_interval, tvb(off + 33, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_log_pdelay_request_interval, tvb(off + 34, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_log_gptp_capable_interval, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_desired_state, tvb(off + 36, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_overrides_response_reserved2, tvb(off + 37, 3))
+end
+
+--- AEM AemPtpPortPdelayMonRecordResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_port_pdelay_mon_record_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_record_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_measurement_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_period_complete, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_timestamp, tvb(off + 32, 8))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_average_mean_link_delay, tvb(off + 40, 8))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_minimum_mean_link_delay, tvb(off + 48, 8))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_maximum_mean_link_delay, tvb(off + 56, 8))
+    tree:add(M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_std_dev_mean_link_delay, tvb(off + 64, 8))
+end
+
+--- AEM AemPtpPortPerfMonRecordResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_ptp_port_perf_mon_record_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_record_index, tvb(off + 28, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_measurement_valid, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_period_complete, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_timestamp, tvb(off + 32, 8))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_tx, tvb(off + 40, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_rx, tvb(off + 44, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_foreign_master_rx, tvb(off + 48, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_sync_tx, tvb(off + 52, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_sync_rx, tvb(off + 56, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_followup_tx, tvb(off + 60, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_followup_rx, tvb(off + 64, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_req_tx, tvb(off + 68, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_req_rx, tvb(off + 72, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_resp_tx, tvb(off + 76, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_delay_resp_rx, tvb(off + 80, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_req_tx, tvb(off + 84, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_req_rx, tvb(off + 88, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_tx, tvb(off + 92, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_rx, tvb(off + 96, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_followup_tx, tvb(off + 100, 4))
+    tree:add(M.f.atdecc_aem_ptp_port_perf_mon_record_response_pdelay_resp_followup_rx, tvb(off + 104, 4))
+end
+
+--- AEM AemPathLatencyResponsePayload (IEEE 1722.1-2021 7.4)
+function M.add_aem_path_latency_response(tree, tvb, off)
+    tree:add(M.f.atdecc_aem_path_latency_response_descriptor_type, tvb(off + 24, 2))
+    tree:add(M.f.atdecc_aem_path_latency_response_descriptor_index, tvb(off + 26, 2))
+    tree:add(M.f.atdecc_aem_path_latency_response_path_latency, tvb(off + 28, 4))
 end
 
 --- DescriptorEntity (IEEE 1722.1-2021 7.2)
@@ -3740,12 +4822,11 @@ function M.add_desc_video_mapping(tree, tvb, off)
     tree:add(M.f.atdecc_desc_video_mapping_mapping_cluster_offset, tvb(off + 6, 2))
 end
 
---- sensor mapping entry
+--- sensor mapping entry (IEEE 1722.1-2021 Table 7-37: 6 octets)
 function M.add_desc_sensor_mapping(tree, tvb, off)
     tree:add(M.f.atdecc_desc_sensor_mapping_mapping_stream_index, tvb(off + 0, 2))
-    tree:add(M.f.atdecc_desc_sensor_mapping_mapping_stream_channel, tvb(off + 2, 2))
+    tree:add(M.f.atdecc_desc_sensor_mapping_mapping_stream_signal, tvb(off + 2, 2))
     tree:add(M.f.atdecc_desc_sensor_mapping_mapping_cluster_offset, tvb(off + 4, 2))
-    tree:add(M.f.atdecc_desc_sensor_mapping_mapping_cluster_channel, tvb(off + 6, 2))
 end
 
 --- signal reference entry (source / map / signal list)
@@ -3794,6 +4875,16 @@ end
 --- gPTP path sequence entry
 function M.add_desc_as_path_entry(tree, tvb, off)
     tree:add(M.f.atdecc_desc_as_path_entry_clock_identity, tvb(off + 0, 8))
+end
+
+--- PTP path trace entry
+function M.add_desc_clock_identity(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_clock_identity_value, tvb(off + 0, 8))
+end
+
+--- keychain key entry
+function M.add_desc_key_eui(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_key_eui_value, tvb(off + 0, 8))
 end
 
 --- control value elements
@@ -3965,6 +5056,7 @@ M.AECP_PAYLOAD = M.f.atdecc_aecp_payload
 M.AA_TLV_DATA = M.f.atdecc_aa_tlv_data
 M.VU_PAYLOAD = M.f.atdecc_vu_payload
 M.AVC_PAYLOAD = M.f.atdecc_avc_command_response
+M.HDCP_APM_DATA = M.f.atdecc_hdcp_apm_message_data
 M.CONTROL_UTF8 = M.f.atdecc_control_utf8
 M.CONTROL_VENDOR = M.f.atdecc_control_vendor_values
 M.DESCRIPTOR_RAW = M.f.atdecc_desc_control_value_details
@@ -4015,28 +5107,67 @@ M.aem_payloads[0x0027] = { cmd = { name = "get_avb_info_command", length = 4, ad
 M.aem_payloads[0x0028] = { cmd = { name = "get_as_path_command", length = 4, add = M.add_aem_get_as_path_command, trailer = nil }, rsp = { name = "get_as_path_response", length = 4, add = M.add_aem_get_as_path_response, trailer = { kind = "elements", element = "as_path_entry", element_size = 8, element_add = M.add_desc_as_path_entry, count_field_offset = 26 } } }
 M.aem_payloads[0x0029] = { cmd = { name = "get_counters_command", length = 4, add = M.add_aem_get_counters_command, trailer = nil }, rsp = { name = "counters", length = 136, add = M.add_aem_counters, trailer = nil } }
 M.aem_payloads[0x002A] = { cmd = { name = "reboot", length = 4, add = M.add_aem_reboot, trailer = nil }, rsp = { name = "reboot", length = 4, add = M.add_aem_reboot, trailer = nil } }
-M.aem_payloads[0x002B] = { cmd = { name = "get_audio_map_command", length = 8, add = M.add_aem_get_audio_map_command, trailer = nil }, rsp = { name = "audio_map_response", length = 12, add = M.add_aem_audio_map_response, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 30 } } }
+M.aem_payloads[0x002B] = { cmd = { name = "get_audio_map_command", length = 8, add = M.add_aem_get_audio_map_command, trailer = nil }, rsp = { name = "map_response", length = 12, add = M.add_aem_map_response, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 32 } } }
 M.aem_payloads[0x002C] = { cmd = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } }, rsp = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } } }
 M.aem_payloads[0x002D] = { cmd = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } }, rsp = { name = "audio_mappings_command", length = 8, add = M.add_aem_audio_mappings_command, trailer = { kind = "elements", element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, count_field_offset = 28 } } }
-M.aem_payloads[0x002E] = { cmd = { name = "get_video_map_command", length = 8, add = M.add_aem_get_video_map_command, trailer = nil }, rsp = { name = "video_map_response", length = 12, add = M.add_aem_video_map_response, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 32 } } }
+M.aem_payloads[0x002E] = { cmd = { name = "get_video_map_command", length = 8, add = M.add_aem_get_video_map_command, trailer = nil }, rsp = { name = "map_response", length = 12, add = M.add_aem_map_response, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 32 } } }
 M.aem_payloads[0x002F] = { cmd = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } }, rsp = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } } }
 M.aem_payloads[0x0030] = { cmd = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } }, rsp = { name = "video_mappings_command", length = 8, add = M.add_aem_video_mappings_command, trailer = { kind = "elements", element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, count_field_offset = 28 } } }
-M.aem_payloads[0x0031] = { cmd = { name = "get_sensor_map_command", length = 8, add = M.add_aem_get_sensor_map_command, trailer = nil }, rsp = { name = "sensor_map_response", length = 12, add = M.add_aem_sensor_map_response, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 32 } } }
-M.aem_payloads[0x0032] = { cmd = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } }, rsp = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } } }
-M.aem_payloads[0x0033] = { cmd = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } }, rsp = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x0031] = { cmd = { name = "get_sensor_map_command", length = 8, add = M.add_aem_get_sensor_map_command, trailer = nil }, rsp = { name = "map_response", length = 12, add = M.add_aem_map_response, trailer = { kind = "elements", element = "sensor_mapping", element_size = 6, element_add = M.add_desc_sensor_mapping, count_field_offset = 32 } } }
+M.aem_payloads[0x0032] = { cmd = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 6, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } }, rsp = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 6, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } } }
+M.aem_payloads[0x0033] = { cmd = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 6, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } }, rsp = { name = "sensor_mappings_command", length = 8, add = M.add_aem_sensor_mappings_command, trailer = { kind = "elements", element = "sensor_mapping", element_size = 6, element_add = M.add_desc_sensor_mapping, count_field_offset = 28 } } }
 M.aem_payloads[0x0034] = { cmd = { name = "start_operation_command", length = 8, add = M.add_aem_start_operation_command, trailer = { kind = "raw" } }, rsp = { name = "start_operation_response", length = 8, add = M.add_aem_start_operation_response, trailer = { kind = "raw" } } }
 M.aem_payloads[0x0035] = { cmd = { name = "abort_operation", length = 8, add = M.add_aem_abort_operation, trailer = nil }, rsp = { name = "abort_operation", length = 8, add = M.add_aem_abort_operation, trailer = nil } }
 M.aem_payloads[0x0036] = { cmd = { name = "operation_status", length = 8, add = M.add_aem_operation_status, trailer = nil }, rsp = { name = "operation_status", length = 8, add = M.add_aem_operation_status, trailer = nil } }
+M.aem_payloads[0x0037] = { cmd = { name = "auth_key", length = 12, add = M.add_aem_auth_key, trailer = { kind = "blob", field = M.f.atdecc_aem_key, count_field_offset = 33 } }, rsp = { name = "key_id", length = 8, add = M.add_aem_key_id, trailer = nil } }
+M.aem_payloads[0x0038] = { cmd = { name = "key_id", length = 8, add = M.add_aem_key_id, trailer = nil }, rsp = { name = "key_id", length = 8, add = M.add_aem_key_id, trailer = nil } }
+M.aem_payloads[0x0039] = { cmd = { name = "auth_get_key_list_command", length = 4, add = M.add_aem_auth_get_key_list_command, trailer = nil }, rsp = { name = "auth_get_key_list_response", length = 4, add = M.add_aem_auth_get_key_list_response, trailer = nil } }
+M.aem_payloads[0x003A] = { cmd = { name = "key_id", length = 8, add = M.add_aem_key_id, trailer = nil }, rsp = { name = "auth_key", length = 12, add = M.add_aem_auth_key, trailer = { kind = "blob", field = M.f.atdecc_aem_key, count_field_offset = 33 } } }
+M.aem_payloads[0x003B] = { cmd = { name = "auth_keychain_key", length = 12, add = M.add_aem_auth_keychain_key, trailer = nil }, rsp = { name = "auth_keychain_key", length = 12, add = M.add_aem_auth_keychain_key, trailer = nil } }
+M.aem_payloads[0x003C] = { cmd = { name = "auth_keychain_key", length = 12, add = M.add_aem_auth_keychain_key, trailer = nil }, rsp = { name = "auth_keychain_key", length = 12, add = M.add_aem_auth_keychain_key, trailer = nil } }
+M.aem_payloads[0x003D] = { cmd = { name = "auth_get_keychain_list_command", length = 4, add = M.add_aem_auth_get_keychain_list_command, trailer = nil }, rsp = { name = "auth_get_keychain_list_response", length = 8, add = M.add_aem_auth_get_keychain_list_response, trailer = { kind = "elements", element = "key_eui", element_size = 8, element_add = M.add_desc_key_eui, count_field_offset = 30 } } }
+M.aem_payloads[0x003E] = { cmd = nil, rsp = { name = "auth_get_identity_response", length = 72, add = M.add_aem_auth_get_identity_response, trailer = nil } }
+M.aem_payloads[0x003F] = { cmd = { name = "auth_token", length = 4, add = M.add_aem_auth_token, trailer = { kind = "blob", field = M.f.atdecc_aem_authentication_token, count_field_offset = 24 } }, rsp = nil }
+M.aem_payloads[0x0040] = { cmd = nil, rsp = nil }
+M.aem_payloads[0x0041] = { cmd = { name = "authenticate_command", length = 8, add = M.add_aem_authenticate_command, trailer = { kind = "blob", field = M.f.atdecc_aem_authentication_token, count_field_offset = 28 } }, rsp = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil } }
+M.aem_payloads[0x0042] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil } }
+M.aem_payloads[0x0043] = { cmd = { name = "key_id", length = 8, add = M.add_aem_key_id, trailer = nil }, rsp = { name = "key_id", length = 8, add = M.add_aem_key_id, trailer = nil } }
+M.aem_payloads[0x0044] = { cmd = nil, rsp = nil }
 M.aem_payloads[0x0045] = { cmd = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil }, rsp = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil } }
-M.aem_payloads[0x0046] = { cmd = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil }, rsp = { name = "stream_encryption", length = 12, add = M.add_aem_stream_encryption, trailer = nil } }
+M.aem_payloads[0x0046] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil } }
 M.aem_payloads[0x0047] = { cmd = { name = "memory_object_length", length = 12, add = M.add_aem_memory_object_length, trailer = nil }, rsp = { name = "memory_object_length", length = 12, add = M.add_aem_memory_object_length, trailer = nil } }
 M.aem_payloads[0x0048] = { cmd = { name = "get_memory_object_length_command", length = 4, add = M.add_aem_get_memory_object_length_command, trailer = nil }, rsp = { name = "memory_object_length", length = 12, add = M.add_aem_memory_object_length, trailer = nil } }
 M.aem_payloads[0x0049] = { cmd = { name = "stream_backup", length = 52, add = M.add_aem_stream_backup, trailer = nil }, rsp = { name = "stream_backup", length = 52, add = M.add_aem_stream_backup, trailer = nil } }
 M.aem_payloads[0x004A] = { cmd = { name = "get_stream_backup_command", length = 4, add = M.add_aem_get_stream_backup_command, trailer = nil }, rsp = { name = "stream_backup", length = 52, add = M.add_aem_stream_backup, trailer = nil } }
+M.aem_payloads[0x004B] = { cmd = { name = "empty", length = 0, add = M.add_aem_empty, trailer = { kind = "dynamic_infos" } }, rsp = { name = "empty", length = 0, add = M.add_aem_empty, trailer = { kind = "dynamic_infos" } } }
 M.aem_payloads[0x004C] = { cmd = { name = "set_max_transit_time", length = 12, add = M.add_aem_set_max_transit_time, trailer = nil }, rsp = { name = "set_max_transit_time", length = 12, add = M.add_aem_set_max_transit_time, trailer = nil } }
 M.aem_payloads[0x004D] = { cmd = { name = "get_max_transit_time_command", length = 4, add = M.add_aem_get_max_transit_time_command, trailer = nil }, rsp = { name = "set_max_transit_time", length = 12, add = M.add_aem_set_max_transit_time, trailer = nil } }
+M.aem_payloads[0x004E] = { cmd = { name = "sampling_rate_range", length = 12, add = M.add_aem_sampling_rate_range, trailer = nil }, rsp = { name = "sampling_rate_range", length = 12, add = M.add_aem_sampling_rate_range, trailer = nil } }
+M.aem_payloads[0x004F] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "sampling_rate_range", length = 12, add = M.add_aem_sampling_rate_range, trailer = nil } }
+M.aem_payloads[0x0050] = { cmd = { name = "set_ptp_instance_info", length = 12, add = M.add_aem_set_ptp_instance_info, trailer = nil }, rsp = { name = "set_ptp_instance_info", length = 12, add = M.add_aem_set_ptp_instance_info, trailer = nil } }
+M.aem_payloads[0x0051] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_instance_info_response", length = 36, add = M.add_aem_ptp_instance_info_response, trailer = nil } }
+M.aem_payloads[0x0052] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_instance_extended_info_response", length = 100, add = M.add_aem_ptp_instance_extended_info_response, trailer = nil } }
+M.aem_payloads[0x0053] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_instance_grandmaster_info_response", length = 36, add = M.add_aem_ptp_instance_grandmaster_info_response, trailer = nil } }
+M.aem_payloads[0x0054] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_path_count_response", length = 8, add = M.add_aem_ptp_path_count_response, trailer = nil } }
+M.aem_payloads[0x0055] = { cmd = { name = "ptp_path_trace_command", length = 8, add = M.add_aem_ptp_path_trace_command, trailer = nil }, rsp = { name = "ptp_path_trace_response", length = 8, add = M.add_aem_ptp_path_trace_response, trailer = { kind = "elements", element = "clock_identity", element_size = 8, element_add = M.add_desc_clock_identity, count_field_offset = 30 } } }
+M.aem_payloads[0x0056] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_perf_mon_count_response", length = 12, add = M.add_aem_ptp_perf_mon_count_response, trailer = nil } }
+M.aem_payloads[0x0057] = { cmd = { name = "ptp_record_command", length = 8, add = M.add_aem_ptp_record_command, trailer = nil }, rsp = { name = "ptp_instance_perf_mon_record_response", length = 144, add = M.add_aem_ptp_instance_perf_mon_record_response, trailer = nil } }
+M.aem_payloads[0x0058] = { cmd = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
+M.aem_payloads[0x0059] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
+M.aem_payloads[0x005B] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
+M.aem_payloads[0x005C] = { cmd = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
+M.aem_payloads[0x005D] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
 M.aem_payloads[0x005E] = { cmd = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil } }
 M.aem_payloads[0x005F] = { cmd = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "get_ptp_port_info_response", length = 76, add = M.add_aem_get_ptp_port_info_response, trailer = nil } }
+M.aem_payloads[0x0060] = { cmd = { name = "set_ptp_port_overrides", length = 16, add = M.add_aem_set_ptp_port_overrides, trailer = nil }, rsp = { name = "set_ptp_port_overrides", length = 16, add = M.add_aem_set_ptp_port_overrides, trailer = nil } }
+M.aem_payloads[0x0061] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "get_ptp_port_overrides_response", length = 16, add = M.add_aem_get_ptp_port_overrides_response, trailer = nil } }
+M.aem_payloads[0x0062] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_perf_mon_count_response", length = 12, add = M.add_aem_ptp_perf_mon_count_response, trailer = nil } }
+M.aem_payloads[0x0063] = { cmd = { name = "ptp_record_command", length = 8, add = M.add_aem_ptp_record_command, trailer = nil }, rsp = { name = "ptp_port_pdelay_mon_record_response", length = 48, add = M.add_aem_ptp_port_pdelay_mon_record_response, trailer = nil } }
+M.aem_payloads[0x0064] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_perf_mon_count_response", length = 12, add = M.add_aem_ptp_perf_mon_count_response, trailer = nil } }
+M.aem_payloads[0x0065] = { cmd = { name = "ptp_record_command", length = 8, add = M.add_aem_ptp_record_command, trailer = nil }, rsp = { name = "ptp_port_perf_mon_record_response", length = 84, add = M.add_aem_ptp_port_perf_mon_record_response, trailer = nil } }
+M.aem_payloads[0x0066] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "path_latency_response", length = 8, add = M.add_aem_path_latency_response, trailer = nil } }
+M.aem_payloads[0x0067] = { cmd = { name = "auth_nonce_command", length = 8, add = M.add_aem_auth_nonce_command, trailer = nil }, rsp = { name = "auth_nonce_response", length = 16, add = M.add_aem_auth_nonce_response, trailer = nil } }
+M.aem_payloads[0x0068] = { cmd = { name = "auth_add_key_nonce", length = 28, add = M.add_aem_auth_add_key_nonce, trailer = { kind = "blob", field = M.f.atdecc_aem_key, count_field_offset = 49 } }, rsp = { name = "auth_add_key_nonce_response", length = 24, add = M.add_aem_auth_add_key_nonce_response, trailer = nil } }
 
 --- descriptor type -> { name, length, add, tables = { { count_field_offset|nil, offset_field_offset, element, element_size, element_add|nil, value_type_offset|nil } } }
 M.descriptors = {}
@@ -4065,7 +5196,7 @@ M.descriptors[0x0015] = { name = "video_cluster", length = 121, add = M.add_desc
 M.descriptors[0x0016] = { name = "sensor_cluster", length = 104, add = M.add_desc_sensor_cluster, tables = { { count_field_offset = 94, offset_field_offset = 92, element = "sensor_format", element_size = 8, element_add = M.add_desc_sensor_format, value_type_offset = nil }, { count_field_offset = 102, offset_field_offset = 100, element = "sampling_rate", element_size = 4, element_add = M.add_desc_sampling_rate, value_type_offset = nil } } }
 M.descriptors[0x0017] = { name = "audio_map", length = 8, add = M.add_desc_audio_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "audio_mapping", element_size = 8, element_add = M.add_desc_audio_mapping, value_type_offset = nil } } }
 M.descriptors[0x0018] = { name = "video_map", length = 8, add = M.add_desc_video_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "video_mapping", element_size = 8, element_add = M.add_desc_video_mapping, value_type_offset = nil } } }
-M.descriptors[0x0019] = { name = "sensor_map", length = 8, add = M.add_desc_sensor_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "sensor_mapping", element_size = 8, element_add = M.add_desc_sensor_mapping, value_type_offset = nil } } }
+M.descriptors[0x0019] = { name = "sensor_map", length = 8, add = M.add_desc_sensor_map, tables = { { count_field_offset = 6, offset_field_offset = 4, element = "sensor_mapping", element_size = 6, element_add = M.add_desc_sensor_mapping, value_type_offset = nil } } }
 M.descriptors[0x001A] = { name = "control", length = 104, add = M.add_desc_control, tables = { { count_field_offset = 96, offset_field_offset = 94, element = "values", element_size = 0, element_add = nil, value_type_offset = 80 } } }
 M.descriptors[0x001B] = { name = "signal_selector", length = 96, add = M.add_desc_signal_selector, tables = { { count_field_offset = 82, offset_field_offset = 80, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil } } }
 M.descriptors[0x001C] = { name = "mixer", length = 88, add = M.add_desc_mixer, tables = { { count_field_offset = 84, offset_field_offset = 82, element = "signal", element_size = 4, element_add = M.add_desc_signal, value_type_offset = nil }, { count_field_offset = nil, offset_field_offset = 86, element = "values", element_size = 0, element_add = nil, value_type_offset = 80 } } }
@@ -4158,6 +5289,8 @@ M.mvu_mcr_flag_fields = {
 }
 
 M.MVU_PROTOCOL_ID = "001bc50ac100"
+M.DYNAMIC_INFO_HEADER_LENGTH = 8
+M.HDCP_APM_HEADER_LENGTH = 28
 M.MVU_HEADER_LENGTH = 30
 M.AVC_HEADER_LENGTH = 24
 M.AUDIO_MAPPING_LENGTH = 8

@@ -583,9 +583,12 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         std::array<uint8_t, 12 + 8> const video_map{0x00, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
                                                     0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00};
         frames.push_back({"aem_get_video_map_response", aem(0x002E, true, 44, std::span<uint8_t const>(video_map))});
-        std::array<uint8_t, 8 + 16> const sensor_mappings{0x00, 0x11, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00};
+        std::array<uint8_t, 8 + 12> const sensor_mappings{0x00, 0x11, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+                                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01};
         frames.push_back({"aem_add_sensor_mappings_command", aem(0x0032, false, 45, std::span<uint8_t const>(sensor_mappings))});
+        std::array<uint8_t, 12 + 6> const sensor_map{
+            0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04};
+        frames.push_back({"aem_get_sensor_map_response", aem(0x0031, true, 55, std::span<uint8_t const>(sensor_map))});
         std::array<uint8_t, 12> const encryption{0x00, 0x06, 0x00, 0x00, 0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x07};
         frames.push_back({"aem_enable_stream_encryption_command", aem(0x0045, false, 46, std::span<uint8_t const>(encryption))});
         std::array<uint8_t, 12> const memory_length{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00};
@@ -603,6 +606,147 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         backup[47] = 0x22;
         backup[49] = 0x03;
         frames.push_back({"aem_set_stream_backup_command", aem(0x0049, false, 48, std::span<uint8_t const>(backup))});
+    }
+
+    // ---- AEM: authentication, security, dynamic info, sampling rate range,
+    // PTP instance and port, path latency (IEEE 1722.1-2021 7.4.56-7.4.104) ----
+    {
+        std::array<uint8_t, 12 + 4> const add_key{
+            0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x07, 0x02, 0x00, 0x04, 0x00, 0xDE, 0xAD, 0xBE, 0xEF};
+        frames.push_back({"aem_auth_add_key_command", aem(0x0037, false, 70, std::span<uint8_t const>(add_key))});
+        std::array<uint8_t, 8 + 16> const keychain_list{0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x1C, 0xAB, 0x00,
+                                                        0x00, 0x00, 0x00, 0x07, 0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x08};
+        frames.push_back({"aem_auth_get_keychain_list_response", aem(0x003D, true, 71, std::span<uint8_t const>(keychain_list))});
+        std::array<uint8_t, 72> identity{};
+        identity[7] = 0x09;
+        identity[8] = 0xC1;
+        identity[39] = 0xC2;
+        identity[40] = 0xD1;
+        identity[71] = 0xD2;
+        frames.push_back({"aem_auth_get_identity_response", aem(0x003E, true, 72, std::span<uint8_t const>(identity))});
+        std::array<uint8_t, 8 + 6> const authenticate{0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 's', 'e', 'c', 'r', 'e', 't'};
+        frames.push_back({"aem_authenticate_command", aem(0x0041, false, 73, std::span<uint8_t const>(authenticate))});
+        std::array<uint8_t, 8> const transport_key{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x09};
+        frames.push_back(
+            {"aem_enable_transport_security_command", aem(0x0043, false, 74, std::span<uint8_t const>(transport_key))});
+        // GET_DYNAMIC_INFO: a GET_CONFIGURATION entry (no command payload) and a GET_SAMPLING_RATE entry
+        std::array<uint8_t, 8 + 8 + 4> const dynamic_command{
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,                          // GET_CONFIGURATION
+            0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x15, 0x00, 0x01, 0x00, 0x00,  // GET_SAMPLING_RATE AUDIO_UNIT 0
+        };
+        frames.push_back({"aem_get_dynamic_info_command", aem(0x004B, false, 75, std::span<uint8_t const>(dynamic_command))});
+        std::array<uint8_t, 8 + 4 + 8 + 8> const dynamic_response{
+            0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00,  // GET_CONFIGURATION rsp
+            0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x15, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0xBB, 0x80,  // GET_SAMPLING_RATE rsp 48 kHz
+        };
+        frames.push_back({"aem_get_dynamic_info_response", aem(0x004B, true, 75, std::span<uint8_t const>(dynamic_response))});
+        std::array<uint8_t, 12> const rate_range{0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x3C};
+        frames.push_back({"aem_set_sampling_rate_range_command", aem(0x004E, false, 76, std::span<uint8_t const>(rate_range))});
+        std::array<uint8_t, 12> const set_instance{0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0xE0, 0xE0, 0xF8, 0xF8, 0x00, 0x05};
+        frames.push_back({"aem_set_ptp_instance_info_command", aem(0x0050, false, 77, std::span<uint8_t const>(set_instance))});
+        std::array<uint8_t, 36> instance_info{
+            0x00, 0x22, 0x00, 0x00, 0xF8, 0xFE, 0x43, 0x6A, 0xF8, 0xF8, 0x00, 0x90, 0x00, 0x25, 0x01, 0x3D};
+        std::array<uint8_t, 8> const gm{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01};
+        std::copy(gm.begin(), gm.end(), instance_info.begin() + 16);
+        instance_info[24] = 0xF8;
+        instance_info[25] = 0xFE;
+        instance_info[26] = 0x43;
+        instance_info[27] = 0x6A;
+        instance_info[28] = 0xF8;
+        instance_info[29] = 0xF8;
+        instance_info[30] = 0x90;
+        instance_info[31] = 0x3C;
+        instance_info[33] = 0x25;
+        frames.push_back({"aem_get_ptp_instance_info_response", aem(0x0051, true, 78, std::span<uint8_t const>(instance_info))});
+        std::array<uint8_t, 100> extended{};
+        std::copy(instance_info.begin(), instance_info.end(), extended.begin());
+        std::copy(gm.begin(), gm.end(), extended.begin() + 36);  // parent clock identity
+        extended[45] = 0x01;                                     // parent port 1
+        extended[47] = 0x02;                                     // steps removed 2
+        extended[52] = 0xFE;                                     // valid_flags: every optional field present
+        extended[55] = 0x03;                                     // gm_timebase_indicator
+        extended[67] = 0x2A;                                     // offset_from_master low octet
+        extended[80] = 0x3F;                                     // last_gm_freq_change = 1.0f
+        extended[81] = 0x80;
+        extended[87] = 0x04;  // gm_change_count 4
+        frames.push_back(
+            {"aem_get_ptp_instance_extended_info_response", aem(0x0052, true, 79, std::span<uint8_t const>(extended))});
+        std::array<uint8_t, 36> grandmaster{0x00, 0x22, 0x00, 0x00};
+        std::copy(gm.begin(), gm.end(), grandmaster.begin() + 4);
+        grandmaster[12] = 0xF8;
+        grandmaster[13] = 0xFE;
+        grandmaster[14] = 0x43;
+        grandmaster[15] = 0x6A;
+        grandmaster[16] = 0xF8;
+        grandmaster[17] = 0xF8;
+        grandmaster[18] = 0x90;
+        grandmaster[19] = 0x3C;
+        grandmaster[21] = 0x25;
+        std::copy(gm.begin(), gm.end(), grandmaster.begin() + 24);
+        grandmaster[33] = 0x01;
+        grandmaster[35] = 0x02;
+        frames.push_back(
+            {"aem_get_ptp_instance_grandmaster_info_response", aem(0x0053, true, 80, std::span<uint8_t const>(grandmaster))});
+        std::array<uint8_t, 8 + 16> path_trace{0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+        std::copy(gm.begin(), gm.end(), path_trace.begin() + 8);
+        std::copy(gm.begin(), gm.end(), path_trace.begin() + 16);
+        path_trace[23] = 0x02;
+        frames.push_back({"aem_get_ptp_instance_path_trace_response", aem(0x0055, true, 81, std::span<uint8_t const>(path_trace))});
+        std::array<uint8_t, 12> const pm_count{0x00, 0x22, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x61, 0x00, 0x10};
+        frames.push_back(
+            {"aem_get_ptp_instance_perf_mon_count_response", aem(0x0056, true, 82, std::span<uint8_t const>(pm_count))});
+        std::array<uint8_t, 144> record{0x00, 0x22, 0x00, 0x00, 0x00, 0x03, 0xFC, 0x00};
+        record[15] = 0x64;  // timestamp 100 ns
+        record[23] = 0x10;  // average_master_slave_delay 16
+        for (size_t i = 136; i < 144; ++i) {
+            record[i] = 0xFF;  // std_dev_offset_from_master = -2
+        }
+        record[143] = 0xFE;
+        frames.push_back(
+            {"aem_get_ptp_instance_perf_mon_record_response", aem(0x0057, true, 83, std::span<uint8_t const>(record))});
+        std::array<uint8_t, 12> const intervals{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0xFD, 0x00, 0x03};
+        frames.push_back(
+            {"aem_set_ptp_port_initial_intervals_command", aem(0x0058, false, 84, std::span<uint8_t const>(intervals))});
+        std::array<uint8_t, 16> const overrides{
+            0x00, 0x23, 0x00, 0x00, 0xFF, 0x00, 0xFE, 0xE0, 0x00, 0xFD, 0x00, 0x03, 0x09, 0x00, 0x00, 0x00};
+        frames.push_back({"aem_set_ptp_port_overrides_command", aem(0x0060, false, 85, std::span<uint8_t const>(overrides))});
+        std::array<uint8_t, 48> pdelay{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00};
+        pdelay[15] = 0x64;
+        pdelay[23] = 0x7B;
+        frames.push_back({"aem_get_ptp_port_pdelay_mon_record_response", aem(0x0063, true, 86, std::span<uint8_t const>(pdelay))});
+        std::array<uint8_t, 84> port_record{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00};
+        port_record[15] = 0x64;
+        port_record[19] = 0x08;  // announce_tx
+        port_record[83] = 0x11;  // pdelay_resp_followup_rx
+        frames.push_back(
+            {"aem_get_ptp_port_perf_mon_record_response", aem(0x0065, true, 87, std::span<uint8_t const>(port_record))});
+        std::array<uint8_t, 8> const latency{0x00, 0x14, 0x00, 0x00, 0x00, 0x1E, 0x84, 0x80};
+        frames.push_back({"aem_get_path_latency_response", aem(0x0066, true, 88, std::span<uint8_t const>(latency))});
+        std::array<uint8_t, 16> const nonces{
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+        frames.push_back({"aem_auth_get_nonce_response", aem(0x0067, true, 89, std::span<uint8_t const>(nonces))});
+        std::array<uint8_t, 28 + 2> const key_nonce{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12,
+                                                    0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x00, 0x1C, 0xAB, 0x00,
+                                                    0x00, 0x00, 0x00, 0x07, 0x02, 0x00, 0x02, 0x00, 0xBE, 0xEF};
+        frames.push_back({"aem_auth_add_key_nonce_command", aem(0x0068, false, 90, std::span<uint8_t const>(key_nonce))});
+        std::array<uint8_t, 4> const disable_encryption{0x00, 0x06, 0x00, 0x00};
+        frames.push_back(
+            {"aem_disable_stream_encryption_command", aem(0x0046, false, 91, std::span<uint8_t const>(disable_encryption))});
+    }
+
+    // ---- HDCP APM command: the last fragment of a 20-octet message ----
+    {
+        AecpDuCommon du{};
+        du.init_command(AECP_MESSAGE_TYPE_HDCP_APM_COMMAND, static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6 + 4));
+        du.target_entity_id = TARGET;
+        du.controller_entity_id = CONTROLLER;
+        du.sequence_id = 51;
+        std::vector<uint8_t> out;
+        append(out, du);
+        std::array<uint8_t, 10> const apm{0x00, 0x14, 0x00, 0x00, 0x00, 0x10, 0xA1, 0xA2, 0xA3, 0xA4};
+        append(out, std::span<uint8_t const>(apm));
+        frames.push_back({"hdcp_apm_command", out});
     }
 
     // ---- AVC command: an AV/C UNIT INFO status frame ----

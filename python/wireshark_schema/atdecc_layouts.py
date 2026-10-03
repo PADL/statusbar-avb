@@ -180,6 +180,11 @@ _HEX_MEMBERS = {
     "current_format",
 }
 _VALUE_MEMBERS = {"descriptor_type": "descriptor_type"}
+for (_sname, _member), _bits in STD.STD_FLAG_WORDS.items():
+    _FLAG_WORDS[(f"aem.{_snake(_sname)}", _member)] = tuple(
+        (sub, mask, kind, None, doc) for sub, mask, kind, doc in _bits
+    )
+_VALUE_MEMBERS["keychain_id"] = "keychain_id"
 
 
 def _fields_for(
@@ -384,6 +389,9 @@ def _payload_spec(text: str | None) -> PayloadSpec | None:
     elif trailer_text.startswith("elements:"):
         _, element, count = trailer_text.split(":")
         trailer = PayloadTrailer("elements", element, count)
+    elif trailer_text.startswith("blob:"):
+        _, field, count = trailer_text.split(":")
+        trailer = PayloadTrailer("blob", field, count)
     elif trailer_text:
         trailer = PayloadTrailer(trailer_text)
     return PayloadSpec(
@@ -478,7 +486,7 @@ DESCRIPTOR_TABLES: dict[str, tuple[TrailerSpec, ...]] = {
         _t("number_of_mappings", "mappings_offset", "video_mapping", 8),
     ),
     "DescriptorSensorMap": (
-        _t("number_of_mappings", "mappings_offset", "sensor_mapping", 8),
+        _t("number_of_mappings", "mappings_offset", "sensor_mapping", 6),
     ),
     "DescriptorClockDomain": (
         _t("clock_sources_count", "clock_sources_offset", "clock_source_index", 2),
@@ -622,7 +630,15 @@ VIDEO_MAP_ENTRY = _elem(
         Field("mapping_cluster_offset", 6, 2, "u16", "mapping_cluster_offset"),
     ),
 )
-SENSOR_MAP_ENTRY = _elem("sensor_mapping", "sensor mapping entry", _MAPPING_FIELDS)
+SENSOR_MAP_ENTRY = _elem(
+    "sensor_mapping",
+    "sensor mapping entry (IEEE 1722.1-2021 Table 7-37: 6 octets)",
+    (
+        Field("mapping_stream_index", 0, 2, "u16", "mapping_stream_index"),
+        Field("mapping_stream_signal", 2, 2, "u16", "mapping_stream_signal"),
+        Field("mapping_cluster_offset", 4, 2, "u16", "mapping_cluster_offset"),
+    ),
+)
 SIGNAL_ENTRY = _elem(
     "signal",
     "signal reference entry (source / map / signal list)",
@@ -685,6 +701,16 @@ AS_PATH_ENTRY = _elem(
     "gPTP path sequence entry",
     (Field("clock_identity", 0, 8, "u64", "clock identity", base="hex"),),
 )
+CLOCK_IDENTITY_ENTRY = _elem(
+    "clock_identity",
+    "PTP path trace entry",
+    (Field("value", 0, 8, "u64", "clock identity", base="hex"),),
+)
+KEY_EUI_ENTRY = _elem(
+    "key_eui",
+    "keychain key entry",
+    (Field("value", 0, 8, "u64", "key EUI-64", base="hex"),),
+)
 TRAILER_ELEMENTS: dict[str, Layout] = {
     "count_entry": COUNT_ENTRY,
     "sampling_rate": SAMPLING_RATE,
@@ -702,6 +728,8 @@ TRAILER_ELEMENTS: dict[str, Layout] = {
     "color_space": COLOR_SPACE,
     "sensor_format": SENSOR_FORMAT,
     "as_path_entry": AS_PATH_ENTRY,
+    "clock_identity": CLOCK_IDENTITY_ENTRY,
+    "key_eui": KEY_EUI_ENTRY,
 }
 ELEMENT_SIZE: dict[str, int] = {
     "count_entry": 4,
@@ -710,7 +738,7 @@ ELEMENT_SIZE: dict[str, int] = {
     "clock_source_index": 2,
     "audio_mapping": 8,
     "video_mapping": 8,
-    "sensor_mapping": 8,
+    "sensor_mapping": 6,
     "signal": 4,
     "ptp_instance_index": 2,
     "redundant_stream_index": 2,
@@ -720,6 +748,8 @@ ELEMENT_SIZE: dict[str, int] = {
     "color_space": 2,
     "sensor_format": 8,
     "as_path_entry": 8,
+    "clock_identity": 8,
+    "key_eui": 8,
 }
 DESCRIPTOR_RAW = Field("value_details", 0, 0, "bytes", "raw descriptor trailer octets")
 JDKS_LOG_TEXT = Field("text", 0, 0, "string", "log text")
@@ -1022,6 +1052,77 @@ MVU_PAYLOADS: dict[int, tuple[MvuSpec | None, MvuSpec | None]] = {
     for code, (cmd, rsp) in STD.MVU_PAYLOADS.items()
 }
 
+VALUE_TABLES["keychain_id"] = ValueTable("keychain_id", dict(STD.KEYCHAIN_IDS))
+
+# byte-string trailers of the AUTH commands (length from a header member)
+AEM_BLOBS = Layout(
+    "aem.blobs",
+    f"{PREFIX}.aem",
+    "AEM byte-string payload trailers",
+    (
+        Field("key", 0, 0, "bytes", "key data (key_length octets)"),
+        Field(
+            "authentication_token",
+            0,
+            0,
+            "bytes",
+            "authentication token (token_length octets)",
+        ),
+    ),
+)
+AEM_BLOB_FIELDS: dict[str, Field] = {f.name: f for f in AEM_BLOBS.fields}
+
+# GET_DYNAMIC_INFO entry header (Figure 7-94), offsets relative to the entry
+DYNAMIC_INFO = Layout(
+    "aem.dynamic_info",
+    f"{PREFIX}.aem.dynamic_info",
+    "dynamic_info entry (IEEE 1722.1-2021 7.4.76)",
+    (
+        Field(
+            "info_command_specific_data_length",
+            0,
+            2,
+            "u16",
+            "octets of info_command_specific_data",
+        ),
+        Field(
+            "info_status",
+            4,
+            2,
+            "u8",
+            "status of this entry",
+            mask=0xF800,
+            values="aem_status",
+        ),
+        Field(
+            "info_command_type",
+            6,
+            2,
+            "u16",
+            "command of this entry",
+            values="aem_command",
+            base="hex",
+        ),
+    ),
+)
+DYNAMIC_INFO_HEADER_LENGTH = STD.DYNAMIC_INFO_HEADER_LENGTH
+
+HDCP_APM = Layout(
+    "hdcp_apm",
+    f"{PREFIX}.hdcp_apm",
+    "HDCP IIA Authentication Protocol AECP message (IEEE 1722.1-2021 9.7.2)",
+    (
+        Field("length", 22, 2, "u16", "hdcp_apm_length (whole message, octets)"),
+        Field("mf", 24, 1, "bool", "more fragments follow", mask=0x01),
+        Field(
+            "fragment_offset", 26, 2, "u16", "offset of this fragment in the message"
+        ),
+        Field("message_data", 0, 0, "bytes", "HDCP IIA message fragment"),
+    ),
+)
+HDCP_APM_HEADER_LENGTH = STD.HDCP_APM_HEADER_LENGTH
+HDCP_APM_DATA = HDCP_APM.fields[-1]
+
 AVC = Layout(
     "avc",
     f"{PREFIX}.avc",
@@ -1049,6 +1150,9 @@ ATDECC_LAYOUTS: tuple[Layout, ...] = (
         MVU,
         MVU_FLAGS,
         AVC,
+        HDCP_APM,
+        AEM_BLOBS,
+        DYNAMIC_INFO,
     )
     + tuple(PAYLOAD_LAYOUTS.values())
     + tuple(DESCRIPTOR_LAYOUTS.values())

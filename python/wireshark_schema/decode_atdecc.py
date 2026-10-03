@@ -246,6 +246,32 @@ def _payload_values(
     _control_values_untyped(data, at, stop, out)
 
 
+def _dynamic_infos(data: bytes, at: int, stop: int, is_command: bool, out: dict) -> int:
+    """GET_DYNAMIC_INFO entries, as dissect_dynamic_infos in atdecc.lua."""
+    while at + A.DYNAMIC_INFO_HEADER_LENGTH <= stop:
+        length = _u16(data, at)
+        code = _u16(data, at + 6) & 0x3FFF
+        total = A.DYNAMIC_INFO_HEADER_LENGTH + length
+        if at + total > stop:
+            total = stop - at
+        out.update(decode_layout(A.DYNAMIC_INFO, data, at))
+        specs = A.AEM_PAYLOADS.get(code)
+        spec = (specs[0] if is_command else specs[1]) if specs else None
+        body = at + A.DYNAMIC_INFO_HEADER_LENGTH
+        if spec is not None and spec.trailer is None and length >= spec.length:
+            out.update(decode_layout(spec.layout, data, body - A.AEM_HEADER_LENGTH))
+            if length > spec.length:
+                out[A.AEM.abbr(A.AEM_PAYLOAD_RAW)] = data[
+                    body + spec.length : body + length
+                ].hex()
+        elif length > 0:
+            out[A.AEM.abbr(A.AEM_PAYLOAD_RAW)] = data[
+                body : body + min(length, stop - body)
+            ].hex()
+        at += total
+    return at
+
+
 def _aem(data: bytes, stop: int, is_command: bool, out: dict) -> None:
     out.update(decode_layout(A.AEM, data))
     code = _u16(data, 22) & 0x3FFF
@@ -281,6 +307,24 @@ def _aem(data: bytes, stop: int, is_command: bool, out: dict) -> None:
                         break
                     out.update(decode_layout(element, data, at))
                     at += size
+            elif trailer.kind == "blob":
+                members = {
+                    m["name"]: m for m in A.ALL_PAYLOAD_STRUCTS[spec.struct]["members"]
+                }
+                length = min(
+                    _u16(
+                        data,
+                        A.AEM_HEADER_LENGTH + members[trailer.count_field]["offset"],
+                    ),
+                    stop - at,
+                )
+                if length > 0:
+                    out[A.AEM_BLOBS.abbr(A.AEM_BLOB_FIELDS[trailer.element])] = data[
+                        at : at + length
+                    ].hex()
+                    at += length
+            elif trailer.kind == "dynamic_infos":
+                at = _dynamic_infos(data, at, stop, is_command, out)
     if stop > at:
         out[A.AEM.abbr(A.AEM_PAYLOAD_RAW)] = data[at:stop].hex()
 
@@ -357,6 +401,16 @@ def decode_atdecc(data: bytes, out: dict) -> None:
         if length > 0:
             out[A.AVC.abbr(A.AVC_PAYLOAD)] = data[
                 A.AVC_HEADER_LENGTH : A.AVC_HEADER_LENGTH + length
+            ].hex()
+    elif msg_type in (8, 9) and len(data) >= A.HDCP_APM_HEADER_LENGTH:
+        out.update(
+            decode_layout(
+                A.Layout("hdcp", A.HDCP_APM.prefix, "", A.HDCP_APM.fields[:-1]), data
+            )
+        )
+        if stop > A.HDCP_APM_HEADER_LENGTH:
+            out[A.HDCP_APM.abbr(A.HDCP_APM_DATA)] = data[
+                A.HDCP_APM_HEADER_LENGTH : stop
             ].hex()
     elif msg_type in (6, 7) and len(data) >= A.VU_HEADER_LENGTH:
         out.update(decode_layout(A.VU, data))

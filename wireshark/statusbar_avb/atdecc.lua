@@ -35,6 +35,8 @@ local AECP_AA_COMMAND = 2
 local AECP_AA_RESPONSE = 3
 local AECP_AVC_COMMAND = 4
 local AECP_AVC_RESPONSE = 5
+local AECP_HDCP_APM_COMMAND = 8
+local AECP_HDCP_APM_RESPONSE = 9
 local AECP_VU_COMMAND = 6
 local AECP_VU_RESPONSE = 7
 local AEM_READ_DESCRIPTOR = 0x0004
@@ -433,6 +435,40 @@ local function dissect_payload_values(t, tvb, at, stop, target, spec, pinfo)
     dissect_control_values(t, tvb, at, stop)
 end
 
+--- GET_DYNAMIC_INFO (7.4.76): dynamic_info entries from `at`, each an
+--- 8-octet header and the AEM payload of its command (fixed-size GETs only,
+--- so the command's own payload spec applies with no trailer)
+local function dissect_dynamic_infos(t, tvb, at, stop, is_command)
+    local index = 0
+    while at + gen.DYNAMIC_INFO_HEADER_LENGTH <= stop do
+        local length = tvb(at, 2):uint()
+        local code = tvb(at + 6, 2):uint() % 0x4000
+        local total = gen.DYNAMIC_INFO_HEADER_LENGTH + length
+        if at + total > stop then
+            t:add_proto_expert_info(ef_trailer)
+            total = stop - at
+        end
+        local entry = t:add(tvb(at, total), string.format("dynamic_info[%d]: %s %s", index,
+            gen.values_aem_command[code] or string.format("command 0x%04x", code), is_command and "command" or "response"))
+        gen.add_aem_dynamic_info(entry, tvb, at)
+        local specs = gen.aem_payloads[code]
+        local spec = specs and (is_command and specs.cmd or specs.rsp)
+        local body = at + gen.DYNAMIC_INFO_HEADER_LENGTH
+        if spec ~= nil and spec.trailer == nil and length >= spec.length then
+            -- the payload layouts are AEM-header relative: shift them to this entry
+            spec.add(entry, tvb, body - gen.AEM_HEADER_LENGTH)
+            if length > spec.length then
+                entry:add(gen.AEM_PAYLOAD_RAW, tvb(body + spec.length, length - spec.length))
+            end
+        elseif length > 0 then
+            entry:add(gen.AEM_PAYLOAD_RAW, tvb(body, math.min(length, stop - body)))
+        end
+        at = at + total
+        index = index + 1
+    end
+    return at
+end
+
 --- AEM command/response after the 24-octet AEM header; returns the summary
 local function dissect_aem(t, tvb, pinfo, stop, is_command)
     gen.add_aem(t, tvb, 0)
@@ -470,6 +506,14 @@ local function dissect_aem(t, tvb, pinfo, stop, is_command)
                     trailer.element_add(element, tvb, at)
                     at = at + trailer.element_size
                 end
+            elseif trailer.kind == "blob" then
+                local length = math.min(tvb(trailer.count_field_offset, 2):uint(), stop - at)
+                if length > 0 then
+                    t:add(trailer.field, tvb(at, length))
+                    at = at + length
+                end
+            elseif trailer.kind == "dynamic_infos" then
+                at = dissect_dynamic_infos(t, tvb, at, stop, is_command)
             end
         end
     end
@@ -557,6 +601,13 @@ local function dissect_aecp(tvb, pinfo, root, header, tree)
             t:add(gen.AVC_PAYLOAD, tvb(gen.AVC_HEADER_LENGTH, length))
         end
         summary = string.format("AVC %s %d octets", is_command and "command" or "response", length)
+    elseif (msg_type == AECP_HDCP_APM_COMMAND or msg_type == AECP_HDCP_APM_RESPONSE) and len >= gen.HDCP_APM_HEADER_LENGTH then
+        gen.add_hdcp_apm(t, tvb, 0)
+        if stop > gen.HDCP_APM_HEADER_LENGTH then
+            t:add(gen.HDCP_APM_DATA, tvb(gen.HDCP_APM_HEADER_LENGTH, stop - gen.HDCP_APM_HEADER_LENGTH))
+        end
+        summary = string.format("HDCP APM %s offset=%d%s", is_command and "command" or "response", tvb(26, 2):uint(),
+            tvb(24, 1):bitfield(7, 1) == 1 and " more fragments" or "")
     elseif (msg_type == AECP_VU_COMMAND or msg_type == AECP_VU_RESPONSE) and len >= gen.VU_HEADER_LENGTH then
         gen.add_vu(t, tvb, 0)
         local protocol_id = tostring(tvb(22, 6):bytes()):lower()

@@ -15,19 +15,18 @@ headers as `avb.avtp.cvf.mjpeg.*`, `.h264.*`, `.h265.*`, `.jpeg2000.*`; SDI,
 raw video and vendor-specific headers as `avb.avtp.svf.*`, `.rvf.*`, `.vsf.*`),
 `avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
 TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and
-`avb.atdecc.*` (ADP, ACMP and AECP: the AEM command payloads the C++
-implements plus, from the standard, video/sensor formats and maps,
-association id, AS path, stream encryption, memory object length and
-stream backup; every descriptor with all of its counted tables; control
-value_details typed per IEEE 1722.1-2021 Table 7.12 as `avb.atdecc.control.*`,
-with SET/GET_CONTROL, MIXER and MATRIX values typed from the descriptor
-already seen in the capture; stream formats as `avb.atdecc.stream_format.*`;
-the JDKS log/IPv4 vendor blobs; Address Access TLVs; AVC; Milan vendor
-unique as `avb.atdecc.mvu.*`; e.g. `avb.atdecc.aem.command_type == 0x0004`).
-Still raw: the AUTH_* / transport security commands, GET_DYNAMIC_INFO,
-SET/GET_SAMPLING_RATE_RANGE, GET_PATH_LATENCY and the 2021 PTP_INSTANCE /
-PTP_PORT family (no payload definitions in this repository), HDCP APM and
-EXTENDED AECP messages.
+`avb.atdecc.*` (ADP, ACMP and AECP: every AEM command of IEEE
+1722.1-2021 Table 7-140 with its payload, including the authentication and
+security commands, GET_DYNAMIC_INFO with each packed sub-command decoded,
+the sampling rate range, PTP instance and PTP port families and
+GET_PATH_LATENCY; every descriptor with all of its counted tables; control
+value_details typed per Table 7.12 as `avb.atdecc.control.*`, with
+SET/GET_CONTROL, MIXER and MATRIX values typed from the descriptor already
+seen in the capture; stream formats as `avb.atdecc.stream_format.*`; the
+JDKS log/IPv4 vendor blobs; Address Access TLVs; AVC; HDCP APM; Milan
+vendor unique as `avb.atdecc.mvu.*`; e.g. `avb.atdecc.aem.command_type ==
+0x0004`). Only the EXTENDED AECP message type, reserved for future use by
+the standard, stays raw.
 Commands and responses are paired on (controller, sequence) and shown as
 *Response in* / *Response to* / *Response time* generated items.
 
@@ -43,8 +42,8 @@ generator that produce the `statusbar_avb/gen/*.lua` files live in
 `acf_table.py`, the same table the C++ `avtp_acf_*.hpp` headers came from;
 the ATDECC layouts are `atdecc_table.py` and `atdecc_units.py`, extracted
 from the C++ `atdecc_*.hpp` wire structs, plus `atdecc_std.py` written from
-IEEE 1722.1 and the Milan specification for what the C++ has no struct
-for), as does every C++ source. Do
+IEEE Std 1722.1-2021 (`docs/1722.1-2021.pdf`) and the Milan specification
+for what the C++ has no struct for), as does every C++ source. Do
 not copy anything from Wireshark's own sources or dissectors into these
 files: everything here is written from the IEEE standards and from this
 repository's C++ wire-format definitions.

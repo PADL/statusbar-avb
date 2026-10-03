@@ -315,6 +315,7 @@ def generate_atdecc_fields() -> str:
         "control_unit_code",
         "mvu_command",
         "mvu_status",
+        "keychain_id",
         # referenced by the stream-format sub-fields
         "aaf_nsr",
         "aaf_format",
@@ -333,9 +334,10 @@ def generate_atdecc_fields() -> str:
         (A.DESCRIPTOR_LAYOUTS["DescriptorControl"], A.DESCRIPTOR_RAW),
         (A.JDKS_LOG, A.JDKS_LOG_TEXT),
         (A.AVC, A.AVC_PAYLOAD),
+        (A.HDCP_APM, A.HDCP_APM_DATA),
         (A.CONTROL_VALUE, A.CONTROL_UTF8),
         (A.CONTROL_VALUE, A.CONTROL_VENDOR),
-    ]
+    ] + [(A.AEM_BLOBS, f) for f in A.AEM_BLOBS.fields]
     for layout in A.MVU_PAYLOAD_LAYOUTS.values():
         for f in layout.fields:
             if f.length == 0:
@@ -353,6 +355,7 @@ def generate_atdecc_fields() -> str:
     out.append("M.AA_TLV_DATA = " + fkey(A.AA_TLV, A.AA_TLV_DATA))
     out.append("M.VU_PAYLOAD = " + fkey(A.VU, A.VU_PAYLOAD))
     out.append("M.AVC_PAYLOAD = " + fkey(A.AVC, A.AVC_PAYLOAD))
+    out.append("M.HDCP_APM_DATA = " + fkey(A.HDCP_APM, A.HDCP_APM_DATA))
     out.append("M.CONTROL_UTF8 = " + fkey(A.CONTROL_VALUE, A.CONTROL_UTF8))
     out.append("M.CONTROL_VENDOR = " + fkey(A.CONTROL_VALUE, A.CONTROL_VENDOR))
     out.append(
@@ -365,6 +368,12 @@ def generate_atdecc_fields() -> str:
     def trailer_table(trailer, struct_members):
         if trailer is None:
             return "nil"
+        if trailer.kind == "blob":
+            count_off = struct_members[trailer.count_field]["offset"]
+            return (
+                f'{{ kind = "blob", field = {fkey(A.AEM_BLOBS, A.AEM_BLOB_FIELDS[trailer.element])}, '
+                f"count_field_offset = {A.AEM_HEADER_LENGTH + count_off} }}"
+            )
         if trailer.kind != "elements":
             return f"{{ kind = {_lua_string(trailer.kind)} }}"
         count_off = struct_members[trailer.count_field]["offset"]
@@ -480,6 +489,8 @@ def generate_atdecc_fields() -> str:
         out.append(f"    M.f.atdecc_mvu_mcr_flags_{name},")
     out += ["}", ""]
     out.append(f"M.MVU_PROTOCOL_ID = {_lua_string(STD.MVU_PROTOCOL_ID)}")
+    out.append(f"M.DYNAMIC_INFO_HEADER_LENGTH = {A.DYNAMIC_INFO_HEADER_LENGTH}")
+    out.append(f"M.HDCP_APM_HEADER_LENGTH = {A.HDCP_APM_HEADER_LENGTH}")
     out.append(f"M.MVU_HEADER_LENGTH = {A.MVU_HEADER_LENGTH}")
     out.append(f"M.AVC_HEADER_LENGTH = {A.AVC_HEADER_LENGTH}")
     out.append(
