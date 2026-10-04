@@ -935,14 +935,16 @@ STD_AEM_PAYLOADS.update(
 
 #: (struct, member) -> bit expansions ((sub-field, mask, kind, doc), ...) for the
 #: flag words of the standard-derived structs
+#: Masks are the tables' "Bit Value" column: IEEE 1722.1 numbers bit 15 of a
+#: 16-bit word as 0x0001 (the last bit on the wire), bit 0 as 0x8000.
 STD_FLAG_WORDS: dict[tuple[str, str], tuple[tuple[str, int, str, str], ...]] = {
     ("AemSetPtpInstanceInfoPayload", "set_flags"): (
-        ("flags.ie", 0x8000, "bool", "IE: ie contains a value to be set"),
-        ("flags.ee", 0x4000, "bool", "EE: ee contains a value to be set"),
-        ("flags.so", 0x2000, "bool", "SO: so contains a value to be set"),
-        ("flags.priority1", 0x0080, "bool", "PRIORITY1 is being set"),
-        ("flags.priority2", 0x0040, "bool", "PRIORITY2 is being set"),
-        ("flags.domain_number", 0x0020, "bool", "DOMAIN_NUMBER is being set"),
+        ("flags.ie", 0x0001, "bool", "IE: ie contains a value to be set"),
+        ("flags.ee", 0x0002, "bool", "EE: ee contains a value to be set"),
+        ("flags.so", 0x0004, "bool", "SO: so contains a value to be set"),
+        ("flags.priority1", 0x0100, "bool", "PRIORITY1 is being set"),
+        ("flags.priority2", 0x0200, "bool", "PRIORITY2 is being set"),
+        ("flags.domain_number", 0x0400, "bool", "DOMAIN_NUMBER is being set"),
     ),
     ("AemSetPtpInstanceInfoPayload", "instance_booleans"): (
         ("so", 0x04, "bool", "defaultDS.slaveOnly"),
@@ -950,60 +952,60 @@ STD_FLAG_WORDS: dict[tuple[str, str], tuple[tuple[str, int, str, str], ...]] = {
         ("ie", 0x01, "bool", "defaultDS.instanceEnabled"),
     ),
     ("AemPtpInstanceExtendedInfoResponsePayload", "valid_flags"): (
-        ("valid.offset_from_master", 0x8000, "bool", "offset_from_master is valid"),
-        ("valid.last_gm_phase_change", 0x4000, "bool", "last_gm_phase_change is valid"),
-        ("valid.last_gm_freq_change", 0x2000, "bool", "last_gm_freq_change is valid"),
-        ("valid.gm_change_count", 0x1000, "bool", "gm_change_count is valid"),
+        ("valid.offset_from_master", 0x0001, "bool", "offset_from_master is valid"),
+        ("valid.last_gm_phase_change", 0x0002, "bool", "last_gm_phase_change is valid"),
+        ("valid.last_gm_freq_change", 0x0004, "bool", "last_gm_freq_change is valid"),
+        ("valid.gm_change_count", 0x0008, "bool", "gm_change_count is valid"),
         (
             "valid.time_of_last_gm_change",
-            0x0800,
+            0x0010,
             "bool",
             "time_of_last_gm_change is valid",
         ),
         (
             "valid.time_of_last_gm_phase_change",
-            0x0400,
+            0x0020,
             "bool",
             "time_of_last_gm_phase_change is valid",
         ),
         (
             "valid.time_of_last_gm_freq_change",
-            0x0200,
+            0x0040,
             "bool",
             "time_of_last_gm_freq_change is valid",
         ),
     ),
     ("AemPtpInstancePerfMonRecordResponsePayload", "record_flags"): (
-        ("measurement_valid", 0x8000, "bool", "MEASUREMENT_VALID"),
-        ("period_complete", 0x4000, "bool", "PERIOD_COMPLETE"),
-        ("master_slave_delay_valid", 0x2000, "bool", "MASTER_SLAVE_DELAY_VALID"),
-        ("slave_master_delay_valid", 0x1000, "bool", "SLAVE_MASTER_DELAY_VALID"),
-        ("mean_path_delay_valid", 0x0800, "bool", "MEAN_PATH_DELAY_VALID"),
-        ("offset_from_master_valid", 0x0400, "bool", "OFFSET_FROM_MASTER_VALID"),
+        ("measurement_valid", 0x0001, "bool", "MEASUREMENT_VALID"),
+        ("period_complete", 0x0002, "bool", "PERIOD_COMPLETE"),
+        ("master_slave_delay_valid", 0x0004, "bool", "MASTER_SLAVE_DELAY_VALID"),
+        ("slave_master_delay_valid", 0x0008, "bool", "SLAVE_MASTER_DELAY_VALID"),
+        ("mean_path_delay_valid", 0x0010, "bool", "MEAN_PATH_DELAY_VALID"),
+        ("offset_from_master_valid", 0x0020, "bool", "OFFSET_FROM_MASTER_VALID"),
     ),
     ("AemPtpPortPdelayMonRecordResponsePayload", "record_flags"): (
-        ("measurement_valid", 0x8000, "bool", "MEASUREMENT_VALID"),
-        ("period_complete", 0x4000, "bool", "PERIOD_COMPLETE"),
+        ("measurement_valid", 0x0001, "bool", "MEASUREMENT_VALID"),
+        ("period_complete", 0x0002, "bool", "PERIOD_COMPLETE"),
     ),
     ("AemPtpPortPerfMonRecordResponsePayload", "record_flags"): (
-        ("measurement_valid", 0x8000, "bool", "MEASUREMENT_VALID"),
-        ("period_complete", 0x4000, "bool", "PERIOD_COMPLETE"),
+        ("measurement_valid", 0x0001, "bool", "MEASUREMENT_VALID"),
+        ("period_complete", 0x0002, "bool", "PERIOD_COMPLETE"),
     ),
     ("AemPtpPortIntervalsPayload", "interval_flags"): (
-        ("announce_valid", 0x8000, "bool", "ANNOUNCE_VALID"),
-        ("sync_valid", 0x4000, "bool", "SYNC_VALID"),
-        ("pdelay_valid", 0x2000, "bool", "PDELAY_VALID"),
-        ("capable_valid", 0x1000, "bool", "CAPABLE_VALID"),
+        ("announce_valid", 0x0001, "bool", "ANNOUNCE_VALID"),
+        ("sync_valid", 0x0002, "bool", "SYNC_VALID"),
+        ("pdelay_valid", 0x0004, "bool", "PDELAY_VALID"),
+        ("capable_valid", 0x0008, "bool", "CAPABLE_VALID"),
     ),
     ("AemSetPtpPortOverridesPayload", "override_flags"): (
-        ("flags.announce_interval", 0x8000, "bool", "ANNOUNCE_INTERVAL"),
-        ("flags.sync_interval", 0x4000, "bool", "SYNC_INTERVAL"),
-        ("flags.pdelay_interval", 0x2000, "bool", "PDELAY_INTERVAL"),
-        ("flags.gptp_capable_interval", 0x1000, "bool", "GPTP_CAPABLE_INTERVAL"),
-        ("flags.compute_neighbor", 0x0800, "bool", "COMPUTE_NEIGHBOR"),
-        ("flags.compute_mean_delay", 0x0400, "bool", "COMPUTE_MEAN_DELAY"),
-        ("flags.onestep_tx_oper", 0x0200, "bool", "ONESTEP_TX_OPER"),
-        ("flags.desired_state", 0x0100, "bool", "DESIRED_STATE"),
+        ("flags.announce_interval", 0x0001, "bool", "ANNOUNCE_INTERVAL"),
+        ("flags.sync_interval", 0x0002, "bool", "SYNC_INTERVAL"),
+        ("flags.pdelay_interval", 0x0004, "bool", "PDELAY_INTERVAL"),
+        ("flags.gptp_capable_interval", 0x0008, "bool", "GPTP_CAPABLE_INTERVAL"),
+        ("flags.compute_neighbor", 0x0010, "bool", "COMPUTE_NEIGHBOR"),
+        ("flags.compute_mean_delay", 0x0020, "bool", "COMPUTE_MEAN_DELAY"),
+        ("flags.onestep_tx_oper", 0x0040, "bool", "ONESTEP_TX_OPER"),
+        ("flags.desired_state", 0x0080, "bool", "DESIRED_STATE"),
     ),
     ("AemSamplingRateRangePayload", "minimum_sampling_rate"): (
         ("minimum_pull", 0xE0000000, "u8", "minimum pull"),
@@ -1015,18 +1017,70 @@ STD_FLAG_WORDS: dict[tuple[str, str], tuple[tuple[str, int, str, str], ...]] = {
     ),
 }
 _BOOLEANS = (
-    ("use_announce_interval", 0x8000, "bool", "USE_ANNOUNCE_INTERVAL"),
-    ("use_sync_interval", 0x4000, "bool", "USE_SYNC_INTERVAL"),
-    ("use_pdelay_interval", 0x2000, "bool", "USE_PDELAY_INTERVAL"),
-    ("use_gptp_capable_interval", 0x1000, "bool", "USE_GPTP_CAPABLE_INTERVAL"),
-    ("use_compute_neighbor", 0x0800, "bool", "USE_COMPUTE_NEIGHBOR"),
-    ("use_compute_mean_delay", 0x0400, "bool", "USE_COMPUTE_MEAN_DELAY"),
-    ("use_onestep_tx_oper", 0x0200, "bool", "USE_ONESTEP_TX_OPER"),
-    ("compute_neighbor_rate", 0x0080, "bool", "COMPUTE_NEIGHBOR_RATE"),
-    ("compute_mean_link_delay", 0x0040, "bool", "COMPUTE_MEAN_LINK_DELAY"),
-    ("onestep_tx_oper", 0x0020, "bool", "ONESTEP_TX_OPER"),
+    ("use_announce_interval", 0x0001, "bool", "USE_ANNOUNCE_INTERVAL"),
+    ("use_sync_interval", 0x0002, "bool", "USE_SYNC_INTERVAL"),
+    ("use_pdelay_interval", 0x0004, "bool", "USE_PDELAY_INTERVAL"),
+    ("use_gptp_capable_interval", 0x0008, "bool", "USE_GPTP_CAPABLE_INTERVAL"),
+    ("use_compute_neighbor", 0x0010, "bool", "USE_COMPUTE_NEIGHBOR"),
+    ("use_compute_mean_delay", 0x0020, "bool", "USE_COMPUTE_MEAN_DELAY"),
+    ("use_onestep_tx_oper", 0x0040, "bool", "USE_ONESTEP_TX_OPER"),
+    ("compute_neighbor_rate", 0x0100, "bool", "COMPUTE_NEIGHBOR_RATE"),
+    ("compute_mean_link_delay", 0x0200, "bool", "COMPUTE_MEAN_LINK_DELAY"),
+    ("onestep_tx_oper", 0x0400, "bool", "ONESTEP_TX_OPER"),
 )
 STD_FLAG_WORDS[("AemSetPtpPortOverridesPayload", "override_booleans")] = _BOOLEANS
+#: SET_PTP_PORT_INFO / GET_PTP_PORT_INFO (Tables 7-173 / 7-174, Figures 7-122 /
+#: 7-124 as replaced by Cor 1-2025)
+STD_FLAG_WORDS[("AemPtpPortInfoCommandPayload", "flags")] = (
+    ("flags.set_enable", 0x0001, "bool", "SET_ENABLE"),
+    ("flags.set_link_delay_threshold", 0x0002, "bool", "SET_LINK_DELAY_THRESHOLD"),
+    ("flags.set_delay_mechanism", 0x0004, "bool", "SET_DELAY_MECHANISM"),
+    ("flags.set_delay_asymmetry", 0x0008, "bool", "SET_DELAY_ASYMMETRY"),
+    ("flags.set_announce_timeouts", 0x0010, "bool", "SET_ANNOUNCE_TIMEOUTS"),
+    ("flags.set_sync_timeouts", 0x0020, "bool", "SET_SYNC_TIMEOUTS"),
+    ("flags.set_gptp_capable_timeouts", 0x0040, "bool", "SET_GPTP_CAPABLE_TIMEOUTS"),
+    ("flags.set_pdelay_timeouts", 0x0080, "bool", "SET_PDELAY_TIMEOUTS"),
+    ("flags.set_ioto", 0x0100, "bool", "SET_IOTO"),
+    ("flags.set_icmd", 0x0200, "bool", "SET_ICMD"),
+    ("flags.set_icnr", 0x0400, "bool", "SET_ICNR"),
+    ("flags.set_faults", 0x0800, "bool", "SET_FAULTS"),
+)
+STD_FLAG_WORDS[("AemPtpPortInfoCommandPayload", "port_flags")] = (
+    ("port_flags.ioto", 0x08, "bool", "IOTO"),
+    ("port_flags.icmd", 0x04, "bool", "ICMD"),
+    ("port_flags.icnr", 0x02, "bool", "ICNR"),
+    ("port_flags.pe", 0x01, "bool", "PE: portDS.ptpPortEnabled"),
+)
+STD_FLAG_WORDS[("AemGetPtpPortInfoResponsePayload", "flags")] = (
+    ("flags.delay_mechanism", 0x0001, "bool", "DELAY_MECHANISM"),
+    ("flags.delay_asymmetry", 0x0002, "bool", "DELAY_ASYMMETRY"),
+    ("flags.gptp_capable_timeouts", 0x0004, "bool", "GPTP_CAPABLE_TIMEOUTS"),
+    ("flags.pdelay_timeouts", 0x0008, "bool", "PDELAY_TIMEOUTS"),
+    ("flags.ioto", 0x0010, "bool", "IOTO"),
+    ("flags.faults", 0x0020, "bool", "FAULTS"),
+    ("flags.osto", 0x0040, "bool", "OSTO"),
+    ("flags.osr", 0x0080, "bool", "OSR"),
+    ("flags.ost", 0x0100, "bool", "OST"),
+    ("flags.coto", 0x0200, "bool", "COTO"),
+    ("flags.sl", 0x0400, "bool", "SL"),
+)
+STD_FLAG_WORDS[("AemGetPtpPortInfoResponsePayload", "port_flags")] = (
+    ("port_flags.cc", 0x80, "bool", "CC"),
+    ("port_flags.ccnr", 0x40, "bool", "CCNR"),
+    ("port_flags.asc", 0x20, "bool", "ASC"),
+    ("port_flags.imd", 0x10, "bool", "IMD"),
+    ("port_flags.ioto", 0x08, "bool", "IOTO"),
+    ("port_flags.icmd", 0x04, "bool", "ICMD"),
+    ("port_flags.icnr", 0x02, "bool", "ICNR"),
+    ("port_flags.pe", 0x01, "bool", "PE: portDS.ptpPortEnabled"),
+)
+STD_FLAG_WORDS[("AemGetPtpPortInfoResponsePayload", "ext_port_flags")] = (
+    ("ext_port_flags.osto", 0x10, "bool", "OSTO"),
+    ("ext_port_flags.osr", 0x08, "bool", "OSR"),
+    ("ext_port_flags.ost", 0x04, "bool", "OST"),
+    ("ext_port_flags.coto", 0x02, "bool", "COTO"),
+    ("ext_port_flags.sl", 0x01, "bool", "SL"),
+)
 STD_FLAG_WORDS[("AemGetPtpPortOverridesResponsePayload", "override_booleans")] = (
     _BOOLEANS
 )

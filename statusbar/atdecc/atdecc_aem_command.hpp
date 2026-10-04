@@ -16,6 +16,7 @@
 #include "statusbar/tsn/tsn.hpp"
 
 #include <array>
+#include <bit>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -1117,78 +1118,85 @@ static_assert(offsetof(AemGetMaxTransitTimeCommandPayload, descriptor_index) == 
 using AemGetMaxTransitTimeResponsePayload = AemSetMaxTransitTimePayload;
 
 //
-// SET_PTP_PORT_INFO / GET_PTP_PORT_INFO Command - Clause 7.4.94 / 7.4.95
+// SET_PTP_PORT_INFO / GET_PTP_PORT_INFO - Clause 7.4.94 / 7.4.95
+// (IEEE 1722.1-2021 Figures 7-122 and 7-124 as corrected by Cor 1-2025)
 //
-/// SET_PTP_PORT_INFO command/response and GET_PTP_PORT_INFO command payload
+/// SET_PTP_PORT_INFO command and response payload (Figure 7-122, 32 octets).
+/// The 64-bit delay fields carry the lower 64 bits of the IEEE 802.1AS-2020
+/// portDS value shifted right by 16, i.e. whole nanoseconds (Cor 1-2025 7.4.94).
 struct AemPtpPortInfoCommandPayload
 {
-    static constexpr size_t LENGTH = 36;
+    static constexpr size_t LENGTH = 32;
 
-    doublet_t descriptor_type{0};               // 0
-    doublet_t descriptor_index{0};              // 2
-    doublet_t reserved1{0};                     // 4
-    doublet_t flags{0};                         // 6
-    octet_t delay_mechanism{0};                 // 8
-    octet_t announce_receipt_timeout{0};        // 9
-    octet_t sync_receipt_timeout{0};            // 10
-    octet_t port_flags{0};                      // 11: cc|ccnr|asc|imd|ioto|icmd|icnr|pe (packed bits)
-    octlet_t mean_link_delay_threshold{0};      // 12
-    octlet_t delay_asymmetry{0};                // 20
-    doublet_t allowed_lost_responses{0};        // 28
-    doublet_t allowed_faults{0};                // 30
-    doublet_t gptp_capable_receipt_timeout{0};  // 32
-    octet_t port_state{0};                      // 34
-    octet_t reserved2{0};                       // 35
+    doublet_t descriptor_type{0};             // 0
+    doublet_t descriptor_index{0};            // 2
+    doublet_t reserved1{0};                   // 4
+    doublet_t flags{0};                       // 6: set_ptp_port_info_flags
+    octet_t delay_mechanism{0};               // 8
+    octet_t announce_receipt_timeout{0};      // 9
+    octet_t sync_receipt_timeout{0};          // 10
+    octet_t port_flags{0};                    // 11: reserved2[4]|ioto|icmd|icnr|pe (ptp_port_flags)
+    octlet_t mean_link_delay_threshold{0};    // 12: portDS.meanLinkDelayThresh >> 16 (ns)
+    octlet_t delay_asymmetry{0};              // 20: portDS.delayAsymmetry >> 16 (signed ns)
+    octet_t allowed_lost_responses{0};        // 28
+    octet_t allowed_faults{0};                // 29
+    octet_t gptp_capable_receipt_timeout{0};  // 30
+    octet_t reserved3{0};                     // 31
 
     auto operator<=>(AemPtpPortInfoCommandPayload const&) const noexcept = default;
 };
 
-static_assert(sizeof(AemPtpPortInfoCommandPayload) == 36);
+static_assert(sizeof(AemPtpPortInfoCommandPayload) == 32);
 static_assert(offsetof(AemPtpPortInfoCommandPayload, flags) == 6);
 static_assert(offsetof(AemPtpPortInfoCommandPayload, mean_link_delay_threshold) == 12);
 static_assert(offsetof(AemPtpPortInfoCommandPayload, delay_asymmetry) == 20);
-static_assert(offsetof(AemPtpPortInfoCommandPayload, port_state) == 34);
+static_assert(offsetof(AemPtpPortInfoCommandPayload, allowed_lost_responses) == 28);
+static_assert(offsetof(AemPtpPortInfoCommandPayload, gptp_capable_receipt_timeout) == 30);
 
-/// GET_PTP_PORT_INFO response payload (Cor1 updated with mean_link_delay, neighbor_rate_ratio, version)
+/// GET_PTP_PORT_INFO response payload (Figure 7-124 as replaced by Cor 1-2025, 52 octets).
+/// mean_link_delay carries portDS.meanLinkDelay >> 16 (whole nanoseconds);
+/// neighbor_rate_ratio carries the IEEE 754 binary64 bits of portDS.neighborRateRatio.
 struct AemGetPtpPortInfoResponsePayload
 {
-    static constexpr size_t LENGTH = 76;
-    static constexpr size_t MINIMUM_LENGTH = 36;  // pre-Cor1 compat
+    static constexpr size_t LENGTH = 52;
 
-    doublet_t descriptor_type{0};               // 0
-    doublet_t descriptor_index{0};              // 2
-    doublet_t reserved1{0};                     // 4
-    doublet_t flags{0};                         // 6
-    octet_t delay_mechanism{0};                 // 8
-    octet_t announce_receipt_timeout{0};        // 9
-    octet_t sync_receipt_timeout{0};            // 10
-    octet_t port_flags{0};                      // 11: cc|ccnr|asc|imd|ioto|icmd|icnr|pe
-    octlet_t mean_link_delay_threshold{0};      // 12
-    octlet_t delay_asymmetry{0};                // 20
-    doublet_t allowed_lost_responses{0};        // 28
-    doublet_t allowed_faults{0};                // 30
-    doublet_t gptp_capable_receipt_timeout{0};  // 32
-    octet_t port_state{0};                      // 34
-    octet_t reserved2{0};                       // 35
-    quadlet_t reserved3{0};                     // 36
-    octlet_t mean_link_delay{0};                // 40  - Cor1
-    octlet_t neighbor_rate_ratio{0};            // 48  - Cor1
-    octet_t major_version{0};                   // 56  - Cor1
-    octet_t minor_version{0};                   // 57  - Cor1
-    octet_t ext_port_flags{0};                  // 58  - Cor1: rsvd|osto|osr|ost|coto|sl
-    octet_t reserved4{0};                       // 59
-    octlet_t reserved5{0};                      // 60
-    octlet_t reserved6{0};                      // 68
+    doublet_t descriptor_type{0};             // 0
+    doublet_t descriptor_index{0};            // 2
+    doublet_t reserved1{0};                   // 4
+    doublet_t flags{0};                       // 6: get_ptp_port_info_flags
+    octet_t delay_mechanism{0};               // 8
+    octet_t announce_receipt_timeout{0};      // 9
+    octet_t sync_receipt_timeout{0};          // 10
+    octet_t port_flags{0};                    // 11: cc|ccnr|asc|imd|ioto|icmd|icnr|pe (ptp_port_flags)
+    octlet_t mean_link_delay_threshold{0};    // 12: portDS.meanLinkDelayThresh >> 16 (ns)
+    octlet_t delay_asymmetry{0};              // 20: portDS.delayAsymmetry >> 16 (signed ns)
+    octet_t allowed_lost_responses{0};        // 28
+    octet_t allowed_faults{0};                // 29
+    octet_t gptp_capable_receipt_timeout{0};  // 30
+    octet_t port_state{0};                    // 31
+    octlet_t mean_link_delay{0};              // 32: portDS.meanLinkDelay >> 16 (ns)
+    octlet_t neighbor_rate_ratio{0};          // 40: portDS.neighborRateRatio (binary64 bits)
+    octet_t major_version{0};                 // 48
+    octet_t minor_version{0};                 // 49
+    octet_t ext_port_flags{0};                // 50: reserved[3]|osto|osr|ost|coto|sl (ptp_port_ext_flags)
+    octet_t reserved3{0};                     // 51
+
+    /// portDS.neighborRateRatio as the double it encodes
+    [[nodiscard]] auto neighbor_rate_ratio_value() const noexcept -> double
+    {
+        return std::bit_cast<double>(neighbor_rate_ratio.get());
+    }
 
     auto operator<=>(AemGetPtpPortInfoResponsePayload const&) const noexcept = default;
 };
 
-static_assert(sizeof(AemGetPtpPortInfoResponsePayload) == 76);
-static_assert(offsetof(AemGetPtpPortInfoResponsePayload, mean_link_delay) == 40);
-static_assert(offsetof(AemGetPtpPortInfoResponsePayload, neighbor_rate_ratio) == 48);
-static_assert(offsetof(AemGetPtpPortInfoResponsePayload, major_version) == 56);
-static_assert(offsetof(AemGetPtpPortInfoResponsePayload, minor_version) == 57);
-static_assert(offsetof(AemGetPtpPortInfoResponsePayload, ext_port_flags) == 58);
+static_assert(sizeof(AemGetPtpPortInfoResponsePayload) == 52);
+static_assert(offsetof(AemGetPtpPortInfoResponsePayload, allowed_lost_responses) == 28);
+static_assert(offsetof(AemGetPtpPortInfoResponsePayload, port_state) == 31);
+static_assert(offsetof(AemGetPtpPortInfoResponsePayload, mean_link_delay) == 32);
+static_assert(offsetof(AemGetPtpPortInfoResponsePayload, neighbor_rate_ratio) == 40);
+static_assert(offsetof(AemGetPtpPortInfoResponsePayload, major_version) == 48);
+static_assert(offsetof(AemGetPtpPortInfoResponsePayload, ext_port_flags) == 50);
 
 //
 // SET_PTP_PORT_INFO flags - Clause 7.4.94
@@ -1224,6 +1232,32 @@ constexpr uint16_t OST = 0x0100;
 constexpr uint16_t COTO = 0x0200;
 constexpr uint16_t SL = 0x0400;
 }  // namespace get_ptp_port_info_flags
+
+//
+// PTP_PORT port_flags octet (Figures 7-122 / 7-124, byte 11): the SET command
+// carries only the low four bits, the GET response all eight
+//
+namespace ptp_port_flags {
+constexpr uint8_t CC = 0x80;    ///< cc (GET only)
+constexpr uint8_t CCNR = 0x40;  ///< ccnr (GET only)
+constexpr uint8_t ASC = 0x20;   ///< asc (GET only)
+constexpr uint8_t IMD = 0x10;   ///< imd (GET only)
+constexpr uint8_t IOTO = 0x08;  ///< ioto
+constexpr uint8_t ICMD = 0x04;  ///< icmd
+constexpr uint8_t ICNR = 0x02;  ///< icnr
+constexpr uint8_t PE = 0x01;    ///< pe: portDS.ptpPortEnabled
+}  // namespace ptp_port_flags
+
+//
+// GET_PTP_PORT_INFO ext_port_flags octet (Figure 7-124 as replaced by Cor 1-2025, byte 50)
+//
+namespace ptp_port_ext_flags {
+constexpr uint8_t OSTO = 0x10;
+constexpr uint8_t OSR = 0x08;
+constexpr uint8_t OST = 0x04;
+constexpr uint8_t COTO = 0x02;
+constexpr uint8_t SL = 0x01;
+}  // namespace ptp_port_ext_flags
 
 //
 // GET_PTP_INSTANCE_PERF_MON_RECORD flags - Clause 7.4.88 (Cor1)

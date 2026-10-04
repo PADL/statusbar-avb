@@ -99,15 +99,14 @@ auto format_to(OutputIt out, AemPtpPortInfoCommandPayload const& p) -> OutputIt
         p.delay_asymmetry.get());
     out = std::format_to(
         out,
-        "          allowed_lost_responses={} allowed_faults={} gptp_capable_to={} port_state={:#04x}\n",
-        p.allowed_lost_responses.get(),
-        p.allowed_faults.get(),
-        p.gptp_capable_receipt_timeout.get(),
-        static_cast<uint8_t>(p.port_state));
+        "          allowed_lost_responses={} allowed_faults={} gptp_capable_to={}\n",
+        static_cast<uint8_t>(p.allowed_lost_responses),
+        static_cast<uint8_t>(p.allowed_faults),
+        static_cast<uint8_t>(p.gptp_capable_receipt_timeout));
     return out;
 }
 
-/// Format GET_PTP_PORT_INFO response payload (2021 Cor1)
+/// Format GET_PTP_PORT_INFO response payload (Figure 7-124, Cor 1-2025)
 /// @param out Output iterator to write formatted text to
 /// @param p GET_PTP_PORT_INFO response payload to format
 template <typename OutputIt>
@@ -131,12 +130,16 @@ auto format_to(OutputIt out, AemGetPtpPortInfoResponsePayload const& p) -> Outpu
     out = std::format_to(
         out,
         "          allowed_lost_responses={} allowed_faults={} gptp_capable_to={} port_state={:#04x}\n",
-        p.allowed_lost_responses.get(),
-        p.allowed_faults.get(),
-        p.gptp_capable_receipt_timeout.get(),
+        static_cast<uint8_t>(p.allowed_lost_responses),
+        static_cast<uint8_t>(p.allowed_faults),
+        static_cast<uint8_t>(p.gptp_capable_receipt_timeout),
         static_cast<uint8_t>(p.port_state));
     out = std::format_to(
-        out, "          mean_link_delay={} neighbor_rate_ratio={}\n", p.mean_link_delay.get(), p.neighbor_rate_ratio.get());
+        out,
+        "          mean_link_delay={} neighbor_rate_ratio={} ({:#018x})\n",
+        p.mean_link_delay.get(),
+        p.neighbor_rate_ratio_value(),
+        p.neighbor_rate_ratio.get());
     out = std::format_to(
         out,
         "          version: major={} minor={} ext_port_flags={:#04x}\n",

@@ -746,43 +746,73 @@ M.f.atdecc_aem_get_max_transit_time_command_descriptor_type = ProtoField.uint16(
 M.f.atdecc_aem_get_max_transit_time_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_max_transit_time_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "Bytes 2-3: Descriptor index")
 M.f.atdecc_aem_ptp_port_info_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_ptp_port_info_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
-M.f.atdecc_aem_ptp_port_info_command_reserved1 = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.reserved1", "reserved1", base.DEC, nil, nil, "reserved1")
-M.f.atdecc_aem_ptp_port_info_command_flags = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.flags", "flags", base.HEX, nil, nil, "flags")
-M.f.atdecc_aem_ptp_port_info_command_delay_mechanism = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.delay_mechanism", "delay_mechanism", base.DEC, nil, nil, "delay_mechanism")
-M.f.atdecc_aem_ptp_port_info_command_announce_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.announce_receipt_timeout", "announce_receipt_timeout", base.DEC, nil, nil, "announce_receipt_timeout")
-M.f.atdecc_aem_ptp_port_info_command_sync_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.sync_receipt_timeout", "sync_receipt_timeout", base.DEC, nil, nil, "sync_receipt_timeout")
-M.f.atdecc_aem_ptp_port_info_command_port_flags = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.port_flags", "port_flags", base.DEC, nil, nil, "11: cc|ccnr|asc|imd|ioto|icmd|icnr|pe (packed bits)")
-M.f.atdecc_aem_ptp_port_info_command_mean_link_delay_threshold = ProtoField.uint64("avb.atdecc.aem.ptp_port_info_command.mean_link_delay_threshold", "mean_link_delay_threshold", base.HEX, nil, nil, "mean_link_delay_threshold")
-M.f.atdecc_aem_ptp_port_info_command_delay_asymmetry = ProtoField.uint64("avb.atdecc.aem.ptp_port_info_command.delay_asymmetry", "delay_asymmetry", base.HEX, nil, nil, "delay_asymmetry")
-M.f.atdecc_aem_ptp_port_info_command_allowed_lost_responses = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.allowed_lost_responses", "allowed_lost_responses", base.DEC, nil, nil, "allowed_lost_responses")
-M.f.atdecc_aem_ptp_port_info_command_allowed_faults = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.allowed_faults", "allowed_faults", base.DEC, nil, nil, "allowed_faults")
-M.f.atdecc_aem_ptp_port_info_command_gptp_capable_receipt_timeout = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.gptp_capable_receipt_timeout", "gptp_capable_receipt_timeout", base.DEC, nil, nil, "gptp_capable_receipt_timeout")
-M.f.atdecc_aem_ptp_port_info_command_port_state = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.port_state", "port_state", base.DEC, nil, nil, "port_state")
-M.f.atdecc_aem_ptp_port_info_command_reserved2 = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.reserved2", "reserved2", base.DEC, nil, nil, "reserved2")
+M.f.atdecc_aem_ptp_port_info_command_reserved1 = ProtoField.uint16("avb.atdecc.aem.ptp_port_info_command.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_enable = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_enable", "flags.set_enable", 16, nil, 0x1, "SET_ENABLE")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_link_delay_threshold = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_link_delay_threshold", "flags.set_link_delay_threshold", 16, nil, 0x2, "SET_LINK_DELAY_THRESHOLD")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_delay_mechanism = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_delay_mechanism", "flags.set_delay_mechanism", 16, nil, 0x4, "SET_DELAY_MECHANISM")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_delay_asymmetry = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_delay_asymmetry", "flags.set_delay_asymmetry", 16, nil, 0x8, "SET_DELAY_ASYMMETRY")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_announce_timeouts = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_announce_timeouts", "flags.set_announce_timeouts", 16, nil, 0x10, "SET_ANNOUNCE_TIMEOUTS")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_sync_timeouts = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_sync_timeouts", "flags.set_sync_timeouts", 16, nil, 0x20, "SET_SYNC_TIMEOUTS")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_gptp_capable_timeouts = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_gptp_capable_timeouts", "flags.set_gptp_capable_timeouts", 16, nil, 0x40, "SET_GPTP_CAPABLE_TIMEOUTS")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_pdelay_timeouts = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_pdelay_timeouts", "flags.set_pdelay_timeouts", 16, nil, 0x80, "SET_PDELAY_TIMEOUTS")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_ioto = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_ioto", "flags.set_ioto", 16, nil, 0x100, "SET_IOTO")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_icmd = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_icmd", "flags.set_icmd", 16, nil, 0x200, "SET_ICMD")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_icnr = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_icnr", "flags.set_icnr", 16, nil, 0x400, "SET_ICNR")
+M.f.atdecc_aem_ptp_port_info_command_flags_set_faults = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.flags.set_faults", "flags.set_faults", 16, nil, 0x800, "SET_FAULTS")
+M.f.atdecc_aem_ptp_port_info_command_delay_mechanism = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.delay_mechanism", "delay_mechanism", base.DEC, nil, nil, "portDS.delayMechanism")
+M.f.atdecc_aem_ptp_port_info_command_announce_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.announce_receipt_timeout", "announce_receipt_timeout", base.DEC, nil, nil, "portDS.announceReceiptTimeout")
+M.f.atdecc_aem_ptp_port_info_command_sync_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.sync_receipt_timeout", "sync_receipt_timeout", base.DEC, nil, nil, "portDS.syncReceiptTimeout")
+M.f.atdecc_aem_ptp_port_info_command_port_flags_ioto = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.port_flags.ioto", "port_flags.ioto", 8, nil, 0x8, "IOTO")
+M.f.atdecc_aem_ptp_port_info_command_port_flags_icmd = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.port_flags.icmd", "port_flags.icmd", 8, nil, 0x4, "ICMD")
+M.f.atdecc_aem_ptp_port_info_command_port_flags_icnr = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.port_flags.icnr", "port_flags.icnr", 8, nil, 0x2, "ICNR")
+M.f.atdecc_aem_ptp_port_info_command_port_flags_pe = ProtoField.bool("avb.atdecc.aem.ptp_port_info_command.port_flags.pe", "port_flags.pe", 8, nil, 0x1, "PE: portDS.ptpPortEnabled")
+M.f.atdecc_aem_ptp_port_info_command_mean_link_delay_threshold = ProtoField.uint64("avb.atdecc.aem.ptp_port_info_command.mean_link_delay_threshold", "mean_link_delay_threshold", base.HEX, nil, nil, "portDS.meanLinkDelayThresh >> 16 (nanoseconds, lower 64 bits)")
+M.f.atdecc_aem_ptp_port_info_command_delay_asymmetry = ProtoField.int64("avb.atdecc.aem.ptp_port_info_command.delay_asymmetry", "delay_asymmetry", base.DEC, nil, nil, "portDS.delayAsymmetry >> 16 (signed nanoseconds, lower 64 bits)")
+M.f.atdecc_aem_ptp_port_info_command_allowed_lost_responses = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.allowed_lost_responses", "allowed_lost_responses", base.DEC, nil, nil, "portDS.allowedLostResponses")
+M.f.atdecc_aem_ptp_port_info_command_allowed_faults = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.allowed_faults", "allowed_faults", base.DEC, nil, nil, "portDS.allowedFaults")
+M.f.atdecc_aem_ptp_port_info_command_gptp_capable_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.gptp_capable_receipt_timeout", "gptp_capable_receipt_timeout", base.DEC, nil, nil, "portDS.gPtpCapableReceiptTimeout")
+M.f.atdecc_aem_ptp_port_info_command_reserved3 = ProtoField.uint8("avb.atdecc.aem.ptp_port_info_command.reserved3", "reserved3", base.DEC, nil, nil, "reserved")
 M.f.atdecc_aem_get_ptp_port_info_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_get_ptp_port_info_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
-M.f.atdecc_aem_get_ptp_port_info_response_reserved1 = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.reserved1", "reserved1", base.DEC, nil, nil, "reserved1")
-M.f.atdecc_aem_get_ptp_port_info_response_flags = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.flags", "flags", base.HEX, nil, nil, "flags")
-M.f.atdecc_aem_get_ptp_port_info_response_delay_mechanism = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.delay_mechanism", "delay_mechanism", base.DEC, nil, nil, "delay_mechanism")
-M.f.atdecc_aem_get_ptp_port_info_response_announce_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.announce_receipt_timeout", "announce_receipt_timeout", base.DEC, nil, nil, "announce_receipt_timeout")
-M.f.atdecc_aem_get_ptp_port_info_response_sync_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.sync_receipt_timeout", "sync_receipt_timeout", base.DEC, nil, nil, "sync_receipt_timeout")
-M.f.atdecc_aem_get_ptp_port_info_response_port_flags = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.port_flags", "port_flags", base.DEC, nil, nil, "11: cc|ccnr|asc|imd|ioto|icmd|icnr|pe")
-M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay_threshold = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.mean_link_delay_threshold", "mean_link_delay_threshold", base.HEX, nil, nil, "mean_link_delay_threshold")
-M.f.atdecc_aem_get_ptp_port_info_response_delay_asymmetry = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.delay_asymmetry", "delay_asymmetry", base.HEX, nil, nil, "delay_asymmetry")
-M.f.atdecc_aem_get_ptp_port_info_response_allowed_lost_responses = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.allowed_lost_responses", "allowed_lost_responses", base.DEC, nil, nil, "allowed_lost_responses")
-M.f.atdecc_aem_get_ptp_port_info_response_allowed_faults = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.allowed_faults", "allowed_faults", base.DEC, nil, nil, "allowed_faults")
-M.f.atdecc_aem_get_ptp_port_info_response_gptp_capable_receipt_timeout = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.gptp_capable_receipt_timeout", "gptp_capable_receipt_timeout", base.DEC, nil, nil, "gptp_capable_receipt_timeout")
-M.f.atdecc_aem_get_ptp_port_info_response_port_state = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.port_state", "port_state", base.DEC, nil, nil, "port_state")
-M.f.atdecc_aem_get_ptp_port_info_response_reserved2 = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.reserved2", "reserved2", base.DEC, nil, nil, "reserved2")
-M.f.atdecc_aem_get_ptp_port_info_response_reserved3 = ProtoField.uint32("avb.atdecc.aem.get_ptp_port_info_response.reserved3", "reserved3", base.DEC, nil, nil, "reserved3")
-M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.mean_link_delay", "mean_link_delay", base.HEX, nil, nil, "40  - Cor1")
-M.f.atdecc_aem_get_ptp_port_info_response_neighbor_rate_ratio = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.neighbor_rate_ratio", "neighbor_rate_ratio", base.HEX, nil, nil, "48  - Cor1")
-M.f.atdecc_aem_get_ptp_port_info_response_major_version = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.major_version", "major_version", base.DEC, nil, nil, "56  - Cor1")
-M.f.atdecc_aem_get_ptp_port_info_response_minor_version = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.minor_version", "minor_version", base.DEC, nil, nil, "57  - Cor1")
-M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.ext_port_flags", "ext_port_flags", base.DEC, nil, nil, "58  - Cor1: rsvd|osto|osr|ost|coto|sl")
-M.f.atdecc_aem_get_ptp_port_info_response_reserved4 = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.reserved4", "reserved4", base.DEC, nil, nil, "reserved4")
-M.f.atdecc_aem_get_ptp_port_info_response_reserved5 = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.reserved5", "reserved5", base.HEX, nil, nil, "reserved5")
-M.f.atdecc_aem_get_ptp_port_info_response_reserved6 = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.reserved6", "reserved6", base.HEX, nil, nil, "reserved6")
+M.f.atdecc_aem_get_ptp_port_info_response_reserved1 = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_info_response.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_delay_mechanism = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.delay_mechanism", "flags.delay_mechanism", 16, nil, 0x1, "DELAY_MECHANISM")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_delay_asymmetry = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.delay_asymmetry", "flags.delay_asymmetry", 16, nil, 0x2, "DELAY_ASYMMETRY")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_gptp_capable_timeouts = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.gptp_capable_timeouts", "flags.gptp_capable_timeouts", 16, nil, 0x4, "GPTP_CAPABLE_TIMEOUTS")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_pdelay_timeouts = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.pdelay_timeouts", "flags.pdelay_timeouts", 16, nil, 0x8, "PDELAY_TIMEOUTS")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_ioto = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.ioto", "flags.ioto", 16, nil, 0x10, "IOTO")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_faults = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.faults", "flags.faults", 16, nil, 0x20, "FAULTS")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_osto = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.osto", "flags.osto", 16, nil, 0x40, "OSTO")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_osr = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.osr", "flags.osr", 16, nil, 0x80, "OSR")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_ost = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.ost", "flags.ost", 16, nil, 0x100, "OST")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_coto = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.coto", "flags.coto", 16, nil, 0x200, "COTO")
+M.f.atdecc_aem_get_ptp_port_info_response_flags_sl = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.flags.sl", "flags.sl", 16, nil, 0x400, "SL")
+M.f.atdecc_aem_get_ptp_port_info_response_delay_mechanism = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.delay_mechanism", "delay_mechanism", base.DEC, nil, nil, "portDS.delayMechanism")
+M.f.atdecc_aem_get_ptp_port_info_response_announce_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.announce_receipt_timeout", "announce_receipt_timeout", base.DEC, nil, nil, "portDS.announceReceiptTimeout")
+M.f.atdecc_aem_get_ptp_port_info_response_sync_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.sync_receipt_timeout", "sync_receipt_timeout", base.DEC, nil, nil, "portDS.syncReceiptTimeout")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_cc = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.cc", "port_flags.cc", 8, nil, 0x80, "CC")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_ccnr = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.ccnr", "port_flags.ccnr", 8, nil, 0x40, "CCNR")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_asc = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.asc", "port_flags.asc", 8, nil, 0x20, "ASC")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_imd = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.imd", "port_flags.imd", 8, nil, 0x10, "IMD")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_ioto = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.ioto", "port_flags.ioto", 8, nil, 0x8, "IOTO")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_icmd = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.icmd", "port_flags.icmd", 8, nil, 0x4, "ICMD")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_icnr = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.icnr", "port_flags.icnr", 8, nil, 0x2, "ICNR")
+M.f.atdecc_aem_get_ptp_port_info_response_port_flags_pe = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.port_flags.pe", "port_flags.pe", 8, nil, 0x1, "PE: portDS.ptpPortEnabled")
+M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay_threshold = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.mean_link_delay_threshold", "mean_link_delay_threshold", base.HEX, nil, nil, "portDS.meanLinkDelayThresh >> 16 (nanoseconds, lower 64 bits)")
+M.f.atdecc_aem_get_ptp_port_info_response_delay_asymmetry = ProtoField.int64("avb.atdecc.aem.get_ptp_port_info_response.delay_asymmetry", "delay_asymmetry", base.DEC, nil, nil, "portDS.delayAsymmetry >> 16 (signed nanoseconds, lower 64 bits)")
+M.f.atdecc_aem_get_ptp_port_info_response_allowed_lost_responses = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.allowed_lost_responses", "allowed_lost_responses", base.DEC, nil, nil, "portDS.allowedLostResponses")
+M.f.atdecc_aem_get_ptp_port_info_response_allowed_faults = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.allowed_faults", "allowed_faults", base.DEC, nil, nil, "portDS.allowedFaults")
+M.f.atdecc_aem_get_ptp_port_info_response_gptp_capable_receipt_timeout = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.gptp_capable_receipt_timeout", "gptp_capable_receipt_timeout", base.DEC, nil, nil, "portDS.gPtpCapableReceiptTimeout")
+M.f.atdecc_aem_get_ptp_port_info_response_port_state = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.port_state", "port_state", base.DEC, nil, nil, "portDS.portState")
+M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay = ProtoField.uint64("avb.atdecc.aem.get_ptp_port_info_response.mean_link_delay", "mean_link_delay", base.HEX, nil, nil, "portDS.meanLinkDelay >> 16 (nanoseconds, lower 64 bits)")
+M.f.atdecc_aem_get_ptp_port_info_response_neighbor_rate_ratio = ProtoField.double("avb.atdecc.aem.get_ptp_port_info_response.neighbor_rate_ratio", "neighbor_rate_ratio", nil, "portDS.neighborRateRatio")
+M.f.atdecc_aem_get_ptp_port_info_response_major_version = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.major_version", "major_version", base.DEC, nil, nil, "portDS.versionNumber (major)")
+M.f.atdecc_aem_get_ptp_port_info_response_minor_version = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.minor_version", "minor_version", base.DEC, nil, nil, "portDS.minorVersionNumber")
+M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_osto = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.ext_port_flags.osto", "ext_port_flags.osto", 8, nil, 0x10, "OSTO")
+M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_osr = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.ext_port_flags.osr", "ext_port_flags.osr", 8, nil, 0x8, "OSR")
+M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_ost = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.ext_port_flags.ost", "ext_port_flags.ost", 8, nil, 0x4, "OST")
+M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_coto = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.ext_port_flags.coto", "ext_port_flags.coto", 8, nil, 0x2, "COTO")
+M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_sl = ProtoField.bool("avb.atdecc.aem.get_ptp_port_info_response.ext_port_flags.sl", "ext_port_flags.sl", 8, nil, 0x1, "SL")
+M.f.atdecc_aem_get_ptp_port_info_response_reserved3 = ProtoField.uint8("avb.atdecc.aem.get_ptp_port_info_response.reserved3", "reserved3", base.DEC, nil, nil, "reserved")
 M.f.atdecc_aem_video_format_descriptor_type = ProtoField.uint16("avb.atdecc.aem.video_format.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_video_format_descriptor_index = ProtoField.uint16("avb.atdecc.aem.video_format.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_video_format_format_specific = ProtoField.uint32("avb.atdecc.aem.video_format.format_specific", "format_specific", base.DEC, nil, nil, "format_specific")
@@ -897,12 +927,12 @@ M.f.atdecc_aem_sampling_rate_range_maximum_base_frequency = ProtoField.uint32("a
 M.f.atdecc_aem_set_ptp_instance_info_descriptor_type = ProtoField.uint16("avb.atdecc.aem.set_ptp_instance_info.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_set_ptp_instance_info_descriptor_index = ProtoField.uint16("avb.atdecc.aem.set_ptp_instance_info.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_set_ptp_instance_info_reserved1 = ProtoField.uint16("avb.atdecc.aem.set_ptp_instance_info.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
-M.f.atdecc_aem_set_ptp_instance_info_flags_ie = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.ie", "flags.ie", 16, nil, 0x8000, "IE: ie contains a value to be set")
-M.f.atdecc_aem_set_ptp_instance_info_flags_ee = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.ee", "flags.ee", 16, nil, 0x4000, "EE: ee contains a value to be set")
-M.f.atdecc_aem_set_ptp_instance_info_flags_so = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.so", "flags.so", 16, nil, 0x2000, "SO: so contains a value to be set")
-M.f.atdecc_aem_set_ptp_instance_info_flags_priority1 = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.priority1", "flags.priority1", 16, nil, 0x80, "PRIORITY1 is being set")
-M.f.atdecc_aem_set_ptp_instance_info_flags_priority2 = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.priority2", "flags.priority2", 16, nil, 0x40, "PRIORITY2 is being set")
-M.f.atdecc_aem_set_ptp_instance_info_flags_domain_number = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.domain_number", "flags.domain_number", 16, nil, 0x20, "DOMAIN_NUMBER is being set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_ie = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.ie", "flags.ie", 16, nil, 0x1, "IE: ie contains a value to be set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_ee = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.ee", "flags.ee", 16, nil, 0x2, "EE: ee contains a value to be set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_so = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.so", "flags.so", 16, nil, 0x4, "SO: so contains a value to be set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_priority1 = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.priority1", "flags.priority1", 16, nil, 0x100, "PRIORITY1 is being set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_priority2 = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.priority2", "flags.priority2", 16, nil, 0x200, "PRIORITY2 is being set")
+M.f.atdecc_aem_set_ptp_instance_info_flags_domain_number = ProtoField.bool("avb.atdecc.aem.set_ptp_instance_info.flags.domain_number", "flags.domain_number", 16, nil, 0x400, "DOMAIN_NUMBER is being set")
 M.f.atdecc_aem_set_ptp_instance_info_priority1 = ProtoField.uint8("avb.atdecc.aem.set_ptp_instance_info.priority1", "priority1", base.DEC, nil, nil, "defaultDS.priority1")
 M.f.atdecc_aem_set_ptp_instance_info_priority2 = ProtoField.uint8("avb.atdecc.aem.set_ptp_instance_info.priority2", "priority2", base.DEC, nil, nil, "defaultDS.priority2")
 M.f.atdecc_aem_set_ptp_instance_info_domain_number = ProtoField.uint8("avb.atdecc.aem.set_ptp_instance_info.domain_number", "domain_number", base.DEC, nil, nil, "defaultDS.domainNumber")
@@ -981,13 +1011,13 @@ M.f.atdecc_aem_ptp_instance_extended_info_response_parent_clock_identity = Proto
 M.f.atdecc_aem_ptp_instance_extended_info_response_parent_port_number = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.parent_port_number", "parent_port_number", base.DEC, nil, nil, "parentDS.parentPortIdentity.portNumber")
 M.f.atdecc_aem_ptp_instance_extended_info_response_steps_removed = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.steps_removed", "steps_removed", base.DEC, nil, nil, "currentDS.stepsRemoved")
 M.f.atdecc_aem_ptp_instance_extended_info_response_cumulative_rate_ratio = ProtoField.int32("avb.atdecc.aem.ptp_instance_extended_info_response.cumulative_rate_ratio", "cumulative_rate_ratio", base.DEC, nil, nil, "parentDS.cumulativeRateRatio")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_offset_from_master = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.offset_from_master", "valid.offset_from_master", 16, nil, 0x8000, "offset_from_master is valid")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_phase_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.last_gm_phase_change", "valid.last_gm_phase_change", 16, nil, 0x4000, "last_gm_phase_change is valid")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_freq_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.last_gm_freq_change", "valid.last_gm_freq_change", 16, nil, 0x2000, "last_gm_freq_change is valid")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_gm_change_count = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.gm_change_count", "valid.gm_change_count", 16, nil, 0x1000, "gm_change_count is valid")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_change", "valid.time_of_last_gm_change", 16, nil, 0x800, "time_of_last_gm_change is valid")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_phase_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_phase_change", "valid.time_of_last_gm_phase_change", 16, nil, 0x400, "time_of_last_gm_phase_change is valid")
-M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_freq_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_freq_change", "valid.time_of_last_gm_freq_change", 16, nil, 0x200, "time_of_last_gm_freq_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_offset_from_master = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.offset_from_master", "valid.offset_from_master", 16, nil, 0x1, "offset_from_master is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_phase_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.last_gm_phase_change", "valid.last_gm_phase_change", 16, nil, 0x2, "last_gm_phase_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_last_gm_freq_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.last_gm_freq_change", "valid.last_gm_freq_change", 16, nil, 0x4, "last_gm_freq_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_gm_change_count = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.gm_change_count", "valid.gm_change_count", 16, nil, 0x8, "gm_change_count is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_change", "valid.time_of_last_gm_change", 16, nil, 0x10, "time_of_last_gm_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_phase_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_phase_change", "valid.time_of_last_gm_phase_change", 16, nil, 0x20, "time_of_last_gm_phase_change is valid")
+M.f.atdecc_aem_ptp_instance_extended_info_response_valid_time_of_last_gm_freq_change = ProtoField.bool("avb.atdecc.aem.ptp_instance_extended_info_response.valid.time_of_last_gm_freq_change", "valid.time_of_last_gm_freq_change", 16, nil, 0x40, "time_of_last_gm_freq_change is valid")
 M.f.atdecc_aem_ptp_instance_extended_info_response_gm_timebase_indicator = ProtoField.uint16("avb.atdecc.aem.ptp_instance_extended_info_response.gm_timebase_indicator", "gm_timebase_indicator", base.DEC, nil, nil, "currentDS.gmTimebaseIndicator")
 M.f.atdecc_aem_ptp_instance_extended_info_response_offset_from_master = ProtoField.bytes("avb.atdecc.aem.ptp_instance_extended_info_response.offset_from_master", "offset_from_master", base.NONE, "currentDS.offsetFromMaster (ScaledNs)")
 M.f.atdecc_aem_ptp_instance_extended_info_response_last_gm_phase_change = ProtoField.bytes("avb.atdecc.aem.ptp_instance_extended_info_response.last_gm_phase_change", "last_gm_phase_change", base.NONE, "currentDS.lastGmPhaseChange (ScaledNs)")
@@ -1041,12 +1071,12 @@ M.f.atdecc_aem_ptp_record_command_reserved = ProtoField.uint16("avb.atdecc.aem.p
 M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_instance_perf_mon_record_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_ptp_instance_perf_mon_record_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_perf_mon_record_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_ptp_instance_perf_mon_record_response_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_instance_perf_mon_record_response.record_index", "record_index", base.DEC, nil, nil, "record index")
-M.f.atdecc_aem_ptp_instance_perf_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x8000, "MEASUREMENT_VALID")
-M.f.atdecc_aem_ptp_instance_perf_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.period_complete", "period_complete", 16, nil, 0x4000, "PERIOD_COMPLETE")
-M.f.atdecc_aem_ptp_instance_perf_mon_record_response_master_slave_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.master_slave_delay_valid", "master_slave_delay_valid", 16, nil, 0x2000, "MASTER_SLAVE_DELAY_VALID")
-M.f.atdecc_aem_ptp_instance_perf_mon_record_response_slave_master_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.slave_master_delay_valid", "slave_master_delay_valid", 16, nil, 0x1000, "SLAVE_MASTER_DELAY_VALID")
-M.f.atdecc_aem_ptp_instance_perf_mon_record_response_mean_path_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.mean_path_delay_valid", "mean_path_delay_valid", 16, nil, 0x800, "MEAN_PATH_DELAY_VALID")
-M.f.atdecc_aem_ptp_instance_perf_mon_record_response_offset_from_master_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.offset_from_master_valid", "offset_from_master_valid", 16, nil, 0x400, "OFFSET_FROM_MASTER_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x1, "MEASUREMENT_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.period_complete", "period_complete", 16, nil, 0x2, "PERIOD_COMPLETE")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_master_slave_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.master_slave_delay_valid", "master_slave_delay_valid", 16, nil, 0x4, "MASTER_SLAVE_DELAY_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_slave_master_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.slave_master_delay_valid", "slave_master_delay_valid", 16, nil, 0x8, "SLAVE_MASTER_DELAY_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_mean_path_delay_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.mean_path_delay_valid", "mean_path_delay_valid", 16, nil, 0x10, "MEAN_PATH_DELAY_VALID")
+M.f.atdecc_aem_ptp_instance_perf_mon_record_response_offset_from_master_valid = ProtoField.bool("avb.atdecc.aem.ptp_instance_perf_mon_record_response.offset_from_master_valid", "offset_from_master_valid", 16, nil, 0x20, "OFFSET_FROM_MASTER_VALID")
 M.f.atdecc_aem_ptp_instance_perf_mon_record_response_timestamp = ProtoField.uint64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.timestamp", "timestamp", base.HEX, nil, nil, "record start (ns, entity epoch)")
 M.f.atdecc_aem_ptp_instance_perf_mon_record_response_average_master_slave_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.average_master_slave_delay", "average_master_slave_delay", base.DEC, nil, nil, "average master slave delay (TimeInterval)")
 M.f.atdecc_aem_ptp_instance_perf_mon_record_response_minimum_master_slave_delay = ProtoField.int64("avb.atdecc.aem.ptp_instance_perf_mon_record_response.minimum_master_slave_delay", "minimum_master_slave_delay", base.DEC, nil, nil, "minimum master slave delay (TimeInterval)")
@@ -1067,34 +1097,34 @@ M.f.atdecc_aem_ptp_instance_perf_mon_record_response_std_dev_offset_from_master 
 M.f.atdecc_aem_ptp_port_intervals_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_intervals.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_ptp_port_intervals_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_intervals.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_ptp_port_intervals_reserved1 = ProtoField.uint16("avb.atdecc.aem.ptp_port_intervals.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
-M.f.atdecc_aem_ptp_port_intervals_announce_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.announce_valid", "announce_valid", 16, nil, 0x8000, "ANNOUNCE_VALID")
-M.f.atdecc_aem_ptp_port_intervals_sync_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.sync_valid", "sync_valid", 16, nil, 0x4000, "SYNC_VALID")
-M.f.atdecc_aem_ptp_port_intervals_pdelay_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.pdelay_valid", "pdelay_valid", 16, nil, 0x2000, "PDELAY_VALID")
-M.f.atdecc_aem_ptp_port_intervals_capable_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.capable_valid", "capable_valid", 16, nil, 0x1000, "CAPABLE_VALID")
+M.f.atdecc_aem_ptp_port_intervals_announce_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.announce_valid", "announce_valid", 16, nil, 0x1, "ANNOUNCE_VALID")
+M.f.atdecc_aem_ptp_port_intervals_sync_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.sync_valid", "sync_valid", 16, nil, 0x2, "SYNC_VALID")
+M.f.atdecc_aem_ptp_port_intervals_pdelay_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.pdelay_valid", "pdelay_valid", 16, nil, 0x4, "PDELAY_VALID")
+M.f.atdecc_aem_ptp_port_intervals_capable_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_intervals.capable_valid", "capable_valid", 16, nil, 0x8, "CAPABLE_VALID")
 M.f.atdecc_aem_ptp_port_intervals_log_announce_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_announce_interval", "log_announce_interval", base.DEC, nil, nil, "log2 announce interval")
 M.f.atdecc_aem_ptp_port_intervals_log_sync_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_sync_interval", "log_sync_interval", base.DEC, nil, nil, "log2 sync interval")
 M.f.atdecc_aem_ptp_port_intervals_log_pdelay_request_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_pdelay_request_interval", "log_pdelay_request_interval", base.DEC, nil, nil, "log2 pdelay request interval")
 M.f.atdecc_aem_ptp_port_intervals_log_gptp_capable_interval = ProtoField.int8("avb.atdecc.aem.ptp_port_intervals.log_gptp_capable_interval", "log_gptp_capable_interval", base.DEC, nil, nil, "log2 gPTP capable message interval")
 M.f.atdecc_aem_set_ptp_port_overrides_descriptor_type = ProtoField.uint16("avb.atdecc.aem.set_ptp_port_overrides.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_set_ptp_port_overrides_descriptor_index = ProtoField.uint16("avb.atdecc.aem.set_ptp_port_overrides.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_announce_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.announce_interval", "flags.announce_interval", 16, nil, 0x8000, "ANNOUNCE_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_sync_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.sync_interval", "flags.sync_interval", 16, nil, 0x4000, "SYNC_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_pdelay_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.pdelay_interval", "flags.pdelay_interval", 16, nil, 0x2000, "PDELAY_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.gptp_capable_interval", "flags.gptp_capable_interval", 16, nil, 0x1000, "GPTP_CAPABLE_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_neighbor = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.compute_neighbor", "flags.compute_neighbor", 16, nil, 0x800, "COMPUTE_NEIGHBOR")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.compute_mean_delay", "flags.compute_mean_delay", 16, nil, 0x400, "COMPUTE_MEAN_DELAY")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.onestep_tx_oper", "flags.onestep_tx_oper", 16, nil, 0x200, "ONESTEP_TX_OPER")
-M.f.atdecc_aem_set_ptp_port_overrides_flags_desired_state = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.desired_state", "flags.desired_state", 16, nil, 0x100, "DESIRED_STATE")
-M.f.atdecc_aem_set_ptp_port_overrides_use_announce_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_announce_interval", "use_announce_interval", 16, nil, 0x8000, "USE_ANNOUNCE_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_use_sync_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_sync_interval", "use_sync_interval", 16, nil, 0x4000, "USE_SYNC_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_use_pdelay_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_pdelay_interval", "use_pdelay_interval", 16, nil, 0x2000, "USE_PDELAY_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_use_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_gptp_capable_interval", "use_gptp_capable_interval", 16, nil, 0x1000, "USE_GPTP_CAPABLE_INTERVAL")
-M.f.atdecc_aem_set_ptp_port_overrides_use_compute_neighbor = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_compute_neighbor", "use_compute_neighbor", 16, nil, 0x800, "USE_COMPUTE_NEIGHBOR")
-M.f.atdecc_aem_set_ptp_port_overrides_use_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_compute_mean_delay", "use_compute_mean_delay", 16, nil, 0x400, "USE_COMPUTE_MEAN_DELAY")
-M.f.atdecc_aem_set_ptp_port_overrides_use_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_onestep_tx_oper", "use_onestep_tx_oper", 16, nil, 0x200, "USE_ONESTEP_TX_OPER")
-M.f.atdecc_aem_set_ptp_port_overrides_compute_neighbor_rate = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.compute_neighbor_rate", "compute_neighbor_rate", 16, nil, 0x80, "COMPUTE_NEIGHBOR_RATE")
-M.f.atdecc_aem_set_ptp_port_overrides_compute_mean_link_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.compute_mean_link_delay", "compute_mean_link_delay", 16, nil, 0x40, "COMPUTE_MEAN_LINK_DELAY")
-M.f.atdecc_aem_set_ptp_port_overrides_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.onestep_tx_oper", "onestep_tx_oper", 16, nil, 0x20, "ONESTEP_TX_OPER")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_announce_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.announce_interval", "flags.announce_interval", 16, nil, 0x1, "ANNOUNCE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_sync_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.sync_interval", "flags.sync_interval", 16, nil, 0x2, "SYNC_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_pdelay_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.pdelay_interval", "flags.pdelay_interval", 16, nil, 0x4, "PDELAY_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.gptp_capable_interval", "flags.gptp_capable_interval", 16, nil, 0x8, "GPTP_CAPABLE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_neighbor = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.compute_neighbor", "flags.compute_neighbor", 16, nil, 0x10, "COMPUTE_NEIGHBOR")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.compute_mean_delay", "flags.compute_mean_delay", 16, nil, 0x20, "COMPUTE_MEAN_DELAY")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.onestep_tx_oper", "flags.onestep_tx_oper", 16, nil, 0x40, "ONESTEP_TX_OPER")
+M.f.atdecc_aem_set_ptp_port_overrides_flags_desired_state = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.flags.desired_state", "flags.desired_state", 16, nil, 0x80, "DESIRED_STATE")
+M.f.atdecc_aem_set_ptp_port_overrides_use_announce_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_announce_interval", "use_announce_interval", 16, nil, 0x1, "USE_ANNOUNCE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_sync_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_sync_interval", "use_sync_interval", 16, nil, 0x2, "USE_SYNC_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_pdelay_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_pdelay_interval", "use_pdelay_interval", 16, nil, 0x4, "USE_PDELAY_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_gptp_capable_interval", "use_gptp_capable_interval", 16, nil, 0x8, "USE_GPTP_CAPABLE_INTERVAL")
+M.f.atdecc_aem_set_ptp_port_overrides_use_compute_neighbor = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_compute_neighbor", "use_compute_neighbor", 16, nil, 0x10, "USE_COMPUTE_NEIGHBOR")
+M.f.atdecc_aem_set_ptp_port_overrides_use_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_compute_mean_delay", "use_compute_mean_delay", 16, nil, 0x20, "USE_COMPUTE_MEAN_DELAY")
+M.f.atdecc_aem_set_ptp_port_overrides_use_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.use_onestep_tx_oper", "use_onestep_tx_oper", 16, nil, 0x40, "USE_ONESTEP_TX_OPER")
+M.f.atdecc_aem_set_ptp_port_overrides_compute_neighbor_rate = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.compute_neighbor_rate", "compute_neighbor_rate", 16, nil, 0x100, "COMPUTE_NEIGHBOR_RATE")
+M.f.atdecc_aem_set_ptp_port_overrides_compute_mean_link_delay = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.compute_mean_link_delay", "compute_mean_link_delay", 16, nil, 0x200, "COMPUTE_MEAN_LINK_DELAY")
+M.f.atdecc_aem_set_ptp_port_overrides_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.set_ptp_port_overrides.onestep_tx_oper", "onestep_tx_oper", 16, nil, 0x400, "ONESTEP_TX_OPER")
 M.f.atdecc_aem_set_ptp_port_overrides_log_announce_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_announce_interval", "log_announce_interval", base.DEC, nil, nil, "log2 announce interval")
 M.f.atdecc_aem_set_ptp_port_overrides_log_sync_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_sync_interval", "log_sync_interval", base.DEC, nil, nil, "log2 sync interval")
 M.f.atdecc_aem_set_ptp_port_overrides_log_pdelay_request_interval = ProtoField.int8("avb.atdecc.aem.set_ptp_port_overrides.log_pdelay_request_interval", "log_pdelay_request_interval", base.DEC, nil, nil, "log2 pdelay request interval")
@@ -1104,16 +1134,16 @@ M.f.atdecc_aem_set_ptp_port_overrides_reserved = ProtoField.bytes("avb.atdecc.ae
 M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_overrides_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_get_ptp_port_overrides_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_overrides_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_get_ptp_port_overrides_response_reserved1 = ProtoField.uint16("avb.atdecc.aem.get_ptp_port_overrides_response.reserved1", "reserved1", base.DEC, nil, nil, "reserved")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_announce_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_announce_interval", "use_announce_interval", 16, nil, 0x8000, "USE_ANNOUNCE_INTERVAL")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_sync_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_sync_interval", "use_sync_interval", 16, nil, 0x4000, "USE_SYNC_INTERVAL")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_pdelay_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_pdelay_interval", "use_pdelay_interval", 16, nil, 0x2000, "USE_PDELAY_INTERVAL")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_gptp_capable_interval", "use_gptp_capable_interval", 16, nil, 0x1000, "USE_GPTP_CAPABLE_INTERVAL")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_neighbor = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_compute_neighbor", "use_compute_neighbor", 16, nil, 0x800, "USE_COMPUTE_NEIGHBOR")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_compute_mean_delay", "use_compute_mean_delay", 16, nil, 0x400, "USE_COMPUTE_MEAN_DELAY")
-M.f.atdecc_aem_get_ptp_port_overrides_response_use_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_onestep_tx_oper", "use_onestep_tx_oper", 16, nil, 0x200, "USE_ONESTEP_TX_OPER")
-M.f.atdecc_aem_get_ptp_port_overrides_response_compute_neighbor_rate = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.compute_neighbor_rate", "compute_neighbor_rate", 16, nil, 0x80, "COMPUTE_NEIGHBOR_RATE")
-M.f.atdecc_aem_get_ptp_port_overrides_response_compute_mean_link_delay = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.compute_mean_link_delay", "compute_mean_link_delay", 16, nil, 0x40, "COMPUTE_MEAN_LINK_DELAY")
-M.f.atdecc_aem_get_ptp_port_overrides_response_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.onestep_tx_oper", "onestep_tx_oper", 16, nil, 0x20, "ONESTEP_TX_OPER")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_announce_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_announce_interval", "use_announce_interval", 16, nil, 0x1, "USE_ANNOUNCE_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_sync_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_sync_interval", "use_sync_interval", 16, nil, 0x2, "USE_SYNC_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_pdelay_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_pdelay_interval", "use_pdelay_interval", 16, nil, 0x4, "USE_PDELAY_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_gptp_capable_interval = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_gptp_capable_interval", "use_gptp_capable_interval", 16, nil, 0x8, "USE_GPTP_CAPABLE_INTERVAL")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_neighbor = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_compute_neighbor", "use_compute_neighbor", 16, nil, 0x10, "USE_COMPUTE_NEIGHBOR")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_compute_mean_delay = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_compute_mean_delay", "use_compute_mean_delay", 16, nil, 0x20, "USE_COMPUTE_MEAN_DELAY")
+M.f.atdecc_aem_get_ptp_port_overrides_response_use_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.use_onestep_tx_oper", "use_onestep_tx_oper", 16, nil, 0x40, "USE_ONESTEP_TX_OPER")
+M.f.atdecc_aem_get_ptp_port_overrides_response_compute_neighbor_rate = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.compute_neighbor_rate", "compute_neighbor_rate", 16, nil, 0x100, "COMPUTE_NEIGHBOR_RATE")
+M.f.atdecc_aem_get_ptp_port_overrides_response_compute_mean_link_delay = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.compute_mean_link_delay", "compute_mean_link_delay", 16, nil, 0x200, "COMPUTE_MEAN_LINK_DELAY")
+M.f.atdecc_aem_get_ptp_port_overrides_response_onestep_tx_oper = ProtoField.bool("avb.atdecc.aem.get_ptp_port_overrides_response.onestep_tx_oper", "onestep_tx_oper", 16, nil, 0x400, "ONESTEP_TX_OPER")
 M.f.atdecc_aem_get_ptp_port_overrides_response_log_announce_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_announce_interval", "log_announce_interval", base.DEC, nil, nil, "log2 announce interval")
 M.f.atdecc_aem_get_ptp_port_overrides_response_log_sync_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_sync_interval", "log_sync_interval", base.DEC, nil, nil, "log2 sync interval")
 M.f.atdecc_aem_get_ptp_port_overrides_response_log_pdelay_request_interval = ProtoField.int8("avb.atdecc.aem.get_ptp_port_overrides_response.log_pdelay_request_interval", "log_pdelay_request_interval", base.DEC, nil, nil, "log2 pdelay request interval")
@@ -1123,8 +1153,8 @@ M.f.atdecc_aem_get_ptp_port_overrides_response_reserved2 = ProtoField.bytes("avb
 M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.record_index", "record_index", base.DEC, nil, nil, "record index")
-M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x8000, "MEASUREMENT_VALID")
-M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.period_complete", "period_complete", 16, nil, 0x4000, "PERIOD_COMPLETE")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x1, "MEASUREMENT_VALID")
+M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.period_complete", "period_complete", 16, nil, 0x2, "PERIOD_COMPLETE")
 M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_timestamp = ProtoField.uint64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.timestamp", "timestamp", base.HEX, nil, nil, "record start (ns, entity epoch)")
 M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_average_mean_link_delay = ProtoField.int64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.average_mean_link_delay", "average_mean_link_delay", base.DEC, nil, nil, "average mean link delay (TimeInterval)")
 M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_minimum_mean_link_delay = ProtoField.int64("avb.atdecc.aem.ptp_port_pdelay_mon_record_response.minimum_mean_link_delay", "minimum_mean_link_delay", base.DEC, nil, nil, "minimum mean link delay (TimeInterval)")
@@ -1133,8 +1163,8 @@ M.f.atdecc_aem_ptp_port_pdelay_mon_record_response_std_dev_mean_link_delay = Pro
 M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_type = ProtoField.uint16("avb.atdecc.aem.ptp_port_perf_mon_record_response.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "descriptor_type")
 M.f.atdecc_aem_ptp_port_perf_mon_record_response_descriptor_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_perf_mon_record_response.descriptor_index", "descriptor_index", base.DEC, nil, nil, "descriptor_index")
 M.f.atdecc_aem_ptp_port_perf_mon_record_response_record_index = ProtoField.uint16("avb.atdecc.aem.ptp_port_perf_mon_record_response.record_index", "record_index", base.DEC, nil, nil, "record index")
-M.f.atdecc_aem_ptp_port_perf_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_perf_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x8000, "MEASUREMENT_VALID")
-M.f.atdecc_aem_ptp_port_perf_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_port_perf_mon_record_response.period_complete", "period_complete", 16, nil, 0x4000, "PERIOD_COMPLETE")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_measurement_valid = ProtoField.bool("avb.atdecc.aem.ptp_port_perf_mon_record_response.measurement_valid", "measurement_valid", 16, nil, 0x1, "MEASUREMENT_VALID")
+M.f.atdecc_aem_ptp_port_perf_mon_record_response_period_complete = ProtoField.bool("avb.atdecc.aem.ptp_port_perf_mon_record_response.period_complete", "period_complete", 16, nil, 0x2, "PERIOD_COMPLETE")
 M.f.atdecc_aem_ptp_port_perf_mon_record_response_timestamp = ProtoField.uint64("avb.atdecc.aem.ptp_port_perf_mon_record_response.timestamp", "timestamp", base.HEX, nil, nil, "record start (ns, entity epoch)")
 M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_tx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.announce_tx", "announce_tx", base.DEC, nil, nil, "announce tx count")
 M.f.atdecc_aem_ptp_port_perf_mon_record_response_announce_rx = ProtoField.uint32("avb.atdecc.aem.ptp_port_perf_mon_record_response.announce_rx", "announce_rx", base.DEC, nil, nil, "announce rx count")
@@ -2041,42 +2071,72 @@ M.fields = {
     M.f.atdecc_aem_ptp_port_info_command_descriptor_type,
     M.f.atdecc_aem_ptp_port_info_command_descriptor_index,
     M.f.atdecc_aem_ptp_port_info_command_reserved1,
-    M.f.atdecc_aem_ptp_port_info_command_flags,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_enable,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_link_delay_threshold,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_delay_mechanism,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_delay_asymmetry,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_announce_timeouts,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_sync_timeouts,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_gptp_capable_timeouts,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_pdelay_timeouts,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_ioto,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_icmd,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_icnr,
+    M.f.atdecc_aem_ptp_port_info_command_flags_set_faults,
     M.f.atdecc_aem_ptp_port_info_command_delay_mechanism,
     M.f.atdecc_aem_ptp_port_info_command_announce_receipt_timeout,
     M.f.atdecc_aem_ptp_port_info_command_sync_receipt_timeout,
-    M.f.atdecc_aem_ptp_port_info_command_port_flags,
+    M.f.atdecc_aem_ptp_port_info_command_port_flags_ioto,
+    M.f.atdecc_aem_ptp_port_info_command_port_flags_icmd,
+    M.f.atdecc_aem_ptp_port_info_command_port_flags_icnr,
+    M.f.atdecc_aem_ptp_port_info_command_port_flags_pe,
     M.f.atdecc_aem_ptp_port_info_command_mean_link_delay_threshold,
     M.f.atdecc_aem_ptp_port_info_command_delay_asymmetry,
     M.f.atdecc_aem_ptp_port_info_command_allowed_lost_responses,
     M.f.atdecc_aem_ptp_port_info_command_allowed_faults,
     M.f.atdecc_aem_ptp_port_info_command_gptp_capable_receipt_timeout,
-    M.f.atdecc_aem_ptp_port_info_command_port_state,
-    M.f.atdecc_aem_ptp_port_info_command_reserved2,
+    M.f.atdecc_aem_ptp_port_info_command_reserved3,
     M.f.atdecc_aem_get_ptp_port_info_response_descriptor_type,
     M.f.atdecc_aem_get_ptp_port_info_response_descriptor_index,
     M.f.atdecc_aem_get_ptp_port_info_response_reserved1,
-    M.f.atdecc_aem_get_ptp_port_info_response_flags,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_delay_mechanism,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_delay_asymmetry,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_gptp_capable_timeouts,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_pdelay_timeouts,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_ioto,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_faults,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_osto,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_osr,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_ost,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_coto,
+    M.f.atdecc_aem_get_ptp_port_info_response_flags_sl,
     M.f.atdecc_aem_get_ptp_port_info_response_delay_mechanism,
     M.f.atdecc_aem_get_ptp_port_info_response_announce_receipt_timeout,
     M.f.atdecc_aem_get_ptp_port_info_response_sync_receipt_timeout,
-    M.f.atdecc_aem_get_ptp_port_info_response_port_flags,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_cc,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_ccnr,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_asc,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_imd,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_ioto,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_icmd,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_icnr,
+    M.f.atdecc_aem_get_ptp_port_info_response_port_flags_pe,
     M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay_threshold,
     M.f.atdecc_aem_get_ptp_port_info_response_delay_asymmetry,
     M.f.atdecc_aem_get_ptp_port_info_response_allowed_lost_responses,
     M.f.atdecc_aem_get_ptp_port_info_response_allowed_faults,
     M.f.atdecc_aem_get_ptp_port_info_response_gptp_capable_receipt_timeout,
     M.f.atdecc_aem_get_ptp_port_info_response_port_state,
-    M.f.atdecc_aem_get_ptp_port_info_response_reserved2,
-    M.f.atdecc_aem_get_ptp_port_info_response_reserved3,
     M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay,
     M.f.atdecc_aem_get_ptp_port_info_response_neighbor_rate_ratio,
     M.f.atdecc_aem_get_ptp_port_info_response_major_version,
     M.f.atdecc_aem_get_ptp_port_info_response_minor_version,
-    M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags,
-    M.f.atdecc_aem_get_ptp_port_info_response_reserved4,
-    M.f.atdecc_aem_get_ptp_port_info_response_reserved5,
-    M.f.atdecc_aem_get_ptp_port_info_response_reserved6,
+    M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_osto,
+    M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_osr,
+    M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_ost,
+    M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_coto,
+    M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_sl,
+    M.f.atdecc_aem_get_ptp_port_info_response_reserved3,
     M.f.atdecc_aem_video_format_descriptor_type,
     M.f.atdecc_aem_video_format_descriptor_index,
     M.f.atdecc_aem_video_format_format_specific,
@@ -3545,18 +3605,31 @@ function M.add_aem_ptp_port_info_command(tree, tvb, off)
     tree:add(M.f.atdecc_aem_ptp_port_info_command_descriptor_type, tvb(off + 24, 2))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_descriptor_index, tvb(off + 26, 2))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_reserved1, tvb(off + 28, 2))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_enable, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_link_delay_threshold, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_delay_mechanism, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_delay_asymmetry, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_announce_timeouts, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_sync_timeouts, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_gptp_capable_timeouts, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_pdelay_timeouts, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_ioto, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_icmd, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_icnr, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_flags_set_faults, tvb(off + 30, 2))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_delay_mechanism, tvb(off + 32, 1))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_announce_receipt_timeout, tvb(off + 33, 1))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_sync_receipt_timeout, tvb(off + 34, 1))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_port_flags, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_port_flags_ioto, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_port_flags_icmd, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_port_flags_icnr, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_port_flags_pe, tvb(off + 35, 1))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_mean_link_delay_threshold, tvb(off + 36, 8))
     tree:add(M.f.atdecc_aem_ptp_port_info_command_delay_asymmetry, tvb(off + 44, 8))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_allowed_lost_responses, tvb(off + 52, 2))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_allowed_faults, tvb(off + 54, 2))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_gptp_capable_receipt_timeout, tvb(off + 56, 2))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_port_state, tvb(off + 58, 1))
-    tree:add(M.f.atdecc_aem_ptp_port_info_command_reserved2, tvb(off + 59, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_allowed_lost_responses, tvb(off + 52, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_allowed_faults, tvb(off + 53, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_gptp_capable_receipt_timeout, tvb(off + 54, 1))
+    tree:add(M.f.atdecc_aem_ptp_port_info_command_reserved3, tvb(off + 55, 1))
 end
 
 --- AEM AemGetPtpPortInfoResponsePayload (IEEE 1722.1-2021 7.4)
@@ -3564,27 +3637,44 @@ function M.add_aem_get_ptp_port_info_response(tree, tvb, off)
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_descriptor_type, tvb(off + 24, 2))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_descriptor_index, tvb(off + 26, 2))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved1, tvb(off + 28, 2))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_delay_mechanism, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_delay_asymmetry, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_gptp_capable_timeouts, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_pdelay_timeouts, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_ioto, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_faults, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_osto, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_osr, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_ost, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_coto, tvb(off + 30, 2))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_flags_sl, tvb(off + 30, 2))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_delay_mechanism, tvb(off + 32, 1))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_announce_receipt_timeout, tvb(off + 33, 1))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_sync_receipt_timeout, tvb(off + 34, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_cc, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_ccnr, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_asc, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_imd, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_ioto, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_icmd, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_icnr, tvb(off + 35, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_flags_pe, tvb(off + 35, 1))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay_threshold, tvb(off + 36, 8))
     tree:add(M.f.atdecc_aem_get_ptp_port_info_response_delay_asymmetry, tvb(off + 44, 8))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_allowed_lost_responses, tvb(off + 52, 2))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_allowed_faults, tvb(off + 54, 2))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_gptp_capable_receipt_timeout, tvb(off + 56, 2))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_state, tvb(off + 58, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved2, tvb(off + 59, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved3, tvb(off + 60, 4))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay, tvb(off + 64, 8))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_neighbor_rate_ratio, tvb(off + 72, 8))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_major_version, tvb(off + 80, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_minor_version, tvb(off + 81, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags, tvb(off + 82, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved4, tvb(off + 83, 1))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved5, tvb(off + 84, 8))
-    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved6, tvb(off + 92, 8))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_allowed_lost_responses, tvb(off + 52, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_allowed_faults, tvb(off + 53, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_gptp_capable_receipt_timeout, tvb(off + 54, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_port_state, tvb(off + 55, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_mean_link_delay, tvb(off + 56, 8))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_neighbor_rate_ratio, tvb(off + 64, 8))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_major_version, tvb(off + 72, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_minor_version, tvb(off + 73, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_osto, tvb(off + 74, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_osr, tvb(off + 74, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_ost, tvb(off + 74, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_coto, tvb(off + 74, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_ext_port_flags_sl, tvb(off + 74, 1))
+    tree:add(M.f.atdecc_aem_get_ptp_port_info_response_reserved3, tvb(off + 75, 1))
 end
 
 --- AEM AemVideoFormatPayload (IEEE 1722.1-2021 7.4)
@@ -5163,8 +5253,8 @@ M.aem_payloads[0x0059] = { cmd = { name = "descriptor_ref", length = 4, add = M.
 M.aem_payloads[0x005B] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
 M.aem_payloads[0x005C] = { cmd = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
 M.aem_payloads[0x005D] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_port_intervals", length = 12, add = M.add_aem_ptp_port_intervals, trailer = nil } }
-M.aem_payloads[0x005E] = { cmd = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil } }
-M.aem_payloads[0x005F] = { cmd = { name = "ptp_port_info_command", length = 36, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "get_ptp_port_info_response", length = 76, add = M.add_aem_get_ptp_port_info_response, trailer = nil } }
+M.aem_payloads[0x005E] = { cmd = { name = "ptp_port_info_command", length = 32, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "ptp_port_info_command", length = 32, add = M.add_aem_ptp_port_info_command, trailer = nil } }
+M.aem_payloads[0x005F] = { cmd = { name = "ptp_port_info_command", length = 32, add = M.add_aem_ptp_port_info_command, trailer = nil }, rsp = { name = "get_ptp_port_info_response", length = 52, add = M.add_aem_get_ptp_port_info_response, trailer = nil } }
 M.aem_payloads[0x0060] = { cmd = { name = "set_ptp_port_overrides", length = 16, add = M.add_aem_set_ptp_port_overrides, trailer = nil }, rsp = { name = "set_ptp_port_overrides", length = 16, add = M.add_aem_set_ptp_port_overrides, trailer = nil } }
 M.aem_payloads[0x0061] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "get_ptp_port_overrides_response", length = 16, add = M.add_aem_get_ptp_port_overrides_response, trailer = nil } }
 M.aem_payloads[0x0062] = { cmd = { name = "descriptor_ref", length = 4, add = M.add_aem_descriptor_ref, trailer = nil }, rsp = { name = "ptp_perf_mon_count_response", length = 12, add = M.add_aem_ptp_perf_mon_count_response, trailer = nil } }

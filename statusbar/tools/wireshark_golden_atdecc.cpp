@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -638,7 +639,7 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         frames.push_back({"aem_get_dynamic_info_response", aem(0x004B, true, 75, std::span<uint8_t const>(dynamic_response))});
         std::array<uint8_t, 12> const rate_range{0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x3C};
         frames.push_back({"aem_set_sampling_rate_range_command", aem(0x004E, false, 76, std::span<uint8_t const>(rate_range))});
-        std::array<uint8_t, 12> const set_instance{0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0xE0, 0xE0, 0xF8, 0xF8, 0x00, 0x05};
+        std::array<uint8_t, 12> const set_instance{0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x07, 0x07, 0xF8, 0xF8, 0x00, 0x05};
         frames.push_back({"aem_set_ptp_instance_info_command", aem(0x0050, false, 77, std::span<uint8_t const>(set_instance))});
         std::array<uint8_t, 36> instance_info{
             0x00, 0x22, 0x00, 0x00, 0xF8, 0xFE, 0x43, 0x6A, 0xF8, 0xF8, 0x00, 0x90, 0x00, 0x25, 0x01, 0x3D};
@@ -659,7 +660,7 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         std::copy(gm.begin(), gm.end(), extended.begin() + 36);  // parent clock identity
         extended[45] = 0x01;                                     // parent port 1
         extended[47] = 0x02;                                     // steps removed 2
-        extended[52] = 0xFE;                                     // valid_flags: every optional field present
+        extended[53] = 0x7F;                                     // valid_flags: every optional field present
         extended[55] = 0x03;                                     // gm_timebase_indicator
         extended[67] = 0x2A;                                     // offset_from_master low octet
         extended[80] = 0x3F;                                     // last_gm_freq_change = 1.0f
@@ -691,7 +692,7 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         std::array<uint8_t, 12> const pm_count{0x00, 0x22, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x61, 0x00, 0x10};
         frames.push_back(
             {"aem_get_ptp_instance_perf_mon_count_response", aem(0x0056, true, 82, std::span<uint8_t const>(pm_count))});
-        std::array<uint8_t, 144> record{0x00, 0x22, 0x00, 0x00, 0x00, 0x03, 0xFC, 0x00};
+        std::array<uint8_t, 144> record{0x00, 0x22, 0x00, 0x00, 0x00, 0x03, 0x00, 0x3F};
         record[15] = 0x64;  // timestamp 100 ns
         record[23] = 0x10;  // average_master_slave_delay 16
         for (size_t i = 136; i < 144; ++i) {
@@ -700,17 +701,17 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         record[143] = 0xFE;
         frames.push_back(
             {"aem_get_ptp_instance_perf_mon_record_response", aem(0x0057, true, 83, std::span<uint8_t const>(record))});
-        std::array<uint8_t, 12> const intervals{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0xFD, 0x00, 0x03};
+        std::array<uint8_t, 12> const intervals{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0xFD, 0x00, 0x03};
         frames.push_back(
             {"aem_set_ptp_port_initial_intervals_command", aem(0x0058, false, 84, std::span<uint8_t const>(intervals))});
         std::array<uint8_t, 16> const overrides{
-            0x00, 0x23, 0x00, 0x00, 0xFF, 0x00, 0xFE, 0xE0, 0x00, 0xFD, 0x00, 0x03, 0x09, 0x00, 0x00, 0x00};
+            0x00, 0x23, 0x00, 0x00, 0x00, 0xFF, 0x07, 0x7F, 0x00, 0xFD, 0x00, 0x03, 0x09, 0x00, 0x00, 0x00};
         frames.push_back({"aem_set_ptp_port_overrides_command", aem(0x0060, false, 85, std::span<uint8_t const>(overrides))});
-        std::array<uint8_t, 48> pdelay{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00};
+        std::array<uint8_t, 48> pdelay{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03};
         pdelay[15] = 0x64;
         pdelay[23] = 0x7B;
         frames.push_back({"aem_get_ptp_port_pdelay_mon_record_response", aem(0x0063, true, 86, std::span<uint8_t const>(pdelay))});
-        std::array<uint8_t, 84> port_record{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00};
+        std::array<uint8_t, 84> port_record{0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03};
         port_record[15] = 0x64;
         port_record[19] = 0x08;  // announce_tx
         port_record[83] = 0x11;  // pdelay_resp_followup_rx
@@ -728,6 +729,53 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         std::array<uint8_t, 4> const disable_encryption{0x00, 0x06, 0x00, 0x00};
         frames.push_back(
             {"aem_disable_stream_encryption_command", aem(0x0046, false, 91, std::span<uint8_t const>(disable_encryption))});
+    }
+
+    // ---- SET_PTP_PORT_INFO command / GET_PTP_PORT_INFO response (Figures 7-122 / 7-124 per Cor 1-2025) ----
+    {
+        AemPtpPortInfoCommandPayload set{};
+        set.descriptor_type = DESCRIPTOR_PTP_PORT;
+        set.descriptor_index = 0;
+        set.flags = doublet_t{
+            set_ptp_port_info_flags::SET_ENABLE | set_ptp_port_info_flags::SET_DELAY_MECHANISM |
+            set_ptp_port_info_flags::SET_PDELAY_TIMEOUTS};
+        set.delay_mechanism = octet_t{0x02};
+        set.announce_receipt_timeout = octet_t{3};
+        set.sync_receipt_timeout = octet_t{3};
+        set.port_flags = octet_t{ptp_port_flags::PE | ptp_port_flags::ICNR};
+        set.mean_link_delay_threshold = 800;
+        set.delay_asymmetry = 0;
+        set.allowed_lost_responses = octet_t{3};
+        set.allowed_faults = octet_t{9};
+        set.gptp_capable_receipt_timeout = octet_t{9};
+        std::array<uint8_t, AemPtpPortInfoCommandPayload::LENGTH> set_bytes{};
+        span_store(set_bytes, set);
+        frames.push_back({"aem_set_ptp_port_info_command", aem(AEM_COMMAND_SET_PTP_PORT_INFO, false, 92, set_bytes)});
+
+        AemGetPtpPortInfoResponsePayload info{};
+        info.descriptor_type = DESCRIPTOR_PTP_PORT;
+        info.descriptor_index = 0;
+        info.flags = doublet_t{
+            get_ptp_port_info_flags::DELAY_MECHANISM | get_ptp_port_info_flags::PDELAY_TIMEOUTS | get_ptp_port_info_flags::FAULTS |
+            get_ptp_port_info_flags::SL};
+        info.delay_mechanism = octet_t{0x02};
+        info.announce_receipt_timeout = octet_t{3};
+        info.sync_receipt_timeout = octet_t{3};
+        info.port_flags = octet_t{ptp_port_flags::ASC | ptp_port_flags::PE};
+        info.mean_link_delay_threshold = 800;
+        info.delay_asymmetry = 0;
+        info.allowed_lost_responses = octet_t{3};
+        info.allowed_faults = octet_t{9};
+        info.gptp_capable_receipt_timeout = octet_t{9};
+        info.port_state = octet_t{9};  // SlavePort
+        info.mean_link_delay = 412;
+        info.neighbor_rate_ratio = std::bit_cast<uint64_t>(1.0000213);
+        info.major_version = octet_t{2};
+        info.minor_version = octet_t{0};
+        info.ext_port_flags = octet_t{ptp_port_ext_flags::SL};
+        std::array<uint8_t, AemGetPtpPortInfoResponsePayload::LENGTH> info_bytes{};
+        span_store(info_bytes, info);
+        frames.push_back({"aem_get_ptp_port_info_response", aem(AEM_COMMAND_GET_PTP_PORT_INFO, true, 93, info_bytes)});
     }
 
     // ---- HDCP APM command: the last fragment of a 20-octet message ----

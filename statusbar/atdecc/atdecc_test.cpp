@@ -11,6 +11,7 @@
 #include "statusbar/test/test.hpp"
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -2465,13 +2466,25 @@ TEST(aem_avb_info_payload, struct_size)
 TEST(aem_ptp_port_info, struct_layout)
 {
     using namespace aem;
-    EXPECT_EQ(sizeof(AemPtpPortInfoCommandPayload), 36u);
-    EXPECT_EQ(sizeof(AemGetPtpPortInfoResponsePayload), 76u);
-    EXPECT_EQ(AemGetPtpPortInfoResponsePayload::MINIMUM_LENGTH, 36u);
-    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, mean_link_delay), 40u);
-    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, neighbor_rate_ratio), 48u);
-    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, major_version), 56u);
-    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, ext_port_flags), 58u);
+    // IEEE 1722.1-2021 Figure 7-122 (SET command, 32 octets) and Figure 7-124 as
+    // replaced by Cor 1-2025 (GET response, 52 octets)
+    EXPECT_EQ(sizeof(AemPtpPortInfoCommandPayload), 32u);
+    EXPECT_EQ(AemPtpPortInfoCommandPayload::LENGTH, 32u);
+    EXPECT_EQ(offsetof(AemPtpPortInfoCommandPayload, allowed_lost_responses), 28u);
+    EXPECT_EQ(offsetof(AemPtpPortInfoCommandPayload, allowed_faults), 29u);
+    EXPECT_EQ(offsetof(AemPtpPortInfoCommandPayload, gptp_capable_receipt_timeout), 30u);
+    EXPECT_EQ(sizeof(AemGetPtpPortInfoResponsePayload), 52u);
+    EXPECT_EQ(AemGetPtpPortInfoResponsePayload::LENGTH, 52u);
+    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, port_state), 31u);
+    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, mean_link_delay), 32u);
+    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, neighbor_rate_ratio), 40u);
+    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, major_version), 48u);
+    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, minor_version), 49u);
+    EXPECT_EQ(offsetof(AemGetPtpPortInfoResponsePayload, ext_port_flags), 50u);
+
+    AemGetPtpPortInfoResponsePayload p{};
+    p.neighbor_rate_ratio = std::bit_cast<uint64_t>(1.000025);
+    EXPECT_EQ(p.neighbor_rate_ratio_value(), 1.000025);
 }
 
 //
