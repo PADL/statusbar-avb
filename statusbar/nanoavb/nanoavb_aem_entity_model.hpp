@@ -147,12 +147,14 @@ class AemEntityModel
     /// calls that don't go through the wire-format path.
     [[nodiscard]] auto handler() const noexcept -> AemEntityHandler& { return *handler_; }
 
-  private:
     /// Look up the pre-agreed symbol for a (configuration, type, index)
     /// triple via the attached DescriptorStorage symbol table, returning
-    /// 0 if no storage is attached or no symbol is registered.
+    /// 0 if no storage is attached or no symbol is registered. Public so
+    /// the command handler can build a DescriptorId for commands that do
+    /// not go through the generic SET/GET value path (memory object length).
     [[nodiscard]] auto symbol_for(DescriptorRef ref) const -> uint32_t;
 
+  private:
     AemEntityHandler* handler_{nullptr};
     std::optional<DescriptorStorage> storage_;
     uint16_t configuration_{0};  ///< see set_configuration

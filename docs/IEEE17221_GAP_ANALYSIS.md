@@ -16,6 +16,20 @@ It does not flag sub-protocols that were intentionally not implemented.
 > - Listener SM enforces `listenerIsConnected` → `LISTENER_EXCLUSIVE` (`atdecc_acmp_listener_sm.cpp`).
 > - Unsolicited notification subsystem is implemented — register/deregister + dispatch
 >   (`nanoavb_entity.cpp`).
+>
+> **Status update (2026-10-04, IEEE 1722.1-2021/Cor 1-2025 review):** the
+> nanoavb entity now notifies on ACQUIRE_ENTITY, LOCK_ENTITY (and lock expiry),
+> DEREGISTER_UNSOLICITED_NOTIFICATION, REBOOT and SET_MEMORY_OBJECT_LENGTH, and
+> implicitly registers the acquiring controller (7.5.2); it exposes
+> `notify_counters_changed()` / `notify_stream_info_changed()` for the SRP, gPTP
+> and stream-reception driven GET_COUNTERS / GET_STREAM_INFO notifications;
+> implements GET_DYNAMIC_INFO with the corrigendum's fixed-size GET list, REBOOT
+> (via `on_reboot`) and SET/GET_MEMORY_OBJECT_LENGTH (via handler hooks); and
+> sends entity-side IN_PROGRESS: a SET hook returning `AEM_STATUS_IN_PROGRESS`
+> (e.g. SET_STREAM_FORMAT awaiting an SRP re-reservation, Cor 1 7.4.9.3) is
+> answered IN_PROGRESS, repeated every 120 ms from `tick()`, and finished by
+> `complete_pending_command()`. ACQUIRE_ENTITY's CONTROLLER_AVAILABLE handshake
+> and LOCK_ENTITY's timeout were already in place.
 
 ---
 
@@ -161,7 +175,7 @@ This is a reasonable design choice for an audio-focused AVB entity.
 |---------|----------|
 | `AEM_STATUS_IN_PROGRESS = 9` defined | OK |
 | `AEM_IN_PROGRESS_TIMEOUT_MS = 120` defined | OK |
-| No code ever sends IN_PROGRESS responses | **Missing** |
+| ~~No code ever sends IN_PROGRESS responses~~ entity side: ACQUIRE_ENTITY handshake and deferred SET commands (`complete_pending_command`) | **Fixed (2026-10-04)** |
 | No controller-side handling of received IN_PROGRESS (reset timeout, wait for final) | **Missing** |
 
 ---

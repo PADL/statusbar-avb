@@ -296,6 +296,20 @@ class AemEntityHandler
     {
         return 0;
     }
+
+    // ---- MEMORY_OBJECT length (IEEE 1722.1-2021 7.4.72 / 7.4.73) ----------
+
+    /// SET_MEMORY_OBJECT_LENGTH: a controller set the length field of the
+    /// MEMORY_OBJECT @p id to @p length octets (e.g. after an upload, Annex D).
+    /// Return an AEM_STATUS_* code. Default: NOT_IMPLEMENTED.
+    virtual auto on_set_memory_object_length(DescriptorId /*id*/, uint64_t /*length*/) -> uint8_t
+    {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+
+    /// GET_MEMORY_OBJECT_LENGTH: write the current length of MEMORY_OBJECT @p id
+    /// into @p length and return true; false => NO_SUCH_DESCRIPTOR. Default: false.
+    virtual auto on_get_memory_object_length(DescriptorId /*id*/, uint64_t& /*length*/) -> bool { return false; }
 };
 
 }  // namespace statusbar::nanoavb

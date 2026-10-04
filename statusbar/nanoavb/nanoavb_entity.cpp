@@ -6,6 +6,9 @@
 #include "statusbar/atdecc/atdecc_addresses.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstring>
 #include <span>
 
@@ -108,6 +111,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
     -> AemCommandResponse
 {
     auto const cmd = header.command_code();
+    current_header_ = header;
 
     switch (cmd) {
         case AEM_COMMAND_READ_DESCRIPTOR:
@@ -125,11 +129,41 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_ENTITY_AVAILABLE:
             return handle_entity_available(header);
 
-        case AEM_COMMAND_ACQUIRE_ENTITY:
-            return handle_acquire_entity(header, command_data, out_buffer);
+        case AEM_COMMAND_ACQUIRE_ENTITY: {
+            auto const r = handle_acquire_entity(header, command_data, out_buffer);
+            notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, r, out_buffer);
+            return r;
+        }
 
-        case AEM_COMMAND_LOCK_ENTITY:
-            return handle_lock_entity(header, command_data, out_buffer);
+        case AEM_COMMAND_LOCK_ENTITY: {
+            auto const r = handle_lock_entity(header, command_data, out_buffer);
+            notify_on_success(AEM_COMMAND_LOCK_ENTITY, r, out_buffer);
+            return r;
+        }
+
+        case AEM_COMMAND_REBOOT: {
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            auto const r = handle_reboot(command_data, out_buffer);
+            notify_on_success(AEM_COMMAND_REBOOT, r, out_buffer);
+            return r;
+        }
+
+        case AEM_COMMAND_SET_MEMORY_OBJECT_LENGTH: {
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            auto const r = handle_set_memory_object_length(command_data, out_buffer);
+            notify_on_success(AEM_COMMAND_SET_MEMORY_OBJECT_LENGTH, r, out_buffer);
+            return r;
+        }
+
+        case AEM_COMMAND_GET_MEMORY_OBJECT_LENGTH:
+            return handle_get_memory_object_length(command_data, out_buffer);
+
+        case AEM_COMMAND_GET_DYNAMIC_INFO:
+            return handle_get_dynamic_info(header, command_data, out_buffer);
 
         case AEM_COMMAND_GET_CONFIGURATION:
             return handle_get_configuration(header, out_buffer);
@@ -233,8 +267,13 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION:
             return handle_register_unsolicited(header);
 
-        case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION:
-            return handle_deregister_unsolicited(header);
+        case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION: {
+            // Listed by 7.5.2 as notification-generating: the remaining
+            // registered controllers learn that this one left.
+            auto const r = handle_deregister_unsolicited(header);
+            notify_on_success(AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, r, out_buffer);
+            return r;
+        }
 
         default:
             return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
@@ -390,7 +429,299 @@ auto AemCommandHandler::handle_set_descriptor_value(
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
     }
+    if (r.status == AEM_STATUS_IN_PROGRESS) {
+        // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT):
+        // answer IN_PROGRESS now, keep repeating it from tick(), and finish when
+        // the application calls complete_pending_command().
+        return defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
+    }
     return {.status = r.status, .size = r.size};
+}
+
+auto AemCommandHandler::defer_command(uint16_t const command_type, std::span<uint8_t const> echoed_body) -> AemCommandResponse
+{
+    (void)command_type;
+    if (echoed_body.size() > MAX_PENDING_BODY) {
+        return {.status = AEM_STATUS_NO_RESOURCES, .size = echoed_body.size()};
+    }
+    PendingCommand pending{};
+    pending.header = current_header_;
+    pending.mac = current_src_mac_;
+    std::copy(echoed_body.begin(), echoed_body.end(), pending.body.begin());
+    pending.body_size = echoed_body.size();
+    pending.next_in_progress = event_time_ + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
+    if (!pending_commands_.add(pending)) {
+        return {.status = AEM_STATUS_NO_RESOURCES, .size = echoed_body.size()};
+    }
+    return {.status = AEM_STATUS_IN_PROGRESS, .size = echoed_body.size()};
+}
+
+auto AemCommandHandler::complete_pending_command(
+    uint16_t const command_type,
+    uint16_t const descriptor_type,
+    uint16_t const descriptor_index,
+    uint8_t const status,
+    std::span<uint8_t const> response_body) -> bool
+{
+    auto const idx = pending_commands_.find_if([&](PendingCommand const& p) {
+        if (p.header.command_code() != command_type || p.body_size < 4) {
+            return false;
+        }
+        doublet_t dtype{};
+        doublet_t dindex{};
+        span_load(dtype, std::span<uint8_t const>{p.body}.subspan(0, 2));
+        span_load(dindex, std::span<uint8_t const>{p.body}.subspan(2, 2));
+        return dtype.get() == descriptor_type && dindex.get() == descriptor_index;
+    });
+    if (idx >= pending_commands_.capacity()) {
+        return false;
+    }
+    PendingCommand const done = pending_commands_[idx];
+    pending_commands_.remove(idx);
+
+    auto const body = response_body.empty() ? std::span<uint8_t const>{done.body}.first(done.body_size) : response_body;
+    (void)send_response(done.mac, done.header, status, body);
+    if (status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(command_type, body);
+    }
+    return true;
+}
+
+void AemCommandHandler::tick(sm::TimePoint const now)
+{
+    if (locked_ && now >= lock_expiry_time_) {
+        release_lock();
+        emit_lock_released();
+    }
+    if (pending_acquire_.active && now >= pending_acquire_.timeout) {
+        controller_available_timed_out();
+    }
+    // IEEE 1722.1 9.2.2.3.1.2: a deferred command repeats IN_PROGRESS every
+    // AEM_IN_PROGRESS_TIMEOUT_MS so the controller keeps waiting.
+    for (auto& p : pending_commands_) {
+        if (now >= p.next_in_progress) {
+            (void)send_response(p.mac, p.header, AEM_STATUS_IN_PROGRESS, std::span<uint8_t const>{p.body}.first(p.body_size));
+            p.next_in_progress = now + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
+        }
+    }
+}
+
+void AemCommandHandler::notify_on_success(
+    uint16_t const command_type, AemCommandResponse const& response, std::span<uint8_t const> out_buffer)
+{
+    if (response.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(command_type, out_buffer.first(response.size));
+    }
+}
+
+void AemCommandHandler::emit_lock_released()
+{
+    AemLockEntityPayload body{};
+    body.set_unlock(true);
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> bytes{};
+    span_store(bytes, body);
+    emit_unsolicited(AEM_COMMAND_LOCK_ENTITY, bytes);
+}
+
+auto AemCommandHandler::notify_counters_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
+{
+    AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
+    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
+    span_store(request, cmd);
+    std::array<uint8_t, sizeof(AemCountersPayload)> out{};
+    auto const r = handle_get_counters(AemDu{}, request, out);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(AEM_COMMAND_GET_COUNTERS, std::span<uint8_t const>{out}.first(r.size));
+    }
+    return r.status;
+}
+
+auto AemCommandHandler::notify_stream_info_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
+{
+    AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
+    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
+    span_store(request, cmd);
+    std::array<uint8_t, AemStreamInfoPayload::LENGTH> out{};
+    auto const r = handle_get_stream_info(AemDu{}, request, out);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
+    }
+    return r.status;
+}
+
+auto AemCommandHandler::handle_reboot(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    if (!callbacks_.on_reboot) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    if (command_data.size() < AemRebootPayload::LENGTH || out_buffer.size() < AemRebootPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemRebootPayload cmd{};
+    span_load(cmd, command_data.first(AemRebootPayload::LENGTH));
+    auto const status = callbacks_.on_reboot(cmd.descriptor_type.get(), cmd.descriptor_index.get());
+    span_store(out_buffer.first(AemRebootPayload::LENGTH), cmd);
+    return {.status = status, .size = AemRebootPayload::LENGTH};
+}
+
+auto AemCommandHandler::memory_object_id(uint16_t const configuration_index, uint16_t const descriptor_index) const -> DescriptorId
+{
+    AemEntityModel aem_model{*handler_};
+    aem_model.set_configuration(configuration_index);
+    DescriptorRef const ref{
+        .configuration_index = configuration_index,
+        .descriptor_type = DESCRIPTOR_MEMORY_OBJECT,
+        .descriptor_index = descriptor_index};
+    return DescriptorId{.ref = ref, .symbol = aem_model.symbol_for(ref)};
+}
+
+auto AemCommandHandler::handle_set_memory_object_length(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (command_data.size() < AemMemoryObjectLengthPayload::LENGTH || out_buffer.size() < AemMemoryObjectLengthPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemMemoryObjectLengthPayload cmd{};
+    span_load(cmd, command_data.first(AemMemoryObjectLengthPayload::LENGTH));
+    auto const status = handler_->on_set_memory_object_length(
+        memory_object_id(cmd.configuration_index.get(), cmd.descriptor_index.get()), cmd.length.get());
+    span_store(out_buffer.first(AemMemoryObjectLengthPayload::LENGTH), cmd);
+    return {.status = status, .size = AemMemoryObjectLengthPayload::LENGTH};
+}
+
+auto AemCommandHandler::handle_get_memory_object_length(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (command_data.size() < AemGetMemoryObjectLengthCommandPayload::LENGTH ||
+        out_buffer.size() < AemMemoryObjectLengthPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemGetMemoryObjectLengthCommandPayload cmd{};
+    span_load(cmd, command_data.first(AemGetMemoryObjectLengthCommandPayload::LENGTH));
+    uint64_t length = 0;
+    if (!handler_->on_get_memory_object_length(
+            memory_object_id(cmd.configuration_index.get(), cmd.descriptor_index.get()), length)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    AemMemoryObjectLengthPayload resp{};
+    resp.descriptor_index = cmd.descriptor_index;
+    resp.configuration_index = cmd.configuration_index;
+    resp.length = length;
+    span_store(out_buffer.first(AemMemoryObjectLengthPayload::LENGTH), resp);
+    return {.status = AEM_STATUS_SUCCESS, .size = AemMemoryObjectLengthPayload::LENGTH};
+}
+
+namespace {
+
+/// dynamic_info entry header (Figure 7-94): info_command_specific_data_length(2),
+/// reserved(2), info_status in the top five bits of a doublet(2), info_command_type(2).
+constexpr size_t DYNAMIC_INFO_HEADER_LENGTH = 8;
+
+/// Fixed-size GET commands GET_DYNAMIC_INFO may carry (7.4.76.2 as amended by
+/// IEEE 1722.1-2021/Cor 1-2025).
+constexpr std::array<uint16_t, 24> DYNAMIC_INFO_COMMANDS{
+    AEM_COMMAND_GET_CONFIGURATION,
+    AEM_COMMAND_GET_STREAM_FORMAT,
+    AEM_COMMAND_GET_VIDEO_FORMAT,
+    AEM_COMMAND_GET_SENSOR_FORMAT,
+    AEM_COMMAND_GET_STREAM_INFO,
+    AEM_COMMAND_GET_NAME,
+    AEM_COMMAND_GET_ASSOCIATION_ID,
+    AEM_COMMAND_GET_SAMPLING_RATE,
+    AEM_COMMAND_GET_CLOCK_SOURCE,
+    AEM_COMMAND_GET_SIGNAL_SELECTOR,
+    AEM_COMMAND_GET_COUNTERS,
+    AEM_COMMAND_GET_MEMORY_OBJECT_LENGTH,
+    AEM_COMMAND_GET_STREAM_BACKUP,
+    AEM_COMMAND_GET_MAX_TRANSIT_TIME,
+    AEM_COMMAND_GET_SAMPLING_RATE_RANGE,
+    AEM_COMMAND_GET_PTP_INSTANCE_INFO,
+    AEM_COMMAND_GET_PTP_INSTANCE_EXTENDED_INFO,
+    AEM_COMMAND_GET_PTP_INSTANCE_GRANDMASTER_INFO,
+    AEM_COMMAND_GET_PTP_PORT_INITIAL_INTERVALS,
+    AEM_COMMAND_GET_PTP_PORT_CURRENT_INTERVALS,
+    AEM_COMMAND_GET_PTP_PORT_REMOTE_INTERVALS,
+    AEM_COMMAND_GET_PTP_PORT_INFO,
+    AEM_COMMAND_GET_PTP_PORT_OVERRIDES,
+    AEM_COMMAND_GET_PATH_LATENCY,
+};
+
+/// The most AEM command-specific data one AECPDU can carry.
+constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
+
+auto read_u16(std::span<uint8_t const> bytes, size_t const at) -> uint16_t
+{
+    doublet_t v{};
+    span_load(v, bytes.subspan(at, 2));
+    return v.get();
+}
+
+void write_u16(std::span<uint8_t> bytes, size_t const at, uint16_t const value)
+{
+    doublet_t const v{value};
+    span_store(bytes.subspan(at, 2), v);
+}
+
+}  // namespace
+
+auto AemCommandHandler::handle_get_dynamic_info(
+    AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    // Pass 1 (7.4.76.2): every entry must parse and name a fixed-size GET, or the
+    // whole command is BAD_ARGUMENTS with the request echoed and nothing processed.
+    auto const echo_request = [&](uint8_t const status) -> AemCommandResponse {
+        if (out_buffer.size() < command_data.size()) {
+            return {.status = status, .size = 0};
+        }
+        span_copy(out_buffer.first(command_data.size()), command_data);
+        return {.status = status, .size = command_data.size()};
+    };
+    for (size_t at = 0; at < command_data.size();) {
+        if (at + DYNAMIC_INFO_HEADER_LENGTH > command_data.size()) {
+            return echo_request(AEM_STATUS_BAD_ARGUMENTS);
+        }
+        size_t const length = read_u16(command_data, at);
+        auto const info_command = static_cast<uint16_t>(read_u16(command_data, at + 6) & 0x3FFFU);
+        if (at + DYNAMIC_INFO_HEADER_LENGTH + length > command_data.size() ||
+            std::find(DYNAMIC_INFO_COMMANDS.begin(), DYNAMIC_INFO_COMMANDS.end(), info_command) == DYNAMIC_INFO_COMMANDS.end()) {
+            return echo_request(AEM_STATUS_BAD_ARGUMENTS);
+        }
+        at += DYNAMIC_INFO_HEADER_LENGTH + length;
+    }
+
+    // Pass 2: dispatch each entry as its own command. The largest fixed-size GET
+    // response is GET_COUNTERS (136 octets), so a quarter of the dispatch buffer
+    // is plenty for one entry.
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE / 4> entry_out{};
+    size_t const out_limit = std::min(out_buffer.size(), MAX_AEM_BODY);
+    size_t out_at = 0;
+    AemDu const saved_header = current_header_;
+    for (size_t at = 0; at < command_data.size();) {
+        size_t const length = read_u16(command_data, at);
+        auto const info_command = static_cast<uint16_t>(read_u16(command_data, at + 6) & 0x3FFFU);
+        auto const request = command_data.subspan(at + DYNAMIC_INFO_HEADER_LENGTH, length);
+
+        AemDu sub_header = header;
+        sub_header.init_command(info_command, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + length));
+        auto const r = handle_command(sub_header, request, entry_out);
+        // A failed entry echoes its request, as the standalone command would.
+        auto const body = r.size > 0 ? std::span<uint8_t const>{entry_out}.first(r.size) : request;
+
+        // An entry that would overflow the AECPDU is dropped and the rest continue.
+        size_t const need = DYNAMIC_INFO_HEADER_LENGTH + body.size();
+        if (out_at + need <= out_limit) {
+            auto entry = out_buffer.subspan(out_at, need);
+            write_u16(entry, 0, static_cast<uint16_t>(body.size()));
+            write_u16(entry, 2, 0);
+            write_u16(entry, 4, static_cast<uint16_t>(static_cast<uint16_t>(r.status) << 11U));
+            write_u16(entry, 6, info_command);
+            span_copy(entry.subspan(DYNAMIC_INFO_HEADER_LENGTH), body);
+            out_at += need;
+        }
+        at += DYNAMIC_INFO_HEADER_LENGTH + length;
+    }
+    current_header_ = saved_header;
+    return {.status = AEM_STATUS_SUCCESS, .size = out_at};
 }
 
 auto AemCommandHandler::handle_get_descriptor_value(
@@ -576,6 +907,7 @@ auto AemCommandHandler::handle_acquire_entity(
             acquired_ = false;
             acquired_persistent_ = false;
             acquiring_controller_ = {};
+            acquiring_controller_mac_ = {};
             return build_acquire_response(
                 {.status = AEM_STATUS_SUCCESS, .flags = 0, .entity_id = {}, .command_data = command_data}, out_buffer);
         }
@@ -593,6 +925,7 @@ auto AemCommandHandler::handle_acquire_entity(
         acquired_ = true;
         acquired_persistent_ = persistent;
         acquiring_controller_ = header.controller_entity_id;
+        acquiring_controller_mac_ = current_src_mac_;
         return build_acquire_response(
             {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data},
             out_buffer);
@@ -923,6 +1256,15 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, command_type, body);
     }
 
+    // IEEE 1722.1 7.5.2: the acquiring controller is implicitly registered.
+    if (acquired_) {
+        auto const registered = unsolicited_registrations_.find_if(
+            [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == acquiring_controller_; });
+        if (registered >= unsolicited_registrations_.capacity()) {
+            send_unsolicited_to(acquiring_controller_mac_, acquiring_controller_, command_type, body);
+        }
+    }
+
     // An IDENTIFY-control change is additionally announced to the IDENTIFY
     // multicast (IEEE 1722.1) so any controller — even one not registered for
     // unsolicited notifications — observes the identify. No specific controller,
@@ -989,6 +1331,7 @@ void AemCommandHandler::controller_available_timed_out()
     // above for why the response is emitted here rather than returned.
     acquired_ = true;
     acquiring_controller_ = pending_acquire_.requester_header.controller_entity_id;
+    acquiring_controller_mac_ = pending_acquire_.requester_mac;
     acquired_persistent_ = (pending_acquire_.requester_flags & 0x01u) != 0u;
 
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
@@ -1004,6 +1347,7 @@ void AemCommandHandler::controller_available_timed_out()
         pending_acquire_.requester_header,
         response.status,
         std::span<uint8_t const>{out_buffer.data(), response.size});
+    notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, response, out_buffer);
 
     pending_acquire_ = {};
 }

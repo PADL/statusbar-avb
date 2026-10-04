@@ -94,6 +94,14 @@ using GetStreamInfoFn =
 /// cleared.
 using IdentifyChangedFn = statusbar::sg14::inplace_function<void(bool active), 64>;
 
+/// REBOOT (IEEE 1722.1 7.4.43): decide whether to reboot the target named by
+/// @p descriptor_type / @p descriptor_index (normally ENTITY 0) and return an
+/// AEM status. The callback runs BEFORE the response and the unsolicited
+/// notification are sent, so it must schedule the restart (a timer, or a flag
+/// the event loop acts on after this packet) rather than restart synchronously.
+/// Optional; if unset, REBOOT replies NOT_IMPLEMENTED.
+using RebootFn = statusbar::sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index), 64>;
+
 /// Callbacks for AECP AEM command handling
 struct AemCommandHandlerCallbacks
 {
@@ -114,6 +122,10 @@ struct AemCommandHandlerCallbacks
     /// Observe IDENTIFY-control changes (e.g. blink an LED, or log when there
     /// is none). Optional.
     IdentifyChangedFn identify_changed;
+
+    /// Accept or refuse REBOOT, and schedule it. Optional; if unset, REBOOT
+    /// replies NOT_IMPLEMENTED.
+    RebootFn on_reboot;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -201,6 +213,7 @@ class AemCommandHandler
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
     void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
+    void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -253,6 +266,7 @@ class AemCommandHandler
     {
         acquired_ = false;
         acquiring_controller_ = {};
+        acquiring_controller_mac_ = {};
     }
 
     /// Release lock (e.g., on timeout)
@@ -343,16 +357,57 @@ class AemCommandHandler
     /// entry point. No-op if no send_response callback is wired.
     void emit_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
 
-    /// Periodic tick to check lock timeout and pending acquire timeout
-    void tick(sm::TimePoint now) noexcept
-    {
-        if (locked_ && now >= lock_expiry_time_) {
-            release_lock();
-        }
-        if (pending_acquire_.active && now >= pending_acquire_.timeout) {
-            controller_available_timed_out();
-        }
-    }
+    /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
+    /// @p descriptor_index) to the registered controllers. IEEE 1722.1 7.5.2 has
+    /// the entity notify when counters change (stream reception, SRP and gPTP
+    /// events) but says nothing about rate, so the application decides when to
+    /// call this: on a state change such as MEDIA_LOCKED, or at most a few times
+    /// a second per descriptor. Counters are read through the get_counters
+    /// callback. Returns the AEM status: NOT_IMPLEMENTED without a callback,
+    /// NO_SUCH_DESCRIPTOR when the callback declines.
+    [[nodiscard]] auto notify_counters_changed(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
+
+    /// Push an unsolicited GET_STREAM_INFO response for a stream descriptor
+    /// (talker advertise/failure, listener connection changes). Reads the
+    /// parameters through the get_stream_info callback; same return values as
+    /// notify_counters_changed().
+    [[nodiscard]] auto notify_stream_info_changed(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
+
+    // ---- Deferred commands (IN_PROGRESS) ------------------------------------
+    //
+    // When on_set_descriptor_value returns AEM_STATUS_IN_PROGRESS (e.g. a
+    // SET_STREAM_FORMAT that must wait for an SRP re-reservation, Cor 1-2025
+    // 7.4.9.3) the handler answers IN_PROGRESS, repeats it every
+    // AEM_IN_PROGRESS_TIMEOUT_MS from tick(), and holds the command until the
+    // application calls complete_pending_command(). Several commands can be in
+    // flight at once (the corrigendum recommends accepting the SET_STREAM_FORMAT
+    // of every stream together so one re-reservation wait covers them all).
+
+    /// Deferred commands held at once; beyond this the hook's IN_PROGRESS is
+    /// answered NO_RESOURCES.
+    static constexpr size_t MAX_PENDING_COMMANDS = 8;
+    /// Longest command body a deferred command keeps for its echoed responses
+    /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
+    static constexpr size_t MAX_PENDING_BODY = 64;
+
+    /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index):
+    /// send its final response with @p status and @p response_body (the echoed
+    /// command when empty) and, on SUCCESS, the unsolicited notification. Returns
+    /// false when no such command is pending.
+    [[nodiscard]] auto complete_pending_command(
+        uint16_t command_type,
+        uint16_t descriptor_type,
+        uint16_t descriptor_index,
+        uint8_t status,
+        std::span<uint8_t const> response_body = {}) -> bool;
+
+    /// Number of deferred commands awaiting complete_pending_command().
+    [[nodiscard]] auto pending_command_count() const noexcept -> size_t { return pending_commands_.size(); }
+
+    /// Periodic tick: lock timeout (with its unsolicited LOCK_ENTITY release
+    /// notification), pending acquire timeout and the IN_PROGRESS repeats of
+    /// deferred commands.
+    void tick(sm::TimePoint now);
 
     /// Get the current configuration index
     [[nodiscard]] auto current_configuration() const noexcept -> uint16_t { return current_configuration_; }
@@ -463,6 +518,39 @@ class AemCommandHandler
     [[nodiscard]] auto handle_get_stream_info(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
+    /// Handle REBOOT (7.4.43) through the on_reboot callback; echoes the
+    /// descriptor reference.
+    [[nodiscard]] auto handle_reboot(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle SET_MEMORY_OBJECT_LENGTH / GET_MEMORY_OBJECT_LENGTH (7.4.72 /
+    /// 7.4.73) through the handler's on_set/get_memory_object_length hooks.
+    [[nodiscard]] auto handle_set_memory_object_length(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    [[nodiscard]] auto handle_get_memory_object_length(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// Handle GET_DYNAMIC_INFO (7.4.76, list per Cor 1-2025): every dynamic_info
+    /// entry must name a fixed-size GET (else BAD_ARGUMENTS for the whole
+    /// command); each is then dispatched as an independent command and its
+    /// status and response (or the echoed request on failure) packed back,
+    /// dropping entries that would overflow the AECPDU.
+    [[nodiscard]] auto handle_get_dynamic_info(
+        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Defer a SET whose hook answered IN_PROGRESS: keep (header, source MAC,
+    /// echoed body) for the periodic IN_PROGRESS repeats and the final response.
+    [[nodiscard]] auto defer_command(uint16_t command_type, std::span<uint8_t const> echoed_body) -> AemCommandResponse;
+
+    /// After a command handled with SUCCESS, send its response body as the
+    /// unsolicited notification (IEEE 1722.1 7.5.2 list).
+    void notify_on_success(uint16_t command_type, AemCommandResponse const& response, std::span<uint8_t const> out_buffer);
+
+    /// Unsolicited LOCK_ENTITY (UNLOCK, locked_entity_id 0) when a lock expires.
+    void emit_lock_released();
+
+    /// DescriptorId for MEMORY_OBJECT @p descriptor_index in @p configuration_index.
+    [[nodiscard]] auto memory_object_id(uint16_t configuration_index, uint16_t descriptor_index) const -> DescriptorId;
+
     /// Handle REGISTER_UNSOLICITED_NOTIFICATION command (no body).
     [[nodiscard]] auto handle_register_unsolicited(AemDu const& header) -> AemCommandResponse;
 
@@ -506,10 +594,12 @@ class AemCommandHandler
     // Emit 2013/2016-length descriptors in READ_DESCRIPTOR responses.
     bool legacy_2016_ = false;
 
-    // Acquisition state
+    // Acquisition state. The acquirer's MAC is kept because IEEE 1722.1 7.5.2
+    // implicitly registers the acquiring controller for unsolicited notifications.
     bool acquired_ = false;
     bool acquired_persistent_ = false;
     Eui64 acquiring_controller_;
+    Eui48 acquiring_controller_mac_{};
 
     // Lock state
     bool locked_ = false;
@@ -524,6 +614,21 @@ class AemCommandHandler
     // handlers (specifically handle_acquire_entity) can retain it in
     // pending_acquire_ for later out-of-band response sending.
     Eui48 current_src_mac_{};
+
+    // Header of the command currently being dispatched (set by handle_command),
+    // retained by defer_command() for a deferred command's later responses.
+    AemDu current_header_{};
+
+    // Deferred commands awaiting complete_pending_command().
+    struct PendingCommand
+    {
+        AemDu header{};
+        Eui48 mac{};
+        std::array<uint8_t, MAX_PENDING_BODY> body{};
+        size_t body_size{0};
+        sm::TimePoint next_in_progress{};
+    };
+    SlotTable<PendingCommand, MAX_PENDING_COMMANDS> pending_commands_{};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will

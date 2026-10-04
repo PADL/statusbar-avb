@@ -687,6 +687,39 @@ struct AemRebootPayload
 static_assert(sizeof(AemRebootPayload) == 4, "AemRebootPayload must be 4 bytes");
 
 //
+// SET_MEMORY_OBJECT_LENGTH / GET_MEMORY_OBJECT_LENGTH - Clause 7.4.72 / 7.4.73
+//
+/// SET_MEMORY_OBJECT_LENGTH command and response, and GET_MEMORY_OBJECT_LENGTH
+/// response (Figure 7-90). Note the field order: descriptor_index first, then
+/// the CONFIGURATION index that holds the MEMORY_OBJECT.
+struct AemMemoryObjectLengthPayload
+{
+    static constexpr size_t LENGTH = 12;
+
+    doublet_t descriptor_index{0};     // 0: MEMORY_OBJECT descriptor_index
+    doublet_t configuration_index{0};  // 2: CONFIGURATION that contains the memory object
+    octlet_t length{0};                // 4: length in octets
+
+    auto operator<=>(AemMemoryObjectLengthPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemMemoryObjectLengthPayload) == 12, "AemMemoryObjectLengthPayload must be 12 bytes");
+static_assert(offsetof(AemMemoryObjectLengthPayload, length) == 4);
+
+/// GET_MEMORY_OBJECT_LENGTH command (Figure 7-91)
+struct AemGetMemoryObjectLengthCommandPayload
+{
+    static constexpr size_t LENGTH = 4;
+
+    doublet_t descriptor_index{0};     // 0: MEMORY_OBJECT descriptor_index
+    doublet_t configuration_index{0};  // 2: CONFIGURATION that contains the memory object
+
+    auto operator<=>(AemGetMemoryObjectLengthCommandPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemGetMemoryObjectLengthCommandPayload) == 4, "AemGetMemoryObjectLengthCommandPayload must be 4 bytes");
+
+//
 // SET_CONTROL / GET_CONTROL - Clause 7.4.25 / 7.4.26
 //
 /// SET_CONTROL / GET_CONTROL command header (values follow)
@@ -1367,6 +1400,15 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemRebootPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemMemoryObjectLengthPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemGetMemoryObjectLengthCommandPayload>
+    : std::true_type
 {};
 
 template <>
