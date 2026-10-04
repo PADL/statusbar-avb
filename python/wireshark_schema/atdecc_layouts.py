@@ -180,6 +180,27 @@ _HEX_MEMBERS = {
     "current_format",
 }
 _VALUE_MEMBERS = {"descriptor_type": "descriptor_type"}
+# 64-bit members that are EUI-64 identifiers (rendered colon-separated with OUI
+# resolution, like Wireshark's own eui64 fields). Stream ids, formats, lengths,
+# nonces, counters and the MSRP bridge id stay plain 64-bit numbers.
+_EUI64_MEMBERS = {
+    "entity_model_id",
+    "gptp_grandmaster_id",
+    "clock_identity",
+    "gm_clock_identity",
+    "parent_clock_identity",
+    "clock_source_identifier",
+    "control_type",
+    "transcoder_type",
+    "vendor_eui64",
+    "key_id",
+}
+
+
+def _is_eui64(name: str, kind: str) -> bool:
+    return kind == "u64" and (name.endswith("entity_id") or name in _EUI64_MEMBERS)
+
+
 for (_sname, _member), _bits in STD.STD_FLAG_WORDS.items():
     _FLAG_WORDS[(f"aem.{_snake(_sname)}", _member)] = tuple(
         (sub, mask, kind, None, doc) for sub, mask, kind, doc in _bits
@@ -248,9 +269,11 @@ def _fields_for(
                 )
             )
             continue
+        if _is_eui64(name, kind):
+            kind = "eui64"
         base = (
             "hex"
-            if (name in _HEX_MEMBERS or kind in ("u64", "eui48", "bytes"))
+            if (name in _HEX_MEMBERS or kind in ("u64", "eui48", "eui64", "bytes"))
             else "dec"
         )
         values = _VALUE_MEMBERS.get(name)
@@ -699,17 +722,17 @@ SENSOR_FORMAT = _elem(
 AS_PATH_ENTRY = _elem(
     "as_path_entry",
     "gPTP path sequence entry",
-    (Field("clock_identity", 0, 8, "u64", "clock identity", base="hex"),),
+    (Field("clock_identity", 0, 8, "eui64", "clock identity"),),
 )
 CLOCK_IDENTITY_ENTRY = _elem(
     "clock_identity",
     "PTP path trace entry",
-    (Field("value", 0, 8, "u64", "clock identity", base="hex"),),
+    (Field("value", 0, 8, "eui64", "clock identity"),),
 )
 KEY_EUI_ENTRY = _elem(
     "key_eui",
     "keychain key entry",
-    (Field("value", 0, 8, "u64", "key EUI-64", base="hex"),),
+    (Field("value", 0, 8, "eui64", "key EUI-64"),),
 )
 TRAILER_ELEMENTS: dict[str, Layout] = {
     "count_entry": COUNT_ENTRY,

@@ -35,7 +35,7 @@ def decode_layout(layout: L.Layout, data: bytes, off: int = 0) -> dict[str, int 
                 raise ValueError(
                     f"{layout.abbr(f)}: needs {f.length} octets at {start}"
                 )
-            if f.kind in ("bytes", "eui48"):
+            if f.kind in ("bytes", "eui48", "eui64"):
                 out[layout.abbr(f)] = chunk.hex()
             elif f.kind == "string":
                 out[layout.abbr(f)] = chunk.split(b"\0", 1)[0].decode(

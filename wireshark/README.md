@@ -15,6 +15,11 @@ headers as `avb.avtp.cvf.mjpeg.*`, `.h264.*`, `.h265.*`, `.jpeg2000.*`; SDI,
 raw video and vendor-specific headers as `avb.avtp.svf.*`, `.rvf.*`, `.vsf.*`,
 with the VSF vendor id reassembled from its two halves as the EUI-48
 `avb.avtp.vsf.vendor_id`),
+Every EUI-64 identifier - entity, controller, talker and listener ids,
+entity model ids, clock identities, key ids, control and transcoder types,
+AEF/ESCF/EECF key ids - is an `eui64` field, so it filters and resolves in
+colon form (`avb.atdecc.adp.entity_id == 70:b3:d5:ed:c0:00:00:03`);
+stream ids, formats, nonces and counters stay 64-bit numbers.
 `avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
 TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and
 `avb.atdecc.*` (ADP, ACMP and AECP: every AEM command of IEEE

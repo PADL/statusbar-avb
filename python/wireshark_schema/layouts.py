@@ -24,7 +24,7 @@ class Field:
     name: str
     offset: int
     length: int
-    kind: str  # u8 u16 u24 u32 u64 i8 i16 i24 i32 i64 f32 f64 bool bytes eui48 string
+    kind: str  # u8 u16 u24 u32 u64 i8 i16 i24 i32 i64 f32 f64 bool bytes eui48 eui64 string
     doc: str = ""
     mask: int | None = None
     base: str = "dec"  # dec hex
@@ -400,7 +400,7 @@ AVTP_STREAM_V1 = Layout(
             "ptp_grandmaster_identity",
             24,
             8,
-            "u64",
+            "eui64",
             "ptp_grandmaster_identity",
             base="hex",
         ),
@@ -1031,7 +1031,12 @@ NTSCF_V0 = Layout(
 _ALT_V1 = (
     Field("sequence_num32", 4, 4, "u32", "sequence_num (32-bit)"),
     Field(
-        "ptp_grandmaster_identity", 8, 8, "u64", "ptp_grandmaster_identity", base="hex"
+        "ptp_grandmaster_identity",
+        8,
+        8,
+        "eui64",
+        "ptp_grandmaster_identity",
+        base="hex",
     ),
 )
 _STREAM_ID_20 = Field("stream_id", 20, 8, "u64", "stream_id", base="hex")
@@ -1166,7 +1171,7 @@ AEF_CONTINUOUS = Layout(
     + (
         Field("aef.enc", 1, 1, "u8", "encryption mode", mask=0x0F, values="aef_enc"),
         Field("aef.stream_data_length", 2, 2, "u16", "stream_data_length"),
-        Field("aef.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+        Field("aef.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
     ),
 )
 AEF_DISCRETE = Layout(
@@ -1184,7 +1189,7 @@ AEF_DISCRETE = Layout(
             "control_data_length (11 bits)",
             mask=0x07FF,
         ),
-        Field("aef.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+        Field("aef.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
     ),
 )
 ESCF = Layout(
@@ -1204,7 +1209,7 @@ ESCF = Layout(
             "control_data_length (11 bits)",
             mask=0x07FF,
         ),
-        Field("escf.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+        Field("escf.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
     ),
 )
 EECF = Layout(
@@ -1224,7 +1229,7 @@ EECF = Layout(
             "encrypted_payload_length (11 bits)",
             mask=0x07FF,
         ),
-        Field("eecf.key_id", 4, 8, "u64", "key_id (EUI-64)", base="hex"),
+        Field("eecf.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
     ),
 )
 

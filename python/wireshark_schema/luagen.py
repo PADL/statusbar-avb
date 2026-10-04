@@ -46,6 +46,7 @@ _PROTOFIELD = {
     "bool": "ProtoField.bool",
     "bytes": "ProtoField.bytes",
     "eui48": "ProtoField.ether",
+    "eui64": "ProtoField.eui64",
     "string": "ProtoField.string",
 }
 
@@ -70,6 +71,8 @@ def _protofield(layout: L.Layout, f: L.Field) -> str:
         return f"{ctor}({abbr}, {title}, {display}, nil, {mask}, {_lua_string(f.doc)})"
     if f.kind in ("bytes", "eui48"):
         return f"{ctor}({abbr}, {title}, base.NONE, {_lua_string(f.doc)})"
+    if f.kind == "eui64":
+        return f"{ctor}({abbr}, {title}, {_lua_string(f.doc)})"
     if f.kind == "string":
         return f"{ctor}({abbr}, {title}, base.ASCII, {_lua_string(f.doc)})"
     if f.kind in ("f32", "f64"):
