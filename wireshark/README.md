@@ -115,6 +115,22 @@ For a one-off run without installing:
 
     tshark -X lua_script:/path/to/wireshark/statusbar_avb.lua -r capture.pcap
 
+### Downloading a prebuilt archive from GitHub
+
+The GitHub mirror packages this directory on every push to `main` that
+touches it (workflow `.github/workflows/wireshark-plugin.yml`). The rolling
+`wireshark-latest` pre-release at
+<https://github.com/statusbar/avb/releases> carries
+`statusbar-avb-wireshark-<date>-g<commit>.tar.gz`, the same tree as a
+`.zip`, and a `.sha256` file; a tag named `wireshark-v<version>` publishes
+a versioned release the same way. Both archives unpack to one folder,
+`statusbar-avb/`, so they go straight into the plugin folder:
+
+    mkdir -p ~/.config/wireshark/plugins
+    tar -C ~/.config/wireshark/plugins -xzf statusbar-avb-wireshark-*.tar.gz
+
+(or unzip the `.zip` there). The `VERSION` file inside names the commit.
+
 ### Building the tarball and the deb
 
 Packaging is part of the standalone avb build (not the umbrella build), and

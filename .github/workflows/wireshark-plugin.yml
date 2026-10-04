@@ -1,0 +1,111 @@
+# Packages the MIT-licensed Wireshark Lua dissector (wireshark/) so it can be
+# downloaded from GitHub without building anything:
+#
+#   * every push to main that touches it uploads a workflow artifact and
+#     refreshes the rolling "wireshark-latest" pre-release;
+#   * pushing a tag "wireshark-v<version>" publishes a versioned release.
+#
+# The archives unpack to one folder, statusbar-avb/, that drops straight into
+# a Wireshark personal plugin folder (see wireshark/README.md).
+name: Wireshark dissector package
+
+on:
+  push:
+    branches: [main]
+    tags: ["wireshark-v*"]
+    paths:
+      - "wireshark/**"
+      - "python/wireshark_schema/**"
+      - ".github/workflows/wireshark-plugin.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wireshark-plugin
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Lua
+        run: sudo apt-get update -q && sudo apt-get install -y -q lua5.4
+
+      - name: Check the generated tables are current
+        working-directory: python
+        run: python3 -m wireshark_schema check ../wireshark
+
+      - name: Syntax-check the Lua modules
+        run: find wireshark -name '*.lua' -print0 | xargs -0 -n1 luac5.4 -p
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/wireshark-v* ]]; then
+            version="${GITHUB_REF#refs/tags/wireshark-v}"
+          else
+            version="$(date -u +%Y%m%d)-g$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage=dist/statusbar-avb
+          mkdir -p "$stage"
+          cp -R wireshark/LICENSE wireshark/README.md wireshark/statusbar_avb.lua wireshark/statusbar_avb "$stage"/
+          printf 'statusbar-avb-wireshark %s\ncommit %s\n' "$VERSION" "$GITHUB_SHA" > "$stage/VERSION"
+          tar -C dist -czf "dist/statusbar-avb-wireshark-$VERSION.tar.gz" statusbar-avb
+          env -C dist zip -qr "statusbar-avb-wireshark-$VERSION.zip" statusbar-avb
+          env -C dist sha256sum "statusbar-avb-wireshark-$VERSION.tar.gz" "statusbar-avb-wireshark-$VERSION.zip" \
+            > "dist/statusbar-avb-wireshark-$VERSION.sha256"
+          cat "dist/statusbar-avb-wireshark-$VERSION.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: statusbar-avb-wireshark-${{ steps.version.outputs.version }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Refresh the rolling pre-release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release delete wireshark-latest --yes --cleanup-tag || true
+          gh release create wireshark-latest --prerelease --target "$GITHUB_SHA" \
+            --title "Wireshark dissector (latest main, $VERSION)" \
+            --notes "$(printf '%s\n' \
+              "Prebuilt IEEE 1722 / 1722.1 Wireshark Lua dissector from the latest main (commit $GITHUB_SHA)." \
+              "" \
+              "Unpack into your Wireshark personal plugin folder, e.g. on macOS:" \
+              "" \
+              '    tar -C ~/.config/wireshark/plugins -xzf statusbar-avb-wireshark-*.tar.gz' \
+              "" \
+              "then restart Wireshark. See the README inside the archive for the other platforms.")" \
+            dist/*.tar.gz dist/*.zip dist/*.sha256
+
+      - name: Publish the tagged release
+        if: startsWith(github.ref, 'refs/tags/wireshark-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --title "Wireshark dissector $VERSION" --generate-notes \
+            dist/*.tar.gz dist/*.zip dist/*.sha256
