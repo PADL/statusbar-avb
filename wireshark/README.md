@@ -12,7 +12,9 @@ AM824 quadlets as `avb.avtp.am824.label` + `.sample` or `.data`; grouped per
 channel, per frame or flat by the preference *Audio sample grouping*;
 IEC 61883-4 transport packets as `avb.avtp.mpegts.*`; compressed video
 headers as `avb.avtp.cvf.mjpeg.*`, `.h264.*`, `.h265.*`, `.jpeg2000.*`; SDI,
-raw video and vendor-specific headers as `avb.avtp.svf.*`, `.rvf.*`, `.vsf.*`),
+raw video and vendor-specific headers as `avb.avtp.svf.*`, `.rvf.*`, `.vsf.*`,
+with the VSF vendor id reassembled from its two halves as the EUI-48
+`avb.avtp.vsf.vendor_id`),
 `avb.ipavtp.*`, `avb.acf.*` (the clause 9.4 ACF messages inside
 TSCF/NTSCF, e.g. `avb.acf.can.can_identifier == 0x18daf110`), and
 `avb.atdecc.*` (ADP, ACMP and AECP: every AEM command of IEEE

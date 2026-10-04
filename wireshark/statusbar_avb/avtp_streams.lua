@@ -324,6 +324,22 @@ function M.post.iec61883(tree, tvb, start, pinfo)
     return data_start
 end
 
+-- Vendor Specific Format -----------------------------------------------------------
+
+local function vsf_vendor_id(tvb, base)
+    local id = tostring(tvb(base, 4):bytes() .. tvb(base + 6, 2):bytes()):lower()
+    return (id:gsub("(%x%x)(%x%x)(%x%x)(%x%x)(%x%x)(%x%x)", "%1:%2:%3:%4:%5:%6"))
+end
+
+--- VSF (IEEE 1722-2025 14.1.1.2): the OUI-based vendor id is carried as
+--- vendor_id_1 (octets 16-19) and vendor_id_2 (octets 22-23) around
+--- stream_data_length; add it reassembled as one EUI-48 item spanning both.
+function M.post.vsf(tree, tvb, start)
+    local base = start == 40 and 32 or 16
+    tree:add(gen.f.avtp_vsf_vendor_id, tvb(base, 8), Address.ether(vsf_vendor_id(tvb, base))):set_generated()
+    return start
+end
+
 -- Compressed Video Format -------------------------------------------------------
 
 local CVF_FORMAT_RFC = 0x02
@@ -463,10 +479,10 @@ M.info.rvf_v1 = function(tvb, version)
     return rvf_summary(tvb, version, 32, "RVF v1")
 end
 M.info.vsf_v0 = function(tvb, version)
-    return string.format("VSF vendor_id=0x%08x%04x %s", tvb(16, 4):uint(), tvb(22, 2):uint(), stream_summary(tvb, version))
+    return string.format("VSF vendor_id=%s %s", vsf_vendor_id(tvb, 16), stream_summary(tvb, version))
 end
 M.info.vsf_v1 = function(tvb, version)
-    return string.format("VSF v1 vendor_id=0x%08x%04x %s", tvb(32, 4):uint(), tvb(38, 2):uint(), stream_summary(tvb, version))
+    return string.format("VSF v1 vendor_id=%s %s", vsf_vendor_id(tvb, 32), stream_summary(tvb, version))
 end
 M.info.mma_v0 = function(tvb, version)
     return string.format("MMA %s len=%d", stream_summary(tvb, version), tvb(20, 2):uint())

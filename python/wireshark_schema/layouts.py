@@ -916,6 +916,23 @@ _VSF_FIELDS = (
 VSF_V0 = Layout(
     "vsf_v0", "avb.avtp.vsf", "VSF header (IEEE 1722-2025 14.1)", _VSF_FIELDS
 )
+# The vendor id is one OUI-based EUI-48 split around stream_data_length
+# (14.1.1.2: vendor_id_1 holds bits 0-31, vendor_id_2 bits 32-47); the "vsf"
+# post hook adds it reassembled as a generated item.
+VSF_EXTRA = Layout(
+    "vsf_extra",
+    "avb.avtp.vsf",
+    "VSF reassembled vendor id",
+    (
+        Field(
+            "vendor_id",
+            0,
+            6,
+            "eui48",
+            "vendor id (vendor_id_1 || vendor_id_2, an OUI-based EUI-48)",
+        ),
+    ),
+)
 VSF_V1 = Layout(
     "vsf_v1", "avb.avtp.vsf", "VSF header, version 1 header", _shift(_VSF_FIELDS, 16)
 )
@@ -1226,8 +1243,8 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("svf_v1", 0x06, 1, (AVTP_STREAM_V1, SVF_V1), 44),
     SubtypeSpec("rvf_v0", 0x07, 0, (AVTP_STREAM_V0, RVF_V0), 32),
     SubtypeSpec("rvf_v1", 0x07, 1, (AVTP_STREAM_V1, RVF_V1), 48),
-    SubtypeSpec("vsf_v0", 0x6F, 0, (AVTP_STREAM_V0, VSF_V0), 24),
-    SubtypeSpec("vsf_v1", 0x6F, 1, (AVTP_STREAM_V1, VSF_V1), 40),
+    SubtypeSpec("vsf_v0", 0x6F, 0, (AVTP_STREAM_V0, VSF_V0), 24, post="vsf"),
+    SubtypeSpec("vsf_v1", 0x6F, 1, (AVTP_STREAM_V1, VSF_V1), 40, post="vsf"),
     SubtypeSpec("mma_v0", 0x01, 0, (AVTP_STREAM_V0, MMA_V0), 24),
     SubtypeSpec("mma_v1", 0x01, 1, (AVTP_STREAM_V1, MMA_V1), 40),
     SubtypeSpec("ef_stream_v0", 0x7F, 0, (AVTP_STREAM_V0, EF_STREAM_V0), 24),
@@ -1433,4 +1450,10 @@ ACF_LAYOUTS: tuple[Layout, ...] = (
 
 #: Fields the post hooks add item by item (no generated add_ function); the
 #: CRF timestamps, the AAF samples/subframes and the AM824 quadlets.
-EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (CRF_EXTRA, AAF_AUDIO, AM824_AUDIO, MPEGTS)
+EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (
+    CRF_EXTRA,
+    AAF_AUDIO,
+    AM824_AUDIO,
+    MPEGTS,
+    VSF_EXTRA,
+)

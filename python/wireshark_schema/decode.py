@@ -357,12 +357,23 @@ def _post_cvf(data: bytes, start: int, out: dict[str, int | str]) -> None:
         out["avb.avtp.payload"] = data[rest:].hex()
 
 
+def _post_vsf(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """VSF: the vendor id reassembled from vendor_id_1 and vendor_id_2, then the payload."""
+    base = 32 if start == 40 else 16
+    out["avb.avtp.vsf.vendor_id"] = (
+        data[base : base + 4] + data[base + 6 : base + 8]
+    ).hex()
+    if start < len(data):
+        out["avb.avtp.payload"] = data[start:].hex()
+
+
 POST_HOOKS = {
     "crf_timestamps": _post_crf_timestamps,
     "acf": _post_acf,
     "aaf_audio": _post_aaf_audio,
     "iec61883": _post_iec61883,
     "cvf": _post_cvf,
+    "vsf": _post_vsf,
 }
 
 #: ADP, AECP, ACMP: dissected by atdecc.lua / decode_atdecc

@@ -482,6 +482,7 @@ M.f.avtp_mpegts_pid = ProtoField.uint16("avb.avtp.mpegts.pid", "pid", base.HEX, 
 M.f.avtp_mpegts_tsc = ProtoField.uint8("avb.avtp.mpegts.tsc", "tsc", base.DEC, nil, 0xC0, "transport scrambling control")
 M.f.avtp_mpegts_afc = ProtoField.uint8("avb.avtp.mpegts.afc", "afc", base.DEC, nil, 0x30, "adaptation field control")
 M.f.avtp_mpegts_cc = ProtoField.uint8("avb.avtp.mpegts.cc", "cc", base.DEC, nil, 0xF, "continuity counter")
+M.f.avtp_vsf_vendor_id = ProtoField.ether("avb.avtp.vsf.vendor_id", "vendor_id", base.NONE, "vendor id (vendor_id_1 || vendor_id_2, an OUI-based EUI-48)")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -661,6 +662,7 @@ M.avtp_fields = {
     M.f.avtp_mpegts_tsc,
     M.f.avtp_mpegts_afc,
     M.f.avtp_mpegts_cc,
+    M.f.avtp_vsf_vendor_id,
 }
 
 M.ipavtp_fields = {
@@ -1169,9 +1171,9 @@ M.subtype_specs[0x07][0] = { name = "rvf_v0", header_length = 32, layouts = { M.
 M.subtype_specs[0x07] = M.subtype_specs[0x07] or {}
 M.subtype_specs[0x07][1] = { name = "rvf_v1", header_length = 48, layouts = { M.add_stream_v1, M.add_rvf_v1 }, post = nil }
 M.subtype_specs[0x6F] = M.subtype_specs[0x6F] or {}
-M.subtype_specs[0x6F][0] = { name = "vsf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_vsf_v0 }, post = nil }
+M.subtype_specs[0x6F][0] = { name = "vsf_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_vsf_v0 }, post = "vsf" }
 M.subtype_specs[0x6F] = M.subtype_specs[0x6F] or {}
-M.subtype_specs[0x6F][1] = { name = "vsf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_vsf_v1 }, post = nil }
+M.subtype_specs[0x6F][1] = { name = "vsf_v1", header_length = 40, layouts = { M.add_stream_v1, M.add_vsf_v1 }, post = "vsf" }
 M.subtype_specs[0x01] = M.subtype_specs[0x01] or {}
 M.subtype_specs[0x01][0] = { name = "mma_v0", header_length = 24, layouts = { M.add_stream_v0, M.add_mma_v0 }, post = nil }
 M.subtype_specs[0x01] = M.subtype_specs[0x01] or {}
