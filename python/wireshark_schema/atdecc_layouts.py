@@ -1158,6 +1158,25 @@ AVC = Layout(
 AVC_HEADER_LENGTH = STD.AVC_HEADER_LENGTH
 AVC_PAYLOAD = AVC.fields[-1]
 
+#: EXTENDED_COMMAND / EXTENDED_RESPONSE (message types 14 and 15) are listed in
+#: IEEE 1722.1-2021 Table 9-1 as "reserved for future use": no payload format
+#: exists, so everything after the common AECP header is one data field.
+EXTENDED = Layout(
+    "extended",
+    f"{PREFIX}.extended",
+    "Extended AECP message (IEEE 1722.1-2021 Table 9-1, reserved for future use)",
+    (
+        Field(
+            "data",
+            0,
+            0,
+            "bytes",
+            "extended command/response data; IEEE 1722.1-2021 defines no format",
+        ),
+    ),
+)
+EXTENDED_DATA = EXTENDED.fields[-1]
+
 ATDECC_LAYOUTS: tuple[Layout, ...] = (
     (
         ADP,
@@ -1174,6 +1193,7 @@ ATDECC_LAYOUTS: tuple[Layout, ...] = (
         MVU_FLAGS,
         AVC,
         HDCP_APM,
+        EXTENDED,
         AEM_BLOBS,
         DYNAMIC_INFO,
     )

@@ -607,6 +607,7 @@ M.f.atdecc_hdcp_apm_length = ProtoField.uint16("avb.atdecc.hdcp_apm.length", "le
 M.f.atdecc_hdcp_apm_mf = ProtoField.bool("avb.atdecc.hdcp_apm.mf", "mf", 8, nil, 0x1, "more fragments follow")
 M.f.atdecc_hdcp_apm_fragment_offset = ProtoField.uint16("avb.atdecc.hdcp_apm.fragment_offset", "fragment_offset", base.DEC, nil, nil, "offset of this fragment in the message")
 M.f.atdecc_hdcp_apm_message_data = ProtoField.bytes("avb.atdecc.hdcp_apm.message_data", "message_data", base.NONE, "HDCP IIA message fragment")
+M.f.atdecc_extended_data = ProtoField.bytes("avb.atdecc.extended.data", "data", base.NONE, "extended command/response data; IEEE 1722.1-2021 defines no format")
 M.f.atdecc_aem_key = ProtoField.bytes("avb.atdecc.aem.key", "key", base.NONE, "key data (key_length octets)")
 M.f.atdecc_aem_authentication_token = ProtoField.bytes("avb.atdecc.aem.authentication_token", "authentication_token", base.NONE, "authentication token (token_length octets)")
 M.f.atdecc_aem_dynamic_info_info_command_specific_data_length = ProtoField.uint16("avb.atdecc.aem.dynamic_info.info_command_specific_data_length", "info_command_specific_data_length", base.DEC, nil, nil, "octets of info_command_specific_data")
@@ -1900,6 +1901,7 @@ M.fields = {
     M.f.atdecc_hdcp_apm_mf,
     M.f.atdecc_hdcp_apm_fragment_offset,
     M.f.atdecc_hdcp_apm_message_data,
+    M.f.atdecc_extended_data,
     M.f.atdecc_aem_key,
     M.f.atdecc_aem_authentication_token,
     M.f.atdecc_aem_dynamic_info_info_command_specific_data_length,
@@ -3244,6 +3246,10 @@ function M.add_hdcp_apm(tree, tvb, off)
     tree:add(M.f.atdecc_hdcp_apm_length, tvb(off + 22, 2))
     tree:add(M.f.atdecc_hdcp_apm_mf, tvb(off + 24, 1))
     tree:add(M.f.atdecc_hdcp_apm_fragment_offset, tvb(off + 26, 2))
+end
+
+--- Extended AECP message (IEEE 1722.1-2021 Table 9-1, reserved for future use)
+function M.add_extended(tree, tvb, off)
 end
 
 --- AEM byte-string payload trailers
@@ -5056,6 +5062,7 @@ M.AA_TLV_DATA = M.f.atdecc_aa_tlv_data
 M.VU_PAYLOAD = M.f.atdecc_vu_payload
 M.AVC_PAYLOAD = M.f.atdecc_avc_command_response
 M.HDCP_APM_DATA = M.f.atdecc_hdcp_apm_message_data
+M.EXTENDED_DATA = M.f.atdecc_extended_data
 M.CONTROL_UTF8 = M.f.atdecc_control_utf8
 M.CONTROL_VENDOR = M.f.atdecc_control_vendor_values
 M.DESCRIPTOR_RAW = M.f.atdecc_desc_control_value_details

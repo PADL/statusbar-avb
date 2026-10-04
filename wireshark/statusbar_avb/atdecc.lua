@@ -37,6 +37,8 @@ local AECP_AVC_COMMAND = 4
 local AECP_AVC_RESPONSE = 5
 local AECP_HDCP_APM_COMMAND = 8
 local AECP_HDCP_APM_RESPONSE = 9
+local AECP_EXTENDED_COMMAND = 14
+local AECP_EXTENDED_RESPONSE = 15
 local AECP_VU_COMMAND = 6
 local AECP_VU_RESPONSE = 7
 local AEM_READ_DESCRIPTOR = 0x0004
@@ -65,7 +67,10 @@ local ef_trailer = ProtoExpert.new("avb.atdecc.expert.trailer", "descriptor trai
     expert.group.MALFORMED, expert.severity.WARN)
 local ef_no_command = ProtoExpert.new("avb.atdecc.expert.unmatched_response",
     "response without a matching command in this capture", expert.group.SEQUENCE, expert.severity.NOTE)
-M.proto.experts = { ef_short, ef_cdl, ef_unknown_descriptor, ef_trailer, ef_no_command }
+local ef_reserved = ProtoExpert.new("avb.atdecc.expert.reserved_message_type",
+    "AECP message type is reserved for future use by IEEE 1722.1-2021; no payload format is defined",
+    expert.group.UNDECODED, expert.severity.NOTE)
+M.proto.experts = { ef_short, ef_cdl, ef_unknown_descriptor, ef_trailer, ef_no_command, ef_reserved }
 
 -- Command/response pairing (two-pass): commands[key] = frame of the last
 -- command seen with that key; responses[frame] = { frame, time } of the
@@ -620,8 +625,20 @@ local function dissect_aecp(tvb, pinfo, root, header, tree)
             end
             summary = string.format("Vendor Unique %s protocol_id=%s", is_command and "command" or "response", protocol_id)
         end
-    elseif stop > gen.AECP_HEADER_LENGTH then
-        t:add(gen.AECP_PAYLOAD, tvb(gen.AECP_HEADER_LENGTH, stop - gen.AECP_HEADER_LENGTH))
+    elseif msg_type == AECP_EXTENDED_COMMAND or msg_type == AECP_EXTENDED_RESPONSE then
+        local length = stop - gen.AECP_HEADER_LENGTH
+        if length > 0 then
+            t:add(gen.EXTENDED_DATA, tvb(gen.AECP_HEADER_LENGTH, length))
+        end
+        t:add_proto_expert_info(ef_reserved)
+        summary = string.format("Extended %s %d octets", is_command and "command" or "response", math.max(length, 0))
+    else
+        if stop > gen.AECP_HEADER_LENGTH then
+            t:add(gen.AECP_PAYLOAD, tvb(gen.AECP_HEADER_LENGTH, stop - gen.AECP_HEADER_LENGTH))
+        end
+        if not gen.values_aecp_message_type[msg_type] then
+            t:add_proto_expert_info(ef_reserved)
+        end
     end
     pinfo.cols.info:set(string.format("%s seq=%d target=%s%s", summary, seq, eui64_hex(tvb(4, 8)),
         is_command and "" or (" " .. status)))

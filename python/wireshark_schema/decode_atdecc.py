@@ -421,5 +421,10 @@ def decode_atdecc(data: bytes, out: dict) -> None:
             _mvu(data, stop, is_command, out)
         elif stop > A.VU_HEADER_LENGTH:
             out[A.VU.abbr(A.VU_PAYLOAD)] = data[A.VU_HEADER_LENGTH : stop].hex()
+    elif msg_type in (14, 15):
+        if stop > A.AECP_HEADER_LENGTH:
+            out[A.EXTENDED.abbr(A.EXTENDED_DATA)] = data[
+                A.AECP_HEADER_LENGTH : stop
+            ].hex()
     elif stop > A.AECP_HEADER_LENGTH:
         out[A.AECP.abbr(A.AECP_PAYLOAD)] = data[A.AECP_HEADER_LENGTH : stop].hex()

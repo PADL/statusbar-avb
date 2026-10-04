@@ -758,6 +758,29 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         frames.push_back({"avc_command", out});
     }
 
+    // ---- EXTENDED command/response: reserved by IEEE 1722.1-2021 Table 9-1, so the data stays opaque ----
+    {
+        AecpDuCommon du{};
+        du.init_command(AECP_MESSAGE_TYPE_EXTENDED_COMMAND, static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6));
+        du.target_entity_id = TARGET;
+        du.controller_entity_id = CONTROLLER;
+        du.sequence_id = 52;
+        std::vector<uint8_t> out;
+        append(out, du);
+        std::array<uint8_t, 6> const data{0xE0, 0x01, 0x02, 0x03, 0x04, 0x05};
+        append(out, std::span<uint8_t const>(data));
+        frames.push_back({"extended_command", out});
+
+        AecpDuCommon rsp{};
+        rsp.init_response(AECP_MESSAGE_TYPE_EXTENDED_RESPONSE, AECP_STATUS_NOT_IMPLEMENTED, AecpDuCommon::COMMON_DATA_LENGTH);
+        rsp.target_entity_id = TARGET;
+        rsp.controller_entity_id = CONTROLLER;
+        rsp.sequence_id = 52;
+        std::vector<uint8_t> rout;
+        append(rout, rsp);
+        frames.push_back({"extended_response", rout});
+    }
+
     // ---- Milan vendor unique: GET_MILAN_INFO, SET_SYSTEM_UNIQUE_ID, MCR info, BIND_STREAM, GET_STREAM_INPUT_INFO_EX ----
     {
         auto const mvu = [&](bool const response, uint16_t const sequence, std::span<uint8_t const> const payload) {

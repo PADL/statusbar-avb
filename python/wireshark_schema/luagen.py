@@ -337,6 +337,7 @@ def generate_atdecc_fields() -> str:
         (A.JDKS_LOG, A.JDKS_LOG_TEXT),
         (A.AVC, A.AVC_PAYLOAD),
         (A.HDCP_APM, A.HDCP_APM_DATA),
+        (A.EXTENDED, A.EXTENDED_DATA),
         (A.CONTROL_VALUE, A.CONTROL_UTF8),
         (A.CONTROL_VALUE, A.CONTROL_VENDOR),
     ] + [(A.AEM_BLOBS, f) for f in A.AEM_BLOBS.fields]
@@ -358,6 +359,7 @@ def generate_atdecc_fields() -> str:
     out.append("M.VU_PAYLOAD = " + fkey(A.VU, A.VU_PAYLOAD))
     out.append("M.AVC_PAYLOAD = " + fkey(A.AVC, A.AVC_PAYLOAD))
     out.append("M.HDCP_APM_DATA = " + fkey(A.HDCP_APM, A.HDCP_APM_DATA))
+    out.append("M.EXTENDED_DATA = " + fkey(A.EXTENDED, A.EXTENDED_DATA))
     out.append("M.CONTROL_UTF8 = " + fkey(A.CONTROL_VALUE, A.CONTROL_UTF8))
     out.append("M.CONTROL_VENDOR = " + fkey(A.CONTROL_VALUE, A.CONTROL_VENDOR))
     out.append(

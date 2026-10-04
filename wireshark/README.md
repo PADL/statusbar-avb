@@ -32,8 +32,10 @@ SET/GET_CONTROL, MIXER and MATRIX values typed from the descriptor already
 seen in the capture; stream formats as `avb.atdecc.stream_format.*`; the
 JDKS log/IPv4 vendor blobs; Address Access TLVs; AVC; HDCP APM; Milan
 vendor unique as `avb.atdecc.mvu.*`; e.g. `avb.atdecc.aem.command_type ==
-0x0004`). Only the EXTENDED AECP message type, reserved for future use by
-the standard, stays raw.
+0x0004`). The EXTENDED AECP message types (14 and 15) are listed by the
+standard as reserved for future use with no payload format, so they show
+the common AECP header, an `avb.atdecc.extended.data` field and an expert
+note; the same note marks the reserved message types 10 to 13.
 Commands and responses are paired on (controller, sequence) and shown as
 *Response in* / *Response to* / *Response time* generated items.
 
