@@ -71,6 +71,8 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
                 }
             }
             last_announce_time_ns_ = now_ns;
+            last_announce_ = *announce;
+            has_announce_ = true;
         }
     }
 }
@@ -536,12 +538,17 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
                 announce.grandmaster_priority2.get(),
                 announce.steps_removed.get());
 
-            // Update ADP advertiser with new grandmaster info
-            // Domain 0 is the default gPTP domain
-            components.adp_advertiser.set_gptp_info(grandmaster_id, 0);
+            // Update ADP advertiser with the new grandmaster and the domain the
+            // Announce was sent in.
+            components.adp_advertiser.set_gptp_info(grandmaster_id, announce.header.domain_number.get());
 
             // Notify that entity state has changed (triggers ADP announcement)
             components.adp_advertiser.notify_entity_changed();
+
+            // IEEE 1722.1 7.5.2: a grandmaster change is also an unsolicited
+            // GET_AVB_INFO to the registered controllers (no-op until an
+            // entity wires get_avb_info).
+            (void)components.aem_handler.notify_avb_info_changed(0);
         }});
 }
 

@@ -11,8 +11,10 @@
 
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_bindings.hpp"
+#include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/srp/srp_msrp.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <print>
@@ -39,6 +41,16 @@ AvbEntityHost::AvbEntityHost(
     , components_{handler, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
 {
     wire_identify_control();
+    wire_avb_info();
+}
+
+AvbEntityHost::~AvbEntityHost()
+{
+    // The reactor owns the ptp4l client; make sure it stops calling back into
+    // a host that is going away.
+    if (ptp4l_ != nullptr) {
+        ptp4l_->set_on_changed({});
+    }
 }
 
 void AvbEntityHost::wire_identify_control()
@@ -96,6 +108,11 @@ auto AvbEntityHost::start_control_plane(net::MessageReactor& reactor, std::strin
     wire_callbacks();
 
     running_ = true;
+    reactor_ = &reactor;
+    // The AVB_INTERFACE descriptor reports the NIC we are actually on from
+    // the start; ptp4l (when enabled) refines the gPTP fields as it answers.
+    apply_interface_runtime();
+    attach_ptp4l(reactor);
     return success();
 }
 
@@ -106,8 +123,195 @@ auto AvbEntityHost::stop_control_plane(TimePoint const now) -> Status
     }
     (void)components_.adp_advertiser.stop(now);
     net_handlers_.reset();
+    if (ptp4l_ != nullptr) {
+        ptp4l_->set_on_changed({});
+        ptp4l_ = nullptr;
+    }
+    reactor_ = nullptr;
     running_ = false;
     return success();
+}
+
+//
+// Live gPTP state: AVB_INTERFACE and GET_AVB_INFO
+//
+
+void AvbEntityHost::wire_avb_info()
+{
+    components_.aem_handler.set_get_avb_info([this](uint16_t const index, nanoavb::AvbInfo& out) -> bool {
+        // Index 0 is this host's NIC; any further AVB_INTERFACE the model
+        // authors is answered with the same state (one port, one clock).
+        if (index != 0) {
+            auto const* storage = descriptor_storage();
+            if (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index)) {
+                return false;
+            }
+        }
+        out = avb_info(index);
+        return true;
+    });
+}
+
+void AvbEntityHost::enable_ptp4l_status(gptp::Ptp4lClient::Config config)
+{
+    ptp4l_config_ = std::move(config);
+    if (reactor_ != nullptr && ptp4l_ == nullptr) {
+        attach_ptp4l(*reactor_);
+    }
+}
+
+void AvbEntityHost::attach_ptp4l(net::MessageReactor& reactor)
+{
+    if (!ptp4l_config_.has_value() || ptp4l_ != nullptr) {
+        return;
+    }
+    auto client = std::make_unique<gptp::Ptp4lClient>(*ptp4l_config_);
+    if (auto st = client->open(); !st) {
+        ctl_log().warning("ptp4l status: cannot open client socket (errno {})", st.error().value());
+        return;
+    }
+    client->set_on_changed([this](gptp::Ptp4lStatus const& status) { on_ptp4l_changed(status); });
+    ptp4l_ = client.get();
+    reactor.add(std::move(client));
+    ctl_log().status("ptp4l status: reading {}", logging::embed<64>(ptp4l_config_->uds_path));
+}
+
+auto AvbEntityHost::ptp4l_status() const noexcept -> gptp::Ptp4lStatus const*
+{
+    return ptp4l_status_.valid() ? &ptp4l_status_ : nullptr;
+}
+
+void AvbEntityHost::set_propagation_delay_ns(uint32_t const ns)
+{
+    propagation_delay_override_ = true;
+    propagation_delay_override_ns_ = ns;
+}
+
+void AvbEntityHost::on_ptp4l_changed(gptp::Ptp4lStatus const& status)
+{
+    ptp4l_status_ = status;
+    if (status.valid()) {
+        ctl_log().status(
+            "ptp4l: clock {:016x} priority1={} priority2={} domain={} port_state={} as_capable={} gm={:016x} peer_delay={}ns",
+            status.clock_identity.to_uint64(),
+            status.priority1,
+            status.priority2,
+            status.domain_number,
+            status.port_state,
+            status.as_capable,
+            status.grandmaster_identity.to_uint64(),
+            status.peer_mean_path_delay_ns);
+    } else {
+        ctl_log().warning("ptp4l: no answer — reporting observed gPTP state");
+    }
+    apply_interface_runtime();
+
+    // ADP carries the grandmaster too; keep it in step with what we report.
+    auto const info = avb_info(0);
+    components_.adp_advertiser.set_gptp_info(tsn::ClockIdentity{info.gptp_grandmaster_id}, info.gptp_domain_number);
+    components_.adp_advertiser.notify_entity_changed();
+
+    // IEEE 1722.1 7.5.2: gPTP changes are unsolicited GET_AVB_INFO notifications.
+    if (info.gptp_grandmaster_id != last_avb_info_.gptp_grandmaster_id || info.flags != last_avb_info_.flags ||
+        info.gptp_domain_number != last_avb_info_.gptp_domain_number ||
+        info.propagation_delay != last_avb_info_.propagation_delay) {
+        last_avb_info_ = info;
+        (void)components_.aem_handler.notify_avb_info_changed(0);
+    }
+}
+
+void AvbEntityHost::apply_interface_runtime()
+{
+    if (handler_ == nullptr) {
+        return;
+    }
+    nanoavb::AvbInterfaceRuntime rt{};
+    if (auto const mac = net::read_interface_mac(interface_name_)) {
+        rt.identity_valid = true;
+        rt.mac_address = *mac;
+        // ptp4l derives its clockIdentity from the NIC the same way, so the
+        // fallback agrees with it.
+        rt.clock_identity = mac->to_modified_eui64();
+        rt.port_number = 1;
+    }
+    if (ptp4l_status_.valid()) {
+        rt.identity_valid = true;
+        rt.clock_identity = ptp4l_status_.clock_identity.to_eui64();
+        if (ptp4l_status_.have_port) {
+            rt.port_number = ptp4l_status_.port_number;
+        }
+        rt.gptp_valid = true;
+        rt.priority1 = ptp4l_status_.priority1;
+        rt.clock_class = ptp4l_status_.clock_class;
+        rt.offset_scaled_log_variance = ptp4l_status_.offset_scaled_log_variance;
+        rt.clock_accuracy = ptp4l_status_.clock_accuracy;
+        rt.priority2 = ptp4l_status_.priority2;
+        rt.domain_number = ptp4l_status_.domain_number;
+        rt.log_sync_interval = ptp4l_status_.log_sync_interval;
+        rt.log_announce_interval = ptp4l_status_.log_announce_interval;
+        rt.log_pdelay_interval = ptp4l_status_.log_min_pdelay_req_interval;
+    }
+    if (!rt.identity_valid && !rt.gptp_valid) {
+        return;
+    }
+    // Every AVB_INTERFACE the model authors describes this one NIC.
+    auto const* storage = descriptor_storage();
+    for (uint16_t index = 0;; ++index) {
+        if (index > 0 && (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index))) {
+            break;
+        }
+        handler_->set_avb_interface_runtime(index, rt);
+    }
+}
+
+auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
+{
+    (void)index;
+    using namespace atdecc::aem::avb_info_flags;
+    nanoavb::AvbInfo info{};
+    info.flags = GPTP_ENABLED | AVTP_DOWN_VALID;
+    if (!supervisor_ctx_.link_up) {
+        info.flags |= AVTP_DOWN;
+    }
+    if (net_handlers_ != nullptr && net_handlers_->msrp_handler().valid()) {
+        info.flags |= SRP_ENABLED;
+        // One mapping per declared SR class: MSRP SRclassID 6 is class A
+        // (traffic class 0), 5 is class B (traffic class 1).
+        auto const& domain = components_.msrp_handler.domain();
+        info.msrp_mappings.push_back(
+            {.traffic_class = static_cast<uint8_t>(domain.sr_class_id == 6 ? 0 : 1),
+             .priority = domain.sr_class_priority,
+             .vlan_id = domain.sr_class_vid});
+    }
+    if (ptp4l_status_.valid()) {
+        if (ptp4l_status_.gm_present || ptp4l_status_.have_parent) {
+            info.gptp_grandmaster_id = ptp4l_status_.grandmaster_identity.to_eui64();
+        }
+        info.gptp_domain_number = ptp4l_status_.domain_number;
+        if (ptp4l_status_.as_capable) {
+            info.flags |= AS_CAPABLE;
+        }
+        if (ptp4l_status_.have_port) {
+            info.propagation_delay = static_cast<uint32_t>(std::max<int64_t>(0, ptp4l_status_.peer_mean_path_delay_ns));
+        }
+    } else {
+        if (net_handlers_ != nullptr) {
+            auto const& announce = net_handlers_->gptp_handler();
+            if (announce.has_grandmaster()) {
+                info.gptp_grandmaster_id = announce.grandmaster_identity().to_eui64();
+            }
+            if (auto const* last = announce.last_announce()) {
+                info.gptp_domain_number = last->header.domain_number.get();
+            }
+        }
+        if (gptp_ctx_.as_capable || gptp_ctx_.time_locked) {
+            info.flags |= AS_CAPABLE;
+        }
+    }
+    if (propagation_delay_override_ && info.propagation_delay == 0) {
+        info.propagation_delay = propagation_delay_override_ns_;
+    }
+    return info;
 }
 
 //

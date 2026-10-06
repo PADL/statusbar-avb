@@ -2019,6 +2019,86 @@ TEST(nanoavb_entity_in_progress, table_full_answers_no_resources)
 }
 
 //
+// GET_AVB_INFO (7.4.40) through the get_avb_info callback, and its
+// unsolicited notification (7.5.2).
+//
+
+TEST(nanoavb_entity_avb_info, not_implemented_without_callback)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    std::array<uint8_t, 4> const request{0x00, 0x09, 0x00, 0x00};  // AVB_INTERFACE 0
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_AVB_INFO), request).status, AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+TEST(nanoavb_entity_avb_info, response_carries_state_and_msrp_mappings)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_get_avb_info([](uint16_t index, AvbInfo& out) -> bool {
+        if (index != 0) {
+            return false;
+        }
+        out.gptp_grandmaster_id = Eui64{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x76, 0x04};
+        out.propagation_delay = 412;
+        out.gptp_domain_number = 0;
+        out.flags = avb_info_flags::AS_CAPABLE | avb_info_flags::GPTP_ENABLED | avb_info_flags::SRP_ENABLED;
+        out.msrp_mappings.push_back({.traffic_class = 0, .priority = 3, .vlan_id = 2});
+        out.msrp_mappings.push_back({.traffic_class = 1, .priority = 2, .vlan_id = 2});
+        return true;
+    });
+
+    std::array<uint8_t, 4> const request{0x00, 0x09, 0x00, 0x00};
+    auto const result = make_test_result(handler, create_aem_header(AEM_COMMAND_GET_AVB_INFO), request);
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(result.response_data().size(), AemAvbInfoPayload::LENGTH + 8);
+    AemAvbInfoPayload payload{};
+    span_load(payload, result.response_data().first(AemAvbInfoPayload::LENGTH));
+    EXPECT_EQ(payload.descriptor_type.get(), DESCRIPTOR_AVB_INTERFACE);
+    EXPECT_EQ(payload.gptp_grandmaster_id.to_uint64(), 0x001CABFFFE007604ULL);
+    EXPECT_EQ(payload.propagation_delay.get(), 412U);
+    EXPECT_TRUE(payload.is_as_capable());
+    EXPECT_TRUE(payload.is_srp_enabled());
+    EXPECT_EQ(payload.msrp_mappings_count.get(), 2);
+    auto const tail = result.response_data().subspan(AemAvbInfoPayload::LENGTH);
+    EXPECT_EQ(tail[0], 0);  // class A
+    EXPECT_EQ(tail[1], 3);  // PCP 3
+    EXPECT_EQ(tail[3], 2);  // VLAN 2
+    EXPECT_EQ(tail[4], 1);  // class B
+    EXPECT_EQ(tail[5], 2);
+
+    // The wrong descriptor type, or an index the callback declines: NO_SUCH_DESCRIPTOR.
+    std::array<uint8_t, 4> const stream{0x00, 0x05, 0x00, 0x00};
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_AVB_INFO), stream).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    std::array<uint8_t, 4> const other{0x00, 0x09, 0x00, 0x01};
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_AVB_INFO), other).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(nanoavb_entity_avb_info, notify_pushes_unsolicited_get_avb_info)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    handler.set_get_avb_info([](uint16_t, AvbInfo& out) -> bool {
+        out.gptp_grandmaster_id = Eui64{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x76, 0x04};
+        out.flags = avb_info_flags::AS_CAPABLE | avb_info_flags::GPTP_ENABLED;
+        return true;
+    });
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    EXPECT_EQ(handler.notify_avb_info_changed(0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_AVB_INFO, kMacB), 1);
+    AemAvbInfoPayload payload{};
+    span_load(payload, body_of(sends.front()).first(AemAvbInfoPayload::LENGTH));
+    EXPECT_TRUE(payload.is_as_capable());
+    EXPECT_EQ(payload.gptp_grandmaster_id.to_uint64(), 0x001CABFFFE007604ULL);
+}
+
+//
 // Test Runner
 //
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)

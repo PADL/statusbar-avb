@@ -111,6 +111,31 @@ struct DescriptorId
     uint32_t symbol{0};   ///< blob symbol-table id (stable across model regeneration); 0 = none
 };
 
+/// The AVB_INTERFACE descriptor fields (IEEE 1722.1 7.2.8) that only the
+/// running entity knows: the NIC it is actually on, and its gPTP port's
+/// clock identity, priorities, clock quality, domain and message intervals.
+/// An authored blob carries placeholders for these; the host (or the entity)
+/// pushes the truth in through set_avb_interface_runtime() and READ_DESCRIPTOR
+/// then reports it. Each group is applied only when its *_valid flag is set.
+struct AvbInterfaceRuntime
+{
+    bool identity_valid{false};
+    ieee::Eui48 mac_address{};
+    ieee::Eui64 clock_identity{};
+    uint16_t port_number{0};
+
+    bool gptp_valid{false};
+    uint8_t priority1{0};
+    uint8_t clock_class{0};
+    uint16_t offset_scaled_log_variance{0};
+    uint8_t clock_accuracy{0};
+    uint8_t priority2{0};
+    uint8_t domain_number{0};
+    int8_t log_sync_interval{0};
+    int8_t log_announce_interval{0};
+    int8_t log_pdelay_interval{0};
+};
+
 /// Abstract base class for AEM descriptor providers.
 ///
 /// Handlers implement only the descriptor types their entity uses.
@@ -310,6 +335,14 @@ class AemEntityHandler
     /// GET_MEMORY_OBJECT_LENGTH: write the current length of MEMORY_OBJECT @p id
     /// into @p length and return true; false => NO_SUCH_DESCRIPTOR. Default: false.
     virtual auto on_get_memory_object_length(DescriptorId /*id*/, uint64_t& /*length*/) -> bool { return false; }
+
+    // ---- AVB_INTERFACE runtime fields (7.2.8) ---------------------------
+
+    /// The host learned the live identity / gPTP state of AVB_INTERFACE
+    /// @p descriptor_index; reflect it in later on_get_avb_interface loads.
+    /// Default: ignored (a handler that composes its descriptors from live
+    /// state already has it).
+    virtual void set_avb_interface_runtime(uint16_t /*descriptor_index*/, AvbInterfaceRuntime const& /*runtime*/) {}
 };
 
 }  // namespace statusbar::nanoavb

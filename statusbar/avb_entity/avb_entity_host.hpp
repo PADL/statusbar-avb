@@ -47,6 +47,7 @@
 /// components() (ACMP/MSRP/AEM) and the three typed stream hooks below.
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/gptp/gptp_ptp4l_client.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
@@ -117,7 +118,7 @@ class AvbEntityHost
     auto operator=(AvbEntityHost const&) -> AvbEntityHost& = delete;
     AvbEntityHost(AvbEntityHost&&) = delete;
     auto operator=(AvbEntityHost&&) -> AvbEntityHost& = delete;
-    ~AvbEntityHost() = default;
+    ~AvbEntityHost();
 
     // --- Lifecycle -------------------------------------------------------------
 
@@ -241,6 +242,36 @@ class AvbEntityHost
 
     /// gPTP / MVRP status for the entity's print_state (the SM contexts are private).
     [[nodiscard]] auto gptp_locked() const noexcept -> bool { return gptp_ctx_.time_locked; }
+
+    // --- Live gPTP state: AVB_INTERFACE and GET_AVB_INFO ---------------------
+    //
+    // The host answers GET_AVB_INFO (IEEE 1722.1 7.4.40) for every entity and
+    // keeps the AVB_INTERFACE descriptor's identity and gPTP fields truthful
+    // (through the handler's set_avb_interface_runtime). The best source is a
+    // running linuxptp ptp4l, read over its management socket with
+    // enable_ptp4l_status(): that gives the port's own clock identity,
+    // priorities, intervals, the grandmaster, asCapable and the measured
+    // peer delay. Without it the host reports what it observes on the wire
+    // (the Announce grandmaster and domain, its own gPTP state machine) and
+    // the NIC's MAC-derived clock identity. Changes go out as unsolicited
+    // GET_AVB_INFO notifications (7.5.2) and update the ADP grandmaster.
+
+    /// Read gPTP state from ptp4l's management socket (default
+    /// /var/run/ptp4lro, the read-only socket any user may query). Call
+    /// before or after start_control_plane(); the client joins the reactor
+    /// when the control plane is up.
+    void enable_ptp4l_status(gptp::Ptp4lClient::Config config = {});
+
+    /// The latest ptp4l snapshot, or nullptr when ptp4l status is not
+    /// enabled or ptp4l has not answered.
+    [[nodiscard]] auto ptp4l_status() const noexcept -> gptp::Ptp4lStatus const*;
+
+    /// The GET_AVB_INFO answer for AVB_INTERFACE @p index: what controllers see.
+    [[nodiscard]] auto avb_info(uint16_t index = 0) const -> nanoavb::AvbInfo;
+
+    /// Propagation delay (ns) to report when ptp4l is not providing one
+    /// (e.g. the entity's own peer-delay measurement).
+    void set_propagation_delay_ns(uint32_t ns);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
     // --- Typed stream hooks (the stream-specific bits of the SM wiring) ---------
@@ -277,6 +308,12 @@ class AvbEntityHost
     ///    set_local_identify(on) from the entity's event loop; it applies the
     ///    control and multicasts the unsolicited IDENTIFY notification.
     void wire_identify_control();
+
+    // AVB_INTERFACE / GET_AVB_INFO plumbing (see enable_ptp4l_status).
+    void wire_avb_info();
+    void attach_ptp4l(net::MessageReactor& reactor);
+    void apply_interface_runtime();
+    void on_ptp4l_changed(gptp::Ptp4lStatus const& status);
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();
@@ -318,6 +355,13 @@ class AvbEntityHost
     statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> on_listener_ready_{};
 
     std::string interface_name_{};
+    net::MessageReactor* reactor_{nullptr};  ///< set while the control plane is up
+    std::optional<gptp::Ptp4lClient::Config> ptp4l_config_{};
+    gptp::Ptp4lClient* ptp4l_{nullptr};  ///< owned by the reactor once attached
+    gptp::Ptp4lStatus ptp4l_status_{};
+    nanoavb::AvbInfo last_avb_info_{};  ///< what the last notification carried
+    bool propagation_delay_override_{false};
+    uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
     bool running_{false};
 };

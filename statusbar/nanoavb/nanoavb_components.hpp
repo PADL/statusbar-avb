@@ -376,6 +376,15 @@ class GptpAnnounceHandler : public net::Pollable
     /// Get the time of the last announce (nanoseconds since epoch)
     [[nodiscard]] auto last_announce_time_ns() const noexcept -> int64_t { return last_announce_time_ns_; }
 
+    /// The most recent Announce seen on the wire (grandmaster priorities,
+    /// clock quality, steps removed, domain in its header), or nullptr before
+    /// the first one. This is the observed gPTP state an entity without a
+    /// local ptp4l reports in GET_AVB_INFO.
+    [[nodiscard]] auto last_announce() const noexcept -> gptp::AnnounceMessage const*
+    {
+        return has_announce_ ? &last_announce_ : nullptr;
+    }
+
     // -- Pollable interface --
 
     [[nodiscard]] auto fd() const noexcept -> int override { return context_.fd(); }
@@ -391,6 +400,8 @@ class GptpAnnounceHandler : public net::Pollable
     GptpAnnounceCallbacks callbacks_;
     gptp::ClockIdentity grandmaster_identity_{};
     int64_t last_announce_time_ns_{0};
+    gptp::AnnounceMessage last_announce_{};
+    bool has_announce_{false};
     std::array<uint8_t, 2048> payload_buf_{};
 };
 

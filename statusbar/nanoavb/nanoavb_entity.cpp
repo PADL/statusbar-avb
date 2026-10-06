@@ -255,6 +255,9 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
 
+        case AEM_COMMAND_GET_AVB_INFO:
+            return handle_get_avb_info(command_data, out_buffer);
+
         case AEM_COMMAND_GET_STREAM_INFO:
             return handle_get_stream_info(header, command_data, out_buffer);
 
@@ -532,6 +535,61 @@ auto AemCommandHandler::notify_counters_changed(uint16_t const descriptor_type, 
     auto const r = handle_get_counters(AemDu{}, request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(AEM_COMMAND_GET_COUNTERS, std::span<uint8_t const>{out}.first(r.size));
+    }
+    return r.status;
+}
+
+auto AemCommandHandler::handle_get_avb_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (!callbacks_.get_avb_info) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    if (command_data.size() < AemGetAvbInfoCommandPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemGetAvbInfoCommandPayload cmd{};
+    span_load(cmd, command_data.first(AemGetAvbInfoCommandPayload::LENGTH));
+    AvbInfo info{};
+    if (cmd.descriptor_type.get() != DESCRIPTOR_AVB_INTERFACE || !callbacks_.get_avb_info(cmd.descriptor_index.get(), info)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    // Response (7.4.40.2): the fixed payload then one 4-octet mapping per SR
+    // class: traffic_class, priority, vlan_id.
+    constexpr size_t MAPPING_LENGTH = 4;
+    size_t const size = AemAvbInfoPayload::LENGTH + info.msrp_mappings.size() * MAPPING_LENGTH;
+    if (out_buffer.size() < size) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    AemAvbInfoPayload resp{};
+    resp.descriptor_type = cmd.descriptor_type;
+    resp.descriptor_index = cmd.descriptor_index;
+    resp.gptp_grandmaster_id = tsn::ClockIdentity{info.gptp_grandmaster_id};
+    resp.propagation_delay = info.propagation_delay;
+    resp.gptp_domain_number = info.gptp_domain_number;
+    resp.flags = info.flags;
+    resp.msrp_mappings_count = static_cast<uint16_t>(info.msrp_mappings.size());
+    span_store(out_buffer.first(AemAvbInfoPayload::LENGTH), resp);
+    size_t at = AemAvbInfoPayload::LENGTH;
+    for (auto const& m : info.msrp_mappings) {
+        out_buffer[at] = m.traffic_class;
+        out_buffer[at + 1] = m.priority;
+        doublet_t const vlan{m.vlan_id};
+        span_store(out_buffer.subspan(at + 2, 2), vlan);
+        at += MAPPING_LENGTH;
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+auto AemCommandHandler::notify_avb_info_changed(uint16_t const descriptor_index) -> uint8_t
+{
+    AemGetAvbInfoCommandPayload const cmd{.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .descriptor_index = descriptor_index};
+    std::array<uint8_t, AemGetAvbInfoCommandPayload::LENGTH> request{};
+    span_store(request, cmd);
+    std::array<uint8_t, AemAvbInfoPayload::LENGTH + AvbInfo::MAX_MSRP_MAPPINGS * 4> out{};
+    auto const r = handle_get_avb_info(request, out);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(AEM_COMMAND_GET_AVB_INFO, std::span<uint8_t const>{out}.first(r.size));
     }
     return r.status;
 }

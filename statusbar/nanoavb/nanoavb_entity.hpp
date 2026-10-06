@@ -15,6 +15,7 @@
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model_adapter.hpp"
 #include "statusbar/sg14/inplace_function.h"
+#include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
 #include <algorithm>
@@ -88,6 +89,35 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 using GetStreamInfoFn =
     statusbar::sg14::inplace_function<bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out), 64>;
 
+/// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
+/// traffic class, priority code point and VLAN of one SR class.
+struct AvbInfoMsrpMapping
+{
+    uint8_t traffic_class{0};
+    uint8_t priority{0};
+    uint16_t vlan_id{0};
+};
+
+/// What GET_AVB_INFO reports for one AVB_INTERFACE (7.4.40): the live gPTP
+/// state (grandmaster, propagation delay, domain, flags) and the MSRP mappings.
+struct AvbInfo
+{
+    static constexpr size_t MAX_MSRP_MAPPINGS = 8;
+
+    Eui64 gptp_grandmaster_id{};
+    uint32_t propagation_delay{0};  ///< nanoseconds
+    uint8_t gptp_domain_number{0};
+    uint8_t flags{0};  ///< aem::avb_info_flags
+    statusbar::sg14::inplace_vector<AvbInfoMsrpMapping, MAX_MSRP_MAPPINGS> msrp_mappings{};
+};
+
+/// Fill the GET_AVB_INFO answer for AVB_INTERFACE @p descriptor_index and
+/// return true; return false for an index that is not one of this entity's
+/// interfaces (the handler then replies NO_SUCH_DESCRIPTOR). Optional; if
+/// unset, GET_AVB_INFO replies NOT_IMPLEMENTED. AvbEntityHost wires this to
+/// its gPTP state so entities built on it need not.
+using GetAvbInfoFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_index, AvbInfo& out), 64>;
+
 /// Notified when a SET_CONTROL targeting the entity's IDENTIFY control is
 /// applied (see set_identify_control_index). @p active is true when the new
 /// value is non-zero (a controller is identifying this entity), false when
@@ -118,6 +148,10 @@ struct AemCommandHandlerCallbacks
     /// Provide stream parameters for GET_STREAM_INFO. Optional; if unset,
     /// GET_STREAM_INFO replies NOT_IMPLEMENTED.
     GetStreamInfoFn get_stream_info;
+
+    /// Provide the live gPTP/MSRP state for GET_AVB_INFO. Optional; if unset,
+    /// GET_AVB_INFO replies NOT_IMPLEMENTED.
+    GetAvbInfoFn get_avb_info;
 
     /// Observe IDENTIFY-control changes (e.g. blink an LED, or log when there
     /// is none). Optional.
@@ -213,6 +247,7 @@ class AemCommandHandler
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
     void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
+    void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
@@ -367,6 +402,12 @@ class AemCommandHandler
     /// NO_SUCH_DESCRIPTOR when the callback declines.
     [[nodiscard]] auto notify_counters_changed(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
 
+    /// Push an unsolicited GET_AVB_INFO response for AVB_INTERFACE
+    /// @p descriptor_index (IEEE 1722.1 7.5.2: a grandmaster, asCapable or
+    /// propagation-delay change). Reads the state through the get_avb_info
+    /// callback; same return values as notify_counters_changed().
+    [[nodiscard]] auto notify_avb_info_changed(uint16_t descriptor_index) -> uint8_t;
+
     /// Push an unsolicited GET_STREAM_INFO response for a stream descriptor
     /// (talker advertise/failure, listener connection changes). Reads the
     /// parameters through the get_stream_info callback; same return values as
@@ -517,6 +558,11 @@ class AemCommandHandler
     /// NO_SUCH_DESCRIPTOR if the descriptor is not one of this entity's streams.
     [[nodiscard]] auto handle_get_stream_info(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
+    /// AemAvbInfoPayload followed by the MSRP mappings.
+    [[nodiscard]] auto handle_get_avb_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
 
     /// Handle REBOOT (7.4.43) through the on_reboot callback; echoes the
     /// descriptor reference.

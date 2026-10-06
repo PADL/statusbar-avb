@@ -247,7 +247,58 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     auto on_get_jack(DescriptorId id, DescriptorJack& desc) -> bool override { return load(id.ref, desc); }
 
-    auto on_get_avb_interface(DescriptorId id, DescriptorAvbInterface& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_avb_interface(DescriptorId id, DescriptorAvbInterface& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        // READ_DESCRIPTOR agrees with the NIC and gPTP port the entity really
+        // runs on: reflect what the host pushed in over the blob's placeholders.
+        if (auto const* rt = find_avb_interface_runtime(id.ref.descriptor_index)) {
+            if (rt->identity_valid) {
+                desc.mac_address = rt->mac_address;
+                desc.clock_identity = rt->clock_identity;
+                desc.port_number = rt->port_number;
+            }
+            if (rt->gptp_valid) {
+                desc.priority1 = rt->priority1;
+                desc.clock_class = rt->clock_class;
+                desc.offset_scaled_log_variance = rt->offset_scaled_log_variance;
+                desc.clock_accuracy = rt->clock_accuracy;
+                desc.priority2 = rt->priority2;
+                desc.domain_number = rt->domain_number;
+                desc.log_sync_interval = static_cast<uint8_t>(rt->log_sync_interval);
+                desc.log_announce_interval = static_cast<uint8_t>(rt->log_announce_interval);
+                desc.log_pdelay_interval = static_cast<uint8_t>(rt->log_pdelay_interval);
+            }
+        }
+        return true;
+    }
+
+    void set_avb_interface_runtime(uint16_t const descriptor_index, AvbInterfaceRuntime const& runtime) override
+    {
+        for (auto& s : avb_interface_runtime_) {
+            if (s.descriptor_index == descriptor_index) {
+                s.runtime = runtime;
+                return;
+            }
+        }
+        if (avb_interface_runtime_.size() < MAX_AVB_INTERFACE_RUNTIME) {
+            avb_interface_runtime_.push_back({.descriptor_index = descriptor_index, .runtime = runtime});
+        }
+    }
+
+    /// The runtime fields pushed in for AVB_INTERFACE @p descriptor_index, or
+    /// nullptr when the blob's authored values still stand.
+    [[nodiscard]] auto find_avb_interface_runtime(uint16_t const descriptor_index) const noexcept -> AvbInterfaceRuntime const*
+    {
+        for (auto const& s : avb_interface_runtime_) {
+            if (s.descriptor_index == descriptor_index) {
+                return &s.runtime;
+            }
+        }
+        return nullptr;
+    }
 
     auto on_get_clock_source(DescriptorId id, DescriptorClockSource& desc) -> bool override { return load(id.ref, desc); }
 
@@ -948,6 +999,15 @@ class DescriptorStorageHandler : public AemEntityHandler
     }
 
     statusbar::sg14::inplace_vector<ClockDomainState, MAX_CLOCK_DOMAIN_STATES> clock_domain_states_;
+
+    // ---- AVB_INTERFACE runtime fields (see set_avb_interface_runtime) ------
+    static constexpr size_t MAX_AVB_INTERFACE_RUNTIME = 4;
+    struct AvbInterfaceRuntimeState
+    {
+        uint16_t descriptor_index{0};
+        AvbInterfaceRuntime runtime{};
+    };
+    statusbar::sg14::inplace_vector<AvbInterfaceRuntimeState, MAX_AVB_INTERFACE_RUNTIME> avb_interface_runtime_;
     statusbar::sg14::inplace_function<uint8_t(uint16_t, uint16_t), 64> on_clock_source_changed_{};
 
     // Generic CONTROL built-in machinery. DescriptorControl wire offsets

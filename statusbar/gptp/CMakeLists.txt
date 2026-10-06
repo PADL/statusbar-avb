@@ -9,6 +9,7 @@ set(_gptp_sources
     gptp_md_pdelay_req.cpp
     gptp_messages.cpp
     gptp_port_state_sm.cpp
+    gptp_ptp4l_client.cpp
     gptp_servo.cpp
     gptp_slave_port.cpp)
 
@@ -30,6 +31,7 @@ statusbar_add_module(
   statusbar::status
   statusbar::tsn
   TESTS
+  gptp_ptp4l_client_test.cpp
   gptp_servo_test.cpp
   gptp_slave_port_test.cpp
   gptp_slave_session_test.cpp
