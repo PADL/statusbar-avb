@@ -66,6 +66,8 @@ enum class ControllerActionKind : uint8_t
     DisconnectTxStream,     ///< ACMP DISCONNECT_TX_COMMAND (direct to talker; self-heal)
     GetCounters,            ///< AEM GET_COUNTERS (target=talker_entity_id, desc_type + desc_index)
     GetAvbInfo,             ///< AEM GET_AVB_INFO (target=talker_entity_id, desc_index = AVB_INTERFACE index)
+    ReadDescriptor,         ///< AEM READ_DESCRIPTOR of one descriptor (target=talker_entity_id, desc_type + desc_index,
+                            ///<   configuration 0); the response reaches the driver as a CommandCompletedEvent
     SetSignalSelector,      ///< AEM SET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index, signal_type/index/output)
     GetSignalSelector,      ///< AEM GET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index)
     GetControl,             ///< AEM GET_CONTROL (target=talker_entity_id, desc_index = CONTROL index)

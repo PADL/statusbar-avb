@@ -323,6 +323,25 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
             }
             break;
         }
+        case ControllerActionKind::ReadDescriptor: {
+            // One READ_DESCRIPTOR (7.4.5) outside the crawl, for a driver that
+            // wants a descriptor re-read after the entity's runtime state
+            // settled (an AVB_INTERFACE whose gPTP fields a proxy fills in
+            // later, say). The response reaches the driver as a
+            // CommandCompletedEvent carrying the response payload; the
+            // descriptor cache is refreshed on the way through.
+            AemReadDescriptorCommandPayload const payload{
+                .configuration_index = 0,
+                .descriptor_type = action.request.desc_type,
+                .descriptor_index = action.request.desc_index};
+            std::array<uint8_t, AemReadDescriptorCommandPayload::LENGTH> buf{};
+            span_store(buf, payload);
+            if (!service_->send_aem_command(
+                    action.request.talker_entity_id, AEM_COMMAND_READ_DESCRIPTOR, buf, make_command_completion())) {
+                emit_status("Read descriptor failed: entity not found or queue full");
+            }
+            break;
+        }
         case ControllerActionKind::SetSignalSelector:
             // desc_index = SIGNAL_SELECTOR index; signal_* = the source to select.
             if (!service_->set_signal_selector(
