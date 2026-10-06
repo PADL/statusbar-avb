@@ -379,7 +379,7 @@ class GptpAnnounceHandler : public net::Pollable
     /// The most recent Announce seen on the wire (grandmaster priorities,
     /// clock quality, steps removed, domain in its header), or nullptr before
     /// the first one. This is the observed gPTP state an entity without a
-    /// local ptp4l reports in GET_AVB_INFO.
+    /// mirrored device reports in GET_AVB_INFO.
     [[nodiscard]] auto last_announce() const noexcept -> gptp::AnnounceMessage const*
     {
         return has_announce_ ? &last_announce_ : nullptr;

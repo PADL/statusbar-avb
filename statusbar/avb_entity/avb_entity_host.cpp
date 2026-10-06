@@ -46,10 +46,10 @@ AvbEntityHost::AvbEntityHost(
 
 AvbEntityHost::~AvbEntityHost()
 {
-    // The reactor owns the ptp4l client; make sure it stops calling back into
+    // The reactor owns the mirror port; make sure it stops calling back into
     // a host that is going away.
-    if (ptp4l_ != nullptr) {
-        ptp4l_->set_on_changed({});
+    if (mirror_ != nullptr) {
+        mirror_->mirror().set_on_update({});
     }
 }
 
@@ -110,9 +110,9 @@ auto AvbEntityHost::start_control_plane(net::MessageReactor& reactor, std::strin
     running_ = true;
     reactor_ = &reactor;
     // The AVB_INTERFACE descriptor reports the NIC we are actually on from
-    // the start; ptp4l (when enabled) refines the gPTP fields as it answers.
+    // the start; a mirrored device's descriptors refine it as they arrive.
     apply_interface_runtime();
-    attach_ptp4l(reactor);
+    attach_mirror(reactor);
     return success();
 }
 
@@ -123,9 +123,9 @@ auto AvbEntityHost::stop_control_plane(TimePoint const now) -> Status
     }
     (void)components_.adp_advertiser.stop(now);
     net_handlers_.reset();
-    if (ptp4l_ != nullptr) {
-        ptp4l_->set_on_changed({});
-        ptp4l_ = nullptr;
+    if (mirror_ != nullptr) {
+        mirror_->mirror().set_on_update({});
+        mirror_ = nullptr;
     }
     reactor_ = nullptr;
     running_ = false;
@@ -152,33 +152,44 @@ void AvbEntityHost::wire_avb_info()
     });
 }
 
-void AvbEntityHost::enable_ptp4l_status(gptp::Ptp4lClient::Config config)
+void AvbEntityHost::mirror_avb_info_from(
+    ieee::Eui64 const target_entity_id, ieee::Eui64 const controller_entity_id, int64_t const poll_interval_ns)
 {
-    ptp4l_config_ = std::move(config);
-    if (reactor_ != nullptr && ptp4l_ == nullptr) {
-        attach_ptp4l(*reactor_);
+    AvbInfoMirror::Config cfg{};
+    cfg.target_entity_id = target_entity_id;
+    cfg.controller_entity_id = controller_entity_id;
+    cfg.poll_interval_ns = poll_interval_ns;
+    mirror_config_ = cfg;
+    if (reactor_ != nullptr && mirror_ == nullptr) {
+        attach_mirror(*reactor_);
     }
 }
 
-void AvbEntityHost::attach_ptp4l(net::MessageReactor& reactor)
+auto AvbEntityHost::mirror_target() const noexcept -> std::optional<ieee::Eui64>
 {
-    if (!ptp4l_config_.has_value() || ptp4l_ != nullptr) {
-        return;
+    if (!mirror_config_.has_value()) {
+        return std::nullopt;
     }
-    auto client = std::make_unique<gptp::Ptp4lClient>(*ptp4l_config_);
-    if (auto st = client->open(); !st) {
-        ctl_log().warning("ptp4l status: cannot open client socket (errno {})", st.error().value());
-        return;
-    }
-    client->set_on_changed([this](gptp::Ptp4lStatus const& status) { on_ptp4l_changed(status); });
-    ptp4l_ = client.get();
-    reactor.add(std::move(client));
-    ctl_log().status("ptp4l status: reading {}", logging::embed<64>(ptp4l_config_->uds_path));
+    return mirror_config_->target_entity_id;
 }
 
-auto AvbEntityHost::ptp4l_status() const noexcept -> gptp::Ptp4lStatus const*
+void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
 {
-    return ptp4l_status_.valid() ? &ptp4l_status_ : nullptr;
+    if (!mirror_config_.has_value() || mirror_ != nullptr) {
+        return;
+    }
+    auto port = std::make_unique<AvbInfoMirrorPort>(interface_name_, *mirror_config_);
+    if (!port->valid()) {
+        ctl_log().warning("avb info mirror: cannot open the ATDECC socket");
+        return;
+    }
+    port->mirror().set_on_update(
+        [this](uint16_t const index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info) {
+            on_mirror_update(index, desc, info);
+        });
+    mirror_ = port.get();
+    reactor.add(std::move(port));
+    ctl_log().status("avb info mirror: following entity {:016x}", mirror_config_->target_entity_id.to_uint64());
 }
 
 void AvbEntityHost::set_propagation_delay_ns(uint32_t const ns)
@@ -187,36 +198,41 @@ void AvbEntityHost::set_propagation_delay_ns(uint32_t const ns)
     propagation_delay_override_ns_ = ns;
 }
 
-void AvbEntityHost::on_ptp4l_changed(gptp::Ptp4lStatus const& status)
+void AvbEntityHost::on_mirror_update(
+    uint16_t const index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info)
 {
-    ptp4l_status_ = status;
-    if (status.valid()) {
-        ctl_log().status(
-            "ptp4l: clock {:016x} priority1={} priority2={} domain={} port_state={} as_capable={} gm={:016x} peer_delay={}ns",
-            status.clock_identity.to_uint64(),
-            status.priority1,
-            status.priority2,
-            status.domain_number,
-            status.port_state,
-            status.as_capable,
-            status.grandmaster_identity.to_uint64(),
-            status.peer_mean_path_delay_ns);
-    } else {
-        ctl_log().warning("ptp4l: no answer — reporting observed gPTP state");
+    auto it = std::find_if(mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& m) { return m.index == index; });
+    if (it == mirrored_.end()) {
+        mirrored_.push_back({.index = index});
+        it = std::prev(mirrored_.end());
     }
-    apply_interface_runtime();
-
-    // ADP carries the grandmaster too; keep it in step with what we report.
-    auto const info = avb_info(0);
-    components_.adp_advertiser.set_gptp_info(tsn::ClockIdentity{info.gptp_grandmaster_id}, info.gptp_domain_number);
-    components_.adp_advertiser.notify_entity_changed();
-
-    // IEEE 1722.1 7.5.2: gPTP changes are unsolicited GET_AVB_INFO notifications.
-    if (info.gptp_grandmaster_id != last_avb_info_.gptp_grandmaster_id || info.flags != last_avb_info_.flags ||
-        info.gptp_domain_number != last_avb_info_.gptp_domain_number ||
-        info.propagation_delay != last_avb_info_.propagation_delay) {
-        last_avb_info_ = info;
-        (void)components_.aem_handler.notify_avb_info_changed(0);
+    if (desc != nullptr) {
+        it->descriptor = *desc;
+        ctl_log().status(
+            "avb info mirror: interface {} clock {:016x} priority1={} priority2={} domain={}",
+            index,
+            desc->clock_identity.to_uint64(),
+            static_cast<uint8_t>(desc->priority1),
+            static_cast<uint8_t>(desc->priority2),
+            static_cast<uint8_t>(desc->domain_number));
+        apply_interface_runtime();
+    }
+    if (info != nullptr) {
+        it->info = *info;
+        ctl_log().status(
+            "avb info mirror: interface {} gm {:016x} domain={} flags={:#04x} propagation_delay={}ns",
+            index,
+            info->gptp_grandmaster_id.to_uint64(),
+            info->gptp_domain_number,
+            info->flags,
+            info->propagation_delay);
+        if (index == 0) {
+            // ADP carries the grandmaster too; keep it in step with what we report.
+            components_.adp_advertiser.set_gptp_info(tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number);
+            components_.adp_advertiser.notify_entity_changed();
+        }
+        // IEEE 1722.1 7.5.2: gPTP changes are unsolicited GET_AVB_INFO notifications.
+        (void)components_.aem_handler.notify_avb_info_changed(index);
     }
 }
 
@@ -225,40 +241,47 @@ void AvbEntityHost::apply_interface_runtime()
     if (handler_ == nullptr) {
         return;
     }
-    nanoavb::AvbInterfaceRuntime rt{};
-    if (auto const mac = net::read_interface_mac(interface_name_)) {
-        rt.identity_valid = true;
-        rt.mac_address = *mac;
-        // ptp4l derives its clockIdentity from the NIC the same way, so the
-        // fallback agrees with it.
-        rt.clock_identity = mac->to_modified_eui64();
-        rt.port_number = 1;
-    }
-    if (ptp4l_status_.valid()) {
-        rt.identity_valid = true;
-        rt.clock_identity = ptp4l_status_.clock_identity.to_eui64();
-        if (ptp4l_status_.have_port) {
-            rt.port_number = ptp4l_status_.port_number;
-        }
-        rt.gptp_valid = true;
-        rt.priority1 = ptp4l_status_.priority1;
-        rt.clock_class = ptp4l_status_.clock_class;
-        rt.offset_scaled_log_variance = ptp4l_status_.offset_scaled_log_variance;
-        rt.clock_accuracy = ptp4l_status_.clock_accuracy;
-        rt.priority2 = ptp4l_status_.priority2;
-        rt.domain_number = ptp4l_status_.domain_number;
-        rt.log_sync_interval = ptp4l_status_.log_sync_interval;
-        rt.log_announce_interval = ptp4l_status_.log_announce_interval;
-        rt.log_pdelay_interval = ptp4l_status_.log_min_pdelay_req_interval;
-    }
-    if (!rt.identity_valid && !rt.gptp_valid) {
-        return;
-    }
-    // Every AVB_INTERFACE the model authors describes this one NIC.
+    auto const mac = net::read_interface_mac(interface_name_);
     auto const* storage = descriptor_storage();
+    // Every AVB_INTERFACE the model authors is this one NIC. A mirrored
+    // device's descriptor supplies the gPTP port fields; otherwise only the
+    // NIC identity is known (ptp4l derives its clockIdentity from the MAC the
+    // same way, so the fallback agrees with a local gPTP daemon).
     for (uint16_t index = 0;; ++index) {
         if (index > 0 && (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index))) {
             break;
+        }
+        nanoavb::AvbInterfaceRuntime rt{};
+        if (mac.has_value()) {
+            rt.identity_valid = true;
+            rt.mac_address = *mac;
+            rt.clock_identity = mac->to_modified_eui64();
+            rt.port_number = 1;
+        }
+        auto const m = std::find_if(mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) {
+            return x.index == index && x.descriptor.has_value();
+        });
+        if (m != mirrored_.end()) {
+            auto const& d = *m->descriptor;
+            rt.identity_valid = true;
+            if (!mac.has_value()) {
+                rt.mac_address = d.mac_address;
+            }
+            rt.clock_identity = d.clock_identity;
+            rt.port_number = d.port_number.get();
+            rt.gptp_valid = true;
+            rt.priority1 = static_cast<uint8_t>(d.priority1);
+            rt.clock_class = static_cast<uint8_t>(d.clock_class);
+            rt.offset_scaled_log_variance = d.offset_scaled_log_variance.get();
+            rt.clock_accuracy = static_cast<uint8_t>(d.clock_accuracy);
+            rt.priority2 = static_cast<uint8_t>(d.priority2);
+            rt.domain_number = static_cast<uint8_t>(d.domain_number);
+            rt.log_sync_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_sync_interval));
+            rt.log_announce_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_announce_interval));
+            rt.log_pdelay_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_pdelay_interval));
+        }
+        if (!rt.identity_valid && !rt.gptp_valid) {
+            continue;
         }
         handler_->set_avb_interface_runtime(index, rt);
     }
@@ -266,8 +289,13 @@ void AvbEntityHost::apply_interface_runtime()
 
 auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
 {
-    (void)index;
     using namespace atdecc::aem::avb_info_flags;
+    // A mirrored device's answer is reported as-is: it IS the state.
+    auto const m = std::find_if(
+        mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) { return x.index == index && x.info.has_value(); });
+    if (m != mirrored_.end()) {
+        return *m->info;
+    }
     nanoavb::AvbInfo info{};
     info.flags = GPTP_ENABLED | AVTP_DOWN_VALID;
     if (!supervisor_ctx_.link_up) {
@@ -283,32 +311,19 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
              .priority = domain.sr_class_priority,
              .vlan_id = domain.sr_class_vid});
     }
-    if (ptp4l_status_.valid()) {
-        if (ptp4l_status_.gm_present || ptp4l_status_.have_parent) {
-            info.gptp_grandmaster_id = ptp4l_status_.grandmaster_identity.to_eui64();
+    if (net_handlers_ != nullptr) {
+        auto const& announce = net_handlers_->gptp_handler();
+        if (announce.has_grandmaster()) {
+            info.gptp_grandmaster_id = announce.grandmaster_identity().to_eui64();
         }
-        info.gptp_domain_number = ptp4l_status_.domain_number;
-        if (ptp4l_status_.as_capable) {
-            info.flags |= AS_CAPABLE;
-        }
-        if (ptp4l_status_.have_port) {
-            info.propagation_delay = static_cast<uint32_t>(std::max<int64_t>(0, ptp4l_status_.peer_mean_path_delay_ns));
-        }
-    } else {
-        if (net_handlers_ != nullptr) {
-            auto const& announce = net_handlers_->gptp_handler();
-            if (announce.has_grandmaster()) {
-                info.gptp_grandmaster_id = announce.grandmaster_identity().to_eui64();
-            }
-            if (auto const* last = announce.last_announce()) {
-                info.gptp_domain_number = last->header.domain_number.get();
-            }
-        }
-        if (gptp_ctx_.as_capable || gptp_ctx_.time_locked) {
-            info.flags |= AS_CAPABLE;
+        if (auto const* last = announce.last_announce()) {
+            info.gptp_domain_number = last->header.domain_number.get();
         }
     }
-    if (propagation_delay_override_ && info.propagation_delay == 0) {
+    if (gptp_ctx_.as_capable || gptp_ctx_.time_locked) {
+        info.flags |= AS_CAPABLE;
+    }
+    if (propagation_delay_override_) {
         info.propagation_delay = propagation_delay_override_ns_;
     }
     return info;

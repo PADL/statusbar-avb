@@ -10,6 +10,7 @@ statusbar_add_module(
   avb_entity_audio_io.cpp
   avb_entity_tone_generator.cpp
   avb_entity_host.cpp
+  avb_entity_avb_info_mirror.cpp
   avb_entity_kit.cpp
   avb_entity_stream_counters.cpp
   avb_entity_stream_spec.cpp
@@ -39,6 +40,7 @@ statusbar_add_module(
   statusbar::tsn
   statusbar::udptun
   TESTS
+  avb_entity_avb_info_mirror_test.cpp
   avb_entity_host_test.cpp
   avb_entity_talker_streams_test.cpp
   avb_entity_udptun_bridge_test.cpp

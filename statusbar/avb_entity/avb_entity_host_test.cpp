@@ -394,7 +394,7 @@ TEST(avb_entity_host_avb_info, host_answers_get_avb_info_from_observed_state)
     EXPECT_TRUE((info.flags & AS_CAPABLE) == 0);
     EXPECT_EQ(info.gptp_grandmaster_id, statusbar::ieee::Eui64{});
     EXPECT_EQ(info.propagation_delay, 0U);
-    EXPECT_TRUE(host->ptp4l_status() == nullptr);
+    EXPECT_FALSE(host->mirror_target().has_value());
 
     host->set_propagation_delay_ns(1234);
     EXPECT_EQ(host->avb_info(0).propagation_delay, 1234U);

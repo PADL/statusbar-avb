@@ -47,7 +47,7 @@
 /// components() (ACMP/MSRP/AEM) and the three typed stream hooks below.
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
-#include "statusbar/gptp/gptp_ptp4l_client.hpp"
+#include "statusbar/avb_entity/avb_entity_avb_info_mirror.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
@@ -63,6 +63,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace statusbar::avb_entity {
 
@@ -243,33 +244,33 @@ class AvbEntityHost
     /// gPTP / MVRP status for the entity's print_state (the SM contexts are private).
     [[nodiscard]] auto gptp_locked() const noexcept -> bool { return gptp_ctx_.time_locked; }
 
-    // --- Live gPTP state: AVB_INTERFACE and GET_AVB_INFO ---------------------
+    // --- AVB_INTERFACE and GET_AVB_INFO: the entity's gPTP state over 1722.1 --
     //
     // The host answers GET_AVB_INFO (IEEE 1722.1 7.4.40) for every entity and
-    // keeps the AVB_INTERFACE descriptor's identity and gPTP fields truthful
-    // (through the handler's set_avb_interface_runtime). The best source is a
-    // running linuxptp ptp4l, read over its management socket with
-    // enable_ptp4l_status(): that gives the port's own clock identity,
-    // priorities, intervals, the grandmaster, asCapable and the measured
-    // peer delay. Without it the host reports what it observes on the wire
-    // (the Announce grandmaster and domain, its own gPTP state machine) and
-    // the NIC's MAC-derived clock identity. Changes go out as unsolicited
-    // GET_AVB_INFO notifications (7.5.2) and update the ADP grandmaster.
+    // keeps the AVB_INTERFACE descriptor's identity fields truthful (through
+    // the handler's set_avb_interface_runtime). By default it reports what it
+    // observes on the AVB wire: the grandmaster and domain of the gPTP
+    // Announces, its own gPTP state machine, its link and SRP state, and the
+    // NIC's MAC-derived clock identity. A proxy entity instead mirrors the
+    // device it stands in for over 1722.1 (mirror_avb_info_from): that
+    // device's AVB_INTERFACE descriptors and GET_AVB_INFO answers become the
+    // proxy's own. Changes go out as unsolicited GET_AVB_INFO notifications
+    // (7.5.2) and update the ADP grandmaster.
 
-    /// Read gPTP state from ptp4l's management socket (default
-    /// /var/run/ptp4lro, the read-only socket any user may query). Call
-    /// before or after start_control_plane(); the client joins the reactor
-    /// when the control plane is up.
-    void enable_ptp4l_status(gptp::Ptp4lClient::Config config = {});
+    /// Mirror @p target_entity_id's AVB interface state over 1722.1, sending
+    /// as @p controller_entity_id (the entity's own id is fine). Call before
+    /// start_control_plane(); the mirror joins the reactor with the control
+    /// plane. Interface index N of the target maps to AVB_INTERFACE N here.
+    void mirror_avb_info_from(
+        ieee::Eui64 target_entity_id, ieee::Eui64 controller_entity_id, int64_t poll_interval_ns = 5'000'000'000);
 
-    /// The latest ptp4l snapshot, or nullptr when ptp4l status is not
-    /// enabled or ptp4l has not answered.
-    [[nodiscard]] auto ptp4l_status() const noexcept -> gptp::Ptp4lStatus const*;
+    /// The entity whose AVB interface state is mirrored, if any.
+    [[nodiscard]] auto mirror_target() const noexcept -> std::optional<ieee::Eui64>;
 
     /// The GET_AVB_INFO answer for AVB_INTERFACE @p index: what controllers see.
     [[nodiscard]] auto avb_info(uint16_t index = 0) const -> nanoavb::AvbInfo;
 
-    /// Propagation delay (ns) to report when ptp4l is not providing one
+    /// Propagation delay (ns) to report in the observed (non-mirrored) state
     /// (e.g. the entity's own peer-delay measurement).
     void set_propagation_delay_ns(uint32_t ns);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
@@ -309,11 +310,11 @@ class AvbEntityHost
     ///    control and multicasts the unsolicited IDENTIFY notification.
     void wire_identify_control();
 
-    // AVB_INTERFACE / GET_AVB_INFO plumbing (see enable_ptp4l_status).
+    // AVB_INTERFACE / GET_AVB_INFO plumbing (see mirror_avb_info_from).
     void wire_avb_info();
-    void attach_ptp4l(net::MessageReactor& reactor);
+    void attach_mirror(net::MessageReactor& reactor);
     void apply_interface_runtime();
-    void on_ptp4l_changed(gptp::Ptp4lStatus const& status);
+    void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();
@@ -356,9 +357,16 @@ class AvbEntityHost
 
     std::string interface_name_{};
     net::MessageReactor* reactor_{nullptr};  ///< set while the control plane is up
-    std::optional<gptp::Ptp4lClient::Config> ptp4l_config_{};
-    gptp::Ptp4lClient* ptp4l_{nullptr};  ///< owned by the reactor once attached
-    gptp::Ptp4lStatus ptp4l_status_{};
+    std::optional<AvbInfoMirror::Config> mirror_config_{};
+    AvbInfoMirrorPort* mirror_{nullptr};  ///< owned by the reactor once attached
+    /// Mirrored state per AVB_INTERFACE index (see mirror_avb_info_from).
+    struct MirroredInterface
+    {
+        uint16_t index{0};
+        std::optional<atdecc::aem::DescriptorAvbInterface> descriptor{};
+        std::optional<nanoavb::AvbInfo> info{};
+    };
+    std::vector<MirroredInterface> mirrored_{};
     nanoavb::AvbInfo last_avb_info_{};  ///< what the last notification carried
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
