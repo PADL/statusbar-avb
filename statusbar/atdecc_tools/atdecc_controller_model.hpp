@@ -65,6 +65,7 @@ enum class ControllerActionKind : uint8_t
     ConnectTxStream,        ///< ACMP CONNECT_TX_COMMAND (direct to talker; self-heal)
     DisconnectTxStream,     ///< ACMP DISCONNECT_TX_COMMAND (direct to talker; self-heal)
     GetCounters,            ///< AEM GET_COUNTERS (target=talker_entity_id, desc_type + desc_index)
+    GetAvbInfo,             ///< AEM GET_AVB_INFO (target=talker_entity_id, desc_index = AVB_INTERFACE index)
     SetSignalSelector,      ///< AEM SET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index, signal_type/index/output)
     GetSignalSelector,      ///< AEM GET_SIGNAL_SELECTOR (target=talker_entity_id, desc_index)
     GetControl,             ///< AEM GET_CONTROL (target=talker_entity_id, desc_index = CONTROL index)

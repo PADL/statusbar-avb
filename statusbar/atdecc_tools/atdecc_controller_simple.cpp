@@ -309,6 +309,20 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
                 emit_status("Get counters failed: entity not found or queue full");
             }
             break;
+        case ControllerActionKind::GetAvbInfo: {
+            // GET_AVB_INFO (7.4.40): the live gPTP/MSRP state of one AVB_INTERFACE.
+            // The response (and any unsolicited one) reaches the driver as a
+            // CommandCompletedEvent / UnsolicitedEvent carrying the payload.
+            AemGetAvbInfoCommandPayload const payload{
+                .descriptor_type = DESCRIPTOR_AVB_INTERFACE, .descriptor_index = action.request.desc_index};
+            std::array<uint8_t, AemGetAvbInfoCommandPayload::LENGTH> buf{};
+            span_store(buf, payload);
+            if (!service_->send_aem_command(
+                    action.request.talker_entity_id, AEM_COMMAND_GET_AVB_INFO, buf, make_command_completion())) {
+                emit_status("Get AVB info failed: entity not found or queue full");
+            }
+            break;
+        }
         case ControllerActionKind::SetSignalSelector:
             // desc_index = SIGNAL_SELECTOR index; signal_* = the source to select.
             if (!service_->set_signal_selector(
