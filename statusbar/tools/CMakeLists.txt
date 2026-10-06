@@ -233,7 +233,9 @@ endif()
 # never installed); the golden test runs tshark with the Lua loader over it and
 # compares every avb.* field with the schema's reference decoder. Skips (77)
 # when tshark is not installed. The drift test regenerates the Lua modules from
-# the schema and fails when the committed ones differ.
+# the schema and fails when the committed ones differ; the pcap drift test
+# compares the freshly written capture with the committed copy in
+# wireshark/golden/ (the sample capture the GitHub release ships).
 add_executable(
   wireshark_golden_tool wireshark_golden_tool.cpp wireshark_golden_acf.cpp
                         wireshark_golden_atdecc.cpp)
@@ -257,6 +259,11 @@ add_test(
 set_tests_properties(
   statusbar/avb/wireshark_golden
   PROPERTIES FIXTURES_REQUIRED wireshark_golden_capture SKIP_RETURN_CODE 77)
+add_test(NAME statusbar/avb/wireshark_golden_pcap_drift
+         COMMAND ${CMAKE_COMMAND} -E compare_files "${_wireshark_golden_pcap}"
+                 "${_wireshark_dir}/golden/statusbar-avb-golden.pcap")
+set_tests_properties(statusbar/avb/wireshark_golden_pcap_drift
+                     PROPERTIES FIXTURES_REQUIRED wireshark_golden_capture)
 add_test(
   NAME statusbar/avb/wireshark_schema_drift
   COMMAND ${Python3_EXECUTABLE} -m wireshark_schema check "${_wireshark_dir}"

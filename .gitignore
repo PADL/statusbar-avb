@@ -7,6 +7,8 @@ deb-output/
 
 # never commit network captures / raw audio
 *.pcap
+# ...except the committed golden capture the Wireshark dissector test and release use
+!wireshark/golden/*.pcap
 *.pcapng
 *.cap
 *.raw

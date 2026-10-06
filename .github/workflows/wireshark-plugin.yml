@@ -6,7 +6,10 @@
 #   * pushing a tag "wireshark-v<version>" publishes a versioned release.
 #
 # The archives unpack to one folder, statusbar-avb/, that drops straight into
-# a Wireshark personal plugin folder (see wireshark/README.md).
+# a Wireshark personal plugin folder (see wireshark/README.md). The golden
+# capture the dissector test runs over (wireshark/golden/, committed and
+# drift-checked against the C++ builders) rides inside the archives and as its
+# own release asset, so there is something to open the moment the plugin loads.
 name: Wireshark dissector package
 
 on:
@@ -63,12 +66,13 @@ jobs:
           set -euo pipefail
           stage=dist/statusbar-avb
           mkdir -p "$stage"
-          cp -R wireshark/LICENSE wireshark/README.md wireshark/statusbar_avb.lua wireshark/statusbar_avb "$stage"/
+          cp -R wireshark/LICENSE wireshark/README.md wireshark/statusbar_avb.lua wireshark/statusbar_avb wireshark/golden "$stage"/
           printf 'statusbar-avb-wireshark %s\ncommit %s\n' "$VERSION" "$GITHUB_SHA" > "$stage/VERSION"
           tar -C dist -czf "dist/statusbar-avb-wireshark-$VERSION.tar.gz" statusbar-avb
           env -C dist zip -qr "statusbar-avb-wireshark-$VERSION.zip" statusbar-avb
+          cp wireshark/golden/statusbar-avb-golden.pcap "dist/statusbar-avb-golden-$VERSION.pcap"
           env -C dist sha256sum "statusbar-avb-wireshark-$VERSION.tar.gz" "statusbar-avb-wireshark-$VERSION.zip" \
-            > "dist/statusbar-avb-wireshark-$VERSION.sha256"
+            "statusbar-avb-golden-$VERSION.pcap" > "dist/statusbar-avb-wireshark-$VERSION.sha256"
           cat "dist/statusbar-avb-wireshark-$VERSION.sha256"
 
       - uses: actions/upload-artifact@v4
@@ -77,6 +81,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.pcap
             dist/*.sha256
           if-no-files-found: error
 
@@ -97,8 +102,12 @@ jobs:
               "" \
               '    tar -C ~/.config/wireshark/plugins -xzf statusbar-avb-wireshark-*.tar.gz' \
               "" \
-              "then restart Wireshark. See the README inside the archive for the other platforms.")" \
-            dist/*.tar.gz dist/*.zip dist/*.sha256
+              "then restart Wireshark. See the README inside the archive for the other platforms." \
+              "" \
+              "statusbar-avb-golden-$VERSION.pcap is the golden capture the dissector's test suite runs over:" \
+              "one frame of every AVTP subtype, ACF message and ATDECC PDU this repository's C++ builders" \
+              "produce, over Ethernet and the Annex J UDP encapsulation. Open it to see every field decoded.")" \
+            dist/*.tar.gz dist/*.zip dist/*.pcap dist/*.sha256
 
       - name: Publish the tagged release
         if: startsWith(github.ref, 'refs/tags/wireshark-v')
@@ -108,4 +117,8 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$GITHUB_REF_NAME" --title "Wireshark dissector $VERSION" --generate-notes \
-            dist/*.tar.gz dist/*.zip dist/*.sha256
+            --notes "$(printf '%s\n' \
+              "statusbar-avb-golden-$VERSION.pcap is the golden capture the dissector's test suite runs over:" \
+              "one frame of every AVTP subtype, ACF message and ATDECC PDU this repository's C++ builders" \
+              "produce, over Ethernet and the Annex J UDP encapsulation. Open it to see every field decoded.")" \
+            dist/*.tar.gz dist/*.zip dist/*.pcap dist/*.sha256

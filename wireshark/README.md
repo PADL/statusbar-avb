@@ -143,12 +143,28 @@ only the `wireshark` component is needed, so from the umbrella directory:
 which writes `avb/build/statusbar-avb-<ver>-<sys>-wireshark.tar.gz` (`-G DEB`
 on Linux for the `.deb`; `container-build.sh` produces it for the Pi nodes).
 
+## Sample capture
+
+`golden/statusbar-avb-golden.pcap` holds one frame of every AVTP subtype,
+ACF message and ATDECC PDU this repository's C++ builders produce, over
+Ethernet and over the Annex J UDP encapsulation — the capture the
+dissector's own test runs over. Open it in Wireshark once the plugin loads
+to see every `avb.*` field decoded, or use it to compare against a
+builtin-dissector view. The GitHub release ships it inside the archives
+and as `statusbar-avb-golden-<version>.pcap` beside them.
+
 ## Testing
 
-`statusbar_avb_wireshark_golden_tool` (built, not installed) writes a
-capture of frames produced by this repository's own C++ builders;
+`statusbar_avb_wireshark_golden_tool` (built, not installed) writes the
+golden capture from this repository's own C++ builders;
 `python/wireshark_schema/golden_test.py` runs `tshark -T json` over it with
 the loader (once passed with `-X lua_script`, once found by itself in a
 staged personal plugin folder) and compares every `avb.*` field against
 the reference decoder generated from the same schema. The ctest `statusbar/avb/wireshark_golden`
-skips (exit 77) when `tshark` is not installed.
+skips (exit 77) when `tshark` is not installed. The capture is
+deterministic, so `statusbar/avb/wireshark_golden_pcap_drift` compares the
+freshly written one with the committed `golden/statusbar-avb-golden.pcap`:
+after changing a builder or adding a golden frame, regenerate the committed
+copy with
+
+    avb/build/statusbar/tools/statusbar_avb_wireshark_golden_tool avb/wireshark/golden/statusbar-avb-golden.pcap
