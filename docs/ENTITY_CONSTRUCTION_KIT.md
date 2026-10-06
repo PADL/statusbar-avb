@@ -51,7 +51,7 @@ phase-steering the media clock and ASRC.
 
 | Asset | State |
 |---|---|
-| `AvbEntityHost` (`avb_entity_host.hpp:85`) | Owns all 7 protocol SMs, lifecycle, SPSC logging; parameterized by blob + 3 stream-count integers; auto-wires IDENTIFY by scanning blob CONTROL descriptors (`avb_entity_host.cpp:45-70`). Control-plane complete. |
+| `AvbEntityHost` (`avb_entity_host.hpp:85`) | Owns all 7 protocol SMs, lifecycle, SPSC logging; parameterized by blob + 3 stream-count integers; auto-wires IDENTIFY by scanning blob CONTROL descriptors (`avb_entity_host.cpp:45-70`). Serves GET_AVB_INFO and the AVB_INTERFACE runtime gPTP fields from observed state, or — `mirror_avb_info_from(target, controller)` — mirrored from another entity over 1722.1 (`avb_entity_avb_info_mirror.hpp`: one-target ATDECC controller reading its AVB_INTERFACE descriptors, registering for unsolicited notifications, polling GET_AVB_INFO). Control-plane complete. |
 | aemxml pipeline | `model.py`/`flatten.py` cover **all 43** IEEE 1722.1-2021 descriptor types, 1:1 with the C++ structs (`atdecc_aem_descriptor.hpp`); symbol table; `${var}` expansion (json2bin `--set`); JSON schema; byte-exact wire tests. Only the JSON front-end is narrower (see gap table). |
 | Handler hooks | Symbol-keyed generic `on_set/get_descriptor_value` (`nanoavb_aem_entity_handler.hpp:284-298`), unsolicited-notification fan-out, `apply_local_descriptor_value` for entity-originated changes. Foundation for control binding; used only by IDENTIFY today. |
 | SIGNAL_SELECTOR + MATRIX runtimes | Full built-ins with veto/apply `inplace_function` callbacks and `matrix_cell()` readback (`nanoavb_aem_descriptor_storage_handler.hpp:354-437`). The template to replicate for CONTROL and MIXER. |

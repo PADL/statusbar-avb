@@ -133,7 +133,12 @@ CSV output into plots and stats.
 - **`nanoavb`** — small, integrated AVB entity stack tying ADP, ACMP, AECP,
   MSRP, MVRP, and gPTP together behind a supervisor state machine.
 - **`avb_entity`** — turn-key AVB audio entities (stereo PCM, AM824) built
-  on top of `nanoavb` and `ptpclient`.
+  on top of `nanoavb` and `ptpclient`. The host answers GET_AVB_INFO and
+  fills the AVB_INTERFACE gPTP fields from what it observes on the wire
+  (the last Announce, link state, the MSRP domain); a proxy entity can
+  instead mirror another entity's AVB_INTERFACE descriptors and
+  GET_AVB_INFO over IEEE 1722.1 (`AvbInfoMirror`,
+  `AvbEntityHost::mirror_avb_info_from`) and serve them as its own.
 - **`udptun`** — gPTP-timestamped UDP framework with redundancy, per-source
   tracking, and CSV / columnar telemetry.
 - **`owlm`** — one-way latency measurement over a gPTP-locked link.
