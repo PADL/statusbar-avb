@@ -112,12 +112,14 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
 
   # ---- Python helpers (runtime component) ----
   # aemxml/ is already a proper Python package (has __init__.py), so it can be
-  # dropped into dist-packages as-is. aemxml_tool.py and
+  # dropped into dist-packages as-is (STATUSBAR_PYTHON_DIST_PACKAGES, core's
+  # module.cmake: absolute /usr/lib/python3/dist-packages for deb/rpm, under the
+  # prefix for archive builds). aemxml_tool.py and
   # descriptor_storage_cross_check.py become /usr/local/bin/ CLI commands.
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/python/aemxml/__init__.py)
     install(
       DIRECTORY python/aemxml/
-      DESTINATION /usr/lib/python3/dist-packages/aemxml
+      DESTINATION ${STATUSBAR_PYTHON_DIST_PACKAGES}/aemxml
       COMPONENT runtime
       FILES_MATCHING
       PATTERN "*.py"
