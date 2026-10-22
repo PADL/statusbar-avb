@@ -216,6 +216,16 @@ static_assert(symbol_code("identify") == 0x12619917U);
 using StreamRenderFn =
     sg14::inplace_function<void(std::span<float> audio, uint32_t frames, uint64_t first_index, uint64_t pts_ns), 64>;
 
+/// Per-stream raw TX render (the media bridge's fast path, alongside the float
+/// StreamRenderFn): fill @p payload, the AAF payload of one packet, with
+/// exactly @p frames frames already in the stream's wire layout (interleaved
+/// big-endian samples of its AAF format; payload.size() == frames x channels x
+/// bytes per sample), for the packet whose first frame has media-clock sample
+/// index @p first_index and presentation time @p pts_ns. Return false to send
+/// nothing for this packet. Same thread and discipline as StreamRenderFn.
+using StreamRawRenderFn =
+    sg14::inplace_function<bool(std::span<uint8_t> payload, uint32_t frames, uint64_t first_index, uint64_t pts_ns), 64>;
+
 /// Per-stream RX audio consumer: one decoded channel of @p samples floats
 /// with its reconstructed 64-bit presentation time. Runs on the reactor/RX
 /// thread: keep it cheap and non-blocking.

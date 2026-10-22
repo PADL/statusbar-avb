@@ -156,6 +156,20 @@ struct TalkerStreams
     /// entities.)
     void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples, std::span<float const> src);
     void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
+    /// Serialize + send one AAF packet of @p frames frames whose wire
+    /// presentation time is @p pts_ns (the AVTP timestamp is its low 32 bits,
+    /// with no presentation offset added: the caller has applied any), whose
+    /// payload @p render fills as raw wire bytes (the media
+    /// bridge's fast path: one memcpy from its held frames, no float). The
+    /// caller drives the cadence and gating; nothing is sent (and the sequence
+    /// number does not advance) when the slot is not AAF, there is no socket,
+    /// or @p render returns false. Media-timer thread. True if a packet was sent.
+    auto transmit_aaf_raw(
+        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
+    /// Send one built stream frame on @p slot (VLAN-tagged, pcap-stamped) and
+    /// count it. The tail every audio transmit shares. Media-timer thread.
+    void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame);
+
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
@@ -181,6 +195,24 @@ struct TalkerStreams
     TxPcapRecorder tx_pcap_recorder_{};
     uint64_t last_tx_gptp_ns_{0};
 };
+
+// ---------------------------------------------------------------------------
+// Raw AAF serialization (pure, socket-free -- unit-testable in isolation).
+// ---------------------------------------------------------------------------
+
+/// Build one AAF frame (header + payload) into @p frame for @p frames frames
+/// whose AVTP timestamp is the low 32 bits of @p pts_ns (@p ctx's presentation
+/// offset is not added), the payload filled by @p render as raw wire bytes.
+/// Returns the frame length, or 0 (with @p ctx untouched) if the format has no
+/// byte layout, @p frame is too small, or @p render returns false. On success
+/// @p ctx's sequence number advances as aaf_stream_serialize would.
+[[nodiscard]] auto serialize_aaf_raw(
+    avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> frame,
+    uint16_t frames,
+    uint64_t first_index,
+    uint64_t pts_ns,
+    StreamRawRenderFn const& render) -> size_t;
 
 // ---------------------------------------------------------------------------
 // CRF timestamp math (pure, socket-free -- unit-testable in isolation).

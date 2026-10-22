@@ -10,12 +10,22 @@
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
 #include <system_error>
 
 namespace statusbar::avb_entity {
+
+namespace {
+
+/// The largest AM824/AAF stream frame built here: header plus the most samples
+/// and channels a packet carries, 4 bytes each.
+constexpr size_t MAX_AUDIO_FRAME = std::max(avtp::AafPdu::HEADER_LENGTH, avtp::Am824Pdu::HEADER_LENGTH) +
+    (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
+
+}  // namespace
 
 auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stream_id, ieee::Eui48 const dest_mac) -> Status
 {
@@ -111,9 +121,7 @@ void TalkerStreams::transmit_am824(
     if (!slot.am824 || stream_tx_.fd() < 0) {
         return;
     }
-    static constexpr size_t MAX_FRAME =
-        avtp::Am824Pdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
-    std::array<uint8_t, MAX_FRAME> frame{};
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame{};
 
     size_t const channels = slot.spec.format.channels;
     avtp::Am824Pdu pdu{};
@@ -136,16 +144,7 @@ void TalkerStreams::transmit_am824(
 
     span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
-    // AVB stream frames must be VLAN-tagged with the SR class VID + PCP so bridges
-    // admit them to the reserved SR class (untagged AVTP is not part of any SR class).
-    // pcap stamp = the gPTP WALL-CLOCK transmit time (not now_ns, which is the
-    // media-clock PRESENTATION timestamp also written into the AVTP header). Using
-    // the wall clock lets a capture reveal the real presentation lead
-    // (avtp_ts - wall_clock = presentation_offset).
-    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
-    ++slot.tx_packets;
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
 }
 
 void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
@@ -153,9 +152,7 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
     if (!slot.aaf || stream_tx_.fd() < 0) {
         return;
     }
-    static constexpr size_t MAX_FRAME =
-        avtp::AafPdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
-    std::array<uint8_t, MAX_FRAME> frame{};
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame{};
 
     size_t const channels = slot.spec.format.channels;
     avtp::AafPdu pdu{};
@@ -172,11 +169,66 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
 
     span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::AafPdu::HEADER_LENGTH + audio_bytes;
-    // pcap stamp = gPTP WALL-CLOCK transmit time (see transmit_am824); now_ns here
-    // is the media-clock PRESENTATION time, also written into the AVTP header.
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+}
+
+auto serialize_aaf_raw(
+    avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> const frame,
+    uint16_t const frames,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    StreamRawRenderFn const& render) -> size_t
+{
+    size_t const bps = avtp::aaf_bytes_per_sample(ctx.format);
+    size_t const payload_len = static_cast<size_t>(frames) * ctx.channel_count * bps;
+    if (bps == 0 || payload_len == 0 || !render || frame.size() < avtp::AafPdu::HEADER_LENGTH + payload_len) {
+        return 0;
+    }
+    std::span<uint8_t> const payload = frame.subspan(avtp::AafPdu::HEADER_LENGTH, payload_len);
+    // Render first: a refused packet must not consume a sequence number.
+    if (!render(payload, frames, first_index, pts_ns)) {
+        return 0;
+    }
+    avtp::AafPdu pdu{};
+    ctx.build_packet_header(pdu, frames, pts_ns);
+    // The wire timestamp is pts_ns itself: build_packet_header adds the context's
+    // presentation offset, which the caller has already applied to pts_ns.
+    pdu.set_avtp_timestamp(static_cast<uint32_t>(pts_ns & 0xFFFF'FFFFU));
+    span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    return avtp::AafPdu::HEADER_LENGTH + payload_len;
+}
+
+auto TalkerStreams::transmit_aaf_raw(
+    TalkerStreamSlot& slot,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    uint16_t const frames,
+    StreamRawRenderFn const& render) -> bool
+{
+    if (!slot.aaf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
+        return false;
+    }
+    // Not zeroed: serialize_aaf_raw writes every byte it sends.
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    size_t const frame_len = serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render);
+    if (frame_len == 0) {
+        return false;
+    }
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    return true;
+}
+
+void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame)
+{
+    // AVB stream frames must be VLAN-tagged with the SR class VID + PCP so bridges
+    // admit them to the reserved SR class (untagged AVTP is not part of any SR class).
+    // pcap stamp = the gPTP WALL-CLOCK transmit time (not the media-clock
+    // PRESENTATION timestamp written into the AVTP header). Using the wall clock
+    // lets a capture reveal the real presentation lead
+    // (avtp_ts - wall_clock = presentation_offset).
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    (void)stream_tx_.send_vlan(&slot.dest_mac, frame, config_.vlan_id, config_.stream_pcp);
     ++slot.tx_packets;
 }
 

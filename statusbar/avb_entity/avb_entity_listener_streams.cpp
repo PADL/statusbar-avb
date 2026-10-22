@@ -46,6 +46,46 @@ auto kind_lit(ListenerStreamSlot const* slot)
 
 }  // namespace
 
+auto aaf_timed_packet(
+    uint16_t const stream_index,
+    avtp::AafStreamInputContext const& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> const payload,
+    uint16_t const frames,
+    uint64_t const pts_ns) noexcept -> StreamRxPacket
+{
+    size_t const bps = avtp::aaf_bytes_per_sample(ctx.format);
+    return StreamRxPacket{
+        .stream_index = stream_index,
+        .fmt = StreamAudioFormat::aaf_int32,
+        .aaf_format = ctx.format,
+        .bytes_per_sample = static_cast<uint8_t>(bps),
+        .payload = payload.first(std::min(payload.size(), size_t{frames} * bps * ctx.channel_count)),
+        .frames = frames,
+        .channels = ctx.channel_count,
+        .pts_ns = pts_ns,
+        .pts_valid = ctx.has_valid_timestamp,
+        .tu = pdu.tu(),
+        .mr = pdu.mr()};
+}
+
+auto aaf_rx_packet(
+    uint16_t const stream_index,
+    avtp::AafStreamInputContext& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> const payload,
+    uint64_t const gptp_now_ns) noexcept -> StreamRxPacket
+{
+    uint16_t const frames = avtp::aaf_payload_frames(ctx, payload);
+    if (frames == 0) {
+        return StreamRxPacket{.stream_index = stream_index, .aaf_format = ctx.format, .channels = ctx.channel_count};
+    }
+    ctx.process_packet_header(pdu, gptp_now_ns);
+    uint64_t const pts = ctx.compute_pts_ns();
+    ctx.advance_samples(frames);
+    return aaf_timed_packet(stream_index, ctx, pdu, payload, frames, pts);
+}
+
 auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
 {
     if (slots_.size() == MAX_ENTITY_STREAMS) {
@@ -273,13 +313,15 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         }
         std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
         uint64_t samples_this = 0;
+        uint64_t pts_first = 0;
         avtp::am824_deserialize_mbla(
             *slot->am824,
             pdu,
             audio,
             static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+            [&samples_this, &pts_first, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
                 samples_this = s.size();
+                pts_first = pts;
                 // Kit phase 2: decoded floats + reconstructed PTS reach the
                 // registered per-stream consumer (previously discarded).
                 if (slot->consume) {
@@ -306,6 +348,20 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         if (audio_sink_ != nullptr) {
             audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::am824_mbla, audio);
         }
+        if (timed_sink_ != nullptr && samples_this != 0) {
+            uint16_t const channels = slot->am824->config.channel_count;
+            timed_sink_->on_listener_packet(StreamRxPacket{
+                .stream_index = slot->spec.index,
+                .fmt = StreamAudioFormat::am824_mbla,
+                .bytes_per_sample = 4,
+                .payload = audio.first(std::min(audio.size(), samples_this * 4 * channels)),
+                .frames = static_cast<uint32_t>(samples_this),
+                .channels = channels,
+                .pts_ns = pts_first,
+                .pts_valid = slot->am824->has_valid_anchor,
+                .tu = pdu.stream_header.tu(),
+                .mr = pdu.stream_header.mr()});
+        }
     } else if (slot->aaf) {
         // --- AAF ---
         auto pdu_opt = avtp::aaf_parse_header(frame);
@@ -317,17 +373,33 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         }
         std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);
         uint64_t samples_this = 0;
-        avtp::aaf_stream_deserialize(
-            *slot->aaf,
-            *pdu_opt,
-            audio,
-            static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
-                samples_this = s.size();
-                if (slot->consume) {
-                    slot->consume(ch, s, pts, period);
-                }
-            });
+        if (timed_sink_ != nullptr && !slot->consume) {
+            // Raw-only: the timed sink takes the payload as is, so skip the
+            // float decode and take the timing from the header alone.
+            auto const packet = aaf_rx_packet(slot->spec.index, *slot->aaf, *pdu_opt, audio, static_cast<uint64_t>(gptp_now_ns));
+            samples_this = packet.frames;
+            if (packet.frames != 0) {
+                timed_sink_->on_listener_packet(packet);
+            }
+        } else {
+            uint64_t pts_first = 0;
+            avtp::aaf_stream_deserialize(
+                *slot->aaf,
+                *pdu_opt,
+                audio,
+                static_cast<uint64_t>(gptp_now_ns),
+                [&samples_this, &pts_first, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+                    samples_this = s.size();
+                    pts_first = pts;
+                    if (slot->consume) {
+                        slot->consume(ch, s, pts, period);
+                    }
+                });
+            if (timed_sink_ != nullptr && samples_this != 0) {
+                timed_sink_->on_listener_packet(aaf_timed_packet(
+                    slot->spec.index, *slot->aaf, *pdu_opt, audio, static_cast<uint16_t>(samples_this), pts_first));
+            }
+        }
         slot->rx_packets.add(1);
         slot->rx_samples.add(samples_this);
         update_stream_input_counters(
