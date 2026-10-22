@@ -18,6 +18,7 @@ statusbar_add_module(
   avb_entity_listener_streams.cpp
   avb_entity_talker_streams.cpp
   avb_entity_talker_gate.cpp
+  avb_entity_shaper.cpp
   avb_entity_udptun_bridge.cpp
   avb_entity_udptun_transport.cpp
   avb_entity_udptun_ingest_path.cpp
@@ -59,6 +60,7 @@ statusbar_add_module(
   avb_entity_udptun_ingest_test.cpp
   avb_entity_stream_rx_sink_test.cpp
   avb_entity_aaf_reframe_test.cpp
+  avb_entity_shaper_test.cpp
   tx_pcap_recorder_test.cpp
   log_sweep_generator_test.cpp)
 

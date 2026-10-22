@@ -146,6 +146,18 @@ class AvbEntityKit
     /// no handler still get the generic store/serve built-in.
     void on_control_symbol(uint32_t symbol_code, ControlChangedFn fn);
 
+    // --- Talker admission (the hardware shaper's input) ------------------------
+    /// The talker stream indices currently admitted (TalkerGate::admitted: a
+    /// listener is ACMP-connected and its reservation is ready; every stream
+    /// when gating is disabled), in stream-table order.
+    using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
+    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
+    /// Called on the reactor thread with the new admitted set whenever it changes, not for the set
+    /// in force when installed (read admitted_talker_streams()). An empty function removes it
+    /// (before whatever it captures goes).
+    using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
+    void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
+
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
     /// state; the blob's authored default until a controller changes it).
@@ -169,6 +181,15 @@ class AvbEntityKit
     [[nodiscard]] auto talker_specs() const noexcept -> StreamSpecs const& { return talker_specs_; }
     [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
+    /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
+    [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
+
+    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at
+    /// the class A cadence, one frame per interval (also the shaper's input).
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
+    {
+        return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+    }
 
     // --- Stream socket health (after start()) ---------------------------------
     /// Why start() could not open the stream TX socket (empty: it opened). The
@@ -191,6 +212,9 @@ class AvbEntityKit
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
+    /// Recompute the admitted set after a gate input changed; fire
+    /// on_admission_changed_ when it differs from the last one.
+    void note_admission();
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
@@ -208,6 +232,9 @@ class AvbEntityKit
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_;
+    /// The admitted set last reported, and its listener.
+    AdmittedStreams admitted_{};
+    AdmissionChangedFn on_admission_changed_{};
 
     /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
     /// counters + capture recorder. Binds the ENTITY's media clock + gPTP atomic.

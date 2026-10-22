@@ -308,6 +308,14 @@ auto TalkerStreams::open_tx(std::string_view const interface_name, TxPcapConfig 
     if (!status) {
         return status;
     }
+    // Bypass frames skip the qdiscs: skb->priority picks their TX queue through the prio-to-TC
+    // map, so the SR class PCP lands them on EntityShaper's shaped queue. Best effort (priority 7
+    // needs CAP_NET_ADMIN): the streams still flow, and the owner logs tx_priority_error().
+    if (auto priority = stream_tx_.set_priority(config_.stream_pcp); !priority) {
+        tx_priority_error_ = priority.error();
+    } else {
+        tx_priority_error_ = {};
+    }
     // Optional TX stream capture: qdisc-bypass egress is invisible to any
     // local capture, so tap the frames at the socket, gPTP-timestamped.
     if (!pcap.path.empty()) {

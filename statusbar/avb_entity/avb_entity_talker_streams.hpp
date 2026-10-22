@@ -38,6 +38,7 @@
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <system_error>
 
 namespace statusbar::avb_entity {
 
@@ -100,6 +101,14 @@ struct TalkerStreams
     /// entities no longer reach into stream_tx_/tx_pcap_recorder_).
     auto open_tx(std::string_view interface_name, TxPcapConfig const& pcap) -> Status;
     auto open_tx(std::string_view const interface_name) -> Status { return open_tx(interface_name, TxPcapConfig{}); }
+
+    /// Set the stream TX socket's SO_PRIORITY, which under PACKET_QDISC_BYPASS picks the hardware
+    /// TX queue; open_tx sets it to config_.stream_pcp (best effort). Reactor thread. Errors: the
+    /// setsockopt errno; bad_file_descriptor before open_tx.
+    [[nodiscard]] auto set_tx_priority(int const priority) noexcept -> Status { return stream_tx_.set_priority(priority); }
+    /// Why open_tx could not set the socket's priority to config_.stream_pcp
+    /// (empty: it did). The socket stays open either way.
+    [[nodiscard]] auto tx_priority_error() const noexcept -> std::error_code { return tx_priority_error_; }
 
     /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
     /// the file awaits the non-RT flush.
@@ -196,6 +205,7 @@ struct TalkerStreams
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     net::RawnetContext stream_tx_{};
+    std::error_code tx_priority_error_{};  ///< see tx_priority_error()
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the socket egress tap can stamp the captured frame with the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};
