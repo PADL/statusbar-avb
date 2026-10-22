@@ -111,6 +111,7 @@ class MaapAddressAcquirer
         if (!net_handler->valid()) {
             log_->warning("maap: socket open failed; using static stream dest MACs");
             handler_.reset();
+            fell_back_to_static_ = true;
             ready_.store(true, std::memory_order_release);  // fall back: do not gate
             return {};
         }
@@ -127,9 +128,15 @@ class MaapAddressAcquirer
     /// defended; false while (re)acquiring.
     [[nodiscard]] auto ready() const noexcept -> bool { return ready_.load(std::memory_order_acquire); }
 
+    /// Whether acquire() could not open the MAAP socket and the talkers kept
+    /// the static per-kind destination MACs (so several talkers of one kind
+    /// share a MAC). Reactor thread, after acquire().
+    [[nodiscard]] auto fell_back_to_static() const noexcept -> bool { return fell_back_to_static_; }
+
   private:
     std::unique_ptr<avtp::MaapHandler> handler_;
     std::atomic<bool> ready_{true};
+    bool fell_back_to_static_{false};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     statusbar::sg14::inplace_function<void(), 32> on_addresses_ready_{};
     std::optional<logging::Logger> log_{};  ///< set by acquire (Logger is not default-constructible)

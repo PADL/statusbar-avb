@@ -306,6 +306,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         // with its wake gPTP time, so RX can't be starved by the control plane.
         if (auto rx = listener_->attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
+        } else {
+            stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
         }
         // Persisted fast-connect bindings (kit phase 5b): a restarted entity
         // re-connects its inputs without a controller (see AvbEntityHost).
@@ -313,10 +315,15 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
     }
 
     // TX socket + optional pcap capture (TalkerStreams assembles its own I/O).
-    (void)talker_->open_tx(
-        config_.interface_name,
-        TalkerStreams::TxPcapConfig{
-            .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+    // Tolerated here (the entity stays a control-plane-only node); recorded
+    // for a host that needs the data plane (stream_tx_error()).
+    if (auto tx = talker_->open_tx(
+            config_.interface_name,
+            TalkerStreams::TxPcapConfig{
+                .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+        !tx) {
+        stream_tx_error_ = tx.error();
+    }
 
     // Menu/selection diagnostics: registrations the model left inert. Status
     // level -- typo-finding, never an error.

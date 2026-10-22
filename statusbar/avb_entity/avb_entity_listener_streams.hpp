@@ -78,6 +78,27 @@ struct ListenerStreamSlot
     StreamInputCounters counters{};
 };
 
+/// The timed packet for @p frames whole frames of an accepted AAF payload presented from @p pts_ns,
+/// after @p ctx processed its header: the payload trimmed to those frames, the sample format, tu and
+/// mr. Both AAF receive paths build their packet with it.
+[[nodiscard]] auto aaf_timed_packet(
+    uint16_t stream_index,
+    avtp::AafStreamInputContext const& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> payload,
+    uint16_t frames,
+    uint64_t pts_ns) noexcept -> StreamRxPacket;
+
+/// The timed packet for one AAF frame without decoding it (the raw-only RX path): accepts what
+/// avtp::aaf_stream_deserialize accepts and updates @p ctx as it does. A refused payload returns
+/// frames == 0 and leaves @p ctx untouched.
+[[nodiscard]] auto aaf_rx_packet(
+    uint16_t stream_index,
+    avtp::AafStreamInputContext& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> payload,
+    uint64_t gptp_now_ns) noexcept -> StreamRxPacket;
+
 struct ListenerStreams
 {
     /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns).
@@ -193,6 +214,11 @@ struct ListenerStreams
     /// talker's multicast group. Wired as the acmp_listener disconnect callback.
     void on_listener_disconnected(uint16_t stream_index);
 
+    /// Attach (nullptr detaches) the timed raw sink offered every accepted AM824/AAF packet with its
+    /// presentation time; an AAF stream with no StreamConsumeFn is then not decoded to float.
+    /// Set before streams flow; the RX thread reads it.
+    void set_timed_audio_sink(StreamRxTimedAudioSink* sink) noexcept { timed_sink_ = sink; }
+
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
@@ -207,6 +233,8 @@ struct ListenerStreams
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does
     /// not know what the sink does with it. Nullable.
     StreamRxAudioSink* audio_sink_{nullptr};
+    /// Timestamped raw sink (the media bridge's listener seam). Nullable.
+    StreamRxTimedAudioSink* timed_sink_{nullptr};
     /// Non-owning handle to the StreamRxHandler's RX socket (owned by the reactor).
     /// Set by the entity in start() before the handler is moved into the reactor;
     /// used to join/leave a remote talker's stream multicast group on connect/disconnect.

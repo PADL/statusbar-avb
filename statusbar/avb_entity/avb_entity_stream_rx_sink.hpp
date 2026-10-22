@@ -15,6 +15,8 @@
 /// decides what to do with it (including dropping it -- e.g. the tunnel ignores
 /// audio for a stream it is not configured to source).
 
+#include "statusbar/avtp/avtp_aaf.hpp"
+
 #include <cstdint>
 #include <span>
 
@@ -45,6 +47,39 @@ struct StreamRxAudioSink
     auto operator=(StreamRxAudioSink const&) -> StreamRxAudioSink& = default;
     auto operator=(StreamRxAudioSink&&) -> StreamRxAudioSink& = default;
     virtual ~StreamRxAudioSink() = default;
+};
+
+/// One accepted listener stream packet with its timing: what a sink needs to
+/// place the frames on the media clock without decoding them.
+struct StreamRxPacket
+{
+    uint16_t stream_index{0};                             ///< STREAM_INPUT index the packet arrived on
+    StreamAudioFormat fmt{StreamAudioFormat::aaf_int32};  ///< wire family: AM824 or AAF (any AAF sample format)
+    /// AAF: the stream's sample format (int16/24/32, float32, AES3); AM824: user_specified.
+    avtp::AafFormat aaf_format{avtp::AafFormat::user_specified};
+    uint8_t bytes_per_sample{0};       ///< AAF: per aaf_format; AM824: 4 (one quadlet)
+    std::span<uint8_t const> payload;  ///< exactly frames x channels x bytes_per_sample bytes, as received
+    uint32_t frames{0};                ///< samples per channel in @p payload
+    uint16_t channels{0};              ///< channels per frame
+    uint64_t pts_ns{0};                ///< reconstructed 64-bit presentation time of the first frame
+    bool pts_valid{false};             ///< false until the stream has carried a valid timestamp
+    bool tu{false};                    ///< AVTP tu: the talker marked its timestamp uncertain
+    bool mr{false};                    ///< AVTP mr: the talker's media clock restart toggle, as received
+};
+
+/// The timestamped StreamRxAudioSink: each accepted packet's raw payload, 64-bit AVTP presentation
+/// time and dimensions, on the RX thread with the same discipline. With only this sink attached,
+/// AAF is not decoded to float.
+struct StreamRxTimedAudioSink
+{
+    virtual void on_listener_packet(StreamRxPacket const& packet) = 0;
+
+    StreamRxTimedAudioSink() = default;
+    StreamRxTimedAudioSink(StreamRxTimedAudioSink const&) = default;
+    StreamRxTimedAudioSink(StreamRxTimedAudioSink&&) = default;
+    auto operator=(StreamRxTimedAudioSink const&) -> StreamRxTimedAudioSink& = default;
+    auto operator=(StreamRxTimedAudioSink&&) -> StreamRxTimedAudioSink& = default;
+    virtual ~StreamRxTimedAudioSink() = default;
 };
 
 }  // namespace statusbar::avb_entity

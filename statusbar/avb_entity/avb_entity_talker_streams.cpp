@@ -10,12 +10,22 @@
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
 #include <system_error>
 
 namespace statusbar::avb_entity {
+
+namespace {
+
+/// The largest AM824/AAF stream frame built here: header plus the most samples
+/// and channels a packet carries, 4 bytes each.
+constexpr size_t MAX_AUDIO_FRAME = std::max(avtp::AafPdu::HEADER_LENGTH, avtp::Am824Pdu::HEADER_LENGTH) +
+    (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
+
+}  // namespace
 
 auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stream_id, ieee::Eui48 const dest_mac) -> Status
 {
@@ -45,7 +55,8 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
             break;
         }
         case StreamKind::crf: {
-            if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0) {
+            if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0 ||
+                spec.format.crf_timestamps_per_pdu > MAX_CRF_TIMESTAMPS_PER_PDU) {
                 return failure(std::errc::invalid_argument);
             }
             slot.crf.emplace(
@@ -111,9 +122,7 @@ void TalkerStreams::transmit_am824(
     if (!slot.am824 || stream_tx_.fd() < 0) {
         return;
     }
-    static constexpr size_t MAX_FRAME =
-        avtp::Am824Pdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
-    std::array<uint8_t, MAX_FRAME> frame{};
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame{};
 
     size_t const channels = slot.spec.format.channels;
     avtp::Am824Pdu pdu{};
@@ -136,16 +145,7 @@ void TalkerStreams::transmit_am824(
 
     span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
-    // AVB stream frames must be VLAN-tagged with the SR class VID + PCP so bridges
-    // admit them to the reserved SR class (untagged AVTP is not part of any SR class).
-    // pcap stamp = the gPTP WALL-CLOCK transmit time (not now_ns, which is the
-    // media-clock PRESENTATION timestamp also written into the AVTP header). Using
-    // the wall clock lets a capture reveal the real presentation lead
-    // (avtp_ts - wall_clock = presentation_offset).
-    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
-    ++slot.tx_packets;
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
 }
 
 void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
@@ -153,9 +153,7 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
     if (!slot.aaf || stream_tx_.fd() < 0) {
         return;
     }
-    static constexpr size_t MAX_FRAME =
-        avtp::AafPdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
-    std::array<uint8_t, MAX_FRAME> frame{};
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame{};
 
     size_t const channels = slot.spec.format.channels;
     avtp::AafPdu pdu{};
@@ -172,11 +170,62 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
 
     span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::AafPdu::HEADER_LENGTH + audio_bytes;
-    // pcap stamp = gPTP WALL-CLOCK transmit time (see transmit_am824); now_ns here
-    // is the media-clock PRESENTATION time, also written into the AVTP header.
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+}
+
+auto serialize_aaf_raw(
+    avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> const frame,
+    uint16_t const frames,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    StreamRawRenderFn const& render) -> size_t
+{
+    size_t const bps = avtp::aaf_bytes_per_sample(ctx.format);
+    size_t const payload_len = static_cast<size_t>(frames) * ctx.channel_count * bps;
+    if (bps == 0 || payload_len == 0 || !render || frame.size() < avtp::AafPdu::HEADER_LENGTH + payload_len) {
+        return 0;
+    }
+    std::span<uint8_t> const payload = frame.subspan(avtp::AafPdu::HEADER_LENGTH, payload_len);
+    // Render first: a refused packet must not consume a sequence number.
+    if (!render(payload, frames, first_index, pts_ns)) {
+        return 0;
+    }
+    avtp::AafPdu pdu{};
+    ctx.build_packet_header(pdu, frames, pts_ns);
+    // The wire timestamp is pts_ns itself: build_packet_header adds the context's
+    // presentation offset, which the caller has already applied to pts_ns.
+    pdu.set_avtp_timestamp(static_cast<uint32_t>(pts_ns & 0xFFFF'FFFFU));
+    span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    return avtp::AafPdu::HEADER_LENGTH + payload_len;
+}
+
+auto TalkerStreams::transmit_aaf_raw(
+    TalkerStreamSlot& slot,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    uint16_t const frames,
+    StreamRawRenderFn const& render) -> bool
+{
+    if (!slot.aaf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
+        return false;
+    }
+    // Not zeroed: serialize_aaf_raw writes every byte it sends.
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    size_t const frame_len = serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render);
+    if (frame_len == 0) {
+        return false;
+    }
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    return true;
+}
+
+void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame)
+{
+    // Frames carry the SR class VID + PCP (untagged AVTP is in no SR class). The pcap stamp is the
+    // gPTP wall-clock transmit time, so a capture shows avtp_ts - wall_clock = presentation_offset.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    (void)stream_tx_.send_vlan(&slot.dest_mac, frame, config_.vlan_id, config_.stream_pcp);
     ++slot.tx_packets;
 }
 
@@ -184,17 +233,37 @@ void fill_crf_timestamps(
     ptpclient::MediaClockGenerator const& media_clock,
     uint64_t const base_index,
     uint32_t const sample_stride,
-    uint16_t const n_ts,
-    std::span<uint8_t> ts_data) noexcept
+    std::span<uint64_t> const timestamps) noexcept
 {
     // Timestamps come from the media clock, so the CRF conveys exactly our media
     // clock (event times, evenly spaced by sample_stride in the SAMPLE_RATE domain).
     // timestamp_for() already carries the presentation offset (Open1722's CRF
     // talker likewise offsets by the max transit time).
-    for (uint16_t i = 0; i < n_ts; ++i) {
-        uint64_t const ts = media_clock.timestamp_for(base_index + (static_cast<uint64_t>(i) * sample_stride));
-        (void)avtp::crf_set_timestamp(ts_data, i, ts);
+    for (size_t i = 0; i < timestamps.size(); ++i) {
+        timestamps[i] = media_clock.timestamp_for(base_index + (static_cast<uint64_t>(i) * sample_stride));
     }
+}
+
+auto serialize_crf_raw(
+    avtp::CrfStreamOutputContext& ctx, std::span<uint8_t> const frame, std::span<uint64_t const> const timestamps) -> size_t
+{
+    uint16_t const n_ts = ctx.timestamps_per_packet;
+    size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
+    if (n_ts == 0 || timestamps.size() != n_ts || frame.size() < frame_len) {
+        return 0;
+    }
+    avtp::CrfPdu pdu{};
+    pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, n_ts);
+    pdu.set_sequence_num(ctx.sequence_num);
+    std::span<uint8_t> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH, frame_len - avtp::CrfPdu::HEADER_LENGTH);
+    for (uint16_t i = 0; i < n_ts; ++i) {
+        (void)avtp::crf_set_timestamp(ts_data, i, timestamps[i]);
+    }
+    span_store(frame.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+    ctx.sequence_num = static_cast<uint8_t>((ctx.sequence_num + 1U) & 0xFFU);
+    ++ctx.packets_sent;
+    ctx.total_timestamps_sent += n_ts;
+    return frame_len;
 }
 
 void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_index)
@@ -202,33 +271,34 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     if (!slot.crf || stream_tx_.fd() < 0 || !media_clock_.anchored()) {
         return;
     }
-    uint16_t const n_ts = slot.crf->timestamps_per_packet;
-    uint16_t const interval = slot.crf->timestamp_interval;
     // Convert the DECLARED interval (in CRF base-frequency events) into the audio
     // sample-index domain that media_clock_.timestamp_for() speaks. With a 48 kHz
     // CRF base and 96 kHz audio, each declared CRF event spans SAMPLE_RATE/base
     // (= 2) audio samples, so the emitted timestamp VALUES stay spaced at
     // interval/base seconds regardless of the base we advertise.
-    uint32_t const sample_stride = crf_sample_stride(interval, slot.crf->base_frequency, config_.sample_rate);
+    uint32_t const sample_stride = crf_sample_stride(slot.crf->timestamp_interval, slot.crf->base_frequency, config_.sample_rate);
+    // Not zeroed: fill_crf_timestamps writes the n_ts sent (open_stream capped
+    // n_ts at MAX_CRF_TIMESTAMPS_PER_PDU).
+    std::array<uint64_t, MAX_CRF_TIMESTAMPS_PER_PDU> timestamps;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::span<uint64_t> const used{timestamps.data(), slot.crf->timestamps_per_packet};
+    fill_crf_timestamps(media_clock_, base_index, sample_stride, used);
+    (void)transmit_crf_raw(slot, used);
+}
 
-    static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (64 * avtp::CrfPdu::TIMESTAMP_SIZE);
-    std::array<uint8_t, MAX_FRAME> frame{};
-
-    avtp::CrfPdu pdu{};
-    pdu.init_audio_sample(slot.crf->stream_id, slot.crf->base_frequency, slot.crf->pull, interval, n_ts);
-    pdu.set_sequence_num(slot.crf->sequence_num);
-
-    std::span<uint8_t> const ts_data = std::span<uint8_t>{frame}.subspan(avtp::CrfPdu::HEADER_LENGTH);
-    fill_crf_timestamps(media_clock_, base_index, sample_stride, n_ts, ts_data);
-    slot.crf->sequence_num = static_cast<uint8_t>((slot.crf->sequence_num + 1U) & 0xFFU);
-    ++slot.crf->packets_sent;
-
-    span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
-    size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
-    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);  // gPTP timestamp for the optional TX pcap tap
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
-    ++slot.tx_packets;
+auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> const timestamps_ns) -> bool
+{
+    if (!slot.crf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
+        return false;
+    }
+    static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (MAX_CRF_TIMESTAMPS_PER_PDU * avtp::CrfPdu::TIMESTAMP_SIZE);
+    // Not zeroed: serialize_crf_raw writes every byte it sends.
+    std::array<uint8_t, MAX_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns);
+    if (frame_len == 0) {
+        return false;
+    }
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    return true;
 }
 
 auto TalkerStreams::open_tx(std::string_view const interface_name, TxPcapConfig const& pcap) -> Status

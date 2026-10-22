@@ -111,7 +111,8 @@ struct TalkerStreams
     /// serializer for @p stream_id. CRF timing (base frequency, interval,
     /// timestamps per PDU) comes from the spec's decoded format word — the
     /// blob is the single source. Errors: unknown/unsupported format kind or
-    /// rate, or more than MAX_ENTITY_STREAMS slots.
+    /// rate, a CRF format with no timestamps or more than
+    /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
@@ -156,13 +157,32 @@ struct TalkerStreams
     /// entities.)
     void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples, std::span<float const> src);
     void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
+    /// Send one AAF packet of @p frames frames at wire presentation time @p pts_ns (no offset added),
+    /// its payload filled by @p render as raw wire bytes. Media-timer thread; true if sent. Nothing is
+    /// sent, nor the sequence advanced, for a non-AAF slot, no socket, or @p render false.
+    auto transmit_aaf_raw(
+        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
+    /// Send one built stream frame on @p slot (VLAN-tagged, pcap-stamped) and
+    /// count it. The tail every audio transmit shares. Media-timer thread.
+    void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame);
+
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
+    /// Fills the timestamps from the media clock (fill_crf_timestamps) and sends
+    /// them with transmit_crf_raw; nothing is sent before the media clock is anchored.
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
+    /// Send one CRF PDU on @p slot carrying exactly @p timestamps_ns (64-bit gPTP times, offset
+    /// applied). Media-timer thread; true if sent. Nothing is sent for a non-CRF or stopped slot,
+    /// no socket, or a count other than timestamps_per_packet.
+    auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns) -> bool;
 
     /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
     /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
     static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = avb_entity::CLASS_A_PACKETS_PER_SEC;
+
+    /// The most timestamps one CRF PDU carries: open_stream refuses a CRF
+    /// format declaring more (or none), so the TX paths size their buffers by it.
+    static constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PDU = 64;
 
     // References / values (bound at construction).
     TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
@@ -181,6 +201,21 @@ struct TalkerStreams
     TxPcapRecorder tx_pcap_recorder_{};
     uint64_t last_tx_gptp_ns_{0};
 };
+
+// ---------------------------------------------------------------------------
+// Raw AAF serialization (pure, socket-free -- unit-testable in isolation).
+// ---------------------------------------------------------------------------
+
+/// Build one AAF frame into @p frame for @p frames frames, AVTP timestamp the low 32 bits of
+/// @p pts_ns (no offset added), payload filled by @p render. Returns the length (sequence advanced),
+/// or 0 with @p ctx untouched for a format with no byte layout, a short @p frame or @p render false.
+[[nodiscard]] auto serialize_aaf_raw(
+    avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> frame,
+    uint16_t frames,
+    uint64_t first_index,
+    uint64_t pts_ns,
+    StreamRawRenderFn const& render) -> size_t;
 
 // ---------------------------------------------------------------------------
 // CRF timestamp math (pure, socket-free -- unit-testable in isolation).
@@ -205,16 +240,18 @@ struct TalkerStreams
     return sample_stride == 0 ? first_index : (first_index / sample_stride) * sample_stride;
 }
 
-/// Fill `n_ts` CRF timestamps into `ts_data` (each avtp::CrfPdu::TIMESTAMP_SIZE
-/// bytes) from `media_clock`, starting at `base_index` and spaced by
-/// `sample_stride` in the media-clock sample-index domain. Pure: no socket,
-/// no mutable state -- the timestamp VALUES are exactly the media clock's
-/// presentation times for those sample indices.
+/// Fill @p timestamps with @p media_clock's presentation times (offset included) for sample indices
+/// from @p base_index spaced by @p sample_stride. Pure.
 void fill_crf_timestamps(
     ptpclient::MediaClockGenerator const& media_clock,
     uint64_t base_index,
     uint32_t sample_stride,
-    uint16_t n_ts,
-    std::span<uint8_t> ts_data) noexcept;
+    std::span<uint64_t> timestamps) noexcept;
+
+/// Build one CRF frame into @p frame carrying @p timestamps verbatim with @p ctx's stream id, type
+/// and sequence. Returns the length (counters advanced), or 0 with @p ctx untouched for a count
+/// other than ctx.timestamps_per_packet (or zero) or a short @p frame. Pure.
+[[nodiscard]] auto serialize_crf_raw(
+    avtp::CrfStreamOutputContext& ctx, std::span<uint8_t> frame, std::span<uint64_t const> timestamps) -> size_t;
 
 }  // namespace statusbar::avb_entity

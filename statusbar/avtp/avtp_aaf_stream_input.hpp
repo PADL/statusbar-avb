@@ -80,6 +80,25 @@ struct AafStreamInputContext
     void advance_samples(uint16_t sample_count) noexcept;
 };
 
+/// Frames per channel in an AAF payload (trailing bytes short of a frame not counted), or 0 if
+/// aaf_stream_deserialize would refuse it (no channels, unsized format, more than MaxChannels or
+/// MaxSamples, no whole frame): the acceptance rule every AAF receive path shares.
+template <size_t MaxChannels = 64, size_t MaxSamples = 256>
+[[nodiscard]] constexpr auto aaf_payload_frames(AafStreamInputContext const& ctx, std::span<uint8_t const> payload) noexcept
+    -> uint16_t
+{
+    uint16_t const channels = ctx.channel_count;
+    size_t const bps = aaf_bytes_per_sample(ctx.format);
+    if (!is_valid_aaf_deserialize_params<MaxChannels>(channels, bps)) {
+        return 0;
+    }
+    uint16_t const samples = static_cast<uint16_t>(payload.size() / (bps * channels));
+    if (samples == 0 || samples > MaxSamples) {
+        return 0;
+    }
+    return samples;
+}
+
 /// Deserialize AAF audio stream — decodes any PCM format to float per-channel
 ///
 /// Calls on_audio once per channel with decoded float samples and presentation time.
@@ -101,16 +120,12 @@ void aaf_stream_deserialize(
     uint64_t gptp_now_ns,
     AudioCallback const& on_audio)
 {
+    uint16_t const samples = aaf_payload_frames<MaxChannels, MaxSamples>(ctx, payload);
+    if (samples == 0) {
+        return;
+    }
     uint16_t const channels = ctx.channel_count;
     size_t const bps = aaf_bytes_per_sample(ctx.format);
-    if (!is_valid_aaf_deserialize_params<MaxChannels>(channels, bps)) {
-        return;
-    }
-
-    uint16_t const samples = static_cast<uint16_t>(payload.size() / (bps * channels));
-    if (samples == 0 || samples > MaxSamples) {
-        return;
-    }
 
     ctx.process_packet_header(pdu, gptp_now_ns);
 

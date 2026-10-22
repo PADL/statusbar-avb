@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <span>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace statusbar::avb_entity {
@@ -44,13 +45,19 @@ class StreamRxHandler : public net::Pollable
     StreamRxHandler(std::string_view interface_name, std::span<ieee::Eui48 const> groups, DrainFn drain)
         : drain_{std::move(drain)}
     {
-        (void)sock_.open(interface_name, avtp::AVTP_ETHERTYPE, groups.empty() ? nullptr : &groups[0], /*qdisc_bypass=*/false);
+        if (auto opened =
+                sock_.open(interface_name, avtp::AVTP_ETHERTYPE, groups.empty() ? nullptr : &groups[0], /*qdisc_bypass=*/false);
+            !opened) {
+            error_ = opened.error();
+        }
         for (size_t i = 1; i < groups.size(); ++i) {
             (void)sock_.join_multicast(groups[i]);
         }
     }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
+    /// What opening the socket failed with (empty when it opened).
+    [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
 
     /// Non-owning access to the RX socket, for dynamic multicast join/leave on ACMP
     /// connect/disconnect. Stable across the move into the reactor.
@@ -64,6 +71,7 @@ class StreamRxHandler : public net::Pollable
   private:
     net::RawnetContext sock_{};
     DrainFn drain_;
+    std::error_code error_{};
 };
 
 }  // namespace statusbar::avb_entity

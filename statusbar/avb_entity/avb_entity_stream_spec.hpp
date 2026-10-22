@@ -216,6 +216,12 @@ static_assert(symbol_code("identify") == 0x12619917U);
 using StreamRenderFn =
     sg14::inplace_function<void(std::span<float> audio, uint32_t frames, uint64_t first_index, uint64_t pts_ns), 64>;
 
+/// Per-stream raw TX render: fill @p payload with exactly @p frames frames in the
+/// stream's AAF wire layout for the packet at sample index @p first_index, time
+/// @p pts_ns. Return false to send nothing. Same thread as StreamRenderFn.
+using StreamRawRenderFn =
+    sg14::inplace_function<bool(std::span<uint8_t> payload, uint32_t frames, uint64_t first_index, uint64_t pts_ns), 64>;
+
 /// Per-stream RX audio consumer: one decoded channel of @p samples floats
 /// with its reconstructed 64-bit presentation time. Runs on the reactor/RX
 /// thread: keep it cheap and non-blocking.
