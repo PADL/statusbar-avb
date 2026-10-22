@@ -1,0 +1,340 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+#include "statusbar/ptpclient/ptpclient_management.hpp"
+
+#include "statusbar/test/test.hpp"
+
+#include <unistd.h>
+
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <format>
+#include <span>
+#include <vector>
+
+#include <sys/socket.h>
+#include <sys/un.h>
+
+using namespace statusbar;
+using namespace statusbar::ptpclient;
+
+namespace {
+
+// ptp4l's RESPONSE to `pmc -u -b 0 'GET PARENT_DATA_SET'` (IEEE 1588-2019 15.5.3.3.1): clock 00:1b:21:ff:fe:aa:bb:cc
+// port 1, domain 0; grandmaster 00:1d:c1:ff:fe:12:34:56 (priority1 128, class 6, accuracy 0x21, variance 0x4e5d).
+// clang-format off
+constexpr std::array<uint8_t, 86> PARENT_RESPONSE{
+    // common header
+    0x0D, 0x02, 0x00, 0x56,                          // management, PTPv2, messageLength 86
+    0x00, 0x00, 0x00, 0x00,                          // domain 0, minorSdoId, flags
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // correctionField
+    0x00, 0x00, 0x00, 0x00,                          // messageTypeSpecific
+    0x00, 0x1B, 0x21, 0xFF, 0xFE, 0xAA, 0xBB, 0xCC,  // sourcePortIdentity.clockIdentity
+    0x00, 0x01,                                      // sourcePortIdentity.portNumber
+    0x00, 0x07,                                      // sequenceId 7
+    0x04, 0x7F,                                      // controlField, logMessageInterval
+    // management header
+    0x00, 0x00, 0x00, 0xFF, 0xFE, 0x00, 0x30, 0x39, 0x00, 0x01,  // targetPortIdentity (pmc's)
+    0x00, 0x00,                                                  // startingBoundaryHops, boundaryHops
+    0x02, 0x00,                                                  // actionField RESPONSE, reserved
+    // MANAGEMENT TLV
+    0x00, 0x01, 0x00, 0x22,                                      // tlvType MANAGEMENT, lengthField 34
+    0x20, 0x02,                                                  // managementId PARENT_DATA_SET
+    0x00, 0x1D, 0xC1, 0xFF, 0xFE, 0x12, 0x34, 0x56, 0x00, 0x01,  // parentPortIdentity
+    0x00, 0x00,                                                  // parentStats, reserved
+    0xFF, 0xFF,                                                  // observedParentOffsetScaledLogVariance
+    0x7F, 0xFF, 0xFF, 0xFF,                                      // observedParentClockPhaseChangeRate
+    0x80,                                                        // grandmasterPriority1
+    0x06, 0x21, 0x4E, 0x5D,                                      // grandmasterClockQuality
+    0x80,                                                        // grandmasterPriority2
+    0x00, 0x1D, 0xC1, 0xFF, 0xFE, 0x12, 0x34, 0x56,              // grandmasterIdentity
+};
+// clang-format on
+
+ieee::Eui64 const GM{0x00, 0x1D, 0xC1, 0xFF, 0xFE, 0x12, 0x34, 0x56};
+
+/// A RESPONSE carrying `data` for `id`, in `domain`, built as the bytes above are.
+auto response(uint16_t const id, std::vector<uint8_t> const& data, uint8_t const domain = 0) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> out(PARENT_RESPONSE.begin(), PARENT_RESPONSE.begin() + 48);
+    out[4] = domain;
+    size_t const length = 48 + 6 + data.size();
+    out[2] = static_cast<uint8_t>(length >> 8U);
+    out[3] = static_cast<uint8_t>(length);
+    uint16_t const tlv_length = static_cast<uint16_t>(2 + data.size());
+    out.insert(out.end(), {0x00, 0x01, static_cast<uint8_t>(tlv_length >> 8U), static_cast<uint8_t>(tlv_length)});
+    out.insert(out.end(), {static_cast<uint8_t>(id >> 8U), static_cast<uint8_t>(id)});
+    out.insert(out.end(), data.begin(), data.end());
+    return out;
+}
+
+auto parent_data(ieee::Eui64 const& gm) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> data(PARENT_RESPONSE.begin() + 54, PARENT_RESPONSE.end());
+    uint64_t const v = gm.get();
+    for (int i = 0; i < 8; ++i) {
+        data[24 + static_cast<size_t>(i)] = static_cast<uint8_t>(v >> (56 - (8 * i)));
+    }
+    return data;
+}
+
+}  // namespace
+
+TEST(ptp_management, builds_a_pmc_get)
+{
+    std::array<uint8_t, 64> out{};
+    gptp::SourcePortIdentity const me{gptp::ClockIdentity{0, 0, 0, 0xFF, 0xFE, 0, 0x30, 0x39}, 1};
+    size_t const n = build_management_get(out, management_id::parent_data_set, 0, 7, me);
+    EXPECT_EQ(n, MANAGEMENT_GET_SIZE);
+    // clang-format off
+    std::array<uint8_t, 54> const expect{
+        0x0D, 0x02, 0x00, 0x36, 0x00, 0x00, 0x00, 0x00,                          // management, v2, length 54, domain 0
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // correction, typeSpecific
+        0x00, 0x00, 0x00, 0xFF, 0xFE, 0x00, 0x30, 0x39, 0x00, 0x01,              // sourcePortIdentity
+        0x00, 0x07, 0x04, 0x7F,                                                  // sequenceId, control, interval
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,              // targetPortIdentity: all
+        0x00, 0x00, 0x00, 0x00,                                                  // hops 0, GET, reserved
+        0x00, 0x01, 0x00, 0x02, 0x20, 0x02,                                      // MANAGEMENT TLV, PARENT_DATA_SET
+    };
+    // clang-format on
+    EXPECT_TRUE(std::equal(expect.begin(), expect.end(), out.begin()));
+    EXPECT_EQ(build_management_get(std::span<uint8_t>{out}.first(53), management_id::parent_data_set, 0, 7, me), size_t{0});
+    // and it parses back as a GET with no data
+    auto const parsed = parse_management_message(std::span<uint8_t const>{out.data(), n});
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->action == ManagementAction::get);
+    EXPECT_EQ(parsed->management_id, management_id::parent_data_set);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(parsed->data));
+}
+
+TEST(ptp_management, parses_parent_data_set)
+{
+    auto const parsed = parse_management_message(PARENT_RESPONSE);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->action == ManagementAction::response);
+    EXPECT_EQ(parsed->domain, uint8_t{0});
+    EXPECT_EQ(parsed->sequence_id, uint16_t{7});
+    EXPECT_TRUE((parsed->source.clock_identity == gptp::ClockIdentity{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0xAA, 0xBB, 0xCC}));
+    EXPECT_EQ(static_cast<uint16_t>(parsed->source.port_number), uint16_t{1});
+    EXPECT_EQ(parsed->management_id, management_id::parent_data_set);
+    auto const* parent = std::get_if<ParentDataSet>(&parsed->data);
+    EXPECT_TRUE(parent != nullptr);
+    EXPECT_TRUE(parent->grandmaster_identity == GM);
+    EXPECT_EQ(parent->parent_port_identity.clock_identity.get(), GM.get());
+    EXPECT_EQ(static_cast<uint16_t>(parent->parent_port_identity.port_number), uint16_t{1});
+    EXPECT_EQ(parent->grandmaster_priority1, uint8_t{128});
+    EXPECT_EQ(parent->grandmaster_clock_class, uint8_t{6});
+    EXPECT_EQ(parent->grandmaster_clock_accuracy, uint8_t{0x21});
+    EXPECT_EQ(parent->grandmaster_offset_scaled_log_variance, uint16_t{0x4E5D});
+    EXPECT_EQ(parent->grandmaster_priority2, uint8_t{128});
+    EXPECT_EQ(parent->observed_parent_clock_phase_change_rate, int32_t{0x7FFFFFFF});
+}
+
+TEST(ptp_management, parses_current_and_time_properties)
+{
+    // stepsRemoved 1, offsetFromMaster -12.5 ns (scaled 2^16), meanPathDelay 500 ns
+    std::vector<uint8_t> current{
+        0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xF4, 0x00, 0x00};
+    auto const c = parse_management_message(response(management_id::current_data_set, current, 3));
+    EXPECT_TRUE(c.has_value());
+    EXPECT_EQ(c->domain, uint8_t{3});
+    auto const* cds = std::get_if<CurrentDataSet>(&c->data);
+    EXPECT_TRUE(cds != nullptr);
+    EXPECT_EQ(cds->steps_removed, uint16_t{1});
+    EXPECT_EQ(cds->offset_from_master_scaled, int64_t{-12 * 65536 - 32768});
+    EXPECT_EQ(cds->mean_path_delay_scaled, int64_t{500} * 65536);
+
+    // UTC offset 37, ptpTimescale | utcOffsetValid, GPS
+    auto const t = parse_management_message(response(management_id::time_properties_data_set, {0x00, 0x25, 0x0C, 0x20}));
+    EXPECT_TRUE(t.has_value());
+    auto const* tp = std::get_if<TimePropertiesDataSet>(&t->data);
+    EXPECT_TRUE(tp != nullptr);
+    EXPECT_EQ(tp->current_utc_offset, int16_t{37});
+    EXPECT_EQ(tp->flags, uint8_t{0x0C});
+    EXPECT_EQ(tp->time_source, uint8_t{0x20});
+}
+
+TEST(ptp_management, refuses_malformed_messages)
+{
+    std::vector<uint8_t> bytes(PARENT_RESPONSE.begin(), PARENT_RESPONSE.end());
+    // truncated below the declared length
+    EXPECT_FALSE(parse_management_message(std::span<uint8_t const>{bytes}.first(60)).has_value());
+    // not management
+    auto other = bytes;
+    other[0] = 0x00;
+    EXPECT_FALSE(parse_management_message(other).has_value());
+    // not PTPv2
+    other = bytes;
+    other[1] = 0x01;
+    EXPECT_FALSE(parse_management_message(other).has_value());
+    // a TLV longer than the message
+    other = bytes;
+    other[51] = 0x40;
+    EXPECT_FALSE(parse_management_message(other).has_value());
+    // a PARENT_DATA_SET response too short for the data set
+    EXPECT_FALSE(parse_management_message(response(management_id::parent_data_set, {0x00, 0x01, 0x02})).has_value());
+    // an unknown data set parses, without data
+    auto const unknown = parse_management_message(response(0x2004, {0x01, 0x02}));
+    EXPECT_TRUE(unknown.has_value());
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(unknown->data));
+    // MANAGEMENT_ERROR_STATUS: NO_SUCH_ID (0x0002) for PARENT_DATA_SET
+    auto error = response(0, {});
+    error.resize(48);
+    error.insert(error.end(), {0x00, 0x02, 0x00, 0x08, 0x00, 0x02, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00});
+    error[3] = static_cast<uint8_t>(error.size());
+    auto const e = parse_management_message(error);
+    EXPECT_TRUE(e.has_value());
+    EXPECT_EQ(e->error.value_or(0), uint16_t{2});
+    EXPECT_EQ(e->management_id, management_id::parent_data_set);
+}
+
+#if defined(__linux__)
+
+namespace {
+
+/// A fresh directory for a client's socket (and a stand-in ptp4l's).
+auto socket_dir(char const* name) -> std::filesystem::path
+{
+    auto const dir = std::filesystem::temp_directory_path() / std::format("ptpmgmt-{}-{}", name, ::getpid());
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+}  // namespace
+
+TEST(ptp_management, client_reports_status_grandmaster_and_silence)
+{
+    auto const dir = socket_dir("status");
+    auto const uds = (dir / "ptp4l").string();  // nothing listens there
+    int calls = 0;
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = uds, .domain = 0, .period_ns = 1'000'000'000, .missed_periods = 3},
+        [&](PtpManagementState const& state) {
+            ++calls;
+            last = state;
+        });
+    EXPECT_TRUE(client.has_value());
+    auto& c = **client;
+    EXPECT_TRUE(std::filesystem::exists(dir / std::format("statusbar-ptpmgmt.{}", ::getpid())));  // pmc-style path
+
+    // No ptp4l: the send's error is recorded once, the status unreachable.
+    c.tick(0);
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
+    EXPECT_TRUE(
+        last.error == std::make_error_code(std::errc::no_such_file_or_directory) ||
+        last.error == std::make_error_code(std::errc::connection_refused));
+    c.tick(1'000'000'000);
+    EXPECT_EQ(calls, 1);  // the same error is not reported again
+
+    // ptp4l answers: locked to the grandmaster, the error cleared.
+    c.handle(PARENT_RESPONSE, 1'000'000'010);
+    EXPECT_EQ(calls, 2);
+    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
+    EXPECT_TRUE(last.grandmaster == GM);
+    EXPECT_FALSE(last.error);
+    c.handle(PARENT_RESPONSE, 1'000'000'020);  // unchanged: no call
+    EXPECT_EQ(calls, 2);
+    c.handle(response(management_id::current_data_set, std::vector<uint8_t>(18)), 1'000'000'030);
+    c.handle(response(management_id::time_properties_data_set, {0x00, 0x25, 0x0C, 0x20}), 1'000'000'040);
+    EXPECT_EQ(calls, 2);  // kept, but not a change
+    EXPECT_TRUE(c.state().current.has_value() && c.state().time_properties.has_value());
+
+    // ptp4l's PARENT_DATA_SET names its own clock: it follows no grandmaster.
+    ieee::Eui64 const self{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0xAA, 0xBB, 0xCC};
+    c.handle(response(management_id::parent_data_set, parent_data(self)), 1'000'000'050);
+    EXPECT_EQ(calls, 3);
+    EXPECT_TRUE(last.status == PtpManagementStatus::no_grandmaster);
+    EXPECT_TRUE(last.grandmaster == self);
+
+    // Silent for more than three periods: unreachable, everything learnt forgotten.
+    c.tick(4'500'000'000);
+    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
+    EXPECT_FALSE(c.state().grandmaster.has_value());
+    EXPECT_FALSE(c.state().parent.has_value());
+    EXPECT_FALSE(c.state().current.has_value());
+    EXPECT_FALSE(c.state().time_properties.has_value());
+    EXPECT_FALSE(c.finished());
+
+    client->reset();
+    EXPECT_FALSE(std::filesystem::exists(dir / std::format("statusbar-ptpmgmt.{}", ::getpid())));  // unlinked
+    std::filesystem::remove_all(dir);
+}
+
+TEST(ptp_management, create_validates_its_configuration)
+{
+    auto const listener = [](PtpManagementState const&) {};
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.uds_address = "relative/ptp4l"}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.uds_address = ""}, listener).has_value());
+    EXPECT_FALSE(
+        PtpManagementClient::create(PtpManagementConfig{.uds_address = std::string("/tmp/a\0b", 8)}, listener).has_value());
+    EXPECT_FALSE(
+        PtpManagementClient::create(PtpManagementConfig{.uds_address = "/" + std::string(200, 'x')}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.missed_periods = 0}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.period_ns = 0}, listener).has_value());
+}
+
+TEST(ptp_management, client_talks_to_a_ptp4l_socket)
+{
+    // A stand-in for ptp4l: a datagram socket at a path, answering each GET
+    // PARENT_DATA_SET with the response above.
+    auto const dir = socket_dir("talk");
+    auto const path = (dir / "ptp4l").string();
+    int const server = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    EXPECT_TRUE(server >= 0);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.data(), path.size());
+    EXPECT_EQ(::bind(server, reinterpret_cast<sockaddr const*>(&address), sizeof(address)), 0);
+
+    int calls = 0;
+    PtpManagementState seen{};
+    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = path}, [&](PtpManagementState const& state) {
+        ++calls;
+        seen = state;
+    });
+    EXPECT_TRUE(client.has_value());
+    (*client)->tick(0);  // three GETs
+    EXPECT_FALSE((*client)->state().error);
+
+    int gets = 0;
+    for (int i = 0; i < 3; ++i) {
+        std::array<uint8_t, 128> in{};
+        sockaddr_un from{};
+        socklen_t from_length = sizeof(from);
+        ssize_t const n = ::recvfrom(server, in.data(), in.size(), 0, reinterpret_cast<sockaddr*>(&from), &from_length);
+        EXPECT_TRUE(n > 0);
+        auto const get = parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(n)});
+        EXPECT_TRUE(get.has_value());
+        EXPECT_TRUE(get->action == ManagementAction::get);
+        ++gets;
+        if (get->management_id == management_id::parent_data_set) {
+            EXPECT_EQ(
+                ::sendto(
+                    server,
+                    PARENT_RESPONSE.data(),
+                    PARENT_RESPONSE.size(),
+                    0,
+                    reinterpret_cast<sockaddr const*>(&from),
+                    from_length),
+                static_cast<ssize_t>(PARENT_RESPONSE.size()));
+        }
+    }
+    EXPECT_EQ(gets, 3);
+    (*client)->on_ready(1);
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(seen.status == PtpManagementStatus::locked);
+    EXPECT_TRUE(seen.grandmaster == GM);
+    EXPECT_FALSE((*client)->finished());
+    ::close(server);
+    std::filesystem::remove_all(dir);
+}
+
+#endif  // __linux__
+
+TEST_MAIN(statusbar_ptpclient, ptpclient_management_test)
