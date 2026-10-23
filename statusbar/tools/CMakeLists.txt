@@ -55,6 +55,11 @@ set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS stun_sm_tool)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(_aem_examples "${CMAKE_CURRENT_LIST_DIR}/../../examples")
 set(_aemxml_tool "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/aemxml_tool.py")
+# The blobs depend on the whole generator, not just its entry point (a change to
+# flatten.py must regenerate them).
+file(GLOB _aemxml_sources CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_LIST_DIR}/../../python/aemxml/*.py")
+list(FILTER _aemxml_sources EXCLUDE REGEX "_test\\.py$")
 
 # _statusbar_avb_entity_blob(<out-abspath> <json-model> <label>) Emit an
 # add_custom_command producing <out> from json2bin <json-model>.json. --set
@@ -67,7 +72,7 @@ function(_statusbar_avb_entity_blob out json_model label)
       ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
       "${_aem_examples}/${json_model}.json" "${out}" --set
       "version=${PROJECT_VERSION}"
-    DEPENDS "${_aem_examples}/${json_model}.json" "${_aemxml_tool}"
+    DEPENDS "${_aem_examples}/${json_model}.json" ${_aemxml_sources}
     COMMENT "Generating ${label} from examples/${json_model}.json (json2bin)"
     VERBATIM)
 endfunction()
@@ -148,7 +153,7 @@ foreach(
       ${Python3_EXECUTABLE} "${_aemxml_tool}" json2bin
       "${_aem_examples}/${_m}.json" "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
       --set "version=${PROJECT_VERSION}"
-    DEPENDS "${_aem_examples}/${_m}.json" "${_aemxml_tool}"
+    DEPENDS "${_aem_examples}/${_m}.json" ${_aemxml_sources}
     COMMENT "AEM blob (json2bin): ${_m}.aem <- examples/${_m}.json"
     VERBATIM)
   list(APPEND _aem_json_blobs "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem")
