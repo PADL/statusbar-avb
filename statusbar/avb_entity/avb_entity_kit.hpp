@@ -166,6 +166,11 @@ class AvbEntityKit
     /// Whether the kit has seen a Link Up since start(), stop() or the last
     /// Link Down: the state on_link_up() tells a repeat from a bounce by.
     [[nodiscard]] auto link_up() const noexcept -> bool { return link_up_; }
+    /// gPTP grandmaster found or changed / lost (EntityUpkeep wires these to
+    /// the Announce handler): drives the talker streams' AVTP tu bit (Milan
+    /// v1.2 Section 4.3.5.2, Annex B.1.1). Reactor thread.
+    void note_grandmaster_changed() noexcept { talker_->note_grandmaster_changed(steady_now_ns()); }
+    void note_grandmaster_lost() noexcept { talker_->note_grandmaster_lost(); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
