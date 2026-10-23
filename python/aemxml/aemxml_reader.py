@@ -981,8 +981,22 @@ def read_aemxml(path_or_string: str) -> Entity:
         group_name=_text(root, "group_name"),
         serial_number=_text(root, "serial_number"),
         schema_year=schema_year,
+        milan=_milan_attribute(root),
         configurations=configs,
     )
+
+
+def _milan_attribute(root: ET.Element) -> bool | None:
+    """The entity element's optional milan attribute (xs:boolean): the entity's
+    ATDECC profile, a PADL extension like the symbol attributes."""
+    value = root.get("milan")
+    if value is None:
+        return None
+    if value in ("true", "1"):
+        return True
+    if value in ("false", "0"):
+        return False
+    raise ValueError(f"entity: milan must be a boolean, not {value!r}")
 
 
 def validate_aemxml(path: str) -> list[str]:
