@@ -3,7 +3,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// EntityShaper: the talker side's hardware traffic shaping (mqprio root, offloaded cbs on the
+/// EntityShaper: the talker side's hardware traffic shaping (mqprio root, offloaded cbs per
 /// SR-class queue, SO_PRIORITY steering of the bypass stream socket). Reactor thread, Linux,
 /// CAP_NET_ADMIN. See docs/SHAPER.md.
 
@@ -156,7 +156,8 @@ inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
 }
 
 /// One SR class's cbs settings (tc's units: kbit/s and octets). All zero
-/// (empty()) when the class has no admitted stream: remove its shaper.
+/// (empty()) when the class has no admitted stream: cbs_targets() then puts
+/// the class's placeholder_cbs() in its place.
 struct CbsParameters
 {
     int32_t idleslope_kbps{0};
@@ -164,6 +165,7 @@ struct CbsParameters
     int32_t hicredit{0};
     int32_t locredit{0};
     uint32_t max_frame_size{0};  ///< the class's largest wire_frame_size (Annex L's maxFrameSize)
+    bool placeholder{false};     ///< placeholder_cbs(): no admitted stream, the cbs only keeps the queue shaped
 
     [[nodiscard]] auto empty() const noexcept -> bool { return idleslope_kbps == 0; }
     auto operator==(CbsParameters const&) const noexcept -> bool = default;
@@ -180,6 +182,91 @@ struct CbsParameters
     std::span<TSpec const> streams, CbsParameters const& class_a, uint32_t link_kbps, uint32_t max_interfering_frame) noexcept
     -> CbsParameters;
 
+/// The share of the link the SR classes may reserve together (802.1Q 34.3.1's
+/// default deltaBandwidth for class A, which class B shares).
+inline constexpr uint32_t SR_BANDWIDTH_PERCENT = 75;
+
+/// The cbs a class keeps while it has no admitted stream, at @p idleslope_kbps (at least 1% of the
+/// link), so igb/igc never switch transmit mode while running. Empty for a zero link.
+[[nodiscard]] auto placeholder_cbs(uint32_t link_kbps, uint32_t max_interfering_frame, int64_t idleslope_kbps) noexcept
+    -> CbsParameters;
+
+/// What both SR-class queues carry.
+struct CbsTargets
+{
+    CbsParameters class_a{};
+    CbsParameters class_b{};
+
+    auto operator==(CbsTargets const&) const noexcept -> bool = default;
+};
+
+/// class_a_cbs and class_b_cbs for the admitted streams, each empty class replaced by a
+/// placeholder_cbs sharing what the streams leave of the SR budget (docs/SHAPER.md). Neither class
+/// is ever empty for a non-zero link.
+[[nodiscard]] auto cbs_targets(
+    std::span<TSpec const> class_a_streams,
+    std::span<TSpec const> class_b_streams,
+    uint32_t link_kbps,
+    uint32_t max_interfering_frame) noexcept -> CbsTargets;
+
+// ---------------------------------------------------------------------------
+// ShaperQdiscs (the requests, Linux)
+// ---------------------------------------------------------------------------
+
+#if defined(__linux__)
+
+/// The qdisc requests behind EntityShaper over a net::tc::TcControl (a recorder in tests). Every
+/// SR-class queue keeps a cbs from the first program() on, changed only in place; only uninstall()
+/// removes it (docs/SHAPER.md, "Adapter resets").
+class ShaperQdiscs
+{
+  public:
+    ShaperQdiscs(net::tc::TcControl& tc, logging::Logger log) noexcept;
+
+    /// Lay the mqprio root down on @p ifindex for @p layout. An identical root is kept with its cbs;
+    /// anything else is replaced, and EINVAL (our handle on another layout) deletes and retries
+    /// once. Errors: the netlink errno.
+    [[nodiscard]] auto install(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, QueueLayout const& layout)
+        -> Status;
+    /// Put @p targets on the SR-class queues, class A's first, each only when changed; always a cbs
+    /// replace. EOPNOTSUPP is logged once and stops further cbs requests. Errors: the first netlink
+    /// failure (each is logged).
+    auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
+    /// Take everything away: pfifo_fast on class B's queue, then class A's, then delete the mqprio
+    /// root (one adapter reset on igb/igc). A no-op success when not installed.
+    [[nodiscard]] auto uninstall() -> Status;
+    /// Forget the installation and leave the qdiscs as they are.
+    void release() noexcept;
+
+    [[nodiscard]] auto installed() const noexcept -> bool { return installed_; }
+    /// Whether install() kept a root that was already in place.
+    [[nodiscard]] auto reused() const noexcept -> bool { return reused_; }
+    /// Whether the driver refused cbs offload (EOPNOTSUPP).
+    [[nodiscard]] auto cbs_unsupported() const noexcept -> bool { return cbs_unsupported_; }
+    /// What is programmed now (empty: no cbs of ours on that class's queue).
+    [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return class_a_; }
+    [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return class_b_; }
+
+  private:
+    [[nodiscard]] auto program_one(uint16_t queue, CbsParameters const& params, CbsParameters& current, logging::StrLit label)
+        -> Status;
+    [[nodiscard]] auto parent_of(uint16_t queue) const noexcept -> uint32_t;
+
+    net::tc::TcControl& tc_;
+    logging::Logger log_;
+    int ifindex_{0};
+    uint16_t major_{0};
+    QueueLayout layout_{};
+    uint32_t link_mbps_{0};
+    bool installed_{false};
+    bool reused_{false};
+    bool cbs_unsupported_{false};
+    CbsParameters class_a_{};
+    CbsParameters class_b_{};
+};
+
+#endif  // __linux__
+
 // ---------------------------------------------------------------------------
 // EntityShaper (reactor thread, Linux)
 // ---------------------------------------------------------------------------
@@ -189,13 +276,14 @@ struct ShaperConfig
     std::string interface_name;
     QueueOverride queues{};
     /// The mqprio root's handle major (`tc qdisc show` prints it as "9000:").
-    /// A root already holding this handle is taken over (deleted and replaced).
+    /// A root already holding this handle with our layout is kept; with
+    /// another, it is taken over (deleted and replaced).
     uint16_t qdisc_major{0x9000};
     /// The link speed assumed while the kernel has never reported one.
     uint32_t fallback_link_mbps{1000};
-    /// shutdown() removes the mqprio (the kernel restores the default root);
-    /// false leaves it, and its cbs, in place.
-    bool restore_qdisc{true};
+    /// shutdown() removes the mqprio and its cbs (an adapter reset on igb/igc). false (the default)
+    /// parks both cbs at their placeholders for the next install() to keep.
+    bool restore_qdisc{false};
 };
 
 #if defined(__linux__)
@@ -226,11 +314,12 @@ class EntityShaper final : public net::Pollable
     /// current link speed. A no-op success before install(). Errors: the
     /// first netlink failure (each is logged).
     auto reprogram() -> Status;
-    /// Unregister the admission hook and delete the mqprio root. A no-op
-    /// success when not installed.
+    /// Unregister the admission hook, take both cbs away and delete the
+    /// mqprio root. A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
-    /// Unregister the admission hook, then uninstall() if config.restore_qdisc
-    /// (failures are logged). Idempotent.
+    /// Unregister the admission hook, then uninstall() if config.restore_qdisc,
+    /// else program the placeholders and leave the qdiscs in place (failures
+    /// are logged). Idempotent.
     void shutdown();
 
     // net::Pollable: tick-only.
@@ -239,23 +328,26 @@ class EntityShaper final : public net::Pollable
     void tick(int64_t now_ns) override;
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
-    [[nodiscard]] auto installed() const noexcept -> bool { return installed_; }
+    [[nodiscard]] auto installed() const noexcept -> bool { return qdiscs_.installed(); }
     [[nodiscard]] auto layout() const noexcept -> QueueLayout const& { return layout_; }
     [[nodiscard]] auto driver() const noexcept -> std::string const& { return driver_; }
     /// What is programmed now (empty: no cbs on that class's queue).
-    [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return class_a_; }
-    [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return class_b_; }
+    [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return qdiscs_.class_a(); }
+    [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return qdiscs_.class_b(); }
     /// The link speed the shaper sizes against (Mbit/s).
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t;
     [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return client_.last_message(); }
 
     /// How often tick() re-reads the link speed.
     static constexpr int64_t LINK_CHECK_NS = 1'000'000'000;
+    /// tick()'s retry of a failed reprogram(): after 1 s, doubling to 32 s.
+    static constexpr int64_t RETRY_MIN_NS = 1'000'000'000;
+    static constexpr int64_t RETRY_MAX_NS = 32'000'000'000;
 
   private:
-    /// Put @p params on @p queue (replace), or the default qdisc back when empty.
-    [[nodiscard]] auto program(uint16_t queue, CbsParameters const& params, CbsParameters& current, logging::StrLit label)
-        -> Status;
+    /// cbs_targets() for the recorded admitted set (@p admitted false: none)
+    /// at the current link speed.
+    [[nodiscard]] auto targets(bool admitted) -> CbsTargets;
     /// Read the link speed; true if the speed the shaper sizes against changed.
     auto refresh_link_speed() -> bool;
     /// Clear the kit's admission hook if this shaper set it.
@@ -264,7 +356,7 @@ class EntityShaper final : public net::Pollable
     ShaperConfig config_;
     AvbEntityKit& kit_;
     net::tc::TcClient client_{};
-    int ifindex_{0};
+    ShaperQdiscs qdiscs_;
     std::string driver_{};
     QueueLayout layout_{};
     uint32_t mtu_{1500};
@@ -274,10 +366,9 @@ class EntityShaper final : public net::Pollable
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> admitted_{};
     bool dirty_{false};
     int64_t next_link_check_ns_{0};
-    bool installed_{false};
+    int64_t retry_at_ns_{0};
+    int64_t retry_backoff_ns_{RETRY_MIN_NS};
     bool hooked_{false};
-    CbsParameters class_a_{};
-    CbsParameters class_b_{};
 };
 
 #endif  // __linux__
