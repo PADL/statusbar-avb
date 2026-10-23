@@ -50,6 +50,7 @@
             <xs:element name="configurations" type="aem:ConfigurationDescriptors"/>
         </xs:sequence>
         <xs:attribute name="version" use="required" type="xs:string"/>
+        <xs:attribute name="milan" use="optional" type="xs:boolean"/>
     </xs:complexType>    
     
     <xs:complexType name="ConfigurationDescriptors">
