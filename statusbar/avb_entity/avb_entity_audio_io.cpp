@@ -431,7 +431,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time, realtime::MonotonicRawClock
         (void)pts_base;
         for (auto& slot : kit_.talker().slots_) {
             kit_.talker().transmit_if_due(
-                slot, tick, kit_.talker_should_transmit(slot.spec.index, raw_now.time_since_epoch().count()), samples, audio_buffer_);
+                slot, tick, kit_.talker_should_transmit(slot.spec.index, raw_now), samples, audio_buffer_);
         }
         kit_.talker().flush_tx();
     }

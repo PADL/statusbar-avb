@@ -13,6 +13,7 @@
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/logging/logging.hpp"
+#include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -599,6 +600,9 @@ void AvbEntityKit::follow_domain(DomainInfo const& domain, TimePoint const now)
         (void)host_.components().mvrp_handler.register_vlan(domain.sr_class_vid, now);
     }
     move_talker_streams_to(domain, now);
+#if defined(__linux__)
+    listener_vlan_.follow(domain.sr_class_vid);  // past the NIC's receive VLAN filter
+#endif
     (void)host_.components().aem_handler.notify_avb_info_changed(0);
     host_.ctl_log().status(
         "msrp: the Class A domain in force: priority {} vlan {} ({})",
@@ -1143,6 +1147,28 @@ auto AvbEntityKit::open_talker_streams() -> Status
         } else {
             stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
         }
+#if defined(__linux__)
+        // The VID's tagged stream frames must get past the NIC's VLAN filter.
+        // Never fatal: without CAP_NET_ADMIN this only warns.
+        // (A control bound before start() -- a test's -- is used as it is.)
+        if (!listener_vlan_.bound()) {
+            if (auto const ifindex = net::interface_index(config_.interface_name); !ifindex) {
+                host_.ctl_log().warning(
+                    "listener: no VLAN filter registration: no index for the interface: errno {}", ifindex.error().value());
+            } else if (vlan_client_ == nullptr || !vlan_client_->is_open()) {
+                auto client = std::make_unique<net::vlan::VlanLinkClient>();
+                if (auto const opened = client->open(); !opened) {
+                    host_.ctl_log().warning(
+                        "listener: no VLAN filter registration: rtnetlink socket: errno {}", opened.error().value());
+                } else {
+                    vlan_client_ = std::move(client);
+                    bind_listener_vlan(*vlan_client_, *ifindex);
+                }
+            } else {
+                bind_listener_vlan(*vlan_client_, *ifindex);
+            }
+        }
+#endif
         // Persisted fast-connect bindings (kit phase 5b): a restarted entity
         // re-connects its inputs without a controller (see AvbEntityHost).
         host_.enable_listener_binding_persistence(config_.listener_bindings_path);
@@ -1245,9 +1271,22 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
         kick_from_media_tick();
     }
 }
+#if defined(__linux__)
+void AvbEntityKit::bind_listener_vlan(net::vlan::VlanControl& control, int const ifindex)
+{
+    if (listener_ == nullptr) {
+        return;
+    }
+    listener_vlan_.bind(control, config_.interface_name, ifindex);
+    listener_vlan_.follow(current_vlan_id());
+}
+#endif
 
 auto AvbEntityKit::stop(TimePoint const now) -> Status
 {
+#if defined(__linux__)
+    listener_vlan_.release();
+#endif
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
