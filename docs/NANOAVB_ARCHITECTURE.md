@@ -238,6 +238,72 @@ class NanoAvbNetHandlers
 };
 ```
 
+### Local ATDECC socket
+
+`AtdeccLocalPort` (`nanoavb_local_port.hpp`) lets controllers on the same
+host reach the entity without raw sockets: an AF_UNIX `SOCK_DGRAM` socket
+at a configured path (`set_local_port_config()` before `add_to_reactor()`;
+`AvbEntityHost::set_local_atdecc_socket()`; the kit's
+`AvbEntityAudioIOConfig::atdecc_socket_path`, `--atdecc.socket` on the
+entity tools). The wire protocol is la_avdecc's local protocol interface,
+as ATDECCSwift's `UnixSocketPort` speaks it: one bare AVTPDU per datagram
+(AVTP control header and ADP/AECP/ACMP data; no Ethernet header, padding
+or COBS), at most 1500 octets. Empty, short (< 12) and oversize datagrams
+are dropped. Controllers bind an address of their own (an autobound
+abstract one on Linux) and connect to the path; `AtdeccLocalClient` is that
+end, shaped like `RawnetContext`.
+
+- **Clients.** A controller exists from its first datagram, keyed by the
+  address it came from (an entity that restarts learns it again from its
+  next one). It is forgotten when a send to it fails with
+  ECONNREFUSED/ENOENT (its socket closed), when the table (16) is full and
+  it is the least recently heard, or after an optional idle timeout (off by
+  default: la_avdecc and ATDECCSwift controllers need not send anything
+  while idle). Forgetting is deferred to the next reactor point outside
+  the entity's own processing, and drops the unsolicited-notification
+  registration made from that controller and any acquisition it holds
+  (its MAC never comes back to release it).
+- **A controller that stops reading** is not expected on a dedicated
+  device. What it has not read stays charged to the entity's socket (send
+  buffer raised to 1 MiB); after 64 consecutive sends to it fail for want
+  of buffer it is forgotten. (A full buffer fails every controller's
+  sends, so others may be forgotten too; each rejoins with its next
+  datagram.)
+- **The path.** `<path>.lock` is flocked for the port's lifetime (left in
+  place on exit), so one entity serves a path. A socket file that a
+  probe connect finds refused is stale and replaced; a live one is
+  EADDRINUSE, and anything else (another error, a non-socket) is left
+  alone. The socket is bound and given its mode inside a private (0700)
+  directory beside the path and renamed into place, so the mode never
+  reaches a symlink's target. The directory must not be writable by
+  others.
+- **Identity.** Each controller gets a synthetic source MAC:
+  `0A:E9:1B:01:01:01` (the protocol's well-known controller MAC) for the
+  first, then `0A:E9:1B:01:xx:xx` in turn. The entity handles its frames
+  exactly as frames from the network, so AECP responses and unsolicited
+  notifications (registered from that MAC) reach only that controller.
+  Two controllers must still use distinct controller entity IDs, as on
+  the network: a registration is keyed by entity ID (a repeated
+  REGISTER_UNSOLICITED_NOTIFICATION moves it to the new MAC). Controllers
+  see the entity as `0A:E9:1B:FF:FF:FF`.
+- **Fan-out.** `AtdeccNetHandler::send()` routes: a unicast to a local
+  controller's MAC (the 0A:E9:1B:01 prefix) goes to that controller only,
+  or nowhere if it has been forgotten, and never to the network; every multicast
+  (ADP, ACMP, the IDENTIFY notification) goes to the network and to every
+  controller. The one exception: a local ENTITY_DISCOVER is answered to
+  that controller alone, so local discovery adds no network traffic.
+- **Not a proxy.** This is a port into the entity. Frames from local
+  controllers are never forwarded onto the AVB network, and network
+  traffic not sent by the entity itself never reaches them: a local
+  controller sees and controls this entity only. (A proxy bridging the
+  two would be a later extension.)
+- **Threading.** The port is a reactor `Pollable`: control-plane thread
+  only, non-blocking socket, at most 32 datagrams per readiness, and a
+  controller whose queue is full loses frames instead of blocking the
+  reactor. The ATDECC handler now joins the reactor even when its raw
+  socket would not open (tick-only), so a local port still reaches the
+  entity and its ADP/ACMP/AEM timers run.
+
 ## Error Handling
 
 ### Callback Patterns

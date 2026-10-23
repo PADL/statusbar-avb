@@ -327,15 +327,11 @@ struct AvbEntityAudioIOConfig
     /// bound; empty, the bindings last only as long as the process.
     std::string listener_bindings_path{};
 
-    /// The machine's state directory (avb_entity_state_dir.hpp). The entity
-    /// keeps what must outlast a restart in <state_dir>/<entity ID as sixteen
-    /// hex digits>/, one file per kind, for each kind no key of its own
-    /// names a file for: listener-bindings under the Milan profile (where
-    /// saving them is required, Milan v1.3 5.3.8.3) and maap-range under
-    /// stream_address_mode "maap". Empty (the default here), or a directory
-    /// that is not there: nothing is saved that no key names. The entity
-    /// tools default it to DEFAULT_ENTITY_STATE_DIR.
-    std::string state_dir{};
+    /// Local ATDECC socket (nanoavb_local_port.hpp): controllers on this host reach the entity
+    /// over an AF_UNIX datagram socket bound here, without raw-socket privileges. Empty = off.
+    std::string atdecc_socket_path{};
+    /// The local ATDECC socket file's mode.
+    int atdecc_socket_mode{0660};
 
     /// Test-signal generator: a repeating logarithmic sine sweep (chirp) on ONE
     /// channel of the UDP tunnel source. When enabled, the sweep REPLACES the

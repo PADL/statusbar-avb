@@ -1054,6 +1054,7 @@ auto AvbEntityKit::bring_up_control_plane(net::MessageReactor& reactor, TimePoin
     if (listener_ != nullptr) {
         listener_->set_logger(host_.ctl_log());
     }
+    host_.set_local_atdecc_socket(config_.atdecc_socket_path, config_.atdecc_socket_mode);
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
