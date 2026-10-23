@@ -210,6 +210,32 @@ TEST(stream_spec_rate, mixed_audio_rates_rejected)
     EXPECT_FALSE(common_audio_sample_rate(crf_only).has_value());
 }
 
+// SET_SAMPLING_RATE re-times an AAF format: the Base formats' words (Base
+// Audio Formats FIS v1.1 Table 4) map onto each other, other fields kept
+TEST(stream_spec_rate, aaf_format_at_rate)
+{
+    // Base 8 ch: 48 kHz 6 samples <-> 96 kHz 12 samples.
+    EXPECT_EQ(aaf_format_at_rate(0x0205022002006000ULL, 96'000U).value_or(0), 0x020702200200C000ULL);
+    EXPECT_EQ(aaf_format_at_rate(0x020702200200C000ULL, 48'000U).value_or(0), 0x0205022002006000ULL);
+    EXPECT_EQ(aaf_format_at_rate(0x0205022000406000ULL, 192'000U).value_or(0), 0x0209022000418000ULL);
+    // INT_24 32 ch keeps its sample format, depth and channels.
+    uint64_t const int24 = 0x0205031800000000ULL | (uint64_t{32} << 22) | (uint64_t{6} << 12);
+    uint64_t const int24_96 = 0x0207031800000000ULL | (uint64_t{32} << 22) | (uint64_t{12} << 12);
+    EXPECT_EQ(aaf_format_at_rate(int24, 96'000U).value_or(0), int24_96);
+    // An unframed word stays unframed.
+    EXPECT_EQ(aaf_format_at_rate(0x0205022002000000ULL, 96'000U).value_or(0), 0x0207022002000000ULL);
+    // Not AAF, or a rate with no code.
+    EXPECT_FALSE(aaf_format_at_rate(CRF_MILAN_48K, 96'000U).has_value());
+    EXPECT_FALSE(aaf_format_at_rate(0x0205022002006000ULL, 12'345U).has_value());
+    // with_format re-decodes.
+    StreamSpec spec{};
+    spec.index = 3;
+    auto const moved = with_format(spec, 0x020702200200C000ULL);
+    EXPECT_EQ(moved.index, uint16_t{3});
+    EXPECT_EQ(moved.format.sample_rate_hz, 96'000U);
+    EXPECT_EQ(moved.format.aaf_samples_per_frame, uint16_t{12});
+}
+
 }  // namespace
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_spec_test)
