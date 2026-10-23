@@ -1183,7 +1183,7 @@ TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
     EXPECT_EQ(ext.flags_ex.get(), stream_info_flags_ex::REGISTERING);
 
     // A classic entity answers IEEE 1722.1-2013's 48 octets.
-    handler.set_profile(EntityProfile{.milan = false});
+    handler.set_entity_profile(EntityProfile{.milan = false});
     auto const classic = make_test_result(handler, header, cmd);
     EXPECT_EQ(classic.status, AEM_STATUS_SUCCESS);
     EXPECT_EQ(classic.response_data().size(), AemStreamInfoPayload::LENGTH);
@@ -3085,7 +3085,7 @@ TEST(nanoavb_entity_milan, start_stop_streaming_not_supported_on_outputs)
     EXPECT_EQ(app.set_count, 2);
 
     // A classic entity lets a controller stop its outputs.
-    handler.set_profile(EntityProfile{.milan = false});
+    handler.set_entity_profile(EntityProfile{.milan = false});
     sends.clear();
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_STOP_STREAMING, output);
     EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});

@@ -438,7 +438,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             break;
         }
     }
-    if (slot == nullptr) {
+    if (slot == nullptr || slot->stopped.load(std::memory_order_relaxed)) {
         return;
     }
 
