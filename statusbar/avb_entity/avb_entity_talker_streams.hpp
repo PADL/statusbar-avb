@@ -71,6 +71,18 @@ struct TalkerStreamSlot
     std::optional<AafReframer> reframer{};
 };
 
+/// One STREAM_OUTPUT's transmitted AVTPDUs for GET_COUNTERS: how many, how many
+/// with tu set, how many toggled mr. The media thread is the one writer (a
+/// relaxed load and store, no read-modify-write); the reactor reads.
+struct TalkerTxCounters
+{
+    std::atomic<uint32_t> pdus{0};
+    std::atomic<uint32_t> tu_pdus{0};
+    std::atomic<uint32_t> mr_toggles{0};
+    bool last_mr{false};  ///< media thread only
+    bool have_mr{false};  ///< media thread only
+};
+
 struct TalkerStreams
 {
     TalkerStreams(
@@ -200,6 +212,13 @@ struct TalkerStreams
     /// count it. The tail every audio transmit shares. Media-timer thread.
     void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame);
 
+    /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
+    /// MAX_ENTITY_STREAMS). Any thread.
+    [[nodiscard]] auto tx_counters(uint16_t const stream_index) const noexcept -> TalkerTxCounters const*
+    {
+        return stream_index < tx_counters_.size() ? &tx_counters_[stream_index] : nullptr;
+    }
+
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
     /// Fills the timestamps from the media clock (fill_crf_timestamps) and sends
@@ -232,6 +251,8 @@ struct TalkerStreams
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
+    /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
+    std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
     net::RawnetContext stream_tx_{};
     std::error_code tx_priority_error_{};  ///< see tx_priority_error()
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each

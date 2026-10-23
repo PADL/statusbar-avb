@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/srp/srp_msrp.hpp"
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace statusbar::avb_entity {
@@ -196,19 +198,44 @@ struct TalkerStreamStatus
     return true;
 }
 
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index: FRAMES_TX
-/// (IEEE 1722.1 Clause 7.4.43 bit 6) from the talker slot's TX packet
-/// count — what tells a reader our actual transmit rate. The tx counter
-/// is single-threaded with the media timer, read plain.
-[[nodiscard]] inline auto fill_talker_stream_counters(
-    TalkerStreams const& talker, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) -> bool
+/// A STREAM_OUTPUT's transmit totals (TalkerTxCounters) as StreamOutputTotals.
+[[nodiscard]] inline auto talker_stream_totals(TalkerStreams const& talker, uint16_t const descriptor_index) -> StreamOutputTotals
 {
-    auto const* slot = talker.slot_for(descriptor_index);
-    if (slot == nullptr) {
+    auto const* c = talker.tx_counters(descriptor_index);
+    if (c == nullptr) {
+        return {};
+    }
+    auto const relaxed = std::memory_order_relaxed;
+    return {.pdus = c->pdus.load(relaxed), .tu_pdus = c->tu_pdus.load(relaxed), .mr_toggles = c->mr_toggles.load(relaxed)};
+}
+
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index: Milan v1.2 Section
+/// 5.4.2.25 Table 5.17, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
+/// False when the talker has no such stream.
+[[nodiscard]] inline auto fill_talker_stream_counters(
+    TalkerStreams const& talker,
+    uint16_t const descriptor_index,
+    StreamOutputIntervals const& intervals,
+    bool const milan,
+    uint32_t& valid,
+    std::array<uint32_t, 32>& out) -> bool
+{
+    if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    valid |= (1U << 6U);
-    out[6] = static_cast<uint32_t>(slot->tx_packets);
+    using I = StreamOutputIntervals;
+    if (milan) {
+        valid |= I::VALID;
+        std::copy(intervals.values.begin(), intervals.values.end(), out.begin());
+        return true;
+    }
+    auto const totals = talker_stream_totals(talker, descriptor_index);
+    valid |= (1U << 0U) | (1U << 1U) | (1U << 3U) | (1U << 4U) | (1U << 7U);
+    out[0] = intervals.values[I::STREAM_START];
+    out[1] = intervals.values[I::STREAM_STOP];
+    out[3] = totals.mr_toggles;
+    out[4] = totals.tu_pdus;
+    out[7] = totals.pdus;
     return true;
 }
 

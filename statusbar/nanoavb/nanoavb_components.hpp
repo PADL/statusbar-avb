@@ -380,7 +380,15 @@ struct GptpAnnounceCallbacks
     /// Called when Announce messages stop for the announce receipt timeout (IEEE 802.1AS
     /// Clause 10.7.3.2): no grandmaster is known. The next Announce reports one again.
     statusbar::sg14::inplace_function<void(int64_t now_ns), 64> grandmaster_lost;
+
+    /// Called when the path trace the Announces carry changes, or is cleared
+    /// when the grandmaster is lost (see GptpAnnounceHandler::path_trace).
+    statusbar::sg14::inplace_function<void(int64_t now_ns), 64> path_trace_changed;
 };
+
+/// The clock identities of an Announce's PATH_TRACE TLV (IEEE 802.1AS-2020
+/// 10.6.3.3), at most MAX_AS_PATH_LENGTH of them.
+[[nodiscard]] auto parse_announce_path_trace(std::span<uint8_t const> announce) noexcept -> AsPath;
 
 /// gPTP Announce Handler - receives gPTP Announce messages and notifies on grandmaster changes.
 /// Implements Pollable for use with MessageReactor.
@@ -440,9 +448,13 @@ class GptpAnnounceHandler : public net::Pollable
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
-    /// Process one parsed Announce received at @p now_ns (on_ready's work
-    /// after the socket read; public for tests).
-    void on_announce(gptp::AnnounceMessage const& announce, int64_t now_ns);
+    /// The path trace of the last Announce (IEEE 802.1AS-2020 Clause 10.6.3.3), empty while no
+    /// grandmaster is known; without the TLV, the grandmaster alone.
+    [[nodiscard]] auto path_trace() const noexcept -> AsPath const& { return path_trace_; }
+
+    /// Process one parsed Announce received at @p now_ns, @p path_trace from
+    /// its TLVs (on_ready's work after the socket read; public for tests).
+    void on_announce(gptp::AnnounceMessage const& announce, int64_t now_ns, AsPath const& path_trace = {});
 
   private:
     net::RawnetContext context_{};
@@ -452,6 +464,7 @@ class GptpAnnounceHandler : public net::Pollable
     int64_t last_announce_time_ns_{0};
     gptp::AnnounceMessage last_announce_{};
     bool has_announce_{false};
+    AsPath path_trace_{};
     std::array<uint8_t, 2048> payload_buf_{};
 };
 

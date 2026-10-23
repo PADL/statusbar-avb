@@ -1558,3 +1558,213 @@ TEST(avb_entity_kit_persistence, milan_binding_survives_a_restart_and_reprobes)
     }
     std::filesystem::remove_all(dir);
 }
+
+// --- Counters, GET_AS_PATH and GET_AVB_INFO ----------------------------------
+
+namespace {
+
+/// The unsolicited AEM responses for @p command among @p sent.
+auto unsolicited_count(std::vector<std::vector<uint8_t>> const& sent, uint16_t const command) -> int
+{
+    int n = 0;
+    for (auto const& bytes : sent) {
+        if (bytes.size() < nanoavb::AemDu::LENGTH) {
+            continue;
+        }
+        nanoavb::AemDu hdr{};
+        span_load(hdr, std::span<uint8_t const>{bytes}.first(nanoavb::AemDu::LENGTH));
+        if (hdr.is_response() && hdr.is_unsolicited() && hdr.command_code() == command) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+auto load_counters(std::vector<uint8_t> const& body) -> atdecc::aem::AemCountersPayload
+{
+    atdecc::aem::AemCountersPayload c{};
+    span_load(c, std::span<uint8_t const>{body}.first(sizeof(atdecc::aem::AemCountersPayload)));
+    return c;
+}
+
+auto counters_of(MilanKit& m, uint16_t const type, uint16_t const index) -> atdecc::aem::AemCountersPayload
+{
+    std::array<uint8_t, 4> body{
+        static_cast<uint8_t>(type >> 8U), static_cast<uint8_t>(type), static_cast<uint8_t>(index >> 8U), static_cast<uint8_t>(index)};
+    auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_COUNTERS, body);
+    EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
+    return load_counters(r.body);
+}
+
+}  // namespace
+
+// Milan v1.2 Table 5.17: the output's counters at bit values 0x01-0x10;
+// STREAM_START when a Listener Ready opens the gate, STREAM_STOP when it
+// closes, each notified.
+TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
+{
+    MilanKit m{std::nullopt, 0x60};
+    EXPECT_TRUE(m.start_ready());
+    m.kit.host().components().aem_handler.tick(sm::Clock::now());
+    auto c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_EQ(c.counters_valid.get(), 0x1FU);
+    EXPECT_EQ(c.counters[0].get(), 0U);
+
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_EQ(c.counters[0].get(), 1U);  // STREAM_START
+    EXPECT_EQ(c.counters[1].get(), 0U);  // STREAM_STOP
+    EXPECT_TRUE(m.kit.output_counters(0)->streaming);
+
+    // The Listener goes; the grace window runs out: stopped.
+    m.bridge_withdraw(0);
+    m.kit.poll_admission(MilanKit::steady_ns() + TalkerGate::GRACE_NS + 1'000'000'000);
+    c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_EQ(c.counters[0].get(), 1U);
+    EXPECT_EQ(c.counters[1].get(), 1U);
+    EXPECT_FALSE(m.kit.output_counters(0)->streaming);
+    EXPECT_TRUE(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_COUNTERS) == 0);  // nobody registered
+
+    // Classic: IEEE 1722.1-2021's layout (FRAMES_TX at bit 7).
+    MilanKit classic{false, 0x61};
+    EXPECT_TRUE(classic.start_ready());
+    EXPECT_EQ(counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
+}
+
+// Milan v1.2 Table 5.16: the input's ten counters; zeroed when it becomes
+// bound (Section 5.3.8.10), not when it is unbound; the fold counts intervals.
+TEST(avb_entity_kit_counters, stream_input_reset_on_bind)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    auto* slot = p.l.kit.listener()->slot_for(0);
+    EXPECT_TRUE(slot != nullptr);
+    int64_t t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);  // the first interval starts
+    slot->counters.frames_rx.store(10);
+    slot->counters.seq_num_mismatch.store(3);
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
+    EXPECT_EQ(c.counters_valid.get(), 0x0F3FU);
+    EXPECT_EQ(c.counters[11].get(), 1U);  // FRAMES_RX: one interval
+    EXPECT_EQ(c.counters[3].get(), 1U);   // SEQ_NUM_MISMATCH
+
+    auto const bound = p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    EXPECT_EQ(bound.status(), atdecc::ACMP_STATUS_SUCCESS);
+    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
+    EXPECT_EQ(c.counters[11].get(), 0U);
+    EXPECT_EQ(c.counters[3].get(), 0U);
+
+    slot->counters.frames_rx.store(20);
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS - 1);  // not yet a second
+    EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 0U);
+    p.l.kit.poll_counters(t += 1);
+    EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 1U);
+
+    // Unbound: kept.
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+    EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 1U);
+}
+
+// GET_AS_PATH (Milan v1.2 Section 5.4.2.24) from the Announces' path trace,
+// and its notification; GET_AVB_INFO notified asynchronously when the
+// grandmaster changes (Table 5.22).
+TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
+{
+    MilanKit m{std::nullopt, 0x62};
+    EXPECT_TRUE(m.start_ready());
+    auto* handlers = m.kit.host().net_handlers();
+    EXPECT_TRUE(handlers != nullptr);
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    m.aem.clear();
+
+    std::array<uint8_t, 4> query{};
+    auto r = m.aem_command(atdecc::AEM_COMMAND_GET_AS_PATH, query);
+    EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(r.body.size(), size_t{4});  // no grandmaster: an empty path
+
+    gptp::AnnounceMessage announce{};
+    announce.init();
+    announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+    nanoavb::AsPath trace{};
+    trace.push_back(ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    trace.push_back(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0002ULL));
+    handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
+        .grandmaster_id_changed = [&m](int64_t, gptp::ClockIdentity const&, gptp::AnnounceMessage const&) {
+            m.kit.note_grandmaster_changed();
+        },
+        .path_trace_changed = [&m](int64_t) { m.kit.note_as_path_changed(); }});
+    handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
+    r = m.aem_command(atdecc::AEM_COMMAND_GET_AS_PATH, query);
+    EXPECT_EQ(r.body.size(), size_t{4 + 16});  // no MAC here: our own identity is not known
+    EXPECT_EQ(r.body[3], 2);
+    EXPECT_EQ(r.body[4 + 8 + 7], 0x02);
+
+    // The same Announce again: nothing new.
+    handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
+}
+
+TEST(avb_entity_kit_counters, as_path_ends_with_this_entity)
+{
+    nanoavb::AsPath trace{};
+    auto const gm = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    auto const self = ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'00AAULL);
+    EXPECT_TRUE(compose_as_path(trace, self).empty());
+    trace.push_back(gm);
+    auto path = compose_as_path(trace, self);
+    EXPECT_EQ(path.size(), size_t{2});
+    EXPECT_TRUE(path.back() == self);
+    EXPECT_EQ(compose_as_path(trace, std::nullopt).size(), size_t{1});
+    // This entity's gPTP daemon is the grandmaster: its own Announce's trace.
+    nanoavb::AsPath own{};
+    own.push_back(self);
+    EXPECT_EQ(compose_as_path(own, self).size(), size_t{1});
+}
+
+// A binding restored at start is bound: unbinding it is no interruption, and
+// is a change of binding (notified, counters kept); a stopped input's
+// discarded stream is none either.
+TEST(avb_entity_kit_counters, a_restored_binding_unbinds_without_an_interruption)
+{
+    auto const dir = state_dir("restored-counters");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentState saved{};
+    saved.configured_entity_name = "kit milan";
+    saved.configured_presentation_offset_ns = 2'000'000;
+    saved.listener_bindings.push_back(
+        {.stream_input = 0, .talker_entity_id = 0x020000fffe000041ULL, .talker_unique_id = 0, .started = true});
+    EXPECT_TRUE(save_persistent_state(path, saved).has_value());
+    MilanPair p{path};
+    EXPECT_TRUE(p.start());
+    EXPECT_TRUE(p.sink().bound());
+    auto& c = p.l.kit.listener()->slot_for(0)->counters;
+    int64_t t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);
+    c.media_locked.store(1);  // as if its stream had locked
+    c.is_locked.store(true);
+    c.frames_rx.store(100);
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+    EXPECT_FALSE(p.sink().bound());
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);  // nothing received since
+    auto counters = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
+    EXPECT_EQ(counters.counters[0].get(), 1U);  // MEDIA_LOCKED
+    EXPECT_EQ(counters.counters[1].get(), 1U);  // MEDIA_UNLOCKED
+    EXPECT_EQ(counters.counters[2].get(), 0U);  // STREAM_INTERRUPTED
+
+    // Bound again and stopped: its stream discarded is no interruption.
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, atdecc::acmp_flags::STREAMING_WAIT);
+    c.media_locked.fetch_add(1);
+    c.is_locked.store(true);
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    counters = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
+    EXPECT_EQ(counters.counters[2].get(), 0U);
+    EXPECT_EQ(counters.counters[0].get(), counters.counters[1].get());
+    std::filesystem::remove_all(dir);
+}

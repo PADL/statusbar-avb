@@ -294,3 +294,35 @@ TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lo
     EXPECT_TRUE(talker.timestamp_uncertain(t0 + 20'100'000'000));
     EXPECT_FALSE(talker.timestamp_uncertain(t0 + 20'300'000'000));
 }
+
+// GET_COUNTERS' transmit totals (Milan v1.2 Table 5.4): every PDU handed to
+// the socket, those with tu set (octet 3 of an AAF PDU, octet 1 of a CRF
+// one), and each mr toggle, per STREAM_OUTPUT.
+TEST(talker_tx_counters, pdus_tu_and_mr_toggles)
+{
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<uint64_t> last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
+    avb_entity::TalkerStreamSlot slot{};
+    slot.spec.index = 3;
+    std::array<uint8_t, 24> aaf{avtp::AvtpSubtype::aaf, 0x81, 0x00, 0x00};
+    talker.send_stream_frame(slot, aaf);
+    aaf[3] = 0x01;  // tu
+    talker.send_stream_frame(slot, aaf);
+    aaf[1] = 0x89;  // mr toggled
+    talker.send_stream_frame(slot, aaf);
+    talker.send_stream_frame(slot, aaf);
+    auto const* c = talker.tx_counters(3);
+    EXPECT_TRUE(c != nullptr);
+    EXPECT_EQ(c->pdus.load(), 4U);
+    EXPECT_EQ(c->tu_pdus.load(), 3U);
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+
+    avb_entity::TalkerStreamSlot crf_slot{};
+    crf_slot.spec.index = 4;
+    std::array<uint8_t, 24> crf{avtp::AvtpSubtype::crf, 0x81, 0x00, 0x00};  // tu in octet 1
+    talker.send_stream_frame(crf_slot, crf);
+    EXPECT_EQ(talker.tx_counters(4)->tu_pdus.load(), 1U);
+    EXPECT_TRUE(talker.tx_counters(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)) == nullptr);
+}

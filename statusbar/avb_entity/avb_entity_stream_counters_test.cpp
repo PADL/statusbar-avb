@@ -118,6 +118,146 @@ TEST(stream_counters, jittered_step_does_not_lock)
     EXPECT_EQ(c.media_locked.load(), 0U);
 }
 
+// --- Milan v1.2 Table 5.6: observation intervals (StreamInputIntervals) -----
+
+namespace {
+
+using statusbar::avb_entity::StreamInputIntervals;
+
+/// @p n locked-grade AAF packets from sequence @p seq, timestamp @p ts.
+void feed_run(StreamInputCounters& c, uint8_t& seq, uint32_t& ts, int const n, bool const tu = false)
+{
+    for (int i = 0; i < n; ++i) {
+        tally_stream_input_packet(
+            c, seq++, ts, true, tu, false, true, SAMPLES_PER_PKT, false, GPTP_OFF, LOCK_TOL_NS, FS);
+        ts += 125'000;
+    }
+}
+
+}  // namespace
+
+TEST(stream_input_intervals, interval_counters_count_intervals_not_packets)
+{
+    StreamInputCounters c;
+    StreamInputIntervals iv;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 100, /*tu=*/true);  // locks after 9
+    EXPECT_TRUE(iv.fold(c));
+    EXPECT_EQ(iv.values[StreamInputIntervals::FRAMES_RX], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::TIMESTAMP_UNCERTAIN], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_UNLOCKED], 0U);
+    // A second interval with a sequence gap: one SEQ_NUM_MISMATCH however
+    // many packets it hit; tu no longer set.
+    seq += 3;
+    feed_run(c, seq, ts, 50);
+    seq += 5;
+    feed_run(c, seq, ts, 50);
+    EXPECT_TRUE(iv.fold(c));
+    EXPECT_EQ(iv.values[StreamInputIntervals::FRAMES_RX], 2U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::SEQ_NUM_MISMATCH], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::TIMESTAMP_UNCERTAIN], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::STREAM_INTERRUPTED], 0U);  // the timestamps stayed in step
+    EXPECT_EQ(StreamInputIntervals::VALID, 0x0F3FU);  // Table 5.16's ten counters
+}
+
+TEST(stream_input_intervals, a_timestamp_break_or_a_stopped_stream_interrupts)
+{
+    StreamInputCounters c;
+    StreamInputIntervals iv;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    ts += 3'000'000;  // AVTPDUs lost: the timestamps jump
+    feed_run(c, seq, ts, 20);  // and lock again
+    (void)iv.fold(c);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_LOCKED], 2U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_UNLOCKED], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::STREAM_INTERRUPTED], 1U);
+    // Nothing in the next interval: the stream stopped while locked.
+    EXPECT_TRUE(iv.fold(c));
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_UNLOCKED], 2U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::STREAM_INTERRUPTED], 2U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::FRAMES_RX], 1U);
+    EXPECT_FALSE(iv.fold(c));  // and only once
+}
+
+TEST(stream_input_intervals, unbind_is_no_interruption_and_bind_resets)
+{
+    StreamInputCounters c;
+    StreamInputIntervals iv;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    (void)iv.fold(c);
+    statusbar::avb_entity::unlock_stream_input(c);  // UNBIND_RX
+    (void)iv.fold(c);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_UNLOCKED], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::STREAM_INTERRUPTED], 0U);
+    // Bound again, locked again: reset zeroes everything, a lock it held
+    // goes first, and counting starts over.
+    feed_run(c, seq, ts, 20);
+    iv.reset(c);
+    EXPECT_TRUE(iv.values == decltype(iv.values){});
+    EXPECT_FALSE(c.is_locked.load());
+    feed_run(c, seq, ts, 20);
+    (void)iv.fold(c);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_UNLOCKED], 0U);
+    EXPECT_EQ(iv.values[StreamInputIntervals::FRAMES_RX], 1U);
+}
+
+TEST(stream_input_intervals, a_reactor_unlock_restarts_the_lock_run)
+{
+    StreamInputCounters c;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    EXPECT_TRUE(c.is_locked.load());
+    statusbar::avb_entity::unlock_stream_input(c);
+    feed_run(c, seq, ts, 8);  // the run starts again: not yet
+    EXPECT_FALSE(c.is_locked.load());
+    feed_run(c, seq, ts, 2);
+    EXPECT_TRUE(c.is_locked.load());
+    EXPECT_EQ(c.media_locked.load(), 2U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    EXPECT_EQ(c.stream_interrupted.load(), 0U);
+}
+
+// --- Milan v1.2 Table 5.4: STREAM_OUTPUT (StreamOutputIntervals) -----------
+
+TEST(stream_output_intervals, start_stop_and_intervals)
+{
+    using statusbar::avb_entity::StreamOutputIntervals;
+    using statusbar::avb_entity::StreamOutputTotals;
+    StreamOutputIntervals iv;
+    EXPECT_EQ(StreamOutputIntervals::VALID, 0x1FU);
+    EXPECT_FALSE(iv.set_streaming(false, {}));
+    EXPECT_TRUE(iv.set_streaming(true, {.pdus = 10}));
+    EXPECT_EQ(iv.values[StreamOutputIntervals::STREAM_START], 1U);
+    EXPECT_FALSE(iv.set_streaming(true, {.pdus = 10}));
+    EXPECT_TRUE(iv.fold({.pdus = 8010, .tu_pdus = 2000}));
+    EXPECT_TRUE(iv.fold({.pdus = 16010, .tu_pdus = 2000, .mr_toggles = 1}));
+    EXPECT_FALSE(iv.fold({.pdus = 16010, .tu_pdus = 2000, .mr_toggles = 1}));  // nothing sent
+    EXPECT_EQ(iv.values[StreamOutputIntervals::FRAMES_TX], 2U);
+    EXPECT_EQ(iv.values[StreamOutputIntervals::TIMESTAMP_UNCERTAIN], 1U);
+    EXPECT_EQ(iv.values[StreamOutputIntervals::MEDIA_RESET], 1U);
+    // STREAM_START == STREAM_STOP + 1 while streaming, == when not.
+    EXPECT_TRUE(iv.set_streaming(false, {.pdus = 16010}));
+    EXPECT_EQ(iv.values[StreamOutputIntervals::STREAM_STOP], 1U);
+    // Starting again zeroes MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX.
+    EXPECT_TRUE(iv.set_streaming(true, StreamOutputTotals{.pdus = 16010, .tu_pdus = 2000, .mr_toggles = 1}));
+    EXPECT_EQ(iv.values[StreamOutputIntervals::STREAM_START], 2U);
+    EXPECT_EQ(iv.values[StreamOutputIntervals::FRAMES_TX], 0U);
+    EXPECT_EQ(iv.values[StreamOutputIntervals::TIMESTAMP_UNCERTAIN], 0U);
+    EXPECT_EQ(iv.values[StreamOutputIntervals::MEDIA_RESET], 0U);
+    EXPECT_TRUE(iv.fold({.pdus = 16020, .tu_pdus = 2000, .mr_toggles = 1}));
+    EXPECT_EQ(iv.values[StreamOutputIntervals::FRAMES_TX], 1U);
+    EXPECT_EQ(iv.values[StreamOutputIntervals::TIMESTAMP_UNCERTAIN], 0U);
+}
+
 // Test runner
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_counters_test)

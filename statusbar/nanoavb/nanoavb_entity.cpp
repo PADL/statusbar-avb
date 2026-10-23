@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <span>
+#include <utility>
 
 namespace statusbar::nanoavb {
 
@@ -91,7 +92,17 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     span_load(header, payload);
 
     // Validate header
-    if (!header.is_valid() || !header.is_command()) {
+    if (!header.is_valid()) {
+        return false;
+    }
+    // A response to a command we sent names us as its controller.
+    if (header.is_response()) {
+        if (header.controller_entity_id == our_entity_id && our_entity_id != Eui64{}) {
+            handle_aem_response(header);
+        }
+        return false;
+    }
+    if (!header.is_command()) {
         return false;
     }
 
@@ -102,6 +113,7 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
 
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
+    note_controller_command(header.controller_entity_id, src_mac);
 
     // Stash the source MAC so per-command handlers can retain it if they
     // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
@@ -153,14 +165,23 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_entity_available(header);
 
         case AEM_COMMAND_ACQUIRE_ENTITY: {
+            // Notify a change of holder only: a RELEASE when not acquired, or
+            // an acquire the holder repeats, tells the other controllers nothing.
+            auto const before = std::pair{acquired_, acquiring_controller_};
             auto const r = handle_acquire_entity(header, command_data, out_buffer);
-            notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, r, out_buffer);
+            if (std::pair{acquired_, acquiring_controller_} != before) {
+                notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, r, out_buffer);
+            }
             return r;
         }
 
         case AEM_COMMAND_LOCK_ENTITY: {
+            // Likewise an UNLOCK when unlocked, or a lock its holder refreshes.
+            auto const before = std::pair{locked_, locking_controller_};
             auto const r = handle_lock_entity(header, command_data, out_buffer);
-            notify_on_success(AEM_COMMAND_LOCK_ENTITY, r, out_buffer);
+            if (std::pair{locked_, locking_controller_} != before) {
+                notify_on_success(AEM_COMMAND_LOCK_ENTITY, r, out_buffer);
+            }
             return r;
         }
 
@@ -297,6 +318,9 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_GET_AVB_INFO:
             return handle_get_avb_info(command_data, out_buffer);
 
+        case AEM_COMMAND_GET_AS_PATH:
+            return handle_get_as_path(command_data, out_buffer);
+
         case AEM_COMMAND_GET_STREAM_INFO:
             return handle_get_stream_info(header, command_data, out_buffer);
 
@@ -309,13 +333,11 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION:
             return handle_register_unsolicited(header);
 
-        case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION: {
-            // Listed by 7.5.2 as notification-generating: the remaining
-            // registered controllers learn that this one left.
-            auto const r = handle_deregister_unsolicited(header);
-            notify_on_success(AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, r, out_buffer);
-            return r;
-        }
+        case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION:
+            // Not fanned out: a controller takes an unsolicited DEREGISTER as
+            // its own deregistration (Milan v1.2 Table 5.22 sends one only to
+            // a controller the entity drops; lib_avb 14c6ee2).
+            return handle_deregister_unsolicited(header);
 
         default:
             return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
@@ -455,7 +477,7 @@ auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, s
         size = command_data.size();
         // A controller renamed a descriptor: notify every registered
         // controller, like handle_set_descriptor_value does for values.
-        emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size});
+        emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size}, current_header_.controller_entity_id);
     }
     return {.status = status, .size = size};
 }
@@ -470,11 +492,10 @@ auto AemCommandHandler::handle_set_descriptor_value(
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_data, out_buffer);
 
     // A controller changed a control: notify every registered controller (IEEE
-    // 1722.1 9.6 unsolicited notifications). All subscribers are notified,
-    // including the originator — the U-bit + distinct sequence_id let a
-    // controller tell its own unsolicited echo from the direct response.
+    // 1722.1 9.6 unsolicited notifications); the originator too in the
+    // classic profile, not in Milan's (emit_unsolicited).
     if (r.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
+        emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size}, current_header_.controller_entity_id);
     }
     if (r.status == AEM_STATUS_IN_PROGRESS) {
         // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT):
@@ -529,7 +550,7 @@ auto AemCommandHandler::complete_pending_command(
     auto const body = response_body.empty() ? std::span<uint8_t const>{done.body}.first(done.body_size) : response_body;
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(command_type, body);
+        emit_unsolicited(command_type, body, done.header.controller_entity_id);
         if (is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
             callbacks_.on_settings_changed(command_type);
         }
@@ -539,6 +560,17 @@ auto AemCommandHandler::complete_pending_command(
 
 void AemCommandHandler::tick(sm::TimePoint const now)
 {
+    now_ = now;
+    have_now_ = true;
+    // A GET_COUNTERS change held back within a second of the last one goes
+    // once the second has passed, with the counters as they are then.
+    for (auto& n : counters_notifications_) {
+        if (n.pending && now >= n.next_allowed) {
+            n.pending = false;
+            n.next_allowed = now + COUNTERS_NOTIFICATION_INTERVAL;
+            (void)send_counters_notification(n.descriptor_type, n.descriptor_index);
+        }
+    }
     if (locked_ && now >= lock_expiry_time_) {
         release_lock();
         emit_lock_released();
@@ -554,13 +586,16 @@ void AemCommandHandler::tick(sm::TimePoint const now)
             p.next_in_progress = now + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
         }
     }
+    if (profile_.milan) {
+        tick_controller_monitor(now);
+    }
 }
 
 void AemCommandHandler::notify_on_success(
     uint16_t const command_type, AemCommandResponse const& response, std::span<uint8_t const> out_buffer)
 {
     if (response.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(command_type, out_buffer.first(response.size));
+        emit_unsolicited(command_type, out_buffer.first(response.size), current_header_.controller_entity_id);
     }
 }
 
@@ -574,6 +609,28 @@ void AemCommandHandler::emit_lock_released()
 }
 
 auto AemCommandHandler::notify_counters_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
+{
+    // Milan v1.2 Table 5.22: at most one GET_COUNTERS notification per descriptor per second,
+    // sent from tick(); before the first tick there is no clock, so send at once.
+    if (!have_now_) {
+        return send_counters_notification(descriptor_type, descriptor_index);
+    }
+    auto at = counters_notifications_.find_if([&](CountersNotification const& n) {
+        return n.descriptor_type == descriptor_type && n.descriptor_index == descriptor_index;
+    });
+    if (at >= counters_notifications_.capacity()) {
+        if (!counters_notifications_.add(
+                CountersNotification{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index})) {
+            // More descriptors than any entity has: unlimited.
+            return send_counters_notification(descriptor_type, descriptor_index);
+        }
+        at = counters_notifications_.size() - 1;
+    }
+    counters_notifications_[at].pending = true;
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::send_counters_notification(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
 {
     AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
     std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
@@ -637,6 +694,46 @@ auto AemCommandHandler::notify_avb_info_changed(uint16_t const descriptor_index)
     auto const r = handle_get_avb_info(request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(AEM_COMMAND_GET_AVB_INFO, std::span<uint8_t const>{out}.first(r.size));
+    }
+    return r.status;
+}
+
+auto AemCommandHandler::handle_get_as_path(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (!callbacks_.get_as_path) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    // Command (7.4.41.1): descriptor_index (AVB_INTERFACE) + reserved.
+    constexpr size_t COMMAND_LENGTH = 4;
+    if (command_data.size() < COMMAND_LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    auto const descriptor_index = static_cast<uint16_t>((uint16_t{command_data[0]} << 8U) | command_data[1]);
+    AsPath path{};
+    if (!callbacks_.get_as_path(descriptor_index, path)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    // Response (7.4.41.2): descriptor_index, count, then count clock identities.
+    size_t const size = 4 + (path.size() * 8);
+    if (out_buffer.size() < size) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    span_store(out_buffer.subspan(0, 2), doublet_t{descriptor_index});
+    span_store(out_buffer.subspan(2, 2), doublet_t{static_cast<uint16_t>(path.size())});
+    for (size_t i = 0; i < path.size(); ++i) {
+        span_copy(out_buffer.subspan(4 + (i * 8), 8), path[i].span());
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+auto AemCommandHandler::notify_as_path_changed(uint16_t const descriptor_index) -> uint8_t
+{
+    std::array<uint8_t, 4> request{static_cast<uint8_t>(descriptor_index >> 8U), static_cast<uint8_t>(descriptor_index), 0, 0};
+    std::array<uint8_t, 4 + (MAX_AS_PATH_LENGTH * 8)> out{};
+    auto const r = handle_get_as_path(request, out);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(AEM_COMMAND_GET_AS_PATH, std::span<uint8_t const>{out}.first(r.size));
     }
     return r.status;
 }
@@ -1058,7 +1155,7 @@ auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_
     // The response echoes the command (MSRP_ACC_LAT_VALID and the offset), and
     // goes to the registered controllers when the offset changed.
     if (offset != current) {
-        emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, out_buffer.first(echoed.size()));
+        emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, out_buffer.first(echoed.size()), current_header_.controller_entity_id);
         // A controller following GET_STREAM_INFO or MAX_TRANSIT_TIME (Milan
         // 1.3) sees it too.
         (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
@@ -1097,7 +1194,7 @@ auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> com
         return {.status = status, .size = echoed.size()};
     }
     if (offset != current) {
-        emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
+        emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()), current_header_.controller_entity_id);
         // GET_MAX_TRANSIT_TIME's response has SET's layout: the echoed command.
         emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
         (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
@@ -1364,7 +1461,9 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
     span_store(out_buffer, resp);
     if (switching) {
         emit_unsolicited(
-            AEM_COMMAND_SET_CONFIGURATION, std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
+            AEM_COMMAND_SET_CONFIGURATION,
+            std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH},
+            current_header_.controller_entity_id);
     }
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
@@ -1423,17 +1522,114 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
     auto const existing = unsolicited_registrations_.find_if(
         [&header](UnsolicitedRegistration const& r) { return r.controller_entity_id == header.controller_entity_id; });
     if (existing < unsolicited_registrations_.capacity()) {
-        unsolicited_registrations_[existing].controller_mac = current_src_mac_;
+        auto& reg = unsolicited_registrations_[existing];
+        if (reg.controller_mac != current_src_mac_) {
+            // A new station: its sequence ids start again (Milan v1.2 Section 5.3.4.2).
+            reg = UnsolicitedRegistration{
+                .controller_entity_id = header.controller_entity_id,
+                .controller_mac = current_src_mac_,
+                .monitor_deadline = event_time_ + monitor_period()};
+        }
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
 
     // Stash the source MAC (set by process_packet) so unsolicited notifications
-    // can be unicast back to this controller.
-    if (!unsolicited_registrations_.add(
-            UnsolicitedRegistration{.controller_entity_id = header.controller_entity_id, .controller_mac = current_src_mac_})) {
+    // can be unicast back to this controller. Its sequence ids start at 0 and
+    // its monitor timer starts now (Milan v1.2 Section 5.4.5.3).
+    if (!unsolicited_registrations_.add(UnsolicitedRegistration{
+            .controller_entity_id = header.controller_entity_id,
+            .controller_mac = current_src_mac_,
+            .monitor_deadline = event_time_ + monitor_period()})) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
+}
+
+void AemCommandHandler::note_controller_command(Eui64 const& controller_entity_id, Eui48 const& /*controller_mac*/)
+{
+    // Registrations are kept by entity ID (handle_register_unsolicited), so is the timer.
+    for (auto& reg : unsolicited_registrations_) {
+        if (reg.controller_entity_id == controller_entity_id) {
+            reg.monitor_deadline = event_time_ + monitor_period();
+            reg.available_outstanding = false;
+        }
+    }
+}
+
+auto AemCommandHandler::monitor_period() noexcept -> sm::Clock::duration
+{
+    // Numerical Recipes' LCG: uniform enough to spread the controllers' timers.
+    monitor_random_ = (monitor_random_ * 1664525U) + 1013904223U;
+    auto const span_ms = std::chrono::duration_cast<std::chrono::milliseconds>(CONTROLLER_MONITOR_MAX - CONTROLLER_MONITOR_MIN).count();
+    auto const offset = std::chrono::milliseconds((monitor_random_ >> 8U) % static_cast<uint32_t>(span_ms + 1));
+    return std::chrono::duration_cast<sm::Clock::duration>(CONTROLLER_MONITOR_MIN + offset);
+}
+
+void AemCommandHandler::send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t const sequence_id)
+{
+    if (!callbacks_.send_response) {
+        return;
+    }
+    // We are the controller of this command: the registered controller is its
+    // target (IEEE 1722.1-2021 7.4.69, no payload).
+    AemDu hdr{};
+    hdr.init_command(AEM_COMMAND_CONTROLLER_AVAILABLE, AemDu::AEM_DATA_LENGTH);
+    hdr.target_entity_id = controller_id;
+    hdr.controller_entity_id = our_entity_id_;
+    hdr.sequence_id = doublet_t{sequence_id};
+    std::array<uint8_t, AemDu::LENGTH> buffer{};
+    span_store(buffer, hdr);
+    (void)callbacks_.send_response(dest_mac, buffer);
+}
+
+void AemCommandHandler::tick_controller_monitor(sm::TimePoint const now)
+{
+    for (size_t i = 0; i < unsolicited_registrations_.size();) {
+        auto& reg = unsolicited_registrations_[i];
+        if (now < reg.monitor_deadline) {
+            ++i;
+            continue;
+        }
+        if (!reg.available_outstanding || reg.available_tries < 2) {
+            // The command, or its one retry (IEEE 1722.1-2021 9.3.6), with the
+            // same sequence_id.
+            if (!reg.available_outstanding) {
+                reg.available_outstanding = true;
+                reg.available_tries = 0;
+                reg.available_sequence_id = command_sequence_id_++;
+            }
+            ++reg.available_tries;
+            reg.monitor_deadline = now + std::chrono::milliseconds(AEM_TIMEOUT_MS);
+            send_controller_available_to(reg.controller_mac, reg.controller_entity_id, reg.available_sequence_id);
+            ++i;
+            continue;
+        }
+        // No answer to either: deregister it and tell it alone (Milan v1.2
+        // Section 5.4.5.3, Table 5.22). The last entry moves to i.
+        auto const gone = reg;
+        unsolicited_registrations_.remove(i);
+        send_unsolicited_to(
+            gone.controller_mac, gone.controller_entity_id, gone.sequence_id, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
+    }
+}
+
+void AemCommandHandler::handle_aem_response(AemDu const& header)
+{
+    if (header.command_code() != AEM_COMMAND_CONTROLLER_AVAILABLE) {
+        return;
+    }
+    // The classic ACQUIRE handshake's question to the holder: it is alive.
+    if (pending_acquire_.active && acquired_ && header.target_entity_id == acquiring_controller_) {
+        controller_available_response_received();
+    }
+    // Any status will do (Section 5.4.5.3): the controller is there.
+    for (auto& reg : unsolicited_registrations_) {
+        if (reg.available_outstanding && reg.controller_entity_id == header.target_entity_id &&
+            reg.available_sequence_id == header.sequence_id.get()) {
+            reg.available_outstanding = false;
+            reg.monitor_deadline = std::max(event_time_, now_) + monitor_period();
+        }
+    }
 }
 
 auto AemCommandHandler::handle_deregister_unsolicited(AemDu const& header) -> AemCommandResponse
@@ -1504,14 +1700,18 @@ auto AemCommandHandler::unsolicited_registration_count() const noexcept -> size_
 }
 
 void AemCommandHandler::send_unsolicited_to(
-    Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t const command_type, std::span<uint8_t const> body)
+    Eui48 const& dest_mac,
+    Eui64 const& controller_id,
+    uint16_t const sequence_id,
+    uint16_t const command_type,
+    std::span<uint8_t const> body)
 {
     // Frame an unsolicited AEM response: our id as target, the controller's id,
-    // a fresh sequence_id, and the U-bit set.
+    // its sequence_id, and the U-bit set.
     AemDu hdr{};
     hdr.target_entity_id = our_entity_id_;
     hdr.controller_entity_id = controller_id;
-    hdr.sequence_id = doublet_t{unsolicited_sequence_id_++};
+    hdr.sequence_id = doublet_t{sequence_id};
     hdr.init_response(
         command_type,
         AEM_STATUS_SUCCESS,
@@ -1550,14 +1750,20 @@ auto AemCommandHandler::targets_identify_control(uint16_t const command_type, st
     return header.descriptor_type.get() == DESCRIPTOR_CONTROL && header.descriptor_index.get() == identify_control_index_;
 }
 
-void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<uint8_t const> body)
+void AemCommandHandler::emit_unsolicited(
+    uint16_t const command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester)
 {
     if (!callbacks_.send_response) {
         return;
     }
 
-    for (auto const& reg : unsolicited_registrations_) {
-        send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, command_type, body);
+    // Milan v1.2 Section 5.4.5.1: every registered controller but the requester, each with its
+    // own sequence id, incremented whether or not the send succeeds. Classic tells the requester too.
+    for (auto& reg : unsolicited_registrations_) {
+        if (profile_.milan && requester == reg.controller_entity_id) {
+            continue;
+        }
+        send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, reg.sequence_id++, command_type, body);
     }
 
     // IEEE 1722.1 7.5.2: the acquiring controller is implicitly registered.
@@ -1565,7 +1771,7 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         auto const registered = unsolicited_registrations_.find_if(
             [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == acquiring_controller_; });
         if (registered >= unsolicited_registrations_.capacity()) {
-            send_unsolicited_to(acquiring_controller_mac_, acquiring_controller_, command_type, body);
+            send_unsolicited_to(acquiring_controller_mac_, acquiring_controller_, unsolicited_sequence_id_++, command_type, body);
         }
     }
 
@@ -1574,7 +1780,7 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
     // unsolicited notifications — observes the identify. No specific controller,
     // so controller_entity_id is left zero.
     if (targets_identify_control(command_type, body)) {
-        send_unsolicited_to(atdecc::ATDECC_IDENTIFY_MULTICAST_MAC, Eui64{}, command_type, body);
+        send_unsolicited_to(atdecc::ATDECC_IDENTIFY_MULTICAST_MAC, Eui64{}, unsolicited_sequence_id_++, command_type, body);
         if (callbacks_.identify_changed) {
             // SET_CONTROL body: descriptor_type(2) + descriptor_index(2) + values.
             // The IDENTIFY control is LINEAR_UINT8: byte 4 is the new value.

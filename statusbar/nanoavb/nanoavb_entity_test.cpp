@@ -1816,7 +1816,55 @@ TEST(nanoavb_entity_notify_cor1, lock_expiry_notifies_unlock)
     EXPECT_EQ(payload.locked_entity_id, Eui64{});
 }
 
-TEST(nanoavb_entity_notify_cor1, deregister_notifies_remaining_controllers)
+TEST(nanoavb_entity_notify_cor1, an_unlock_or_release_that_changes_nothing_notifies_nobody)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_profile(EntityProfile{.milan = false});  // classic: ACQUIRE_ENTITY implemented
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    // A asks who holds it (a controller holding neither): an UNLOCK and a
+    // RELEASE answer A, and tell B nothing
+    AemLockEntityPayload unlock{};
+    unlock.set_unlock(true);
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> unlock_bytes{};
+    span_store(unlock_bytes, unlock);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_LOCK_ENTITY, unlock_bytes);
+    AemAcquireEntityPayload release{};
+    release.set_release(true);
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> release_bytes{};
+    span_store(release_bytes, release);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, release_bytes, 2);
+    EXPECT_EQ(sends.size(), size_t{2});  // the two solicited responses, to A
+    for (auto const& s : sends) {
+        EXPECT_TRUE(s.dest == kMacA && !header_of(s).is_unsolicited());
+    }
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_SUCCESS);          // unlocked already
+    EXPECT_EQ(header_of(sends[1]).status(), AEM_STATUS_ENTITY_ACQUIRED);  // not ours to release; held by nobody
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_LOCK_ENTITY, kMacB), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacB), 0);
+
+    // a lock is news, its holder refreshing it is not, its unlock is
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> lock{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_LOCK_ENTITY, lock, 3);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_LOCK_ENTITY, lock, 4);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_LOCK_ENTITY, kMacB), 1);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_LOCK_ENTITY, unlock_bytes, 5);
+    EXPECT_FALSE(handler.is_locked());
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_LOCK_ENTITY, kMacB), 2);
+
+    // likewise an acquire repeated by its holder
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> acquire{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 6);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 7);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacB), 1);
+}
+
+TEST(nanoavb_entity_notify_cor1, deregister_is_not_fanned_out)
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
@@ -1829,9 +1877,11 @@ TEST(nanoavb_entity_notify_cor1, deregister_notifies_remaining_controllers)
 
     inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
     EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 1);
+    // Not fanned out: A would take an unsolicited DEREGISTER as its own
+    // (Milan v1.2 Table 5.22 sends one only to a controller the entity drops).
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 0);
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
-    EXPECT_EQ(sends.size(), size_t{2});  // B's own response + A's notification
+    EXPECT_EQ(sends.size(), size_t{1});  // B's own response
 }
 
 TEST(nanoavb_entity_notify_cor1, notify_counters_changed_pushes_get_counters)
@@ -2539,6 +2589,331 @@ TEST(nanoavb_entity_milan, start_stop_streaming_not_supported_on_outputs)
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_STOP_STREAMING, output);
     EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(app.set_count, 3);
+}
+
+//
+// Milan v1.2 Section 5.4.5: notifications and the controller monitor
+//
+namespace {
+
+/// The unsolicited responses for @p command sent to @p dest, their sequence ids in order.
+auto unsolicited_sequence_ids(std::vector<CapturedSend> const& sends, uint16_t const command, Eui48 const& dest)
+    -> std::vector<uint16_t>
+{
+    std::vector<uint16_t> ids;
+    for (auto const& s : sends) {
+        auto const hdr = header_of(s);
+        if (s.dest == dest && hdr.is_unsolicited() && hdr.command_code() == command) {
+            ids.push_back(hdr.sequence_id.get());
+        }
+    }
+    return ids;
+}
+
+/// The CONTROLLER_AVAILABLE commands sent to @p dest.
+auto controller_available_commands(std::vector<CapturedSend> const& sends, Eui48 const& dest) -> std::vector<AemDu>
+{
+    std::vector<AemDu> out;
+    for (auto const& s : sends) {
+        auto const hdr = header_of(s);
+        if (s.dest == dest && hdr.is_command() && hdr.command_code() == AEM_COMMAND_CONTROLLER_AVAILABLE) {
+            out.push_back(hdr);
+        }
+    }
+    return out;
+}
+
+/// @p controller's response (status @p status) to our CONTROLLER_AVAILABLE @p command.
+void answer_controller_available(
+    AemCommandHandler& handler, AemDu const& command, Eui48 const& src_mac, uint8_t const status = AEM_STATUS_SUCCESS)
+{
+    AemDu response = command;
+    response.init_response(AEM_COMMAND_CONTROLLER_AVAILABLE, status, AemDu::AEM_DATA_LENGTH, false);
+    std::array<uint8_t, AemDu::LENGTH> packet{};
+    span_store(packet, response);
+    (void)handler.process_packet(src_mac, packet, kEntity);
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_milan_notify, requester_is_left_out_and_sequence_ids_are_per_controller)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    // B sets a control twice: A is told each time, B (the requester) never.
+    std::array<uint8_t, 6> body{0x00, 0x1A, 0x00, 0x00, 0x01, 0x02};
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_CONTROL, body, 1);
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_CONTROL, body, 2);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 0);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+
+    // Then A sets it: B's first notification is its own sequence id 0.
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, body, 3);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{0}));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacA), 2);
+
+    // An asynchronous change has no requester: both, each with its next id.
+    sends.clear();
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{2}));
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{1}));
+}
+
+TEST(nanoavb_entity_milan_notify, sequence_id_advances_when_the_send_fails)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    bool fail = false;
+    handler.set_send_response([&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return !fail;
+    });
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    std::array<uint8_t, 6> body{0x00, 0x1A, 0x00, 0x00, 0x01, 0x02};
+    fail = true;
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    fail = false;
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+}
+
+TEST(nanoavb_entity_milan_notify, classic_tells_the_requester_too)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_profile(EntityProfile{.milan = false});
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+    std::array<uint8_t, 6> body{0x00, 0x1A, 0x00, 0x00, 0x01, 0x02};
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_CONTROL, body);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
+TEST(nanoavb_entity_milan_notify, sixteen_controllers_register)
+{
+    EXPECT_TRUE(AemCommandHandler::MAX_UNSOLICITED_REGISTRATIONS >= 16U);
+}
+
+TEST(nanoavb_entity_milan_notify, get_counters_notifications_at_most_once_a_second_per_descriptor)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    uint32_t value = 0;
+    handler.set_get_counters([&value](uint16_t type, uint16_t, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
+        if (type != DESCRIPTOR_STREAM_INPUT && type != DESCRIPTOR_AVB_INTERFACE) {
+            return false;
+        }
+        valid = 1U;
+        counters[0] = value;
+        return true;
+    });
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    auto const t0 = sm::TimePoint{} + std::chrono::seconds(100);
+    handler.set_event_time(t0);  // B's monitor timer runs from here
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    handler.tick(t0);
+    value = 1;
+    EXPECT_EQ(handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, 0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 0);  // sent by tick()
+    handler.tick(t0 + std::chrono::milliseconds(1));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 1);  // the first at the next tick
+
+    // Changes within the second are held back; another descriptor is not.
+    value = 2;
+    EXPECT_EQ(handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, 0), AEM_STATUS_SUCCESS);
+    value = 3;
+    EXPECT_EQ(handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, 0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(handler.notify_counters_changed(DESCRIPTOR_AVB_INTERFACE, 0), AEM_STATUS_SUCCESS);
+    handler.tick(t0 + std::chrono::milliseconds(300));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 2);
+    handler.tick(t0 + std::chrono::milliseconds(1000));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 2);
+
+    // A second after the first: one notification, with the counters as they are then.
+    handler.tick(t0 + std::chrono::milliseconds(1001));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 3);
+    AemCountersPayload payload{};
+    span_load(payload, body_of(sends.back()).first(sizeof(AemCountersPayload)));
+    EXPECT_EQ(payload.descriptor_type.get(), DESCRIPTOR_STREAM_INPUT);
+    EXPECT_EQ(payload.counters[0].get(), 3U);
+    handler.tick(t0 + std::chrono::seconds(3));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 3);  // nothing pending
+
+    // Quiet for over a second: the next change goes at the next tick.
+    EXPECT_EQ(handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, 0), AEM_STATUS_SUCCESS);
+    handler.tick(t0 + std::chrono::seconds(3) + std::chrono::milliseconds(1));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_COUNTERS, kMacB), 4);
+}
+
+TEST(nanoavb_entity_milan_notify, re_registration_from_a_new_mac_starts_the_sequence_again)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    std::array<uint8_t, 6> body{0x00, 0x1A, 0x00, 0x00, 0x01, 0x02};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    register_controller(handler, kEntity, kControllerA, kMacA);  // the same station: kept
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+    register_controller(handler, kEntity, kControllerA, kMacB);  // moved
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{0}));
+}
+
+TEST(nanoavb_entity_get_as_path, not_implemented_without_callback)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    std::array<uint8_t, 4> command{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, command);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends.front()).status(), AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+TEST(nanoavb_entity_get_as_path, response_and_notification)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    AsPath path{};
+    path.push_back(Eui64{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x01});
+    path.push_back(Eui64{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x02});
+    handler.set_get_as_path([&path](uint16_t const index, AsPath& out) -> bool {
+        if (index != 0) {
+            return false;
+        }
+        out = path;
+        return true;
+    });
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    std::array<uint8_t, 4> command{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, command);
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
+    auto const body = body_of(*reply);
+    EXPECT_EQ(body.size(), size_t{4 + 16});
+    EXPECT_EQ(body[3], 2);  // count
+    EXPECT_EQ(body[4 + 7], 0x01);
+    EXPECT_EQ(body[4 + 8 + 7], 0x02);
+
+    // Another interface: none.
+    sends.clear();
+    std::array<uint8_t, 4> other{0x00, 0x01, 0x00, 0x00};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, other);
+    EXPECT_EQ(header_of(sends.front()).status(), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+
+    // No grandmaster: an empty path, notified to the registered controllers.
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+    path.clear();
+    EXPECT_EQ(handler.notify_as_path_changed(0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_AS_PATH, kMacB), 1);
+    EXPECT_EQ(body_of(sends.front()).size(), size_t{4});
+}
+
+TEST(nanoavb_entity_controller_monitor, a_silent_controller_is_deregistered_after_the_retry)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    auto const t0 = sm::TimePoint{} + std::chrono::seconds(1000);
+    handler.set_event_time(t0);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    // Nothing within the 30 s minimum.
+    handler.tick(t0 + std::chrono::seconds(29));
+    EXPECT_TRUE(sends.empty());
+
+    // By 60 s both have been asked; A answers (any status), B never does.
+    handler.tick(t0 + std::chrono::seconds(61));
+    auto const to_a = controller_available_commands(sends, kMacA);
+    auto const to_b = controller_available_commands(sends, kMacB);
+    EXPECT_EQ(to_a.size(), size_t{1});
+    EXPECT_EQ(to_b.size(), size_t{1});
+    EXPECT_EQ(to_b.front().target_entity_id, kControllerB);
+    EXPECT_EQ(to_b.front().controller_entity_id, kEntity);
+    handler.set_event_time(t0 + std::chrono::seconds(61));
+    answer_controller_available(handler, to_a.front(), kMacA, AEM_STATUS_NOT_IMPLEMENTED);
+
+    // B is retried once with the same sequence id after 250 ms ...
+    handler.tick(t0 + std::chrono::seconds(61) + std::chrono::milliseconds(250));
+    auto const retry = controller_available_commands(sends, kMacB);
+    EXPECT_EQ(retry.size(), size_t{2});
+    EXPECT_EQ(retry.back().sequence_id.get(), retry.front().sequence_id.get());
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{2});
+
+    // ... then deregistered and told so, alone.
+    handler.tick(t0 + std::chrono::seconds(61) + std::chrono::milliseconds(500));
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 0);
+    EXPECT_EQ(controller_available_commands(sends, kMacA).size(), size_t{1});  // A answered: not retried
+}
+
+TEST(nanoavb_entity_controller_monitor, any_command_restarts_the_timer)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    auto const t0 = sm::TimePoint{} + std::chrono::seconds(1000);
+    handler.set_event_time(t0);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+
+    // A command every 29 s keeps it from ever being asked.
+    for (int i = 1; i <= 4; ++i) {
+        auto const t = t0 + std::chrono::seconds(29 * i);
+        handler.tick(t);
+        handler.set_event_time(t);
+        std::array<uint8_t, 4> command{};
+        inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, command, static_cast<uint16_t>(i));
+    }
+    handler.tick(t0 + std::chrono::seconds(29 * 4 + 29));
+    EXPECT_TRUE(controller_available_commands(sends, kMacA).empty());
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+}
+
+TEST(nanoavb_entity_controller_monitor, classic_has_no_monitor)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_profile(EntityProfile{.milan = false});
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    handler.tick(sm::TimePoint{} + std::chrono::seconds(120));
+    EXPECT_TRUE(controller_available_commands(sends, kMacA).empty());
 }
 
 //

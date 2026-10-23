@@ -53,7 +53,7 @@ class MvuCommandHandler
 
     /// The AEM handler whose lock and acquisition gate the SETs and whose registrations receive
     /// their notifications; without one, nothing is locked and nobody is notified.
-    void set_aem_handler(AemCommandHandler const* aem) noexcept { aem_ = aem; }
+    void set_aem_handler(AemCommandHandler* aem) noexcept { aem_ = aem; }
 
     /// Called (reactor thread) after a SET_SYSTEM_UNIQUE_ID or
     /// SET_MEDIA_CLOCK_REFERENCE_INFO that changed a value, once its response
@@ -128,10 +128,9 @@ class MvuCommandHandler
     EntityProfile profile_{};
     uint32_t certification_version_{0};
     SendAemResponseFn send_response_{};
-    AemCommandHandler const* aem_{nullptr};
+    AemCommandHandler* aem_{nullptr};
     MvuSettingsChangedFn on_settings_changed_{};
     Eui64 our_entity_id_{};
-    uint16_t unsolicited_sequence_id_{0};  ///< apart from the AEM one (v1.3 Section 5.4.5.2)
     uint32_t system_unique_id_{0};
     uint8_t default_mcr_prio_{atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE};
     size_t clock_domain_count_{1};

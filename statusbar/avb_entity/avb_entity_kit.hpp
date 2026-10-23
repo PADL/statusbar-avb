@@ -36,6 +36,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_declarations.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -149,7 +150,13 @@ class AvbEntityKit
         host_.note_grandmaster_changed();
         talker_->note_grandmaster_changed(steady_now_ns());
     }
-    void note_grandmaster_lost() noexcept { talker_->note_grandmaster_lost(); }
+    void note_grandmaster_lost()
+    {
+        talker_->note_grandmaster_lost();
+        host_.note_grandmaster_lost();
+    }
+    /// The Announces' gPTP path trace changed (GET_AS_PATH). Reactor thread.
+    void note_as_path_changed() { host_.note_as_path_changed(); }
     void on_link_down(TimePoint time) { host_.on_link_down(time); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
@@ -216,6 +223,20 @@ class AvbEntityKit
     /// at steady-clock @p now_ns, so a grace window that runs out with no MSRP
     /// event still closes the stream's admission and fires the callback.
     void poll_admission(int64_t const now_ns) { note_admission(now_ns); }
+
+    /// The GET_COUNTERS observation interval (Milan v1.2 Tables 5.4 and 5.6:
+    /// at most 1 s).
+    static constexpr int64_t COUNTERS_INTERVAL_NS = 1'000'000'000;
+    /// Reactor thread, periodically: end the counters' observation interval once
+    /// COUNTERS_INTERVAL_NS has passed and notify each stream descriptor whose
+    /// counters changed (the AEM handler holds them to one a second).
+    void poll_counters(int64_t now_ns);
+    /// STREAM_OUTPUT @p idx's Milan counters (StreamOutputIntervals), or
+    /// nullptr for a stream the kit does not have.
+    [[nodiscard]] auto output_counters(uint16_t const idx) const noexcept -> StreamOutputIntervals const*
+    {
+        return is_talker_index(idx) ? &output_counters_[idx] : nullptr;
+    }
 
     // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
 
@@ -411,6 +432,14 @@ class AvbEntityKit
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
+    /// GET_COUNTERS per talker stream (StreamOutputIntervals), the next end of
+    /// the observation interval, and each Milan input's bound state.
+    std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
+    std::optional<int64_t> next_counters_fold_ns_{};
+    std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
+    /// Start or stop each talker stream's STREAM_START/STREAM_STOP at @p now_ns:
+    /// streaming while it may transmit (talker_should_transmit).
+    void update_output_streaming(int64_t now_ns);
 
     /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
     /// counters + capture recorder. Binds the ENTITY's media clock + gPTP atomic.

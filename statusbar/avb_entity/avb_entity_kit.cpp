@@ -150,6 +150,7 @@ AvbEntityKit::AvbEntityKit(
     storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
         if (type == DESCRIPTOR_STREAM_OUTPUT) {
             talker_->set_stream_stopped(index, !streaming);
+            note_admission(steady_now_ns());  // STREAM_START / STREAM_STOP now
         }
         // Milan v1.2 Sections 5.4.2.19-20: a bound input becomes started or
         // stopped (no effect on an unbound one); the AEM lock was checked.
@@ -227,6 +228,7 @@ auto AvbEntityKit::admitted_talker_streams(int64_t const now_ns) const noexcept 
 
 void AvbEntityKit::note_admission(int64_t const now_ns)
 {
+    update_output_streaming(now_ns);
     auto admitted = admitted_talker_streams(now_ns);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
@@ -234,6 +236,46 @@ void AvbEntityKit::note_admission(int64_t const now_ns)
     admitted_ = admitted;
     if (on_admission_changed_) {
         on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
+}
+
+void AvbEntityKit::update_output_streaming(int64_t const now_ns)
+{
+    if (talker_ == nullptr) {
+        return;
+    }
+    for (auto const& spec : talker_specs_) {
+        bool const on = talker_should_transmit(spec.index, now_ns);
+        if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
+            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        }
+    }
+}
+
+void AvbEntityKit::poll_counters(int64_t const now_ns)
+{
+    if (next_counters_fold_ns_.has_value() && now_ns < *next_counters_fold_ns_) {
+        return;
+    }
+    bool const first = !next_counters_fold_ns_.has_value();
+    next_counters_fold_ns_ = now_ns + COUNTERS_INTERVAL_NS;
+    if (first) {
+        return;  // the first interval starts now
+    }
+    auto& aem = host_.components().aem_handler;
+    if (talker_ != nullptr) {
+        for (auto const& spec : talker_specs_) {
+            if (output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index))) {
+                (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+            }
+        }
+    }
+    if (listener_ != nullptr) {
+        for (auto const& spec : listener_specs_) {
+            if (listener_->fold_input_counters(spec.index)) {
+                (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
+            }
+        }
     }
 }
 
@@ -479,7 +521,13 @@ void AvbEntityKit::wire_stream_callbacks()
                     host_.components().profile.milan && s != nullptr && s->connected) {
                     leave_sink_vlan(s->stream_vlan_id);
                 }
+                // A classic disconnect is the controller's: no interruption.
+                // (A Milan input unsettles for other reasons too; its unbind is
+                // the sink's binding change.)
                 listener_->on_listener_disconnected(stream_index);
+                if (!host_.components().profile.milan) {
+                    listener_->note_input_unbound(stream_index);
+                }
             });
     }
 
@@ -489,11 +537,15 @@ void AvbEntityKit::wire_stream_callbacks()
     // sink identity so a controller can read what an input is connected to).
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
+            bool const milan = host_.components().profile.milan;
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
+                return is_talker_index(descriptor_index) &&
+                    fill_talker_stream_counters(*talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
+                // Classic keeps IEEE 1722.1's running totals.
+                return milan ? listener_->fill_interval_stream_input_counters(descriptor_index, valid, counters)
+                             : listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
             return host_.fill_counters(descriptor_type, descriptor_index, valid, counters);
         });
@@ -581,6 +633,18 @@ void AvbEntityKit::wire_milan_listener()
             auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
             // An unbound sink's started is the default, true.
             listener_->set_stream_stopped(index, sink != nullptr && !sink->binding.started);
+            // Milan v1.2 Section 5.3.8.10: bound from unbound zeroes the
+            // input's counters; an unbind is no interruption.
+            bool const bound = sink != nullptr && sink->bound();
+            if (index < input_bound_.size() && bound != input_bound_[index]) {
+                input_bound_[index] = bound;
+                if (bound) {
+                    listener_->reset_input_counters(index);
+                } else {
+                    listener_->note_input_unbound(index);
+                }
+                (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, index);
+            }
         }
     });
     sinks.set_on_status_changed([this](uint16_t const index) {
@@ -1120,6 +1184,9 @@ void AvbEntityKit::apply_saved_listener_bindings()
                         .controller_entity_id = controller,
                         .started = binding.started})) {
                 listener_->set_stream_stopped(binding.stream_input, !binding.started);
+                // Bound from here on: an UNBIND_RX is a change of binding.
+                input_bound_[binding.stream_input] = true;
+                listener_->reset_input_counters(binding.stream_input);
                 ++armed;
             }
             continue;
