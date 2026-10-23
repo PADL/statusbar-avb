@@ -211,24 +211,9 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
     return format.aaf_samples_per_frame != 0 ? format.aaf_samples_per_frame : aaf_table_samples_per_pdu(format.sample_rate_hz);
 }
 
-/// The most channels an AAF stream input decodes.
-inline constexpr uint16_t MAX_AAF_INPUT_CHANNELS = 64;
-
-/// Whether an AAF stream input opened as @p opened can be brought to the
-/// format @p word: an AAF format with its "up to" bit clear that differs
-/// from the opened one in channels_per_frame alone, and has from one channel
-/// to MAX_AAF_INPUT_CHANNELS. The sample rate is the media clock's, and the
-/// sample format, bit depth and samples per AVTPDU stay as the input was
-/// opened; a format that changes one of them is not one this input takes.
-[[nodiscard]] constexpr auto aaf_input_can_take(StreamFormatFields const& opened, uint64_t const word) noexcept -> bool
-{
-    auto const wanted = decode_stream_format(word);
-    bool const both_aaf = opened.kind == StreamKind::aaf && wanted.kind == StreamKind::aaf;
-    bool const same_but_channels = wanted.sample_rate_hz == opened.sample_rate_hz && wanted.aaf_format == opened.aaf_format &&
-        wanted.bit_depth == opened.bit_depth && wanted.aaf_samples_per_frame == opened.aaf_samples_per_frame;
-    bool const channels_ok = wanted.channels >= 1 && wanted.channels <= MAX_AAF_INPUT_CHANNELS;
-    return both_aaf && same_but_channels && channels_ok && !avtp::AafStreamFormat::from_u64(word).ut();
-}
+/// The byte Milan v1.3 Table 4.4 adds to every MaxFrameSize for a sampling
+/// clock a little faster than nominal.
+inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
 
 /// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence:
 /// L2 payload bytes of the largest AVTP frame the stream can emit. Audio

@@ -580,6 +580,37 @@ TEST(mvrp_participant, a_leaveall_in_the_same_tick_does_not_expire_the_registrar
     EXPECT_FALSE(b.has_vlan(200));
 }
 
+// MVRP keeps the standard registrar on rLv!: IN -> LV with the LeaveTimer
+// (Milan v1.2 Table 4.3: 5 s), unlike MSRP's immediate IN -> MT (Section
+// 4.2.7.2.2). The registration is Leaving until the timer expires.
+TEST(mvrp_participant, received_leave_runs_the_leave_timer)
+{
+    MvrpParticipant a{test_mvrp_config(), 0xcc35};
+    MvrpParticipant b{test_mvrp_config(), 0xdd46};
+    MvrpFabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    MvrpTestClock c{};
+    a.start(c.now);
+    b.start(c.now);
+    (void)a.declare_vlan(300, c.now);
+    auto t = c.advance(std::chrono::milliseconds(250));
+    a.tick(t);
+    fab.deliver_a_to_b(b, t);
+    EXPECT_TRUE(b.is_vlan_registered(300));
+    (void)a.withdraw_vlan(300, c.now);
+    t = c.advance(std::chrono::milliseconds(250));
+    a.tick(t);
+    fab.deliver_a_to_b(b, t);
+    EXPECT_FALSE(b.is_vlan_registered(300));
+    EXPECT_TRUE(b.is_vlan_leaving(300));  // LV, not MT
+    b.tick(c.advance(std::chrono::milliseconds(4000)));
+    EXPECT_TRUE(b.is_vlan_leaving(300));  // still inside the 5 s LeaveTime
+    b.tick(c.advance(std::chrono::milliseconds(1100)));
+    EXPECT_FALSE(b.is_vlan_leaving(300));
+    EXPECT_FALSE(b.is_vlan_registered(300));
+}
+
 namespace {
 
 /// The LeaveAllEvent bit of the first VectorAttribute of an MVRP PDU:

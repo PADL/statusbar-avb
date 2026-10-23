@@ -11,6 +11,7 @@
 #include "statusbar/tsn/tsn.hpp"
 #include "statusbar/tsn/tsn_error.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -640,7 +641,9 @@ TEST(mrp_timer_scheduler, tick_leave_expires)
     TimerScheduler ts{1};
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_leave(now);
-    auto e = ts.tick(now + std::chrono::milliseconds(1000));
+    auto e0 = ts.tick(now + std::chrono::milliseconds(4999));
+    EXPECT_FALSE(e0.leave);
+    auto e = ts.tick(now + std::chrono::milliseconds(5000));
     EXPECT_TRUE(e.leave);
 }
 
