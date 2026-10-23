@@ -947,6 +947,8 @@ def write_aemxml(
     else:
         root.set("xsi:schemaLocation", f"{NS} {NS}/atdecc.xsd")
         root.set("version", "2.0")
+    if entity.milan is not None:
+        root.set("milan", "true" if entity.milan else "false")
 
     _hex64(root, "entity_id", entity.entity_id)
     _hex64(root, "entity_model_id", entity.entity_model_id)

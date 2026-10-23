@@ -69,13 +69,12 @@ namespace statusbar::avb_entity {
 
 using statusbar::Status;
 
-/// The default ADP advertiser identity/timing shared by every avb_entity: valid_time 31
-/// (62 s) + a 5 s reannounce interval. All four entities used byte-identical local copies;
-/// this is the single source of truth.
+/// The default ADP advertiser config shared by every avb_entity: valid_time 10
+/// (20 s) and a 5 s reannounce interval (Milan v1.2 Section 5.6.2).
 [[nodiscard]] inline auto default_adp_advertiser_config() noexcept -> nanoavb::AdpAdvertiserConfig
 {
     nanoavb::AdpAdvertiserConfig cfg{};
-    cfg.valid_time = 31;                                        // 62 seconds
+    cfg.valid_time = 10;                                        // 20 seconds
     cfg.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
     return cfg;
 }
@@ -94,12 +93,15 @@ class AvbEntityHost
     /// @param talker_max_streams  number of STREAM_OUTPUT (talker) streams.
     /// @param talker_max_listeners max listeners per talker stream.
     /// @param listener_max_streams number of STREAM_INPUT (listener) streams.
+    /// @param milan  entity profile override (nanoavb::EntityProfile); unset
+    ///               takes the model's, else Milan.
     AvbEntityHost(
         nanoavb::EntityModel model,
         nanoavb::AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<bool> milan = std::nullopt);
 
     /// Symbol-aware construction. The host serves descriptors and resolves their
     /// well-known **symbols** through a caller-built @p handler (typically a
@@ -113,7 +115,8 @@ class AvbEntityHost
         nanoavb::AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<bool> milan = std::nullopt);
 
     AvbEntityHost(AvbEntityHost const&) = delete;
     auto operator=(AvbEntityHost const&) -> AvbEntityHost& = delete;

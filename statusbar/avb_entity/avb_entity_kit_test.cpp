@@ -347,3 +347,41 @@ TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
     EXPECT_EQ(kit.talker().vlan_id(), uint16_t{2});
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(2) != nanoavb::VlanState::Unregistered);
 }
+
+// The kit's `milan` setting reaches the entity profile every handler reads
+// (nanoavb::EntityProfile): unset takes the model's (this test model says
+// nothing: Milan), false runs classic IEEE 1722.1.
+TEST(avb_entity_kit_profile, config_milan_overrides_the_model)
+{
+    auto const blob = make_blob(1, 1);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+    EXPECT_TRUE(storage.has_value());
+    auto const talkers = *talker_stream_specs(*storage, 0);
+    auto const listeners = *listener_stream_specs(*storage, 0);
+    for (auto const setting : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+        AvbEntityAudioIOConfig config{};
+        config.interface_name = "kit-profile-test0";
+        config.entity_id = ieee::Eui64{0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x04};
+        config.stream_address_mode = "static";
+        config.milan = setting;
+        EntityIdentityDescriptorHandler handler{
+            *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit profile", std::nullopt, /*patch_avb_interface=*/false};
+        ptpclient::MediaClockGenerator media_clock{};
+        std::atomic<uint64_t> last_gptp_ns{0};
+        AvbEntityKit kit{
+            config,
+            handler,
+            talkers,
+            listeners,
+            48000,
+            0,
+            std::nullopt,
+            media_clock,
+            last_gptp_ns,
+            nullptr,
+            std::pmr::get_default_resource()};
+        bool const expected = setting.value_or(true);
+        EXPECT_EQ(kit.host().components().profile.milan, expected);
+        EXPECT_EQ(kit.host().components().aem_handler.profile().milan, expected);
+    }
+}
