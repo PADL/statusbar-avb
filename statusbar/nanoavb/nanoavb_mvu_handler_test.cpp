@@ -18,6 +18,8 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 using namespace statusbar;
@@ -179,32 +181,312 @@ TEST(nanoavb_mvu, classic_profile)
     EXPECT_EQ(sent[0].size(), MVU_MIN_PDU_LENGTH);
 }
 
-// SET/GET_SYSTEM_UNIQUE_ID and SET/GET_MEDIA_CLOCK_REFERENCE_INFO wait for the
-// persistence store: NOT_IMPLEMENTED, the command echoed
-TEST(nanoavb_mvu, deferred_commands_not_implemented)
+namespace {
+
+Eui64 const OTHER{0x00, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+Eui48 const OTHER_MAC{0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+
+auto get_system_unique_id_command() -> std::vector<uint8_t>
+{
+    std::array<uint8_t, MvuGetMilanInfoCommand::LENGTH> const reserved{};
+    return mvu_command(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, reserved);
+}
+
+auto set_system_unique_id_command(uint32_t const id) -> std::vector<uint8_t>
+{
+    MvuSystemUniqueIdPayload payload{};
+    payload.system_unique_id = id;
+    return mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(payload));
+}
+
+auto get_mcr_command(uint16_t const domain) -> std::vector<uint8_t>
+{
+    MvuGetMediaClockReferenceInfoCommand payload{};
+    payload.clock_domain_index = domain;
+    return mvu_command(MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(payload));
+}
+
+auto set_mcr_command(uint16_t const domain, uint8_t const flags, uint8_t const prio, std::string_view const name)
+    -> std::vector<uint8_t>
+{
+    MvuMediaClockReferenceInfoPayload payload{};
+    payload.clock_domain_index = domain;
+    payload.flags = flags;
+    payload.default_mcr_prio = 7;  // ignored in a command
+    payload.user_mcr_prio = prio;
+    payload.media_clock_domain_name = mcr_domain_name(name);
+    return mvu_command(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(payload));
+}
+
+template <typename T>
+auto reply_payload(std::vector<uint8_t> const& reply) -> T
+{
+    T payload{};
+    span_load(payload, std::span<uint8_t const>{reply}.subspan(MvuDu::LENGTH, T::LENGTH));
+    return payload;
+}
+
+/// An AEM command from @p controller with @p payload
+auto aem_command(uint16_t const code, Eui64 const& controller, std::span<uint8_t const> const payload = {}) -> std::vector<uint8_t>
+{
+    AemDu du{};
+    du.init_command(code, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + payload.size()));
+    du.target_entity_id = US;
+    du.controller_entity_id = controller;
+    std::vector<uint8_t> out(AemDu::LENGTH + payload.size(), 0);
+    span_store(std::span<uint8_t>{out}.first(AemDu::LENGTH), du);
+    std::ranges::copy(payload, out.begin() + AemDu::LENGTH);
+    return out;
+}
+
+/// An AEM handler beside the MVU handler (the lock and the unsolicited
+/// registrations), its responses dropped
+struct AemSide
+{
+    EntityModel model{[] {
+        DescriptorEntity entity{};
+        entity.entity_id = US;
+        entity.configurations_count = 1;
+        return EntityModelBuilder{}.entity(entity).configuration(DescriptorConfiguration{}).build();
+    }()};
+    AemCommandHandler aem{model};
+
+    AemSide()
+    {
+        aem.set_send_response([](Eui48 const&, std::span<uint8_t const>) { return true; });
+    }
+};
+
+}  // namespace
+
+// Sections 5.4.4.2-3: the system unique id is 0 until a SET; a SET of 0 is
+// refused; a change is reported once for saving
+TEST(nanoavb_mvu, system_unique_id_set_get)
 {
     std::vector<std::vector<uint8_t>> sent;
     auto handler = make_handler(sent);
-    std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH> const unique_id{0x00, 0x00, 0x12, 0x34, 0x56, 0x78};
-    std::array<uint8_t, MvuGetMilanInfoCommand::LENGTH> const reserved{};
-    std::array<uint8_t, MvuMediaClockReferenceInfoPayload::LENGTH> mcr{};
-    mcr[2] = MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID;
-    std::array<uint8_t, MvuGetMediaClockReferenceInfoCommand::LENGTH> const domain{};
+    int changes = 0;
+    handler.set_on_settings_changed([&changes] { ++changes; });
 
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, unique_id), US));
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, reserved), US));
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, mcr), US));
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, domain), US));
-    EXPECT_EQ(sent.size(), size_t{4});
-    expect_mvu_response(sent[0], MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_NOT_IMPLEMENTED);
-    EXPECT_EQ(reply_header(sent[0]).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 6});
-    EXPECT_TRUE(std::equal(unique_id.begin(), unique_id.end(), sent[0].begin() + MvuDu::LENGTH));
-    expect_mvu_response(sent[1], MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, MVU_STATUS_NOT_IMPLEMENTED);
-    expect_mvu_response(sent[2], MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NOT_IMPLEMENTED);
-    // Longer than the minimum: echoed whole, no padding
-    EXPECT_EQ(reply_header(sent[2]).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 74});
-    EXPECT_EQ(sent[2].size(), MvuDu::LENGTH + MvuMediaClockReferenceInfoPayload::LENGTH);
-    expect_mvu_response(sent[3], MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NOT_IMPLEMENTED);
+    EXPECT_TRUE(handler.process_packet(SRC, get_system_unique_id_command(), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(reply_header(sent.back()).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 6});
+    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0});
+
+    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(0x12345678), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0x12345678});
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{0x12345678});
+    EXPECT_EQ(changes, 1);
+
+    EXPECT_TRUE(handler.process_packet(SRC, get_system_unique_id_command(), US));
+    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0x12345678});
+
+    // The same id again changes nothing
+    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(0x12345678), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(changes, 1);
+
+    // 0 is the default, never a new id
+    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(0), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0x12345678});
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{0x12345678});
+
+    // A SET without the id
+    std::array<uint8_t, 2> const reserved{};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, reserved), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(changes, 1);
+}
+
+// la_avdecc always sends the v1.3 form (u64 number + 64-octet name): its number
+// is taken when it fits the v1.2 u32, and the answer is the v1.2 layout
+TEST(nanoavb_mvu, system_unique_id_v13_command)
+{
+    std::vector<std::vector<uint8_t>> sent;
+    auto handler = make_handler(sent);
+    MvuSystemUniqueIdPayloadV13 v13{};
+    v13.number = uint64_t{0xABCDEF01};
+    v13.name = mcr_domain_name("System A");
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(reply_header(sent.back()).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 6});
+    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0xABCDEF01});
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{0xABCDEF01});
+
+    // The v1.3 number without its name (10 octets) is the v1.3 form too
+    std::array<uint8_t, 10> const short_v13{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, short_v13), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{42});
+    // ... but a v1.2 id with octets after it is the v1.2 id
+    std::array<uint8_t, 10> const long_v12{0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xAA, 0xBB, 0xCC, 0xDD};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, long_v12), US));
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{7});
+    std::array<uint8_t, 10> const long_v12b{0x00, 0x00, 0x00, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x01};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, long_v12b), US));
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{42});
+
+    v13.number = uint64_t{0x100000000};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{42});
+}
+
+// Milan v1.2 Sections 5.4.4.4-5, 7.6: default priority 192, user priority following it, name
+// "DEFAULT"; a SET changes only the flagged fields, the response carries every supported flag
+TEST(nanoavb_mvu, media_clock_reference_info)
+{
+    std::vector<std::vector<uint8_t>> sent;
+    auto handler = make_handler(sent);
+    int changes = 0;
+    handler.set_on_settings_changed([&changes] { ++changes; });
+
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(0), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(reply_header(sent.back()).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 74});
+    auto info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.clock_domain_index.get(), uint16_t{0});
+    EXPECT_EQ(info.flags.get(), MVU_MCR_FLAGS_SUPPORTED);
+    EXPECT_EQ(info.default_mcr_prio.get(), uint8_t{192});
+    EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{192});
+    EXPECT_TRUE(info.media_clock_domain_name == mcr_domain_name("DEFAULT"));
+
+    // The priority only: the name stays
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(0, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 200, "x"), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS);
+    info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.flags.get(), MVU_MCR_FLAGS_SUPPORTED);
+    EXPECT_EQ(info.default_mcr_prio.get(), uint8_t{192});
+    EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{200});
+    EXPECT_TRUE(info.media_clock_domain_name == mcr_domain_name("DEFAULT"));
+    EXPECT_EQ(changes, 1);
+
+    // The name only, a full 64 octets with no NUL
+    std::string const long_name(64, 'n');
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(0, MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID, 1, long_name), US));
+    info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{200});
+    EXPECT_TRUE(info.media_clock_domain_name == mcr_domain_name(long_name));
+    EXPECT_EQ(changes, 2);
+
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(0), US));
+    info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{200});
+    EXPECT_TRUE(info.media_clock_domain_name == mcr_domain_name(long_name));
+
+    // No flags: nothing changes, nothing to save
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(0, 0, 9, "y"), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(changes, 2);
+
+    // One clock domain by default: index 1 does not exist
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(1), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_TRUE(
+        handler.process_packet(SRC, set_mcr_command(1, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 1, ""), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NO_SUCH_DESCRIPTOR);
+    // Short commands
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, {}), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_BAD_ARGUMENTS);
+    std::array<uint8_t, 8> const partial{};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, partial), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(changes, 2);
+
+    // A new default carries a user priority still at the old default along
+    handler.set_default_mcr_priority(224);
+    handler.set_clock_domain_count(2);
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(1), US));
+    info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.default_mcr_prio.get(), uint8_t{224});
+    EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{224});
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(0), US));
+    EXPECT_EQ(reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back()).user_mcr_prio.get(), uint8_t{200});
+}
+
+// The SETs honour the AEM lock: another controller's lock refuses them
+// ENTITY_LOCKED (the GETs still answer); the locking controller may SET
+TEST(nanoavb_mvu, sets_refused_while_locked)
+{
+    AemSide side;
+    std::vector<std::vector<uint8_t>> sent;
+    auto handler = make_handler(sent);
+    handler.set_aem_handler(&side.aem);
+    int changes = 0;
+    handler.set_on_settings_changed([&changes] { ++changes; });
+
+    AemLockEntityPayload lock{};
+    EXPECT_TRUE(side.aem.process_packet(OTHER_MAC, aem_command(AEM_COMMAND_LOCK_ENTITY, OTHER, make_const_span(lock)), US));
+    EXPECT_TRUE(side.aem.is_locked());
+
+    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(5), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{0});
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(0, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 50, ""), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back()).user_mcr_prio.get(), uint8_t{192});
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(0), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS);
+    EXPECT_EQ(changes, 0);
+
+    // The lock holder's SET goes through
+    auto from_holder = set_mcr_command(0, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 50, "");
+    MvuDu du = reply_header(from_holder);
+    du.common.controller_entity_id = OTHER;
+    span_store(std::span<uint8_t>{from_holder}.first(MvuDu::LENGTH), du);
+    EXPECT_TRUE(handler.process_packet(OTHER_MAC, from_holder, US));
+    EXPECT_EQ(reply_header(sent.back()).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(handler.mcr_info(0)->user_mcr_prio, uint8_t{50});
+    EXPECT_EQ(changes, 1);
+}
+
+// A SET that changes something is sent, u bit set, to every controller
+// registered for unsolicited notifications but the one that asked (Milan
+// v1.2 Section 5.4.5.1), with its own controller id
+TEST(nanoavb_mvu, set_notifies_registered_controllers)
+{
+    AemSide side;
+    struct Sent
+    {
+        Eui48 mac;
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<Sent> sent;
+    MvuCommandHandler handler{};
+    handler.set_aem_handler(&side.aem);
+    handler.set_send_response([&sent](Eui48 const& mac, std::span<uint8_t const> const resp) {
+        sent.push_back({mac, {resp.begin(), resp.end()}});
+        return true;
+    });
+    EXPECT_TRUE(side.aem.process_packet(SRC, aem_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, CONTROLLER), US));
+    EXPECT_TRUE(side.aem.process_packet(OTHER_MAC, aem_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, OTHER), US));
+
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(0, MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID, 0, "Stage"), US));
+    EXPECT_EQ(sent.size(), size_t{2});
+    expect_mvu_response(sent[0].bytes, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS);
+    EXPECT_TRUE(sent[0].mac == SRC);
+    EXPECT_TRUE(sent[1].mac == OTHER_MAC);
+    auto const note = reply_header(sent[1].bytes);
+    EXPECT_EQ(note.common.message_type(), AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE);
+    EXPECT_TRUE(note.unsolicited());
+    EXPECT_EQ(note.command_type(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO);
+    EXPECT_TRUE(note.common.target_entity_id == US);
+    EXPECT_TRUE(note.common.controller_entity_id == OTHER);
+    EXPECT_TRUE(
+        reply_payload<MvuMediaClockReferenceInfoPayload>(sent[1].bytes).media_clock_domain_name == mcr_domain_name("Stage"));
+
+    // No change, no notification
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(0, MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID, 0, "Stage"), US));
+    EXPECT_EQ(sent.size(), size_t{3});
+
+    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(77), US));
+    EXPECT_EQ(sent.size(), size_t{5});
+    EXPECT_TRUE(sent[4].mac == OTHER_MAC);
+    EXPECT_TRUE(reply_header(sent[4].bytes).unsolicited());
+    EXPECT_EQ(reply_header(sent[4].bytes).common.sequence_id.get(), uint16_t(reply_header(sent[1].bytes).common.sequence_id.get() + 1));
+    EXPECT_EQ(sent[4].bytes.size(), MVU_MIN_PDU_LENGTH);
 }
 
 // A reserved command type (v1.2 Table 5.18: 0x0005-0x7FFF, which v1.3 uses
