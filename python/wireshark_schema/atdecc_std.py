@@ -295,8 +295,13 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
     ),
     "MvuSystemUniqueId": _struct(
         "MvuSystemUniqueId",
-        "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Figure 5.7)",
-        [_RSV2, ("system_unique_id", 8, "u64", "system_unique_id")],
+        "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Milan 1.2 Figure 5.5: one quadlet)",
+        [_RSV2, ("system_unique_id", 4, "u32", "system_unique_id")],
+    ),
+    "MvuSystemUniqueIdV13": _struct(
+        "MvuSystemUniqueIdV13",
+        "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Milan 1.3 Figure 5.7)",
+        [_RSV2, ("system_unique_number", 8, "u64", "system unique id number (Milan 1.3)")],
     ),
     "MvuMediaClockReferenceInfo": _struct(
         "MvuMediaClockReferenceInfo",
@@ -354,7 +359,7 @@ MVU_OPTIONAL_TAIL: dict[str, tuple[str, int, str, str]] = {
         "u32",
         "specification_version (Milan 1.3, optional)",
     ),
-    "MvuSystemUniqueId": (
+    "MvuSystemUniqueIdV13": (
         "system_name",
         64,
         "string",
@@ -366,6 +371,12 @@ MVU_OPTIONAL_TAIL: dict[str, tuple[str, int, str, str]] = {
         "string",
         "name (Milan 1.3, 64 octets, optional)",
     ),
+}
+# struct -> the Milan 1.3 struct that replaces it when the payload holds it
+# (Milan 1.3 widened system_unique_id from 1.2's quadlet to a u64 and a name;
+# la_avdecc tells the two apart the same way)
+MVU_LONG_FORM: dict[str, str] = {
+    "MvuSystemUniqueId": "MvuSystemUniqueIdV13",
 }
 MVU_PAYLOADS: dict[int, tuple[str | None, str | None]] = {
     0x0000: ("MvuReserved", "MvuGetMilanInfoResponse"),
