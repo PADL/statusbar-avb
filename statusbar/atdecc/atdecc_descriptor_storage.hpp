@@ -160,6 +160,29 @@ class DescriptorStorage
         return failure(BufferError::invalid_offset);
     }
 
+    /// Call @p fn(configuration, type, index, bytes) for every descriptor, in
+    /// table order (one with a bad offset or length is skipped).
+    template <typename Fn>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_descriptor(Fn&& fn) const
+    {
+        auto const count = static_cast<uint32_t>(header_.toc_count);
+        auto const base = static_cast<uint32_t>(header_.toc_offset);
+        for (uint32_t i = 0; i < count; ++i) {
+            DescriptorStorageTocEntry entry{};
+            span_load(entry, blob_.subspan(base + (i * DescriptorStorageTocEntry::LENGTH)));
+            auto const offset = static_cast<size_t>(static_cast<uint32_t>(entry.offset));
+            auto const length = static_cast<size_t>(static_cast<uint16_t>(entry.length));
+            if (!can_add(offset, length) || offset + length > blob_.size()) {
+                continue;
+            }
+            fn(static_cast<uint16_t>(entry.configuration_index),
+               static_cast<uint16_t>(entry.descriptor_type),
+               static_cast<uint16_t>(entry.descriptor_index),
+               blob_.subspan(offset, length));
+        }
+    }
+
     /// Forward lookup: the well-known symbol assigned to a given descriptor, or
     /// failure if that descriptor has no symbol entry. The symbol decouples the
     /// designer-chosen descriptor index from code that handles the descriptor.
