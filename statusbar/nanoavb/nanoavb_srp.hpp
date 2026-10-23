@@ -606,9 +606,18 @@ class MsrpHandler
     /// new one for two LeaveAll periods (IEEE 802.1Q 35.2.2.8).
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
     {
-        auto const idx = remember_talker(info);
-        if (!idx) {
-            return idx;
+        size_t idx = 0;
+        bool found = false;
+        TalkerStreamSrpInfo previous{};
+        for (size_t i = 0; i < talker_streams_.size(); ++i) {
+            if (talker_streams_[i].stream_id == info.stream_id) {
+                previous = talker_streams_[i];
+                talker_streams_[i] = info;
+                talker_streams_[i].state = TalkerReservationState::Advertising;
+                idx = i;
+                found = true;
+                break;
+            }
         }
         ensure_started(now);
         auto& stream = talker_streams_[*idx];
@@ -616,6 +625,31 @@ class MsrpHandler
             declare_talker(stream, now);
         } else {
             stand_talker_down(stream, now);
+        }
+
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fv.stream_id = info.stream_id;
+        fv.destination_address = info.dest_address;
+        fv.vlan_identifier = info.vlan_id;
+        fv.max_frame_size = info.max_frame_size;
+        fv.max_interval_frames = info.max_interval_frames;
+        fv.set_priority(info.priority);
+        fv.set_rank(statusbar::srp::msrp::RANK_NON_EMERGENCY);
+        fv.accumulated_latency = info.accumulated_latency;
+
+        if (!started_) {
+            participant_.start(now);
+            started_ = true;
+        }
+        // A full attribute table is the caller's to see; put the reservation entry back as it
+        // was so the table never claims an Advertise that was never declared.
+        if (auto status = participant_.declare_talker_advertise(fv, now); !status) {
+            if (found) {
+                talker_streams_[idx] = previous;
+            } else {
+                talker_streams_.pop_back();
+            }
+            return failure(status.error());
         }
         return idx;
     }
@@ -681,24 +715,17 @@ class MsrpHandler
     /// count (see listener_withdraw). Returns the record's index.
     [[nodiscard]] auto listener_ready(StreamId const& stream_id, TimePoint now) -> StatusValue<size_t>
     {
-        auto const idx = attach_listener_record(stream_id, ListenerReservationState::Ready);
-        if (!idx) {
-            return failure(idx.error());
-        }
-        ensure_started(now);
-        (void)participant_.declare_listener(stream_id, statusbar::srp::msrp::ListenerDeclaration::Ready, now);
-        return *idx;
+        return attach_declared(stream_id, ListenerReservationState::Ready, statusbar::srp::msrp::ListenerDeclaration::Ready, now);
     }
 
     /// One more input attached to @p stream_id, declared Asking Failed.
     [[nodiscard]] auto listener_asking_failed(StreamId const& stream_id, TimePoint now) -> Status
     {
-        auto const idx = attach_listener_record(stream_id, ListenerReservationState::AskingFailed);
+        auto const idx = attach_declared(
+            stream_id, ListenerReservationState::AskingFailed, statusbar::srp::msrp::ListenerDeclaration::AskingFailed, now);
         if (!idx) {
             return failure(idx.error());
         }
-        ensure_started(now);
-        (void)participant_.declare_listener(stream_id, statusbar::srp::msrp::ListenerDeclaration::AskingFailed, now);
         return success();
     }
 
@@ -1095,6 +1122,24 @@ class MsrpHandler
             }
         }
         return listener_streams_.size();
+    }
+
+    /// Declare @p stream_id's Listener @p decl, then attach one more input in @p state. A declaration
+    /// the participant's full table refuses leaves the record as it was; a full record table
+    /// withdraws a declaration made for a stream no record holds.
+    [[nodiscard]] auto attach_declared(
+        StreamId const& stream_id, ListenerReservationState state, statusbar::srp::msrp::ListenerDeclaration decl, TimePoint now)
+        -> StatusValue<size_t>
+    {
+        ensure_started(now);
+        if (auto const r = participant_.declare_listener(stream_id, decl, now); !r) {
+            return failure(r.error());
+        }
+        auto const idx = attach_listener_record(stream_id, state);
+        if (!idx) {
+            (void)participant_.withdraw_listener(stream_id, now);
+        }
+        return idx;
     }
 
     /// The record for @p stream_id, made when there is none, put in @p state

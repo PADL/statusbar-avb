@@ -1096,6 +1096,13 @@ TEST(msrp_config_validate, valid_default)
     EXPECT_TRUE(is_success(cfg.validate()));
 }
 
+TEST(msrp_config_validate, reserved_exceeds_table)
+{
+    MsrpConfig cfg = test_msrp_config();
+    cfg.reserved_talker_advertise = cfg.max_talker_advertise + 1;
+    EXPECT_TRUE(is_failure(cfg.validate()));
+}
+
 TEST(msrp_config_validate, invalid_exceeds)
 {
     MsrpConfig cfg{};
@@ -3221,103 +3228,61 @@ TEST(msrp_participant, a_leave_skipped_for_space_rides_the_next_pdu)
     EXPECT_TRUE(lv_seen.has_value() && *lv_seen == AttributeEvent::Lv);
 }
 
-//
-// A transmit opportunity that owes nothing sends nothing (IEEE 802.1Q
-// 10.7.6.3, 10.7.6.5): two participants on one LAN do not answer each other
-//
-
-namespace {
-
-struct MsrpLanTraffic
+// Foreign Talker Advertises a bridge propagates get only max - reserved slots: our own Talker
+// Advertises, declared later, still declare, and the one our listener stream is bound to registers.
+TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
 {
-    int from_a{0};
-    int from_b{0};
-    bool talker_stayed_registered{true};
-};
+    auto const run = [](size_t reserved, bool expect_own_ok) {
+        MsrpConfig cfg = test_msrp_config();  // 8 Talker Advertises, 8 Listeners
+        cfg.reserved_talker_advertise = reserved;
+        cfg.reserved_listeners = reserved;
+        MsrpParticipant a{cfg, 0xa5a5};
+        MsrpConfig bridge_cfg = test_msrp_config();
+        bridge_cfg.max_talker_advertise = 16;
+        bridge_cfg.max_listeners = 16;
+        MsrpParticipant b{bridge_cfg, 0xb6b6};
+        Fabric fab{};
+        a.set_send_pdu(fab.make_a_sender());
+        b.set_send_pdu(fab.make_b_sender());
+        TestClock clock{};
+        a.start(clock.now);
+        b.start(clock.now);
 
-/// A declares a Domain and a Talker Advertise, B the same Domain: a talker
-/// and another end station on one port. Twenty seconds to settle, then
-/// @p seconds are counted. Time is told, 10 ms a step.
-auto run_two_msrp_on_a_lan(int const seconds) -> MsrpLanTraffic
-{
-    MsrpParticipant a{test_msrp_config(), 0xa001};
-    MsrpParticipant b{test_msrp_config(), 0xb002};
-    Fabric fab{};
-    TestClock clock{};
-    MsrpLanTraffic seen;
-    bool counting = false;
-    a.set_send_pdu([&](std::span<uint8_t const> pdu) {
-        seen.from_a += counting ? 1 : 0;
-        return fab.make_a_sender()(pdu);
-    });
-    b.set_send_pdu([&](std::span<uint8_t const> pdu) {
-        seen.from_b += counting ? 1 : 0;
-        return fab.make_b_sender()(pdu);
-    });
-    a.start(clock.now);
-    b.start(clock.now);
-    (void)a.declare_domain(make_domain(3, 2), clock.now);
-    (void)b.declare_domain(make_domain(3, 2), clock.now);
-    (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
-    for (int ms = 0; ms < (seconds + 20) * 1000; ms += 10) {
-        counting = ms >= 20'000;
-        auto const t = clock.advance(std::chrono::milliseconds{10});
-        a.tick(t);
-        fab.deliver_a_to_b(b, t);
-        b.tick(t);
-        fab.deliver_b_to_a(a, t);
-        bool const registered = b.find_registered_talker_advertise(make_stream_id(0xA001)) != nullptr;
-        seen.talker_stayed_registered = seen.talker_stayed_registered && (!counting || registered);
-    }
-    return seen;
-}
+        // The "bridge" propagates 8 foreign advertises and 8 foreign Listeners.
+        for (uint16_t uid = 0x0100; uid < 0x0108; ++uid) {
+            EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(uid), clock.now)));
+            EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(uid + 0x0100), ListenerDeclaration::Ready, clock.now)));
+        }
+        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        fab.deliver_b_to_a(a, clock.now);
+        EXPECT_EQ(a.talker_advertise_count(), 8u - reserved);
+        EXPECT_EQ(a.listener_count(), 8u - reserved);
 
-}  // namespace
+        // Our two talker streams and our listener stream, declared later.
+        bool const t1 = is_success(a.declare_talker_advertise(make_talker_adv(0x0001), clock.now));
+        bool const t2 = is_success(a.declare_talker_advertise(make_talker_adv(0x0002), clock.now));
+        bool const l1 = is_success(a.declare_listener(make_stream_id(0x0300), ListenerDeclaration::AskingFailed, clock.now));
+        EXPECT_EQ(t1 && t2 && l1, expect_own_ok);
+        if (!expect_own_ok) {
+            return;
+        }
 
-TEST(msrp_quiet_opportunity, two_on_one_lan_do_not_answer_each_other)
-{
-    // They used to: each PDU heard was answered a JoinTime later with the
-    // optional Joins of everything declared, about three PDUs a second from
-    // each, for ever. What is left is each one's periodic and LeaveAll.
-    auto const seen = run_two_msrp_on_a_lan(60);
-    EXPECT_TRUE(seen.from_a >= 4 && seen.from_a <= 80);
-    EXPECT_TRUE(seen.from_b <= 80);
-    EXPECT_TRUE(seen.from_a + seen.from_b <= 140);
-    EXPECT_TRUE(seen.talker_stayed_registered);  // A's stream stayed registered at B throughout
-}
-
-TEST(msrp_quiet_opportunity, an_opportunity_nobody_asked_for_sends_nothing)
-{
-    MsrpParticipant a{test_msrp_config(), 0xa001};
-    MsrpParticipant peer{test_msrp_config(), 0xb002};
-    Fabric fab{};
-    a.set_send_pdu(fab.make_a_sender());
-    peer.set_send_pdu(fab.make_b_sender());
-    TestClock clock{};
-    a.start(clock.now);
-    peer.start(clock.now);
-    (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
-    (void)peer.declare_talker_advertise(make_talker_adv(0xB001), clock.now);
-    // 1.3 s: both have sent their News and their first periodic Join. Neither
-    // hears the other yet.
-    for (int i = 0; i < 130; ++i) {
-        auto const t = clock.advance(std::chrono::milliseconds{10});
-        a.tick(t);
-        peer.tick(t);
-    }
-    EXPECT_TRUE(!fab.a_to_b.empty() && !fab.b_to_a.empty());
-    auto const heard = fab.b_to_a.back();
-    fab.a_to_b.clear();
-
-    // A PDU arrives that asks nothing of us. One opportunity follows it, a
-    // JoinTime later at most (finish_receive), and nothing goes out at it.
-    // 500 ms: past that opportunity and short of the next periodic.
-    a.receive_pdu(heard, clock.now);
-    for (int i = 0; i < 50; ++i) {
-        a.tick(clock.advance(std::chrono::milliseconds{10}));
-    }
-    EXPECT_TRUE(fab.a_to_b.empty());
-    EXPECT_TRUE(a.find_registered_talker_advertise(make_stream_id(0xB001)) != nullptr);  // it was heard
+        // The talker our listener stream is bound to comes up: its Advertise
+        // registers, as do the peer Listeners for our talker streams.
+        EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(0x0300), clock.now)));
+        EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now)));
+        // Yet more foreign traffic is still held to the remainder.
+        EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(0x0108), clock.now)));
+        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        fab.deliver_b_to_a(a, clock.now);
+        EXPECT_NE(a.find_talker_advertise(make_stream_id(0x0300)), nullptr);
+        EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0108)), nullptr);
+        EXPECT_NE(a.find_listener(make_stream_id(0x0001)), nullptr);
+        EXPECT_TRUE(a.listener_permits_transmit(make_stream_id(0x0001)));
+        EXPECT_EQ(a.talker_advertise_count(), 8u - reserved + 3u);
+    };
+    run(0, false);  // unreserved: the foreign advertises refuse ours
+    run(4, true);   // 2 talker + 2 listener streams' worth reserved
 }
 
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)

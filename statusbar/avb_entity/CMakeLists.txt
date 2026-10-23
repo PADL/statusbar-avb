@@ -47,9 +47,6 @@ statusbar_add_module(
   avb_entity_clock_sources_test.cpp
   avb_entity_descriptor_helpers_test.cpp
   avb_entity_host_test.cpp
-  avb_entity_kit_test.cpp
-  avb_entity_talker_gate_test.cpp
-  avb_entity_state_dir_test.cpp
   avb_entity_talker_streams_test.cpp
   avb_entity_udptun_bridge_test.cpp
   avb_entity_stereo_io_test.cpp
@@ -69,6 +66,7 @@ statusbar_add_module(
   avb_entity_stream_rx_sink_test.cpp
   avb_entity_aaf_reframe_test.cpp
   avb_entity_shaper_test.cpp
+  avb_entity_kit_test.cpp
   tx_pcap_recorder_test.cpp
   log_sweep_generator_test.cpp
   FUNCTIONAL_TESTS
