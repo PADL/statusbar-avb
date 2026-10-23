@@ -14,6 +14,7 @@
 #include <expected>
 #include <functional>
 #include <system_error>
+#include <vector>
 
 using namespace statusbar::nanoavb;
 using namespace statusbar::atdecc;
@@ -328,6 +329,180 @@ TEST(nanoavb_acmp_talker, ignores_wrong_entity_id)
 
     EXPECT_FALSE(handled);
     EXPECT_FALSE(response_sent);
+}
+
+//
+// NanoAvbAcmpTalker as a Milan talker (Milan v1.2 Section 5.5.4)
+//
+TEST(nanoavb_acmp_milan_talker, probe_answers_without_connecting)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+
+    std::vector<AcmpCommandResponse> sent;
+    AcmpTalkerCallbacks callbacks;
+    callbacks.tx_response = [&](AcmpCommandResponse const& resp) {
+        sent.push_back(resp);
+        return true;
+    };
+    int connects = 0;
+    callbacks.on_connect = [&](uint16_t, Eui64, uint16_t) { ++connects; };
+
+    NanoAvbAcmpTalker talker{talker_id, callbacks};
+    talker.set_milan(true);
+    talker.start();
+    auto stream_id = make_stream_id(talker_id, 1);
+    Eui48 dest_mac{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};
+    (void)talker.configure_stream(1, stream_id, dest_mac, 2);
+
+    std::vector<uint16_t> probes;
+    bool dest_valid = false;
+    talker.set_milan_callbacks(
+        [&](uint16_t) { return MilanTalkerStreamState{.dest_mac_valid = dest_valid}; },
+        [&](uint16_t const index, statusbar::sm::TimePoint) {
+            // The window opens before the response goes.
+            EXPECT_EQ(sent.size(), size_t{probes.size()});
+            probes.push_back(index);
+        });
+
+    // Before MAAP: TALKER_DEST_MAC_FAIL, and the probe counts.
+    auto probe = make_connect_tx_command(talker_id, 1, listener_id, 3, 7);
+    EXPECT_TRUE(talker.receive_command(probe, statusbar::sm::TimePoint{}));
+    EXPECT_EQ(sent.size(), size_t{1});
+    EXPECT_EQ(sent.back().message_type(), ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+    EXPECT_EQ(probes.size(), size_t{1});
+
+    // With an address: SUCCESS, connection_count 0, nothing connected.
+    dest_valid = true;
+    EXPECT_TRUE(talker.receive_command(probe, statusbar::sm::TimePoint{}));
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(sent.back().connection_count.get(), uint16_t{0});
+    EXPECT_EQ(sent.back().stream_id, stream_id);
+    EXPECT_EQ(sent.back().stream_dest_mac, dest_mac);
+    EXPECT_EQ(sent.back().sequence_id.get(), uint16_t{7});
+    EXPECT_EQ(probes.size(), size_t{2});
+    EXPECT_EQ(probes.back(), uint16_t{1});
+    EXPECT_EQ(talker.connection_count(1), size_t{0});
+    EXPECT_EQ(connects, 0);
+
+    // An unknown unique id is answered and does not count.
+    EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 99, listener_id, 3), statusbar::sm::TimePoint{}));
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_TALKER_UNKNOWN_ID);
+    EXPECT_EQ(probes.size(), size_t{2});
+
+    // Another talker's command, and responses, are not ours.
+    EXPECT_FALSE(talker.receive_command(make_connect_tx_command(make_entity_id(0x99), 1, listener_id, 3), {}));
+    auto response = probe;
+    response.set_message_type(ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
+    EXPECT_FALSE(talker.receive_command(response, {}));
+}
+
+TEST(nanoavb_acmp_milan_talker, disconnect_state_and_connection)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+    std::vector<AcmpCommandResponse> sent;
+    AcmpTalkerCallbacks callbacks;
+    callbacks.tx_response = [&](AcmpCommandResponse const& resp) {
+        sent.push_back(resp);
+        return true;
+    };
+    int disconnects = 0;
+    callbacks.on_disconnect = [&](uint16_t, Eui64, uint16_t) { ++disconnects; };
+    NanoAvbAcmpTalker talker{talker_id, callbacks};
+    talker.set_milan(true);
+    talker.start();
+    auto stream_id = make_stream_id(talker_id, 0);
+    (void)talker.configure_stream(0, stream_id, Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x02}, 2);
+    bool asking_failed = false;
+    talker.set_milan_callbacks(
+        [&](uint16_t) { return MilanTalkerStreamState{.dest_mac_valid = true, .registering_failed = asking_failed}; }, {});
+
+    // DISCONNECT_TX: SUCCESS, nothing changes, the stream fields zero.
+    EXPECT_TRUE(talker.receive_command(make_disconnect_tx_command(talker_id, 0, listener_id, 0), {}));
+    EXPECT_EQ(sent.back().message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE);
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(sent.back().stream_id, Eui64{});
+    EXPECT_EQ(disconnects, 0);
+
+    // GET_TX_STATE: count 0, REGISTERING_FAILED with a Listener Asking Failed.
+    asking_failed = true;
+    EXPECT_TRUE(talker.receive_command(make_get_tx_state_command(talker_id, 0), {}));
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(sent.back().connection_count.get(), uint16_t{0});
+    EXPECT_EQ(sent.back().flags.get(), uint16_t{acmp_flags::REGISTERING_FAILED});
+    EXPECT_EQ(sent.back().stream_id, stream_id);
+
+    // GET_TX_CONNECTION: NOT_SUPPORTED.
+    AcmpCommandResponse get_connection{};
+    get_connection.set_message_type(ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_COMMAND);
+    get_connection.talker_entity_id = talker_id;
+    EXPECT_TRUE(talker.receive_command(get_connection, {}));
+    EXPECT_EQ(sent.back().message_type(), ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_RESPONSE);
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_NOT_SUPPORTED);
+}
+
+// A connect before MAAP has the stream's address is refused TALKER_DEST_MAC_FAIL in both
+// profiles, connecting nothing; the next connect or probe after MAAP gets the MAAP address.
+TEST(nanoavb_acmp_talker, connect_before_maap_is_refused_then_gets_the_maap_address)
+{
+    auto talker_id = make_entity_id(0x01);
+    auto listener_id = make_entity_id(0x02);
+    Eui48 const maap_mac{0x91, 0xE0, 0xF0, 0x00, 0x83, 0x7E};
+    for (bool const milan : {false, true}) {
+        std::vector<AcmpCommandResponse> sent;
+        AcmpTalkerCallbacks callbacks;
+        callbacks.tx_response = [&](AcmpCommandResponse const& resp) {
+            sent.push_back(resp);
+            return true;
+        };
+        NanoAvbAcmpTalker talker{talker_id, callbacks};
+        talker.set_milan(milan);
+        talker.start();
+        auto const stream_id = make_stream_id(talker_id, 0);
+        // MAAP acquiring: no destination address.
+        (void)talker.configure_stream(0, stream_id, Eui48{}, 2);
+        bool acquired = false;
+        talker.set_milan_callbacks([&](uint16_t) { return MilanTalkerStreamState{.dest_mac_valid = acquired}; }, {});
+
+        EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 0, listener_id, 1), {}));
+        EXPECT_EQ(sent.back().message_type(), ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+        EXPECT_EQ(sent.back().status(), ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+        EXPECT_EQ(talker.connection_count(0), size_t{0});
+
+        // MAAP defends its block: the stream's address, then valid.
+        (void)talker.configure_stream(0, stream_id, maap_mac, 2);
+        acquired = true;
+        EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 0, listener_id, 1, 2), {}));
+        EXPECT_EQ(sent.back().status(), ACMP_STATUS_SUCCESS);
+        EXPECT_EQ(sent.back().stream_dest_mac, maap_mac);
+        EXPECT_EQ(sent.back().stream_id, stream_id);
+        EXPECT_EQ(talker.connection_count(0), size_t{milan ? 0U : 1U});
+    }
+}
+
+TEST(nanoavb_acmp_milan_talker, probe_from_another_interface)
+{
+    auto talker_id = make_entity_id(0x01);
+    std::vector<AcmpCommandResponse> sent;
+    AcmpTalkerCallbacks callbacks;
+    callbacks.tx_response = [&](AcmpCommandResponse const& resp) {
+        sent.push_back(resp);
+        return true;
+    };
+    NanoAvbAcmpTalker talker{talker_id, callbacks};
+    talker.set_milan(true);
+    (void)talker.configure_stream(0, make_stream_id(talker_id, 0), Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x03}, 2);
+    int probes = 0;
+    talker.set_milan_callbacks({}, [&](uint16_t, statusbar::sm::TimePoint) { ++probes; });
+    // Default state: the address is valid when not zero, the stream on interface 0.
+    EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 0, make_entity_id(2), 0), {}, 1));
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_INCOMPATIBLE_REQUEST);
+    EXPECT_EQ(probes, 0);
+    EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 0, make_entity_id(2), 0), {}, 0));
+    EXPECT_EQ(sent.back().status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(probes, 1);
 }
 
 //

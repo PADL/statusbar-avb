@@ -307,6 +307,11 @@ def _aem(data: bytes, stop: int, is_command: bool, out: dict) -> None:
                         break
                     out.update(decode_layout(element, data, at))
                     at += size
+            elif trailer.kind == "tail":
+                size = A.ELEMENT_SIZE[trailer.element]
+                if stop - at >= size:
+                    out.update(decode_layout(A.TRAILER_ELEMENTS[trailer.element], data, at))
+                    at += size
             elif trailer.kind == "blob":
                 members = {
                     m["name"]: m for m in A.ALL_PAYLOAD_STRUCTS[spec.struct]["members"]

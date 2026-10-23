@@ -433,20 +433,23 @@ TEST(avb_entity_host_stream_info, stopped_talker_reports_streaming_wait)
     AvbEntityHost const& h = *host.operator->();
     (void)talker.configure_stream(0, stream_id, dest);
 
+    statusbar::atdecc::aem::AemStreamInfoMilanExtension ext{};
+    TalkerStreamStatus status{.milan = false, .presentation_offset_ns = 2'000'000};
     statusbar::atdecc::aem::AemStreamInfoPayload streaming{};
-    EXPECT_TRUE(fill_talker_stream_info(h, 0, 2'000'000, /*stopped=*/false, streaming));
+    EXPECT_TRUE(fill_talker_stream_info(h, 0, status, streaming, ext));
     EXPECT_TRUE((streaming.flags.get() & stream_info_flags::STREAMING_WAIT) == 0);
     EXPECT_TRUE((streaming.flags.get() & stream_info_flags::STREAM_ID_VALID) != 0);
     EXPECT_EQ(streaming.stream_id, stream_id);
 
+    status.stopped = true;
     statusbar::atdecc::aem::AemStreamInfoPayload stopped{};
-    EXPECT_TRUE(fill_talker_stream_info(h, 0, 2'000'000, /*stopped=*/true, stopped));
+    EXPECT_TRUE(fill_talker_stream_info(h, 0, status, stopped, ext));
     EXPECT_TRUE((stopped.flags.get() & stream_info_flags::STREAMING_WAIT) != 0);
     EXPECT_EQ(stopped.stream_id, stream_id);
 
     // An index the talker does not have is declined either way.
     statusbar::atdecc::aem::AemStreamInfoPayload none{};
-    EXPECT_FALSE(fill_talker_stream_info(h, 200, 2'000'000, true, none));
+    EXPECT_FALSE(fill_talker_stream_info(h, 200, status, none, ext));
 
     // IEEE 1722.1-2021 Table 7-158: FRAMES_TX is STREAM_OUTPUT counter bit 7.
     EXPECT_EQ(stream_output_frames_tx_bit, 7U);
