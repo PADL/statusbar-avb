@@ -388,8 +388,10 @@ class MsrpHandler
     {
         size_t idx = 0;
         bool found = false;
+        TalkerStreamSrpInfo previous{};
         for (size_t i = 0; i < talker_streams_.size(); ++i) {
             if (talker_streams_[i].stream_id == info.stream_id) {
+                previous = talker_streams_[i];
                 talker_streams_[i] = info;
                 talker_streams_[i].state = TalkerReservationState::Advertising;
                 idx = i;
@@ -422,7 +424,16 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
-        (void)participant_.declare_talker_advertise(fv, now);
+        // A full attribute table is the caller's to see; put the reservation entry back as it
+        // was so the table never claims an Advertise that was never declared.
+        if (auto status = participant_.declare_talker_advertise(fv, now); !status) {
+            if (found) {
+                talker_streams_[idx] = previous;
+            } else {
+                talker_streams_.pop_back();
+            }
+            return failure(status.error());
+        }
         return idx;
     }
 
