@@ -366,6 +366,7 @@ NanoAvbComponents::NanoAvbComponents(
 {
     aem_handler.set_profile(profile);
     mvu_handler.set_profile(profile);
+    acmp_talker.set_milan(profile.milan);
 }
 
 namespace {
@@ -422,6 +423,7 @@ NanoAvbComponents::NanoAvbComponents(
 {
     aem_handler.set_profile(profile);
     mvu_handler.set_profile(profile);
+    acmp_talker.set_milan(profile.milan);
 }
 
 //
