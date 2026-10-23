@@ -212,6 +212,7 @@ auto make_connected_donor(tsn::StreamId const am824_id, tsn::StreamId const aaf_
     AvbEntityAudioIOConfig config{};
     config.entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
     config.descriptor_storage_blob = audio_blob();
+    config.milan = false;  // the classic CONNECT_RX / CONNECT_TX handshake
     auto const listener_id = config.entity_id;
     auto created = AvbEntityAudioIO::create(std::move(config));
     EXPECT_TRUE(created.has_value());

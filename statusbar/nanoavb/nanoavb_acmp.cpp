@@ -138,10 +138,50 @@ auto NanoAvbAcmpTalker::receive_command(AcmpCommandResponse const& cmd, TimePoin
 NanoAvbAcmpListener::NanoAvbAcmpListener(Eui64 entity_id, AcmpListenerCallbacks callbacks, size_t max_streams)
     : callbacks_{std::move(callbacks)}
     , ctx_{max_streams}
+    , milan_{entity_id, max_streams}
 {
     ctx_.my_id = entity_id;
 
     wire_listener_callbacks();
+    wire_milan();
+}
+
+void NanoAvbAcmpListener::wire_milan()
+{
+    // Commands (PROBE_TX) and responses alike go out through tx_command
+    // (both are multicast).
+    milan_.set_send([this](AcmpCommandResponse const& pdu) -> bool {
+        return callbacks_.tx_command ? callbacks_.tx_command(pdu) : false;
+    });
+    milan_.set_on_settled([this](uint16_t const index, MilanSinkStream const& stream) {
+        auto* const s = ctx_.get_stream(index);
+        if (s == nullptr) {
+            return;
+        }
+        auto const* const sink = milan_.sink(index);
+        s->reset();
+        s->connected = true;
+        s->talker_entity_id = sink->binding.talker_entity_id;
+        s->talker_unique_id = sink->binding.talker_unique_id;
+        s->controller_entity_id = sink->binding.controller_entity_id;
+        s->stream_id = stream.stream_id;
+        s->stream_dest_mac = stream.dest_mac;
+        s->stream_vlan_id = stream.vlan_id;
+        if (callbacks_.on_connect) {
+            callbacks_.on_connect(index, stream.stream_id, stream.dest_mac);
+        }
+    });
+    milan_.set_on_unsettled([this](uint16_t const index, MilanSinkStream const&) {
+        auto* const s = ctx_.get_stream(index);
+        if (s == nullptr || !s->connected) {
+            return;
+        }
+        // The data plane reads the stream identity to release it.
+        if (callbacks_.on_disconnect) {
+            callbacks_.on_disconnect(index);
+        }
+        s->reset();
+    });
 }
 
 void NanoAvbAcmpListener::set_callbacks(AcmpListenerCallbacks callbacks)
@@ -187,6 +227,10 @@ void NanoAvbAcmpListener::wire_listener_callbacks()
 
 auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& cmd, TimePoint event_time) -> bool
 {
+    if (milan_mode_) {
+        return cmd.is_command() && milan_.receive(cmd, event_time);
+    }
+
     // Check if this command is for us
     auto event = listener_event_for_controller_command(ctx_, cmd);
     if (!event) {
@@ -213,7 +257,7 @@ auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& 
 auto NanoAvbAcmpListener::fast_connect(
     uint16_t const listener_unique_id, Eui64 const& talker_id, uint16_t const talker_unique_id, TimePoint const now) -> bool
 {
-    if (ctx_.has_pending || listener_unique_id >= ctx_.max_streams() || is_connected(listener_unique_id)) {
+    if (milan_mode_ || ctx_.has_pending || listener_unique_id >= ctx_.max_streams() || is_connected(listener_unique_id)) {
         return false;
     }
     // Clause 8.2.2.1.1: the listener acts as its own controller. The
@@ -292,6 +336,10 @@ void NanoAvbAcmpListener::fast_connect_tick(TimePoint const now)
 
 auto NanoAvbAcmpListener::receive_talker_response(AcmpCommandResponse const& resp, TimePoint event_time) -> bool
 {
+    if (milan_mode_) {
+        return resp.is_response() && milan_.receive(resp, event_time);
+    }
+
     // Check if this response is for our pending command
     auto event = listener_event_for_talker_response(ctx_, resp);
     if (!event) {
@@ -339,6 +387,9 @@ auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
 
 auto NanoAvbAcmpListener::on_talker_departed(Eui64 const& talker_id) -> size_t
 {
+    if (milan_mode_) {
+        return 0;  // the Milan sinks run their own discovery
+    }
     return ctx_.clear_talker_connections(talker_id, [this](uint16_t stream_index) {
         if (callbacks_.on_disconnect) {
             callbacks_.on_disconnect(stream_index);

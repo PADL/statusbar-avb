@@ -76,6 +76,11 @@ struct ListenerStreamSlot
     /// IEEE 1722.1 STREAM_INPUT health counters (Clause 7.4.42). The
     /// per-packet update lives in avb_entity_stream_counters.hpp (unit-tested).
     StreamInputCounters counters{};
+
+    /// A bound Milan input that is stopped (STOP_STREAMING, or bound with
+    /// STREAMING_WAIT) discards its stream's AVTPDUs (Milan v1.2 Section
+    /// 5.3.8.7). Written on the reactor, read on the RX thread.
+    std::atomic<bool> stopped{false};
 };
 
 /// The timed packet for @p frames whole frames of an accepted AAF payload presented from @p pts_ns,
@@ -223,6 +228,15 @@ struct ListenerStreams
     /// presentation time; an AAF stream with no StreamConsumeFn is then not decoded to float.
     /// Set before streams flow; the RX thread reads it.
     void set_timed_audio_sink(StreamRxTimedAudioSink* sink) noexcept { timed_sink_ = sink; }
+
+    /// Discard (@p stopped) or process STREAM_INPUT @p stream_index's
+    /// AVTPDUs (ListenerStreamSlot::stopped). Reactor thread.
+    void set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+    {
+        if (auto* const slot = slot_for(stream_index); slot != nullptr) {
+            slot->stopped.store(stopped, std::memory_order_relaxed);
+        }
+    }
 
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }

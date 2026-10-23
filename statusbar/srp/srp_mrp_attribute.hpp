@@ -62,6 +62,14 @@ struct AttributeRecord
         return registrar_sm.current_state() == registrar_sm::Def::State::In;
     }
 
+    /// Is the peer's declaration registered: Registrar In, or Leaving (a
+    /// LeaveAll or a Leave not yet timed out)?
+    [[nodiscard]] auto registrar_is_registered() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::In || s == registrar_sm::Def::State::Lv;
+    }
+
     /// Convenience: has this attribute fully decayed?
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {

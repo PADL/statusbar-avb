@@ -98,36 +98,37 @@ struct TalkerStreamStatus
     return true;
 }
 
-/// Fill the GET_STREAM_INFO response for a STREAM_INPUT index from the ACMP listener: the
-/// connected talker's stream_id and destination, the current format; @p milan adds Milan v1.2
-/// Section 5.4.2.10.1's fields, mapped from the classic listener and MSRP.
-[[nodiscard]] inline auto fill_listener_stream_info(
-    AvbEntityHost const& host,
-    uint16_t const descriptor_index,
-    bool const milan,
-    atdecc::aem::AemStreamInfoPayload& out,
-    atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
+/// The STREAM_INPUT descriptor's current_format into @p out (true when the
+/// model has the input).
+[[nodiscard]] inline auto fill_stream_input_format(
+    AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
 {
-    using atdecc::aem::DESCRIPTOR_STREAM_INPUT;
-    namespace stream_info_flags = atdecc::aem::stream_info_flags;
-    namespace probing_status = atdecc::aem::probing_status;
+    auto const desc = host.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_INPUT, descriptor_index);
+    if (!desc.has_value()) {
+        return false;
+    }
+    atdecc::aem::DescriptorStream stream_desc{};
+    span_load_padded(stream_desc, *desc);
+    span_copy(make_span(out.stream_format), stream_desc.current_format.span());
+    return true;
+}
 
-    auto const& listener = host.components().acmp_listener;
-    auto const* sink = listener.get_stream(descriptor_index);
+/// Fill the classic GET_STREAM_INFO response for STREAM_INPUT @p descriptor_index
+/// from the ACMP listener sink: the connected talker's stream_id and dest MAC
+/// when connected, plus current_format.
+[[nodiscard]] inline auto fill_listener_stream_info(
+    AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+
+    auto const* sink = host.components().acmp_listener.get_stream(descriptor_index);
     if (sink == nullptr) {
         return false;
     }
-
     uint32_t flags = 0;
-
-    if (auto const desc = host.get_descriptor(DESCRIPTOR_STREAM_INPUT, descriptor_index); desc.has_value()) {
-        atdecc::aem::DescriptorStream stream_desc{};
-        span_load_padded(stream_desc, *desc);
-        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
+    if (fill_stream_input_format(host, descriptor_index, out)) {
         flags |= stream_info_flags::STREAM_FORMAT_VALID;
     }
-
-    // A connected sink knows the talker's stream identity.
     if (sink->connected) {
         flags |= stream_info_flags::CONNECTED | stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID;
         out.stream_id = sink->stream_id;
@@ -137,38 +138,60 @@ struct TalkerStreamStatus
             out.stream_vlan_id = ieee::doublet_t{sink->stream_vlan_id};
         }
     }
+    out.flags = ieee::quadlet_t{flags};
+    return true;
+}
 
-    if (milan) {
-        auto const goals = listener.fast_connect_goals();
-        bool const goal =
-            std::ranges::any_of(goals, [descriptor_index](auto const& g) { return g.listener_unique_id == descriptor_index; });
-        bool const bound = sink->connected || goal;
-        if (bound) {
-            flags |= stream_info_flags::BOUND | stream_info_flags::FAST_CONNECT | stream_info_flags::SAVED_STATE;
+/// Fill the Milan GET_STREAM_INFO response for a STREAM_INPUT from its sink state
+/// machine (Milan v1.2 Section 5.4.2.10.1, Tables 5.9-5.10; docs/AVB_ENTITY_KIT.md).
+/// False when the input or its sink does not exist.
+[[nodiscard]] inline auto fill_milan_listener_stream_info(
+    AvbEntityHost const& host,
+    uint16_t const descriptor_index,
+    atdecc::aem::AemStreamInfoPayload& out,
+    atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+    using atdecc::MilanTalkerRegistration;
+
+    auto const* sink = host.components().acmp_listener.milan_sinks().sink(descriptor_index);
+    if (sink == nullptr) {
+        return false;
+    }
+    uint32_t flags = 0;
+    if (fill_stream_input_format(host, descriptor_index, out)) {
+        flags |= stream_info_flags::STREAM_FORMAT_VALID;
+    }
+    if (sink->bound()) {
+        flags |= stream_info_flags::BOUND | stream_info_flags::FAST_CONNECT | stream_info_flags::SAVED_STATE;
+        if (!sink->binding.started) {
+            flags |= stream_info_flags::STREAMING_WAIT;
         }
-        ext.set_probing(
-            sink->connected ? probing_status::COMPLETED : (bound ? probing_status::ACTIVE : probing_status::DISABLED), 0);
-        bool registering = false;
-        if (sink->connected) {
-            statusbar::tsn::StreamId sid{};
-            (void)statusbar::tsn::load_unchecked(sink->stream_id.span(), &sid);
-            auto const& msrp = host.components().msrp_handler;
-            if (auto const* failed = msrp.registered_talker_failed(sid); failed != nullptr) {
-                registering = true;
-                flags |= stream_info_flags::REGISTERING_FAILED | stream_info_flags::MSRP_FAILURE_VALID;
+    }
+    if (sink->settled()) {
+        flags |= stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID;
+        out.stream_id = sink->stream.stream_id;
+        out.stream_dest_mac = sink->stream.dest_mac;
+        out.stream_vlan_id = ieee::doublet_t{sink->stream.vlan_id};
+    }
+    if (sink->registering()) {
+        statusbar::tsn::StreamId sid{};
+        (void)statusbar::tsn::load_unchecked(sink->stream.stream_id.span(), &sid);
+        auto const& msrp = host.components().msrp_handler;
+        flags |= stream_info_flags::MSRP_ACC_LAT_VALID;
+        if (sink->registration == MilanTalkerRegistration::failed) {
+            flags |= stream_info_flags::REGISTERING_FAILED | stream_info_flags::MSRP_FAILURE_VALID;
+            if (auto const* failed = msrp.peer_talker_failed(sid); failed != nullptr) {
                 out.msrp_failure_code = failed->failure_code;
                 out.msrp_failure_bridge_id = failed->failure_bridge_id;
                 out.msrp_accumulated_latency = failed->advertise.accumulated_latency;
-            } else if (auto const* advertise = msrp.registered_talker_advertise(sid); advertise != nullptr) {
-                registering = true;
-                out.msrp_accumulated_latency = advertise->accumulated_latency;
             }
+        } else if (auto const* advertise = msrp.peer_talker_advertise(sid); advertise != nullptr) {
+            out.msrp_accumulated_latency = advertise->accumulated_latency;
         }
-        if (registering) {
-            flags |= stream_info_flags::MSRP_ACC_LAT_VALID;
-        }
-        ext.flags_ex = ieee::quadlet_t{registering ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
     }
+    ext.flags_ex = ieee::quadlet_t{sink->registering() ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
+    ext.set_probing(sink->probing_status, sink->acmp_status);
     out.flags = ieee::quadlet_t{flags};
     return true;
 }

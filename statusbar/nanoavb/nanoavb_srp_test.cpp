@@ -552,6 +552,103 @@ TEST(nanoavb_srp_msrp, on_talker_listener_permits_ready_and_ready_failed_only)
     EXPECT_FALSE(permits.value_or(true));
 }
 
+// The Milan listener (v1.2 Section 5.3.8.5) declares only for a registered talker, never Ready
+// Failed, and withdraws when it leaves; peer_talker_* see only the live registration.
+TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    using statusbar::srp::msrp::MsrpConfig;
+    using statusbar::srp::msrp::MsrpParticipant;
+
+    TimePoint now{std::chrono::seconds{1}};
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(9);
+
+    std::vector<std::vector<uint8_t>> talker_out;
+    std::vector<std::vector<uint8_t>> listener_out;
+    MsrpParticipant talker{MsrpConfig{}, 0x7a1};
+    talker.set_send_pdu([&talker_out](std::span<uint8_t const> p) {
+        talker_out.emplace_back(p.begin(), p.end());
+        return true;
+    });
+    talker.start(now);
+    MsrpHandler<> listener{MsrpConfig{}, MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
+                               listener_out.emplace_back(p.begin(), p.end());
+                               return true;
+                           }}};
+    listener.set_listener_waits_for_talker(true);
+    int hooks = 0;
+    listener.set_on_remote_talker([&](StreamId const& s) {
+        if (s == sid) {
+            ++hooks;
+        }
+    });
+    auto run = [&](int const rounds) {
+        for (int round = 0; round < rounds; ++round) {
+            now += std::chrono::milliseconds{120};
+            talker.tick(now);
+            listener.tick(now);
+            for (auto const& p : talker_out) {
+                listener.receive_packet(p, now);
+            }
+            talker_out.clear();
+            for (auto const& p : listener_out) {
+                talker.receive_pdu(p, now);
+            }
+            listener_out.clear();
+        }
+    };
+    auto const heard = [&] {
+        auto const* rec = talker.find_listener(sid);
+        return rec != nullptr && rec->registrar_is_registered() ? rec->substate : ListenerDeclaration::Ignore;
+    };
+
+    auto const attached = listener.listener_attach(sid, now);
+    EXPECT_TRUE(attached.has_value());
+    EXPECT_EQ(*attached, ListenerReservationState::Waiting);
+    run(12);
+    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);  // nothing declared
+
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = sid;
+    fv.vlan_identifier = 2;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    (void)talker.declare_talker_advertise(fv, now);
+    run(12);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
+    EXPECT_TRUE(heard() == ListenerDeclaration::Ready);
+    EXPECT_TRUE(listener.peer_talker_advertise(sid) != nullptr);
+    EXPECT_TRUE(hooks > 0);
+
+    // The talker leaves: the declaration goes; the lingering record is no
+    // registration.
+    int const before = hooks;
+    (void)talker.withdraw_talker(sid, now);
+    run(12);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
+    EXPECT_TRUE(listener.peer_talker_advertise(sid) == nullptr);
+    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(hooks > before);
+
+    // A Talker Failed: Asking Failed.
+    statusbar::srp::msrp::TalkerFailedFirstValue failed{};
+    failed.advertise = fv;
+    failed.failure_code = 8;
+    (void)talker.declare_talker_failed(failed, now);
+    run(12);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::AskingFailed);
+    EXPECT_TRUE(heard() == ListenerDeclaration::AskingFailed);
+    EXPECT_TRUE(listener.peer_talker_failed(sid) != nullptr);
+
+    // Withdrawn while Waiting or declared: Idle, nothing left declared.
+    EXPECT_TRUE(listener.listener_withdraw(sid, now).has_value());
+    run(12);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Idle);
+    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);
+}
+
 // Kit phase 5d: listener_attach declares AskingFailed until the talker's
 // Advertise is registered from the wire, then upgrades to Ready
 // automatically (802.1Q 35.2.4.4) — the MSRP half of a fast-connect

@@ -18,6 +18,7 @@ statusbar_add_module(
   atdecc_aem_print.cpp
   atdecc_aem_units.cpp
   atdecc_acmp_listener_sm.cpp
+  atdecc_acmp_milan_listener.cpp
   atdecc_acmp_milan_talker.cpp
   atdecc_acmp_talker_sm.cpp
   atdecc_acmp_controller_sm.cpp
@@ -35,6 +36,7 @@ statusbar_add_module(
   statusbar::status
   statusbar::tsn
   TESTS
+  atdecc_acmp_milan_listener_test.cpp
   atdecc_acmp_milan_talker_test.cpp
   atdecc_acmp_sm_test.cpp
   atdecc_adp_test.cpp

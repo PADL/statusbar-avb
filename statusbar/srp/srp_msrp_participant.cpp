@@ -282,6 +282,30 @@ auto MsrpParticipantT<Limits>::find_talker_failed(tsn::StreamId const& id) const
 }
 
 template <class Limits>
+auto MsrpParticipantT<Limits>::find_registered_talker_advertise(tsn::StreamId const& id) const noexcept
+    -> TalkerAdvertiseFirstValue const*
+{
+    for (auto const& rec : talker_adv_) {
+        if (rec.first_value.stream_id == id) {
+            return rec.registrar_is_registered() ? &rec.first_value : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::find_registered_talker_failed(tsn::StreamId const& id) const noexcept
+    -> TalkerFailedFirstValue const*
+{
+    for (auto const& rec : talker_failed_) {
+        if (rec.first_value.advertise.stream_id == id) {
+            return rec.registrar_is_registered() ? &rec.first_value : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::find_listener(tsn::StreamId const& id) const noexcept -> ListenerRecord const*
 {
     for (auto const& rec : listeners_) {

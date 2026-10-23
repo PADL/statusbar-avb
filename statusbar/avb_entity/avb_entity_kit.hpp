@@ -321,6 +321,16 @@ class AvbEntityKit
     /// The ACMP talker's Milan hooks, the AEM presentation offset store and
     /// the GET_STREAM_INFO fills.
     void wire_milan_talker();
+    /// The Milan listener's sink hooks (persistence, stopped inputs,
+    /// GET_STREAM_INFO notifications) and its MSRP talker registration feed.
+    void wire_milan_listener();
+    /// Report settled Milan sink @p index's Talker registration (Section
+    /// 5.5.3.3: matching stream ID, destination address and VLAN ID).
+    void refresh_sink_registration(uint16_t index);
+    /// A settled Milan input's VID joins MVRP (refcounted; the Class
+    /// A VID is the host's), and leaves when the last such input goes.
+    void join_sink_vlan(uint16_t vid);
+    void leave_sink_vlan(uint16_t vid);
     /// Re-read talker stream @p idx's registered Listener at steady-clock
     /// @p now_ns; true when it changed (the declaration predicate and
     /// GET_STREAM_INFO follow it).
@@ -396,6 +406,8 @@ class AvbEntityKit
     bool persistence_active_{false};   ///< a state path is configured
     bool persistence_blocked_{false};  ///< the file did not read at start: nothing written this run
     bool persist_pending_{false};      ///< a listener goal changed this reactor pass
+    /// The VIDs connected or settled inputs use, each with its count.
+    sg14::inplace_vector<std::pair<uint16_t, uint16_t>, MAX_ENTITY_STREAMS> sink_vlans_{};
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};

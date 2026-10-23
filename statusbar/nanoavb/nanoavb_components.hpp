@@ -543,6 +543,10 @@ struct NanoAvbComponents
 
     /// Get total talker connection count
     [[nodiscard]] auto talker_connection_count() const -> size_t;
+
+  private:
+    /// The handlers' Milan behaviour, from profile (both constructors).
+    void wire_profile();
 };
 
 /// The MSRP participant's tables for an entity's components, at full capacity, with part of
