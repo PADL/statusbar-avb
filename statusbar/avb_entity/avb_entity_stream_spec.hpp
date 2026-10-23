@@ -210,6 +210,10 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
     return format.aaf_samples_per_frame != 0 ? format.aaf_samples_per_frame : aaf_table_samples_per_pdu(format.sample_rate_hz);
 }
 
+/// The byte Milan v1.3 Table 4.4 adds to every MaxFrameSize for a sampling
+/// clock a little faster than nominal.
+inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
+
 /// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence:
 /// L2 payload bytes of the largest AVTP frame the stream can emit. Audio
 /// kinds reserve one extra sample per channel over the nominal cadence — the
