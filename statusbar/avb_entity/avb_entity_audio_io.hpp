@@ -213,7 +213,7 @@ class AvbEntityAudioIO
     [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
         -> bool
     {
-        return kit_.talker_should_transmit(idx, now.time_since_epoch().count());
+        return kit_.talker_should_transmit(idx, now);
     }
 
     auto set_audio_callback(AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }

@@ -31,6 +31,7 @@
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
@@ -128,8 +129,19 @@ class AvbEntityKit
     /// to open leaves those opened, as their hooks were told, until stop().
     [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
     /// Stop the control plane (fails with not_connected when not running),
-    /// withdrawing its declarations at @p now.
+    /// withdrawing its declarations at @p now. Deletes the listener's VLAN link
+    /// first if the kit created it (even when not running).
     [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status;
+
+#if defined(__linux__)
+    // --- The listener's VID on the NIC's VLAN filter (Linux) -------------------
+
+    /// Keep the SR-class VID in use on @p ifindex's receive VLAN filter through
+    /// @p control until stop(); a no-op without stream inputs. start() calls it
+    /// unless called first; @p control must outlive the kit.
+    void bind_listener_vlan(net::vlan::VlanControl& control, int ifindex);
+    [[nodiscard]] auto listener_vlan() const noexcept -> ListenerVlan const& { return listener_vlan_; }
+#endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
     /// The link is up: the control plane's Link Up, and MAAP's
@@ -233,12 +245,14 @@ class AvbEntityKit
 
     /// Whether talker stream @p idx transmits this tick: admitted (or gating off),
     /// its MAAP address ready in "maap" mode, and not STOP_STREAMING'd.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+    /// The gate runs on the steady clock until it moves to the wake's RAW time.
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const /*now*/) const noexcept
+        -> bool
     {
         if (!maap_.ready() || talker_->stream_stopped(idx)) {
             return false;
         }
-        return gate_.should_transmit(idx, now_ns);
+        return gate_.should_transmit(idx, steady_now_ns());
     }
 
     // --- Talker admission (reactor thread) ------------------------------------
@@ -855,38 +869,13 @@ class AvbEntityKit
     /// When save_talker_advertises() next looks (reactor cycle time, ns).
     int64_t talker_advertises_look_ns_{0};
 
-    /// Each talker stream's presentation offset a controller set (reactor thread); unset,
-    /// the configured one.
-    std::array<std::optional<uint32_t>, MAX_ENTITY_STREAMS> presentation_offsets_{};
-    PresentationOffsetFn on_presentation_offset_changed_{};
-    UnitRateFn on_unit_rate_changed_{};
-    /// The streams a SET_SAMPLING_RATE re-timed, notified after its response.
-    RetimedFormats retimed_notices_{};
-    /// The admitted set last told (notify_admission), and the hook told it.
-    AdmittedStreams admitted_{};
-    AdmissionChangedFn on_admission_changed_{};
-    std::optional<RawTimePoint> admission_deadline_{};  ///< see admission_deadline()
-    /// The reactor-clock half of the pair last told (tell_cycle_time); the gate holds the RAW half.
-    int64_t cycle_ns_{0};
-    /// Each talker stream's gate as last evaluated (notify_talker_gates), and the hook told its changes.
-    std::array<bool, MAX_ENTITY_STREAMS> talker_gates_{};
-    TalkerGateFn on_talker_gate_changed_{};
-    /// The end of the counters' observation interval (end_cycle), unset before the first.
-    std::optional<int64_t> next_counters_fold_ns_{};
-    /// The intervals ended since the descriptors were last notified (fold_stream_counters).
-    unsigned counters_folds_{0};
-    /// The stream inputs and outputs whose counters changed since they were last notified.
-    std::array<bool, MAX_ENTITY_STREAMS> input_counters_changed_{};
-    std::array<bool, MAX_ENTITY_STREAMS> output_counters_changed_{};
-    /// Each stream input as tell_changed_input_info() last found it; unset before its first look.
-    std::array<std::optional<atdecc::aem::AemStreamInfoPayload>, MAX_ENTITY_STREAMS> input_info_told_{};
-    /// Each Milan stream input's bound state as last followed (follow_input_bound).
-    std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
-    /// Each stream output's Milan counters, by observation interval (reactor thread).
-    std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
-    /// Each stream output's signal presence within its channels as of the last fold, to tell a
-    /// change (TalkerStreams::signal_presence).
-    std::array<std::optional<uint64_t>, MAX_ENTITY_STREAMS> output_presence_{};
+#if defined(__linux__)
+    /// The listener's VID on the NIC's VLAN filter: start()'s own client
+    /// (when no other control was bound), declared before the ListenerVlan
+    /// that deletes its link through it on destruction.
+    std::unique_ptr<net::vlan::VlanLinkClient> vlan_client_{};
+    ListenerVlan listener_vlan_{host_.ctl_log()};
+#endif
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).
