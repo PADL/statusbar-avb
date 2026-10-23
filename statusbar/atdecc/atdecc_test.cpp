@@ -281,6 +281,7 @@ TEST(aem_parse_descriptor, stream_2013_compat)
     std::array<uint8_t, 132> buf{};
     buf[0] = 0x00;
     buf[1] = 0x05;  // STREAM_INPUT
+    buf[83] = 132;  // formats_offset = 132 (no formats)
     auto result = parse_descriptor(std::span<uint8_t const>(buf));
     EXPECT_TRUE(result.has_value());
 }
