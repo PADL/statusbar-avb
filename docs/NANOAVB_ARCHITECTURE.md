@@ -93,7 +93,7 @@ The supervisor coordinates the overall protocol lifecycle:
     └───┬───┘                                           │
         │ LinkUp (start_protocols)                      │
         ▼                                               │
-    ┌───────┐──────Timeout─────► Down (timeout_gptp)    │
+    ┌───────┐──────Timeout─────► Init (timeout_gptp)    │
     │ Init  │                                           │
     └───┬───┘──────LinkDown────►────────────────────────┤
         │ GptpLocked                                    │
@@ -397,8 +397,9 @@ handlers.add_to_reactor(reactor);
 State machines include timeout handling for stuck states:
 
 ```cpp
-// Supervisor handles timeout in Init (gPTP lock timeout)
-t.at(S::Init, E::Timeout) = T::action<timeout_gptp>(S::Down);
+// Supervisor reports a timeout in Init (gPTP lock timeout) and keeps
+// waiting: ADP runs with the link, gPTP or not (Milan v1.3 5.6.3)
+t.at(S::Init, E::Timeout) = T::action<timeout_gptp>(S::Init);
 
 // Supervisor handles timeout in WaitVlanBase (VLAN timeout)
 t.at(S::WaitVlanBase, E::Timeout) = T::action<timeout_vlan>(S::Degraded);
