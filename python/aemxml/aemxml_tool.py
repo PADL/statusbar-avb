@@ -99,6 +99,9 @@ def cmd_dump(args: argparse.Namespace) -> None:
         0x0017: "AUDIO_MAP",
         0x001A: "CONTROL",
         0x0024: "CLOCK_DOMAIN",
+        0x0026: "TIMING",
+        0x0027: "PTP_INSTANCE",
+        0x0028: "PTP_PORT",
     }
 
     for d in descs:

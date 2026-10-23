@@ -2684,6 +2684,131 @@ def test_downgrade_strip_removes_2021_only_descriptors():
     print("  [+] downgrade --strip removes 2021-only: OK")
 
 
+def test_json_timing_clock_source():
+    """A JSON model whose clock source is a TIMING descriptor (Milan 1.2 7.5:
+    EXTERNAL, located at TIMING -> PTP_INSTANCE -> PTP_PORT) compiles with the
+    IEEE 1722.1-2021 descriptor types and reads back."""
+    from aemxml.json_reader import read_json
+    from aemxml.model import (
+        DESCRIPTOR_PTP_INSTANCE,
+        DESCRIPTOR_PTP_PORT,
+        DESCRIPTOR_TIMING,
+    )
+    from aemxml.unflatten import unflatten
+
+    assert (DESCRIPTOR_TIMING, DESCRIPTOR_PTP_INSTANCE, DESCRIPTOR_PTP_PORT) == (
+        0x0026,
+        0x0027,
+        0x0028,
+    )
+    model = {
+        "entity": {
+            "vendor": "V",
+            "model": "M",
+            "name": "Timing",
+            "configurations": [
+                {
+                    "name": "C",
+                    "avb_interfaces": [{"name": "eth0"}],
+                    "clock_sources": [
+                        {"name": "Internal", "type": "INTERNAL", "location_type": 2},
+                        {
+                            "name": "gPTP",
+                            "type": "EXTERNAL",
+                            "location_type": "TIMING",
+                            "location_index": 0,
+                        },
+                    ],
+                    "clock_domains": [{"name": "CD", "source": 1, "sources": [0, 1]}],
+                    "timings": [
+                        {"name": "gPTP", "algorithm": "SINGLE", "ptp_instances": [0]}
+                    ],
+                    "ptp_instances": [
+                        {
+                            "name": "gPTP",
+                            "flags": ["GRANDMASTER_CAPABLE"],
+                            "ptp_ports": [
+                                {
+                                    "name": "gPTP",
+                                    "port_type": "P2P_LINK_LAYER",
+                                    "avb_interface_index": 0,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    entity = read_json(json.dumps(model))
+    config = entity.configurations[0]
+    assert len(config.timings) == 1 and config.timings[0].ptp_instance_indices == [0]
+    assert config.clock_sources[1].clock_source_location_type == 0x0026
+    descs, syms = flatten(entity)
+    types = {d.descriptor_type for d in descs}
+    assert {0x0026, 0x0027, 0x0028} <= types, sorted(types)
+    blob = write_blob(descs, syms)
+    back = unflatten(*read_blob(blob))
+    c2 = back.configurations[0]
+    assert len(c2.timings) == 1
+    assert c2.timings[0].algorithm == 0
+    assert c2.timings[0].ptp_instance_indices == [0]
+    assert len(c2.ptp_instances) == 1
+    assert c2.ptp_instances[0].flags == 0x80000000
+    assert len(c2.ptp_instances[0].ptp_ports) == 1
+    assert c2.ptp_instances[0].ptp_ports[0].avb_interface_index == 0
+    assert c2.clock_sources[1].clock_source_type == 1
+    assert c2.clock_sources[1].clock_source_location_type == 0x0026
+    assert c2.clock_sources[1].clock_source_location_index == 0
+    print("  [+] JSON TIMING clock source: OK")
+
+
+def test_json_stream_buffer_length():
+    """A stream's "buffer_length" (ns) reaches the STREAM_INPUT descriptor and
+    survives the JSON round trip (Milan v1.2 5.3.3.4: an input's must be at
+    least 2126000 ns); a bad value is refused."""
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+    from aemxml.unflatten import unflatten
+
+    model = {
+        "entity": {
+            "vendor": "V",
+            "model": "M",
+            "name": "Buffer",
+            "configurations": [
+                {
+                    "name": "C",
+                    "avb_interfaces": [{"name": "eth0"}],
+                    "clock_sources": [{"name": "Internal", "type": "INTERNAL"}],
+                    "clock_domains": [{"name": "CD", "source": 0, "sources": [0]}],
+                    "streams_in": [
+                        {
+                            "name": "In",
+                            "format": {"type": "AAF", "rate": 48000, "channels": 8, "depth": 32},
+                            "flags": ["CLASS_A"],
+                            "buffer_length": 2126000,
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    entity = read_json(json.dumps(model))
+    assert entity.configurations[0].streams_input[0].buffer_length == 2126000
+    again = read_json(write_json(entity))
+    assert again.configurations[0].streams_input[0].buffer_length == 2126000
+    back = unflatten(*read_blob(write_blob(*flatten(entity))))
+    assert back.configurations[0].streams_input[0].buffer_length == 2126000
+    model["entity"]["configurations"][0]["streams_in"][0]["buffer_length"] = -1
+    try:
+        read_json(json.dumps(model))
+        raise AssertionError("a negative buffer_length was accepted")
+    except ValueError as e:
+        assert "buffer_length" in str(e)
+    print("  [+] JSON stream buffer_length: OK")
+
+
 def main():
     tests = [
         test_wire_pack_unpack,
@@ -2711,6 +2836,7 @@ def main():
         test_stream_format_aaf_encode_decode,
         test_json_read_simple_stereo,
         test_json_round_trip,
+        test_json_stream_buffer_length,
         test_json_to_blob,
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,
@@ -2728,6 +2854,7 @@ def main():
         test_upgrade_then_downgrade_round_trip,
         test_downgrade_rejects_2021_only_descriptors,
         test_downgrade_strip_removes_2021_only_descriptors,
+        test_json_timing_clock_source,
     ]
     passed = 0
     failed = 0
