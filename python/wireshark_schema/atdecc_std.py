@@ -275,21 +275,22 @@ MVU_MCR_FLAGS: tuple[tuple[str, int], ...] = (
     ("media_clock_domain", 0x02),
 )
 
-# offsets relative to MVU_HEADER_LENGTH; a 64-octet name that Milan 1.3 added
-# after the fixed part is optional (OPTIONAL_NAME) so 1.2 frames still decode
+# offsets relative to MVU_HEADER_LENGTH; a field that Milan 1.3 appended after
+# the Milan 1.2 fixed part (a 64-octet name, GET_MILAN_INFO's
+# specification_version) is an optional tail (OPTIONAL_TAIL) so 1.2 frames
+# still decode
 MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
     "MvuReserved": _struct(
         "MvuReserved", "GET_MILAN_INFO / GET_SYSTEM_UNIQUE_ID command", [_RSV2]
     ),
     "MvuGetMilanInfoResponse": _struct(
         "MvuGetMilanInfoResponse",
-        "GET_MILAN_INFO response (Milan 1.3 Figure 5.6)",
+        "GET_MILAN_INFO response (Milan 1.2 Figure 5.4, 1.3 Figure 5.6)",
         [
             _RSV2,
             ("protocol_version", 4, "u32", "protocol_version"),
             ("features_flags", 4, "u32", "features_flags (Table 5.17)"),
             ("certification_version", 4, "u32", "certification_version"),
-            ("specification_version", 4, "u32", "specification_version"),
         ],
     ),
     "MvuSystemUniqueId": _struct(
@@ -345,9 +346,26 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
         ],
     ),
 }
-MVU_OPTIONAL_NAME: dict[str, str] = {
-    "MvuSystemUniqueId": "system_name",
-    "MvuMediaClockReferenceInfo": "media_clock_domain_name",
+# struct -> (field, octets, kind, doc) of its optional tail
+MVU_OPTIONAL_TAIL: dict[str, tuple[str, int, str, str]] = {
+    "MvuGetMilanInfoResponse": (
+        "specification_version",
+        4,
+        "u32",
+        "specification_version (Milan 1.3, optional)",
+    ),
+    "MvuSystemUniqueId": (
+        "system_name",
+        64,
+        "string",
+        "name (Milan 1.3, 64 octets, optional)",
+    ),
+    "MvuMediaClockReferenceInfo": (
+        "media_clock_domain_name",
+        64,
+        "string",
+        "name (Milan 1.3, 64 octets, optional)",
+    ),
 }
 MVU_PAYLOADS: dict[int, tuple[str | None, str | None]] = {
     0x0000: ("MvuReserved", "MvuGetMilanInfoResponse"),

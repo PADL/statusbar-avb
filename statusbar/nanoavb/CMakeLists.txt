@@ -21,6 +21,7 @@ statusbar_add_module(
   nanoavb_msrp_listener_sm.cpp
   nanoavb_msrp_talker_sm.cpp
   nanoavb_mvrp_sm.cpp
+  nanoavb_mvu_handler.cpp
   nanoavb_srp.cpp
   nanoavb_supervisor_sm.cpp
   nanoavb_components.cpp
@@ -52,6 +53,7 @@ statusbar_add_module(
   nanoavb_entity_test.cpp
   nanoavb_gptp_sm_test.cpp
   nanoavb_msrp_sm_test.cpp
+  nanoavb_mvu_handler_test.cpp
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
   nanoavb_controller_test.cpp
