@@ -393,7 +393,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time, realtime::MonotonicRa
                 src = dest;
             }
             if (auto* slot = kit_.talker().slot_for(specs[pos].index); slot != nullptr) {
-                kit_.talker().transmit_if_due(*slot, tick, kit_.talker_should_transmit(slot->spec.index, raw_now), samples, src);
+                kit_.talker().transmit_if_due(*slot, tick, kit_.talker_should_transmit(slot->spec.index, raw_now.time_since_epoch().count()), samples, src);
             }
         }
         kit_.talker().flush_tx();

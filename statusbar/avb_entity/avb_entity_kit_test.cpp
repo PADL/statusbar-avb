@@ -1,16 +1,15 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// The kit's talker streams and the SR class domain: ACMP's picture of each
-// stream and the MSRP Talker Advertise carry the VLAN and priority the
-// frames are tagged with, configured or adopted from the wire (Milan v1.3
-// 4.2.7.2.1), never the headers' defaults.
+// The kit at its stream bound, with no network: MAX_ENTITY_STREAMS outputs and
+// inputs (16 AAF 32-channel + CRF each way) all open; one more is refused when
+// the tables are derived, and an extra slot by the stream paths themselves.
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
-#include "statusbar/atdecc/atdecc_aem_command.hpp"
+#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
@@ -54,12 +53,191 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <tuple>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 using namespace statusbar;
 using namespace statusbar::avb_entity;
+using atdecc::aem::DESCRIPTOR_AVB_INTERFACE;
+using atdecc::aem::DESCRIPTOR_CONFIGURATION;
+using atdecc::aem::DESCRIPTOR_ENTITY;
+using atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+using atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
+
+namespace {
+
+/// AAF 48 kHz INT_24, 32 channels, 6 frames per packet (class A): subtype
+/// 0x02, nsr 5, format 3, bit depth 24, channels << 22, frames << 12.
+constexpr uint64_t AAF_48K_INT24_32CH = 0x0205031800000000ULL | (uint64_t{32} << 22) | (uint64_t{6} << 12);
+/// Milan CRF: AUDIO_SAMPLE, 48 kHz base, interval 96, one timestamp a PDU.
+constexpr uint64_t CRF_MILAN_48K = 0x041060010000BB80ULL;
+
+template <typename Descriptor>
+auto wire(Descriptor const& desc) -> std::span<uint8_t const>
+{
+    return std::span{reinterpret_cast<uint8_t const*>(&desc), desc.wire_size()};
+}
+
+/// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then one CRF
+/// in each direction.
+auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs) -> std::vector<uint8_t>
+{
+    nanoavb::AemBlobWriter w;
+    atdecc::aem::DescriptorEntity entity{};
+    entity.configurations_count = 1;
+    entity.talker_stream_sources = static_cast<uint16_t>(audio_outputs + 1);
+    entity.listener_stream_sinks = static_cast<uint16_t>(audio_inputs + 1);
+    w.add(0, DESCRIPTOR_ENTITY, 0, make_const_span(entity));
+    atdecc::aem::DescriptorConfiguration config{};
+    w.add(0, DESCRIPTOR_CONFIGURATION, 0, make_const_span(config));
+    for (auto const [type, audio] :
+         {std::pair{DESCRIPTOR_STREAM_OUTPUT, audio_outputs}, std::pair{DESCRIPTOR_STREAM_INPUT, audio_inputs}}) {
+        for (uint16_t index = 0; index <= audio; ++index) {
+            atdecc::aem::DescriptorStream stream{};
+            stream.descriptor_type = type;
+            stream.descriptor_index = index;
+            stream.current_format.from_uint64(index < audio ? AAF_48K_INT24_32CH : CRF_MILAN_48K);
+            w.add(0, type, index, wire(stream));
+        }
+    }
+    atdecc::aem::DescriptorAvbInterface iface{};
+    w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    return w.write();
+}
+
+auto stream_id(uint64_t const value) -> tsn::StreamId
+{
+    tsn::StreamId sid{};
+    ieee::Eui64 const eui = ieee::Eui64{}.from_uint64(value);
+    (void)tsn::load_unchecked(eui.span(), &sid);
+    return sid;
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_bounds, a_full_model_derives_its_tables_and_one_more_is_refused)
+{
+    static_assert(MAX_ENTITY_STREAMS == MAX_ENTITY_AUDIO_STREAMS + MAX_ENTITY_CRF_STREAMS);
+    constexpr auto audio = static_cast<uint16_t>(MAX_ENTITY_AUDIO_STREAMS);
+
+    auto const full = make_blob(audio, audio);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{full});
+    EXPECT_TRUE(storage.has_value());
+    auto const talkers = talker_stream_specs(*storage, 0);
+    auto const listeners = listener_stream_specs(*storage, 0);
+    EXPECT_TRUE(talkers.has_value() && listeners.has_value());
+    EXPECT_EQ(talkers->size(), MAX_ENTITY_STREAMS);
+    EXPECT_EQ(listeners->size(), MAX_ENTITY_STREAMS);
+    EXPECT_EQ(talkers->front().format.channels, uint16_t{32});
+    EXPECT_EQ(talkers->back().format.kind, StreamKind::crf);
+    EXPECT_EQ(listeners->back().format.kind, StreamKind::crf);
+
+    // A 17th audio stream (18 descriptors with the CRF) is past the bound.
+    auto const outputs_over = make_blob(audio + 1, audio);
+    auto const over_out = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{outputs_over});
+    EXPECT_TRUE(talker_stream_specs(*over_out, 0).error() == std::errc::result_out_of_range);
+    EXPECT_TRUE(listener_stream_specs(*over_out, 0).has_value());
+    auto const inputs_over = make_blob(audio, audio + 1);
+    auto const over_in = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{inputs_over});
+    EXPECT_TRUE(listener_stream_specs(*over_in, 0).error() == std::errc::result_out_of_range);
+}
+
+TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
+{
+    constexpr auto audio = static_cast<uint16_t>(MAX_ENTITY_AUDIO_STREAMS);
+    auto const blob = make_blob(audio, audio);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+    EXPECT_TRUE(storage.has_value());
+    auto const talkers = *talker_stream_specs(*storage, 0);
+    auto const listeners = *listener_stream_specs(*storage, 0);
+
+    AvbEntityAudioIOConfig config{};
+    config.interface_name = "kit-bounds-test0";  // no such interface: no MAC, no sockets
+    config.entity_id = ieee::Eui64{0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01};
+    config.stream_address_mode = "static";
+    EntityIdentityDescriptorHandler handler{
+        *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit bounds", std::nullopt, /*patch_avb_interface=*/false};
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<int64_t> last_gptp_ns{0};
+    AvbEntityKit kit{
+        config,
+        handler,
+        talkers,
+        listeners,
+        48000,
+        /*initial_clock_source=*/0,
+        /*crf_clock_source_index=*/std::nullopt,
+        media_clock,
+        last_gptp_ns,
+        /*audio_sink=*/nullptr,
+        std::pmr::get_default_resource()};
+    auto& components = kit.host().components();
+
+    // TX: one ACMP talker stream and one serializer slot per STREAM_OUTPUT.
+    for (auto const& spec : talkers) {
+        auto const* stream = components.acmp_talker.get_stream(spec.index);
+        EXPECT_TRUE(stream != nullptr);
+        tsn::StreamId sid{};
+        (void)tsn::load_unchecked(stream->stream_id.span(), &sid);
+        EXPECT_TRUE(kit.talker().open_stream(spec, sid, stream->stream_dest_mac).has_value());
+    }
+    EXPECT_EQ(kit.talker().slots_.size(), MAX_ENTITY_STREAMS);
+    EXPECT_TRUE(kit.talker().slot_for(0)->aaf.has_value());
+    EXPECT_TRUE(kit.talker().slot_for(audio)->crf.has_value());
+    EXPECT_TRUE(
+        kit.talker().open_stream(talkers.front(), tsn::StreamId{}, ieee::Eui48{}).error() == std::errc::result_out_of_range);
+
+    // RX: one deserializer slot per STREAM_INPUT.
+    EXPECT_TRUE(kit.listener() != nullptr);
+    for (auto const& spec : listeners) {
+        EXPECT_TRUE(kit.listener()->open_stream(spec).has_value());
+    }
+    EXPECT_EQ(kit.listener()->slots_.size(), MAX_ENTITY_STREAMS);
+    EXPECT_EQ(kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{32});
+    EXPECT_TRUE(kit.listener()->open_stream(listeners.front()).error() == std::errc::result_out_of_range);
+
+    // MSRP: a Talker Advertise per talker stream and a Listener Ready per
+    // listener stream all fit the participant's tables (MsrpConfig's default
+    // 16 refused the 17th).
+    auto const now = sm::Clock::now();
+    for (auto const& spec : talkers) {
+        nanoavb::TalkerStreamSrpInfo info{};
+        info.stream_id = stream_id(0x0200000000000100ULL + spec.index);
+        info.vlan_id = 2;
+        info.max_frame_size = AvbEntityKit::talker_tspec(spec).max_frame_size;
+        info.max_interval_frames = 1;
+        EXPECT_TRUE(components.msrp_handler.talker_advertise(info, now).has_value());
+    }
+    for (auto const& spec : listeners) {
+        EXPECT_TRUE(components.msrp_handler.listener_ready(stream_id(0x0200000000000200ULL + spec.index), now).has_value());
+    }
+    for (auto const& spec : talkers) {
+        EXPECT_TRUE(components.msrp_handler.talker_advertise_registered(stream_id(0x0200000000000100ULL + spec.index)));
+    }
+
+    // AEM: every STREAM_INPUT and STREAM_OUTPUT latches its own runtime state
+    // (34 entries in a table both directions share); the outputs' STOP
+    // reaches the talker slots.
+    for (auto const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
+        for (uint16_t index = 0; index < MAX_ENTITY_STREAMS; ++index) {
+            nanoavb::DescriptorId const id{
+                .ref = nanoavb::DescriptorRef{.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}};
+            EXPECT_EQ(handler.on_set_descriptor_value(atdecc::AEM_COMMAND_STOP_STREAMING, id, {}), atdecc::AEM_STATUS_SUCCESS);
+        }
+    }
+    for (auto const& spec : talkers) {
+        EXPECT_TRUE(kit.talker().stream_stopped(spec.index));
+    }
+}
+
+//
+// The talker streams and the SR class domain: ACMP's picture of each stream and the Talker
+// Advertise carry the VLAN and priority the frames are tagged with (Milan v1.3 4.2.7.2.1)
+//
+
+namespace kit_domain {
+
 using statusbar::ieee::Eui48;
 using statusbar::ieee::Eui64;
 using statusbar::nanoavb::DomainInfo;
@@ -621,1521 +799,86 @@ TEST(avb_entity_kit_profile, the_milan_info_comes_from_the_configuration)
     }
 }
 
-TEST(avb_entity_kit_profile, mvu_binding_is_advertised_when_bind_stream_is_answered_and_only_then)
+}  // namespace kit_domain
+
+// Talker admission through the kit, driven by MSRP listener events and grace
+// expiry with no ACMP connection; the callback fires on every transition.
+TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
 {
-    // Milan v1.3 5.4.4.6: the flag says the commands are implemented. They
-    // are under the Milan profile, whatever the configuration leaves out,
-    // and are not under IEEE 1722.1 connection management, whatever it claims.
-    auto claimed = make_config(2, "classic", true);
-    claimed.milan_features_flags = atdecc::MVU_FEATURE_MVU_BINDING | atdecc::MVU_FEATURE_REDUNDANCY;
-    KitUnderTest classic{claimed};
-    EXPECT_FALSE(classic->host().components().acmp_is_milan());
-    EXPECT_EQ(milan_info_of(classic)->features_flags, atdecc::MVU_FEATURE_REDUNDANCY);
+    auto const blob = make_blob(1, 1);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+    EXPECT_TRUE(storage.has_value());
+    auto const talkers = *talker_stream_specs(*storage, 0);
+    auto const listeners = *listener_stream_specs(*storage, 0);
 
-    KitUnderTest milan{make_config(2, "", true)};
-    EXPECT_TRUE(milan->host().components().acmp_is_milan());
-    EXPECT_EQ(milan_info_of(milan)->features_flags, atdecc::MVU_FEATURE_MVU_BINDING);
-}
-
-//
-// SET_SAMPLING_RATE - IEEE 1722.1-2021 Clause 7.4.21
-//
-
-namespace {
-
-constexpr uint64_t AAF_48K_8CH = 0x0205022002006000ULL;  // AAF 48k INT_32 8ch 6 samples/frame
-constexpr uint64_t AAF_96K_8CH = 0x020702200200C000ULL;  // AAF 96k INT_32 8ch 12 samples/frame
-constexpr uint64_t CRF_48K = 0x041060010000BB80ULL;
-Eui64 const RATE_ENTITY{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
-Eui64 const RATE_CONTROLLER_A{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0xA1};
-Eui64 const RATE_CONTROLLER_B{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0xB2};
-Eui48 const RATE_MAC_A{0x02, 0x00, 0x00, 0x00, 0x00, 0xA1};
-Eui48 const RATE_MAC_B{0x02, 0x00, 0x00, 0x00, 0x00, 0xB2};
-
-/// A model whose AUDIO_UNIT 0 lists 48, 96 and 192 kHz, with an AAF stream input and output listing
-/// their format at 48 and 96 kHz, a CRF output, and dynamic stream ports (source: entity_rates.json).
-auto make_rates_config(std::string_view const profile) -> AvbEntityAudioIOConfig
-{
-    auto config = make_config(2, profile);
-    config.descriptor_storage_blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_rates.bin");
-    return config;
-}
-
-/// One frame the kit's AEM handler sent: where to, and the AECPDU.
-struct SentFrame
-{
-    Eui48 dest{};
-    std::vector<uint8_t> frame;
-
-    [[nodiscard]] auto header() const -> atdecc::AemDu
-    {
-        atdecc::AemDu du{};
-        span_load(du, std::span<uint8_t const>{frame});
-        return du;
+    AvbEntityAudioIOConfig config{};
+    config.interface_name = "kit-admission-test0";  // no such interface: no MAC, no sockets
+    config.entity_id = ieee::Eui64{0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x02};
+    config.stream_address_mode = "static";
+    EXPECT_TRUE(config.gate_talker_on_listener);
+    EntityIdentityDescriptorHandler handler{
+        *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit admission", std::nullopt, /*patch_avb_interface=*/false};
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<int64_t> last_gptp_ns{0};
+    AvbEntityKit kit{
+        config,
+        handler,
+        talkers,
+        listeners,
+        48000,
+        /*initial_clock_source=*/0,
+        /*crf_clock_source_index=*/std::nullopt,
+        media_clock,
+        last_gptp_ns,
+        /*audio_sink=*/nullptr,
+        std::pmr::get_default_resource()};
+    auto& components = kit.host().components();
+    auto const* aaf = components.acmp_talker.get_stream(0);
+    auto const* crf = components.acmp_talker.get_stream(1);
+    EXPECT_TRUE(aaf != nullptr && crf != nullptr);
+    if (aaf == nullptr || crf == nullptr) {
+        return;
     }
-    [[nodiscard]] auto body() const -> std::span<uint8_t const>
-    {
-        return std::span<uint8_t const>{frame}.subspan(atdecc::AemDu::LENGTH);
-    }
-};
+    nanoavb::StreamId aaf_sid{};
+    aaf_sid.from_uint64(aaf->stream_id.to_uint64());
+    nanoavb::StreamId crf_sid{};
+    crf_sid.from_uint64(crf->stream_id.to_uint64());
+    EXPECT_EQ(components.acmp_talker.connection_count(0), size_t{0});
 
-/// The kit's AEM handler as two controllers see it: commands go in through process_packet(),
-/// every frame it sends is kept.
-struct RateControllers
-{
-    KitUnderTest& kit;
-    std::vector<SentFrame> sent{};
-    uint16_t sequence_id{0};
-
-    explicit RateControllers(KitUnderTest& under_test)
-        : kit{under_test}
-    {
-        kit->host().components().aem_handler.set_send_response([this](Eui48 const& dest, std::span<uint8_t const> const frame) {
-            sent.push_back({.dest = dest, .frame = {frame.begin(), frame.end()}});
-            return true;
-        });
-    }
-
-    /// @p controller at @p mac sends AEM @p command with @p body; its response's status.
-    auto command(Eui64 const& controller, Eui48 const& mac, uint16_t const command, std::span<uint8_t const> const body) -> uint8_t
-    {
-        atdecc::AemDu header{};
-        header.init_command(command, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
-        header.target_entity_id = RATE_ENTITY;
-        header.controller_entity_id = controller;
-        header.sequence_id = ++sequence_id;
-        std::vector<uint8_t> frame(atdecc::AemDu::LENGTH + body.size());
-        span_store(std::span{frame}, header);
-        std::ranges::copy(body, frame.begin() + atdecc::AemDu::LENGTH);
-        size_t const before = sent.size();
-        (void)kit->host().components().aem_handler.process_packet(mac, frame, header.target_entity_id);
-        auto const response = std::find_if(sent.begin() + static_cast<std::ptrdiff_t>(before), sent.end(), [](SentFrame const& f) {
-            return !f.header().is_unsolicited();
-        });
-        return response != sent.end() ? response->header().status() : uint8_t{0xFF};
-    }
-
-    auto set_rate(uint32_t const rate) -> uint8_t
-    {
-        std::array<uint8_t, atdecc::aem::AemSamplingRatePayload::LENGTH> body{};
-        span_store(
-            std::span{body},
-            atdecc::aem::AemSamplingRatePayload{
-                .descriptor_type = atdecc::aem::DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0, .sampling_rate = rate});
-        return command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, body);
-    }
-
-    /// The rate GET_SAMPLING_RATE answers for AUDIO_UNIT 0.
-    auto rate() -> uint32_t
-    {
-        std::array<uint8_t, 4> const body{0x00, 0x02, 0x00, 0x00};
-        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, body);
-        atdecc::aem::AemSamplingRatePayload answer{};
-        span_load(answer, sent.back().body());
-        return answer.sampling_rate.get();
-    }
-
-    /// The format GET_STREAM_FORMAT answers for stream (@p type, @p index).
-    auto format(uint16_t const type, uint16_t const index) -> uint64_t
-    {
-        std::array<uint8_t, 4> const body{0x00, static_cast<uint8_t>(type), 0x00, static_cast<uint8_t>(index)};
-        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, body);
-        ieee::octlet_t word{};
-        span_load(word, sent.back().body().subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)));
-        return word.get();
-    }
-
-    void register_a()
-    {
-        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {});
-        sent.clear();
-    }
-
-    void register_b()
-    {
-        (void)command(RATE_CONTROLLER_B, RATE_MAC_B, atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {});
-        sent.clear();
-    }
-
-    /// The unsolicited @p command responses in sent to @p dest.
-    [[nodiscard]] auto notifications_to(Eui48 const& dest, uint16_t const command) const -> size_t
-    {
-        return static_cast<size_t>(std::ranges::count_if(sent, [&](SentFrame const& f) {
-            return f.dest == dest && f.header().is_unsolicited() && f.header().command_code() == command;
-        }));
-    }
-
-    /// The unsolicited SET_STREAM_FORMATs in sent, to @p dest or to anyone: (type, index, format).
-    [[nodiscard]] auto format_notifications(std::optional<Eui48> const dest = {}) const
-        -> std::vector<std::tuple<uint16_t, uint16_t, uint64_t>>
-    {
-        std::vector<std::tuple<uint16_t, uint16_t, uint64_t>> found;
-        for (auto const& f : sent) {
-            if (dest && f.dest != *dest) {
-                continue;
-            }
-            if (f.header().is_unsolicited() && f.header().command_code() == atdecc::AEM_COMMAND_SET_STREAM_FORMAT) {
-                atdecc::aem::AemStreamFormatPayload payload{};
-                span_load(payload, f.body());
-                ieee::octlet_t word{};
-                span_load(word, f.body().subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)));
-                found.emplace_back(payload.descriptor_type.get(), payload.descriptor_index.get(), word.get());
-            }
-        }
-        return found;
-    }
-};
-
-/// What the entity's data plane was asked: each rate with its streams.
-struct UnitRateRecorder
-{
-    std::vector<std::pair<uint32_t, std::vector<AvbEntityKit::RetimedFormat>>> asked{};
-    uint8_t answer{atdecc::AEM_STATUS_SUCCESS};
-
-    void install(KitUnderTest& kit)
-    {
-        kit->set_on_unit_rate_changed([this](uint32_t const rate, std::span<AvbEntityKit::RetimedFormat const> const streams) {
-            asked.emplace_back(rate, std::vector<AvbEntityKit::RetimedFormat>{streams.begin(), streams.end()});
-            return answer;
-        });
-    }
-};
-
-}  // namespace
-
-TEST(avb_entity_kit_rate, without_a_unit_rate_hook_only_the_rate_in_force_is_accepted)
-{
-    KitUnderTest kit{make_rates_config("classic")};
-    RateControllers controllers{kit};
-    EXPECT_EQ(controllers.set_rate(48'000), atdecc::AEM_STATUS_SUCCESS);
-    // The data plane keeps its rate, so the unit does not report another (IEEE 1722.1-2021 Clause 7.4.21).
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
-    EXPECT_EQ(controllers.rate(), 48'000U);
-    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0), AAF_48K_8CH);
-    EXPECT_EQ(kit->sample_rate(), 48'000U);
-}
-
-TEST(avb_entity_kit_rate, a_unit_rate_hook_retimes_the_units_streams_notified_after_the_response)
-{
-    KitUnderTest kit{make_rates_config("classic")};
-    RateControllers controllers{kit};
-    UnitRateRecorder data_plane;
-    data_plane.install(kit);
-    controllers.register_a();
-    controllers.register_b();
-
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
-    // The AAF output and input, their layout kept; the CRF output stays.
-    EXPECT_EQ(data_plane.asked.size(), size_t{1});
-    if (data_plane.asked.size() == 1) {
-        auto const& [rate, streams] = data_plane.asked.front();
-        EXPECT_EQ(rate, 96'000U);
-        EXPECT_EQ(streams.size(), size_t{2});
-        EXPECT_TRUE(std::ranges::all_of(streams, [](auto const& s) { return s.from == AAF_48K_8CH && s.to == AAF_96K_8CH; }));
-    }
-    // The response first, to A; the rate's notification to B alone; then each stream's to both, A
-    // included: a change beyond what it requested (Milan v1.3 Section 5.4.5.3).
-    EXPECT_FALSE(controllers.sent.empty());
-    EXPECT_FALSE(controllers.sent.front().header().is_unsolicited());
-    EXPECT_EQ(controllers.sent.front().dest, RATE_MAC_A);
-    EXPECT_EQ(controllers.sent.size(), size_t{6});
-    EXPECT_EQ(controllers.notifications_to(RATE_MAC_A, atdecc::AEM_COMMAND_SET_SAMPLING_RATE), size_t{0});
-    EXPECT_EQ(controllers.notifications_to(RATE_MAC_B, atdecc::AEM_COMMAND_SET_SAMPLING_RATE), size_t{1});
-    using Notice = std::tuple<uint16_t, uint16_t, uint64_t>;
-    std::vector<Notice> const retimed{
-        {atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0, AAF_96K_8CH}, {atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0, AAF_96K_8CH}};
-    EXPECT_TRUE(controllers.format_notifications(RATE_MAC_A) == retimed);
-    EXPECT_TRUE(controllers.format_notifications(RATE_MAC_B) == retimed);
-
-    // The descriptors report what the data plane runs.
-    EXPECT_EQ(controllers.rate(), 96'000U);
-    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0), AAF_96K_8CH);
-    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0), AAF_96K_8CH);
-    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 1), CRF_48K);
-    // The kit's specs and engines keep the rate they were built with: the media thread reads them.
-    EXPECT_EQ(kit->sample_rate(), 48'000U);
-    EXPECT_EQ(kit->talker_specs().front().format.sample_rate_hz, 48'000U);
-    EXPECT_EQ(kit->talker_specs().front().format_word, AAF_48K_8CH);
-}
-
-TEST(avb_entity_kit_rate, a_refused_or_unlisted_rate_moves_nothing)
-{
-    KitUnderTest kit{make_rates_config("classic")};
-    RateControllers controllers{kit};
-    UnitRateRecorder data_plane;
-    data_plane.install(kit);
-    controllers.register_b();
-
-    // The unit lists 192 kHz, its AAF streams do not: the data plane is not asked.
-    EXPECT_EQ(controllers.set_rate(192'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
-    EXPECT_TRUE(data_plane.asked.empty());
-    // The data plane refuses: its status, and the rate and formats in force.
-    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-    EXPECT_EQ(data_plane.asked.size(), size_t{1});
-    EXPECT_TRUE(controllers.format_notifications().empty());
-    EXPECT_EQ(controllers.rate(), 48'000U);
-    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0), AAF_48K_8CH);
-    EXPECT_EQ(kit->sample_rate(), 48'000U);
-}
-
-TEST(avb_entity_kit_rate, a_bound_milan_input_keeps_the_rate)
-{
-    KitUnderTest kit{make_rates_config("milan13")};
-    RateControllers controllers{kit};
-    UnitRateRecorder data_plane;
-    data_plane.install(kit);
-    auto& sinks = *kit->host().components().milan_acmp_listener;
-    EXPECT_TRUE(sinks.restore_binding(
-        atdecc::MilanBinding{.listener_unique_id = 0, .talker_entity_id = RATE_CONTROLLER_B}, TimePoint{std::chrono::seconds{1}}));
-
-    // Milan v1.3 Section 5.4.2.7: as the input's own SET_STREAM_FORMAT would be.
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-    EXPECT_TRUE(data_plane.asked.empty());
-    EXPECT_EQ(controllers.rate(), 48'000U);
-}
-
-// Milan v1.3 Section 5.4.2.13: a mapping held on a stream at the rate in force refuses a re-time,
-// the data plane not asked; once it is removed the unit re-times.
-TEST(avb_entity_kit_rate, a_held_mapping_refuses_a_retime)
-{
-    KitUnderTest kit{make_rates_config("classic")};
-    RateControllers controllers{kit};
-    UnitRateRecorder data_plane;
-    data_plane.install(kit);
-    auto& aem = kit->host().components().aem_handler;
-    auto const maps = std::make_unique<nanoavb::DynamicAudioMaps>();
-    aem.set_dynamic_audio_maps(maps.get());
-    aem.set_on_audio_mappings_changed(
-        [](uint16_t, uint16_t, std::span<nanoavb::DynamicAudioMapping const>) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
-    auto const mapping = [&controllers](uint16_t const command) {
-        std::array<uint8_t, atdecc::aem::AemAudioMappingsCommandHeader::LENGTH + atdecc::aem::AemAudioMapping::LENGTH> body{};
-        span_store(
-            std::span{body},
-            atdecc::aem::AemAudioMappingsCommandHeader{
-                .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, .descriptor_index = 0, .number_of_mappings = 1});
-        span_store(
-            std::span{body}.subspan(atdecc::aem::AemAudioMappingsCommandHeader::LENGTH),
-            atdecc::aem::AemAudioMapping{.stream_index = 0, .stream_channel = 0, .cluster_offset = 0, .cluster_channel = 0});
-        return controllers.command(RATE_CONTROLLER_A, RATE_MAC_A, command, body);
-    };
-    EXPECT_EQ(mapping(atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
-    EXPECT_TRUE(data_plane.asked.empty());
-    EXPECT_EQ(controllers.rate(), 48'000U);
-
-    EXPECT_EQ(mapping(atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(data_plane.asked.size(), size_t{1});
-    EXPECT_TRUE(aem.mappings_hold());
-    aem.set_dynamic_audio_maps(nullptr);
-}
-
-// IEEE 1722-2016 Clause 4.4.4.3: a re-timed stream output's media clock restarts, so its mr
-// toggles; a refused rate restarts nothing.
-TEST(avb_entity_kit_rate, a_retimed_stream_output_toggles_mr)
-{
-    KitUnderTest kit{make_rates_config("classic")};
-    RateControllers controllers{kit};
-    UnitRateRecorder data_plane;
-    data_plane.install(kit);
-    auto& talker = kit->talker();
-    auto const& aaf = kit->talker_specs().front();
-    EXPECT_TRUE(talker.open_stream(aaf, {}, {}).has_value());  // as start() opens it
-    auto* const slot = talker.slot_for(aaf.index);
-    EXPECT_TRUE(slot != nullptr);
-
-    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-    EXPECT_FALSE(talker.next_mr(*slot));
-    data_plane.answer = atdecc::AEM_STATUS_SUCCESS;
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(talker.next_mr(*slot));
-}
-
-namespace {
-
-/// A RAW instant the kit's gate is told in the admission tests.
-constexpr auto ADMIT_T0 = AvbEntityKit::RawTimePoint{std::chrono::seconds{100}};
-
-/// The end of a reactor cycle the loop told at reactor-clock @p now_ns and @p raw on the gate's clock.
-void end_cycle_at(KitUnderTest& kit, int64_t const now_ns, AvbEntityKit::RawTimePoint const raw)
-{
-    kit->tell_cycle_time(now_ns, raw);
-    kit->end_cycle(now_ns);
-}
-
-/// Talker stream @p idx's StreamID as MSRP reports it.
-auto talker_sid(KitUnderTest& kit, uint16_t const idx) -> nanoavb::StreamId
-{
-    nanoavb::StreamId sid{};
-    auto const stream = kit->host().components().talker_stream(idx);
-    EXPECT_TRUE(stream.has_value());
-    sid.from_uint64(stream.has_value() ? stream->stream_id.to_uint64() : 0);
-    return sid;
-}
-
-/// A controller's CONNECT_TX_COMMAND (or DISCONNECT_TX_COMMAND) for talker stream @p idx.
-void acmp_tx_command(KitUnderTest& kit, uint8_t const type, uint16_t const idx)
-{
-    atdecc::AcmpCommandResponse cmd{};
-    cmd.set_message_type(type);
-    cmd.talker_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
-    cmd.talker_unique_id = idx;
-    cmd.listener_entity_id = Eui64{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, 0x33};
-    cmd.listener_unique_id = idx;
-    cmd.sequence_id = 1;
-    (void)kit->host().components().acmp_talker.receive_command(cmd, TimePoint{});
-}
-
-/// Each admitted set the kit's hook is told.
-struct AdmissionRecorder
-{
-    std::vector<std::vector<uint16_t>> told{};
-
-    void install(KitUnderTest& kit)
-    {
-        kit->set_on_admission_changed(
-            [this](std::span<uint16_t const> const admitted) { told.emplace_back(admitted.begin(), admitted.end()); });
-    }
-};
-
-}  // namespace
-
-// IEEE 1722.1-2021 Clause 8.2.1: a classic talker stream is admitted while it is connected and its
-// Listener Ready registered; the hook hears each change of the set, not the set at install.
-TEST(avb_entity_kit_admission, the_hook_follows_the_listener_and_the_acmp_connection)
-{
+    std::vector<std::vector<uint16_t>> reports;
+    kit.set_on_admission_changed(
+        [r = &reports](std::span<uint16_t const> admitted) { r->emplace_back(admitted.begin(), admitted.end()); });
     using V = std::vector<uint16_t>;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0) == AvbEntityKit::AdmittedStreams{1});
-    AdmissionRecorder first;
-    first.install(kit);
-    EXPECT_TRUE(first.told.empty());  // the set in force at install is not told
+    constexpr int64_t t0 = 1'000'000'000;
+    constexpr int64_t grace = TalkerGate::GRACE_NS;
 
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2);
-    EXPECT_TRUE(first.told.empty());  // connected, no Listener Ready: no change
-    kit->notify_listener_ready(talker_sid(kit, 2), true, ADMIT_T0);
-    EXPECT_TRUE((first.told == std::vector<V>{V{1, 2}}));
-    EXPECT_TRUE(kit->talker_should_transmit(2, ADMIT_T0));
+    EXPECT_TRUE(kit.admitted_talker_streams(t0).empty());
+    kit.poll_admission(t0);
+    EXPECT_TRUE(reports.empty());  // no change, no report
 
-    AdmissionRecorder second;
-    second.install(kit);  // replaces the first
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND, 1);
-    EXPECT_TRUE(second.told == std::vector<V>{V{2}});
-    EXPECT_EQ(first.told.size(), size_t{1});
-    EXPECT_FALSE(kit->talker_should_transmit(1, ADMIT_T0));
-    kit->set_on_admission_changed({});
+    kit.note_listener_ready(aaf_sid, true, t0);
+    EXPECT_EQ(reports.size(), size_t{1});
+    EXPECT_TRUE(reports.back() == V{0});
+    kit.note_listener_ready(crf_sid, true, t0);
+    EXPECT_TRUE(reports.back() == (V{0, 1}));
+    EXPECT_EQ(reports.size(), size_t{2});
+
+    // AAF's Ready withdrawn: still admitted through the grace window (no report),
+    // then the poll past it reports the drop -- no MSRP event needed.
+    kit.note_listener_ready(aaf_sid, false, t0 + 10);
+    EXPECT_EQ(reports.size(), size_t{2});
+    kit.poll_admission(t0 + 10 + grace - 1);
+    EXPECT_EQ(reports.size(), size_t{2});
+    kit.poll_admission(t0 + 10 + grace);
+    EXPECT_EQ(reports.size(), size_t{3});
+    EXPECT_TRUE(reports.back() == V{1});
+    kit.poll_admission(t0 + 10 * grace);
+    EXPECT_EQ(reports.size(), size_t{3});
+
+    // Re-registered: back in.
+    kit.note_listener_ready(aaf_sid, true, t0 + 11 * grace);
+    EXPECT_TRUE(reports.back() == (V{0, 1}));
+    EXPECT_EQ(reports.size(), size_t{4});
+    kit.set_on_admission_changed({});
 }
-
-namespace {
-
-/// A bridge that speaks MSRP to a kit, and the loop that drives the kit's reactor as these tests see
-/// it: each cycle the kit is told the pair of clocks, then handed what the bridge sent.
-struct BridgeOverMsrp
-{
-    KitUnderTest& kit;
-    TimePoint now{std::chrono::seconds{2}};
-    std::vector<std::vector<uint8_t>> out{};
-    nanoavb::MsrpHandler<> bridge{
-        statusbar::srp::msrp::MsrpConfig{}, nanoavb::MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
-            out.emplace_back(p.begin(), p.end());
-            return true;
-        }}};
-
-    /// The gate's clock at reactor time @p at: one hundred seconds ahead of it.
-    [[nodiscard]] static auto raw_of(TimePoint const at) -> AvbEntityKit::RawTimePoint
-    {
-        return AvbEntityKit::RawTimePoint{at.time_since_epoch() + std::chrono::seconds{100}};
-    }
-    [[nodiscard]] static auto ns_of(TimePoint const at) -> int64_t
-    {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count();
-    }
-
-    /// One reactor cycle 120 ms on: the kit told its time, the bridge's PDUs received, the timers run.
-    void cycle()
-    {
-        now += std::chrono::milliseconds{120};
-        kit->tell_cycle_time(ns_of(now), raw_of(now));
-        bridge.tick(now);
-        auto& msrp = kit->host().components().msrp_handler;
-        for (auto const& p : std::exchange(out, {})) {
-            msrp.receive_packet(p, now);
-        }
-        msrp.tick(now);
-    }
-
-    /// Cycles until @p done or @p rounds have gone by.
-    template <typename Done>
-    void cycles_until(int const rounds, Done done)
-    {
-        for (int round = 0; round < rounds && !done(); ++round) {
-            cycle();
-        }
-    }
-};
-
-}  // namespace
-
-// IEEE 802.1Q-2022 Clause 35.2.4.4: a Listener Ready a bridge declares over MSRP reaches the gate through
-// the host, known at the instant the loop told the kit for that reactor cycle, and admits the connected
-// stream.
-TEST(avb_entity_kit_admission, a_listener_ready_over_msrp_admits_the_connected_stream)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    uint16_t const idx = kit.talker_specs()[0].index;
-    BridgeOverMsrp wire{kit};
-    auto& msrp = kit->host().components().msrp_handler;
-    EXPECT_TRUE(msrp.talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[0]), wire.now).has_value());
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, idx);
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    EXPECT_TRUE(wire.bridge.listener_ready(talker_sid(kit, idx), wire.now).has_value());
-    wire.cycles_until(6, [&recorder] { return !recorder.told.empty(); });
-    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{idx}});
-    EXPECT_TRUE(kit->talker_should_transmit(idx, BridgeOverMsrp::raw_of(wire.now)));
-    kit->set_on_admission_changed({});
-}
-
-// The kit reads no clock. A Listener Ready withdrawn over MSRP is stamped with the instant told for
-// the cycle that saw it go, the grace and the admission deadline run from that instant, and a loop that
-// holds the reactor clock alone is given its wait from the pair carried forward.
-TEST(avb_entity_kit_admission, a_withdrawal_over_msrp_is_known_at_the_cycle_the_loop_told)
-{
-    using std::chrono::milliseconds;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    uint16_t const idx = kit.talker_specs()[0].index;
-    BridgeOverMsrp wire{kit};
-    auto& msrp = kit->host().components().msrp_handler;
-    msrp.set_suppress_leaveall(true);
-    wire.bridge.set_suppress_leaveall(true);
-    EXPECT_TRUE(msrp.talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[0]), wire.now).has_value());
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, idx);
-    EXPECT_TRUE(wire.bridge.listener_ready(talker_sid(kit, idx), wire.now).has_value());
-    wire.cycles_until(6, [&] { return kit->admitted_talker_streams() == AvbEntityKit::AdmittedStreams{idx}; });
-    EXPECT_TRUE(kit->admitted_talker_streams() == AvbEntityKit::AdmittedStreams{idx});
-    EXPECT_FALSE(kit->admission_deadline().has_value());  // registered: no grace runs
-
-    // The bridge withdraws. The kit's registrar lets go a LeaveTime later, in one of the cycles told.
-    EXPECT_TRUE(wire.bridge.listener_withdraw(talker_sid(kit, idx), wire.now).has_value());
-    auto const before = BridgeOverMsrp::raw_of(wire.now);
-    wire.cycles_until(100, [&] { return kit->admission_deadline().has_value(); });
-    auto const deadline = kit->admission_deadline();
-    EXPECT_TRUE(deadline.has_value());
-    auto const stamped = BridgeOverMsrp::raw_of(wire.now);  // the cycle that saw it go
-    EXPECT_TRUE(stamped > before);
-    EXPECT_TRUE(deadline.value_or(AvbEntityKit::RawTimePoint{}) == stamped + TalkerGate::GRACE);
-    EXPECT_TRUE(kit->admitted_talker_streams() == AvbEntityKit::AdmittedStreams{idx});  // within the grace
-
-    // 40 ms further into the cycle, by the reactor clock alone.
-    int64_t const later_ns = BridgeOverMsrp::ns_of(wire.now + milliseconds{40});
-    EXPECT_TRUE(kit->raw_at(later_ns) == stamped + milliseconds{40});
-    EXPECT_TRUE(kit->poll_timeout_ms(60'000, later_ns) <= 4960);  // the deadline is 4960 ms off, or a timer sooner
-    EXPECT_EQ(kit->poll_timeout_ms(60'000, later_ns), kit->poll_timeout_ms(60'000, later_ns, stamped + milliseconds{40}));
-    int64_t const at_deadline_ns = BridgeOverMsrp::ns_of(wire.now) + 5'000'000'000;
-    EXPECT_EQ(kit->poll_timeout_ms(60'000, at_deadline_ns), 0);  // due: no wait until end_cycle() has run
-
-    // A cycle told at the deadline: the set asked for with no instant is the set of that cycle.
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    kit->tell_cycle_time(at_deadline_ns, stamped + TalkerGate::GRACE);
-    EXPECT_TRUE(kit->admitted_talker_streams().empty());
-    kit->end_cycle(at_deadline_ns);
-    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
-    EXPECT_FALSE(kit->admission_deadline().has_value());
-    kit->set_on_admission_changed({});
-}
-
-// An ACMP connection is a gate input with no time of its own: the set is evaluated at the instant
-// told for its cycle, so one that arrives after a grace has run out finds it over.
-TEST(avb_entity_kit_admission, an_acmp_connection_is_evaluated_at_the_cycle_the_loop_told)
-{
-    using std::chrono::seconds;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{seconds{1}}));
-    auto connect_from = [&kit](uint8_t const listener) {
-        atdecc::AcmpCommandResponse cmd{};
-        cmd.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
-        cmd.talker_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
-        cmd.talker_unique_id = 1;
-        cmd.listener_entity_id = Eui64{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, listener};
-        (void)kit->host().components().acmp_talker.receive_command(cmd, TimePoint{});
-    };
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    connect_from(0x01);
-    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + seconds{1});  // the grace runs to T0 + 1 s + GRACE
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-
-    kit->tell_cycle_time(1, ADMIT_T0 + seconds{2});  // a cycle inside the grace
-    connect_from(0x02);
-    EXPECT_TRUE(recorder.told.empty());
-    EXPECT_EQ(kit->host().components().acmp_talker.connection_count(1), size_t{2});
-
-    kit->tell_cycle_time(2, ADMIT_T0 + seconds{1} + TalkerGate::GRACE);  // a cycle at its end
-    connect_from(0x03);
-    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
-    kit->set_on_admission_changed({});
-}
-
-// Told no pair, the kit has no instant on the gate's clock: raw_at() says so, and the loop's wait is
-// the control plane's alone.
-TEST(avb_entity_kit_admission, a_kit_told_no_time_has_no_instant_on_the_gates_clock)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    EXPECT_TRUE(kit->raw_at(5'000'000'000) == AvbEntityKit::RawTimePoint{});
-    EXPECT_FALSE(kit->admission_deadline().has_value());
-    EXPECT_EQ(kit->poll_timeout_ms(7, 5'000'000'000), kit->poll_timeout_ms(7, 5'000'000'000, ADMIT_T0));
-}
-
-// Milan v1.3 Section 5.5.4.1: a Milan talker streams while its Listener is registered, with no
-// connection and no grace, so the stream leaves the admitted set at the Listener's withdrawal.
-TEST(avb_entity_kit_admission, a_milan_stream_closes_at_the_listener_leave)
-{
-    using V = std::vector<uint16_t>;
-    KitUnderTest kit{make_config(2, "milan13")};
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    kit->notify_listener_ready(talker_sid(kit, 0), true, ADMIT_T0);
-    EXPECT_TRUE(recorder.told == std::vector<V>{V{0}});
-    kit->notify_listener_ready(talker_sid(kit, 0), false, ADMIT_T0 + std::chrono::seconds{1});
-    EXPECT_TRUE(recorder.told == (std::vector<V>{V{0}, V{}}));
-    EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0 + std::chrono::seconds{1}).empty());
-    EXPECT_FALSE(kit->admission_deadline().has_value());  // no grace: nothing to wait for
-    kit->set_on_admission_changed({});
-}
-
-// A classic stream's grace runs out with no MSRP or ACMP event: the kit arms its deadline at the
-// grace's end, re-evaluates admission there, tells the hook, and disarms.
-TEST(avb_entity_kit_admission, the_deadline_is_armed_at_the_grace_end_and_disarmed_after)
-{
-    using V = std::vector<uint16_t>;
-    using std::chrono::nanoseconds;
-    constexpr auto grace = TalkerGate::GRACE;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    EXPECT_FALSE(kit->admission_deadline().has_value());  // registered: no grace runs
-
-    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + nanoseconds{10});
-    auto const ends = ADMIT_T0 + nanoseconds{10} + grace;
-    EXPECT_TRUE(kit->admission_deadline() == ends);
-    end_cycle_at(kit, 1, ends - nanoseconds{1});
-    EXPECT_TRUE(recorder.told == std::vector<V>{V{1}});  // still within the grace
-    EXPECT_TRUE(kit->talker_should_transmit(1, ends - nanoseconds{1}));
-    end_cycle_at(kit, 2, ends);
-    EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}}));
-    EXPECT_FALSE(kit->talker_should_transmit(1, ends));
-    EXPECT_FALSE(kit->admission_deadline().has_value());
-    end_cycle_at(kit, 3, ends + 10 * grace);
-    EXPECT_EQ(recorder.told.size(), size_t{2});
-
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ends + 11 * grace);  // registered again: back in
-    EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}, V{1}}));
-    kit->set_on_admission_changed({});
-}
-
-// The loop does not sleep past a grace's end: its wait is cut to what is left of the deadline on
-// the gate's clock, as it is for an MRP timer, and is 0 from the deadline until end_cycle() runs.
-TEST(avb_entity_kit_admission, the_loop_wakes_for_the_admission_deadline)
-{
-    using std::chrono::milliseconds;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    auto const control = kit->next_control_deadline_ns();
-    int64_t const now_ns = control.has_value() ? *control - 1'000'000'000 : 0;  // no other deadline within 100 ms
-    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ADMIT_T0), 100);                // nothing armed
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + milliseconds{50});
-    auto const ends = ADMIT_T0 + milliseconds{50} + TalkerGate::GRACE;
-    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends - milliseconds{50}), 50);
-    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends - milliseconds{150}), 100);
-    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends), 0);
-    end_cycle_at(kit, now_ns, ends);
-    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends), 100);  // disarmed
-}
-
-// end_cycle() finds the gate's clock as poll_timeout_ms() does, from the pair told for the cycle
-// carried forward by the reactor clock, and runs the deadline once that reaches it.
-TEST(avb_entity_kit_admission, the_end_of_a_cycle_runs_the_deadline_on_the_pair_carried_forward)
-{
-    using std::chrono::milliseconds;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0);  // the grace runs to T0 + GRACE
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    int64_t const told_ns = 9'000'000'000;
-    kit->tell_cycle_time(told_ns, ADMIT_T0 + TalkerGate::GRACE - milliseconds{40});
-    kit->end_cycle(told_ns + 39'000'000);
-    EXPECT_TRUE(recorder.told.empty());  // 1 ms short of the grace's end
-    EXPECT_TRUE(kit->admission_deadline().has_value());
-    kit->end_cycle(told_ns + 40'000'000);
-    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
-    EXPECT_FALSE(kit->admission_deadline().has_value());
-    kit->set_on_admission_changed({});
-}
-
-// Two streams' graces that end apart: the timer at the first end closes that stream and arms the
-// second end, where the second closes and the deadline is disarmed.
-TEST(avb_entity_kit_admission, the_timer_at_one_grace_end_arms_the_next)
-{
-    using V = std::vector<uint16_t>;
-    using std::chrono::seconds;
-    constexpr auto grace = TalkerGate::GRACE;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{seconds{1}}));
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2);
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    kit->notify_listener_ready(talker_sid(kit, 2), true, ADMIT_T0);
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    kit->notify_listener_ready(talker_sid(kit, 2), false, ADMIT_T0 + seconds{2});
-    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + seconds{3});
-    EXPECT_TRUE(kit->admission_deadline() == ADMIT_T0 + seconds{2} + grace);
-    end_cycle_at(kit, 1, ADMIT_T0 + seconds{2} + grace);
-    EXPECT_TRUE(recorder.told == std::vector<V>{V{1}});
-    EXPECT_TRUE(kit->admission_deadline() == ADMIT_T0 + seconds{3} + grace);
-    end_cycle_at(kit, 2, ADMIT_T0 + seconds{3} + grace);
-    EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}}));
-    EXPECT_FALSE(kit->admission_deadline().has_value());
-    kit->set_on_admission_changed({});
-}
-
-// An entity that forwards poll_timeout_ms() forwards end_cycle(), or its loop would wake at once
-// from the admission deadline on: the runner calls end_cycle() only where it exists.
-template <typename Entity>
-concept EndsCycle = requires(Entity& entity) { entity.end_cycle(int64_t{}); };
-static_assert(EndsCycle<AvbEntityAudioIO>);
-static_assert(EndsCycle<AvbEntityToneGenerator>);
-
-// An entity whose gate is stamped from an MSRP hook is told the reactor cycle's time by its loop
-// (entity_reactor_clock): the kit's two entities forward it to the kit.
-template <typename Entity>
-concept ToldCycleTime = requires(Entity& entity) { entity.tell_cycle_time(int64_t{}, AvbEntityKit::RawTimePoint{}); };
-static_assert(ToldCycleTime<AvbEntityAudioIO>);
-static_assert(ToldCycleTime<AvbEntityToneGenerator>);
-
-// With the gate off every talker stream transmits from the start: that is the set in force, so
-// nothing is told until a stream leaves it, which none does.
-TEST(avb_entity_kit_admission, a_kit_without_a_gate_admits_every_stream_and_tells_nothing)
-{
-    auto config = make_config(2, "classic");
-    config.gate_talker_on_listener = false;
-    KitUnderTest kit{std::move(config)};
-    AdmissionRecorder recorder;
-    recorder.install(kit);
-    kit->notify_listener_ready(talker_sid(kit, 0), true, ADMIT_T0);
-    EXPECT_EQ(kit->admitted_talker_streams(ADMIT_T0).size(), kit.talker_specs().size());
-    EXPECT_TRUE(recorder.told.empty());
-}
-
-//
-// Stream port
-//
-
-namespace {
-
-/// The 802.1Q-tagged Ethernet header build_stream_frame writes ahead of each AVTPDU.
-constexpr size_t TAGGED_HEADER_LENGTH = 18;
-Eui48 const TEST_PORT_MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
-
-/// @p kit started at @p now on an in-process test port opened before the start: that port, or
-/// nullptr when the start did not keep it.
-auto start_on_test_port(KitUnderTest& kit, TimePoint const now) -> net::TestPortContext*
-{
-    EXPECT_TRUE(kit->stream_port().open_test({.hardware_address = TEST_PORT_MAC}).has_value());
-    EXPECT_TRUE(kit.start(now));
-    return kit->stream_port().test_port();
-}
-
-}  // namespace
-
-// The host's port is the streams': the start keeps it, the talker's frames reach it tagged with
-// the configured VLAN, and the stop closes it as it would one the kit opened.
-TEST(avb_entity_kit_stream_port, a_port_opened_before_the_start_carries_the_talkers_frames)
-{
-    KitUnderTest kit{make_config(7, "classic")};
-    auto* const wire = start_on_test_port(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    EXPECT_EQ(kit->stream_port().generation(), 1U);  // not opened again
-    auto* const slot = kit->talker().slot_of(StreamKind::aaf);
-    EXPECT_TRUE(slot != nullptr);
-    if (wire == nullptr || slot == nullptr) {
-        return;
-    }
-    std::vector<float> const audio(size_t{slot->aaf_samples} * slot->spec.format.channels);
-    kit->talker().transmit_aaf(*slot, kit->talker().presentation_for(0), slot->aaf_samples, audio);
-    auto const sent = wire->pop_tx();
-    EXPECT_TRUE(sent.has_value());
-    if (sent.has_value()) {
-        std::array<uint8_t, TAGGED_HEADER_LENGTH> header{};
-        EXPECT_EQ(build_stream_frame(header, slot->dest_mac, TEST_PORT_MAC, 7, 3, {}), TAGGED_HEADER_LENGTH);
-        EXPECT_TRUE(std::ranges::equal(std::span<uint8_t const>{sent->frame}.first(TAGGED_HEADER_LENGTH), header));
-        EXPECT_TRUE(avtp::aaf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(TAGGED_HEADER_LENGTH)).has_value());
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-    EXPECT_FALSE(kit->stream_port().valid());
-}
-
-//
-// AVTP tu on the wire - IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2
-//
-
-namespace {
-
-/// The tu and mr of one AVTPDU captured on the wire.
-struct StreamBits
-{
-    bool tu{false};
-    bool mr{false};
-
-    auto operator==(StreamBits const&) const -> bool = default;
-};
-
-/// The tu and mr of the AVTPDU in captured @p frame of a @p kind stream; nullopt when it holds none.
-auto bits_of(StreamKind const kind, std::span<uint8_t const> const frame) -> std::optional<StreamBits>
-{
-    auto const pdu = frame.size() > TAGGED_HEADER_LENGTH ? frame.subspan(TAGGED_HEADER_LENGTH) : std::span<uint8_t const>{};
-    switch (kind) {
-        case StreamKind::am824: {
-            auto const p = avtp::am824_parse_header(pdu);
-            return p ? std::optional{StreamBits{.tu = p->stream_header.tu(), .mr = p->stream_header.mr()}} : std::nullopt;
-        }
-        case StreamKind::aaf: {
-            auto const p = avtp::aaf_parse_header(pdu);
-            return p ? std::optional{StreamBits{.tu = p->tu(), .mr = p->mr()}} : std::nullopt;
-        }
-        case StreamKind::crf: {
-            auto const p = avtp::crf_parse_header(pdu);
-            return p ? std::optional{StreamBits{.tu = p->tu(), .mr = p->mr()}} : std::nullopt;
-        }
-        case StreamKind::other:
-        default:
-            return std::nullopt;
-    }
-}
-
-/// One AVTPDU of @p slot, sent as the media thread sends one of its kind.
-void transmit_one(TalkerStreams& talker, TalkerStreamSlot& slot)
-{
-    constexpr uint32_t AM824_SAMPLES = 6;
-    std::vector<float> const audio(size_t{avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET} * slot.spec.format.channels);
-    switch (slot.spec.format.kind) {
-        case StreamKind::am824:
-            talker.transmit_am824(slot, talker.presentation_for(0), AM824_SAMPLES, audio);
-            return;
-        case StreamKind::aaf:
-            talker.transmit_aaf(slot, talker.presentation_for(0), slot.aaf_samples, audio);
-            return;
-        case StreamKind::crf:
-            talker.transmit_crf(slot, 0);
-            return;
-        case StreamKind::other:
-        default:
-            return;
-    }
-}
-
-using RawTimePoint = TalkerStreams::RawTimePoint;
-
-/// The tu and mr of @p count AVTPDUs the kit's @p kind output sends in a media wake at RAW
-/// instant @p wake, as captured on @p wire. The kit is asked about the stream first, as an
-/// entity asks it each wake, which tells the talker the wake's instant.
-auto send(KitUnderTest& kit, net::TestPortContext& wire, StreamKind const kind, size_t const count, RawTimePoint const wake)
-    -> std::vector<StreamBits>
-{
-    std::vector<StreamBits> captured;
-    auto* const slot = kit->talker().slot_of(kind);
-    for (size_t i = 0; slot != nullptr && i < count; ++i) {
-        (void)kit->talker_should_transmit(slot->spec.index, wake);
-        transmit_one(kit->talker(), *slot);
-        auto const frame = wire.pop_tx();
-        auto const bits = frame ? bits_of(kind, frame->frame) : std::nullopt;
-        if (bits.has_value()) {
-            captured.push_back(*bits);
-        }
-    }
-    return captured;
-}
-
-/// @p count AVTPDUs of one tu and one mr.
-auto all(size_t const count, bool const tu, bool const mr) -> std::vector<StreamBits>
-{
-    return std::vector<StreamBits>(count, StreamBits{.tu = tu, .mr = mr});
-}
-
-/// The talker's three kinds of stream, each the tone model's STREAM_OUTPUT of its kind.
-constexpr std::array<StreamKind, 3> ALL_KINDS{StreamKind::am824, StreamKind::aaf, StreamKind::crf};
-
-/// The tone kit started on a test port, its media clock anchored at a told gPTP instant (CRF needs one).
-auto start_streaming(KitUnderTest& kit, TimePoint const now) -> net::TestPortContext*
-{
-    auto* const wire = start_on_test_port(kit, now);
-    (void)kit.media_clock().advance(1'000'000'000, 1.0, 6);
-    return wire;
-}
-
-/// GET_COUNTERS of the kit's STREAM_OUTPUT of @p kind, as a controller reads them.
-auto output_counters(KitUnderTest& kit, StreamKind const kind) -> atdecc::aem::AemCountersPayload
-{
-    auto const* const slot = kit->talker().slot_of(kind);
-    atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_GET_COUNTERS, atdecc::aem::AemGetCountersCommandPayload::LENGTH);
-    header.controller_entity_id = RATE_CONTROLLER_A;
-    atdecc::aem::AemGetCountersCommandPayload const asked{
-        .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT,
-        .descriptor_index = slot != nullptr ? slot->spec.index : uint16_t{0xFFFF}};
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    auto const result = kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
-    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
-    atdecc::aem::AemCountersPayload counters{};
-    span_load(counters, std::span<uint8_t const>{out}.first(atdecc::aem::AemCountersPayload::LENGTH));
-    return counters;
-}
-
-/// What GET_COUNTERS answers for the kit's @p kind output at @p bit (IEEE 1722.1-2021 Table 7-158).
-auto output_counter(KitUnderTest& kit, StreamKind const kind, unsigned const bit) -> uint32_t
-{
-    return output_counters(kit, kind).counters.at(bit).get();
-}
-
-/// The RAW instant of the reactor cycle an Announce arrives in, as the loop tells the kit it.
-constexpr RawTimePoint CYCLE{std::chrono::seconds{500}};
-/// The gPTP handler's time of that Announce.
-constexpr int64_t ANNOUNCE_NS = 2'000'000'000;
-/// A media wake @p after the cycle the Announce arrived in.
-constexpr auto wake_after(std::chrono::nanoseconds const after) -> RawTimePoint
-{
-    return CYCLE + after;
-}
-constexpr auto WINDOW = std::chrono::nanoseconds{TalkerStreams::TU_AFTER_GM_CHANGE_NS};
-
-/// A grandmaster announced to @p kit in the reactor cycle at CYCLE, as the loop tells it; its handler.
-auto announce_grandmaster(KitUnderTest& kit) -> nanoavb::GptpAnnounceHandler&
-{
-    auto& announces = kit->host().net_handlers()->gptp_handler();
-    gptp::AnnounceMessage announce{};
-    announce.init(1);
-    announce.grandmaster_identity = gptp::ClockIdentity{Eui64{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55}};
-    kit->tell_cycle_time(ANNOUNCE_NS, CYCLE);
-    announces.observe_announce(ANNOUNCE_NS, announce);
-    return announces;
-}
-
-}  // namespace
-
-namespace {
-
-/// Each (stream, open) the kit's gate hook is told.
-struct GateRecorder
-{
-    std::vector<std::pair<uint16_t, bool>> told{};
-
-    void install(KitUnderTest& kit)
-    {
-        kit->set_on_talker_gate_changed([this](uint16_t const idx, bool const open) { told.emplace_back(idx, open); });
-    }
-};
-
-/// A controller's START_STREAMING or STOP_STREAMING (@p command) for STREAM_OUTPUT @p index: the status.
-auto output_streaming_command(KitUnderTest& kit, uint16_t const command, uint16_t const index) -> uint8_t
-{
-    atdecc::AemDu header{};
-    header.init_command(command, atdecc::aem::AemStreamingPayload::LENGTH);
-    header.controller_entity_id = Eui64{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
-    atdecc::aem::AemStreamingPayload payload{};
-    payload.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
-    payload.descriptor_index = index;
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    return kit->host().components().aem_handler.handle_command(header, make_const_span(payload), out).status;
-}
-
-}  // namespace
-
-// A start knows no grandmaster: every AVTPDU of each kind carries tu, and does again once the
-// grandmaster announced is lost; TIMESTAMP_UNCERTAIN counts each of them.
-TEST(avb_entity_kit_tu, every_kind_of_avtpdu_carries_tu_while_no_grandmaster_is_in_force)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    auto* const wire = start_streaming(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send(kit, *wire, kind, 3, wake_after(std::chrono::seconds{1})) == all(3, true, false));
-    }
-
-    auto& announces = announce_grandmaster(kit);
-    announces.tick(ANNOUNCE_NS + announces.announce_receipt_timeout_ns() + 1);  // the Announces stopped
-    EXPECT_FALSE(announces.has_grandmaster());
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send(kit, *wire, kind, 2, wake_after(std::chrono::seconds{10})) == all(2, true, false));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_timestamp_uncertain_bit), 5U);
-        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 5U);
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{3}}));
-}
-
-// Milan v1.3 Annex B.1.1: an Announce opens the 0.25 s window at the reactor cycle it arrives in;
-// every AVTPDU of a wake inside it carries tu, none of a wake at its end or past it.
-TEST(avb_entity_kit_tu, every_kind_of_avtpdu_carries_tu_inside_the_window_after_an_announce_and_not_past_it)
-{
-    using std::chrono::nanoseconds;
-    KitUnderTest kit{make_config(2, "classic")};
-    auto* const wire = start_streaming(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    (void)announce_grandmaster(kit);
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send(kit, *wire, kind, 1, wake_after(nanoseconds{0})) == all(1, true, false));
-        EXPECT_TRUE(send(kit, *wire, kind, 1, wake_after(WINDOW - nanoseconds{1})) == all(1, true, false));
-        EXPECT_TRUE(send(kit, *wire, kind, 1, wake_after(WINDOW)) == all(1, false, false));
-        EXPECT_TRUE(send(kit, *wire, kind, 2, wake_after(std::chrono::seconds{1})) == all(2, false, false));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_timestamp_uncertain_bit), 2U);
-        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 5U);
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-}
-
-//
-// AVTP mr on the wire - IEEE 1722-2016 Clauses 4.4.4.3, 10.4.3
-//
-
-namespace {
-
-/// The mr of each AVTPDU in @p captured.
-auto mrs(std::vector<StreamBits> const& captured) -> std::vector<bool>
-{
-    std::vector<bool> out;
-    std::ranges::transform(captured, std::back_inserter(out), [](StreamBits const& b) { return b.mr; });
-    return out;
-}
-
-/// The mr of @p count AVTPDUs the kit's @p kind output sends in a wake past the tu window, as
-/// captured on @p wire.
-auto send_mr(KitUnderTest& kit, net::TestPortContext& wire, StreamKind const kind, size_t const count) -> std::vector<bool>
-{
-    return mrs(send(kit, wire, kind, count, wake_after(std::chrono::seconds{1})));
-}
-
-/// Runs of mr: each (count, value) in turn.
-auto runs(std::initializer_list<std::pair<size_t, bool>> const parts) -> std::vector<bool>
-{
-    std::vector<bool> out;
-    for (auto const& [count, value] : parts) {
-        out.insert(out.end(), count, value);
-    }
-    return out;
-}
-
-/// The toggles of mr from one AVTPDU to the next in @p sent: what MEDIA_RESET counts of them.
-auto toggles(std::vector<bool> const& sent) -> uint32_t
-{
-    uint32_t count = 0;
-    for (size_t i = 1; i < sent.size(); ++i) {
-        count += sent[i] != sent[i - 1] ? 1U : 0U;
-    }
-    return count;
-}
-
-constexpr size_t HOLD = TalkerStreams::MR_HOLD_PDUS;
-
-/// The tone kit started on a test port with a grandmaster announced, so the AVTPDUs send_mr()
-/// sends carry tu clear and a frame's bits are its mr alone.
-auto start_certain(KitUnderTest& kit, TimePoint const now) -> net::TestPortContext*
-{
-    auto* const wire = start_streaming(kit, now);
-    (void)announce_grandmaster(kit);
-    return wire;
-}
-
-/// SET_CLOCK_SOURCE of clock domain 0 to @p source, as a controller asks it; the status answered.
-auto set_clock_source(KitUnderTest& kit, uint16_t const source) -> uint8_t
-{
-    atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, atdecc::aem::AemClockSourcePayload::LENGTH);
-    header.controller_entity_id = RATE_CONTROLLER_A;
-    atdecc::aem::AemClockSourcePayload const asked{
-        .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0, .clock_source_index = source};
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    return kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out).status;
-}
-
-}  // namespace
-
-// A restart toggles mr on the next AVTPDU, which keeps it for eight; one asked inside the hold
-// toggles it back on the first after. MEDIA_RESET counts the toggles the frames carry.
-TEST(avb_entity_kit_mr, a_media_clock_restart_toggles_mr_on_the_wire_and_holds_it_for_eight_avtpdus)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    for (auto const kind : ALL_KINDS) {
-        auto const index = kit->talker().slot_of(kind)->spec.index;
-        auto sent = send_mr(kit, *wire, kind, 2);
-        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());
-        auto const first = send_mr(kit, *wire, kind, 1);
-        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());
-        auto const rest = send_mr(kit, *wire, kind, HOLD - 1 + HOLD + 1);
-        sent.insert(sent.end(), first.begin(), first.end());
-        sent.insert(sent.end(), rest.begin(), rest.end());
-        EXPECT_TRUE(sent == runs({{2, false}, {HOLD, true}, {HOLD + 1, false}}));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), toggles(sent));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), sent.size());
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-}
-
-// The media clock re-anchored on a gPTP timeline stepped seconds ahead restarts every stream it
-// times: each kind's next AVTPDU toggles mr and holds it. One that keeps time toggles nothing.
-TEST(avb_entity_kit_mr, a_stepped_re_anchor_toggles_mr_on_every_kind_of_avtpdu)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, 1) == runs({{1, false}}));  // the first AVTPDU knows the clock's steps
-    }
-    (void)kit.media_clock().advance(1'000'125'000, 1.0, 6);  // on time
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, 1) == runs({{1, false}}));
-    }
-    (void)kit.media_clock().advance(9'000'000'000, 1.0, 6);
-    EXPECT_EQ(kit.media_clock().step_count(), 1U);
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, HOLD) == runs({{HOLD, true}}));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), 1U);
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-}
-
-// SET_CLOCK_SOURCE to another source of clock domain 0 restarts the media clock of the domain's
-// outputs: mr toggles on each kind's next AVTPDU. The source in force named again restarts nothing.
-TEST(avb_entity_kit_mr, another_clock_source_toggles_mr_on_every_kind_of_avtpdu_and_the_same_one_does_not)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, 2) == runs({{2, false}}));
-    }
-    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, HOLD) == runs({{HOLD, true}}));
-    }
-    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, 2) == runs({{2, true}}));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), 1U);
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-}
-
-// An accepted SET_SAMPLING_RATE re-times the AAF output, whose next AVTPDU toggles mr; the CRF
-// output it does not move, and a rate the data plane refuses, toggle nothing.
-TEST(avb_entity_kit_mr, an_accepted_sampling_rate_toggles_mr_on_the_retimed_output_alone)
-{
-    KitUnderTest kit{make_rates_config("classic")};
-    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    RateControllers controllers{kit};  // after the start, which gives the AEM handler its socket
-    UnitRateRecorder data_plane;
-    data_plane.install(kit);
-    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::aaf, 2) == runs({{2, false}}));
-    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::aaf, 2) == runs({{2, false}}));
-    data_plane.answer = atdecc::AEM_STATUS_SUCCESS;
-    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::aaf, HOLD) == runs({{HOLD, true}}));
-    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::crf, 2) == runs({{2, false}}));
-    EXPECT_EQ(output_counter(kit, StreamKind::aaf, stream_output_media_reset_bit), 1U);
-    EXPECT_EQ(output_counter(kit, StreamKind::crf, stream_output_media_reset_bit), 0U);
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-}
-
-// A stop ends the streams: the next start's first AVTPDUs carry mr clear, whatever the last run
-// sent or asked, and MEDIA_RESET counts no toggle at the reopen.
-TEST(avb_entity_kit_mr, a_stream_reopened_after_a_stop_starts_with_mr_clear)
-{
-    KitUnderTest kit{make_config(2, "classic")};
-    auto* wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    for (auto const kind : ALL_KINDS) {
-        auto const index = kit->talker().slot_of(kind)->spec.index;
-        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());
-        EXPECT_TRUE(send_mr(kit, *wire, kind, 3) == runs({{3, true}}));
-        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());  // inside the hold: owed at the stop
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-
-    wire = start_certain(kit, TimePoint{std::chrono::seconds{3}});
-    EXPECT_TRUE(wire != nullptr);
-    if (wire == nullptr) {
-        return;
-    }
-    for (auto const kind : ALL_KINDS) {
-        EXPECT_TRUE(send_mr(kit, *wire, kind, HOLD + 1) == runs({{HOLD + 1, false}}));
-        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), 0U);
-        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 3U + HOLD + 1);
-    }
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
-}
-
-// A classic stream streams while it is admitted and not stopped: the hook is told each edge the media
-// thread's transmit_if_due() finds, STOP_STREAMING's included, which leaves the admitted set as it is.
-TEST(avb_entity_kit_talker_gate, the_hook_follows_admission_and_stop_streaming)
-{
-    using G = std::vector<std::pair<uint16_t, bool>>;
-    KitUnderTest kit{make_config(2, "classic")};
-    GateRecorder recorder;
-    recorder.install(kit);
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    EXPECT_TRUE(recorder.told.empty());  // nothing admitted yet
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    EXPECT_TRUE((recorder.told == G{{1, true}}));
-    EXPECT_TRUE(kit->talker_gate_open(1));
-
-    EXPECT_EQ(output_streaming_command(kit, atdecc::AEM_COMMAND_STOP_STREAMING, 1), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE((recorder.told == G{{1, true}, {1, false}}));
-    EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0) == AvbEntityKit::AdmittedStreams{1});  // the slot stops, not the gate
-    EXPECT_EQ(output_streaming_command(kit, atdecc::AEM_COMMAND_STOP_STREAMING, 1), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(recorder.told.size(), size_t{2});  // stopped again: no change
-    EXPECT_EQ(output_streaming_command(kit, atdecc::AEM_COMMAND_START_STREAMING, 1), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE((recorder.told == G{{1, true}, {1, false}, {1, true}}));
-    kit->set_on_talker_gate_changed({});
-}
-
-// A grace that runs out with no event closes the gate at the admission deadline, and stop() closes
-// every gate still open; a later install replaces the earlier hook.
-TEST(avb_entity_kit_talker_gate, the_deadline_and_stop_close_the_gate)
-{
-    using G = std::vector<std::pair<uint16_t, bool>>;
-    KitUnderTest kit{make_config(2, "classic")};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2);
-    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
-    kit->notify_listener_ready(talker_sid(kit, 2), true, ADMIT_T0);
-    GateRecorder first;
-    first.install(kit);
-    EXPECT_TRUE(first.told.empty());  // the gates in force at install are not told
-    EXPECT_TRUE(kit->talker_gate_open(1) && kit->talker_gate_open(2));
-
-    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + std::chrono::seconds{1});
-    EXPECT_TRUE(first.told.empty());  // within the grace
-    end_cycle_at(kit, 1, ADMIT_T0 + std::chrono::seconds{1} + TalkerGate::GRACE);
-    EXPECT_TRUE((first.told == G{{1, false}}));
-
-    GateRecorder second;
-    second.install(kit);
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-    EXPECT_TRUE((second.told == G{{2, false}}));
-    EXPECT_EQ(first.told.size(), size_t{1});
-    EXPECT_FALSE(kit->talker_gate_open(2));
-    kit->set_on_talker_gate_changed({});
-}
-
-// With the gate off every talker stream streams from start() to stop(): start() tells each one open,
-// stop() each one closed.
-TEST(avb_entity_kit_talker_gate, a_kit_without_a_gate_opens_every_stream_at_start_and_closes_it_at_stop)
-{
-    auto config = make_config(2, "classic");
-    config.gate_talker_on_listener = false;
-    KitUnderTest kit{std::move(config)};
-    GateRecorder recorder;
-    recorder.install(kit);
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    std::vector<std::pair<uint16_t, bool>> opened;
-    std::vector<std::pair<uint16_t, bool>> closed;
-    for (auto const& spec : kit.talker_specs()) {
-        opened.emplace_back(spec.index, true);
-        closed.emplace_back(spec.index, false);
-    }
-    EXPECT_TRUE(recorder.told == opened);
-    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
-    opened.insert(opened.end(), closed.begin(), closed.end());
-    EXPECT_TRUE(recorder.told == opened);
-    kit->set_on_talker_gate_changed({});
-}
-
-// IEEE 1722-2025 Annex B.3: in "maap" address mode a stream streams only while its block is defended. The
-// gate closes when the block is lost and opens when it is defended again, as the media thread finds it.
-TEST(avb_entity_kit_talker_gate, the_gate_follows_the_maap_block)
-{
-    constexpr int64_t SEC = 1'000'000'000;
-    auto config = make_config(2, "classic");
-    config.gate_talker_on_listener = false;
-    config.stream_address_mode = "maap";
-    KitUnderTest kit{std::move(config)};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));  // no MAAP socket: the static addresses stand
-    std::vector<std::pair<uint16_t, bool>> closed;
-    std::vector<std::pair<uint16_t, bool>> opened;
-    for (auto const& spec : kit.talker_specs()) {
-        closed.emplace_back(spec.index, false);
-        opened.emplace_back(spec.index, true);
-    }
-    uint16_t const idx = kit.talker_specs().front().index;
-    auto agree = [&kit, idx] { return kit->talker_gate_open(idx) == kit->talker_should_transmit(idx, ADMIT_T0); };
-    EXPECT_TRUE(kit->talker_gate_open(idx));
-    EXPECT_TRUE(agree());
-    GateRecorder recorder;
-    recorder.install(kit);
-
-    avtp::MaapHandler handler{Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, 1};
-    handler.set_send([](Eui48 const&, std::span<uint8_t const>) { return true; });
-    kit->maap().wire_handler(handler, kit->host().components(), kit->talker());
-    handler.prepare(static_cast<uint16_t>(kit.talker_specs().size()));
-    auto defend = [&handler](int64_t const from_ns) {
-        handler.port_operational(from_ns);
-        for (int k = 1; k <= 12 && !handler.is_acquired(); ++k) {
-            handler.tick(from_ns + (k * SEC));
-        }
-    };
-    defend(SEC);
-    EXPECT_TRUE(recorder.told.empty());  // ready already: no change
-    handler.release(20 * SEC);
-    EXPECT_TRUE(recorder.told == closed);
-    EXPECT_FALSE(kit->talker_gate_open(idx));
-    EXPECT_TRUE(agree());
-    defend(30 * SEC);
-    closed.insert(closed.end(), opened.begin(), opened.end());
-    EXPECT_TRUE(recorder.told == closed);
-    EXPECT_TRUE(kit->talker_gate_open(idx));
-    EXPECT_TRUE(agree());
-    kit->set_on_talker_gate_changed({});
-}
-
-// atdecc.acquire_shared: the kit hands the configured mode to the AEM handler; under the Milan
-// profile an ACQUIRE_ENTITY is refused whatever the mode (Milan v1.3 5.4.2.1).
-TEST(avb_entity_kit_acquire, the_configured_acquire_mode_reaches_the_handler_and_milan_grants_none)
-{
-    using AcquireMode = nanoavb::AemCommandHandler::AcquireMode;
-    KitUnderTest by_default{make_config(2, "classic")};
-    EXPECT_TRUE(by_default->host().components().aem_handler.acquire_mode() == AcquireMode::exclusive);
-
-    auto shared_config = make_config(2, "classic");
-    shared_config.acquire_shared = true;
-    KitUnderTest shared{std::move(shared_config)};
-    EXPECT_TRUE(shared->host().components().aem_handler.acquire_mode() == AcquireMode::shared);
-
-    auto milan_config = make_config(2, "milan13", true);
-    milan_config.acquire_shared = true;
-    KitUnderTest milan{std::move(milan_config)};
-    atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_ACQUIRE_ENTITY, atdecc::aem::AemAcquireEntityPayload::LENGTH);
-    header.controller_entity_id = RATE_CONTROLLER_A;
-    atdecc::aem::AemAcquireEntityPayload const asked{};
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    auto const answered = milan->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
-    EXPECT_EQ(answered.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
-}
-
-//
-// The kit's CRF media clock recovery and the host's CRF consumers
-//
-
-namespace {
-
-/// The tone AAF model (examples/tone-aaf.json) with its CRF STREAM_INPUT 0 three times over, and its
-/// INPUT_STREAM CLOCK_SOURCE 1 located at STREAM_INPUT @p located.
-auto crf_inputs_blob(uint16_t const located) -> std::vector<uint8_t>
-{
-    auto const base = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf.bin");
-    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{base});
-    auto source = *load_descriptor<atdecc::aem::DescriptorClockSource>(*storage, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 1);
-    source.clock_source_location_index = located;
-    nanoavb::AemBlobWriter w;
-    for (uint16_t type = 0; type <= atdecc::aem::DESCRIPTOR_CONTROL_BLOCK; ++type) {
-        for (uint16_t index = 0; storage->get_descriptor(0, type, index).has_value(); ++index) {
-            bool const relocated = type == atdecc::aem::DESCRIPTOR_CLOCK_SOURCE && index == 1;
-            w.add(0, type, index, relocated ? make_const_span(source) : *storage->get_descriptor(0, type, index));
-        }
-    }
-    for (uint16_t const index : {uint16_t{1}, uint16_t{2}}) {
-        w.add(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, index, *storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0));
-    }
-    return w.write();
-}
-
-/// A classic entity's configuration over crf_inputs_blob(@p located).
-auto crf_inputs_config(uint16_t const located = 1) -> AvbEntityAudioIOConfig
-{
-    auto config = make_config(2, "classic");
-    config.descriptor_storage_blob = crf_inputs_blob(located);
-    return config;
-}
-
-/// Hand STREAM_INPUT @p index's CRF consumer one timestamp, as the RX path does; false with none bound.
-auto feed_crf(KitUnderTest& kit, uint16_t const index) -> bool
-{
-    auto* const slot = kit->listener()->slot_for(index);
-    if (slot == nullptr || !slot->on_crf) {
-        return false;
-    }
-    slot->on_crf(1'000'000'000ULL, 0, 1'000'000'000, false, 1);
-    return true;
-}
-
-}  // namespace
-
-TEST(avb_entity_kit_crf, the_recovery_follows_the_input_the_crf_clock_source_locates_and_no_other)
-{
-    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    EXPECT_FALSE(feed_crf(kit, 0));
-    EXPECT_FALSE(feed_crf(kit, 2));
-    EXPECT_TRUE(feed_crf(kit, 1));
-    EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{1});
-}
-
-namespace {
-
-constexpr ieee::Eui64 CRF_TALKER_STREAM{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x09};
-constexpr ieee::Eui48 CRF_GROUP{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x39};
-
-}  // namespace
-
-// IEEE 1722-2025 4.7.4.4: "If a Clock Reference Format (CRF) stream ... is being received by a
-// Talker, then any streams deriving timestamps from the CRF stream shall toggle the mr bit if a
-// disruption of the CRF stream occurs or if the mr bit in the CRF stream has been toggled." The kit
-// looks once a cycle at the CRF input its media clock follows and asks a restart of every stream
-// output of the clock domain; a CONNECT repeated for the input's stream asks none.
-TEST(avb_entity_kit_crf, a_restart_or_a_disruption_of_the_crf_stream_the_media_clock_follows_restarts_the_domains_outputs)
-{
-    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    auto const output = kit.talker_specs().front().index;
-    auto const asked = [&kit, output] { return kit->talker().media_clock_restart_requests(output); };
-    auto* const input = kit->listener()->slot_for(1);
-    EXPECT_TRUE(input != nullptr);
-    int64_t now_ns = 2'000'000'000;
-    auto const cycle = [&kit, &now_ns] { kit->end_cycle(now_ns += 1'000'000); };
-
-    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);  // the CRF source comes into force
-    uint32_t const at_selection = asked();
-    cycle();  // the first look takes the count
-    EXPECT_EQ(asked(), at_selection);
-
-    kit->listener()->on_listener_connected(1, CRF_TALKER_STREAM, CRF_GROUP, TimePoint{std::chrono::seconds{3}});
-    EXPECT_EQ(asked(), at_selection);  // nothing before the cycle ends
-    cycle();
-    EXPECT_EQ(asked(), at_selection + 1);  // the input was given its stream
-    cycle();
-    EXPECT_EQ(asked(), at_selection + 1);  // once
-
-    input->counters.media_reset.fetch_add(1);  // what an AVTPDU with a toggled mr counts
-    cycle();
-    EXPECT_EQ(asked(), at_selection + 2);
-
-    kit->listener()->on_listener_connected(1, CRF_TALKER_STREAM, CRF_GROUP, TimePoint{std::chrono::seconds{4}});
-    cycle();
-    EXPECT_EQ(asked(), at_selection + 2);  // the CONNECT again: the same stream, the same clock
-
-    kit->listener()->on_listener_disconnected(1, TimePoint{std::chrono::seconds{5}}, StreamInputLoss::released);
-    cycle();
-    EXPECT_EQ(asked(), at_selection + 3);  // the stream is lost
-}
-
-// While another clock source is in force the stream outputs take nothing from the CRF stream, and
-// what happens to it restarts nothing. Coming back to the CRF source is the change of source's own
-// restart and no second one for what the stream did meanwhile.
-TEST(avb_entity_kit_crf, a_crf_stream_the_media_clock_does_not_follow_restarts_nothing)
-{
-    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    auto const output = kit.talker_specs().front().index;
-    auto const asked = [&kit, output] { return kit->talker().media_clock_restart_requests(output); };
-    auto* const input = kit->listener()->slot_for(1);
-    int64_t now_ns = 2'000'000'000;
-    auto const cycle = [&kit, &now_ns] { kit->end_cycle(now_ns += 1'000'000); };
-
-    EXPECT_EQ(set_clock_source(kit, 0), atdecc::AEM_STATUS_SUCCESS);
-    uint32_t const before = asked();
-    cycle();
-    kit->listener()->on_listener_connected(1, CRF_TALKER_STREAM, CRF_GROUP, TimePoint{std::chrono::seconds{3}});
-    input->counters.media_reset.fetch_add(1);
-    cycle();
-    EXPECT_EQ(asked(), before);
-
-    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);
-    uint32_t const at_selection = asked();
-    EXPECT_EQ(at_selection, before + 1);  // the change of source
-    cycle();
-    cycle();
-    EXPECT_EQ(asked(), at_selection);
-    input->counters.media_reset.fetch_add(1);
-    cycle();
-    EXPECT_EQ(asked(), at_selection + 1);
-}
-
-TEST(avb_entity_kit_crf, without_a_crf_clock_source_the_recovery_follows_the_first_crf_input)
-{
-    KitUnderTest kit{crf_inputs_config()};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    EXPECT_TRUE(feed_crf(kit, 0));
-    EXPECT_FALSE(feed_crf(kit, 1));
-    EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{1});
-}
-
-// A CRF clock source that locates no CRF input feeds the recovery from none: media_rate() follows
-// that source alone, so another input must not stand in for it.
-TEST(avb_entity_kit_crf, a_crf_clock_source_at_no_crf_input_binds_the_recovery_to_none)
-{
-    KitUnderTest kit{crf_inputs_config(/*located=*/7), /*crf_clock_source=*/1};
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    for (uint16_t index = 0; index < 3; ++index) {
-        EXPECT_FALSE(feed_crf(kit, index));
-    }
-}
-
-TEST(avb_entity_kit_crf, a_consumer_the_host_binds_before_start_is_kept)
-{
-    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
-    std::array<int, 3> host_calls{};
-    for (uint16_t index = 0; index < 3; ++index) {
-        kit->listener()->set_crf(index, [&host_calls, index](uint64_t, uint16_t, int64_t, bool) { ++host_calls.at(index); });
-    }
-    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
-    for (uint16_t index = 0; index < 3; ++index) {
-        EXPECT_TRUE(feed_crf(kit, index));
-        EXPECT_EQ(host_calls.at(index), 1);
-    }
-    EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{0});
-}
-
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
