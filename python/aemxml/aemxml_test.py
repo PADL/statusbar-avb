@@ -66,6 +66,7 @@ from aemxml.flatten import flatten, FlatDescriptor
 from aemxml.model import (
     DESCRIPTOR_ENTITY,
     DESCRIPTOR_CONFIGURATION,
+    DESCRIPTOR_CONTROL,
     DESCRIPTOR_AUDIO_UNIT,
     DESCRIPTOR_VIDEO_UNIT,
     DESCRIPTOR_SENSOR_UNIT,
@@ -355,6 +356,27 @@ def test_identify_capability_and_base_control_zeroing():
     assert struct.unpack_from(">HH", au, 98) == (0, 0)  # num/base controls
     spo = by_type[DESCRIPTOR_STREAM_PORT_OUTPUT].wire_bytes
     assert struct.unpack_from(">HH", spo, 8) == (0, 0)  # num/base controls
+
+    # The IDENTIFY control has no signal (IEEE 1722.1-2021 7.2.22).
+    ctrl = by_type[DESCRIPTOR_CONTROL].wire_bytes
+    assert struct.unpack_from(">HH", ctrl, 98) == (0xFFFF, 0)  # signal_type/index
+
+    # descriptor_counts lists only top-level descriptors (7.2.2): the
+    # port, its cluster and its map are reached through their owners.
+    cfg = by_type[DESCRIPTOR_CONFIGURATION].wire_bytes
+    n, off = struct.unpack_from(">HH", cfg, 70)
+    listed = {struct.unpack_from(">H", cfg, off + 4 * i)[0] for i in range(n)}
+    top_level = {DESCRIPTOR_AUDIO_UNIT, DESCRIPTOR_CONTROL, DESCRIPTOR_LOCALE}
+    assert listed == top_level, listed
+
+    # An IDENTIFY control given a signal is refused.
+    signalled = json.loads(json_str)
+    signalled["entity"]["configuration"]["controls"][0]["signal_type"] = "ENTITY"
+    try:
+        read_json(json.dumps(signalled))
+        raise AssertionError("an IDENTIFY control with a signal was accepted")
+    except ValueError as e:
+        assert "IDENTIFY" in str(e)
 
     # No identify control -> bit stays clear.
     plain = json.loads(json_str)
