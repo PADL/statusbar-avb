@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// EntityUpkeep: a kit entity's reactor-side upkeep (link, gPTP, log drain,
-/// timeouts) as a Pollable, for a host whose main thread is a
-/// net::MessageReactor. Reactor thread.
+/// timeouts, admission) as a Pollable, for a host whose main thread is a
+/// net::MessageReactor. Reactor thread; see docs/AVB_ENTITY_KIT.md.
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/logging/logging.hpp"

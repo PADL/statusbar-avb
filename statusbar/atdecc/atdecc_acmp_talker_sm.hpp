@@ -53,6 +53,9 @@ enum class TalkerEvent : uint8_t
 template <size_t MaxStreams = 32, size_t MaxConnectedListeners = 32>
 struct TalkerContext
 {
+    /// The compile-time stream capacity (the runtime max_streams is at most this).
+    static constexpr size_t MAX_STREAMS = MaxStreams;
+
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
