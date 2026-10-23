@@ -5377,7 +5377,11 @@ AEM_PAYLOADS: dict[str, tuple[str | None, str | None]] = {
     "SET_STREAM_FORMAT": ("AemStreamFormatPayload", "AemStreamFormatPayload"),
     "GET_STREAM_FORMAT": ("AemGetStreamFormatCommandPayload", "AemStreamFormatPayload"),
     "SET_STREAM_INFO": ("AemStreamInfoPayload", "AemStreamInfoPayload"),
-    "GET_STREAM_INFO": ("AemGetStreamInfoCommandPayload", "AemStreamInfoPayload"),
+    # Milan v1.2 appends an 8-octet tail (flags_ex, pbsta, acmpsta)
+    "GET_STREAM_INFO": (
+        "AemGetStreamInfoCommandPayload",
+        "AemStreamInfoPayload+tail:stream_info_milan",
+    ),
     "SET_NAME": ("AemNamePayload", "AemNamePayload"),
     "GET_NAME": ("AemNameCommandPayload", "AemNamePayload"),
     "SET_SAMPLING_RATE": ("AemSamplingRatePayload", "AemSamplingRatePayload"),
