@@ -377,37 +377,69 @@ auto MsrpParticipantT<Limits>::find_domain(uint8_t sr_class_id) const noexcept -
 // ============================================================
 
 template <class Limits>
-auto MsrpParticipantT<Limits>::find_or_create_talker_advertise(tsn::StreamId const& id)
+auto MsrpParticipantT<Limits>::talker_owned(Operation const op, tsn::StreamId const& id) const noexcept -> bool
+{
+    if (op == Operation::Declare) {
+        return true;
+    }
+    return std::any_of(listeners_.begin(), listeners_.end(), [&id](ListenerRecord const& r) {
+        return r.operation == Operation::Declare && r.first_value.stream_id == id;
+    });
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::listener_owned(Operation const op, tsn::StreamId const& id) const noexcept -> bool
+{
+    if (op == Operation::Declare) {
+        return true;
+    }
+    return std::any_of(talker_adv_.begin(), talker_adv_.end(), [&id](auto const& r) {
+        return r.operation == Operation::Declare && r.first_value.stream_id == id;
+    });
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::find_or_create_talker_advertise(tsn::StreamId const& id, bool const local)
     -> AttributeRecord<TalkerAdvertiseFirstValue>*
 {
     return find_or_create(
         talker_adv_,
         config_.max_talker_advertise,
+        config_.max_talker_advertise - config_.reserved_talker_advertise,
+        local,
         id,
         [](auto const& r) { return r.first_value.stream_id; },
-        [](auto& r, auto const& k) { r.first_value.stream_id = k; });
+        [](auto& r, auto const& k) { r.first_value.stream_id = k; },
+        [this](Operation op, tsn::StreamId const& k) { return talker_owned(op, k); });
 }
 
 template <class Limits>
-auto MsrpParticipantT<Limits>::find_or_create_talker_failed(tsn::StreamId const& id) -> AttributeRecord<TalkerFailedFirstValue>*
+auto MsrpParticipantT<Limits>::find_or_create_talker_failed(tsn::StreamId const& id, bool const local)
+    -> AttributeRecord<TalkerFailedFirstValue>*
 {
     return find_or_create(
         talker_failed_,
         config_.max_talker_failed,
+        config_.max_talker_failed - config_.reserved_talker_failed,
+        local,
         id,
         [](auto const& r) { return r.first_value.advertise.stream_id; },
-        [](auto& r, auto const& k) { r.first_value.advertise.stream_id = k; });
+        [](auto& r, auto const& k) { r.first_value.advertise.stream_id = k; },
+        [this](Operation op, tsn::StreamId const& k) { return talker_owned(op, k); });
 }
 
 template <class Limits>
-auto MsrpParticipantT<Limits>::find_or_create_listener(tsn::StreamId const& id) -> ListenerRecord*
+auto MsrpParticipantT<Limits>::find_or_create_listener(tsn::StreamId const& id, bool const local) -> ListenerRecord*
 {
     return find_or_create(
         listeners_,
         config_.max_listeners,
+        config_.max_listeners - config_.reserved_listeners,
+        local,
         id,
         [](auto const& r) { return r.first_value.stream_id; },
-        [](auto& r, auto const& k) { r.first_value.stream_id = k; });
+        [](auto& r, auto const& k) { r.first_value.stream_id = k; },
+        [this](Operation op, tsn::StreamId const& k) { return listener_owned(op, k); });
 }
 
 template <class Limits>
@@ -416,9 +448,12 @@ auto MsrpParticipantT<Limits>::find_or_create_domain(uint8_t sr_class_id) -> Att
     return find_or_create(
         domains_,
         config_.max_domains,
+        config_.max_domains,
+        true,
         sr_class_id,
         [](auto const& r) { return r.first_value.sr_class_id.get(); },
-        [](auto& r, auto const& k) { r.first_value.sr_class_id = k; });
+        [](auto& r, auto const& k) { r.first_value.sr_class_id = k; },
+        [](Operation, uint8_t) { return true; });
 }
 
 // ============================================================
@@ -428,7 +463,7 @@ auto MsrpParticipantT<Limits>::find_or_create_domain(uint8_t sr_class_id) -> Att
 template <class Limits>
 auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status
 {
-    auto* rec_ptr = find_or_create_talker_advertise(fv.stream_id);
+    auto* rec_ptr = find_or_create_talker_advertise(fv.stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
@@ -590,7 +625,7 @@ void MsrpParticipantT<Limits>::complete_pending_changes(TimePoint now)
 template <class Limits>
 auto MsrpParticipantT<Limits>::declare_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status
 {
-    auto* rec_ptr = find_or_create_talker_failed(fv.advertise.stream_id);
+    auto* rec_ptr = find_or_create_talker_failed(fv.advertise.stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
@@ -630,7 +665,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
 template <class Limits>
 auto MsrpParticipantT<Limits>::declare_listener(tsn::StreamId const& stream_id, ListenerDeclaration decl, TimePoint now) -> Status
 {
-    auto* rec_ptr = find_or_create_listener(stream_id);
+    auto* rec_ptr = find_or_create_listener(stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
@@ -1130,7 +1165,7 @@ void MsrpParticipantT<Limits>::handle_talker_advertise_rx(
         registrar_event,
         now,
         [this](TalkerAdvertiseFirstValue const& fv) { return is_interesting(fv.stream_id); },
-        [this](TalkerAdvertiseFirstValue const& fv) { return find_or_create_talker_advertise(fv.stream_id); },
+        [this](TalkerAdvertiseFirstValue const& fv) { return find_or_create_talker_advertise(fv.stream_id, false); },
         [this](TalkerAdvertiseFirstValue const& fv) { notify_talker_advertise(fv, Operation::Register); },
         [this](TalkerAdvertiseFirstValue const& fv) { notify_talker_leave(fv.stream_id); });
 }
@@ -1152,7 +1187,7 @@ void MsrpParticipantT<Limits>::handle_talker_failed_rx(
         registrar_event,
         now,
         [this](TalkerFailedFirstValue const& fv) { return is_interesting(fv.advertise.stream_id); },
-        [this](TalkerFailedFirstValue const& fv) { return find_or_create_talker_failed(fv.advertise.stream_id); },
+        [this](TalkerFailedFirstValue const& fv) { return find_or_create_talker_failed(fv.advertise.stream_id, false); },
         [this](TalkerFailedFirstValue const& fv) { notify_talker_failed(fv, Operation::Register); },
         [this](TalkerFailedFirstValue const& fv) { notify_talker_leave(fv.advertise.stream_id); });
 }
@@ -1172,7 +1207,7 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
         return;
     }
     auto const fv = detail_msrp::listener_first_value_at(first_value_bytes, value_index);
-    auto* rec_ptr = find_or_create_listener(fv.stream_id);
+    auto* rec_ptr = find_or_create_listener(fv.stream_id, false);
     if (rec_ptr == nullptr) {
         return;  // peer attribute, table full — silently drop
     }
