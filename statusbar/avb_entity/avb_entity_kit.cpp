@@ -288,10 +288,23 @@ void AvbEntityKit::install_storage_hooks()
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
-    storage_handler_.set_on_streaming_changed(
-        [this](uint16_t type, uint16_t index, bool streaming) -> uint8_t { return on_streaming_changed(type, index, streaming); });
-    storage_handler_.set_on_stream_format_changed([this](uint16_t type, uint16_t index, uint64_t format) -> uint8_t {
-        return on_stream_format_changed(type, index, format);
+    // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
+    // (the media thread treats it as a closed SRP gate); START reopens.
+    // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
+    // Table 7-145), so every subscribed controller is told by an unsolicited
+    // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
+    storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
+        if (type == DESCRIPTOR_STREAM_OUTPUT) {
+            talker_->set_stream_stopped(index, !streaming);
+            note_admission(steady_now_ns());  // STREAM_START / STREAM_STOP now
+            (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
+        }
+        // Milan v1.2 Sections 5.4.2.19-20: a bound input becomes started or
+        // stopped (no effect on an unbound one); the AEM lock was checked.
+        if (type == DESCRIPTOR_STREAM_INPUT && host_.components().profile.milan) {
+            (void)host_.components().acmp_listener.milan_sinks().set_started(index, streaming);
+        }
+        return atdecc::AEM_STATUS_SUCCESS;
     });
     // The data plane runs each stream in its spec's format at the kit's rate: SET_STREAM_FORMAT
     // and SET_SAMPLING_RATE accept only those, so no descriptor reports (and no file keeps) a
@@ -411,6 +424,7 @@ auto AvbEntityKit::admitted_talker_streams(int64_t const now_ns) const noexcept 
 
 void AvbEntityKit::note_admission(int64_t const now_ns)
 {
+    update_output_streaming(now_ns);
     auto admitted = admitted_talker_streams(now_ns);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
@@ -418,6 +432,46 @@ void AvbEntityKit::note_admission(int64_t const now_ns)
     admitted_ = admitted;
     if (on_admission_changed_) {
         on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
+}
+
+void AvbEntityKit::update_output_streaming(int64_t const now_ns)
+{
+    if (talker_ == nullptr) {
+        return;
+    }
+    for (auto const& spec : talker_specs_) {
+        bool const on = talker_should_transmit(spec.index, realtime::MonotonicRawClock::from_ns(now_ns));
+        if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
+            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        }
+    }
+}
+
+void AvbEntityKit::poll_counters(int64_t const now_ns)
+{
+    if (next_counters_fold_ns_.has_value() && now_ns < *next_counters_fold_ns_) {
+        return;
+    }
+    bool const first = !next_counters_fold_ns_.has_value();
+    next_counters_fold_ns_ = now_ns + COUNTERS_INTERVAL_NS;
+    if (first) {
+        return;  // the first interval starts now
+    }
+    auto& aem = host_.components().aem_handler;
+    if (talker_ != nullptr) {
+        for (auto const& spec : talker_specs_) {
+            if (output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index))) {
+                (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+            }
+        }
+    }
+    if (listener_ != nullptr) {
+        for (auto const& spec : listener_specs_) {
+            if (listener_->fold_input_counters(spec.index)) {
+                (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
+            }
+        }
     }
 }
 
@@ -651,8 +705,34 @@ void AvbEntityKit::wire_srp_callbacks()
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
         });
-    wire_listener_connections(host_.components().acmp_listener);
-}
+    if (listener_ != nullptr) {
+        // A connected (classic) or settled (Milan) input: the MSRP Listener
+        // declaration, the multicast join and, for Milan, the stream's VID with
+        // MVRP (Milan v1.2 Section 4.4.1).
+        host_.components().acmp_listener.set_connection_callbacks(
+            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+                listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
+                if (host_.components().profile.milan) {
+                    if (auto const* s = host_.components().acmp_listener.get_stream(stream_index); s != nullptr) {
+                        join_sink_vlan(s->stream_vlan_id, now);
+                    }
+                    refresh_sink_registration(stream_index);
+                }
+            },
+            [this](uint16_t stream_index, TimePoint now) {
+                if (auto const* s = host_.components().acmp_listener.get_stream(stream_index);
+                    host_.components().profile.milan && s != nullptr && s->connected) {
+                    leave_sink_vlan(s->stream_vlan_id, now);
+                }
+                // A classic disconnect is the controller's: no interruption.
+                // (A Milan input unsettles for other reasons too; its unbind is
+                // the sink's binding change.)
+                listener_->on_listener_disconnected(stream_index, now);
+                if (!host_.components().profile.milan) {
+                    listener_->note_input_unbound(stream_index);
+                }
+            });
+    }
 
 void AvbEntityKit::wire_aem_stream_callbacks()
 {
@@ -662,22 +742,15 @@ void AvbEntityKit::wire_aem_stream_callbacks()
     // sink identity so a controller can read what an input is connected to).
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
+            bool const milan = host_.components().profile.milan;
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                // Milan v1.3 Table 5.14 by observation interval; IEEE 1722.1's running counts otherwise.
-                return milan_profile() && descriptor_index < output_counters_.size()
-                    ? fill_interval_talker_stream_counters(
-                          *talker_,
-                          descriptor_index,
-                          output_counters_[descriptor_index],
-                          output_channels(descriptor_index),
-                          valid,
-                          counters)
-                    : fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
+                return is_talker_index(descriptor_index) &&
+                    fill_talker_stream_counters(*talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                // Milan v1.3 Table 5.13 by observation interval; IEEE 1722.1's running counts otherwise.
-                return milan_profile() ? listener_->fill_interval_stream_input_counters(descriptor_index, valid, counters)
-                                       : listener_->fill_stream_input_counters(descriptor_index, valid, counters);
+                // Classic keeps IEEE 1722.1's running totals.
+                return milan ? listener_->fill_interval_stream_input_counters(descriptor_index, valid, counters)
+                             : listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
             return host_.fill_counters(descriptor_type, descriptor_index, valid, counters);
         });
@@ -921,6 +994,131 @@ void AvbEntityKit::wire_milan_talker()
             host_.ctl_log().status("aem: talker stream {} presentation offset {} -> {} ns", idx, before, offset_ns);
             return atdecc::AEM_STATUS_SUCCESS;
         });
+}
+
+void AvbEntityKit::wire_milan_listener()
+{
+    auto& components = host_.components();
+    auto& sinks = components.acmp_listener.milan_sinks();
+    // A binding change is saved after the reactor pass that made it (after the
+    // ACMP response); a stopped input discards its stream (Milan v1.2 5.3.8.7).
+    sinks.set_on_binding_changed([this](uint16_t const index) {
+        persist_pending_ = true;
+        if (listener_ != nullptr) {
+            auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
+            // An unbound sink's started is the default, true.
+            listener_->set_stream_stopped(index, sink != nullptr && !sink->binding.started);
+            // Milan v1.2 Section 5.3.8.10: bound from unbound zeroes the
+            // input's counters; an unbind is no interruption.
+            bool const bound = sink != nullptr && sink->bound();
+            if (index < input_bound_.size() && bound != input_bound_[index]) {
+                input_bound_[index] = bound;
+                if (bound) {
+                    listener_->reset_input_counters(index);
+                } else {
+                    listener_->note_input_unbound(index);
+                }
+                (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, index);
+            }
+        }
+    });
+    sinks.set_on_status_changed([this](uint16_t const index) {
+        auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
+        if (sink == nullptr) {
+            return;
+        }
+        if (!sink->bound()) {
+            host_.ctl_log().status("acmp: listener stream {} unbound", index);
+        } else {
+            host_.ctl_log().status(
+                "acmp: listener stream {} bound to {:016x}:{} {}{} (acmp status {}){}",
+                index,
+                sink->binding.talker_entity_id.to_uint64(),
+                sink->binding.talker_unique_id,
+                logging::static_str(atdecc::milan_sink_state_name(sink->state)),
+                sink->registration == atdecc::MilanTalkerRegistration::failed ? logging::lit(" talker failed")
+                                                                              : logging::lit(""),
+                sink->acmp_status,
+                sink->binding.started ? logging::lit("") : logging::lit(", stopped"));
+        }
+        (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
+    });
+    // EVT_TK_REGISTERED / EVT_TK_UNREGISTERED: every change of a talker's
+    // registration is matched against the settled sinks.
+    components.msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& sid) {
+        auto const& sinks = host_.components().acmp_listener.milan_sinks();
+        for (size_t i = 0; i < sinks.sink_count(); ++i) {
+            auto const index = static_cast<uint16_t>(i);
+            auto const* sink = sinks.sink(index);
+            if (sink->settled() && sink->stream.stream_id.to_uint64() == sid.to_uint64()) {
+                refresh_sink_registration(index);
+            }
+        }
+    });
+}
+
+void AvbEntityKit::refresh_sink_registration(uint16_t const index)
+{
+    auto& sinks = host_.components().acmp_listener.milan_sinks();
+    auto const* sink = sinks.sink(index);
+    if (sink == nullptr || !sink->settled()) {
+        return;
+    }
+    // Milan v1.2 Section 5.5.3.3: a Talker attribute matching the stream ID,
+    // destination address and VLAN ID the probe returned.
+    statusbar::tsn::StreamId sid{};
+    (void)statusbar::tsn::load_unchecked(sink->stream.stream_id.span(), &sid);
+    auto const& msrp = host_.components().msrp_handler;
+    auto const matches = [sink](srp::msrp::TalkerAdvertiseFirstValue const& fv) {
+        return fv.destination_address == sink->stream.dest_mac && fv.vlan_identifier.get() == sink->stream.vlan_id;
+    };
+    auto registration = atdecc::MilanTalkerRegistration::none;
+    if (auto const* failed = msrp.peer_talker_failed(sid); failed != nullptr && matches(failed->advertise)) {
+        registration = atdecc::MilanTalkerRegistration::failed;
+    } else if (auto const* advertise = msrp.peer_talker_advertise(sid); advertise != nullptr && matches(*advertise)) {
+        registration = atdecc::MilanTalkerRegistration::advertise;
+    }
+    sinks.set_registration(index, registration, sm::Clock::now());
+}
+
+void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
+{
+    if (vid == 0 || vid > 4094) {
+        return;
+    }
+    for (auto& [joined, count] : sink_vlans_) {
+        if (joined == vid) {
+            ++count;
+            return;
+        }
+    }
+    (void)sink_vlans_.try_push_back({vid, uint16_t{1}});
+    // The Class A VID in use is the host's (always joined).
+    if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
+        (void)host_.components().mvrp_handler.register_vlan(vid, now);
+#if defined(__linux__)
+        host_.ctl_log().warning(
+            "listener: a stream on VLAN {}, not the Class A VLAN {}: joined with MVRP, but not on the NIC's VLAN filter",
+            vid,
+            host_.components().msrp_handler.domain().sr_class_vid);
+#endif
+    }
+}
+
+void AvbEntityKit::leave_sink_vlan(uint16_t const vid, TimePoint const now)
+{
+    for (auto* it = sink_vlans_.begin(); it != sink_vlans_.end(); ++it) {
+        if (it->first != vid) {
+            continue;
+        }
+        if (--it->second == 0) {
+            sink_vlans_.erase(it);
+            if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
+                (void)host_.components().mvrp_handler.withdraw_vlan(vid, now);
+            }
+        }
+        return;
+    }
 }
 
 auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
@@ -1692,6 +1890,26 @@ void AvbEntityKit::apply_saved_listener_bindings()
         }
         ieee::Eui64 talker{};
         talker.from_uint64(binding.talker_entity_id);
+        if (milan) {
+            // Milan v1.2 Section 5.5.3.5.2: bound, waiting in PRB_W_AVAIL to
+            // discover the talker, then probing it again.
+            ieee::Eui64 controller{};
+            controller.from_uint64(binding.controller_entity_id);
+            if (listener.milan_sinks().restore(
+                    binding.stream_input,
+                    atdecc::MilanSinkBinding{
+                        .talker_entity_id = talker,
+                        .talker_unique_id = binding.talker_unique_id,
+                        .controller_entity_id = controller,
+                        .started = binding.started})) {
+                listener_->set_stream_stopped(binding.stream_input, !binding.started);
+                // Bound from here on: an UNBIND_RX is a change of binding.
+                input_bound_[binding.stream_input] = true;
+                listener_->reset_input_counters(binding.stream_input);
+                ++armed;
+            }
+            continue;
+        }
         listener.set_fast_connect_goal(binding.stream_input, talker, binding.talker_unique_id);
         ++armed;
     }

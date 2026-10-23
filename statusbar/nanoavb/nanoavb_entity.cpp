@@ -113,8 +113,8 @@ namespace {
     return header;
 }
 
-/// The AEM header in @p payload when it is a response to a command this entity
-/// sent as a controller (its controller_entity_id is ours); nullopt otherwise.
+/// The AEM header in @p payload when it is a valid AEM response to a command
+/// @p our_entity_id sent as a controller; nullopt for anything else.
 [[nodiscard]] auto aem_response_for(std::span<uint8_t const> const payload, Eui64 const& our_entity_id) noexcept
     -> std::optional<AemDu>
 {
@@ -127,64 +127,6 @@ namespace {
         return std::nullopt;
     }
     return header;
-}
-
-/// A GET_AS_PATH response (IEEE 1722.1-2021 Clause 7.4.41.2) for @p descriptor_index in
-/// @p out_buffer: the header, then @p path's clock identities; NOT_SUPPORTED when it does not fit.
-[[nodiscard]] auto as_path_response(
-    uint16_t const descriptor_index, AsPath const& path, std::span<uint8_t> const out_buffer) noexcept -> AemCommandResponse
-{
-    size_t const size = AemAsPathResponseHeader::LENGTH + (path.size() * Eui64::LENGTH);
-    if (out_buffer.size() < size) {
-        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
-    }
-    span_store(
-        out_buffer, AemAsPathResponseHeader{.descriptor_index = descriptor_index, .count = static_cast<uint16_t>(path.size())});
-    for (size_t i = 0; i < path.size(); ++i) {
-        span_store(out_buffer.subspan(AemAsPathResponseHeader::LENGTH + (i * Eui64::LENGTH)), path[i]);
-    }
-    return {.status = AEM_STATUS_SUCCESS, .size = size};
-}
-
-/// The leading T of @p bytes, nullopt when they are too few.
-template <typename T>
-[[nodiscard]] auto load_payload(std::span<uint8_t const> const bytes) noexcept -> std::optional<T>
-{
-    if (bytes.size() < T::LENGTH) {
-        return std::nullopt;
-    }
-    T value{};
-    span_load(value, bytes);
-    return value;
-}
-
-/// The command data of the AEM command @p header in @p payload: as long as its
-/// control_data_length says (IEEE 1722.1-2021 Clause 9.2.1.1.7), not the octets behind it.
-[[nodiscard]] auto aem_command_data(AemDu const& header, std::span<uint8_t const> const payload) noexcept
-    -> std::span<uint8_t const>
-{
-    size_t const declared = size_t{header.control_data_length()} - AemDu::AEM_DATA_LENGTH;
-    return payload.subspan(AemDu::LENGTH).first(std::min(payload.size() - AemDu::LENGTH, declared));
-}
-
-/// Where a SET_NAME body's name begins: after its AemNameCommandPayload head (IEEE 1722.1-2021 Clause 7.4.17.1).
-constexpr size_t SET_NAME_NAME_OFFSET = aem::AemNameCommandPayload::LENGTH;
-static_assert(offsetof(aem::AemNamePayload, name) == SET_NAME_NAME_OFFSET);
-
-/// SET_NAME body @p command_data copied into @p out with its name zero-filled after its first NUL, the
-/// form the name is kept, compared and answered in; a body too short for a name, or too long for
-/// @p out, is given back as it is.
-[[nodiscard]] auto name_zero_filled(std::span<uint8_t const> const command_data, std::span<uint8_t> const out)
-    -> std::span<uint8_t const>
-{
-    if (command_data.size() < aem::AemNamePayload::LENGTH || command_data.size() > out.size()) {
-        return command_data;
-    }
-    auto const kept = out.first(command_data.size());
-    span_copy(kept, command_data);
-    auto const name = kept.subspan(SET_NAME_NAME_OFFSET, AtdeccString::LENGTH);
-    std::fill(std::ranges::find(name, uint8_t{0}), name.end(), uint8_t{0});
-    return kept;
 }
 
 }  // namespace
@@ -201,6 +143,11 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     if (is_other_aecp_command_for(payload, our_entity_id)) {
         return send_not_implemented(src_mac, payload);
     }
+    // A response to a command we sent names us as its controller.
+    if (auto const response = aem_response_for(payload, our_entity_id)) {
+        handle_aem_response(*response);
+        return false;
+    }
     auto const header = aem_command_for(payload, our_entity_id);
     if (!header) {
         return false;
@@ -214,6 +161,11 @@ auto AemCommandHandler::process_aem_command(
 {
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
+    note_controller_command(header.controller_entity_id, src_mac);
+    // Stash the source MAC so per-command handlers can retain it if they
+    // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
+    // CONTROLLER_AVAILABLE handshake). Cleared after dispatch.
+    current_src_mac_ = src_mac;
     // One output buffer per dispatch — handlers write into this and return
     // status + bytes-written, avoiding the per-return 1 KB struct copy that
     // the previous AemCommandResult shape incurred.
@@ -284,14 +236,23 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
             return handle_entity_available(header);
 
         case AEM_COMMAND_ACQUIRE_ENTITY: {
+            // Notify a change of holder only: a RELEASE when not acquired, or
+            // an acquire the holder repeats, tells the other controllers nothing.
+            auto const before = std::pair{acquired_, acquiring_controller_};
             auto const r = handle_acquire_entity(header, command_data, out_buffer);
-            notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, r, out_buffer);
+            if (std::pair{acquired_, acquiring_controller_} != before) {
+                notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, r, out_buffer);
+            }
             return r;
         }
 
         case AEM_COMMAND_LOCK_ENTITY: {
+            // Likewise an UNLOCK when unlocked, or a lock its holder refreshes.
+            auto const before = std::pair{locked_, locking_controller_};
             auto const r = handle_lock_entity(header, command_data, out_buffer);
-            notify_on_success(AEM_COMMAND_LOCK_ENTITY, r, out_buffer);
+            if (std::pair{locked_, locking_controller_} != before) {
+                notify_on_success(AEM_COMMAND_LOCK_ENTITY, r, out_buffer);
+            }
             return r;
         }
 
@@ -890,7 +851,17 @@ auto AemCommandHandler::completion_body(
 
 void AemCommandHandler::tick(sm::TimePoint const now)
 {
-    event_time_ = std::max(event_time_, now);
+    now_ = now;
+    have_now_ = true;
+    // A GET_COUNTERS change held back within a second of the last one goes
+    // once the second has passed, with the counters as they are then.
+    for (auto& n : counters_notifications_) {
+        if (n.pending && now >= n.next_allowed) {
+            n.pending = false;
+            n.next_allowed = now + COUNTERS_NOTIFICATION_INTERVAL;
+            (void)send_counters_notification(n.descriptor_type, n.descriptor_index);
+        }
+    }
     if (locked_ && now >= lock_expiry_time_) {
         release_lock();
         emit_lock_released();
@@ -909,7 +880,7 @@ void AemCommandHandler::tick(sm::TimePoint const now)
             p.next_in_progress = now + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
         }
     }
-    if (profile_ == Profile::milan13) {
+    if (entity_profile_.milan) {
         tick_controller_monitor(now);
     }
 }
@@ -933,15 +904,45 @@ void AemCommandHandler::emit_lock_released()
 
 auto AemCommandHandler::notify_counters_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
 {
-    AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
-    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
-    span_store(request, cmd);
-    std::array<uint8_t, sizeof(AemCountersPayload)> out{};
-    auto const r = handle_get_counters(AemDu{}, request, out);
-    if (r.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(AEM_COMMAND_GET_COUNTERS, std::span<uint8_t const>{out}.first(r.size));
+    // Milan v1.2 Table 5.22: at most one GET_COUNTERS notification per descriptor per second,
+    // sent from tick(); before the first tick there is no clock, so send at once.
+    if (!have_now_) {
+        return send_counters_notification(descriptor_type, descriptor_index);
     }
-    return r.status;
+    if (auto const status = counters_of(descriptor_type, descriptor_index).response.status; status != AEM_STATUS_SUCCESS) {
+        return status;  // no counters for it (no callback, no such descriptor): nothing held
+    }
+    auto at = counters_notifications_.find_if([&](CountersNotification const& n) {
+        return n.descriptor_type == descriptor_type && n.descriptor_index == descriptor_index;
+    });
+    if (at >= counters_notifications_.capacity()) {
+        if (!counters_notifications_.add(
+                CountersNotification{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index})) {
+            // More descriptors than any entity has: unlimited.
+            return send_counters_notification(descriptor_type, descriptor_index);
+        }
+        at = counters_notifications_.size() - 1;
+    }
+    counters_notifications_[at].pending = true;
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::counters_of(uint16_t const descriptor_type, uint16_t const descriptor_index) -> CountersResponse
+{
+    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
+    span_store(request, AemGetCountersCommandPayload{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index});
+    CountersResponse r{};
+    r.response = handle_get_counters(AemDu{}, request, r.payload);
+    return r;
+}
+
+auto AemCommandHandler::send_counters_notification(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
+{
+    auto const r = counters_of(descriptor_type, descriptor_index);
+    if (r.response.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited_to_all(AEM_COMMAND_GET_COUNTERS, std::span<uint8_t const>{r.payload}.first(r.response.size));
+    }
+    return r.response.status;
 }
 
 auto AemCommandHandler::handle_get_avb_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -994,7 +995,47 @@ auto AemCommandHandler::notify_avb_info_changed(uint16_t const descriptor_index)
     std::array<uint8_t, AemAvbInfoPayload::LENGTH + AvbInfo::MAX_MSRP_MAPPINGS * 4> out{};
     auto const r = handle_get_avb_info(request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(AEM_COMMAND_GET_AVB_INFO, std::span<uint8_t const>{out}.first(r.size));
+        emit_unsolicited_to_all(AEM_COMMAND_GET_AVB_INFO, std::span<uint8_t const>{out}.first(r.size));
+    }
+    return r.status;
+}
+
+auto AemCommandHandler::handle_get_as_path(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (!callbacks_.get_as_path) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    // Command (7.4.41.1): descriptor_index (AVB_INTERFACE) + reserved.
+    constexpr size_t COMMAND_LENGTH = 4;
+    if (command_data.size() < COMMAND_LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    auto const descriptor_index = static_cast<uint16_t>((uint16_t{command_data[0]} << 8U) | command_data[1]);
+    AsPath path{};
+    if (!callbacks_.get_as_path(descriptor_index, path)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    // Response (7.4.41.2): descriptor_index, count, then count clock identities.
+    size_t const size = 4 + (path.size() * 8);
+    if (out_buffer.size() < size) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    span_store(out_buffer.subspan(0, 2), doublet_t{descriptor_index});
+    span_store(out_buffer.subspan(2, 2), doublet_t{static_cast<uint16_t>(path.size())});
+    for (size_t i = 0; i < path.size(); ++i) {
+        span_copy(out_buffer.subspan(4 + (i * 8), 8), path[i].span());
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+auto AemCommandHandler::notify_as_path_changed(uint16_t const descriptor_index) -> uint8_t
+{
+    std::array<uint8_t, 4> request{static_cast<uint8_t>(descriptor_index >> 8U), static_cast<uint8_t>(descriptor_index), 0, 0};
+    std::array<uint8_t, 4 + (MAX_AS_PATH_LENGTH * 8)> out{};
+    auto const r = handle_get_as_path(request, out);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited_to_all(AEM_COMMAND_GET_AS_PATH, std::span<uint8_t const>{out}.first(r.size));
     }
     return r.status;
 }
@@ -1036,7 +1077,7 @@ auto AemCommandHandler::notify_stream_info_changed(uint16_t const descriptor_typ
     std::array<uint8_t, AEM_STREAM_INFO_MILAN_LENGTH> out{};
     auto const r = handle_get_stream_info(AemDu{}, request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
+        emit_unsolicited_to_all(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
     }
     return r.status;
 }
@@ -1575,7 +1616,7 @@ auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_
         transit.max_transit_time = uint64_t{offset};
         std::array<uint8_t, AemGetMaxTransitTimeResponsePayload::LENGTH> body{};
         span_store(body, transit);
-        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, body);
+        emit_unsolicited_to_all(AEM_COMMAND_GET_MAX_TRANSIT_TIME, body);
     }
     return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};
 }
@@ -1606,7 +1647,7 @@ auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> com
     if (offset != current) {
         emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
         // GET_MAX_TRANSIT_TIME's response has SET's layout: the echoed command.
-        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
+        emit_unsolicited_to_all(AEM_COMMAND_GET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
         (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     }
     return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};
@@ -2595,7 +2636,8 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
     span_store(out_buffer, resp);
     if (switching) {
         emit_unsolicited(
-            AEM_COMMAND_SET_CONFIGURATION, std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
+            AEM_COMMAND_SET_CONFIGURATION,
+            std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
     }
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
@@ -3206,71 +3248,47 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
     auto const existing = unsolicited_registrations_.find_if(
         [&header](UnsolicitedRegistration const& r) { return r.controller_entity_id == header.controller_entity_id; });
     if (existing < unsolicited_registrations_.capacity()) {
-        unsolicited_registrations_[existing].controller_mac = current_src_mac_;
+        auto& reg = unsolicited_registrations_[existing];
+        if (reg.controller_mac != current_src_mac_) {
+            // A new station: its sequence ids start again (Milan v1.2 Section 5.3.4.2).
+            reg = UnsolicitedRegistration{
+                .controller_entity_id = header.controller_entity_id,
+                .controller_mac = current_src_mac_,
+                .monitor_deadline = event_time_ + monitor_period()};
+        }
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
-    if (!unsolicited_registrations_.add(fresh)) {
+
+    // Stash the source MAC (set by process_packet) so unsolicited notifications
+    // can be unicast back to this controller. Its sequence ids start at 0 and
+    // its monitor timer starts now (Milan v1.2 Section 5.4.5.3).
+    if (!unsolicited_registrations_.add(UnsolicitedRegistration{
+            .controller_entity_id = header.controller_entity_id,
+            .controller_mac = current_src_mac_,
+            .monitor_deadline = event_time_ + monitor_period()})) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
 }
 
-void AemCommandHandler::restart_controller_monitor(Eui64 const& controller_entity_id)
+void AemCommandHandler::note_controller_command(Eui64 const& controller_entity_id, Eui48 const& /*controller_mac*/)
 {
-    auto const idx = unsolicited_registrations_.find_if(
-        [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == controller_entity_id; });
-    if (auto* const reg = unsolicited_registrations_.get(idx)) {
-        reg->monitor_deadline = event_time_ + monitor_period();
-        reg->available_tries = 0;
+    // Registrations are kept by entity ID (handle_register_unsolicited), so is the timer.
+    for (auto& reg : unsolicited_registrations_) {
+        if (reg.controller_entity_id == controller_entity_id) {
+            reg.monitor_deadline = event_time_ + monitor_period();
+            reg.available_outstanding = false;
+        }
     }
 }
 
 auto AemCommandHandler::monitor_period() noexcept -> sm::Clock::duration
 {
-    // xorshift32: spreading the controllers' timers is all the period asks of it.
-    monitor_random_ ^= monitor_random_ << 13U;
-    monitor_random_ ^= monitor_random_ >> 17U;
-    monitor_random_ ^= monitor_random_ << 5U;
-    auto const span = std::chrono::duration_cast<std::chrono::milliseconds>(CONTROLLER_MONITOR_MAX - CONTROLLER_MONITOR_MIN);
-    auto const offset = std::chrono::milliseconds{monitor_random_ % (static_cast<uint32_t>(span.count()) + 1U)};
+    // Numerical Recipes' LCG: uniform enough to spread the controllers' timers.
+    monitor_random_ = (monitor_random_ * 1664525U) + 1013904223U;
+    auto const span_ms = std::chrono::duration_cast<std::chrono::milliseconds>(CONTROLLER_MONITOR_MAX - CONTROLLER_MONITOR_MIN).count();
+    auto const offset = std::chrono::milliseconds((monitor_random_ >> 8U) % static_cast<uint32_t>(span_ms + 1));
     return std::chrono::duration_cast<sm::Clock::duration>(CONTROLLER_MONITOR_MIN + offset);
-}
-
-void AemCommandHandler::tick_controller_monitor(sm::TimePoint const now)
-{
-    // An entry removed has the last one moved into its slot (SlotTable::remove): i stays.
-    for (size_t i = 0; i < unsolicited_registrations_.size();) {
-        if (keep_monitoring(unsolicited_registrations_[i], now)) {
-            ++i;
-            continue;
-        }
-        // Neither answered: deregistered, and told so alone (Milan v1.3 Section 5.4.5.4).
-        auto const gone = unsolicited_registrations_[i];
-        unsolicited_registrations_.remove(i);
-        send_unsolicited_to(
-            gone.controller_mac, gone.controller_entity_id, gone.sequence_id, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
-    }
-}
-
-auto AemCommandHandler::keep_monitoring(UnsolicitedRegistration& reg, sm::TimePoint const now) -> bool
-{
-    if (now < reg.monitor_deadline) {
-        return true;
-    }
-    if (reg.available_tries >= 2) {
-        return false;
-    }
-    ask_controller_available(reg, now);
-    return true;
-}
-
-void AemCommandHandler::ask_controller_available(UnsolicitedRegistration& reg, sm::TimePoint const now)
-{
-    // The command, then its one retry with the same sequence_id.
-    reg.available_sequence_id = reg.available_tries == 0 ? command_sequence_id_++ : reg.available_sequence_id;
-    ++reg.available_tries;
-    reg.monitor_deadline = now + std::chrono::milliseconds(AEM_TIMEOUT_MS);
-    send_controller_available_to(reg.controller_mac, reg.controller_entity_id, reg.available_sequence_id);
 }
 
 void AemCommandHandler::send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t const sequence_id)
@@ -3278,9 +3296,47 @@ void AemCommandHandler::send_controller_available_to(Eui48 const& dest_mac, Eui6
     if (!callbacks_.send_response) {
         return;
     }
+    // We are the controller of this command: the registered controller is its
+    // target (IEEE 1722.1-2021 7.4.69, no payload).
+    AemDu hdr{};
+    hdr.init_command(AEM_COMMAND_CONTROLLER_AVAILABLE, AemDu::AEM_DATA_LENGTH);
+    hdr.target_entity_id = controller_id;
+    hdr.controller_entity_id = our_entity_id_;
+    hdr.sequence_id = doublet_t{sequence_id};
     std::array<uint8_t, AemDu::LENGTH> buffer{};
-    span_store(buffer, controller_available_command(our_entity_id_, controller_id, sequence_id));
+    span_store(buffer, hdr);
     (void)callbacks_.send_response(dest_mac, buffer);
+}
+
+void AemCommandHandler::tick_controller_monitor(sm::TimePoint const now)
+{
+    for (size_t i = 0; i < unsolicited_registrations_.size();) {
+        auto& reg = unsolicited_registrations_[i];
+        if (now < reg.monitor_deadline) {
+            ++i;
+            continue;
+        }
+        if (!reg.available_outstanding || reg.available_tries < 2) {
+            // The command, or its one retry (IEEE 1722.1-2021 9.3.6), with the
+            // same sequence_id.
+            if (!reg.available_outstanding) {
+                reg.available_outstanding = true;
+                reg.available_tries = 0;
+                reg.available_sequence_id = command_sequence_id_++;
+            }
+            ++reg.available_tries;
+            reg.monitor_deadline = now + std::chrono::milliseconds(AEM_TIMEOUT_MS);
+            send_controller_available_to(reg.controller_mac, reg.controller_entity_id, reg.available_sequence_id);
+            ++i;
+            continue;
+        }
+        // No answer to either: deregister it and tell it alone (Milan v1.2
+        // Section 5.4.5.3, Table 5.22). The last entry moves to i.
+        auto const gone = reg;
+        unsolicited_registrations_.remove(i);
+        send_unsolicited_to(
+            gone.controller_mac, gone.controller_entity_id, gone.sequence_id, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
+    }
 }
 
 void AemCommandHandler::handle_aem_response(AemDu const& header)
@@ -3288,16 +3344,16 @@ void AemCommandHandler::handle_aem_response(AemDu const& header)
     if (header.command_code() != AEM_COMMAND_CONTROLLER_AVAILABLE) {
         return;
     }
-    // The acquire handshake asked the holder whether it is still there: it is.
-    if (answers_pending_acquire(header)) {
+    // The classic ACQUIRE handshake's question to the holder: it is alive.
+    if (pending_acquire_.active && acquired_ && header.target_entity_id == acquiring_controller_) {
         controller_available_response_received();
     }
-    // The monitor's question, answered with any status (Milan v1.3 Section 5.4.5.4).
+    // Any status will do (Section 5.4.5.3): the controller is there.
     for (auto& reg : unsolicited_registrations_) {
-        if (reg.available_tries > 0 && reg.controller_entity_id == header.target_entity_id &&
+        if (reg.available_outstanding && reg.controller_entity_id == header.target_entity_id &&
             reg.available_sequence_id == header.sequence_id.get()) {
-            reg.available_tries = 0;
-            reg.monitor_deadline = event_time_ + monitor_period();
+            reg.available_outstanding = false;
+            reg.monitor_deadline = std::max(event_time_, now_) + monitor_period();
         }
     }
 }
@@ -3376,6 +3432,18 @@ void AemCommandHandler::send_unsolicited_to(
     uint16_t const command_type,
     std::span<uint8_t const> body)
 {
+    // Frame an unsolicited AEM response: our id as target, the controller's id,
+    // its sequence_id, and the U-bit set.
+    AemDu hdr{};
+    hdr.target_entity_id = our_entity_id_;
+    hdr.controller_entity_id = controller_id;
+    hdr.sequence_id = doublet_t{sequence_id};
+    hdr.init_response(
+        command_type,
+        AEM_STATUS_SUCCESS,
+        static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + body.size()),
+        /*unsolicited=*/true);
+
     std::array<uint8_t, AemDu::LENGTH + MAX_AEM_RESPONSE_SIZE> buffer{};
     auto buffer_span = std::span{buffer};
     span_store(buffer_span, aem_unsolicited_header(our_entity_id_, controller_id, sequence_id, command_type, body.size()));
@@ -3408,6 +3476,13 @@ auto AemCommandHandler::targets_identify_control(uint16_t const command_type, st
     return header.descriptor_type.get() == DESCRIPTOR_CONTROL && header.descriptor_index.get() == identify_control_index_;
 }
 
+void AemCommandHandler::emit_unsolicited_to_all(uint16_t const command_type, std::span<uint8_t const> body)
+{
+    Eui64 const requester = std::exchange(requester_, Eui64{});
+    emit_unsolicited(command_type, body);
+    requester_ = requester;
+}
+
 void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<uint8_t const> body)
 {
     if (!callbacks_.send_response) {
@@ -3417,12 +3492,13 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         return;  // sent after the command's response
     }
 
+    // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
+    // and every registered controller "without sending the unsolicited
+    // response back to the ATDECC Controller which executed the command",
+    // under either profile (Milan v1.3 5.4.5.3 asks the same). Each
+    // registration has its own sequence id, incremented whether or not the
+    // send succeeds (Milan v1.2 Section 5.4.5.1).
     for (auto& reg : unsolicited_registrations_) {
-        // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
-        // and every registered controller "without sending the unsolicited
-        // response back to the ATDECC Controller which executed the command",
-        // under either profile (Milan v1.3 5.4.5.3 asks the same). Each
-        // registration's sequence id advances whether or not the send succeeds (5.4.5.1).
         if (reg.controller_entity_id == requester_) {
             continue;
         }

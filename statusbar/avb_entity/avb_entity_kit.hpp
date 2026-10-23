@@ -193,7 +193,13 @@ class AvbEntityKit
         host_.note_grandmaster_changed();
         talker_->note_grandmaster_changed(steady_now_ns());
     }
-    void note_grandmaster_lost() noexcept { talker_->note_grandmaster_lost(); }
+    void note_grandmaster_lost()
+    {
+        talker_->note_grandmaster_lost();
+        host_.note_grandmaster_lost();
+    }
+    /// The Announces' gPTP path trace changed (GET_AS_PATH). Reactor thread.
+    void note_as_path_changed() { host_.note_as_path_changed(); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
@@ -892,6 +898,14 @@ class AvbEntityKit
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
+    /// GET_COUNTERS per talker stream (StreamOutputIntervals), the next end of
+    /// the observation interval, and each Milan input's bound state.
+    std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
+    std::optional<int64_t> next_counters_fold_ns_{};
+    std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
+    /// Start or stop each talker stream's STREAM_START/STREAM_STOP at @p now_ns:
+    /// streaming while it may transmit (talker_should_transmit).
+    void update_output_streaming(int64_t now_ns);
 
     /// The one port every stream frame goes through, backend from
     /// config_.net_backend or opened by the host (stream_port()). Declared before the talker, the listener and the

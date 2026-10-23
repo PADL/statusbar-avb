@@ -100,6 +100,15 @@ using GetStreamInfoFn = statusbar::sg14::inplace_function<
     bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext),
     64>;
 
+/// The most clock identities a GET_AS_PATH response carries: an AS path is
+/// the grandmaster, each bridge, and this entity (802.1AS-2020 10.3.9.23).
+constexpr size_t MAX_AS_PATH_LENGTH = 32;
+using AsPath = statusbar::sg14::inplace_vector<Eui64, MAX_AS_PATH_LENGTH>;
+
+/// Fill the gPTP path trace for AVB_INTERFACE @p descriptor_index (IEEE 1722.1-2021 Clause
+/// 7.4.41), empty while no grandmaster is known; false for no such interface.
+using GetAsPathFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_index, AsPath& path), 64>;
+
 /// A STREAM_OUTPUT's presentation time offset in nanoseconds (Milan v1.2
 /// Section 5.3.7.6), or nullopt when @p stream_output_index is not one of
 /// this entity's talker streams.
@@ -236,8 +245,8 @@ struct AemCommandHandlerCallbacks
     /// GET_AVB_INFO replies NOT_IMPLEMENTED.
     GetAvbInfoFn get_avb_info;
 
-    /// Provide the gPTP path for GET_AS_PATH. Optional; if unset, GET_AS_PATH
-    /// replies NOT_IMPLEMENTED.
+    /// Provide the gPTP path trace for GET_AS_PATH. Optional; if unset,
+    /// GET_AS_PATH replies NOT_IMPLEMENTED.
     GetAsPathFn get_as_path;
 
     /// Observe IDENTIFY-control changes (e.g. blink an LED, or log when there
@@ -561,19 +570,36 @@ class AemCommandHandler
     /// (ENTITY_ACQUIRED, ENTITY_LOCKED), or nullopt. Shared with MVU (Milan v1.2 Section 5.4.4.4).
     [[nodiscard]] auto exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>;
 
-    /// Call @p fn(controller_mac, controller_entity_id) for each controller
-    /// registered for unsolicited notifications (the MVU handler notifies them
-    /// too).
+    /// Call @p fn(controller_mac, controller_entity_id, mvu_sequence_id) for each registered
+    /// controller; the caller sends with the registration's own MVU sequence id and increments
+    /// it whether or not the send succeeds (Milan v1.2 Section 5.4.5.1).
     template <typename Fn>
-    void for_each_unsolicited_registration(Fn&& fn) const
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_unsolicited_registration(Fn&& fn)
     {
-        for (auto const& reg : unsolicited_registrations_) {
-            fn(reg.controller_mac, reg.controller_entity_id);
+        for (auto& reg : unsolicited_registrations_) {
+            fn(reg.controller_mac, reg.controller_entity_id, reg.mvu_sequence_id);
         }
     }
 
-    /// Maximum number of unsolicited notification registrations
-    static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 8;
+    /// Maximum number of unsolicited notification registrations (Milan v1.2
+    /// Section 5.3.4.2: at least 16 per AVB interface).
+    static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 16;
+
+    /// The controller monitor's period (Milan v1.2 Section 5.4.5.3): a random
+    /// time between these after a registered controller's last AECP command,
+    /// it is sent CONTROLLER_AVAILABLE.
+    static constexpr auto CONTROLLER_MONITOR_MIN = std::chrono::seconds(30);
+    static constexpr auto CONTROLLER_MONITOR_MAX = std::chrono::seconds(60);
+
+    /// Milan v1.2 Section 5.4.5.3: an MVU command from @p controller_entity_id restarts its
+    /// monitor timer (process_packet() does this for AEM commands).
+    void note_controller_command(Eui64 const& controller_entity_id, Eui48 const& controller_mac);
+
+    /// GET_COUNTERS notifications go at most once a second per descriptor
+    /// (Milan v1.2 Table 5.22), from tick(): a change goes at the next tick,
+    /// or, within a second of the last one, at the tick a second after it.
+    static constexpr auto COUNTERS_NOTIFICATION_INTERVAL = std::chrono::seconds(1);
 
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;
@@ -655,53 +681,21 @@ class AemCommandHandler
     /// @p body to every registered controller (plus the IDENTIFY multicast when the
     /// change targets the IDENTIFY control). Exposed so an entity can push a
     /// notification it framed itself; apply_local_descriptor_value() is the usual
-    /// entry point. No-op if no send_response callback is wired. Raised while a
-    /// command is dispatched (from a hook), it is sent after that command's response,
-    /// up to MAX_QUEUED_NOTIFICATIONS of them; past those, a side effect goes at once
-    /// after the side effects held, and one of the command's type is not sent but
-    /// spends each controller's sequence id (Milan v1.3 Section 5.4.5.1), a gap it sees.
+    /// entry point. No-op if no send_response callback is wired.
+    /// Under milan13 the controller whose command this is (requester_) is left out.
     void emit_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
+    /// emit_unsolicited with no requester left out: a state report (GET_COUNTERS, GET_AVB_INFO,
+    /// GET_AS_PATH, GET_STREAM_INFO, GET_MAX_TRANSIT_TIME) reaches every registered controller.
+    void emit_unsolicited_to_all(uint16_t command_type, std::span<uint8_t const> body);
 
-    /// The notifications one command's dispatch holds for after its response, the last
-    /// kept for one of the command's own type.
-    static constexpr size_t MAX_QUEUED_NOTIFICATIONS = 4;
-
-    /// Emit an unsolicited MVU response (u bit set) carrying @p command_type and @p body to
-    /// every registered controller, each with its own MVU sequence id, which advances whether
-    /// or not the send succeeds (Milan v1.3 Sections 5.4.5.1, 5.4.5.2). The controller whose
-    /// MVU command is being dispatched is left out. No-op for an entity without milan_info()
-    /// or a send_response callback.
-    void emit_mvu_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
-
-    /// Something Milan v1.3 Table 5.21 names of STREAM_INPUT @p stream_input_index has changed
-    /// (its talker, its Probing status, its ACMP status, the registration of its Talker
-    /// attribute): send its GET_STREAM_INPUT_INFO_EX response, as the attached stream inputs
-    /// give it now, to every registered controller as an MVU notification
-    /// (emit_mvu_unsolicited()). False, and nothing sent, when no stream inputs are attached
-    /// or they have no such input.
-    auto notify_stream_input_info_ex(uint16_t stream_input_index) -> bool;
-
-    /// Work a hook leaves for after its command's response, such as more notifications than
-    /// MAX_QUEUED_NOTIFICATIONS holds.
-    using AfterResponseFn = statusbar::sg14::inplace_function<void(), 32>;
-    /// How many AfterResponseFn one command holds.
-    static constexpr size_t MAX_AFTER_RESPONSE = 4;
-
-    /// Run @p fn once the command being dispatched is answered and its held notifications are
-    /// sent, in the order given. What it notifies goes to every registered controller, the
-    /// command's controller included (Milan v1.3 Section 5.4.5.3). Outside a command off the wire (a
-    /// local change, tick()), or past MAX_AFTER_RESPONSE, it runs at once. Reactor thread.
-    void call_after_response(AfterResponseFn fn);
-
-    /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
-    /// @p descriptor_index) to the registered controllers. IEEE 1722.1 7.5.2 has
-    /// the entity notify when counters change (stream reception, SRP and gPTP
-    /// events) but says nothing about rate, so the application decides when to
-    /// call this: on a state change such as MEDIA_LOCKED, or at most a few times
-    /// a second per descriptor. Counters are read through the get_counters
-    /// callback. Returns the AEM status: NOT_IMPLEMENTED without a callback,
-    /// NO_SUCH_DESCRIPTOR when the callback declines.
+    /// Push an unsolicited GET_COUNTERS response, at most one a second per descriptor: queued
+    /// for tick() (SUCCESS) once ticked, sent at once before. NOT_IMPLEMENTED without a
+    /// get_counters callback, NO_SUCH_DESCRIPTOR when it declines.
     [[nodiscard]] auto notify_counters_changed(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
+
+    /// Push an unsolicited GET_AS_PATH response for AVB_INTERFACE @p descriptor_index (Milan v1.2
+    /// Table 5.22). Returns as notify_counters_changed().
+    [[nodiscard]] auto notify_as_path_changed(uint16_t descriptor_index) -> uint8_t;
 
     /// Push an unsolicited GET_AVB_INFO response for AVB_INTERFACE
     /// @p descriptor_index (IEEE 1722.1 7.5.2: a grandmaster, asCapable or
@@ -1308,6 +1302,30 @@ class AemCommandHandler
         uint16_t command_type,
         std::span<uint8_t const> body);
 
+    /// Handle GET_AS_PATH (IEEE 1722.1-2021 7.4.41) through the get_as_path callback.
+    [[nodiscard]] auto handle_get_as_path(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// A GET_COUNTERS response's status and payload, as the command would answer.
+    struct CountersResponse
+    {
+        AemCommandResponse response{};
+        std::array<uint8_t, sizeof(AemCountersPayload)> payload{};
+    };
+    /// GET_COUNTERS for (@p descriptor_type, @p descriptor_index), answered locally.
+    [[nodiscard]] auto counters_of(uint16_t descriptor_type, uint16_t descriptor_index) -> CountersResponse;
+    /// Send GET_COUNTERS for (@p descriptor_type, @p descriptor_index) now.
+    auto send_counters_notification(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
+
+    /// The controller monitor (Milan v1.2 Section 5.4.5.3), from tick().
+    void tick_controller_monitor(sm::TimePoint now);
+    /// A random monitor period in [CONTROLLER_MONITOR_MIN, CONTROLLER_MONITOR_MAX].
+    [[nodiscard]] auto monitor_period() noexcept -> sm::Clock::duration;
+    /// Frame and send CONTROLLER_AVAILABLE to a registered controller.
+    void send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t sequence_id);
+    /// An AEM response to one of our commands (CONTROLLER_AVAILABLE).
+    void handle_aem_response(AemDu const& header);
+
     /// True if (@p command_type, @p body) is a SET_CONTROL targeting the configured
     /// IDENTIFY control — i.e. the change must also go to the IDENTIFY multicast.
     [[nodiscard]] auto targets_identify_control(uint16_t command_type, std::span<uint8_t const> body) const noexcept -> bool;
@@ -1680,26 +1698,36 @@ class AemCommandHandler
     struct UnsolicitedRegistration
     {
         Eui64 controller_entity_id{};
-        Eui48 controller_mac{};       ///< Source MAC of the REGISTER command, for unicast notifications
-        uint16_t sequence_id{0};      ///< of its next AEM notification (Milan v1.3 Section 5.3.4.2)
-        uint16_t mvu_sequence_id{0};  ///< of its next MVU notification
-        /// When the monitor next sends CONTROLLER_AVAILABLE or, with one outstanding, when that times out.
+        Eui48 controller_mac{};  ///< Source MAC of the REGISTER command, for unicast notifications
+        uint16_t sequence_id{0};      ///< of its next unsolicited AEM notification (Milan v1.2 Section 5.3.4.2)
+        uint16_t mvu_sequence_id{0};  ///< of its next unsolicited MVU notification
+        /// Controller monitor (Milan v1.2 Section 5.4.5.3): when it is next
+        /// sent CONTROLLER_AVAILABLE or, with one outstanding, when that times out.
         sm::TimePoint monitor_deadline{};
-        uint8_t available_tries{0};         ///< CONTROLLER_AVAILABLE sent and unanswered: 0, 1, or 2 with the retry
-        uint16_t available_sequence_id{0};  ///< of the one outstanding
+        bool available_outstanding{false};
+        uint8_t available_tries{0};
+        uint16_t available_sequence_id{0};
     };
     SlotTable<UnsolicitedRegistration, MAX_UNSOLICITED_REGISTRATIONS> unsolicited_registrations_{};
 
-    /// Whether @p reg stays registered at @p now: its timer has not run out, or CONTROLLER_AVAILABLE
-    /// or its one retry (IEEE 1722.1-2021 Clause 9.3.6) is sent to it now.
-    [[nodiscard]] auto keep_monitoring(UnsolicitedRegistration& reg, sm::TimePoint now) -> bool;
 
-    /// Send @p reg CONTROLLER_AVAILABLE, or its retry with the same sequence id, at @p now.
-    void ask_controller_available(UnsolicitedRegistration& reg, sm::TimePoint now);
+    // GET_COUNTERS notification hold-off per descriptor (COUNTERS_NOTIFICATION_INTERVAL).
+    struct CountersNotification
+    {
+        uint16_t descriptor_type{0};
+        uint16_t descriptor_index{0};
+        sm::TimePoint next_allowed{sm::TimePoint::min()};
+        bool pending{false};
+    };
+    static constexpr size_t MAX_COUNTERS_NOTIFICATIONS = 64;
+    SlotTable<CountersNotification, MAX_COUNTERS_NOTIFICATIONS> counters_notifications_{};
+    // The latest tick() time: the clock the hold-off reads.
+    sm::TimePoint now_{};
+    bool have_now_{false};
 
-    // Sequence ids of the commands this entity sends as a controller (CONTROLLER_AVAILABLE).
+    // Sequence ids of the commands this entity sends (CONTROLLER_AVAILABLE).
     uint16_t command_sequence_id_{0};
-    // The monitor period's xorshift32 state.
+    // The monitor period's generator (a linear congruential state).
     uint32_t monitor_random_{0x2545F491U};
 
     // Our own entity_id, needed as the target_entity_id of unsolicited

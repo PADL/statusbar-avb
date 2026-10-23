@@ -21,7 +21,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -318,109 +317,41 @@ inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc:
 /// index past MAX_ENTITY_STREAMS. Reactor thread.
 [[nodiscard]] inline auto talker_stream_totals(TalkerStreams const& talker, uint16_t const descriptor_index) -> StreamOutputTotals
 {
-    auto const* const c = talker.tx_counters(descriptor_index);
+    auto const* c = talker.tx_counters(descriptor_index);
     if (c == nullptr) {
         return {};
     }
     auto const relaxed = std::memory_order_relaxed;
-    uint32_t const changes = c->streaming_changes.load(relaxed);
-    return {
-        .starts = stream_starts(changes),
-        .stops = stream_stops(changes),
-        .pdus = c->pdus.load(relaxed),
-        .tu_pdus = c->tu_pdus.load(relaxed),
-        .mr_toggles = c->mr_toggles.load(relaxed)};
+    return {.pdus = c->pdus.load(relaxed), .tu_pdus = c->tu_pdus.load(relaxed), .mr_toggles = c->mr_toggles.load(relaxed)};
 }
 
-/// The counters_valid bits of the STREAM_OUTPUT counters a talker counts.
-inline constexpr uint32_t stream_output_counters_valid = (1U << stream_output_stream_start_bit) |
-    (1U << stream_output_stream_stop_bit) | (1U << stream_output_media_reset_bit) | (1U << stream_output_timestamp_uncertain_bit) |
-    (1U << stream_output_frames_tx_bit);
-
-/// @p totals as running counts into the GET_COUNTERS array @p out, each at its bit.
-inline void store_stream_output_totals(StreamOutputTotals const& totals, std::array<uint32_t, 32>& out) noexcept
-{
-    out[stream_output_stream_start_bit] = totals.starts;
-    out[stream_output_stream_stop_bit] = totals.stops;
-    out[stream_output_media_reset_bit] = totals.mr_toggles;
-    out[stream_output_timestamp_uncertain_bit] = totals.tu_pdus;
-    out[stream_output_frames_tx_bit] = totals.pdus;
-}
-
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index (IEEE 1722.1-2021
-/// Clause 7.4.42, Table 7-158) from what the talker sent (TalkerTxCounters):
-/// STREAM_START, STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX,
-/// as running counts. False for a stream the talker has no slot for.
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index: Milan v1.2 Section
+/// 5.4.2.25 Table 5.17, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
+/// False when the talker has no such stream.
 [[nodiscard]] inline auto fill_talker_stream_counters(
-    TalkerStreams const& talker, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) -> bool
-{
-    if (talker.slot_for(descriptor_index) == nullptr || talker.tx_counters(descriptor_index) == nullptr) {
-        return false;
-    }
-    valid |= stream_output_counters_valid;
-    store_stream_output_totals(talker_stream_totals(talker, descriptor_index), out);
-    return true;
-}
-
-/// The signal presence @p channels (bit k channel k) a STREAM_OUTPUT of @p stream_channels
-/// reports: the bits past its channels, and past TalkerStreams::SIGNAL_PRESENCE_CHANNELS, clear
-/// (Milan v1.3 Section 5.3.7.7.1).
-[[nodiscard]] constexpr auto reported_signal_presence(uint64_t const channels, size_t const stream_channels) noexcept -> uint64_t
-{
-    size_t const reported = std::min(stream_channels, TalkerStreams::SIGNAL_PRESENCE_CHANNELS);
-    return channels & ((uint64_t{1} << reported) - 1U);
-}
-
-/// The signal presence of channels @p first to @p first + 31 of @p channels (bit k channel k) as
-/// one counter: channel first + i at bit i counted from the MSB, channels past 59 clear (Milan v1.3
-/// Section 5.3.7.7.1).
-[[nodiscard]] constexpr auto signal_presence_quadlet(uint64_t const channels, size_t const first) noexcept -> uint32_t
-{
-    uint32_t quadlet = 0;
-    for (size_t i = 0; i < 32 && first + i < TalkerStreams::SIGNAL_PRESENCE_CHANNELS; ++i) {
-        quadlet |= ((channels >> (first + i)) & 1U) != 0 ? 0x8000'0000U >> i : 0U;
-    }
-    return quadlet;
-}
-
-/// @p presence, within a stream of @p stream_channels, into its two counters of @p out; the
-/// counters_valid bits that makes valid, none while the output reports no signal presence.
-[[nodiscard]] inline auto store_signal_presence(
-    std::optional<uint64_t> const presence, size_t const stream_channels, std::array<uint32_t, 32>& out) noexcept -> uint32_t
-{
-    if (!presence) {
-        return 0;
-    }
-    uint64_t const reported = reported_signal_presence(*presence, stream_channels);
-    out[stream_output_signal_presence_0_31_bit] = signal_presence_quadlet(reported, 0);
-    out[stream_output_signal_presence_32_59_bit] = signal_presence_quadlet(reported, 32);
-    return (1U << stream_output_signal_presence_0_31_bit) | (1U << stream_output_signal_presence_32_59_bit);
-}
-
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index as Milan v1.3 Table
-/// 5.14 has them: @p intervals, the stream's StreamOutputIntervals, current()
-/// at what the talker has sent, and the signal presence the talker holds now within the stream's
-/// @p stream_channels, once the output reports it. False for a stream the talker has no slot for.
-/// Reactor thread.
-[[nodiscard]] inline auto fill_interval_talker_stream_counters(
     TalkerStreams const& talker,
     uint16_t const descriptor_index,
     StreamOutputIntervals const& intervals,
-    size_t const stream_channels,
+    bool const milan,
     uint32_t& valid,
     std::array<uint32_t, 32>& out) -> bool
 {
     if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    valid |= StreamOutputIntervals::VALID;
-    auto const values = intervals.current(talker_stream_totals(talker, descriptor_index));
-    for (size_t i = 0; i < values.size(); ++i) {
-        if ((StreamOutputIntervals::VALID & (1U << i)) != 0) {
-            out[i] = values[i];
-        }
+    using I = StreamOutputIntervals;
+    if (milan) {
+        valid |= I::VALID;
+        std::copy(intervals.values.begin(), intervals.values.end(), out.begin());
+        return true;
     }
-    valid |= store_signal_presence(talker.signal_presence(descriptor_index), stream_channels, out);
+    auto const totals = talker_stream_totals(talker, descriptor_index);
+    valid |= (1U << 0U) | (1U << 1U) | (1U << 3U) | (1U << 4U) | (1U << stream_output_frames_tx_bit);
+    out[0] = intervals.values[I::STREAM_START];
+    out[1] = intervals.values[I::STREAM_STOP];
+    out[3] = totals.mr_toggles;
+    out[4] = totals.tu_pdus;
+    out[stream_output_frames_tx_bit] = totals.pdus;
     return true;
 }
 
