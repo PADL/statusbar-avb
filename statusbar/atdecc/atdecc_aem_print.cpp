@@ -37,9 +37,9 @@ namespace {
             return trailer_end(DescriptorConfiguration::LENGTH, d->data.configuration.used_descriptor_counts().size_bytes());
         case DESCRIPTOR_AUDIO_UNIT:
             return trailer_end(DescriptorAudioUnit::LENGTH, d->data.audio_unit.used_sampling_rates().size_bytes());
-        case DESCRIPTOR_STREAM_INPUT:
-        case DESCRIPTOR_STREAM_OUTPUT:
-            return trailer_end(DescriptorStream::LENGTH, d->data.stream.used_stream_formats().size_bytes());
+        // STREAM_INPUT/OUTPUT: the formats sit at formats_offset (132 in 2013,
+        // 138 in 2021), not at a fixed LENGTH; validated by
+        // stream_descriptor_trailers() in parse_descriptor instead.
         case DESCRIPTOR_AUDIO_MAP:
             return trailer_end(DescriptorAudioMap::LENGTH, d->data.audio_map.used_mappings().size_bytes());
         case DESCRIPTOR_VIDEO_MAP:
@@ -83,6 +83,10 @@ auto parse_descriptor(std::span<uint8_t const> desc_data) -> StatusValue<ParsedD
     // attacker-controlled count cannot drive a read past desc_data. Safe to
     // evaluate now: the count field is within min_length.
     if (size_t const trailer_end = descriptor_trailer_end(parsed_descriptor, desc_type); desc_data.size() < trailer_end) {
+        return failure(BufferError::insufficient_data);
+    }
+    if ((desc_type == DESCRIPTOR_STREAM_INPUT || desc_type == DESCRIPTOR_STREAM_OUTPUT) &&
+        !stream_descriptor_trailers(desc_data).has_value()) {
         return failure(BufferError::insufficient_data);
     }
 
