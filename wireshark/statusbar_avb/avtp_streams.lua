@@ -254,7 +254,7 @@ local MPEGTS_PACKET = 188
 --- IEC 61883-4 source packets (SPH = 1): dbs*4*2^fn octets each, a source
 --- packet header timestamp then an MPEG2 transport packet
 local function add_mpegts_source_packets(tree, tvb, start, length, dbs, fn, pinfo)
-    local packet = dbs * 4 * (1 << fn)
+    local packet = dbs * 4 * math.floor(2 ^ fn)  -- no `<<` before Lua 5.3 (Wireshark < 4.4)
     local packets = math.floor(length / packet)
     local t = tree:add(tvb(start, packets * packet), string.format("IEC 61883-4: %d source packets x %d octets", packets, packet))
     t:add(gen.f.avtp_mpegts_source_packets, tvb(start, packets * packet), packets):set_generated()
