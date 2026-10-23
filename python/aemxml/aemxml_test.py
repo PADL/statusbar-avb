@@ -2911,6 +2911,53 @@ def test_json_stream_buffer_length():
     print("  [+] JSON stream buffer_length: OK")
 
 
+def test_entity_milan_profile():
+    """The entity's "milan" profile reaches the blob only as the ENTITY
+    descriptor's well-known symbol (descriptor bytes unchanged), and survives
+    JSON, AEMXML and blob round trips; absent stays absent."""
+    from aemxml.aemxml_reader import read_aemxml
+    from aemxml.aemxml_writer import write_aemxml
+    from aemxml.flatten import (
+        ENTITY_PROFILE_CLASSIC_SYMBOL,
+        ENTITY_PROFILE_MILAN_SYMBOL,
+        symbol_to_code,
+    )
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+    from aemxml.model import DESCRIPTOR_ENTITY
+    from aemxml.unflatten import unflatten
+
+    json_path = str(Path(__file__).parent.parent.parent / "examples" / "simple_stereo.json")
+    with open(json_path, encoding="utf-8") as f:
+        base = json.load(f)
+    assert read_json(json.dumps(base)).milan is None
+    plain_descs, plain_syms = flatten(read_json(json.dumps(base)))
+
+    for value, name in ((True, ENTITY_PROFILE_MILAN_SYMBOL), (False, ENTITY_PROFILE_CLASSIC_SYMBOL)):
+        model = json.loads(json.dumps(base))
+        model["entity"]["milan"] = value
+        entity = read_json(json.dumps(model))
+        assert entity.milan is value
+        descs, syms = flatten(entity)
+        # Not in any descriptor: the wire bytes are those of the plain model.
+        assert [d.wire_bytes for d in descs] == [d.wire_bytes for d in plain_descs]
+        extra = [s for s in syms if (s.config_index, s.descriptor_type, s.descriptor_index) == (0, DESCRIPTOR_ENTITY, 0)]
+        assert len(extra) == 1 and extra[0].symbol_code == symbol_to_code(name)
+        assert len(syms) == len(plain_syms) + 1
+        assert unflatten(*read_blob(write_blob(descs, syms))).milan is value
+        assert read_json(write_json(entity)).milan is value
+        xml = write_aemxml(entity)
+        assert read_aemxml(xml).milan is value
+    try:
+        model = json.loads(json.dumps(base))
+        model["entity"]["milan"] = "yes"
+        read_json(json.dumps(model))
+        raise AssertionError("a non-boolean milan was accepted")
+    except ValueError as e:
+        assert "milan" in str(e)
+    print("  [+] entity milan profile: OK")
+
+
 def main():
     tests = [
         test_wire_pack_unpack,
@@ -2939,6 +2986,7 @@ def main():
         test_json_read_simple_stereo,
         test_json_round_trip,
         test_json_stream_buffer_length,
+        test_entity_milan_profile,
         test_json_to_blob,
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,

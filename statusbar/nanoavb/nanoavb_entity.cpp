@@ -65,6 +65,22 @@ namespace {
 
 auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool
 {
+    // A non-AEM AECP command addressed to us is answered NOT_IMPLEMENTED rather than dropped
+    // (IEEE 1722.1-2021 9.2.1.1.6; Milan v1.2 Section 5.4.3.3).
+    if (payload.size() >= AecpDuCommon::LENGTH) {
+        AecpDuCommon common{};
+        span_load(common, payload.first(AecpDuCommon::LENGTH));
+        // Only the defined non-AEM command types (IEEE 1722.1-2021 Table 9.1);
+        // reserved types (10, 12) are not answered.
+        auto const type = common.message_type();
+        bool const defined = type == AECP_MESSAGE_TYPE_ADDRESS_ACCESS_COMMAND || type == AECP_MESSAGE_TYPE_AVC_COMMAND ||
+            type == AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND || type == AECP_MESSAGE_TYPE_HDCP_APM_COMMAND ||
+            type == AECP_MESSAGE_TYPE_EXTENDED_COMMAND;
+        if (common.subtype.get() == AvtpSubtype::aecp && defined && common.target_entity_id == our_entity_id) {
+            return send_not_implemented(src_mac, payload);
+        }
+    }
+
     // Validate minimum size
     if (payload.size() < AemDu::LENGTH) {
         return false;
@@ -947,6 +963,12 @@ auto AemCommandHandler::handle_get_stream_info(
 auto AemCommandHandler::handle_acquire_entity(
     AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
+    // Milan v1.2 Section 5.4.2.1: ACQUIRE_ENTITY is NOT_SUPPORTED; nothing is acquired, so
+    // the controller is not registered for notifications either.
+    if (profile_.milan) {
+        return reject_command(AEM_STATUS_NOT_SUPPORTED, command_data, out_buffer);
+    }
+
     // ACQUIRE_ENTITY command payload (AemAcquireEntityPayload):
     //   flags(4) + owner_entity_id(8) + descriptor_type(2) + descriptor_index(2)
     if (command_data.size() < AemAcquireEntityPayload::LENGTH) {
@@ -1175,6 +1197,21 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
             AEM_COMMAND_SET_CONFIGURATION, std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
     }
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
+}
+
+auto AemCommandHandler::send_not_implemented(Eui48 const& dest_mac, std::span<uint8_t const> const command) const -> bool
+{
+    if (!callbacks_.send_response) {
+        return false;
+    }
+    // The command echoed back (as much as was received) as its response type, NOT_IMPLEMENTED.
+    // A command whose control_data_length is short of the AECP common fields is dropped.
+    std::array<uint8_t, AemDu::LENGTH + MAX_AEM_RESPONSE_SIZE> response_buffer{};
+    auto const out = aecp_echo_response(command, AECP_STATUS_NOT_IMPLEMENTED, response_buffer);
+    if (out.empty()) {
+        return false;
+    }
+    return callbacks_.send_response(dest_mac, out);
 }
 
 auto AemCommandHandler::send_response(
