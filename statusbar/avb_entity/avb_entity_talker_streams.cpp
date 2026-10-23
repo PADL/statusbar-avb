@@ -269,8 +269,27 @@ void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
     // Frames carry the SR class VID + PCP (untagged AVTP is in no SR class). The pcap stamp is the
     // gPTP wall-clock transmit time, so a capture shows avtp_ts - wall_clock = presentation_offset.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    send_stream_frame(slot.dest_mac, frame);
+    if (port_ != nullptr) {
+        send_stream_frame(slot.dest_mac, frame);
+    }
     ++slot.tx_packets;
+    if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
+        // AVTP stream header: mr is bit 3 of octet 1; tu is bit 0 of octet 3,
+        // or of octet 1 in a CRF PDU (IEEE 1722-2016 4.4.4, 10.4).
+        auto& c = tx_counters_[slot.spec.index];
+        auto const bump = [](std::atomic<uint32_t>& n) { n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+        bool const mr = (frame[1] & 0x08U) != 0;
+        bool const tu = ((frame[0] == avtp::AvtpSubtype::crf ? frame[1] : frame[3]) & 0x01U) != 0;
+        bump(c.pdus);
+        if (tu) {
+            bump(c.tu_pdus);
+        }
+        if (c.have_mr && mr != c.last_mr) {
+            bump(c.mr_toggles);
+        }
+        c.last_mr = mr;
+        c.have_mr = true;
+    }
 }
 
 void fill_crf_timestamps(
