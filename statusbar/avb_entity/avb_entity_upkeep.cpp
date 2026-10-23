@@ -56,7 +56,13 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
                         announce.grandmaster_priority2.get());
                     kit->host().components().adp_advertiser.set_gptp_info(grandmaster, 0);
                     kit->host().components().adp_advertiser.notify_entity_changed();
+                    kit->note_grandmaster_changed();  // AVTP tu for 0.25 s (Milan v1.2 B.1.1)
                     kit->on_gptp_announce(steady_time_point(), true);
+                },
+            .grandmaster_lost =
+                [kit = &kit](int64_t /*now_ns*/) {
+                    kit->host().ctl_log().warning("gPTP: no Announce within the receipt timeout: grandmaster lost");
+                    kit->note_grandmaster_lost();  // AVTP tu until a grandmaster returns
                 }});
     }
 }
