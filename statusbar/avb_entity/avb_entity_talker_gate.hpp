@@ -50,6 +50,10 @@ struct TalkerGate
     /// Reactor thread: our Talker declarations were withdrawn. Every stream closes at once (no
     /// grace) and forgets its listener state until note_listener_ready re-learns it.
     void note_talker_withdrawn() noexcept;
+    /// Reactor thread: stream @p idx's Talker Advertise alone was withdrawn (a
+    /// Milan talker's declaration window closed, or MAAP lost its address):
+    /// that stream closes at once, as above.
+    void note_talker_withdrawn(uint16_t idx) noexcept;
 
     /// Any thread: mark talker stream @p idx Started (@p started true) or Stopped.
     /// Stopped suppresses transmit without tearing down the reservation.
@@ -65,6 +69,10 @@ struct TalkerGate
     /// disabled, or the stream is Started and a permitting listener declaration is registered now
     /// or was within GRACE_NS. Time-dependent: the reactor re-evaluates it (poll_admission).
     [[nodiscard]] auto admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+
+    /// Whether stream @p idx has a permitting listener declaration now or within GRACE_NS,
+    /// regardless of gate_enabled_ and Started (Milan v1.2 Section 5.3.7.3).
+    [[nodiscard]] auto listener_admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
     /// Media-timer thread: may talker stream @p idx transmit at steady-clock @p now_ns? Exactly
     /// admitted(), independent of every other stream.

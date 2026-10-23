@@ -1702,6 +1702,10 @@ M.f.atdecc_desc_sensor_format_value = ProtoField.uint64("avb.atdecc.desc.sensor_
 M.f.atdecc_desc_as_path_entry_clock_identity = ProtoField.eui64("avb.atdecc.desc.as_path_entry.clock_identity", "clock_identity", "clock identity")
 M.f.atdecc_desc_clock_identity_value = ProtoField.eui64("avb.atdecc.desc.clock_identity.value", "value", "clock identity")
 M.f.atdecc_desc_key_eui_value = ProtoField.eui64("avb.atdecc.desc.key_eui.value", "value", "key EUI-64")
+M.f.atdecc_desc_stream_info_milan_flags_ex = ProtoField.uint32("avb.atdecc.desc.stream_info_milan.flags_ex", "flags_ex", base.HEX, nil, nil, "flags_ex (Milan 1.2 Table 5.8: 0x00000001 REGISTERING)")
+M.f.atdecc_desc_stream_info_milan_pbsta = ProtoField.uint8("avb.atdecc.desc.stream_info_milan.pbsta", "pbsta", base.DEC, nil, 0xE0, "probing status (Milan 1.2 Table 5.5)")
+M.f.atdecc_desc_stream_info_milan_acmpsta = ProtoField.uint8("avb.atdecc.desc.stream_info_milan.acmpsta", "acmpsta", base.DEC, nil, 0x1F, "ACMP status of the last probe")
+M.f.atdecc_desc_stream_info_milan_reserved = ProtoField.bytes("avb.atdecc.desc.stream_info_milan.reserved", "reserved", base.NONE, "reserved")
 M.f.atdecc_control_value_i8 = ProtoField.int8("avb.atdecc.control.value_i8", "value_i8", base.DEC, nil, nil, "INT8 value")
 M.f.atdecc_control_value_u8 = ProtoField.uint8("avb.atdecc.control.value_u8", "value_u8", base.DEC, nil, nil, "UINT8 value")
 M.f.atdecc_control_value_i16 = ProtoField.int16("avb.atdecc.control.value_i16", "value_i16", base.DEC, nil, nil, "INT16 value")
@@ -3026,6 +3030,10 @@ M.fields = {
     M.f.atdecc_desc_as_path_entry_clock_identity,
     M.f.atdecc_desc_clock_identity_value,
     M.f.atdecc_desc_key_eui_value,
+    M.f.atdecc_desc_stream_info_milan_flags_ex,
+    M.f.atdecc_desc_stream_info_milan_pbsta,
+    M.f.atdecc_desc_stream_info_milan_acmpsta,
+    M.f.atdecc_desc_stream_info_milan_reserved,
     M.f.atdecc_control_value_i8,
     M.f.atdecc_control_value_u8,
     M.f.atdecc_control_value_i16,
@@ -4982,6 +4990,14 @@ function M.add_desc_key_eui(tree, tvb, off)
     tree:add(M.f.atdecc_desc_key_eui_value, tvb(off + 0, 8))
 end
 
+--- GET_STREAM_INFO Milan v1.2 tail (Section 5.4.2.10, Figure 5.1)
+function M.add_desc_stream_info_milan(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_stream_info_milan_flags_ex, tvb(off + 0, 4))
+    tree:add(M.f.atdecc_desc_stream_info_milan_pbsta, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_desc_stream_info_milan_acmpsta, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_desc_stream_info_milan_reserved, tvb(off + 5, 3))
+end
+
 --- control value elements
 function M.add_control(tree, tvb, off)
     tree:add(M.f.atdecc_control_value_i8, tvb(off + 0, 1))
@@ -5174,7 +5190,7 @@ M.aem_payloads[0x000B] = { cmd = { name = "get_video_format_command", length = 4
 M.aem_payloads[0x000C] = { cmd = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil }, rsp = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil } }
 M.aem_payloads[0x000D] = { cmd = { name = "get_sensor_format_command", length = 4, add = M.add_aem_get_sensor_format_command, trailer = nil }, rsp = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil } }
 M.aem_payloads[0x000E] = { cmd = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil } }
-M.aem_payloads[0x000F] = { cmd = { name = "get_stream_info_command", length = 4, add = M.add_aem_get_stream_info_command, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil } }
+M.aem_payloads[0x000F] = { cmd = { name = "get_stream_info_command", length = 4, add = M.add_aem_get_stream_info_command, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = { kind = "tail", element = "stream_info_milan", element_size = 8, element_add = M.add_desc_stream_info_milan } } }
 M.aem_payloads[0x0010] = { cmd = { name = "name", length = 72, add = M.add_aem_name, trailer = nil }, rsp = { name = "name", length = 72, add = M.add_aem_name, trailer = nil } }
 M.aem_payloads[0x0011] = { cmd = { name = "name_command", length = 8, add = M.add_aem_name_command, trailer = nil }, rsp = { name = "name", length = 72, add = M.add_aem_name, trailer = nil } }
 M.aem_payloads[0x0012] = { cmd = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil }, rsp = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil } }

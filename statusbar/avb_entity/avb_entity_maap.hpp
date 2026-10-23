@@ -47,7 +47,11 @@ class MaapAddressAcquirer
     /// fires on the reactor thread each time the block is (re)defended and
     /// every dest MAC has been published — entities re-declare their MSRP
     /// Talker Advertise there so listeners reserve against the MAAP
-    /// address, told the reactor time it fires at. Call once from start() in
+    /// address, told the reactor time it fires at. @p on_addresses_lost fires
+    /// on the reactor thread when a conflict claims the block (Milan v1.2 Table
+    /// 5.3: the talkers withdraw their Talker attributes), after each stream's
+    /// ACMP destination address has been zeroed ("When invalid, the Stream
+    /// Destination MAC Address is set to zero"). Call once from start() in
     /// "maap" address mode; in static mode simply never call it (ready()
     /// defaults true). @p now is the control-plane time the acquisition
     /// starts at: a setup edge, read once here unless the caller holds it.
@@ -60,6 +64,7 @@ class MaapAddressAcquirer
         std::span<uint16_t const> const stream_indices,
         logging::Logger const log,
         statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_ready,
+        statusbar::sg14::inplace_function<void(), 32> on_addresses_lost = {},
         sm::TimePoint const now = sm::Clock::now()) -> Status
     {  // NOLINT(statusbar-block-statements) the acquisition setup, one step after another; pre-dates the gate
         log_ = log;
@@ -68,6 +73,7 @@ class MaapAddressAcquirer
             (void)indices_.try_push_back(idx);
         }
         on_addresses_ready_ = std::move(on_addresses_ready);
+        on_addresses_lost_ = std::move(on_addresses_lost);
 
         // One allocation covering all talker streams; the PDUs carry the
         // first stream's id, and the seed spreads our initial random pick
@@ -108,11 +114,19 @@ class MaapAddressAcquirer
                 }
             });
 
-        handler_->set_on_lost([this](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
-            // Conflict: close the TX gate until a new block is defended (the
-            // handler is already re-probing; on_acquired re-opens it).
+        handler_->set_on_lost([this, &components](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
+            // Conflict: close the TX gate until a new block is defended (on_acquired
+            // re-opens it). The media slot keeps its MAC; the control plane's is zeroed.
             ready_.store(false, std::memory_order_release);
+            for (auto const idx : indices_) {
+                if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
+                    (void)components.acmp_talker.configure_stream(idx, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
+                }
+            }
             log_->warning("maap: address lost to a conflict; re-acquiring");
+            if (on_addresses_lost_) {
+                on_addresses_lost_();
+            }
         });
 
         auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(interface_name, *handler_);
@@ -149,6 +163,7 @@ class MaapAddressAcquirer
     bool fell_back_to_static_{false};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_ready_{};
+    statusbar::sg14::inplace_function<void(), 32> on_addresses_lost_{};
     std::optional<logging::Logger> log_{};  ///< set by acquire (Logger is not default-constructible)
 };
 

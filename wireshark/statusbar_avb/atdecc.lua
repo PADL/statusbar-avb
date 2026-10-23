@@ -511,6 +511,13 @@ local function dissect_aem(t, tvb, pinfo, stop, is_command)
                     trailer.element_add(element, tvb, at)
                     at = at + trailer.element_size
                 end
+            elseif trailer.kind == "tail" then
+                -- an optional fixed tail (Milan 1.2's GET_STREAM_INFO), when present
+                if stop - at >= trailer.element_size then
+                    local element = t:add(tvb(at, trailer.element_size), trailer.element)
+                    trailer.element_add(element, tvb, at)
+                    at = at + trailer.element_size
+                end
             elseif trailer.kind == "blob" then
                 local length = math.min(tvb(trailer.count_field_offset, 2):uint(), stop - at)
                 if length > 0 then
