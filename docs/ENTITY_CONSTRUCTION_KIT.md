@@ -59,7 +59,7 @@ phase-steering the media clock and ASRC.
 | `KalmanRatioTracker` (`ptpclient_freq_ratio.hpp:132`) | 3-state phase/freq/drift estimator with outlier gating — exactly the filter CRF clock recovery needs (today it eats gPTP−GPS pairs; feed it CRF−gPTP instead). |
 | Depacketizers | AAF int16/24/32/f32 any-rate (`avtp_aaf_stream_input.hpp:37`), AM824 incl. an unused MIDI/SMPTE-capable variant (`avtp_am824_stream_input.hpp:150`), CRF complete-but-unwired. All reconstruct full 64-bit PTS. |
 | StereoIO playout pattern | PTS-stamped SPSC pipe + consume-when-due against the local media clock (`avb_entity_stereo_io.cpp:464-483,540-572`) — the one real time-aligned renderer; generalize for the kit listener. |
-| Diagnostics | STREAM_INPUT counters (media lock, seq, late/early — `avb_entity_stream_counters.cpp`), TX pcap recorder (`tx_pcap_recorder.hpp`), per-stream ACMP∧MSRP talker gate. |
+| Diagnostics | STREAM_INPUT counters (media lock, seq, late/early — `avb_entity_stream_counters.cpp`), TX pcap recorder (`tx_pcap_recorder.hpp`), per-stream MSRP (Listener Ready / Ready Failed) talker gate. |
 
 ## Gap map by kit feature
 
