@@ -80,6 +80,12 @@ using statusbar::Status;
     return cfg;
 }
 
+/// An AS path from an Announce's path trace (802.1AS-2020 10.3.9.23): the
+/// trace, then @p own_clock_identity unless it ends the trace already (this
+/// system is the grandmaster) or is unknown; empty when the trace is.
+[[nodiscard]] auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity)
+    -> nanoavb::AsPath;
+
 /// The shared AVB entity control plane: state machines + NanoAvbComponents + net
 /// handlers + lifecycle. Owned by a concrete entity (composition). Non-copyable and
 /// non-movable (NanoAvbComponents pins itself), so build it in place in the entity's
@@ -158,6 +164,20 @@ class AvbEntityHost
     /// A gPTP grandmaster change seen (the Announce handler's): counted for
     /// GET_COUNTERS (AVB_INTERFACE GPTP_GM_CHANGED). Reactor thread.
     void note_grandmaster_changed();
+    /// The grandmaster was lost (no Announce within the receipt timeout).
+    /// Reactor thread.
+    void note_grandmaster_lost();
+    /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
+    /// v1.2 Table 5.22). Reactor thread.
+    void note_as_path_changed();
+
+    /// The gPTP path for AVB_INTERFACE @p index (IEEE 1722.1-2021 Clause 7.4.41): the
+    /// last Announce's path trace, then this entity's clock identity unless already
+    /// last; empty with no grandmaster. False for an unknown interface. Reactor thread.
+    [[nodiscard]] auto as_path(uint16_t index, nanoavb::AsPath& path) const -> bool;
+
+    /// The clock identity AVB_INTERFACE 0 reports, once known.
+    [[nodiscard]] auto own_clock_identity() const noexcept -> std::optional<ieee::Eui64> const& { return own_clock_identity_; }
 
     /// GET_COUNTERS for ENTITY, AVB_INTERFACE and CLOCK_DOMAIN descriptors (IEEE
     /// 1722.1-2021 Clause 7.4.42); see docs/AVB_ENTITY_KIT.md. False for any other
@@ -408,8 +428,13 @@ class AvbEntityHost
     };
     std::vector<MirroredInterface> mirrored_{};
     nanoavb::AvbInfo last_avb_info_{};  ///< what the last notification carried
+    /// Notify GET_AVB_INFO of interface 0 asynchronously (Milan v1.2 Table 5.22)
+    /// when a listed field differs from the last one sent.
+    void refresh_avb_info();
     /// The media clock (gPTP) lock state changed: count it and notify.
     void note_media_clock_locked(bool locked);
+    /// The clock identity AVB_INTERFACE 0 reports (apply_interface_runtime).
+    std::optional<ieee::Eui64> own_clock_identity_{};
 
     // GET_COUNTERS state (fill_counters): 32-bit counters that wrap.
     uint32_t link_up_count_{0};

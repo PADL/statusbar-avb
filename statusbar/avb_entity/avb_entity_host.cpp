@@ -73,6 +73,7 @@ void AvbEntityHost::wire_domain_callbacks()
             if (on_domain_vid_changed_) {
                 on_domain_vid_changed_(new_vid, time);
             }
+            refresh_avb_info();
             if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready && advertise_streams_) {
                 advertise_streams_(time);
             }
@@ -181,6 +182,56 @@ void AvbEntityHost::wire_avb_info()
         out = avb_info(index);
         return true;
     });
+    components_.aem_handler.set_get_as_path(
+        [this](uint16_t const index, nanoavb::AsPath& path) -> bool { return as_path(index, path); });
+}
+
+auto AvbEntityHost::as_path(uint16_t const index, nanoavb::AsPath& path) const -> bool
+{
+    if (index != 0) {
+        auto const* storage = descriptor_storage();
+        if (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index)) {
+            return false;
+        }
+    }
+    path = net_handlers_ != nullptr ? compose_as_path(net_handlers_->gptp_handler().path_trace(), own_clock_identity_)
+                                    : nanoavb::AsPath{};
+    return true;
+}
+
+auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity) -> nanoavb::AsPath
+{
+    nanoavb::AsPath path = path_trace;
+    if (!path.empty() && own_clock_identity.has_value() && path.back() != *own_clock_identity && path.size() < path.capacity()) {
+        path.push_back(*own_clock_identity);
+    }
+    return path;
+}
+
+void AvbEntityHost::note_as_path_changed()
+{
+    (void)components_.aem_handler.notify_as_path_changed(0);
+}
+
+void AvbEntityHost::refresh_avb_info()
+{
+    if (mirror_config_.has_value()) {
+        return;
+    }
+    using atdecc::aem::avb_info_flags::AS_CAPABLE;
+    auto const info = avb_info(0);
+    auto const class_a = [](nanoavb::AvbInfo const& i) -> std::pair<uint8_t, uint16_t> {
+        auto const* const m = std::ranges::find_if(i.msrp_mappings, [](auto const& x) { return x.traffic_class == 0; });
+        return m != i.msrp_mappings.end() ? std::pair{m->priority, m->vlan_id} : std::pair<uint8_t, uint16_t>{};
+    };
+    bool const changed = info.gptp_grandmaster_id != last_avb_info_.gptp_grandmaster_id ||
+        info.propagation_delay != last_avb_info_.propagation_delay ||
+        info.gptp_domain_number != last_avb_info_.gptp_domain_number ||
+        (info.flags & AS_CAPABLE) != (last_avb_info_.flags & AS_CAPABLE) || class_a(info) != class_a(last_avb_info_);
+    last_avb_info_ = info;
+    if (changed) {
+        (void)components_.aem_handler.notify_avb_info_changed(0);
+    }
 }
 
 void AvbEntityHost::mirror_avb_info_from(
@@ -314,6 +365,9 @@ void AvbEntityHost::apply_interface_runtime()
         if (!rt.identity_valid && !rt.gptp_valid) {
             continue;
         }
+        if (index == 0) {
+            own_clock_identity_ = rt.clock_identity;
+        }
         handler_->set_avb_interface_runtime(index, rt);
     }
 }
@@ -376,6 +430,7 @@ void AvbEntityHost::on_link_up(TimePoint const time)
     }
     supervisor_ctx_.link_up = true;
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkUp, time);
+    refresh_avb_info();
 }
 
 void AvbEntityHost::on_link_down(TimePoint const time)
@@ -386,6 +441,7 @@ void AvbEntityHost::on_link_down(TimePoint const time)
     }
     supervisor_ctx_.link_up = false;
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, time);
+    refresh_avb_info();
 }
 
 void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandmaster)
@@ -397,6 +453,7 @@ void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandm
 
 void AvbEntityHost::note_grandmaster_changed()
 {
+    refresh_avb_info();
     // The first grandmaster found is not a change.
     if (!grandmaster_seen_) {
         grandmaster_seen_ = true;
@@ -404,6 +461,11 @@ void AvbEntityHost::note_grandmaster_changed()
     }
     ++gm_changed_count_;
     (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
+}
+
+void AvbEntityHost::note_grandmaster_lost()
+{
+    refresh_avb_info();
 }
 
 void AvbEntityHost::note_media_clock_locked(bool const locked)
@@ -414,6 +476,7 @@ void AvbEntityHost::note_media_clock_locked(bool const locked)
     media_locked_ = locked;
     ++(locked ? media_locked_count_ : media_unlocked_count_);
     (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0);
+    refresh_avb_info();  // asCapable follows the gPTP lock
 }
 
 auto AvbEntityHost::fill_counters(
