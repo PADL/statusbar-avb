@@ -16,6 +16,7 @@ statusbar_add_module(
   avb_entity_stream_counters.cpp
   avb_entity_stream_spec.cpp
   avb_entity_listener_streams.cpp
+  avb_entity_listener_vlan.cpp
   avb_entity_talker_streams.cpp
   avb_entity_talker_gate.cpp
   avb_entity_shaper.cpp
@@ -54,6 +55,7 @@ statusbar_add_module(
   avb_entity_stream_spec_test.cpp
   avb_entity_listener_streams_test.cpp
   avb_entity_listener_bindings_test.cpp
+  avb_entity_listener_vlan_test.cpp
   avb_entity_crf_clock_recovery_test.cpp
   avb_entity_media_rate_test.cpp
   avb_entity_udptun_egress_test.cpp

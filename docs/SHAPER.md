@@ -205,6 +205,40 @@ Advertise closes every stream at once. With
 `gate_talker_on_listener = false` every talker stream is admitted. Every kit talker stream is class A today (the kit
 declares only the class A SR domain); class B is laid out but stays empty.
 
+## Listener VLAN (the NIC's receive VLAN filter)
+
+Not shaping, but the same kind of NIC setup, on the listener side. A NIC
+with `rx-vlan-filter` on drops VLAN-tagged frames on a VID nobody
+registered before any socket sees them; on igb (i210) the filter is
+`on [fixed]`, so the listener's VID 2 stream frames never reached the stream
+RX socket although its multicast join was in place. The kernel registers a
+VID with the NIC (`ndo_vlan_rx_add_vid`) while a VLAN link on it exists,
+up or not. So when the blob declares stream inputs, `AvbEntityKit::start()`
+creates `<if>.<vid>` (`ip link add link <if> name <if>.<vid> type vlan id
+<vid>`, left down; the interface part is cut short past 15 characters) for
+the Class A VID in use, through `avb_entity::ListenerVlan`
+(`statusbar/avb_entity/avb_entity_listener_vlan.hpp`) over
+`net::vlan::VlanLinkClient` (`core/statusbar/net/net_vlan_link.hpp`). An
+adopted MSRP Domain VID moves it (the new link first, then ours goes), and
+the return to the configured VID on link up moves it back; `stop()` (and the
+kit's destructor) deletes it, only if the kit created it. A link already
+there (EEXIST: an operator's `ip link add ...`, or one a crashed run left)
+is used and never deleted; it is not checked, so a link of that name on
+another VID or parent leaves the VID unregistered (the kit logs a warning
+naming it). A failed create changes nothing and is tried again at the next
+VID change or `start()`. A down VLAN link takes no addresses, and the
+stream RX socket (bound to the real device for all protocols) still sees the
+frames. Without CAP_NET_ADMIN (or 8021q) the kit logs a warning and goes on;
+on a filtering NIC the listener's streams then stay dropped. A talker-only
+entity creates nothing: transmitting tagged frames needs no filter entry.
+
+The VID followed is our own SR-class VID; a talker whose stream frames carry
+another VID (its Talker Advertise's DataFrameParameters) is not covered.
+
+```
+ip -d link show type vlan     # <if>.2@<if>: ... state DOWN ... vlan protocol 802.1Q id 2
+```
+
 ## Verifying on the box
 
 ```
