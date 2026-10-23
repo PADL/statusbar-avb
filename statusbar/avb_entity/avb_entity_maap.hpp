@@ -58,6 +58,10 @@ class MaapAddressAcquirer
 {
   public:
     using ReadyFn = statusbar::sg14::inplace_function<void(sm::TimePoint), 32>;
+    /// Called on the reactor thread when the block is no longer defended (a
+    /// conflict, a Link Up re-probe, the stop), after each stream's ACMP
+    /// destination address has been zeroed (Milan v1.2 Table 5.3).
+    using LostFn = statusbar::sg14::inplace_function<void(), 32>;
 
     /// Set up the acquisition of one MAAP block covering the given talker
     /// stream indices (block offset = position in the list). Nothing goes on
@@ -79,9 +83,11 @@ class MaapAddressAcquirer
         std::span<uint16_t const> const stream_indices,
         logging::Logger const log,
         ReadyFn on_addresses_ready,
+        LostFn on_addresses_lost = {},
         sm::TimePoint const now = sm::Clock::now()) -> Status
     {
         begin_setup(log, stream_indices, std::move(on_addresses_ready), now);
+        on_addresses_lost_ = std::move(on_addresses_lost);
         // One allocation covering all talker streams; the seed spreads our
         // initial draw per station and per boot.
         auto handler = std::make_unique<avtp::MaapHandler>(our_mac, maap_seed(our_mac, realtime_now_ns()));
@@ -198,11 +204,20 @@ class MaapAddressAcquirer
                     on_addresses_ready_(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
                 }
             });
-        handler.set_on_lost([this](ieee::Eui48 const& start, uint16_t /*count*/) {
+        handler.set_on_lost([this, &components](ieee::Eui48 const& start, uint16_t /*count*/) {
             // A conflict, a Link Up re-probing the range, or the stop: the TX
             // gate closes until a block is defended (on_acquired re-opens it).
             ready_.store(false, std::memory_order_release);
+            // The media slot keeps its MAC; the control plane's is zeroed.
+            for (auto const idx : indices_) {
+                if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
+                    (void)components.acmp_talker.configure_stream(idx, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
+                }
+            }
             log_->warning("maap: no longer defending {:012x}; stream TX gated", start.to_uint64());
+            if (on_addresses_lost_) {
+                on_addresses_lost_();
+            }
         });
     }
 
@@ -227,6 +242,7 @@ class MaapAddressAcquirer
     bool fell_back_to_static_{false};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     ReadyFn on_addresses_ready_{};
+    LostFn on_addresses_lost_{};
     std::optional<logging::Logger> log_{};  ///< set by setup (Logger is not default-constructible)
 };
 
