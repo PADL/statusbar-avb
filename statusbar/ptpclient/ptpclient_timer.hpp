@@ -14,13 +14,15 @@
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <atomic>
+#include <climits>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
-#include <optional>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -209,6 +211,7 @@ class PtpTimer : public PtpTimerBase
         }
 
         stats_.reset();
+        headroom_.reset();
         reset_recovery_count();
         reset_missed_cycles();
 
@@ -229,8 +232,8 @@ class PtpTimer : public PtpTimerBase
     /// Check if timer is running
     [[nodiscard]] auto is_running() const noexcept -> bool { return is_running_atomic(); }
 
-    /// Get a snapshot of wake statistics (thread-safe)
-    /// @return Consistent copy of all statistics
+    /// Wake statistics (thread-safe copy): error = actual minus scheduled wake (positive = late),
+    /// duration = callback time per wake, skipped_counts = periods skipped by a late wake.
     [[nodiscard]] auto stats() const noexcept -> stats::AtomicWakeStats::Snapshot { return stats_.snapshot(); }
 
     /// Get configured period in nanoseconds
@@ -248,51 +251,55 @@ class PtpTimer : public PtpTimerBase
     /// Get the total number of missed cycles (periods skipped due to running behind)
     [[nodiscard]] auto missed_cycles() const noexcept -> int64_t { return load_missed_cycles(); }
 
+    /// Wake headroom (thread-safe copy): per wake that slept, what was left of the spin window
+    /// (BridgeSamplingParams::wake_refine_spin_ns) when the sleep returned; negative = overran.
+    /// The OS wake latency is the window minus the headroom.
+    [[nodiscard]] auto wake_headroom() const noexcept -> stats::AtomicTimeStats::Snapshot { return headroom_.snapshot(); }
+
+    /// Name the timer thread (default "media"; Linux keeps 15 characters, the
+    /// rest is dropped). Copied; applies from the next start(). Call it
+    /// while the timer is stopped.
+    void set_thread_name(std::string_view const name) noexcept
+    {
+        thread_name_ = {};
+        name.copy(thread_name_.data(), thread_name_.size() - 1);
+    }
+
   private:
     using PtpTimePoint = realtime::GptpClock0::time_point;
 
     /// The schedule after a wake at @p actual_wake: the next period, or,
     /// when that is already behind the wake, the first period boundary still
-    /// ahead, the skipped ones counted as missed cycles.
-    auto advance_schedule(PtpTimePoint const actual_wake, PtpTimePoint& next_wake) noexcept -> void
+    /// ahead, the skipped ones counted as missed cycles. Returns how many.
+    auto advance_schedule(int64_t const actual_wake_ptp, int64_t& next_wake) noexcept -> int64_t
     {
-        next_wake += period();
-        if (actual_wake > next_wake) {
-            int64_t const periods_behind = ((actual_wake - next_wake).count() / period_ns_) + 1;
-            next_wake += periods_behind * period();
+        int64_t periods_behind = 0;
+        next_wake += period_ns_;
+        if (actual_wake_ptp > next_wake) {
+            periods_behind = ((actual_wake_ptp - next_wake) / period_ns_) + 1;
+            next_wake += periods_behind * period_ns_;
             add_missed_cycles(periods_behind);
         }
+        return periods_behind;
     }
-
-    [[nodiscard]] auto period() const noexcept -> realtime::Nanoseconds { return realtime::Nanoseconds{period_ns_}; }
-
-    /// The first period boundary after @p now on the PHC's clock.
-    [[nodiscard]] auto next_boundary(PtpTimePoint const now) const noexcept -> PtpTimePoint
-    {
-        return PtpTimePoint{((now.time_since_epoch() / period()) + 1) * period()};
-    }
-
-    /// What sleep_until_ptp leaves in its headroom argument when it did not sleep.
-    static constexpr realtime::Nanoseconds NOT_SLEPT{realtime::Nanoseconds::min()};
 
     /// Process a successful wake: update stats, call the callback with the
-    /// wake told on both clocks and the spin headroom, advance the schedule.
-    /// @return wake error
-    auto process_wake(PtpTimeBridge::WakeTimes const& wake, PtpTimePoint& next_wake, realtime::Nanoseconds const headroom)
-        -> realtime::Nanoseconds
+    /// wake told on both clocks, advance the schedule; the callback's duration
+    /// runs on RAW from the wake.
+    /// @return wake error in nanoseconds
+    auto process_wake(PtpTimeBridge::WakeTimes const& wake, int64_t& next_wake) -> int64_t
     {
-        realtime::Nanoseconds const error = wake.ptp - next_wake;
-        stats_.update(error.count());
-        TimerWakeInfo const info{
-            .scheduled_time = next_wake,
-            .actual_time = wake.ptp,
-            .error = error,
+        int64_t const error_ns = wake.ptp_ns - next_wake;
+        stats_.update(error_ns);
+        callback_(success(TimerWakeInfo{
+            .scheduled_time_ns = next_wake,
+            .actual_time_ns = wake.ptp_ns,
+            .error_ns = error_ns,
             .wake_count = stats_.count(),
-            .actual_raw = wake.raw,
-            .spin_headroom = headroom == NOT_SLEPT ? std::nullopt : std::optional{headroom}};
-        callback_(success(info));
-        advance_schedule(wake.ptp, next_wake);
-        return error;
+            .actual_raw = realtime::MonotonicRawClock::from_ns(wake.raw_ns)}));
+        int64_t const periods_behind = advance_schedule(wake.ptp_ns, next_wake);
+        stats_.update_duration(realtime::read_monotonic_raw_ns() - wake.raw_ns, periods_behind);
+        return error_ns;
     }
 
     void timer_loop()
@@ -321,9 +328,7 @@ class PtpTimer : public PtpTimerBase
     void prepare_timer_thread()
     {
         realtime::prefault_stack(stack_prefault_bytes_);
-        if (lock_memory_) {
-            lock_thread_memory();
-        }
+        realtime::set_current_thread_name(thread_name_.data());
         // Set realtime affinity if set (log failure but continue)
         if (cpu_affinity_ >= 0) {
             (void)realtime::set_realtime_affinity_logged(cpu_affinity_, "PTP timer");
@@ -369,9 +374,8 @@ class PtpTimer : public PtpTimerBase
                 aligned = true;
             }
 
-            realtime::Nanoseconds headroom = NOT_SLEPT;
-            auto wake_result =
-                bridge_.sleep_until_ptp(next_wake + realtime::Nanoseconds{compensation_ns_}, running_flag_ptr(), &headroom);
+            int64_t headroom_ns = NO_HEADROOM;
+            auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_, running_flag_ptr(), &headroom_ns);
 
             if (!wake_result) {
                 if (!is_running_atomic()) {
@@ -388,7 +392,10 @@ class PtpTimer : public PtpTimerBase
             // Updates wake stats, invokes the callback, and advances the
             // schedule (catching up if we ran behind). A late wake is recorded
             // in the stats but never stops the timer.
-            (void)process_wake(*wake_result, next_wake, headroom);
+            if (headroom_ns != NO_HEADROOM) {
+                headroom_.update(headroom_ns);
+            }
+            (void)process_wake(*wake_result, next_wake);
         }
     }
 
@@ -404,7 +411,10 @@ class PtpTimer : public PtpTimerBase
     Callback callback_;
     // Atomics are in PtpTimerBase
     std::thread timer_thread_;
+    static constexpr int64_t NO_HEADROOM = INT64_MIN;  ///< the wake did not sleep
+    std::array<char, 16> thread_name_{'m', 'e', 'd', 'i', 'a'};
     stats::AtomicWakeStats stats_;
+    stats::AtomicTimeStats headroom_;
 };
 
 /// Factory function to create a PtpTimer with type deduction
