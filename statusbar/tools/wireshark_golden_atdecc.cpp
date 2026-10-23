@@ -986,6 +986,30 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         append(rout, du);
         rout.resize(rout.size() + MVU_GET_MILAN_INFO_COMMAND_LENGTH, 0);
         frames.push_back({"mvu_get_system_unique_id_not_implemented", padded(rout)});
+
+        // The 1.2 GET_SYSTEM_UNIQUE_ID response: one quadlet (Figure 5.5)
+        du.init_response(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS, MvuSystemUniqueIdPayload::LENGTH);
+        du.common.sequence_id = 67;
+        MvuSystemUniqueIdPayload unique_id{};
+        unique_id.system_unique_id = uint32_t{0x12345678};
+        std::vector<uint8_t> uout;
+        append(uout, du);
+        append(uout, unique_id);
+        frames.push_back({"mvu_get_system_unique_id_response_v1_2", padded(uout)});
+
+        // An unsolicited SET_MEDIA_CLOCK_REFERENCE_INFO (u bit set)
+        du.init_response(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS, MvuMediaClockReferenceInfoPayload::LENGTH);
+        du.set_command_type(du.command_type(), true);
+        du.common.sequence_id = 68;
+        MvuMediaClockReferenceInfoPayload mcr_info{};
+        mcr_info.flags = MVU_MCR_FLAGS_SUPPORTED;
+        mcr_info.default_mcr_prio = MVU_MCR_PRIO_NETWORK_INTERFACE;
+        mcr_info.user_mcr_prio = uint8_t{200};
+        mcr_info.media_clock_domain_name[0] = 'S';
+        std::vector<uint8_t> mout;
+        append(mout, du);
+        append(mout, mcr_info);
+        frames.push_back({"mvu_set_media_clock_reference_info_unsolicited", padded(mout)});
     }
 
     // ---- Address Access: a command with a read and a write TLV ----
