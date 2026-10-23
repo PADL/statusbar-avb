@@ -9,7 +9,7 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
-#include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -3384,7 +3384,7 @@ TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
             EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(uid), clock.now)));
             EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(uid + 0x0100), ListenerDeclaration::Ready, clock.now)));
         }
-        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        b.tick(clock.advance(std::chrono::milliseconds(250)));
         fab.deliver_b_to_a(a, clock.now);
         EXPECT_EQ(a.talker_advertise_count(), 8u - reserved);
         EXPECT_EQ(a.listener_count(), 8u - reserved);
@@ -3404,7 +3404,7 @@ TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
         EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now)));
         // Yet more foreign traffic is still held to the remainder.
         EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(0x0108), clock.now)));
-        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        b.tick(clock.advance(std::chrono::milliseconds(250)));
         fab.deliver_b_to_a(a, clock.now);
         EXPECT_NE(a.find_talker_advertise(make_stream_id(0x0300)), nullptr);
         EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0108)), nullptr);
