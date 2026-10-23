@@ -112,7 +112,7 @@ TEST(nanoavb_supervisor_sm, gptp_lost_then_relock_is_dynamic)
     EXPECT_EQ(degrade_count, 1);
 }
 
-TEST(nanoavb_supervisor_sm, timeout_in_init_goes_to_down)
+TEST(nanoavb_supervisor_sm, timeout_in_init_reports_and_keeps_waiting)
 {
     sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
@@ -128,13 +128,20 @@ TEST(nanoavb_supervisor_sm, timeout_in_init_goes_to_down)
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Init);
 
-    // Timeout in Init -> Down (gPTP lock timeout)
+    stop_all_called = false;  // the Down entry hook fired it on the initial UCT
+
+    // Timeout in Init: reported, nothing stopped (ADP keeps advertising),
+    // still waiting for the lock.
     machine.handle_event(ctx, supervisor::Def::Event::Timeout, TimePoint{});
 
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Down);
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Init);
     EXPECT_TRUE(timeout_gptp_called);
-    EXPECT_TRUE(stop_all_called);
+    EXPECT_FALSE(stop_all_called);
     EXPECT_EQ(machine.last_action, "timeout_gptp");
+
+    // A lock after the timeout still makes the entity ready.
+    machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
 }
 
 TEST(nanoavb_supervisor_sm, link_down_from_any_state_to_down)
@@ -174,9 +181,9 @@ TEST(nanoavb_supervisor_sm, null_callbacks_no_crash)
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Init);
 
-    // Timeout in Init -> Down (calls timeout_gptp + stop_all, both null)
+    // Timeout in Init stays in Init (calls timeout_gptp, null)
     machine.handle_event(ctx, supervisor::Def::Event::Timeout, TimePoint{});
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Down);
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Init);
 }
 
 TEST(nanoavb_supervisor_sm, gptp_lost_null_callbacks)

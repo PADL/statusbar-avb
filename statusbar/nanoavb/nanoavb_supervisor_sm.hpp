@@ -44,7 +44,12 @@ struct Context
 //
 //   Down --LinkUp--> Init (gPTP starting) --GptpLocked--> Ready (SRP+streaming)
 //   Ready --GptpLost--> Degraded --GptpLocked--> Ready   (dynamic re-lock)
-//   any --LinkDown--> Down;  Init --Timeout--> Down       (gPTP-lock watchdog)
+//   any --LinkDown--> Down;  Init --Timeout--> Init       (gPTP-lock watchdog)
+//
+// The watchdog only reports: an entity without gPTP keeps advertising (ADP,
+// started with the link, depends on the link alone: Milan v1.3 5.6.3, with
+// the ADPDU's gPTP fields per IEEE 1722.1 6.2.2.16) and keeps waiting for a
+// lock, which still takes it to Ready.
 struct Def
 {
     using Context = supervisor_sm::Context;
@@ -93,7 +98,7 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     // gPTP lock alone enables SRP + streaming (no VLAN-registration gate).
     t.at(S::Init, E::GptpLocked) = T::transition(S::Ready);
     t.at(S::Init, E::LinkDown) = T::transition(S::Down);
-    t.at(S::Init, E::Timeout) = T::action<timeout_gptp>(S::Down);  // gPTP lock timeout
+    t.at(S::Init, E::Timeout) = T::action<timeout_gptp>(S::Init);  // gPTP lock timeout: report, keep waiting
 
     t.at(S::Ready, E::GptpLost) = T::action<degrade_stop_streams>(S::Degraded);
     t.at(S::Ready, E::LinkDown) = T::transition(S::Down);
@@ -107,7 +112,7 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
 
     // Entry hook: every arrival in Down stops all protocols. Also fires
     // after init_iface on the initial UCT edge (a no-op on a fresh
-    // context) and after timeout_gptp (which no longer stops explicitly).
+    // context).
     t.on_entry(S::Down) = T::hook<stop_all>();
 
     return t;

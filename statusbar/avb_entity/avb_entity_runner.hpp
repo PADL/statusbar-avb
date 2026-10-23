@@ -365,6 +365,7 @@ auto run_entity_main_loop(
     constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
     auto last_state_change_time = std::chrono::steady_clock::now();
     auto last_state = entity.state_string();
+    bool lock_timeout_reported = false;  // the gPTP watchdog fired in this stay in the state
     auto last_telemetry_time = std::chrono::steady_clock::now();
 
     if (net_handlers != nullptr) {
@@ -423,6 +424,7 @@ auto run_entity_main_loop(
             }
             last_state_change_time = std::chrono::steady_clock::now();
             last_state = current_state;
+            lock_timeout_reported = false;
         }
 
         auto const now = std::chrono::steady_clock::now();
@@ -442,9 +444,12 @@ auto run_entity_main_loop(
             had_grandmaster = has_gm;
         }
 
-        if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
+        // The gPTP watchdog reports once per stay in Init (as EntityUpkeep):
+        // on_timeout leaves the entity in Init, so re-arming it would log the
+        // lock timeout every GPTP_LOCK_TIMEOUT for as long as gPTP is unlocked.
+        if (current_state == "Init" && !lock_timeout_reported && time_in_state > GPTP_LOCK_TIMEOUT) {
             entity.on_timeout(sm_now);
-            last_state_change_time = now;
+            lock_timeout_reported = true;
         }
 
         if (tool.verbose && ctx.bridge && now - last_telemetry_time >= std::chrono::seconds(1)) {
