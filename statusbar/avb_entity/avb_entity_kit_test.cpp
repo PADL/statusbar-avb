@@ -383,5 +383,6 @@ TEST(avb_entity_kit_profile, config_milan_overrides_the_model)
         bool const expected = setting.value_or(true);
         EXPECT_EQ(kit.host().components().profile.milan, expected);
         EXPECT_EQ(kit.host().components().aem_handler.profile().milan, expected);
+        EXPECT_EQ(kit.host().components().mvu_handler.profile().milan, expected);
     }
 }
