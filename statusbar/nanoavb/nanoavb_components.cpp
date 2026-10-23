@@ -346,6 +346,25 @@ void AtdeccNetHandler::dispatch_frame(
 // NanoAvbComponents constructor
 //
 
+namespace {
+
+/// The CLOCK_DOMAIN descriptors in configuration 0 of @p storage (one, the
+/// MVU handler's default, without a blob).
+auto clock_domain_count(atdecc::aem::DescriptorStorage const* const storage) noexcept -> size_t
+{
+    if (storage == nullptr) {
+        return 1;
+    }
+    size_t count = 0;
+    while (count < MvuCommandHandler::MAX_CLOCK_DOMAINS &&
+           storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, static_cast<uint16_t>(count)).has_value()) {
+        ++count;
+    }
+    return count;
+}
+
+}  // namespace
+
 // Wire each handler against the *member* `entity_model`. Member init runs in
 // declaration order (entity_model first), so the references the handlers take
 // point at the final, stable member — valid for the object's whole lifetime
@@ -368,6 +387,8 @@ NanoAvbComponents::NanoAvbComponents(
 {
     aem_handler.set_profile(profile);
     mvu_handler.set_profile(profile);
+    mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
+    mvu_handler.set_clock_domain_count(clock_domain_count(entity_model.descriptor_storage()));
     acmp_talker.set_milan(profile.milan);
 }
 
@@ -425,6 +446,8 @@ NanoAvbComponents::NanoAvbComponents(
 {
     aem_handler.set_profile(profile);
     mvu_handler.set_profile(profile);
+    mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
+    mvu_handler.set_clock_domain_count(clock_domain_count(handler.descriptor_storage()));
     acmp_talker.set_milan(profile.milan);
 }
 
