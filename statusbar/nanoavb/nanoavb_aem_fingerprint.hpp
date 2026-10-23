@@ -35,4 +35,8 @@ struct AemRawDescriptor
 /// The model fingerprint as 64 lowercase hex characters (SHA-256).
 std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors);
 
+/// The fingerprint of every descriptor in a compiled .aem blob @p blob (its
+/// entity_model_id included, as authored); empty when the blob does not parse.
+std::string aem_fingerprint(std::span<std::uint8_t const> blob);
+
 }  // namespace statusbar::nanoavb
