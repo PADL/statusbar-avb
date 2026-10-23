@@ -14,6 +14,7 @@
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model_adapter.hpp"
+#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -237,6 +238,11 @@ class AemCommandHandler
     /// Set the callbacks for sending responses
     /// @param callbacks The callback interface for sending AEM responses
     void set_callbacks(AemCommandHandlerCallbacks callbacks) { callbacks_ = std::move(callbacks); }
+
+    /// The entity's profile (EntityProfile): Milan v1.2 or classic IEEE 1722.1, a property
+    /// of the model; set by NanoAvbComponents at construction. Default: Milan.
+    void set_entity_profile(EntityProfile const profile) noexcept { entity_profile_ = profile; }
+    [[nodiscard]] auto entity_profile() const noexcept -> EntityProfile { return entity_profile_; }
 
     /// Set only the GET_COUNTERS provider, without disturbing the others
     /// (set_callbacks replaces the whole struct, which would clear send_response
@@ -788,6 +794,10 @@ class AemCommandHandler
     /// IDENTIFY control — i.e. the change must also go to the IDENTIFY multicast.
     [[nodiscard]] auto targets_identify_control(uint16_t command_type, std::span<uint8_t const> body) const noexcept -> bool;
 
+    /// Answer a non-AEM AECP command (ADDRESS_ACCESS, AVC, VENDOR_UNIQUE, ...)
+    /// with its response type and status NOT_IMPLEMENTED, echoing the command.
+    [[nodiscard]] auto send_not_implemented(Eui48 const& dest_mac, std::span<uint8_t const> command) const -> bool;
+
     /// Build and send AECP AEM response.
     /// @param dest_mac Destination MAC address for the response
     /// @param cmd_header The original command header to echo in the response
@@ -797,6 +807,7 @@ class AemCommandHandler
         Eui48 const& dest_mac, AemDu const& cmd_header, uint8_t status, std::span<uint8_t const> response_body) const -> bool;
 
     AemCommandHandlerCallbacks callbacks_;
+    EntityProfile entity_profile_{};
 
     // One of two code paths:
     //  (1) Legacy `EntityModel&` constructor: adapter_storage_ holds an

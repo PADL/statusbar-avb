@@ -399,6 +399,8 @@ def write_json(entity: Entity, path: str | None = None) -> str:
         entity_obj["group"] = entity.group_name
     if entity.serial_number:
         entity_obj["serial"] = entity.serial_number
+    if entity.milan is not None:
+        entity_obj["milan"] = entity.milan
 
     # Configurations (singular/plural)
     if entity.configurations:

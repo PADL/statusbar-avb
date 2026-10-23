@@ -1762,6 +1762,10 @@
           "type": "string",
           "description": "Serial number string."
         },
+        "milan": {
+          "type": "boolean",
+          "description": "The entity's ATDECC profile: true for Milan, false for classic IEEE 1722.1. Omitted: Milan. Carried as blob metadata (the ENTITY descriptor's well-known symbol), never in a served descriptor; a kit runtime setting overrides it."
+        },
         "configuration": {
           "oneOf": [
             {

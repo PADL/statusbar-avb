@@ -11,6 +11,7 @@
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -186,6 +187,10 @@ struct AvbEntityAudioIOConfig
     /// "milan13" applies Milan v1.3 where it says otherwise (a SET to the
     /// value already in force is not notified, 5.4.5.3).
     std::string atdecc_profile{"classic"};
+
+    /// The entity profile: true Milan v1.2, false classic IEEE 1722.1. Unset follows
+    /// the model's (Milan when it says nothing). Separate from atdecc_profile above.
+    std::optional<bool> milan{};
 
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
