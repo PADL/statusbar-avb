@@ -5,13 +5,16 @@
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
+#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -287,6 +290,49 @@ TEST(nanoavb_entity_acquire, acquire_success)
     EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
     EXPECT_TRUE(handler.is_acquired());
     EXPECT_EQ(handler.acquiring_controller(), header.controller_entity_id);
+}
+
+// The profile is a property of the model: the blob's ENTITY descriptor may
+// carry a well-known profile symbol (blob metadata, never served); a runtime
+// setting overrides it; a model that says nothing is Milan.
+TEST(nanoavb_entity_profile, from_model_symbol_with_runtime_override)
+{
+    static_assert(entity_profile_symbol_code("identify") == 0x12619917U);  // aemxml's CRC-32
+    auto blob_with = [](std::optional<uint32_t> const symbol) {
+        AemBlobWriter w;
+        atdecc::aem::DescriptorEntity entity{};
+        entity.configurations_count = 1;
+        w.add(0, atdecc::aem::DESCRIPTOR_ENTITY, 0, make_const_span(entity));
+        atdecc::aem::DescriptorConfiguration config{};
+        w.add(0, atdecc::aem::DESCRIPTOR_CONFIGURATION, 0, make_const_span(config));
+        if (symbol) {
+            w.add_symbol(0, atdecc::aem::DESCRIPTOR_ENTITY, 0, *symbol);
+        }
+        return w.write();
+    };
+    auto profile_of = [](std::vector<uint8_t> const& blob, std::optional<bool> const override) {
+        auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+        EXPECT_TRUE(storage.has_value());
+        return entity_profile_from_model(&*storage, override);
+    };
+    auto const plain = blob_with(std::nullopt);
+    auto const classic = blob_with(entity_profile_symbol_code(ENTITY_PROFILE_CLASSIC_SYMBOL));
+    auto const milan = blob_with(entity_profile_symbol_code(ENTITY_PROFILE_MILAN_SYMBOL));
+    EXPECT_TRUE(profile_of(plain, std::nullopt).milan);
+    EXPECT_FALSE(profile_of(classic, std::nullopt).milan);
+    EXPECT_TRUE(profile_of(milan, std::nullopt).milan);
+    EXPECT_TRUE(profile_of(classic, true).milan);
+    EXPECT_FALSE(profile_of(milan, false).milan);
+    EXPECT_TRUE(entity_profile_from_model(nullptr).milan);
+
+    // The symbol is not part of what a controller reads: the ENTITY descriptor
+    // bytes are the same with or without it.
+    auto const a = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{plain});
+    auto const b = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{classic});
+    auto const da = a->get_descriptor(0, atdecc::aem::DESCRIPTOR_ENTITY, 0);
+    auto const db = b->get_descriptor(0, atdecc::aem::DESCRIPTOR_ENTITY, 0);
+    EXPECT_TRUE(da.has_value() && db.has_value());
+    EXPECT_TRUE(std::equal(da->begin(), da->end(), db->begin(), db->end()));
 }
 
 TEST(nanoavb_entity_acquire, acquire_already_acquired)
@@ -1192,6 +1238,77 @@ TEST(nanoavb_entity_aecp, process_packet_read_descriptor)
     EXPECT_TRUE(resp_header.is_response());
     EXPECT_EQ(resp_header.status(), AEM_STATUS_SUCCESS);
     EXPECT_EQ(resp_header.command_code(), AEM_COMMAND_READ_DESCRIPTOR);
+}
+
+// A non-AEM AECP command (MVU, ADDRESS_ACCESS) is answered NOT_IMPLEMENTED (IEEE 1722.1-2021
+// Clause 9.2.1.1.6, Milan v1.2 Section 5.4.3.3); responses and other targets get nothing.
+TEST(nanoavb_entity_aecp, non_aem_commands_get_not_implemented)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    std::vector<std::vector<uint8_t>> sent;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const&, std::span<uint8_t const> resp) {
+        sent.emplace_back(resp.begin(), resp.end());
+        return true;
+    }});
+    auto const us = model.get_entity().entity_id;
+    // VENDOR_UNIQUE_COMMAND: 22-byte common header, protocol_id 00-1B-C5-0A-C1-00,
+    // command_type GET_MILAN_INFO (0), 2 reserved bytes.
+    std::array<uint8_t, 32> mvu{};
+    AecpDuCommon common{};
+    common.subtype = AvtpSubtype::aecp;
+    common.set_message_type(AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND);
+    common.set_control_data_length(10 + 6 + 2 + 2);
+    common.target_entity_id = us;
+    common.controller_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    common.sequence_id = 0x1234;
+    span_store(std::span<uint8_t>{mvu}.first(AecpDuCommon::LENGTH), common);
+    std::array<uint8_t, 6> const protocol_id{0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00};
+    std::copy(protocol_id.begin(), protocol_id.end(), mvu.begin() + 22);
+    Eui48 const src{0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+
+    EXPECT_TRUE(handler.process_packet(src, mvu, us));
+    EXPECT_EQ(sent.size(), size_t{1});
+    AecpDuCommon reply{};
+    span_load(reply, std::span<uint8_t const>{sent[0]}.first(AecpDuCommon::LENGTH));
+    EXPECT_EQ(reply.message_type(), AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE);
+    EXPECT_EQ(reply.status(), AECP_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(reply.control_data_length(), uint16_t{20});
+    EXPECT_EQ(reply.sequence_id.get(), uint16_t{0x1234});
+    EXPECT_EQ(sent[0].size(), size_t{32});
+    EXPECT_TRUE(std::equal(protocol_id.begin(), protocol_id.end(), sent[0].begin() + 22));
+
+    common.set_message_type(AECP_MESSAGE_TYPE_ADDRESS_ACCESS_COMMAND);
+    span_store(std::span<uint8_t>{mvu}.first(AecpDuCommon::LENGTH), common);
+    EXPECT_TRUE(handler.process_packet(src, mvu, us));
+    EXPECT_EQ(sent.size(), size_t{2});
+    span_load(reply, std::span<uint8_t const>{sent[1]}.first(AecpDuCommon::LENGTH));
+    EXPECT_EQ(reply.message_type(), AECP_MESSAGE_TYPE_ADDRESS_ACCESS_RESPONSE);
+    EXPECT_EQ(reply.status(), AECP_STATUS_NOT_IMPLEMENTED);
+
+    // Malformed: control_data_length short of the AECP common fields
+    // (controller_entity_id + sequence_id): dropped, nothing read past it.
+    common.set_message_type(AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND);
+    common.set_control_data_length(4);
+    span_store(std::span<uint8_t>{mvu}.first(AecpDuCommon::LENGTH), common);
+    EXPECT_FALSE(handler.process_packet(src, mvu, us));
+    EXPECT_EQ(sent.size(), size_t{2});
+    common.set_control_data_length(10 + 6 + 2 + 2);
+    // A reserved command type (10): not answered.
+    common.set_message_type(10);
+    span_store(std::span<uint8_t>{mvu}.first(AecpDuCommon::LENGTH), common);
+    EXPECT_FALSE(handler.process_packet(src, mvu, us));
+    EXPECT_EQ(sent.size(), size_t{2});
+
+    // A response, or a command for someone else: no reply.
+    common.set_message_type(AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE);
+    span_store(std::span<uint8_t>{mvu}.first(AecpDuCommon::LENGTH), common);
+    EXPECT_FALSE(handler.process_packet(src, mvu, us));
+    common.set_message_type(AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND);
+    common.target_entity_id = Eui64{0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09};
+    span_store(std::span<uint8_t>{mvu}.first(AecpDuCommon::LENGTH), common);
+    EXPECT_FALSE(handler.process_packet(src, mvu, us));
+    EXPECT_EQ(sent.size(), size_t{2});
 }
 
 TEST(nanoavb_entity_aecp, process_packet_wrong_target)
