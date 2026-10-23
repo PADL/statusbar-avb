@@ -336,6 +336,13 @@ class AudioCluster:
     symbol: str | None = None
 
 
+# The most mappings one AUDIO_MAP descriptor carries (IEEE 1722.1-2021
+# 7.2.19.1 number_of_mappings: 62, the 508-octet descriptor less its 8-octet
+# header, 8 octets a mapping; atdecc::aem::DescriptorAudioMap::MAX_MAPPINGS).
+# A stream port with more mappings spreads them over consecutive AUDIO_MAPs.
+AUDIO_MAP_MAX_MAPPINGS = 62
+
+
 @dataclass
 class AudioMap:
     """AUDIO_MAP descriptor data."""
