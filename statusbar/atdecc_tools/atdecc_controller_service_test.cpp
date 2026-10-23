@@ -10,9 +10,14 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_simple.hpp"
+#include "statusbar/buffer/buffer.hpp"
+#include "statusbar/nanoavb/nanoavb_local_port.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <unistd.h>
+
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <span>
 #include <string>
@@ -416,5 +421,44 @@ TEST(controller_service_seam, unsolicited_responses_surface_as_events)
 //
 // Test Runner
 //
+
+// The raw backend over a local entity's ATDECC socket: discovery and the
+// entity's replies travel as bare AVTPDUs, with no raw socket.
+TEST(controller_service_local, discovers_an_entity_over_its_socket)
+{
+    auto const path = std::format("/tmp/atdecc-tools-local-{}.sock", ::getpid());
+    auto entity = nanoavb::AtdeccLocalPort::open({.path = path});
+    EXPECT_TRUE(entity.has_value());
+    auto& port = **entity;
+    size_t discovers = 0;
+    port.set_receiver([&](int64_t, Eui48 const& src, std::span<uint8_t const> frame) {
+        AdpDu adp{};
+        span_load(adp, frame);
+        if (!adp.is_entity_discover()) {
+            return;
+        }
+        ++discovers;
+        AdpDu available{};
+        available.init_entity_available(ENTITY_A, 10);
+        (void)port.send(src, make_const_span(available));
+    });
+
+    std::string error;
+    auto service = make_local_controller_service(path, Eui64{0x0A, 0xE9, 0x1B, 0x01, 0, 0, 0, 1}, error);
+    EXPECT_TRUE(service != nullptr);
+    std::vector<Eui64> added;
+    ControllerServiceSink sink{};
+    sink.on_entity_added = [&added](DiscoveredEntity const& e) { added.push_back(e.adpdu.entity_id); };
+    service->set_sink(std::move(sink));
+    service->start();
+    service->discover_all();
+    port.on_ready(0);
+    EXPECT_EQ(discovers, size_t{1});
+    service->pollable()->on_ready(0);
+    EXPECT_EQ(added.size(), size_t{1});
+    EXPECT_TRUE(added.front() == ENTITY_A);
+    EXPECT_TRUE(service->find_entity(ENTITY_A) != nullptr);
+    ::unlink((path + ".lock").c_str());
+}
 
 TEST_MAIN(statusbar_atdecc_tools, atdecc_controller_service_test)
