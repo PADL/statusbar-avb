@@ -66,7 +66,29 @@ auto aaf_timed_packet(
         .pts_ns = pts_ns,
         .pts_valid = ctx.has_valid_timestamp,
         .tu = pdu.tu(),
-        .mr = pdu.mr()};
+        .mr = pdu.mr(),
+        .sequence_num = pdu.get_sequence_num()};
+}
+
+auto aaf_header_matches_format(StreamFormatFields const& format, avtp::AafPdu const& pdu) noexcept -> bool
+{
+    if (format.kind != StreamKind::aaf || pdu.get_format() != format.aaf_format ||
+        avtp::aaf_nsr_to_hz(static_cast<uint8_t>(pdu.nsr())) != format.sample_rate_hz ||
+        pdu.channels_per_frame() != format.channels) {
+        return false;
+    }
+    size_t const bps = avtp::aaf_bytes_per_sample(format.aaf_format);
+    if (bps != 0) {
+        uint8_t const depth = pdu.get_bit_depth();
+        if (depth == 0 || depth > bps * 8) {
+            return false;
+        }
+    }
+    if (format.aaf_samples_per_frame != 0 &&
+        pdu.get_stream_data_length() != avtp::aaf_payload_size(format.aaf_format, format.channels, format.aaf_samples_per_frame)) {
+        return false;
+    }
+    return true;
 }
 
 auto aaf_rx_packet(
@@ -360,7 +382,8 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
                 .pts_ns = pts_first,
                 .pts_valid = slot->am824->has_valid_anchor,
                 .tu = pdu.stream_header.tu(),
-                .mr = pdu.stream_header.mr()});
+                .mr = pdu.stream_header.mr(),
+                .sequence_num = pdu.stream_header.sequence_num.get()});
         }
     } else if (slot->aaf) {
         // --- AAF ---
@@ -369,6 +392,21 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             slot->rx_bad.add(1);
             update_stream_input_counters(
                 *slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
+            return;
+        }
+        if (!aaf_header_matches_format(slot->spec.format, *pdu_opt)) {
+            // Milan v1.2 Section 4.4.2.2: discard, counted in UNSUPPORTED_FORMAT.
+            update_stream_input_counters(
+                *slot,
+                pdu_opt->get_sequence_num(),
+                pdu_opt->get_avtp_timestamp(),
+                pdu_opt->tv(),
+                pdu_opt->tu(),
+                pdu_opt->mr(),
+                /*format_ok=*/false,
+                0,
+                /*ts_sparse=*/false,
+                gptp_now_ns);
             return;
         }
         std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);

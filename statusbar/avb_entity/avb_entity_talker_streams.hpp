@@ -146,6 +146,24 @@ struct TalkerStreams
         size_t samples,
         std::span<float const> src);
 
+    /// How long AVTP tu stays set after a grandmaster change (Milan v1.2 Section 4.3.5.2, Annex
+    /// B.1.1); tu is also set while no grandmaster is known. Reactor thread writes, media thread
+    /// reads; an entity that never reports gPTP state never sets tu.
+    static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
+    /// A grandmaster was found or changed at steady-clock time @p now_ns.
+    void note_grandmaster_changed(int64_t const now_ns) noexcept
+    {
+        tu_until_ns_.store(now_ns + TU_AFTER_GM_CHANGE_NS, std::memory_order_relaxed);
+        gptp_lost_.store(false, std::memory_order_relaxed);
+    }
+    /// No grandmaster is known (the Announces stopped).
+    void note_grandmaster_lost() noexcept { gptp_lost_.store(true, std::memory_order_relaxed); }
+    /// Whether a PDU stamped at steady-clock time @p now_ns carries tu = 1.
+    [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
+    {
+        return gptp_lost_.load(std::memory_order_relaxed) || now_ns < tu_until_ns_.load(std::memory_order_relaxed);
+    }
+
     /// VLAN ID the stream frames are tagged with: config.vlan_id until the
     /// Class A VID in use changes (adopted from the bridge's MSRP Domain,
     /// Milan v1.2 Section 4.2.7.2.1). Reactor thread writes, media thread reads.
@@ -201,8 +219,10 @@ struct TalkerStreams
     static constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PDU = 64;
 
     // References / values (bound at construction).
-    TalkerStreamsConfig config_;     ///< destructured entity config (rate + VLAN/PCP), by value
-    std::atomic<uint16_t> vlan_id_;  ///< VLAN tag for stream frames (config_.vlan_id, or the adopted Domain VID)
+    TalkerStreamsConfig config_;           ///< destructured entity config (rate + VLAN/PCP), by value
+    std::atomic<uint16_t> vlan_id_;        ///< VLAN tag for stream frames (config_.vlan_id, or the adopted Domain VID)
+    std::atomic<int64_t> tu_until_ns_{0};  ///< steady-clock end of the post-GM-change tu window
+    std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<uint64_t> const& last_gptp_ns_;
     uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
@@ -233,7 +253,8 @@ struct TalkerStreams
     uint16_t frames,
     uint64_t first_index,
     uint64_t pts_ns,
-    StreamRawRenderFn const& render) -> size_t;
+    StreamRawRenderFn const& render,
+    bool timestamp_uncertain = false) -> size_t;
 
 // ---------------------------------------------------------------------------
 // CRF timestamp math (pure, socket-free -- unit-testable in isolation).
@@ -270,6 +291,9 @@ void fill_crf_timestamps(
 /// and sequence. Returns the length (counters advanced), or 0 with @p ctx untouched for a count
 /// other than ctx.timestamps_per_packet (or zero) or a short @p frame. Pure.
 [[nodiscard]] auto serialize_crf_raw(
-    avtp::CrfStreamOutputContext& ctx, std::span<uint8_t> frame, std::span<uint64_t const> timestamps) -> size_t;
+    avtp::CrfStreamOutputContext& ctx,
+    std::span<uint8_t> frame,
+    std::span<uint64_t const> timestamps,
+    bool timestamp_uncertain = false) -> size_t;
 
 }  // namespace statusbar::avb_entity

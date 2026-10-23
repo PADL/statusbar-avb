@@ -19,6 +19,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/tsn/tsn_clock_identity.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -56,24 +57,41 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
             continue;
         }
 
-        // Check if it's an Announce message and extract grandmaster identity
         if (auto const* announce = std::get_if<AnnounceMessage>(&*msg)) {
-            auto const new_gm = announce->grandmaster_identity;
-            bool const gm_changed = (new_gm != grandmaster_identity_);
-
-            if (gm_changed) {
-                grandmaster_identity_ = new_gm;
-
-                // Invoke callback if set — convert nanoseconds to net::TimePoint for compatibility
-                if (callbacks_.grandmaster_id_changed) {
-                    auto const tp = now_ns;
-                    callbacks_.grandmaster_id_changed(tp, new_gm, *announce);
-                }
-            }
-            last_announce_time_ns_ = now_ns;
-            last_announce_ = *announce;
-            has_announce_ = true;
+            on_announce(*announce, now_ns);
         }
+    }
+}
+
+void GptpAnnounceHandler::on_announce(gptp::AnnounceMessage const& announce, int64_t const now_ns)
+{
+    auto const new_gm = announce.grandmaster_identity;
+    if (new_gm != grandmaster_identity_) {
+        grandmaster_identity_ = new_gm;
+        if (callbacks_.grandmaster_id_changed) {
+            callbacks_.grandmaster_id_changed(now_ns, new_gm, announce);
+        }
+    }
+    // announceReceiptTimeout x the sender's announce interval, at the slow end of Milan v1.2
+    // Tables 4.1-4.2 (+50%: 4.5 s at a 1 s interval); the log interval is kept to [-3, 4].
+    auto const log_interval = std::clamp<int>(static_cast<int8_t>(announce.header.log_message_interval.get()), -3, 4);
+    int64_t const interval_ns =
+        log_interval >= 0 ? (INT64_C(1'000'000'000) << log_interval) : (INT64_C(1'000'000'000) >> -log_interval);
+    announce_timeout_ns_ =
+        ANNOUNCE_RECEIPT_TIMEOUT * interval_ns * ANNOUNCE_INTERVAL_TOLERANCE_NUM / ANNOUNCE_INTERVAL_TOLERANCE_DEN;
+    last_announce_time_ns_ = now_ns;
+    last_announce_ = announce;
+    has_announce_ = true;
+}
+
+void GptpAnnounceHandler::tick(int64_t const now_ns)
+{
+    if (!grandmaster_identity_.is_set() || !has_announce_ || now_ns - last_announce_time_ns_ <= announce_timeout_ns_) {
+        return;
+    }
+    grandmaster_identity_ = gptp::ClockIdentity{};
+    if (callbacks_.grandmaster_lost) {
+        callbacks_.grandmaster_lost(now_ns);
     }
 }
 

@@ -250,3 +250,47 @@ TEST(raw_crf, transmit_without_a_socket_sends_nothing)
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)
+
+// Milan v1.2 Section 4.3.5.2 / AVTP 4.4.4.7: the raw serializers carry the tu
+// bit they are given (TalkerStreams passes timestamp_uncertain()).
+TEST(raw_tu, aaf_and_crf_carry_the_timestamp_uncertain_bit)
+{
+    avtp::AafStreamOutputContext aaf{
+        avtp::StreamId{}, avtp::AafFormat::int_32bit, avtp::AafSampleRate::rate_48_khz, 2, 32, /*pres_offset=*/0};
+    std::array<uint8_t, 128> frame{};
+    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
+    size_t len = avb_entity::serialize_aaf_raw(aaf, frame, 6, 0, 1'000, render);
+    EXPECT_FALSE(avtp::aaf_parse_header(std::span<uint8_t const>{frame.data(), len})->tu());
+    len = avb_entity::serialize_aaf_raw(aaf, frame, 6, 6, 126'000, render, /*timestamp_uncertain=*/true);
+    EXPECT_TRUE(avtp::aaf_parse_header(std::span<uint8_t const>{frame.data(), len})->tu());
+
+    avtp::CrfStreamOutputContext crf{avtp::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint64_t, 1> const ts{0x0123'4567'89AB'CDEFULL};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> crf_frame{};
+    EXPECT_EQ(avb_entity::serialize_crf_raw(crf, crf_frame, ts), crf_frame.size());
+    EXPECT_FALSE(avtp::crf_parse_header(crf_frame)->tu());
+    EXPECT_EQ(avb_entity::serialize_crf_raw(crf, crf_frame, ts, /*timestamp_uncertain=*/true), crf_frame.size());
+    EXPECT_TRUE(avtp::crf_parse_header(crf_frame)->tu());
+}
+
+// Milan v1.2 Annex B.1.1: "In case of a change of grandmaster, the tu bit
+// shall be set to 1 for the duration of 0.25 seconds"; and while no
+// grandmaster is known at all.
+TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lost)
+{
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<uint64_t> last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
+    constexpr int64_t t0 = 5'000'000'000;
+    EXPECT_FALSE(talker.timestamp_uncertain(t0));  // never told: certain
+    talker.note_grandmaster_changed(t0);
+    EXPECT_TRUE(talker.timestamp_uncertain(t0));
+    EXPECT_TRUE(talker.timestamp_uncertain(t0 + 249'999'999));
+    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 250'000'000));
+    talker.note_grandmaster_lost();
+    EXPECT_TRUE(talker.timestamp_uncertain(t0 + 10'000'000'000));
+    talker.note_grandmaster_changed(t0 + 20'000'000'000);  // a grandmaster again
+    EXPECT_TRUE(talker.timestamp_uncertain(t0 + 20'100'000'000));
+    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 20'300'000'000));
+}

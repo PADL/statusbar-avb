@@ -3,6 +3,8 @@
 
 #include "statusbar/nanoavb/nanoavb_gptp_sm.hpp"
 
+#include "statusbar/gptp/gptp_messages.hpp"
+#include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/sm/sm_test_support.hpp"
 #include "statusbar/test/test.hpp"
@@ -427,3 +429,49 @@ TEST(nanoavb_gptp_sm, context_time_locked_tracks_state)
 //
 
 TEST_MAIN(statusbar_nanoavb, nanoavb_gptp_sm_test)
+
+// The grandmaster expires after announceReceiptTimeout announce intervals without an
+// Announce (IEEE 802.1AS Clause 10.7.3.2); the next Announce reports it again.
+TEST(nanoavb_gptp_announce, grandmaster_expires_after_the_receipt_timeout)
+{
+    int changes = 0;
+    int losses = 0;
+    statusbar::nanoavb::GptpAnnounceHandler handler{
+        "nanoavb-announce-test0",  // no such interface: no socket, on_announce driven directly
+        statusbar::nanoavb::GptpAnnounceCallbacks{
+            .grandmaster_id_changed =
+                [&](int64_t, ::statusbar::gptp::ClockIdentity const&, ::statusbar::gptp::AnnounceMessage const&) { ++changes; },
+            .grandmaster_lost = [&](int64_t) { ++losses; }}};
+    ::statusbar::gptp::AnnounceMessage announce{};
+    announce.grandmaster_identity = ::statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+    announce.header.log_message_interval = 0;  // 1 s: lost after 4.5 s (Milan Table 4.2's max)
+
+    constexpr int64_t t0 = 100'000'000'000;
+    handler.on_announce(announce, t0);
+    EXPECT_TRUE(handler.has_grandmaster());
+    EXPECT_EQ(changes, 1);
+    handler.tick(t0 + 1'400'000'000);
+    handler.on_announce(announce, t0 + 1'500'000'000);  // a slow (+50%) sender, same grandmaster
+    EXPECT_EQ(changes, 1);
+    handler.tick(t0 + 4'500'000'000);
+    EXPECT_TRUE(handler.has_grandmaster());
+    handler.tick(t0 + 5'999'999'999);  // 4.5 s after it, less a ns: one Announce lost is tolerated
+    EXPECT_TRUE(handler.has_grandmaster());
+    handler.tick(t0 + 6'000'000'001);
+    EXPECT_FALSE(handler.has_grandmaster());
+    EXPECT_EQ(losses, 1);
+    handler.tick(t0 + 9'000'000'000);  // reported once
+    EXPECT_EQ(losses, 1);
+    handler.on_announce(announce, t0 + 10'000'000'000);  // back: a change again
+    EXPECT_TRUE(handler.has_grandmaster());
+    EXPECT_EQ(changes, 2);
+
+    // logMessageInterval -3 (125 ms): lost after 562.5 ms.
+    announce.header.log_message_interval = static_cast<uint8_t>(-3);
+    handler.on_announce(announce, t0 + 11'000'000'000);
+    handler.tick(t0 + 11'562'500'000);
+    EXPECT_TRUE(handler.has_grandmaster());
+    handler.tick(t0 + 11'562'500'001);
+    EXPECT_FALSE(handler.has_grandmaster());
+    EXPECT_EQ(losses, 2);
+}

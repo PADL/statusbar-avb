@@ -99,6 +99,11 @@ struct ListenerStreamSlot
     std::span<uint8_t const> payload,
     uint64_t gptp_now_ns) noexcept -> StreamRxPacket;
 
+/// Whether @p pdu's AAF header carries @p format, the STREAM_INPUT's current format (Milan v1.2
+/// Section 4.4.2.2): sample format, nominal rate, channels and samples per frame match, and the
+/// bit depth is valid for the container. See docs/MILAN_LISTENER.md.
+[[nodiscard]] auto aaf_header_matches_format(StreamFormatFields const& format, avtp::AafPdu const& pdu) noexcept -> bool;
+
 struct ListenerStreams
 {
     /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns).
