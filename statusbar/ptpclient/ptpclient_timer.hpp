@@ -13,10 +13,13 @@
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <atomic>
+#include <climits>
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -160,6 +163,7 @@ class PtpTimer : public PtpTimerBase
         }
 
         stats_.reset();
+        headroom_.reset();
         reset_recovery_count();
         reset_missed_cycles();
 
@@ -180,8 +184,8 @@ class PtpTimer : public PtpTimerBase
     /// Check if timer is running
     [[nodiscard]] auto is_running() const noexcept -> bool { return is_running_atomic(); }
 
-    /// Get a snapshot of wake statistics (thread-safe)
-    /// @return Consistent copy of all statistics
+    /// Wake statistics (thread-safe copy): error = actual minus scheduled wake (positive = late),
+    /// duration = callback time per wake, skipped_counts = periods skipped by a late wake.
     [[nodiscard]] auto stats() const noexcept -> stats::AtomicWakeStats::Snapshot { return stats_.snapshot(); }
 
     /// Get configured period in nanoseconds
@@ -199,6 +203,20 @@ class PtpTimer : public PtpTimerBase
     /// Get the total number of missed cycles (periods skipped due to running behind)
     [[nodiscard]] auto missed_cycles() const noexcept -> int64_t { return load_missed_cycles(); }
 
+    /// Wake headroom (thread-safe copy): per wake that slept, what was left of the spin window
+    /// (BridgeSamplingParams::wake_refine_spin_ns) when the sleep returned; negative = overran.
+    /// The OS wake latency is the window minus the headroom.
+    [[nodiscard]] auto wake_headroom() const noexcept -> stats::AtomicTimeStats::Snapshot { return headroom_.snapshot(); }
+
+    /// Name the timer thread (default "media"; Linux keeps 15 characters, the
+    /// rest is dropped). Copied; takes effect at the next start(). Call it
+    /// while the timer is stopped.
+    void set_thread_name(std::string_view const name) noexcept
+    {
+        thread_name_ = {};
+        name.copy(thread_name_.data(), thread_name_.size() - 1);
+    }
+
   private:
     /// Process a successful wake: update stats, call callback, advance schedule
     /// @return wake error in nanoseconds
@@ -206,17 +224,23 @@ class PtpTimer : public PtpTimerBase
     {
         int64_t const error_ns = actual_wake_ptp - next_wake;
         stats_.update(error_ns);
+        int64_t const callback_start = read_monotonic_ns();
 
         TimerWakeInfo info{
-            .scheduled_time_ns = next_wake, .actual_time_ns = actual_wake_ptp, .error_ns = error_ns, .wake_count = stats_.count()};
+            .scheduled_time_ns = next_wake,
+            .actual_time_ns = actual_wake_ptp,
+            .error_ns = error_ns,
+            .wake_count = stats_.count()};
         callback_(success(info));
 
+        int64_t periods_behind = 0;
         next_wake += period_ns_;
         if (actual_wake_ptp > next_wake) {
-            int64_t const periods_behind = ((actual_wake_ptp - next_wake) / period_ns_) + 1;
+            periods_behind = ((actual_wake_ptp - next_wake) / period_ns_) + 1;
             next_wake += periods_behind * period_ns_;
             add_missed_cycles(periods_behind);
         }
+        stats_.update_duration(read_monotonic_ns() - callback_start, periods_behind);
 
         return error_ns;
     }
@@ -228,6 +252,7 @@ class PtpTimer : public PtpTimerBase
 
     void timer_loop_impl()
     {
+        realtime::set_current_thread_name(thread_name_.data());
         // Set realtime affinity if set (log failure but continue)
         if (cpu_affinity_ >= 0) {
             (void)realtime::set_realtime_affinity_logged(cpu_affinity_, "PTP timer");
@@ -266,7 +291,8 @@ class PtpTimer : public PtpTimerBase
                 aligned = true;
             }
 
-            auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_);
+            int64_t headroom_ns = NO_HEADROOM;
+            auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_, &headroom_ns);
 
             if (!wake_result) {
                 if (!is_running_atomic()) {
@@ -283,6 +309,9 @@ class PtpTimer : public PtpTimerBase
             // Updates wake stats, invokes the callback, and advances the
             // schedule (catching up if we ran behind). A late wake is recorded
             // in the stats but never stops the timer.
+            if (headroom_ns != NO_HEADROOM) {
+                headroom_.update(headroom_ns);
+            }
             (void)process_wake(*wake_result, next_wake);
         }
     }
@@ -304,7 +333,10 @@ class PtpTimer : public PtpTimerBase
     Callback callback_;
     // Atomics are in PtpTimerBase
     std::thread timer_thread_;
+    static constexpr int64_t NO_HEADROOM = INT64_MIN;  ///< the wake did not sleep
+    std::array<char, 16> thread_name_{'m', 'e', 'd', 'i', 'a'};
     stats::AtomicWakeStats stats_;
+    stats::AtomicTimeStats headroom_;
 };
 
 /// Factory function to create a PtpTimer with type deduction

@@ -368,6 +368,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
 
     bool const rx_rt = entity.config().stream_rx_rt_timer;
     if (rx_rt) {
+        rx_timer.set_thread_name("stream-rx");
         if (auto const rs = rx_timer.start(); !rs) {
             std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
         } else {

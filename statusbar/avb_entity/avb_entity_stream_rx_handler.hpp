@@ -25,6 +25,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
+#include <array>
 #include <cstddef>
 #include <span>
 #include <string_view>
@@ -50,6 +51,11 @@ class StreamRxHandler : public net::Pollable
             !opened) {
             error_ = opened.error();
         }
+        // Only the stream formats a listener decodes (ListenerStreams::
+        // on_stream_rx_frame): no ATDECC/MAAP control frames on the media path.
+        static constexpr std::array<uint8_t, 3> stream_subtypes{
+            avtp::AvtpSubtype::iec_61883_iidc, avtp::AvtpSubtype::aaf, avtp::AvtpSubtype::crf};
+        (void)sock_.set_subtype_filter(stream_subtypes);
         for (size_t i = 1; i < groups.size(); ++i) {
             (void)sock_.join_multicast(groups[i]);
         }

@@ -5,12 +5,15 @@
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <string_view>
 #include <system_error>
 #include <thread>
 
@@ -434,6 +437,94 @@ TEST(ptp_bridge_sleep, sleep_returns_wake_time)
     EXPECT_TRUE(result.has_value());
     // Wake time should be close to or after the deadline
     EXPECT_TRUE(*result >= deadline_ptp.time_ns - 1'000'000LL);  // Within 1ms tolerance
+
+    bridge.stop_sampling();
+}
+
+TEST(ptp_bridge_sleep, sleep_reports_spin_headroom)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+    params.wake_refine_spin_ns = 200'000;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    auto const mono_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto const deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 5'000'000LL);
+
+    int64_t headroom = INT64_MIN;
+    auto const result = bridge.sleep_until_ptp(deadline_ptp.time_ns, &headroom);
+    EXPECT_TRUE(result.has_value());
+    // The sleep woke about the spin window early (plus a slew guard, less the OS wake latency):
+    // never as early as the whole sleep; on a loaded host possibly late.
+    EXPECT_TRUE(headroom != INT64_MIN);
+    EXPECT_TRUE(headroom < 5'000'000);
+    EXPECT_TRUE(headroom > -5'000'000);
+
+    bridge.stop_sampling();
+}
+
+TEST(ptp_timer_stats, headroom_duration_and_thread_name)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+    params.wake_refine_spin_ns = 50'000;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    std::atomic<int> wakes{0};
+    std::array<char, 16> name{};
+    auto timer = make_ptp_timer(
+        bridge,
+        1'000'000,
+        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
+            if (!info) {
+                return;
+            }
+            if (wakes.fetch_add(1) == 0) {
+#if defined(__linux__) || defined(__APPLE__)
+                (void)pthread_getname_np(pthread_self(), name.data(), name.size());
+#endif
+                std::this_thread::sleep_for(std::chrono::microseconds(200));  // measurable work
+            }
+        },
+        0,
+        /*enable_realtime=*/false,
+        /*cpu_affinity=*/-1);
+    timer.set_thread_name("test-timer");
+    EXPECT_TRUE(timer.start().has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    timer.stop();
+
+    EXPECT_TRUE(wakes.load() > 5);
+    auto const headroom = timer.wake_headroom();
+    auto const stats = timer.stats();
+    // Headroom is reported only for wakes that slept: the first aligned wake
+    // can fall inside the spin window and not sleep.
+    EXPECT_TRUE(headroom.count <= stats.error.count);
+    EXPECT_TRUE(headroom.count + 1 >= stats.error.count);
+    EXPECT_TRUE(headroom.max_ns < 1'000'000);  // never a whole period early
+    EXPECT_EQ(stats.duration.count, stats.error.count);
+    EXPECT_TRUE(stats.duration.max_ns >= 200'000);
+    EXPECT_EQ(stats.skipped_counts, timer.missed_cycles());
+#if defined(__linux__) || defined(__APPLE__)
+    EXPECT_EQ(std::string_view{name.data()}, std::string_view{"test-timer"});
+#endif
 
     bridge.stop_sampling();
 }

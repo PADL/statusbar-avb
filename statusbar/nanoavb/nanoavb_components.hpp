@@ -212,6 +212,9 @@ class MaapNetHandler : public net::Pollable
         : handler_{handler}
     {
         (void)context_.open(interface_name, ETHERTYPE_AVTP, &MAAP_MULTICAST_MAC);
+        // MAAP only: not woken by every AVB stream frame on the segment.
+        static constexpr std::array<uint8_t, 1> maap_subtype{avtp::AvtpSubtype::maap};
+        (void)context_.set_subtype_filter(maap_subtype);
         // All MAAP PDUs go to the MAAP multicast group; route the handler's frames
         // out through this socket.
         handler_.set_send(
@@ -264,7 +267,7 @@ class AtdeccNetHandler : public net::Pollable
     static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
     /// Periodic-status interval, wall clock. (Was a tick-count modulus that
     /// assumed a 10 ms tick — reactors tick ~1 kHz, which made this line spam
-    /// journald ~10x/second.)
+    /// journald ~10x/second.) The line is pure telemetry, logged at Debug.
     static constexpr int64_t STATUS_INTERVAL_NS = 1'000'000'000;
 
     /// @param interface_name The network interface name
@@ -287,6 +290,11 @@ class AtdeccNetHandler : public net::Pollable
         , mvu_handler_{mvu_handler}
     {
         (void)context_.open(interface_name, ETHERTYPE_AVTP, &atdecc::ATDECC_MULTICAST_MAC);
+        // ADP, AECP and ACMP only (dispatch_frame): not woken by every AVB
+        // stream frame on the segment.
+        static constexpr std::array<uint8_t, 3> atdecc_subtypes{
+            avtp::AvtpSubtype::adp, avtp::AvtpSubtype::aecp, avtp::AvtpSubtype::acmp};
+        (void)context_.set_subtype_filter(atdecc_subtypes);
     }
 
     /// Check if the handler is valid (socket opened successfully)

@@ -319,7 +319,10 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
 auto TalkerStreams::open_tx(std::string_view const interface_name, TxPcapConfig const& pcap) -> Status
 {
     // qdisc-bypass: our own egress must not be re-received by our RX socket.
-    auto status = stream_tx_.open(interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
+    // Transmit-only: nothing reads this socket, so it must not be handed (and
+    // drop) a copy of every AVTP frame on the host.
+    auto status =
+        stream_tx_.open(interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true, /*transmit_only=*/true);
     if (!status) {
         return status;
     }

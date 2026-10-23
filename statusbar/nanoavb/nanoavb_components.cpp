@@ -197,7 +197,8 @@ void AtdeccNetHandler::tick(int64_t now_ns)
 
     ++tick_count_;
 
-    // Periodic status (wall-clock gated; emitted only when a logger is set).
+    // Periodic telemetry (wall-clock gated; emitted only when a logger is set,
+    // at Debug: state changes and warnings are logged where they happen).
     if (logger_.has_value() && now_ns - last_status_ns_ >= STATUS_INTERVAL_NS) {
         last_status_ns_ = now_ns;
         log_status();
@@ -222,7 +223,8 @@ void AtdeccNetHandler::log_status()
         }
     }
 
-    logger_->status(
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) - tick() calls this only with a logger set
+    logger_->debug(
         "ticks={} ptp_wakes={} adp={} acmp_t={} acmp_l={}",
         tick_count_,
         wakes,

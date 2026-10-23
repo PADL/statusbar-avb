@@ -342,11 +342,11 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// @return current PTP time, or error if epoch changed or mapping unhealthy
     [[nodiscard]] auto finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>;
 
-    /// Sleep until a PTP deadline by converting to monotonic and sleeping
-    /// @param ptp_deadline_ns Target PTP time in nanoseconds
-    /// @return Current PTP time on success (allows caller to measure wake accuracy), error otherwise
-    /// @note On Linux, uses clock_nanosleep for precision. On other platforms, uses std::this_thread::sleep_until.
-    [[nodiscard]] auto sleep_until_ptp(int64_t ptp_deadline_ns) noexcept -> StatusValue<int64_t>;
+    /// Sleep (clock_nanosleep) to wake_refine_spin_ns before @p ptp_deadline_ns, then spin on
+    /// CLOCK_MONOTONIC_RAW to it. @p spin_headroom_ns, if given, gets what was left of the spin
+    /// window (negative on overrun), only when it slept. Returns the PTP time at wake, or an error.
+    [[nodiscard]] auto sleep_until_ptp(int64_t ptp_deadline_ns, int64_t* spin_headroom_ns = nullptr) noexcept
+        -> StatusValue<int64_t>;
 
     // Manual Epoch Control
 

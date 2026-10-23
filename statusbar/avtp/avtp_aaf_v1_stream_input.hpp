@@ -105,9 +105,10 @@ void aaf_v1_stream_deserialize(
 
     ctx.advance_samples(samples);
 
-    // Decode payload into per-channel scratch buffers
-    // AAF wire layout: channel-interleaved, big-endian
-    std::array<std::array<float, MaxSamples>, MaxChannels> scratch{};
+    // Decode the channel-interleaved, big-endian payload into per-channel scratch buffers. Not
+    // zeroed (64 KB on the real-time stack at the defaults): only [0, channels) x [0, samples) is
+    // written and handed on.
+    std::array<std::array<float, MaxSamples>, MaxChannels> scratch;  // NOLINT(cppcoreguidelines-pro-type-member-init)
 
     size_t offset = 0;
     for (uint16_t s = 0; s < samples; ++s) {
