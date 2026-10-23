@@ -61,14 +61,17 @@ struct PersistedPresentationOffset
     auto operator==(PersistedPresentationOffset const&) const -> bool = default;
 };
 
-/// A listener binding: the talker a stream input connects to (a classic fast-connect goal) and
-/// the input's format when saved (0: unknown); not restored onto an input whose format differs.
+/// A listener binding: the talker a stream input connects to and the input's
+/// format when saved (0: unknown; not restored onto a different format), plus
+/// a Milan input's binding parameters (Milan v1.2 Section 5.3.8.3, 5.3.8.7).
 struct PersistedListenerBinding
 {
     uint16_t stream_input{0};
     uint64_t talker_entity_id{0};
     uint16_t talker_unique_id{0};
     uint64_t format{0};
+    uint64_t controller_entity_id{0};
+    bool started{true};
 
     auto operator==(PersistedListenerBinding const&) const -> bool = default;
 };
