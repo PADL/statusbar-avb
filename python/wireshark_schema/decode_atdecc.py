@@ -340,6 +340,8 @@ def _mvu(data: bytes, stop: int, is_command: bool, out: dict) -> None:
     specs = A.MVU_PAYLOADS.get(code)
     spec = (specs[0] if is_command else specs[1]) if specs else None
     at = A.MVU_HEADER_LENGTH
+    if spec is not None and spec.long_form is not None and stop - at >= spec.long_form.length:
+        spec = spec.long_form
     if spec is not None and stop - at >= spec.length:
         out.update(decode_layout(spec.layout, data))
         at += spec.length

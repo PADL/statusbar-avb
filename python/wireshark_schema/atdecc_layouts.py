@@ -1075,6 +1075,8 @@ class MvuSpec:
     length: int
     optional_tail: str | None
     optional_tail_length: int
+    # decoded in place of this one when the payload is at least its length
+    long_form: "MvuSpec | None" = None
 
 
 def _mvu_spec(sname: str | None) -> MvuSpec | None:
@@ -1087,6 +1089,7 @@ def _mvu_spec(sname: str | None) -> MvuSpec | None:
         STD.MVU_PAYLOAD_STRUCTS[sname]["length"],
         STD.MVU_OPTIONAL_TAIL[sname][0] if sname in STD.MVU_OPTIONAL_TAIL else None,
         STD.MVU_OPTIONAL_TAIL[sname][1] if sname in STD.MVU_OPTIONAL_TAIL else 0,
+        _mvu_spec(STD.MVU_LONG_FORM.get(sname)),
     )
 
 

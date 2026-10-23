@@ -120,7 +120,14 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     current_src_mac_ = {};
 
     // Build and send response
-    return send_response(src_mac, header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    bool const sent = send_response(src_mac, header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    // Then let the entity save a changed setting (after the response: a
+    // write to non-volatile storage must not delay it).
+    if (response.status == AEM_STATUS_SUCCESS && is_persistent_setting_command(header.command_code()) &&
+        callbacks_.on_settings_changed) {
+        callbacks_.on_settings_changed(header.command_code());
+    }
+    return sent;
 }
 
 auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -386,13 +393,18 @@ auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, s
 
 auto AemCommandHandler::check_exclusive_access(AemDu const& header) const noexcept -> std::optional<uint8_t>
 {
+    return exclusive_access_status(header.controller_entity_id);
+}
+
+auto AemCommandHandler::exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>
+{
     // ENTITY_ACQUIRED takes precedence over ENTITY_LOCKED (an acquisition is the
     // stronger claim). Either held by a controller OTHER than the sender blocks the
     // mutation; the owning controller (or a free entity) proceeds.
-    if (acquired_ && !(acquiring_controller_ == header.controller_entity_id)) {
+    if (acquired_ && !(acquiring_controller_ == controller_entity_id)) {
         return AEM_STATUS_ENTITY_ACQUIRED;
     }
-    if (locked_ && !(locking_controller_ == header.controller_entity_id)) {
+    if (locked_ && !(locking_controller_ == controller_entity_id)) {
         return AEM_STATUS_ENTITY_LOCKED;
     }
     return std::nullopt;
@@ -678,6 +690,9 @@ void AemCommandHandler::answer_completed(PendingCommand const& done, uint8_t con
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
         emit_unsolicited_for(done.header.controller_entity_id, command_type, body);
+        if (is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
+            callbacks_.on_settings_changed(command_type);
+        }
     }
 }
 
@@ -1849,6 +1864,9 @@ auto AemCommandHandler::apply_and_notify(uint16_t const command_type, std::span<
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
     notify_on_success(command_type, {.status = r.status, .size = r.size}, echo);
+    if (r.status == AEM_STATUS_SUCCESS && is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
+        callbacks_.on_settings_changed(command_type);
+    }
     return r.status;
 }
 
