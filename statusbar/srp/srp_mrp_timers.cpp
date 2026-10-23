@@ -11,11 +11,9 @@ TimerScheduler::TimerScheduler(uint64_t seed)
 
 auto TimerScheduler::randomized_leaveall_duration() -> std::chrono::milliseconds
 {
-    // mrp.c:412-428 — uniform in [nominal/2, nominal*3/2).
-    constexpr auto half_nominal = LEAVE_ALL_TIME_NOMINAL.count() / 2;
-    constexpr auto full_nominal = LEAVE_ALL_TIME_NOMINAL.count();
-    std::uniform_int_distribution<int64_t> dist{0, full_nominal - 1};
-    return std::chrono::milliseconds(half_nominal + dist(rng_));
+    // Milan v1.2 Table 4.3: uniform in [10 s, 15 s).
+    std::uniform_int_distribution<int64_t> dist{LEAVE_ALL_TIME_MIN.count(), LEAVE_ALL_TIME_MAX.count() - 1};
+    return std::chrono::milliseconds(dist(rng_));
 }
 
 //
