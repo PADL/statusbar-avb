@@ -109,6 +109,27 @@ using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<
 /// STREAM_IS_RUNNING while it streams, NOT_SUPPORTED when the entity cannot change it.
 using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
 
+/// A successful command changed a persistent setting (is_persistent_setting_command): called
+/// on the reactor thread after the response and its notification, with the command's code.
+using SettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t command_type), 32>;
+
+/// The AEM commands whose effect Milan v1.2 has the entity keep in non-volatile memory
+/// (Sections 5.3.5.1, 5.3.7.1, 5.3.7.6, 5.3.8.1, 5.3.11.1, 5.3.13).
+[[nodiscard]] constexpr auto is_persistent_setting_command(uint16_t const command_type) noexcept -> bool
+{
+    switch (command_type) {
+        case atdecc::AEM_COMMAND_SET_NAME:
+        case atdecc::AEM_COMMAND_SET_STREAM_FORMAT:
+        case atdecc::AEM_COMMAND_SET_SAMPLING_RATE:
+        case atdecc::AEM_COMMAND_SET_CLOCK_SOURCE:
+        case atdecc::AEM_COMMAND_SET_STREAM_INFO:
+        case atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME:
+            return true;
+        default:
+            return false;
+    }
+}
+
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
 ///
@@ -231,6 +252,9 @@ struct AemCommandHandlerCallbacks
     /// and SET/GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
     GetPresentationOffsetFn get_presentation_offset;
     SetPresentationOffsetFn set_presentation_offset;
+
+    /// A persistent setting changed (SettingsChangedFn). Optional.
+    SettingsChangedFn on_settings_changed;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -450,6 +474,9 @@ class AemCommandHandler
         callbacks_.set_presentation_offset = std::move(set);
     }
 
+    /// Observe changes to the persistent settings (SettingsChangedFn).
+    void set_on_settings_changed(SettingsChangedFn fn) { callbacks_.on_settings_changed = std::move(fn); }
+
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
     /// plane. Return AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_*
@@ -530,15 +557,23 @@ class AemCommandHandler
     /// Check if there is a pending acquire waiting for CONTROLLER_AVAILABLE
     [[nodiscard]] auto has_pending_acquire() const noexcept -> bool { return pending_acquire_.active; }
 
-    /// Maximum number of unsolicited notification registrations (Milan v1.3
-    /// Section 5.3.4.2: at least 16 per AVB interface).
-    static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 16;
+    /// The status a state-changing command from @p controller_entity_id is refused with
+    /// (ENTITY_ACQUIRED, ENTITY_LOCKED), or nullopt. Shared with MVU (Milan v1.2 Section 5.4.4.4).
+    [[nodiscard]] auto exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>;
 
-    /// The controller monitor's period under milan13 (Milan v1.3 Section 5.4.5.4): a random time
-    /// between these after a registered controller's last AECP command, tick() sends it
-    /// CONTROLLER_AVAILABLE, and deregisters it when neither that nor its one retry is answered.
-    static constexpr auto CONTROLLER_MONITOR_MIN = std::chrono::seconds(30);
-    static constexpr auto CONTROLLER_MONITOR_MAX = std::chrono::seconds(60);
+    /// Call @p fn(controller_mac, controller_entity_id) for each controller
+    /// registered for unsolicited notifications (the MVU handler notifies them
+    /// too).
+    template <typename Fn>
+    void for_each_unsolicited_registration(Fn&& fn) const
+    {
+        for (auto const& reg : unsolicited_registrations_) {
+            fn(reg.controller_mac, reg.controller_entity_id);
+        }
+    }
+
+    /// Maximum number of unsolicited notification registrations
+    static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 8;
 
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;

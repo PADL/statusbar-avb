@@ -294,8 +294,13 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
     ),
     "MvuSystemUniqueId": _struct(
         "MvuSystemUniqueId",
-        "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Figure 5.7)",
-        [_RSV2, ("system_unique_id", 8, "u64", "system_unique_id")],
+        "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Milan 1.2 Figure 5.5: one quadlet)",
+        [_RSV2, ("system_unique_id", 4, "u32", "system_unique_id")],
+    ),
+    "MvuSystemUniqueIdV13": _struct(
+        "MvuSystemUniqueIdV13",
+        "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Milan 1.3 Figure 5.7)",
+        [_RSV2, ("system_unique_number", 8, "u64", "system unique id number (Milan 1.3)")],
     ),
     "MvuMediaClockReferenceInfo": _struct(
         "MvuMediaClockReferenceInfo",
@@ -345,34 +350,32 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
         ],
     ),
 }
-#: Probing status (Milan 1.3 Table 5.5)
-MVU_PROBING_STATUS: dict[int, str] = {
-    0: "PROBING_DISABLED",
-    1: "PROBING_PASSIVE",
-    2: "PROBING_ACTIVE",
-    3: "PROBING_COMPLETED",
-}
-#: (struct, member) -> the sub-fields packed into one member of an MVU struct,
-#: ((sub-field, mask, kind, value table, doc), ...). Figure 5.12 puts the
-#: Probing status in the three high bits of one octet and the ACMP status in
-#: its five low bits (5.3.8.6: a 3-bit and a 5-bit integer).
-MVU_PACKED_MEMBERS: dict[
-    tuple[str, str], tuple[tuple[str, int, str, str | None, str], ...]
-] = {
-    ("MvuStreamInputInfoExResponse", "pbsta_acmpsta"): (
-        ("pbsta", 0xE0, "u8", "mvu_probing_status", "Probing status (Table 5.5)"),
-        (
-            "acmpsta",
-            0x1F,
-            "u8",
-            "acmp_status",
-            "ACMP status of the last probe (5.3.8.6)",
-        ),
+# struct -> (field, octets, kind, doc) of its optional tail
+MVU_OPTIONAL_TAIL: dict[str, tuple[str, int, str, str]] = {
+    "MvuGetMilanInfoResponse": (
+        "specification_version",
+        4,
+        "u32",
+        "specification_version (Milan 1.3, optional)",
+    ),
+    "MvuSystemUniqueIdV13": (
+        "system_name",
+        64,
+        "string",
+        "name (Milan 1.3, 64 octets, optional)",
+    ),
+    "MvuMediaClockReferenceInfo": (
+        "media_clock_domain_name",
+        64,
+        "string",
+        "name (Milan 1.3, 64 octets, optional)",
     ),
 }
-MVU_OPTIONAL_NAME: dict[str, str] = {
-    "MvuSystemUniqueId": "system_name",
-    "MvuMediaClockReferenceInfo": "media_clock_domain_name",
+# struct -> the Milan 1.3 struct that replaces it when the payload holds it
+# (Milan 1.3 widened system_unique_id from 1.2's quadlet to a u64 and a name;
+# la_avdecc tells the two apart the same way)
+MVU_LONG_FORM: dict[str, str] = {
+    "MvuSystemUniqueId": "MvuSystemUniqueIdV13",
 }
 MVU_PAYLOADS: dict[int, tuple[str | None, str | None]] = {
     0x0000: ("MvuReserved", "MvuGetMilanInfoResponse"),

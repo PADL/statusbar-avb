@@ -234,36 +234,15 @@ auto AemCommandHandler::dispatch_aem_command(
     auto const response = handle_command(header, command_data, out_buffer);
     dispatching_ = false;
     current_src_mac_ = {};
-    return response;
-}
-
-auto AemCommandHandler::answer_aem_command(
-    Eui48 const& src_mac, AemDu const& header, AemCommandResponse const& response, std::span<uint8_t const> const body) -> bool
-{
-    // The response, then the notifications the command raised (Milan v1.3 Section 5.4.5.3).
-    bool const sent = send_response(src_mac, header, response.status, body);
-    flush_notifications();
-    run_after_response();
+    // Build and send response
+    bool const sent = send_response(src_mac, header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    // Then let the entity save a changed setting (after the response: a
+    // write to non-volatile storage must not delay it).
+    if (response.status == AEM_STATUS_SUCCESS && is_persistent_setting_command(header.command_code()) &&
+        callbacks_.on_settings_changed) {
+        callbacks_.on_settings_changed(header.command_code());
+    }
     return sent;
-}
-
-void AemCommandHandler::run_after_response()
-{
-    // Changes beyond what the controller asked: every registered controller is told (Milan v1.3 Section 5.4.5.3).
-    Eui64 const outer = std::exchange(requester_, Eui64{});
-    for (auto& fn : std::exchange(after_response_, {})) {
-        fn();
-    }
-    requester_ = outer;
-}
-
-void AemCommandHandler::call_after_response(AfterResponseFn fn)
-{
-    if (!dispatching_ || after_response_.size() == MAX_AFTER_RESPONSE) {
-        fn();
-        return;
-    }
-    after_response_.push_back(std::move(fn));
 }
 
 auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -877,6 +856,9 @@ void AemCommandHandler::answer_completed(PendingCommand const& done, uint8_t con
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
         emit_unsolicited_for(done.header.controller_entity_id, command_type, body);
+        if (is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
+            callbacks_.on_settings_changed(command_type);
+        }
     }
 }
 
@@ -3575,6 +3557,9 @@ auto AemCommandHandler::apply_and_notify(uint16_t const command_type, std::span<
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
     notify_on_success(command_type, {.status = r.status, .size = r.size}, echo);
+    if (r.status == AEM_STATUS_SUCCESS && is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
+        callbacks_.on_settings_changed(command_type);
+    }
     return r.status;
 }
 
