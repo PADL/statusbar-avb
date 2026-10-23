@@ -30,6 +30,7 @@
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
@@ -120,8 +121,19 @@ class AvbEntityKit
     /// once here unless the caller holds it.
     [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
     /// Stop the control plane (fails with not_connected when not running),
-    /// withdrawing its declarations at @p now.
+    /// withdrawing its declarations at @p now. Deletes the listener's VLAN link
+    /// first if the kit created it (even when not running).
     [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status;
+
+#if defined(__linux__)
+    // --- The listener's VID on the NIC's VLAN filter (Linux) -------------------
+
+    /// Keep the SR-class VID in use on @p ifindex's receive VLAN filter through
+    /// @p control until stop(); a no-op without stream inputs. start() calls it
+    /// unless called first; @p control must outlive the kit.
+    void bind_listener_vlan(net::vlan::VlanControl& control, int ifindex);
+    [[nodiscard]] auto listener_vlan() const noexcept -> ListenerVlan const& { return listener_vlan_; }
+#endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
     void on_link_up(TimePoint time) { host_.on_link_up(time); }
@@ -150,12 +162,14 @@ class AvbEntityKit
 
     /// Whether talker stream @p idx transmits this tick: admitted (or gating off),
     /// its MAAP address ready in "maap" mode, and not STOP_STREAMING'd.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+    /// The gate runs on the steady clock until it moves to the wake's RAW time.
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const /*now*/) const noexcept
+        -> bool
     {
         if (!maap_.ready() || talker_->stream_stopped(idx)) {
             return false;
         }
-        return gate_.should_transmit(idx, now);
+        return gate_.should_transmit(idx, steady_now_ns());
     }
 
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
@@ -364,6 +378,14 @@ class AvbEntityKit
     /// the media thread.
     std::atomic<uint16_t> active_clock_source_{0};
     std::optional<uint16_t> crf_clock_source_index_{};
+
+#if defined(__linux__)
+    /// The listener's VID on the NIC's VLAN filter: start()'s own client
+    /// (when no other control was bound), declared before the ListenerVlan
+    /// that deletes its link through it on destruction.
+    std::unique_ptr<net::vlan::VlanLinkClient> vlan_client_{};
+    ListenerVlan listener_vlan_{host_.ctl_log()};
+#endif
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

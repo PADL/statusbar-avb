@@ -119,7 +119,7 @@ auto mqprio_for(QueueLayout const& layout, uint16_t const major, uint8_t const c
     q.offset[CLASS_B_TC] = layout.class_b_queue;
     q.count[CLASS_A_TC] = 1;
     q.offset[CLASS_A_TC] = layout.class_a_queue;
-    q.hw = false;
+    q.offload = false;
     return q;
 }
 #endif
@@ -268,7 +268,7 @@ auto ShaperQdiscs::install(
     // children and reset igb/igc. The first program() changes its cbs in place.
     bool reuse = false;
     if (auto const current = tc_.get(ifindex, net::tc::ROOT)) {
-        reuse = current->handle == root && current->mqprio.has_value() && *current->mqprio == mqprio;
+        reuse = current->handle == root && current->has_mqprio_params && current->mqprio == mqprio;
     }
     if (!reuse) {
         auto replaced = tc_.replace_mqprio(ifindex, mqprio);
