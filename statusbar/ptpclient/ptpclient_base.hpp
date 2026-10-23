@@ -101,7 +101,10 @@ struct BridgeSamplingParams
     int64_t step_threshold_ns = 200'000;    ///< Residual > this = step/discontinuity (200us)
     int64_t degrade_threshold_ns = 80'000;  ///< RMS > this = degraded quality (80us)
     double max_rate_ppm = 200.0;            ///< Max rate deviation from 1.0 in ppm
-    int64_t wake_refine_spin_ns = 50'000;   ///< Final spin refinement for sleep (50us, 0 to disable)
+    /// Final spin before a sleep's deadline (ns, 0 to disable): must cover the worst OS wake
+    /// latency on the timer's core; ~15-20us suffices on an isolated core (docs/LINUXPTP.md).
+    /// PtpTimer::wake_headroom() reports the margin actually left.
+    int64_t wake_refine_spin_ns = 50'000;
     int min_samples_for_healthy = 16;       ///< Minimum samples before declaring healthy
 
     /// Builder pattern for configuration
