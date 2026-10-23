@@ -1013,10 +1013,103 @@ void add_hdcp_avc_and_extended_frames(Frames& frames)
     }
 }
 
-/// Milan vendor unique, Address Access, and another vendor's protocol.
-void add_vendor_unique_and_address_access_frames(Frames& frames)
-{
-    add_mvu_frames(frames);
+    // ---- Milan vendor unique: GET_MILAN_INFO, SET_SYSTEM_UNIQUE_ID, MCR info, BIND_STREAM, GET_STREAM_INPUT_INFO_EX ----
+    {
+        auto const mvu = [&](bool const response, uint16_t const sequence, std::span<uint8_t const> const payload) {
+            AecpDuCommon du{};
+            du.init_command(
+                response ? AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE : AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND,
+                static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6 + payload.size()));
+            du.target_entity_id = TARGET;
+            du.controller_entity_id = CONTROLLER;
+            du.sequence_id = sequence;
+            std::vector<uint8_t> out;
+            append(out, du);
+            std::array<uint8_t, 6> const protocol_id{0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00};
+            append(out, std::span<uint8_t const>(protocol_id));
+            append(out, payload);
+            return out;
+        };
+        std::array<uint8_t, 4> const get_info{0x00, 0x00, 0x00, 0x00};
+        frames.push_back({"mvu_get_milan_info_command", mvu(false, 60, std::span<uint8_t const>(get_info))});
+        std::array<uint8_t, 20> const info{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+                                           0x00, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x03, 0x00};
+        frames.push_back({"mvu_get_milan_info_response", mvu(true, 60, std::span<uint8_t const>(info))});
+        std::vector<uint8_t> unique_id{0x00, 0x01, 0x00, 0x00, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x51, 0x1D};
+        std::array<uint8_t, 64> name{};
+        std::string_view const text{"FOH system"};
+        std::copy(text.begin(), text.end(), name.begin());
+        unique_id.insert(unique_id.end(), name.begin(), name.end());
+        frames.push_back({"mvu_set_system_unique_id_command", mvu(false, 61, std::span<uint8_t const>(unique_id))});
+        std::vector<uint8_t> mcr{0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00};
+        std::array<uint8_t, 64> domain{};
+        std::string_view const dtext{"Main clock"};
+        std::copy(dtext.begin(), dtext.end(), domain.begin());
+        mcr.insert(mcr.end(), domain.begin(), domain.end());
+        frames.push_back({"mvu_set_media_clock_reference_info_command", mvu(false, 62, std::span<uint8_t const>(mcr))});
+        std::array<uint8_t, 20> const bind{0x00, 0x05, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x70, 0xB3,
+                                           0xD5, 0xED, 0xC0, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x00, 0x00};
+        frames.push_back({"mvu_bind_stream_command", mvu(false, 63, std::span<uint8_t const>(bind))});
+        std::array<uint8_t, 20> const info_ex{0x00, 0x07, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x70, 0xB3,
+                                              0xD5, 0xED, 0xC0, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x02, 0x00};
+        frames.push_back({"mvu_get_stream_input_info_ex_response", mvu(true, 64, std::span<uint8_t const>(info_ex))});
+    }
+
+    // ---- Milan 1.2 MVU built with the entity's structs (atdecc_aecp_mvu.hpp): GET_MILAN_INFO without
+    // specification_version, and a NOT_IMPLEMENTED echo, both padded past control_data_length ----
+    {
+        auto const padded = [](std::vector<uint8_t> out) {
+            out.resize(std::max(out.size(), MVU_MIN_PDU_LENGTH), 0);
+            return out;
+        };
+        AecpMvuDu du{};
+        // v1.2's response (Figure 5.4): v1.3's (Figure 5.6) without specification_version
+        constexpr uint16_t V1_2_LENGTH = MvuGetMilanInfoResponse::LENGTH - 4;
+        du.init_response(MVU_COMMAND_GET_MILAN_INFO, MVU_STATUS_SUCCESS, V1_2_LENGTH);
+        du.common.target_entity_id = TARGET;
+        du.common.controller_entity_id = CONTROLLER;
+        du.common.sequence_id = 65;
+        MvuGetMilanInfoResponse info{};
+        info.protocol_version = MVU_PROTOCOL_VERSION;
+        info.features_flags = MVU_FEATURE_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING;
+        info.certification_version = mvu_version(1, 2, 0, 0);
+        std::vector<uint8_t> out;
+        append(out, du);
+        append(out, info);
+        out.resize(out.size() - 4);
+        frames.push_back({"mvu_get_milan_info_response_v1_2", padded(out)});
+
+        du.init_response(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, MVU_STATUS_NOT_IMPLEMENTED, MVU_GET_MILAN_INFO_COMMAND_LENGTH);
+        du.common.sequence_id = 66;
+        std::vector<uint8_t> rout;
+        append(rout, du);
+        rout.resize(rout.size() + MVU_GET_MILAN_INFO_COMMAND_LENGTH, 0);
+        frames.push_back({"mvu_get_system_unique_id_not_implemented", padded(rout)});
+
+        // The 1.2 GET_SYSTEM_UNIQUE_ID response: one quadlet (Figure 5.5)
+        du.init_response(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS, MvuSystemUniqueIdPayload::LENGTH);
+        du.common.sequence_id = 67;
+        MvuSystemUniqueIdPayload unique_id{};
+        unique_id.system_unique_id = uint32_t{0x12345678};
+        std::vector<uint8_t> uout;
+        append(uout, du);
+        append(uout, unique_id);
+        frames.push_back({"mvu_get_system_unique_id_response_v1_2", padded(uout)});
+
+        // An unsolicited SET_MEDIA_CLOCK_REFERENCE_INFO (u bit set)
+        du.init_response(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_SUCCESS, MvuMediaClockReferenceInfoPayload::LENGTH);
+        du.set_command_type(du.command_type(), true);
+        du.common.sequence_id = 68;
+        MvuMediaClockReferenceInfoPayload mcr_info{};
+        mcr_info.flags = MVU_MCR_FLAGS_SUPPORTED;
+        mcr_info.default_mcr_prio = MVU_MCR_PRIO_NETWORK_INTERFACE;
+        mcr_info.user_mcr_prio = uint8_t{200};
+        mcr_info.media_clock_domain_name[0] = 'S';
+        std::vector<uint8_t> mout;
+        append(mout, du);
+        append(mout, mcr_info);
+        frames.push_back({"mvu_set_media_clock_reference_info_unsolicited", padded(mout)});
+    }
 
     // ---- Address Access: a command with a read and a write TLV ----
     {

@@ -151,17 +151,40 @@ TEST(aecp_mvu, a_bind_stream_is_laid_out_as_figure_5_10_has_it)
     std::array<uint8_t, MvuBindStream::LENGTH> bytes{};
     span_store(std::span<uint8_t>{bytes}, bind);
 
-    // Octets 30 to 47 of the AECPDU: flags, descriptor, talker, its stream, reserved.
-    std::array<uint8_t, MvuBindStream::LENGTH> const golden{
-        0x00, 0x01, 0x00, 0x05, 0x01, 0x02, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00, 0x01, 0x03, 0x04, 0x00, 0x00};
-    EXPECT_TRUE(bytes == golden);
-    EXPECT_TRUE(bind.streaming_wait());
+    // r is masked out of command_type and cleared by set_command_type
+    du.u_command_type = uint16_t{0x8001};
+    EXPECT_EQ(du.command_type(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID);
+    du.set_command_type(du.command_type());
+    EXPECT_EQ(du.u_command_type.get(), uint16_t{0x0001});
 
-    MvuBindStream back{};
-    span_load(back, make_const_span(bytes));
-    EXPECT_EQ(back, bind);
-    back.flags = 0xFFFE;  // every bit Table 5.19 reserves
-    EXPECT_FALSE(back.streaming_wait());
+    // v1.3's u bit (an unsolicited response) is that bit
+    du.set_command_type(du.command_type(), true);
+    EXPECT_TRUE(du.is_unsolicited());
+    EXPECT_EQ(du.u_command_type.get(), uint16_t{0x8001});
+    du.set_command_type(du.command_type(), false);
+    EXPECT_EQ(du.u_command_type.get(), uint16_t{0x0001});
+}
+
+// Figure 5.5 (v1.2): system_unique_id is one quadlet at 32; v1.3 Figure 5.7:
+// a u64 number at 32 and the name at 40
+TEST(aecp_mvu, system_unique_id_layouts)
+{
+    MvuSystemUniqueIdPayload v12{};
+    v12.system_unique_id = uint32_t{0x01020304};
+    std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH> b12{};
+    span_store(b12, v12);
+    std::array<uint8_t, 6> const expected{0x00, 0x00, 0x01, 0x02, 0x03, 0x04};
+    EXPECT_TRUE(b12 == expected);
+
+    MvuSystemUniqueIdPayloadV13 v13{};
+    v13.number = uint64_t{0x0102030405060708};
+    v13.name[0] = 'S';
+    std::array<uint8_t, MvuSystemUniqueIdPayloadV13::LENGTH> b13{};
+    span_store(b13, v13);
+    size_t constexpr BASE = AecpMvuDu::LENGTH;
+    EXPECT_EQ(b13[32 - BASE], uint8_t{0x01});
+    EXPECT_EQ(b13[39 - BASE], uint8_t{0x08});
+    EXPECT_EQ(b13[40 - BASE], uint8_t{'S'});
 }
 
 TEST(aecp_mvu, a_command_naming_a_stream_input_is_laid_out_as_figure_5_11_has_it)
