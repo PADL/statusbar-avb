@@ -33,6 +33,8 @@
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
+#include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
@@ -61,8 +63,10 @@
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <string>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace statusbar::avb_entity {
 
@@ -367,6 +371,14 @@ class AvbEntityKit
     /// that receives the CRF stream itself and is told of a toggled mr. Reactor thread; from
     /// another thread, TalkerStreams::toggle_media_clock_restart() per stream.
     void restart_media_clock(uint16_t domain);
+
+    // --- Persistent state (Milan non-volatile settings) ------------------------
+    /// With config.persistent_state_path set, start() loads and applies the file through the checks
+    /// a controller's command gets, and every later setting change rewrites it when it changed.
+    /// Reactor thread.
+    void persist();
+    /// The state persist() would write now.
+    [[nodiscard]] auto collect_persistent_state() const -> PersistentState;
 
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
@@ -802,6 +814,18 @@ class AvbEntityKit
     /// Fires the unsolicited GET_STREAM_INFO for talker stream @p idx.
     void notify_talker_stream_info(uint16_t idx);
     [[nodiscard]] auto setup_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
+    /// start(): load the persistent state and apply all but the listener
+    /// bindings (kept for apply_saved_listener_bindings).
+    void load_persistent_state();
+    /// Apply one saved setting, logging (and dropping) what the model refuses.
+    void apply_saved_settings(PersistentState const& saved);
+    /// start(), the listener up: arm the saved bindings as fast-connect goals
+    /// and save every change of them.
+    void apply_saved_listener_bindings();
+    /// The entity model id controllers see (the ENTITY descriptor served).
+    [[nodiscard]] auto served_entity_model_id() const -> uint64_t;
+    /// The presentation offset a talker stream starts with.
+    [[nodiscard]] auto default_presentation_offset_ns() const noexcept -> uint32_t;
     /// Recompute the admitted set at steady-clock @p now_ns after a gate input
     /// changed (or time passed); fire on_admission_changed_ when it differs
     /// from the last one.
@@ -856,6 +880,15 @@ class AvbEntityKit
     /// read by the data plane and GET_STREAM_INFO).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
     PresentationOffsetFn on_presentation_offset_changed_{};
+    /// The persistent state: the entity name the handler was configured
+    /// with, the bindings start() arms once the listener is up, and the text
+    /// last written (persist() skips an unchanged state).
+    std::string configured_entity_name_;
+    std::vector<PersistedListenerBinding> saved_bindings_{};
+    std::string persisted_text_{};
+    bool persistence_active_{false};   ///< a state path is configured
+    bool persistence_blocked_{false};  ///< the file did not read at start: nothing written this run
+    bool persist_pending_{false};      ///< a listener goal changed this reactor pass
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
