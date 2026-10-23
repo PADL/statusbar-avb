@@ -9,6 +9,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <algorithm>
+#include <array>
 
 namespace statusbar::avb_entity {
 
@@ -249,6 +250,10 @@ AvbInfoMirrorPort::AvbInfoMirrorPort(std::string_view const interface_name, AvbI
           }}
 {
     (void)context_.open(interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC);
+    // ADP and AECP only (AvbInfoMirror::receive_frame): not woken by every
+    // AVB stream frame on the segment.
+    static constexpr std::array<uint8_t, 2> mirror_subtypes{avtp::AvtpSubtype::adp, avtp::AvtpSubtype::aecp};
+    (void)context_.set_subtype_filter(mirror_subtypes);
 }
 
 void AvbInfoMirrorPort::on_ready(int64_t const now_ns)

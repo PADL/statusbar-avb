@@ -344,7 +344,9 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
     // before the deadline then busy-polls the rest for sub-us precision. Spinning
     // ~40% of every 125us period is heat-intensive; set 0 to drop the spin (just
     // clock_nanosleep, looser wakes, far lower CPU/heat -- useful on thermally
-    // marginal nodes).
+    // marginal nodes). The default 50us covers kernel work stalling a shared
+    // core; with the timer's core isolated (isolcpus/nohz_full, IRQs and
+    // kworkers off it, deep C-states disabled) 15000-20000 is enough.
     specs.add<int64_t>(
         "ptp.spin_ns",
         "Busy-spin refinement window before each wake in ns (0 = no busy-wait)",

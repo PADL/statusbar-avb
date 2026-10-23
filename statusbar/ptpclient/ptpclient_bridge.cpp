@@ -331,6 +331,7 @@ void PtpTimeBridge::sampler_loop()
 
 void PtpTimeBridge::sampler_loop_impl()
 {
+    realtime::set_current_thread_name("ptp-sampler");
     // The sampler brackets each /dev/ptp0 read between two CLOCK_MONOTONIC reads;
     // a preemption inside that bracket inflates it past max_bracket_ns (sample
     // rejected) or the residual past the degrade/step thresholds. The sampler
@@ -423,7 +424,8 @@ auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcep
     return result;
 }
 
-auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<int64_t>
+auto PtpTimeBridge::sleep_until_ptp(
+    int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going, int64_t* const spin_headroom_ns) noexcept -> StatusValue<int64_t>
 {  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
     auto prep = prepare_sleep(ptp_deadline_ns);
     if (!prep) {
@@ -453,11 +455,13 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
     int64_t const mono_wake = plan.mono_deadline_ns - (base_guard + slew_guard);
 
+    bool slept = false;
 #if defined(__linux__)
     timespec now_ts{};
     ::clock_gettime(CLOCK_MONOTONIC, &now_ts);
     int64_t const mono_now = timespec_to_ns(now_ts.tv_sec, now_ts.tv_nsec);
     if (mono_wake > mono_now) {
+        slept = true;
         int64_t sec = 0, nsec = 0;
         ns_to_timespec(mono_wake, sec, nsec);
         timespec ts{};
@@ -476,12 +480,21 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
     int64_t const mono_now =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (mono_wake > mono_now) {
+        slept = true;
         std::this_thread::sleep_until(std::chrono::steady_clock::time_point{std::chrono::nanoseconds{mono_wake}});
     }
 #endif
 
-    // Precise finish: spin on CLOCK_MONOTONIC_RAW to the exact RAW deadline.
-    // sched_yield while still far out to avoid a hard busy-loop; bail on shutdown.
+    // Precise finish: spin on CLOCK_MONOTONIC_RAW (vDSO) to the deadline with a pause hint, bailing
+    // on shutdown; sched_yield only every SPIN_YIELD_INTERVAL_NS and not in the last
+    // SPIN_NO_YIELD_NS (docs/LINUXPTP.md).
+    static constexpr int64_t SPIN_YIELD_INTERVAL_NS = 20'000;
+    static constexpr int64_t SPIN_NO_YIELD_NS = 10'000;
+    int64_t const spin_start = read_raw_ns();
+    // Headroom against the configured window: the slew term is part of the
+    // planned early wake, not of the OS's lateness.
+    int64_t const headroom = raw_deadline - spin_start - slew_guard;
+    int64_t last_yield = spin_start;
     while (true) {
         int64_t const now_raw = read_raw_ns();
         if (now_raw >= raw_deadline) {
@@ -490,13 +503,20 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         if (!is_running_atomic() || (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed))) {
             return failure(PtpError::bridge_not_running);
         }
-        if (raw_deadline - now_raw > 10'000) {
+        if (now_raw - last_yield > SPIN_YIELD_INTERVAL_NS && raw_deadline - now_raw > SPIN_NO_YIELD_NS) {
             ::sched_yield();
+            last_yield = now_raw;
+        } else {
+            realtime::cpu_relax();
         }
     }
 
     int64_t const wake_raw = read_raw_ns();
-    return finalize_wake(wake_raw, plan.before);
+    auto woke = finalize_wake(wake_raw, plan.before);
+    if (woke && slept && spin_headroom_ns != nullptr) {
+        *spin_headroom_ns = headroom;
+    }
+    return woke;
 }
 
 auto PtpTimeBridge::collect_sample(TimingSampleWindow& phc_window, TimingSampleWindow& mono_window, int64_t& worst_bracket) -> bool

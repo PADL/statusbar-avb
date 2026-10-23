@@ -452,6 +452,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
 
     bool const rx_rt = entity.config().stream_rx_rt_timer;
     if (rx_rt) {
+        rx_timer.set_thread_name("stream-rx");
         if (auto const rs = rx_timer.start(); !rs) {
             entity.rx_to_reactor(reactor);
             std::print(
