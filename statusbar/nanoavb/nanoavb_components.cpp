@@ -604,15 +604,19 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
+    size_t const listener_max_streams,
+    std::optional<bool> const milan)
     : entity_model{std::move(model)}
+    , profile{entity_profile_from_model(entity_model.descriptor_storage(), milan)}
     , aem_handler{entity_model}
     , adp_advertiser{entity_model.get_entity(), AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity_model.get_entity().entity_id, AcmpListenerCallbacks{}, listener_max_streams}
     , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
     , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
-{}
+{
+    aem_handler.set_entity_profile(profile);
+}
 
 namespace {
 
@@ -637,9 +641,16 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
+    size_t const listener_max_streams,
+    std::optional<bool> const milan)
     : NanoAvbComponents{
-          handler, resolve_entity_descriptor(handler), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+          handler,
+          resolve_entity_descriptor(handler),
+          adp_config,
+          talker_max_streams,
+          talker_max_listeners,
+          listener_max_streams,
+          milan}
 {}
 
 NanoAvbComponents::NanoAvbComponents(
@@ -648,15 +659,19 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
+    size_t const listener_max_streams,
+    std::optional<bool> const milan)
     : entity_model{}  // empty: descriptors are served by the handler, not this member
+    , profile{entity_profile_from_model(handler.descriptor_storage(), milan)}
     , aem_handler{handler}
     , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity.entity_id, AcmpListenerCallbacks{}, listener_max_streams}
     , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
     , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
-{}
+{
+    aem_handler.set_entity_profile(profile);
+}
 
 //
 // NanoAvbComponentsBuilder implementation

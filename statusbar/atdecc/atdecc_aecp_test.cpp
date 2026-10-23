@@ -292,6 +292,46 @@ TEST(aecp_pdu, format_to_response)
 }
 
 //
+// aecp_echo_response
+//
+
+// The command echoed as its response type with the status, its control data
+// as declared (received padding is not echoed); malformed commands give an
+// empty span.
+TEST(aecp_pdu, echo_response)
+{
+    std::array<uint8_t, 40> command{};
+    AecpDuCommon aecp{};
+    aecp.init_command(AECP_MESSAGE_TYPE_ADDRESS_ACCESS_COMMAND, AecpDuCommon::COMMON_DATA_LENGTH + 4);
+    aecp.sequence_id = 7;
+    span_store(command, aecp);
+    command[22] = 0xAB;
+    command[25] = 0xCD;
+    std::array<uint8_t, 64> out{};
+
+    auto const response = aecp_echo_response(command, AECP_STATUS_NOT_IMPLEMENTED, out);
+    EXPECT_EQ(response.size(), size_t{26});
+    EXPECT_EQ(response.data(), out.data());
+    AecpDuCommon reply{};
+    span_load(reply, std::span<uint8_t const>{response}.first(AecpDuCommon::LENGTH));
+    EXPECT_EQ(reply.message_type(), AECP_MESSAGE_TYPE_ADDRESS_ACCESS_RESPONSE);
+    EXPECT_EQ(reply.status(), AECP_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(reply.control_data_length(), uint16_t{14});
+    EXPECT_EQ(reply.sequence_id.get(), uint16_t{7});
+    EXPECT_EQ(response[22], uint8_t{0xAB});
+    EXPECT_EQ(response[25], uint8_t{0xCD});
+
+    // Received shorter than declared: echoed as far as received
+    EXPECT_EQ(aecp_echo_response(std::span<uint8_t const>{command}.first(24), AECP_STATUS_NOT_IMPLEMENTED, out).size(), size_t{24});
+    // Shorter than the AECP common header, or control_data_length short of the
+    // common fields: not echoed
+    EXPECT_TRUE(aecp_echo_response(std::span<uint8_t const>{command}.first(21), AECP_STATUS_NOT_IMPLEMENTED, out).empty());
+    aecp.set_control_data_length(4);
+    span_store(command, aecp);
+    EXPECT_TRUE(aecp_echo_response(command, AECP_STATUS_NOT_IMPLEMENTED, out).empty());
+}
+
+//
 // Test Runner
 //
 

@@ -81,6 +81,21 @@ namespace {
     return common.message_type() == AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND;
 }
 
+/// Whether @p payload is a defined non-AEM, non-vendor-unique AECP command type (IEEE 1722.1-2021
+/// Table 9.1) addressed to @p our_entity_id; reserved types (10, 12) are not.
+[[nodiscard]] auto is_other_aecp_command_for(std::span<uint8_t const> const payload, Eui64 const& our_entity_id) noexcept -> bool
+{
+    if (payload.size() < AecpDuCommon::LENGTH) {
+        return false;
+    }
+    AecpDuCommon common{};
+    span_load(common, payload.first(AecpDuCommon::LENGTH));
+    auto const type = common.message_type();
+    bool const defined = type == AECP_MESSAGE_TYPE_ADDRESS_ACCESS_COMMAND || type == AECP_MESSAGE_TYPE_AVC_COMMAND ||
+        type == AECP_MESSAGE_TYPE_HDCP_APM_COMMAND || type == AECP_MESSAGE_TYPE_EXTENDED_COMMAND;
+    return common.subtype.get() == AvtpSubtype::aecp && defined && common.target_entity_id == our_entity_id;
+}
+
 /// The AEM header in @p payload when it is a valid AEM command addressed to
 /// @p our_entity_id; nullopt for a response, another target, or a short or
 /// malformed header.
@@ -181,9 +196,10 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     if (is_vendor_unique_command(payload)) {
         return process_mvu_packet(src_mac, payload, our_entity_id);
     }
-    if (auto const response = aem_response_for(payload, our_entity_id)) {
-        handle_aem_response(*response);
-        return false;
+    // Any other AECP command type addressed to us is answered NOT_IMPLEMENTED
+    // rather than dropped (IEEE 1722.1-2021 Clause 9.2.1.1.6).
+    if (is_other_aecp_command_for(payload, our_entity_id)) {
+        return send_not_implemented(src_mac, payload);
     }
     auto const header = aem_command_for(payload, our_entity_id);
     if (!header) {
@@ -2447,24 +2463,19 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
 
-auto AemCommandHandler::answer_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-    -> AemCommandResponse
+auto AemCommandHandler::send_not_implemented(Eui48 const& dest_mac, std::span<uint8_t const> const command) const -> bool
 {
-    uint16_t const before = current_configuration_;
-    auto const r = refuse_unless_success(
-        AEM_COMMAND_SET_CONFIGURATION, handle_set_configuration(command_data, out_buffer), command_data, out_buffer);
-    if (current_configuration_ != before) {
-        forget_configuration_state();
+    if (!callbacks_.send_response) {
+        return false;
     }
-    return r;
-}
-
-void AemCommandHandler::forget_configuration_state()
-{
-    mcr_info_ = {};  // the new configuration's CLOCK_DOMAINs start from their defaults
-    if (audio_maps_ != nullptr) {
-        audio_maps_->clear();  // they named the old configuration's ports
+    // The command echoed back (as much as was received) as its response type, NOT_IMPLEMENTED.
+    // A command whose control_data_length is short of the AECP common fields is dropped.
+    std::array<uint8_t, AemDu::LENGTH + MAX_AEM_RESPONSE_SIZE> response_buffer{};
+    auto const out = aecp_echo_response(command, AECP_STATUS_NOT_IMPLEMENTED, response_buffer);
+    if (out.empty()) {
+        return false;
     }
+    return callbacks_.send_response(dest_mac, out);
 }
 
 auto AemCommandHandler::send_response(

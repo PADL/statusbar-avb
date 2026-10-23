@@ -131,6 +131,14 @@ def symbol_to_code(symbol: str) -> int:
     return zlib.crc32(symbol.encode("utf-8")) & 0xFFFFFFFF
 
 
+# The ENTITY descriptor's well-known symbols for Entity.milan (the entity's
+# ATDECC profile). Blob metadata only: the symbol table is read by the kit
+# (nanoavb::entity_profile_from_model), never served to a controller. The
+# C++ side hashes the same names (avb_entity::symbol_code).
+ENTITY_PROFILE_MILAN_SYMBOL = "entity_profile:milan"
+ENTITY_PROFILE_CLASSIC_SYMBOL = "entity_profile:classic"
+
+
 def _pack_localized_desc(ref: LocalizedStringRef) -> bytes:
     return pack_localized_string_ref(ref.offset, ref.index)
 
@@ -1118,6 +1126,14 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
     descriptors.append(
         FlatDescriptor(0, DESCRIPTOR_ENTITY, 0, _serialize_entity(entity))
     )
+    if entity.milan is not None:
+        _add_symbol(
+            symbols,
+            0,
+            DESCRIPTOR_ENTITY,
+            0,
+            ENTITY_PROFILE_MILAN_SYMBOL if entity.milan else ENTITY_PROFILE_CLASSIC_SYMBOL,
+        )
 
     for config_idx, config in enumerate(entity.configurations):
         # Track indices for each descriptor type within this configuration
