@@ -8,6 +8,7 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iterator>
@@ -156,6 +157,41 @@ auto talker_advertise_unique_ids(std::span<uint8_t const> pdu) -> std::vector<ui
         p = list_end;
     }
     return ids;
+}
+
+// The three-packed event (802.1Q 10.8.2.10: New 0, JoinIn 1, In 2, JoinMt 3,
+// Mt 4, Lv 5) of the first value of the first non-empty TalkerAdvertise
+// vector in the PDU, if any.
+auto first_talker_advertise_event(std::span<uint8_t const> pdu) -> std::optional<uint8_t>
+{
+    size_t p = 1;
+    while (p + 4 <= pdu.size()) {
+        uint8_t const attr_type = pdu[p];
+        if (attr_type == 0) {
+            break;
+        }
+        uint8_t const attr_len = pdu[p + 1];
+        size_t const list_len = (static_cast<size_t>(pdu[p + 2]) << 8) | pdu[p + 3];
+        p += 4;
+        size_t const list_end = std::min(p + list_len, pdu.size());
+        if (attr_type == static_cast<uint8_t>(AttributeType::TalkerAdvertise)) {
+            size_t vp = p;
+            while (vp + 2 <= list_end) {
+                uint16_t const vh = (static_cast<uint16_t>(pdu[vp]) << 8) | pdu[vp + 1];
+                vp += 2;
+                uint16_t const num_values = vh & 0x1FFF;
+                if (num_values == 0) {
+                    break;
+                }
+                if (vp + attr_len >= list_end) {
+                    break;
+                }
+                return static_cast<uint8_t>(pdu[vp + attr_len] / 36);
+            }
+        }
+        p = list_end;
+    }
+    return std::nullopt;
 }
 
 // True if any message in the PDU has its first vector header carrying the
@@ -327,7 +363,7 @@ TEST(msrp_participant, declare_talker_emits_pdu_peer_notifies)
     auto const ta = make_talker_adv(0x0001);
     auto status = a.declare_talker_advertise(ta, clock.now);
     EXPECT_TRUE(bool(status));
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
     fab.deliver_a_to_b(b, t1);
@@ -362,7 +398,7 @@ TEST(msrp_participant, registered_peer_talker_is_not_readvertised)
         peer.set_send_pdu(peer_fab.make_a_sender());
         peer.start(clock.now);
         (void)peer.declare_talker_advertise(make_talker_adv(0xB001), clock.now);
-        auto const tp = clock.advance(std::chrono::milliseconds(150));
+        auto const tp = clock.advance(std::chrono::milliseconds(250));
         peer.tick(tp);
         for (auto const& pdu : peer_fab.a_to_b) {
             a.receive_pdu(std::span<uint8_t const>(pdu.data(), pdu.size()), clock.now);
@@ -379,7 +415,7 @@ TEST(msrp_participant, registered_peer_talker_is_not_readvertised)
     // re-assertion (the 20s jump fires the LeaveAll, driving every applicant --
     // including the registered-peer observer -- to attempt a transmit).
     fab.a_to_b.clear();
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     a.tick(clock.advance(std::chrono::seconds(20)));
     EXPECT_TRUE(!fab.a_to_b.empty());
 
@@ -410,7 +446,7 @@ TEST(msrp_participant, periodic_leaveall_is_transmitted)
     a.start(clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
     fab.a_to_b.clear();
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     a.tick(clock.advance(std::chrono::seconds(20)));  // fire the LeaveAll timer
     EXPECT_TRUE(!fab.a_to_b.empty());
     bool saw_leaveall = false;
@@ -438,7 +474,7 @@ TEST(msrp_participant, leaveall_pdu_redeclares_listener_and_omits_recordless_tal
     (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
     (void)a.declare_listener(make_stream_id(0xB001), ListenerDeclaration::Ready, clock.now);
     fab.a_to_b.clear();
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     a.tick(clock.advance(std::chrono::seconds(20)));  // fire the LeaveAll timer
     bool found_la = false;
     for (auto const& pdu : fab.a_to_b) {
@@ -478,7 +514,7 @@ TEST(msrp_participant, received_leaveall_triggers_immediate_redeclare)
     a.start(clock.now);
     b.start(clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
 
     // Fire b's periodic LeaveAll and grab the PDU it emits.
     bfab.a_to_b.clear();
@@ -529,13 +565,13 @@ TEST(msrp_participant, registered_listener_redeclared_only_when_sticky_enabled)
 
         // a is the TALKER for 0xA001.
         (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
-        a.tick(clock.advance(std::chrono::milliseconds(150)));
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
 
         // b is a downstream LISTENER for 0xA001; deliver its Listener-Ready to a so
         // a holds a REGISTERED (operation=Register) Listener record for its stream.
         (void)b.declare_listener(make_stream_id(0xA001), ListenerDeclaration::Ready, clock.now);
         bfab.a_to_b.clear();
-        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        b.tick(clock.advance(std::chrono::milliseconds(250)));
         for (auto const& pdu : bfab.a_to_b) {
             a.receive_pdu(std::span<uint8_t const>(pdu.data(), pdu.size()), clock.now);
         }
@@ -543,7 +579,7 @@ TEST(msrp_participant, registered_listener_redeclared_only_when_sticky_enabled)
         // Run a periodic + LeaveAll pass on a and see whether a Listener attribute
         // (the only one a could emit -- a never DECLARED a listener) goes out.
         fab.a_to_b.clear();
-        a.tick(clock.advance(std::chrono::milliseconds(150)));
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
         a.tick(clock.advance(std::chrono::seconds(20)));
         for (auto const& pdu : fab.a_to_b) {
             for (uint8_t const t : pdu_attribute_types(std::span<uint8_t const>(pdu.data(), pdu.size()))) {
@@ -575,7 +611,7 @@ TEST(msrp_participant, suppress_leaveall_never_originates_leaveall)
         a.start(clock.now);
         (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
         fab.a_to_b.clear();
-        a.tick(clock.advance(std::chrono::milliseconds(150)));
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
         a.tick(clock.advance(std::chrono::seconds(20)));  // fire the LeaveAll timer
         a.tick(clock.advance(std::chrono::seconds(1)));   // periodic re-assert
         bool saw_leaveall = false;
@@ -614,12 +650,12 @@ TEST(msrp_participant, withdraw_talker_notifies_peer_leave)
     obs.on_talker_leave = [&](tsn::StreamId const& id) { leave_id = id; };
     b.subscribe(obs);
     (void)a.declare_talker_advertise(make_talker_adv(0x0042), clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     auto const stream_id = make_stream_id(0x0042);
     (void)a.withdraw_talker(stream_id, clock.now);
-    auto const t2 = clock.advance(std::chrono::milliseconds(150));
+    auto const t2 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t2);
     fab.deliver_a_to_b(b, t2);
     auto const t3 = clock.advance(std::chrono::milliseconds(1100));
@@ -648,7 +684,7 @@ TEST(msrp_participant, listener_declare_reaches_peer)
     a.subscribe(obs);
     auto const sid = make_stream_id(0x0099);
     (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     b.tick(t1);
     fab.deliver_b_to_a(a, t1);
     EXPECT_TRUE(listener_seen.has_value());
@@ -656,6 +692,83 @@ TEST(msrp_participant, listener_declare_reaches_peer)
         EXPECT_EQ(std::get<0>(*listener_seen).get_unique_id(), 0x0099);
         EXPECT_EQ(static_cast<int>(std::get<1>(*listener_seen)), static_cast<int>(ListenerDeclaration::Ready));
     }
+}
+
+// Milan v1.2 Section 4.2.7.2.2: an explicit Lv takes the MSRP registrar
+// straight from IN to MT (no 5 s leavetimer), so the talker sees the listener
+// go the moment the Lv arrives.
+TEST(msrp_participant, listener_leave_deregisters_immediately_without_leavetimer)
+{
+    MsrpParticipant a{test_msrp_config(), 0xee55};
+    MsrpParticipant b{test_msrp_config(), 0xff66};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+    std::optional<tsn::StreamId> left{};
+    Observer obs{};
+    obs.on_listener_leave = [&](tsn::StreamId const& id) { left = id; };
+    a.subscribe(obs);
+    auto const sid = make_stream_id(0x0077);
+    (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
+    auto t = clock.advance(std::chrono::milliseconds(250));
+    b.tick(t);
+    fab.deliver_b_to_a(a, t);
+    EXPECT_TRUE(a.listener_permits_transmit(sid));
+
+    (void)b.withdraw_listener(sid, clock.now);
+    t = clock.advance(std::chrono::milliseconds(250));
+    b.tick(t);
+    fab.deliver_b_to_a(a, t);
+    // No time has passed on A since the Lv arrived: the registration is gone
+    // and no leave timer was needed for it.
+    EXPECT_FALSE(a.listener_permits_transmit(sid));
+    EXPECT_TRUE(left.has_value());
+}
+
+// A declared Talker Advertise whose value changes (the talker moved to an
+// adopted Class A VID) is sent New at once, so the peer learns the new VID
+// within one join period, not at the next periodic transmission.
+TEST(msrp_participant, changed_talker_advertise_is_sent_promptly)
+{
+    MsrpParticipant a{test_msrp_config(), 0xab12};
+    MsrpParticipant b{test_msrp_config(), 0xcd34};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+    auto fv = make_talker_adv(0x0101);
+    (void)a.declare_talker_advertise(fv, clock.now);
+    // Settle: a few join periods, so the applicant is quiet (QA).
+    for (int i = 0; i < 4; ++i) {
+        auto const t = clock.advance(std::chrono::milliseconds(250));
+        a.tick(t);
+        fab.deliver_a_to_b(b, t);
+        b.tick(t);
+        fab.deliver_b_to_a(a, t);
+    }
+    auto const* reg = b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_TRUE(reg != nullptr);
+    EXPECT_EQ(reg->vlan_identifier.get(), default_sr_class_vid);
+
+    fv.vlan_identifier = 7;
+    (void)a.declare_talker_advertise(fv, clock.now);
+    auto const t = clock.advance(std::chrono::milliseconds(250));  // one join period: before any periodic
+    a.tick(t);
+    EXPECT_FALSE(fab.a_to_b.empty());
+    bool saw_new = false;
+    for (auto const& pdu : fab.a_to_b) {
+        saw_new = saw_new || first_talker_advertise_event(pdu) == std::optional<uint8_t>{0};  // New
+    }
+    EXPECT_TRUE(saw_new);
+    fab.deliver_a_to_b(b, t);
+    reg = b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_TRUE(reg != nullptr);
+    EXPECT_EQ(reg->vlan_identifier.get(), uint16_t{7});
 }
 
 TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
@@ -679,7 +792,7 @@ TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
     b.start(clock.now);
     auto const sid = make_stream_id(0x0099);
     (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
-    auto t = clock.advance(std::chrono::milliseconds(150));
+    auto t = clock.advance(std::chrono::milliseconds(250));
     b.tick(t);
     fab.deliver_b_to_a(a, t);
     EXPECT_TRUE(a.listener_permits_transmit(sid));  // registered (Registrar In)
@@ -713,7 +826,7 @@ TEST(msrp_participant, interesting_stream_id_pruning)
     b.subscribe(obs);
     (void)a.declare_talker_advertise(make_talker_adv(0x0001), clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0x0002), clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     EXPECT_EQ(talker_advertise_count, 1);
@@ -772,7 +885,7 @@ TEST(msrp_participant, declare_domain_basic)
     dfv.sr_class_vid = default_sr_class_vid;
     EXPECT_TRUE(bool(a.declare_domain(dfv, clock.now)));
     EXPECT_EQ(a.domain_count(), 1u);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     EXPECT_TRUE(domain_seen.has_value());
@@ -1014,7 +1127,7 @@ TEST(msrp_participant, leaveall_emits_pdu)
     TestClock clock{};
     a.start(clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(1), clock.now);
-    auto t1 = clock.advance(std::chrono::milliseconds(150));
+    auto t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.a_to_b.clear();
     auto t2 = clock.advance(std::chrono::seconds(20));
@@ -1040,7 +1153,7 @@ TEST(msrp_print, format_msrp_of_declare_talker_advertise_pdu)
     auto const ta = make_talker_adv(0x0001);
     auto status = a.declare_talker_advertise(ta, clock.now);
     EXPECT_TRUE(bool(status));
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
 
@@ -1067,7 +1180,7 @@ TEST(msrp_print, format_msrp_of_listener_and_domain_pdus)
     auto const domain_status = a.declare_domain(domain, clock.now);
     EXPECT_TRUE(bool(domain_status));
 
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
 
@@ -1440,7 +1553,7 @@ TEST(msrp_participant, consecutive_listeners_coalesce_into_one_vector)
     (void)a.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0002), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0003), ListenerDeclaration::Ready, clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     EXPECT_TRUE(!fab.a_to_b.empty());
 
     std::vector<uint16_t> nvals{};
@@ -1470,7 +1583,7 @@ TEST(msrp_participant, coalesced_listeners_round_trip_to_peer)
     (void)a.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0002), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0003), ListenerDeclaration::Ready, clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
 
@@ -1496,7 +1609,7 @@ TEST(msrp_participant, non_consecutive_listeners_stay_separate_vectors)
     a.start(clock.now);
     (void)a.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0005), ListenerDeclaration::Ready, clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
 
     std::vector<uint16_t> nvals{};
     for (auto const& pdu : fab.a_to_b) {
@@ -1534,7 +1647,7 @@ TEST(msrp_participant, domain_class_b_then_a_coalesce_and_round_trip)
     dom_a.sr_class_vid = default_sr_class_vid;
     (void)a.declare_domain(dom_b, clock.now);  // declared B first so container order chains B -> A
     (void)a.declare_domain(dom_a, clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
 
     std::vector<uint16_t> nvals{};
@@ -1664,13 +1777,13 @@ TEST(msrp_participant, peer_declaration_does_not_overwrite_our_talker)
     auto ta_ours = make_talker_adv(0x0001);
     ta_ours.destination_address = our_mac;
     EXPECT_TRUE(bool(a.declare_talker_advertise(ta_ours, clock.now)));
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
 
     // B declares the SAME stream S with a DIFFERENT dest MAC; A receives it.
     auto ta_foreign = make_talker_adv(0x0001);
     ta_foreign.destination_address = foreign_mac;
     EXPECT_TRUE(bool(b.declare_talker_advertise(ta_foreign, clock.now)));
-    b.tick(clock.advance(std::chrono::milliseconds(150)));
+    b.tick(clock.advance(std::chrono::milliseconds(250)));
     fab.deliver_b_to_a(a, clock.now);
 
     // A must NOT have adopted B's foreign dest MAC into our own declaration -- our
@@ -1709,7 +1822,7 @@ TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
             EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(uid), clock.now)));
             EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(uid + 0x0100), ListenerDeclaration::Ready, clock.now)));
         }
-        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        b.tick(clock.advance(std::chrono::milliseconds(250)));
         fab.deliver_b_to_a(a, clock.now);
         EXPECT_EQ(a.talker_advertise_count(), 8u - reserved);
         EXPECT_EQ(a.listener_count(), 8u - reserved);
@@ -1729,7 +1842,7 @@ TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
         EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now)));
         // Yet more foreign traffic is still held to the remainder.
         EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(0x0108), clock.now)));
-        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        b.tick(clock.advance(std::chrono::milliseconds(250)));
         fab.deliver_b_to_a(a, clock.now);
         EXPECT_NE(a.find_talker_advertise(make_stream_id(0x0300)), nullptr);
         EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0108)), nullptr);

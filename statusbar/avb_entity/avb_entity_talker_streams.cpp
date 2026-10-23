@@ -225,7 +225,7 @@ void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
     // Frames carry the SR class VID + PCP (untagged AVTP is in no SR class). The pcap stamp is the
     // gPTP wall-clock transmit time, so a capture shows avtp_ts - wall_clock = presentation_offset.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(&slot.dest_mac, frame, config_.vlan_id, config_.stream_pcp);
+    (void)stream_tx_.send_vlan(&slot.dest_mac, frame, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp);
     ++slot.tx_packets;
 }
 

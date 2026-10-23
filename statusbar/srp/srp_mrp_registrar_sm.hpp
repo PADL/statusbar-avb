@@ -97,11 +97,15 @@ struct Def
     /// deliberately absent from the table and therefore no-ops.
     enum class Event : uint8_t
     {
-        UCT = 0,     ///< unconditional — BEGIN! initialization from Start
-        RNew,        ///< rNew!      (10.7.5.14) received New
-        RJoinIn,     ///< rJoinIn!   (10.7.5.15) received JoinIn
-        RJoinMt,     ///< rJoinMt!   (10.7.5.16) received JoinMt (JoinEmpty)
-        RLeave,      ///< rLv!       (10.7.5.17) received Lv
+        UCT = 0,  ///< unconditional — BEGIN! initialization from Start
+        RNew,     ///< rNew!      (10.7.5.14) received New
+        RJoinIn,  ///< rJoinIn!   (10.7.5.15) received JoinIn
+        RJoinMt,  ///< rJoinMt!   (10.7.5.16) received JoinMt (JoinEmpty)
+        RLeave,   ///< rLv!       (10.7.5.17) received Lv
+        /// rLv! with the Milan v1.2 Section 4.2.7.2.2 registrar change
+        /// (IN / rLv! -> Lv -> MT, no leavetimer). The MSRP participant
+        /// dispatches this instead of RLeave; MVRP keeps RLeave.
+        RLeaveImmediate,
         RLeaveAll,   ///< rLA!       (10.7.5.20) received LeaveAll
         TxLeaveAll,  ///< txLA!      (10.7.5.8)  paired Applicant emitted LeaveAll
         Redeclare,   ///< ReDeclare! (10.7.5.3)  port role change
@@ -163,6 +167,13 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::In, E::RLeave) = T::action<a_notify_lv_and_start_lvtimer>(S::Lv);
     t.at(S::Lv, E::RLeave) = T::action<a_notify_lv>(S::Lv);  // self-loop with notify only
     t.at(S::Mt, E::RLeave) = T::action<a_notify_lv>(S::Mt);  // self-loop with notify only
+
+    // -----------------------------------------------------------------
+    // rLv! for MSRP: IN / rLv! -> (Lv) -> MT (Milan v1.2 Section 4.2.7.2.2)
+    // -----------------------------------------------------------------
+    t.at(S::In, E::RLeaveImmediate) = T::action<a_notify_lv>(S::Mt);
+    t.at(S::Lv, E::RLeaveImmediate) = T::action<a_notify_lv>(S::Lv);
+    t.at(S::Mt, E::RLeaveImmediate) = T::action<a_notify_lv>(S::Mt);
 
     // -----------------------------------------------------------------
     // rLA! and txLA! and ReDeclare! — mrp.c:946-961 (shared, no notify)

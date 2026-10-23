@@ -14,8 +14,11 @@
 // deadlines it learns from next_deadline(). Expired timers are
 // reported and then cleared; the caller decides whether to rearm.
 //
-// Timer durations follow OpenAvnu mrpd defaults (mrp.h:140-143), which
-// match IEEE 802.1Q-2014 Clause 10.7.4 within the permitted ranges.
+// Timer durations are the Milan v1.2 defaults (Section 4.2.7.1.1,
+// Table 4.3: joinTime 200 ms [180, 240], LeaveTime 5000 ms [4500, 7500],
+// leavealltimer 10-15 s [9.5, 15.5], periodictimer 1000 ms [900, 1500]).
+// Each value is also inside the IEEE 802.1Q-2018 Clause 10.7.11 ranges, so
+// classic MRP peers interoperate unchanged.
 //
 
 #include "statusbar/sm/sm.hpp"
@@ -35,19 +38,20 @@ using sm::TimePoint;
 class TimerScheduler
 {
   public:
-    /// JoinTime — mrp.h:140. The spec allows up to 3 join fires in
-    /// 300 ms (10.7.4.1); mrp.c uses 100 ms to give 3 fires in 300 ms.
-    static constexpr auto JOIN_TIME = std::chrono::milliseconds(100);
+    /// JoinTime — Milan v1.2 Table 4.3 default 200 ms (802.1Q 10.7.4.1).
+    static constexpr auto JOIN_TIME = std::chrono::milliseconds(200);
 
-    /// LeaveTime — mrp.h:141, spec 10.7.4.3.
-    static constexpr auto LEAVE_TIME = std::chrono::milliseconds(1000);
+    /// LeaveTime: Milan v1.2 Table 4.3 default 5000 ms (IEEE 802.1Q 10.7.4.2), paired with the MSRP
+    /// IN/rLv! -> MT rule (Milan v1.2 Section 4.2.7.2.2) so an explicit withdrawal is seen at once.
+    static constexpr auto LEAVE_TIME = std::chrono::milliseconds(5000);
 
-    /// LeaveAllTime (nominal) — mrp.h:142, spec 10.7.4.2.
-    /// The actual interval is randomized in
-    /// [LEAVE_ALL_TIME_NOMINAL / 2, LEAVE_ALL_TIME_NOMINAL * 3 / 2).
-    static constexpr auto LEAVE_ALL_TIME_NOMINAL = std::chrono::milliseconds(10000);
+    /// LeaveAllTime: Milan v1.2 Table 4.3 "10-15 s" (IEEE 802.1Q 10.7.4.3); each period is drawn
+    /// uniformly from [LEAVE_ALL_TIME_MIN, LEAVE_ALL_TIME_MAX).
+    static constexpr auto LEAVE_ALL_TIME_MIN = std::chrono::milliseconds(10000);
+    static constexpr auto LEAVE_ALL_TIME_MAX = std::chrono::milliseconds(15000);
 
-    /// PeriodicTransmissionTime — mrp.h:143, spec 10.7.5.23.
+    /// PeriodicTransmissionTime — Milan v1.2 Table 4.3 default 1000 ms
+    /// (802.1Q 10.7.5.23).
     static constexpr auto PERIODIC_TIME = std::chrono::milliseconds(1000);
 
     /// Construct. Pass a nonzero seed for deterministic tests; the
@@ -104,8 +108,7 @@ class TimerScheduler
     [[nodiscard]] auto tick(TimePoint now) noexcept -> Expired;
 
   private:
-    /// Uniform random interval in [LEAVE_ALL_TIME_NOMINAL/2, 3*LEAVE_ALL_TIME_NOMINAL/2).
-    /// See mrp.c:412-428 for the reference formula.
+    /// Uniform random interval in [LEAVE_ALL_TIME_MIN, LEAVE_ALL_TIME_MAX).
     auto randomized_leaveall_duration() -> std::chrono::milliseconds;
 
     std::optional<TimePoint> join_{};

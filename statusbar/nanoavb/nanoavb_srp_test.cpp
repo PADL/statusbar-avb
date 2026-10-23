@@ -189,6 +189,170 @@ TEST(nanoavb_srp_msrp, set_domain)
 }
 
 //
+// MSRP Domain (Milan v1.2 Section 4.2.7.2.1)
+//
+namespace {
+
+/// A bare MSRP participant standing in for the bridge port, wired to an
+/// MsrpHandler (the end station) through two packet queues.
+struct DomainBench
+{
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> station_out{};
+    std::vector<std::vector<uint8_t>> bridge_out{};
+    MsrpHandler<> station{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
+                              station_out.emplace_back(p.begin(), p.end());
+                              return true;
+                          }}};
+    statusbar::srp::msrp::MsrpParticipant bridge{statusbar::srp::msrp::MsrpConfig{}, 0x5eed};
+    std::vector<statusbar::srp::msrp::DomainFirstValue> seen_by_bridge{};
+
+    DomainBench()
+    {
+        bridge.set_send_pdu([this](std::span<uint8_t const> p) {
+            bridge_out.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        statusbar::srp::msrp::Observer obs{};
+        obs.on_domain_declared = [this](statusbar::srp::msrp::DomainFirstValue const& fv) { seen_by_bridge.push_back(fv); };
+        (void)bridge.subscribe(obs);
+        bridge.start(now);
+    }
+
+    void run(int rounds)
+    {
+        for (int i = 0; i < rounds; ++i) {
+            now += std::chrono::milliseconds{250};
+            station.tick(now);
+            bridge.tick(now);
+            for (auto const& p : station_out) {
+                bridge.receive_pdu(p, now);
+            }
+            station_out.clear();
+            for (auto const& p : bridge_out) {
+                station.receive_packet(p, now);
+            }
+            bridge_out.clear();
+        }
+    }
+
+    static auto domain(uint8_t id, uint8_t prio, uint16_t vid) -> statusbar::srp::msrp::DomainFirstValue
+    {
+        statusbar::srp::msrp::DomainFirstValue fv{};
+        fv.sr_class_id = id;
+        fv.sr_class_priority = prio;
+        fv.sr_class_vid = vid;
+        return fv;
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_srp_msrp, declares_class_a_domain_only)
+{
+    DomainBench b{};
+    (void)b.station.declare_domain(b.now);
+    b.run(4);
+    EXPECT_FALSE(b.seen_by_bridge.empty());
+    for (auto const& fv : b.seen_by_bridge) {
+        EXPECT_EQ(fv.sr_class_id.get(), 6);
+        EXPECT_EQ(fv.sr_class_priority.get(), 3);
+        EXPECT_EQ(fv.sr_class_vid.get(), 2);
+    }
+}
+
+// A bridge's default domain vector {5,2,VID},{6,3,VID}: the VID does not step per position.
+// The station adopts VID 7 for Class A, tells its owner and re-declares a matching domain.
+TEST(nanoavb_srp_msrp, adopts_bridge_class_a_vid_from_domain_vector)
+{
+    DomainBench b{};
+    std::vector<std::pair<uint16_t, uint16_t>> changes{};
+    b.station.set_on_domain_vid_changed([&](uint16_t o, uint16_t n, TimePoint) { changes.emplace_back(o, n); });
+    (void)b.station.declare_domain(b.now);
+    (void)b.bridge.declare_domain(DomainBench::domain(5, 2, 7), b.now);
+    (void)b.bridge.declare_domain(DomainBench::domain(6, 3, 7), b.now);
+    b.run(4);
+    EXPECT_EQ(b.station.domain().sr_class_vid, 7);
+    EXPECT_EQ(changes.size(), 1u);
+    if (!changes.empty()) {
+        EXPECT_EQ(changes[0].first, 2);
+        EXPECT_EQ(changes[0].second, 7);
+    }
+    b.seen_by_bridge.clear();
+    b.run(8);
+    EXPECT_FALSE(b.seen_by_bridge.empty());
+    EXPECT_EQ(b.seen_by_bridge.back().sr_class_id.get(), 6);
+    EXPECT_EQ(b.seen_by_bridge.back().sr_class_vid.get(), 7);
+
+    // Link up: back to the configured VID 2 (and declared), until the bridge's
+    // next declaration is adopted again.
+    changes.clear();
+    (void)b.station.reset_domain(b.now);
+    EXPECT_EQ(b.station.domain().sr_class_vid, 2);
+    EXPECT_EQ(changes.size(), 1u);
+    if (!changes.empty()) {
+        EXPECT_EQ(changes[0].second, 2);
+    }
+}
+
+// Two adopting end stations on a direct link, configured VIDs 2 and 7: each
+// adopts at most once per link up instead of swapping each other's previous
+// value on every periodic PDU.
+TEST(nanoavb_srp_msrp, two_adopting_stations_do_not_oscillate)
+{
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> a_out;
+    std::vector<std::vector<uint8_t>> b_out;
+    MsrpHandler<> a{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&a_out](std::span<uint8_t const> p) {
+                        a_out.emplace_back(p.begin(), p.end());
+                        return true;
+                    }}};
+    MsrpHandler<> b{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&b_out](std::span<uint8_t const> p) {
+                        b_out.emplace_back(p.begin(), p.end());
+                        return true;
+                    }}};
+    a.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = 2});
+    b.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = 7});
+    int a_changes = 0;
+    int b_changes = 0;
+    a.set_on_domain_vid_changed([&](uint16_t, uint16_t, TimePoint) { ++a_changes; });
+    b.set_on_domain_vid_changed([&](uint16_t, uint16_t, TimePoint) { ++b_changes; });
+    (void)a.declare_domain(now);
+    (void)b.declare_domain(now);
+    for (int round = 0; round < 200; ++round) {  // 50 s: dozens of periodic and LeaveAll PDUs
+        now += std::chrono::milliseconds{250};
+        a.tick(now);
+        b.tick(now);
+        for (auto const& p : a_out) {
+            b.receive_packet(p, now);
+        }
+        a_out.clear();
+        for (auto const& p : b_out) {
+            a.receive_packet(p, now);
+        }
+        b_out.clear();
+    }
+    EXPECT_TRUE(a_changes <= 1);
+    EXPECT_TRUE(b_changes <= 1);
+}
+
+// A Class A domain at another priority is not adopted: our frames always use
+// PCP 3, so the port stays an SRP domain boundary (802.1Q 35.2.1.4 h). A
+// Class B domain never changes the Class A VID either.
+TEST(nanoavb_srp_msrp, ignores_class_a_domain_at_other_priority_and_class_b)
+{
+    DomainBench b{};
+    bool changed = false;
+    b.station.set_on_domain_vid_changed([&](uint16_t, uint16_t, TimePoint) { changed = true; });
+    (void)b.station.declare_domain(b.now);
+    (void)b.bridge.declare_domain(DomainBench::domain(6, 2, 9), b.now);
+    (void)b.bridge.declare_domain(DomainBench::domain(5, 2, 11), b.now);
+    b.run(4);
+    EXPECT_FALSE(changed);
+    EXPECT_EQ(b.station.domain().sr_class_vid, 2);
+}
+
+//
 // MSRP Handler Talker Tests
 //
 TEST(nanoavb_srp_msrp, talker_advertise)

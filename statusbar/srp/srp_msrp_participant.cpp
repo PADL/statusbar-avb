@@ -78,7 +78,9 @@ constexpr auto rx_events_for(AttributeEvent event) noexcept -> RxEvents
             // Registrar ignores rMt! per Clause 10.7.8 Table 10-4
             return {.applicant = applicant_sm::Def::Event::RMt, .registrar = registrar_sm::Def::Event::Count};
         case AttributeEvent::Lv:
-            return {.applicant = applicant_sm::Def::Event::RLeave, .registrar = registrar_sm::Def::Event::RLeave};
+            // Milan v1.2 Section 4.2.7.2.2: the MSRP registrar goes IN -> MT
+            // on rLv! without running the leavetimer.
+            return {.applicant = applicant_sm::Def::Event::RLeave, .registrar = registrar_sm::Def::Event::RLeaveImmediate};
         default:
             return {.applicant = applicant_sm::Def::Event::Count, .registrar = registrar_sm::Def::Event::Count};
     }
@@ -438,10 +440,13 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
+    // A declaration whose value changed (e.g. a talker moved to an adopted VID) is declared New
+    // (IEEE 802.1Q-2018 10.7.5.1) so the change goes out at the next transmit opportunity.
+    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
     rec.first_value = fv;
     rec.operation = Operation::Declare;
 
-    auto const event = first_declare_event(rec);
+    auto const event = changed ? applicant_sm::Def::Event::New : first_declare_event(rec);
     mrp::dispatch_applicant(rec, event, now);
     port_.timers().start_join(now);
     return success();
@@ -455,10 +460,13 @@ auto MsrpParticipantT<Limits>::declare_talker_failed(TalkerFailedFirstValue cons
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
+    // A declaration whose value changed (e.g. a talker moved to an adopted VID) is declared New
+    // (IEEE 802.1Q-2018 10.7.5.1) so the change goes out at the next transmit opportunity.
+    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
     rec.first_value = fv;
     rec.operation = Operation::Declare;
 
-    auto const event = first_declare_event(rec);
+    auto const event = changed ? applicant_sm::Def::Event::New : first_declare_event(rec);
     mrp::dispatch_applicant(rec, event, now);
     port_.timers().start_join(now);
     return success();
@@ -526,10 +534,13 @@ auto MsrpParticipantT<Limits>::declare_domain(DomainFirstValue const& fv, TimePo
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
+    // A declaration whose value changed (e.g. a talker moved to an adopted VID) is declared New
+    // (IEEE 802.1Q-2018 10.7.5.1) so the change goes out at the next transmit opportunity.
+    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
     rec.first_value = fv;
     rec.operation = Operation::Declare;
 
-    auto const event = first_declare_event(rec);
+    auto const event = changed ? applicant_sm::Def::Event::New : first_declare_event(rec);
     mrp::dispatch_applicant(rec, event, now);
     port_.timers().start_join(now);
     return success();
@@ -1076,6 +1087,18 @@ void MsrpParticipantT<Limits>::handle_domain_rx(
     registrar_sm::Def::Event registrar_event,
     TimePoint now)
 {
+    // Report the peer's declaration as received, before the shared spine (which
+    // keeps OUR value in the record when we declare the same SRclassID).
+    if ((applicant_event == applicant_sm::Def::Event::RNew || applicant_event == applicant_sm::Def::Event::RJoinIn ||
+         applicant_event == applicant_sm::Def::Event::RJoinMt) &&
+        attr_length >= DomainFirstValue::LENGTH) {
+        DomainFirstValue received{};
+        (void)load_unchecked(first_value_bytes, &received);
+        for (uint16_t k = 0; k < value_index; ++k) {
+            increment_first_value(received);
+        }
+        notify_all(&Observer::on_domain_declared, received);
+    }
     // Domain has no interesting-stream filter, so it passes an always-true predicate.
     // Multi-value Domain vectors increment SRclassID and SRclassPriority per value
     // (IEEE 802.1Q 35.2.2.9; AVnu MSRP.End.c.35.1.11 Part B), handled by

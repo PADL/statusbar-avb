@@ -81,6 +81,7 @@ struct TalkerStreams
         : config_{config}
         , media_clock_{media_clock}
         , last_gptp_ns_{last_gptp_ns}
+        , vlan_id_{config.vlan_id}
         , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
         , mem_resource_{memory_resource}
     {}
@@ -145,6 +146,12 @@ struct TalkerStreams
         size_t samples,
         std::span<float const> src);
 
+    /// VLAN ID the stream frames are tagged with: config.vlan_id until the
+    /// Class A VID in use changes (adopted from the bridge's MSRP Domain,
+    /// Milan v1.2 Section 4.2.7.2.1). Reactor thread writes, media thread reads.
+    void set_vlan_id(uint16_t const vlan_id) noexcept { vlan_id_.store(vlan_id, std::memory_order_relaxed); }
+    [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
+
     /// STOP_STREAMING gate for one STREAM_OUTPUT descriptor index (kit
     /// phase 5): a stopped stream is treated as gate-closed by
     /// transmit_if_due (AAF FIFO cleared, CRF phase reset). Reactor thread
@@ -194,7 +201,8 @@ struct TalkerStreams
     static constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PDU = 64;
 
     // References / values (bound at construction).
-    TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
+    TalkerStreamsConfig config_;     ///< destructured entity config (rate + VLAN/PCP), by value
+    std::atomic<uint16_t> vlan_id_;  ///< VLAN tag for stream frames (config_.vlan_id, or the adopted Domain VID)
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<uint64_t> const& last_gptp_ns_;
     uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k

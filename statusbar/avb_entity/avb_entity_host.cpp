@@ -29,7 +29,9 @@ AvbEntityHost::AvbEntityHost(
     size_t const talker_max_listeners,
     size_t const listener_max_streams)
     : components_{std::move(model), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
-{}
+{
+    wire_domain_callbacks();
+}
 
 AvbEntityHost::AvbEntityHost(
     nanoavb::AemEntityHandler& handler,
@@ -42,6 +44,7 @@ AvbEntityHost::AvbEntityHost(
 {
     wire_identify_control();
     wire_avb_info();
+    wire_domain_callbacks();
 }
 
 AvbEntityHost::~AvbEntityHost()
@@ -51,6 +54,27 @@ AvbEntityHost::~AvbEntityHost()
     if (mirror_ != nullptr) {
         mirror_->mirror().set_on_update({});
     }
+}
+
+void AvbEntityHost::wire_domain_callbacks()
+{
+    // The Class A VID changed: join the new VLAN (Milan v1.2 Section 4.3.2), report
+    // it in ACMP, let the entity re-tag, and re-advertise the talker streams.
+    components_.msrp_handler.set_on_domain_vid_changed(
+        [this](uint16_t const old_vid, uint16_t const new_vid, TimePoint const time) {
+            ctl_log().status("msrp: Class A VID {} -> {} (Domain)", old_vid, new_vid);
+            (void)components_.mvrp_handler.withdraw_vlan(old_vid, time);
+            (void)components_.mvrp_handler.register_vlan(new_vid, time);
+            for (size_t i = 0; i < components_.acmp_talker.max_streams(); ++i) {
+                (void)components_.acmp_talker.set_stream_vlan_id(static_cast<uint16_t>(i), new_vid);
+            }
+            if (on_domain_vid_changed_) {
+                on_domain_vid_changed_(new_vid, time);
+            }
+            if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready && advertise_streams_) {
+                advertise_streams_(time);
+            }
+        });
 }
 
 void AvbEntityHost::wire_identify_control()
@@ -335,6 +359,10 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
 
 void AvbEntityHost::on_link_up(TimePoint const time)
 {
+    // Milan v1.2 Section 4.2.7.2.1: after a Link Up, return to the configured
+    // Class A domain (forget an adopted VID) and declare it at once -- not
+    // gated on gPTP, unlike the stream advertisements.
+    (void)components_.msrp_handler.reset_domain(time);
     supervisor_ctx_.link_up = true;
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkUp, time);
 }

@@ -117,6 +117,40 @@ TEST(mrp_registrar_sm, lvtimer_from_lv_to_mt_notifies_leave)
 }
 
 //
+// RLeaveImmediate (MSRP, Milan v1.2 Section 4.2.7.2.2): IN / rLv! -> (Lv) -> MT
+//
+
+TEST(mrp_registrar_sm, rleave_immediate_from_in_to_mt_without_lvtimer)
+{
+    Walker w{};
+    w.fire(Def::Event::UCT);
+    w.fire(Def::Event::RNew);  // Mt -> In
+    w.fire(Def::Event::RLeaveImmediate);
+    EXPECT_EQ(static_cast<int>(w.machine.current_state()), static_cast<int>(Def::State::Mt));
+    EXPECT_EQ(static_cast<int>(w.ctx.notify), static_cast<int>(Notify::Leave));
+    EXPECT_FALSE(w.ctx.lvtimer_request);
+    // A later join registers again with a fresh notification.
+    w.fire(Def::Event::RJoinIn);
+    EXPECT_EQ(static_cast<int>(w.machine.current_state()), static_cast<int>(Def::State::In));
+    EXPECT_EQ(static_cast<int>(w.ctx.notify), static_cast<int>(Notify::Join));
+}
+
+TEST(mrp_registrar_sm, rleave_immediate_from_lv_and_mt_keeps_state)
+{
+    Walker w{};
+    w.fire(Def::Event::UCT);
+    w.fire(Def::Event::RLeaveImmediate);
+    EXPECT_EQ(static_cast<int>(w.machine.current_state()), static_cast<int>(Def::State::Mt));
+    EXPECT_FALSE(w.ctx.lvtimer_request);
+    w.fire(Def::Event::RNew);
+    w.fire(Def::Event::RLeaveAll);  // In -> Lv (leavetimer as standard)
+    EXPECT_TRUE(w.ctx.lvtimer_request);
+    w.fire(Def::Event::RLeaveImmediate);
+    EXPECT_EQ(static_cast<int>(w.machine.current_state()), static_cast<int>(Def::State::Lv));
+    EXPECT_FALSE(w.ctx.lvtimer_request);
+}
+
+//
 // TxLeaveAll / RLeaveAll / Redeclare from In: silent (no notify), arm lvtimer, -> Lv
 //
 

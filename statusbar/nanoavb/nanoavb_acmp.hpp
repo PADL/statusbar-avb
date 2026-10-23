@@ -142,6 +142,19 @@ class NanoAvbAcmpTalker
     [[nodiscard]] auto configure_stream(
         uint16_t stream_index, Eui64 stream_id, Eui48 dest_mac, uint16_t vlan_id = srp::DEFAULT_SR_CLASS_A_VID) -> Status;
 
+    /// Change only a configured talker stream's VLAN ID (the Class A VID in
+    /// use changed, e.g. adopted from the bridge's MSRP Domain). Reported in
+    /// CONNECT_TX / GET_TX_STATE responses and GET_STREAM_INFO from then on.
+    [[nodiscard]] auto set_stream_vlan_id(uint16_t const stream_index, uint16_t const vlan_id) -> Status
+    {
+        auto* stream = ctx_.get_stream(stream_index);
+        if (stream == nullptr) {
+            return failure(make_error_code(NanoAvbError::InvalidStreamIndex));
+        }
+        stream->stream_vlan_id = vlan_id;
+        return success();
+    }
+
     /// Get stream info
     /// @param stream_index The stream index to query
     [[nodiscard]] auto get_stream(uint16_t const stream_index) const noexcept -> TalkerStreamInfoDynamic<> const*

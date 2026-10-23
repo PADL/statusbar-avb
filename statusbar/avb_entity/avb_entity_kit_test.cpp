@@ -15,6 +15,7 @@
 #include "statusbar/test/test.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory_resource>
 #include <optional>
@@ -277,4 +278,72 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     EXPECT_TRUE(reports.back() == (V{0, 1}));
     EXPECT_EQ(reports.size(), size_t{4});
     kit.set_on_admission_changed({});
+}
+
+// Milan v1.2 Section 4.2.7.2.1: an adopted Class A VID reaches the MVRP join,
+// ACMP stream_vlan_id and the frames' tag; a link up restores the configured VID.
+TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
+{
+    auto const blob = make_blob(1, 1);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+    EXPECT_TRUE(storage.has_value());
+    auto const talkers = *talker_stream_specs(*storage, 0);
+    auto const listeners = *listener_stream_specs(*storage, 0);
+
+    AvbEntityAudioIOConfig config{};
+    config.interface_name = "kit-domain-test0";  // no such interface: no MAC, no sockets
+    config.entity_id = ieee::Eui64{0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x03};
+    config.stream_address_mode = "static";
+    EntityIdentityDescriptorHandler handler{
+        *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit domain", std::nullopt, /*patch_avb_interface=*/false};
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<uint64_t> last_gptp_ns{0};
+    AvbEntityKit kit{
+        config,
+        handler,
+        talkers,
+        listeners,
+        48000,
+        /*initial_clock_source=*/0,
+        /*crf_clock_source_index=*/std::nullopt,
+        media_clock,
+        last_gptp_ns,
+        /*audio_sink=*/nullptr,
+        std::pmr::get_default_resource()};
+    auto& components = kit.host().components();
+    EXPECT_EQ(components.acmp_talker.get_stream(0)->stream_vlan_id, uint16_t{2});
+    EXPECT_EQ(kit.talker().vlan_id(), uint16_t{2});
+
+    // The bridge port: a bare participant declaring Class A on VID 7.
+    std::vector<std::vector<uint8_t>> bridge_out;
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9e};
+    bridge.set_send_pdu([&bridge_out](std::span<uint8_t const> p) {
+        bridge_out.emplace_back(p.begin(), p.end());
+        return true;
+    });
+    auto now = sm::Clock::now();
+    bridge.start(now);
+    srp::msrp::DomainFirstValue class_a{};
+    class_a.sr_class_vid = 7;
+    (void)bridge.declare_domain(class_a, now);
+    for (int i = 0; i < 4; ++i) {
+        now += std::chrono::milliseconds(250);
+        bridge.tick(now);
+        for (auto const& p : bridge_out) {
+            components.msrp_handler.receive_packet(p, now);
+        }
+        bridge_out.clear();
+    }
+    EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{7});
+    EXPECT_EQ(components.acmp_talker.get_stream(0)->stream_vlan_id, uint16_t{7});
+    EXPECT_EQ(components.acmp_talker.get_stream(1)->stream_vlan_id, uint16_t{7});
+    EXPECT_EQ(kit.talker().vlan_id(), uint16_t{7});
+    EXPECT_TRUE(components.mvrp_handler.get_vlan_state(7) != nanoavb::VlanState::Unregistered);
+    EXPECT_TRUE(components.mvrp_handler.get_vlan_state(2) == nanoavb::VlanState::Unregistered);
+
+    kit.on_link_up(now);
+    EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{2});
+    EXPECT_EQ(components.acmp_talker.get_stream(0)->stream_vlan_id, uint16_t{2});
+    EXPECT_EQ(kit.talker().vlan_id(), uint16_t{2});
+    EXPECT_TRUE(components.mvrp_handler.get_vlan_state(2) != nanoavb::VlanState::Unregistered);
 }
