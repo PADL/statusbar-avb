@@ -69,7 +69,7 @@ repository's C++ wire-format definitions.
 | `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps; AAF PCM samples and AES3 subframes; IEC 61883: IIDC, CIP, AM824 data blocks, IEC 61883-4 MPEG2-TS source packets; CVF: MJPEG, H.264 and H.265 NAL/FU headers, JPEG 2000; audio grouped by channel or by frame per the preference *Audio sample grouping*) and info-column summaries for every stream subtype (IEC 61883, MMA, AAF, CVF, CRF, TSCF, SVF, RVF, VSF, EF, NTSCF) and MAAP, AEF, ESCF, EECF |
 | `statusbar_avb/acf.lua` | the ACF message walker inside TSCF/NTSCF: every clause 9.4 type, pad rules, Checksum/CRC trailer verification (preference *Verify ACF Checksum/CRC trailers*) |
 | `statusbar_avb/atdecc.lua` | IEEE 1722.1: ADP, ACMP, AECP (AEM payloads and every descriptor's counted tables by table; control value_details typed by control_value_type, and SET/GET_CONTROL / MIXER / MATRIX values typed from the descriptor seen earlier in the capture; stream formats broken into AAF / IEC 61883-6 / CRF fields; Address Access TLVs; AVC; Milan vendor unique (MVU) commands; other Vendor Unique raw), command/response pairing |
-| `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers; needs Lua 5.3+ (Wireshark 4.4+), otherwise verification is skipped |
+| `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers (bit32 on Lua 5.2, the native operators on 5.3+) |
 | `statusbar_avb/gen/*.lua` | **generated** field tables and layout decoders — do not edit; regenerate with `python3 -m wireshark_schema gen-lua wireshark` from `avb/python/` |
 
 Wireshark executes every `.lua` under a plugin folder, modules included,
