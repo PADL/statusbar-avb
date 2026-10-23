@@ -12,6 +12,7 @@ statusbar_add_module(
   avb_entity_host.cpp
   avb_entity_avb_info_mirror.cpp
   avb_entity_kit.cpp
+  avb_entity_persistent_state.cpp
   avb_entity_upkeep.cpp
   avb_entity_stream_counters.cpp
   avb_entity_stream_spec.cpp
@@ -41,6 +42,7 @@ statusbar_add_module(
   statusbar::sm
   statusbar::status
   statusbar::stun
+  statusbar::toml
   statusbar::tsn
   statusbar::udptun
   TESTS
@@ -57,6 +59,7 @@ statusbar_add_module(
   avb_entity_stream_spec_test.cpp
   avb_entity_listener_streams_test.cpp
   avb_entity_listener_bindings_test.cpp
+  avb_entity_persistent_state_test.cpp
   avb_entity_listener_vlan_test.cpp
   avb_entity_crf_clock_recovery_test.cpp
   avb_entity_media_rate_test.cpp

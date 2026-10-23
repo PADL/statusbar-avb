@@ -228,8 +228,13 @@ struct AvbEntityAudioIOConfig
     /// controller DISCONNECT removes the binding. Empty = disabled.
     std::string listener_bindings_path{};
 
-    /// Local ATDECC socket (nanoavb_local_port.hpp): controllers on this host reach the entity
-    /// over an AF_UNIX datagram socket bound here, without raw-socket privileges. Empty = off.
+    /// The persistent state TOML file (docs/PERSISTENT_STATE.md), loaded at start()
+    /// and rewritten on every change; supersedes listener_bindings_path, importing
+    /// it once. Empty = off.
+    std::string persistent_state_path{};
+
+    /// Local ATDECC socket (nanoavb_local_port.hpp): an AF_UNIX datagram socket for
+    /// controllers on this host, without raw-socket privileges. Empty = off.
     std::string atdecc_socket_path{};
     /// The local ATDECC socket file's mode.
     int atdecc_socket_mode{0660};

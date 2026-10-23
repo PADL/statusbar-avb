@@ -107,11 +107,11 @@ AvbEntityKit::AvbEntityKit(
     // configured presentation offset (2 ms by default), within the range a
     // controller may set (0..0x7FFFFFFF ns).
     for (auto& offset : presentation_offset_ns_) {
-        offset.store(
-            static_cast<uint32_t>(
-                std::min<uint64_t>(config_.presentation_offset_ns, atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS)),
-            std::memory_order_relaxed);
+        offset.store(default_presentation_offset_ns(), std::memory_order_relaxed);
     }
+    // The name the entity was given (a saved one replaces it only while the
+    // configuration still says this).
+    configured_entity_name_ = std::string{storage_handler_.entity_name().as_string_view()};
 
     (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
     host_.components().msrp_handler.set_domain(
@@ -147,6 +147,18 @@ AvbEntityKit::AvbEntityKit(
             talker_->set_stream_stopped(index, !streaming);
         }
         return atdecc::AEM_STATUS_SUCCESS;
+    });
+    // The data plane runs each stream in its spec's format at the kit's rate: SET_STREAM_FORMAT
+    // and SET_SAMPLING_RATE take only those, so no descriptor reports (and no file keeps) a
+    // format or rate the streams are not using.
+    storage_handler_.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t {
+        auto const& specs = type == DESCRIPTOR_STREAM_OUTPUT ? talker_specs_ : listener_specs_;
+        bool const current = std::ranges::any_of(
+            specs, [&](StreamSpec const& spec) { return spec.index == index && spec.format_word == format; });
+        return current ? atdecc::AEM_STATUS_SUCCESS : atdecc::AEM_STATUS_NOT_SUPPORTED;
+    });
+    storage_handler_.set_on_sampling_rate_changed([this](uint16_t, uint32_t const rate) -> uint8_t {
+        return rate == sample_rate_ ? atdecc::AEM_STATUS_SUCCESS : atdecc::AEM_STATUS_NOT_SUPPORTED;
     });
     // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
     // source; the media thread reads it per tick (media_rate()).
@@ -561,6 +573,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         listener_->set_logger(host_.ctl_log());
     }
     host_.set_local_atdecc_socket(config_.atdecc_socket_path, config_.atdecc_socket_mode);
+    // The saved settings, before the entity shows itself to the network.
+    load_persistent_state();
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
@@ -682,8 +696,13 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         }
 #endif
         // Persisted fast-connect bindings (kit phase 5b): a restarted entity
-        // re-connects its inputs without a controller (see AvbEntityHost).
-        host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+        // re-connects its inputs without a controller (see AvbEntityHost),
+        // kept in the persistent state when there is one.
+        if (persistence_active_) {
+            apply_saved_listener_bindings();
+        } else {
+            host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+        }
     }
 
     // TX socket + optional pcap capture (TalkerStreams assembles its own I/O).
@@ -701,6 +720,10 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
             config_.stream_pcp,
             priority.value());
     }
+
+    // Write what start() ended up with: an imported, fresh or pruned state
+    // (nothing when the file already says it).
+    persist();
 
     // Menu/selection diagnostics: registrations the model left inert. Status
     // level -- typo-finding, never an error.
@@ -730,6 +753,9 @@ auto AvbEntityKit::stop() -> Status
     listener_vlan_.release();
 #endif
     declaration_timer_token_.reset();  // the timer finishes
+    if (persist_pending_) {
+        persist();  // a listener goal change of this pass
+    }
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
@@ -742,9 +768,300 @@ auto AvbEntityKit::stop() -> Status
 
 void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
 {
+    // A listener goal change during this pass is saved now, after its ACMP
+    // response.
+    if (persist_pending_) {
+        persist();
+    }
     if (declaration_deadline_ns_ && host_.is_running() && now_ns >= *declaration_deadline_ns_) {
         update_talker_declarations(now_ns);
     }
+}
+
+auto AvbEntityKit::default_presentation_offset_ns() const noexcept -> uint32_t
+{
+    return static_cast<uint32_t>(std::min<uint64_t>(config_.presentation_offset_ns, atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS));
+}
+
+auto AvbEntityKit::served_entity_model_id() const -> uint64_t
+{
+    atdecc::aem::DescriptorEntity entity{};
+    nanoavb::DescriptorId const id{
+        .ref = {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0}, .symbol = 0};
+    if (!storage_handler_.on_get_entity(id, entity)) {
+        return config_.entity_model_id.to_uint64();
+    }
+    return entity.entity_model_id.to_uint64();
+}
+
+void AvbEntityKit::load_persistent_state()
+{
+    persistence_active_ = false;
+    persistence_blocked_ = false;
+    persist_pending_ = false;
+    saved_bindings_.clear();
+    if (config_.persistent_state_path.empty()) {
+        return;
+    }
+    auto loaded = avb_entity::load_persistent_state(
+        config_.persistent_state_path, served_entity_model_id(), listener_ != nullptr ? config_.listener_bindings_path : std::string{});
+    auto log = host_.ctl_log();
+    persistence_active_ = true;
+    // Every later change is saved: AEM settings, the MVU values (the
+    // listener bindings once the listener is up).
+    host_.components().aem_handler.set_on_settings_changed([this](uint16_t) { persist(); });
+    host_.components().mvu_handler.set_on_settings_changed([this] { persist(); });
+    switch (loaded.outcome) {
+        case PersistentStateOutcome::fresh:
+            log.status("kit: no persistent state yet; starting from the model's defaults");
+            break;
+        case PersistentStateOutcome::loaded:
+            // Unchanged by what follows, it needs no rewrite.
+            persisted_text_ = serialize_persistent_state(loaded.state);
+            break;
+        case PersistentStateOutcome::imported:
+            log.status(
+                "kit: no persistent state yet; {} listener binding(s) imported from the listener bindings file, which is no "
+                "longer written",
+                loaded.state.listener_bindings.size());
+            break;
+        case PersistentStateOutcome::corrupt:
+            log.warning(
+                "kit: the persistent state file is corrupt (error {}); starting fresh, the old file kept as {}",
+                loaded.error.value(),
+                logging::embed<48>(loaded.bad_copy.empty() ? std::string_view{"(not kept)"} : std::string_view{loaded.bad_copy}));
+            break;
+        case PersistentStateOutcome::unreadable:
+        case PersistentStateOutcome::newer_version:
+            // Never overwrite what could not be read: run on the model's
+            // defaults and write nothing this run.
+            log.warning(
+                "kit: the persistent state file {} (error {}); running on the model's defaults, saving nothing this run",
+                logging::static_str(
+                    loaded.outcome == PersistentStateOutcome::unreadable ? "cannot be read" : "is of a later version"),
+                loaded.error.value());
+            persistence_blocked_ = true;
+            return;
+        case PersistentStateOutcome::model_changed:
+            log.warning(
+                "kit: the persistent state belongs to entity model {:016x}, not this model {:016x}: discarded",
+                loaded.discarded_model_id,
+                loaded.state.entity_model_id);
+            break;
+    }
+    apply_saved_settings(loaded.state);
+    saved_bindings_ = std::move(loaded.state.listener_bindings);
+}
+
+void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
+{
+    using atdecc::AEM_STATUS_SUCCESS;
+    using atdecc::aem::DESCRIPTOR_AUDIO_UNIT;
+    using atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
+    auto log = host_.ctl_log();
+    auto const id = [](uint16_t const type, uint16_t const index) {
+        return nanoavb::DescriptorId{.ref = {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, .symbol = 0};
+    };
+    // A refused value is dropped (the file is rewritten without it).
+    auto const refused = [&log](std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status) {
+        log.warning(
+            "kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
+    };
+    // Milan's restore order (lib_avb 70c93a1): rate, formats, clock source,
+    // then the rest. Each goes through the handler's own validation.
+    for (auto const& rate : saved.sampling_rates) {
+        ieee::quadlet_t const value{rate.rate};
+        if (auto const status = storage_handler_.on_set_descriptor_value(
+                atdecc::AEM_COMMAND_SET_SAMPLING_RATE, id(DESCRIPTOR_AUDIO_UNIT, rate.audio_unit), make_const_span(value));
+            status != AEM_STATUS_SUCCESS) {
+            refused("sampling rate", DESCRIPTOR_AUDIO_UNIT, rate.audio_unit, status);
+        }
+    }
+    for (auto const& format : saved.stream_formats) {
+        ieee::Eui64 value{};
+        value.from_uint64(format.format);
+        if (auto const status = storage_handler_.on_set_descriptor_value(
+                atdecc::AEM_COMMAND_SET_STREAM_FORMAT, id(format.descriptor_type, format.descriptor_index), make_const_span(value));
+            status != AEM_STATUS_SUCCESS) {
+            refused("stream format", format.descriptor_type, format.descriptor_index, status);
+        }
+    }
+    for (auto const& source : saved.clock_sources) {
+        // clock_source_index and the reserved doublet (AemClockSourcePayload's tail)
+        std::array<uint8_t, 4> const value{
+            static_cast<uint8_t>(source.clock_source >> 8U), static_cast<uint8_t>(source.clock_source & 0xFFU), 0, 0};
+        if (auto const status = storage_handler_.on_set_descriptor_value(
+                atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, id(DESCRIPTOR_CLOCK_DOMAIN, source.clock_domain), value);
+            status != AEM_STATUS_SUCCESS) {
+            refused("clock source", DESCRIPTOR_CLOCK_DOMAIN, source.clock_domain, status);
+        }
+    }
+    bool const offsets_stand = saved.configured_presentation_offset_ns == default_presentation_offset_ns();
+    if (!saved.presentation_offsets.empty() && !offsets_stand) {
+        log.status("kit: the configured presentation offset changed: the saved ones are dropped");
+    }
+    for (auto const& offset : saved.presentation_offsets) {
+        if (!offsets_stand) {
+            break;
+        }
+        uint8_t status = atdecc::AEM_STATUS_NOT_SUPPORTED;
+        if (is_talker_index(offset.stream_output) && offset.ns <= atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS &&
+            on_presentation_offset_changed_) {
+            status = on_presentation_offset_changed_(offset.stream_output, offset.ns);
+        }
+        if (status != AEM_STATUS_SUCCESS) {
+            refused("presentation offset", DESCRIPTOR_STREAM_OUTPUT, offset.stream_output, status);
+            continue;
+        }
+        presentation_offset_ns_[offset.stream_output].store(offset.ns, std::memory_order_relaxed);
+    }
+    for (auto const& name : saved.names) {
+        // A saved entity name stands only while the configuration still
+        // names the entity as it did when it was saved.
+        if (name.descriptor_type == atdecc::aem::DESCRIPTOR_ENTITY && name.descriptor_index == 0 && name.name_index == 0 &&
+            saved.configured_entity_name != configured_entity_name_) {
+            log.status("kit: the configured entity name changed: the saved one is dropped");
+            continue;
+        }
+        if (auto const status = storage_handler_.on_set_name(
+                id(name.descriptor_type, name.descriptor_index), name.name_index, atdecc::aem::AtdeccString{name.value});
+            status != AEM_STATUS_SUCCESS) {
+            refused("name", name.descriptor_type, name.descriptor_index, status);
+        }
+    }
+    auto& mvu = host_.components().mvu_handler;
+    mvu.set_system_unique_id(saved.system_unique_id);
+    for (auto const& mcr : saved.media_clock_references) {
+        nanoavb::MvuCommandHandler::McrInfo const info{
+            .user_mcr_prio = mcr.user_priority, .domain_name = nanoavb::mcr_domain_name(mcr.domain_name)};
+        if (!mvu.set_mcr_info(mcr.clock_domain, info)) {
+            log.warning("kit: saved media clock reference of CLOCK_DOMAIN {}: no such clock domain: dropped", mcr.clock_domain);
+        }
+    }
+}
+
+void AvbEntityKit::apply_saved_listener_bindings()
+{
+    auto& listener = host_.components().acmp_listener;
+    size_t armed = 0;
+    for (auto const& binding : saved_bindings_) {
+        bool const known = std::ranges::any_of(
+            listener_specs_, [&binding](StreamSpec const& spec) { return spec.index == binding.stream_input; });
+        if (!known) {
+            host_.ctl_log().warning("kit: saved listener binding of STREAM_INPUT {}: no such input: dropped", binding.stream_input);
+            continue;
+        }
+        // An input whose format changed is not the input the binding was
+        // made for.
+        if (auto const format = storage_handler_.current_stream_format(
+                {.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = binding.stream_input});
+            binding.format != 0 && (!format || format->to_uint64() != binding.format)) {
+            host_.ctl_log().warning(
+                "kit: saved listener binding of STREAM_INPUT {}: the input's format changed: dropped", binding.stream_input);
+            continue;
+        }
+        ieee::Eui64 talker{};
+        talker.from_uint64(binding.talker_entity_id);
+        listener.set_fast_connect_goal(binding.stream_input, talker, binding.talker_unique_id);
+        ++armed;
+    }
+    if (armed != 0) {
+        host_.ctl_log().status("acmp: {} saved listener binding(s) loaded; fast-connect armed", armed);
+    }
+    saved_bindings_.clear();
+    // Sticky from here on: every successful connect is remembered, every goal
+    // change (connect, retarget, controller DISCONNECT) saved once the
+    // reactor pass that made it is done (after the ACMP response).
+    listener.enable_sticky_bindings();
+    listener.set_on_goals_changed([this] { persist_pending_ = true; });
+}
+
+auto AvbEntityKit::collect_persistent_state() const -> PersistentState
+{
+    PersistentState state{};
+    state.entity_model_id = served_entity_model_id();
+    state.configured_entity_name = configured_entity_name_;
+    state.configured_presentation_offset_ns = default_presentation_offset_ns();
+    if (auto const name = storage_handler_.entity_name().as_string_view(); name != configured_entity_name_) {
+        state.names.push_back(
+            {.descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0, .name_index = 0, .value = std::string{name}});
+    }
+    storage_handler_.for_each_object_name_override(
+        [&state](uint16_t const type, uint16_t const index, atdecc::aem::AtdeccString const& name) {
+            state.names.push_back(
+                {.descriptor_type = type, .descriptor_index = index, .name_index = 0, .value = std::string{name.as_string_view()}});
+        });
+    storage_handler_.for_each_runtime_stream_format([this, &state](uint16_t const type, uint16_t const index, ieee::Eui64 const& format) {
+        // A stream's own format is the model's: nothing to keep.
+        auto const& specs = type == DESCRIPTOR_STREAM_OUTPUT ? talker_specs_ : listener_specs_;
+        bool const authored = std::ranges::any_of(
+            specs, [&](StreamSpec const& spec) { return spec.index == index && spec.format_word == format.to_uint64(); });
+        if (!authored) {
+            state.stream_formats.push_back({.descriptor_type = type, .descriptor_index = index, .format = format.to_uint64()});
+        }
+    });
+    storage_handler_.for_each_runtime_sampling_rate([&state](uint16_t const unit, uint32_t const rate) {
+        state.sampling_rates.push_back({.audio_unit = unit, .rate = rate});
+    });
+    storage_handler_.for_each_runtime_clock_source([&state](uint16_t const domain, uint16_t const source) {
+        state.clock_sources.push_back({.clock_domain = domain, .clock_source = source});
+    });
+    for (auto const& spec : talker_specs_) {
+        if (auto const ns = presentation_offset_ns(spec.index); ns != default_presentation_offset_ns()) {
+            state.presentation_offsets.push_back({.stream_output = spec.index, .ns = ns});
+        }
+    }
+    if (listener_ != nullptr) {
+        // Before the listener is up (start() arms them then), the saved ones.
+        if (!saved_bindings_.empty()) {
+            state.listener_bindings = saved_bindings_;
+        } else {
+            for (auto const& goal : host_.components().acmp_listener.fast_connect_goals()) {
+                auto const format = storage_handler_.current_stream_format(
+                    {.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = goal.listener_unique_id});
+                state.listener_bindings.push_back(
+                    {.stream_input = goal.listener_unique_id,
+                     .talker_entity_id = goal.talker_entity_id.to_uint64(),
+                     .talker_unique_id = goal.talker_unique_id,
+                     .format = format ? format->to_uint64() : 0});
+            }
+        }
+    }
+    auto const& mvu = host_.components().mvu_handler;
+    state.system_unique_id = mvu.system_unique_id();
+    nanoavb::MvuCommandHandler::McrInfo const defaults{.user_mcr_prio = mvu.default_mcr_priority()};
+    for (size_t index = 0; index < mvu.clock_domain_count(); ++index) {
+        if (auto const* info = mvu.mcr_info(index); info != nullptr && !(*info == defaults)) {
+            auto const& field = info->domain_name;
+            auto const length = static_cast<size_t>(std::ranges::find(field, '\0') - field.begin());
+            state.media_clock_references.push_back(
+                {.clock_domain = static_cast<uint16_t>(index),
+                 .user_priority = info->user_mcr_prio,
+                 .domain_name = std::string{field.data(), length}});
+        }
+    }
+    return state;
+}
+
+void AvbEntityKit::persist()
+{
+    persist_pending_ = false;
+    if (!persistence_active_) {
+        return;
+    }
+    if (persistence_blocked_) {
+        return;  // the file did not read at start: it is never overwritten this run
+    }
+    auto const state = collect_persistent_state();
+    auto text = serialize_persistent_state(state);
+    if (text == persisted_text_) {
+        return;
+    }
+    if (auto const saved = save_persistent_state(config_.persistent_state_path, state); !saved) {
+        host_.ctl_log().warning("kit: could not save the persistent state: error {}", saved.error().value());
+        return;
+    }
+    persisted_text_ = std::move(text);
 }
 
 auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo

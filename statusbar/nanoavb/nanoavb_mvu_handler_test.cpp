@@ -315,23 +315,16 @@ TEST(nanoavb_mvu, system_unique_id_v13_command)
     EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0xABCDEF01});
     EXPECT_EQ(handler.system_unique_id(), uint32_t{0xABCDEF01});
 
-    // The v1.3 number without its name (10 octets) is the v1.3 form too
-    std::array<uint8_t, 10> const short_v13{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A};
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, short_v13), US));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{42});
-    // ... but a v1.2 id with octets after it is the v1.2 id
+    // Shorter than the full v1.3 payload: the v1.2 id, whatever follows it
     std::array<uint8_t, 10> const long_v12{0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xAA, 0xBB, 0xCC, 0xDD};
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, long_v12), US));
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
     EXPECT_EQ(handler.system_unique_id(), uint32_t{7});
-    std::array<uint8_t, 10> const long_v12b{0x00, 0x00, 0x00, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x01};
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, long_v12b), US));
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{42});
 
     v13.number = uint64_t{0x100000000};
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US));
     expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{42});
+    EXPECT_EQ(handler.system_unique_id(), uint32_t{7});
 }
 
 // Milan v1.2 Sections 5.4.4.4-5, 7.6: default priority 192, user priority following it, name

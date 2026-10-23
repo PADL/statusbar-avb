@@ -176,6 +176,13 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         entity.listener_bindings_path,
         [&entity](auto v) { entity.listener_bindings_path = std::string{v}; });
     specs.add<std::string>(
+        "persistent_state",
+        "Keep the entity's Milan non-volatile settings (names, formats, rate, clock source, presentation offsets, "
+        "listener bindings, system unique id, media clock reference) in this TOML file across restarts; imports "
+        "listener.bindings once. Empty = off.",
+        entity.persistent_state_path,
+        [&entity](auto v) { entity.persistent_state_path = std::string{v}; });
+    specs.add<std::string>(
         "atdecc.socket",
         "Serve local ATDECC controllers on an AF_UNIX datagram socket at this path (one AVTPDU per datagram, as "
         "la_avdecc's local protocol interface): statusbar-atdecc-monitor --socket=PATH reaches the entity without raw "

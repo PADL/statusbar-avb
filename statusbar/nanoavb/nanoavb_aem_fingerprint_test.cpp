@@ -9,6 +9,7 @@
 #include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <cstring>
@@ -96,6 +97,21 @@ TEST(aem_fingerprint, model_differences_do_leak)
     grown.push_back(grown[2]);
     grown.back().descriptor_index = 1;
     EXPECT_FALSE(aem_fingerprint(grown) == fp);
+}
+
+// A compiled blob fingerprints as its descriptors do; a blob that does not
+// parse has none
+TEST(aem_fingerprint, of_a_blob)
+{
+    auto const model = model_for_unit(1);
+    AemBlobWriter writer;
+    for (auto const& d : model) {
+        writer.add(d.configuration, d.descriptor_type, d.descriptor_index, d.bytes);
+    }
+    auto const blob = writer.write();
+    EXPECT_TRUE(aem_fingerprint(std::span<std::uint8_t const>{blob}) == aem_fingerprint(model));
+    std::vector<std::uint8_t> const junk{1, 2, 3};
+    EXPECT_TRUE(aem_fingerprint(std::span<std::uint8_t const>{junk}).empty());
 }
 
 //

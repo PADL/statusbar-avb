@@ -4,6 +4,7 @@
 #include "statusbar/nanoavb/nanoavb_aem_fingerprint.hpp"
 
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/crypto/sha/sha256.hpp"
 
 #include <algorithm>
@@ -88,6 +89,21 @@ std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors)
         out.push_back(HEX[b & 0xF]);
     }
     return out;
+}
+
+std::string aem_fingerprint(std::span<std::uint8_t const> const blob)
+{
+    auto const storage = atdecc::aem::DescriptorStorage::create(blob);
+    if (!storage) {
+        return {};
+    }
+    std::vector<AemRawDescriptor> descriptors;
+    storage->for_each_descriptor(
+        [&descriptors](std::uint16_t const configuration, std::uint16_t const type, std::uint16_t const index, std::span<std::uint8_t const> const bytes) {
+            descriptors.push_back(
+                {.configuration = configuration, .descriptor_type = type, .descriptor_index = index, .bytes = {bytes.begin(), bytes.end()}});
+        });
+    return aem_fingerprint(descriptors);
 }
 
 }  // namespace statusbar::nanoavb
