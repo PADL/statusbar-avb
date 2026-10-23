@@ -366,37 +366,8 @@ class MsrpHandler
     {
         return participant_.listener_permit_debug(stream_id);
     }
-    /// Set the configured (default) Class A domain. This is also what
-    /// reset_domain() returns to on link up; a Domain adopted from the
-    /// bridge (Milan v1.2 Section 4.2.7.2.1) overrides it until then.
-    void set_domain(DomainInfo const& domain) noexcept
-    {
-        default_domain_ = domain;
-        domain_ = domain;
-    }
-    /// The Class A domain in use: the configured one, or the one adopted
-    /// from the bridge's Domain declaration.
+    void set_domain(DomainInfo const& domain) noexcept { domain_ = domain; }
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return domain_; }
-
-    /// Called with (old VID, new VID) when the Class A SRclassVID in use changes (adopted, or
-    /// reset_domain()); the talker moves its MVRP join, Talker Advertise and stream frames.
-    void set_on_domain_vid_changed(statusbar::sg14::inplace_function<void(uint16_t, uint16_t, TimePoint), 64> cb)
-    {
-        on_domain_vid_changed_ = std::move(cb);
-    }
-
-    /// Restore the configured Class A domain (forgetting an adopted VID) and declare it
-    /// (Milan v1.2 Section 4.2.7.2.1). Call on link up; not gated on gPTP.
-    [[nodiscard]] auto reset_domain(TimePoint now) -> Status
-    {
-        uint16_t const old_vid = domain_.sr_class_vid;
-        domain_ = default_domain_;
-        auto const status = declare_domain(now);
-        if (old_vid != domain_.sr_class_vid && on_domain_vid_changed_) {
-            on_domain_vid_changed_(old_vid, domain_.sr_class_vid, now);
-        }
-        return status;
-    }
 
     /// Sticky-Listener workaround passthrough. When enabled, registered Listener
     /// attributes are re-declared on every periodic/LeaveAll pass so a bridge
@@ -487,11 +458,8 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
-        statusbar::srp::msrp::DomainFirstValue class_a{};
-        class_a.sr_class_id = statusbar::srp::msrp::SR_CLASS_A;  // 6
-        class_a.sr_class_priority = domain_.sr_class_priority;   // 3
-        class_a.sr_class_vid = domain_.sr_class_vid;
-        return participant_.declare_domain(class_a, now);
+        declare_sr_class(statusbar::srp::msrp::SR_CLASS_A, domain_.sr_class_priority, now);
+        return success();
     }
 
     /// Declare one SR class Domain on the handler's VLAN.
@@ -715,29 +683,6 @@ class MsrpHandler
     auto send(std::span<uint8_t const> const packet) -> bool
     {
         return callbacks_.send_packet ? callbacks_.send_packet(packet) : false;
-    }
-
-    /// A peer declared a Domain: adopt a Class A SRclassVID at our SRclassPriority, at most once
-    /// per link up (Milan v1.2 Section 4.2.7.2.1); docs/NANOAVB_ARCHITECTURE.md.
-    void on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv)
-    {
-        if (fv.sr_class_id.get() != statusbar::srp::msrp::SR_CLASS_A || fv.sr_class_priority.get() != domain_.sr_class_priority) {
-            return;
-        }
-        uint16_t const vid = fv.sr_class_vid.get();
-        if (vid == 0 || vid > 4094 || vid == domain_.sr_class_vid) {
-            return;
-        }
-        // Adopt at most once per link up (reset_domain restores the default).
-        if (domain_.sr_class_vid != default_domain_.sr_class_vid) {
-            return;
-        }
-        uint16_t const old_vid = domain_.sr_class_vid;
-        domain_.sr_class_vid = vid;
-        (void)declare_domain(last_event_time_);
-        if (on_domain_vid_changed_) {
-            on_domain_vid_changed_(old_vid, vid, last_event_time_);
-        }
     }
 
     /// Forward a listener register/leave for one of OUR talker streams to the
