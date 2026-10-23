@@ -466,7 +466,7 @@ void AvbEntityStereoIO::on_timeout(TimePoint time)
 // Audio Processing
 //
 
-void AvbEntityStereoIO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
+void AvbEntityStereoIO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const /*raw_now*/)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     int64_t const gptp_now_ns = time.time_since_epoch().count();
     auto const gptp_now = static_cast<uint64_t>(gptp_now_ns);
@@ -482,7 +482,8 @@ void AvbEntityStereoIO::process_audio(TimePoint time, realtime::MonotonicRawCloc
 
     // The gate is told this wake's RAW instant (its grace window's clock); decide
     // it once per wake.
-    bool const gate_open = gate_.should_transmit(0, raw_now);
+    bool const gate_open = gate_.should_transmit(
+        0, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 
     // Reclock every loopback block whose gPTP presentation time has elapsed onto our
     // local media clock. Both ends run 48 kHz gPTP so the pipe is naturally rate-matched

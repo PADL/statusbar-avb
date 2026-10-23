@@ -409,7 +409,7 @@ void AvbEntityAm824IO::on_timeout(TimePoint time)
 // Audio Processing
 //
 
-void AvbEntityAm824IO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
+void AvbEntityAm824IO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const /*raw_now*/)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     // Publish this media-timer wake's gPTP time for the listener RX tally (the reactor /
     // RX-timer path reads it as the "now" for the STREAM_INPUT LATE/EARLY classification).
@@ -450,7 +450,8 @@ void AvbEntityAm824IO::process_audio(TimePoint time, realtime::MonotonicRawClock
 
     // The gate is told this wake's RAW instant (its grace window's clock); decide
     // it once per wake.
-    if (gate_.should_transmit(0, raw_now)) {
+    if (gate_.should_transmit(
+        0, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())) {
         if (auto* slot = talker_.slot_for(0); slot != nullptr) {
             talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
         }
