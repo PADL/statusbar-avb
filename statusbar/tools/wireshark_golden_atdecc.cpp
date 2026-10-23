@@ -15,6 +15,7 @@
 #include "statusbar/atdecc/atdecc_aecp.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aa.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_jdks.hpp"
@@ -869,6 +870,36 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         std::array<uint8_t, 20> const info_ex{0x00, 0x07, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x70, 0xB3,
                                               0xD5, 0xED, 0xC0, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x02, 0x00};
         frames.push_back({"mvu_get_stream_input_info_ex_response", mvu(true, 64, std::span<uint8_t const>(info_ex))});
+    }
+
+    // ---- Milan 1.2 MVU built with the entity's structs (atdecc_aecp_mvu.hpp): GET_MILAN_INFO without
+    // specification_version, and a NOT_IMPLEMENTED echo, both padded past control_data_length ----
+    {
+        auto const padded = [](std::vector<uint8_t> out) {
+            out.resize(std::max(out.size(), mvu::MVU_MIN_PDU_LENGTH), 0);
+            return out;
+        };
+        mvu::MvuDu du{};
+        du.init_response(mvu::MVU_COMMAND_GET_MILAN_INFO, mvu::MVU_STATUS_SUCCESS, mvu::MvuGetMilanInfoResponse::LENGTH);
+        du.common.target_entity_id = TARGET;
+        du.common.controller_entity_id = CONTROLLER;
+        du.common.sequence_id = 65;
+        mvu::MvuGetMilanInfoResponse info{};
+        info.protocol_version = mvu::MVU_PROTOCOL_VERSION;
+        info.features_flags = mvu::MVU_FEATURES_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING;
+        info.certification_version = mvu::milan_certification_version(1, 2, 0, 0);
+        std::vector<uint8_t> out;
+        append(out, du);
+        append(out, info);
+        frames.push_back({"mvu_get_milan_info_response_v1_2", padded(out)});
+
+        du.init_response(
+            mvu::MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, mvu::MVU_STATUS_NOT_IMPLEMENTED, mvu::MvuGetMilanInfoCommand::LENGTH);
+        du.common.sequence_id = 66;
+        std::vector<uint8_t> rout;
+        append(rout, du);
+        append(rout, mvu::MvuGetMilanInfoCommand{});
+        frames.push_back({"mvu_get_system_unique_id_not_implemented", padded(rout)});
     }
 
     // ---- Address Access: a command with a read and a write TLV ----

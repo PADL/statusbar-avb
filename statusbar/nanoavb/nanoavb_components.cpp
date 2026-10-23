@@ -113,6 +113,7 @@ void NanoAvbComponents::print_info() const
     std::print("Components initialized:\n");
     std::print("  - EntityModel with {} configuration(s)\n", entity_model.configuration_count());
     std::print("  - AemCommandHandler\n");
+    std::print("  - MvuCommandHandler\n");
     std::print("  - NanoAvbAdpAdvertiser\n");
     std::print("  - NanoAvbAcmpTalker with {} streams\n", acmp_talker.max_streams());
     std::print("  - NanoAvbAcmpListener with {} streams\n", acmp_listener.max_streams());
@@ -265,13 +266,14 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
         }
 
         case AvtpSubtype::aecp: {
-            // AECP/AEM message - process and send unicast response
+            // AECP message - an MVU command to the MVU handler, anything else
+            // to the AEM handler; each sends its unicast response
             auto const our_entity_id = adp_advertiser_.adpdu().entity_id;
             // Advance the handler's clock so a LOCK/ACQUIRE deadline set while
             // processing this command is relative to now, not epoch 0 (tick()
             // above then checks those deadlines each reactor tick).
             aem_handler_.set_event_time(sm_now);
-            (void)aem_handler_.process_packet(src_mac, payload, our_entity_id);
+            (void)dispatch_aecp(aem_handler_, mvu_handler_, src_mac, payload, our_entity_id);
             break;
         }
 
@@ -306,6 +308,7 @@ NanoAvbComponents::NanoAvbComponents(
     , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
 {
     aem_handler.set_profile(profile);
+    mvu_handler.set_profile(profile);
 }
 
 namespace {
@@ -361,6 +364,7 @@ NanoAvbComponents::NanoAvbComponents(
     , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
 {
     aem_handler.set_profile(profile);
+    mvu_handler.set_profile(profile);
 }
 
 //
@@ -404,7 +408,8 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
         components_->adp_advertiser,
         components_->acmp_talker,
         components_->acmp_listener,
-        components_->aem_handler);
+        components_->aem_handler,
+        components_->mvu_handler);
 
     // Wire discovery ageout -> listener teardown. A talker that is powered off never
     // sends ENTITY_DEPARTING, so the explicit-departing path in dispatch_frame can't
@@ -523,6 +528,15 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // would wipe callbacks installed before start (identify_changed,
     // get_counters, get_stream_info).
     components.aem_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
+        auto& atdecc = handlers.atdecc_handler();
+        if (!atdecc.valid()) {
+            return false;
+        }
+        return atdecc.send(dest_mac, response).has_value();
+    });
+
+    // AECP MVU: unicast to the controller, like AEM.
+    components.mvu_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
         auto& atdecc = handlers.atdecc_handler();
         if (!atdecc.valid()) {
             return false;

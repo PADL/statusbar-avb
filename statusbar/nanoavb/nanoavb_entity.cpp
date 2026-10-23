@@ -65,8 +65,8 @@ namespace {
 
 auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool
 {
-    // A non-AEM AECP command addressed to us is answered NOT_IMPLEMENTED rather than dropped
-    // (IEEE 1722.1-2021 9.2.1.1.6; Milan v1.2 Section 5.4.3.3).
+    // Any other AECP command type addressed to us is answered NOT_IMPLEMENTED rather than
+    // dropped (IEEE 1722.1-2021 Clause 9.2.1.1.6); MVU normally goes to dispatch_aecp.
     if (payload.size() >= AecpDuCommon::LENGTH) {
         AecpDuCommon common{};
         span_load(common, payload.first(AecpDuCommon::LENGTH));

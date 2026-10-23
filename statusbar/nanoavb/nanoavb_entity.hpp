@@ -276,7 +276,10 @@ class AemCommandHandler
     /// this callback's captures are similarly small in practice.
     statusbar::sg14::inplace_function<bool(Eui64 const& owner_entity_id), 64> send_controller_available;
 
-    /// Process an incoming AECP AEM packet and send response
+    /// Process an incoming AECP AEM packet and send response. Other AECP
+    /// command types are answered NOT_IMPLEMENTED. The network path calls
+    /// this through dispatch_aecp (nanoavb_mvu_handler.hpp), which sends Milan
+    /// MVU commands to MvuCommandHandler instead.
     /// @param src_mac Source MAC address (for unicast response)
     /// @param payload The AECP packet payload (starting with AemDu header)
     /// @param our_entity_id Our entity ID (for target validation)

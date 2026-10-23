@@ -38,6 +38,7 @@ statusbar_add_module(
   atdecc_adp_test.cpp
   atdecc_aecp_test.cpp
   atdecc_aecp_aa_test.cpp
+  atdecc_aecp_mvu_test.cpp
   atdecc_aem_control_accessors_test.cpp
   atdecc_aem_control_command_test.cpp
   atdecc_aem_control_types_test.cpp
