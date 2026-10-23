@@ -2477,6 +2477,22 @@ TEST(stream_lifecycle, start_stop_streaming_latches_and_gates)
     EXPECT_TRUE(!handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));  // still stopped
 }
 
+// A SET_SAMPLING_RATE the application's hook refuses leaves no runtime rate behind to persist.
+TEST(stream_lifecycle, a_refused_sampling_rate_leaves_no_state)
+{
+    auto blob = make_blob_with_audio_unit();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    handler.set_on_sampling_rate_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 96000u));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    size_t states = 0;
+    handler.for_each_runtime_sampling_rate([&states](uint16_t, uint32_t) { ++states; });
+    EXPECT_EQ(states, size_t{0});
+}
+
 TEST(stream_lifecycle, set_sampling_rate_validates_and_round_trips)
 {
     auto blob = make_blob_with_audio_unit();
