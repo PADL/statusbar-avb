@@ -12,12 +12,15 @@
 /// Milan controller tells a Milan device from any other ATDECC entity.
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 
+#include <array>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace statusbar::atdecc {
@@ -215,4 +218,116 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::A
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMilanInfoResponse> : std::true_type
+{};
+
+//
+// SYSTEM_UNIQUE_ID and MEDIA_CLOCK_REFERENCE_INFO - 5.4.4.2 to 5.4.4.5
+//
+
+namespace statusbar::atdecc {
+
+/// SET_MEDIA_CLOCK_REFERENCE_INFO flags (Table 5.21), MSB-numbered as above
+constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID = 0x01;
+constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID = 0x02;
+
+/// The shortest AVTPDU in an MVU frame: a 64-octet Ethernet frame (the minimum,
+/// FCS included) less the 14-octet header and the 4-octet FCS. Shorter MVU
+/// PDUs are padded to this; the padding is not in control_data_length.
+constexpr size_t MVU_MIN_PDU_LENGTH = 64 - 14 - 4;
+
+/// True when @p pdu is an AECP VENDOR_UNIQUE command carrying the MVU
+/// protocol_id, with room (received and declared) for protocol_id and
+/// command_type. Says nothing about the target or the command_specific_data.
+[[nodiscard]] inline auto is_mvu_command(std::span<uint8_t const> const pdu) noexcept -> bool
+{
+    if (pdu.size() < AecpMvuDu::LENGTH) {
+        return false;
+    }
+    AecpMvuDu du{};
+    span_load(du, pdu.first(AecpMvuDu::LENGTH));
+    return du.common.subtype.get() == AvtpSubtype::aecp && du.is_command() && du.is_valid();
+}
+
+// ---------------------------------------------------------------------------
+// Command payloads (command_specific_data, after AecpMvuDu) - Section 5.4.4
+// ---------------------------------------------------------------------------
+
+/// SET_SYSTEM_UNIQUE_ID command and response, GET_SYSTEM_UNIQUE_ID response
+/// (Figure 5.5). The v1.2 text calls system_unique_id "64 bit" but Figure 5.5
+/// draws one quadlet, and GenAVB's v1.2 layout is a u32: the figure is followed.
+struct MvuSystemUniqueIdPayload
+{
+    static constexpr size_t LENGTH = 6;
+
+    /// Bytes 30-31: reserved
+    doublet_t reserved{0};
+
+    /// Bytes 32-35: system_unique_id (default 0; SET to 0 is invalid)
+    quadlet_t system_unique_id{0};
+
+    auto operator<=>(MvuSystemUniqueIdPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuSystemUniqueIdPayload) == 6, "MvuSystemUniqueIdPayload must be 6 bytes");
+
+/// GET_MEDIA_CLOCK_REFERENCE_INFO command (Figure 5.7)
+struct MvuGetMediaClockReferenceInfoCommand
+{
+    static constexpr size_t LENGTH = 2;
+
+    /// Bytes 30-31: CLOCK_DOMAIN descriptor index
+    doublet_t clock_domain_index{0};
+
+    auto operator<=>(MvuGetMediaClockReferenceInfoCommand const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuGetMediaClockReferenceInfoCommand) == 2, "MvuGetMediaClockReferenceInfoCommand must be 2 bytes");
+
+/// SET_MEDIA_CLOCK_REFERENCE_INFO command and response,
+/// GET_MEDIA_CLOCK_REFERENCE_INFO response (Figure 5.6)
+struct MvuMediaClockReferenceInfoPayload
+{
+    static constexpr size_t LENGTH = 74;
+
+    /// Bytes 30-31: CLOCK_DOMAIN descriptor index
+    doublet_t clock_domain_index{0};
+
+    /// Byte 32: flags (MVU_MCR_FLAGS_*)
+    octet_t flags{0};
+
+    /// Byte 33: reserved
+    octet_t reserved1{0};
+
+    /// Byte 34: default_mcr_prio (ignored in a command)
+    octet_t default_mcr_prio{0};
+
+    /// Byte 35: user_mcr_prio (default: default_mcr_prio)
+    octet_t user_mcr_prio{0};
+
+    /// Bytes 36-39: reserved
+    quadlet_t reserved2{0};
+
+    /// Bytes 40-103: media_clock_domain_name (UTF-8, zero padded, no trailing
+    /// NUL when 64 bytes long; default "DEFAULT")
+    std::array<char, 64> media_clock_domain_name{};
+
+    auto operator<=>(MvuMediaClockReferenceInfoPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuMediaClockReferenceInfoPayload) == 74, "MvuMediaClockReferenceInfoPayload must be 74 bytes");
+
+}  // namespace statusbar::atdecc
+
+// Serialization traits
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuSystemUniqueIdPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMediaClockReferenceInfoCommand>
+    : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuMediaClockReferenceInfoPayload> : std::true_type
 {};

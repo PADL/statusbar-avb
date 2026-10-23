@@ -1773,7 +1773,7 @@ M.f.atdecc_mvu_reserved = ProtoField.uint16("avb.atdecc.mvu.reserved", "reserved
 M.f.atdecc_mvu_protocol_version = ProtoField.uint32("avb.atdecc.mvu.protocol_version", "protocol_version", base.DEC, nil, nil, "protocol_version")
 M.f.atdecc_mvu_features_flags = ProtoField.uint32("avb.atdecc.mvu.features_flags", "features_flags", base.DEC, nil, nil, "features_flags (Table 5.17)")
 M.f.atdecc_mvu_certification_version = ProtoField.uint32("avb.atdecc.mvu.certification_version", "certification_version", base.DEC, nil, nil, "certification_version")
-M.f.atdecc_mvu_specification_version = ProtoField.uint32("avb.atdecc.mvu.specification_version", "specification_version", base.DEC, nil, nil, "specification_version")
+M.f.atdecc_mvu_specification_version = ProtoField.uint32("avb.atdecc.mvu.specification_version", "specification_version", base.DEC, nil, nil, "specification_version (Milan 1.3, optional)")
 M.f.atdecc_mvu_system_unique_id = ProtoField.uint64("avb.atdecc.mvu.system_unique_id", "system_unique_id", base.HEX, nil, nil, "system_unique_id")
 M.f.atdecc_mvu_system_name = ProtoField.string("avb.atdecc.mvu.system_name", "system_name", base.ASCII, "name (Milan 1.3, 64 octets, optional)")
 M.f.atdecc_mvu_clock_domain_index = ProtoField.uint16("avb.atdecc.mvu.clock_domain_index", "clock_domain_index", base.DEC, nil, nil, "CLOCK_DOMAIN descriptor_index")
@@ -5088,13 +5088,12 @@ function M.add_mvu_mvu_reserved(tree, tvb, off)
     tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
 end
 
---- GET_MILAN_INFO response (Milan 1.3 Figure 5.6)
+--- GET_MILAN_INFO response (Milan 1.2 Figure 5.4, 1.3 Figure 5.6)
 function M.add_mvu_mvu_get_milan_info_response(tree, tvb, off)
     tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
     tree:add(M.f.atdecc_mvu_protocol_version, tvb(off + 32, 4))
     tree:add(M.f.atdecc_mvu_features_flags, tvb(off + 36, 4))
     tree:add(M.f.atdecc_mvu_certification_version, tvb(off + 40, 4))
-    tree:add(M.f.atdecc_mvu_specification_version, tvb(off + 44, 4))
 end
 
 --- SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Figure 5.7)
@@ -5363,16 +5362,16 @@ M.stream_format_add = {
     [0x04] = M.add_stream_format_crf,
 }
 
---- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, name_field }
+--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, tail_field, tail_length }
 M.mvu_payloads = {}
-M.mvu_payloads[0x0000] = { cmd = { name = "mvu_reserved", length = 2, add = M.add_mvu_mvu_reserved, name_field = nil }, rsp = { name = "mvu_get_milan_info_response", length = 18, add = M.add_mvu_mvu_get_milan_info_response, name_field = nil } }
-M.mvu_payloads[0x0001] = { cmd = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, name_field = M.f.atdecc_mvu_system_name }, rsp = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, name_field = M.f.atdecc_mvu_system_name } }
-M.mvu_payloads[0x0002] = { cmd = { name = "mvu_reserved", length = 2, add = M.add_mvu_mvu_reserved, name_field = nil }, rsp = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, name_field = M.f.atdecc_mvu_system_name } }
-M.mvu_payloads[0x0003] = { cmd = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, name_field = M.f.atdecc_mvu_media_clock_domain_name }, rsp = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, name_field = M.f.atdecc_mvu_media_clock_domain_name } }
-M.mvu_payloads[0x0004] = { cmd = { name = "mvu_get_media_clock_reference_info_command", length = 2, add = M.add_mvu_mvu_get_media_clock_reference_info_command, name_field = nil }, rsp = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, name_field = M.f.atdecc_mvu_media_clock_domain_name } }
-M.mvu_payloads[0x0005] = { cmd = { name = "mvu_bind_stream", length = 18, add = M.add_mvu_mvu_bind_stream, name_field = nil }, rsp = { name = "mvu_bind_stream", length = 18, add = M.add_mvu_mvu_bind_stream, name_field = nil } }
-M.mvu_payloads[0x0006] = { cmd = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, name_field = nil }, rsp = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, name_field = nil } }
-M.mvu_payloads[0x0007] = { cmd = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, name_field = nil }, rsp = { name = "mvu_stream_input_info_ex_response", length = 18, add = M.add_mvu_mvu_stream_input_info_ex_response, name_field = nil } }
+M.mvu_payloads[0x0000] = { cmd = { name = "mvu_reserved", length = 2, add = M.add_mvu_mvu_reserved, tail_field = nil, tail_length = 0 }, rsp = { name = "mvu_get_milan_info_response", length = 14, add = M.add_mvu_mvu_get_milan_info_response, tail_field = M.f.atdecc_mvu_specification_version, tail_length = 4 } }
+M.mvu_payloads[0x0001] = { cmd = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, tail_field = M.f.atdecc_mvu_system_name, tail_length = 64 }, rsp = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, tail_field = M.f.atdecc_mvu_system_name, tail_length = 64 } }
+M.mvu_payloads[0x0002] = { cmd = { name = "mvu_reserved", length = 2, add = M.add_mvu_mvu_reserved, tail_field = nil, tail_length = 0 }, rsp = { name = "mvu_system_unique_id", length = 10, add = M.add_mvu_mvu_system_unique_id, tail_field = M.f.atdecc_mvu_system_name, tail_length = 64 } }
+M.mvu_payloads[0x0003] = { cmd = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, tail_field = M.f.atdecc_mvu_media_clock_domain_name, tail_length = 64 }, rsp = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, tail_field = M.f.atdecc_mvu_media_clock_domain_name, tail_length = 64 } }
+M.mvu_payloads[0x0004] = { cmd = { name = "mvu_get_media_clock_reference_info_command", length = 2, add = M.add_mvu_mvu_get_media_clock_reference_info_command, tail_field = nil, tail_length = 0 }, rsp = { name = "mvu_media_clock_reference_info", length = 10, add = M.add_mvu_mvu_media_clock_reference_info, tail_field = M.f.atdecc_mvu_media_clock_domain_name, tail_length = 64 } }
+M.mvu_payloads[0x0005] = { cmd = { name = "mvu_bind_stream", length = 18, add = M.add_mvu_mvu_bind_stream, tail_field = nil, tail_length = 0 }, rsp = { name = "mvu_bind_stream", length = 18, add = M.add_mvu_mvu_bind_stream, tail_field = nil, tail_length = 0 } }
+M.mvu_payloads[0x0006] = { cmd = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, tail_field = nil, tail_length = 0 }, rsp = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, tail_field = nil, tail_length = 0 } }
+M.mvu_payloads[0x0007] = { cmd = { name = "mvu_stream_input_ref", length = 6, add = M.add_mvu_mvu_stream_input_ref, tail_field = nil, tail_length = 0 }, rsp = { name = "mvu_stream_input_info_ex_response", length = 18, add = M.add_mvu_mvu_stream_input_info_ex_response, tail_field = nil, tail_length = 0 } }
 M.mvu_features_flag_fields = {
     M.f.atdecc_mvu_features_flags_redundancy,
     M.f.atdecc_mvu_features_flags_talker_dynamic_mappings,
