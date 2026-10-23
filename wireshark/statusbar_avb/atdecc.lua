@@ -548,9 +548,10 @@ local function dissect_mvu(t, tvb, stop, is_command)
                 t:add(f, tvb(gen.MVU_HEADER_LENGTH + 2, 1))
             end
         end
-        if spec.name_field ~= nil and stop - at >= 64 then
-            t:add(spec.name_field, tvb(at, 64))
-            at = at + 64
+        -- a field Milan 1.3 appended (a 64-octet name, specification_version)
+        if spec.tail_field ~= nil and stop - at >= spec.tail_length then
+            t:add(spec.tail_field, tvb(at, spec.tail_length))
+            at = at + spec.tail_length
         end
     end
     if stop > at then
