@@ -1026,15 +1026,11 @@ for _sname, _struct in STD.MVU_PAYLOAD_STRUCTS.items():
             MVU_HEADER_LENGTH,
         )
     )
-    if _sname in STD.MVU_OPTIONAL_NAME:
+    if _sname in STD.MVU_OPTIONAL_TAIL:
+        _tail, _octets, _kind, _doc = STD.MVU_OPTIONAL_TAIL[_sname]
+        # a placeholder (length 0): the walker adds it when the frame has it
         _fields.append(
-            Field(
-                STD.MVU_OPTIONAL_NAME[_sname],
-                MVU_HEADER_LENGTH + _struct["length"],
-                0,
-                "string",
-                "name (Milan 1.3, 64 octets, optional)",
-            )
+            Field(_tail, MVU_HEADER_LENGTH + _struct["length"], 0, _kind, _doc)
         )
     MVU_PAYLOAD_LAYOUTS[_sname] = Layout(
         f"mvu.{_snake(_sname)}", f"{PREFIX}.mvu", _struct["doc"], tuple(_fields)
@@ -1055,7 +1051,8 @@ class MvuSpec:
     struct: str
     layout: Layout
     length: int
-    optional_name: str | None
+    optional_tail: str | None
+    optional_tail_length: int
 
 
 def _mvu_spec(sname: str | None) -> MvuSpec | None:
@@ -1066,7 +1063,8 @@ def _mvu_spec(sname: str | None) -> MvuSpec | None:
         sname,
         MVU_PAYLOAD_LAYOUTS[sname],
         STD.MVU_PAYLOAD_STRUCTS[sname]["length"],
-        STD.MVU_OPTIONAL_NAME.get(sname),
+        STD.MVU_OPTIONAL_TAIL[sname][0] if sname in STD.MVU_OPTIONAL_TAIL else None,
+        STD.MVU_OPTIONAL_TAIL[sname][1] if sname in STD.MVU_OPTIONAL_TAIL else 0,
     )
 
 
