@@ -126,6 +126,8 @@ def _write_stream(stream: Stream) -> dict:
     flags = _flags_to_names(stream.stream_flags, STREAM_FLAGS_NAMES)
     if flags:
         result["flags"] = flags
+    if stream.buffer_length:
+        result["buffer_length"] = stream.buffer_length
     if stream.symbol:
         result["symbol"] = stream.symbol
     return result
