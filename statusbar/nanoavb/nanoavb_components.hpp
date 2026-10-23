@@ -387,7 +387,15 @@ struct GptpAnnounceCallbacks
     /// the last Announce's header named): the grandmaster is lost, and
     /// has_grandmaster() is already false.
     statusbar::sg14::inplace_function<void(int64_t now_ns), 64> grandmaster_lost;
+
+    /// Called when the path trace the Announces carry changes, or is cleared
+    /// when the grandmaster is lost (see GptpAnnounceHandler::path_trace).
+    statusbar::sg14::inplace_function<void(int64_t now_ns), 64> path_trace_changed;
 };
+
+/// The clock identities of an Announce's PATH_TRACE TLV (IEEE 802.1AS-2020
+/// 10.6.3.3), at most MAX_AS_PATH_LENGTH of them.
+[[nodiscard]] auto parse_announce_path_trace(std::span<uint8_t const> announce) noexcept -> AsPath;
 
 /// gPTP Announce Handler - receives gPTP Announce messages and notifies on
 /// grandmaster changes and loss. Implements Pollable for use with
@@ -426,7 +434,12 @@ class GptpAnnounceHandler : public net::Pollable
     /// Take one Announce as received at @p now_ns: record it, then tell the
     /// callbacks what changed. on_ready() calls this for every Announce the
     /// socket delivers; a test can call it directly.
-    void observe_announce(int64_t now_ns, gptp::AnnounceMessage const& announce);
+    /// @p path_trace is the Announce's PATH_TRACE (parse_announce_path_trace).
+    void observe_announce(int64_t now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace = {});
+
+    /// The path trace of the last Announce (IEEE 802.1AS-2020 Clause 10.6.3.3), empty while no
+    /// grandmaster is known; without the TLV, the grandmaster alone.
+    [[nodiscard]] auto path_trace() const noexcept -> AsPath const& { return path_trace_; }
 
     /// How long after its last Announce a grandmaster is held: three times
     /// the interval that Announce's header named (logMessageInterval, clamped
@@ -464,6 +477,9 @@ class GptpAnnounceHandler : public net::Pollable
     int64_t last_announce_time_ns_{0};
     gptp::AnnounceMessage last_announce_{};
     bool has_announce_{false};
+    AsPath path_trace_{};
+
+    void observe_path_trace(int64_t now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace);
     std::array<uint8_t, 2048> payload_buf_{};
 };
 

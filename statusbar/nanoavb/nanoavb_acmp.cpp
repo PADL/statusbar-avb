@@ -168,7 +168,7 @@ void NanoAvbAcmpListener::wire_milan()
         s->stream_dest_mac = stream.dest_mac;
         s->stream_vlan_id = stream.vlan_id;
         if (callbacks_.on_connect) {
-            callbacks_.on_connect(index, stream.stream_id, stream.dest_mac);
+            callbacks_.on_connect(index, stream.stream_id, stream.dest_mac, last_event_time_);
         }
     });
     milan_.set_on_unsettled([this](uint16_t const index, MilanSinkStream const&) {
@@ -178,7 +178,7 @@ void NanoAvbAcmpListener::wire_milan()
         }
         // The data plane reads the stream identity to release it.
         if (callbacks_.on_disconnect) {
-            callbacks_.on_disconnect(index);
+            callbacks_.on_disconnect(index, last_event_time_);
         }
         s->reset();
     });
