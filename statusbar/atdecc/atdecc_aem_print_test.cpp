@@ -489,6 +489,7 @@ TEST(aem_print, format_descriptor_dispatch_stream_input)
     std::array<uint8_t, DescriptorStream::MINIMUM_LENGTH> buf{};
     buf[0] = 0x00;
     buf[1] = 0x05;
+    buf[83] = DescriptorStream::MINIMUM_LENGTH;  // formats_offset = 132 (2013), no formats
     auto result = parse_descriptor(std::span<uint8_t const>(buf));
     EXPECT_TRUE(result.has_value());
     std::string output;
@@ -501,6 +502,7 @@ TEST(aem_print, format_descriptor_dispatch_stream_output)
     std::array<uint8_t, DescriptorStream::MINIMUM_LENGTH> buf{};
     buf[0] = 0x00;
     buf[1] = 0x06;
+    buf[83] = DescriptorStream::MINIMUM_LENGTH;  // formats_offset = 132 (2013), no formats
     auto result = parse_descriptor(std::span<uint8_t const>(buf));
     EXPECT_TRUE(result.has_value());
     std::string output;
@@ -1312,6 +1314,178 @@ TEST(aem_stream_list, format_to_emits_each_entry)
     format_stream_descriptor(std::back_inserter(buf), d, "STREAM_INPUT");
     EXPECT_TRUE(buf.find("formats: count=1") != std::string::npos);
     EXPECT_TRUE(buf.find("[0] = 00:a0:02:40:40:00:00:60") != std::string::npos);
+}
+
+//
+// STREAM descriptors honour formats_offset (2013: 132; 2021: 138)
+//
+
+namespace {
+
+void put_u16(std::vector<uint8_t>& b, size_t off, uint16_t v)
+{
+    b[off] = static_cast<uint8_t>(v >> 8U);
+    b[off + 1] = static_cast<uint8_t>(v & 0xFFU);
+}
+
+/// Raw STREAM_INPUT bytes: @p formats_offset / @p count in the header, @p count
+/// formats [i] = 00:a0:02:40:40:00:00:<i+1> written at @p formats_offset, total
+/// size @p size.
+auto raw_stream(size_t size, uint16_t formats_offset, uint16_t count) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> b(size, 0);
+    put_u16(b, 0, DESCRIPTOR_STREAM_INPUT);
+    b[4] = 'i';
+    b[5] = 'n';
+    put_u16(b, offsetof(DescriptorStream, formats_offset), formats_offset);
+    put_u16(b, offsetof(DescriptorStream, number_of_formats), count);
+    for (size_t i = 0; i < count && formats_offset + (8 * (i + 1)) <= size; ++i) {
+        std::array<uint8_t, 8> const f{0x00, 0xA0, 0x02, 0x40, 0x40, 0x00, 0x00, static_cast<uint8_t>(i + 1)};
+        std::memcpy(b.data() + formats_offset + (8 * i), f.data(), f.size());
+    }
+    return b;
+}
+
+auto format_raw(std::vector<uint8_t> const& b) -> std::string
+{
+    std::string out;
+    format_descriptor(std::back_inserter(out), std::span<uint8_t const>(b));
+    return out;
+}
+
+}  // namespace
+
+TEST(aem_stream_formats_offset, layout_2013_parses_and_formats)
+{
+    // As sent by a 1722.1-2013 entity (MOTU 16A: fo=132, 12 formats, 228 bytes).
+    auto const b = raw_stream(228, 132, 12);
+    auto const t = stream_descriptor_trailers(std::span<uint8_t const>(b));
+    EXPECT_TRUE(t.has_value());
+    if (!(t.has_value())) {
+        return;
+    }
+    EXPECT_EQ(t->stream_formats.size(), 12U);
+    EXPECT_EQ(t->stream_formats[0], (Eui64{0x00, 0xA0, 0x02, 0x40, 0x40, 0x00, 0x00, 0x01}));
+    EXPECT_EQ(t->stream_formats[11], (Eui64{0x00, 0xA0, 0x02, 0x40, 0x40, 0x00, 0x00, 0x0C}));
+    EXPECT_FALSE(t->has_2021_fields);
+    EXPECT_TRUE(t->redundant_streams.empty());
+
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    if (!(parse_descriptor(std::span<uint8_t const>(b)).has_value())) {
+        return;
+    }
+    auto const out = format_raw(b);
+    EXPECT_NE(out.find("formats: count=12 offset=132"), std::string::npos);
+    EXPECT_NE(out.find("[0] = 00:a0:02:40:40:00:00:01"), std::string::npos);
+    EXPECT_NE(out.find("[11] = 00:a0:02:40:40:00:00:0c"), std::string::npos);
+    EXPECT_EQ(out.find("timing:"), std::string::npos);
+    EXPECT_EQ(out.find("redundant_streams:"), std::string::npos);
+}
+
+TEST(aem_stream_formats_offset, layout_2013_single_format)
+{
+    // Our own bridge in 2016 mode / Monitor Two: fo=132, 1 format, 140 bytes.
+    auto const b = raw_stream(140, 132, 1);
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    if (!(parse_descriptor(std::span<uint8_t const>(b)).has_value())) {
+        return;
+    }
+    auto const out = format_raw(b);
+    EXPECT_NE(out.find("[0] = 00:a0:02:40:40:00:00:01"), std::string::npos);
+}
+
+TEST(aem_stream_formats_offset, layout_2021_parses_and_formats)
+{
+    // fo=138, 18 formats, 282 bytes, plus 2 redundant stream indices after them.
+    constexpr size_t kRedundant = 138 + (18 * 8);
+    auto b = raw_stream(kRedundant + 4, 138, 18);
+    put_u16(b, offsetof(DescriptorStream, redundant_offset), kRedundant);
+    put_u16(b, offsetof(DescriptorStream, number_of_redundant_streams), 2);
+    put_u16(b, offsetof(DescriptorStream, timing), 7);
+    put_u16(b, kRedundant, 3);
+    put_u16(b, kRedundant + 2, 9);
+
+    auto const t = stream_descriptor_trailers(std::span<uint8_t const>(b));
+    EXPECT_TRUE(t.has_value());
+    if (!(t.has_value())) {
+        return;
+    }
+    EXPECT_EQ(t->stream_formats.size(), 18U);
+    EXPECT_EQ(t->stream_formats[17], (Eui64{0x00, 0xA0, 0x02, 0x40, 0x40, 0x00, 0x00, 0x12}));
+    EXPECT_TRUE(t->has_2021_fields);
+    EXPECT_EQ(t->timing, 7U);
+    EXPECT_EQ(t->redundant_streams.size(), 2U);
+    if (!((t->redundant_streams.size()) == (2U))) {
+        return;
+    }
+    EXPECT_EQ(t->redundant_streams[1].get(), 9U);
+
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    if (!(parse_descriptor(std::span<uint8_t const>(b)).has_value())) {
+        return;
+    }
+    auto const out = format_raw(b);
+    EXPECT_NE(out.find("formats: count=18 offset=138"), std::string::npos);
+    EXPECT_NE(out.find("[17] = 00:a0:02:40:40:00:00:12"), std::string::npos);
+    EXPECT_NE(out.find("timing: 7"), std::string::npos);
+    EXPECT_NE(out.find("redundant_streams: count=2"), std::string::npos);
+    EXPECT_NE(out.find("[1] = 9"), std::string::npos);
+}
+
+TEST(aem_stream_formats_offset, layout_2021_no_formats_at_length)
+{
+    auto const b = raw_stream(DescriptorStream::LENGTH, 138, 0);
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    if (!(parse_descriptor(std::span<uint8_t const>(b)).has_value())) {
+        return;
+    }
+}
+
+TEST(aem_stream_formats_offset, rejects_count_past_end)
+{
+    // One format short: 2013 layout claims 12 but only 11 present.
+    auto const b = raw_stream(220, 132, 12);
+    EXPECT_FALSE(stream_descriptor_trailers(std::span<uint8_t const>(b)).has_value());
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    EXPECT_NE(format_raw(b).find("Failed to parse"), std::string::npos);
+
+    // Attacker-controlled count.
+    auto const huge = raw_stream(140, 132, 0xFFFF);
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(huge)).has_value());
+
+    // formats_offset itself past the end.
+    auto const far = raw_stream(140, 400, 0);
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(far)).has_value());
+
+    // A 2021 descriptor whose formats fit when read at 132 but not at 138.
+    auto const shifted = raw_stream(140, 138, 1);
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(shifted)).has_value());
+}
+
+TEST(aem_stream_formats_offset, rejects_redundant_list_past_end)
+{
+    auto b = raw_stream(146, 138, 1);
+    put_u16(b, offsetof(DescriptorStream, redundant_offset), 146);
+    put_u16(b, offsetof(DescriptorStream, number_of_redundant_streams), 1);
+    EXPECT_FALSE(stream_descriptor_trailers(std::span<uint8_t const>(b)).has_value());
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+
+    // redundant_offset pointing back into the fixed header is malformed too.
+    put_u16(b, offsetof(DescriptorStream, redundant_offset), 100);
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+
+    // A count of zero ignores whatever redundant_offset says.
+    put_u16(b, offsetof(DescriptorStream, number_of_redundant_streams), 0);
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+}
+
+TEST(aem_stream_formats_offset, rejects_offset_below_2013_header)
+{
+    auto const b = raw_stream(140, 128, 1);
+    EXPECT_FALSE(stream_descriptor_trailers(std::span<uint8_t const>(b)).has_value());
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    auto const zero = raw_stream(DescriptorStream::MINIMUM_LENGTH, 0, 0);
+    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(zero)).has_value());
 }
 
 //
