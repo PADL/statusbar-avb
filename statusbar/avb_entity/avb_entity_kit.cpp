@@ -80,12 +80,15 @@ AvbEntityKit::AvbEntityKit(
             default:
                 break;
         }
-        (void)host_.components().acmp_talker.configure_stream(spec.index, stream_id_for(stream_base_mac, spec.index), dest);
+        (void)host_.components().acmp_talker.configure_stream(
+            spec.index, stream_id_for(stream_base_mac, spec.index), dest, config_.vlan_id);
     }
 
     // The VID itself is registered at start() (stop() withdraws it).
     host_.components().msrp_handler.set_domain(
         DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id});
+    // Tag stream frames with the Class A VID in use (adopted MSRP Domain).
+    host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint) { talker_->set_vlan_id(vlan_id); });
     host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
     host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
 

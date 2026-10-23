@@ -178,12 +178,13 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
     return sample_rate_hz / CLASS_A_PACKETS_PER_SEC;
 }
 
-/// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence:
-/// L2 payload bytes of the largest AVTP frame the stream can emit. Audio
-/// kinds reserve one extra sample per channel over the nominal cadence — the
-/// gPTP-paced media clock may emit nominal+1 samples on a wake. CRF is sized
-/// exactly from its timestamps-per-PDU. Returns 0 for StreamKind::other or a
-/// format with an unknown rate.
+/// The byte Milan v1.2 Table 4.4 adds to every MaxFrameSize for a sampling
+/// clock a little faster than nominal.
+inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
+
+/// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence
+/// (Milan v1.2 Section 4.3.3.2, Table 4.4). Returns 0 for StreamKind::other
+/// or an unknown rate.
 [[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
 
 /// One stream's MSRP TSpec (IEEE 802.1Q 35.2.2.8.4).
