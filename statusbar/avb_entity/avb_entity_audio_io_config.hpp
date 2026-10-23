@@ -11,6 +11,7 @@
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
