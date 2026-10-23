@@ -115,7 +115,10 @@ void am824_deserialize_mbla(
     // Decode quadlets into per-channel scratch buffers
     // Layout: data blocks are channel-interleaved
     //   [ch0_s0, ch1_s0, ..., chN_s0, ch0_s1, ch1_s1, ..., chN_s1, ...]
-    std::array<std::array<float, MaxSamples>, MaxChannels> scratch{};
+    // Not zeroed (MaxChannels x MaxSamples floats on the real-time stack, 64 KB
+    // at the AAF defaults): the loop below writes [0, channels) x [0, samples)
+    // and only that region is handed on.
+    std::array<std::array<float, MaxSamples>, MaxChannels> scratch;  // NOLINT(cppcoreguidelines-pro-type-member-init)
 
     for (uint8_t s = 0; s < samples; ++s) {
         for (uint8_t ch = 0; ch < channels; ++ch) {
