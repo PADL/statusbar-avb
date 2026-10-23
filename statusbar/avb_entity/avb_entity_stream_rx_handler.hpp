@@ -24,6 +24,7 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
+#include <array>
 #include <cstddef>
 #include <span>
 #include <string_view>

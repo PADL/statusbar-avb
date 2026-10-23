@@ -15,6 +15,7 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_stream_common.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -114,9 +115,11 @@ auto aaf_stream_serialize(
 
     ctx.build_packet_header(pdu, samples_per_channel, gptp_now_ns);
 
-    // Collect float samples from source into per-channel scratch buffers
-    std::array<std::array<float, MaxSamples>, MaxChannels> scratch{};
+    // Collect float samples from source into per-channel scratch buffers. Only the region the
+    // encoder reads is zeroed (the array lives on the real-time stack), so unfilled dest is silence.
+    std::array<std::array<float, MaxSamples>, MaxChannels> scratch;  // NOLINT(cppcoreguidelines-pro-type-member-init)
     for (uint16_t ch = 0; ch < channels; ++ch) {
+        std::fill_n(scratch[ch].data(), samples_per_channel, 0.0F);
         get_audio(static_cast<uint8_t>(ch), std::span<float>{scratch[ch].data(), samples_per_channel});
     }
 
