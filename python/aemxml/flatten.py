@@ -7,8 +7,9 @@ from __future__ import annotations
 import zlib
 from dataclasses import dataclass
 
-from .control_values import count_values
+from .control_values import CONTROL_TYPE_NAMES, count_values
 from .model import (
+    DESCRIPTOR_INVALID,
     AUDIO_MAP_MAX_MAPPINGS,
     DESCRIPTOR_ENTITY,
     DESCRIPTOR_CONFIGURATION,
@@ -534,6 +535,15 @@ def _serialize_audio_map(am: AudioMap, desc_index: int) -> bytes:
 
 def _serialize_control(ctrl: Control, desc_index: int) -> bytes:
     """Serialize CONTROL descriptor (104 + L bytes)."""
+    # Whatever the model came from (JSON, AEMXML): an IDENTIFY control has
+    # no signal (IEEE 1722.1-2021 7.2.22, as la_avdecc checks it).
+    if ctrl.control_type == CONTROL_TYPE_NAMES["IDENTIFY"] and (
+        ctrl.signal_type != DESCRIPTOR_INVALID or ctrl.signal_index != 0
+    ):
+        raise ValueError(
+            f"CONTROL {desc_index} ({ctrl.object_name!r}): an IDENTIFY control's "
+            f"signal_type is INVALID and its signal_index 0 (IEEE 1722.1-2021 7.2.22)"
+        )
     val_len = len(ctrl.value_details)
     parts = [
         pack_u16(DESCRIPTOR_CONTROL),
@@ -1171,7 +1181,9 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
         add_count(DESCRIPTOR_AVB_INTERFACE, len(config.avb_interfaces))
         add_count(DESCRIPTOR_CLOCK_SOURCE, len(config.clock_sources))
         add_count(DESCRIPTOR_MEMORY_OBJECT, len(config.memory_objects))
-        add_count(DESCRIPTOR_CONTROL, _count_all_controls(config))
+        # The configuration's own controls: those of units, ports, interfaces,
+        # jacks and control blocks are reached through their base_control.
+        add_count(DESCRIPTOR_CONTROL, len(config.controls))
         add_count(DESCRIPTOR_SIGNAL_SELECTOR, len(config.signal_selectors))
         add_count(DESCRIPTOR_MIXER, len(config.mixers))
         add_count(DESCRIPTOR_MATRIX, len(config.matrices))
@@ -1190,13 +1202,10 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
         add_count(DESCRIPTOR_TIMING, len(config.timings))
         add_count(DESCRIPTOR_PTP_INSTANCE, len(config.ptp_instances))
 
-        # Nothing else is counted. IEEE 1722.1-2021 7.2.2 has descriptor_counts
-        # list the top level descriptors only, the types above. STRINGS, the
-        # stream, external and internal ports, the clusters, the maps and the
-        # PTP_PORTs are reached from the descriptor that owns them (a LOCALE's
-        # base_strings, a unit's base_stream_input_port, a stream port's
-        # base_cluster and base_map, a PTP_INSTANCE's base_ptp_port), and a
-        # count of them here would give each a second parent.
+        # Only top-level descriptors (IEEE 1722.1-2021 7.2.2): stream,
+        # external and internal ports, clusters, maps, STRINGS and PTP_PORTs
+        # are reached through their owners' base/count fields, and a
+        # controller (la_avdecc) flags an entity that lists them here.
 
         # Serialize configuration descriptor
         descriptors.append(
@@ -2848,35 +2857,3 @@ def _check_duplicate_symbols(symbols: list[FlatSymbol]) -> None:
                 f"symbols must be unique within the blob"
             )
         seen[s.symbol_code] = s
-
-
-def _count_all_controls(config: Configuration) -> int:
-    """Count total controls across all levels in a configuration."""
-    count = len(config.controls)
-    count += sum(len(intf.controls) for intf in config.avb_interfaces)
-    count += sum(len(cb.controls) for cb in config.control_blocks)
-    for unit in config.audio_units:
-        count += len(unit.controls)
-        for port in unit.input_stream_ports + unit.output_stream_ports:
-            count += len(port.controls)
-        for port in unit.input_external_ports + unit.output_external_ports:
-            count += len(port.controls)
-        for port in unit.input_internal_ports + unit.output_internal_ports:
-            count += len(port.controls)
-    for unit in config.video_units:
-        count += len(unit.controls)
-        for port in unit.input_stream_ports + unit.output_stream_ports:
-            count += len(port.controls)
-        for port in unit.input_external_ports + unit.output_external_ports:
-            count += len(port.controls)
-        for port in unit.input_internal_ports + unit.output_internal_ports:
-            count += len(port.controls)
-    for unit in config.sensor_units:
-        count += len(unit.controls)
-        for port in unit.input_stream_ports + unit.output_stream_ports:
-            count += len(port.controls)
-        for port in unit.input_external_ports + unit.output_external_ports:
-            count += len(port.controls)
-        for port in unit.input_internal_ports + unit.output_internal_ports:
-            count += len(port.controls)
-    return count
