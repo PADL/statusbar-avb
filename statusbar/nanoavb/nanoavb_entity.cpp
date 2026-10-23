@@ -257,16 +257,32 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_set_descriptor_value(AEM_COMMAND_SET_SAMPLING_RATE, command_data, out_buffer);
 
         case AEM_COMMAND_START_STREAMING:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_START_STREAMING, command_data, out_buffer);
-
         case AEM_COMMAND_STOP_STREAMING:
+            // Milan v1.2 Sections 5.4.2.19-20 and 5.3.7.3: a stream output
+            // streams while it has a Listener Ready; it cannot be stopped.
+            if (profile_.milan && command_data.size() >= 2 &&
+                ((uint16_t{command_data[0]} << 8U) | command_data[1]) == DESCRIPTOR_STREAM_OUTPUT) {
+                return reject_command(AEM_STATUS_NOT_SUPPORTED, command_data, out_buffer);
+            }
             if (auto const blocked = check_exclusive_access(header)) {
                 return reject_command(*blocked, command_data, out_buffer);
             }
-            return handle_set_descriptor_value(AEM_COMMAND_STOP_STREAMING, command_data, out_buffer);
+            return handle_set_descriptor_value(cmd, command_data, out_buffer);
+
+        case AEM_COMMAND_SET_STREAM_INFO:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_stream_info(command_data, out_buffer);
+
+        case AEM_COMMAND_SET_MAX_TRANSIT_TIME:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_set_max_transit_time(command_data, out_buffer);
+
+        case AEM_COMMAND_GET_MAX_TRANSIT_TIME:
+            return handle_get_max_transit_time(command_data, out_buffer);
 
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
@@ -615,7 +631,7 @@ auto AemCommandHandler::notify_stream_info_changed(uint16_t const descriptor_typ
     AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
     std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
     span_store(request, cmd);
-    std::array<uint8_t, AemStreamInfoPayload::LENGTH> out{};
+    std::array<uint8_t, AEM_STREAM_INFO_MILAN_LENGTH> out{};
     auto const r = handle_get_stream_info(AemDu{}, request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
@@ -947,17 +963,153 @@ auto AemCommandHandler::handle_get_stream_info(
 
     // Echo descriptor_type/index back; the app fills the rest plus the flag bits.
     AemStreamInfoPayload resp{};
+    AemStreamInfoMilanExtension ext{};
     resp.descriptor_type = ieee::doublet_t{descriptor_type};
     resp.descriptor_index = ieee::doublet_t{descriptor_index};
-    if (!callbacks_.get_stream_info(descriptor_type, descriptor_index, resp)) {
+    if (!callbacks_.get_stream_info(descriptor_type, descriptor_index, resp, ext)) {
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
 
-    if (out_buffer.size() < AemStreamInfoPayload::LENGTH) {
+    // Milan v1.2 Section 5.4.2.10 (Figure 5.1): the Milan profile appends
+    // flags_ex, pbsta and acmpsta; a classic entity answers IEEE 1722.1-2013's
+    // 48 octets.
+    size_t const size = profile_.milan ? AEM_STREAM_INFO_MILAN_LENGTH : AemStreamInfoPayload::LENGTH;
+    if (out_buffer.size() < size) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
     span_store(out_buffer.first(AemStreamInfoPayload::LENGTH), resp);
-    return {.status = AEM_STATUS_SUCCESS, .size = AemStreamInfoPayload::LENGTH};
+    if (profile_.milan) {
+        span_store(out_buffer.subspan(AemStreamInfoPayload::LENGTH, AemStreamInfoMilanExtension::LENGTH), ext);
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+auto AemCommandHandler::presentation_offset_target(
+    uint16_t const descriptor_type, uint16_t const descriptor_index, uint32_t& current) const -> uint8_t
+{
+    if (!callbacks_.get_presentation_offset || !callbacks_.set_presentation_offset) {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+    // Milan v1.2 Section 5.4.2.9: "The PAAD-AE shall not implement the
+    // SET_STREAM_INFO command on Stream Inputs"; MAX_TRANSIT_TIME is a talker's
+    // (Milan v1.3 Section 5.4.2.30).
+    if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
+        return AEM_STATUS_NOT_SUPPORTED;
+    }
+    if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
+        return AEM_STATUS_NO_SUCH_DESCRIPTOR;  // no stream there
+    }
+    auto const offset = callbacks_.get_presentation_offset(descriptor_index);
+    if (!offset) {
+        return AEM_STATUS_NO_SUCH_DESCRIPTOR;
+    }
+    current = *offset;
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    using namespace stream_info_flags;
+    if (command_data.size() < AemStreamInfoPayload::LENGTH || out_buffer.size() < AemStreamInfoPayload::LENGTH) {
+        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
+    }
+    auto const echoed = command_data.first(AemStreamInfoPayload::LENGTH);
+    AemStreamInfoPayload cmd{};
+    span_load(cmd, echoed);
+    uint16_t const index = cmd.descriptor_index.get();
+    uint32_t current = 0;
+    if (auto const status = presentation_offset_target(cmd.descriptor_type.get(), index, current); status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, echoed, out_buffer);
+    }
+    // "If the PAAD-AE receives a SET_STREAM_INFO command with any unsupported
+    // sub-commands, the PAAD-AE shall refuse the entire command by returning
+    // the NOT_SUPPORTED error code."
+    uint32_t const flags = cmd.flags.get();
+    if ((flags & SET_SUB_COMMANDS & ~MSRP_ACC_LAT_VALID) != 0) {
+        return reject_command(AEM_STATUS_NOT_SUPPORTED, echoed, out_buffer);
+    }
+    span_copy(out_buffer.first(echoed.size()), echoed);
+    if ((flags & MSRP_ACC_LAT_VALID) == 0) {
+        return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};  // nothing asked
+    }
+    uint32_t const offset = cmd.msrp_accumulated_latency.get();
+    if (offset > MILAN_PRESENTATION_OFFSET_MAX_NS) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = echoed.size()};
+    }
+    if (auto const status = callbacks_.set_presentation_offset(index, offset); status != AEM_STATUS_SUCCESS) {
+        return {.status = status, .size = echoed.size()};
+    }
+    // The response echoes the command (MSRP_ACC_LAT_VALID and the offset), and
+    // goes to the registered controllers when the offset changed.
+    if (offset != current) {
+        emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, out_buffer.first(echoed.size()));
+        // A controller following GET_STREAM_INFO or MAX_TRANSIT_TIME (Milan
+        // 1.3) sees it too.
+        (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
+        AemGetMaxTransitTimeResponsePayload transit{};
+        transit.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        transit.descriptor_index = index;
+        transit.max_transit_time = uint64_t{offset};
+        std::array<uint8_t, AemGetMaxTransitTimeResponsePayload::LENGTH> body{};
+        span_store(body, transit);
+        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, body);
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};
+}
+
+auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (command_data.size() < AemSetMaxTransitTimePayload::LENGTH || out_buffer.size() < AemSetMaxTransitTimePayload::LENGTH) {
+        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
+    }
+    auto const echoed = command_data.first(AemSetMaxTransitTimePayload::LENGTH);
+    AemSetMaxTransitTimePayload cmd{};
+    span_load(cmd, echoed);
+    uint16_t const index = cmd.descriptor_index.get();
+    uint32_t current = 0;
+    if (auto const status = presentation_offset_target(cmd.descriptor_type.get(), index, current); status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, echoed, out_buffer);
+    }
+    span_copy(out_buffer.first(echoed.size()), echoed);
+    uint64_t const requested = cmd.max_transit_time.get();
+    if (requested > MILAN_PRESENTATION_OFFSET_MAX_NS) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = echoed.size()};
+    }
+    auto const offset = static_cast<uint32_t>(requested);
+    if (auto const status = callbacks_.set_presentation_offset(index, offset); status != AEM_STATUS_SUCCESS) {
+        return {.status = status, .size = echoed.size()};
+    }
+    if (offset != current) {
+        emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
+        // GET_MAX_TRANSIT_TIME's response has SET's layout: the echoed command.
+        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
+        (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};
+}
+
+auto AemCommandHandler::handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (command_data.size() < AemGetMaxTransitTimeCommandPayload::LENGTH ||
+        out_buffer.size() < AemGetMaxTransitTimeResponsePayload::LENGTH) {
+        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
+    }
+    AemGetMaxTransitTimeCommandPayload cmd{};
+    span_load(cmd, command_data.first(AemGetMaxTransitTimeCommandPayload::LENGTH));
+    uint32_t current = 0;
+    if (auto const status = presentation_offset_target(cmd.descriptor_type.get(), cmd.descriptor_index.get(), current);
+        status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data.first(AemGetMaxTransitTimeCommandPayload::LENGTH), out_buffer);
+    }
+    AemGetMaxTransitTimeResponsePayload resp{};
+    resp.descriptor_type = cmd.descriptor_type;
+    resp.descriptor_index = cmd.descriptor_index;
+    resp.max_transit_time = uint64_t{current};
+    span_store(out_buffer.first(AemGetMaxTransitTimeResponsePayload::LENGTH), resp);
+    return {.status = AEM_STATUS_SUCCESS, .size = AemGetMaxTransitTimeResponsePayload::LENGTH};
 }
 
 auto AemCommandHandler::handle_acquire_entity(

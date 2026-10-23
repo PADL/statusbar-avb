@@ -40,6 +40,14 @@ void TalkerGate::note_talker_withdrawn() noexcept
     }
 }
 
+void TalkerGate::note_talker_withdrawn(uint16_t const idx) noexcept
+{
+    if (idx < listener_ready_.size()) {
+        listener_ready_[idx].store(false, std::memory_order_relaxed);
+        ready_ns_[idx].store(0, std::memory_order_relaxed);
+    }
+}
+
 auto TalkerGate::admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
 {
     if (!gate_enabled_) {
@@ -51,9 +59,16 @@ auto TalkerGate::admitted(uint16_t const idx, int64_t const now_ns) const noexce
     if (idx >= stream_started_.size() || !stream_started_[idx].load(std::memory_order_relaxed)) {
         return false;
     }
-    // MSRP Listener Ready / Ready Failed, held across the MRP LeaveAll re-registration blip by
-    // GRACE_NS: a declaration briefly withdrawn must not chop the stream; one gone longer closes
-    // the gate.
+    return listener_admitted(idx, now_ns);
+}
+
+auto TalkerGate::listener_admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+{
+    if (idx >= listener_ready_.size()) {
+        return false;
+    }
+    // Listener Ready / Ready Failed registered, held across the MRP LeaveAll re-registration
+    // blip by GRACE_NS; a listener that does not re-declare within it closes the gate.
     if (listener_ready_[idx].load(std::memory_order_relaxed)) {
         return true;
     }

@@ -268,7 +268,32 @@ constexpr uint32_t STREAM_DEST_MAC_VALID = 0x10000000;
 constexpr uint32_t MSRP_ACC_LAT_VALID = 0x20000000;
 constexpr uint32_t STREAM_ID_VALID = 0x40000000;
 constexpr uint32_t STREAM_FORMAT_VALID = 0x80000000;
+/// Milan v1.2 Section 5.4.2.10 renames TALKER_FAILED and CONNECTED.
+constexpr uint32_t REGISTERING_FAILED = TALKER_FAILED;
+constexpr uint32_t BOUND = CONNECTED;
+/// The SET_STREAM_INFO sub-commands (IEEE 1722.1 7.4.15.1: "the XXX_VALID
+/// flags ... indicate which parameters are to be set").
+constexpr uint32_t SET_SUB_COMMANDS =
+    STREAM_VLAN_ID_VALID | MSRP_FAILURE_VALID | STREAM_DEST_MAC_VALID | MSRP_ACC_LAT_VALID | STREAM_ID_VALID | STREAM_FORMAT_VALID;
 }  // namespace stream_info_flags
+
+/// GET_STREAM_INFO flags_ex (Milan v1.2 Table 5.8; written as masks, the
+/// tables numbering bits from the MSB).
+namespace stream_info_flags_ex {
+/// Stream Input: registering a matching Talker Advertise or Talker Failed.
+/// Stream Output: declaring a Talker attribute and registering a matching
+/// Listener (Ready, Ready Failed or Asking Failed).
+constexpr uint32_t REGISTERING = 0x00000001;
+}  // namespace stream_info_flags_ex
+
+/// A Stream Input's probing status (Milan v1.2 Table 5.5), GET_STREAM_INFO's
+/// pbsta.
+namespace probing_status {
+constexpr uint8_t DISABLED = 0;   ///< not bound
+constexpr uint8_t PASSIVE = 1;    ///< waiting to discover the bound talker
+constexpr uint8_t ACTIVE = 2;     ///< querying the talker (PROBE_TX)
+constexpr uint8_t COMPLETED = 3;  ///< settled
+}  // namespace probing_status
 
 /// GET_STREAM_INFO command payload
 struct AemGetStreamInfoCommandPayload
@@ -343,6 +368,51 @@ struct AemStreamInfoPayload
 };
 
 static_assert(sizeof(AemStreamInfoPayload) == 48, "AemStreamInfoPayload must be 48 bytes");
+
+/// The Milan v1.2 tail of a GET_STREAM_INFO response (Section 5.4.2.10, Figure 5.1), after the
+/// 48 octets of AemStreamInfoPayload: a 56-octet response, told from 2013 (48) and 2021 (84) forms
+/// by control_data_length.
+struct AemStreamInfoMilanExtension
+{
+    static constexpr size_t LENGTH = 8;
+
+    /// Bytes 48-51: stream_info_flags_ex
+    quadlet_t flags_ex{0};
+
+    /// Byte 52: pbsta (3 bits, the most significant) and acmpsta (5 bits)
+    octet_t pbsta_acmpsta{0};
+
+    /// Bytes 53-55: Reserved
+    std::array<octet_t, 3> reserved{};
+
+    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t
+    {
+        return static_cast<uint8_t>(pbsta_acmpsta.get() >> 5U);
+    }
+    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t
+    {
+        return static_cast<uint8_t>(pbsta_acmpsta.get() & 0x1FU);
+    }
+    /// pbsta per Table 5.5; acmpsta an ACMP status (defined only while
+    /// probing actively, else 0).
+    constexpr void set_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept
+    {
+        pbsta_acmpsta = static_cast<uint8_t>(((pbsta & 0x07U) << 5U) | (acmpsta & 0x1FU));
+    }
+
+    auto operator<=>(AemStreamInfoMilanExtension const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemStreamInfoMilanExtension) == 8, "AemStreamInfoMilanExtension must be 8 bytes");
+static_assert(offsetof(AemStreamInfoMilanExtension, pbsta_acmpsta) == 4, "pbsta/acmpsta at Milan GET_STREAM_INFO octet 52");
+
+/// A Milan v1.2 GET_STREAM_INFO response's length: the IEEE 1722.1-2013 form
+/// and the Milan tail.
+inline constexpr size_t AEM_STREAM_INFO_MILAN_LENGTH = AemStreamInfoPayload::LENGTH + AemStreamInfoMilanExtension::LENGTH;
+
+/// Milan's presentation time offset range (v1.2 Sections 5.3.7.6, 5.4.2.9;
+/// v1.3 5.4.2.30), nanoseconds.
+inline constexpr uint32_t MILAN_PRESENTATION_OFFSET_MAX_NS = 0x7FFFFFFF;
 
 //
 // SET_NAME / GET_NAME - Clause 7.4.17 / 7.4.18
@@ -1346,6 +1416,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoMilanExtension> : std::true_type
 {};
 
 template <>

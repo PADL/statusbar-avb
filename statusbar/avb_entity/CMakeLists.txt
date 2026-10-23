@@ -18,6 +18,7 @@ statusbar_add_module(
   avb_entity_listener_streams.cpp
   avb_entity_listener_vlan.cpp
   avb_entity_talker_streams.cpp
+  avb_entity_talker_declarations.cpp
   avb_entity_talker_gate.cpp
   avb_entity_shaper.cpp
   avb_entity_udptun_bridge.cpp
@@ -45,6 +46,7 @@ statusbar_add_module(
   TESTS
   avb_entity_avb_info_mirror_test.cpp
   avb_entity_host_test.cpp
+  avb_entity_talker_declarations_test.cpp
   avb_entity_talker_streams_test.cpp
   avb_entity_udptun_bridge_test.cpp
   avb_entity_stereo_io_test.cpp

@@ -372,7 +372,9 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 TEST(tone_gate, classic_listener_admitted_by_listener_ready_not_connection)
 {
     auto blob = load_file(entity_tone_bin_path());
-    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    auto config = make_config_with_blob(std::move(blob));
+    config.milan = false;  // a classic talker counts CONNECT_TX connections
+    auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;

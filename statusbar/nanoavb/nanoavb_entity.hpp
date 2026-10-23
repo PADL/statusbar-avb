@@ -87,8 +87,21 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 /// Milan listeners (e.g. the DSP processor) query GET_STREAM_INFO on a talker's
 /// STREAM_OUTPUT after connecting to verify the stream's format/identity, and
 /// tear the connection down if the talker answers NOT_IMPLEMENTED.
-using GetStreamInfoFn =
-    statusbar::sg14::inplace_function<bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out), 64>;
+///
+/// @p ext is Milan v1.2's tail (flags_ex, pbsta, acmpsta; Section 5.4.2.10):
+/// sent, making the response 56 octets, only in the Milan profile.
+using GetStreamInfoFn = statusbar::sg14::inplace_function<
+    bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext),
+    64>;
+
+/// A STREAM_OUTPUT's presentation time offset in nanoseconds (Milan v1.2
+/// Section 5.3.7.6), or nullopt when @p stream_output_index is not one of
+/// this entity's talker streams.
+using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<uint32_t>(uint16_t stream_output_index), 64>;
+
+/// Set a STREAM_OUTPUT's presentation time offset (range-checked): SUCCESS once in force,
+/// STREAM_IS_RUNNING while it streams, NOT_SUPPORTED when the entity cannot change it.
+using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
@@ -161,6 +174,11 @@ struct AemCommandHandlerCallbacks
     /// Accept or refuse REBOOT, and schedule it. Optional; if unset, REBOOT
     /// replies NOT_IMPLEMENTED.
     RebootFn on_reboot;
+
+    /// The talkers' presentation time offsets, for SET_STREAM_INFO (Milan v1.2 Section 5.4.2.9)
+    /// and SET/GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
+    GetPresentationOffsetFn get_presentation_offset;
+    SetPresentationOffsetFn set_presentation_offset;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -256,6 +274,12 @@ class AemCommandHandler
     void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
     void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
+    /// Install the presentation time offset store (see AemCommandHandlerCallbacks).
+    void set_presentation_offset_hooks(GetPresentationOffsetFn get, SetPresentationOffsetFn set)
+    {
+        callbacks_.get_presentation_offset = std::move(get);
+        callbacks_.set_presentation_offset = std::move(set);
+    }
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -577,6 +601,23 @@ class AemCommandHandler
     /// NO_SUCH_DESCRIPTOR if the descriptor is not one of this entity's streams.
     [[nodiscard]] auto handle_get_stream_info(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// SET_STREAM_INFO per Milan v1.2 Section 5.4.2.9: only MSRP_ACC_LAT_VALID on a STREAM_OUTPUT
+    /// (the presentation time offset); anything else NOT_SUPPORTED. The command echoed.
+    [[nodiscard]] auto handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// SET/GET_MAX_TRANSIT_TIME (IEEE 1722.1-2021 Clauses 7.4.77-78, Milan v1.3 Sections
+    /// 5.4.2.30-31): a STREAM_OUTPUT's presentation time offset, as SET_STREAM_INFO sets it.
+    [[nodiscard]] auto handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    [[nodiscard]] auto handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// The presentation offset checks common to SET_STREAM_INFO and SET_MAX_TRANSIT_TIME:
+    /// SUCCESS with the current offset in @p current, or the status to refuse with.
+    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
+        -> uint8_t;
 
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.

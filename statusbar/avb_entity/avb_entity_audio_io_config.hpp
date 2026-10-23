@@ -254,13 +254,10 @@ struct AvbEntityAudioIOConfig
     /// into the right SR class / credit-based shaper. Default 3 = SR Class A.
     uint8_t stream_pcp{3};
 
-    /// Presentation-time offset in nanoseconds added to the gPTP time to form the
-    /// AVTP timestamp of transmitted stream packets (how far in the future the
-    /// listener should present the samples). Must exceed the worst-case talker +
-    /// network transit time or the listener flags LATE_TIMESTAMP. Default 1 ms
-    /// (the deterministic GPS-rate media clock owns this lead; see
-    /// ptpclient::MediaClockGenerator).
-    uint64_t presentation_offset_ns{1'000'000};
+    /// Presentation-time offset (ns) added to gPTP time for transmitted AVTP
+    /// timestamps; must exceed talker + network transit. Default 2 ms (Milan v1.2
+    /// Section 5.3.7.6); a controller may change it per output.
+    uint64_t presentation_offset_ns{2'000'000};
 
     /// Number of stream packets emitted per stream per media-timer wake. Default 1
     /// = strict SR Class A (one 12-sample/125 us packet per 125 us wake, evenly

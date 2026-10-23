@@ -34,6 +34,7 @@
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_declarations.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -44,6 +45,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -65,6 +67,9 @@ static_assert(
 static_assert(
     nanoavb::DescriptorStorageHandler::MAX_STREAM_STATES >= 2 * MAX_ENTITY_STREAMS,
     "AEM stream runtime state (SET_STREAM_FORMAT, START/STOP_STREAMING): inputs and outputs share the table");
+static_assert(
+    TalkerDeclarations::LISTENER_GRACE_NS == TalkerGate::GRACE_NS,
+    "a departed Listener keeps its stream declared as long as it keeps the gate open");
 static_assert(
     nanoavb::NanoAvbAcmpListener::MAX_FAST_CONNECT_GOALS >= MAX_ENTITY_STREAMS,
     "fast-connect goals and persisted listener bindings: one per STREAM_INPUT");
@@ -209,6 +214,42 @@ class AvbEntityKit
     /// event still closes the stream's admission and fires the callback.
     void poll_admission(int64_t const now_ns) { note_admission(now_ns); }
 
+    // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
+
+    /// Whether talker stream @p idx declares its Talker Advertise now
+    /// (TalkerDeclarations; the rules are in docs/AVB_ENTITY_KIT.md).
+    [[nodiscard]] auto talker_declared(uint16_t const idx) const noexcept -> bool { return declarations_.declared(idx); }
+    [[nodiscard]] auto talker_declarations() const noexcept -> TalkerDeclarations const& { return declarations_; }
+    /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx counted at
+    /// steady-clock @p now_ns (the ACMP talker's on_probe lands here): its
+    /// window opens and the declarations are re-evaluated.
+    void note_talker_probe(uint16_t idx, int64_t now_ns);
+    /// Reactor thread: declare and withdraw Talker Advertises as TalkerDeclarations
+    /// decides at @p now_ns (@p refresh re-declares, e.g. with a new Class A VID).
+    /// The kit's own timer calls it at each deadline; events call it directly.
+    void update_talker_declarations(int64_t now_ns, bool refresh = false);
+    /// Reactor thread: the talker streams' MAAP addresses became valid (@p valid)
+    /// or were lost to a conflict. Until valid, PROBE_TX / CONNECT_TX are answered
+    /// TALKER_DEST_MAC_FAIL and nothing is declared.
+    void note_talker_addresses(bool valid, int64_t now_ns);
+    /// Reactor thread, every pass while started: run the declarations once
+    /// their next deadline (TalkerDeclarations::next_deadline) has come.
+    void on_declaration_timer(int64_t now_ns);
+
+    // --- Presentation time offset (Milan v1.2 Section 5.3.7.6) ------------------
+    /// Talker stream @p idx's presentation time offset in ns (any thread): config's 2 ms default
+    /// until a controller sets it (SET_STREAM_INFO, SET_MAX_TRANSIT_TIME) while the stream is not
+    /// streaming. Not persisted yet.
+    [[nodiscard]] auto presentation_offset_ns(uint16_t const idx) const noexcept -> uint32_t
+    {
+        return idx < presentation_offset_ns_.size() ? presentation_offset_ns_[idx].load(std::memory_order_relaxed) : 0;
+    }
+    /// The entity applies a talker stream's new presentation offset (reactor thread,
+    /// before the kit stores it) and answers an AEM status. Without one the kit
+    /// refuses (NOT_SUPPORTED). Pass an empty function to remove it.
+    using PresentationOffsetFn = sg14::inplace_function<uint8_t(uint16_t idx, uint32_t offset_ns), 32>;
+    void set_on_presentation_offset_changed(PresentationOffsetFn fn) noexcept { on_presentation_offset_changed_ = std::move(fn); }
+
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
     /// state; the blob's authored default until a controller changes it).
@@ -263,6 +304,21 @@ class AvbEntityKit
     void wire_stream_callbacks();
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
+    void withdraw_talker_streams(TimePoint time);
+    /// One pass of update_talker_declarations over the talker streams.
+    void run_talker_declarations(int64_t now_ns, bool refresh);
+    /// The ACMP talker's Milan hooks, the AEM presentation offset store and
+    /// the GET_STREAM_INFO fills.
+    void wire_milan_talker();
+    /// Re-read talker stream @p idx's registered Listener at steady-clock
+    /// @p now_ns; true when it changed (the declaration predicate and
+    /// GET_STREAM_INFO follow it).
+    auto refresh_talker_listener(uint16_t idx, int64_t now_ns) -> bool;
+    /// The talker spec index for @p stream_id, or nullopt.
+    [[nodiscard]] auto talker_index_of(nanoavb::StreamId const& stream_id) const noexcept -> std::optional<uint16_t>;
+    [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
+    /// Fires the unsolicited GET_STREAM_INFO for talker stream @p idx.
+    void notify_talker_stream_info(uint16_t idx);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
     /// Recompute the admitted set at steady-clock @p now_ns after a gate input
     /// changed (or time passed); fire on_admission_changed_ when it differs
@@ -290,6 +346,24 @@ class AvbEntityKit
 
     /// Per-stream transmit gate (MSRP listener declaration + grace). Binds config_ + components.
     TalkerGate gate_;
+    /// When each talker stream declares its Talker Advertise, and the deadline
+    /// its timer next wakes for (nullopt: none).
+    TalkerDeclarations declarations_;
+    std::optional<int64_t> declaration_deadline_ns_{};
+    bool updating_declarations_{false};
+    bool declarations_pending_{false};          ///< asked for while updating
+    bool declarations_pending_refresh_{false};  ///< ... with refresh
+    /// What the declarations' timer reaches the kit through (start(); stop()
+    /// drops it and the timer finishes).
+    std::shared_ptr<AvbEntityKit* const> declaration_timer_token_{};
+    /// The registered Listener per talker stream (refresh_talker_listener).
+    std::array<srp::msrp::ListenerDeclaration, MAX_ENTITY_STREAMS> talker_listener_{};
+    /// Each STREAM_OUTPUT's avb_interface_index (Milan PROBE_TX check).
+    std::array<uint16_t, MAX_ENTITY_STREAMS> talker_interface_{};
+    /// Per talker stream presentation time offset (written on the reactor,
+    /// read by the data plane and GET_STREAM_INFO).
+    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
+    PresentationOffsetFn on_presentation_offset_changed_{};
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
