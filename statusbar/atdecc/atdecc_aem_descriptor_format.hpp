@@ -11,9 +11,11 @@
 #include "statusbar/ieee/ieee_ethernet_format.hpp"
 #include "statusbar/tsn/tsn_clock_identity_format.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <span>
 
 namespace statusbar::atdecc::aem {
 
@@ -223,10 +225,11 @@ auto format_to(OutputIt out, DescriptorSensorUnit const& d) -> OutputIt
 }
 
 /// @param out Output iterator to write formatted text to
-/// @param d Stream descriptor to format
-/// @param type_name Human-readable stream type name
+/// @param d Stream descriptor to format; @p type_name its human-readable stream type name
+/// @param data_size Valid bytes at @p d (the wire length; formats are read at formats_offset)
 template <typename OutputIt>
-auto format_stream_descriptor(OutputIt out, DescriptorStream const& d, char const* type_name) -> OutputIt
+auto format_stream_descriptor(
+    OutputIt out, DescriptorStream const& d, char const* type_name, size_t const data_size = sizeof(DescriptorStream)) -> OutputIt
 {
     out = std::format_to(out, "        {} Descriptor [{}]:\n", type_name, d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
@@ -238,29 +241,50 @@ auto format_stream_descriptor(OutputIt out, DescriptorStream const& d, char cons
     }
     out = std::format_to(out, "\n");
     out = std::format_to(out, "          formats: count={} offset={}\n", d.number_of_formats.get(), d.formats_offset.get());
-    auto const formats = d.used_stream_formats();
-    for (size_t i = 0; i < formats.size(); ++i) {
-        out = std::format_to(out, "            [{}] = ", i);
-        out = ieee::format_to(out, formats[i]);
-        out = std::format_to(out, "\n");
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - view the struct as its wire bytes
+    std::span<uint8_t const> const wire{reinterpret_cast<uint8_t const*>(&d), std::min(data_size, sizeof(DescriptorStream))};
+    auto const trailers = stream_descriptor_trailers(wire);
+    if (!trailers.has_value()) {
+        out = std::format_to(out, "            <formats out of bounds>\n");
+    } else {
+        auto const formats = trailers->stream_formats;
+        for (size_t i = 0; i < formats.size(); ++i) {
+            out = std::format_to(out, "            [{}] = ", i);
+            out = ieee::format_to(out, formats[i]);
+            out = std::format_to(out, "\n");
+        }
     }
     out = std::format_to(out, "          avb_interface_index: {}\n", d.avb_interface_index.get());
+    out = std::format_to(out, "          buffer_length: {}\n", d.buffer_length.get());
+    if (trailers.has_value() && trailers->has_2021_fields) {
+        out = std::format_to(out, "          timing: {}\n", trailers->timing);
+        out = std::format_to(
+            out,
+            "          redundant_streams: count={} offset={}\n",
+            trailers->number_of_redundant_streams,
+            trailers->redundant_offset);
+        auto const redundant = trailers->redundant_streams;
+        for (size_t i = 0; i < redundant.size(); ++i) {
+            out = std::format_to(out, "            [{}] = {}\n", i, redundant[i].get());
+        }
+    }
     return out;
 }
 
 /// @param out Output iterator to write formatted text to
 /// @param d Stream descriptor to format (uses STREAM as generic banner)
+/// @param data_size Valid bytes at @p d (see format_stream_descriptor)
 template <typename OutputIt>
-auto format_to(OutputIt out, DescriptorStream const& d) -> OutputIt
+auto format_to(OutputIt out, DescriptorStream const& d, size_t const data_size = sizeof(DescriptorStream)) -> OutputIt
 {
     uint16_t const type = d.descriptor_type.get();
     if (type == DESCRIPTOR_STREAM_INPUT) {
-        return format_stream_descriptor(out, d, "STREAM_INPUT");
+        return format_stream_descriptor(out, d, "STREAM_INPUT", data_size);
     }
     if (type == DESCRIPTOR_STREAM_OUTPUT) {
-        return format_stream_descriptor(out, d, "STREAM_OUTPUT");
+        return format_stream_descriptor(out, d, "STREAM_OUTPUT", data_size);
     }
-    return format_stream_descriptor(out, d, "STREAM");
+    return format_stream_descriptor(out, d, "STREAM", data_size);
 }
 
 /// @param out Output iterator to write formatted text to
