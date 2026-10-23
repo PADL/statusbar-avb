@@ -412,6 +412,9 @@ def _payload_spec(text: str | None) -> PayloadSpec | None:
     elif trailer_text.startswith("elements:"):
         _, element, count = trailer_text.split(":")
         trailer = PayloadTrailer("elements", element, count)
+    elif trailer_text.startswith("tail:"):
+        # an optional fixed element after the payload, decoded when present
+        trailer = PayloadTrailer("tail", trailer_text.split(":")[1])
     elif trailer_text.startswith("blob:"):
         _, field, count = trailer_text.split(":")
         trailer = PayloadTrailer("blob", field, count)
@@ -734,6 +737,23 @@ KEY_EUI_ENTRY = _elem(
     "keychain key entry",
     (Field("value", 0, 8, "eui64", "key EUI-64"),),
 )
+STREAM_INFO_MILAN = _elem(
+    "stream_info_milan",
+    "GET_STREAM_INFO Milan v1.2 tail (Section 5.4.2.10, Figure 5.1)",
+    (
+        Field(
+            "flags_ex",
+            0,
+            4,
+            "u32",
+            "flags_ex (Milan 1.2 Table 5.8: 0x00000001 REGISTERING)",
+            base="hex",
+        ),
+        Field("pbsta", 4, 1, "u8", "probing status (Milan 1.2 Table 5.5)", mask=0xE0),
+        Field("acmpsta", 4, 1, "u8", "ACMP status of the last probe", mask=0x1F),
+        Field("reserved", 5, 3, "bytes", "reserved"),
+    ),
+)
 TRAILER_ELEMENTS: dict[str, Layout] = {
     "count_entry": COUNT_ENTRY,
     "sampling_rate": SAMPLING_RATE,
@@ -753,6 +773,7 @@ TRAILER_ELEMENTS: dict[str, Layout] = {
     "as_path_entry": AS_PATH_ENTRY,
     "clock_identity": CLOCK_IDENTITY_ENTRY,
     "key_eui": KEY_EUI_ENTRY,
+    "stream_info_milan": STREAM_INFO_MILAN,
 }
 ELEMENT_SIZE: dict[str, int] = {
     "count_entry": 4,
@@ -773,6 +794,7 @@ ELEMENT_SIZE: dict[str, int] = {
     "as_path_entry": 8,
     "clock_identity": 8,
     "key_eui": 8,
+    "stream_info_milan": 8,
 }
 DESCRIPTOR_RAW = Field("value_details", 0, 0, "bytes", "raw descriptor trailer octets")
 JDKS_LOG_TEXT = Field("text", 0, 0, "string", "log text")

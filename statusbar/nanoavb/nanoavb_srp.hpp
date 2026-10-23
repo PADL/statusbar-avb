@@ -788,41 +788,30 @@ class MsrpHandler
         return nullptr;
     }
 
-    /// The remote Talker attribute this port registers for @p stream_id,
-    /// a Talker Failed before a Talker Advertise when both are (IEEE 802.1Q
-    /// 35.2.6), nullopt with neither.
-    [[nodiscard]] auto registered_talker(StreamId const& stream_id) const noexcept -> std::optional<RegisteredTalker>
+    /// A remote talker's registered Talker Advertise / Talker Failed for
+    /// @p stream_id, or nullptr (what a listener's GET_STREAM_INFO reports:
+    /// accumulated latency, failure bridge and code).
+    [[nodiscard]] auto registered_talker_advertise(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
     {
-        return registered_talker(stream_id, std::nullopt);
+        return participant_.find_talker_advertise(stream_id);
+    }
+    [[nodiscard]] auto registered_talker_failed(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerFailedFirstValue const*
+    {
+        return participant_.find_talker_failed(stream_id);
     }
 
-    /// As above, counting only an attribute @p only admits when it names
-    /// one: an attribute of the StreamID on another destination address or
-    /// VLAN is then as good as none.
-    [[nodiscard]] auto registered_talker(StreamId const& stream_id, std::optional<TalkerMatch> const& only) const noexcept
-        -> std::optional<RegisteredTalker>
+    /// The registered (peer-declared, registrar In or Leaving) Listener
+    /// declaration for one of our talker streams, or Ignore when none:
+    /// Ready, ReadyFailed or AskingFailed.
+    [[nodiscard]] auto registered_listener(StreamId const& stream_id) const noexcept -> statusbar::srp::msrp::ListenerDeclaration
     {
-        auto const* failed = participant_.find_registered_talker_failed(stream_id);
-        if (failed != nullptr && admitted(only, registered_talker_from(failed->advertise, true))) {
-            return registered_talker_from(failed->advertise, true);
+        auto const d = participant_.listener_permit_debug(stream_id);
+        if (!d.has_record || d.operation != statusbar::srp::msrp::Operation::Register || !d.registrar_in) {
+            return statusbar::srp::msrp::ListenerDeclaration::Ignore;
         }
-        auto const* advertise = participant_.find_registered_talker_advertise(stream_id);
-        if (advertise != nullptr && admitted(only, registered_talker_from(*advertise, false))) {
-            return registered_talker_from(*advertise, false);
-        }
-        return std::nullopt;
-    }
-
-    /// Whether one of this port's talker streams is declared (Advertise or
-    /// Failed) while a peer's Listener Asking Failed is registered for it:
-    /// REGISTERING_FAILED in a Milan GET_TX_STATE_RESPONSE (v1.3 Table 5.23).
-    [[nodiscard]] auto talker_listener_asking_failed(StreamId const& stream_id) const noexcept -> bool
-    {
-        auto const* talker = get_talker_stream(stream_id);
-        auto const* listener = participant_.find_listener(stream_id);
-        return talker != nullptr && talker_is_declared(talker->state) && listener != nullptr &&
-            listener->operation == statusbar::srp::msrp::Operation::Register && listener->registrar_is_registered() &&
-            listener->substate == statusbar::srp::msrp::ListenerDeclaration::AskingFailed;
+        return d.substate;
     }
 
     /// True when the talker's Advertise is registered from the wire and no
