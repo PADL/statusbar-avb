@@ -63,7 +63,8 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
                 [kit = &kit](int64_t /*now_ns*/) {
                     kit->host().ctl_log().warning("gPTP: no Announce within the receipt timeout: grandmaster lost");
                     kit->note_grandmaster_lost();  // AVTP tu until a grandmaster returns
-                }});
+                },
+            .path_trace_changed = [kit = &kit](int64_t /*now_ns*/) { kit->note_as_path_changed(); }});
     }
 }
 
@@ -95,7 +96,9 @@ void EntityUpkeep::tick(int64_t /*now_ns*/)
     // Talker admission is time-dependent (the Listener Ready grace window):
     // re-evaluate it so an expiry with no MSRP event still reaches the
     // admission-changed callback (the hardware shaper).
-    kit_.poll_admission(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+    auto const now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    kit_.poll_admission(now_ns);
+    kit_.poll_counters(now_ns);
     drain();
 }
 

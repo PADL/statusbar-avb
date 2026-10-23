@@ -58,12 +58,43 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
         }
 
         if (auto const* announce = std::get_if<AnnounceMessage>(&*msg)) {
-            on_announce(*announce, now_ns);
+            on_announce(*announce, now_ns, parse_announce_path_trace(payload));
         }
     }
 }
 
-void GptpAnnounceHandler::on_announce(gptp::AnnounceMessage const& announce, int64_t const now_ns)
+auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept -> AsPath
+{
+    using namespace statusbar::gptp;
+    AsPath path{};
+    if (announce.size() < AnnounceMessage::LENGTH) {
+        return path;
+    }
+    // The TLVs follow the 64-octet Announce body, up to messageLength.
+    size_t const message_length = (size_t{announce[2]} << 8U) | announce[3];
+    auto tlvs = announce.first(std::min(announce.size(), message_length));
+    tlvs = tlvs.size() > AnnounceMessage::LENGTH ? tlvs.subspan(AnnounceMessage::LENGTH) : std::span<uint8_t const>{};
+    while (tlvs.size() >= TlvHeader::LENGTH) {
+        uint16_t const type = static_cast<uint16_t>((uint16_t{tlvs[0]} << 8U) | tlvs[1]);
+        size_t const length = (size_t{tlvs[2]} << 8U) | tlvs[3];
+        if (tlvs.size() < TlvHeader::LENGTH + length) {
+            break;
+        }
+        if (type == TLV_TYPE_PATH_TRACE) {
+            auto const value = tlvs.subspan(TlvHeader::LENGTH, length);
+            for (size_t at = 0; at + 8 <= value.size() && path.size() < path.capacity(); at += 8) {
+                Eui64 id{};
+                span_copy(id.span(), value.subspan(at, 8));
+                path.push_back(id);
+            }
+            break;
+        }
+        tlvs = tlvs.subspan(TlvHeader::LENGTH + length);
+    }
+    return path;
+}
+
+void GptpAnnounceHandler::on_announce(gptp::AnnounceMessage const& announce, int64_t const now_ns, AsPath const& path_trace)
 {
     auto const new_gm = announce.grandmaster_identity;
     if (new_gm != grandmaster_identity_) {
@@ -72,8 +103,19 @@ void GptpAnnounceHandler::on_announce(gptp::AnnounceMessage const& announce, int
             callbacks_.grandmaster_id_changed(now_ns, new_gm, announce);
         }
     }
+    // An Announce without a path trace names its grandmaster alone.
+    AsPath path = path_trace;
+    if (path.empty()) {
+        path.push_back(new_gm.to_eui64());
+    }
+    if (!std::ranges::equal(path, path_trace_)) {
+        path_trace_ = path;
+        if (callbacks_.path_trace_changed) {
+            callbacks_.path_trace_changed(now_ns);
+        }
+    }
     // announceReceiptTimeout x the sender's announce interval, at the slow end of Milan v1.2
-    // Tables 4.1-4.2 (+50%: 4.5 s at a 1 s interval); the log interval is kept to [-3, 4].
+    // Tables 4.1-4.2 (4.5 s); the log interval is clamped to [-3, 4].
     auto const log_interval = std::clamp<int>(static_cast<int8_t>(announce.header.log_message_interval.get()), -3, 4);
     int64_t const interval_ns =
         log_interval >= 0 ? (INT64_C(1'000'000'000) << log_interval) : (INT64_C(1'000'000'000) >> -log_interval);
@@ -92,6 +134,12 @@ void GptpAnnounceHandler::tick(int64_t const now_ns)
     grandmaster_identity_ = gptp::ClockIdentity{};
     if (callbacks_.grandmaster_lost) {
         callbacks_.grandmaster_lost(now_ns);
+    }
+    if (!path_trace_.empty()) {
+        path_trace_.clear();
+        if (callbacks_.path_trace_changed) {
+            callbacks_.path_trace_changed(now_ns);
+        }
     }
 }
 
