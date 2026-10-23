@@ -543,6 +543,10 @@ local function dissect_mvu(t, tvb, stop, is_command)
     local specs = gen.mvu_payloads[code]
     local spec = specs and (is_command and specs.cmd or specs.rsp)
     local at = gen.MVU_HEADER_LENGTH
+    -- a Milan 1.3 layout that replaces the 1.2 one when the payload holds it
+    if spec ~= nil and spec.long ~= nil and stop - at >= spec.long.length then
+        spec = spec.long
+    end
     if spec ~= nil and stop - at >= spec.length then
         spec.add(t, tvb, 0)
         at = at + spec.length

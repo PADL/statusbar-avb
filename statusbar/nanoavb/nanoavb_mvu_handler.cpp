@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 
 namespace statusbar::nanoavb {
 
@@ -38,6 +40,7 @@ auto MvuCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
         return false;
     }
     auto const command = payload.first(declared);
+    our_entity_id_ = our_entity_id;
 
     // Not Milan: no reply to GET_MILAN_INFO (Milan v1.2 Section 5.4.4.1 NOTE), NOT_IMPLEMENTED
     // for the others.
@@ -61,14 +64,199 @@ auto MvuCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
             return send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
         }
 
-        // Recommended in v1.2 and persisted: they come with the persistence
-        // store.
         case MVU_COMMAND_SET_SYSTEM_UNIQUE_ID:
-        case MVU_COMMAND_GET_SYSTEM_UNIQUE_ID:
+            return set_system_unique_id_command(src_mac, header, command);
+
+        case MVU_COMMAND_GET_SYSTEM_UNIQUE_ID: {
+            // The reserved field is ignored, as for GET_MILAN_INFO.
+            MvuSystemUniqueIdPayload response{};
+            response.system_unique_id = system_unique_id_;
+            return send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
+        }
+
         case MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO:
+            return set_mcr_info_command(src_mac, header, command);
+
         case MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO:
+            return get_mcr_info_command(src_mac, header, command);
+
         default:
             return send_not_implemented(src_mac, command);
+    }
+}
+
+void MvuCommandHandler::set_clock_domain_count(size_t const count) noexcept
+{
+    clock_domain_count_ = std::min(count, MAX_CLOCK_DOMAINS);
+}
+
+void MvuCommandHandler::set_default_mcr_priority(uint8_t const prio) noexcept
+{
+    for (auto& info : mcr_) {
+        if (info.user_mcr_prio == default_mcr_prio_) {
+            info.user_mcr_prio = prio;
+        }
+    }
+    default_mcr_prio_ = prio;
+}
+
+auto MvuCommandHandler::mcr_info(size_t const index) const noexcept -> McrInfo const*
+{
+    return index < clock_domain_count_ ? &mcr_[index] : nullptr;
+}
+
+auto MvuCommandHandler::set_mcr_info(size_t const index, McrInfo const& info) noexcept -> bool
+{
+    if (index >= clock_domain_count_) {
+        return false;
+    }
+    mcr_[index] = info;
+    return true;
+}
+
+auto MvuCommandHandler::locked_against(MvuDu const& header) const noexcept -> bool
+{
+    return aem_ != nullptr && aem_->exclusive_access_status(header.common.controller_entity_id).has_value();
+}
+
+auto MvuCommandHandler::set_system_unique_id_command(Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command)
+    -> bool
+{
+    auto const data = command.subspan(MvuDu::LENGTH);
+    uint64_t requested = 0;
+    // The v1.3 form has a u64 number where v1.2 has its u32 (the name is not kept). A shorter
+    // payload that holds the number is v1.3 only while its high half is zero, else v1.2 with
+    // octets after the id.
+    constexpr size_t V13_NUMBER_AT = offsetof(MvuSystemUniqueIdPayloadV13, number);
+    constexpr size_t V13_NUMBER_END = offsetof(MvuSystemUniqueIdPayloadV13, name);
+    bool const v13 = data.size() >= MvuSystemUniqueIdPayloadV13::LENGTH ||
+        (data.size() >= V13_NUMBER_END &&
+         std::all_of(data.begin() + V13_NUMBER_AT, data.begin() + V13_NUMBER_AT + 4, [](uint8_t const b) { return b == 0; }));
+    if (v13) {
+        ieee::octlet_t number{0};
+        span_load(number, data.subspan(offsetof(MvuSystemUniqueIdPayloadV13, number), sizeof(number)));
+        requested = number.get();
+    } else if (data.size() >= MvuSystemUniqueIdPayload::LENGTH) {
+        MvuSystemUniqueIdPayload v12{};
+        span_load(v12, data.first(MvuSystemUniqueIdPayload::LENGTH));
+        requested = v12.system_unique_id.get();
+    } else {
+        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, {});
+    }
+    MvuSystemUniqueIdPayload response{};
+    if (locked_against(header)) {
+        response.system_unique_id = system_unique_id_;
+        return send_response(src_mac, header, MVU_STATUS_ENTITY_LOCKED, make_const_span(response));
+    }
+    // Section 5.4.4.2: the new id differs from the default, 0; and it is a
+    // v1.2 u32.
+    if (requested == 0 || requested > UINT32_MAX) {
+        response.system_unique_id = system_unique_id_;
+        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, make_const_span(response));
+    }
+    bool const changed = system_unique_id_ != static_cast<uint32_t>(requested);
+    system_unique_id_ = static_cast<uint32_t>(requested);
+    response.system_unique_id = system_unique_id_;
+    bool const sent = send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
+    if (changed) {
+        notify_changed(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, header.common.controller_entity_id, make_const_span(response));
+    }
+    return sent;
+}
+
+auto MvuCommandHandler::mcr_payload(uint16_t const index) const noexcept -> MvuMediaClockReferenceInfoPayload
+{
+    MvuMediaClockReferenceInfoPayload payload{};
+    payload.clock_domain_index = index;
+    payload.flags = MVU_MCR_FLAGS_SUPPORTED;
+    payload.default_mcr_prio = default_mcr_prio_;
+    if (auto const* info = mcr_info(index); info != nullptr) {
+        payload.user_mcr_prio = info->user_mcr_prio;
+        payload.media_clock_domain_name = info->domain_name;
+    }
+    return payload;
+}
+
+auto MvuCommandHandler::get_mcr_info_command(Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command)
+    -> bool
+{
+    auto const data = command.subspan(MvuDu::LENGTH);
+    if (data.size() < MvuGetMediaClockReferenceInfoCommand::LENGTH) {
+        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, {});
+    }
+    MvuGetMediaClockReferenceInfoCommand request{};
+    span_load(request, data.first(MvuGetMediaClockReferenceInfoCommand::LENGTH));
+    uint16_t const index = request.clock_domain_index.get();
+    if (index >= clock_domain_count_) {
+        return send_response(src_mac, header, MVU_STATUS_NO_SUCH_DESCRIPTOR, make_const_span(request));
+    }
+    auto const response = mcr_payload(index);
+    return send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
+}
+
+auto MvuCommandHandler::set_mcr_info_command(Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command)
+    -> bool
+{
+    auto const data = command.subspan(MvuDu::LENGTH);
+    if (data.size() < MvuMediaClockReferenceInfoPayload::LENGTH) {
+        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, data);
+    }
+    MvuMediaClockReferenceInfoPayload request{};
+    span_load(request, data.first(MvuMediaClockReferenceInfoPayload::LENGTH));
+    uint16_t const index = request.clock_domain_index.get();
+    if (index >= clock_domain_count_) {
+        return send_response(src_mac, header, MVU_STATUS_NO_SUCH_DESCRIPTOR, make_const_span(request));
+    }
+    if (locked_against(header)) {
+        auto const current = mcr_payload(index);
+        return send_response(src_mac, header, MVU_STATUS_ENTITY_LOCKED, make_const_span(current));
+    }
+    // Only the fields the flags mark valid change; default_mcr_prio is
+    // read-only (ignored in a command).
+    McrInfo info = mcr_[index];
+    if ((request.flags.get() & MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID) != 0) {
+        info.user_mcr_prio = request.user_mcr_prio.get();
+    }
+    if ((request.flags.get() & MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID) != 0) {
+        info.domain_name = request.media_clock_domain_name;
+    }
+    bool const changed = !(info == mcr_[index]);
+    mcr_[index] = info;
+    auto const response = mcr_payload(index);
+    bool const sent = send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
+    if (changed) {
+        notify_changed(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, header.common.controller_entity_id, make_const_span(response));
+    }
+    return sent;
+}
+
+void MvuCommandHandler::notify_changed(uint16_t const command_type, Eui64 const& requester, std::span<uint8_t const> const body)
+{
+    if (aem_ != nullptr && send_response_) {
+        std::array<uint8_t, MAX_AECP_PDU_LENGTH> buffer{};
+        size_t const length = MvuDu::LENGTH + body.size();
+        if (length <= buffer.size()) {
+            // Milan v1.2 Section 5.4.5.1: one to each registered controller
+            // but the one that asked, each with its own controller id and a
+            // fresh sequence_id.
+            aem_->for_each_unsolicited_registration([&](Eui48 const& mac, Eui64 const& controller) {
+                if (controller == requester) {
+                    return;
+                }
+                MvuDu header{};
+                header.init_response(command_type, MVU_STATUS_SUCCESS, static_cast<uint16_t>(body.size()));
+                header.common.target_entity_id = our_entity_id_;
+                header.common.controller_entity_id = controller;
+                header.common.sequence_id = unsolicited_sequence_id_++;
+                header.set_unsolicited(true);
+                span_store(std::span{buffer}.first(MvuDu::LENGTH), header);
+                span_copy(std::span{buffer}.subspan(MvuDu::LENGTH, body.size()), body);
+                (void)send_response_(mac, std::span<uint8_t const>{buffer}.first(std::max(length, MVU_MIN_PDU_LENGTH)));
+            });
+        }
+    }
+    if (on_settings_changed_) {
+        on_settings_changed_();
     }
 }
 

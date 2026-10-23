@@ -784,6 +784,52 @@ class DescriptorStorageHandler : public AemEntityHandler
         return rate.get();
     }
 
+    // ---- Runtime settings (for an entity that saves them) -------------------
+    // What controllers changed from the blob's authored values (Milan v1.2 Section 5.3);
+    // restore them through on_set_descriptor_value and on_set_name.
+
+    /// @p fn(descriptor_type, descriptor_index, format) per stream with a
+    /// SET_STREAM_FORMAT in force.
+    template <typename Fn>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_runtime_stream_format(Fn&& fn) const
+    {
+        for (auto const& state : stream_states_) {
+            if (state.has_format) {
+                fn(state.descriptor_type, state.descriptor_index, state.format);
+            }
+        }
+    }
+    /// @p fn(audio_unit_index, rate) per AUDIO_UNIT with a SET_SAMPLING_RATE in force.
+    template <typename Fn>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_runtime_sampling_rate(Fn&& fn) const
+    {
+        for (auto const& state : sampling_rate_states_) {
+            fn(state.descriptor_index, state.rate);
+        }
+    }
+    /// @p fn(clock_domain_index, clock_source_index) per CLOCK_DOMAIN with a
+    /// SET_CLOCK_SOURCE in force.
+    template <typename Fn>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_runtime_clock_source(Fn&& fn) const
+    {
+        for (auto const& state : clock_domain_states_) {
+            fn(state.descriptor_index, state.clock_source_index);
+        }
+    }
+    /// @p fn(descriptor_type, descriptor_index, name) per managed object_name
+    /// override (manage_object_names).
+    template <typename Fn>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_object_name_override(Fn&& fn) const
+    {
+        for (auto const& state : object_names_) {
+            fn(state.descriptor_type, state.descriptor_index, state.name);
+        }
+    }
+
     /// Access the underlying storage (useful for derived handlers that
     /// want to look up additional blobs beyond descriptors).
     [[nodiscard]] auto storage() const noexcept -> DescriptorStorage const& { return storage_; }

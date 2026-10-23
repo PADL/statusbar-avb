@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace statusbar::atdecc::mvu {
 
@@ -43,6 +44,13 @@ constexpr uint16_t MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO = 0x0004;
 constexpr uint8_t MVU_STATUS_SUCCESS = 0;
 constexpr uint8_t MVU_STATUS_NOT_IMPLEMENTED = 1;
 
+/// The refusals v1.2 has no status for (a SET_SYSTEM_UNIQUE_ID of 0, an
+/// unknown clock domain, a locked entity, a short command) take the codes v1.3
+/// assigns them (Table 5.16), which la_avdecc decodes.
+constexpr uint8_t MVU_STATUS_NO_SUCH_DESCRIPTOR = 2;
+constexpr uint8_t MVU_STATUS_ENTITY_LOCKED = 3;
+constexpr uint8_t MVU_STATUS_BAD_ARGUMENTS = 7;
+
 /// MVU command timeout; an entity answers within 240 ms (Section 5.4.3.4)
 constexpr uint32_t MVU_TIMEOUT_MS = 250;
 
@@ -57,6 +65,20 @@ constexpr uint32_t MVU_FEATURES_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING = 0x000000
 /// SET_MEDIA_CLOCK_REFERENCE_INFO flags (Table 5.21), MSB-numbered as above
 constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID = 0x01;
 constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID = 0x02;
+/// Every SET_MEDIA_CLOCK_REFERENCE_INFO flag: a response carries the bits the
+/// entity supports (Section 5.4.4.4), and it supports both.
+constexpr uint8_t MVU_MCR_FLAGS_SUPPORTED =
+    MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID | MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID;
+
+/// Default Media Clock Reference Priorities by type of device (Table 7.2), a
+/// selection: 192 is "stageboxes, network interfaces", 224 "matrix mixing
+/// devices, signal routers", 128 the priority of a device that gives none.
+constexpr uint8_t MVU_MCR_PRIO_ROUTER = 224;
+constexpr uint8_t MVU_MCR_PRIO_NETWORK_INTERFACE = 192;
+constexpr uint8_t MVU_MCR_PRIO_DEFAULT = 128;
+
+/// The default media_clock_domain_name (Section 7.6.2)
+inline constexpr std::string_view MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME = "DEFAULT";
 
 /// The shortest AVTPDU in an MVU frame: a 64-octet Ethernet frame (the minimum,
 /// FCS included) less the 14-octet header and the 4-octet FCS. Shorter MVU
@@ -85,6 +107,7 @@ struct MvuDu
     static constexpr uint16_t BASE_CONTROL_DATA_LENGTH = LENGTH - AecpDuCommon::HEADER_LENGTH;
 
     static constexpr uint16_t COMMAND_TYPE_MASK = 0x7FFF;
+    /// r in v1.2 (reserved); v1.3 calls it u, set in an unsolicited response
     static constexpr uint16_t R_MASK = 0x8000;
 
     // AECP common header (22 bytes)
@@ -106,6 +129,14 @@ struct MvuDu
     {
         r_command_type = static_cast<uint16_t>(type & COMMAND_TYPE_MASK);
     }
+
+    /// Set the u bit of an unsolicited response (v1.3 Section 5.4.5.2, the
+    /// mechanism v1.2 lacks; la_avdecc reads it)
+    constexpr void set_unsolicited(bool const unsolicited) noexcept
+    {
+        r_command_type = static_cast<uint16_t>(command_type() | (unsolicited ? R_MASK : 0U));
+    }
+    [[nodiscard]] constexpr auto unsolicited() const noexcept -> bool { return (r_command_type.get() & R_MASK) != 0; }
 
     [[nodiscard]] constexpr auto is_mvu_protocol() const noexcept -> bool { return protocol_id == MVU_PROTOCOL_ID; }
 
@@ -191,9 +222,8 @@ struct MvuGetMilanInfoResponse
 
 static_assert(sizeof(MvuGetMilanInfoResponse) == 14, "MvuGetMilanInfoResponse must be 14 bytes");
 
-/// SET_SYSTEM_UNIQUE_ID command and response, GET_SYSTEM_UNIQUE_ID response
-/// (Figure 5.5). The v1.2 text calls system_unique_id "64 bit" but Figure 5.5
-/// draws one quadlet, and GenAVB's v1.2 layout is a u32: the figure is followed.
+/// SET_SYSTEM_UNIQUE_ID command and response, GET_SYSTEM_UNIQUE_ID response (Milan v1.2
+/// Figure 5.5): one quadlet, as the figure draws it (docs/MVU.md).
 struct MvuSystemUniqueIdPayload
 {
     static constexpr size_t LENGTH = 6;
@@ -208,6 +238,26 @@ struct MvuSystemUniqueIdPayload
 };
 
 static_assert(sizeof(MvuSystemUniqueIdPayload) == 6, "MvuSystemUniqueIdPayload must be 6 bytes");
+
+/// The v1.3 SET_SYSTEM_UNIQUE_ID command (v1.3 Figure 5.7): a u64 number and a 64-octet name.
+/// A v1.2 entity takes the number when it fits a u32 and answers in the v1.2 layout.
+struct MvuSystemUniqueIdPayloadV13
+{
+    static constexpr size_t LENGTH = 74;
+
+    /// Bytes 30-31: reserved
+    doublet_t reserved{0};
+
+    /// Bytes 32-39: number
+    ieee::octlet_t number{0};
+
+    /// Bytes 40-103: name (UTF-8, zero padded)
+    std::array<char, 64> name{};
+
+    auto operator<=>(MvuSystemUniqueIdPayloadV13 const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuSystemUniqueIdPayloadV13) == 74, "MvuSystemUniqueIdPayloadV13 must be 74 bytes");
 
 /// GET_MEDIA_CLOCK_REFERENCE_INFO command (Figure 5.7)
 struct MvuGetMediaClockReferenceInfoCommand
@@ -272,6 +322,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::m
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::mvu::MvuSystemUniqueIdPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::mvu::MvuSystemUniqueIdPayloadV13> : std::true_type
 {};
 
 template <>
