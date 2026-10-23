@@ -16,12 +16,19 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
+#include <iterator>
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -836,4 +843,352 @@ TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)
     auto const& probe = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     EXPECT_EQ(probe.status(), atdecc::ACMP_STATUS_SUCCESS);
     EXPECT_TRUE(m.kit.talker_declared(0));
+}
+
+// ---- The persistent state -----------------------------------------------------
+
+namespace {
+
+/// A fresh, empty directory for one test
+auto state_dir(std::string const& name) -> std::filesystem::path
+{
+    auto dir = std::filesystem::temp_directory_path() / ("avb-kit-state-" + std::to_string(::getpid()) + "-" + name);
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+ieee::Eui48 const CONTROLLER_MAC{0x02, 0x00, 0x00, 0xC0, 0x00, 0x01};
+
+/// A kit keeping its persistent state at @p path, with a capture of what its
+/// MVU handler sends
+struct PersistentKit : MilanKit
+{
+    explicit PersistentKit(std::string const& path, uint64_t const entity_low = 0x30)
+        : MilanKit{std::nullopt, entity_low}
+    {
+        config.persistent_state_path = path;
+        kit.host().components().mvu_handler.set_clock_domain_count(1);  // the test model has none
+    }
+
+    /// An AEM command through process_packet (as from the network: the
+    /// settings hook runs after the response)
+    auto aem_packet(uint16_t const command, std::span<uint8_t const> const body) -> uint8_t
+    {
+        nanoavb::AemDu header{};
+        header.init_command(command, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + body.size()));
+        header.target_entity_id = config.entity_id;
+        std::vector<uint8_t> frame(nanoavb::AemDu::LENGTH + body.size());
+        span_store(std::span<uint8_t>{frame}.first(nanoavb::AemDu::LENGTH), header);
+        std::ranges::copy(body, frame.begin() + nanoavb::AemDu::LENGTH);
+        aem.clear();
+        (void)kit.host().components().aem_handler.process_packet(CONTROLLER_MAC, frame, config.entity_id);
+        nanoavb::AemDu reply{};
+        span_load(reply, std::span<uint8_t const>{aem.front()}.first(nanoavb::AemDu::LENGTH));
+        return reply.status();
+    }
+
+    /// An MVU command through the MVU handler; the response's status
+    auto mvu_packet(uint16_t const command, std::span<uint8_t const> const body) -> uint8_t
+    {
+        atdecc::mvu::MvuDu header{};
+        header.init_command(command, static_cast<uint16_t>(body.size()));
+        header.common.target_entity_id = config.entity_id;
+        std::vector<uint8_t> frame(atdecc::mvu::MvuDu::LENGTH + body.size());
+        span_store(std::span<uint8_t>{frame}.first(atdecc::mvu::MvuDu::LENGTH), header);
+        std::ranges::copy(body, frame.begin() + atdecc::mvu::MvuDu::LENGTH);
+        std::vector<uint8_t> response;
+        kit.host().components().mvu_handler.set_send_response([&response](ieee::Eui48 const&, std::span<uint8_t const> bytes) {
+            response.assign(bytes.begin(), bytes.end());
+            return true;
+        });
+        (void)kit.host().components().mvu_handler.process_packet(CONTROLLER_MAC, frame, config.entity_id);
+        atdecc::mvu::MvuDu reply{};
+        span_load(reply, std::span<uint8_t const>{response}.first(atdecc::mvu::MvuDu::LENGTH));
+        return reply.common.status();
+    }
+
+    /// READ_DESCRIPTOR of the ENTITY: its entity_name
+    auto entity_name() -> std::string
+    {
+        atdecc::aem::AemReadDescriptorCommandPayload read{};
+        read.descriptor_type = DESCRIPTOR_ENTITY;
+        std::array<uint8_t, atdecc::aem::AemReadDescriptorCommandPayload::LENGTH> body{};
+        span_store(body, read);
+        auto const r = aem_command(atdecc::AEM_COMMAND_READ_DESCRIPTOR, body);
+        EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
+        atdecc::aem::DescriptorEntity entity{};
+        span_load_padded(entity, std::span<uint8_t const>{r.body}.subspan(atdecc::aem::AemReadDescriptorResponsePayload::LENGTH));
+        return std::string{entity.entity_name.as_string_view()};
+    }
+
+    auto set_entity_name(std::string_view const name) -> uint8_t
+    {
+        std::array<uint8_t, 8 + 64> body{};  // ENTITY 0, name_index 0, configuration 0, the name
+        std::ranges::copy(name, body.begin() + 8);
+        return aem_packet(atdecc::AEM_COMMAND_SET_NAME, body);
+    }
+};
+
+}  // namespace
+
+// SET_NAME is saved; a kit rebuilt on the same file serves the name in
+// READ_DESCRIPTOR
+TEST(avb_entity_kit_persistence, set_name_survives_a_rebuild)
+{
+    auto const dir = state_dir("name");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.entity_name() == "kit milan");
+        EXPECT_EQ(m.set_entity_name("FOH bridge"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(m.entity_name() == "FOH bridge");
+        auto const saved = load_persistent_state(path, 0, {});
+        EXPECT_TRUE(saved.outcome == PersistentStateOutcome::loaded);
+        EXPECT_EQ(saved.state.names.size(), size_t{1});
+        EXPECT_TRUE(saved.state.configured_entity_name == "kit milan");
+    }
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.entity_name() == "FOH bridge");
+        // Back to the configured name: nothing left to keep
+        EXPECT_EQ(m.set_entity_name("kit milan"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(load_persistent_state(path, 0, {}).state.names.empty());
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// The talker presentation offset (SET_STREAM_INFO) is saved and
+// handed to the entity's data plane again at the next start
+TEST(avb_entity_kit_persistence, presentation_offset_survives_a_rebuild)
+{
+    auto const dir = state_dir("offset");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<std::pair<uint16_t, uint32_t>> applied;
+    auto const hook = [&applied](uint16_t const idx, uint32_t const ns) -> uint8_t {
+        applied.emplace_back(idx, ns);
+        return atdecc::AEM_STATUS_SUCCESS;
+    };
+    {
+        PersistentKit m{path};
+        m.kit.set_on_presentation_offset_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        atdecc::aem::AemStreamInfoPayload set{};
+        set.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        set.descriptor_index = uint16_t{1};
+        set.flags = atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID;
+        set.msrp_accumulated_latency = uint32_t{2'500'000};
+        std::array<uint8_t, atdecc::aem::AemStreamInfoPayload::LENGTH> body{};
+        span_store(body, set);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_INFO, body), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.kit.presentation_offset_ns(1), 2'500'000U);
+    }
+    applied.clear();
+    {
+        PersistentKit m{path};
+        m.kit.set_on_presentation_offset_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE((applied.size() == 1 && applied.front() == std::pair<uint16_t, uint32_t>(1, 2'500'000)));
+        EXPECT_EQ(m.kit.presentation_offset_ns(1), 2'500'000U);
+        EXPECT_EQ(m.kit.presentation_offset_ns(0), 2'000'000U);
+        EXPECT_EQ(load_info(m.stream_info(1).body).first.msrp_accumulated_latency.get(), 2'500'000U);
+    }
+    // An entity that cannot apply it at the next start drops it
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.kit.presentation_offset_ns(1), 2'000'000U);
+        EXPECT_TRUE(load_persistent_state(path, 0, {}).state.presentation_offsets.empty());
+    }
+    // A changed configured offset wins over a saved one
+    {
+        PersistentKit m{path};
+        m.kit.set_on_presentation_offset_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        atdecc::aem::AemStreamInfoPayload set{};
+        set.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        set.descriptor_index = uint16_t{1};
+        set.flags = atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID;
+        set.msrp_accumulated_latency = uint32_t{2'500'000};
+        std::array<uint8_t, atdecc::aem::AemStreamInfoPayload::LENGTH> body{};
+        span_store(body, set);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_INFO, body), atdecc::AEM_STATUS_SUCCESS);
+    }
+    applied.clear();
+    {
+        PersistentKit m{path};
+        m.config.presentation_offset_ns = 3'000'000;
+        m.kit.set_on_presentation_offset_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(applied.empty());
+        EXPECT_EQ(m.kit.presentation_offset_ns(1), 2'000'000U);  // the constructor's start, before the edit
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// SET_SYSTEM_UNIQUE_ID and SET_MEDIA_CLOCK_REFERENCE_INFO are saved and
+// restored
+TEST(avb_entity_kit_persistence, mvu_values_survive_a_rebuild)
+{
+    auto const dir = state_dir("mvu");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        atdecc::mvu::MvuSystemUniqueIdPayload id{};
+        id.system_unique_id = uint32_t{4242};
+        EXPECT_EQ(m.mvu_packet(atdecc::mvu::MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(id)), atdecc::mvu::MVU_STATUS_SUCCESS);
+        atdecc::mvu::MvuMediaClockReferenceInfoPayload mcr{};
+        mcr.flags = atdecc::mvu::MVU_MCR_FLAGS_SUPPORTED;
+        mcr.user_mcr_prio = uint8_t{210};
+        mcr.media_clock_domain_name = nanoavb::mcr_domain_name("Stage");
+        EXPECT_EQ(
+            m.mvu_packet(atdecc::mvu::MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(mcr)),
+            atdecc::mvu::MVU_STATUS_SUCCESS);
+    }
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        auto const& mvu = m.kit.host().components().mvu_handler;
+        EXPECT_EQ(mvu.system_unique_id(), uint32_t{4242});
+        EXPECT_EQ(mvu.mcr_info(0)->user_mcr_prio, uint8_t{210});
+        EXPECT_TRUE(mvu.mcr_info(0)->domain_name == nanoavb::mcr_domain_name("Stage"));
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// No state file yet: the listener bindings file's bindings are imported and
+// armed as fast-connect goals, and the state file is written with them; the
+// old file is no longer written
+TEST(avb_entity_kit_persistence, listener_bindings_imported)
+{
+    auto const dir = state_dir("bindings");
+    auto const path = (dir / "avb-state.toml").string();
+    auto const legacy = (dir / "avb-bindings").string();
+    std::string const legacy_text = std::string{LISTENER_BINDINGS_MAGIC} + "\n0 0200001111110001 2\n";
+    {
+        std::ofstream out{legacy};
+        out << legacy_text;
+    }
+    PersistentKit m{path};
+    m.config.listener_bindings_path = legacy;
+    EXPECT_TRUE(m.start_ready());
+    auto const goals = m.kit.host().components().acmp_listener.fast_connect_goals();
+    EXPECT_EQ(goals.size(), size_t{1});
+    EXPECT_EQ(goals[0].listener_unique_id, uint16_t{0});
+    EXPECT_EQ(goals[0].talker_entity_id.to_uint64(), 0x0200001111110001ULL);
+    EXPECT_EQ(goals[0].talker_unique_id, uint16_t{2});
+    auto const saved = load_persistent_state(path, 0, {});
+    EXPECT_TRUE(saved.outcome == PersistentStateOutcome::loaded);
+    EXPECT_TRUE(
+        (saved.state.listener_bindings ==
+         std::vector<PersistedListenerBinding>{
+             {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 2, .format = AAF_48K_INT24_32CH}}));
+
+    // A goal change is saved to the state file only, at the end of the
+    // reactor pass (after the ACMP response)
+    m.kit.host().components().acmp_listener.clear_fast_connect_goal(0);
+    EXPECT_EQ(load_persistent_state(path, 0, {}).state.listener_bindings.size(), size_t{1});
+    m.kit.on_declaration_timer(MilanKit::steady_ns());
+    EXPECT_TRUE(load_persistent_state(path, 0, {}).state.listener_bindings.empty());
+    // ... or at stop(), when that comes first
+    m.kit.host().components().acmp_listener.set_fast_connect_goal(0, ieee::Eui64{}.from_uint64(0x0200001111110001ULL), 2);
+    EXPECT_TRUE(m.kit.stop().has_value());
+    EXPECT_EQ(load_persistent_state(path, 0, {}).state.listener_bindings.size(), size_t{1});
+    std::ifstream in{legacy};
+    std::string const now{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    EXPECT_TRUE(now == legacy_text);
+    std::filesystem::remove_all(dir);
+}
+
+// A file for another entity model is discarded (and rewritten for this one);
+// a corrupt file is kept as .bad and the kit starts fresh
+TEST(avb_entity_kit_persistence, other_model_and_corrupt_files)
+{
+    auto const dir = state_dir("model");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentState other{};
+    other.entity_model_id = 0x99;
+    other.configured_entity_name = "kit milan";
+    other.names.push_back({.descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0, .name_index = 0, .value = "Stale"});
+    EXPECT_TRUE(save_persistent_state(path, other).has_value());
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.entity_name() == "kit milan");
+        auto const rewritten = load_persistent_state(path, 0, {});
+        EXPECT_TRUE(rewritten.outcome == PersistentStateOutcome::loaded);
+        EXPECT_TRUE(rewritten.state.names.empty());
+    }
+    {
+        std::ofstream out{path};
+        out << "this is not toml [";
+    }
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.entity_name() == "kit milan");
+        EXPECT_TRUE(std::filesystem::exists(path + ".bad"));
+        EXPECT_TRUE(load_persistent_state(path, 0, {}).outcome == PersistentStateOutcome::loaded);
+    }
+    // A later version's file is neither applied nor overwritten
+    {
+        std::ofstream out{path};
+        out << "version = 9\nentity_model_id = \"0x0\"\n";
+    }
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.set_entity_name("Not saved"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(load_persistent_state(path, 0, {}).outcome == PersistentStateOutcome::newer_version);
+    }
+    // A saved entity name gives way to a changed configured name
+    other.entity_model_id = 0;
+    other.configured_entity_name = "an older configured name";
+    EXPECT_TRUE(save_persistent_state(path, other).has_value());
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.entity_name() == "kit milan");
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// Until the data plane follows a format or rate change, only the
+// stream's own format and the kit's rate are taken, so nothing else is saved
+TEST(avb_entity_kit_persistence, formats_and_rates_follow_the_data_plane)
+{
+    auto const dir = state_dir("formats");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentKit m{path};
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 12> body{0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT 0
+    ieee::Eui64 other{};
+    other.from_uint64(CRF_MILAN_48K);
+    span_store(std::span{body}.subspan(4, 8), other);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, body), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    ieee::Eui64 same{};
+    same.from_uint64(AAF_48K_INT24_32CH);
+    span_store(std::span{body}.subspan(4, 8), same);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, body), atdecc::AEM_STATUS_SUCCESS);
+    std::filesystem::remove_all(dir);
+}
+
+// A binding saved for an input whose format has since changed is dropped
+TEST(avb_entity_kit_persistence, binding_for_a_changed_input_format_dropped)
+{
+    auto const dir = state_dir("bindfmt");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentState saved{};
+    saved.configured_entity_name = "kit milan";
+    saved.configured_presentation_offset_ns = 2'000'000;
+    saved.listener_bindings.push_back(
+        {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 2, .format = CRF_MILAN_48K});
+    EXPECT_TRUE(save_persistent_state(path, saved).has_value());
+    PersistentKit m{path};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_TRUE(m.kit.host().components().acmp_listener.fast_connect_goals().empty());
+    std::filesystem::remove_all(dir);
 }
