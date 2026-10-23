@@ -448,6 +448,72 @@ TEST(listener_timed, delivery_through_on_stream_rx_frame)
     EXPECT_EQ(raw_sink.seen.size(), size_t{4});
 }
 
+// Milan v1.2 Section 4.4.2.2: AVTPDUs that don't respect the STREAM_INPUT's
+// configured format are discarded and counted in UNSUPPORTED_FORMAT.
+TEST(listener_format, aaf_header_matches_format)
+{
+    StreamFormatFields f{};
+    f.kind = StreamKind::aaf;
+    f.sample_rate_hz = 48000;
+    f.channels = 8;
+    f.bit_depth = 32;
+    f.aaf_format = AafFormat::int_32bit;
+    f.aaf_samples_per_frame = 6;
+    avtp::AafStreamOutputContext tx{kAafId, AafFormat::int_32bit, AafSampleRate::rate_48_khz, 8, 32, 0};
+    auto header = [&](avtp::AafStreamOutputContext& ctx, uint16_t frames) {
+        auto const bytes = aaf_frame(ctx, frames, 1'000'000);
+        return *avtp::aaf_parse_header(std::span<uint8_t const>{bytes.data(), bytes.size()});
+    };
+    EXPECT_TRUE(aaf_header_matches_format(f, header(tx, 6)));
+    EXPECT_FALSE(aaf_header_matches_format(f, header(tx, 7)));  // not the format's 6 samples
+    auto pdu = header(tx, 6);
+    pdu.set_bit_depth(24);  // 24 bits in an INT_32 container: same layout, accepted
+    EXPECT_TRUE(aaf_header_matches_format(f, pdu));
+    pdu.set_bit_depth(0);
+    EXPECT_FALSE(aaf_header_matches_format(f, pdu));
+    pdu.set_bit_depth(33);
+    EXPECT_FALSE(aaf_header_matches_format(f, pdu));
+    avtp::AafStreamOutputContext two{kAafId, AafFormat::int_32bit, AafSampleRate::rate_48_khz, 2, 32, 0};
+    EXPECT_FALSE(aaf_header_matches_format(f, header(two, 6)));  // channels
+    avtp::AafStreamOutputContext fast{kAafId, AafFormat::int_32bit, AafSampleRate::rate_96_khz, 8, 32, 0};
+    EXPECT_FALSE(aaf_header_matches_format(f, header(fast, 6)));  // rate
+    avtp::AafStreamOutputContext narrow{kAafId, AafFormat::int_24bit, AafSampleRate::rate_48_khz, 8, 24, 0};
+    EXPECT_FALSE(aaf_header_matches_format(f, header(narrow, 6)));  // sample format
+    f.aaf_samples_per_frame = 0;                                    // a format word naming no count
+    EXPECT_TRUE(aaf_header_matches_format(f, header(tx, 7)));
+}
+
+TEST(listener_format, mismatched_aaf_is_discarded_and_counted)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const specs = audio_specs();
+    auto const& aaf_spec = specs[1];
+    std::atomic<uint64_t> gptp{0};
+    RecordingSink sink;
+    ListenerStreams ls{1'000'000, aaf_spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    ls.set_timed_audio_sink(&sink);
+    auto const rate = *avtp::aaf_sample_rate_from_hz(aaf_spec.format.sample_rate_hz);
+    uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(aaf_spec.format.sample_rate_hz));
+    avtp::AafStreamOutputContext good{
+        kAafId, aaf_spec.format.aaf_format, rate, aaf_spec.format.channels, aaf_spec.format.bit_depth, 0};
+    avtp::AafStreamOutputContext wrong{
+        kAafId,
+        aaf_spec.format.aaf_format,
+        rate,
+        static_cast<uint16_t>(aaf_spec.format.channels + 1),
+        aaf_spec.format.bit_depth,
+        0};
+    uint64_t const pts0 = 9'000'000'000ULL;
+    ls.on_stream_rx_frame(aaf_frame(good, spp, pts0), static_cast<int64_t>(pts0 - 1'000'000));
+    ls.on_stream_rx_frame(aaf_frame(wrong, spp, pts0 + 125'000), static_cast<int64_t>(pts0 - 1'000'000));
+    EXPECT_EQ(sink.seen.size(), size_t{1});
+    auto const* slot = ls.slot_for(1);
+    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{1});
+    EXPECT_EQ(slot->counters.frames_rx.load(), uint32_t{2});
+    EXPECT_EQ(slot->rx_packets.load(), uint64_t{1});
+}
+
 // The AM824 timed path: pts_valid follows the deserializer's anchor (false
 // until a SYT-bearing packet), and the payload is exactly frames x channels
 // quadlets even when the frame carries padding.

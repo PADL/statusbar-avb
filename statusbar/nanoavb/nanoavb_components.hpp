@@ -346,6 +346,10 @@ struct GptpAnnounceCallbacks
     statusbar::sg14::
         inplace_function<void(int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce), 64>
             grandmaster_id_changed;
+
+    /// Called when Announce messages stop for the announce receipt timeout (IEEE 802.1AS
+    /// Clause 10.7.3.2): no grandmaster is known. The next Announce reports one again.
+    statusbar::sg14::inplace_function<void(int64_t now_ns), 64> grandmaster_lost;
 };
 
 /// gPTP Announce Handler - receives gPTP Announce messages and notifies on grandmaster changes.
@@ -371,8 +375,17 @@ class GptpAnnounceHandler : public net::Pollable
     /// Get the current grandmaster identity (8-byte clock identity)
     [[nodiscard]] auto grandmaster_identity() const noexcept -> gptp::ClockIdentity { return grandmaster_identity_; }
 
-    /// Check if grandmaster identity has been received
+    /// Whether an Announce has been received within the announce receipt timeout (a local ptp4l
+    /// that is grandmaster keeps this true with its own Announces).
     [[nodiscard]] auto has_grandmaster() const noexcept -> bool { return grandmaster_identity_.is_set(); }
+
+    /// announceReceiptTimeout (802.1AS 10.7.3.2): Announces missed before the
+    /// grandmaster is considered lost.
+    static constexpr int64_t ANNOUNCE_RECEIPT_TIMEOUT = 3;
+    /// The announce interval's Milan v1.2 tolerance, +50% (Table 4.1; Table
+    /// 4.2 announceReceiptTimeout max 4.5 s): the timeout is 3 x 1.5 x interval.
+    static constexpr int64_t ANNOUNCE_INTERVAL_TOLERANCE_NUM = 3;
+    static constexpr int64_t ANNOUNCE_INTERVAL_TOLERANCE_DEN = 2;
 
     /// Get the time of the last announce (nanoseconds since epoch)
     [[nodiscard]] auto last_announce_time_ns() const noexcept -> int64_t { return last_announce_time_ns_; }
@@ -392,13 +405,19 @@ class GptpAnnounceHandler : public net::Pollable
 
     void on_ready(int64_t now_ns) override;
 
-    void tick(int64_t /*now_ns*/) override {}
+    /// Expire the grandmaster after the announce receipt timeout.
+    void tick(int64_t now_ns) override;
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+
+    /// Process one parsed Announce received at @p now_ns (on_ready's work
+    /// after the socket read; public for tests).
+    void on_announce(gptp::AnnounceMessage const& announce, int64_t now_ns);
 
   private:
     net::RawnetContext context_{};
     GptpAnnounceCallbacks callbacks_;
+    int64_t announce_timeout_ns_{0};  ///< from the last Announce's logMessageInterval
     gptp::ClockIdentity grandmaster_identity_{};
     int64_t last_announce_time_ns_{0};
     gptp::AnnounceMessage last_announce_{};

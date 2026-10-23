@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <system_error>
@@ -24,6 +25,12 @@ namespace {
 /// and channels a packet carries, 4 bytes each.
 constexpr size_t MAX_AUDIO_FRAME = std::max(avtp::AafPdu::HEADER_LENGTH, avtp::Am824Pdu::HEADER_LENGTH) +
     (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
+
+/// The steady clock in ns: the time base of the tu window (note_grandmaster_changed).
+[[nodiscard]] auto steady_now_ns() noexcept -> int64_t
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 }  // namespace
 
@@ -168,6 +175,7 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
         return;
     }
 
+    pdu.set_tu(timestamp_uncertain(steady_now_ns()));
     span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::AafPdu::HEADER_LENGTH + audio_bytes;
     send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
@@ -179,7 +187,8 @@ auto serialize_aaf_raw(
     uint16_t const frames,
     uint64_t const first_index,
     uint64_t const pts_ns,
-    StreamRawRenderFn const& render) -> size_t
+    StreamRawRenderFn const& render,
+    bool const timestamp_uncertain) -> size_t
 {
     size_t const bps = avtp::aaf_bytes_per_sample(ctx.format);
     size_t const payload_len = static_cast<size_t>(frames) * ctx.channel_count * bps;
@@ -196,6 +205,7 @@ auto serialize_aaf_raw(
     // The wire timestamp is pts_ns itself: build_packet_header adds the context's
     // presentation offset, which the caller has already applied to pts_ns.
     pdu.set_avtp_timestamp(static_cast<uint32_t>(pts_ns & 0xFFFF'FFFFU));
+    pdu.set_tu(timestamp_uncertain);
     span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     return avtp::AafPdu::HEADER_LENGTH + payload_len;
 }
@@ -212,7 +222,8 @@ auto TalkerStreams::transmit_aaf_raw(
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
     std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
-    size_t const frame_len = serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render);
+    size_t const frame_len =
+        serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
@@ -245,7 +256,10 @@ void fill_crf_timestamps(
 }
 
 auto serialize_crf_raw(
-    avtp::CrfStreamOutputContext& ctx, std::span<uint8_t> const frame, std::span<uint64_t const> const timestamps) -> size_t
+    avtp::CrfStreamOutputContext& ctx,
+    std::span<uint8_t> const frame,
+    std::span<uint64_t const> const timestamps,
+    bool const timestamp_uncertain) -> size_t
 {
     uint16_t const n_ts = ctx.timestamps_per_packet;
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
@@ -255,6 +269,7 @@ auto serialize_crf_raw(
     avtp::CrfPdu pdu{};
     pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, n_ts);
     pdu.set_sequence_num(ctx.sequence_num);
+    pdu.set_tu(timestamp_uncertain);
     std::span<uint8_t> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH, frame_len - avtp::CrfPdu::HEADER_LENGTH);
     for (uint16_t i = 0; i < n_ts; ++i) {
         (void)avtp::crf_set_timestamp(ts_data, i, timestamps[i]);
@@ -293,7 +308,7 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (MAX_CRF_TIMESTAMPS_PER_PDU * avtp::CrfPdu::TIMESTAMP_SIZE);
     // Not zeroed: serialize_crf_raw writes every byte it sends.
     std::array<uint8_t, MAX_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
-    size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns);
+    size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
