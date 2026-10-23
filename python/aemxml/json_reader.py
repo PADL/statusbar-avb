@@ -45,7 +45,6 @@ from .model import (
     CLOCK_SOURCE_TYPE_NAMES,
     INTERFACE_FLAGS_NAMES,
     PTP_INSTANCE_FLAGS_NAMES,
-    PTP_PORT_FLAGS_NAMES,
     PTP_PORT_TYPE_NAMES,
     TIMING_ALGORITHM_NAMES,
 )
@@ -312,9 +311,18 @@ def _parse_stream(s: dict, strings: _LocalizedStrings, context: str) -> Stream:
         stream_flags=flags,
         avb_interface_index=s.get("avb_interface_index", 0),
         clock_domain_index=s.get("clock_domain_index", 0),
-        buffer_length=s.get("buffer_length", 0),
+        buffer_length=_parse_buffer_length(s.get("buffer_length", 0), f"{context}.buffer_length"),
         symbol=s.get("symbol"),
     )
+
+
+def _parse_buffer_length(value, context: str) -> int:
+    """A STREAM_* buffer_length in nanoseconds (IEEE 1722.1-2021 7.2.6.1,
+    a 32-bit field). Milan v1.2 Section 5.3.3.4 requires a STREAM_INPUT's to be
+    at least 2126000 ns."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError(f"{context}: buffer_length must be an integer number of ns, 0 to 4294967295")
+    return value
 
 
 def _parse_external_port(ep: dict, context: str) -> ExternalPort:
@@ -755,9 +763,6 @@ def _parse_clock_source(
         clock_source_type=_parse_enum(
             cs_type, CLOCK_SOURCE_TYPE_NAMES, f"{context}.type"
         ),
-        clock_source_identifier=_parse_octets(
-            cs.get("identifier", 0), f"{context}.identifier"
-        ),
         clock_source_location_type=_parse_descriptor_type(
             cs.get("location_type", 0), f"{context}.location_type"
         ),
@@ -766,63 +771,60 @@ def _parse_clock_source(
     )
 
 
+def _parse_descriptor_type(value, context: str) -> int:
+    """A descriptor type: its number, or its name ("TIMING", "AUDIO_UNIT", ...)."""
+    if isinstance(value, str):
+        return _parse_enum(value, DESCRIPTOR_TYPE_NAMES, context)
+    return value
+
+
 def _parse_timing(t: dict, strings: _LocalizedStrings, context: str) -> Timing:
-    """Parse a TIMING descriptor (IEEE 1722.1-2021 7.2.34) from JSON. With no
-    'ptp_instances' it names PTP_INSTANCE 0."""
+    """Parse a TIMING descriptor (IEEE 1722.1-2021 7.2.34) from JSON."""
     return Timing(
         object_name=t.get("name", ""),
         localized_description=_parse_localized(t, strings, context=context),
         algorithm=_parse_enum(
-            t.get("algorithm", "SINGLE"),
-            TIMING_ALGORITHM_NAMES,
-            f"{context}.algorithm",
+            t.get("algorithm", "SINGLE"), TIMING_ALGORITHM_NAMES, f"{context}.algorithm"
         ),
-        ptp_instance_indices=[int(i) for i in t.get("ptp_instances", [0])],
+        ptp_instance_indices=list(t.get("ptp_instances", [])),
         symbol=t.get("symbol"),
     )
 
 
-def _parse_ptp_port(p: dict, strings: _LocalizedStrings, context: str) -> PtpPort:
-    """Parse a PTP_PORT descriptor (IEEE 1722.1-2021 7.2.36) from JSON."""
+def _parse_ptp_port(pp: dict, strings: _LocalizedStrings, context: str) -> PtpPort:
+    """Parse a PTP_PORT descriptor (7.2.36) from JSON; flags as the AEMXML reader names them."""
     return PtpPort(
-        object_name=p.get("name", ""),
-        localized_description=_parse_localized(p, strings, context=context),
-        port_number=int(p.get("port_number", 1)),
+        object_name=pp.get("name", ""),
+        localized_description=_parse_localized(pp, strings, context=context),
+        port_number=pp.get("port_number", 0),
         port_type=_parse_enum(
-            p.get("type", "P2P_LINK_LAYER"), PTP_PORT_TYPE_NAMES, f"{context}.type"
+            pp.get("port_type", "P2P_LINK_LAYER"),
+            PTP_PORT_TYPE_NAMES,
+            f"{context}.port_type",
         ),
         flags=_parse_flags(
-            p.get("flags", []), PTP_PORT_FLAGS_NAMES, f"{context}.flags"
+            pp.get("flags", []), PTP_INSTANCE_FLAGS_NAMES, f"{context}.flags"
         ),
-        avb_interface_index=int(p.get("avb_interface", 0)),
-        profile_identifier=_parse_octets(
-            p.get("profile_identifier", 0), f"{context}.profile_identifier"
-        ),
-        symbol=p.get("symbol"),
+        avb_interface_index=pp.get("avb_interface_index", 0),
+        profile_identifier=pp.get("profile_identifier", 0),
+        symbol=pp.get("symbol"),
     )
 
 
 def _parse_ptp_instance(
     pi: dict, strings: _LocalizedStrings, context: str
 ) -> PtpInstance:
-    """Parse a PTP_INSTANCE descriptor (IEEE 1722.1-2021 7.2.35) and the
-    PTP_PORT descriptors it owns from JSON. The clock identity is the running
-    entity's to fill; a model leaves it out."""
-    ports = _get_list(pi, "ptp_port", "ptp_ports")
+    """Parse a PTP_INSTANCE descriptor (7.2.35) and its PTP_PORTs from JSON."""
     return PtpInstance(
         object_name=pi.get("name", ""),
         localized_description=_parse_localized(pi, strings, context=context),
-        clock_identity=_parse_octets(
-            pi.get("clock_identity", 0), f"{context}.clock_identity"
-        ),
+        clock_identity=pi.get("clock_identity", 0),
         flags=_parse_flags(
             pi.get("flags", []), PTP_INSTANCE_FLAGS_NAMES, f"{context}.flags"
         ),
-        number_of_controls=int(pi.get("number_of_controls", 0)),
-        base_control=int(pi.get("base_control", 0)),
         ptp_ports=[
-            _parse_ptp_port(p, strings, f"{context}.ptp_ports[{i}]")
-            for i, p in enumerate(ports)
+            _parse_ptp_port(pp, strings, f"{context}.ptp_ports[{i}]")
+            for i, pp in enumerate(pi.get("ptp_ports", []))
         ],
         symbol=pi.get("symbol"),
     )
@@ -928,14 +930,15 @@ def _parse_configuration(
         for i, cd in enumerate(cd_list)
     ]
 
-    # Timings and PTP instances (singular/plural)
+    # gPTP timing (IEEE 1722.1-2021): TIMING descriptors and the PTP_INSTANCEs
+    # (each owning its PTP_PORTs) they reference.
     timings = [
         _parse_timing(t, loc, f"{context}.timings[{i}]")
-        for i, t in enumerate(_get_list(config_obj, "timing", "timings"))
+        for i, t in enumerate(config_obj.get("timings", []))
     ]
     ptp_instances = [
         _parse_ptp_instance(pi, loc, f"{context}.ptp_instances[{i}]")
-        for i, pi in enumerate(_get_list(config_obj, "ptp_instance", "ptp_instances"))
+        for i, pi in enumerate(config_obj.get("ptp_instances", []))
     ]
 
     # Jacks
@@ -1008,6 +1011,8 @@ def _parse_configuration(
         avb_interfaces=avb_interfaces,
         clock_sources=clock_sources,
         clock_domains=clock_domains,
+        timings=timings,
+        ptp_instances=ptp_instances,
         jacks_input=jacks_in,
         jacks_output=jacks_out,
         controls=controls,
