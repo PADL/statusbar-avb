@@ -141,8 +141,8 @@ function M.dissect(tvb, pinfo, tree, start, length)
     local names = {}
     while at + 2 <= stop do
         local header = tvb(at, 2):uint()
-        local msg_type = header >> 9
-        local quadlets = header & 0x1FF
+        local msg_type = math.floor(header / 0x200)  -- Lua 5.2 (Wireshark < 4.4): no bitwise operators
+        local quadlets = header % 0x200
         local octets = quadlets * 4
         if quadlets == 0 or at + octets > stop then
             local bad = root:add(tvb(at, stop - at), "ACF message (malformed length)")
@@ -171,7 +171,7 @@ local function declared_length(tvb, header)
         return header.version == 1 and tvb(36, 2):uint() or tvb(20, 2):uint()
     end
     local at = header.version == 1 and 16 or 1
-    return tvb(at, 2):uint() & 0x7FF
+    return tvb(at, 2):uint() % 0x800
 end
 
 --- The TSCF/NTSCF subtype dissector: ACF messages after the header
