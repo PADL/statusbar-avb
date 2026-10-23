@@ -475,3 +475,59 @@ TEST(nanoavb_gptp_announce, grandmaster_expires_after_the_receipt_timeout)
     EXPECT_FALSE(handler.has_grandmaster());
     EXPECT_EQ(losses, 2);
 }
+
+// The Announce's PATH_TRACE TLV (IEEE 802.1AS-2020 10.6.3.3) is the AS path
+// GET_AS_PATH reports (Milan v1.2 Section 5.4.2.24); its changes, and its
+// clearing when the grandmaster is lost, are reported once each.
+TEST(nanoavb_gptp_announce, path_trace_from_the_tlv)
+{
+    using statusbar::ieee::Eui64;
+    ::statusbar::gptp::AnnounceMessage announce{};
+    announce.init();
+    announce.grandmaster_identity = ::statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+    announce.header.log_message_interval = 0;
+    // The Announce, a PATH_TRACE TLV of two identities, and messageLength over both.
+    std::array<uint8_t, ::statusbar::gptp::AnnounceMessage::LENGTH + 4 + 16> frame{};
+    announce.header.message_length = static_cast<uint16_t>(frame.size());
+    statusbar::span_store(std::span{frame}.first(::statusbar::gptp::AnnounceMessage::LENGTH), announce);
+    auto tlv = std::span{frame}.subspan(::statusbar::gptp::AnnounceMessage::LENGTH);
+    tlv[0] = 0x00;
+    tlv[1] = 0x08;  // PATH_TRACE
+    tlv[2] = 0x00;
+    tlv[3] = 16;
+    std::array<uint8_t, 8> const gm{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55};
+    std::array<uint8_t, 8> const bridge{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x02};
+    std::copy(gm.begin(), gm.end(), tlv.begin() + 4);
+    std::copy(bridge.begin(), bridge.end(), tlv.begin() + 12);
+
+    auto const path = statusbar::nanoavb::parse_announce_path_trace(frame);
+    EXPECT_EQ(path.size(), size_t{2});
+    EXPECT_EQ(path[0].to_uint64(), 0x0011'22FF'FE33'4455ULL);
+    EXPECT_EQ(path[1].to_uint64(), 0x001B'21FF'FE00'0002ULL);
+    // A TLV that runs past messageLength is not read.
+    std::array<uint8_t, frame.size()> cut = frame;
+    cut[2] = 0;
+    cut[3] = static_cast<uint8_t>(::statusbar::gptp::AnnounceMessage::LENGTH + 4 + 8);
+    EXPECT_TRUE(statusbar::nanoavb::parse_announce_path_trace(cut).empty());
+
+    int changes = 0;
+    statusbar::nanoavb::GptpAnnounceHandler handler{
+        "nanoavb-announce-test0",
+        statusbar::nanoavb::GptpAnnounceCallbacks{.path_trace_changed = [&](int64_t) { ++changes; }}};
+    constexpr int64_t t0 = 100'000'000'000;
+    handler.on_announce(announce, t0, path);
+    EXPECT_EQ(changes, 1);
+    EXPECT_EQ(handler.path_trace().size(), size_t{2});
+    handler.on_announce(announce, t0 + 1'000'000'000, path);  // the same path
+    EXPECT_EQ(changes, 1);
+    // Without the TLV: the grandmaster alone.
+    handler.on_announce(announce, t0 + 2'000'000'000);
+    EXPECT_EQ(changes, 2);
+    EXPECT_EQ(handler.path_trace().size(), size_t{1});
+    EXPECT_EQ(handler.path_trace()[0].to_uint64(), 0x0011'22FF'FE33'4455ULL);
+    // Lost: empty.
+    handler.tick(t0 + 10'000'000'000);
+    EXPECT_FALSE(handler.has_grandmaster());
+    EXPECT_TRUE(handler.path_trace().empty());
+    EXPECT_EQ(changes, 3);
+}
