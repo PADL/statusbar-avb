@@ -164,15 +164,14 @@ TEST(stream_spec_derive, audio_blob_three_out_three_in)
     EXPECT_EQ(*rate, 96'000U);
 }
 
-TEST(stream_spec_tspec, matches_wire_registered_sizes)
+TEST(stream_spec_tspec, milan_table_4_4_sizes)
 {
-    // These are the MSRP TSpec frame sizes real bridges registered for the
-    // tone entity's streams (talker declarations observed on an AVB switch):
-    // AAF 8ch 96 kHz int32 -> 440 bytes; Milan CRF 1 ts/pdu -> 28 bytes.
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 440);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
+    // Milan v1.2 Section 4.3.3.2, Table 4.4: AVTPDU header + payload + 1.
+    // AAF PCM32 96 kHz 8 ch: 48*8 + 24 + 1 = 409; CRF 1 ts/pdu: 28 + 1 = 29.
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 409);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 29);
 
-    // AM824 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
+    // AM824 (not a Milan format) 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
 
     // Unknown formats size to 0 (callers must treat as authoring error).
