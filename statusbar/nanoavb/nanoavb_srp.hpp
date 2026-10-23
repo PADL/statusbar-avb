@@ -75,8 +75,8 @@ enum class ListenerReservationState : uint8_t
     AskingFailed,
     Ready,
     ReadyFailed,
-    /// Attached with nothing declared: neither a Talker Advertise nor a
-    /// Talker Failed is registered for the stream (MsrpHandler::listener_attach).
+    /// Attached, declaring nothing until the talker's attribute is
+    /// registered (the Milan listener: set_listener_waits_for_talker).
     Waiting,
 };
 
@@ -415,13 +415,16 @@ class MsrpHandler
     /// (see MsrpParticipant::set_instant_leave).
     void set_instant_leave(bool const on) noexcept { participant_.set_instant_leave(on); }
 
-    /// The MRP timer durations of this port from here on: IEEE 802.1Q Table
-    /// 10-7's (statusbar::srp::mrp::TimerConfig{}) or a profile's, such as
-    /// MILAN_MRP_TIMERS. An invalid @p timers is ignored.
-    void set_mrp_timers(statusbar::srp::mrp::TimerConfig const& timers) noexcept { (void)participant_.set_mrp_timers(timers); }
+    /// Called when a peer's Talker Advertise or Talker Failed for @p stream_id is registered or
+    /// leaves, after an attached listener's declaration has followed it.
+    void set_on_remote_talker(statusbar::sg14::inplace_function<void(StreamId const&), 64> cb)
+    {
+        on_remote_talker_ = std::move(cb);
+    }
 
-    /// The MRP timer durations in force.
-    [[nodiscard]] auto mrp_timers() const noexcept -> statusbar::srp::mrp::TimerConfig const& { return participant_.mrp_timers(); }
+    /// The Milan listener (v1.2 Section 5.3.8.5): Listener Ready while the talker's Advertise is
+    /// registered, Asking Failed while its Talker Failed is, otherwise nothing; never Ready Failed.
+    void set_listener_waits_for_talker(bool const wait) noexcept { listener_waits_for_talker_ = wait; }
 
     /// Diagnostic breakdown of why the talker gate is open/closed for a stream
     /// (record present? operation? registrar In? Ready substate?), for logging
@@ -606,8 +609,11 @@ class MsrpHandler
         if (--listener_streams_[idx].attached > 0) {
             return success();
         }
+        bool const declared = listener_is_declared(listener_streams_[idx].state);
         listener_streams_[idx].state = ListenerReservationState::Idle;
-        (void)participant_.withdraw_listener(stream_id, now);
+        if (declared) {
+            (void)participant_.withdraw_listener(stream_id, now);
+        }
         return success();
     }
 
@@ -671,6 +677,19 @@ class MsrpHandler
         return participant_.find_talker_failed(stream_id);
     }
 
+    /// A peer's Talker Advertise / Talker Failed for @p stream_id while its registrar holds it,
+    /// or nullptr; never our own (Milan v1.2 Section 5.3.8.8).
+    [[nodiscard]] auto peer_talker_advertise(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
+    {
+        return participant_.find_registered_talker_advertise(stream_id);
+    }
+    [[nodiscard]] auto peer_talker_failed(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerFailedFirstValue const*
+    {
+        return participant_.find_registered_talker_failed(stream_id);
+    }
+
     /// The registered (peer-declared, registrar In or Leaving) Listener
     /// declaration for one of our talker streams, or Ignore when none:
     /// Ready, ReadyFailed or AskingFailed.
@@ -683,72 +702,44 @@ class MsrpHandler
         return d.substate;
     }
 
-    /// True when the talker's Advertise is registered from the wire and no
-    /// Talker Failed has replaced it — the 802.1Q condition for a listener
-    /// to declare Ready.
+    /// True when the talker's Advertise is registered from the wire and no Talker Failed has
+    /// replaced it; with set_listener_waits_for_talker, only a peer's live registration counts.
     [[nodiscard]] auto talker_advertise_registered(StreamId const& stream_id) const noexcept -> bool
     {
-        return listener_state_wanted(stream_id) == ListenerReservationState::Ready;
+        if (listener_waits_for_talker_) {
+            return peer_talker_advertise(stream_id) != nullptr && peer_talker_failed(stream_id) == nullptr;
+        }
+        return participant_.find_talker_advertise(stream_id) != nullptr && participant_.find_talker_failed(stream_id) == nullptr;
     }
 
-    /// What an attached listener declares while neither a Talker Advertise
-    /// nor a Talker Failed is registered for its stream. Waiting (the
-    /// default) declares nothing until one is; false declares Listener
-    /// Asking Failed at once, the other choice IEEE 802.1Q 35.1.2.2 and Milan
-    /// v1.3 5.3.8.5 leave open, which then changes type when the talker's
-    /// attribute arrives. Set before the listeners attach.
-    void set_listener_waits_for_talker(bool const wait) noexcept { listener_waits_for_talker_ = wait; }
-
-    /// What an attached listener holds for @p stream_id as the talker's
-    /// registration stands now. IEEE 802.1Q 35.1.2.2: Ready for a registered
-    /// Talker Advertise, Asking Failed for a registered Talker Failed (which
-    /// takes precedence when both are, 35.2.6). With neither registered the
-    /// listener is Waiting and declares nothing, which Milan v1.3 5.3.8.5
-    /// allows ("may either be declaring a Listener Asking Failed attribute,
-    /// or not be declaring anything") and 802.1Q does too: it sets no order
-    /// between the two declarations. set_listener_waits_for_talker(false)
-    /// makes that case Asking Failed.
-    [[nodiscard]] auto listener_state_wanted(StreamId const& stream_id) const noexcept -> ListenerReservationState
-    {
-        if (participant_.find_registered_talker_failed(stream_id) != nullptr) {
-            return ListenerReservationState::AskingFailed;
-        }
-        if (participant_.find_registered_talker_advertise(stream_id) != nullptr) {
-            return ListenerReservationState::Ready;
-        }
-        return listener_waits_for_talker_ ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
-    }
-
-    /// One more input attached to @p stream_id with nothing declared: the
-    /// talker has registered neither an Advertise nor a Failed yet. The
-    /// declaration is made when one arrives (see on_remote_talker_changed).
-    [[nodiscard]] auto listener_waiting(StreamId const& stream_id, TimePoint now) -> Status
-    {
-        auto const idx = attach_listener_record(stream_id, ListenerReservationState::Waiting);
-        if (!idx) {
-            return failure(idx.error());
-        }
-        ensure_started(now);
-        return success();
-    }
-
-    /// Attach this listener to @p stream_id and hold what the talker's
-    /// registration calls for (listener_state_wanted): Listener Ready,
-    /// Listener Asking Failed, or nothing while Waiting. While attached the
-    /// listener follows the talker's registration (on_remote_talker_changed):
-    /// the first declaration is made when the talker's attribute arrives, so
-    /// a bridge first learns of this listener as a new registration of the
-    /// type that holds, and the declaration is withdrawn when the talker's
-    /// attribute has gone. Returns the state held. Use instead of
-    /// listener_ready() when the talker may not be up yet, as with an ACMP
-    /// fast-connect at boot.
+    /// Attach this listener to @p stream_id (kit phase 5d, IEEE 802.1Q
+    /// 35.2.4.4): declare Listener Ready when the talker's Advertise is
+    /// registered, Listener Asking Failed otherwise (the talker is not
+    /// advertising yet, or registered Talker Failed). While attached, the
+    /// declaration is upgraded/downgraded automatically as the talker's
+    /// registration changes (see on_remote_talker_changed). Returns the
+    /// state actually declared. Use instead of listener_ready() when the
+    /// talker may not be up yet — e.g. an ACMP fast-connect at boot.
+    ///
+    /// With set_listener_waits_for_talker (Milan), nothing is declared until
+    /// the talker's Advertise (Ready) or Talker Failed (Asking Failed) is
+    /// registered: the stream is attached in Waiting.
     [[nodiscard]] auto listener_attach(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>
     {
         ListenerReservationState const want = listener_state_wanted(stream_id);
         if (Status const attached = attach_listener_in(stream_id, want, now); !attached) {
             return failure(attached.error());
         }
-        return success(want);
+        if (listener_waits_for_talker_ && peer_talker_failed(stream_id) == nullptr) {
+            if (auto const r = attach_waiting(stream_id); !r) {
+                return failure(r.error());
+            }
+            return success(ListenerReservationState::Waiting);
+        }
+        if (auto const r = listener_asking_failed(stream_id, now); !r) {
+            return failure(r.error());
+        }
+        return success(ListenerReservationState::AskingFailed);
     }
 
     auto receive_packet(std::span<uint8_t const> packet, TimePoint now) -> void
@@ -794,11 +785,11 @@ class MsrpHandler
     void withdraw_listeners(TimePoint now)
     {
         for (auto& stream : listener_streams_) {
-            if (stream.state != ListenerReservationState::Idle) {
-                stream.state = ListenerReservationState::Idle;
-                stream.attached = 0;
+            if (listener_is_declared(stream.state)) {
                 (void)participant_.withdraw_listener(stream.stream_id, now);
             }
+            stream.state = ListenerReservationState::Idle;
+            stream.attached = 0;
         }
     }
 
@@ -847,6 +838,27 @@ class MsrpHandler
         record.state = state;
         ++record.attached;
         return idx;
+    }
+
+    /// One more input attached to @p stream_id in Waiting: counted, nothing declared (a
+    /// declaration the record still had is withdrawn).
+    [[nodiscard]] auto attach_waiting(StreamId const& stream_id) -> Status
+    {
+        size_t const idx = listener_index(stream_id);
+        bool const declared = idx < listener_streams_.size() && listener_is_declared(listener_streams_[idx].state);
+        if (auto const r = attach_listener_record(stream_id, ListenerReservationState::Waiting); !r) {
+            return failure(r.error());
+        }
+        if (declared) {
+            (void)participant_.withdraw_listener(stream_id, last_event_time_);
+        }
+        return success();
+    }
+
+    /// Whether a record in @p state has a Listener declaration on the wire.
+    [[nodiscard]] static constexpr auto listener_is_declared(ListenerReservationState const state) noexcept -> bool
+    {
+        return state != ListenerReservationState::Idle && state != ListenerReservationState::Waiting;
     }
 
     void ensure_started(TimePoint now)
@@ -939,6 +951,14 @@ class MsrpHandler
 
     void on_remote_talker_changed(tsn::StreamId const& sid)
     {
+        follow_remote_talker(sid);
+        if (on_remote_talker_) {
+            on_remote_talker_(sid);
+        }
+    }
+
+    void follow_remote_talker(tsn::StreamId const& sid)
+    {
         for (auto& stream : listener_streams_) {
             if (stream.stream_id == sid) {
                 redeclare_attached_listener(stream);
@@ -970,10 +990,15 @@ class MsrpHandler
             state == ListenerReservationState::Waiting;
     }
 
-    /// Whether a stream in @p state has a Listener declaration on the wire.
-    [[nodiscard]] static constexpr auto listener_is_declared(ListenerReservationState const state) noexcept -> bool
+    /// The state an attached listener stream wants: Ready with the talker's Advertise; without it,
+    /// Waiting where the handler waits for an absent talker, else AskingFailed.
+    [[nodiscard]] auto wanted_listener_state(tsn::StreamId const& sid) -> ListenerReservationState
     {
-        return state == ListenerReservationState::Ready || state == ListenerReservationState::AskingFailed;
+        if (talker_advertise_registered(sid)) {
+            return ListenerReservationState::Ready;
+        }
+        bool const waits = listener_waits_for_talker_ && peer_talker_failed(sid) == nullptr;
+        return waits ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
     }
 
     /// Take an attached stream to @p want: declared (a first declaration is
@@ -981,29 +1006,20 @@ class MsrpHandler
     /// IEEE 802.1Q 35.2.6), or withdrawn when it goes back to Waiting.
     void move_attached_listener(ListenerStreamSrpInfo& stream, ListenerReservationState const want)
     {
-        stream.state = want;
-        if (!listener_is_declared(want)) {
-            (void)participant_.withdraw_listener(stream.stream_id, last_event_time_);
-            return;
-        }
-        bool const ready = want == ListenerReservationState::Ready;
-        (void)participant_.declare_listener(
-            stream.stream_id,
-            ready ? statusbar::srp::msrp::ListenerDeclaration::Ready : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
-            last_event_time_);
-    }
-
-    /// Re-derive one attached listener stream's state from the remote
-    /// talker's registration and act on it when it changed, telling the
-    /// on_listener_state_change hook the event's time. A stream that is not
-    /// attached (Idle/withdrawn) has nothing to follow.
-    void redeclare_attached_listener(ListenerStreamSrpInfo& stream)
-    {
-        ListenerReservationState const want = listener_state_wanted(stream.stream_id);
+        ListenerReservationState const want = wanted_listener_state(stream.stream_id);
         if (!listener_is_attached(stream.state) || stream.state == want) {
             return;
         }
-        move_attached_listener(stream, want);
+        stream.state = want;
+        if (want == ListenerReservationState::Waiting) {
+            (void)participant_.withdraw_listener(stream.stream_id, last_event_time_);
+        } else {
+            (void)participant_.declare_listener(
+                stream.stream_id,
+                want == ListenerReservationState::Ready ? statusbar::srp::msrp::ListenerDeclaration::Ready
+                                                        : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
+                last_event_time_);
+        }
         if (callbacks_.on_listener_state_change) {
             callbacks_.on_listener_state_change(stream.stream_id, stream.state, last_event_time_);
         }
@@ -1017,6 +1033,8 @@ class MsrpHandler
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipant participant_;
     TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)
+    statusbar::sg14::inplace_function<void(StreamId const&), 64> on_remote_talker_{};
+    bool listener_waits_for_talker_{false};
     bool started_{false};
 };
 

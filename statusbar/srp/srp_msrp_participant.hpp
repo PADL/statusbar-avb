@@ -407,16 +407,11 @@ class MsrpParticipantT
     /// Look up a locally known Talker Failed by tsn::StreamId.
     [[nodiscard]] auto find_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
-    /// The Talker Advertise for @p id while a peer's declaration of it is
-    /// registered on this port (Registrar In, or Lv until its leavetimer
-    /// expires), or nullptr. find_talker_advertise() also answers a record
-    /// this port declares itself and one whose registration has lapsed and
-    /// waits for the reclaim sweep, which is what an observer told of a
-    /// Leave still finds.
+    /// The Talker Advertise for @p id while a peer's declaration is registered (In or Leaving), or
+    /// nullptr: never a record the peer has left or one only we declare.
     [[nodiscard]] auto find_registered_talker_advertise(tsn::StreamId const& id) const noexcept -> TalkerAdvertiseFirstValue const*;
 
-    /// The Talker Failed for @p id while a peer's declaration of it is
-    /// registered on this port, or nullptr.
+    /// The Talker Failed for @p id while registered, or nullptr.
     [[nodiscard]] auto find_registered_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
     /// Look up a locally known Listener by tsn::StreamId and return its

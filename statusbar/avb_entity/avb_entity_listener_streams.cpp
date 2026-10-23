@@ -472,13 +472,11 @@ auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> Lis
 
 void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
 {
-    on_stream_rx_frame(frame, avtp::Nanoseconds{gptp_now_ns});
-}
-
-void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, avtp::Nanoseconds const now)
-{
-    ListenerStreamSlot* const slot = frame.empty() ? nullptr : find_slot_for_frame(frame);
-    if (slot == nullptr) {
+    if (frame.empty()) {
+        return;
+    }
+    ListenerStreamSlot* const slot = find_slot_for_frame(frame);
+    if (slot == nullptr || slot->stopped.load(std::memory_order_relaxed)) {
         return;
     }
     if (slot->am824) {
