@@ -3,9 +3,11 @@
 
 // ATDECC Monitor Tool — monitors ATDECC entities via ADP, reads ENTITY descriptors,
 // and tracks ACMP stream connections/disconnections. Frames can come from a live
-// interface (--interface=eth0) or a pcap/pcapng capture (--pcap=file.pcapng).
+// interface (--interface=eth0), a local entity's ATDECC socket
+// (--socket=/run/mediabridge/atdecc.sock), or a pcap/pcapng capture (--pcap=file.pcapng).
 //
 // Usage: statusbar-atdecc-monitor --interface=eth0 [--instance=N] [--controller-entity-id=EUI64] [--show-descriptors]
+//        statusbar-atdecc-monitor --socket=/run/mediabridge/atdecc.sock [--show-descriptors]
 //        statusbar-atdecc-monitor --pcap=file.pcapng [--show-descriptors]
 
 #include "statusbar/atdecc/atdecc_acmp.hpp"
@@ -20,6 +22,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_controller.hpp"
+#include "statusbar/nanoavb/nanoavb_local_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/pcap/pcapng_reader.hpp"
@@ -31,6 +34,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <format>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -516,13 +520,15 @@ class MonitorCore
 };
 
 // ---------------------------------------------------------------------------
-// MonitorPollable — live-socket driver wrapping MonitorCore.
+// MonitorPollable — live-socket driver wrapping MonitorCore, on a raw socket
+// (RawnetContext) or a local entity's ATDECC socket (AtdeccLocalClient).
 // ---------------------------------------------------------------------------
 
+template <typename Context>
 class MonitorPollable : public Pollable
 {
   public:
-    MonitorPollable(RawnetContext context, MonitorCore& core)
+    MonitorPollable(Context context, MonitorCore& core)
         : context_{std::move(context)}
         , core_{core}
     {
@@ -551,12 +557,19 @@ class MonitorPollable : public Pollable
         }
     }
 
-    void tick(int64_t now_ns) override { core_.tick(now_ns); }
+    void tick(int64_t now_ns) override
+    {
+        // The local socket's keepalive (an entity may forget an idle controller).
+        if constexpr (requires(Context& c) { c.tick(now_ns); }) {
+            context_.tick(now_ns);
+        }
+        core_.tick(now_ns);
+    }
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
   private:
-    RawnetContext context_;
+    Context context_;
     MonitorCore& core_;
     std::array<uint8_t, 2048> payload_buf_{};
 };
@@ -884,8 +897,34 @@ void print_usage(char const* prog, args::ArgumentSpecs const& specs)
         prog,
         specs,
         "Monitor ATDECC entities (ADP), descriptors (AEM), and stream connections (ACMP).\n"
-        "Frames are read from a live network interface (--interface=<name>) or a "
-        "pcap/pcapng file (--pcap=<file>).");
+        "Frames are read from a live network interface (--interface=<name>), a local "
+        "entity's ATDECC socket (--socket=<path>), or a pcap/pcapng file (--pcap=<file>).");
+}
+
+/// Where the live drivers listen, for messages.
+auto live_source(MonitorConfig const& config) -> std::string
+{
+    return config.socket_path.empty() ? std::format("interface '{}'", config.interface_name)
+                                      : std::format("socket '{}'", config.socket_path);
+}
+
+/// The live driver on the configured transport, or nullptr (reported).
+auto make_monitor_pollable(MonitorConfig const& config, MonitorCore& core) -> std::unique_ptr<Pollable>
+{
+    if (!config.socket_path.empty()) {
+        nanoavb::AtdeccLocalClient client;
+        if (auto const opened = client.open(config.socket_path); !opened) {
+            std::println(stderr, "Error: cannot open socket '{}': {}", config.socket_path, opened.error().message());
+            return nullptr;
+        }
+        return std::make_unique<MonitorPollable<nanoavb::AtdeccLocalClient>>(std::move(client), core);
+    }
+    RawnetContext rawnet;
+    if (!rawnet.open(config.interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC)) {
+        std::println(stderr, "Error: failed to open raw socket on '{}' (root/cap_net_raw required)", config.interface_name);
+        return nullptr;
+    }
+    return std::make_unique<MonitorPollable<RawnetContext>>(std::move(rawnet), core);
 }
 
 auto run_live(MonitorConfig const& config) -> int
@@ -896,23 +935,16 @@ auto run_live(MonitorConfig const& config) -> int
         return 1;
     }
     Eui64 const controller_id = *id_result;
-    std::println(
-        "statusbar-atdecc-monitor on interface '{}' controller_id={}",
-        config.interface_name,
-        ieee::to_string(controller_id).view());
-
-    RawnetContext rawnet;
-    auto open_result = rawnet.open(config.interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC);
-    if (!open_result) {
-        std::println(stderr, "Error: failed to open raw socket on '{}' (root/cap_net_raw required)", config.interface_name);
-        return 1;
-    }
+    std::println("statusbar-atdecc-monitor on {} controller_id={}", live_source(config), ieee::to_string(controller_id).view());
 
     g_now_fn = elapsed_ns;
     auto core =
         std::make_unique<MonitorCore>(controller_id, make_print_callbacks(config.show_descriptors), config.show_descriptors);
     auto* core_ptr = core.get();
-    auto monitor = std::make_unique<MonitorPollable>(std::move(rawnet), *core_ptr);
+    auto monitor = make_monitor_pollable(config, *core_ptr);
+    if (monitor == nullptr) {
+        return 1;
+    }
 
     auto& stop = statusbar::itc::install_stop_signal();
     MessageReactor reactor{stop, elapsed_ns, 10};
@@ -959,16 +991,7 @@ auto run_enumerate(MonitorConfig const& config) -> int
     }
     Eui64 const controller_id = *id_result;
     std::println(
-        "statusbar-atdecc-monitor enumerate on '{}' controller_id={}",
-        config.interface_name,
-        ieee::to_string(controller_id).view());
-
-    RawnetContext rawnet;
-    auto open_result = rawnet.open(config.interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC);
-    if (!open_result) {
-        std::println(stderr, "Error: failed to open raw socket on '{}' (root/cap_net_raw required)", config.interface_name);
-        return 1;
-    }
+        "statusbar-atdecc-monitor enumerate on {} controller_id={}", live_source(config), ieee::to_string(controller_id).view());
 
     g_now_fn = elapsed_ns;
 
@@ -988,7 +1011,10 @@ auto run_enumerate(MonitorConfig const& config) -> int
 
     auto core = std::make_unique<MonitorCore>(controller_id, std::move(cbs), /*show_descriptors=*/false);
     auto* core_ptr = core.get();
-    auto monitor = std::make_unique<MonitorPollable>(std::move(rawnet), *core_ptr);
+    auto monitor = make_monitor_pollable(config, *core_ptr);
+    if (monitor == nullptr) {
+        return 1;
+    }
 
     auto& stop = statusbar::itc::install_stop_signal();
     MessageReactor reactor{stop, elapsed_ns, 10};
@@ -1027,15 +1053,16 @@ int main(int argc, char* argv[])
     }
 
     bool const has_iface = !config.interface_name.empty();
+    bool const has_socket = !config.socket_path.empty();
     bool const has_pcap = !config.pcap_file.empty();
-    if (has_iface == has_pcap) {
-        std::println(stderr, "Error: exactly one of --interface or --pcap is required");
+    if (int{has_iface} + int{has_socket} + int{has_pcap} != 1) {
+        std::println(stderr, "Error: exactly one of --interface, --socket or --pcap is required");
         return 1;
     }
 
     if (config.enumerate) {
         if (has_pcap) {
-            std::println(stderr, "Error: --enumerate requires --interface (it actively queries entities)");
+            std::println(stderr, "Error: --enumerate requires --interface or --socket (it actively queries entities)");
             return 1;
         }
         return run_enumerate(config);

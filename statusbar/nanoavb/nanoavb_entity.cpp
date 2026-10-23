@@ -1011,7 +1011,10 @@ auto AemCommandHandler::handle_acquire_entity(
             out_buffer);
     }
     if (acquiring_controller_ == header.controller_entity_id) {
-        // Already acquired by this controller
+        // Already acquired by this controller, which may have moved (a local
+        // controller that reconnected): its unsolicited notifications, and
+        // forgetting it (forget_controller_at), follow the new address.
+        acquiring_controller_mac_ = current_src_mac_;
         return build_acquire_response(
             {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data},
             out_buffer);
@@ -1247,10 +1250,13 @@ auto AemCommandHandler::send_response(
 
 auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemCommandResponse
 {
-    // Idempotent: if this controller is already registered, return success.
+    // Idempotent: if this controller is already registered, return success,
+    // notifying it where this command came from (it may have moved: a local
+    // controller that reconnected has a new address).
     auto const existing = unsolicited_registrations_.find_if(
         [&header](UnsolicitedRegistration const& r) { return r.controller_entity_id == header.controller_entity_id; });
     if (existing < unsolicited_registrations_.capacity()) {
+        unsolicited_registrations_[existing].controller_mac = current_src_mac_;
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
 
@@ -1287,6 +1293,42 @@ auto AemCommandHandler::remove_unsolicited_registrations_for(Eui64 controller_en
         ++removed;
     }
     return removed;
+}
+
+auto AemCommandHandler::remove_unsolicited_registrations_for_mac(Eui48 const& controller_mac) noexcept -> size_t
+{
+    size_t removed = 0;
+    for (;;) {
+        auto const idx = unsolicited_registrations_.find_if(
+            [&](UnsolicitedRegistration const& r) { return r.controller_mac == controller_mac; });
+        if (idx >= unsolicited_registrations_.capacity()) {
+            break;
+        }
+        unsolicited_registrations_.remove(idx);
+        ++removed;
+    }
+    return removed;
+}
+
+void AemCommandHandler::forget_controller_at(Eui48 const& controller_mac)
+{
+    (void)remove_unsolicited_registrations_for_mac(controller_mac);
+    if (pending_acquire_.active && pending_acquire_.requester_mac == controller_mac) {
+        pending_acquire_ = {};
+    }
+    if (!acquired_ || acquiring_controller_mac_ != controller_mac) {
+        return;
+    }
+    if (pending_acquire_.active) {
+        // Someone is waiting for the owner to answer CONTROLLER_AVAILABLE: it
+        // never will, so the waiting controller gets the entity now.
+        controller_available_timed_out();
+        return;
+    }
+    acquired_ = false;
+    acquired_persistent_ = false;
+    acquiring_controller_ = {};
+    acquiring_controller_mac_ = {};
 }
 
 auto AemCommandHandler::unsolicited_registration_count() const noexcept -> size_t

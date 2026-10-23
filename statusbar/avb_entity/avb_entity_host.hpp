@@ -172,6 +172,19 @@ class AvbEntityHost
     /// path; empty @p path disables. Reactor thread only.
     void enable_listener_binding_persistence(std::string path);
 
+    /// Serve local ATDECC controllers on an AF_UNIX datagram socket at @p path with
+    /// file mode @p mode. Call before start_control_plane(); empty disables. A socket
+    /// that will not open is a warning: the entity still serves the network.
+    void set_local_atdecc_socket(std::string path, int mode = 0660)
+    {
+        local_atdecc_socket_ = nanoavb::AtdeccLocalPort::Config{.path = std::move(path), .mode = mode};
+    }
+    /// The local ATDECC port while the control plane is up, or nullptr.
+    [[nodiscard]] auto local_atdecc_port() noexcept -> nanoavb::AtdeccLocalPort*
+    {
+        return net_handlers_ != nullptr ? net_handlers_->local_port() : nullptr;
+    }
+
     // --- Logging -----------------------------------------------------------------
     //
     // The host owns two SPSC log channels, one per producer thread context:
@@ -387,6 +400,7 @@ class AvbEntityHost
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
+    nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
     bool running_{false};
 };
 

@@ -347,6 +347,15 @@ class AemCommandHandler
     /// and send notifications to an entity that is gone. Returns the number removed.
     auto remove_unsolicited_registrations_for(Eui64 controller_entity_id) noexcept -> size_t;
 
+    /// Drop any unsolicited-notification registration made from @p controller_mac:
+    /// the station there has gone (a local controller whose socket closed), whatever
+    /// entity ID it registered as. Returns the number removed.
+    auto remove_unsolicited_registrations_for_mac(Eui48 const& controller_mac) noexcept -> size_t;
+
+    /// The controller at @p controller_mac is gone for good: drop its registrations, release its
+    /// acquisition (to a waiting controller, if any) and abandon an acquire it was waiting for.
+    void forget_controller_at(Eui48 const& controller_mac);
+
     /// Set our own entity_id, used as the target_entity_id of unsolicited
     /// notifications. process_packet() also keeps this current; call this so
     /// notifications emitted before any command is received carry the right id.

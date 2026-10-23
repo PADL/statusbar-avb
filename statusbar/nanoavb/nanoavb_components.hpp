@@ -21,6 +21,7 @@
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
+#include "statusbar/nanoavb/nanoavb_local_port.hpp"
 #include "statusbar/nanoavb/nanoavb_mvu_handler.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -41,7 +42,9 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <variant>
+#include <vector>
 
 namespace statusbar::nanoavb {
 
@@ -289,10 +292,19 @@ class AtdeccNetHandler : public net::Pollable
     /// Check if the handler is valid (socket opened successfully)
     [[nodiscard]] auto valid() const noexcept -> bool { return context_.valid(); }
 
-    /// Send a frame directly
-    [[nodiscard]] auto send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload) -> StatusValue<ssize_t>
+    /// Send a frame from the entity: to a local controller's MAC only to that controller, never
+    /// the network; a multicast also to every local controller; everything else to the network.
+    [[nodiscard]] auto send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload) -> StatusValue<ssize_t>;
+
+    /// Attach (nullptr: detach) a local ATDECC port: its controllers' frames
+    /// are dispatched as if received from the network, and send() reaches
+    /// them. Forgetting a controller drops its unsolicited registration.
+    void attach_local_port(AtdeccLocalPort* port);
+
+    /// Handle @p payload from local controller @p src_mac as a received frame.
+    void receive_local_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload)
     {
-        return context_.send(&dest_mac, payload);
+        dispatch_frame(now_ns, src_mac, payload, true);
     }
 
     /// Set optional ADP discovery component for controller-side entity tracking
@@ -321,10 +333,14 @@ class AtdeccNetHandler : public net::Pollable
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
   private:
-    void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload);
+    /// @p local: from a local controller (see attach_local_port).
+    void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, bool local = false);
     void log_status();
 
     net::RawnetContext context_{};
+    AtdeccLocalPort* local_port_{nullptr};
+    /// Answering a local ENTITY_DISCOVER: multicast goes to that controller only.
+    std::optional<ieee::Eui48> local_reply_to_{};
     NanoAvbAdpAdvertiser& adp_advertiser_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpTalker& acmp_talker_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpListener& acmp_listener_;    // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
@@ -650,9 +666,24 @@ class NanoAvbNetHandlers
         , components_{&components}
     {}
 
+    /// Also open a local ATDECC socket (nanoavb_local_port.hpp) in
+    /// add_to_reactor(). Call before it. An empty path opens none.
+    void set_local_port_config(AtdeccLocalPort::Config config) { local_port_config_ = std::move(config); }
+
     /// Create handlers, transfer ownership to reactor, and store raw pointers.
+    /// The ATDECC handler joins the reactor even when its raw socket would not
+    /// open, so a local port still reaches the entity (and its timers run).
     /// @param reactor The message reactor to register handlers with
     void add_to_reactor(net::MessageReactor& reactor);
+
+    /// The local ATDECC port, or nullptr (none configured, or it would not open).
+    [[nodiscard]] auto local_port() noexcept -> AtdeccLocalPort* { return local_ptr_; }
+    /// Why the configured local port would not open (empty: it opened).
+    [[nodiscard]] auto local_port_error() const noexcept -> std::error_code { return local_port_error_; }
+
+    /// Close the local port and detach it from the ATDECC handler. Call while
+    /// the reactor (which owns both) is alive, before destroying this.
+    void close_local_port();
 
     /// Get the ATDECC handler (requires add_to_reactor called first)
     [[nodiscard]] auto atdecc_handler() -> AtdeccNetHandler& { return *atdecc_ptr_; }
@@ -686,6 +717,12 @@ class NanoAvbNetHandlers
     MsrpNetHandler* msrp_ptr_{nullptr};
     AtdeccNetHandler* atdecc_ptr_{nullptr};
     GptpAnnounceHandler* gptp_ptr_{nullptr};
+    AtdeccLocalPort::Config local_port_config_{};
+    AtdeccLocalPort* local_ptr_{nullptr};
+    std::error_code local_port_error_{};
+    /// Handlers whose socket would not open: not in the reactor, but kept so
+    /// the pointers above (and the callbacks wired through them) stay valid.
+    std::vector<std::unique_ptr<net::Pollable>> unopened_{};
     bool mvrp_valid_{false};
     bool msrp_valid_{false};
     bool atdecc_valid_{false};

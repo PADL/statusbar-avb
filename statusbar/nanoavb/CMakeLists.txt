@@ -26,6 +26,7 @@ statusbar_add_module(
   nanoavb_supervisor_sm.cpp
   nanoavb_components.cpp
   nanoavb_controller.cpp
+  nanoavb_local_port.cpp
   DEPS
   statusbar::atdecc
   statusbar::avtp
@@ -57,7 +58,8 @@ statusbar_add_module(
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
   nanoavb_controller_test.cpp
-  nanoavb_integration_test.cpp)
+  nanoavb_integration_test.cpp
+  nanoavb_local_port_test.cpp)
 
 add_executable(nanoavb_example nanoavb_example.cpp)
 target_link_libraries(nanoavb_example PRIVATE statusbar)

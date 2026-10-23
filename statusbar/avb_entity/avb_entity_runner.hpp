@@ -39,6 +39,7 @@
 #include "statusbar/stats/stats_atomic_wake_stats.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -48,6 +49,8 @@
 #include <memory>
 #include <print>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace statusbar::avb_entity {
@@ -172,6 +175,28 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "remembered and fast-connected (IEEE 1722.1 8.2.2.1.1) after an entity or talker restart. Empty = off.",
         entity.listener_bindings_path,
         [&entity](auto v) { entity.listener_bindings_path = std::string{v}; });
+    specs.add<std::string>(
+        "atdecc.socket",
+        "Serve local ATDECC controllers on an AF_UNIX datagram socket at this path (one AVTPDU per datagram, as "
+        "la_avdecc's local protocol interface): statusbar-atdecc-monitor --socket=PATH reaches the entity without raw "
+        "sockets. Empty = off.",
+        entity.atdecc_socket_path,
+        [&entity](auto v) { entity.atdecc_socket_path = std::string{v}; });
+    specs.add<std::string>(
+        "atdecc.socket_mode", "File mode of the atdecc.socket socket, in octal (default 0660).", "0660", [&entity](auto v) {
+            std::string_view const text{v};
+            unsigned mode = 0;
+            auto const [end, ec] = std::from_chars(text.data(), text.data() + text.size(), mode, 8);
+            if (ec != std::errc{} || end != text.data() + text.size() || mode > 0777U) {
+                std::println(
+                    stderr,
+                    "warning: atdecc.socket_mode '{}' is not an octal mode; keeping {:04o}",
+                    text,
+                    entity.atdecc_socket_mode);
+                return;
+            }
+            entity.atdecc_socket_mode = static_cast<int>(mode);
+        });
     specs.add<std::string>(
         "tx_pcap.path",
         "Diagnostic: record our OWN transmitted stream frames (AAF/AM824/CRF, normally invisible because the TX "

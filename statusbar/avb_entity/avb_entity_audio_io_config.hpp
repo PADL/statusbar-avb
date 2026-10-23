@@ -228,6 +228,12 @@ struct AvbEntityAudioIOConfig
     /// controller DISCONNECT removes the binding. Empty = disabled.
     std::string listener_bindings_path{};
 
+    /// Local ATDECC socket (nanoavb_local_port.hpp): controllers on this host reach the entity
+    /// over an AF_UNIX datagram socket bound here, without raw-socket privileges. Empty = off.
+    std::string atdecc_socket_path{};
+    /// The local ATDECC socket file's mode.
+    int atdecc_socket_mode{0660};
+
     /// Test-signal generator: a repeating logarithmic sine sweep (chirp) on ONE
     /// channel of the UDP tunnel source. When enabled, the sweep REPLACES the
     /// tunnel's normal source (the AVB listener stream / silence keepalive) so the
