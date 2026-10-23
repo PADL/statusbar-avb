@@ -9,6 +9,7 @@
 
 #include "wireshark_golden_atdecc.hpp"
 
+#include "statusbar/atdecc/atdecc_acmp_milan_talker.hpp"
 #include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 #include "statusbar/atdecc/atdecc_acmp_types.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
@@ -181,6 +182,40 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         frames.push_back({"acmp_get_tx_state_command", bytes_of(state)});
     }
 
+    // ---- ACMP: the Milan talker's answers (milan_talker_respond, Milan v1.2
+    // Section 5.5.4), in the 56-octet form the entity sends ----
+    {
+        MilanTalkerSource const source{
+            .stream_id = Eui64{0x70, 0xB3, 0xD5, 0xED, 0xC8, 0xF0, 0x00, 0x00},
+            .stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x83, 0x7E},
+            .stream_vlan_id = 2,
+            .avb_interface_index = 0,
+            .dest_mac_valid = true,
+            .registering_failed = true};
+        AcmpCommandResponse probe{};
+        probe.init_command(ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
+        probe.controller_entity_id = CONTROLLER;
+        probe.talker_entity_id = TALKER;
+        probe.listener_entity_id = TARGET;
+        probe.listener_unique_id = 1;
+        probe.sequence_id = 0x0103;
+        probe.flags = acmp_flags::FAST_CONNECT;
+        std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
+        auto const pdu = acmp_serialize_2016(milan_talker_respond(probe, &source, 0)->response, buf);
+        frames.push_back({"acmp_milan_probe_tx_response", {pdu.begin(), pdu.end()}});
+        auto unready = source;
+        unready.dest_mac_valid = false;
+        auto const refused = acmp_serialize_2016(milan_talker_respond(probe, &unready, 0)->response, buf);
+        frames.push_back({"acmp_milan_probe_tx_response_dest_mac_fail", {refused.begin(), refused.end()}});
+        AcmpCommandResponse state{};
+        state.init_command(ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND);
+        state.controller_entity_id = CONTROLLER;
+        state.talker_entity_id = TALKER;
+        state.sequence_id = 0x0104;
+        auto const answered = acmp_serialize_2016(milan_talker_respond(state, &source, 0)->response, buf);
+        frames.push_back({"acmp_milan_get_tx_state_response", {answered.begin(), answered.end()}});
+    }
+
     // ---- AEM: ACQUIRE_ENTITY command + response ----
     {
         AemAcquireEntityPayload acquire{};
@@ -282,6 +317,55 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         info.stream_vlan_id = 2;
         frames.push_back(
             {"aem_get_stream_info_response", aem(AEM_COMMAND_GET_STREAM_INFO, true, 8, std::span<uint8_t const>(bytes_of(info)))});
+
+        // Milan v1.2 Section 5.4.2.10: a talker's 56-octet answer (declaring,
+        // registering a Listener Asking Failed; msrp_accumulated_latency the
+        // presentation offset) and a settled listener's (pbsta COMPLETED).
+        namespace f = stream_info_flags;
+        AemStreamInfoPayload output{};
+        output.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        output.descriptor_index = 0;
+        output.flags = f::STREAM_FORMAT_VALID | f::STREAM_ID_VALID | f::MSRP_ACC_LAT_VALID | f::STREAM_DEST_MAC_VALID |
+            f::STREAM_VLAN_ID_VALID | f::REGISTERING_FAILED;
+        output.stream_format = {0x02, 0x05, 0x02, 0x20, 0x00, 0x80, 0x60, 0x00};
+        output.stream_id = Eui64{0x70, 0xB3, 0xD5, 0xED, 0xC8, 0xF0, 0x00, 0x00};
+        output.msrp_accumulated_latency = 2000000U;
+        output.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x83, 0x7E};
+        output.stream_vlan_id = 2;
+        AemStreamInfoMilanExtension output_ex{};
+        output_ex.flags_ex = stream_info_flags_ex::REGISTERING;
+        frames.push_back(
+            {"aem_get_stream_info_response_milan_output",
+             aem(AEM_COMMAND_GET_STREAM_INFO,
+                 true,
+                 11,
+                 std::span<uint8_t const>(bytes_of(output)),
+                 std::span<uint8_t const>(bytes_of(output_ex)))});
+        AemStreamInfoPayload input = info;
+        input.flags = f::STREAM_FORMAT_VALID | f::STREAM_ID_VALID | f::STREAM_DEST_MAC_VALID | f::STREAM_VLAN_ID_VALID |
+            f::MSRP_ACC_LAT_VALID | f::BOUND | f::FAST_CONNECT | f::SAVED_STATE;
+        AemStreamInfoMilanExtension input_ex{};
+        input_ex.flags_ex = stream_info_flags_ex::REGISTERING;
+        input_ex.set_probing(probing_status::COMPLETED, 0);
+        frames.push_back(
+            {"aem_get_stream_info_response_milan_input",
+             aem(AEM_COMMAND_GET_STREAM_INFO,
+                 true,
+                 12,
+                 std::span<uint8_t const>(bytes_of(input)),
+                 std::span<uint8_t const>(bytes_of(input_ex)))});
+
+        // Milan v1.3 Section 5.4.2.30-31: the presentation offset as max transit time.
+        AemSetMaxTransitTimePayload transit{};
+        transit.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        transit.descriptor_index = 0;
+        transit.max_transit_time = uint64_t{2500000};
+        frames.push_back(
+            {"aem_set_max_transit_time_command",
+             aem(AEM_COMMAND_SET_MAX_TRANSIT_TIME, false, 13, std::span<uint8_t const>(bytes_of(transit)))});
+        frames.push_back(
+            {"aem_get_max_transit_time_response",
+             aem(AEM_COMMAND_GET_MAX_TRANSIT_TIME, true, 14, std::span<uint8_t const>(bytes_of(transit)))});
     }
 
     // ---- AEM: SET_NAME, GET_COUNTERS response, SET_CONTROL with a JDKS log blob ----
