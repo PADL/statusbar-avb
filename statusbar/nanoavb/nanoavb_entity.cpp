@@ -262,7 +262,7 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
         case AEM_COMMAND_STOP_STREAMING:
             // Milan v1.2 Sections 5.4.2.19-20 and 5.3.7.3: a stream output
             // streams while it has a Listener Ready; it cannot be stopped.
-            if (profile_.milan && command_data.size() >= 2 &&
+            if (entity_profile_.milan && command_data.size() >= 2 &&
                 ((uint16_t{command_data[0]} << 8U) | command_data[1]) == DESCRIPTOR_STREAM_OUTPUT) {
                 return reject_command(AEM_STATUS_NOT_SUPPORTED, command_data, out_buffer);
             }
@@ -1215,12 +1215,12 @@ auto AemCommandHandler::handle_get_stream_info(
     // Milan v1.2 Section 5.4.2.10 (Figure 5.1): the Milan profile appends
     // flags_ex, pbsta and acmpsta; a classic entity answers IEEE 1722.1-2013's
     // 48 octets.
-    size_t const size = profile_.milan ? AEM_STREAM_INFO_MILAN_LENGTH : AemStreamInfoPayload::LENGTH;
+    size_t const size = entity_profile_.milan ? AEM_STREAM_INFO_MILAN_LENGTH : AemStreamInfoPayload::LENGTH;
     if (out_buffer.size() < size) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
     span_store(out_buffer.first(AemStreamInfoPayload::LENGTH), resp);
-    if (profile_.milan) {
+    if (entity_profile_.milan) {
         span_store(out_buffer.subspan(AemStreamInfoPayload::LENGTH, AemStreamInfoMilanExtension::LENGTH), ext);
     }
     return {.status = AEM_STATUS_SUCCESS, .size = size};

@@ -155,6 +155,11 @@ AvbEntityKit::AvbEntityKit(
             talker_->set_stream_stopped(index, !streaming);
             (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
         }
+        // Milan v1.2 Sections 5.4.2.19-20: a bound input becomes started or
+        // stopped (no effect on an unbound one); the AEM lock was checked.
+        if (type == DESCRIPTOR_STREAM_INPUT && host_.components().profile.milan) {
+            (void)host_.components().acmp_listener.milan_sinks().set_started(index, streaming);
+        }
         return atdecc::AEM_STATUS_SUCCESS;
     });
     // The data plane runs each stream in its spec's format at the kit's rate: SET_STREAM_FORMAT
@@ -177,8 +182,9 @@ AvbEntityKit::AvbEntityKit(
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
-    // The Milan talker's ACMP and AEM hooks need no network.
+    // The Milan talker's and listener's hooks need no network.
     wire_milan_talker();
+    wire_milan_listener();
 }
 
 void AvbEntityKit::on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn)
@@ -222,6 +228,10 @@ void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
     if (domain.sr_class_vid != old_vlan) {
         (void)host_.components().mvrp_handler.withdraw_vlan(old_vlan, now);
         (void)host_.components().mvrp_handler.register_vlan(domain.sr_class_vid, now);
+        // Keep the VIDs settled listener streams still use.
+        for (auto const& [vid, count] : sink_vlans_) {
+            (void)host_.components().mvrp_handler.register_vlan(vid, now);
+        }
     }
     move_talker_streams_to(domain, now);
 #if defined(__linux__)
@@ -505,11 +515,26 @@ void AvbEntityKit::wire_stream_callbacks()
                 listener_unique_id);
         });
     if (listener_ != nullptr) {
+        // A connected (classic) or settled (Milan) input: the MSRP Listener
+        // declaration, the multicast join and, for Milan, the stream's VID with
+        // MVRP (Milan v1.2 Section 4.4.1).
         host_.components().acmp_listener.set_connection_callbacks(
             [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
                 listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
+                if (host_.components().profile.milan) {
+                    if (auto const* s = host_.components().acmp_listener.get_stream(stream_index); s != nullptr) {
+                        join_sink_vlan(s->stream_vlan_id, now);
+                    }
+                    refresh_sink_registration(stream_index);
+                }
             },
-            [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
+            [this](uint16_t stream_index, TimePoint now) {
+                if (auto const* s = host_.components().acmp_listener.get_stream(stream_index);
+                    host_.components().profile.milan && s != nullptr && s->connected) {
+                    leave_sink_vlan(s->stream_vlan_id, now);
+                }
+                listener_->on_listener_disconnected(stream_index, now);
+            });
     }
 
     // AECP GET_COUNTERS (STREAM_OUTPUT talker rate + STREAM_INPUT listener
@@ -546,7 +571,8 @@ void AvbEntityKit::wire_stream_callbacks()
                 return fill_talker_stream_info(host_, descriptor_index, status, out, ext);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                return fill_listener_stream_info(host_, descriptor_index, milan, out, ext);
+                return milan ? fill_milan_listener_stream_info(host_, descriptor_index, out, ext)
+                             : fill_listener_stream_info(host_, descriptor_index, out);
             }
             return false;
         });
@@ -596,6 +622,119 @@ void AvbEntityKit::wire_milan_talker()
             host_.ctl_log().status("aem: talker stream {} presentation offset {} -> {} ns", idx, before, offset_ns);
             return atdecc::AEM_STATUS_SUCCESS;
         });
+}
+
+void AvbEntityKit::wire_milan_listener()
+{
+    auto& components = host_.components();
+    auto& sinks = components.acmp_listener.milan_sinks();
+    // A binding change is saved after the reactor pass that made it (after the
+    // ACMP response); a stopped input discards its stream (Milan v1.2 5.3.8.7).
+    sinks.set_on_binding_changed([this](uint16_t const index) {
+        persist_pending_ = true;
+        if (listener_ != nullptr) {
+            auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
+            // An unbound sink's started is the default, true.
+            listener_->set_stream_stopped(index, sink != nullptr && !sink->binding.started);
+        }
+    });
+    sinks.set_on_status_changed([this](uint16_t const index) {
+        auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
+        if (sink == nullptr) {
+            return;
+        }
+        if (!sink->bound()) {
+            host_.ctl_log().status("acmp: listener stream {} unbound", index);
+        } else {
+            host_.ctl_log().status(
+                "acmp: listener stream {} bound to {:016x}:{} {}{} (acmp status {}){}",
+                index,
+                sink->binding.talker_entity_id.to_uint64(),
+                sink->binding.talker_unique_id,
+                logging::static_str(atdecc::milan_sink_state_name(sink->state)),
+                sink->registration == atdecc::MilanTalkerRegistration::failed ? logging::lit(" talker failed")
+                                                                              : logging::lit(""),
+                sink->acmp_status,
+                sink->binding.started ? logging::lit("") : logging::lit(", stopped"));
+        }
+        (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
+    });
+    // EVT_TK_REGISTERED / EVT_TK_UNREGISTERED: every change of a talker's
+    // registration is matched against the settled sinks.
+    components.msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& sid) {
+        auto const& sinks = host_.components().acmp_listener.milan_sinks();
+        for (size_t i = 0; i < sinks.sink_count(); ++i) {
+            auto const index = static_cast<uint16_t>(i);
+            auto const* sink = sinks.sink(index);
+            if (sink->settled() && sink->stream.stream_id.to_uint64() == sid.to_uint64()) {
+                refresh_sink_registration(index);
+            }
+        }
+    });
+}
+
+void AvbEntityKit::refresh_sink_registration(uint16_t const index)
+{
+    auto& sinks = host_.components().acmp_listener.milan_sinks();
+    auto const* sink = sinks.sink(index);
+    if (sink == nullptr || !sink->settled()) {
+        return;
+    }
+    // Milan v1.2 Section 5.5.3.3: a Talker attribute matching the stream ID,
+    // destination address and VLAN ID the probe returned.
+    statusbar::tsn::StreamId sid{};
+    (void)statusbar::tsn::load_unchecked(sink->stream.stream_id.span(), &sid);
+    auto const& msrp = host_.components().msrp_handler;
+    auto const matches = [sink](srp::msrp::TalkerAdvertiseFirstValue const& fv) {
+        return fv.destination_address == sink->stream.dest_mac && fv.vlan_identifier.get() == sink->stream.vlan_id;
+    };
+    auto registration = atdecc::MilanTalkerRegistration::none;
+    if (auto const* failed = msrp.peer_talker_failed(sid); failed != nullptr && matches(failed->advertise)) {
+        registration = atdecc::MilanTalkerRegistration::failed;
+    } else if (auto const* advertise = msrp.peer_talker_advertise(sid); advertise != nullptr && matches(*advertise)) {
+        registration = atdecc::MilanTalkerRegistration::advertise;
+    }
+    sinks.set_registration(index, registration, sm::Clock::now());
+}
+
+void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
+{
+    if (vid == 0 || vid > 4094) {
+        return;
+    }
+    for (auto& [joined, count] : sink_vlans_) {
+        if (joined == vid) {
+            ++count;
+            return;
+        }
+    }
+    (void)sink_vlans_.try_push_back({vid, uint16_t{1}});
+    // The Class A VID in use is the host's (always joined).
+    if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
+        (void)host_.components().mvrp_handler.register_vlan(vid, now);
+#if defined(__linux__)
+        host_.ctl_log().warning(
+            "listener: a stream on VLAN {}, not the Class A VLAN {}: joined with MVRP, but not on the NIC's VLAN filter",
+            vid,
+            host_.components().msrp_handler.domain().sr_class_vid);
+#endif
+    }
+}
+
+void AvbEntityKit::leave_sink_vlan(uint16_t const vid, TimePoint const now)
+{
+    for (auto* it = sink_vlans_.begin(); it != sink_vlans_.end(); ++it) {
+        if (it->first != vid) {
+            continue;
+        }
+        if (--it->second == 0) {
+            sink_vlans_.erase(it);
+            if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
+                (void)host_.components().mvrp_handler.withdraw_vlan(vid, now);
+            }
+        }
+        return;
+    }
 }
 
 auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
@@ -780,8 +919,12 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
         // kept in the persistent state when there is one.
         if (persistence_active_) {
             apply_saved_listener_bindings();
-        } else {
+        } else if (!host_.components().profile.milan) {
             host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+        } else if (!config_.listener_bindings_path.empty()) {
+            host_.ctl_log().warning(
+                "kit: the Milan listener keeps its bindings in the persistent state file only: none is configured, "
+                "the listener bindings file is not used");
         }
     }
 
@@ -1046,6 +1189,7 @@ void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
 void AvbEntityKit::apply_saved_listener_bindings()
 {
     auto& listener = host_.components().acmp_listener;
+    bool const milan = host_.components().profile.milan;
     size_t armed = 0;
     for (auto const& binding : saved_bindings_) {
         bool const known = std::ranges::any_of(
@@ -1065,13 +1209,35 @@ void AvbEntityKit::apply_saved_listener_bindings()
         }
         ieee::Eui64 talker{};
         talker.from_uint64(binding.talker_entity_id);
+        if (milan) {
+            // Milan v1.2 Section 5.5.3.5.2: bound, waiting in PRB_W_AVAIL to
+            // discover the talker, then probing it again.
+            ieee::Eui64 controller{};
+            controller.from_uint64(binding.controller_entity_id);
+            if (listener.milan_sinks().restore(
+                    binding.stream_input,
+                    atdecc::MilanSinkBinding{
+                        .talker_entity_id = talker,
+                        .talker_unique_id = binding.talker_unique_id,
+                        .controller_entity_id = controller,
+                        .started = binding.started})) {
+                listener_->set_stream_stopped(binding.stream_input, !binding.started);
+                ++armed;
+            }
+            continue;
+        }
         listener.set_fast_connect_goal(binding.stream_input, talker, binding.talker_unique_id);
         ++armed;
     }
-    if (armed != 0) {
+    if (armed != 0 && milan) {
+        host_.ctl_log().status("acmp: {} saved listener binding(s) restored; probing their talkers once discovered", armed);
+    } else if (armed != 0) {
         host_.ctl_log().status("acmp: {} saved listener binding(s) loaded; fast-connect armed", armed);
     }
     saved_bindings_.clear();
+    if (milan) {
+        return;  // the sinks report their binding changes (wire_milan_listener)
+    }
     // Sticky from here on: every successful connect is remembered, every goal
     // change (connect, retarget, controller DISCONNECT) saved once the
     // reactor pass that made it is done (after the ACMP response).
@@ -1118,6 +1284,25 @@ auto AvbEntityKit::collect_persistent_state() const -> PersistentState
         // Before the listener is up (start() arms them then), the saved ones.
         if (!saved_bindings_.empty()) {
             state.listener_bindings = saved_bindings_;
+        } else if (host_.components().profile.milan) {
+            // Milan v1.2 Sections 5.3.8.2-3, 5.3.8.7: every bound input.
+            auto const& sinks = host_.components().acmp_listener.milan_sinks();
+            for (size_t i = 0; i < sinks.sink_count(); ++i) {
+                auto const index = static_cast<uint16_t>(i);
+                auto const* sink = sinks.sink(index);
+                if (!sink->bound()) {
+                    continue;
+                }
+                auto const format = storage_handler_.current_stream_format(
+                    {.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = index});
+                state.listener_bindings.push_back(
+                    {.stream_input = index,
+                     .talker_entity_id = sink->binding.talker_entity_id.to_uint64(),
+                     .talker_unique_id = sink->binding.talker_unique_id,
+                     .format = format ? format->to_uint64() : 0,
+                     .controller_entity_id = sink->binding.controller_entity_id.to_uint64(),
+                     .started = sink->binding.started});
+            }
         } else {
             for (auto const& goal : host_.components().acmp_listener.fast_connect_goals()) {
                 auto const format = storage_handler_.current_stream_format(

@@ -60,6 +60,9 @@ auto sample_state() -> PersistentState
     state.presentation_offsets.push_back({.stream_output = 2, .ns = 1500000});
     state.listener_bindings.push_back({.stream_input = 0, .talker_entity_id = 0xFFEEDDCCBBAA9988ULL, .talker_unique_id = 3, .format = 0x0205022002006000ULL});
     state.listener_bindings.push_back({.stream_input = 1, .talker_entity_id = 0x01, .talker_unique_id = 0});
+    // A Milan input's binding parameters: its controller, stopped
+    state.listener_bindings.push_back(
+        {.stream_input = 2, .talker_entity_id = 0x02, .talker_unique_id = 1, .controller_entity_id = 0x001B92FFFE000003ULL, .started = false});
     state.system_unique_id = 0xDEADBEEF;
     state.media_clock_references.push_back({.clock_domain = 0, .user_priority = 200, .domain_name = "Stage"});
     return state;
@@ -108,6 +111,10 @@ TEST(avb_persistent_state, malformed_rejected)
                              std::string(65, 'n') + "\"\n"));
     EXPECT_TRUE(is_malformed(head + "[[media_clock_reference]]\nclock_domain = 0\nuser_priority = 256\ndomain_name = \"\"\n"));
     EXPECT_TRUE(is_malformed(head + "name = 3\n"));
+    EXPECT_TRUE(is_malformed(head + "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
+                                    "started = 1\n"));
+    EXPECT_TRUE(is_malformed(head + "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
+                                    "controller_entity_id = 3\n"));
     EXPECT_TRUE(is_malformed("version = = 1\n"));
     EXPECT_TRUE(is_malformed(""));
 
