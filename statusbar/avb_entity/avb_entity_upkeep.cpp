@@ -75,6 +75,7 @@ void EntityUpkeep::tick(int64_t /*now_ns*/)
         kit_.host().ctl_log().status("entity: {} -> {}", logging::static_str(last_state_), logging::static_str(state));
         last_state_ = state;
         state_since_ = now;
+        lock_timeout_reported_ = false;
     }
     // Grandmaster regained under an unchanged identity; a changed identity is
     // handled by the announce callback. Here, so one thread drives the SM/MSRP.
@@ -85,9 +86,11 @@ void EntityUpkeep::tick(int64_t /*now_ns*/)
         }
         had_grandmaster_ = has_grandmaster;
     }
-    if (last_state_ == "Init" && now - state_since_ > GPTP_LOCK_TIMEOUT) {
+    // The gPTP watchdog reports once per stay in Init (the entity keeps
+    // advertising and waiting for a lock either way).
+    if (last_state_ == "Init" && !lock_timeout_reported_ && now - state_since_ > GPTP_LOCK_TIMEOUT) {
         kit_.on_timeout(sm_now);
-        state_since_ = now;
+        lock_timeout_reported_ = true;
     }
     // Talker admission is time-dependent (the Listener Ready grace window):
     // re-evaluate it so an expiry with no MSRP event still reaches the
