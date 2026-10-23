@@ -9,6 +9,7 @@ import os
 import re
 
 from .model import (
+    AUDIO_MAP_MAX_MAPPINGS,
     AudioCluster,
     AudioMap,
     AudioMapping,
@@ -274,7 +275,12 @@ def _parse_port(
         mappings = [
             _parse_mapping(m, f"{context}.maps[{i}]") for i, m in enumerate(maps_data)
         ]
-        audio_maps = [AudioMap(mappings=mappings)]
+        # One AUDIO_MAP holds at most AUDIO_MAP_MAX_MAPPINGS: a wider port
+        # (more than 62 channels mapped) takes several, in order.
+        audio_maps = [
+            AudioMap(mappings=mappings[i : i + AUDIO_MAP_MAX_MAPPINGS])
+            for i in range(0, len(mappings), AUDIO_MAP_MAX_MAPPINGS)
+        ]
     controls = [
         _parse_control(c, strings, f"{context}.controls[{i}]")
         for i, c in enumerate(port_obj.get("controls", []))

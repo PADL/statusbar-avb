@@ -299,8 +299,10 @@ class MsrpHandler
     {
         size_t idx = 0;
         bool found = false;
+        TalkerStreamSrpInfo previous{};
         for (size_t i = 0; i < talker_streams_.size(); ++i) {
             if (talker_streams_[i].stream_id == info.stream_id) {
+                previous = talker_streams_[i];
                 talker_streams_[i] = info;
                 talker_streams_[i].state = TalkerReservationState::Advertising;
                 idx = i;
@@ -333,7 +335,16 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
-        (void)participant_.declare_talker_advertise(fv, now);
+        // A full attribute table is the caller's to see; put the reservation entry back as it
+        // was so the table never claims an Advertise that was never declared.
+        if (auto status = participant_.declare_talker_advertise(fv, now); !status) {
+            if (found) {
+                talker_streams_[idx] = previous;
+            } else {
+                talker_streams_.pop_back();
+            }
+            return failure(status.error());
+        }
         return idx;
     }
 
@@ -390,55 +401,14 @@ class MsrpHandler
 
     [[nodiscard]] auto listener_ready(StreamId const& stream_id, TimePoint now) -> StatusValue<size_t>
     {
-        size_t idx = 0;
-        bool found = false;
-        for (size_t i = 0; i < listener_streams_.size(); ++i) {
-            if (listener_streams_[i].stream_id == stream_id) {
-                listener_streams_[i].state = ListenerReservationState::Ready;
-                idx = i;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            // Reject rather than throw when the reservation table is full (reactor path).
-            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = ListenerReservationState::Ready}) == nullptr) {
-                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
-            }
-            idx = listener_streams_.size() - 1;
-        }
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
-        (void)participant_.declare_listener(stream_id, statusbar::srp::msrp::ListenerDeclaration::Ready, now);
-        return idx;
+        return declare_listener_stream(stream_id, ListenerReservationState::Ready, now);
     }
 
     [[nodiscard]] auto listener_asking_failed(StreamId const& stream_id, TimePoint now) -> Status
     {
-        bool found = false;
-        for (auto& stream : listener_streams_) {
-            if (stream.stream_id == stream_id) {
-                stream.state = ListenerReservationState::AskingFailed;
-                found = true;
-                break;
-            }
+        if (auto const r = declare_listener_stream(stream_id, ListenerReservationState::AskingFailed, now); !r) {
+            return failure(r.error());
         }
-        if (!found) {
-            // Reject rather than throw when the reservation table is full (reactor path).
-            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = ListenerReservationState::AskingFailed}) ==
-                nullptr) {
-                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
-            }
-        }
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
-        (void)participant_.declare_listener(stream_id, statusbar::srp::msrp::ListenerDeclaration::AskingFailed, now);
         return success();
     }
 
@@ -524,6 +494,47 @@ class MsrpHandler
     [[nodiscard]] auto listener_streams() const noexcept -> std::span<ListenerStreamSrpInfo const> { return listener_streams_; }
 
   private:
+    /// Record @p stream_id's local reservation as @p state (Ready or AskingFailed) and declare the
+    /// Listener attribute; a failed declaration (a full table) puts the entry back as it was.
+    /// Returns the entry's index.
+    [[nodiscard]] auto declare_listener_stream(StreamId const& stream_id, ListenerReservationState const state, TimePoint now)
+        -> StatusValue<size_t>
+    {
+        size_t idx = listener_streams_.size();
+        for (size_t i = 0; i < listener_streams_.size(); ++i) {
+            if (listener_streams_[i].stream_id == stream_id) {
+                idx = i;
+                break;
+            }
+        }
+        bool const added = idx == listener_streams_.size();
+        if (added) {
+            // Reject rather than throw when the reservation table is full (reactor path).
+            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = state}) == nullptr) {
+                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
+            }
+        }
+        ListenerReservationState const previous = listener_streams_[idx].state;
+        listener_streams_[idx].state = state;
+
+        if (!started_) {
+            participant_.start(now);
+            started_ = true;
+        }
+        auto const decl = state == ListenerReservationState::Ready ? statusbar::srp::msrp::ListenerDeclaration::Ready
+                                                                   : statusbar::srp::msrp::ListenerDeclaration::AskingFailed;
+        if (auto status = participant_.declare_listener(stream_id, decl, now); !status) {
+            // A full attribute table: never declared.
+            if (added) {
+                listener_streams_.pop_back();
+            } else {
+                listener_streams_[idx].state = previous;
+            }
+            return failure(status.error());
+        }
+        return idx;
+    }
+
     /// Forward a listener register/leave for one of OUR talker streams to the
     /// on_talker_listener hook, reporting the aggregate "may transmit" state.
     void notify_talker_listener(tsn::StreamId const& sid)

@@ -992,6 +992,13 @@ TEST(msrp_config_validate, valid_default)
     EXPECT_TRUE(is_success(cfg.validate()));
 }
 
+TEST(msrp_config_validate, reserved_exceeds_table)
+{
+    MsrpConfig cfg = test_msrp_config();
+    cfg.reserved_talker_advertise = cfg.max_talker_advertise + 1;
+    EXPECT_TRUE(is_failure(cfg.validate()));
+}
+
 TEST(msrp_config_validate, invalid_exceeds)
 {
     MsrpConfig cfg{};
@@ -1675,6 +1682,63 @@ TEST(msrp_participant, peer_declaration_does_not_overwrite_our_talker)
     }
     // The collision is observable.
     EXPECT_TRUE(a.foreign_declaration_conflict_count() > 0);
+}
+
+// Foreign Talker Advertises a bridge propagates get only max - reserved slots: our own Talker
+// Advertises, declared later, still declare, and the one our listener stream is bound to registers.
+TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
+{
+    auto const run = [](size_t reserved, bool expect_own_ok) {
+        MsrpConfig cfg = test_msrp_config();  // 8 Talker Advertises, 8 Listeners
+        cfg.reserved_talker_advertise = reserved;
+        cfg.reserved_listeners = reserved;
+        MsrpParticipant a{cfg, 0xa5a5};
+        MsrpConfig bridge_cfg = test_msrp_config();
+        bridge_cfg.max_talker_advertise = 16;
+        bridge_cfg.max_listeners = 16;
+        MsrpParticipant b{bridge_cfg, 0xb6b6};
+        Fabric fab{};
+        a.set_send_pdu(fab.make_a_sender());
+        b.set_send_pdu(fab.make_b_sender());
+        TestClock clock{};
+        a.start(clock.now);
+        b.start(clock.now);
+
+        // The "bridge" propagates 8 foreign advertises and 8 foreign Listeners.
+        for (uint16_t uid = 0x0100; uid < 0x0108; ++uid) {
+            EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(uid), clock.now)));
+            EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(uid + 0x0100), ListenerDeclaration::Ready, clock.now)));
+        }
+        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        fab.deliver_b_to_a(a, clock.now);
+        EXPECT_EQ(a.talker_advertise_count(), 8u - reserved);
+        EXPECT_EQ(a.listener_count(), 8u - reserved);
+
+        // Our two talker streams and our listener stream, declared later.
+        bool const t1 = is_success(a.declare_talker_advertise(make_talker_adv(0x0001), clock.now));
+        bool const t2 = is_success(a.declare_talker_advertise(make_talker_adv(0x0002), clock.now));
+        bool const l1 = is_success(a.declare_listener(make_stream_id(0x0300), ListenerDeclaration::AskingFailed, clock.now));
+        EXPECT_EQ(t1 && t2 && l1, expect_own_ok);
+        if (!expect_own_ok) {
+            return;
+        }
+
+        // The talker our listener stream is bound to comes up: its Advertise
+        // registers, as do the peer Listeners for our talker streams.
+        EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(0x0300), clock.now)));
+        EXPECT_TRUE(is_success(b.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now)));
+        // Yet more foreign traffic is still held to the remainder.
+        EXPECT_TRUE(is_success(b.declare_talker_advertise(make_talker_adv(0x0108), clock.now)));
+        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        fab.deliver_b_to_a(a, clock.now);
+        EXPECT_NE(a.find_talker_advertise(make_stream_id(0x0300)), nullptr);
+        EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0108)), nullptr);
+        EXPECT_NE(a.find_listener(make_stream_id(0x0001)), nullptr);
+        EXPECT_TRUE(a.listener_permits_transmit(make_stream_id(0x0001)));
+        EXPECT_EQ(a.talker_advertise_count(), 8u - reserved + 3u);
+    };
+    run(0, false);  // unreserved: the foreign advertises refuse ours
+    run(4, true);   // 2 talker + 2 listener streams' worth reserved
 }
 
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)

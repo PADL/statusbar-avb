@@ -2684,6 +2684,108 @@ def test_downgrade_strip_removes_2021_only_descriptors():
     print("  [+] downgrade --strip removes 2021-only: OK")
 
 
+def test_json_audio_maps_split_at_62_mappings():
+    """A stream port's identity maps fill AUDIO_MAPs of at most 62 mappings.
+
+    32 channels (the media bridge's widest stream) fit one AUDIO_MAP of
+    8 + 32 x 8 = 264 octets; 64 channels take two (62 + 2), and the
+    STREAM_PORT counts both. One AudioMap of more than 62 is refused.
+    """
+    import struct
+
+    from aemxml.json_reader import read_json
+    from aemxml.model import (
+        AUDIO_MAP_MAX_MAPPINGS,
+        DESCRIPTOR_AUDIO_MAP,
+        AudioMap,
+        AudioMapping,
+    )
+
+    def model(channels: int) -> str:
+        return json.dumps(
+            {
+                "entity": {
+                    "name": "Wide",
+                    "configurations": [
+                        {
+                            "name": "Wide",
+                            "streams_in": [
+                                {
+                                    "name": "In",
+                                    "format": {
+                                        "type": "AAF",
+                                        "rate": 48000,
+                                        "channels": channels,
+                                        "depth": 32,
+                                    },
+                                }
+                            ],
+                            "audio_units": [
+                                {
+                                    "name": "Unit",
+                                    "rates": [48000],
+                                    "input_ports": [
+                                        {
+                                            "clusters": [
+                                                {"name": "In", "channels": channels}
+                                            ],
+                                            "maps": [
+                                                {
+                                                    "stream": 0,
+                                                    "stream_ch": ch,
+                                                    "cluster": 0,
+                                                    "cluster_ch": ch,
+                                                }
+                                                for ch in range(channels)
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                            "avb_interfaces": [{"name": "eth0"}],
+                            "clock_sources": [{"name": "Internal", "type": "INTERNAL"}],
+                            "clock_domains": [
+                                {"name": "Domain", "source": 0, "sources": [0]}
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+
+    assert AUDIO_MAP_MAX_MAPPINGS == 62
+    for channels, sizes in ((32, [264]), (62, [504]), (64, [504, 24])):
+        descs, _ = flatten(read_json(model(channels)))
+        maps = [d for d in descs if d.descriptor_type == DESCRIPTOR_AUDIO_MAP]
+        assert [len(d.wire_bytes) for d in maps] == sizes, (
+            channels,
+            [len(d.wire_bytes) for d in maps],
+        )
+        port = next(
+            d for d in descs if d.descriptor_type == DESCRIPTOR_STREAM_PORT_INPUT
+        )
+        number_of_maps, base_map = struct.unpack_from(">HH", port.wire_bytes, 16)
+        assert (number_of_maps, base_map) == (len(sizes), 0)
+        # The mappings run on across the maps: the second starts at stream channel 62.
+        if len(maps) > 1:
+            assert struct.unpack_from(">H", maps[1].wire_bytes, 10)[0] == 62
+
+    too_many = AudioMap(
+        mappings=[
+            AudioMapping(stream_channel=ch, cluster_channel=ch) for ch in range(63)
+        ]
+    )
+    try:
+        from aemxml.flatten import _serialize_audio_map
+
+        _serialize_audio_map(too_many, 0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an AUDIO_MAP of 63 mappings serialized")
+    print("  [+] json audio maps split at 62 mappings: OK")
+
+
 def test_json_timing_clock_source():
     """A JSON model whose clock source is a TIMING descriptor (Milan 1.2 7.5:
     EXTERNAL, located at TIMING -> PTP_INSTANCE -> PTP_PORT) compiles with the
@@ -2855,6 +2957,7 @@ def main():
         test_downgrade_rejects_2021_only_descriptors,
         test_downgrade_strip_removes_2021_only_descriptors,
         test_json_timing_clock_source,
+        test_json_audio_maps_split_at_62_mappings,
     ]
     passed = 0
     failed = 0

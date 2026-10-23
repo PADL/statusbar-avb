@@ -299,7 +299,7 @@ TEST(audio_io_print, print_state_does_not_crash)
 TEST(audio_io_gate, default_suppresses_all_talkers_without_listener)
 {
     // Default config gates on listener readiness. Fresh entity has no MSRP
-    // Listener Ready and no ACMP connection on any stream, so every talker
+    // Listener Ready on any stream, so every talker
     // (AM824, AAF, CRF) must stay off the wire.
     auto blob = load_file(entity_audio_bin_path());
     auto config = make_config_with_blob(std::move(blob));

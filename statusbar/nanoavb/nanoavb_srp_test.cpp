@@ -12,8 +12,10 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <span>
 #include <system_error>
+#include <vector>
 
 using namespace statusbar::nanoavb;
 using statusbar::ieee::Eui48;
@@ -316,6 +318,76 @@ TEST(nanoavb_srp_msrp, on_talker_listener_fires_when_listener_ready)
     EXPECT_FALSE(fired_for_other);
 }
 
+// on_talker_listener permits transmission for Listener Ready or Ready Failed, not Asking Failed,
+// and stops once the registrar leaves (Milan v1.2 Section 5.3.7.3).
+TEST(nanoavb_srp_msrp, on_talker_listener_permits_ready_and_ready_failed_only)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    using statusbar::srp::msrp::MsrpConfig;
+
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> talker_out;
+    std::vector<std::vector<uint8_t>> listener_out;
+    MsrpHandler<> talker{MsrpConfig{}, MsrpCallbacks{.send_packet = [&talker_out](std::span<uint8_t const> p) {
+                             talker_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+    statusbar::srp::msrp::MsrpParticipant listener{MsrpConfig{}};
+    listener.set_send_pdu([&listener_out](std::span<uint8_t const> p) {
+        listener_out.emplace_back(p.begin(), p.end());
+        return true;
+    });
+    listener.start(now);
+
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(7);
+    std::optional<bool> permits;
+    talker.set_on_talker_listener([&](StreamId const& s, bool ready) {
+        if (s == sid) {
+            permits = ready;
+        }
+    });
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+    info.max_frame_size = 416;
+    info.max_interval_frames = 1;
+    (void)talker.talker_advertise(info, now);
+
+    auto const run = [&](int rounds) {
+        for (int round = 0; round < rounds; ++round) {
+            now += std::chrono::milliseconds{120};
+            talker.tick(now);
+            listener.tick(now);
+            for (auto const& p : talker_out) {
+                listener.receive_pdu(p, now);
+            }
+            talker_out.clear();
+            for (auto const& p : listener_out) {
+                talker.receive_packet(p, now);
+            }
+            listener_out.clear();
+        }
+    };
+
+    (void)listener.declare_listener(sid, ListenerDeclaration::AskingFailed, now);
+    run(12);
+    EXPECT_TRUE(permits.has_value());
+    EXPECT_FALSE(permits.value_or(true));
+
+    (void)listener.declare_listener(sid, ListenerDeclaration::ReadyFailed, now);
+    run(12);
+    EXPECT_TRUE(permits.value_or(false));
+
+    (void)listener.declare_listener(sid, ListenerDeclaration::Ready, now);
+    run(12);
+    EXPECT_TRUE(permits.value_or(false));
+
+    (void)listener.withdraw_listener(sid, now);
+    run(40);
+    EXPECT_FALSE(permits.value_or(true));
+}
+
 // Kit phase 5d: listener_attach declares AskingFailed until the talker's
 // Advertise is registered from the wire, then upgrades to Ready
 // automatically (802.1Q 35.2.4.4) — the MSRP half of a fast-connect
@@ -430,6 +502,63 @@ TEST(nanoavb_srp_msrp, listener_asking_failed)
     auto const* stored = handler.get_listener_stream(stream_id);
     EXPECT_TRUE(stored != nullptr);
     EXPECT_EQ(stored->state, ListenerReservationState::AskingFailed);
+}
+
+// A full Talker Advertise table: the declaration fails, and the local
+// reservation entry is rolled back -- a new entry dropped (so listener events
+// for it are not forwarded as ours), an existing one restored.
+TEST(nanoavb_srp_msrp, talker_advertise_failure_leaves_no_reservation)
+{
+    statusbar::srp::msrp::MsrpConfig config{};
+    config.max_talker_advertise = 1;
+    config.max_interesting_stream_ids = 1;  // validate(): no more than the Advertise table
+    MsrpHandler<> handler{config};
+    auto const info = [](uint16_t unique) {
+        TalkerStreamSrpInfo i;
+        i.stream_id.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+        i.stream_id.set_unique_id(unique);
+        i.max_frame_size = 416;
+        i.max_interval_frames = 1;
+        return i;
+    };
+    TimePoint const now{std::chrono::seconds{1}};
+
+    EXPECT_TRUE(handler.talker_advertise(info(1), now).has_value());
+    EXPECT_FALSE(handler.talker_advertise(info(2), now).has_value());
+    EXPECT_TRUE(handler.get_talker_stream(info(2).stream_id) == nullptr);
+    EXPECT_EQ(handler.talker_streams().size(), size_t{1});
+    EXPECT_EQ(handler.get_talker_stream(info(1).stream_id)->state, TalkerReservationState::Advertising);
+    // Re-advertising the declared stream still works.
+    EXPECT_TRUE(handler.talker_advertise(info(1), now).has_value());
+}
+
+// A full Listener attribute table: the declaration fails, and the local
+// reservation entry must not stay marked as if it had been declared -- a new
+// entry is dropped, an existing one keeps its previous state.
+TEST(nanoavb_srp_msrp, listener_declare_failure_leaves_no_reservation)
+{
+    statusbar::srp::msrp::MsrpConfig config{};
+    config.max_listeners = 1;
+    MsrpHandler<> handler{config};
+    auto const sid = [](uint16_t unique) {
+        statusbar::tsn::StreamId stream_id;
+        stream_id.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+        stream_id.set_unique_id(unique);
+        return stream_id;
+    };
+    TimePoint const now{std::chrono::seconds{1}};
+
+    EXPECT_TRUE(handler.listener_ready(sid(1), now).has_value());
+    EXPECT_FALSE(handler.listener_ready(sid(2), now).has_value());
+    EXPECT_TRUE(handler.get_listener_stream(sid(2)) == nullptr);
+    EXPECT_FALSE(handler.listener_asking_failed(sid(3), now).has_value());
+    EXPECT_TRUE(handler.get_listener_stream(sid(3)) == nullptr);
+    EXPECT_EQ(handler.listener_streams().size(), size_t{1});
+
+    // The declared stream is untouched, and re-declaring it still works.
+    EXPECT_EQ(handler.get_listener_stream(sid(1))->state, ListenerReservationState::Ready);
+    EXPECT_TRUE(handler.listener_asking_failed(sid(1), now).has_value());
+    EXPECT_EQ(handler.get_listener_stream(sid(1))->state, ListenerReservationState::AskingFailed);
 }
 
 TEST(nanoavb_srp_msrp, listener_withdraw)
