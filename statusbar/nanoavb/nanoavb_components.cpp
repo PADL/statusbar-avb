@@ -276,6 +276,10 @@ void AtdeccNetHandler::dispatch_frame(
             if (adp_discovery_ != nullptr) {
                 adp_discovery_->receive_adpdu(adp, src_mac, sm_now);
             }
+            // The Milan listener's per-sink talker discovery (Section 5.6.4)
+            // compares the talker's gPTP grandmaster and domain with ours.
+            acmp_listener_.receive_adpdu(
+                adp, adp_advertiser_.adpdu().gptp_grandmaster_id, adp_advertiser_.adpdu().gptp_domain_number.get(), sm_now);
             // A talker announcing ENTITY_DEPARTING must tear down any listener sink
             // still connected to it: ACMP alone only clears a sink on an explicit
             // controller DISCONNECT_RX, so otherwise the sink would report connected
@@ -389,7 +393,7 @@ NanoAvbComponents::NanoAvbComponents(
     mvu_handler.set_profile(profile);
     mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
     mvu_handler.set_clock_domain_count(clock_domain_count(entity_model.descriptor_storage()));
-    acmp_talker.set_milan(profile.milan);
+    wire_profile();
 }
 
 namespace {
@@ -448,7 +452,18 @@ NanoAvbComponents::NanoAvbComponents(
     mvu_handler.set_profile(profile);
     mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
     mvu_handler.set_clock_domain_count(clock_domain_count(handler.descriptor_storage()));
+    wire_profile();
+}
+
+void NanoAvbComponents::wire_profile()
+{
     acmp_talker.set_milan(profile.milan);
+    acmp_listener.set_milan(profile.milan);
+    msrp_handler.set_listener_waits_for_talker(profile.milan);
+    // Milan v1.2 Section 5.5.3.5.3 step 1: a locked entity takes bindings
+    // only from the locking controller.
+    acmp_listener.milan_sinks().set_authorized(
+        [this](Eui64 const& controller) { return !aem_handler.exclusive_access_status(controller).has_value(); });
 }
 
 //

@@ -119,6 +119,13 @@ auto hex_at(Table const& table, std::string_view const key) -> std::optional<uin
     return n;
 }
 
+/// A boolean key; nullopt when absent or mistyped
+auto bool_at(Table const& table, std::string_view const key) -> std::optional<bool>
+{
+    auto const* value = table.get(key);
+    return value != nullptr ? value->as_boolean() : std::nullopt;
+}
+
 /// A string of at most 64 octets (an ATDECC string)
 auto name_at(Table const& table, std::string_view const key) -> std::optional<std::string>
 {
@@ -262,6 +269,12 @@ auto serialize_persistent_state(PersistentState const& state) -> std::string
         if (binding.format != 0) {
             out += std::format("format = {}\n", toml_hex(binding.format));
         }
+        if (binding.controller_entity_id != 0) {
+            out += std::format("controller_entity_id = {}\n", toml_hex(binding.controller_entity_id));
+        }
+        if (!binding.started) {
+            out += "started = false\n";
+        }
     }
     for (auto const& mcr : state.media_clock_references) {
         out += std::format(
@@ -388,11 +401,19 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
                 auto const talker = hex_at(t, "talker_entity_id");
                 auto const unique_id = u16_at(t, "talker_unique_id");
                 auto const format = t.contains("format") ? hex_at(t, "format") : std::optional<uint64_t>{0};
-                if (!input || !talker || !unique_id || !format) {
+                auto const controller =
+                    t.contains("controller_entity_id") ? hex_at(t, "controller_entity_id") : std::optional<uint64_t>{0};
+                auto const started = t.contains("started") ? bool_at(t, "started") : std::optional<bool>{true};
+                if (!input || !talker || !unique_id || !format || !controller || !started) {
                     return false;
                 }
                 state.listener_bindings.push_back(
-                    {.stream_input = *input, .talker_entity_id = *talker, .talker_unique_id = *unique_id, .format = *format});
+                    {.stream_input = *input,
+                     .talker_entity_id = *talker,
+                     .talker_unique_id = *unique_id,
+                     .format = *format,
+                     .controller_entity_id = *controller,
+                     .started = *started});
                 return true;
             }) &&
         each_table(root, "media_clock_reference", [&](Table const& t) {

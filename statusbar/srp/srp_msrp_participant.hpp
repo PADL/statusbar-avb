@@ -339,6 +339,13 @@ class MsrpParticipantT
     /// Look up a locally known Talker Failed by tsn::StreamId.
     [[nodiscard]] auto find_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
+    /// The Talker Advertise for @p id while a peer's declaration is registered (In or Leaving), or
+    /// nullptr: never a record the peer has left or one only we declare.
+    [[nodiscard]] auto find_registered_talker_advertise(tsn::StreamId const& id) const noexcept -> TalkerAdvertiseFirstValue const*;
+
+    /// The Talker Failed for @p id while registered, or nullptr.
+    [[nodiscard]] auto find_registered_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
+
     /// Look up a locally known Listener by tsn::StreamId and return its
     /// current substate if found.
     [[nodiscard]] auto find_listener(tsn::StreamId const& id) const noexcept -> ListenerRecord const*;
