@@ -473,7 +473,7 @@ def generate_atdecc_fields() -> str:
         out.append(f"    [0x{subtype:02X}] = {addname(layout)},")
     out += ["}", ""]
     out.append(
-        "--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, tail_field, tail_length }"
+        "--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, tail_field, tail_length, long }"
     )
     out.append("M.mvu_payloads = {}")
     for code, (cmd, rsp) in sorted(A.MVU_PAYLOADS.items()):
@@ -487,7 +487,7 @@ def generate_atdecc_fields() -> str:
                 tail_field = fkey(p.layout, f)
             return (
                 f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = {addname(p.layout)}, "
-                f"tail_field = {tail_field}, tail_length = {p.optional_tail_length} }}"
+                f"tail_field = {tail_field}, tail_length = {p.optional_tail_length}, long = {mspec(p.long_form)} }}"
             )
 
         out.append(
