@@ -5,6 +5,7 @@
 // Discovers entities via ADP, reads ENTITY descriptors via AEM,
 // and manages stream connections via ACMP.
 // Usage: statusbar-atdecc-controller --interface=eth0 [--instance=N] [--controller-entity-id=EUI64]
+//        statusbar-atdecc-controller --socket=/run/mediabridge/atdecc.sock
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_service.hpp"
@@ -86,8 +87,8 @@ int main(int argc, char* argv[])
     if (!cli_result) {
         return config::handled_builtin_command(cli_result) ? 0 : 1;
     }
-    if (config.interface_name.empty()) {
-        std::println(stderr, "Error: --interface is required");
+    if (config.interface_name.empty() == config.socket_path.empty()) {
+        std::println(stderr, "Error: exactly one of --interface or --socket is required");
         return 1;
     }
 
@@ -101,7 +102,9 @@ int main(int argc, char* argv[])
     // Create the controller backend (platform default: AVB framework on
     // macOS, raw socket elsewhere) and the controller pollable on it.
     std::string backend_error;
-    auto service = atdecc_tools::make_controller_service(g_backend, config.interface_name, controller_id, backend_error);
+    auto service = config.socket_path.empty()
+        ? atdecc_tools::make_controller_service(g_backend, config.interface_name, controller_id, backend_error)
+        : atdecc_tools::make_local_controller_service(config.socket_path, controller_id, backend_error);
     if (service == nullptr) {
         std::println(stderr, "Error: {}", backend_error);
         return 1;
@@ -115,7 +118,7 @@ int main(int argc, char* argv[])
     // Create TUI app (presentation layer). It subscribes to events from
     // the business layer (ControllerSimple) and emits actions back.
     ControllerTuiApp app{};
-    app.set_interface_name(config.interface_name);
+    app.set_interface_name(config.socket_path.empty() ? config.interface_name : config.socket_path);
 
     // Set up terminal
     tui::TerminalTui tui;

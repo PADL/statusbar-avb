@@ -204,6 +204,12 @@ class ControllerService
 [[nodiscard]] auto make_rawnet_controller_service(net::RawnetContext context, ieee::Eui64 controller_id)
     -> std::unique_ptr<ControllerService>;
 
+/// The same backend over a local entity's ATDECC socket at @p socket_path
+/// (nanoavb_local_port.hpp): no raw-socket privileges, and only that entity
+/// is reachable. Returns nullptr with the reason in @p error on failure.
+[[nodiscard]] auto make_local_controller_service(std::string const& socket_path, ieee::Eui64 controller_id, std::string& error)
+    -> std::unique_ptr<ControllerService>;
+
 #if defined(__APPLE__)
 /// The macOS backend over the system AVB framework (AudioVideoBridging):
 /// the framework owns discovery and AECP/ACMP timing, and this is the only

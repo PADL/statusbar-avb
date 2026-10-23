@@ -94,8 +94,8 @@ see "Saved state" in `ENTITY_CONSTRUCTION_KIT.md`.
 |---|---|---|
 | `statusbar-atdecc-ctl` | Scriptable controller: resolve entity names → connect/disconnect, set/get clock source and signal selector, probe RX/TX state, identify, validate models, run TOML batches, supervise connections. | all |
 | `statusbar-acmp-controller` | One-shot ACMP CONNECT/DISCONNECT (RX, to the listener) or CONNECT_TX/DISCONNECT_TX (direct to the talker) to set up or tear down a stream. | all |
-| `statusbar-atdecc-controller` | Interactive terminal-UI controller (ADP discovery, AEM descriptor read, ACMP connection management). | all |
-| `statusbar-atdecc-monitor` | Passively monitor ADP/AEM/ACMP from a live interface or a pcap; optional active descriptor-tree enumeration of one target. | all |
+| `statusbar-atdecc-controller` | Interactive terminal-UI controller (ADP discovery, AEM descriptor read, ACMP connection management), on an interface or a local entity's ATDECC socket. | all |
+| `statusbar-atdecc-monitor` | Passively monitor ADP/AEM/ACMP from a live interface, a local entity's ATDECC socket, or a pcap; optional active descriptor-tree enumeration of one target. | all |
 | `statusbar-aem-control` | GET or SET one CONTROL descriptor's values on a target (`--set=` comma-separated values; omit to GET). | all |
 | `statusbar-aem-get-counters` | Poll a target's descriptor counters (GET_COUNTERS) at an interval, printing values and deltas. | all |
 | `statusbar-aem-set-clock-source` | Discover a target and SET (default) or GET its CLOCK_DOMAIN media-clock source. | all |
@@ -125,6 +125,7 @@ statusbar-acmp-controller --interface=eth0 --action=CONNECT \
   --listener-entity-id=aa:bb:cc:dd:ee:ff:00:11 --listener-uid=1
 statusbar-atdecc-controller --interface=eth0
 statusbar-atdecc-monitor --interface=eth0 --show-descriptors
+statusbar-atdecc-monitor --socket=/run/mediabridge/atdecc.sock --enumerate
 statusbar-atdecc-monitor --pcap=capture.pcapng --enumerate
 statusbar-aem-control --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=1          # GET
 statusbar-aem-control --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=1 --set=-3.0
@@ -135,6 +136,13 @@ statusbar-descriptor-storage entity.aem
 statusbar-aemxml json2bin examples/dual.json entity.bin
 statusbar-aemxml dump entity.bin
 ```
+
+`--socket=PATH` (monitor and controller) reaches one entity on this host
+through its local ATDECC socket (an entity started with
+`--atdecc.socket=PATH`, or mediabridge's `[avb] atdecc_socket`) instead of
+`--interface`: no raw-socket privileges, only that entity, and only its own
+traffic (see NANOAVB_ARCHITECTURE.md, "Local ATDECC socket"). The tools send
+an ENTITY_DISCOVER every 5 s while otherwise idle.
 
 `atdecc-ctl --command` accepts `list`, `validate`, `connect`, `disconnect`,
 `get-rx-state`, `get-tx-state`, `set-clock-source`, `get-clock-source`,

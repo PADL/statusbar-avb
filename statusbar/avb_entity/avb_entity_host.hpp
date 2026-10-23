@@ -206,14 +206,17 @@ class AvbEntityHost
     /// is written anywhere the configuration did not name.
     void enable_listener_binding_persistence(std::string path);
 
-    /// Called after any Milan sink's binding parameters changed (a bind, an
-    /// unbind, a started/stopped change), once they are saved where they are
-    /// saved at all, and before the controller is answered. For what follows
-    /// a binding beside its file: the kit's stopped state of each stream
-    /// input. Reactor thread.
-    void set_on_milan_bindings_changed(statusbar::sg14::inplace_function<void(), 64> fn)
+    /// Serve local ATDECC controllers on an AF_UNIX datagram socket at @p path with
+    /// file mode @p mode. Call before start_control_plane(); empty disables. A socket
+    /// that will not open is a warning: the entity still serves the network.
+    void set_local_atdecc_socket(std::string path, int mode = 0660)
     {
-        on_milan_bindings_changed_ = std::move(fn);
+        local_atdecc_socket_ = nanoavb::AtdeccLocalPort::Config{.path = std::move(path), .mode = mode};
+    }
+    /// The local ATDECC port while the control plane is up, or nullptr.
+    [[nodiscard]] auto local_atdecc_port() noexcept -> nanoavb::AtdeccLocalPort*
+    {
+        return net_handlers_ != nullptr ? net_handlers_->local_port() : nullptr;
     }
 
     // --- Logging -----------------------------------------------------------------
@@ -448,7 +451,7 @@ class AvbEntityHost
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
-    statusbar::sg14::inplace_function<void(), 64> on_milan_bindings_changed_{};
+    nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
     bool running_{false};
     bool adp_held_{false};  ///< see hold_adp()
     bool adp_owed_{false};  ///< a Link Up under the hold has not started ADP yet
