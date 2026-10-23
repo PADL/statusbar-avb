@@ -75,6 +75,9 @@ static_assert(
     nanoavb::DescriptorStorageHandler::MAX_STREAM_STATES >= 2 * MAX_ENTITY_STREAMS,
     "AEM stream runtime state (SET_STREAM_FORMAT, START/STOP_STREAMING): inputs and outputs share the table");
 static_assert(
+    TalkerDeclarations::LISTENER_GRACE_NS == TalkerGate::GRACE_NS,
+    "a departed Listener keeps its stream declared as long as it keeps the gate open");
+static_assert(
     nanoavb::NanoAvbAcmpListener::MAX_FAST_CONNECT_GOALS >= MAX_ENTITY_STREAMS,
     "fast-connect goals and persisted listener bindings: one per STREAM_INPUT");
 static_assert(
@@ -783,6 +786,21 @@ class AvbEntityKit
     /// Stream @p index's identity (ACMP), VLAN and priority (the domain in force) into @p info.
     void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
     void advertise_talker_streams(TimePoint time);
+    void withdraw_talker_streams(TimePoint time);
+    /// One pass of update_talker_declarations over the talker streams.
+    void run_talker_declarations(int64_t now_ns, bool refresh);
+    /// The ACMP talker's Milan hooks, the AEM presentation offset store and
+    /// the GET_STREAM_INFO fills.
+    void wire_milan_talker();
+    /// Re-read talker stream @p idx's registered Listener at steady-clock
+    /// @p now_ns; true when it changed (the declaration predicate and
+    /// GET_STREAM_INFO follow it).
+    auto refresh_talker_listener(uint16_t idx, int64_t now_ns) -> bool;
+    /// The talker spec index for @p stream_id, or nullopt.
+    [[nodiscard]] auto talker_index_of(nanoavb::StreamId const& stream_id) const noexcept -> std::optional<uint16_t>;
+    [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
+    /// Fires the unsolicited GET_STREAM_INFO for talker stream @p idx.
+    void notify_talker_stream_info(uint16_t idx);
     [[nodiscard]] auto setup_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
     /// Recompute the admitted set at steady-clock @p now_ns after a gate input
     /// changed (or time passed); fire on_admission_changed_ when it differs
@@ -792,6 +810,11 @@ class AvbEntityKit
     [[nodiscard]] static auto steady_now_ns() noexcept -> int64_t
     {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    /// Control-plane time @p time as the gate's steady-clock ns.
+    [[nodiscard]] static auto steady_ns_of(TimePoint const time) noexcept -> int64_t
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
     }
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
@@ -815,6 +838,24 @@ class AvbEntityKit
 
     /// Per-stream transmit gate (MSRP listener declaration + grace). Binds config_ + components.
     TalkerGate gate_;
+    /// When each talker stream declares its Talker Advertise, and the deadline
+    /// its timer next wakes for (nullopt: none).
+    TalkerDeclarations declarations_;
+    std::optional<int64_t> declaration_deadline_ns_{};
+    bool updating_declarations_{false};
+    bool declarations_pending_{false};          ///< asked for while updating
+    bool declarations_pending_refresh_{false};  ///< ... with refresh
+    /// What the declarations' timer reaches the kit through (start(); stop()
+    /// drops it and the timer finishes).
+    std::shared_ptr<AvbEntityKit* const> declaration_timer_token_{};
+    /// The registered Listener per talker stream (refresh_talker_listener).
+    std::array<srp::msrp::ListenerDeclaration, MAX_ENTITY_STREAMS> talker_listener_{};
+    /// Each STREAM_OUTPUT's avb_interface_index (Milan PROBE_TX check).
+    std::array<uint16_t, MAX_ENTITY_STREAMS> talker_interface_{};
+    /// Per talker stream presentation time offset (written on the reactor,
+    /// read by the data plane and GET_STREAM_INFO).
+    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
+    PresentationOffsetFn on_presentation_offset_changed_{};
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};

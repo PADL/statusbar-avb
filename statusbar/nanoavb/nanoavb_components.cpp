@@ -592,6 +592,8 @@ NanoAvbComponents::NanoAvbComponents(
     , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
 {
     aem_handler.set_entity_profile(profile);
+    mvu_handler.set_profile(profile);
+    acmp_talker.set_milan(profile.milan);
 }
 
 namespace {
@@ -647,6 +649,8 @@ NanoAvbComponents::NanoAvbComponents(
     , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
 {
     aem_handler.set_entity_profile(profile);
+    mvu_handler.set_profile(profile);
+    acmp_talker.set_milan(profile.milan);
 }
 
 //

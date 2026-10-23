@@ -93,8 +93,21 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 /// Milan listeners (e.g. the DSP processor) query GET_STREAM_INFO on a talker's
 /// STREAM_OUTPUT after connecting to verify the stream's format/identity, and
 /// tear the connection down if the talker answers NOT_IMPLEMENTED.
-using GetStreamInfoFn =
-    statusbar::sg14::inplace_function<bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out), 64>;
+///
+/// @p ext is Milan v1.2's tail (flags_ex, pbsta, acmpsta; Section 5.4.2.10):
+/// sent, making the response 56 octets, only in the Milan profile.
+using GetStreamInfoFn = statusbar::sg14::inplace_function<
+    bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext),
+    64>;
+
+/// A STREAM_OUTPUT's presentation time offset in nanoseconds (Milan v1.2
+/// Section 5.3.7.6), or nullopt when @p stream_output_index is not one of
+/// this entity's talker streams.
+using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<uint32_t>(uint16_t stream_output_index), 64>;
+
+/// Set a STREAM_OUTPUT's presentation time offset (range-checked): SUCCESS once in force,
+/// STREAM_IS_RUNNING while it streams, NOT_SUPPORTED when the entity cannot change it.
+using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
@@ -214,40 +227,10 @@ struct AemCommandHandlerCallbacks
     /// replies NOT_IMPLEMENTED.
     RebootFn on_reboot;
 
-    /// The talkers' presentation time offsets, for SET_MAX_TRANSIT_TIME and
-    /// GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
+    /// The talkers' presentation time offsets, for SET_STREAM_INFO (Milan v1.2 Section 5.4.2.9)
+    /// and SET/GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
     GetPresentationOffsetFn get_presentation_offset;
     SetPresentationOffsetFn set_presentation_offset;
-
-    /// Put a stream port's dynamic mappings in force. Optional; if unset,
-    /// ADD_AUDIO_MAPPINGS and REMOVE_AUDIO_MAPPINGS reply NOT_IMPLEMENTED.
-    AudioMappingsChangedFn on_audio_mappings_changed;
-};
-
-/// What answers Milan's stream input commands over AECP MVU (Milan v1.3
-/// 5.4.4.6 to 5.4.4.8): the entity's Milan connection management, when it
-/// runs one. The handler reads the commands and writes the responses; what
-/// a sink does with them is asked here.
-struct MvuStreamInputCallbacks
-{
-    /// Takes the ACMP response a sink gives to a bind or unbind.
-    using Respond = statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64>;
-
-    /// A BIND_STREAM or UNBIND_STREAM command, as the BIND_RX or UNBIND_RX
-    /// command it equals (Table 5.22). @p respond is called once, at the
-    /// step where the sink would send its ACMP response (5.5.3.2).
-    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const& command, Respond const& respond), 64> binding_command;
-
-    /// The GET_STREAM_INPUT_INFO_EX response data of STREAM_INPUT @p index,
-    /// nullopt when the entity has no such stream input.
-    statusbar::sg14::inplace_function<std::optional<atdecc::MvuGetStreamInputInfoExResponse>(uint16_t index), 64> stream_input_info;
-
-    /// The binding parameters of STREAM_INPUT @p index (5.3.8.3), nullopt
-    /// while it is not bound or the entity has no such stream input. It is
-    /// how the handler knows that a BIND_STREAM or UNBIND_STREAM changed the
-    /// entity's state, which is when 5.4.5.3 has the command notified to the
-    /// other registered controllers. Unset, none is notified.
-    statusbar::sg14::inplace_function<std::optional<atdecc::MilanBinding>(uint16_t index), 64> binding;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -460,61 +443,12 @@ class AemCommandHandler
     void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
     void set_get_as_path(GetAsPathFn fn) { callbacks_.get_as_path = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
-    /// Install the presentation time offset hooks (see AemCommandHandlerCallbacks).
+    /// Install the presentation time offset store (see AemCommandHandlerCallbacks).
     void set_presentation_offset_hooks(GetPresentationOffsetFn get, SetPresentationOffsetFn set)
     {
         callbacks_.get_presentation_offset = std::move(get);
         callbacks_.set_presentation_offset = std::move(set);
     }
-
-    // ---- Dynamic audio mappings (IEEE 1722.1-2021 Clauses 7.4.44-7.4.46) --------
-    // A STREAM_PORT without AUDIO_MAP descriptors has dynamic mappings, kept in the store the
-    // entity hands the handler. A configuration switch forgets them.
-
-    /// A GET_AUDIO_MAP partition under milan13: 176 mappings, 1420 octets (Milan v1.3 Section 5.4.1).
-    static constexpr size_t MILAN_AUDIO_MAP_MAPPINGS = 176;
-    /// A GET_AUDIO_MAP partition under classic, within an AECPDU's 524 octets of control data.
-    static constexpr size_t AUDIO_MAP_MAPPINGS = (MAX_AEM_BODY - AemAudioMapResponseHeader::LENGTH) / AemAudioMapping::LENGTH;
-    static_assert(
-        AemAudioMapResponseHeader::LENGTH + (MILAN_AUDIO_MAP_MAPPINGS * AemAudioMapping::LENGTH) <= MAX_AEM_RESPONSE_SIZE);
-    /// The STREAM_OUTPUTs an output port's GET_AUDIO_MAP partitions count (Milan v1.3 Section 5.4.2.26).
-    static constexpr size_t MAX_PARTITIONED_STREAMS = 256;
-
-    /// Give the handler the store of its stream ports' dynamic mappings, both directions; the
-    /// handler alone changes it. Without one (the default) GET_AUDIO_MAP, ADD_AUDIO_MAPPINGS and
-    /// REMOVE_AUDIO_MAPPINGS answer NOT_IMPLEMENTED. @p maps must outlive the handler, or be withdrawn.
-    void set_dynamic_audio_maps(DynamicAudioMaps* maps) noexcept { audio_maps_ = maps; }
-    /// Install the data plane's hook for the dynamic mappings (AudioMappingsChangedFn).
-    void set_on_audio_mappings_changed(AudioMappingsChangedFn fn) { callbacks_.on_audio_mappings_changed = std::move(fn); }
-    /// The store of the dynamic mappings in force, nullptr without one.
-    [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const* { return audio_maps_; }
-    /// Whether STREAM_PORT_INPUT or STREAM_PORT_OUTPUT (@p port_type, @p port_index) of the current
-    /// configuration has dynamic mappings (no AUDIO_MAP descriptor).
-    [[nodiscard]] auto has_dynamic_map(uint16_t port_type, uint16_t port_index) const -> bool;
-    /// Make @p mappings dynamic port (@p port_type, @p port_index)'s, checked as an ADD onto an empty
-    /// port, without the hook and without notifying: an entity's defaults, or mappings it restores to
-    /// a data plane it has set itself. The AEM status; nothing changes unless SUCCESS.
-    [[nodiscard]] auto seed_audio_mappings(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings)
-        -> uint8_t;
-    /// The entity's own REMOVE of @p remove (a mapping not held ignored), then ADD of @p add, on
-    /// dynamic port (@p port_type, @p port_index), all or nothing, checked and put in force through the
-    /// hook as a controller's would be; a change is notified to every registered controller as REMOVE
-    /// then ADD_AUDIO_MAPPINGS, in AECPDUs of at most 63 mappings. The AEM status; local_change_refusal()
-    /// while it refuses.
-    [[nodiscard]] auto apply_local_audio_mappings(
-        uint16_t port_type,
-        uint16_t port_index,
-        std::span<DynamicAudioMapping const> add,
-        std::span<DynamicAudioMapping const> remove) -> uint8_t;
-    /// Whether every mapping held still names a cluster channel of its port and a channel of its
-    /// stream's current format at its unit's rate, as an ADD of it would be checked; the handler
-    /// keeps it so by refusing a stream format or rate that would break one (mappings_refusal()).
-    [[nodiscard]] auto mappings_hold() const -> bool;
-    /// The status SET_STREAM_FORMAT or SET_SAMPLING_RATE @p command_body is refused with because a
-    /// mapping held would not hold after it: BAD_ARGUMENTS for a stream channel or rate a format
-    /// leaves (Milan v1.3 Sections 5.4.2.7, 5.4.2.27), NOT_SUPPORTED for a rate (Section 5.4.2.13).
-    [[nodiscard]] auto mappings_refusal(uint16_t command_type, std::span<uint8_t const> command_body) const
-        -> std::optional<uint8_t>;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -1005,6 +939,23 @@ class AemCommandHandler
     /// NOT_SUPPORTED when @p out_buffer is shorter.
     [[nodiscard]] auto store_stream_info(AemStreamInfoPayload const& resp, std::span<uint8_t> out_buffer) const
         -> AemCommandResponse;
+
+    /// SET_STREAM_INFO per Milan v1.2 Section 5.4.2.9: only MSRP_ACC_LAT_VALID on a STREAM_OUTPUT
+    /// (the presentation time offset); anything else NOT_SUPPORTED. The command echoed.
+    [[nodiscard]] auto handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// SET/GET_MAX_TRANSIT_TIME (IEEE 1722.1-2021 Clauses 7.4.77-78, Milan v1.3 Sections
+    /// 5.4.2.30-31): a STREAM_OUTPUT's presentation time offset, as SET_STREAM_INFO sets it.
+    [[nodiscard]] auto handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    [[nodiscard]] auto handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// The presentation offset checks common to SET_STREAM_INFO and SET_MAX_TRANSIT_TIME:
+    /// SUCCESS with the current offset in @p current, or the status to refuse with.
+    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
+        -> uint8_t;
 
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.
