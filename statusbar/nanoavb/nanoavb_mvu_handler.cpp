@@ -124,15 +124,9 @@ auto MvuCommandHandler::set_system_unique_id_command(Eui48 const& src_mac, MvuDu
 {
     auto const data = command.subspan(MvuDu::LENGTH);
     uint64_t requested = 0;
-    // The v1.3 form has a u64 number where v1.2 has its u32 (the name is not kept). A shorter
-    // payload that holds the number is v1.3 only while its high half is zero, else v1.2 with
-    // octets after the id.
-    constexpr size_t V13_NUMBER_AT = offsetof(MvuSystemUniqueIdPayloadV13, number);
-    constexpr size_t V13_NUMBER_END = offsetof(MvuSystemUniqueIdPayloadV13, name);
-    bool const v13 = data.size() >= MvuSystemUniqueIdPayloadV13::LENGTH ||
-        (data.size() >= V13_NUMBER_END &&
-         std::all_of(data.begin() + V13_NUMBER_AT, data.begin() + V13_NUMBER_AT + 4, [](uint8_t const b) { return b == 0; }));
-    if (v13) {
+    // The full v1.3 payload (a u64 number where v1.2 has its u32, and a name,
+    // not kept); anything shorter that holds the v1.2 id is v1.2.
+    if (data.size() >= MvuSystemUniqueIdPayloadV13::LENGTH) {
         ieee::octlet_t number{0};
         span_load(number, data.subspan(offsetof(MvuSystemUniqueIdPayloadV13, number), sizeof(number)));
         requested = number.get();
