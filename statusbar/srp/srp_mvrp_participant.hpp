@@ -289,6 +289,18 @@ class MvrpParticipantT
         return false;
     }
 
+    /// True while @p vid's registrar is Leaving (Lv). MVRP keeps the standard IN / rLv! -> LV (the
+    /// Milan v1.2 Section 4.2.7.2.2 immediate leave is MSRP only).
+    [[nodiscard]] auto is_vlan_leaving(uint16_t vid) const noexcept -> bool
+    {
+        for (auto const& rec : vlans_) {
+            if (rec.first_value.get_vid() == vid) {
+                return rec.registrar_sm.current_state() == registrar_sm::Def::State::Lv;
+            }
+        }
+        return false;
+    }
+
     // -------------------- PDU I/O --------------------
 
     void receive_pdu(std::span<uint8_t const> pdu, TimePoint now)

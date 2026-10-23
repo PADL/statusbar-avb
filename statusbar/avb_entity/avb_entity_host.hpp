@@ -293,6 +293,14 @@ class AvbEntityHost
         on_listener_ready_ = std::move(fn);
     }
 
+    /// Called when the Class A VID in use changes (Milan v1.2 Section 4.2.7.2.1),
+    /// after the host has moved the MVRP join and ACMP stream_vlan_id to @p vlan_id;
+    /// the entity re-tags its frames. The advertise hook is called again when Ready.
+    void set_on_domain_vid_changed(statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> fn)
+    {
+        on_domain_vid_changed_ = std::move(fn);
+    }
+
   private:
     /// Scan configuration 0's CONTROL descriptors for the standard IDENTIFY
     /// control_type and, when found, mirror its index into the AEM handler
@@ -321,6 +329,10 @@ class AvbEntityHost
     void wire_supervisor_callbacks();
     void wire_gptp_callbacks();
     void wire_mvrp_callbacks();
+    /// Class A VID changes (adopted MSRP Domain / link-up reset): MVRP, ACMP
+    /// talker streams, the entity hook and re-advertising. Wired at
+    /// construction: it needs no network.
+    void wire_domain_callbacks();
     void wire_srp_callbacks();  ///< MSRP talker/listener SM drive + the talker-listener bridge (uses the hooks)
     void wire_engine_callbacks();
 
@@ -354,6 +366,7 @@ class AvbEntityHost
     statusbar::sg14::inplace_function<void(TimePoint), 64> advertise_streams_{};
     statusbar::sg14::inplace_function<void(TimePoint), 64> withdraw_streams_{};
     statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> on_listener_ready_{};
+    statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> on_domain_vid_changed_{};
 
     std::string interface_name_{};
     net::MessageReactor* reactor_{nullptr};  ///< set while the control plane is up

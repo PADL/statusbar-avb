@@ -242,6 +242,11 @@ struct Observer
 
     /// A previously-registered Domain was withdrawn.
     statusbar::sg14::inplace_function<void(DomainFirstValue const&), 64> on_domain_leave;
+
+    /// A peer declared a Domain (New, JoinIn or JoinMt, refreshes included), with the value as on the
+    /// wire, even when we declare the same SRclassID. Used to adopt a bridge's Class A parameters
+    /// (Milan v1.2 Section 4.2.7.2.1).
+    statusbar::sg14::inplace_function<void(DomainFirstValue const&), 64> on_domain_declared;
 };
 
 //
