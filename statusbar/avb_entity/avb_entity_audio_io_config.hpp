@@ -11,6 +11,7 @@
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -162,6 +163,11 @@ struct AvbEntityAudioIOConfig
     /// NOT implemented -- it is only needed to connect IP-transported streams, and
     /// is deferred until there is an IP-stream use case. Default "2016".
     std::string atdecc_version{"2016"};
+
+    /// The ATDECC profile: true Milan v1.2, false classic IEEE 1722.1. Unset takes
+    /// the model's (Milan when it says nothing). Under Milan, ACQUIRE_ENTITY answers
+    /// NOT_SUPPORTED (Milan v1.2 Section 5.4.2.1).
+    std::optional<bool> milan{};
 
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of

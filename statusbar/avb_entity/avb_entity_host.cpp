@@ -27,8 +27,9 @@ AvbEntityHost::AvbEntityHost(
     nanoavb::AdpAdvertiserConfig adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
-    : components_{std::move(model), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+    size_t const listener_max_streams,
+    std::optional<bool> const milan)
+    : components_{std::move(model), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams, milan}
 {
     wire_domain_callbacks();
 }
@@ -38,9 +39,10 @@ AvbEntityHost::AvbEntityHost(
     nanoavb::AdpAdvertiserConfig adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
+    size_t const listener_max_streams,
+    std::optional<bool> const milan)
     : handler_{&handler}
-    , components_{handler, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+    , components_{handler, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams, milan}
 {
     wire_identify_control();
     wire_avb_info();

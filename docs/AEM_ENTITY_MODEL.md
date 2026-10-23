@@ -136,6 +136,14 @@ of it at runtime.
 TOC looking for a match, then returns a `std::span<uint8_t const>` pointing
 directly into the blob. Zero copy, no C++ structs.
 
+The symbol table is metadata for the kit, never served to a controller
+(READ_DESCRIPTOR serves TOC entries only). Besides the authored symbols
+(`symbol` in the JSON/XML models), the ENTITY descriptor may carry one
+well-known symbol, `entity_profile:milan` or `entity_profile:classic`,
+compiled from the model's entity `milan` attribute: the entity's ATDECC
+profile (`nanoavb::EntityProfile`, `nanoavb_entity_profile.hpp`). Without
+it the kit runs Milan; the kit config's `milan` overrides it.
+
 ### How the two interact
 
 `EntityModel` has an optional external `DescriptorStorage`:

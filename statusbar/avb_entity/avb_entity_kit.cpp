@@ -39,7 +39,7 @@ AvbEntityKit::AvbEntityKit(
     , listener_specs_{listener_specs}
     , sample_rate_{sample_rate}
     , storage_handler_{handler}
-    , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
+    , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size(), config.milan}
     , gate_{config.gate_talker_on_listener, host_.components()}
     , talker_{std::make_unique<TalkerStreams>(
           TalkerStreamsConfig{.sample_rate = sample_rate, .vlan_id = config.vlan_id, .stream_pcp = config.stream_pcp},

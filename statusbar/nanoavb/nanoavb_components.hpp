@@ -20,6 +20,7 @@
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
+#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
@@ -452,12 +453,15 @@ struct NanoAvbComponents
     /// @param talker_max_streams    Max talker streams.
     /// @param talker_max_listeners  Max listeners per talker stream.
     /// @param listener_max_streams  Max listener streams.
+    /// @param milan                 Profile override (EntityProfile): unset takes
+    ///                              the model's (its ENTITY symbol), else Milan.
     NanoAvbComponents(
         EntityModel model,
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<bool> milan = std::nullopt);
 
     /// Symbol-aware construction: serve descriptors (and resolve their well-known
     /// symbols) through a caller-owned @p handler — typically a DescriptorStorageHandler
@@ -470,7 +474,8 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<bool> milan = std::nullopt);
 
     NanoAvbComponents(NanoAvbComponents const&) = delete;
     auto operator=(NanoAvbComponents const&) -> NanoAvbComponents& = delete;
@@ -487,12 +492,16 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<bool> milan);
 
   public:
     // Declaration order matters: `entity_model` must precede the handlers that
     // reference it so it is fully constructed when they are wired.
     EntityModel entity_model;
+    /// The entity's profile (nanoavb_entity_profile.hpp), shared by every
+    /// handler that has Milan-only behaviour.
+    EntityProfile profile;
     AemCommandHandler aem_handler;
     NanoAvbAdpAdvertiser adp_advertiser;
     NanoAvbAcmpTalker acmp_talker;

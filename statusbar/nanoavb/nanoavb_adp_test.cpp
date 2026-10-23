@@ -58,7 +58,11 @@ TEST(nanoavb_adp_advertiser, default_construction)
 
     EXPECT_EQ(advertiser.state(), AdpAdvertiserState::Stopped);
     EXPECT_EQ(advertiser.available_index(), 0);
-    EXPECT_EQ(advertiser.valid_time(), 31);  // Default valid time
+    EXPECT_EQ(advertiser.valid_time(), 10);  // Milan v1.2 Section 5.6.2
+    EXPECT_EQ(advertiser.config().reannounce_interval, std::chrono::milliseconds{5000});
+    // Milan v1.2 Section 5.6.2: AEM_INTERFACE_INDEX_VALID set, interface_index 0.
+    EXPECT_TRUE(advertiser.adpdu().has_entity_capability(statusbar::atdecc::entity_capabilities::AEM_INTERFACE_INDEX_VALID));
+    EXPECT_EQ(advertiser.adpdu().interface_index.get(), 0);
 }
 
 TEST(nanoavb_adp_advertiser, custom_config)
@@ -85,7 +89,11 @@ TEST(nanoavb_adp_advertiser, adpdu_populated_from_model)
     // Verify ADPDU fields match entity model
     EXPECT_EQ(adpdu.entity_id, entity.entity_id);
     EXPECT_EQ(adpdu.entity_model_id, entity.entity_model_id);
-    EXPECT_EQ(adpdu.entity_capabilities.get(), entity.entity_capabilities.get());
+    // The model's capabilities, plus AEM_INTERFACE_INDEX_VALID (the advertiser
+    // always populates interface_index, Milan v1.2 Section 5.6.2).
+    EXPECT_EQ(
+        adpdu.entity_capabilities.get(),
+        entity.entity_capabilities.get() | statusbar::atdecc::entity_capabilities::AEM_INTERFACE_INDEX_VALID);
     EXPECT_EQ(adpdu.talker_stream_sources.get(), entity.talker_stream_sources.get());
     EXPECT_EQ(adpdu.talker_capabilities.get(), entity.talker_capabilities.get());
     EXPECT_EQ(adpdu.listener_stream_sinks.get(), entity.listener_stream_sinks.get());
@@ -476,16 +484,16 @@ TEST(nanoavb_adp_advertiser, update_config)
     auto entity = create_test_entity_descriptor();
     NanoAvbAdpAdvertiser advertiser{entity};
 
-    EXPECT_EQ(advertiser.valid_time(), 31);
+    EXPECT_EQ(advertiser.valid_time(), 10);
 
     AdpAdvertiserConfig new_config;
-    new_config.valid_time = 10;
+    new_config.valid_time = 15;
     new_config.reannounce_interval = std::chrono::milliseconds{2000};
 
     advertiser.set_config(new_config);
 
-    EXPECT_EQ(advertiser.valid_time(), 10);
-    EXPECT_EQ(advertiser.adpdu().valid_time(), 10);
+    EXPECT_EQ(advertiser.valid_time(), 15);
+    EXPECT_EQ(advertiser.adpdu().valid_time(), 15);
     EXPECT_EQ(advertiser.config().reannounce_interval, std::chrono::milliseconds{2000});
 }
 

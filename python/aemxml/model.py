@@ -1027,4 +1027,11 @@ class Entity:
     group_name: str = ""
     serial_number: str = ""
     schema_year: int = 2021
+    # The entity's ATDECC profile, a property of the device model: True for
+    # Milan, False for classic IEEE 1722.1, None when the model does not say
+    # (the kit then runs Milan). Not part of any descriptor: it is carried in
+    # the blob's symbol table only, as the ENTITY descriptor's well-known
+    # symbol ENTITY_PROFILE_MILAN_SYMBOL or ENTITY_PROFILE_CLASSIC_SYMBOL
+    # (flatten.py), so nothing a controller reads changes.
+    milan: bool | None = None
     configurations: list[Configuration] = field(default_factory=list)

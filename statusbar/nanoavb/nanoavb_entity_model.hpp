@@ -288,6 +288,11 @@ class EntityModel
 
     /// Check if a DescriptorStorage blob is attached.
     [[nodiscard]] auto has_descriptor_storage() const noexcept -> bool { return descriptor_storage_.has_value(); }
+    /// The attached DescriptorStorage blob, or nullptr.
+    [[nodiscard]] auto descriptor_storage() const noexcept -> atdecc::aem::DescriptorStorage const*
+    {
+        return descriptor_storage_.has_value() ? &*descriptor_storage_ : nullptr;
+    }
 
     /// Get configuration for this model
     [[nodiscard]] auto config() const noexcept -> EntityModelConfig const& { return config_; }

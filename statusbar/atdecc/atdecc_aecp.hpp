@@ -244,6 +244,12 @@ static_assert(offsetof(AecpDuCommon, target_entity_id) == 4, "target_entity_id m
 static_assert(offsetof(AecpDuCommon, controller_entity_id) == 12, "controller_entity_id must be at offset 12");
 static_assert(offsetof(AecpDuCommon, sequence_id) == 20, "sequence_id must be at offset 20");
 
+/// Echo @p command as its response type with @p status (IEEE 1722.1-2021 Clause 9.2.1.1.6), its
+/// control data truncated to what was received and fits @p out. Returns the bytes within @p out,
+/// or empty for a command shorter than the AECP common header or with a malformed control_data_length.
+[[nodiscard]] auto aecp_echo_response(std::span<uint8_t const> command, uint8_t status, std::span<uint8_t> out) noexcept
+    -> std::span<uint8_t>;
+
 }  // namespace statusbar::atdecc
 
 // Serialization traits - AecpDuCommon is a packed wire format struct

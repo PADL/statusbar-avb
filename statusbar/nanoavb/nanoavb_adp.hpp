@@ -44,11 +44,15 @@ using TimePoint = sm::TimePoint;
 /// Configuration for ADP advertiser behavior
 struct AdpAdvertiserConfig
 {
-    /// Valid time in 2-second units (0-31, default 31 = 62 seconds)
-    uint8_t valid_time = 31;
+    /// Valid time in 2-second units (0-31). Default 10 (20 seconds): Milan
+    /// v1.2 Section 5.6.2, "The valid_time field shall be set to 10 in
+    /// ENTITY_AVAILABLE messages".
+    uint8_t valid_time = 10;
 
-    /// Reannounce interval (should be less than valid_time * 2 seconds)
-    std::chrono::milliseconds reannounce_interval{10000};  // 10 seconds default
+    /// Reannounce interval (should be less than valid_time * 2 seconds).
+    /// Default 5 s: Milan v1.2 Section 5.6.2, "a PAAD-AE shall advertise
+    /// itself every 5 seconds".
+    std::chrono::milliseconds reannounce_interval{5000};
 };
 
 //
@@ -170,9 +174,14 @@ class NanoAvbAdpAdvertiser
         adpdu_.gptp_domain_number = domain_number;
     }
 
-    /// Set the interface index
-    /// @param index The AVB interface index
-    void set_interface_index(uint16_t index) { adpdu_.interface_index = index; }
+    /// Set the AVB_INTERFACE index the ADPDU carries, always with AEM_INTERFACE_INDEX_VALID
+    /// (IEEE 1722.1-2021 Clause 6.2.1.10, Milan v1.2 Section 5.6.2); default 0, kept across
+    /// update_adpdu_from_model().
+    void set_interface_index(uint16_t index)
+    {
+        interface_index_ = index;
+        adpdu_.interface_index = index;
+    }
 
     /// Set the identify control index and advertise it as valid.
     /// Sets the ADPDU identify_control_index and the AEM_IDENTIFY_CONTROL_INDEX_VALID
@@ -230,6 +239,7 @@ class NanoAvbAdpAdvertiser
     AdpAdvertiserConfig config_;
     uint16_t identify_control_index_ = 0;
     bool identify_control_index_valid_ = false;
+    uint16_t interface_index_ = 0;
 
     AdpAdvertiserState state_ = AdpAdvertiserState::Stopped;
     AdpDu adpdu_;

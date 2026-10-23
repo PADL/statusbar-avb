@@ -1165,5 +1165,14 @@ def read_json(path_or_string: str, variables: dict[str, str] | None = None) -> E
         firmware_version=entity_obj.get("firmware", ""),
         group_name=entity_obj.get("group", ""),
         serial_number=entity_obj.get("serial", ""),
+        milan=_parse_milan(entity_obj.get("milan"), "entity.milan"),
         configurations=configurations,
     )
+
+
+def _parse_milan(value, context: str) -> bool | None:
+    """The entity's profile: true (Milan), false (classic IEEE 1722.1), or
+    absent (None: the kit runs Milan)."""
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError(f"{context}: milan must be true or false")
