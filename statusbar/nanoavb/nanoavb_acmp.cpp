@@ -57,12 +57,73 @@ auto NanoAvbAcmpTalker::configure_stream(
     return success();
 }
 
-auto NanoAvbAcmpTalker::receive_command(AcmpCommandResponse const& cmd, TimePoint event_time) -> bool
+auto NanoAvbAcmpTalker::milan_source(uint16_t const stream_index) const -> std::optional<MilanTalkerSource>
 {
+    auto const* stream = ctx_.get_stream(stream_index);
+    if (stream == nullptr) {
+        return std::nullopt;
+    }
+    MilanTalkerStreamState state{.dest_mac_valid = stream->stream_dest_mac != Eui48{}};
+    if (milan_state_) {
+        state = milan_state_(stream_index);
+    }
+    return MilanTalkerSource{
+        .stream_id = stream->stream_id,
+        .stream_dest_mac = stream->stream_dest_mac,
+        .stream_vlan_id = stream->stream_vlan_id,
+        .avb_interface_index = state.avb_interface_index,
+        .dest_mac_valid = state.dest_mac_valid,
+        .registering_failed = state.registering_failed};
+}
+
+auto NanoAvbAcmpTalker::receive_milan_command(
+    AcmpCommandResponse const& cmd, TimePoint const event_time, uint16_t const ingress_interface) -> bool
+{
+    uint16_t const index = cmd.talker_unique_id.get();
+    auto const source = milan_source(index);
+    auto const reply = milan_talker_respond(cmd, source ? &*source : nullptr, ingress_interface);
+    if (!reply) {
+        return false;
+    }
+    // The window opens before the answer goes: the entity may declare the
+    // Talker Advertise the listener is about to look for.
+    if (reply->probe_counts && on_probe_) {
+        on_probe_(index, event_time);
+    }
+    if (callbacks_.tx_response) {
+        (void)callbacks_.tx_response(reply->response);
+    }
+    return true;
+}
+
+auto NanoAvbAcmpTalker::receive_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t const ingress_interface)
+    -> bool
+{
+    if (milan_) {
+        if (!cmd.is_command() || cmd.talker_entity_id != ctx_.my_id) {
+            return false;
+        }
+        return receive_milan_command(cmd, event_time, ingress_interface);
+    }
+
     // Check if this command is for us
     auto event = talker_event_for_command(ctx_, cmd);
     if (!event) {
         return false;
+    }
+
+    // IEEE 1722.1-2021 Table 8-3 TALKER_DEST_MAC_FAIL: a talker without a destination
+    // address yet (MAAP still acquiring) refuses CONNECT_TX; nothing is connected.
+    if (*event == TalkerEvent::RcvdConnectTx) {
+        if (auto const source = milan_source(cmd.talker_unique_id.get()); source && !source->dest_mac_valid) {
+            auto resp = cmd;
+            resp.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+            resp.set_status(ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+            if (callbacks_.tx_response) {
+                (void)callbacks_.tx_response(resp);
+            }
+            return true;
+        }
     }
 
     // Store the command in context
