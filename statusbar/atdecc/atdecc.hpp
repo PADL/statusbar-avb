@@ -6,6 +6,7 @@
 #include "statusbar/atdecc/atdecc_acmp.hpp"
 #include "statusbar/atdecc/atdecc_acmp_controller_sm.hpp"
 #include "statusbar/atdecc/atdecc_acmp_listener_sm.hpp"
+#include "statusbar/atdecc/atdecc_acmp_milan_listener.hpp"
 #include "statusbar/atdecc/atdecc_acmp_milan_talker.hpp"
 #include "statusbar/atdecc/atdecc_acmp_talker_sm.hpp"
 #include "statusbar/atdecc/atdecc_addresses.hpp"

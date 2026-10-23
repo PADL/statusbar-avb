@@ -399,7 +399,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             break;
         }
     }
-    if (slot == nullptr) {
+    if (slot == nullptr || slot->stopped.load(std::memory_order_relaxed)) {
         return;
     }
 
@@ -648,6 +648,7 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     // talker's boot) — the handler upgrades to Ready when it appears.
     auto const result = components_.msrp_handler.listener_attach(sid, now);
     bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
+    bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
     // Join the talker's stream group so the NIC delivers its frames to us.
     bool joined = false;
     if (port_ != nullptr) {
@@ -662,6 +663,7 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
             dest_mac.to_uint64(),
             !result.has_value() ? logging::lit("declare FAILED")
                 : ready         ? logging::lit("Ready")
+                : waiting       ? logging::lit("once the talker's attribute is registered")
                                 : logging::lit("AskingFailed (talker not advertising yet)"),
             joined ? logging::lit("ok") : logging::lit("FAILED"));
     }

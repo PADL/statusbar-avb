@@ -64,6 +64,9 @@ auto make_config_with_blob(std::vector<uint8_t> blob) -> AvbEntityAudioIOConfig
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
     config.entity_model_id = Eui64{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
     config.descriptor_storage_blob = std::move(blob);
+    // The ACMP tests below drive the classic 1722.1 listener (CONNECT_RX
+    // relayed as CONNECT_TX); the Milan listener has its own tests.
+    config.milan = false;
     return config;
 }
 

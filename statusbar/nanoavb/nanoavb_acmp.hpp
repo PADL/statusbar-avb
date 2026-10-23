@@ -254,12 +254,44 @@ class NanoAvbAcmpListener
 
     /// Set the entity ID
     /// @param entity_id The new entity ID
-    void set_entity_id(Eui64 entity_id) noexcept { ctx_.my_id = entity_id; }
+    void set_entity_id(Eui64 entity_id) noexcept
+    {
+        ctx_.my_id = entity_id;
+        milan_.set_entity_id(entity_id);
+    }
 
     /// Set or update callbacks after construction
     /// This allows wiring up network handlers after both components are created
     /// @param callbacks The new callback interface
     void set_callbacks(AcmpListenerCallbacks callbacks);
+
+    /// Set just the transmit callbacks without disturbing the connection
+    /// callbacks (set_callbacks replaces the whole struct).
+    void set_transmit(
+        statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> tx_command,
+        statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> tx_response)
+    {
+        callbacks_.tx_command = std::move(tx_command);
+        callbacks_.tx_response = std::move(tx_response);
+    }
+
+    /// Behave as a Milan listener (true) or a classic 1722.1 listener (false).
+    void set_milan(bool const milan) noexcept { milan_mode_ = milan; }
+    [[nodiscard]] auto milan() const noexcept -> bool { return milan_mode_; }
+
+    /// The Milan sinks (one per stream). Their send, on_settled and
+    /// on_unsettled hooks are this listener's; the others are the caller's.
+    [[nodiscard]] auto milan_sinks() noexcept -> MilanListener& { return milan_; }
+    [[nodiscard]] auto milan_sinks() const noexcept -> MilanListener const& { return milan_; }
+
+    /// An ADPDU received (Milan: the sinks' talker discovery, Section 5.6.4),
+    /// with this entity's gPTP grandmaster and domain. No-op when classic.
+    void receive_adpdu(AdpDu const& adp, tsn::ClockIdentity const& grandmaster, uint8_t domain, TimePoint now)
+    {
+        if (milan_mode_) {
+            milan_.receive_adp(adp, grandmaster, domain, now);
+        }
+    }
 
     /// Set just the connection callbacks without disturbing the others
     /// (set_callbacks replaces the whole struct, which would clear the tx_command/
@@ -381,6 +413,10 @@ class NanoAvbAcmpListener
     /// @param current_time Current time for timeout processing
     void tick(TimePoint current_time)
     {
+        if (milan_mode_) {
+            milan_.tick(current_time);
+            return;
+        }
         check_timeout(current_time);
         fast_connect_tick(current_time);
     }
@@ -390,11 +426,14 @@ class NanoAvbAcmpListener
 
   private:
     void wire_listener_callbacks();
+    void wire_milan();
     void fast_connect_tick(TimePoint now);
 
     AcmpListenerCallbacks callbacks_;
     ListenerContext<> ctx_;
     AcmpListenerStateMachine<> sm_;
+    MilanListener milan_;
+    bool milan_mode_{false};
     statusbar::sg14::inplace_vector<FastConnectGoal, MAX_FAST_CONNECT_GOALS> fast_connect_goals_{};
     statusbar::sg14::inplace_function<void(), 64> on_goals_changed_{};
     TimePoint next_fast_connect_attempt_{};
