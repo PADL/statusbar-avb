@@ -468,7 +468,7 @@ def generate_atdecc_fields() -> str:
         out.append(f"    [0x{subtype:02X}] = {addname(layout)},")
     out += ["}", ""]
     out.append(
-        "--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, name_field }"
+        "--- MVU command_type -> { cmd = spec, rsp = spec }; spec = { name, length, add, tail_field, tail_length }"
     )
     out.append("M.mvu_payloads = {}")
     for code, (cmd, rsp) in sorted(A.MVU_PAYLOADS.items()):
@@ -476,11 +476,14 @@ def generate_atdecc_fields() -> str:
         def mspec(p):
             if p is None:
                 return "nil"
-            name_field = "nil"
-            if p.optional_name:
-                f = next(f for f in p.layout.fields if f.name == p.optional_name)
-                name_field = fkey(p.layout, f)
-            return f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = {addname(p.layout)}, name_field = {name_field} }}"
+            tail_field = "nil"
+            if p.optional_tail:
+                f = next(f for f in p.layout.fields if f.name == p.optional_tail)
+                tail_field = fkey(p.layout, f)
+            return (
+                f"{{ name = {_lua_string(p.name)}, length = {p.length}, add = {addname(p.layout)}, "
+                f"tail_field = {tail_field}, tail_length = {p.optional_tail_length} }}"
+            )
 
         out.append(
             f"M.mvu_payloads[0x{code:04X}] = {{ cmd = {mspec(cmd)}, rsp = {mspec(rsp)} }}"
