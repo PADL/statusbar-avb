@@ -775,7 +775,7 @@ void AemCommandHandler::tick(sm::TimePoint const now)
             p.next_in_progress = now + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
         }
     }
-    if (profile_.milan) {
+    if (entity_profile_.milan) {
         tick_controller_monitor(now);
     }
 }
