@@ -247,10 +247,14 @@ struct TSpec
 /// when nonzero.
 [[nodiscard]] auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t fallback_hz = 0) -> StatusValue<uint32_t>;
 
-/// The AAF format word @p word at @p rate_hz: its nsr, and a samples_per_frame it names set to
-/// the rate's aaf_table_samples_per_pdu(); sample format, depth and channels kept. nullopt for a
-/// word that is not AAF or a rate with no nsr code (IEEE 1722-2016 Table 11).
+/// The AAF format word @p word re-timed to @p rate_hz (nominal rate and class A
+/// framing; sample format, depth, channels kept), as SET_SAMPLING_RATE applies.
+/// nullopt for a non-AAF word or a rate AAF has no code for.
 [[nodiscard]] auto aaf_format_at_rate(uint64_t word, uint32_t rate_hz) noexcept -> std::optional<uint64_t>;
+
+/// The StreamSpec @p spec with the format word @p word (decoded into its
+/// fields); the index, clock domain and interface are kept.
+[[nodiscard]] auto with_format(StreamSpec const& spec, uint64_t word) noexcept -> StreamSpec;
 
 /// First stream of @p kind in the table, or nullopt. Replaces the per-entity
 /// hardcoded index constants (AM824=0 / AAF=1 / CRF=2 style).
