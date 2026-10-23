@@ -1,98 +1,64 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// TalkerGate methods — the per-stream transmit gate, moved out of
-// avb_entity_audio_io.cpp (god-object phase 4). Bodies unchanged except the
-// member names (msrp_listener_ready_ -> listener_ready_, msrp_ready_ns_ ->
-// ready_ns_) and the qualifier; the gate holds same-typed refs (config_/components_).
+// TalkerGate methods — the per-stream SRP transmit gate, moved out of
+// avb_entity_audio_io.cpp (god-object phase 4).
 
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 
-#include <chrono>
 #include <cstdint>
-#include <print>
 
 namespace statusbar::avb_entity {
 
-void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready)
+void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, int64_t const now_ns)
 {
-    // Per-stream transmit gate: record whether this talker stream now has a
-    // listener that permits transmit (MSRP Listener Ready). Matched to the stream
-    // index by the ACMP stream_id (same value MSRP advertises).
+    // Record whether this talker stream has a listener that permits transmit (Listener Ready /
+    // Ready Failed), matched to the stream index by stream_id.
     uint64_t const sid_u64 = stream_id.to_uint64();
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
         auto const* s = components_.acmp_talker.get_stream(idx);
-        if (s != nullptr && s->stream_id.to_uint64() == sid_u64) {
-            bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
-            if (ready && acmp_conn_[idx].load() > 0) {
-                // Only a reservation made for a live connection counts: a Ready seen with none neither admits
-                // nor opens the grace window. Stamp the last-ready time so the grace window survives the next
-                // LeaveAll blip.
-                latch_ready(idx);
-            }
-            if (was != ready && logger_) {
-                logger_->status("srp: talker stream {} MSRP listener-ready -> {} (ACMP-AND-MSRP gate)", idx, ready);
-            }
+        if (s == nullptr || s->stream_id.to_uint64() != sid_u64) {
+            continue;
+        }
+        bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
+        if (ready || was) {
+            // The grace window runs from the last moment the declaration was known registered;
+            // a withdrawal seen while already withdrawn does not extend it.
+            ready_ns_[idx].store(now_ns, std::memory_order_relaxed);
+        }
+        if (was != ready && logger_) {
+            logger_->status("srp: talker stream {} MSRP listener-ready -> {} (SRP gate)", idx, ready);
         }
     }
 }
 
-void TalkerGate::latch_ready(uint16_t const idx) noexcept
+void TalkerGate::note_talker_withdrawn() noexcept
 {
-    reservation_ready_[idx] = true;
-    ready_ns_[idx].store(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
-        std::memory_order_relaxed);
-}
-
-void TalkerGate::note_acmp_connections(uint16_t const idx, uint32_t const count) noexcept
-{
-    if (idx >= acmp_conn_.size()) {
-        return;
-    }
-    acmp_conn_[idx].publish(count);
-    if (count == 0) {
-        reservation_ready_[idx] = false;
+    for (size_t idx = 0; idx < listener_ready_.size(); ++idx) {
+        listener_ready_[idx].store(false, std::memory_order_relaxed);
         ready_ns_[idx].store(0, std::memory_order_relaxed);
-    } else if (listener_ready_[idx].load(std::memory_order_relaxed)) {
-        latch_ready(idx);  // connected to a listener whose Ready is already declared
     }
 }
 
-auto TalkerGate::should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+auto TalkerGate::admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
 {
     if (!gate_enabled_) {
         // Gate disabled: transmit unconditionally. NOTE: this puts the stream on the
-        // SR class with NO ACMP connection and NO reservation, which is not AVB-spec
-        // compliant -- for bench debugging / free-running reference sources only.
+        // SR class with NO reservation, which is not AVB-spec compliant -- for
+        // bench debugging / free-running reference sources only.
         return true;
     }
-    if (idx >= stream_started_.size()) {
+    if (idx >= stream_started_.size() || !stream_started_[idx].load(std::memory_order_relaxed)) {
         return false;
     }
-    // Spec-correct SR-class admission for THIS stream, evaluated on its own state
-    // (a CRF stream must never ride the audio streams' gate). Requires, together:
-    //   (1) an ACMP connection for this stream (implies our Talker Advertise was
-    //       registered, so no separate Talker-attribute check is needed), and
-    //   (2) the stream is Started (defaults true), and
-    //   (3) MSRP Listener Ready for this stream.
-    // ACMP connection count is published by the reactor thread (note_acmp_connections)
-    // rather than read live from the reactor-mutated connection list here.
-    bool const acmp = acmp_conn_[idx].load() > 0;
-    if (!acmp) {
-        return false;
+    // MSRP Listener Ready / Ready Failed, held across the MRP LeaveAll re-registration blip by
+    // GRACE_NS: a declaration briefly withdrawn must not chop the stream; one gone longer closes
+    // the gate.
+    if (listener_ready_[idx].load(std::memory_order_relaxed)) {
+        return true;
     }
-    if (!stream_started_[idx].load(std::memory_order_relaxed)) {
-        return false;
-    }
-    // MSRP Listener Ready, held across the MRP LeaveAll re-registration blip by a
-    // grace window: the peer's Listener declaration ages out and re-declares on a
-    // ~10s leave-all cycle (Ready momentarily withdrawn for ~1-3s), which must NOT
-    // chop the stream. Stay up while Ready is currently set OR was set within
-    // GRACE. A genuine listener departure (no re-declare for GRACE) closes the gate.
     int64_t const last_ready = ready_ns_[idx].load(std::memory_order_relaxed);
-    bool const msrp = listener_ready_[idx].load(std::memory_order_relaxed) || (last_ready != 0 && (now_ns - last_ready) < GRACE_NS);
-    return msrp;
+    return last_ready != 0 && (now_ns - last_ready) < GRACE_NS;
 }
 
 }  // namespace statusbar::avb_entity

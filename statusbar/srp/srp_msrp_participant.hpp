@@ -59,9 +59,14 @@ namespace statusbar::srp::msrp {
 /// it as the Limits template parameter.
 struct DefaultMsrpLimits
 {
-    static constexpr size_t max_talker_advertise = 32;
-    static constexpr size_t max_talker_failed = 16;
-    static constexpr size_t max_listeners = 32;
+    /// Own talker streams, the peer advertises our listener streams reserve against, and foreign
+    /// advertises a bridge propagates, up to MsrpConfig's max minus reserved_talker_advertise.
+    static constexpr size_t max_talker_advertise = 64;
+    /// One peer TalkerFailed per listener stream.
+    static constexpr size_t max_talker_failed = 32;
+    /// Its own Listener declarations and the peers' declarations for its talker
+    /// streams (see MsrpConfig::reserved_listeners).
+    static constexpr size_t max_listeners = 64;
     static constexpr size_t max_domains = 8;
     static constexpr size_t max_observers = 16;
     static constexpr size_t max_interesting_stream_ids = 32;
@@ -131,7 +136,9 @@ struct ListenerRecord
 // allocates nothing: local declarations that would exceed their limit
 // return `tsn::TsnError::attribute_table_full`, and peer-observed attributes
 // are silently dropped (the peer will retransmit on its next periodic
-// cycle if we later free capacity).
+// cycle if we later free capacity). The reserved_* fields keep part of
+// each table for our own attributes, which peer registrations for other
+// stations' streams cannot take.
 //
 struct MsrpConfig
 {
@@ -180,10 +187,21 @@ struct MsrpConfig
     /// records.
     size_t max_interesting_stream_ids = 16;
 
+    /// Slots of each table that registrations of attributes not ours (see docs/MRP_STATE_MACHINES.md)
+    /// may not take, so foreign attributes never fill a table ahead of our own declarations. Size to
+    /// the entity's own streams using the table. 0 = no reservation.
+    size_t reserved_talker_advertise = 0;
+    size_t reserved_talker_failed = 0;
+    size_t reserved_listeners = 0;
+
     /// Check invariants. Returns Success if the config is
     /// self-consistent, otherwise a tsn::TsnError.
     [[nodiscard]] auto validate() const noexcept -> Status
     {
+        if (reserved_talker_advertise > max_talker_advertise || reserved_talker_failed > max_talker_failed ||
+            reserved_listeners > max_listeners) {
+            return failure(make_error_code(tsn::TsnError::invalid_configuration));
+        }
         if (max_interesting_stream_ids > max_talker_advertise) {
             return failure(make_error_code(tsn::TsnError::invalid_configuration));
         }
@@ -675,17 +693,35 @@ class MsrpParticipantT
     // translate nullptr into tsn::TsnError::attribute_table_full; callers
     // servicing a peer-observed attribute should silently drop.
     //
-    auto find_or_create_talker_advertise(tsn::StreamId const& id) -> AttributeRecord<TalkerAdvertiseFirstValue>*;
-    auto find_or_create_talker_failed(tsn::StreamId const& id) -> AttributeRecord<TalkerFailedFirstValue>*;
-    auto find_or_create_listener(tsn::StreamId const& id) -> ListenerRecord*;
+    //
+    // @p local is true for a local declare_* request, false for a peer-observed
+    // attribute. A peer attribute that is not OWNED (see the *_owned predicates)
+    // may only take a slot while fewer than (max - reserved) unowned records are
+    // held, so registrations from the wire can never starve our own declarations
+    // (MsrpConfig::reserved_*).
+    //
+    auto find_or_create_talker_advertise(tsn::StreamId const& id, bool local) -> AttributeRecord<TalkerAdvertiseFirstValue>*;
+    auto find_or_create_talker_failed(tsn::StreamId const& id, bool local) -> AttributeRecord<TalkerFailedFirstValue>*;
+    auto find_or_create_listener(tsn::StreamId const& id, bool local) -> ListenerRecord*;
     auto find_or_create_domain(uint8_t sr_class_id) -> AttributeRecord<DomainFirstValue>*;
+
+    /// A Talker Advertise / Talker Failed for @p id is ours when we declare it,
+    /// or when we declare a Listener for that stream (the talker our listener
+    /// stream is bound to).
+    [[nodiscard]] auto talker_owned(Operation op, tsn::StreamId const& id) const noexcept -> bool;
+    /// A Listener for @p id is ours when we declare it, or when we declare the
+    /// Talker Advertise for that stream (a listener of our talker stream).
+    [[nodiscard]] auto listener_owned(Operation op, tsn::StreamId const& id) const noexcept -> bool;
 
     /// Generic linear-search-or-append over a capacity-bounded attribute table.
     /// Returns the existing record whose key (via @p key_of) matches @p key, else a
-    /// freshly appended one with @p key_set applied, else nullptr if the table is full.
+    /// freshly appended one with @p key_set applied, else nullptr if the table is full
+    /// -- or, for a peer attribute (!@p local) that is not @p owned, if the table
+    /// already holds @p unowned_cap unowned records.
     /// Backs the four find_or_create_* wrappers (they differ only by container/limit/key).
-    template <class Container, class Key, class KeyOf, class KeySet>
-    auto find_or_create(Container& table, size_t cap, Key const& key, KeyOf key_of, KeySet key_set) ->
+    template <class Container, class Key, class KeyOf, class KeySet, class Owned>
+    auto find_or_create(
+        Container& table, size_t cap, size_t unowned_cap, bool local, Key const& key, KeyOf key_of, KeySet key_set, Owned owned) ->
         typename Container::value_type*
     {
         for (auto& rec : table) {
@@ -695,6 +731,17 @@ class MsrpParticipantT
         }
         if (table.size() >= cap) {
             return nullptr;
+        }
+        if (!local && !owned(Operation::Register, key)) {
+            size_t unowned = 0;
+            for (auto const& rec : table) {
+                if (!owned(rec.operation, key_of(rec))) {
+                    ++unowned;
+                }
+            }
+            if (unowned >= unowned_cap) {
+                return nullptr;
+            }
         }
         typename Container::value_type rec{};
         key_set(rec, key);

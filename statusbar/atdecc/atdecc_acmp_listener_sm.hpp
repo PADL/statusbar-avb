@@ -55,6 +55,9 @@ enum class ListenerEvent : uint8_t
 template <size_t MaxStreams = 32>
 struct ListenerContext
 {
+    /// The compile-time stream capacity (the runtime max_streams is at most this).
+    static constexpr size_t MAX_STREAMS = MaxStreams;
+
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 

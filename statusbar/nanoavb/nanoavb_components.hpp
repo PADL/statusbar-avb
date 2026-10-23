@@ -27,6 +27,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -485,6 +486,23 @@ struct NanoAvbComponents
     /// Get total talker connection count
     [[nodiscard]] auto talker_connection_count() const -> size_t;
 };
+
+/// The MSRP participant's tables for an entity's components, at full capacity, with part of
+/// each reserved for this entity's own streams and their peers so other stations' attributes
+/// never refuse ours with attribute_table_full (docs/NANOAVB_ARCHITECTURE.md).
+[[nodiscard]] constexpr auto entity_msrp_config(size_t const talker_streams, size_t const listener_streams) noexcept
+    -> statusbar::srp::msrp::MsrpConfig
+{
+    using Limits = statusbar::srp::msrp::DefaultMsrpLimits;
+    statusbar::srp::msrp::MsrpConfig config{};
+    config.max_talker_advertise = Limits::max_talker_advertise;
+    config.max_talker_failed = Limits::max_talker_failed;
+    config.max_listeners = Limits::max_listeners;
+    config.reserved_talker_advertise = std::min(talker_streams + listener_streams, config.max_talker_advertise);
+    config.reserved_talker_failed = std::min(listener_streams, config.max_talker_failed);
+    config.reserved_listeners = std::min(talker_streams + listener_streams, config.max_listeners);
+    return config;
+}
 
 //
 // NanoAvbComponentsBuilder - Fluent builder for NanoAvbComponents

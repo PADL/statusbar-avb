@@ -83,6 +83,10 @@ void EntityUpkeep::tick(int64_t /*now_ns*/)
         kit_.on_timeout(sm_now);
         state_since_ = now;
     }
+    // Talker admission is time-dependent (the Listener Ready grace window):
+    // re-evaluate it so an expiry with no MSRP event still reaches the
+    // admission-changed callback (the hardware shaper).
+    kit_.poll_admission(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
     drain();
 }
 

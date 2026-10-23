@@ -3,30 +3,11 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// @file avb_entity_talker_gate.hpp
-/// @brief TalkerGate — the per-stream "should this talker transmit?" gate,
-/// extracted from AvbEntityAudioIO (god-object phase 4).
-///
-/// Spec-correct SR-class admission, evaluated PER STREAM and independently of any
-/// other stream (a CRF media-clock stream is a stream too — it must gate on its own
-/// ACMP connection + reservation, never ride the audio streams' gate). A talker puts
-/// stream `idx` on the wire only when all of its AVB preconditions hold:
-///   1. an ACMP connection exists for that stream (a controller connected a listener),
-///   2. the Talker Advertise attribute is declared — implied by (1)/(3): an ACMP
-///      connection and a peer Listener Ready only arise after our Talker Advertise is
-///      registered, so it needs no separate check,
-///   3. the downstream listener permits transmit via MSRP Listener Ready (held across
-///      an MRP LeaveAll re-registration blip by a grace window),
-///   4. the stream is Started (defaults true; a hook to stop a stream without tearing
-///      down its ACMP connection / reservation).
-/// The gate is cross-thread: the MSRP listener-ready + stream-started state is written
-/// by the reactor thread (note_listener_ready / note_stream_started) and read by the
-/// media-timer thread (should_transmit), so those flags + the last-ready timestamps
-/// are atomic. Reads ACMP connection state + the gate-enable flag through references
-/// bound at construction.
+/// TalkerGate: the per-stream "should this talker transmit?" gate (Milan v1.2 Sections 5.3.7.3,
+/// 5.5.2.5). Written by the reactor thread, read by the media-timer thread (should_transmit), so
+/// its state is atomic. See docs/MILAN_TALKER.md.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
-#include "statusbar/itc/itc_published.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 
@@ -34,6 +15,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::avb_entity {
 
@@ -43,8 +25,8 @@ struct TalkerGate
         : gate_enabled_{gate_enabled}
         , components_{components}
     {
-        // Stream Started defaults true: a stream is admitted once ACMP-connected +
-        // Listener Ready unless explicitly stopped via note_stream_started().
+        // Stream Started defaults true: a stream is admitted once a listener's
+        // Ready is registered unless explicitly stopped via note_stream_started().
         for (auto& started : stream_started_) {
             started.store(true, std::memory_order_relaxed);
         }
@@ -56,22 +38,22 @@ struct TalkerGate
     /// One per talker stream (STREAM_OUTPUT descriptor index); sized for the
     /// data plane's maximum blob-declared stream table (kit phase 1).
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
-    /// Grace window the MSRP Listener Ready is held across a LeaveAll re-registration
-    /// blip (Ready momentarily withdrawn for ~1-3 s on the ~10 s leave-all cycle), so
-    /// a normal MRP cycle does NOT chop the stream. A genuine listener departure (no
-    /// re-declare for GRACE) closes the gate.
+    /// How long the gate stays open after the listener declaration was last seen registered, so
+    /// an MRP LeaveAll re-registration blip does not chop the stream.
     static constexpr int64_t GRACE_NS = 5'000'000'000;
 
-    /// Reactor thread: an MSRP Listener Ready declaration for @p stream_id changed
-    /// to @p ready. Matched to a talker stream index by ACMP stream_id (same value
-    /// MSRP advertises); records the readiness flag and, while the stream has an
-    /// ACMP connection, stamps the last-ready time and the admitted() latch (a
-    /// Ready with no connection opens no grace window and admits nothing).
-    void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready);
+    /// Reactor thread: whether a Listener declaration permitting transmission (Ready or Ready
+    /// Failed) is registered for @p stream_id at steady-clock @p now_ns. Registration and
+    /// withdrawal both stamp the last-ready time, from which GRACE_NS runs.
+    void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns);
+
+    /// Reactor thread: our Talker declarations were withdrawn. Every stream closes at once (no
+    /// grace) and forgets its listener state until note_listener_ready re-learns it.
+    void note_talker_withdrawn() noexcept;
 
     /// Any thread: mark talker stream @p idx Started (@p started true) or Stopped.
-    /// Stopped suppresses transmit without tearing down the ACMP connection or the
-    /// reservation. Defaults Started; out-of-range indices are ignored.
+    /// Stopped suppresses transmit without tearing down the reservation.
+    /// Defaults Started; out-of-range indices are ignored.
     void note_stream_started(uint16_t idx, bool started) noexcept
     {
         if (idx < stream_started_.size()) {
@@ -79,59 +61,31 @@ struct TalkerGate
         }
     }
 
-    /// Reactor thread: talker stream @p idx now has @p count ACMP connections, published for the
-    /// media thread. The last disconnect forgets the stream's reservation history; a connection
-    /// made while Listener Ready is declared latches it at once.
-    void note_acmp_connections(uint16_t idx, uint32_t count) noexcept;
+    /// Any thread: is talker stream @p idx admitted at steady-clock @p now_ns? True if gating is
+    /// disabled, or the stream is Started and a permitting listener declaration is registered now
+    /// or was within GRACE_NS. Time-dependent: the reactor re-evaluates it (poll_admission).
+    [[nodiscard]] auto admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
-    /// Reactor thread: is talker stream @p idx admitted (gating off, or an ACMP connection whose
-    /// listener's reservation is ready)? Only the last disconnect ends admission, so the set is
-    /// always a superset of what should_transmit passes; not time-dependent.
-    [[nodiscard]] auto admitted(uint16_t idx) const noexcept -> bool
-    {
-        if (!gate_enabled_) {
-            return true;
-        }
-        if (idx >= acmp_conn_.size() || acmp_conn_[idx].load() == 0) {
-            return false;
-        }
-        return reservation_ready_[idx] || listener_ready_[idx].load(std::memory_order_relaxed);
-    }
-
-    /// Media-timer thread: may talker stream @p idx put its stream on the wire at
-    /// steady-clock time @p now_ns? True if gating is disabled, or ALL of this
-    /// stream's own preconditions hold: an ACMP connection exists AND the stream is
-    /// Started AND MSRP Listener Ready is set (or within GRACE_NS). Independent of
-    /// every other stream.
-    [[nodiscard]] auto should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool;
-
-    /// Reactor thread: set the admitted() latch and stamp the last-ready time.
-    void latch_ready(uint16_t idx) noexcept;
+    /// Media-timer thread: may talker stream @p idx transmit at steady-clock @p now_ns? Exactly
+    /// admitted(), independent of every other stream.
+    [[nodiscard]] auto should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool { return admitted(idx, now_ns); }
 
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
-    nanoavb::NanoAvbComponents const& components_;  ///< reads acmp_talker connection state
+    nanoavb::NanoAvbComponents const& components_;  ///< maps stream_id -> talker stream index (acmp_talker)
     std::optional<logging::Logger> logger_{};       ///< reactor-thread gate-transition logging
 
     // --- Owned gate state (cross-thread) ---------------------------------------
-    /// "A listener permits transmit" (MSRP Listener Ready), per stream. Written by
-    /// note_listener_ready (reactor), read by should_transmit (media timer).
+    /// A listener declaration permitting transmission is registered, per stream.
+    /// Written by note_listener_ready (reactor), read by admitted (any thread).
     std::array<std::atomic<bool>, STREAM_COUNT> listener_ready_{};
-    /// Last steady-clock time (ns) each stream's Listener Ready was observed true;
-    /// the strict gate keeps transmitting for GRACE_NS past this. Reset to 0 when
-    /// the stream's last ACMP connection goes.
+    /// Last steady-clock time (ns) each stream's listener declaration was known
+    /// registered (0 = never, or forgotten by note_talker_withdrawn); the gate
+    /// stays open for GRACE_NS past this.
     std::array<std::atomic<int64_t>, STREAM_COUNT> ready_ns_{};
     /// Stream Started state, per stream (defaults true; see the constructor). A
-    /// Stopped stream is not admitted even when connected + Listener Ready.
+    /// Stopped stream is not admitted even with Listener Ready registered.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
-    /// Per-stream ACMP connection count, published by note_acmp_connections
-    /// (reactor) and read by should_transmit (media timer). Mirrors
-    /// acmp_talker.connection_count(idx) so the media thread never reads the
-    /// reactor-mutated connection list directly.
-    std::array<itc::Published<uint32_t>, STREAM_COUNT> acmp_conn_{};
-    /// Listener Ready seen while the stream had an ACMP connection (cleared
-    /// when the last one goes). Reactor thread only; feeds admitted().
-    std::array<bool, STREAM_COUNT> reservation_ready_{};
 };
 
 }  // namespace statusbar::avb_entity

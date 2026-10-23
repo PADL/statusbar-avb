@@ -96,7 +96,7 @@ struct AvbEntityAm824IOConfig
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
 
-    /// Gate transmit on an admitted downstream (ACMP connection + MSRP Listener Ready).
+    /// Gate transmit on an admitted downstream (MSRP Listener Ready / Ready Failed).
     /// DEFAULT FALSE (unlike audio/stereo/tone which default true): the AM824 bench
     /// entity deliberately streams ungated so it transmits its test tone with no
     /// controller connected. False keeps should_transmit always-true, preserving the
@@ -396,7 +396,7 @@ class AvbEntityAm824IO
         last_gptp_ns_,
         mem_resource_};
 
-    /// Per-stream transmit gate (ACMP connection + MSRP Listener Ready). Gating is
+    /// Per-stream transmit gate (MSRP Listener Ready / Ready Failed). Gating is
     /// disabled by default (gate_talker_on_listener=false) so TX stays always-on.
     /// After host_.
     TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};

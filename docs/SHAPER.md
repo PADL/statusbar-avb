@@ -119,16 +119,22 @@ arithmetic).
 
 The shaper sizes class A by the kit's admitted set
 (`AvbEntityKit::admitted_talker_streams()`, reported through
-`set_on_admission_changed`): a talker stream with an ACMP connection whose
-listener's MSRP Listener Ready is set, or was seen while a connection existed
-(`TalkerGate::admitted`; a Ready seen with no connection counts for nothing).
-A Listener Ready withdrawal alone does not end admission, only the last ACMP
-disconnect does, so the LeaveAll re-registration blip that the transmit gate's
-grace window rides over never takes bandwidth from a stream still on the wire.
-The last disconnect also resets the grace window's last-ready time, so a
-reconnect transmits only on a fresh (or still declared) Listener Ready: the
-admitted set is always a superset of what the gate lets transmit. With `gate_talker_on_listener = false` every
-talker stream is admitted. Every kit talker stream is class A today (the kit
+`set_on_admission_changed`): a Started talker stream for which an MSRP
+Listener Ready or Listener Ready Failed is registered, or was within the
+transmit gate's 5 s grace window (`TalkerGate::admitted`). That is the
+Milan 1.2 5.3.7.3 streaming condition; Listener Asking Failed does not
+admit, and ACMP connections play no part (a Milan listener binds with
+PROBE_TX and makes none). The grace window runs from the last moment the
+declaration was known registered, so the LeaveAll re-registration blip
+never takes bandwidth from a stream still on the wire, and a listener that
+really leaves gives its bandwidth back 5 s later. The kit re-evaluates the
+set on every MSRP listener event and on every `EntityUpkeep` tick, which is
+what notices a grace expiry. The transmit gate is the same predicate (the
+kit's MAAP and STOP_STREAMING checks only narrow it), and the reactor
+evaluates it later than the media thread does, so the admitted set never
+drops a stream before it stops transmitting. Withdrawing our Talker
+Advertise closes every stream at once. With
+`gate_talker_on_listener = false` every talker stream is admitted. Every kit talker stream is class A today (the kit
 declares only the class A SR domain); class B is laid out but stays empty.
 
 ## Verifying on the box

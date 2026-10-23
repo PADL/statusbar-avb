@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from .control_values import count_values
 from .model import (
+    AUDIO_MAP_MAX_MAPPINGS,
     DESCRIPTOR_ENTITY,
     DESCRIPTOR_CONFIGURATION,
     DESCRIPTOR_AUDIO_UNIT,
@@ -504,6 +505,11 @@ def _serialize_audio_cluster(cluster: AudioCluster, desc_index: int) -> bytes:
 def _serialize_audio_map(am: AudioMap, desc_index: int) -> bytes:
     """Serialize AUDIO_MAP descriptor (8 + 8*N bytes)."""
     n = len(am.mappings)
+    if n > AUDIO_MAP_MAX_MAPPINGS:
+        raise ValueError(
+            f"AUDIO_MAP {desc_index}: {n} mappings, more than one AUDIO_MAP holds "
+            f"({AUDIO_MAP_MAX_MAPPINGS}); split them over several"
+        )
     parts = [
         pack_u16(DESCRIPTOR_AUDIO_MAP),
         pack_u16(desc_index),

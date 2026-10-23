@@ -184,8 +184,8 @@ void AvbEntityAm824IO::wire_stream_callbacks()
     host_.set_withdraw_streams(
         [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time); });
 
-    // ACMP talker connection callbacks are wired once, in start(): the log +
-    // gate-publish pair (a second registration here would just be overwritten).
+    // ACMP talker connection callbacks are wired once, in start(): the
+    // connection log (a second registration here would just be overwritten).
 }
 
 //
@@ -243,13 +243,14 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         rt_rx_handler_ = std::move(*rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
     }
 
-    // The per-stream transmit gate tracks MSRP Listener Ready + the ACMP connection
-    // count. Re-sets the acmp_talker callbacks wire_stream_callbacks installed for
-    // logging, MERGING the gate publish -- the media timer never reads the reactor-
-    // mutated connection list directly. (Gating is disabled by default for this bench
-    // entity, so the gate is effectively a no-op unless gate_talker_on_listener is set.)
-    host_.set_on_listener_ready(
-        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+    // The per-stream gate tracks the MSRP listener declaration; ACMP connections
+    // are only logged. Gating is off by default here (gate_talker_on_listener).
+    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool ready) {
+        gate_.note_listener_ready(
+            stream_id,
+            ready,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    });
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -257,8 +258,6 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -266,8 +265,6 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         });
 
     // Listener connect/disconnect -> MSRP reserve + join/leave the talker's multicast

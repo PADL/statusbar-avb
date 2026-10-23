@@ -86,7 +86,7 @@ struct AvbEntityStereoIOConfig
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
 
-    /// Gate transmit on an admitted downstream (ACMP connection + MSRP Listener Ready).
+    /// Gate transmit on an admitted downstream (MSRP Listener Ready / Ready Failed).
     /// See AvbEntityAudioIOConfig::gate_talker_on_listener. Default true.
     bool gate_talker_on_listener{true};
 
@@ -312,7 +312,7 @@ class AvbEntityStereoIO
         last_gptp_ns_,
         mem_resource_};
 
-    /// Per-stream transmit gate (ACMP connection + MSRP Listener Ready). After host_.
+    /// Per-stream transmit gate (MSRP Listener Ready / Ready Failed). After host_.
     TalkerGate gate_{config_.gate_talker_on_listener, host_.components()};
 
     /// The AM824 listener RX path (shared ListenerStreams: socket, deserialize,

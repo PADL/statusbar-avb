@@ -215,9 +215,8 @@ void AvbEntityStereoIO::wire_stream_callbacks()
     host_.set_withdraw_streams(
         [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time); });
 
-    // (The ACMP talker connection callbacks are registered once, in start(),
-    // where the gate publish is wired in — a second log-only registration
-    // here would just be overwritten.)
+    // (The ACMP talker connection callbacks are registered once, in start() —
+    // a second registration here would just be overwritten.)
 }
 
 //
@@ -300,12 +299,14 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         rt_rx_handler_ = std::move(*rx);
     }
 
-    // The per-stream transmit gate tracks MSRP Listener Ready + the ACMP connection
-    // count. (Re-sets the acmp_talker callbacks wire_stream_callbacks installed for
-    // logging, adding the gate publish -- the media timer never reads the reactor-
-    // mutated connection list directly.)
-    host_.set_on_listener_ready(
-        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+    // The per-stream transmit gate tracks the MSRP listener declaration (Ready /
+    // Ready Failed); ACMP connections are only logged.
+    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool ready) {
+        gate_.note_listener_ready(
+            stream_id,
+            ready,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    });
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -313,8 +314,6 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -322,8 +321,6 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
                 stream_index,
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         });
 
     // Listener connect/disconnect: MSRP attach (Ready / AskingFailed per the

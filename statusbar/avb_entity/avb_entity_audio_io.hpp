@@ -180,8 +180,8 @@ class AvbEntityAudioIO
 
     /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
     /// stream on the wire this tick: true if gating is disabled, or ALL of this
-    /// stream's own preconditions hold -- an ACMP connection exists AND the stream
-    /// is Started AND MSRP Listener Ready (with grace). Each stream (CRF included)
+    /// stream's own preconditions hold -- the stream is Started AND an MSRP
+    /// Listener Ready / Ready Failed is registered (with grace). Each stream (CRF included)
     /// gates independently. See TalkerGate / gate_talker_on_listener.
     [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
     {

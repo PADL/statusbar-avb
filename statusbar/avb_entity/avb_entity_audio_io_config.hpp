@@ -57,19 +57,9 @@ struct AvbEntityAudioIOConfig
     uint16_t crf_timestamp_interval{96};
     uint16_t crf_timestamps_per_packet{1};
 
-    /// Gate talker stream transmission on spec-correct SR-class admission
-    /// (IEEE 802.1Q SRP), evaluated PER STREAM: a talker emits its AVTP stream
-    /// only when ALL of that stream's own preconditions hold -- an ACMP
-    /// connection exists AND the stream is Started AND a downstream listener has
-    /// declared MSRP Listener Ready (held across an MRP LeaveAll re-registration
-    /// blip by a short grace window). An ACMP connection without a reservation is
-    /// NOT sufficient: streaming an SR-class stream with no MSRP reservation puts
-    /// it on the wire with no bandwidth allocated on the switches. With no
-    /// listener the talker stays silent instead of streaming into the void. The
-    /// CRF media clock is a first-class stream and gates INDEPENDENTLY on its own
-    /// ACMP connection + reservation -- it does NOT follow the audio talkers.
-    /// Default true; set false to stream unconditionally from link-up (non-spec:
-    /// no reservation, bench/debug only).
+    /// Gate each talker stream on SR-class admission: it transmits only when Started
+    /// and an MSRP Listener Ready (Failed) is registered (Milan v1.2 Section 5.3.7.3).
+    /// Default true; false streams unconditionally (bench only). docs/AVB_ENTITY_KIT.md.
     bool gate_talker_on_listener{true};
 
     // Inter-site UDPTUN ingest (TX). When enabled and a peer is set, audio

@@ -44,6 +44,7 @@
 #include "statusbar/status/status.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -54,6 +55,24 @@
 #include <utility>
 
 namespace statusbar::avb_entity {
+
+// The control-plane collaborators the kit hands its stream tables to are sized
+// in nanoavb/atdecc/srp; each must hold MAX_ENTITY_STREAMS per direction.
+static_assert(
+    atdecc::TalkerContext<>::MAX_STREAMS >= MAX_ENTITY_STREAMS && atdecc::ListenerContext<>::MAX_STREAMS >= MAX_ENTITY_STREAMS,
+    "ACMP talker/listener contexts: one entry per STREAM_OUTPUT/STREAM_INPUT");
+static_assert(
+    nanoavb::DescriptorStorageHandler::MAX_STREAM_STATES >= 2 * MAX_ENTITY_STREAMS,
+    "AEM stream runtime state (SET_STREAM_FORMAT, START/STOP_STREAMING): inputs and outputs share the table");
+static_assert(
+    nanoavb::NanoAvbAcmpListener::MAX_FAST_CONNECT_GOALS >= MAX_ENTITY_STREAMS,
+    "fast-connect goals and persisted listener bindings: one per STREAM_INPUT");
+static_assert(
+    srp::msrp::DefaultMsrpLimits::max_talker_advertise >= 2 * MAX_ENTITY_STREAMS &&
+        srp::msrp::DefaultMsrpLimits::max_listeners >= 2 * MAX_ENTITY_STREAMS &&
+        srp::msrp::DefaultMsrpLimits::max_talker_failed >= MAX_ENTITY_STREAMS,
+    "MSRP tables (nanoavb::entity_msrp_config): room to reserve our own declarations plus the bound peers', per "
+    "direction; other stations' propagated advertises only get the remainder");
 
 class AvbEntityKit
 {
@@ -106,10 +125,9 @@ class AvbEntityKit
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
     // --- Media-thread (RT) calls ----------------------------------------------
-    /// Whether talker stream @p idx should put its AVTP stream on the wire this
-    /// tick (gating disabled, or a downstream listener is ready/connected).
-    /// Also gated on MAAP-address readiness in "maap" mode, and closed while a
-    /// controller has the stream STOP_STREAMING'd.
+
+    /// Whether talker stream @p idx transmits this tick: admitted (or gating off),
+    /// its MAAP address ready in "maap" mode, and not STOP_STREAMING'd.
     [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
     {
         if (!maap_.ready() || talker_->stream_stopped(idx)) {
@@ -147,16 +165,27 @@ class AvbEntityKit
     void on_control_symbol(uint32_t symbol_code, ControlChangedFn fn);
 
     // --- Talker admission (the hardware shaper's input) ------------------------
-    /// The talker stream indices currently admitted (TalkerGate::admitted: a
-    /// listener is ACMP-connected and its reservation is ready; every stream
-    /// when gating is disabled), in stream-table order.
+
+    /// The talker stream indices admitted at steady-clock @p now_ns, in table
+    /// order (TalkerGate::admitted). The no-argument form reads the steady clock.
     using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
-    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
-    /// Called on the reactor thread with the new admitted set whenever it changes, not for the set
-    /// in force when installed (read admitted_talker_streams()). An empty function removes it
-    /// (before whatever it captures goes).
+    [[nodiscard]] auto admitted_talker_streams(int64_t now_ns) const noexcept -> AdmittedStreams;
+    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams
+    {
+        return admitted_talker_streams(steady_now_ns());
+    }
+    /// Called on the reactor thread with the new admitted set whenever it changes;
+    /// not for the set in force at install (read admitted_talker_streams()).
+    /// Pass an empty function to remove it before whatever it captures goes.
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
+    /// Reactor thread: an MSRP listener declaration for @p stream_id was registered
+    /// (@p ready) or withdrawn at @p now_ns; feeds the gate, re-evaluates admission.
+    void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns);
+    /// Reactor thread, periodically (EntityUpkeep::tick): re-evaluate admission
+    /// at steady-clock @p now_ns, so a grace window that runs out with no MSRP
+    /// event still closes the stream's admission and fires the callback.
+    void poll_admission(int64_t const now_ns) { note_admission(now_ns); }
 
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
@@ -205,16 +234,23 @@ class AvbEntityKit
 
   private:
     /// Attach the stream-specific control-plane behavior to the host: MSRP
-    /// advertise/withdraw, the ACMP talker log + transmit-gate publication,
+    /// advertise/withdraw (+ the transmit gate's MSRP listener feed), the
+    /// ACMP talker connection log,
     /// the ACMP listener connect/disconnect drive, and the AEM
     /// GET_COUNTERS / GET_STREAM_INFO fills.
     void wire_stream_callbacks();
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
-    /// Recompute the admitted set after a gate input changed; fire
-    /// on_admission_changed_ when it differs from the last one.
-    void note_admission();
+    /// Recompute the admitted set at steady-clock @p now_ns after a gate input
+    /// changed (or time passed); fire on_admission_changed_ when it differs
+    /// from the last one.
+    void note_admission(int64_t now_ns);
+    /// The steady clock in ns: the gate's time base (grace window stamps).
+    [[nodiscard]] static auto steady_now_ns() noexcept -> int64_t
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
@@ -230,7 +266,7 @@ class AvbEntityKit
     /// blob, 4 max listeners per talker stream.
     AvbEntityHost host_;
 
-    /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
+    /// Per-stream transmit gate (MSRP listener declaration + grace). Binds config_ + components.
     TalkerGate gate_;
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};

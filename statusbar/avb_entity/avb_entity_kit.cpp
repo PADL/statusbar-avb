@@ -148,20 +148,20 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
     return StreamKind::other;
 }
 
-auto AvbEntityKit::admitted_talker_streams() const noexcept -> AdmittedStreams
+auto AvbEntityKit::admitted_talker_streams(int64_t const now_ns) const noexcept -> AdmittedStreams
 {
     AdmittedStreams admitted{};
     for (auto const& spec : talker_specs_) {
-        if (gate_.admitted(spec.index)) {
+        if (gate_.admitted(spec.index, now_ns)) {
             (void)admitted.try_push_back(spec.index);
         }
     }
     return admitted;
 }
 
-void AvbEntityKit::note_admission()
+void AvbEntityKit::note_admission(int64_t const now_ns)
 {
-    auto admitted = admitted_talker_streams();
+    auto admitted = admitted_talker_streams(now_ns);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
     }
@@ -169,6 +169,12 @@ void AvbEntityKit::note_admission()
     if (on_admission_changed_) {
         on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
     }
+}
+
+void AvbEntityKit::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, int64_t const now_ns)
+{
+    gate_.note_listener_ready(stream_id, ready, now_ns);
+    note_admission(now_ns);
 }
 
 void AvbEntityKit::wire_stream_callbacks()
@@ -180,16 +186,18 @@ void AvbEntityKit::wire_stream_callbacks()
         for (auto const& spec : talker_specs_) {
             (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info(spec).stream_id, time);
         }
+        // No Talker Advertise, no streaming (Milan 1.2 5.3.7.3): close every
+        // stream now, without the grace window.
+        gate_.note_talker_withdrawn();
+        note_admission(steady_now_ns());
     });
-    // The per-stream transmit gate tracks MSRP Listener Ready.
-    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool ready) {
-        gate_.note_listener_ready(stream_id, ready);
-        note_admission();
-    });
+    // The transmit gate follows the MSRP Listener Ready / Ready Failed registered for our talker
+    // streams (Milan v1.2 Section 5.3.7.3); ACMP connections play no part.
+    host_.set_on_listener_ready(
+        [this](nanoavb::StreamId const& stream_id, bool ready) { note_listener_ready(stream_id, ready, steady_now_ns()); });
 
-    // ACMP: log talker connections + publish the fresh connection count for
-    // the media-timer gate; drive the listener (MSRP attach + mcast join) on
-    // listener connect/disconnect.
+    // ACMP: log talker connections (they no longer gate anything); drive the
+    // listener (MSRP attach + mcast join) on listener connect/disconnect.
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -198,9 +206,6 @@ void AvbEntityKit::wire_stream_callbacks()
                 logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
-            note_admission();
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -209,9 +214,6 @@ void AvbEntityKit::wire_stream_callbacks()
                 logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
-            note_admission();
         });
     if (listener_ != nullptr) {
         host_.components().acmp_listener.set_connection_callbacks(
@@ -408,12 +410,21 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
     if (!maap_.ready()) {
         return;
     }
+    int64_t const now_ns = steady_now_ns();
     for (auto const& spec : talker_specs_) {
-        auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(spec), time);
+        auto const info = make_talker_srp_info(spec);
+        auto result = host_.components().msrp_handler.talker_advertise(info, time);
         if (!result) {
             host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", spec.index, result.error().value());
+            continue;
         }
+        // Re-learn the gate's listener state from the live registration: a
+        // withdraw forgot it, and a listener whose declaration stayed
+        // registered throughout raises no fresh MSRP event.
+        bool const permits = host_.components().msrp_handler.listener_permit_debug(info.stream_id).permits;
+        gate_.note_listener_ready(info.stream_id, permits, now_ns);
     }
+    note_admission(now_ns);
 }
 
 }  // namespace statusbar::avb_entity

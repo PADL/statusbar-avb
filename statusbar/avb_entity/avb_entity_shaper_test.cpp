@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <system_error>
+#include <vector>
 
 using namespace statusbar;
 using namespace statusbar::avb_entity;
@@ -242,6 +243,29 @@ TEST(shaper_cbs, class_b_sees_class_a_as_interference)
     auto const b_alone = class_b_cbs(b_streams, CbsParameters{}, 1'000'000, 1500);
     EXPECT_EQ(b_alone.hicredit, int32_t{12});
     EXPECT_TRUE(class_b_cbs({}, a, 1'000'000, 1500).empty());
+}
+
+// The kit's bound: 16 32-channel 48 kHz INT_24 AAF talkers (wire frame 739 octets, 47296 kbit/s
+// each) and the CRF on a gigabit link: idleSlope 762432 kbit/s (76.2%), hiCredit 1144, loCredit
+// -175. Past 802.1Q's default 75% (34.3): a bridge admits 15 of them, not the 16th.
+TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
+{
+    auto aaf = aaf_8ch_48k_int24();
+    aaf.format.channels = 32;
+    EXPECT_EQ(AvbEntityKit::talker_tspec(aaf).max_frame_size, uint16_t{696});
+    EXPECT_EQ(stream_bandwidth_kbps(AvbEntityKit::talker_tspec(aaf), CLASS_A_INTERVALS_PER_SEC), uint32_t{47296});
+    std::vector<TSpec> streams(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
+    streams.push_back(AvbEntityKit::talker_tspec(crf_one_timestamp()));
+    EXPECT_EQ(streams.size(), MAX_ENTITY_STREAMS);
+    auto const a = class_a_cbs(streams, 1'000'000, 1500);
+    EXPECT_EQ(a.idleslope_kbps, int32_t{762432});
+    EXPECT_EQ(a.sendslope_kbps, int32_t{-237568});
+    EXPECT_EQ(a.hicredit, int32_t{1144});
+    EXPECT_EQ(a.locredit, int32_t{-175});
+    EXPECT_EQ(a.max_frame_size, uint32_t{739});
+    EXPECT_TRUE(a.idleslope_kbps > 750'000);
+    streams.erase(streams.begin());
+    EXPECT_TRUE(class_a_cbs(streams, 1'000'000, 1500).idleslope_kbps < 750'000);
 }
 
 TEST(shaper_errors, messages)

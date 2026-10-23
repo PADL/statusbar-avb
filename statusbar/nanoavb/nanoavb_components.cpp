@@ -283,7 +283,7 @@ NanoAvbComponents::NanoAvbComponents(
     , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity_model.get_entity().entity_id, AcmpListenerCallbacks{}, listener_max_streams}
     , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
-    , msrp_handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}}
+    , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
 {}
 
 namespace {
@@ -327,7 +327,7 @@ NanoAvbComponents::NanoAvbComponents(
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity.entity_id, AcmpListenerCallbacks{}, listener_max_streams}
     , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
-    , msrp_handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}}
+    , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
 {}
 
 //

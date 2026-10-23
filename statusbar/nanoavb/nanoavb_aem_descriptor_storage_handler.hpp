@@ -106,6 +106,10 @@ using atdecc::aem::SignalSource;
 class DescriptorStorageHandler : public AemEntityHandler
 {
   public:
+    /// STREAM_INPUT + STREAM_OUTPUT descriptors with runtime state: 32 per direction, as the
+    /// ACMP contexts hold (MAX_STREAMS). A stream past the table answers NO_SUCH_DESCRIPTOR.
+    static constexpr size_t MAX_STREAM_STATES = 64;
+
     explicit DescriptorStorageHandler(DescriptorStorage storage) noexcept
         : storage_{storage}
     {}
@@ -1436,7 +1440,6 @@ class DescriptorStorageHandler : public AemEntityHandler
     static constexpr size_t STREAM_CURRENT_FORMAT_FIELD = offsetof(atdecc::aem::DescriptorStream, current_format);
     static constexpr size_t STREAM_FORMATS_OFFSET_FIELD = offsetof(atdecc::aem::DescriptorStream, formats_offset);
     static constexpr size_t STREAM_NUMBER_OF_FORMATS_FIELD = offsetof(atdecc::aem::DescriptorStream, number_of_formats);
-    static constexpr size_t MAX_STREAM_STATES = 16;
 
     /// Runtime state for one STREAM_INPUT/OUTPUT descriptor.
     struct StreamRuntimeState

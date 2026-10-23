@@ -258,7 +258,9 @@ class NanoAvbAcmpListener
 
     /// How often tick() re-attempts a disconnected fast-connect goal.
     static constexpr auto FAST_CONNECT_RETRY = std::chrono::seconds{2};
-    static constexpr size_t MAX_FAST_CONNECT_GOALS = 16;
+    /// One goal per listener stream: the 32 streams the ACMP listener context
+    /// holds (atdecc::ListenerContext::MAX_STREAMS).
+    static constexpr size_t MAX_FAST_CONNECT_GOALS = 32;
 
     /// IEEE 1722.1 Clause 8.2.2.1.1 fast connect: the listener originates a
     /// connection to a remembered talker with itself as the controller (no

@@ -137,9 +137,9 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         [&entity](auto v) { entity.suppress_leaveall = v; });
     specs.add<bool>(
         "gate.talker_on_listener",
-        "Transmit a talker stream only when it is fully SR-class admitted: an ACMP connection AND MSRP Listener "
-        "Ready (with grace) for that stream; stay silent otherwise (IEEE 802.1Q SRP). Each stream gates "
-        "independently -- the CRF media clock on its own connection + reservation, not on the audio talkers. "
+        "Transmit a talker stream only while an MSRP Listener Ready or Ready Failed is registered for it (with "
+        "grace); stay silent otherwise (IEEE 802.1Q SRP, Milan 1.2 5.3.7.3). Each stream gates "
+        "independently -- the CRF media clock on its own reservation, not on the audio talkers. "
         "Default true (false = stream unconditionally from link-up; non-spec, bench only).",
         entity.gate_talker_on_listener,
         [&entity](auto v) { entity.gate_talker_on_listener = v; });
