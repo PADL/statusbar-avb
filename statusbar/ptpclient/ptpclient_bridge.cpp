@@ -311,6 +311,7 @@ void PtpTimeBridge::sampler_loop()
 
 void PtpTimeBridge::sampler_loop_impl()
 {
+    realtime::set_current_thread_name("ptp-sampler");
     // The sampler brackets each /dev/ptp0 read between two CLOCK_MONOTONIC reads;
     // a preemption inside that bracket inflates it past max_bracket_ns (sample
     // rejected) or the residual past the degrade/step thresholds. The sampler
@@ -397,7 +398,8 @@ auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcep
     return TimeConvertResult{.time_ns = from_monotonic_ns(monotonic_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
 }
 
-auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<WakeTimes>
+auto PtpTimeBridge::sleep_until_ptp(
+    int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going, int64_t* const spin_headroom_ns) noexcept -> StatusValue<WakeTimes>
 {  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
     auto prep = prepare_sleep(ptp_deadline_ns);
     if (!prep) {
@@ -432,7 +434,9 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
     // which is CLOCK_MONOTONIC_RAW there, against a deadline on a different
     // counter: harmless on a desktop, a full-period spin on a laptop that had
     // ever slept.)
+    bool slept = false;
     if (mono_wake > realtime::read_monotonic_ns()) {
+        slept = true;
         int const rc = realtime::sleep_until_monotonic_ns(mono_wake);
         if (rc == EINTR) {
             // Signal received -- return error so caller can check shutdown flag
@@ -443,8 +447,16 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         }
     }
 
-    // Precise finish: spin on CLOCK_MONOTONIC_RAW to the exact RAW deadline.
-    // sched_yield while still far out to avoid a hard busy-loop; bail on shutdown.
+    // Precise finish: spin on CLOCK_MONOTONIC_RAW (vDSO) to the deadline with a pause hint, bailing
+    // on shutdown; sched_yield only every SPIN_YIELD_INTERVAL_NS and not in the last
+    // SPIN_NO_YIELD_NS (docs/LINUXPTP.md).
+    static constexpr int64_t SPIN_YIELD_INTERVAL_NS = 20'000;
+    static constexpr int64_t SPIN_NO_YIELD_NS = 10'000;
+    int64_t const spin_start = realtime::read_monotonic_raw_ns();
+    // Headroom against the configured window: the slew term is part of the
+    // planned early wake, not of the OS's lateness.
+    int64_t const headroom = raw_deadline - spin_start - slew_guard;
+    int64_t last_yield = spin_start;
     while (true) {
         int64_t const now_raw = realtime::read_monotonic_raw_ns();
         if (now_raw >= raw_deadline) {
@@ -453,8 +465,11 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         if (!is_running_atomic() || (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed))) {
             return failure(PtpError::bridge_not_running);
         }
-        if (raw_deadline - now_raw > 10'000) {
+        if (now_raw - last_yield > SPIN_YIELD_INTERVAL_NS && raw_deadline - now_raw > SPIN_NO_YIELD_NS) {
             ::sched_yield();
+            last_yield = now_raw;
+        } else {
+            realtime::cpu_relax();
         }
     }
 
@@ -462,6 +477,9 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
     auto const wake_ptp = finalize_wake(wake_raw, plan.before);
     if (!wake_ptp) {
         return forward_failure(wake_ptp);
+    }
+    if (slept && spin_headroom_ns != nullptr) {
+        *spin_headroom_ns = headroom;
     }
     return success(WakeTimes{.ptp_ns = *wake_ptp, .raw_ns = wake_raw});
 }

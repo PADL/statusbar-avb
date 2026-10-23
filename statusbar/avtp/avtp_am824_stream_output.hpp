@@ -14,6 +14,11 @@
 
 #include "statusbar/avtp/avtp_am824_stream.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <span>
+
 namespace statusbar::avtp {
 
 /// Check if AM824 serialize frame parameters are valid
@@ -97,9 +102,11 @@ auto am824_serialize_mbla(
 
     ctx.build_packet_header(pdu, samples_per_channel, gptp_now_ns);
 
-    // Collect float samples from source into per-channel scratch buffers
-    std::array<std::array<float, MaxSamples>, MaxChannels> scratch{};
+    // Collect float samples from source into per-channel scratch buffers. Only the region the
+    // encoder reads is zeroed (the array lives on the real-time stack), so unfilled dest is silence.
+    std::array<std::array<float, MaxSamples>, MaxChannels> scratch;  // NOLINT(cppcoreguidelines-pro-type-member-init)
     for (uint8_t ch = 0; ch < channels; ++ch) {
+        std::fill_n(scratch[ch].data(), samples_per_channel, 0.0F);
         get_audio(ch, std::span<float>{scratch[ch].data(), samples_per_channel});
     }
 
@@ -168,9 +175,11 @@ auto am824_serialize_mixed(
     ctx.build_packet_header(pdu, samples_per_channel, gptp_now_ns);
 
     // Collect audio samples into scratch for MBLA channels
-    std::array<std::array<float, MaxSamples>, MaxChannels> audio_scratch{};
+    // Only the MBLA channels' used region is zeroed (see am824_serialize_mbla).
+    std::array<std::array<float, MaxSamples>, MaxChannels> audio_scratch;  // NOLINT(cppcoreguidelines-pro-type-member-init)
     for (uint8_t ch = 0; ch < channels; ++ch) {
         if (channel_types[ch] == Am824ChannelType::mbla) {
+            std::fill_n(audio_scratch[ch].data(), samples_per_channel, 0.0F);
             get_audio(ch, std::span<float>{audio_scratch[ch].data(), samples_per_channel});
         }
     }
