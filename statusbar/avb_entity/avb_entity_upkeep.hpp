@@ -52,6 +52,7 @@ class EntityUpkeep final : public net::Pollable
     logging::LogCollector<MAX_LOG_CHANNELS> collector_;
     std::string_view last_state_;
     std::chrono::steady_clock::time_point state_since_;
+    bool lock_timeout_reported_{false};  ///< the gPTP watchdog fired in this stay in Init
     bool had_grandmaster_{false};
 };
 
