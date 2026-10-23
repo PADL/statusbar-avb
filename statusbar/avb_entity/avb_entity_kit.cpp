@@ -227,7 +227,7 @@ void AvbEntityKit::wire_stream_callbacks()
     }
 
     // AECP GET_COUNTERS (STREAM_OUTPUT talker rate + STREAM_INPUT listener
-    // health) and GET_STREAM_INFO (talker stream identity, queried by a Milan
+    // health; ENTITY, AVB_INTERFACE and CLOCK_DOMAIN from the host) and GET_STREAM_INFO (talker stream identity, queried by a Milan
     // listener to verify the stream before sustaining a connection; listener
     // sink identity so a controller can read what an input is connected to).
     host_.components().aem_handler.set_get_counters(
@@ -238,7 +238,7 @@ void AvbEntityKit::wire_stream_callbacks()
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
-            return false;
+            return host_.fill_counters(descriptor_type, descriptor_index, valid, counters);
         });
     host_.components().aem_handler.set_get_stream_info(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {

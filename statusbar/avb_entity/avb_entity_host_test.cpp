@@ -417,4 +417,38 @@ TEST(avb_entity_host_avb_info, host_answers_get_avb_info_from_observed_state)
     EXPECT_EQ(host->components().aem_handler.handle_command(header, other, out).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
 }
 
+TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
+{
+    using statusbar::atdecc::aem::DESCRIPTOR_AVB_INTERFACE;
+    using statusbar::atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
+    using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    using TimePoint = statusbar::sm::TimePoint;
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    std::array<uint32_t, 32> counters{};
+    uint32_t valid = 0;
+
+    // ENTITY: answered, but IEEE 1722.1 defines only entity-specific counters.
+    EXPECT_TRUE(host->fill_counters(DESCRIPTOR_ENTITY, 0, valid, counters));
+    EXPECT_EQ(valid, 0U);
+
+    // AVB_INTERFACE: link transitions (not repeats) and grandmaster changes.
+    host->on_link_up(TimePoint{});
+    host->on_link_up(TimePoint{});
+    host->on_link_down(TimePoint{});
+    host->on_link_up(TimePoint{});
+    host->note_grandmaster_changed();  // the first: found, not changed
+    host->note_grandmaster_changed();
+    EXPECT_TRUE(host->fill_counters(DESCRIPTOR_AVB_INTERFACE, 0, valid, counters));
+    EXPECT_EQ(valid, 0x23U);
+    EXPECT_EQ(counters[0], 2U);  // LINK_UP
+    EXPECT_EQ(counters[1], 1U);  // LINK_DOWN: up now, so one fewer
+    EXPECT_EQ(counters[5], 1U);  // GPTP_GM_CHANGED
+    EXPECT_FALSE(host->fill_counters(DESCRIPTOR_AVB_INTERFACE, 1, valid, counters));
+
+    // The model has no CLOCK_DOMAIN: not ours to answer.
+    EXPECT_FALSE(host->fill_counters(DESCRIPTOR_CLOCK_DOMAIN, 0, valid, counters));
+    EXPECT_FALSE(host->fill_counters(DESCRIPTOR_STREAM_INPUT, 0, valid, counters));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_host_test)

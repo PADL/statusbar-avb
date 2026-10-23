@@ -123,7 +123,11 @@ class AvbEntityKit
     /// gPTP grandmaster found or changed / lost (EntityUpkeep wires these to
     /// the Announce handler): drives the talker streams' AVTP tu bit (Milan
     /// v1.2 Section 4.3.5.2, Annex B.1.1). Reactor thread.
-    void note_grandmaster_changed() noexcept { talker_->note_grandmaster_changed(steady_now_ns()); }
+    void note_grandmaster_changed()
+    {
+        host_.note_grandmaster_changed();
+        talker_->note_grandmaster_changed(steady_now_ns());
+    }
     void note_grandmaster_lost() noexcept { talker_->note_grandmaster_lost(); }
     void on_link_down(TimePoint time) { host_.on_link_down(time); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }

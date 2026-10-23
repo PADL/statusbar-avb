@@ -476,11 +476,22 @@ def _parse_control_values(
 
 def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control:
     """Parse a control descriptor from JSON."""
+    control_type = _parse_control_type(c, context)
+    identify = control_type == CONTROL_TYPE_NAMES["IDENTIFY"]
+    # An IDENTIFY control has no signal: signal_type INVALID and
+    # signal_index 0 (IEEE 1722.1-2021 7.2.22, as la_avdecc checks it).
     sig_type = _parse_enum(
-        c.get("signal_type", "ENTITY"),
+        c.get("signal_type", "INVALID" if identify else "ENTITY"),
         DESCRIPTOR_TYPE_NAMES,
         f"{context}.signal_type",
     )
+    if identify and (
+        sig_type != DESCRIPTOR_TYPE_NAMES["INVALID"] or c.get("signal_index", 0) != 0
+    ):
+        raise ValueError(
+            f"{context}: an IDENTIFY control's signal_type is INVALID and its "
+            f"signal_index 0 (IEEE 1722.1-2021 7.2.22)"
+        )
     value_type = _parse_control_value_type(c, context)
     return Control(
         object_name=c.get("name", ""),
@@ -489,7 +500,7 @@ def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control
         control_latency=c.get("control_latency", 0),
         control_domain=c.get("control_domain", 0),
         control_value_type=value_type,
-        control_type=_parse_control_type(c, context),
+        control_type=control_type,
         reset_time=c.get("reset_time", 0),
         signal_type=sig_type,
         signal_index=c.get("signal_index", 0),

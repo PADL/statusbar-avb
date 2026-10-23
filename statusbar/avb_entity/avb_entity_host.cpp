@@ -370,12 +370,20 @@ void AvbEntityHost::on_link_up(TimePoint const time)
     // Class A domain (forget an adopted VID) and declare it at once -- not
     // gated on gPTP, unlike the stream advertisements.
     (void)components_.msrp_handler.reset_domain(time);
+    if (!supervisor_ctx_.link_up) {
+        ++link_up_count_;
+        (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
+    }
     supervisor_ctx_.link_up = true;
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkUp, time);
 }
 
 void AvbEntityHost::on_link_down(TimePoint const time)
 {
+    if (supervisor_ctx_.link_up) {
+        ++link_down_count_;
+        (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
+    }
     supervisor_ctx_.link_up = false;
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, time);
 }
@@ -384,6 +392,70 @@ void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandm
 {
     if (has_grandmaster && !gptp_ctx_.time_locked) {
         gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::LockedStable, time);
+    }
+}
+
+void AvbEntityHost::note_grandmaster_changed()
+{
+    // The first grandmaster found is not a change.
+    if (!grandmaster_seen_) {
+        grandmaster_seen_ = true;
+        return;
+    }
+    ++gm_changed_count_;
+    (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
+}
+
+void AvbEntityHost::note_media_clock_locked(bool const locked)
+{
+    if (locked == media_locked_) {
+        return;
+    }
+    media_locked_ = locked;
+    ++(locked ? media_locked_count_ : media_unlocked_count_);
+    (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0);
+}
+
+auto AvbEntityHost::fill_counters(
+    uint16_t const descriptor_type, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) const
+    -> bool
+{
+    using namespace atdecc::aem;
+    // On the legacy (parsed-model) path there is no blob to check against:
+    // the one ENTITY, AVB_INTERFACE and CLOCK_DOMAIN every model has.
+    auto const exists = [this, descriptor_type, descriptor_index] {
+        auto const* store = descriptor_storage();
+        return store != nullptr ? store->get_descriptor(0, descriptor_type, descriptor_index).has_value() : descriptor_index == 0;
+    };
+    // Bit value (1 << i) flags counters[i] (bit 31 - i in IEEE 1722.1's numbering).
+    switch (descriptor_type) {
+        case DESCRIPTOR_ENTITY:
+            return descriptor_index == 0;  // only ENTITY_SPECIFIC_1..8 are defined: none valid
+        case DESCRIPTOR_AVB_INTERFACE:
+            if (!exists()) {
+                return false;
+            }
+            if (descriptor_index != 0) {
+                return true;  // the host accounts for interface 0, the one it runs on
+            }
+            valid |= 0x00000001U | 0x00000002U | 0x00000020U;  // LINK_UP, LINK_DOWN, GPTP_GM_CHANGED
+            counters[0] = link_up_count_;
+            counters[1] = link_down_count_;
+            counters[5] = gm_changed_count_;
+            return true;
+        case DESCRIPTOR_CLOCK_DOMAIN:
+            if (!exists()) {
+                return false;
+            }
+            if (descriptor_index != 0) {
+                return true;  // only domain 0 follows gPTP: nothing accounted for others
+            }
+            valid |= 0x00000001U | 0x00000002U;  // LOCKED, UNLOCKED
+            counters[0] = media_locked_count_;
+            counters[1] = media_unlocked_count_;
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -471,6 +543,7 @@ void AvbEntityHost::wire_supervisor_callbacks()
 
     supervisor_ctx_.callbacks.stop_all = [this](auto& /*ctx*/, TimePoint time) -> void {
         (void)components_.adp_advertiser.stop(time);
+        note_media_clock_locked(false);  // the gPTP reset below drops the lock
         talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::Fatal, time);
         listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
         gptp_.reset();
@@ -491,9 +564,11 @@ void AvbEntityHost::wire_gptp_callbacks()
     gptp_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     gptp_ctx_.callbacks.start_servo = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     gptp_ctx_.callbacks.report_locked = [this](auto& /*ctx*/, TimePoint time) -> void {
+        note_media_clock_locked(true);
         supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLocked, time);
     };
     gptp_ctx_.callbacks.report_unlocked = [this](auto& /*ctx*/, TimePoint time) -> void {
+        note_media_clock_locked(false);
         supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLost, time);
     };
 }

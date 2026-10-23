@@ -763,6 +763,8 @@ class Enumerator
                         enqueue(target, t, k);
                     }
                 }
+            } else {
+                expand_children(target, dtype, body);
             }
         }
         // NOTE: do not issue reads here. This callback runs inside the
@@ -831,6 +833,108 @@ class Enumerator
         }
     }
 
+    /// descriptor_counts lists only top-level descriptors (IEEE 1722.1-2021
+    /// 7.2.2): the rest are reached through their owners' base/count pairs.
+    void expand_children(Eui64 target, uint16_t type, std::span<uint8_t const> body)
+    {
+        switch (type) {
+            case DESCRIPTOR_AUDIO_UNIT:
+                expand_unit<DescriptorAudioUnit>(target, body, DESCRIPTOR_AUDIO_CLUSTER, DESCRIPTOR_AUDIO_MAP);
+                break;
+            case DESCRIPTOR_VIDEO_UNIT:
+                expand_unit<DescriptorVideoUnit>(target, body, DESCRIPTOR_VIDEO_CLUSTER, DESCRIPTOR_VIDEO_MAP);
+                break;
+            case DESCRIPTOR_SENSOR_UNIT:
+                expand_unit<DescriptorSensorUnit>(target, body, DESCRIPTOR_SENSOR_CLUSTER, DESCRIPTOR_SENSOR_MAP);
+                break;
+            case DESCRIPTOR_STREAM_PORT_INPUT:
+            case DESCRIPTOR_STREAM_PORT_OUTPUT: {
+                DescriptorStreamPort port{};
+                span_load_padded(port, body);
+                // Clusters and maps of the kind of the unit that owns the port.
+                auto const owner = port_owners_.find(ReadKey{target, type, be16_at(body, 2)});
+                auto const [cluster, map] =
+                    owner != port_owners_.end() ? owner->second : std::pair{DESCRIPTOR_AUDIO_CLUSTER, DESCRIPTOR_AUDIO_MAP};
+                range(target, cluster, port.base_cluster.get(), port.number_of_clusters.get());
+                range(target, map, port.base_map.get(), port.number_of_maps.get());
+                range(target, DESCRIPTOR_CONTROL, port.base_control.get(), port.number_of_controls.get());
+                break;
+            }
+            case DESCRIPTOR_LOCALE: {
+                DescriptorLocale locale{};
+                span_load_padded(locale, body);
+                range(target, DESCRIPTOR_STRINGS, locale.base_strings.get(), locale.number_of_strings.get());
+                break;
+            }
+            case DESCRIPTOR_PTP_INSTANCE: {
+                DescriptorPtpInstance ptp{};
+                span_load_padded(ptp, body);
+                range(target, DESCRIPTOR_PTP_PORT, ptp.base_ptp_port.get(), ptp.number_of_ptp_ports.get());
+                range(target, DESCRIPTOR_CONTROL, ptp.base_control.get(), ptp.number_of_controls.get());
+                break;
+            }
+            case DESCRIPTOR_AVB_INTERFACE:
+                expand_controls<DescriptorAvbInterface>(target, body);
+                break;
+            case DESCRIPTOR_JACK_INPUT:
+            case DESCRIPTOR_JACK_OUTPUT:
+                expand_controls<DescriptorJack>(target, body);
+                break;
+            case DESCRIPTOR_CONTROL_BLOCK:
+                expand_controls<DescriptorControlBlock>(target, body);
+                break;
+            default:
+                break;
+        }
+    }
+
+    template <typename Unit>
+    void expand_unit(Eui64 target, std::span<uint8_t const> body, uint16_t cluster, uint16_t map)
+    {
+        Unit unit{};
+        span_load_padded(unit, body);
+        auto ports = [&](uint16_t port_type, uint16_t base, uint16_t count) {
+            for (uint32_t i = 0; i < std::min(count, MAX_DESCRIPTORS_PER_TYPE) && base + i <= 0xFFFF; ++i) {
+                port_owners_[ReadKey{target, port_type, static_cast<uint16_t>(base + i)}] = {cluster, map};
+            }
+            range(target, port_type, base, count);
+        };
+        ports(DESCRIPTOR_STREAM_PORT_INPUT, unit.base_stream_input_port.get(), unit.number_of_stream_input_ports.get());
+        ports(DESCRIPTOR_STREAM_PORT_OUTPUT, unit.base_stream_output_port.get(), unit.number_of_stream_output_ports.get());
+        range(
+            target, DESCRIPTOR_EXTERNAL_PORT_INPUT, unit.base_external_input_port.get(), unit.number_of_external_input_ports.get());
+        range(
+            target,
+            DESCRIPTOR_EXTERNAL_PORT_OUTPUT,
+            unit.base_external_output_port.get(),
+            unit.number_of_external_output_ports.get());
+        range(
+            target, DESCRIPTOR_INTERNAL_PORT_INPUT, unit.base_internal_input_port.get(), unit.number_of_internal_input_ports.get());
+        range(
+            target,
+            DESCRIPTOR_INTERNAL_PORT_OUTPUT,
+            unit.base_internal_output_port.get(),
+            unit.number_of_internal_output_ports.get());
+        range(target, DESCRIPTOR_CONTROL, unit.base_control.get(), unit.number_of_controls.get());
+    }
+
+    template <typename Owner>
+    void expand_controls(Eui64 target, std::span<uint8_t const> body)
+    {
+        Owner owner{};
+        span_load_padded(owner, body);
+        range(target, DESCRIPTOR_CONTROL, owner.base_control.get(), owner.number_of_controls.get());
+    }
+
+    /// Enqueue @p count descriptors of @p type from @p base (bounded).
+    void range(Eui64 target, uint16_t type, uint16_t base, uint16_t count)
+    {
+        count = std::min(count, MAX_DESCRIPTORS_PER_TYPE);
+        for (uint32_t i = 0; i < count && base + i <= 0xFFFF; ++i) {
+            enqueue(target, type, static_cast<uint16_t>(base + i));
+        }
+    }
+
     void enqueue(Eui64 t, uint16_t type, uint16_t index)
     {
         if (queued_.insert(ReadKey{t, type, index}).second) {
@@ -847,6 +951,8 @@ class Enumerator
     std::set<ReadKey> queued_;
     std::set<ReadKey> printed_;
     std::set<ReadKey> expanded_;
+    /// A stream port's owning unit kind: its (cluster, map) descriptor types.
+    std::map<ReadKey, std::pair<uint16_t, uint16_t>> port_owners_;
     int outstanding_{0};
 };
 
