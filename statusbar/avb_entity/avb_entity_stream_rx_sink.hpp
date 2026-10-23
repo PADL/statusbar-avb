@@ -65,6 +65,9 @@ struct StreamRxPacket
     bool pts_valid{false};             ///< false until the stream has carried a valid timestamp
     bool tu{false};                    ///< AVTP tu: the talker marked its timestamp uncertain
     bool mr{false};                    ///< AVTP mr: the talker's media clock restart toggle, as received
+    /// AVTP sequence_num, as received: a sink placing frames without a usable
+    /// timestamp (tu set) counts the packets lost since the last one by it.
+    uint8_t sequence_num{0};
 };
 
 /// The timestamped StreamRxAudioSink: each accepted packet's raw payload, 64-bit AVTP presentation
