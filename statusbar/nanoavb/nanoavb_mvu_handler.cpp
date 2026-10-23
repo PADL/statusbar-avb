@@ -231,9 +231,9 @@ void MvuCommandHandler::notify_changed(uint16_t const command_type, Eui64 const&
         size_t const length = MvuDu::LENGTH + body.size();
         if (length <= buffer.size()) {
             // Milan v1.2 Section 5.4.5.1: one to each registered controller
-            // but the one that asked, each with its own controller id and a
-            // fresh sequence_id.
-            aem_->for_each_unsolicited_registration([&](Eui48 const& mac, Eui64 const& controller) {
+            // but the one that asked, each with its own controller id and its
+            // own next MVU sequence_id.
+            aem_->for_each_unsolicited_registration([&](Eui48 const& mac, Eui64 const& controller, uint16_t& sequence_id) {
                 if (controller == requester) {
                     return;
                 }
@@ -241,7 +241,7 @@ void MvuCommandHandler::notify_changed(uint16_t const command_type, Eui64 const&
                 header.init_response(command_type, MVU_STATUS_SUCCESS, static_cast<uint16_t>(body.size()));
                 header.common.target_entity_id = our_entity_id_;
                 header.common.controller_entity_id = controller;
-                header.common.sequence_id = unsolicited_sequence_id_++;
+                header.common.sequence_id = sequence_id++;
                 header.set_unsolicited(true);
                 span_store(std::span{buffer}.first(MvuDu::LENGTH), header);
                 span_copy(std::span{buffer}.subspan(MvuDu::LENGTH, body.size()), body);
@@ -298,6 +298,15 @@ auto dispatch_aecp(
     Eui64 const& our_entity_id) -> bool
 {
     if (is_mvu_command(payload)) {
+        // A valid AECP command from a registered controller restarts its
+        // monitor timer (Milan v1.2 Section 5.4.5.3).
+        if (payload.size() >= AecpDuCommon::LENGTH) {
+            AecpDuCommon common{};
+            span_load(common, payload.first(AecpDuCommon::LENGTH));
+            if (common.target_entity_id == our_entity_id) {
+                aem.note_controller_command(common.controller_entity_id, src_mac);
+            }
+        }
         return mvu.process_packet(src_mac, payload, our_entity_id);
     }
     return aem.process_packet(src_mac, payload, our_entity_id);
