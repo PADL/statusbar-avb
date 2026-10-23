@@ -378,6 +378,11 @@ def generate_atdecc_fields() -> str:
                 f'{{ kind = "blob", field = {fkey(A.AEM_BLOBS, A.AEM_BLOB_FIELDS[trailer.element])}, '
                 f"count_field_offset = {A.AEM_HEADER_LENGTH + count_off} }}"
             )
+        if trailer.kind == "tail":
+            return (
+                f'{{ kind = "tail", element = {_lua_string(trailer.element)}, '
+                f"element_size = {A.ELEMENT_SIZE[trailer.element]}, element_add = {addname(A.TRAILER_ELEMENTS[trailer.element])} }}"
+            )
         if trailer.kind != "elements":
             return f"{{ kind = {_lua_string(trailer.kind)} }}"
         count_off = struct_members[trailer.count_field]["offset"]

@@ -2344,6 +2344,8 @@ TEST(stream_lifecycle, start_stop_streaming_latches_and_gates)
     EXPECT_TRUE(storage_result.has_value());
     DescriptorStorageHandler handler{*storage_result};
     AemCommandHandler cmd_handler{handler};
+    // Classic: a Milan stream output cannot be stopped (NOT_SUPPORTED).
+    cmd_handler.set_profile(EntityProfile{.milan = false});
 
     // Streams default to streaming.
     EXPECT_TRUE(handler.is_streaming(DESCRIPTOR_STREAM_OUTPUT, 0));

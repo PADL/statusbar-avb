@@ -451,6 +451,32 @@ class MsrpHandler
         return nullptr;
     }
 
+    /// A remote talker's registered Talker Advertise / Talker Failed for
+    /// @p stream_id, or nullptr (what a listener's GET_STREAM_INFO reports:
+    /// accumulated latency, failure bridge and code).
+    [[nodiscard]] auto registered_talker_advertise(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
+    {
+        return participant_.find_talker_advertise(stream_id);
+    }
+    [[nodiscard]] auto registered_talker_failed(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerFailedFirstValue const*
+    {
+        return participant_.find_talker_failed(stream_id);
+    }
+
+    /// The registered (peer-declared, registrar In or Leaving) Listener
+    /// declaration for one of our talker streams, or Ignore when none:
+    /// Ready, ReadyFailed or AskingFailed.
+    [[nodiscard]] auto registered_listener(StreamId const& stream_id) const noexcept -> statusbar::srp::msrp::ListenerDeclaration
+    {
+        auto const d = participant_.listener_permit_debug(stream_id);
+        if (!d.has_record || d.operation != statusbar::srp::msrp::Operation::Register || !d.registrar_in) {
+            return statusbar::srp::msrp::ListenerDeclaration::Ignore;
+        }
+        return d.substate;
+    }
+
     /// True when the talker's Advertise is registered from the wire and no
     /// Talker Failed has replaced it — the 802.1Q condition for a listener
     /// to declare Ready rather than Asking Failed.
