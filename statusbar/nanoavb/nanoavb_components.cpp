@@ -140,6 +140,47 @@ void AtdeccNetHandler::on_ready(int64_t now_ns)
     }
 }
 
+auto AtdeccNetHandler::send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload) -> StatusValue<ssize_t>
+{
+    auto const sent = static_cast<ssize_t>(payload.size());
+    if (AtdeccLocalPort::is_local_mac(dest_mac)) {
+        // A local controller's address (known now, forgotten, or of a port
+        // since closed): never the network's business.
+        if (local_port_ != nullptr && local_port_->send(dest_mac, payload)) {
+            return success(sent);
+        }
+        return failure(std::errc::host_unreachable);
+    }
+    if (local_port_ != nullptr) {
+        if (dest_mac.is_multicast()) {
+            bool const local = local_port_->send(local_reply_to_.value_or(dest_mac), payload);
+            if (local_reply_to_ || !context_.valid()) {
+                return local ? StatusValue<ssize_t>{sent} : failure(std::errc::network_unreachable);
+            }
+        }
+    }
+    return context_.send(&dest_mac, payload);
+}
+
+void AtdeccNetHandler::attach_local_port(AtdeccLocalPort* const port)
+{
+    if (local_port_ != nullptr) {
+        local_port_->set_receiver({});
+        local_port_->set_on_client_gone({});
+    }
+    local_port_ = port;
+    if (port == nullptr) {
+        return;
+    }
+    port->set_receiver([this](int64_t const now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> frame) {
+        receive_local_frame(now_ns, src_mac, frame);
+    });
+    // A controller that has gone cannot deregister or release: drop its
+    // registration (it holds a slot) and any acquisition (its MAC never comes
+    // back to release it). Its entity ID may not be known to discovery.
+    port->set_on_client_gone([this](ieee::Eui48 const& mac) { aem_handler_.forget_controller_at(mac); });
+}
+
 void AtdeccNetHandler::tick(int64_t now_ns)
 {
     // Convert nanoseconds to sm::TimePoint for protocol handlers
@@ -190,7 +231,8 @@ void AtdeccNetHandler::log_status()
         listener_connections);
 }
 
-void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload)
+void AtdeccNetHandler::dispatch_frame(
+    int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, bool const local)
 {
     using namespace statusbar::atdecc;
     namespace AvtpSubtype = avtp::AvtpSubtype;
@@ -213,7 +255,22 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
             }
             AdpDu adp{};
             span_load(adp, payload);
+            // A local controller's ENTITY_DISCOVER is answered to it alone:
+            // its discovery is no reason to advertise on the network (or to
+            // the other local controllers) every few seconds.
+            if (local) {
+                local_reply_to_ = src_mac;
+            }
             adp_advertiser_.receive_adpdu(adp, sm_now);
+            local_reply_to_.reset();
+            // The local socket does not depend on the network: with the
+            // advertiser stopped (link down), a local discover is still
+            // answered with the entity's ADPDU.
+            if (local && local_port_ != nullptr && adp.is_entity_discover() &&
+                adp_advertiser_.state() != AdpAdvertiserState::Advertising &&
+                (adp.entity_id == Eui64{} || adp.entity_id == adp_advertiser_.adpdu().entity_id)) {
+                (void)local_port_->send(src_mac, as_bytes(adp_advertiser_.adpdu()));
+            }
             if (adp_discovery_ != nullptr) {
                 adp_discovery_->receive_adpdu(adp, src_mac, sm_now);
             }
@@ -438,19 +495,42 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
     atdecc_ptr_ = atdecc.get();
     gptp_ptr_ = gptp.get();
 
-    // Transfer ownership to reactor (only valid handlers)
-    if (mvrp_valid_) {
-        reactor.add(std::move(mvrp));
+    if (!local_port_config_.path.empty()) {
+        if (auto port = AtdeccLocalPort::open(local_port_config_)) {
+            local_ptr_ = port->get();
+            atdecc->attach_local_port(local_ptr_);
+            reactor.add(std::move(*port));
+        } else {
+            local_port_error_ = port.error();
+        }
     }
-    if (msrp_valid_) {
-        reactor.add(std::move(msrp));
+
+    // Transfer ownership to reactor (only valid handlers; the ATDECC handler
+    // always: tick-only without its socket, it still serves the local port
+    // and runs the ADP/ACMP/AEM timers). The rest stay owned here.
+    auto const place = [this, &reactor](bool const valid, std::unique_ptr<net::Pollable> handler) {
+        if (valid) {
+            reactor.add(std::move(handler));
+        } else {
+            unopened_.push_back(std::move(handler));
+        }
+    };
+    place(mvrp_valid_, std::move(mvrp));
+    place(msrp_valid_, std::move(msrp));
+    place(true, std::move(atdecc));
+    place(gptp_valid_, std::move(gptp));
+}
+
+void NanoAvbNetHandlers::close_local_port()
+{
+    if (local_ptr_ == nullptr) {
+        return;
     }
-    if (atdecc_valid_) {
-        reactor.add(std::move(atdecc));
-    }
-    if (gptp_valid_) {
-        reactor.add(std::move(gptp));
-    }
+    // Closing first forgets its controllers through the entity (their
+    // registrations and acquisition go); then nothing more reaches it.
+    local_ptr_->close();  // finished(): the reactor drops it
+    atdecc_ptr_->attach_local_port(nullptr);
+    local_ptr_ = nullptr;
 }
 
 void NanoAvbNetHandlers::print_status() const
@@ -474,6 +554,10 @@ void NanoAvbNetHandlers::print_warnings(std::string_view interface_name) const
     if (!atdecc_valid_) {
         std::print(stderr, "Warning: Could not open ATDECC socket on {}\n", interface_name);
     }
+    if (local_port_error_) {
+        std::print(
+            stderr, "Warning: Could not open local ATDECC socket {}: {}\n", local_port_config_.path, local_port_error_.message());
+    }
     if (!gptp_valid_) {
         std::print(stderr, "Warning: Could not open gPTP socket on {}\n", interface_name);
     }
@@ -484,9 +568,6 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // ADP: send Entity Available/Departing to multicast
     components.adp_advertiser.set_callbacks(AdpAdvertiserCallbacks{.send_adpdu = [&handlers](atdecc::AdpDu const& adpdu) -> bool {
         auto& atdecc = handlers.atdecc_handler();
-        if (!atdecc.valid()) {
-            return false;
-        }
         return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, as_bytes(adpdu)).has_value();
     }});
 
@@ -497,9 +578,6 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     components.acmp_talker.set_callbacks(
         AcmpTalkerCallbacks{.tx_response = [&handlers](atdecc::AcmpCommandResponse const& resp) -> bool {
             auto& atdecc = handlers.atdecc_handler();
-            if (!atdecc.valid()) {
-                return false;
-            }
             std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
             return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
         }});
@@ -508,17 +586,11 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     components.acmp_listener.set_callbacks(AcmpListenerCallbacks{
         .tx_command = [&handlers](atdecc::AcmpCommandResponse const& cmd) -> bool {
             auto& atdecc = handlers.atdecc_handler();
-            if (!atdecc.valid()) {
-                return false;
-            }
             std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
             return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(cmd, buf)).has_value();
         },
         .tx_response = [&handlers](atdecc::AcmpCommandResponse const& resp) -> bool {
             auto& atdecc = handlers.atdecc_handler();
-            if (!atdecc.valid()) {
-                return false;
-            }
             std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
             return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
         }});
@@ -529,18 +601,12 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // get_counters, get_stream_info).
     components.aem_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
         auto& atdecc = handlers.atdecc_handler();
-        if (!atdecc.valid()) {
-            return false;
-        }
         return atdecc.send(dest_mac, response).has_value();
     });
 
     // AECP MVU: unicast to the controller, like AEM.
     components.mvu_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
         auto& atdecc = handlers.atdecc_handler();
-        if (!atdecc.valid()) {
-            return false;
-        }
         return atdecc.send(dest_mac, response).has_value();
     });
 
