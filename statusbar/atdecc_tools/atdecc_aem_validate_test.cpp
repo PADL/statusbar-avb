@@ -10,6 +10,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <cstddef>
 #include <cstring>
 #include <string_view>
 #include <vector>
@@ -121,6 +122,49 @@ TEST(aem_validate, stream_with_zero_format_is_error)
     descs.push_back(to_raw(good_entity(), DESCRIPTOR_ENTITY, 0));
     descs.push_back(to_raw(good_avb_interface(), DESCRIPTOR_AVB_INTERFACE, 0));
     descs.push_back(to_raw(stream(DESCRIPTOR_STREAM_INPUT, 0, /*with_format=*/false), DESCRIPTOR_STREAM_INPUT, 0));
+
+    auto const f = validate_aem_model(descs);
+    EXPECT_TRUE(has_msg(f, "STREAM_INPUT[0]", Severity::Error));
+}
+
+namespace {
+
+// A 1722.1-2013 STREAM: 132-byte header, formats at formats_offset = 132.
+auto stream_2013(uint16_t number_of_formats, size_t formats_present) -> RawDescriptor
+{
+    DescriptorStream const d = stream(DESCRIPTOR_STREAM_INPUT, 0, /*with_format=*/true);
+    std::vector<uint8_t> bytes(DescriptorStream::MINIMUM_LENGTH + (formats_present * sizeof(Eui64)));
+    std::memcpy(bytes.data(), &d, DescriptorStream::MINIMUM_LENGTH);
+    bytes[offsetof(DescriptorStream, formats_offset)] = 0;
+    bytes[offsetof(DescriptorStream, formats_offset) + 1] = DescriptorStream::MINIMUM_LENGTH;
+    bytes[offsetof(DescriptorStream, number_of_formats)] = static_cast<uint8_t>(number_of_formats >> 8U);
+    bytes[offsetof(DescriptorStream, number_of_formats) + 1] = static_cast<uint8_t>(number_of_formats & 0xFFU);
+    for (size_t i = 0; i < formats_present; ++i) {
+        std::memcpy(bytes.data() + DescriptorStream::MINIMUM_LENGTH + (i * sizeof(Eui64)), &d.current_format, sizeof(Eui64));
+    }
+    return {.type = DESCRIPTOR_STREAM_INPUT, .index = 0, .data = std::move(bytes)};
+}
+
+}  // namespace
+
+TEST(aem_validate, stream_2013_layout_is_valid)
+{
+    std::vector<RawDescriptor> descs;
+    descs.push_back(to_raw(good_entity(), DESCRIPTOR_ENTITY, 0));
+    descs.push_back(to_raw(good_avb_interface(), DESCRIPTOR_AVB_INTERFACE, 0));
+    descs.push_back(stream_2013(1, 1));
+
+    auto const f = validate_aem_model(descs);
+    EXPECT_FALSE(has_msg(f, "STREAM_INPUT[0]", Severity::Error));
+    EXPECT_FALSE(has_msg(f, "STREAM_INPUT[0]", Severity::Warn));
+}
+
+TEST(aem_validate, stream_formats_past_end_is_error)
+{
+    std::vector<RawDescriptor> descs;
+    descs.push_back(to_raw(good_entity(), DESCRIPTOR_ENTITY, 0));
+    descs.push_back(to_raw(good_avb_interface(), DESCRIPTOR_AVB_INTERFACE, 0));
+    descs.push_back(stream_2013(3, 2));
 
     auto const f = validate_aem_model(descs);
     EXPECT_TRUE(has_msg(f, "STREAM_INPUT[0]", Severity::Error));
