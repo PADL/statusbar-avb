@@ -697,7 +697,28 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, avtp::N
             audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::aaf_int32, audio);
         }
     } else if (slot->crf) {
-        receive_crf_frame(*slot, frame, now);
+        // --- CRF (kit phase 3): media-clock reference, no audio payload ---
+        if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
+            return;
+        }
+        avtp::CrfPdu pdu{};
+        span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+        if (!pdu.is_valid()) {
+            slot->rx_bad.add(1);
+            return;
+        }
+        std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
+        update_stream_input_counters(
+            *slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/true, 0, /*ts_sparse=*/true, gptp_now_ns);
+        slot->crf->process_packet(pdu, ts_data, [slot, gptp_now_ns](uint64_t ts_ns, uint16_t index) {
+            // Each (CRF timestamp, local receive time) pair feeds media-clock
+            // recovery via the registered consumer.
+            if (slot->on_crf) {
+                slot->on_crf(ts_ns, index, gptp_now_ns);
+            }
+        });
+        slot->rx_packets.add(1);
+        slot->rx_samples.add(slot->crf->last_timestamp_count);
     }
 }
 
@@ -899,8 +920,20 @@ auto ListenerStreams::fill_stream_input_counters(
     }
     for (auto const& [bit, counter] : STREAM_INPUT_COUNTERS) {
         valid |= (1U << bit);
-        out[bit] = (slot->counters.*counter).load(std::memory_order_relaxed);
-    }
+        out[bit] = v;
+    };
+    set(0, c.media_locked.load(relaxed));
+    set(1, c.media_unlocked.load(relaxed));
+    set(2, c.stream_interrupted.load(relaxed));
+    set(3, c.seq_num_mismatch.load(relaxed));
+    set(4, c.media_reset.load(relaxed));
+    set(5, c.timestamp_uncertain.load(relaxed));
+    set(6, c.timestamp_valid.load(relaxed));
+    set(7, c.timestamp_not_valid.load(relaxed));
+    set(8, c.unsupported_format.load(relaxed));
+    set(9, c.late_timestamp.load(relaxed));
+    set(10, c.early_timestamp.load(relaxed));
+    set(11, c.frames_rx.load(relaxed));
     return true;
 }
 
@@ -912,10 +945,9 @@ auto ListenerStreams::fill_interval_stream_input_counters(
         return false;
     }
     valid |= StreamInputIntervals::VALID;
-    auto const values = slot->intervals.current(slot->counters);
-    for (size_t i = 0; i < values.size(); ++i) {
+    for (size_t i = 0; i < slot->intervals.values.size(); ++i) {
         if ((StreamInputIntervals::VALID & (1U << i)) != 0) {
-            out[i] = values[i];
+            out[i] = slot->intervals.values[i];
         }
     }
     return true;
@@ -927,8 +959,9 @@ auto ListenerStreams::fold_input_counters(uint16_t const descriptor_index) -> bo
     if (slot == nullptr) {
         return false;
     }
-    // A stopped input discards its stream on purpose (5.3.8.7): no interruption.
-    if (stream_stopped(descriptor_index)) {
+    // A stopped input discards its AVTPDUs on purpose (STOP_STREAMING): its
+    // lock goes without an interruption.
+    if (slot->stopped.load(std::memory_order_relaxed)) {
         unlock_stream_input(slot->counters);
     }
     return slot->intervals.fold(slot->counters);
@@ -938,6 +971,13 @@ void ListenerStreams::reset_input_counters(uint16_t const descriptor_index)
 {
     if (auto* const slot = slot_for(descriptor_index); slot != nullptr) {
         slot->intervals.reset(slot->counters);
+    }
+}
+
+void ListenerStreams::note_input_unbound(uint16_t const descriptor_index)
+{
+    if (auto* const slot = slot_for(descriptor_index); slot != nullptr) {
+        unlock_stream_input(slot->counters);
     }
 }
 

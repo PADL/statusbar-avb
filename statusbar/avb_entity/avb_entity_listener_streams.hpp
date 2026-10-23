@@ -118,8 +118,13 @@ struct ListenerStreamSlot
     /// IEEE 1722.1 STREAM_INPUT health counters (Clause 7.4.42). The
     /// per-packet update lives in avb_entity_stream_counters.hpp (unit-tested).
     StreamInputCounters counters{};
-    /// Their Milan form, by observation interval (reactor thread only).
+    /// Their Milan observation-interval form (reactor thread only).
     StreamInputIntervals intervals{};
+
+    /// A bound Milan input that is stopped (STOP_STREAMING, or bound with
+    /// STREAMING_WAIT) discards its stream's AVTPDUs (Milan v1.2 Section
+    /// 5.3.8.7). Written on the reactor, read on the RX thread.
+    std::atomic<bool> stopped{false};
 };
 
 /// The timed packet for @p frames whole frames of an accepted AAF payload presented from @p pts_ns,
@@ -286,19 +291,24 @@ struct ListenerStreams
     [[nodiscard]] auto fill_stream_input_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
         -> bool;
 
-    /// The same as Milan v1.3 Table 5.13 has them: the slot's StreamInputIntervals,
-    /// current(). True if it is one of our stream inputs. Reactor thread.
+    /// GET_COUNTERS for a STREAM_INPUT index as Milan v1.2 Table 5.16 has them
+    /// (StreamInputIntervals: interval counters as of the last fold). True if
+    /// it is one of our stream inputs. Reactor thread.
     [[nodiscard]] auto fill_interval_stream_input_counters(
         uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool;
 
     /// End STREAM_INPUT @p descriptor_index's observation interval
-    /// (StreamInputIntervals::fold), a stopped input's lock dropped first with
-    /// no interruption: true when a value changed. Reactor thread.
+    /// (StreamInputIntervals::fold): true when a counter changed. Reactor thread.
     [[nodiscard]] auto fold_input_counters(uint16_t descriptor_index) -> bool;
 
-    /// The input became bound: zero its Milan counters (Milan v1.3 Section
-    /// 5.3.8.10). Reactor thread.
+    /// The input became bound: zero its counters (Milan v1.2 Section 5.3.8.10).
+    /// Reactor thread.
     void reset_input_counters(uint16_t descriptor_index);
+
+    /// The input was unbound (a controller's UNBIND_RX, or a classic
+    /// DISCONNECT_RX): its media lock goes without counting an interruption.
+    /// Reactor thread.
+    void note_input_unbound(uint16_t descriptor_index);
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream group on the RX socket -- when the
