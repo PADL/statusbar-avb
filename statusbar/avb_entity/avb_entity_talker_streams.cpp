@@ -343,7 +343,7 @@ void TalkerStreams::send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uin
         return;
     }
     size_t const length =
-        build_stream_frame(slot->buffer, dest_mac, port_->port().hardware_address(), config_.vlan_id, config_.stream_pcp, payload);
+        build_stream_frame(slot->buffer, dest_mac, port_->port().hardware_address(), vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp, payload);
     if (length == 0) {
         (void)port_->port().tx_cancel(slot->handle);
         return;
