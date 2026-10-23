@@ -123,8 +123,12 @@ auto AvbEntityHost::start_control_plane(net::MessageReactor& reactor, std::strin
     interface_name_ = std::string{interface_name};
 
     net_handlers_ = std::make_unique<nanoavb::NanoAvbNetHandlers>(interface_name_, components_);
+    net_handlers_->set_local_port_config(local_atdecc_socket_);
     net_handlers_->add_to_reactor(reactor);
     net_handlers_->print_warnings(interface_name_);
+    if (auto* local = net_handlers_->local_port(); local != nullptr) {
+        local->set_logger(ctl_log());
+    }
     // Reactor-thread logging for the ATDECC handler's once-per-second status
     // and the MSRP participant's Debug-level MRP diagnostics.
     net_handlers_->atdecc_handler().set_logger(ctl_log());
@@ -166,6 +170,7 @@ void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
 
 void AvbEntityHost::release_net_handlers()
 {
+    net_handlers_->close_local_port();
     net_handlers_.reset();
     if (mirror_ != nullptr) {
         mirror_->mirror().set_on_update({});

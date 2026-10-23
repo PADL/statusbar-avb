@@ -4,7 +4,9 @@
 /// The raw-L2-socket ControllerService backend: NanoAvbAemController (our
 /// ADP/ACMP/AECP state machines) driven by a RawnetContext. Owns the L2
 /// receive/demux/serialize path; the consumer only ever sees decoded PDUs
-/// through the ControllerServiceSink and per-command completions.
+/// through the ControllerServiceSink and per-command completions. The same
+/// backend runs over a local entity's ATDECC socket (AtdeccLocalClient, the
+/// RawnetContext shape without the Ethernet header).
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_acmp.hpp"
@@ -12,6 +14,7 @@
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/nanoavb/nanoavb_controller.hpp"
+#include "statusbar/nanoavb/nanoavb_local_port.hpp"
 
 #include <array>
 #include <cstdint>
@@ -28,12 +31,13 @@ namespace {
 using namespace statusbar::atdecc;
 using namespace statusbar::ieee;
 
+template <typename Context>
 class RawnetControllerService final
     : public ControllerService
     , public net::Pollable
 {
   public:
-    RawnetControllerService(net::RawnetContext context, Eui64 controller_id)
+    RawnetControllerService(Context context, Eui64 controller_id)
         : context_{std::move(context)}
         , controller_{controller_id}
     {
@@ -48,7 +52,14 @@ class RawnetControllerService final
 
     /// One override serves both bases: ControllerService::tick and
     /// net::Pollable::tick share the signature.
-    void tick(int64_t now_ns) override { controller_.tick(now_ns); }
+    void tick(int64_t now_ns) override
+    {
+        // The local socket's keepalive (an entity may forget an idle controller).
+        if constexpr (requires(Context& c) { c.tick(now_ns); }) {
+            context_.tick(now_ns);
+        }
+        controller_.tick(now_ns);
+    }
 
     [[nodiscard]] auto pollable() noexcept -> net::Pollable* override { return this; }
 
@@ -306,7 +317,7 @@ class RawnetControllerService final
         controller_.receive_acmp(resp, now_ns);
     }
 
-    net::RawnetContext context_;
+    Context context_;
     nanoavb::NanoAvbAemController controller_;
     ControllerServiceSink sink_{};
     std::array<uint8_t, 2048> payload_buf_{};
@@ -316,7 +327,18 @@ class RawnetControllerService final
 
 auto make_rawnet_controller_service(net::RawnetContext context, Eui64 controller_id) -> std::unique_ptr<ControllerService>
 {
-    return std::make_unique<RawnetControllerService>(std::move(context), controller_id);
+    return std::make_unique<RawnetControllerService<net::RawnetContext>>(std::move(context), controller_id);
+}
+
+auto make_local_controller_service(std::string const& socket_path, Eui64 controller_id, std::string& error)
+    -> std::unique_ptr<ControllerService>
+{
+    nanoavb::AtdeccLocalClient client;
+    if (auto const opened = client.open(socket_path); !opened) {
+        error = std::format("cannot open socket '{}': {}", socket_path, opened.error().message());
+        return nullptr;
+    }
+    return std::make_unique<RawnetControllerService<nanoavb::AtdeccLocalClient>>(std::move(client), controller_id);
 }
 
 auto make_controller_service(std::string const& backend, std::string const& interface_name, Eui64 controller_id, std::string& error)
