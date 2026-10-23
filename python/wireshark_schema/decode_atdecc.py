@@ -352,12 +352,16 @@ def _mvu(data: bytes, stop: int, is_command: bool, out: dict) -> None:
             out.update(
                 decode_layout(A.Layout("mf", A.MVU_FLAGS.prefix, "", fields), data)
             )
-        if spec.optional_name is not None and stop - at >= 64:
-            f = next(f for f in spec.layout.fields if f.name == spec.optional_name)
+        tail = spec.optional_tail_length
+        if spec.optional_tail is not None and stop - at >= tail:
+            f = next(f for f in spec.layout.fields if f.name == spec.optional_tail)
+            chunk = data[at : at + tail]
             out[spec.layout.abbr(f)] = (
-                data[at : at + 64].split(b"\0", 1)[0].decode("utf-8", "replace")
+                chunk.split(b"\0", 1)[0].decode("utf-8", "replace")
+                if f.kind == "string"
+                else int.from_bytes(chunk, "big")
             )
-            at += 64
+            at += tail
     if stop > at:
         out[A.VU.abbr(A.VU_PAYLOAD)] = data[at:stop].hex()
 
