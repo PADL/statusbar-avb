@@ -732,6 +732,13 @@ class DescriptorStorageHandler : public AemEntityHandler
             state != nullptr && state->has_format) {
             return state->format;
         }
+        return authored_stream_format(ref);
+    }
+
+    /// The stream's authored current_format: the blob's (a SET_STREAM_FORMAT
+    /// changes the runtime format only); nullopt if the blob has no such stream.
+    [[nodiscard]] auto authored_stream_format(DescriptorRef ref) const noexcept -> std::optional<ieee::Eui64>
+    {
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < STREAM_CURRENT_FORMAT_FIELD + 8) {
             return std::nullopt;
@@ -739,6 +746,31 @@ class DescriptorStorageHandler : public AemEntityHandler
         ieee::Eui64 authored{};
         span_load(authored, blob->subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
         return authored;
+    }
+
+    /// Whether @p format is one the stream's descriptor lists (its authored
+    /// current_format or its stream_formats), as SET_STREAM_FORMAT requires.
+    [[nodiscard]] auto stream_format_listed(DescriptorRef ref, ieee::Eui64 const& format) const noexcept -> bool
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        return blob.has_value() && blob->size() >= atdecc::aem::DescriptorStream::MINIMUM_LENGTH &&
+            stream_format_supported(*blob, format);
+    }
+
+    /// Set the stream's runtime current_format to @p format without the stream-format callback.
+    /// False when the descriptor does not list the format or the blob has no such stream.
+    [[nodiscard]] auto set_runtime_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
+    {
+        if (!stream_format_listed(ref, format)) {
+            return false;
+        }
+        auto* const state = find_or_init_stream_state(ref);
+        if (state == nullptr) {
+            return false;
+        }
+        state->format = format;
+        state->has_format = true;
+        return true;
     }
 
     /// Called when START/STOP_STREAMING flips a stream's streaming state —
@@ -1626,16 +1658,21 @@ class DescriptorStorageHandler : public AemEntityHandler
             return atdecc::AEM_STATUS_NOT_SUPPORTED;
         }
 
+        // Room for the state before the application re-clocks (a new entry
+        // holds the rate in force until the hook has taken the new one).
+        uint32_t const in_force = current_sampling_rate(ref).value_or(authored.get());
+        auto* const state = find_or_push_state(
+            sampling_rate_states_,
+            by_index(ref.descriptor_index),
+            SamplingRateState{.descriptor_index = ref.descriptor_index, .rate = in_force});
+        if (state == nullptr) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
         if (on_sampling_rate_changed_) {
             if (auto const status = on_sampling_rate_changed_(ref.descriptor_index, requested.get());
                 status != atdecc::AEM_STATUS_SUCCESS) {
                 return status;
             }
-        }
-        auto* const state = find_or_push_state(
-            sampling_rate_states_, by_index(ref.descriptor_index), SamplingRateState{.descriptor_index = ref.descriptor_index});
-        if (state == nullptr) {
-            return atdecc::AEM_STATUS_NO_RESOURCES;
         }
         state->rate = requested.get();
         return atdecc::AEM_STATUS_SUCCESS;

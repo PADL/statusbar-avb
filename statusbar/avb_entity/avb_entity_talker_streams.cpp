@@ -34,14 +34,8 @@ constexpr size_t MAX_AUDIO_FRAME = std::max(avtp::AafPdu::HEADER_LENGTH, avtp::A
 
 }  // namespace
 
-auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stream_id, ieee::Eui48 const dest_mac) -> Status
+auto TalkerStreams::shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id) -> Status
 {
-    if (slots_.size() == MAX_ENTITY_STREAMS) {
-        return failure(std::errc::result_out_of_range);
-    }
-    TalkerStreamSlot slot{};
-    slot.spec = spec;
-    slot.dest_mac = dest_mac;
     switch (spec.format.kind) {
         case StreamKind::am824: {
             auto const rate = avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
@@ -49,17 +43,16 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
                 return failure(std::errc::invalid_argument);
             }
             slot.am824.emplace(stream_id, *rate, static_cast<uint8_t>(spec.format.channels), /*pres_offset=*/0);
-            break;
+            return success();
         }
         case StreamKind::aaf: {
             auto const rate = avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz);
             if (!rate || spec.format.channels == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            slot.aaf.emplace(
-                stream_id, spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth, /*pres_offset=*/0);
+            slot.aaf.emplace(stream_id, spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth, /*pres_offset=*/0);
             slot.reframer.emplace(spec.format.channels, samples_per_packet_, 4, mem_resource_);
-            break;
+            return success();
         }
         case StreamKind::crf: {
             if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0 ||
@@ -73,13 +66,55 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
                 static_cast<avtp::CrfPull>(spec.format.crf_pull),
                 spec.format.crf_timestamp_interval,
                 spec.format.crf_timestamps_per_pdu);
-            break;
+            return success();
         }
         case StreamKind::other:
         default:
             return failure(std::errc::not_supported);
     }
+}
+
+auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stream_id, ieee::Eui48 const dest_mac) -> Status
+{
+    if (slots_.size() == MAX_ENTITY_STREAMS || spec.index >= MAX_ENTITY_STREAMS) {
+        return failure(std::errc::result_out_of_range);
+    }
+    TalkerStreamSlot slot{};
+    slot.spec = spec;
+    slot.dest_mac = dest_mac;
+    if (auto status = shape(slot, spec, stream_id); !status) {
+        return status;
+    }
     slots_.push_back(std::move(slot));
+    return success();
+}
+
+auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
+{
+    auto* const slot = slot_for(spec.index);
+    if (slot == nullptr) {
+        return failure(std::errc::no_such_device);
+    }
+    if (spec.format.kind != slot->spec.format.kind) {
+        return failure(std::errc::invalid_argument);
+    }
+    if (spec.format.kind == StreamKind::crf || spec.format.kind == StreamKind::other) {
+        // One CRF format a stream: nothing to re-shape.
+        return spec.format_word == slot->spec.format_word ? Status{} : Status{failure(std::errc::not_supported)};
+    }
+    auto const stream_id = slot->aaf ? slot->aaf->stream_id : slot->am824 ? slot->am824->stream_id : tsn::StreamId{};
+    // A trial first, so that a refused format leaves the slot as it was.
+    TalkerStreamSlot trial{};
+    if (auto status = shape(trial, spec, stream_id); !status) {
+        return status;
+    }
+    SlotGuard::Lock const lock{guards_[spec.index]};
+    slot->am824 = trial.am824;
+    slot->aaf = trial.aaf;
+    slot->reframer = std::move(trial.reframer);
+    // The index stays (slot_for reads it unlocked); the format is the new one.
+    slot->spec.format_word = spec.format_word;
+    slot->spec.format = spec.format;
     return success();
 }
 
@@ -217,8 +252,9 @@ auto TalkerStreams::transmit_aaf_raw(
     uint16_t const frames,
     StreamRawRenderFn const& render) -> bool
 {
-    if (!slot.aaf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
-        return false;
+    SlotGuard::Entry const entry{guards_[slot.spec.index]};
+    if (!entry.entered() || !slot.aaf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
+        return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
     std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
@@ -368,6 +404,10 @@ void TalkerStreams::transmit_if_due(
     size_t const samples,
     std::span<float const> src)
 {
+    SlotGuard::Entry const entry{guards_[slot.spec.index]};
+    if (!entry.entered()) {
+        return;  // being re-shaped (reformat_stream): this tick sends nothing
+    }
     // A STOP_STREAMING'd stream behaves exactly like a closed SRP gate:
     // no emission, AAF FIFO cleared, CRF phase reset for a clean restart.
     bool const gate_open = srp_gate_open && !stream_stopped(slot.spec.index);

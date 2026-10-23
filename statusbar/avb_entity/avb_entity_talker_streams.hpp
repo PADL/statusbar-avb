@@ -19,6 +19,7 @@
 /// TX shape follows its declarative model instead of per-entity C++ enums.
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
+#include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
@@ -137,6 +138,19 @@ struct TalkerStreams
     /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
+    /// Re-shape the slot of @p spec.index for @p spec (new format, same stream id and destination,
+    /// fresh sequence). Reactor thread; the slot is locked (SlotGuard) so the media thread skips it.
+    /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
+    auto reformat_stream(StreamSpec const& spec) -> Status;
+
+    /// The stream rate (config_.sample_rate) and its class A samples per
+    /// packet, for a SET_SAMPLING_RATE. Same discipline as reformat_stream.
+    void set_sample_rate(uint32_t const sample_rate) noexcept
+    {
+        config_.sample_rate = sample_rate;
+        samples_per_packet_ = sample_rate / CLASS_A_PACKETS_PER_SEC;
+    }
+
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
     /// descriptor index == ACMP talker unique id), or nullptr.
     [[nodiscard]] auto slot_for(uint16_t stream_index) noexcept -> TalkerStreamSlot*;
@@ -247,8 +261,15 @@ struct TalkerStreams
     uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
     std::pmr::memory_resource* mem_resource_;
 
+    /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
+    /// @p stream_id: what open_stream and reformat_stream share.
+    auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
+
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
+    /// Per-stream guards between the media thread's transmits and the
+    /// reactor's reformat_stream, by STREAM_OUTPUT index.
+    std::array<SlotGuard, MAX_ENTITY_STREAMS> guards_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).

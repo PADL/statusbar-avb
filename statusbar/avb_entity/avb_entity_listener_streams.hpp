@@ -25,6 +25,7 @@
 /// state through a NanoAvbComponents reference (all bound at construction).
 /// It knows nothing about where the audio goes -- only the StreamRxAudioSink.
 
+#include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
@@ -55,6 +56,9 @@ namespace statusbar::avb_entity {
 struct ListenerStreamSlot
 {
     StreamSpec spec{};
+    /// spec.format.kind, never changed after open_stream (a re-shape keeps the
+    /// kind): what the RX thread matches frames by, unlocked.
+    StreamKind kind{StreamKind::other};
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
     std::optional<avtp::CrfStreamInputContext> crf{};
@@ -83,6 +87,9 @@ struct ListenerStreamSlot
     /// STREAMING_WAIT) discards its stream's AVTPDUs (Milan v1.2 Section
     /// 5.3.8.7). Written on the reactor, read on the RX thread.
     std::atomic<bool> stopped{false};
+
+    /// The RX thread's per-frame work against the reactor's reformat_stream.
+    SlotGuard guard{};
 };
 
 /// The timed packet for @p frames whole frames of an accepted AAF payload presented from @p pts_ns,
@@ -136,6 +143,15 @@ struct ListenerStreams
     /// bound here. Errors: unsupported kind (CRF input is kit phase 3;
     /// `other` never), unknown rate, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec) -> Status;
+
+    /// Re-shape the slot of @p spec.index for @p spec (Milan v1.2 Section 4.4.2.2), keeping its
+    /// consumers and counters. Reactor thread; the slot is locked (SlotGuard) so RX drops its frames.
+    /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
+    auto reformat_stream(StreamSpec const& spec) -> Status;
+
+    /// The stream rate the media-lock step is measured at, for a
+    /// SET_SAMPLING_RATE. Same discipline as reformat_stream.
+    void set_sample_rate(uint32_t const sample_rate) noexcept { sample_rate_ = sample_rate; }
 
     /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:
     /// each decoded channel is delivered as floats with its reconstructed
@@ -264,6 +280,9 @@ struct ListenerStreams
 
     /// Move a pending set_consume registration into its newly-opened slot.
     void bind_pending_consume(ListenerStreamSlot& slot);
+    /// Build @p slot's deserializer for @p spec: what open_stream and
+    /// reformat_stream share. Errors as open_stream's.
+    static auto shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
 
     // --- References / collaborators (bound at construction) --------------------
     uint32_t lock_tolerance_ns_;              ///< MEDIA_LOCKED step tolerance

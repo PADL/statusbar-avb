@@ -274,10 +274,40 @@ class AvbEntityKit
     using PresentationOffsetFn = sg14::inplace_function<uint8_t(uint16_t idx, uint32_t offset_ns), 32>;
     void set_on_presentation_offset_changed(PresentationOffsetFn fn) noexcept { on_presentation_offset_changed_ = std::move(fn); }
 
-    // --- Persistent state (Milan non-volatile settings) ------------------------
-    /// With config.persistent_state_path set, start() loads and applies the file through the checks
-    /// a controller's command gets, and every later setting change rewrites it when it changed.
-    /// Reactor thread.
+    // --- Stream formats and the sampling rate (Milan v1.2 Section 5.4.2.7) ------
+    // SET_STREAM_FORMAT and SET_SAMPLING_RATE go through the entity's hooks and
+    // are persisted; the rules are in docs/AVB_ENTITY_KIT.md.
+
+    /// The entity applies a stream's new (decoded) format to its data plane (reactor
+    /// thread, before the kit takes it) and answers an AEM status. Pass an empty
+    /// function to remove it.
+    using StreamFormatFn =
+        sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
+    void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
+    /// The entity re-clocks its data plane at @p rate (reactor thread): quiet the
+    /// streams, apply_sampling_rate(), rebuild, answer; a refusal leaves everything
+    /// as it was. Pass an empty function to remove it.
+    using SamplingRateFn = sg14::inplace_function<uint8_t(uint32_t rate), 32>;
+    void set_on_sampling_rate_changed(SamplingRateFn fn) noexcept { on_sampling_rate_changed_ = std::move(fn); }
+    /// Re-time the kit and every AAF stream's current format to @p rate, all or
+    /// nothing (false when a stream lists no format at @p rate). From the
+    /// sampling-rate hook only, with nothing reading the streams.
+    auto apply_sampling_rate(uint32_t rate) -> bool;
+    /// A sampling-rate change by other than ATDECC: refused ENTITY_LOCKED while
+    /// locked or acquired (Milan v1.2 Section 5.4.2.13), else as SET_SAMPLING_RATE
+    /// on AUDIO_UNIT 0, notified and saved. Answers the AEM status. Reactor thread.
+    [[nodiscard]] auto request_sampling_rate(uint32_t rate) -> uint8_t;
+    /// Whether STREAM_INPUT @p idx is bound (Milan) or connected (classic):
+    /// its format is not to change (Milan v1.2 Section 5.4.2.7).
+    [[nodiscard]] auto input_running(uint16_t idx) const noexcept -> bool;
+    /// Whether STREAM_OUTPUT @p idx streams at @p now_ns: it may transmit, or it
+    /// declares with a Listener Ready (Failed) registered (Milan v1.2 Section 5.3.7.3).
+    [[nodiscard]] auto output_streaming(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+
+    // --- Persistent state (docs/PERSISTENT_STATE.md) -----------------------------
+
+    /// Rewrite the persistent state file if it changed (reactor thread); a no-op
+    /// when persistence is off. start() loads and applies it first.
     void persist();
     /// The state persist() would write now.
     [[nodiscard]] auto collect_persistent_state() const -> PersistentState;
@@ -378,6 +408,28 @@ class AvbEntityKit
     /// changed (or time passed); fire on_admission_changed_ when it differs
     /// from the last one.
     void note_admission(int64_t now_ns);
+    /// The storage handler's SET_STREAM_FORMAT and SET_SAMPLING_RATE hooks.
+    [[nodiscard]] auto change_stream_format(uint16_t descriptor_type, uint16_t descriptor_index, uint64_t format) -> uint8_t;
+    [[nodiscard]] auto change_sampling_rate(uint16_t audio_unit, uint32_t rate) -> uint8_t;
+    /// Re-shape the TX (@p output) or RX slot for @p spec.
+    [[nodiscard]] auto reshape_stream(bool output, StreamSpec const& spec) -> Status;
+    /// Every audio stream's current format at @p rate (descriptor type,
+    /// index, word), or not_supported when one lists none there.
+    struct RetimedFormat
+    {
+        uint16_t type{0};
+        uint16_t index{0};
+        uint64_t word{0};
+    };
+    using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
+    [[nodiscard]] auto retimed_formats(uint32_t rate) const -> StatusValue<RetimedFormats>;
+    /// The rate the kit and its talker and listener paths run at.
+    void set_streams_rate(uint32_t rate);
+    /// Back to @p rate and the specs @p talkers / @p listeners had (a refused
+    /// rate change), the runtime formats and stream paths with them.
+    void restore_streams(uint32_t rate, StreamSpecs const& talkers, StreamSpecs const& listeners);
+    /// Send the queued stream format notifications (a rate change's).
+    void flush_format_notifications();
     /// The steady clock in ns: the gate's time base (grace window stamps).
     [[nodiscard]] static auto steady_now_ns() noexcept -> int64_t
     {
@@ -418,6 +470,11 @@ class AvbEntityKit
     /// read by the data plane and GET_STREAM_INFO).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
     PresentationOffsetFn on_presentation_offset_changed_{};
+    StreamFormatFn on_stream_format_changed_{};
+    SamplingRateFn on_sampling_rate_changed_{};
+    /// Streams (descriptor type, index) a rate change re-timed, for their
+    /// SET_STREAM_FORMAT notifications after the command's response.
+    sg14::inplace_vector<std::pair<uint16_t, uint16_t>, 2 * MAX_ENTITY_STREAMS> format_notifications_{};
     /// The persistent state: the entity name the handler was configured
     /// with, the bindings start() arms once the listener is up, and the text
     /// last written (persist() skips an unchanged state).
