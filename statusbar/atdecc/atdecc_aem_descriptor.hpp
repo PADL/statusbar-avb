@@ -746,6 +746,13 @@ static_assert(offsetof(DescriptorSensorUnit, base_control_block) == 134);
 ///
 /// Max stream_formats capped by AECP 508-byte budget:
 /// (508 - 138) / 8 = 46.
+///
+/// The inline layout is the 2021 one this repo serializes. A RECEIVED
+/// descriptor may legally use the 2013 layout (no redundant/timing fields,
+/// formats at 132), and in either revision the formats live at
+/// `formats_offset`. Consumers of received bytes must therefore not use
+/// `used_stream_formats()` / `stream_formats` directly; use
+/// `stream_descriptor_trailers()` on the raw span instead.
 struct DescriptorStream
 {
     static constexpr size_t LENGTH = 138;
@@ -831,7 +838,7 @@ static_assert(offsetof(DescriptorStream, buffer_length) == 128);
 static_assert(
     offsetof(DescriptorStream, redundant_offset) == DescriptorStream::MINIMUM_LENGTH,
     "redundant_offset is the first 2021-only field. Its offset must equal MINIMUM_LENGTH so "
-    "format_to() can gate tail-field reads on data_size >= LENGTH — see "
+    "stream_descriptor_trailers() can gate tail-field reads on formats_offset >= LENGTH — see "
     "docs/ATDECC_DESCRIPTOR_2013_COMPAT.md");
 static_assert(offsetof(DescriptorStream, timing) == 136);
 static_assert(
@@ -840,6 +847,58 @@ static_assert(
 static_assert(
     sizeof(DescriptorStream) == DescriptorStream::LENGTH + (DescriptorStream::MAX_STREAM_FORMATS * sizeof(Eui64)),
     "DescriptorStream must have no padding around the inline stream_formats array");
+
+/// The variable parts of a received STREAM_INPUT/STREAM_OUTPUT descriptor,
+/// located by its own offset fields rather than by the inline 2021 layout.
+/// The spans alias the caller's buffer.
+struct StreamDescriptorTrailers
+{
+    std::span<Eui64 const> stream_formats;  ///< number_of_formats entries at formats_offset
+    bool has_2021_fields{false};            ///< redundant_offset/number_of_redundant_streams/timing present
+    uint16_t redundant_offset{0};
+    uint16_t number_of_redundant_streams{0};
+    uint16_t timing{0};
+    std::span<doublet_t const> redundant_streams;  ///< empty unless has_2021_fields
+};
+
+/// Locate a STREAM descriptor's stream_formats (and, for IEEE 1722.1-2021 Clause 7.2.6, the
+/// redundant/timing fields and redundant_streams) in @p wire, honouring formats_offset (2013: 132,
+/// 2021: 138). Fails unless formats_offset >= 132 and the formats and redundant_streams lie within @p wire.
+[[nodiscard]] inline auto stream_descriptor_trailers(std::span<uint8_t const> const wire) noexcept
+    -> StatusValue<StreamDescriptorTrailers>
+{
+    static_assert(alignof(Eui64) == 1 && alignof(doublet_t) == 1, "trailer spans alias unaligned wire bytes");
+    auto const u16 = [wire](size_t const off) -> size_t {
+        return (static_cast<size_t>(wire[off]) << 8U) | static_cast<size_t>(wire[off + 1]);
+    };
+    if (wire.size() < DescriptorStream::MINIMUM_LENGTH) {
+        return failure(BufferError::insufficient_data);
+    }
+    size_t const formats_offset = u16(offsetof(DescriptorStream, formats_offset));
+    size_t const number_of_formats = u16(offsetof(DescriptorStream, number_of_formats));
+    if (formats_offset < DescriptorStream::MINIMUM_LENGTH || formats_offset > wire.size() ||
+        number_of_formats * sizeof(Eui64) > wire.size() - formats_offset) {
+        return failure(BufferError::insufficient_data);
+    }
+    StreamDescriptorTrailers t{};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Eui64 is a byte array
+    t.stream_formats = {reinterpret_cast<Eui64 const*>(wire.data() + formats_offset), number_of_formats};
+    if (formats_offset >= DescriptorStream::LENGTH) {
+        t.has_2021_fields = true;
+        t.redundant_offset = static_cast<uint16_t>(u16(offsetof(DescriptorStream, redundant_offset)));
+        t.number_of_redundant_streams = static_cast<uint16_t>(u16(offsetof(DescriptorStream, number_of_redundant_streams)));
+        t.timing = static_cast<uint16_t>(u16(offsetof(DescriptorStream, timing)));
+        if (size_t const n = t.number_of_redundant_streams; n != 0) {
+            size_t const off = t.redundant_offset;
+            if (off < DescriptorStream::LENGTH || off > wire.size() || n * sizeof(doublet_t) > wire.size() - off) {
+                return failure(BufferError::insufficient_data);
+            }
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - doublet_t is a byte array
+            t.redundant_streams = {reinterpret_cast<doublet_t const*>(wire.data() + off), n};
+        }
+    }
+    return success(t);
+}
 
 //
 // Jack Descriptor - Clause 7.2.7

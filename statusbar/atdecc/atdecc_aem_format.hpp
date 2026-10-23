@@ -187,9 +187,9 @@ auto format_descriptor(OutputIt out, ParsedDescriptor const& desc, size_t const 
         case DESCRIPTOR_SENSOR_UNIT:
             return format_to(out, desc.data.sensor_unit);
         case DESCRIPTOR_STREAM_INPUT:
-            return format_stream_descriptor(out, desc.data.stream, "STREAM_INPUT");
+            return format_stream_descriptor(out, desc.data.stream, "STREAM_INPUT", data_size);
         case DESCRIPTOR_STREAM_OUTPUT:
-            return format_stream_descriptor(out, desc.data.stream, "STREAM_OUTPUT");
+            return format_stream_descriptor(out, desc.data.stream, "STREAM_OUTPUT", data_size);
         case DESCRIPTOR_JACK_INPUT:
             return format_jack_descriptor(out, desc.data.jack, "JACK_INPUT");
         case DESCRIPTOR_JACK_OUTPUT:

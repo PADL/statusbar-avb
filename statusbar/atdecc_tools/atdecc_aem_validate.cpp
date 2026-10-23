@@ -132,7 +132,9 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
         }
         std::string const where =
             std::format("{}[{}]", r.type == DESCRIPTOR_STREAM_INPUT ? "STREAM_INPUT" : "STREAM_OUTPUT", r.index);
-        if (r.data.size() < DescriptorStream::LENGTH) {
+        // 2013 descriptors are MINIMUM_LENGTH (formats at 132); 2021 are LENGTH
+        // (formats at 138). Either is valid as long as formats_offset holds.
+        if (r.data.size() < DescriptorStream::MINIMUM_LENGTH) {
             add(Severity::Error, where, "truncated.");
             continue;
         }
@@ -141,7 +143,15 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
         if (!s.current_format.is_set()) {
             add(Severity::Error, where, "current_format is 0.");
         }
-        if (s.number_of_formats.get() == 0) {
+        if (!stream_descriptor_trailers(make_const_span(r.data)).has_value()) {
+            add(Severity::Error,
+                where,
+                std::format(
+                    "formats_offset {} / number_of_formats {} (or redundant_streams) exceed the {}-byte descriptor.",
+                    s.formats_offset.get(),
+                    s.number_of_formats.get(),
+                    r.data.size()));
+        } else if (s.number_of_formats.get() == 0) {
             add(Severity::Warn, where, "number_of_formats is 0 — no advertised format list.");
         }
     }

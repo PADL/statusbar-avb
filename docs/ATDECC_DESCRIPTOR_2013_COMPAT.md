@@ -80,11 +80,22 @@ auto format_to(OutputIt out, DescriptorSignalTranscoder const& d,
 ```
 
 Today, only `format_to(DescriptorSignalTranscoder)` and
-`format_to(DescriptorControlBlock)` read tail-gap fields. The other
-three affected structs (`Stream`, `AvbInterface`, `AudioCluster`) have
-formatters that only touch fields below `MINIMUM_LENGTH` — they are
-safe today but would need the same treatment if future edits added
-reads of their 2021-only fields.
+`format_to(DescriptorControlBlock)` read tail-gap fields by gating on
+`data_size`. `AvbInterface` and `AudioCluster` have formatters that only
+touch fields below `MINIMUM_LENGTH` — they are safe today but would need
+the same treatment if future edits added reads of their 2021-only fields.
+
+`DescriptorStream` is different: its 2021 fields sit *before* the
+variable `stream_formats` trailer, not at the tail, so the 2013 and 2021
+layouts put the formats at different offsets (132 vs 138). The
+authoritative position is the descriptor's own `formats_offset`. Received
+stream descriptors must go through `stream_descriptor_trailers(span)`,
+which bounds-checks `formats_offset + 8 * number_of_formats` (and the
+2021 `redundant_streams` list) against the wire length and only reads
+`redundant_offset` / `number_of_redundant_streams` / `timing` when
+`formats_offset >= LENGTH`. The inline `stream_formats` array and
+`used_stream_formats()` describe the 2021 layout this repo serializes and
+are only valid for descriptors it built itself.
 
 The compiler cannot enforce invariant 2 — it's up to reviewers to
 catch. The static_assert in invariant 1 at least makes the boundary
