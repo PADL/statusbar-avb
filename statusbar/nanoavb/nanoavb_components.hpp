@@ -21,6 +21,7 @@
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
+#include "statusbar/nanoavb/nanoavb_mvu_handler.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
@@ -268,16 +269,19 @@ class AtdeccNetHandler : public net::Pollable
     /// @param acmp_talker Reference to the ACMP talker handler
     /// @param acmp_listener Reference to the ACMP listener handler
     /// @param aem_handler Reference to the AEM command handler
+    /// @param mvu_handler Reference to the MVU command handler
     AtdeccNetHandler(
         std::string_view interface_name,
         NanoAvbAdpAdvertiser& adp_advertiser,
         NanoAvbAcmpTalker& acmp_talker,
         NanoAvbAcmpListener& acmp_listener,
-        AemCommandHandler& aem_handler)
+        AemCommandHandler& aem_handler,
+        MvuCommandHandler& mvu_handler)
         : adp_advertiser_{adp_advertiser}
         , acmp_talker_{acmp_talker}
         , acmp_listener_{acmp_listener}
         , aem_handler_{aem_handler}
+        , mvu_handler_{mvu_handler}
     {
         (void)context_.open(interface_name, ETHERTYPE_AVTP, &atdecc::ATDECC_MULTICAST_MAC);
     }
@@ -325,6 +329,7 @@ class AtdeccNetHandler : public net::Pollable
     NanoAvbAcmpTalker& acmp_talker_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpListener& acmp_listener_;    // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     AemCommandHandler& aem_handler_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+    MvuCommandHandler& mvu_handler_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAdpDiscovery* adp_discovery_{nullptr};
     statusbar::itc::TelemetryCounter<int64_t>* ptp_wake_count_{nullptr};
     std::optional<logging::Logger> logger_{};
@@ -503,6 +508,7 @@ struct NanoAvbComponents
     /// handler that has Milan-only behaviour.
     EntityProfile profile;
     AemCommandHandler aem_handler;
+    MvuCommandHandler mvu_handler;
     NanoAvbAdpAdvertiser adp_advertiser;
     NanoAvbAcmpTalker acmp_talker;
     NanoAvbAcmpListener acmp_listener;
