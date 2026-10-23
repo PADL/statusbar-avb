@@ -30,6 +30,7 @@
 #include <span>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 using namespace statusbar;
@@ -81,6 +82,62 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs) -> std
     return w.write();
 }
 
+/// The multi-rate model's AAF formats: INT_24 8 ch, and the Base formats
+/// (Base Audio Formats FIS v1.1 Table 4: INT_32, class A framing).
+constexpr uint64_t INT24_8CH_48K = 0x0205031802006000ULL;
+constexpr uint64_t INT24_8CH_96K = 0x020703180200C000ULL;
+constexpr auto base_format(uint32_t const rate, uint16_t const channels) -> uint64_t
+{
+    uint64_t const nsr = rate == 96000 ? 0x07 : 0x05;
+    return (uint64_t{0x02} << 56) | (nsr << 48) | (uint64_t{0x02} << 40) | (uint64_t{32} << 32) | (uint64_t{channels} << 22) |
+        (uint64_t{rate / 8000} << 12);
+}
+static_assert(base_format(48000, 2) == 0x0205022000806000ULL && base_format(96000, 8) == 0x020702200200C000ULL);
+
+/// A bridge-like multi-rate model: STREAM_OUTPUT 0 (INT_24 8 ch at 48 and 96 kHz, then the CRF),
+/// STREAM_INPUT 0 (every Base format at both rates, then a CRF input) and an AUDIO_UNIT at
+/// 48 kHz listing 48 and 96 kHz.
+auto make_multirate_blob() -> std::vector<uint8_t>
+{
+    nanoavb::AemBlobWriter w;
+    atdecc::aem::DescriptorEntity entity{};
+    entity.configurations_count = 1;
+    entity.talker_stream_sources = 2;
+    entity.listener_stream_sinks = 2;
+    w.add(0, DESCRIPTOR_ENTITY, 0, make_const_span(entity));
+    atdecc::aem::DescriptorConfiguration config{};
+    w.add(0, DESCRIPTOR_CONFIGURATION, 0, make_const_span(config));
+    for (auto const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
+        atdecc::aem::DescriptorStream stream{};
+        stream.descriptor_type = type;
+        stream.descriptor_index = 0;
+        stream.current_format.from_uint64(INT24_8CH_48K);
+        for (uint32_t const rate : {48000U, 96000U}) {
+            (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(rate == 48000 ? INT24_8CH_48K : INT24_8CH_96K));
+            for (uint16_t const channels : {1, 2, 4, 6, 8}) {
+                if (type == DESCRIPTOR_STREAM_INPUT || channels == 8) {
+                    (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(base_format(rate, channels)));
+                }
+            }
+        }
+        w.add(0, type, 0, wire(stream));
+        atdecc::aem::DescriptorStream crf{};
+        crf.descriptor_type = type;
+        crf.descriptor_index = 1;
+        crf.current_format.from_uint64(CRF_MILAN_48K);
+        w.add(0, type, 1, wire(crf));
+    }
+    atdecc::aem::DescriptorAudioUnit unit{};
+    unit.current_sampling_rate = uint32_t{48000};
+    unit.sampling_rates_count = uint16_t{2};
+    unit.sampling_rates[0] = uint32_t{48000};
+    unit.sampling_rates[1] = uint32_t{96000};
+    w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_UNIT, 0, wire(unit));
+    atdecc::aem::DescriptorAvbInterface iface{};
+    w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    return w.write();
+}
+
 auto stream_id(uint64_t const value) -> tsn::StreamId
 {
     tsn::StreamId sid{};
@@ -95,8 +152,9 @@ namespace {
 
 struct MilanKit
 {
-    explicit MilanKit(std::optional<bool> const milan, uint64_t const entity_low, bool const gate = true)
-        : blob{make_blob(1, 1)}
+    explicit MilanKit(
+        std::optional<bool> const milan, uint64_t const entity_low, bool const gate = true, std::vector<uint8_t> model = make_blob(1, 1))
+        : blob{std::move(model)}
         , storage{*atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob})}
         , talkers{*talker_stream_specs(storage, 0)}
         , listeners{*listener_stream_specs(storage, 0)}
@@ -864,8 +922,12 @@ ieee::Eui48 const CONTROLLER_MAC{0x02, 0x00, 0x00, 0xC0, 0x00, 0x01};
 /// MVU handler sends
 struct PersistentKit : MilanKit
 {
-    explicit PersistentKit(std::string const& path, uint64_t const entity_low = 0x30, std::optional<bool> const milan = std::nullopt)
-        : MilanKit{milan, entity_low}
+    explicit PersistentKit(
+        std::string const& path,
+        uint64_t const entity_low = 0x30,
+        std::optional<bool> const milan = std::nullopt,
+        std::vector<uint8_t> model = make_blob(1, 1))
+        : MilanKit{milan, entity_low, true, std::move(model)}
     {
         config.persistent_state_path = path;
         kit.host().components().mvu_handler.set_clock_domain_count(1);  // the test model has none
@@ -1156,8 +1218,8 @@ TEST(avb_entity_kit_persistence, other_model_and_corrupt_files)
     std::filesystem::remove_all(dir);
 }
 
-// Until the data plane follows a format or rate change, only the
-// stream's own format and the kit's rate are taken, so nothing else is saved
+// Without the entity's hooks only the stream's own format and the kit's rate
+// are taken, so nothing else is saved
 TEST(avb_entity_kit_persistence, formats_and_rates_follow_the_data_plane)
 {
     auto const dir = state_dir("formats");
@@ -1174,6 +1236,394 @@ TEST(avb_entity_kit_persistence, formats_and_rates_follow_the_data_plane)
     span_store(std::span{body}.subspan(4, 8), same);
     EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, body), atdecc::AEM_STATUS_SUCCESS);
     std::filesystem::remove_all(dir);
+}
+
+// --- Formats and the sampling rate ---------------------------------------------
+
+namespace {
+
+/// SET_STREAM_FORMAT's body: the stream, the format.
+auto format_body(uint16_t const type, uint16_t const index, uint64_t const format) -> std::array<uint8_t, 12>
+{
+    std::array<uint8_t, 12> body{
+        static_cast<uint8_t>(type >> 8U), static_cast<uint8_t>(type), static_cast<uint8_t>(index >> 8U), static_cast<uint8_t>(index)};
+    span_store(std::span{body}.subspan(4, 8), ieee::Eui64{}.from_uint64(format));
+    return body;
+}
+
+/// SET_SAMPLING_RATE's body: AUDIO_UNIT 0, the rate.
+auto rate_body(uint32_t const rate) -> std::array<uint8_t, 8>
+{
+    return {0x00,
+            0x02,
+            0x00,
+            0x00,
+            static_cast<uint8_t>(rate >> 24U),
+            static_cast<uint8_t>(rate >> 16U),
+            static_cast<uint8_t>(rate >> 8U),
+            static_cast<uint8_t>(rate)};
+}
+
+/// The multi-rate model's kit, with hooks that record what the entity was
+/// asked (the rate hook applies the rate, as an entity re-clocking would).
+struct RateKit : PersistentKit
+{
+    explicit RateKit(std::string const& path = {}, uint64_t const entity_low = 0x70)
+        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob()}
+    {
+        kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
+            formats.push_back({type, index, format});
+            return format_status;
+        });
+        kit.set_on_sampling_rate_changed([this](uint32_t const rate) {
+            rates.push_back(rate);
+            if (rate_status == atdecc::AEM_STATUS_SUCCESS) {
+                kit.apply_sampling_rate(rate);
+            }
+            return rate_status;
+        });
+    }
+
+    /// GET_STREAM_FORMAT of a stream
+    auto current_format(uint16_t const type, uint16_t const index) -> uint64_t
+    {
+        std::array<uint8_t, 4> body{
+            static_cast<uint8_t>(type >> 8U), static_cast<uint8_t>(type), static_cast<uint8_t>(index >> 8U), static_cast<uint8_t>(index)};
+        auto const r = aem_command(atdecc::AEM_COMMAND_GET_STREAM_FORMAT, body);
+        EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
+        if (r.body.size() < 12) {
+            return 0;
+        }
+        ieee::Eui64 format{};
+        span_load(format, std::span<uint8_t const>{r.body}.subspan(4, 8));
+        return format.to_uint64();
+    }
+
+    struct Format
+    {
+        uint16_t type{0};
+        uint16_t index{0};
+        StreamFormatFields fields{};
+    };
+    std::vector<Format> formats;
+    std::vector<uint32_t> rates;
+    uint8_t format_status{atdecc::AEM_STATUS_SUCCESS};
+    uint8_t rate_status{atdecc::AEM_STATUS_SUCCESS};
+};
+
+/// The unsolicited AEM responses in @p frames with command @p command.
+auto unsolicited(std::vector<std::vector<uint8_t>> const& frames, uint16_t const command) -> std::vector<std::vector<uint8_t>>
+{
+    std::vector<std::vector<uint8_t>> out;
+    for (auto const& frame : frames) {
+        nanoavb::AemDu du{};
+        span_load(du, std::span<uint8_t const>{frame}.first(nanoavb::AemDu::LENGTH));
+        if (du.is_unsolicited() && du.command_code() == command) {
+            out.emplace_back(frame.begin() + nanoavb::AemDu::LENGTH, frame.end());
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+// SET_STREAM_FORMAT takes a listed format of the stream's kind at the kit's
+// rate, through the entity's hook, and re-shapes the stream (spec, TX or RX
+// slot); refused while the input is bound or the output streams
+TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+
+    // An input takes a 2-channel Base format: the entity is told, the RX slot
+    // follows (what it accepts is the new format).
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 2))),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.formats.size(), size_t{1});
+    EXPECT_TRUE(m.formats.back().type == DESCRIPTOR_STREAM_INPUT && m.formats.back().fields.channels == 2);
+    EXPECT_TRUE(m.formats.back().fields.aaf_format == avtp::AafFormat::int_32bit);
+    EXPECT_EQ(m.kit.listener_specs().front().format_word, base_format(48000, 2));
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.channels, uint16_t{2});
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{2});
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 2));
+    {
+        // GET_STREAM_INFO reports the current format too.
+        std::array<uint8_t, 4> body{0x00, 0x05, 0x00, 0x00};
+        auto const info = load_info(m.aem_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, body).body).first;
+        ieee::Eui64 format{};
+        span_load(format, make_const_span(info.stream_format));
+        EXPECT_EQ(format.to_uint64(), base_format(48000, 2));
+    }
+
+    // An output takes the 8-channel Base format: the TX slot serializes it,
+    // and the TSpec follows.
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf->format == avtp::AafFormat::int_32bit);
+    EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{6 * 8 * 4 + 24 + 1});
+
+    // Refused: an unlisted format (the handler), one at another rate, the
+    // CRF's, and the entity's own refusal (nothing changes).
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 2))),
+        atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(96000, 2))),
+        atdecc::AEM_STATUS_NOT_SUPPORTED);
+    m.format_status = atdecc::AEM_STATUS_BAD_ARGUMENTS;
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_48K)),
+        atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 2));
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{2});  // the RX slot put back
+    m.format_status = atdecc::AEM_STATUS_SUCCESS;
+
+    // Milan v1.2 Section 5.4.2.7: a streaming output keeps its format.
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::steady_ns()));
+    size_t const asked = m.formats.size();
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_48K)),
+        atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(m.formats.size(), asked);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), base_format(48000, 8));
+}
+
+// A bound input keeps its format (and the rate with it); a saved format is
+// restored at the next start through the entity's hook
+TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
+{
+    auto const dir = state_dir("stage8-formats");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        RateKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 6))),
+            atdecc::AEM_STATUS_SUCCESS);
+        auto const saved = load_persistent_state(path, 0, {});
+        EXPECT_EQ(saved.state.stream_formats.size(), size_t{1});
+    }
+    PersistentState state = load_persistent_state(path, 0, {}).state;
+    state.listener_bindings.push_back(
+        {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 0, .format = base_format(48000, 6)});
+    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    {
+        RateKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.formats.size(), size_t{1});  // the saved format, through the hook
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 6));
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.channels, uint16_t{6});
+        EXPECT_TRUE(m.kit.input_running(0));  // the saved binding
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 8))),
+            atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+        EXPECT_TRUE(m.rates.empty());
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// SET_SAMPLING_RATE re-times every AAF stream through the entity's hook (the
+// CRF keeps its format), notifies the re-timed formats after the response,
+// and is restored, rate before formats, at the next start
+TEST(avb_entity_kit_formats, set_sampling_rate_retimes_every_stream)
+{
+    auto const dir = state_dir("stage8-rate");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        RateKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        std::array<uint8_t, 0> none{};
+        (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 2))),
+            atdecc::AEM_STATUS_SUCCESS);
+
+        // An unlisted rate, then the entity refusing: nothing changes.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(192000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        m.rate_status = atdecc::AEM_STATUS_NO_RESOURCES;
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+        EXPECT_EQ(m.kit.sample_rate(), 48000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+        m.rate_status = atdecc::AEM_STATUS_SUCCESS;
+
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(m.rates.size() == 2 && m.rates.back() == 96000U);
+        EXPECT_EQ(m.kit.sample_rate(), 96000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(96000, 2));
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 1), CRF_MILAN_48K);
+        EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format.aaf_samples_per_frame, uint16_t{12});
+        EXPECT_EQ(m.kit.talker().samples_per_packet_, 12U);
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 96000U);
+        EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{12 * 8 * 3 + 24 + 1});
+        // The re-timed formats are notified once the reactor pass is done,
+        // to every registered controller (the requester too), as
+        // SET_STREAM_FORMATs.
+        EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
+        m.aem.clear();
+        m.kit.on_declaration_timer(MilanKit::steady_ns());
+        auto const notified = unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT);
+        EXPECT_EQ(notified.size(), size_t{2});
+        if (notified.size() == 2) {
+            ieee::Eui64 format{};
+            span_load(format, std::span<uint8_t const>{notified[0]}.subspan(4, 8));
+            EXPECT_EQ(format.to_uint64(), INT24_8CH_96K);  // STREAM_OUTPUT 0
+        }
+        // The same rate again changes nothing.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.rates.size(), size_t{2});
+        auto const saved = load_persistent_state(path, 0, {});
+        EXPECT_TRUE(saved.state.sampling_rates.size() == 1 && saved.state.sampling_rates.front().rate == 96000U);
+        EXPECT_EQ(saved.state.stream_formats.size(), size_t{2});
+    }
+    {
+        RateKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.rates.size() == 1 && m.rates.front() == 96000U);
+        EXPECT_EQ(m.kit.sample_rate(), 96000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(96000, 2));
+        // The TX and RX slots opened at start() are the restored formats'.
+        EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format.sample_rate_hz, 96000U);
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{2});
+        // Back to 48 kHz.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 2));
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// An entity that applies the rate and then refuses it leaves the kit exactly
+// as it was: rate, formats, stream paths, no notifications
+TEST(avb_entity_kit_formats, a_refused_rate_change_is_undone)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 4))),
+        atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_on_sampling_rate_changed([&m](uint32_t const rate) -> uint8_t {
+        EXPECT_TRUE(m.kit.apply_sampling_rate(rate));
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, rate);
+        return atdecc::AEM_STATUS_NO_RESOURCES;
+    });
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_EQ(m.kit.talker().samples_per_packet_, 6U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 4));
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 48000U);
+    EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format_word, INT24_8CH_48K);
+    std::array<uint8_t, 4> get_rate{0x00, 0x02, 0x00, 0x00};
+    auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_SAMPLING_RATE, get_rate);
+    EXPECT_TRUE(r.status == atdecc::AEM_STATUS_SUCCESS && r.body.size() >= 8 && r.body[5] == 0x00 && r.body[6] == 0xBB && r.body[7] == 0x80);
+    m.aem.clear();
+    m.kit.on_declaration_timer(MilanKit::steady_ns());
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
+    // A hook that re-times back itself before refusing (as the bridge's data
+    // plane falls back to the old rate) leaves nothing queued either.
+    m.kit.set_on_sampling_rate_changed([&m](uint32_t const rate) -> uint8_t {
+        EXPECT_TRUE(m.kit.apply_sampling_rate(rate));
+        EXPECT_TRUE(m.kit.apply_sampling_rate(48000));
+        return atdecc::AEM_STATUS_NO_RESOURCES;
+    });
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 4));
+    m.aem.clear();
+    m.kit.on_declaration_timer(MilanKit::steady_ns());
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
+    // apply_sampling_rate is all or nothing: a rate a stream lists no format at changes nothing.
+    EXPECT_FALSE(m.kit.apply_sampling_rate(192000));
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+}
+
+// A stream path refuses a format it cannot carry and keeps its own
+TEST(avb_entity_kit_formats, a_refused_reshape_leaves_the_slot)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    auto spec = m.kit.talker_specs().front();
+    spec.format.sample_rate_hz = 12345;  // no AAF code
+    EXPECT_FALSE(m.kit.talker().reformat_stream(spec).has_value());
+    EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf->sample_rate == avtp::AafSampleRate::rate_48_khz);
+    EXPECT_FALSE(m.kit.listener()->reformat_stream(spec).has_value());  // index 0 is an AAF input too
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{8});
+    spec = m.kit.talker_specs().back();  // the CRF
+    EXPECT_TRUE(m.kit.talker().reformat_stream(spec).has_value());  // its own format: nothing to do
+    spec.format_word ^= 1;
+    EXPECT_FALSE(m.kit.talker().reformat_stream(spec).has_value());
+}
+
+// SlotGuard: the data-plane thread never waits, the reactor waits for it
+TEST(avb_entity_slot_guard, enter_never_waits_lock_waits_for_leave)
+{
+    SlotGuard guard;
+    EXPECT_TRUE(guard.try_enter());
+    std::atomic<bool> locked{false};
+    std::thread reactor{[&] {
+        guard.lock();
+        locked = true;
+        guard.unlock();
+    }};
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    EXPECT_FALSE(locked.load());  // still in the data-plane thread's packet
+    guard.leave();
+    reactor.join();
+    EXPECT_TRUE(locked.load());
+    guard.lock();
+    EXPECT_FALSE(guard.try_enter());  // re-shaping: the packet is skipped
+    guard.unlock();
+    {
+        SlotGuard::Entry const entry{guard};
+        EXPECT_TRUE(entry.entered());
+    }
+    EXPECT_TRUE(guard.try_enter());
+    guard.leave();
+}
+
+// A streaming output refuses the rate change; so does a kit without the
+// entity's hook; a local change is refused while a controller has the entity
+// locked, and is otherwise applied and notified like a controller's
+TEST(avb_entity_kit_formats, rate_refusals_and_local_changes)
+{
+    {
+        RateKit m;
+        EXPECT_TRUE(m.start_ready());
+        (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 1);  // the CRF output
+        m.bridge_listener(1, srp::msrp::ListenerDeclaration::Ready);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+        EXPECT_TRUE(m.rates.empty());
+    }
+    {
+        RateKit m;
+        m.kit.set_on_sampling_rate_changed({});
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
+    }
+    {
+        RateKit m;
+        EXPECT_TRUE(m.start_ready());
+        std::array<uint8_t, 0> none{};
+        (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+        std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+        EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.kit.request_sampling_rate(96000), atdecc::AEM_STATUS_ENTITY_LOCKED);
+        EXPECT_TRUE(m.rates.empty());
+        lock[3] = 0x01;  // UNLOCK
+        EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+        m.aem.clear();
+        EXPECT_EQ(m.kit.request_sampling_rate(96000), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.kit.sample_rate(), 96000U);
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_SAMPLING_RATE).size(), size_t{1});
+        EXPECT_EQ(m.kit.request_sampling_rate(44100), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    }
 }
 
 // A binding saved for an input whose format has since changed is dropped

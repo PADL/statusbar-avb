@@ -36,7 +36,7 @@ auto kind_lit(ListenerStreamSlot const* slot)
     if (slot == nullptr) {
         return logging::lit("?");
     }
-    switch (slot->spec.format.kind) {
+    switch (slot->kind) {
         case StreamKind::am824:
             return logging::lit("AM824");
         case StreamKind::aaf:
@@ -113,20 +113,15 @@ auto aaf_rx_packet(
     return aaf_timed_packet(stream_index, ctx, pdu, payload, frames, pts);
 }
 
-auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
+auto ListenerStreams::shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status
 {
-    if (slots_.size() == MAX_ENTITY_STREAMS) {
-        return failure(std::errc::result_out_of_range);
-    }
     switch (spec.format.kind) {
         case StreamKind::am824: {
             auto const rate = avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
             if (!rate || spec.format.channels == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            auto& slot = new_slot(spec);
             slot.am824.emplace(*rate, static_cast<uint8_t>(spec.format.channels));
-            bind_pending_consume(slot);
             return success();
         }
         case StreamKind::aaf: {
@@ -134,9 +129,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             if (!rate || spec.format.channels == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            auto& slot = new_slot(spec);
             slot.aaf.emplace(spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth);
-            bind_pending_consume(slot);
             return success();
         }
         case StreamKind::crf: {
@@ -146,13 +139,11 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             if (spec.format.crf_base_frequency_hz == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            auto& slot = new_slot(spec);
             slot.crf.emplace(
                 static_cast<avtp::CrfType>(spec.format.crf_type),
                 spec.format.crf_base_frequency_hz,
                 static_cast<avtp::CrfPull>(spec.format.crf_pull),
                 spec.format.crf_timestamp_interval);
-            bind_pending_consume(slot);
             return success();
         }
         case StreamKind::other:
@@ -198,6 +189,52 @@ auto ListenerStreams::write_margin_histogram_csvs(std::string const& path) const
         written += write_histogram_csv(file.string(), slot.counters.margin_histogram.snapshot()) ? 1U : 0U;
     }
     return written;
+}
+
+auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
+{
+    if (slots_.size() == MAX_ENTITY_STREAMS) {
+        return failure(std::errc::result_out_of_range);
+    }
+    if (spec.format.kind == StreamKind::other) {
+        return failure(std::errc::not_supported);
+    }
+    auto& slot = new_slot(spec);
+    if (auto status = shape(slot, spec); !status) {
+        slots_.pop_back();
+        return status;
+    }
+    slot.kind = spec.format.kind;
+    bind_pending_consume(slot);
+    return success();
+}
+
+auto ListenerStreams::reformat_stream(StreamSpec const& spec) -> Status
+{
+    auto* const slot = slot_for(spec.index);
+    if (slot == nullptr) {
+        return failure(std::errc::no_such_device);
+    }
+    if (spec.format.kind != slot->kind) {
+        return failure(std::errc::invalid_argument);
+    }
+    if (spec.format.kind == StreamKind::crf) {
+        // One CRF format a stream: nothing to re-shape.
+        return spec.format_word == slot->spec.format_word ? Status{} : Status{failure(std::errc::not_supported)};
+    }
+    // Checked first, so that a refused format leaves the slot as it was.
+    bool const aaf = spec.format.kind == StreamKind::aaf;
+    if ((aaf ? !avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz).has_value()
+             : !avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz).has_value()) ||
+        spec.format.channels == 0) {
+        return failure(std::errc::invalid_argument);
+    }
+    SlotGuard::Lock const lock{slot->guard};
+    (void)shape(*slot, spec);
+    // The index stays (slot_for reads it unlocked); the format is the new one.
+    slot->spec.format_word = spec.format_word;
+    slot->spec.format = spec.format;
+    return success();
 }
 
 void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn fn)
@@ -277,7 +314,7 @@ auto ListenerStreams::slot_for(uint16_t const stream_index) const noexcept -> Li
 auto ListenerStreams::slot_of(StreamKind const kind) noexcept -> ListenerStreamSlot*
 {
     for (auto& slot : slots_) {
-        if (slot.spec.format.kind == kind) {
+        if (slot.kind == kind) {
             return &slot;
         }
     }
@@ -287,7 +324,7 @@ auto ListenerStreams::slot_of(StreamKind const kind) noexcept -> ListenerStreamS
 auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerStreamSlot const*
 {
     for (auto const& slot : slots_) {
-        if (slot.spec.format.kind == kind) {
+        if (slot.kind == kind) {
             return &slot;
         }
     }
@@ -394,13 +431,17 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
     }
     ListenerStreamSlot* slot = nullptr;
     for (auto& s : slots_) {
-        if (s.spec.format.kind == subtype_kind && frame_is_for_listener(s.spec.index, frame)) {
+        if (s.kind == subtype_kind && frame_is_for_listener(s.spec.index, frame)) {
             slot = &s;
             break;
         }
     }
     if (slot == nullptr || slot->stopped.load(std::memory_order_relaxed)) {
         return;
+    }
+    SlotGuard::Entry const entry{slot->guard};
+    if (!entry.entered()) {
+        return;  // being re-shaped (reformat_stream)
     }
 
     if (slot->am824) {
