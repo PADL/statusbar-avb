@@ -19,6 +19,7 @@
 /// TX shape follows its declarative model instead of per-entity C++ enums.
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
+#include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
@@ -169,6 +170,15 @@ struct TalkerStreams
     /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
+    /// Re-shape the slot of @p spec.index for @p spec (new format, same stream id and destination,
+    /// fresh sequence). Reactor thread; the slot is locked (SlotGuard) so the media thread skips it.
+    /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
+    auto reformat_stream(StreamSpec const& spec) -> Status;
+
+    /// The stream rate (config_.sample_rate), for a SET_SAMPLING_RATE (each slot's
+    /// frames per PDU follow its format at reformat_stream). Same discipline as reformat_stream.
+    void set_sample_rate(uint32_t const sample_rate) noexcept { config_.sample_rate = sample_rate; }
+
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
     /// descriptor index == ACMP talker unique id), or nullptr.
     [[nodiscard]] auto slot_for(uint16_t stream_index) noexcept -> TalkerStreamSlot*;
@@ -294,8 +304,15 @@ struct TalkerStreams
     std::atomic<int64_t> const& last_gptp_ns_;
     std::pmr::memory_resource* mem_resource_;
 
+    /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
+    /// @p stream_id: what open_stream and reformat_stream share.
+    auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
+
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
+    /// Per-stream guards between the media thread's transmits and the
+    /// reactor's reformat_stream, by STREAM_OUTPUT index.
+    std::array<SlotGuard, MAX_ENTITY_STREAMS> guards_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
