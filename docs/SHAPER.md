@@ -31,27 +31,92 @@ it although they never meet mqprio itself. The shaper therefore:
    class A on that same PCP (`kit.config().stream_pcp`) and class B on the
    802.1Q default 2, and refuses a PCP of 8 or more or one PCP for both
    (`ShaperError::bad_priority`);
-3. keeps an offloaded cbs on the class A queue (`parent <major>:<queue + 1>`)
-   whose idleSlope is the sum of the admitted streams' reservations, and puts
-   the default qdisc (pfifo_fast) back when none is admitted.
+3. keeps an offloaded cbs on both SR-class queues (`parent <major>:<queue + 1>`)
+   from install on: class A's idleSlope is the sum of the admitted streams'
+   reservations, and a class with none admitted holds a placeholder (see
+   "Adapter resets" below). Admission only changes the parameters in place.
 
 A software cbs would do nothing here: bypass frames never enter it. Only the
 offloaded cbs (`offload 1`), which programs the NIC's own shaper on the queue,
 shapes them. Without a shaper, `SO_PRIORITY` alone still lands the streams on
 the SR-class queue once some mqprio map is in place.
 
-Removing a cbs grafts pfifo_fast rather than deleting the child: deleting an
-mqprio child leaves `noop_qdisc` on the queue, which drops every non-bypass
-frame steered there. Either way the cbs is destroyed and its offload disabled.
-`uninstall()` deletes the mqprio root (its children go with it) and the
-kernel restores the default root. `install()` first tries to replace the root;
-if that fails with EINVAL, which is what mqprio answers when the root is
-already an mqprio with our handle (a "change", which it refuses), it deletes
-the root with our handle and tries once more. So a root left by a run that did
-not uninstall is replaced, and a foreign mqprio that happens to hold our
-handle (`ShaperConfig::qdisc_major`, the bridge's `[avb] qdisc_handle`,
-default 0x9000) is taken over. Nothing of ours is left installed when
-`install()` fails.
+`uninstall()` grafts pfifo_fast on class B's queue, then class A's (both,
+whatever this run recorded: a kept root may carry a cbs it never programmed),
+rather than deleting the children (deleting an mqprio child leaves `noop_qdisc` on
+the queue, which drops every non-bypass frame steered there; and igc refuses
+to drop class A's cbs while class B's is on), then deletes the mqprio root and
+the kernel restores the default root.
+
+`install()` first reads the root (`TcClient::get`: an `RTM_GETQDISC` dump,
+filtered to the interface's root; a single get would also notify every
+`tc monitor`). A root
+that already is our mqprio, with our handle and exactly our layout (a run that
+left it at shutdown, or crashed), is kept with its cbs children, whose
+parameters the first reprogramming changes in place. Anything else is
+replaced; if that fails with EINVAL, which is what mqprio answers when the
+root is already an mqprio with our handle (a "change", which it refuses: our
+handle with another layout), it deletes the root with our handle and tries
+once more. So a foreign mqprio that happens to hold our handle
+(`ShaperConfig::qdisc_major`, the bridge's `[avb] qdisc_handle`, default
+0x9000) is taken over. Nothing of ours is left installed when `install()`
+fails.
+
+## Adapter resets (igb, igc)
+
+igb (i210) switches its transmit mode to FQTSS (Qav) when the first offloaded
+cbs or etf is added and back when the last is removed (`igb_offload_apply` ->
+`enable_fqtss`), and each switch schedules `reset_task`: "Reset adapter", the
+link down for about 4 s, gPTP lost, and the PHC's SDP pin functions cleared
+(ts2phc's EXTTS input on the port stops). igc on an i225 does the same
+(`igc_tsn_offload_apply`). A cbs replacing a cbs is a change (`cbs_change`:
+the driver reprograms the queue's idleSlope and credits only), and mqprio is
+never offloaded on igb (`hw 0`: installing or deleting it touches no
+hardware); only the first cbs and the last one cost a reset.
+
+So the shaper puts a cbs on both class queues at install and never takes the
+last one away while running:
+
+| Event | Requests | Resets (igb) |
+| --- | --- | --- |
+| first start (default root) | mqprio; cbs A, cbs B (placeholders) | 1 (the first cbs; the second finds FQTSS on) |
+| a stream admitted, withdrawn, link speed change | cbs A and/or B changed in place | 0 |
+| shutdown, `restore_qdisc = false` (default) | both cbs set to their placeholders; root left | 0 |
+| restart onto that root | the root kept; both cbs changed in place | 0 |
+| shutdown, `restore_qdisc = true` | pfifo_fast on B, on A; root deleted | 1 (the last cbs) |
+| start after that, or after a reboot | as a first start | 1 |
+| our handle with another layout (a changed queue override) | root deleted and replaced, cbs added | 1 or 2 (the driver's reset work may coalesce the off and on switches) |
+
+The placeholder (`placeholder_cbs`) must keep the queue shaped without
+throttling what still reaches it. On class A's queue that is only the gated
+stream frames, which can run for the moment between the talker gate opening
+and the next tick, before the cbs follows the admitted set. On class B's queue
+(skb priority 2 on our map, `map 0 0 1 2 0 ...`) it is any AF_PACKET socket
+with SO_PRIORITY 2 and any IPv4 socket whose IP_TOS the kernel maps to
+TC_PRIO_BULK (`rt_tos2priority`: the AFx1 DSCPs, e.g. OpenSSH's default AF21
+for interactive sessions) when the AVB port carries IP. The bridge's kit sets
+no priority but the stream socket's, ptp4l's default `socket_priority` is 0,
+and the bench box's AVB port has no address, so nothing reaches class B there
+today. A small idleSlope would cap that traffic at a trickle; instead the
+placeholders share what the admitted streams leave of the SR budget, 75% of
+the link (802.1Q 34.3.1's default deltaBandwidth): all of it for the one
+empty class, half each when both are empty, with Annex L credits for an MTU
+frame (1 Gbit/s, MTU 1500, nothing admitted: each idleslope 375000, sendslope
+-625000, hicredit 563, locredit -963). So the two SR queues together never
+claim more than 75% and legacy traffic keeps a quarter of the link even with
+both busy (on igb, SP_WAIT_SR holds the strict-priority queues while an SR
+queue has credit). A placeholder never falls under 1% of the link; only when
+admitted streams leave less than that does the total pass the budget.
+
+A driver without cbs offload (EOPNOTSUPP: igb on anything but an i210, a
+driver with no cbs `ndo_setup_tc`) is logged once and the shaper sends no
+further cbs request; the mqprio map, which is what steers the
+bypass frames, stays. Other errors (EINVAL for an igb queue above 1, EBUSY)
+leave the class unprogrammed and the shaper dirty: `tick()` retries after
+1 s, doubling to 32 s, each attempt logged, and a new admitted set goes out
+at once. On igb/igc an override putting class A on queue 1 and class B on
+queue 0 is refused (`bad_queue_override`): queue 0 outranks queue 1, and igc
+takes queue 1's cbs only after queue 0's.
 
 ## Threading
 
@@ -62,7 +127,10 @@ shaper dirty: no netlink request runs inside the kit's ACMP/MSRP callbacks.
 when the admitted set or the link speed changed, so a burst of admission
 changes costs one reprogramming and a renegotiated link is corrected within a
 second. `shutdown()` unregisters the hook and, when `restore_qdisc` is set,
-uninstalls; the destructor unregisters too. The kit must outlive the shaper.
+uninstalls; otherwise (the default) it parks both cbs at their placeholders
+and leaves the qdiscs for the next start. The destructor unregisters too. The
+kit must outlive the shaper. The requests themselves are `ShaperQdiscs`, over
+`net::tc::TcControl`; its tests record them.
 
 `netdev_set_num_tc` resets any XPS maps; do not configure XPS on the AVB port
 afterwards (XPS is consulted before the TC hash in `netdev_pick_tx`).
@@ -144,6 +212,7 @@ tc qdisc show dev <if>
 #  qdisc mqprio 9000: root tc 3 map 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0
 #               queues:(2:3) (1:1) (0:0)
 #  qdisc cbs 8001: parent 9000:1 hicredit 32 locredit -230 sendslope -979264 idleslope 20736 offload 1
+#  qdisc cbs 8002: parent 9000:2 hicredit 1094 locredit -417 sendslope -270736 idleslope 729264 offload 1
 tc -s class show dev <if>        # per-queue counters (non-bypass traffic only)
 ethtool -S <if> | grep tx_queue  # per-queue packet counters, bypass frames included
 ```
@@ -160,4 +229,9 @@ interface, that the kernel accepts the mqprio layout, refuses a same-handle
 replace with EINVAL (the takeover path), accepts a software cbs and its
 in-place change, the pfifo_fast graft and the root delete, refuses `offload 1`
 on a device without it (EOPNOTSUPP), and steers SO_PRIORITY 3 onto class A's
-queue. The offloaded cbs on an i210 has not been exercised.
+queue. In the same setup `ShaperQdiscs` over a real `TcClient` read back an
+mqprio and a cbs laid down by `tc`, kept the identical root, stopped asking
+after EOPNOTSUPP, uninstalled, and took over our handle holding another
+layout (EINVAL, delete, replace). The offloaded cbs on an i210 has not been
+exercised by these tests; the reset behaviour above is from the driver source
+and the bench box's dmesg.
