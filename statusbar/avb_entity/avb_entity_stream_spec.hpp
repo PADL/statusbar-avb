@@ -142,10 +142,19 @@ struct StreamSpec
     uint16_t avb_interface_index{0};
 };
 
-/// Upper bound on streams per direction the data plane composes. The blob may
-/// declare more (the spec allows 65535); deriving specs from such a blob is an
-/// error rather than a silent truncation.
-inline constexpr size_t MAX_ENTITY_STREAMS = 8;
+/// Audio (AM824/AAF) streams per direction the data plane is sized for: 16
+/// talker and 16 listener streams (the media bridge's product limit).
+inline constexpr size_t MAX_ENTITY_AUDIO_STREAMS = 16;
+
+/// Clock-reference (CRF) streams per direction beside the audio: the
+/// media-clock talker (Milan 1.2 7.3) on the output side, or the one CRF input
+/// a kit entity may slave its media clock to on the input side.
+inline constexpr size_t MAX_ENTITY_CRF_STREAMS = 1;
+
+/// Upper bound on the descriptors of one direction the data plane composes:
+/// 16 audio + 1 CRF. A blob declaring more is an error, not a truncation.
+/// What it sizes: docs/AVB_ENTITY_KIT.md.
+inline constexpr size_t MAX_ENTITY_STREAMS = MAX_ENTITY_AUDIO_STREAMS + MAX_ENTITY_CRF_STREAMS;
 
 using StreamSpecs = sg14::inplace_vector<StreamSpec, MAX_ENTITY_STREAMS>;
 
