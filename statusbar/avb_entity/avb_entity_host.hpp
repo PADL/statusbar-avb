@@ -58,6 +58,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -153,6 +154,16 @@ class AvbEntityHost
     void on_link_down(TimePoint time);
     void on_gptp_announce(TimePoint time, bool has_grandmaster);
     void on_timeout(TimePoint time);
+
+    /// A gPTP grandmaster change seen (the Announce handler's): counted for
+    /// GET_COUNTERS (AVB_INTERFACE GPTP_GM_CHANGED). Reactor thread.
+    void note_grandmaster_changed();
+
+    /// GET_COUNTERS for ENTITY, AVB_INTERFACE and CLOCK_DOMAIN descriptors (IEEE
+    /// 1722.1-2021 Clause 7.4.42); see docs/AVB_ENTITY_KIT.md. False for any other
+    /// descriptor or one the model lacks. Reactor thread.
+    [[nodiscard]] auto fill_counters(
+        uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) const -> bool;
 
     // --- State queries ---------------------------------------------------------
     [[nodiscard]] auto is_ready() const noexcept -> bool;
@@ -397,6 +408,17 @@ class AvbEntityHost
     };
     std::vector<MirroredInterface> mirrored_{};
     nanoavb::AvbInfo last_avb_info_{};  ///< what the last notification carried
+    /// The media clock (gPTP) lock state changed: count it and notify.
+    void note_media_clock_locked(bool locked);
+
+    // GET_COUNTERS state (fill_counters): 32-bit counters that wrap.
+    uint32_t link_up_count_{0};
+    uint32_t link_down_count_{0};
+    uint32_t gm_changed_count_{0};
+    uint32_t media_locked_count_{0};
+    uint32_t media_unlocked_count_{0};
+    bool media_locked_{false};
+    bool grandmaster_seen_{false};
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
