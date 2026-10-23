@@ -134,20 +134,20 @@ inline constexpr uint32_t MIN_L2_FRAME = 68;
 inline constexpr uint32_t CLASS_A_INTERVALS_PER_SEC = 8000;
 inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
 
-/// The octets a stream frame occupies on the wire for bandwidth purposes:
-/// max(MaxFrameSize + VLAN + L2, 68) + L1 + 1 (one octet for clock drift),
-/// as SwiftMRP's calcFrameSize / calculateBandwidthUsed (non-nominal) count it.
+/// The octets a stream frame occupies on the wire (Milan v1.2 Table 4.4): F = MaxFrameSize + 22,
+/// at least 68, plus 20. The clock-drift byte is already in MaxFrameSize (srp_max_frame_size).
 [[nodiscard]] constexpr auto wire_frame_size(uint16_t const max_frame_size) noexcept -> uint32_t
 {
     uint32_t frame = uint32_t{max_frame_size} + VLAN_OVERHEAD + L2_OVERHEAD;
     if (frame < MIN_L2_FRAME) {
         frame = MIN_L2_FRAME;
     }
-    return frame + L1_OVERHEAD + 1;
+    return frame + L1_OVERHEAD;
 }
 
 /// A stream's reserved bandwidth in kbit/s, rounded up:
-/// wire_frame_size * 8 * max_interval_frames * @p intervals_per_sec / 1000.
+/// wire_frame_size * 8 * max_interval_frames * @p intervals_per_sec / 1000
+/// (Milan v1.2 Table 4.4's "Bandwidth (kbps)" column at class A).
 [[nodiscard]] constexpr auto stream_bandwidth_kbps(TSpec const& tspec, uint32_t const intervals_per_sec) noexcept -> uint32_t
 {
     uint64_t const bits_per_sec =

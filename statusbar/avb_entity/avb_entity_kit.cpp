@@ -92,7 +92,8 @@ AvbEntityKit::AvbEntityKit(
             default:
                 break;
         }
-        (void)host_.components().acmp_talker.configure_stream(spec.index, stream_id_for(stream_base_mac, spec.index), dest);
+        (void)host_.components().acmp_talker.configure_stream(
+            spec.index, stream_id_for(stream_base_mac, spec.index), dest, config_.vlan_id);
     }
 
     // The VID itself is registered at start() (stop() withdraws it).
@@ -181,6 +182,9 @@ void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
     }
     active_vlan_id_ = domain.sr_class_vid;
     talker_->set_vlan(domain.sr_class_vid, domain.sr_class_priority);
+    for (auto const& spec : talker_specs_) {
+        (void)host_.components().acmp_talker.set_stream_vlan_id(spec.index, domain.sr_class_vid);
+    }
     (void)host_.components().aem_handler.notify_avb_info_changed(0);
     host_.ctl_log().status(
         "msrp: adopted the Class A domain from the wire: priority {} vlan {}", domain.sr_class_priority, domain.sr_class_vid);

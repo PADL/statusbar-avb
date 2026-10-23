@@ -190,6 +190,79 @@ TEST(nanoavb_srp_msrp, set_domain)
 }
 
 //
+// MSRP Domain (Milan v1.2 Section 4.2.7.2.1)
+//
+namespace {
+
+/// A bare MSRP participant standing in for the bridge port, wired to an
+/// MsrpHandler (the end station) through two packet queues.
+struct DomainBench
+{
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> station_out{};
+    std::vector<std::vector<uint8_t>> bridge_out{};
+    MsrpHandler<> station{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
+                              station_out.emplace_back(p.begin(), p.end());
+                              return true;
+                          }}};
+    statusbar::srp::msrp::MsrpParticipant bridge{statusbar::srp::msrp::MsrpConfig{}, 0x5eed};
+    std::vector<statusbar::srp::msrp::DomainFirstValue> seen_by_bridge{};
+
+    DomainBench()
+    {
+        bridge.set_send_pdu([this](std::span<uint8_t const> p) {
+            bridge_out.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        statusbar::srp::msrp::Observer obs{};
+        obs.on_domain_declared = [this](statusbar::srp::msrp::DomainFirstValue const& fv) { seen_by_bridge.push_back(fv); };
+        (void)bridge.subscribe(obs);
+        bridge.start(now);
+    }
+
+    void run(int rounds)
+    {
+        for (int i = 0; i < rounds; ++i) {
+            now += std::chrono::milliseconds{250};
+            station.tick(now);
+            bridge.tick(now);
+            for (auto const& p : station_out) {
+                bridge.receive_pdu(p, now);
+            }
+            station_out.clear();
+            for (auto const& p : bridge_out) {
+                station.receive_packet(p, now);
+            }
+            bridge_out.clear();
+        }
+    }
+
+    static auto domain(uint8_t id, uint8_t prio, uint16_t vid) -> statusbar::srp::msrp::DomainFirstValue
+    {
+        statusbar::srp::msrp::DomainFirstValue fv{};
+        fv.sr_class_id = id;
+        fv.sr_class_priority = prio;
+        fv.sr_class_vid = vid;
+        return fv;
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_srp_msrp, declares_class_a_domain_only)
+{
+    DomainBench b{};
+    (void)b.station.declare_domain(b.now);
+    b.run(4);
+    EXPECT_FALSE(b.seen_by_bridge.empty());
+    for (auto const& fv : b.seen_by_bridge) {
+        EXPECT_EQ(fv.sr_class_id.get(), 6);
+        EXPECT_EQ(fv.sr_class_priority.get(), 3);
+        EXPECT_EQ(fv.sr_class_vid.get(), 2);
+    }
+}
+
+//
 // MSRP Handler Talker Tests
 //
 TEST(nanoavb_srp_msrp, talker_advertise)

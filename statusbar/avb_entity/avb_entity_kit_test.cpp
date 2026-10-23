@@ -15,6 +15,7 @@
 #include "statusbar/test/test.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory_resource>
 #include <optional>
