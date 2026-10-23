@@ -57,6 +57,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <utility>
 
@@ -733,6 +734,13 @@ class DescriptorStorageHandler : public AemEntityHandler
             state != nullptr && state->has_format) {
             return state->format;
         }
+        return authored_stream_format(ref);
+    }
+
+    /// The stream's authored current_format: the blob's (a SET_STREAM_FORMAT
+    /// changes the runtime format only); nullopt if the blob has no such stream.
+    [[nodiscard]] auto authored_stream_format(DescriptorRef ref) const noexcept -> std::optional<ieee::Eui64>
+    {
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < STREAM_CURRENT_FORMAT_FIELD + 8) {
             return std::nullopt;
@@ -740,6 +748,31 @@ class DescriptorStorageHandler : public AemEntityHandler
         ieee::Eui64 authored{};
         span_load(authored, blob->subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
         return authored;
+    }
+
+    /// Whether @p format is one the stream's descriptor lists (its authored
+    /// current_format or its stream_formats), as SET_STREAM_FORMAT requires.
+    [[nodiscard]] auto stream_format_listed(DescriptorRef ref, ieee::Eui64 const& format) const noexcept -> bool
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        return blob.has_value() && blob->size() >= atdecc::aem::DescriptorStream::MINIMUM_LENGTH &&
+            stream_format_supported(*blob, format);
+    }
+
+    /// Set the stream's runtime current_format to @p format without the stream-format callback.
+    /// False when the descriptor does not list the format or the blob has no such stream.
+    [[nodiscard]] auto set_runtime_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
+    {
+        if (!stream_format_listed(ref, format)) {
+            return false;
+        }
+        auto* const state = find_or_init_stream_state(ref);
+        if (state == nullptr) {
+            return false;
+        }
+        state->format = format;
+        state->has_format = true;
+        return true;
     }
 
     /// Called when START/STOP_STREAMING flips a stream's streaming state —
@@ -1645,41 +1678,46 @@ class DescriptorStorageHandler : public AemEntityHandler
         return find_state(sampling_rate_states_, by_index(descriptor_index));
     }
 
-    /// Apply a SET_SAMPLING_RATE (Clause 7.4.21). @p value is the payload
-    /// after the 4-byte descriptor header: the requested 4-byte rate,
-    /// validated against the AUDIO_UNIT's authored sampling_rates.
+    /// Apply a SET_SAMPLING_RATE (Clause 7.4.21). @p value is the payload after the 4-byte
+    /// descriptor header; the state is written only once the application's hook has accepted the rate.
     [[nodiscard]] auto set_sampling_rate(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
     {
+        auto const requested = listed_sampling_rate(ref, value);
+        if (!requested) {
+            return requested.error();
+        }
+        if (find_sampling_rate_state(ref.descriptor_index) == nullptr && sampling_rate_states_.size() == MAX_AUDIO_UNIT_STATES) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;  // checked before the application re-clocks
+        }
+        if (auto const status = on_sampling_rate_changed_ ? on_sampling_rate_changed_(ref.descriptor_index, *requested)
+                                                          : atdecc::AEM_STATUS_SUCCESS;
+            status != atdecc::AEM_STATUS_SUCCESS) {
+            return status;
+        }
+        auto const fresh = SamplingRateState{.descriptor_index = ref.descriptor_index, .rate = *requested};
+        find_or_push_state(sampling_rate_states_, by_index(ref.descriptor_index), fresh)->rate = *requested;
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    /// The rate SET_SAMPLING_RATE's @p value asks for, if the AUDIO_UNIT @p ref lists it; else the
+    /// AEM status refusing it.
+    [[nodiscard]] auto listed_sampling_rate(DescriptorRef ref, std::span<uint8_t const> value) const
+        -> std::expected<uint32_t, uint8_t>
+    {
         if (value.size() < 4) {
-            return atdecc::AEM_STATUS_BAD_ARGUMENTS;
+            return std::unexpected(atdecc::AEM_STATUS_BAD_ARGUMENTS);
         }
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
         if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorAudioUnit::LENGTH) {
-            return atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR;
+            return std::unexpected(atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
         }
         ieee::quadlet_t requested{0};
         span_load(requested, value.first(4));
-
         ieee::quadlet_t authored{0};
         span_load(authored, blob->subspan(AUDIO_UNIT_CURRENT_RATE_FIELD, 4));
-        if (authored != requested &&
-            !blob_list_contains(*blob, AUDIO_UNIT_RATES_OFFSET_FIELD, AUDIO_UNIT_RATES_COUNT_FIELD, requested)) {
-            return atdecc::AEM_STATUS_NOT_SUPPORTED;
-        }
-
-        if (on_sampling_rate_changed_) {
-            if (auto const status = on_sampling_rate_changed_(ref.descriptor_index, requested.get());
-                status != atdecc::AEM_STATUS_SUCCESS) {
-                return status;
-            }
-        }
-        auto* const state = find_or_push_state(
-            sampling_rate_states_, by_index(ref.descriptor_index), SamplingRateState{.descriptor_index = ref.descriptor_index});
-        if (state == nullptr) {
-            return atdecc::AEM_STATUS_NO_RESOURCES;
-        }
-        state->rate = requested.get();
-        return atdecc::AEM_STATUS_SUCCESS;
+        bool const listed = authored == requested ||
+            blob_list_contains(*blob, AUDIO_UNIT_RATES_OFFSET_FIELD, AUDIO_UNIT_RATES_COUNT_FIELD, requested);
+        return listed ? std::expected<uint32_t, uint8_t>{requested.get()} : std::unexpected(atdecc::AEM_STATUS_NOT_SUPPORTED);
     }
 
     statusbar::sg14::inplace_vector<SamplingRateState, MAX_AUDIO_UNIT_STATES> sampling_rate_states_;
