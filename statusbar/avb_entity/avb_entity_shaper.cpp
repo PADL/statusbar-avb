@@ -66,6 +66,11 @@ auto make_queue_layout(std::string_view const driver, uint16_t const tx_queues, 
     if (a >= tx_queues || b >= tx_queues || a == b) {
         return failure(ShaperError::bad_queue_override);
     }
+    // On igb/igc queue 0 outranks queue 1, and igc takes queue 1's cbs only
+    // after queue 0's: class A on 1 with class B on 0 cannot be shaped.
+    if (intel && a == 1 && b == 0) {
+        return failure(ShaperError::bad_queue_override);
+    }
     // The legacy TC takes every other queue, as one count@offset range.
     uint16_t low = 0;
     while (low == a || low == b) {
@@ -200,15 +205,205 @@ auto class_b_cbs(
     };
 }
 
+auto placeholder_cbs(uint32_t const link_kbps, uint32_t const max_interfering_frame, int64_t const idleslope_kbps) noexcept
+    -> CbsParameters
+{
+    if (link_kbps == 0) {
+        return {};
+    }
+    int64_t const link = link_kbps;
+    int64_t const idleslope = std::max<int64_t>({idleslope_kbps, link / 100, 1});
+    int64_t const sendslope = idleslope - link;
+    uint32_t const frame = wire_frame_size(static_cast<uint16_t>(std::min<uint32_t>(max_interfering_frame, UINT16_MAX)));
+    return CbsParameters{
+        .idleslope_kbps = clamp32(idleslope),
+        .sendslope_kbps = clamp32(sendslope),
+        .hicredit = clamp32(ceil_div(idleslope * max_interfering_frame, link)),  // L-10
+        .locredit = clamp32(ceil_div(sendslope * frame, link)),                  // L-12
+        .max_frame_size = frame,
+        .placeholder = true,
+    };
+}
+
+auto cbs_targets(
+    std::span<TSpec const> const class_a_streams,
+    std::span<TSpec const> const class_b_streams,
+    uint32_t const link_kbps,
+    uint32_t const max_interfering_frame) noexcept -> CbsTargets
+{
+    auto const a = class_a_cbs(class_a_streams, link_kbps, max_interfering_frame);
+    auto const b = class_b_cbs(class_b_streams, a, link_kbps, max_interfering_frame);
+    int64_t const budget = (int64_t{link_kbps} * SR_BANDWIDTH_PERCENT / 100) - a.idleslope_kbps - b.idleslope_kbps;
+    int64_t const share = a.empty() && b.empty() ? budget / 2 : budget;
+    return CbsTargets{
+        .class_a = a.empty() ? placeholder_cbs(link_kbps, max_interfering_frame, share) : a,
+        .class_b = b.empty() ? placeholder_cbs(link_kbps, max_interfering_frame, share) : b,
+    };
+}
+
+#if defined(__linux__)
+
+// ---------------------------------------------------------------------------
+// ShaperQdiscs
+// ---------------------------------------------------------------------------
+
+ShaperQdiscs::ShaperQdiscs(net::tc::TcControl& tc, logging::Logger const log) noexcept
+    : tc_{tc}
+    , log_{log}
+{}
+
+auto ShaperQdiscs::parent_of(uint16_t const queue) const noexcept -> uint32_t
+{
+    return net::tc::make_handle(major_, static_cast<uint16_t>(queue + 1));
+}
+
+auto ShaperQdiscs::install(
+    int const ifindex, std::string_view const name, net::tc::MqprioQdisc const& mqprio, QueueLayout const& layout) -> Status
+{
+    if (installed_) {
+        return success();
+    }
+    uint32_t const root = net::tc::make_handle(mqprio.major, 0);
+    // A root that already is ours, as we would lay it, stays: replacing it would destroy its cbs
+    // children and reset igb/igc. The first program() changes its cbs in place.
+    bool reuse = false;
+    if (auto const current = tc_.get(ifindex, net::tc::ROOT)) {
+        reuse = current->handle == root && current->mqprio.has_value() && *current->mqprio == mqprio;
+    }
+    if (!reuse) {
+        auto replaced = tc_.replace_mqprio(ifindex, mqprio);
+        if (!replaced && replaced.error() == std::errc::invalid_argument) {
+            // EINVAL: the root already holds an mqprio with our handle, which mqprio refuses to
+            // change. Delete it and retry once; a refused layout leaves our handle uninstalled.
+            if (tc_.remove(ifindex, root, net::tc::ROOT)) {
+                log_.status("shaper: replaced an existing mqprio root {:x}: on {}", mqprio.major, logging::embed<16>(name));
+            }
+            replaced = tc_.replace_mqprio(ifindex, mqprio);
+        }
+        if (!replaced) {
+            return replaced;
+        }
+    } else {
+        log_.status("shaper: kept the mqprio root {:x}: already on {}", mqprio.major, logging::embed<16>(name));
+    }
+    ifindex_ = ifindex;
+    major_ = mqprio.major;
+    layout_ = layout;
+    installed_ = true;
+    reused_ = reuse;
+    cbs_unsupported_ = false;
+    class_a_ = {};
+    class_b_ = {};
+    return success();
+}
+
+auto ShaperQdiscs::program(CbsTargets const& targets, uint32_t const link_mbps) -> Status
+{
+    if (!installed_ || cbs_unsupported_) {
+        return success();
+    }
+    link_mbps_ = link_mbps;
+    auto status_a = program_one(layout_.class_a_queue, targets.class_a, class_a_, logging::lit("A"));
+    if (cbs_unsupported_) {
+        return status_a;
+    }
+    auto status_b = program_one(layout_.class_b_queue, targets.class_b, class_b_, logging::lit("B"));
+    return !status_a ? status_a : status_b;
+}
+
+auto ShaperQdiscs::program_one(
+    uint16_t const queue, CbsParameters const& params, CbsParameters& current, logging::StrLit const label) -> Status
+{
+    if (params == current || params.empty()) {
+        return success();
+    }
+    // Always a replace: a change in place on a cbs, a graft on the default qdisc (which resets
+    // igb/igc only when it is the first cbs). See docs/SHAPER.md.
+    auto status = tc_.replace_cbs(
+        ifindex_,
+        net::tc::CbsQdisc{
+            .parent = parent_of(queue),
+            .offload = true,
+            .hicredit = params.hicredit,
+            .locredit = params.locredit,
+            .idleslope_kbps = params.idleslope_kbps,
+            .sendslope_kbps = params.sendslope_kbps,
+        });
+    if (!status) {
+        if (status.error() == std::errc::operation_not_supported) {
+            // No cbs offload (not an i210/i225, a switch port without it):
+            // a software cbs would never see the bypass frames, so stop asking.
+            cbs_unsupported_ = true;
+            log_.warning(
+                "shaper: no cbs offload on queue {} ({}): talker streams run unshaped on the class queues",
+                queue,
+                logging::embed<32>(tc_.last_message()));
+            return status;
+        }
+        log_.warning(
+            "shaper: class {} cbs on queue {} ({:x}:{:x}) failed: errno {} {}",
+            label,
+            queue,
+            major_,
+            queue + 1,
+            status.error().value(),
+            logging::embed<32>(tc_.last_message()));
+        return status;
+    }
+    current = params;
+    log_.status(
+        "shaper: class {} cbs on queue {}{}: idleslope {} sendslope {} hicredit {} locredit {} ({} Mbit/s)",
+        label,
+        queue,
+        params.placeholder ? logging::lit(" (placeholder: none admitted)") : logging::lit(""),
+        params.idleslope_kbps,
+        params.sendslope_kbps,
+        params.hicredit,
+        params.locredit,
+        link_mbps_);
+    return success();
+}
+
+auto ShaperQdiscs::uninstall() -> Status
+{
+    if (!installed_) {
+        return success();
+    }
+    installed_ = false;
+    // Class B's queue first (igc refuses to drop class A's cbs while B's is on), both queues
+    // whatever was recorded, grafting the default qdisc (deleting an mqprio child leaves
+    // noop_qdisc). See docs/SHAPER.md.
+    for (uint16_t const queue : {layout_.class_b_queue, layout_.class_a_queue}) {
+        if (auto status = tc_.replace_kind(ifindex_, parent_of(queue), "pfifo_fast"); !status) {
+            log_.warning("shaper: removing the cbs on queue {} failed: errno {}", queue, status.error().value());
+        }
+    }
+    class_a_ = {};
+    class_b_ = {};
+    auto status = tc_.remove(ifindex_, net::tc::make_handle(major_, 0), net::tc::ROOT);
+    if (!status) {
+        log_.warning("shaper: removing mqprio {:x} failed: errno {}", major_, status.error().value());
+        return status;
+    }
+    log_.status("shaper: mqprio {:x} removed", major_);
+    return success();
+}
+
+void ShaperQdiscs::release() noexcept
+{
+    installed_ = false;
+    class_a_ = {};
+    class_b_ = {};
+}
+
 // ---------------------------------------------------------------------------
 // EntityShaper
 // ---------------------------------------------------------------------------
 
-#if defined(__linux__)
-
 EntityShaper::EntityShaper(ShaperConfig config, AvbEntityKit& kit)
     : config_{std::move(config)}
     , kit_{kit}
+    , qdiscs_{client_, kit.host().ctl_log()}
 {}
 
 EntityShaper::~EntityShaper()
@@ -227,14 +422,28 @@ void EntityShaper::unhook() noexcept
 void EntityShaper::shutdown()
 {
     unhook();
+    if (!qdiscs_.installed()) {
+        return;
+    }
+    dirty_ = false;
     if (config_.restore_qdisc) {
         (void)uninstall();  // logged
+        return;
     }
+    // Leave the root and both cbs for the next install(), parked at the
+    // placeholders: no stream is ours any more, and taking the last cbs away
+    // would reset an igb/igc adapter now and again at the next start.
+    (void)qdiscs_.program(targets(false), link_mbps());  // logged
+    qdiscs_.release();
+    kit_.host().ctl_log().status(
+        "shaper: left mqprio {:x}: and its cbs on {} for the next start",
+        config_.qdisc_major,
+        logging::embed<16>(config_.interface_name));
 }
 
 auto EntityShaper::install() -> Status
 {
-    if (installed_) {
+    if (qdiscs_.installed()) {
         return success();
     }
     auto log = kit_.host().ctl_log();
@@ -267,25 +476,11 @@ auto EntityShaper::install() -> Status
     if (auto status = client_.open(); !status) {
         return status;
     }
-    ifindex_ = *ifindex;
+    if (auto status = qdiscs_.install(*ifindex, name, *mqprio, *layout); !status) {
+        return status;
+    }
     driver_ = std::move(*driver);
     layout_ = *layout;
-
-    uint32_t const root = net::tc::make_handle(config_.qdisc_major, 0);
-    auto replaced = client_.replace_mqprio(ifindex_, *mqprio);
-    if (!replaced && replaced.error() == std::errc::invalid_argument) {
-        // EINVAL: the root already holds an mqprio with our handle (ours from a run that did not
-        // uninstall, or a foreign one we take over), which mqprio will not change. Delete it and try
-        // once more; a refused layout fails again and leaves our handle uninstalled.
-        if (client_.remove(ifindex_, root, net::tc::ROOT)) {
-            log.status("shaper: replaced an existing mqprio root {:x}: on {}", config_.qdisc_major, logging::embed<16>(name));
-        }
-        replaced = client_.replace_mqprio(ifindex_, *mqprio);
-    }
-    if (!replaced) {
-        return replaced;
-    }
-    installed_ = true;
     log.status(
         "shaper: mqprio {:x}: on {} ({}, {} TX queues): class A queue {}, class B queue {}, legacy {}@{}",
         config_.qdisc_major,
@@ -320,11 +515,12 @@ void EntityShaper::on_admission_changed(std::span<uint16_t const> const admitted
         (void)admitted_.try_push_back(index);
     }
     dirty_ = true;
+    retry_at_ns_ = 0;  // a new admitted set goes out at once
 }
 
 void EntityShaper::tick(int64_t const now_ns)
 {
-    if (!installed_) {
+    if (!qdiscs_.installed()) {
         return;
     }
     if (now_ns >= next_link_check_ns_) {
@@ -333,8 +529,15 @@ void EntityShaper::tick(int64_t const now_ns)
             dirty_ = true;
         }
     }
-    if (dirty_) {
-        (void)reprogram();
+    if (dirty_ && now_ns >= retry_at_ns_) {
+        if (reprogram()) {
+            retry_backoff_ns_ = RETRY_MIN_NS;
+        } else if (dirty_) {
+            // A failed cbs request stays due: retry, backing off to
+            // RETRY_MAX_NS (each attempt is logged).
+            retry_at_ns_ = now_ns + retry_backoff_ns_;
+            retry_backoff_ns_ = std::min(retry_backoff_ns_ * 2, RETRY_MAX_NS);
+        }
     }
 }
 
@@ -358,105 +561,44 @@ auto EntityShaper::refresh_link_speed() -> bool
     return link_mbps() != programmed_link_mbps_;
 }
 
-auto EntityShaper::reprogram() -> Status
+auto EntityShaper::targets(bool const admitted) -> CbsTargets
 {
-    if (!installed_) {
-        return success();
-    }
-    dirty_ = false;
     // Every talker stream of the kit is class A: it declares only the class A
-    // SR domain (MSRP sr_class_id 6). Class B stays empty until it talks class
-    // B, and is laid out (queue, TC) regardless.
+    // SR domain (MSRP sr_class_id 6). Class B stays empty (its placeholder)
+    // until it talks class B, and is laid out (queue, TC) regardless.
     sg14::inplace_vector<TSpec, MAX_ENTITY_STREAMS> class_a_streams{};
-    for (uint16_t const index : admitted_) {
-        for (auto const& spec : kit_.talker_specs()) {
-            if (spec.index == index) {
-                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
+    if (admitted) {
+        for (uint16_t const index : admitted_) {
+            for (auto const& spec : kit_.talker_specs()) {
+                if (spec.index == index) {
+                    (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
+                }
             }
         }
     }
     uint32_t const mbps = link_mbps();
     programmed_link_mbps_ = mbps;
-    uint32_t const link = mbps * 1000U;
-    auto const a = class_a_cbs(class_a_streams, link, mtu_);
-    auto const b = class_b_cbs({}, a, link, mtu_);
-    auto status_a = program(layout_.class_a_queue, a, class_a_, logging::lit("A"));
-    auto status_b = program(layout_.class_b_queue, b, class_b_, logging::lit("B"));
-    return !status_a ? status_a : status_b;
+    return cbs_targets(class_a_streams, {}, mbps * 1000U, mtu_);
 }
 
-auto EntityShaper::program(uint16_t const queue, CbsParameters const& params, CbsParameters& current, logging::StrLit const label)
-    -> Status
+auto EntityShaper::reprogram() -> Status
 {
-    if (params == current) {
+    if (!qdiscs_.installed()) {
         return success();
     }
-    auto log = kit_.host().ctl_log();
-    uint32_t const parent = net::tc::make_handle(config_.qdisc_major, static_cast<uint16_t>(queue + 1));
-    Status status = success();
-    if (params.empty()) {
-        // Removing the cbs: graft the default qdisc back rather than delete
-        // (deleting an mqprio child leaves noop_qdisc on the queue). Either
-        // way the cbs is destroyed and the NIC's shaper on the queue disabled.
-        status = client_.replace_kind(ifindex_, parent, "pfifo_fast");
-    } else {
-        status = client_.replace_cbs(
-            ifindex_,
-            net::tc::CbsQdisc{
-                .parent = parent,
-                .offload = true,
-                .hicredit = params.hicredit,
-                .locredit = params.locredit,
-                .idleslope_kbps = params.idleslope_kbps,
-                .sendslope_kbps = params.sendslope_kbps,
-            });
+    dirty_ = false;
+    auto status = qdiscs_.program(targets(true), link_mbps());
+    if (!status && !qdiscs_.cbs_unsupported()) {
+        dirty_ = true;  // tick() retries
     }
-    if (!status) {
-        log.warning(
-            "shaper: class {} cbs on queue {} ({:x}:{:x}) failed: errno {} {}",
-            label,
-            queue,
-            config_.qdisc_major,
-            queue + 1,
-            status.error().value(),
-            logging::embed<32>(client_.last_message()));
-        return status;
-    }
-    current = params;
-    if (params.empty()) {
-        log.status("shaper: class {} cbs removed from queue {}: no admitted stream", label, queue);
-    } else {
-        log.status(
-            "shaper: class {} cbs on queue {}: idleslope {} sendslope {} hicredit {} locredit {} ({} Mbit/s)",
-            label,
-            queue,
-            params.idleslope_kbps,
-            params.sendslope_kbps,
-            params.hicredit,
-            params.locredit,
-            programmed_link_mbps_);
-    }
-    return success();
+    return status;
 }
 
 auto EntityShaper::uninstall() -> Status
 {
     unhook();
-    if (!installed_) {
-        return success();
-    }
-    installed_ = false;
     dirty_ = false;
-    class_a_ = {};
-    class_b_ = {};
-    auto log = kit_.host().ctl_log();
-    auto status = client_.remove(ifindex_, net::tc::make_handle(config_.qdisc_major, 0), net::tc::ROOT);
-    if (!status) {
-        log.warning("shaper: removing mqprio {:x} failed: errno {}", config_.qdisc_major, status.error().value());
-        return status;
-    }
-    log.status("shaper: mqprio {:x} removed", config_.qdisc_major);
-    return success();
+    return qdiscs_.uninstall();
 }
 
 #endif  // __linux__

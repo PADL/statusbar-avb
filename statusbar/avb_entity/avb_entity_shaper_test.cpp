@@ -1,18 +1,25 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// The shaper's pure parts (queue layout, mqprio, IEEE 802.1Q Annex L cbs parameters), with the
-// arithmetic worked by hand; EntityShaper needs rtnetlink and is not run here.
+// The shaper's pure parts (queue layout, mqprio, IEEE 802.1Q Annex L cbs parameters, placeholders)
+// and ShaperQdiscs against a recording TcControl; EntityShaper needs rtnetlink and is not run here.
+// The arithmetic is worked in docs/SHAPER.md ("Worked examples").
 
 #include "statusbar/avb_entity/avb_entity_shaper.hpp"
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
 #include <cstdint>
+#include <format>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 using namespace statusbar;
@@ -103,6 +110,7 @@ TEST(shaper_layout, refuses_what_cannot_work)
     EXPECT_TRUE(bad({.class_a = 2, .class_b = 2}));   // shared
     EXPECT_TRUE(bad({.class_a = 1, .class_b = 2}));   // legacy {0, 3}
     EXPECT_TRUE(bad({.class_a = 3}));                 // legacy {0, 2}
+    EXPECT_TRUE(bad({.class_a = 1, .class_b = 0}));   // igb: class A under class B
     EXPECT_FALSE(bad({.class_a = 0, .class_b = 3}));  // legacy {1, 2}
 }
 
@@ -310,6 +318,316 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
     wide.push_back(AvbEntityKit::talker_tspec(crf_one_timestamp()));
     EXPECT_EQ(class_a_cbs(wide, 1'000'000, 1500).idleslope_kbps, int32_t{860672});
 }
+
+// The placeholder at half the 75% SR budget, 1 Gbit/s, MTU 1500 (wire frame 1542): idleSlope
+// 375000, sendSlope -625000, hiCredit 563 (L-10), loCredit -963 (L-12).
+TEST(shaper_cbs, placeholders)
+{
+    auto const idle = placeholder_cbs(1'000'000, 1500, 375'000);
+    EXPECT_EQ(idle.idleslope_kbps, int32_t{375'000});
+    EXPECT_EQ(idle.sendslope_kbps, int32_t{-625'000});
+    EXPECT_EQ(idle.hicredit, int32_t{563});
+    EXPECT_EQ(idle.locredit, int32_t{-963});
+    EXPECT_EQ(idle.max_frame_size, uint32_t{1542});
+    EXPECT_TRUE(idle.placeholder && !idle.empty());
+    // Never under 1% of the link.
+    EXPECT_EQ(placeholder_cbs(1'000'000, 1500, 85'936).idleslope_kbps, int32_t{85'936});
+    EXPECT_EQ(placeholder_cbs(1'000'000, 1500, -110'672).idleslope_kbps, int32_t{10'000});
+    EXPECT_TRUE(placeholder_cbs(0, 1500, 0).empty());
+
+    // cbs_targets: nothing admitted, both classes hold half the budget, so
+    // together they claim 75% of the link and legacy keeps the rest.
+    auto const none = cbs_targets({}, {}, 1'000'000, 1500);
+    EXPECT_TRUE(none.class_a == idle && none.class_b == idle);
+    EXPECT_EQ(none.class_a.idleslope_kbps + none.class_b.idleslope_kbps, int32_t{750'000});
+    // The same at 100 Mbit/s: 37500 each, hiCredit 563, loCredit -963.
+    auto const slow = cbs_targets({}, {}, 100'000, 1500);
+    EXPECT_EQ(slow.class_a.idleslope_kbps, int32_t{37'500});
+    EXPECT_EQ(slow.class_a.hicredit, int32_t{563});
+    EXPECT_EQ(slow.class_a.locredit, int32_t{-963});
+    // The AAF and the CRF admitted (19136 kbit/s): class B's placeholder takes the rest of the
+    // budget: idleSlope 730864, sendSlope -269136, hiCredit 1097, loCredit -415.
+    std::array<TSpec, 2> const streams{
+        AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    auto const some = cbs_targets(streams, {}, 1'000'000, 1500);
+    EXPECT_TRUE(some.class_a == class_a_cbs(streams, 1'000'000, 1500));
+    EXPECT_FALSE(some.class_a.placeholder);
+    EXPECT_TRUE(some.class_b.placeholder);
+    EXPECT_EQ(some.class_b.idleslope_kbps, int32_t{730'864});
+    EXPECT_EQ(some.class_b.sendslope_kbps, int32_t{-269'136});
+    EXPECT_EQ(some.class_b.hicredit, int32_t{1097});
+    EXPECT_EQ(some.class_b.locredit, int32_t{-415});
+    EXPECT_EQ(some.class_a.idleslope_kbps + some.class_b.idleslope_kbps, int32_t{750'000});
+    // At the kit's INT_32 bound class A alone exceeds the budget: class B's
+    // placeholder falls to its 1% floor.
+    auto aaf = aaf_8ch_48k_int24();
+    aaf.format.channels = 32;
+    aaf.format.aaf_format = avtp::AafFormat::int_32bit;
+    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
+    EXPECT_EQ(cbs_targets(wide, {}, 1'000'000, 1500).class_b.idleslope_kbps, int32_t{10'000});
+}
+
+#if defined(__linux__)
+namespace {
+
+/// A TcControl that records each request as `tc` would spell it and answers
+/// from a canned root and canned errors.
+class RecordingTc final : public net::tc::TcControl
+{
+  public:
+    std::vector<std::string> requests{};
+    std::optional<net::tc::QdiscInfo> root{};  ///< get(ROOT)'s answer (none: ENOENT)
+    std::error_code mqprio_error{};            ///< replace_mqprio's first answer
+    std::error_code cbs_error{};               ///< every replace_cbs's answer
+
+    auto replace_mqprio(int /*ifindex*/, net::tc::MqprioQdisc const& q) -> Status override
+    {
+        requests.push_back(std::format("replace root mqprio {:x}:", q.major));
+        if (mqprio_error) {
+            return failure(std::exchange(mqprio_error, {}));
+        }
+        return success();
+    }
+    auto replace_cbs(int /*ifindex*/, net::tc::CbsQdisc const& q) -> Status override
+    {
+        requests.push_back(
+            std::format("replace {:x}:{:x} cbs idleslope {}", q.parent >> 16U, q.parent & 0xFFFFU, q.idleslope_kbps));
+        if (cbs_error) {
+            return failure(cbs_error);
+        }
+        return success();
+    }
+    auto replace_kind(int /*ifindex*/, uint32_t const parent, std::string_view const kind) -> Status override
+    {
+        requests.push_back(std::format("replace {:x}:{:x} {}", parent >> 16U, parent & 0xFFFFU, kind));
+        return success();
+    }
+    auto remove(int /*ifindex*/, uint32_t const handle, uint32_t /*parent*/) -> Status override
+    {
+        requests.push_back(std::format("del root {:x}:", handle >> 16U));
+        return success();
+    }
+    auto get(int /*ifindex*/, uint32_t const parent) -> StatusValue<net::tc::QdiscInfo> override
+    {
+        requests.push_back(parent == net::tc::ROOT ? std::string{"show root"} : std::format("show {:x}", parent));
+        if (parent == net::tc::ROOT && root) {
+            return *root;
+        }
+        return failure(std::make_error_code(std::errc::no_such_file_or_directory));
+    }
+    [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
+
+    /// The requests since the last take, cleared.
+    auto take() -> std::vector<std::string> { return std::exchange(requests, {}); }
+
+  private:
+    std::string message_{};
+};
+
+auto igb_layout() -> QueueLayout
+{
+    return *make_queue_layout("igb", 4);
+}
+
+auto igb_mqprio() -> net::tc::MqprioQdisc
+{
+    return *mqprio_for(igb_layout(), 0x9000);
+}
+
+/// The admitted AAF + CRF (class A 19136 kbit/s) and nothing, at 1 Gbit/s.
+auto admitted_targets() -> CbsTargets
+{
+    std::array<TSpec, 2> const streams{
+        AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    return cbs_targets(streams, {}, 1'000'000, 1500);
+}
+
+auto idle_targets() -> CbsTargets
+{
+    return cbs_targets({}, {}, 1'000'000, 1500);
+}
+
+using Requests = std::vector<std::string>;
+
+}  // namespace
+
+// A fresh start (the default mq root): mqprio, then a cbs on both class
+// queues at once, class A's (9000:1, queue 0) first. On igb the first cbs
+// switches FQTSS on (one reset); the second finds it on.
+TEST(shaper_qdiscs, a_fresh_start_installs_both_cbs)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.installed() && !qdiscs.reused());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+        }));
+    EXPECT_TRUE(qdiscs.class_a().placeholder && qdiscs.class_b().placeholder);
+    // Nothing changed: nothing sent.
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take().empty());
+}
+
+// Admission and withdrawal only ever change cbs parameters in place: no
+// pfifo_fast graft, no delete, so the last cbs never goes while running.
+TEST(shaper_qdiscs, admission_and_withdrawal_only_replace_cbs)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    (void)tc.take();
+
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "replace 9000:1 cbs idleslope 19136",
+            "replace 9000:2 cbs idleslope 730864",
+        }));
+    EXPECT_FALSE(qdiscs.class_a().placeholder);
+
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+        }));
+    EXPECT_TRUE(qdiscs.class_a().placeholder && qdiscs.class_b().placeholder);
+}
+
+// A restart onto the root a previous run left (restore_qdisc = false, or a
+// crash): kept as it is, no mqprio replace or delete (which would destroy its
+// cbs and reset an igb twice); its cbs are changed in place.
+TEST(shaper_qdiscs, a_restart_keeps_an_identical_mqprio)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.reused());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+        }));
+}
+
+// Our handle with another layout (a changed queue override) cannot be changed
+// in place: mqprio answers EINVAL, the root is deleted and laid down again.
+TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    auto other = igb_mqprio();
+    other.prio_tc_map[5] = CLASS_A_TC;
+    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = other};
+    tc.mqprio_error = std::make_error_code(std::errc::invalid_argument);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_FALSE(qdiscs.reused());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "del root 9000:",
+            "replace root mqprio 9000:",
+        }));
+    // And a foreign root of another handle is simply replaced.
+    RecordingTc foreign{};
+    foreign.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    ShaperQdiscs taken{foreign, channel.logger()};
+    EXPECT_TRUE(taken.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(foreign.take() == Requests({"show root", "replace root mqprio 9000:"}));
+}
+
+// A driver without cbs offload (EOPNOTSUPP): logged once, then no further
+// cbs request; the mqprio steering stays, and uninstall has no cbs to take.
+TEST(shaper_qdiscs, no_cbs_offload_stops_asking)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.cbs_error = std::make_error_code(std::errc::operation_not_supported);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.cbs_unsupported());
+    EXPECT_TRUE(tc.take() == Requests({"show root", "replace root mqprio 9000:", "replace 9000:1 cbs idleslope 375000"}));
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take().empty());
+    EXPECT_TRUE(qdiscs.uninstall().has_value());
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+}
+
+// A failed cbs request (here EBUSY) is not recorded as programmed: the next
+// program() with the same targets sends it again (EntityShaper keeps itself
+// dirty and retries from tick()).
+TEST(shaper_qdiscs, a_failed_cbs_is_sent_again)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    tc.cbs_error = std::make_error_code(std::errc::device_or_resource_busy);
+    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_FALSE(qdiscs.cbs_unsupported());
+    EXPECT_TRUE(qdiscs.class_a().empty() && qdiscs.class_b().empty());
+    (void)tc.take();
+    tc.cbs_error = {};
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+}
+
+// Uninstall takes class B's cbs first, then class A's (igc's order), then the
+// root, whatever was recorded (a kept root may hold a cbs this run never
+// programmed); release leaves everything for the next start.
+TEST(shaper_qdiscs, uninstall_and_release)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    (void)tc.take();
+    EXPECT_TRUE(qdiscs.uninstall().has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "replace 9000:2 pfifo_fast",
+            "replace 9000:1 pfifo_fast",
+            "del root 9000:",
+        }));
+    EXPECT_FALSE(qdiscs.installed());
+    EXPECT_TRUE(qdiscs.uninstall().has_value());
+    EXPECT_TRUE(tc.take().empty());
+
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // what shutdown parks
+    (void)tc.take();
+    qdiscs.release();
+    EXPECT_FALSE(qdiscs.installed());
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.uninstall().has_value());
+    EXPECT_TRUE(tc.take().empty());
+}
+#endif
 
 TEST(shaper_errors, messages)
 {
