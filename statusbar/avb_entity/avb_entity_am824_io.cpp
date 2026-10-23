@@ -143,13 +143,15 @@ AvbEntityAm824IO::AvbEntityAm824IO(
     // the hardwired multicast destination MAC from config.
     ieee::Eui64 stream_id{};
     span_copy(stream_id.span().first(6), config_.entity_id.span().first(6));
-    (void)host_.components().acmp_talker.configure_stream(0, stream_id, config_.talker_dest_mac);
+    (void)host_.components().acmp_talker.configure_stream(0, stream_id, config_.talker_dest_mac, config_.vlan_id);
 
     // The MSRP SR-class domain; the VID itself is registered at start().
     host_.components().msrp_handler.set_domain(DomainInfo{
         .sr_class_id = 6,        // SR Class A
         .sr_class_priority = 3,  // Priority 3
         .sr_class_vid = config_.vlan_id});
+    // Tag stream frames with the Class A VID in use (adopted MSRP Domain).
+    host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint) { talker_.set_vlan_id(vlan_id); });
 }
 
 AvbEntityAm824IO::~AvbEntityAm824IO()
