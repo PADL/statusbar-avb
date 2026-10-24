@@ -395,7 +395,7 @@ class AvbEntityAm824IO
     /// STREAM_INPUT health counters, and the borrowed RX socket. Counting-only here
     /// (sink=nullptr) -- this entity's process_audio generates its own tone independent
     /// of RX. Declared after config_ + host_ (components) + last_gptp_ns_.
-    ListenerStreams listener_{config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, nullptr};
+    ListenerStreams listener_{config_.lock_tolerance_ns, host_.components(), last_gptp_ns_, nullptr};
 
     /// The port every stream frame goes through (backend config_.net_backend).
     /// Declared after listener_ only for layout; it is opened in start() before
