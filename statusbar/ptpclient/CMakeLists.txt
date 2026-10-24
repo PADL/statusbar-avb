@@ -40,3 +40,5 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                       ptpclient_wake_example)
 endif()
+
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/ptpclient_management_fuzzer.cpp)
