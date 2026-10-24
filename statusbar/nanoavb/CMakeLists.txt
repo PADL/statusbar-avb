@@ -58,6 +58,8 @@ statusbar_add_module(
   nanoavb_entity_test.cpp
   nanoavb_gptp_sm_test.cpp
   nanoavb_msrp_sm_test.cpp
+  nanoavb_mvu_handler_test.cpp
+  nanoavb_audio_map_test.cpp
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
   nanoavb_controller_test.cpp

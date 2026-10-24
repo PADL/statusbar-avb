@@ -62,6 +62,16 @@ auto sample_state() -> PersistentState
     state.listener_bindings.push_back({.stream_input = 1, .talker_entity_id = 0x01, .talker_unique_id = 0});
     state.system_unique_id = 0xDEADBEEF;
     state.media_clock_references.push_back({.clock_domain = 0, .user_priority = 200, .domain_name = "Stage"});
+    // A port's dynamic mappings (one swapped, one fanned out), and a
+    // port with every mapping removed.
+    state.audio_maps.push_back(
+        {.descriptor_type = 14,
+         .descriptor_index = 0,
+         .mappings = {
+             {.stream_index = 0, .stream_channel = 1, .cluster_offset = 0, .cluster_channel = 0},
+             {.stream_index = 0, .stream_channel = 0, .cluster_offset = 1, .cluster_channel = 0},
+             {.stream_index = 0, .stream_channel = 0, .cluster_offset = 2, .cluster_channel = 0}}});
+    state.audio_maps.push_back({.descriptor_type = 14, .descriptor_index = 1, .mappings = {}});
     return state;
 }
 
@@ -108,6 +118,13 @@ TEST(avb_persistent_state, malformed_rejected)
                              std::string(65, 'n') + "\"\n"));
     EXPECT_TRUE(is_malformed(head + "[[media_clock_reference]]\nclock_domain = 0\nuser_priority = 256\ndomain_name = \"\"\n"));
     EXPECT_TRUE(is_malformed(head + "name = 3\n"));
+    EXPECT_TRUE(is_malformed(head + "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
+                                    "started = 1\n"));
+    EXPECT_TRUE(is_malformed(head + "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
+                                    "controller_entity_id = 3\n"));
+    EXPECT_TRUE(is_malformed(head + "[[audio_map]]\ndescriptor_type = 14\ndescriptor_index = 0\nmappings = [[0, 1, 0]]\n"));
+    EXPECT_TRUE(is_malformed(head + "[[audio_map]]\ndescriptor_type = 14\ndescriptor_index = 0\nmappings = [[0, 1, 0, -1]]\n"));
+    EXPECT_TRUE(is_malformed(head + "[[audio_map]]\ndescriptor_type = 14\ndescriptor_index = 0\n"));
     EXPECT_TRUE(is_malformed("version = = 1\n"));
     EXPECT_TRUE(is_malformed(""));
 
