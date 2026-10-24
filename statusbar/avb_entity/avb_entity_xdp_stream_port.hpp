@@ -168,6 +168,9 @@ class XdpStreamPort final : public StreamPort
     /// The mode the program runs in, and whether open() adopted a pinned one.
     [[nodiscard]] auto attach_mode() const noexcept -> net::XdpAttachMode { return context_.attach_mode(); }
     [[nodiscard]] auto adopted() const noexcept -> bool { return context_.adopted(); }
+    /// Whether the program is pinned (by open() or adopted from the pins); false
+    /// while closed, without a pin path, or when pinning failed (no bpffs).
+    [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
     /// The bind mode open() asked for.
     [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode { return context_.bind_mode(); }
     /// The socket's counters. On the thread that drains the port only.

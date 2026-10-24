@@ -22,8 +22,10 @@
 
 #    include <linux/if_ether.h>
 #    include <linux/if_packet.h>
+#    include <linux/magic.h>
 #    include <net/if.h>
 #    include <sys/socket.h>
+#    include <sys/vfs.h>
 #endif
 
 #include <algorithm>
@@ -206,6 +208,7 @@ TEST(avb_entity_xdp_stream_port, open_fails_cleanly)
     EXPECT_EQ(port.rx_fd(), -1);
     EXPECT_FALSE(port.zero_copy());
     EXPECT_TRUE(port.hardware_address() == ieee::Eui48{});
+    EXPECT_FALSE(port.pinned());
     port.begin_cycle();
     EXPECT_EQ(port.tx_pool_size(), size_t{0});
     EXPECT_EQ(port.rx_poll([](std::span<uint8_t const>, std::span<uint8_t const>) {}, 8), size_t{0});
@@ -320,6 +323,7 @@ TEST(avb_entity_xdp_stream_port, receives_avtp_from_a_veth_peer_when_privileged)
         return;
     }
     EXPECT_FALSE(port.zero_copy());
+    EXPECT_FALSE(port.pinned());
 
     ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x01};
     EXPECT_TRUE(port.join_multicast(group).has_value());
@@ -389,6 +393,35 @@ TEST(avb_entity_xdp_stream_port, receives_avtp_from_a_veth_peer_when_privileged)
     EXPECT_TRUE(port.leave_multicast(group).has_value());
     EXPECT_FALSE(in_dev_mcast(VETH_RX, group));
     port.close();
+}
+
+// A generic program this port attached is detached at close, its pins with it.
+TEST(avb_entity_xdp_stream_port, a_pin_path_pins_the_program_until_close_when_privileged)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: not root");
+        return;
+    }
+    Veth const veth;
+    if (!veth.ok) {
+        std::println("  skipped: cannot create the veth pair");
+        return;
+    }
+    struct statfs fs{};
+    bool const bpffs = ::statfs("/sys/fs/bpf", &fs) == 0 && fs.f_type == BPF_FS_MAGIC;
+    XdpStreamPort port;
+    auto const options = xdp_stream_port_options(StreamXdpMode::copy, VETH_RX, 0);
+    if (auto opened = port.open(VETH_RX, options); !opened) {
+        std::println("  skipped: AF_XDP unavailable ({})", opened.error().message());
+        return;
+    }
+    EXPECT_EQ(port.pinned(), bpffs);
+    std::string const prog_pin = options.pin_path + "/" + std::string{net::XdpProgram::PIN_PROG};
+    EXPECT_EQ(::access(prog_pin.c_str(), F_OK) == 0, bpffs);
+    port.close();
+    EXPECT_FALSE(port.pinned());
+    EXPECT_FALSE(::access(prog_pin.c_str(), F_OK) == 0);
+    (void)net::XdpProgram::detach(::if_nametoindex(VETH_RX), options.pin_path);
 }
 
 namespace {
