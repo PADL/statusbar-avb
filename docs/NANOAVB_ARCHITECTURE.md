@@ -452,7 +452,9 @@ STREAM_INPUT; a stream channel may feed several.
   or nothing; the data plane may refuse with BAD_ARGUMENTS), is answered with
   the command echoed, notified to the other registered controllers, and
   reported to `on_settings_changed`. `set_audio_mappings` seeds default or
-  saved mappings without notification or settings report.
+  saved mappings without notification or settings report;
+  `apply_local_audio_mappings` is the entity's own REMOVE-then-ADD (refused
+  while locked or acquired), notified in AECPDUs of at most 63 mappings.
 - GET_AUDIO_MAP partitions the port's cluster channels, in cluster order,
   into maps of `MAX_AUDIO_MAP_MAPPINGS` (fixed for the model) and answers
   map_index P with the mappings of partition P. A port with static maps
