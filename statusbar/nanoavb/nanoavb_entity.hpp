@@ -337,18 +337,22 @@ class AemCommandHandler
     void set_on_settings_changed(SettingsChangedFn fn) { callbacks_.on_settings_changed = std::move(fn); }
 
     // ---- Dynamic audio mappings (Milan v1.2 Sections 5.3.10, 5.4.2.26-28) ---
-    // A STREAM_PORT_INPUT with no static AUDIO_MAP keeps dynamic mappings; the command rules
-    // are in docs/NANOAVB_ARCHITECTURE.md.
+    // A stream port with no static AUDIO_MAP keeps dynamic mappings: an input's are the controllers',
+    // an output's the entity's own. The command rules are in docs/NANOAVB_ARCHITECTURE.md.
 
     /// Milan v1.2 Section 5.4.2.26: a GET_AUDIO_MAP partition's size.
     static constexpr size_t MAX_AUDIO_MAP_MAPPINGS = 176;
 
     void set_on_audio_mappings_changed(AudioMappingsChangedFn fn) { callbacks_.on_audio_mappings_changed = std::move(fn); }
-    /// The dynamic mappings in force.
+    /// The dynamic input mappings in force.
     [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const& { return dynamic_maps_; }
+    /// The dynamic output mappings in force (set_output_mappings).
+    [[nodiscard]] auto output_audio_maps() const noexcept -> DynamicAudioMaps const& { return output_maps_; }
     /// Whether (@p port_type, @p port_index) is a STREAM_PORT_INPUT of the
     /// current configuration with dynamic mappings (no static AUDIO_MAP).
     [[nodiscard]] auto has_dynamic_input_map(uint16_t port_type, uint16_t port_index) const -> bool;
+    /// Whether STREAM_PORT_OUTPUT @p port_index of the current configuration has no static AUDIO_MAP.
+    [[nodiscard]] auto has_dynamic_output_map(uint16_t port_index) const -> bool;
     /// Make @p mappings input port (@p port_type, @p port_index)'s dynamic mappings, validated as
     /// an ADD onto an empty port, applied when @p apply; no notification, no settings report.
     /// The AEM status; nothing changes unless SUCCESS.
@@ -359,6 +363,10 @@ class AemCommandHandler
     /// controller's, all or nothing; a change is notified and reported to the settings hook. The AEM status.
     [[nodiscard]] auto apply_local_audio_mappings(
         uint16_t port_index, std::span<DynamicAudioMapping const> add, std::span<DynamicAudioMapping const> remove) -> uint8_t;
+    /// Make @p mappings dynamic STREAM_PORT_OUTPUT @p port_index's, the entity's own at the unit's rate (controllers'
+    /// ADD/REMOVE are NOT_SUPPORTED, Milan v1.2 Section 5.3.9.1), validated as an ADD onto an empty port; a change is
+    /// notified as unsolicited REMOVE then ADD_AUDIO_MAPPINGS. The AEM status; nothing changes unless SUCCESS.
+    [[nodiscard]] auto set_output_mappings(uint16_t port_index, std::span<DynamicAudioMapping const> mappings) -> uint8_t;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -668,6 +676,7 @@ class AemCommandHandler
     /// A stream port's model, for the mapping commands.
     struct PortModel
     {
+        uint16_t port_type{0};  ///< STREAM_PORT_INPUT or STREAM_PORT_OUTPUT
         uint16_t base_cluster{0};
         uint16_t number_of_clusters{0};
         uint16_t number_of_maps{0};
@@ -682,11 +691,11 @@ class AemCommandHandler
     /// The position of @p mapping's cluster channel among @p port's (its
     /// clusters' channels in order), or nullopt when it names none.
     [[nodiscard]] static auto cluster_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) -> std::optional<uint32_t>;
-    /// SUCCESS when @p mapping names a cluster channel of the input port and a STREAM_INPUT and,
-    /// with @p check_channel, a channel of its current format at the unit's rate; else BAD_ARGUMENTS.
+    /// SUCCESS when @p mapping names a cluster channel of the port and a stream of its direction and,
+    /// with @p check_channel, a channel of its current format (an input's at the unit's rate); else BAD_ARGUMENTS.
     [[nodiscard]] auto check_mapping(uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const
         -> uint8_t;
-    /// The set @p mappings would leave input port (@p port_index, @p port)
+    /// The set @p mappings would leave port (@p port_index, @p port)
     /// with, added to @p current (validated as ADD_AUDIO_MAPPINGS), or the
     /// status to refuse with.
     [[nodiscard]] auto merged_mappings(
@@ -710,10 +719,14 @@ class AemCommandHandler
     /// NO_RESOURCES past the store's capacity; nothing changes unless SUCCESS.
     [[nodiscard]] auto commit_mappings(
         uint16_t port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t;
-    /// Unsolicited ADD (@p add) or REMOVE_AUDIO_MAPPINGS on STREAM_PORT_INPUT @p port_index of the
+    /// Unsolicited ADD (@p add) or REMOVE_AUDIO_MAPPINGS on (@p port_type, @p port_index) of the
     /// mappings in @p of but not in @p but (both in cluster order), as many AECPDUs as they take.
     void notify_mappings(
-        bool add, uint16_t port_index, std::span<DynamicAudioMapping const> of, std::span<DynamicAudioMapping const> but);
+        bool add,
+        uint16_t port_type,
+        uint16_t port_index,
+        std::span<DynamicAudioMapping const> of,
+        std::span<DynamicAudioMapping const> but);
     /// Read descriptor (@p type, @p index) of the current configuration.
     template <typename T>
     [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;
@@ -1015,8 +1028,9 @@ class AemCommandHandler
     uint16_t identify_control_index_{0};
     bool identify_control_index_valid_{false};
 
-    // The stream ports' dynamic audio mappings.
+    // The stream ports' dynamic audio mappings: the inputs', the outputs'.
     DynamicAudioMaps dynamic_maps_{};
+    DynamicAudioMaps output_maps_{};
     // The command being dispatched succeeded without changing a persistent
     // setting (an ADD/REMOVE_AUDIO_MAPPINGS that left the port as it was):
     // process_packet does not report it to on_settings_changed.
