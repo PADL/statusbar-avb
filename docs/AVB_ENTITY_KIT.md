@@ -138,11 +138,22 @@ recorder).
 ## Stream formats and the sampling rate
 
 SET_STREAM_FORMAT takes any format the stream's descriptor lists of the
-stream's kind at the kit's rate. Milan v1.2 Section 5.4.2.7 refuses it
-STREAM_IS_RUNNING on a bound input or a streaming output. The entity's hook
+stream's kind, at any rate: a stream's rate is set through its format. Milan
+v1.2 Section 5.4.2.7 refuses it STREAM_IS_RUNNING on a bound input or a
+streaming output. A format at another rate than the AUDIO_UNIT's is taken only
+while no port map names the stream (an input's dynamic mappings, a static
+AUDIO_MAP of either direction), else BAD_ARGUMENTS: Section 5.4.2.27 maps no
+stream at another rate than its unit's onto a port without rate conversion, so
+such a stream exists unmapped (Section 5.4.2.7 names BAD_ARGUMENTS for a format
+the mappings forbid). A controller removes the mappings first. The entity's hook
 (`set_on_stream_format_changed`) applies it to its data plane, and the kit
-re-shapes the stream (its spec, its TX or RX slot, a declared talker's TSpec).
-Without a hook only the stream's current format is taken.
+re-shapes the stream (its spec, its TX or RX slot at the format's rate, a
+declared talker's TSpec at that rate's samples per frame). Without a hook only
+the stream's current format is taken; an entity whose data plane runs at the
+unit's rate refuses another (`TalkerStreams::transmit_if_due` feeds streams at
+its media clock's rate; a stream at another rate is sent from the entity's own
+clock with `transmit_aaf_raw`). `ListenerStreams` measures each input's media
+lock at its own format's rate.
 
 A talker format, or a sampling rate, that raises every talker's TSpec bandwidth
 together (Milan v1.2 Table 4.4, the shaper's arithmetic) past the class A
@@ -152,11 +163,16 @@ talker counts, admitted or not: an output's format changes only while it does
 not stream, so the check is the last chance to keep them all admissible.
 Milan v1.2 Section 5.4.2.7 names no status for this. Listeners do not count.
 
-SET_SAMPLING_RATE (AUDIO_UNIT 0, the kit's one media clock) re-times every AAF
-stream's current format to the new rate, so it is taken only when each stream
-lists its format at that rate, and refused STREAM_IS_RUNNING while any input is
-bound or any output streams (each re-timing is a SET_STREAM_FORMAT that would
-be). The entity's hook (`set_on_sampling_rate_changed`) stops whatever reads the
+SET_SAMPLING_RATE to the unit's current rate is a no-op SUCCESS, and a rate the
+AUDIO_UNIT does not list is NOT_SUPPORTED (the storage handler). A unit that
+lists one rate therefore keeps it: Milan v1.2 Section 5.4.2.13 requires the
+command per Audio Unit and Section 5.3.3.3 only that the list report the rates
+the unit supports. For a unit that lists more, SET_SAMPLING_RATE (AUDIO_UNIT 0,
+the kit's one media clock) re-times every AAF stream at the unit's rate to the
+new rate (a stream at another rate stays as it is), so it is taken only when
+each lists its format at that rate, and refused STREAM_IS_RUNNING while any
+input is bound or any output streams (each re-timing is a SET_STREAM_FORMAT that
+would be, and the talker's media clock is re-clocked). The entity's hook (`set_on_sampling_rate_changed`) stops whatever reads the
 kit's streams (its media thread, the RX drain), calls `apply_sampling_rate()`,
 rebuilds its data plane, and answers; a refusal after applying applies the old
 rate back, and a hook that accepts without applying has it applied for it. The
@@ -171,14 +187,27 @@ host's own control socket; they are applied with the same checks and hooks as
 the ATDECC commands, every registered controller is notified and the value is
 saved.
 
-## Dynamic input audio mappings
+## Dynamic audio mappings
 
 Every STREAM_PORT_INPUT without a static AUDIO_MAP keeps dynamic mappings
 (nanoavb's ADD/REMOVE_AUDIO_MAPPINGS validate them against the model; Milan
 v1.2 Sections 5.3.10, 5.4.2.26-28). The kit starts each such port k with its
 default: STREAM_INPUT k's channels, in order, onto the port's cluster channels
 in order, as far as both go (the identity a port-per-stream data plane already
-routes); none for a port with no stream input of its index. A controller's
+routes); none for a port with no stream input of its index, and none while
+stream k is at another rate than the unit's (Section 5.4.2.27). A stream leaves
+the unit's rate only with no mappings (above); when it comes back, the port
+stays empty until its owner restores them (a controller's ADD, or the entity's
+`request_audio_mappings`).
+
+Every STREAM_PORT_OUTPUT without a static AUDIO_MAP carries the kit's own
+identity, built as the input default from STREAM_OUTPUT k, while stream k is at
+the unit's rate, and none otherwise; the kit re-derives it after every format
+or rate change, told to the registered controllers as unsolicited
+REMOVE/ADD_AUDIO_MAPPINGS. GET_AUDIO_MAP answers it; a controller's ADD or
+REMOVE is NOT_SUPPORTED (Section 5.3.9.1). It is not persisted: it follows the
+formats. A model's static output maps stay as they are and keep their streams
+at the unit's rate. A controller's
 change goes to the entity's hook, which routes it or refuses it, and is
 persisted while it differs from the default (restored after the stream formats,
 before the bindings). A SET_STREAM_FORMAT that would drop a mapped channel of a
