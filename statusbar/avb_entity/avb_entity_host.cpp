@@ -278,6 +278,7 @@ void AvbEntityHost::set_propagation_delay_ns(uint32_t const ns)
 {
     propagation_delay_override_ = true;
     propagation_delay_override_ns_ = ns;
+    refresh_avb_info();  // a change notifies GET_AVB_INFO's subscribers
 }
 
 void AvbEntityHost::on_mirror_update(
