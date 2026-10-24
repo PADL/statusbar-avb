@@ -49,7 +49,7 @@ namespace statusbar::avb_entity {
 /// a concrete entity config. Destructured at the call site (mirrors ListenerStreams).
 struct TalkerStreamsConfig
 {
-    uint32_t sample_rate;  ///< stream sample rate (Hz), e.g. 96000 or 48000
+    uint32_t sample_rate;  ///< the media clock's rate (Hz), e.g. 96000 or 48000: transmit_if_due's streams'
     uint16_t vlan_id;      ///< AVB VLAN id
     uint8_t stream_pcp;    ///< AVB priority code point
 };
@@ -139,7 +139,7 @@ struct TalkerStreams
     /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
     auto reformat_stream(StreamSpec const& spec) -> Status;
 
-    /// The stream rate (config_.sample_rate) and its class A samples per
+    /// The media clock's rate (config_.sample_rate) and its class A samples per
     /// packet, for a SET_SAMPLING_RATE. Same discipline as reformat_stream.
     void set_sample_rate(uint32_t const sample_rate) noexcept
     {
@@ -255,7 +255,7 @@ struct TalkerStreams
     std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<uint64_t> const& last_gptp_ns_;
-    uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
+    uint32_t samples_per_packet_;  ///< the media clock's per class A packet: 12 @ 96k, 6 @ 48k
     std::pmr::memory_resource* mem_resource_;
 
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream

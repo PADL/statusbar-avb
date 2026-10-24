@@ -100,8 +100,9 @@ static_assert(base_format(48000, 2) == 0x0205022000806000ULL && base_format(9600
 
 /// A multi-rate model: 8 ch INT_24 output and input (+ CRF each) at 48/96 kHz.
 /// With @p ports, STREAM_PORT_INPUT 0 has eight 1-channel clusters and no
-/// AUDIO_MAP, plus every Milan v1.2 Section 5.3.13 name's descriptor.
-auto make_multirate_blob(bool const ports = false) -> std::vector<uint8_t>
+/// AUDIO_MAP, plus every Milan v1.2 Section 5.3.13 name's descriptor. With
+/// @p one_rate the unit lists 48 kHz only and STREAM_PORT_OUTPUT 0 is dynamic.
+auto make_multirate_blob(bool const ports = false, bool const one_rate = false) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -133,9 +134,9 @@ auto make_multirate_blob(bool const ports = false) -> std::vector<uint8_t>
     }
     atdecc::aem::DescriptorAudioUnit unit{};
     unit.current_sampling_rate = uint32_t{48000};
-    unit.sampling_rates_count = uint16_t{2};
+    unit.sampling_rates_count = static_cast<uint16_t>(one_rate ? 1 : 2);
     unit.sampling_rates[0] = uint32_t{48000};
-    unit.sampling_rates[1] = uint32_t{96000};
+    unit.sampling_rates[1] = static_cast<uint32_t>(one_rate ? 0 : 96000);
     if (ports) {
         unit.number_of_stream_input_ports = uint16_t{1};
         atdecc::aem::DescriptorStreamPort port{};
@@ -156,7 +157,7 @@ auto make_multirate_blob(bool const ports = false) -> std::vector<uint8_t>
         out_port.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
         out_port.number_of_clusters = uint16_t{1};
         out_port.base_cluster = uint16_t{8};
-        out_port.number_of_maps = uint16_t{1};
+        out_port.number_of_maps = static_cast<uint16_t>(one_rate ? 0 : 1);
         w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 0, make_const_span(out_port));
         atdecc::aem::DescriptorAudioCluster out_cluster{};
         out_cluster.descriptor_index = uint16_t{8};
@@ -170,7 +171,9 @@ auto make_multirate_blob(bool const ports = false) -> std::vector<uint8_t>
                  .mapping_cluster_offset = uint16_t{0},
                  .mapping_cluster_channel = ch});
         }
-        w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_MAP, 0, wire(map));
+        if (!one_rate) {
+            w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_MAP, 0, wire(map));
+        }
         atdecc::aem::DescriptorClockSource source{};
         w.add(0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 0, make_const_span(source));
         atdecc::aem::DescriptorClockDomain domain{};
@@ -1439,8 +1442,9 @@ auto rate_body(uint32_t const rate) -> std::array<uint8_t, 8>
 /// asked (the rate hook applies the rate, as an entity re-clocking would).
 struct RateKit : PersistentKit
 {
-    explicit RateKit(std::string const& path = {}, uint64_t const entity_low = 0x70, bool const ports = false)
-        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports)}
+    explicit RateKit(
+        std::string const& path = {}, uint64_t const entity_low = 0x70, bool const ports = false, bool const one_rate = false)
+        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate)}
     {
         kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
             formats.push_back({type, index, format});
@@ -1535,13 +1539,13 @@ TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
     EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf->format == avtp::AafFormat::int_32bit);
     EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{6 * 8 * 4 + 24 + 1});
 
-    // Refused: an unlisted format (the handler), one at another rate, the
-    // CRF's, and the entity's own refusal (nothing changes).
+    // Refused: an unlisted format (the handler), the CRF's, and the entity's
+    // own refusal (nothing changes).
     EXPECT_EQ(
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 2))),
         atdecc::AEM_STATUS_NOT_SUPPORTED);
     EXPECT_EQ(
-        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(96000, 2))),
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 1, CRF_MILAN_48K ^ 1)),
         atdecc::AEM_STATUS_NOT_SUPPORTED);
     m.format_status = atdecc::AEM_STATUS_BAD_ARGUMENTS;
     EXPECT_EQ(
@@ -2798,6 +2802,169 @@ TEST(avb_entity_kit_mappings, saved_mappings_survive_a_start_before_the_hook)
         EXPECT_TRUE(saved.audio_maps.size() == 1 && saved.audio_maps[0].mappings.size() == 3);
     }
     std::filesystem::remove_all(dir);
+}
+
+// --- Streams at another rate than the unit's ------------------------------------
+
+namespace {
+
+/// GET_AUDIO_MAP of STREAM_PORT_OUTPUT 0, map 0: the status and the mappings' count.
+auto output_map(PersistentKit& m) -> std::pair<uint8_t, uint16_t>
+{
+    atdecc::aem::AemGetAudioMapCommandPayload cmd{};
+    cmd.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
+    std::array<uint8_t, atdecc::aem::AemGetAudioMapCommandPayload::LENGTH> body{};
+    span_store(body, cmd);
+    auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_AUDIO_MAP, body);
+    atdecc::aem::AemAudioMapResponseHeader resp{};
+    if (r.body.size() >= atdecc::aem::AemAudioMapResponseHeader::LENGTH) {
+        span_load(resp, std::span<uint8_t const>{r.body}.first(atdecc::aem::AemAudioMapResponseHeader::LENGTH));
+    }
+    return {r.status, resp.number_of_mappings.get()};
+}
+
+}  // namespace
+
+// Milan v1.2 Sections 5.4.2.7, 5.4.2.27: an input takes a format at another rate
+// than the unit's only while no mapping names it, keeps no default there, is
+// notified and saved, and comes back to the unit's rate unmapped
+TEST(avb_entity_kit_mixed_rates, an_unmapped_input_takes_another_rate)
+{
+    auto const dir = state_dir("mixed-input");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<nanoavb::DynamicAudioMapping> identity;
+    for (uint16_t ch = 0; ch < 8; ++ch) {
+        identity.push_back(mapping(ch, ch));
+    }
+    {
+        RateKit m{path, 0x76, false, true};
+        m.kit.set_on_input_mappings_changed(
+            [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+        EXPECT_TRUE(m.start_ready());
+        register_other_controller(m);
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), identity));
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_96K)),
+            atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_TRUE(m.formats.empty());
+        // Unmapped (the bridge removes them first, as a controller would), it is taken.
+        EXPECT_EQ(m.kit.request_audio_mappings(0, {}, identity), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_96K)),
+            atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).size(), size_t{1});
+        EXPECT_TRUE(m.formats.size() == 1 && m.formats.back().fields.sample_rate_hz == 96000U);
+        EXPECT_EQ(m.kit.sample_rate(), 48000U);
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 96000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_96K);
+        EXPECT_TRUE(m.kit.default_input_mappings(0).empty());
+        EXPECT_EQ(map_command(m, true, {mapping(0, 0)}), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        // Another format at the same rate needs no mapping either.
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(96000, 2))),
+            atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_96K)),
+            atdecc::AEM_STATUS_SUCCESS);
+        auto const saved = load_persistent_state(path, 0, {}).state;
+        EXPECT_TRUE(saved.stream_formats.size() == 1 && saved.stream_formats[0].format == INT24_8CH_96K);
+        EXPECT_TRUE(saved.audio_maps.empty());
+    }
+    {
+        // Restored at 96 kHz before the mappings: unmapped, the RX slot at its rate.
+        RateKit m{path, 0x76, false, true};
+        m.kit.set_on_input_mappings_changed(
+            [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_96K);
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 96000U);
+        EXPECT_TRUE(m.kit.input_mappings(0).empty());
+        // Back at the unit's rate the port is still empty: the caller restores its mappings.
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_48K)),
+            atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(m.kit.input_mappings(0).empty());
+        EXPECT_EQ(m.kit.request_audio_mappings(0, identity, {}), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), m.kit.default_input_mappings(0)));
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// Milan v1.2 Sections 5.4.2.13, 5.3.3.3: a unit listing one rate takes that rate
+// as a no-op and refuses any other, with streams at other rates or not
+TEST(avb_entity_kit_mixed_rates, a_one_rate_unit_keeps_its_rate)
+{
+    RateKit m{{}, 0x77, false, true};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.request_sampling_rate(96000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(m.rates.empty());  // never asked to re-clock
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+}
+
+// A dynamic output port carries the kit's identity while its stream is at the
+// unit's rate and none at another (Milan v1.2 Section 5.4.2.27), told as REMOVE
+// and ADD_AUDIO_MAPPINGS; controllers cannot change it; the class A budget holds
+TEST(avb_entity_kit_mixed_rates, a_dynamic_output_identity_follows_the_rate)
+{
+    RateKit m{{}, 0x78, false, true};
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    EXPECT_TRUE(m.kit.has_dynamic_output_map(0));
+    EXPECT_EQ(m.kit.output_static_map_channels(0), uint16_t{0});
+    EXPECT_EQ(m.kit.output_mappings(0).size(), size_t{8});
+    EXPECT_TRUE(std::ranges::equal(m.kit.output_mappings(0), m.kit.default_output_mappings(0)));
+    EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{8}}));
+    {
+        std::vector<uint8_t> body(16);
+        atdecc::aem::AemAudioMappingsCommandHeader header{};
+        header.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
+        header.number_of_mappings = uint16_t{1};
+        span_store(std::span{body}.first(8), header);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, body), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    }
+    // 96 kHz doubles the AAF talker past a 28 Mbit/s link's budget (see above).
+    m.kit.set_link_mbps(28);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_EQ(m.kit.output_mappings(0).size(), size_t{8});
+    m.kit.set_link_mbps(1000);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).size(), size_t{1});
+    EXPECT_TRUE(m.kit.output_mappings(0).empty());
+    EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{0}}));
+    EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format.sample_rate_hz, 96000U);
+    EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{12 * 8 * 3 + 24 + 1});
+    EXPECT_EQ(m.kit.talker().samples_per_packet_, 6U);  // the media clock stays at the unit's rate
+    // Back at the unit's rate the identity returns.
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 4))),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS).size(), size_t{1});
+    EXPECT_EQ(m.kit.output_mappings(0).size(), size_t{4});
+    EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{4}}));
+}
+
+// A static output map names its stream: no format at another rate while it does
+TEST(avb_entity_kit_mixed_rates, a_static_output_map_keeps_the_unit_rate)
+{
+    RateKit m{{}, 0x79, true};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_FALSE(m.kit.has_dynamic_output_map(0));
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(m.formats.empty());
+    EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_NOT_SUPPORTED, uint16_t{0}}));  // its AUDIO_MAP says it
 }
 
 // A port bound before start() is the kit's stream port: the talker transmits

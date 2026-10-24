@@ -381,7 +381,7 @@ class AvbEntityAm824IO
     /// STREAM_INPUT health counters, and the borrowed stream port. Counting-only here
     /// (sink=nullptr) -- this entity's process_audio generates its own tone independent
     /// of RX. Declared after config_ + host_ (components) + last_gptp_ns_.
-    ListenerStreams listener_{config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, nullptr};
+    ListenerStreams listener_{config_.lock_tolerance_ns, host_.components(), last_gptp_ns_, nullptr};
 
     /// The stream RX handler. Default: moved into the reactor by start(). With
     /// stream_rx_rt_timer set it is kept HERE + drained by the

@@ -277,8 +277,8 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
     // hand-rolled drain/deserialize/counter copy): one AM824 input slot;
     // the decoded per-channel floats re-assemble the interleaved loopback
     // block, published to the reclock pipe at its presentation time.
-    listener_ = std::make_unique<ListenerStreams>(
-        config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, /*audio_sink=*/nullptr);
+    listener_ =
+        std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, host_.components(), last_gptp_ns_, /*audio_sink=*/nullptr);
     listener_->set_logger(host_.ctl_log());
     StreamSpec in_spec{};
     in_spec.index = 0;

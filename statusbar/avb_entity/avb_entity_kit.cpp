@@ -54,8 +54,7 @@ AvbEntityKit::AvbEntityKit(
     active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
     crf_clock_source_index_ = crf_clock_source_index;
     if (!listener_specs_.empty()) {
-        listener_ = std::make_unique<ListenerStreams>(
-            config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns, audio_sink);
+        listener_ = std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, host_.components(), last_gptp_ns, audio_sink);
     }
 
     // ATDECC descriptor wire version. Default "2016": emit descriptors at their
@@ -188,6 +187,14 @@ AvbEntityKit::AvbEntityKit(
         }
     }
     reset_input_mappings();
+    // Dynamic output ports carry the kit's identity map while their stream is at the unit's rate.
+    for (uint16_t port = 0; port < UINT16_MAX && host_.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port).has_value();
+         ++port) {
+        if (aem.has_dynamic_output_map(port)) {
+            dynamic_output_ports_.push_back(port);
+        }
+    }
+    refresh_output_mappings();
     aem.set_on_audio_mappings_changed(
         [this](uint16_t const port_type, uint16_t const port_index, std::span<nanoavb::DynamicAudioMapping const> const mappings) -> uint8_t {
             if (port_type != atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT || !on_input_mappings_changed_) {
@@ -209,12 +216,30 @@ auto AvbEntityKit::input_mappings(uint16_t const port_index) const -> nanoavb::D
     return host_.components().aem_handler.dynamic_audio_maps().port(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
 }
 
+auto AvbEntityKit::output_mappings(uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
+{
+    return host_.components().aem_handler.output_audio_maps().port(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
+}
+
 auto AvbEntityKit::default_input_mappings(uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
 {
+    return identity_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
+}
+
+auto AvbEntityKit::default_output_mappings(uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
+{
+    return identity_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
+}
+
+auto AvbEntityKit::identity_mappings(uint16_t const port_type, uint16_t const port_index) const
+    -> nanoavb::DynamicAudioMaps::Mappings
+{
     nanoavb::DynamicAudioMaps::Mappings out{};
-    auto const* spec = std::ranges::find(listener_specs_, port_index, &StreamSpec::index);
-    auto const port_blob = host_.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
-    if (spec == listener_specs_.end() || !port_blob.has_value()) {
+    auto const& specs = port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT ? talker_specs_ : listener_specs_;
+    auto const* spec = std::ranges::find(specs, port_index, &StreamSpec::index);
+    auto const port_blob = host_.get_descriptor(port_type, port_index);
+    // Milan v1.2 Section 5.4.2.27: none for a stream at another rate than the unit's.
+    if (spec == specs.end() || !port_blob.has_value() || spec->format.sample_rate_hz != sample_rate_) {
         return out;
     }
     atdecc::aem::DescriptorStreamPort port{};
@@ -297,6 +322,19 @@ void AvbEntityKit::reset_input_mappings()
     }
 }
 
+void AvbEntityKit::refresh_output_mappings()
+{
+    auto& aem = host_.components().aem_handler;
+    for (auto const port : dynamic_output_ports_) {
+        if (auto const status = aem.set_output_mappings(port, default_output_mappings(port));
+            status != atdecc::AEM_STATUS_SUCCESS) {
+            host_.ctl_log().warning(
+                "kit: STREAM_PORT_OUTPUT {}: its identity mappings were refused (status {}): unmapped", port, status);
+            (void)aem.set_output_mappings(port, {});
+        }
+    }
+}
+
 void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
 {
     auto& aem = host_.components().aem_handler;
@@ -353,11 +391,16 @@ void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
 
 auto AvbEntityKit::output_static_map_channels(uint16_t const stream_index) const -> uint16_t
 {
-    // Every STREAM_PORT_OUTPUT's static AUDIO_MAPs (the model's): the
-    // channels of STREAM_OUTPUT @p stream_index they name.
+    return static_map_channels(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, stream_index);
+}
+
+auto AvbEntityKit::static_map_channels(uint16_t const port_type, uint16_t const stream_index) const -> uint16_t
+{
+    // Every such port's static AUDIO_MAPs (the model's): the channels of
+    // stream @p stream_index of the port's direction they name.
     uint16_t needed = 0;
     for (uint16_t p = 0; p < UINT16_MAX; ++p) {
-        auto const port_blob = host_.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, p);
+        auto const port_blob = host_.get_descriptor(port_type, p);
         if (!port_blob.has_value()) {
             break;
         }
@@ -380,6 +423,22 @@ auto AvbEntityKit::output_static_map_channels(uint16_t const stream_index) const
         }
     }
     return needed;
+}
+
+auto AvbEntityKit::stream_mapped(bool const output, uint16_t const index) const -> bool
+{
+    if (static_map_channels(
+            output ? atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT : atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, index) != 0) {
+        return true;
+    }
+    bool named = false;
+    if (!output) {
+        host_.components().aem_handler.dynamic_audio_maps().for_each(
+            [&named, index](uint16_t const port_type, uint16_t /*port_index*/, nanoavb::DynamicAudioMapping const& m) {
+                named = named || (port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == index);
+            });
+    }
+    return named;
 }
 
 auto AvbEntityKit::input_running(uint16_t const idx) const noexcept -> bool
@@ -417,17 +476,20 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
     if (spec->format_word == format) {
         return atdecc::AEM_STATUS_SUCCESS;
     }
-    // The stream's kind, at the kit's one media-clock rate (SET_SAMPLING_RATE
-    // moves every stream to another): an audio stream's format changes, a
-    // CRF's never.
+    // The stream's kind, at any rate: an audio stream's format changes, a CRF's never.
     auto const updated = with_format(*spec, format);
     bool const audio = updated.format.kind == StreamKind::aaf || updated.format.kind == StreamKind::am824;
-    if (!audio || updated.format.kind != spec->format.kind || updated.format.sample_rate_hz != sample_rate_) {
+    if (!audio || updated.format.kind != spec->format.kind) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Milan v1.2 Section 5.4.2.7.
     if (output ? output_streaming(index, steady_now_ns()) : input_running(index)) {
         return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    }
+    // Milan v1.2 Sections 5.4.2.7, 5.4.2.27: no port maps a stream at another rate than the
+    // unit's, so it takes one only while no map names it (the kit's own output identity goes).
+    if (updated.format.sample_rate_hz != sample_rate_ && stream_mapped(output, index)) {
+        return atdecc::AEM_STATUS_BAD_ARGUMENTS;
     }
     // ... and no mapped channel of the stream may go: an output's static
     // map is the model's (the generator lists no narrower format; this is
@@ -467,6 +529,12 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
         return status;
     }
     *spec = updated;
+    if (output) {
+        // The handler records the format after this hook; the identity it maps is checked against it.
+        (void)storage_handler_.set_runtime_stream_format(
+            {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, ieee::Eui64{}.from_uint64(format));
+        refresh_output_mappings();
+    }
     host_.ctl_log().status(
         "aem: {} stream {} format {:016x} -> {:016x}",
         output ? logging::lit("talker") : logging::lit("listener"),
@@ -484,8 +552,8 @@ auto AvbEntityKit::retimed_formats(uint32_t const rate) const -> StatusValue<Ret
     RetimedFormats out{};
     for (auto const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
         for (auto const& spec : type == DESCRIPTOR_STREAM_OUTPUT ? talker_specs_ : listener_specs_) {
-            if (spec.format.kind == StreamKind::crf) {
-                continue;  // its format stays
+            if (spec.format.kind == StreamKind::crf || spec.format.sample_rate_hz != sample_rate_) {
+                continue;  // its format stays: a CRF's, or one at another rate than the unit's
             }
             auto const word = aaf_format_at_rate(spec.format_word, rate);
             ieee::Eui64 value{};
@@ -527,8 +595,8 @@ auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t cons
     if (audio_unit != 0) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;  // the kit's one media clock is AUDIO_UNIT 0's
     }
-    // Every audio stream follows: its current format at the new rate must be
-    // one it lists (an AM824 stream cannot be re-timed).
+    // Every audio stream at the unit's rate follows: its current format at the
+    // new rate must be one it lists (an AM824 stream cannot be re-timed).
     auto const retimed = retimed_formats(rate);
     if (!retimed) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
@@ -576,9 +644,6 @@ void AvbEntityKit::set_streams_rate(uint32_t const rate)
 {
     sample_rate_ = rate;
     talker_->set_sample_rate(rate);
-    if (listener_ != nullptr) {
-        listener_->set_sample_rate(rate);
-    }
 }
 
 void AvbEntityKit::restore_streams(uint32_t const rate, StreamSpecs const& talkers, StreamSpecs const& listeners)
@@ -602,6 +667,7 @@ void AvbEntityKit::restore_streams(uint32_t const rate, StreamSpecs const& talke
             declared = declared || (output && declarations_.declared(saved.index));
         }
     }
+    refresh_output_mappings();
     if (declared) {
         update_talker_declarations(steady_now_ns(), true);
     }
@@ -643,6 +709,7 @@ auto AvbEntityKit::apply_sampling_rate(uint32_t const rate) -> bool
             (void)format_notifications_.try_push_back({type, index});
         }
     }
+    refresh_output_mappings();
     host_.ctl_log().status("aem: sampling rate {} -> {} Hz: {} stream format(s) re-timed", before, rate, retimed->size());
     if (declared) {
         update_talker_declarations(steady_now_ns(), true);  // their TSpecs

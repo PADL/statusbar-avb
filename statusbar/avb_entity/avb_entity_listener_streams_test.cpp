@@ -85,7 +85,7 @@ TEST(listener_consume, pending_binds_on_open_unknown_stays_inert)
 {
     auto donor = make_donor();
     std::atomic<uint64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
 
     // Register BEFORE the slot exists (the normal pre-start pattern) plus one
     // for an index no model will ever declare (the menu is bigger than the
@@ -108,7 +108,7 @@ TEST(listener_consume, slot_shapes_follow_specs)
 {
     auto donor = make_donor();
     std::atomic<uint64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
 
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
     EXPECT_NE(ls.slot_of(StreamKind::aaf), nullptr);
@@ -125,7 +125,7 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
 {
     auto donor = make_donor();
     std::atomic<uint64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
 
     // Register the CRF consumer BEFORE the slot exists (pending), plus one
     // for an index the model never declares (menu/selection: inert).
@@ -384,8 +384,8 @@ TEST(listener_timed, delivery_through_on_stream_rx_frame)
     std::atomic<uint64_t> gptp{0};
     RecordingSink raw_sink;
     RecordingSink decoded_sink;
-    ListenerStreams raw{1'000'000, aaf_spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
-    ListenerStreams decoded{1'000'000, aaf_spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
+    ListenerStreams raw{1'000'000, donor->components(), gptp, nullptr};
+    ListenerStreams decoded{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(raw.open_stream(aaf_spec).has_value());
     EXPECT_TRUE(decoded.open_stream(aaf_spec).has_value());
     raw.set_timed_audio_sink(&raw_sink);
@@ -494,7 +494,7 @@ TEST(listener_format, mismatched_aaf_is_discarded_and_counted)
     auto const& aaf_spec = specs[1];
     std::atomic<uint64_t> gptp{0};
     RecordingSink sink;
-    ListenerStreams ls{1'000'000, aaf_spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
     ls.set_timed_audio_sink(&sink);
     auto const rate = *avtp::aaf_sample_rate_from_hz(aaf_spec.format.sample_rate_hz);
@@ -518,6 +518,30 @@ TEST(listener_format, mismatched_aaf_is_discarded_and_counted)
     EXPECT_EQ(slot->rx_packets.load(), uint64_t{1});
 }
 
+// MEDIA_LOCKED follows each stream's own rate: a 192 kHz input's 24 frames a
+// packet lock on their 125 us step (at 48 kHz that step would be implausible)
+TEST(listener_format, media_lock_is_at_the_streams_rate)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    StreamSpec spec{};
+    spec.index = 1;
+    spec.format_word = 0x0209031800000000ULL | (uint64_t{2} << 22U) | (uint64_t{24} << 12U);  // INT_24, 2 ch, 192 kHz
+    spec.format = decode_stream_format(spec.format_word);
+    EXPECT_EQ(spec.format.sample_rate_hz, 192000U);
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(spec).has_value());
+    avtp::AafStreamOutputContext tx{kAafId, spec.format.aaf_format, AafSampleRate::rate_192_khz, 2, 24, 0};
+    uint64_t const pts0 = 9'000'000'000ULL;
+    for (uint64_t k = 0; k < 12; ++k) {
+        ls.on_stream_rx_frame(aaf_frame(tx, 24, pts0 + (k * 125'000)), static_cast<int64_t>(pts0 - 1'000'000));
+    }
+    auto const& counters = ls.slot_for(1)->counters;
+    EXPECT_EQ(counters.unsupported_format.load(), uint32_t{0});
+    EXPECT_EQ(counters.media_locked.load(), uint32_t{1});
+    EXPECT_EQ(counters.media_unlocked.load(), uint32_t{0});
+}
+
 // The AM824 timed path: pts_valid follows the deserializer's anchor (false
 // until a SYT-bearing packet), and the payload is exactly frames x channels
 // quadlets even when the frame carries padding.
@@ -529,7 +553,7 @@ TEST(listener_timed, am824_timed_path)
     EXPECT_TRUE(spec.format.kind == StreamKind::am824);
     std::atomic<uint64_t> gptp{0};
     RecordingSink sink;
-    ListenerStreams ls{1'000'000, spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(spec).has_value());
     ls.set_timed_audio_sink(&sink);
 
@@ -605,7 +629,7 @@ TEST(listener_port, tagged_and_untagged_frames_reach_their_slot)
     auto const& aaf_spec = specs[1];
     std::atomic<uint64_t> gptp{0};
     RecordingSink sink;
-    ListenerStreams ls{1'000'000, aaf_spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
     ls.set_timed_audio_sink(&sink);
     TestStreamPort port{kRxPortMac};
@@ -648,7 +672,7 @@ TEST(listener_port, groups_are_joined_and_left_on_the_port)
     auto donor = make_connected_donor(kAm824Id, kAafId);
     auto const specs = audio_specs();
     std::atomic<uint64_t> gptp{0};
-    ListenerStreams ls{1'000'000, specs[1].format.sample_rate_hz, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(specs[1]).has_value());
     TestStreamPort port{kRxPortMac};
     itc::StopToken stop{};
