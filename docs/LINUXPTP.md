@@ -95,3 +95,49 @@ Note: at Site A the GPS grandmaster has a 3D GPS lock but is **not** the active 
 (the AVB switch free-runs as GM); fix is on the GPS grandmaster's PTP Config page
 (`Packet Output = 802.1AS`).
 
+
+## ptpclient: grandmaster status from ptp4l
+
+`ptpclient::PtpManagementClient` asks ptp4l which grandmaster the local clock
+follows, as `pmc -u` does. ptp4l answers IEEE 1588 management messages on a
+datagram socket (`uds_address`, `/var/run/ptp4l` by default), and only in its
+own domain: a message whose domainNumber differs is ignored, so
+`PtpManagementConfig::domain` must be ptp4l's (pmc `-d` semantics), else the
+client sees no answer and reports unreachable.
+
+The client is a `net::Pollable` for the reactor thread. On its first tick, and
+every `period_ns` after, it sends GET PARENT_DATA_SET, GET CURRENT_DATA_SET and
+GET TIME_PROPERTIES_DATA_SET, parses the responses as they arrive, and calls
+its listener when the status or grandmaster changes. Its own socket is a path
+beside ptp4l's, as pmc's is (`dirname(uds_address)/statusbar-ptpmgmt.<pid>`),
+removed on destruction.
+
+The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
+`gptp::MessageHeader`), the management header (15.4.1), the MANAGEMENT TLV
+(15.5.2) and the data sets (15.5.3). `build_management_get()` and
+`parse_management_message()` are pure and portable, so the wire format is unit
+tested without a ptp4l.
+
+## ptpclient: waking on a PTP deadline
+
+`PtpTimeBridge::sleep_until_ptp` converts the PTP deadline to CLOCK_MONOTONIC,
+sleeps with `clock_nanosleep` to `wake_refine_spin_ns` (plus a slew term)
+before it, then busy-waits on CLOCK_MONOTONIC_RAW (a vDSO read, no syscall)
+with a CPU pause hint to the deadline itself. The spin calls `sched_yield` only
+every 20 us and not in the last 10 us: a yield lets an equal-priority
+SCHED_FIFO thread sharing the core run during a long spin, but a yield per
+iteration costs a syscall round trip each (about 1 us) and coarsens where the
+wake lands.
+
+`wake_refine_spin_ns` must cover the worst OS wake latency on the timer's core.
+The default 50 us absorbs stray kernel work on a shared core; on an isolated
+core (isolcpus/nohz_full, IRQs and kworkers moved off, deep C-states held off)
+15-20 us is enough and halves the spin's CPU.
+
+The optional `spin_headroom_ns` result is how far before the deadline the sleep
+returned, less the slew term: what was left of the spin window, so the OS wake
+latency is the window minus it. It is negative when the sleep overran the
+deadline, and set only on success when the call slept (not when the deadline was
+already inside the window). `PtpTimer::wake_headroom()` aggregates it; its
+`min_ns` is the closest call, and a negative minimum shows up as a late wake in
+`stats()`.

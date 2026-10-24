@@ -120,18 +120,24 @@ CSV output into plots and stats.
   channel interleaver, AVTP-to-WAV).
 - **`atdecc`** — IEEE 1722.1: ADP discovery, ACMP connection management,
   AECP including AEM and Address Access; descriptor storage and AEM control
-  value/type accessors.
+  value/type accessors. The Milan v1.2 ACMP talker and listener
+  (`atdecc_acmp_milan_*`) and the Milan Vendor Unique PDUs
+  (`atdecc_aecp_mvu`).
 - **`atdecc_tools`** — interactive ATDECC controller driver and TUI.
 - **`gptp`** — IEEE 802.1AS generalised PTP: messages, slave port + session
   state machines, link delay, servo, Linux clock/socket integration, and an
   NTP-SHM publisher.
 - **`ptpclient`** — application-facing PTP client abstraction with a bridge
-  to `linuxptp` and a wake/timer interface.
+  to `linuxptp`, a wake/timer interface, and a ptp4l management client for
+  the grandmaster's data sets (`ptpclient_management`).
 - **`srp`** — IEEE 802.1Q SRP: MRP (applicant / registrar / leave-all /
   periodic state machines), plus MSRP (stream reservation) and MVRP (VLAN
   registration) participants.
 - **`nanoavb`** — small, integrated AVB entity stack tying ADP, ACMP, AECP,
-  MSRP, MVRP, and gPTP together behind a supervisor state machine.
+  MSRP, MVRP, and gPTP together behind a supervisor state machine. An entity
+  runs the Milan or the classic profile; it serves MVU commands, dynamic
+  audio mappings and object names, and a local ATDECC socket for
+  controllers on the same host.
 - **`avb_entity`** — turn-key AVB audio entities (stereo PCM, AM824) built
   on top of `nanoavb` and `ptpclient`. The host answers GET_AVB_INFO and
   fills the AVB_INTERFACE gPTP fields from what it observes on the wire
@@ -139,6 +145,10 @@ CSV output into plots and stats.
   instead mirror another entity's AVB_INTERFACE descriptors and
   GET_AVB_INFO over IEEE 1722.1 (`AvbInfoMirror`,
   `AvbEntityHost::mirror_avb_info_from`) and serve them as its own.
+  Kit entities keep controller settings in a persistent state file, shape
+  their talker streams with mqprio and cbs, gate transmission on the Milan
+  talker rules, and send and receive through a stream port (packet socket
+  or AF_XDP).
 - **`udptun`** — gPTP-timestamped UDP framework with redundancy, per-source
   tracking, and CSV / columnar telemetry.
 - **`owlm`** — one-way latency measurement over a gPTP-locked link.
@@ -148,6 +158,37 @@ CSV output into plots and stats.
   (pcap/pcapng).
 
 **Wireshark:** `wireshark/` holds Lua dissectors for IEEE 1722 and IEEE 1722.1 over Ethernet and UDP that take priority over Wireshark's builtin `ieee1722`/`ieee17221` (filter namespace `avb.*`). They are MIT like the rest of the repository (see `wireshark/README.md`), generated from the schema in `python/wireshark_schema/`, and ship as the `statusbar-avb-wireshark` Debian package / a `-wireshark` tarball.
+
+### Documents
+
+Topic documents live in [`docs/`](docs/):
+
+| Document | Covers |
+|---|---|
+| [`ACMP_STATE_MACHINES.md`](docs/ACMP_STATE_MACHINES.md) | IEEE 1722.1 ACMP controller, talker and listener state machines |
+| [`AEM_ENTITY_MODEL.md`](docs/AEM_ENTITY_MODEL.md) | The AEM entity model and descriptor storage |
+| [`ATDECC_DESCRIPTOR_2013_COMPAT.md`](docs/ATDECC_DESCRIPTOR_2013_COMPAT.md) | IEEE 1722.1-2013/2021 descriptor compatibility |
+| [`AVB_ENTITY_KIT.md`](docs/AVB_ENTITY_KIT.md) | The `avb_entity` kit at run time |
+| [`ENTITY_CONSTRUCTION_KIT.md`](docs/ENTITY_CONSTRUCTION_KIT.md) | The kit's design and build order |
+| [`GPS_MEDIA_CLOCK.md`](docs/GPS_MEDIA_CLOCK.md) | GPS-locked media clocks across sites |
+| [`GPTP_LINUX_PHC.md`](docs/GPTP_LINUX_PHC.md) | The Linux PHC factory for gPTP |
+| [`GPTP_STATE_MACHINES.md`](docs/GPTP_STATE_MACHINES.md) | The IEEE 802.1AS slave-role follower |
+| [`IEEE17221_GAP_ANALYSIS.md`](docs/IEEE17221_GAP_ANALYSIS.md) | IEEE 1722.1 implementation gap analysis |
+| [`LINUXPTP.md`](docs/LINUXPTP.md) | linuxptp configuration and the `ptpclient` bridge |
+| [`MILAN_LISTENER.md`](docs/MILAN_LISTENER.md) | The Milan listener: binding, probing and receive |
+| [`MILAN_TALKER.md`](docs/MILAN_TALKER.md) | The Milan talker: ACMP, declarations and the transmit gate |
+| [`MRP_STATE_MACHINES.md`](docs/MRP_STATE_MACHINES.md) | MRP, MSRP and MVRP |
+| [`MVU.md`](docs/MVU.md) | Milan Vendor Unique commands |
+| [`NANOAVB_ARCHITECTURE.md`](docs/NANOAVB_ARCHITECTURE.md) | The `nanoavb` entity stack |
+| [`NANOAVB_STATE_MACHINE_ARCHITECTURE.md`](docs/NANOAVB_STATE_MACHINE_ARCHITECTURE.md) | The `nanoavb` state machines |
+| [`OWLM.md`](docs/OWLM.md) | One-way latency measurement |
+| [`PERSISTENT_STATE.md`](docs/PERSISTENT_STATE.md) | The entity's persistent state file |
+| [`PTP_WAKE_TIMING.md`](docs/PTP_WAKE_TIMING.md) | Waking on a PTP deadline |
+| [`SHAPER.md`](docs/SHAPER.md) | Talker traffic shaping and the listener VLAN |
+| [`STREAM_PORTS.md`](docs/STREAM_PORTS.md) | The AVTP frame transport (packet socket, AF_XDP) |
+| [`TOOLS.md`](docs/TOOLS.md) | Every installed tool |
+| [`UDPTUN.md`](docs/UDPTUN.md) | The `udptun` framework |
+| [`YUBIKEY_AVB_KEY_SETUP.md`](docs/YUBIKEY_AVB_KEY_SETUP.md) | YubiKey keys for `avtp_crypto` |
 
 ## Building
 

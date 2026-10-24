@@ -70,7 +70,7 @@ statusbar-acmp-controller --interface=eth0 --action=CONNECT \
   --listener-entity-id=aa:bb:cc:dd:ee:ff:00:11 --listener-uid=1
 statusbar-atdecc-controller --interface=eth0
 statusbar-atdecc-monitor --interface=eth0 --show-descriptors
-statusbar-atdecc-monitor --socket=/run/mediabridge/atdecc.sock --enumerate
+statusbar-atdecc-monitor --socket=/run/avb-entity/atdecc.sock --enumerate
 statusbar-atdecc-monitor --pcap=capture.pcapng --enumerate
 statusbar-aem-get-counters --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=0
 statusbar-aem-set-clock-source --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --clock-domain-index=0 --clock-source-index=5
@@ -81,7 +81,7 @@ statusbar-aemxml json2bin examples/dual.json entity.bin
 
 `--socket=PATH` (monitor and controller) reaches one entity on this host
 through its local ATDECC socket (an entity started with
-`--atdecc.socket=PATH`, or mediabridge's `[avb] atdecc_socket`) instead of
+`--atdecc.socket=PATH`) instead of
 `--interface`: no raw-socket privileges, only that entity, and only its own
 traffic (see NANOAVB_ARCHITECTURE.md, "Local ATDECC socket"). The tools send
 an ENTITY_DISCOVER every 5 s while otherwise idle.
