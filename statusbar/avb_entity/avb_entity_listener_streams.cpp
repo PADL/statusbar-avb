@@ -992,20 +992,7 @@ void ListenerStreams::update_stream_input_counters(
         ts_sparse,
         now.count(),
         lock_tolerance_ns_,
-        sample_rate_);
-    drop_lock_of_a_lost_stream(slot);
-}
-
-void ListenerStreams::drop_lock_of_a_lost_stream(ListenerStreamSlot& slot)
-{
-    // An AVTPDU taken up just before the input lost its stream may lock it
-    // after the reactor thread has dropped the lock (on_listener_disconnected).
-    // The reactor clears the stream id first and the lock after, so a lock
-    // set after that sees the id gone here, and is dropped; the run restarts,
-    // so this AVTPDU is not the one the next stream's first is compared with.
-    if (slot.rx_stream_id.load() == 0) {
-        restart_stream_input(slot.counters);
-    }
+        slot.spec.format.sample_rate_hz);
 }
 
 namespace {
