@@ -183,7 +183,10 @@ constexpr size_t DISPATCH_TABLE_SIZE = 0x80;
     table[DESCRIPTOR_SIGNAL_TRANSCODER] = &dispatch_fixed<DescriptorSignalTranscoder, &AemEntityHandler::on_get_signal_transcoder>;
     table[DESCRIPTOR_CLOCK_DOMAIN] = &dispatch_fixed<DescriptorClockDomain, &AemEntityHandler::on_get_clock_domain>;
     table[DESCRIPTOR_CONTROL_BLOCK] = &dispatch_fixed<DescriptorControlBlock, &AemEntityHandler::on_get_control_block>;
-    table[DESCRIPTOR_TIMING] = &dispatch_fixed<DescriptorTiming, &AemEntityHandler::on_get_timing>;
+    // TIMING's ptp_instances list is a trailer wire_size() does not model
+    // inline either: without it a controller reads number_of_ptp_instances
+    // entries past the end (la_avdecc: "Incorrect payload size").
+    table[DESCRIPTOR_TIMING] = &dispatch_fixed_with_raw_trailer<DescriptorTiming, &AemEntityHandler::on_get_timing>;
     table[DESCRIPTOR_PTP_INSTANCE] = &dispatch_fixed<DescriptorPtpInstance, &AemEntityHandler::on_get_ptp_instance>;
     table[DESCRIPTOR_PTP_PORT] = &dispatch_fixed<DescriptorPtpPort, &AemEntityHandler::on_get_ptp_port>;
 
