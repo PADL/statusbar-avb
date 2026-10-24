@@ -7,12 +7,14 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include <sys/socket.h>
@@ -55,6 +57,62 @@ constexpr std::array<uint8_t, 86> PARENT_RESPONSE{
 // clang-format on
 
 ieee::Eui64 const GM{0x00, 0x1D, 0xC1, 0xFF, 0xFE, 0x12, 0x34, 0x56};
+
+// ptp4l's RESPONSE to `pmc -u -b 0 'GET PORT_DATA_SET'` (IEEE 1588-2019 15.5.3.6.1, linuxptp's struct portDS) from
+// a gPTP master port: 8c1f64.fffe.e89000-2, MASTER, peerMeanPathDelay 74.25 ns, P2P, version 2.
+// clang-format off
+constexpr std::array<uint8_t, 80> PORT_RESPONSE{
+    // common header
+    0x0D, 0x02, 0x00, 0x50,                          // management, PTPv2, messageLength 80
+    0x00, 0x00, 0x00, 0x00,                          // domain 0, minorSdoId, flags
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // correctionField
+    0x00, 0x00, 0x00, 0x00,                          // messageTypeSpecific
+    0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00,  // sourcePortIdentity.clockIdentity
+    0x00, 0x02,                                      // sourcePortIdentity.portNumber
+    0x00, 0x09,                                      // sequenceId 9
+    0x04, 0x7F,                                      // controlField, logMessageInterval
+    // management header
+    0x00, 0x00, 0x00, 0xFF, 0xFE, 0x00, 0x30, 0x39, 0x00, 0x01,  // targetPortIdentity (pmc's)
+    0x00, 0x00,                                                  // startingBoundaryHops, boundaryHops
+    0x02, 0x00,                                                  // actionField RESPONSE, reserved
+    // MANAGEMENT TLV
+    0x00, 0x01, 0x00, 0x1C,                                      // tlvType MANAGEMENT, lengthField 28
+    0x20, 0x04,                                                  // managementId PORT_DATA_SET
+    0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00, 0x00, 0x02,  // portIdentity
+    0x06,                                                        // portState MASTER
+    0x00,                                                        // logMinDelayReqInterval
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x4A, 0x40, 0x00,              // peerMeanPathDelay 74.25 ns
+    0x00, 0x03,                                                  // logAnnounceInterval, announceReceiptTimeout
+    0xFD,                                                        // logSyncInterval -3
+    0x02,                                                        // delayMechanism P2P
+    0x00, 0x02,                                                  // logMinPdelayReqInterval, versionNumber
+};
+// clang-format on
+
+gptp::ClockIdentity const BRIDGE{0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00};
+
+/// PORT_DATA_SET's data for `port` of BRIDGE with `delay_scaled`.
+auto port_data(uint16_t const port, int64_t const delay_scaled) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> data(PORT_RESPONSE.begin() + 54, PORT_RESPONSE.end());
+    data[9] = static_cast<uint8_t>(port);
+    for (int i = 0; i < 8; ++i) {
+        data[12 + static_cast<size_t>(i)] = static_cast<uint8_t>(static_cast<uint64_t>(delay_scaled) >> (56 - (8 * i)));
+    }
+    return data;
+}
+
+/// linuxptp's PORT_PROPERTIES_NP data for `port` of BRIDGE on `name` (MASTER, hardware timestamping).
+auto port_properties(uint16_t const port, std::string_view const name) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> data{0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00, 0x00, static_cast<uint8_t>(port), 0x06, 0x02};
+    data.push_back(static_cast<uint8_t>(name.size()));
+    data.insert(data.end(), name.begin(), name.end());
+    if (data.size() % 2 != 0) {
+        data.push_back(0);  // ptp4l pads the TLV to an even length
+    }
+    return data;
+}
 
 /// A RESPONSE carrying `data` for `id`, in `domain`, built as the bytes above are.
 auto response(uint16_t const id, std::vector<uint8_t> const& data, uint8_t const domain = 0) -> std::vector<uint8_t>
@@ -157,6 +215,52 @@ TEST(ptp_management, parses_current_and_time_properties)
     EXPECT_EQ(tp->time_source, uint8_t{0x20});
 }
 
+TEST(ptp_management, parses_port_data_set)
+{
+    auto const parsed = parse_management_message(PORT_RESPONSE);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->management_id, management_id::port_data_set);
+    auto const* port = std::get_if<PortDataSet>(&parsed->data);
+    EXPECT_TRUE(port != nullptr);
+    EXPECT_TRUE((port->port_identity == gptp::SourcePortIdentity{BRIDGE, 2}));
+    EXPECT_TRUE(port->port_state == PortState::master);
+    EXPECT_EQ(port->peer_mean_path_delay_scaled, int64_t{74} * 65536 + 16384);
+    EXPECT_EQ(time_interval_ns(port->peer_mean_path_delay_scaled), int64_t{74});
+    EXPECT_EQ(port->announce_receipt_timeout, uint8_t{3});
+    EXPECT_EQ(port->log_sync_interval, int8_t{-3});
+    EXPECT_TRUE(port->delay_mechanism == DelayMechanism::p2p);
+    EXPECT_EQ(port->version_number, uint8_t{2});
+    // too short for the data set
+    EXPECT_FALSE(parse_management_message(response(management_id::port_data_set, std::vector<uint8_t>(25))).has_value());
+}
+
+TEST(ptp_management, parses_port_properties_np)
+{
+    auto const parsed = parse_management_message(response(management_id::port_properties_np, port_properties(2, "enp8s0")));
+    EXPECT_TRUE(parsed.has_value());
+    auto const* properties = std::get_if<PortPropertiesNp>(&parsed->data);
+    EXPECT_TRUE(properties != nullptr);
+    EXPECT_TRUE((properties->port_identity == gptp::SourcePortIdentity{BRIDGE, 2}));
+    EXPECT_TRUE(properties->port_state == PortState::master);
+    EXPECT_EQ(properties->timestamping, uint8_t{2});
+    EXPECT_TRUE(properties->interface_name() == "enp8s0");
+    // a PTPText longer than the TLV
+    auto bad = port_properties(2, "enp8s0");
+    bad[12] = 40;
+    EXPECT_FALSE(parse_management_message(response(management_id::port_properties_np, bad)).has_value());
+}
+
+TEST(ptp_management, time_intervals_round_to_the_nearest_ns)
+{
+    EXPECT_EQ(time_interval_ns(0), int64_t{0});
+    EXPECT_EQ(time_interval_ns(int64_t{74} * 65536), int64_t{74});
+    EXPECT_EQ(time_interval_ns(int64_t{74} * 65536 + 32767), int64_t{74});
+    EXPECT_EQ(time_interval_ns(int64_t{74} * 65536 + 32768), int64_t{75});
+    EXPECT_EQ(time_interval_ns(int64_t{-12} * 65536 - 32768), int64_t{-13});
+    EXPECT_EQ(time_interval_ns(int64_t{-12} * 65536 - 32767), int64_t{-12});
+    EXPECT_EQ(time_interval_ns(INT64_MAX), INT64_MAX / 65536 + 1);
+}
+
 TEST(ptp_management, refuses_malformed_messages)
 {
     std::vector<uint8_t> bytes(PARENT_RESPONSE.begin(), PARENT_RESPONSE.end());
@@ -177,7 +281,7 @@ TEST(ptp_management, refuses_malformed_messages)
     // a PARENT_DATA_SET response too short for the data set
     EXPECT_FALSE(parse_management_message(response(management_id::parent_data_set, {0x00, 0x01, 0x02})).has_value());
     // an unknown data set parses, without data
-    auto const unknown = parse_management_message(response(0x2004, {0x01, 0x02}));
+    auto const unknown = parse_management_message(response(0x2005, {0x01, 0x02}));
     EXPECT_TRUE(unknown.has_value());
     EXPECT_TRUE(std::holds_alternative<std::monostate>(unknown->data));
     // MANAGEMENT_ERROR_STATUS: NO_SUCH_ID (0x0002) for PARENT_DATA_SET
@@ -266,6 +370,57 @@ TEST(ptp_management, client_reports_status_grandmaster_and_silence)
     std::filesystem::remove_all(dir);
 }
 
+TEST(ptp_management, client_follows_the_named_port_s_peer_delay)
+{
+    auto const dir = socket_dir("port");
+    int calls = 0;
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = (dir / "ptp4l").string(), .port_interface = "enp8s0"},
+        [&](PtpManagementState const& state) {
+            ++calls;
+            last = state;
+        });
+    EXPECT_TRUE(client.has_value());
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 10);
+    EXPECT_EQ(calls, 1);
+
+    // A PORT_DATA_SET before PORT_PROPERTIES_NP names the port: not ours yet.
+    c.handle(PORT_RESPONSE, 20);
+    EXPECT_EQ(calls, 1);
+    EXPECT_FALSE(c.state().peer_mean_path_delay_ns.has_value());
+
+    // ptp4l's ports, as pmc -b 0 sees them: port 1 ens4, port 2 enp8s0.
+    c.handle(response(management_id::port_properties_np, port_properties(1, "ens4")), 30);
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 31);
+    EXPECT_TRUE((c.state().port == gptp::SourcePortIdentity{BRIDGE, 2}));
+    EXPECT_EQ(calls, 1);                                                                       // the port alone is not a change
+    c.handle(response(management_id::port_data_set, port_data(1, int64_t{900} * 65536)), 40);  // ens4's: ignored
+    EXPECT_EQ(calls, 1);
+    c.handle(PORT_RESPONSE, 41);
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{74});
+    EXPECT_TRUE(last.port_state == PortState::master);
+    EXPECT_TRUE(last.delay_mechanism == DelayMechanism::p2p);
+    EXPECT_TRUE(last.grandmaster == GM);
+
+    // The same delay to the ns: no call; a new one: a call.
+    c.handle(response(management_id::port_data_set, port_data(2, int64_t{74} * 65536 + 100)), 50);
+    EXPECT_EQ(calls, 2);
+    c.handle(response(management_id::port_data_set, port_data(2, int64_t{77} * 65536)), 60);
+    EXPECT_EQ(calls, 3);
+    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{77});
+
+    // Silence forgets the port with the rest.
+    c.tick(0);
+    c.tick(10'000'000'000);
+    EXPECT_FALSE(c.state().port.has_value());
+    EXPECT_FALSE(last.peer_mean_path_delay_ns.has_value());
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
 TEST(ptp_management, create_validates_its_configuration)
 {
     auto const listener = [](PtpManagementState const&) {};
@@ -331,6 +486,30 @@ TEST(ptp_management, client_talks_to_a_ptp4l_socket)
     EXPECT_TRUE(seen.status == PtpManagementStatus::locked);
     EXPECT_TRUE(seen.grandmaster == GM);
     EXPECT_FALSE((*client)->finished());
+
+    // Following a port adds PORT_PROPERTIES_NP, then PORT_DATA_SET.
+    std::vector<uint16_t> ids;
+    auto follower = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = path, .port_interface = "enp8s0"}, [](PtpManagementState const&) {});
+    EXPECT_TRUE(follower.has_value());
+    (*follower)->tick(0);
+    for (int i = 0; i < 5; ++i) {
+        std::array<uint8_t, 128> in{};
+        ssize_t const n = ::recv(server, in.data(), in.size(), 0);
+        EXPECT_TRUE(n > 0);
+        auto const get =
+            parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(std::max<ssize_t>(n, 0))});
+        ids.push_back(get ? get->management_id : 0);
+    }
+    EXPECT_TRUE(
+        (ids ==
+         std::vector<uint16_t>{
+             management_id::parent_data_set,
+             management_id::current_data_set,
+             management_id::time_properties_data_set,
+             management_id::port_properties_np,
+             management_id::port_data_set}));
+    follower->reset();
     ::close(server);
     std::filesystem::remove_all(dir);
 }
