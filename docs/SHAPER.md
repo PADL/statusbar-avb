@@ -184,10 +184,10 @@ known speed is kept, so a flap does not churn the shaper; before any is known,
 1 Gbit/s is assumed. igb computes its own credits from idleSlope; the others
 matter to drivers that take them.
 
-Example (one 8-channel 48 kHz INT_24 AAF talker plus the CRF, 1 Gbit/s, MTU
-1500): AAF MaxFrameSize 169, wire 211, 13504 kbit/s; CRF wire 88 (the 68-octet
-minimum), 5632 kbit/s; idleSlope 19136, sendSlope -980864, hiCredit 29,
-loCredit -206.
+Example (one admitted 8-channel 48 kHz INT_32 AAF talker, 6 frames a packet,
+1 Gbit/s, MTU 1500, as captured on an i210 below): MaxFrameSize 24 + 6 x 8 x 4
++ 1 = 217, wire 259, 16576 kbit/s; idleSlope 16576, sendSlope -983424,
+hiCredit 25, loCredit -254.
 
 The frame size follows the rules under Milan v1.2 Table 4.4: F = MaxFrameSize
 + 22 (Ethernet header with the VLAN tag, and the FCS), at least 68; W = F + 20
@@ -198,6 +198,24 @@ MaxFrameSize.
 ## Worked examples
 
 The unit tests (`avb_entity_shaper_test.cpp`) check these by hand.
+
+One 8-channel 48 kHz INT_32 AAF stream (6 frames a packet) admitted, the CRF
+talker gated for want of a listener, 1 Gbit/s, MTU 1500; the i210 capture
+under "Verifying on a target":
+
+```
+MaxFrameSize = 24 + 6 x 8 x 4 + 1             = 217 octets (srp_max_frame_size)
+wire frame   = 217 + 22 + 20                  = 259 octets
+idleSlope    = 259 x 8 x 8000 / 1000          = 16576 kbit/s
+sendSlope    = 16576 - 1000000                = -983424 kbit/s
+hiCredit     = ceil(16576 x 1500 / 1000000)   = ceil(24.864)    = 25
+loCredit     = ceil(-983424 x 259 / 1000000)  = ceil(-254.707)  = -254
+class B (placeholder, the rest of the 75% budget, wire frame 1542):
+idleSlope    = 750000 - 16576                 = 733424 kbit/s
+sendSlope    = 733424 - 1000000               = -266576 kbit/s
+hiCredit     = ceil(733424 x 1500 / 1000000)  = ceil(1100.136)  = 1101
+loCredit     = ceil(-266576 x 1542 / 1000000) = ceil(-411.060)  = -411
+```
 
 One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s (1,000,000
 kbit/s), MTU 1500 as the largest interfering frame (SwiftMRP's frameNonSr):
@@ -314,12 +332,21 @@ ip -d link show type vlan     # <if>.2@<if>: ... state DOWN ... vlan protocol 80
 
 ## Verifying on a target
 
+On an i210 (igb, 4 TX queues, 1 Gbit/s) with one admitted 8-channel INT_32
+class A talker and the CRF talker gated (the first worked example above):
+
 ```
 tc qdisc show dev <if>
 #  qdisc mqprio 9000: root tc 3 map 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0
 #               queues:(2:3) (1:1) (0:0)
-#  qdisc cbs 8001: parent 9000:1 hicredit 29 locredit -206 sendslope -980864 idleslope 19136 offload 1
-#  qdisc cbs 8002: parent 9000:2 hicredit 1097 locredit -415 sendslope -269136 idleslope 730864 offload 1
+#               mode:dcb
+#               shaper:dcb
+#  qdisc pfifo 0: parent 8002: limit 1000p
+#  qdisc cbs 8001: parent 9000:1 hicredit 25 locredit -254 sendslope -983424 idleslope 16576 offload 1
+#  qdisc pfifo 0: parent 8001: limit 1000p
+#  qdisc fq_codel 0: parent 9000:4 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
+#  qdisc fq_codel 0: parent 9000:3 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
+#  qdisc cbs 8002: parent 9000:2 hicredit 1101 locredit -411 sendslope -266576 idleslope 733424 offload 1
 tc -s class show dev <if>        # per-queue counters (non-bypass traffic only)
 ethtool -S <if> | grep tx_queue  # per-queue packet counters, bypass frames included
 ```
@@ -341,7 +368,8 @@ mqprio and a cbs laid down by `tc`, kept the identical root, stopped asking
 after EOPNOTSUPP, uninstalled, and took over our handle holding another
 layout (EINVAL, delete, replace). The offloaded cbs on an i210 has not been
 exercised by these tests; the reset behaviour above is from the driver source
-and the kernel log.
+and the kernel log. The i210 output above is from a bench entity, and
+`shaper_cbs.one_int32_talker_as_captured_on_an_i210` checks its numbers.
 
 ## See also
 

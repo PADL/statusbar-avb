@@ -367,6 +367,27 @@ TEST(shaper_cbs, placeholders)
     EXPECT_EQ(cbs_targets(wide, {}, 1'000'000, 1500).class_b.idleslope_kbps, int32_t{10'000});
 }
 
+// One admitted 8-channel 48 kHz INT_32 AAF talker (the CRF gated, no listener), 1 Gbit/s,
+// MTU 1500: the cbs an i210 was programmed with (docs/SHAPER.md, "Verifying on a target").
+TEST(shaper_cbs, one_int32_talker_as_captured_on_an_i210)
+{
+    auto aaf = aaf_8ch_48k_int24();
+    aaf.format.aaf_format = avtp::AafFormat::int_32bit;
+    std::array<TSpec, 1> const streams{AvbEntityKit::talker_tspec(aaf)};
+    EXPECT_EQ(streams[0].max_frame_size, uint16_t{217});
+    auto const targets = cbs_targets(streams, {}, 1'000'000, 1500);
+    EXPECT_EQ(targets.class_a.idleslope_kbps, int32_t{16576});
+    EXPECT_EQ(targets.class_a.sendslope_kbps, int32_t{-983424});
+    EXPECT_EQ(targets.class_a.hicredit, int32_t{25});
+    EXPECT_EQ(targets.class_a.locredit, int32_t{-254});
+    EXPECT_EQ(targets.class_a.max_frame_size, uint32_t{259});
+    EXPECT_TRUE(targets.class_b.placeholder);
+    EXPECT_EQ(targets.class_b.idleslope_kbps, int32_t{733424});
+    EXPECT_EQ(targets.class_b.sendslope_kbps, int32_t{-266576});
+    EXPECT_EQ(targets.class_b.hicredit, int32_t{1101});
+    EXPECT_EQ(targets.class_b.locredit, int32_t{-411});
+}
+
 #if defined(__linux__)
 namespace {
 
