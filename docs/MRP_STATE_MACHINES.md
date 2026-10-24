@@ -347,6 +347,42 @@ A full declare → peer notification → withdraw cycle:
   declaration, interesting stream ID pruning, and observer
   subscription lifecycle.
 
+## End-station and Milan additions
+
+- **Immediate leave for MSRP.** Milan v1.2 Section 4.2.7.2.2 replaces the
+  registrar's `IN / rLv! -> (start leavetimer) -> LV` with
+  `IN / rLv! -> (Lv) -> MT` for MSRP (`Event::RLeaveImmediate`); Lv and Mt
+  behave as for the standard rLv!. MVRP keeps the standard transition.
+- **Timers.** LeaveTime defaults to 5000 ms (Milan v1.2 Table 4.3,
+  IEEE 802.1Q 10.7.4.2). The long LeaveTime is safe only because of the
+  immediate-leave rule: an explicit withdrawal is still seen at once.
+  LeaveAllTime is drawn uniformly from [10 s, 15 s) per period, inside the
+  9.5 s to 15.5 s tolerance (IEEE 802.1Q 10.7.4.3).
+- **Changed values are declared New.** When an attribute we declare is
+  re-declared with a different value (a talker moved to an adopted VID),
+  the participant declares it New (IEEE 802.1Q-2018 10.7.5.1) so the change
+  goes out at the next transmit opportunity rather than at the next periodic
+  or LeaveAll.
+- **Reserved table slots.** Without pruning, a bridge propagates every Talker
+  Advertise on the network to an end station, and those registrations arrive
+  before the station's own declarations (made after gPTP lock and MAAP).
+  `MsrpConfig::reserved_*` keeps slots of each table for attributes that are
+  ours: a Talker Advertise or Talker Failed we declare or whose stream one of
+  our declared Listeners is bound to, and a Listener we declare or one for a
+  stream we advertise. Foreign attributes are held to `max - reserved`. Size
+  each reservation to the entity's own streams that use the table (Talker
+  Advertise: talker streams plus listener streams).
+- **Domain adoption.** `on_domain_declared` fires on every received Domain
+  declaration (New, JoinIn, JoinMt, refreshes included) with the value as on
+  the wire (SRclassID and SRclassPriority stepped per vector position,
+  SRclassVID unchanged), even when the station declares the same SRclassID
+  itself. An entity uses it to adopt the bridge's Class A parameters (Milan
+  v1.2 Section 4.2.7.2.1).
+- **Registered versus known advertises.** `find_registered_talker_advertise`
+  returns a Talker Advertise only while a peer's declaration is registered
+  (In or Leaving); `find_talker_advertise` also returns records the peer has
+  left (kept until reclaimed) and ones only we declare.
+
 ## References
 
 - IEEE 802.1Q-2014 Clause 10 (MRP), Clause 11.2 (MVRP), Clause 35 (MSRP)

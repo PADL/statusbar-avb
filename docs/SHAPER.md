@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com> -->
+
 # Talker traffic shaping: mqprio, cbs and SO_PRIORITY
 
 `avb_entity::EntityShaper` (`statusbar/avb_entity/avb_entity_shaper.hpp`) puts
@@ -58,8 +60,7 @@ replaced; if that fails with EINVAL, which is what mqprio answers when the
 root is already an mqprio with our handle (a "change", which it refuses: our
 handle with another layout), it deletes the root with our handle and tries
 once more. So a foreign mqprio that happens to hold our handle
-(`ShaperConfig::qdisc_major`, the bridge's `[avb] qdisc_handle`, default
-0x9000) is taken over. Nothing of ours is left installed when `install()`
+(`ShaperConfig::qdisc_major`, default 0x9000) is taken over. Nothing of ours is left installed when `install()`
 fails.
 
 ## Adapter resets (igb, igc)
@@ -73,6 +74,13 @@ link down for about 4 s, gPTP lost, and the PHC's SDP pin functions cleared
 the driver reprograms the queue's idleSlope and credits only), and mqprio is
 never offloaded on igb (`hw 0`: installing or deleting it touches no
 hardware); only the first cbs and the last one cost a reset.
+
+`ShaperQdiscs::program()` therefore always sends a cbs replace, never a
+removal: on a queue that already has a cbs it is a change in place (the
+driver's offload is reprogrammed, its transmit mode untouched); on the default
+qdisc it grafts the cbs, which enables the transmit mode only when no other
+cbs is there yet. Class A's goes first, since igc refuses a class B cbs before
+class A's.
 
 So the shaper puts a cbs on both class queues at install and never takes the
 last one away while running:
@@ -94,10 +102,10 @@ and the next tick, before the cbs follows the admitted set. On class B's queue
 (skb priority 2 on our map, `map 0 0 1 2 0 ...`) it is any AF_PACKET socket
 with SO_PRIORITY 2 and any IPv4 socket whose IP_TOS the kernel maps to
 TC_PRIO_BULK (`rt_tos2priority`: the AFx1 DSCPs, e.g. OpenSSH's default AF21
-for interactive sessions) when the AVB port carries IP. The bridge's kit sets
+for interactive sessions) when the AVB port carries IP. The kit sets
 no priority but the stream socket's, ptp4l's default `socket_priority` is 0,
-and the bench box's AVB port has no address, so nothing reaches class B there
-today. A small idleSlope would cap that traffic at a trickle; instead the
+and an AVB port with no address carries no such IP traffic, so usually
+nothing reaches class B. A small idleSlope would cap that traffic at a trickle; instead the
 placeholders share what the admitted streams leave of the SR budget, 75% of
 the link (802.1Q 34.3.1's default deltaBandwidth): all of it for the one
 empty class, half each when both are empty, with Annex L credits for an MTU
@@ -142,8 +150,7 @@ afterwards (XPS is consulted before the TC hash in `netdev_pick_tx`).
 | `igb` (i210), `igc` (i225/i226) | queue 0 | queue 1 | [2, N) | Qav mode: the lowest queue has the highest priority, and cbs offload is honoured only on queues 0 and 1 (`igb_offload_cbs` refuses others) |
 | anything else (e.g. mv88e6xxx switch ports) | N-1 | N-2 | [0, N-2) | the highest queue has the highest priority |
 
-`ShaperConfig::queues` (the bridge's `[avb] class_a_queue` / `class_b_queue`)
-overrides either queue; the queues left must form one range, and fewer than 3
+`ShaperConfig::queues` overrides either queue; the queues left must form one range, and fewer than 3
 TX queues is refused (`ShaperError::not_avb_capable`): an AVB port must keep
 its queues (no `ethtool -L <if> combined 1`). SwiftMRP's README notes the same
 igb inversion ("pass `--class-a-qdisc-handle 1 --class-b-qdisc-handle 2`").
@@ -152,13 +159,13 @@ The igb layout maps TCs to queues in reverse order (TC0 on 2-3, TC2 on 0);
 mqprio accepts that since Linux 6.5 ("allow reverse TC:TXQ mappings"); older
 kernels refuse it with EINVAL.
 
-## The cbs parameters (IEEE 802.1Q Annex L, as SwiftMRP)
+## The cbs parameters - IEEE 802.1Q-2022 Annex L
 
 Per admitted talker stream, from the TSpec the kit advertises
 (`srp_max_frame_size(format)`, MaxIntervalFrames 1):
 
 ```
-wire frame    = max(MaxFrameSize + 4 (VLAN) + 18 (L2), 68) + 20 (L1) + 1 (clock drift)
+wire frame    = max(MaxFrameSize + 4 (VLAN) + 18 (L2), 68) + 20 (L1)
 bandwidth     = ceil(wire frame * 8 * MaxIntervalFrames * intervals/s / 1000)   kbit/s
                 intervals/s: 8000 for class A (125 us), 4000 for class B (250 us)
 idleSlope     = sum of the class's bandwidths                                  kbit/s
@@ -177,11 +184,77 @@ known speed is kept, so a flap does not churn the shaper; before any is known,
 1 Gbit/s is assumed. igb computes its own credits from idleSlope; the others
 matter to drivers that take them.
 
-Example (the bridge's default model: one 8-channel 48 kHz INT_24 AAF talker
-plus the CRF, 1 Gbit/s, MTU 1500): AAF MaxFrameSize 192, wire 235, 15040
-kbit/s; CRF MaxFrameSize 28, wire 89, 5696 kbit/s; idleSlope 20736, sendSlope
--979264, hiCredit 32, loCredit -230 (`avb_entity_shaper_test.cpp` shows the
-arithmetic).
+Example (one 8-channel 48 kHz INT_24 AAF talker plus the CRF, 1 Gbit/s, MTU
+1500): AAF MaxFrameSize 169, wire 211, 13504 kbit/s; CRF wire 88 (the 68-octet
+minimum), 5632 kbit/s; idleSlope 19136, sendSlope -980864, hiCredit 29,
+loCredit -206.
+
+The frame size follows the rules under Milan v1.2 Table 4.4: F = MaxFrameSize
++ 22 (Ethernet header with the VLAN tag, and the FCS), at least 68; W = F + 20
+(preamble and inter-packet gap). `wire_frame_size` does not add the
+clock-drift byte, because `srp_max_frame_size` already includes it in
+MaxFrameSize.
+
+## Worked examples
+
+The unit tests (`avb_entity_shaper_test.cpp`) check these by hand.
+
+One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s (1,000,000
+kbit/s), MTU 1500 as the largest interfering frame (SwiftMRP's frameNonSr):
+
+```
+idleSlope = 13504 + 5632                     = 19136 kbit/s
+sendSlope = 19136 - 1000000                  = -980864 kbit/s
+hiCredit  = ceil(19136 x 1500 / 1000000)     = ceil(28.704)    = 29
+loCredit  = ceil(-980864 x 211 / 1000000)    = ceil(-206.962)  = -206
+            (maxFrameSizeA = the larger wire frame, 211)
+```
+
+The AAF alone at 100 Mbit/s (100,000 kbit/s): idleSlope 13504, sendSlope
+-86496, hiCredit ceil(13504 x 1500 / 100000) = ceil(202.56) = 203, loCredit
+ceil(-86496 x 211 / 100000) = ceil(-182.507) = -182.
+
+One AAF stream in class B (6752 kbit/s), class A as above:
+
+```
+sendSlopeB = 6752 - 1000000 = -993248
+hiCreditB  = ceil(6752 x (1500 / (1000000 - 19136) + 211 / 1000000))
+           = ceil(6752 x (0.00152926 + 0.000211)) = ceil(11.750) = 12   (L-11)
+loCreditB  = ceil(-993248 x 211 / 1000000) = ceil(-209.575) = -209
+```
+
+The kit's bound: MAX_ENTITY_AUDIO_STREAMS 32-channel 48 kHz INT_24 AAF talkers
+and the CRF, on a gigabit link:
+
+```
+AAF TSpec  = 18 x 32 + 24 + 1                 = 601 octets (srp_max_frame_size)
+wire frame = 601 + 22 + 20                    = 643 octets
+bandwidth  = 643 x 8 x 8000                   = 41152 kbit/s a stream
+idleSlope  = 16 x 41152 + 5632 (the CRF)      = 664064 kbit/s (66.4% of the link)
+sendSlope  = 664064 - 1000000                 = -335936
+hiCredit   = ceil(664064 x 1500 / 1000000)    = ceil(996.096)   = 997
+loCredit   = ceil(-335936 x 643 / 1000000)    = ceil(-216.007)  = -216
+```
+
+That is within 802.1Q's default 75% for SR classes (IEEE 802.1Q-2022 Clause
+34.3, deltaBandwidth). The same at INT_32 (793-octet TSpec, 53440 kbit/s a
+stream, 860672 in all) is not.
+
+The placeholder, 1 Gbit/s, MTU 1500 (wire frame 1542), at half the 75% budget
+as each class gets with nothing admitted:
+
+```
+idleSlope = 750000 / 2                      = 375000 kbit/s
+sendSlope = 375000 - 1000000                = -625000
+hiCredit  = ceil(375000 x 1500 / 1000000)   = ceil(562.5)   = 563    (L-10)
+loCredit  = ceil(-625000 x 1542 / 1000000)  = ceil(-963.75) = -963   (L-12)
+```
+
+With the AAF and the CRF admitted (19136 kbit/s), class A is shaped for them and
+class B's placeholder takes the rest of the budget: idleSlope 750000 - 19136 =
+730864, sendSlope -269136, hiCredit ceil(730864 x 1500 / 1000000) =
+ceil(1096.296) = 1097, loCredit ceil(-269136 x 1542 / 1000000) =
+ceil(-415.008) = -415.
 
 ## Admission
 
@@ -239,14 +312,14 @@ another VID (its Talker Advertise's DataFrameParameters) is not covered.
 ip -d link show type vlan     # <if>.2@<if>: ... state DOWN ... vlan protocol 802.1Q id 2
 ```
 
-## Verifying on the box
+## Verifying on a target
 
 ```
 tc qdisc show dev <if>
 #  qdisc mqprio 9000: root tc 3 map 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0
 #               queues:(2:3) (1:1) (0:0)
-#  qdisc cbs 8001: parent 9000:1 hicredit 32 locredit -230 sendslope -979264 idleslope 20736 offload 1
-#  qdisc cbs 8002: parent 9000:2 hicredit 1094 locredit -417 sendslope -270736 idleslope 729264 offload 1
+#  qdisc cbs 8001: parent 9000:1 hicredit 29 locredit -206 sendslope -980864 idleslope 19136 offload 1
+#  qdisc cbs 8002: parent 9000:2 hicredit 1097 locredit -415 sendslope -269136 idleslope 730864 offload 1
 tc -s class show dev <if>        # per-queue counters (non-bypass traffic only)
 ethtool -S <if> | grep tx_queue  # per-queue packet counters, bypass frames included
 ```
@@ -268,4 +341,10 @@ mqprio and a cbs laid down by `tc`, kept the identical root, stopped asking
 after EOPNOTSUPP, uninstalled, and took over our handle holding another
 layout (EINVAL, delete, replace). The offloaded cbs on an i210 has not been
 exercised by these tests; the reset behaviour above is from the driver source
-and the bench box's dmesg.
+and the kernel log.
+
+## See also
+
+- [`AVB_ENTITY_KIT.md`](AVB_ENTITY_KIT.md) - talker admission
+- [`MILAN_TALKER.md`](MILAN_TALKER.md) - the transmit gate
+- [`STREAM_PORTS.md`](STREAM_PORTS.md) - the stream sockets
