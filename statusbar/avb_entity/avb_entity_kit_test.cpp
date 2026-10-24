@@ -1758,6 +1758,40 @@ TEST(avb_entity_slot_guard, enter_never_waits_lock_waits_for_leave)
     guard.leave();
 }
 
+// IEEE 802.1Q-2022 Clause 34.3.1: a talker format or rate change that takes every talker's
+// TSpec bandwidth (Milan v1.2 Table 4.4) past 75% of the link is NO_RESOURCES; the other
+// talkers' current formats count, a change lowering the total is always taken
+TEST(avb_entity_kit_formats, a_talker_change_keeps_within_the_class_a_budget)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.kit.link_mbps(), 1000U);
+    auto const output = [&m](uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, word));
+    };
+    // INT24 8 ch: 13504 kbit/s, INT32 8 ch: 16576, the CRF talker: 5632.
+    // At 28 Mbit/s (21000 kbit/s) the INT32 output fits alone, not beside the CRF.
+    m.kit.set_link_mbps(28);
+    EXPECT_EQ(output(base_format(48000, 8)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_TRUE(m.formats.empty());
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    // 96 kHz doubles the AAF talker (22720 kbit/s): refused as its SET_STREAM_FORMAT.
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_TRUE(m.rates.empty());
+    // At 30 Mbit/s (22500 kbit/s) the 22208 fits.
+    m.kit.set_link_mbps(30);
+    EXPECT_EQ(output(base_format(48000, 8)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), base_format(48000, 8));
+    // Over budget already, narrowing back is taken; listeners never count.
+    m.kit.set_link_mbps(1);
+    EXPECT_EQ(output(INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 8))),
+        atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_link_mbps(40);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+}
+
 // A streaming output refuses the rate change; so does a kit without the
 // entity's hook; a local change is refused while a controller has the entity
 // locked, and is otherwise applied and notified like a controller's

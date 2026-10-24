@@ -8,6 +8,7 @@
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_shaper.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
@@ -449,6 +450,11 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
     if (!on_stream_format_changed_) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
+    // IEEE 802.1Q-2022 Clause 34.3.1: class A's share of the link. Milan v1.2 Section
+    // 5.4.2.7 names no status for it; NO_RESOURCES says what is short.
+    if (output && !talkers_fit(std::array{RetimedFormat{.type = type, .index = index, .word = format}})) {
+        return atdecc::AEM_STATUS_NO_RESOURCES;
+    }
     // The stream path first (it may refuse the format; no slot before
     // start(), which opens it with the spec), then the entity's data plane;
     // either refusing leaves both as they were.
@@ -497,6 +503,22 @@ auto AvbEntityKit::retimed_formats(uint32_t const rate) const -> StatusValue<Ret
     return out;
 }
 
+auto AvbEntityKit::talkers_fit(std::span<RetimedFormat const> const changed) const noexcept -> bool
+{
+    auto const kbps = [](StreamSpec const& s) {
+        return uint64_t{stream_bandwidth_kbps(talker_tspec(s), CLASS_A_INTERVALS_PER_SEC)};
+    };
+    uint64_t before = 0;
+    uint64_t after = 0;
+    for (auto const& spec : talker_specs_) {
+        auto const change = std::ranges::find_if(
+            changed, [&spec](RetimedFormat const& r) { return r.type == DESCRIPTOR_STREAM_OUTPUT && r.index == spec.index; });
+        before += kbps(spec);
+        after += change == changed.end() ? kbps(spec) : kbps(with_format(spec, change->word));
+    }
+    return after <= before || after <= static_cast<uint64_t>(sr_budget_kbps(link_mbps_ * 1000U));
+}
+
 auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t const rate) -> uint8_t
 {
     if (rate == sample_rate_) {
@@ -507,7 +529,8 @@ auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t cons
     }
     // Every audio stream follows: its current format at the new rate must be
     // one it lists (an AM824 stream cannot be re-timed).
-    if (!retimed_formats(rate)) {
+    auto const retimed = retimed_formats(rate);
+    if (!retimed) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Each re-timing is a SET_STREAM_FORMAT, refused on a bound input or a
@@ -526,6 +549,9 @@ auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t cons
     }
     if (!on_sampling_rate_changed_) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    if (!talkers_fit(*retimed)) {
+        return atdecc::AEM_STATUS_NO_RESOURCES;  // as each SET_STREAM_FORMAT would be
     }
     // What a refusal restores exactly: the rate, the specs, the runtime formats.
     uint32_t const before = sample_rate_;

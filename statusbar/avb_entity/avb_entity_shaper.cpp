@@ -233,7 +233,7 @@ auto cbs_targets(
 {
     auto const a = class_a_cbs(class_a_streams, link_kbps, max_interfering_frame);
     auto const b = class_b_cbs(class_b_streams, a, link_kbps, max_interfering_frame);
-    int64_t const budget = (int64_t{link_kbps} * SR_BANDWIDTH_PERCENT / 100) - a.idleslope_kbps - b.idleslope_kbps;
+    int64_t const budget = sr_budget_kbps(link_kbps) - a.idleslope_kbps - b.idleslope_kbps;
     int64_t const share = a.empty() && b.empty() ? budget / 2 : budget;
     return CbsTargets{
         .class_a = a.empty() ? placeholder_cbs(link_kbps, max_interfering_frame, share) : a,
@@ -558,6 +558,7 @@ auto EntityShaper::refresh_link_speed() -> bool
         link_error_ = speed.error();
         kit_.host().ctl_log().warning("shaper: reading the link speed failed: errno {}", link_error_.value());
     }
+    kit_.set_link_mbps(link_mbps());  // its class A budget
     return link_mbps() != programmed_link_mbps_;
 }
 

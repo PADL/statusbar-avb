@@ -325,6 +325,11 @@ class AvbEntityKit
     /// as it was. Pass an empty function to remove it.
     using SamplingRateFn = sg14::inplace_function<uint8_t(uint32_t rate), 32>;
     void set_on_sampling_rate_changed(SamplingRateFn fn) noexcept { on_sampling_rate_changed_ = std::move(fn); }
+    /// The link speed (Mbit/s, reactor thread; 1000 until set, the shaper keeps it current) whose
+    /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format or rate change that takes
+    /// every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
+    void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
+    [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
     /// Re-time the kit and every AAF stream's current format to @p rate, all or
     /// nothing (false when a stream lists no format at @p rate). From the
     /// sampling-rate hook only, with nothing reading the streams.
@@ -533,6 +538,9 @@ class AvbEntityKit
     };
     using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
     [[nodiscard]] auto retimed_formats(uint32_t rate) const -> StatusValue<RetimedFormats>;
+    /// Whether the talkers fit the class A budget (see set_link_mbps) with @p changed's
+    /// STREAM_OUTPUT formats in place of theirs; a change that lowers the total always does.
+    [[nodiscard]] auto talkers_fit(std::span<RetimedFormat const> changed) const noexcept -> bool;
     /// The rate the kit and its talker and listener paths run at.
     void set_streams_rate(uint32_t rate);
     /// Back to @p rate and the specs @p talkers / @p listeners had (a refused
@@ -552,6 +560,7 @@ class AvbEntityKit
     StreamSpecs talker_specs_;
     StreamSpecs listener_specs_;
     uint32_t sample_rate_;
+    uint32_t link_mbps_{1000};
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
     nanoavb::DescriptorStorageHandler& storage_handler_;
