@@ -7,11 +7,11 @@ requests are `net::tc::TcClient` (`core/statusbar/net/net_tc_qdisc.hpp`).
 
 ## Why bypass + mqprio + SO_PRIORITY works
 
-The kit sends stream frames on a `PACKET_QDISC_BYPASS` socket
-(`TalkerStreams::open_tx`). Bypass frames skip every software qdisc and go
-straight to `dev_direct_xmit` on a TX queue that `packet_pick_tx_queue` picks:
-the driver's `ndo_select_queue` if it has one (igb and igc do not), otherwise
-`netdev_pick_tx`, which maps `skb->priority` through the netdev's
+The kit sends stream frames on a `PACKET_QDISC_BYPASS` socket (its stream
+port's, `PacketStreamPort::open_tx`). Bypass frames skip every software qdisc
+and go straight to `dev_direct_xmit` on a TX queue that `packet_pick_tx_queue`
+picks: the driver's `ndo_select_queue` if it has one (igb and igc do not),
+otherwise `netdev_pick_tx`, which maps `skb->priority` through the netdev's
 priority-to-traffic-class map to that class's queue range. An AF_PACKET
 socket's `skb->priority` is its `SO_PRIORITY`.
 
@@ -24,10 +24,10 @@ it although they never meet mqprio itself. The shaper therefore:
    to TC1, every other priority to TC0; one TX queue per SR class, the rest
    to TC0;
 2. relies on the stream TX socket's `SO_PRIORITY` being the class A PCP:
-   `open_tx` sets it to the kit's `stream_pcp` (best effort: priority 7 needs
-   CAP_NET_ADMIN, and on failure the kit logs a warning and the socket stays
-   open on the default queue), so the steering holds whoever installs the
-   map: SwiftMRP's mrpd, a hand-run `tc`, or this shaper. The shaper keys
+   `PacketStreamPort::open_tx` sets it to the kit's `stream_pcp` (best
+   effort: priority 7 needs CAP_NET_ADMIN, and on failure the kit logs a
+   warning and the socket stays open on the default queue), so the steering
+   holds whoever installs the map: SwiftMRP's mrpd, a hand-run `tc`, or this shaper. The shaper keys
    class A on that same PCP (`kit.config().stream_pcp`) and class B on the
    802.1Q default 2, and refuses a PCP of 8 or more or one PCP for both
    (`ShaperError::bad_priority`);

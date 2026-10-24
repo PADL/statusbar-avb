@@ -16,10 +16,13 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
+#include "statusbar/avb_entity/avb_entity_test_stream_port.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
@@ -742,6 +745,38 @@ TEST(tone_clocking, audio_inputs_still_rejected)
     auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_audio.bin");
     auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
     EXPECT_TRUE(!result.has_value());
+}
+
+// Each media-timer wake begins a port cycle and ends with one flush of the
+// stream port after the wake's transmits (StreamPort::tx_flush once per tick).
+TEST(tone_port, each_wake_transmits_then_flushes_the_port_once)
+{
+    auto config = make_config_with_blob(load_file(entity_tone_aaf_bin_path()));
+    config.gate_talker_on_listener = false;
+    config.stream_address_mode = "static";
+    config.interface_name = "tone-port-test0";  // no such interface: no sockets
+    auto result = AvbEntityToneGenerator::create(std::move(config));
+    EXPECT_TRUE(result.has_value());
+    if (!result.has_value()) {
+        return;
+    }
+    auto& entity = **result;
+    TestStreamPort port{Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}};
+    entity.bind_stream_port(port);
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    EXPECT_TRUE(entity.start(reactor).has_value());
+
+    auto t = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    for (size_t wake = 1; wake <= 4; ++wake) {
+        entity.process_audio(t);
+        t += std::chrono::microseconds{125};
+        EXPECT_EQ(port.flushes(), wake);
+        EXPECT_EQ(port.cycles_begun(), wake);
+        EXPECT_EQ(port.cycles_ended(), wake);
+    }
+    EXPECT_TRUE(port.tx_pending() > 0);
+    (void)entity.stop();
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)

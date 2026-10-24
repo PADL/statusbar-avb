@@ -21,10 +21,9 @@ namespace statusbar::avb_entity {
 
 namespace {
 
-/// The largest AM824/AAF stream frame built here: header plus the most samples
-/// and channels a packet carries, 4 bytes each.
-constexpr size_t MAX_AUDIO_FRAME = std::max(avtp::AafPdu::HEADER_LENGTH, avtp::Am824Pdu::HEADER_LENGTH) +
-    (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
+/// The window an audio AVTPDU is serialized into: the most a tagged frame
+/// carries (a format needing more is refused by its serializer).
+constexpr size_t MAX_AUDIO_PAYLOAD = StreamPort::MAX_TX_PAYLOAD;
 
 /// The steady clock in ns: the time base of the tu window (note_grandmaster_changed).
 [[nodiscard]] auto steady_now_ns() noexcept -> int64_t
@@ -161,10 +160,14 @@ auto TalkerStreams::slot_of(StreamKind const kind) const noexcept -> TalkerStrea
 void TalkerStreams::transmit_am824(
     TalkerStreamSlot& slot, uint64_t const now_ns, uint32_t const samples, std::span<float const> src)
 {
-    if (!slot.am824 || stream_tx_.fd() < 0) {
+    if (!slot.am824 || port_ == nullptr) {
         return;
     }
-    std::array<uint8_t, MAX_AUDIO_FRAME> frame{};
+    std::span<uint8_t> const frame = port_->tx_begin(MAX_AUDIO_PAYLOAD);
+    if (frame.empty()) {
+        return;
+    }
+    span_zero(frame);
 
     size_t const channels = slot.spec.format.channels;
     avtp::Am824Pdu pdu{};
@@ -174,7 +177,7 @@ void TalkerStreams::transmit_am824(
     auto const am824_rate = avtp::am824_sample_rate_from_hz(config_.sample_rate).value_or(avtp::Am824SampleRate::rate_96_khz);
     pdu.init(slot.am824->stream_id, static_cast<uint8_t>(channels), am824_rate);
 
-    std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
+    std::span<uint8_t> const payload = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::am824_serialize_mbla(
         *slot.am824, pdu, payload, static_cast<uint8_t>(samples), now_ns, [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
@@ -185,21 +188,24 @@ void TalkerStreams::transmit_am824(
         return;
     }
 
-    span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
-    size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
-    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
+    send_stream_frame(slot, frame.first(avtp::Am824Pdu::HEADER_LENGTH + audio_bytes));
 }
 
 void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
 {
-    if (!slot.aaf || stream_tx_.fd() < 0) {
+    if (!slot.aaf || port_ == nullptr) {
         return;
     }
-    std::array<uint8_t, MAX_AUDIO_FRAME> frame{};
+    std::span<uint8_t> const frame = port_->tx_begin(MAX_AUDIO_PAYLOAD);
+    if (frame.empty()) {
+        return;
+    }
+    span_zero(frame);
 
     size_t const channels = slot.spec.format.channels;
     avtp::AafPdu pdu{};
-    std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
+    std::span<uint8_t> const payload = frame.subspan(avtp::AafPdu::HEADER_LENGTH);
     size_t const audio_bytes =
         avtp::aaf_stream_serialize(*slot.aaf, pdu, payload, samples, now_ns, [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
@@ -211,9 +217,8 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
     }
 
     pdu.set_tu(timestamp_uncertain(steady_now_ns()));
-    span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
-    size_t const frame_len = avtp::AafPdu::HEADER_LENGTH + audio_bytes;
-    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    send_stream_frame(slot, frame.first(avtp::AafPdu::HEADER_LENGTH + audio_bytes));
 }
 
 auto serialize_aaf_raw(
@@ -253,17 +258,20 @@ auto TalkerStreams::transmit_aaf_raw(
     StreamRawRenderFn const& render) -> bool
 {
     SlotGuard::Entry const entry{guards_[slot.spec.index]};
-    if (!entry.entered() || !slot.aaf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
+    if (!entry.entered() || !slot.aaf || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
-    std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::span<uint8_t> const frame = port_->tx_begin(MAX_AUDIO_PAYLOAD);
+    if (frame.empty()) {
+        return false;
+    }
     size_t const frame_len =
         serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
-    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    send_stream_frame(slot, frame.first(frame_len));
     return true;
 }
 
@@ -272,7 +280,9 @@ void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
     // Frames carry the SR class VID + PCP (untagged AVTP is in no SR class). The pcap stamp is the
     // gPTP wall-clock transmit time, so a capture shows avtp_ts - wall_clock = presentation_offset.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(&slot.dest_mac, frame, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp);
+    if (port_ != nullptr) {
+        (void)port_->tx_commit(frame, slot.dest_mac, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp);
+    }
     ++slot.tx_packets;
     if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
         // AVTP stream header: mr is bit 3 of octet 1; tu is bit 0 of octet 3,
@@ -336,7 +346,7 @@ auto serialize_crf_raw(
 
 void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_index)
 {
-    if (!slot.crf || stream_tx_.fd() < 0 || !media_clock_.anchored()) {
+    if (!slot.crf || port_ == nullptr || !media_clock_.anchored()) {
         return;
     }
     // Convert the DECLARED interval (in CRF base-frequency events) into the audio
@@ -355,44 +365,33 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
 
 auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> const timestamps_ns) -> bool
 {
-    if (!slot.crf || stream_tx_.fd() < 0 || stream_stopped(slot.spec.index)) {
+    if (!slot.crf || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;
     }
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (MAX_CRF_TIMESTAMPS_PER_PDU * avtp::CrfPdu::TIMESTAMP_SIZE);
+    static_assert(MAX_FRAME <= StreamPort::MAX_TX_PAYLOAD);
     // Not zeroed: serialize_crf_raw writes every byte it sends.
-    std::array<uint8_t, MAX_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::span<uint8_t> const frame = port_->tx_begin(MAX_FRAME);
+    if (frame.empty()) {
+        return false;
+    }
     size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
-    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    send_stream_frame(slot, frame.first(frame_len));
     return true;
 }
 
-auto TalkerStreams::open_tx(std::string_view const interface_name, TxPcapConfig const& pcap) -> Status
+auto TalkerStreams::open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status
 {
-    // qdisc-bypass: our own egress must not be re-received by our RX socket.
-    // Transmit-only: nothing reads this socket, so it must not be handed (and
-    // drop) a copy of every AVTP frame on the host.
-    auto status =
-        stream_tx_.open(interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true, /*transmit_only=*/true);
-    if (!status) {
-        return status;
-    }
-    // Bypass frames skip the qdiscs: skb->priority picks their TX queue through the prio-to-TC
-    // map, so the SR class PCP lands them on EntityShaper's shaped queue. Best effort (priority 7
-    // needs CAP_NET_ADMIN): the streams still flow, and the owner logs tx_priority_error().
-    if (auto priority = stream_tx_.set_priority(config_.stream_pcp); !priority) {
-        tx_priority_error_ = priority.error();
-    } else {
-        tx_priority_error_ = {};
-    }
+    port_ = &port;
     // Optional TX stream capture: qdisc-bypass egress is invisible to any
-    // local capture, so tap the frames at the socket, gPTP-timestamped.
+    // local capture, so tap the frames at the port, gPTP-timestamped.
     if (!pcap.path.empty()) {
         tx_pcap_recorder_.configure(
             std::string{pcap.path}, pcap.max_bytes, /*snaplen=*/1522, static_cast<uint64_t>(pcap.seconds) * 1'000'000'000ULL);
-        stream_tx_.set_tx_tap([this](std::span<uint8_t const> frame) { tx_pcap_recorder_.record(frame, last_tx_gptp_ns_); });
+        port.set_tx_tap([this](std::span<uint8_t const> frame) { tx_pcap_recorder_.record(frame, last_tx_gptp_ns_); });
     }
     return success();
 }

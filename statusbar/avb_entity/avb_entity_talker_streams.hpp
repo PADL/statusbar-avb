@@ -6,8 +6,9 @@
 /// @file avb_entity_talker_streams.hpp
 /// @brief TalkerStreams — the local AVB stream TX path.
 ///
-/// Owns the qdisc-bypass TX socket, N per-stream TX slots (each holding the
-/// kind-matching AM824/AAF/CRF serializer shaped by its StreamSpec), the TX
+/// Borrows the StreamPort it transmits on and owns N per-stream TX slots
+/// (each holding the kind-matching AM824/AAF/CRF serializer shaped by its
+/// StreamSpec), the TX
 /// packet counters, and the TX-capture recorder. Runs on the SCHED_FIFO
 /// media-timer thread (called from the entities' process_audio). Reads the
 /// entity's config / media clock / audio buffer / gPTP-now through references
@@ -20,13 +21,13 @@
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
 #include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
-#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -108,21 +109,16 @@ struct TalkerStreams
         uint32_t seconds{0};
     };
 
-    /// Open the qdisc-bypass TX socket on @p interface_name and (optionally)
-    /// arm the TX pcap capture with its socket egress tap. One call from the
-    /// owning entity's start() — the socket, the recorder and the tap are
-    /// THIS class's state, so this class assembles them (refactor phase A:
-    /// entities no longer reach into stream_tx_/tx_pcap_recorder_).
-    auto open_tx(std::string_view interface_name, TxPcapConfig const& pcap) -> Status;
-    auto open_tx(std::string_view const interface_name) -> Status { return open_tx(interface_name, TxPcapConfig{}); }
+    /// Transmit on @p port from now on and (optionally) arm the TX pcap capture
+    /// as its egress tap. @p port must outlive this object, or a later open_tx.
+    /// Reactor thread, before the media thread transmits. Errors: none today.
+    [[nodiscard]] auto open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status;
+    [[nodiscard]] auto open_tx(StreamPort& port) -> Status { return open_tx(port, TxPcapConfig{}); }
 
-    /// Set the stream TX socket's SO_PRIORITY, which under PACKET_QDISC_BYPASS picks the hardware
-    /// TX queue; open_tx sets it to config_.stream_pcp (best effort). Reactor thread. Errors: the
-    /// setsockopt errno; bad_file_descriptor before open_tx.
-    [[nodiscard]] auto set_tx_priority(int const priority) noexcept -> Status { return stream_tx_.set_priority(priority); }
-    /// Why open_tx could not set the socket's priority to config_.stream_pcp
-    /// (empty: it did). The socket stays open either way.
-    [[nodiscard]] auto tx_priority_error() const noexcept -> std::error_code { return tx_priority_error_; }
+    /// Hand this tick's committed frames to the link (StreamPort::tx_flush):
+    /// once per media tick, after the tick's last transmit. Media thread.
+    /// Errors: the port's; success before open_tx.
+    [[nodiscard]] auto flush() noexcept -> Status { return port_ != nullptr ? port_->tx_flush() : Status{}; }
 
     /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
     /// the file awaits the non-RT flush.
@@ -219,12 +215,13 @@ struct TalkerStreams
     void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
     /// Send one AAF packet of @p frames frames at wire presentation time @p pts_ns (no offset added),
     /// its payload filled by @p render as raw wire bytes. Media-timer thread; true if sent. Nothing is
-    /// sent, nor the sequence advanced, for a non-AAF slot, no socket, or @p render false.
+    /// sent, nor the sequence advanced, for a non-AAF slot, no port frame, or @p render false.
     auto transmit_aaf_raw(
         TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
-    /// Send one built stream frame on @p slot (VLAN-tagged, pcap-stamped) and
-    /// count it. The tail every audio transmit shares. Media-timer thread.
-    void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame);
+    /// Commit @p payload, a prefix of the port's tx_begin window, on @p slot
+    /// (VLAN-tagged, pcap-stamped) and count it. The tail every transmit
+    /// shares. Media-timer thread.
+    void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> payload);
 
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.
@@ -240,7 +237,7 @@ struct TalkerStreams
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
     /// Send one CRF PDU on @p slot carrying exactly @p timestamps_ns (64-bit gPTP times, offset
     /// applied). Media-timer thread; true if sent. Nothing is sent for a non-CRF or stopped slot,
-    /// no socket, or a count other than timestamps_per_packet.
+    /// no port frame, or a count other than timestamps_per_packet.
     auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns) -> bool;
 
     /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
@@ -274,10 +271,9 @@ struct TalkerStreams
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
-    net::RawnetContext stream_tx_{};
-    std::error_code tx_priority_error_{};  ///< see tx_priority_error()
+    StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
-    /// send so the socket egress tap can stamp the captured frame with the gPTP TX time.
+    /// send so the port egress tap can stamp the captured frame with the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};
     uint64_t last_tx_gptp_ns_{0};
 };

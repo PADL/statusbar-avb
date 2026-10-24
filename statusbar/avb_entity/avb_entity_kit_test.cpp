@@ -10,6 +10,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_test_stream_port.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
@@ -2680,4 +2681,39 @@ TEST(avb_entity_kit_mappings, saved_mappings_survive_a_start_before_the_hook)
         EXPECT_TRUE(saved.audio_maps.size() == 1 && saved.audio_maps[0].mappings.size() == 3);
     }
     std::filesystem::remove_all(dir);
+}
+
+// A port bound before start() is the kit's stream port: the talker transmits
+// on it and the listener joins its static groups on it; begin_stream_tick
+// begins the tick and flush_stream_tx flushes and ends it; stop() leaves it.
+TEST(avb_entity_kit_stream_port, a_bound_port_carries_the_streams_and_the_tick)
+{
+    TestStreamPort port{ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x51}};
+    MilanKit k{false, 0x51, /*gate=*/false};
+    k.kit.bind_stream_port(port);
+    EXPECT_TRUE(k.kit.start(k.reactor).has_value());
+    EXPECT_FALSE(k.kit.stream_tx_error());
+    EXPECT_FALSE(k.kit.stream_rx_error());
+    EXPECT_FALSE(k.kit.stream_tx_priority_error());
+
+    auto* const aaf = k.kit.talker().slot_of(StreamKind::aaf);
+    EXPECT_TRUE(aaf != nullptr);
+    EXPECT_TRUE(std::ranges::find(port.joined(), aaf->dest_mac) != port.joined().end());
+
+    StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
+    EXPECT_EQ(k.kit.drain_stream_rx(1'000'000), size_t{0});  // the reactor drains
+    k.kit.begin_stream_tick();
+    EXPECT_TRUE(k.kit.talker().transmit_aaf_raw(*aaf, 0, 2'000'000, 6, render));
+    EXPECT_TRUE(k.kit.flush_stream_tx().has_value());
+    EXPECT_EQ(port.cycles_begun(), size_t{1});
+    EXPECT_EQ(port.flushes(), size_t{1});
+    EXPECT_EQ(port.cycles_ended(), size_t{1});
+    auto const sent = port.pop_tx();
+    EXPECT_TRUE(sent.has_value());
+    std::span<uint8_t const> const frame = sent->frame;
+    EXPECT_TRUE(std::ranges::equal(frame.first(6), aaf->dest_mac.value));
+    EXPECT_TRUE(std::ranges::equal(frame.subspan(6, 6), port.hardware_address().value));
+
+    EXPECT_TRUE(k.kit.stop().has_value());
+    EXPECT_TRUE(k.kit.talker().transmit_aaf_raw(*aaf, 6, 2'125'000, 6, render));  // the bound port stays open
 }

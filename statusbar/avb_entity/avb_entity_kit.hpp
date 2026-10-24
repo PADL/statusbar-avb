@@ -22,9 +22,9 @@
 /// public control-plane surface here.
 ///
 /// Threading: construction + start()/stop() + on_*() run on the main/reactor
-/// side; talker_should_transmit() / media_rate() / drain_stream_rx() are the
-/// media-thread (RT) calls; the CONTROL/lifecycle callbacks fire on the
-/// reactor thread (see each hook).
+/// side; talker_should_transmit() / media_rate() / begin_stream_tick() /
+/// flush_stream_tx() are the media-thread (RT) calls, drain_stream_rx() the
+/// RX timer's; the CONTROL/lifecycle callbacks fire on the reactor thread.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
@@ -34,6 +34,7 @@
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_declarations.hpp"
@@ -121,15 +122,13 @@ class AvbEntityKit
     auto operator=(AvbEntityKit&&) -> AvbEntityKit& = delete;
     ~AvbEntityKit() = default;
 
-    /// Bring up the control plane and wire the whole kit: stream callbacks,
-    /// MAAP (in "maap" address mode), the talker TX slots + socket (+ optional
-    /// pcap capture), the listener RX slots + socket + CRF recovery feed, and
-    /// persisted listener bindings. Logs any inert CONTROL registrations
-    /// (menu/selection: never an error).
+    /// Bring up the control plane and wire the whole kit: stream callbacks, MAAP,
+    /// the stream port with the talker and listener slots on it (+ pcap capture,
+    /// CRF recovery), persisted listener bindings; logs inert CONTROL registrations.
     [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
-    /// Stop the control plane (fails with not_connected when not running).
-    /// Deletes the listener's VLAN link first if the kit created it (even
-    /// when not running).
+    /// Stop the control plane (not_connected when not running). Even then:
+    /// delete the listener's VLAN link if the kit created it and close its own
+    /// stream port, so the media thread must no longer transmit.
     [[nodiscard]] auto stop() -> Status;
 
 #if defined(__linux__)
@@ -189,11 +188,33 @@ class AvbEntityKit
         return base_r;
     }
 
-    /// Batch-drain the stream RX socket from the tool's dedicated SCHED_FIFO RX
+    /// Batch-drain the stream RX from the tool's dedicated SCHED_FIFO RX
     /// timer (config.stream_rx_rt_timer). No-op when RX is on the reactor.
     auto drain_stream_rx(int64_t const wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
+    }
+
+    /// Begin a media tick on the stream port (StreamPort::begin_cycle), before
+    /// its receive and transmit. Media thread; a no-op before start().
+    void begin_stream_tick() noexcept
+    {
+        if (stream_port_ != nullptr) {
+            stream_port_->begin_cycle();
+        }
+    }
+
+    /// End a media tick: hand the tick's committed stream frames to the link
+    /// (TalkerStreams::flush), then StreamPort::end_cycle. Once per tick, after
+    /// its last transmit. Errors: the port's; success before start().
+    [[nodiscard]] auto flush_stream_tx() noexcept -> Status
+    {
+        if (stream_port_ == nullptr) {
+            return success();
+        }
+        auto flushed = talker_->flush();
+        auto ended = stream_port_->end_cycle();
+        return flushed ? ended : flushed;
     }
 
     // --- Per-control value handlers (kit phase 4) -----------------------------
@@ -384,6 +405,12 @@ class AvbEntityKit
         return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
     }
 
+    // --- The stream port ------------------------------------------------------
+    /// Stream through @p port instead of the kit's own PacketStreamPort, which
+    /// start() then does not open (tests bind a TestStreamPort). Before
+    /// start(); @p port must outlive the kit.
+    void bind_stream_port(StreamPort& port) noexcept { bound_port_ = &port; }
+
     // --- Stream socket health (after start()) ---------------------------------
     /// Why start() could not open the stream TX socket (empty: it opened). The
     /// kit carries on without it (a control-plane-only entity); a host that
@@ -392,6 +419,13 @@ class AvbEntityKit
     /// Why start() could not open the stream RX socket (empty: it opened, or
     /// the blob declares no stream inputs).
     [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }
+    /// Why start() could not give the stream TX socket the stream PCP as its
+    /// SO_PRIORITY (empty: it did, or the kit streams through a bound port).
+    /// The socket stays open on the default TX queue.
+    [[nodiscard]] auto stream_tx_priority_error() const noexcept -> std::error_code
+    {
+        return stream_port_ == &packet_port_ ? packet_port_.tx_priority_error() : std::error_code{};
+    }
     /// Whether "maap" address mode fell back to the static per-kind
     /// destination MACs (the MAAP socket would not open).
     [[nodiscard]] auto maap_fell_back_to_static() const noexcept -> bool { return maap_.fell_back_to_static(); }
@@ -545,8 +579,15 @@ class AvbEntityKit
     /// streaming while it may transmit (talker_should_transmit).
     void update_output_streaming(int64_t now_ns);
 
-    /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
-    /// counters + capture recorder. Binds the ENTITY's media clock + gPTP atomic.
+    /// The kit's own stream port (AF_PACKET), opened by start() unless a port
+    /// is bound; the port in use (nullptr before start()); the bound one.
+    /// Declared before the talker and listener paths that borrow it.
+    PacketStreamPort packet_port_{};
+    StreamPort* stream_port_{nullptr};
+    StreamPort* bound_port_{nullptr};
+
+    /// Stream TX path: spec-shaped serializer slots + TX counters + capture
+    /// recorder over the stream port. Binds the ENTITY's media clock + gPTP atomic.
     std::unique_ptr<TalkerStreams> talker_;
 
     /// Stream RX path (only allocated when the blob declares stream inputs).
@@ -556,7 +597,7 @@ class AvbEntityKit
     /// out of the reactor (drained via drain_stream_rx()).
     std::unique_ptr<net::Pollable> rt_rx_handler_{};
 
-    /// What opening the stream TX / RX sockets failed with (see stream_tx_error()).
+    /// What opening the stream port's TX / RX failed with (see stream_tx_error()).
     std::error_code stream_tx_error_{};
     std::error_code stream_rx_error_{};
 

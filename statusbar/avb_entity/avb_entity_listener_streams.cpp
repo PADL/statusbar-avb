@@ -289,16 +289,18 @@ auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerS
 }
 
 auto ListenerStreams::attach_rx(
-    std::string_view const interface_name,
+    StreamPort& port,
     std::span<ieee::Eui48 const> const static_groups,
     net::MessageReactor& reactor,
     bool const keep_handler) -> StatusValue<std::unique_ptr<net::Pollable>>
 {
-    auto rx = std::make_unique<StreamRxHandler>(interface_name, static_groups, [this] { drain_rx(current_gptp_ns()); });
-    if (!rx->valid()) {
-        return failure(rx->error() ? rx->error() : std::make_error_code(std::errc::io_error));
+    for (size_t i = 0; i < static_groups.size(); ++i) {
+        if (auto joined = port.join_multicast(static_groups[i]); !joined && i == 0) {
+            return failure(joined.error());
+        }
     }
-    rx_sock_ = rx->socket();  // borrow before any move; used for dynamic ACMP-connect joins
+    port_ = &port;  // used for dynamic ACMP-connect joins
+    auto rx = std::make_unique<StreamRxHandler>(port, [this] { drain_rx(current_gptp_ns()); });
     if (keep_handler) {
         return success(std::unique_ptr<net::Pollable>{std::move(rx)});
     }
@@ -308,24 +310,16 @@ auto ListenerStreams::attach_rx(
 
 auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
 {
-    if (rx_sock_ == nullptr) {
+    if (port_ == nullptr) {
         return 0;
     }
-    // Drain every queued frame in one pass (the arrival rate is 8000/s = 125 us apart;
-    // a 50 us RX-timer tick or a reactor wake sees 0-3 frames). All frames in this pass
-    // share gptp_now_ns -- the caller's fresh gPTP "now".
-    ieee::Eui48 src{};
-    ieee::Eui48 dst{};
-    size_t drained = 0;
-    while (true) {
-        auto const r = rx_sock_->recv(&src, &dst, rx_buf_);
-        if (!r || *r <= 0) {
-            break;
-        }
-        on_stream_rx_frame({rx_buf_.data(), static_cast<size_t>(*r)}, gptp_now_ns);
-        ++drained;
-    }
-    return drained;
+    // The arrival rate is 8000/s per stream, 125 us apart: a tick or a reactor
+    // wake sees a few frames. All frames of one pass share gptp_now_ns.
+    return port_->rx_poll(
+        [this, gptp_now_ns](std::span<uint8_t const> const payload, std::span<uint8_t const> /*frame*/) {
+            on_stream_rx_frame(payload, gptp_now_ns);
+        },
+        RX_DRAIN_MAX);
 }
 
 void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
@@ -654,7 +648,7 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
     bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
     // Join the talker's stream group so the NIC delivers its frames to us.
-    bool const joined = rx_sock_ != nullptr && rx_sock_->join_multicast(dest_mac).has_value();
+    bool const joined = port_ != nullptr && port_->join_multicast(dest_mac).has_value();
     if (logger_) {
         logger_->status(
             "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener {}, mcast join {}",
@@ -677,8 +671,8 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
         (void)components_.msrp_handler.listener_withdraw(sid, sm::Clock::now());
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
-        if (rx_sock_ != nullptr) {
-            (void)rx_sock_->leave_multicast(stream->stream_dest_mac);
+        if (port_ != nullptr) {
+            (void)port_->leave_multicast(stream->stream_dest_mac);
         }
     }
     if (logger_) {

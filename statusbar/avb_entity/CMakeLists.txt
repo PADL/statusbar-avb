@@ -18,6 +18,8 @@ statusbar_add_module(
   avb_entity_stream_spec.cpp
   avb_entity_listener_streams.cpp
   avb_entity_listener_vlan.cpp
+  avb_entity_stream_port.cpp
+  avb_entity_test_stream_port.cpp
   avb_entity_talker_streams.cpp
   avb_entity_talker_declarations.cpp
   avb_entity_talker_gate.cpp
@@ -50,6 +52,7 @@ statusbar_add_module(
   avb_entity_host_test.cpp
   avb_entity_talker_declarations_test.cpp
   avb_entity_talker_streams_test.cpp
+  avb_entity_stream_port_test.cpp
   avb_entity_udptun_bridge_test.cpp
   avb_entity_stereo_io_test.cpp
   avb_entity_am824_io_test.cpp

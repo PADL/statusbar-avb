@@ -122,6 +122,8 @@ class AvbEntityToneGenerator
 
     [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
     [[nodiscard]] auto stop() -> Status { return kit_.stop(); }
+    /// Stream through @p port instead of the kit's own (AvbEntityKit::bind_stream_port).
+    void bind_stream_port(StreamPort& port) noexcept { kit_.bind_stream_port(port); }
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }

@@ -3,81 +3,40 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// @file avb_entity_stream_rx_handler.hpp
-/// @brief StreamRxHandler — the shared reactor adapter that owns one RX socket joined to
-/// a stream's multicast group(s) and delegates each batch drain to a caller-supplied
-/// callback.
-///
-/// Replaces the three near-identical per-entity copies (AvbEntityAudioIO / AvbEntityAm824IO
-/// / AvbEntityStereoIO). Each differed only in how many groups it joined (AudioIO joins
-/// AM824 + AAF; the others one) and which drain it called (ListenerStreams::drain_rx vs the
-/// entity's own reactor drain) — both are now parameters: the groups span and a DrainFn.
-///
-/// The reactor's monotonic now is intentionally ignored: the RX tally + the AM824/AAF
-/// deserialize need a gPTP "now", which the drain callback sources itself (the media-timer
-/// wake for the reactor path, or the RX timer's wake in RT-timer mode). The socket is
-/// borrowable via socket() for dynamic multicast join/leave on ACMP connect/disconnect;
-/// the pointer stays valid across the move into the reactor (heap-allocated Pollable).
+/// StreamRxHandler: the reactor adapter that polls a StreamPort's receive
+/// descriptor and drains it through a caller-supplied callback.
 
-#include "statusbar/avtp/avtp.hpp"
-#include "statusbar/ieee/ieee.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
-#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
-#include <array>
-#include <cstddef>
-#include <span>
-#include <string_view>
-#include <system_error>
+#include <cstdint>
 #include <utility>
 
 namespace statusbar::avb_entity {
 
+/// Polls @p port's rx_fd() and calls the drain on every wake. The reactor's
+/// monotonic now is ignored: the drain sources its own gPTP "now".
 class StreamRxHandler : public net::Pollable
 {
   public:
-    /// Called on each reactor wake to drain the socket; captures the owner + the gPTP
-    /// source. One pointer fits the small inplace capacity (RT-safe, no heap).
+    /// Drains the port; one pointer fits (RT-safe, no heap).
     using DrainFn = statusbar::sg14::inplace_function<void(), 16>;
 
-    /// Open a non-promiscuous raw AVTP socket joined to @p groups[0] (then join any
-    /// further groups), draining via @p drain. @p groups must be non-empty.
-    StreamRxHandler(std::string_view interface_name, std::span<ieee::Eui48 const> groups, DrainFn drain)
-        : drain_{std::move(drain)}
-    {
-        if (auto opened =
-                sock_.open(interface_name, avtp::AVTP_ETHERTYPE, groups.empty() ? nullptr : &groups[0], /*qdisc_bypass=*/false);
-            !opened) {
-            error_ = opened.error();
-        }
-        // Only the stream formats a listener decodes (ListenerStreams::
-        // on_stream_rx_frame): no ATDECC/MAAP control frames on the media path.
-        static constexpr std::array<uint8_t, 3> stream_subtypes{
-            avtp::AvtpSubtype::iec_61883_iidc, avtp::AvtpSubtype::aaf, avtp::AvtpSubtype::crf};
-        (void)sock_.set_subtype_filter(stream_subtypes);
-        for (size_t i = 1; i < groups.size(); ++i) {
-            (void)sock_.join_multicast(groups[i]);
-        }
-    }
+    /// Poll @p port, which must outlive the handler, draining via @p drain.
+    StreamRxHandler(StreamPort& port, DrainFn drain) noexcept
+        : port_{port}
+        , drain_{std::move(drain)}
+    {}
 
-    [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
-    /// What opening the socket failed with (empty when it opened).
-    [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
-
-    /// Non-owning access to the RX socket, for dynamic multicast join/leave on ACMP
-    /// connect/disconnect. Stable across the move into the reactor.
-    [[nodiscard]] auto socket() noexcept -> net::RawnetContext* { return &sock_; }
-
-    [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
+    [[nodiscard]] auto fd() const noexcept -> int override { return port_.rx_fd(); }
     void on_ready(int64_t /*reactor_now_ns*/) override { drain_(); }
     void tick(int64_t /*now_ns*/) override {}
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
   private:
-    net::RawnetContext sock_{};
+    StreamPort& port_;
     DrainFn drain_;
-    std::error_code error_{};
 };
 
 }  // namespace statusbar::avb_entity

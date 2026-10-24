@@ -464,8 +464,8 @@ auto EntityShaper::install() -> Status
     if (!layout) {
         return failure(layout.error());
     }
-    // Class A is the kit's stream PCP (open_tx made it the stream socket's
-    // SO_PRIORITY); class B the 802.1Q default.
+    // Class A is the kit's stream PCP (the stream port made it its TX
+    // socket's SO_PRIORITY); class B the 802.1Q default.
     auto const mqprio = mqprio_for(*layout, config_.qdisc_major, kit_.config().stream_pcp, DEFAULT_CLASS_B_PCP);
     if (!mqprio) {
         return failure(mqprio.error());
@@ -495,7 +495,7 @@ auto EntityShaper::install() -> Status
         log.warning(
             "shaper: {} offloads cbs only on queues 0 and 1; the override puts an SR class elsewhere", logging::embed<16>(driver_));
     }
-    if (auto const priority = kit_.talker().tx_priority_error(); priority) {
+    if (auto const priority = kit_.stream_tx_priority_error(); priority) {
         log.warning("shaper: the stream socket has no SO_PRIORITY (errno {}): its frames miss the shaped queue", priority.value());
     }
     // From here on the kit reports admission changes; tick() reprograms.

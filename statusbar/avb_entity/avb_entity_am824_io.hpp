@@ -13,6 +13,7 @@
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
@@ -364,14 +365,18 @@ class AvbEntityAm824IO
     /// STREAM_INPUT LATE/EARLY classification. Declared before listener_ + talker_.
     std::atomic<uint64_t> last_gptp_ns_{0};
 
+    /// The stream sockets (start() opens them); the listener and talker paths
+    /// borrow it, so it is declared before both.
+    PacketStreamPort stream_port_{};
+
     /// The shared RX path: owns the AM824 deserialize context, the IEEE 1722.1
-    /// STREAM_INPUT health counters, and the borrowed RX socket. Counting-only here
+    /// STREAM_INPUT health counters, and the borrowed stream port. Counting-only here
     /// (sink=nullptr) -- this entity's process_audio generates its own tone independent
     /// of RX. Declared after config_ + host_ (components) + last_gptp_ns_.
     ListenerStreams listener_{config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, nullptr};
 
-    /// The stream RX socket handler. Default: moved into the reactor by start(). With
-    /// stream_rx_rt_timer set it is kept HERE (owning the socket) + drained by the
+    /// The stream RX handler. Default: moved into the reactor by start(). With
+    /// stream_rx_rt_timer set it is kept HERE + drained by the
     /// tool's SCHED_FIFO RX timer via drain_stream_rx(). Base type so the concrete
     /// handler stays private to the .cpp.
     std::unique_ptr<net::Pollable> rt_rx_handler_{};

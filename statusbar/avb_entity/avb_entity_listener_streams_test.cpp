@@ -16,12 +16,15 @@
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_test_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_input.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
+#include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -560,6 +563,108 @@ TEST(listener_timed, am824_timed_path)
     }
     EXPECT_TRUE(sink.seen.back().packet.pts_valid);  // anchored within 8 packets
     (void)saw_invalid_before_anchor;
+}
+
+//
+// Receive through a StreamPort
+//
+
+namespace {
+
+ieee::Eui48 const kRxPortMac{0x00, 0x1B, 0x21, 0x0D, 0x0E, 0x0F};
+ieee::Eui48 const kTalkerMac{0x00, 0x1B, 0x21, 0x01, 0x02, 0x03};
+ieee::Eui48 const kAafGroup{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};  // the donor's STREAM_INPUT 1 destination
+
+/// @p avtpdu as an Ethernet frame from the talker to @p dest: untagged, or
+/// under one 802.1Q tag (a NIC with receive VLAN offload off), or with
+/// another @p ethertype.
+auto l2_frame(std::span<uint8_t const> const avtpdu, bool const tagged, uint16_t const ethertype = 0x22F0) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> frame{kAafGroup.value.begin(), kAafGroup.value.end()};
+    frame.insert(frame.end(), kTalkerMac.value.begin(), kTalkerMac.value.end());
+    if (tagged) {
+        for (uint8_t const b : {uint8_t{0x81}, uint8_t{0x00}, uint8_t{0x60}, uint8_t{0x02}}) {
+            frame.push_back(b);
+        }
+    }
+    frame.push_back(static_cast<uint8_t>(ethertype >> 8U));
+    frame.push_back(static_cast<uint8_t>(ethertype));
+    frame.insert(frame.end(), avtpdu.begin(), avtpdu.end());
+    return frame;
+}
+
+}  // namespace
+
+// drain_rx takes frames from the port: an untagged and a tagged AAF frame both
+// reach the connected slot with the AVTPDU at its offset (14, 18), and a
+// frame of another ethertype reaches nothing.
+TEST(listener_port, tagged_and_untagged_frames_reach_their_slot)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const specs = audio_specs();
+    auto const& aaf_spec = specs[1];
+    std::atomic<uint64_t> gptp{0};
+    RecordingSink sink;
+    ListenerStreams ls{1'000'000, aaf_spec.format.sample_rate_hz, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    ls.set_timed_audio_sink(&sink);
+    TestStreamPort port{kRxPortMac};
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    auto handler = ls.attach_rx(port, {}, reactor, /*keep_handler=*/true);
+    EXPECT_TRUE(handler.has_value() && *handler != nullptr);
+    EXPECT_EQ((*handler)->fd(), -1);  // nothing for the reactor to poll
+
+    auto const rate = *avtp::aaf_sample_rate_from_hz(aaf_spec.format.sample_rate_hz);
+    uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(aaf_spec.format.sample_rate_hz));
+    avtp::AafStreamOutputContext tx{
+        kAafId, aaf_spec.format.aaf_format, rate, aaf_spec.format.channels, aaf_spec.format.bit_depth, 0};
+    uint64_t const pts0 = 9'000'000'000ULL;
+    auto const untagged = aaf_frame(tx, spp, pts0);
+    auto const tagged = aaf_frame(tx, spp, pts0 + 125'000);
+    EXPECT_TRUE(port.inject_rx(l2_frame(untagged, false)).has_value());
+    EXPECT_TRUE(port.inject_rx(l2_frame(untagged, false, 0x88F7)).has_value());
+    EXPECT_TRUE(port.inject_rx(l2_frame(tagged, true)).has_value());
+
+    EXPECT_EQ(ls.drain_rx(static_cast<int64_t>(pts0 - 1'000'000)), size_t{2});
+    EXPECT_EQ(ls.drain_rx(static_cast<int64_t>(pts0 - 1'000'000)), size_t{0});
+    EXPECT_EQ(sink.seen.size(), size_t{2});
+    EXPECT_EQ(ls.slot_for(1)->rx_packets.load(), uint64_t{2});
+    if (sink.seen.size() == 2) {
+        auto const first = avtp::aaf_get_audio_payload(untagged);
+        auto const second = avtp::aaf_get_audio_payload(tagged);
+        EXPECT_EQ(sink.seen[0].packet.pts_ns, pts0);
+        EXPECT_EQ(sink.seen[1].packet.pts_ns, pts0 + 125'000);
+        EXPECT_TRUE(std::ranges::equal(sink.seen[0].bytes, first));
+        EXPECT_TRUE(std::ranges::equal(sink.seen[1].bytes, second));
+    }
+    EXPECT_EQ(port.stats().rx_frames, uint64_t{2});
+}
+
+// attach_rx joins the static groups on the port; an ACMP connect joins the
+// talker's group and the disconnect leaves it.
+TEST(listener_port, groups_are_joined_and_left_on_the_port)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const specs = audio_specs();
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, specs[1].format.sample_rate_hz, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(specs[1]).has_value());
+    TestStreamPort port{kRxPortMac};
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    ieee::Eui48 const static_group{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x42};
+    std::array<ieee::Eui48, 1> const groups{static_group};
+    auto handler = ls.attach_rx(port, groups, reactor);
+    EXPECT_TRUE(handler.has_value() && *handler == nullptr);  // added to the reactor
+    EXPECT_EQ(port.joined().size(), size_t{1});
+
+    ls.on_listener_connected(1, ieee::Eui64{}, kAafGroup);
+    EXPECT_EQ(port.joined().size(), size_t{2});
+    EXPECT_TRUE(std::ranges::find(port.joined(), kAafGroup) != port.joined().end());
+    ls.on_listener_disconnected(1);
+    EXPECT_EQ(port.joined().size(), size_t{1});
+    EXPECT_TRUE(port.joined()[0] == static_group);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

@@ -296,6 +296,7 @@ void AvbEntityToneGenerator::print_state() const
 
 void AvbEntityToneGenerator::process_audio(TimePoint time)
 {
+    kit_.begin_stream_tick();
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
     uint64_t const packet_interval_ns = (static_cast<uint64_t>(samples_per_packet_) * 1'000'000'000ULL) / sample_rate_;
 
@@ -344,6 +345,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
             }
         }
     }
+    (void)kit_.flush_stream_tx();  // once per wake, after its last transmit
 }
 
 }  // namespace statusbar::avb_entity

@@ -279,6 +279,7 @@ void AvbEntityAudioIO::print_state() const
 
 void AvbEntityAudioIO::process_audio(TimePoint time)
 {
+    kit_.begin_stream_tick();
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
     // One packet's worth of gPTP time: 12 samples @ 96 kHz = 125 us.
     constexpr uint64_t PACKET_INTERVAL_NS = (static_cast<uint64_t>(SAMPLES_PER_PACKET) * 1'000'000'000ULL) / SAMPLE_RATE;
@@ -400,6 +401,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
                 slot, tick, kit_.talker_should_transmit(slot.spec.index, now_steady_ns), samples, audio_buffer_);
         }
     }
+    (void)kit_.flush_stream_tx();  // once per wake, after its last transmit
 }
 
 void AvbEntityAudioIO::update_gps_ratio(uint64_t gptp_now_ns)

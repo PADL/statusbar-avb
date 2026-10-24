@@ -236,13 +236,19 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
 
     // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
     // our own stream frames on this host.
-    (void)talker_.open_tx(config_.interface_name);
+    if (stream_port_.open_tx(config_.interface_name, talker_.config_.stream_pcp)) {
+        (void)talker_.open_tx(stream_port_);
+    }
 
     // Receive port: join the stream multicast group; the shared ListenerStreams owns
     // the socket + drain (decode, STREAM_INPUT health counters).
     std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
-    if (auto rx = listener_.attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
-        rt_rx_handler_ = std::move(*rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
+    if (stream_port_.open_rx(config_.interface_name)) {
+        if (auto rx = listener_.attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+            rt_rx_handler_ = std::move(*rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
+        } else {
+            stream_port_.close_rx();  // nobody reads it
+        }
     }
 
     // The per-stream gate tracks the MSRP listener declaration; ACMP connections
@@ -426,6 +432,7 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
             talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
         }
     }
+    (void)talker_.flush();
 }
 
 void AvbEntityAm824IO::configure_filter(double const freq_hz, double const gain_db, double const q)

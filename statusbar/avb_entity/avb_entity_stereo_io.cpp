@@ -291,14 +291,20 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         }
     });
 
-    // TX socket (media-timer egress; TalkerStreams assembles its own I/O).
-    (void)talker_.open_tx(config_.interface_name);
+    // TX socket (media-timer egress; TalkerStreams transmits on the port).
+    if (stream_port_.open_tx(config_.interface_name, talker_.config_.stream_pcp)) {
+        (void)talker_.open_tx(stream_port_);
+    }
 
     // RX socket joined to the stream group; kept for the tool's SCHED_FIFO RX
     // timer when stream_rx_rt_timer is set, reactor-drained otherwise.
     std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
-    if (auto rx = listener_->attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
-        rt_rx_handler_ = std::move(*rx);
+    if (stream_port_.open_rx(config_.interface_name)) {
+        if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+            rt_rx_handler_ = std::move(*rx);
+        } else {
+            stream_port_.close_rx();  // nobody reads it
+        }
     }
 
     // The per-stream transmit gate tracks the MSRP listener declaration (Ready /
@@ -475,6 +481,7 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
             }
         }
     }
+    (void)talker_.flush();
 }
 
 void AvbEntityStereoIO::configure_filter(double const freq_hz, double const gain_db, double const q)

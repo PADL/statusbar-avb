@@ -11,6 +11,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
@@ -303,6 +304,10 @@ class AvbEntityStereoIO
     /// Media clock for TX presentation timestamps (r=1.0, gPTP-locked -- stereo has no
     /// separate GPS media clock). Advanced once per media-timer wake.
     ptpclient::MediaClockGenerator media_clock_{};
+
+    /// The stream sockets (start() opens them); the talker and listener paths
+    /// borrow it, so it is declared before both.
+    PacketStreamPort stream_port_{};
 
     /// Shared TX path (48 kHz via TalkerStreamsConfig). Declared after config_/
     /// media_clock_/audio_buffer_/channels_/last_gptp_ns_/mem_resource_.
