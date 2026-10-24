@@ -44,6 +44,11 @@ auto TestStreamPort::tx_commit(
     }
     auto const slot = *pending_;
     pending_.reset();
+    if (refuse_commits_) {
+        (void)port_.tx_cancel(slot.handle);
+        count_tx(false);
+        return failure(std::errc::no_buffer_space);
+    }
     write_stream_header(slot.buffer, dest, port_.hardware_address(), vid, pcp);
     size_t const length = TX_PAYLOAD_OFFSET + payload.size();
     auto const committed = port_.tx_commit(slot.handle, length);

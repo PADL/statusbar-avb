@@ -17,6 +17,7 @@
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -490,4 +491,51 @@ TEST(talker_port, a_refused_render_commits_nothing_and_flush_reaches_the_port)
     EXPECT_TRUE(talker.flush().has_value());
     EXPECT_TRUE(talker.flush().has_value());
     EXPECT_EQ(port.flushes(), size_t{2});
+}
+
+// A frame the port refuses (a full ring) consumes no sequence number and is
+// not counted; the next accepted frame carries the number it would have.
+TEST(talker_port, a_refused_commit_consumes_no_sequence_number)
+{
+    avb_entity::TestStreamPort port{kPortMac};
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    auto* aaf = talker.slot_for(0);
+    auto* crf = talker.slot_for(1);
+    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t> payload, uint32_t, uint64_t, uint64_t) {
+        std::ranges::fill(payload, uint8_t{0x5A});
+        return true;
+    };
+    std::array<uint64_t, 1> const ts{1'000'000};
+
+    port.refuse_commits(true);
+    EXPECT_FALSE(talker.transmit_aaf_raw(*aaf, 0, 1'000'000, 12, render));
+    EXPECT_FALSE(talker.transmit_crf_raw(*crf, ts));
+    EXPECT_EQ(aaf->aaf->sequence_num, uint8_t{0});
+    EXPECT_EQ(crf->crf->sequence_num, uint8_t{0});
+    EXPECT_EQ(aaf->tx_packets, uint64_t{0});
+    EXPECT_EQ(talker.tx_counters(0)->pdus.load(), 0U);
+    EXPECT_EQ(port.stats().tx_errors, uint64_t{2});
+    EXPECT_EQ(port.tx_pending(), size_t{0});
+
+    port.refuse_commits(false);
+    EXPECT_TRUE(talker.transmit_aaf_raw(*aaf, 0, 1'000'000, 12, render));
+    EXPECT_TRUE(talker.transmit_crf_raw(*crf, ts));
+    auto const sent_aaf = port.pop_tx();
+    auto const sent_crf = port.pop_tx();
+    EXPECT_TRUE(sent_aaf.has_value() && sent_crf.has_value());
+    if (sent_aaf && sent_crf) {
+        EXPECT_EQ(sent_aaf->frame[18 + 2], uint8_t{0});  // AAF sequence_num
+        EXPECT_EQ(sent_crf->frame[18 + 2], uint8_t{0});  // CRF sequence_num
+    }
+    EXPECT_EQ(aaf->aaf->sequence_num, uint8_t{1});
+    EXPECT_EQ(aaf->tx_packets, uint64_t{1});
 }

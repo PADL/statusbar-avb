@@ -218,10 +218,10 @@ struct TalkerStreams
     /// sent, nor the sequence advanced, for a non-AAF slot, no port frame, or @p render false.
     auto transmit_aaf_raw(
         TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
-    /// Commit @p payload, a prefix of the port's tx_begin window, on @p slot
-    /// (VLAN-tagged, pcap-stamped) and count it. The tail every transmit
-    /// shares. Media-timer thread.
-    void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> payload);
+    /// Commit @p frame, a prefix of the port's tx_begin window, on @p slot
+    /// (VLAN-tagged, pcap-stamped) and count it; false, counting nothing, when
+    /// the port refuses it (no port: only counted). Media-timer thread.
+    auto send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame) -> bool;
 
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.

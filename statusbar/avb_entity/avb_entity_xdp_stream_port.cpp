@@ -1,7 +1,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// XdpStreamPort: the receive side, the TX pool and the multicast filter.
+/// XdpStreamPort: transmit from the TX pool, the receive side and the multicast filter.
 
 #include "statusbar/avb_entity/avb_entity_xdp_stream_port.hpp"
 
@@ -51,6 +51,7 @@ auto XdpStreamPort::config_for(
         .fill_ring_size = FILL_RING,
         .umem_frame_count = UMEM_FRAMES,
         .rx_drain_max = 0,
+        .completion_drain_max = TX_RING,
         .rx_clock_id = -1,
         .bind_mode = options.bind_mode,
         .attach_mode = options.attach_mode,
@@ -66,28 +67,68 @@ auto XdpStreamPort::open(std::string_view const interface_name, XdpStreamPortOpt
         return opened;
     }
     queue_id_ = options.queue_id;
+    tx_health_.reset();
     return success();
 }
 
 void XdpStreamPort::close() noexcept
 {
+    tx_pending_.reset();
+    tx_window_ = 0;
     tx_pool_.clear();
     context_.close();
 }
 
-auto XdpStreamPort::tx_begin(size_t const /*capacity*/) noexcept -> std::span<uint8_t>
+auto XdpStreamPort::tx_begin(size_t const capacity) noexcept -> std::span<uint8_t>
 {
-    return {};
+    if (!context_.valid() || capacity > MAX_TX_PAYLOAD) {
+        return {};
+    }
+    if (!tx_pending_) {
+        tx_pending_ = tx_pool_.take();
+        if (!tx_pending_) {
+            tx_pool_empty_.store(tx_pool_empty_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            return {};
+        }
+    }
+    tx_window_ = capacity;
+    return tx_pending_->buffer.subspan(TX_PAYLOAD_OFFSET, capacity);
 }
 
 auto XdpStreamPort::tx_commit(
-    std::span<uint8_t const> const /*payload*/,
-    ieee::Eui48 const& /*dest*/,
-    uint16_t const /*vid*/,
-    uint8_t const /*pcp*/) noexcept -> Status
+    std::span<uint8_t const> const payload, ieee::Eui48 const& dest, uint16_t const vid, uint8_t const pcp) noexcept -> Status
 {
-    count_tx(false);
-    return failure(std::errc::not_supported);
+    if (!tx_pending_ || payload.data() != tx_pending_->buffer.data() + TX_PAYLOAD_OFFSET || payload.size() > tx_window_) {
+        count_tx(false);
+        return failure(std::errc::invalid_argument);
+    }
+    auto const slot = *tx_pending_;
+    tx_pending_.reset();
+    write_stream_header(slot.buffer, dest, context_.hardware_address(), vid, pcp);
+    size_t const length = TX_PAYLOAD_OFFSET + payload.size();
+    if (auto committed = context_.tx_commit(slot.handle, length); !committed) {
+        // The socket freed the frame: take one back so the pool stays whole.
+        if (auto again = context_.tx_start()) {
+            (void)tx_pool_.put(*again);
+        }
+        count_tx(false);
+        return committed;
+    }
+    count_tx(true);
+    if (tx_tap_) {
+        tx_tap_(std::span<uint8_t const>{slot.buffer.data(), length});
+    }
+    return success();
+}
+
+auto XdpStreamPort::tx_flush() noexcept -> Status
+{
+    if (!context_.valid()) {
+        return success();
+    }
+    auto flushed = context_.tx_flush();
+    tx_health_.record(flushed.has_value(), flushed ? 0 : context_.stats().tx_flush_errno);
+    return flushed;
 }
 
 void XdpStreamPort::refill_tx_pool() noexcept

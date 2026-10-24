@@ -64,6 +64,9 @@ class TestStreamPort final : public StreamPort
     [[nodiscard]] auto flushes() const noexcept -> size_t { return flushes_; }
     [[nodiscard]] auto cycles_begun() const noexcept -> size_t { return cycles_begun_; }
     [[nodiscard]] auto cycles_ended() const noexcept -> size_t { return cycles_ended_; }
+    /// Refuse every tx_commit from now on (@p refuse) as a full ring does: the
+    /// frame is not sent and goes back to the pool (errc::no_buffer_space).
+    void refuse_commits(bool const refuse) noexcept { refuse_commits_ = refuse; }
     /// The groups joined and not left, in join order.
     [[nodiscard]] auto joined() const noexcept -> std::span<ieee::Eui48 const> { return {joined_.data(), joined_.size()}; }
 
@@ -71,6 +74,7 @@ class TestStreamPort final : public StreamPort
     net::TestPortContext port_{};
     std::optional<net::EthernetTxSlot> pending_{};  ///< the tx_begin frame not yet committed
     TxTap tap_{};
+    bool refuse_commits_{false};
     size_t flushes_{0};
     size_t cycles_begun_{0};
     size_t cycles_ended_{0};

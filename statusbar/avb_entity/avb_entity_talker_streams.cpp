@@ -189,7 +189,7 @@ void TalkerStreams::transmit_am824(
     }
 
     span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
-    send_stream_frame(slot, frame.first(avtp::Am824Pdu::HEADER_LENGTH + audio_bytes));
+    (void)send_stream_frame(slot, frame.first(avtp::Am824Pdu::HEADER_LENGTH + audio_bytes));
 }
 
 void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
@@ -218,7 +218,7 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
 
     pdu.set_tu(timestamp_uncertain(steady_now_ns()));
     span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
-    send_stream_frame(slot, frame.first(avtp::AafPdu::HEADER_LENGTH + audio_bytes));
+    (void)send_stream_frame(slot, frame.first(avtp::AafPdu::HEADER_LENGTH + audio_bytes));
 }
 
 auto serialize_aaf_raw(
@@ -266,22 +266,26 @@ auto TalkerStreams::transmit_aaf_raw(
     if (frame.empty()) {
         return false;
     }
+    auto const saved = *slot.aaf;  // restored when the port refuses the frame
     size_t const frame_len =
         serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
-    send_stream_frame(slot, frame.first(frame_len));
+    if (!send_stream_frame(slot, frame.first(frame_len))) {
+        *slot.aaf = saved;
+        return false;
+    }
     return true;
 }
 
-void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame)
+auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame) -> bool
 {
     // Frames carry the SR class VID + PCP (untagged AVTP is in no SR class). The pcap stamp is the
     // gPTP wall-clock transmit time, so a capture shows avtp_ts - wall_clock = presentation_offset.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    if (port_ != nullptr) {
-        (void)port_->tx_commit(frame, slot.dest_mac, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp);
+    if (port_ != nullptr && !port_->tx_commit(frame, slot.dest_mac, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp)) {
+        return false;
     }
     ++slot.tx_packets;
     if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
@@ -301,6 +305,7 @@ void TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
         c.last_mr = mr;
         c.have_mr = true;
     }
+    return true;
 }
 
 void fill_crf_timestamps(
@@ -375,11 +380,15 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
     if (frame.empty()) {
         return false;
     }
+    auto const saved = *slot.crf;  // restored when the port refuses the frame
     size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
-    send_stream_frame(slot, frame.first(frame_len));
+    if (!send_stream_frame(slot, frame.first(frame_len))) {
+        *slot.crf = saved;
+        return false;
+    }
     return true;
 }
 

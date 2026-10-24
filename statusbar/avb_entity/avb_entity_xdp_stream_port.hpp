@@ -13,12 +13,14 @@
 #include "statusbar/status/status.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace statusbar::avb_entity {
 
@@ -40,6 +42,9 @@ struct XdpStreamPortOptions
 [[nodiscard]] auto xdp_stream_port_options(StreamXdpMode mode, std::string_view interface_name, uint32_t queue_id)
     -> XdpStreamPortOptions;
 
+/// One AF_XDP socket, both ways. tx_begin/tx_commit/tx_flush, rx_poll and the
+/// cycle run on one thread only (the media thread): the rings have one producer
+/// and one consumer.
 class XdpStreamPort final : public StreamPort
 {
   public:
@@ -54,6 +59,8 @@ class XdpStreamPort final : public StreamPort
     /// the TX pool and the frames in flight.
     static constexpr size_t UMEM_FRAMES = 2 * FILL_RING;
     static_assert(UMEM_FRAMES >= FILL_RING + RX_RING + TX_POOL + TX_RING);
+    /// Consecutive refused TX kicks that put the port in error (tx_error()).
+    static constexpr uint32_t TX_FAILING_AFTER = 8;
 
     /// UMEM frames held back for transmit (internal; public for tests).
     class TxPool
@@ -84,9 +91,56 @@ class XdpStreamPort final : public StreamPort
         size_t count_{0};
     };
 
+    /// Refused TX kicks, the last errno, and whether transmit is failing
+    /// (internal; public for tests). record() on the transmitting thread only.
+    class TxHealth
+    {
+      public:
+        /// One kick's result: refused with @p error (an errno) unless @p ok.
+        void record(bool const ok, int const error) noexcept
+        {
+            if (ok) {
+                in_a_row_ = 0;
+                if (failing_.load(std::memory_order_relaxed)) {
+                    failing_.store(false, std::memory_order_relaxed);
+                }
+                return;
+            }
+            errno_.store(error, std::memory_order_relaxed);
+            failures_.store(failures_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            if (++in_a_row_ >= TX_FAILING_AFTER && !failing_.load(std::memory_order_relaxed)) {
+                failing_.store(true, std::memory_order_relaxed);
+            }
+        }
+        /// Forget every kick (open()). Not while a kick is recorded.
+        void reset() noexcept
+        {
+            in_a_row_ = 0;
+            failures_.store(0, std::memory_order_relaxed);
+            errno_.store(0, std::memory_order_relaxed);
+            failing_.store(false, std::memory_order_relaxed);
+        }
+        /// Kicks refused since the last reset. Any thread.
+        [[nodiscard]] auto failures() const noexcept -> uint64_t { return failures_.load(std::memory_order_relaxed); }
+        /// The last refusal's errno as an error code (none before the first). Any thread.
+        [[nodiscard]] auto error() const noexcept -> std::error_code
+        {
+            int const value = errno_.load(std::memory_order_relaxed);
+            return value != 0 ? std::error_code{value, std::system_category()} : std::error_code{};
+        }
+        /// TX_FAILING_AFTER refusals in a row, and none accepted since. Any thread.
+        [[nodiscard]] auto failing() const noexcept -> bool { return failing_.load(std::memory_order_relaxed); }
+
+      private:
+        uint32_t in_a_row_{0};
+        std::atomic<uint64_t> failures_{0};
+        std::atomic<int> errno_{0};
+        std::atomic<bool> failing_{false};
+    };
+
     /// The XdpConfig open() uses on @p interface_name: UMEM_FRAMES frames, a
-    /// FILL_RING fill ring, @p rules, no per-frame clock, no drain budget (rx_poll
-    /// bounds it) and @p options, both by view: they must outlive the config.
+    /// FILL_RING fill ring, a ring's worth of completions a cycle, @p rules, no per-frame
+    /// clock, no drain budget (rx_poll bounds it) and @p options, both by view.
     [[nodiscard]] static auto config_for(
         std::string_view interface_name,
         XdpStreamPortOptions const& options,
@@ -118,15 +172,31 @@ class XdpStreamPort final : public StreamPort
     [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode { return context_.bind_mode(); }
     /// The socket's counters. On the thread that drains the port only.
     [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats const& { return context_.stats(); }
-    /// The frames held back for transmit (internal; public for tests).
+    /// The frames held back for transmit, the uncommitted tx_begin frame not
+    /// counted (internal; public for tests).
     [[nodiscard]] auto tx_pool_size() const noexcept -> size_t { return tx_pool_.size(); }
+    /// tx_begin calls that found no pooled frame. Any thread.
+    [[nodiscard]] auto tx_pool_empty_count() const noexcept -> uint64_t { return tx_pool_empty_.load(std::memory_order_relaxed); }
+    /// While TX_FAILING_AFTER kicks in a row have been refused (until one is
+    /// not): the last refusal's errno; else none. Any thread.
+    [[nodiscard]] auto tx_error() const noexcept -> std::error_code
+    {
+        return tx_health_.failing() ? tx_health_.error() : std::error_code{};
+    }
+    /// The kick history behind tx_error(). Any thread.
+    [[nodiscard]] auto tx_health() const noexcept -> TxHealth const& { return tx_health_; }
 
-    /// Transmit is not implemented yet: an empty window.
+    /// The window at TX_PAYLOAD_OFFSET of a pooled UMEM frame; empty when the
+    /// port is closed, the pool is empty or @p capacity exceeds MAX_TX_PAYLOAD.
     [[nodiscard]] auto tx_begin(size_t capacity) noexcept -> std::span<uint8_t> override;
-    /// Transmit is not implemented yet: not_supported.
+    /// Write the tagged header in front of @p payload, tap the frame and put it
+    /// on the TX ring. A full ring fails (net::XdpError::tx_ring_full) and the
+    /// frame goes back to the pool; a span not in the window: invalid_argument.
     [[nodiscard]] auto tx_commit(std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp) noexcept
         -> Status override;
-    [[nodiscard]] auto tx_flush() noexcept -> Status override { return success(); }
+    /// One kick when the kernel asks for it (need_wakeup); a transient refusal
+    /// (net::detail::is_transient_kick_error) is not one. Errors: tx_flush_failed.
+    [[nodiscard]] auto tx_flush() noexcept -> Status override;
     /// Reap completions and top up the TX pool, before rx_poll offers the
     /// kernel the rest of the UMEM.
     void begin_cycle() noexcept override;
@@ -149,7 +219,11 @@ class XdpStreamPort final : public StreamPort
 
     net::XdpContext context_{};
     TxPool tx_pool_{};
+    std::optional<net::EthernetTxSlot> tx_pending_{};  ///< the tx_begin frame not yet committed
+    size_t tx_window_{0};                              ///< the last tx_begin capacity
     TxTap tx_tap_{};
+    TxHealth tx_health_{};
+    std::atomic<uint64_t> tx_pool_empty_{0};
     uint32_t queue_id_{0};
 };
 

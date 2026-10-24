@@ -206,7 +206,8 @@ class AvbEntityKit
     [[nodiscard]] auto stream_rx_on_tick() const noexcept -> bool { return rx_on_tick_; }
 
     /// Begin a media tick on the stream ports (StreamPort::begin_cycle), before
-    /// their receive and transmit. Media thread; a no-op before start().
+    /// their receive and transmit; an AF_XDP port with no listener on it is
+    /// drained here (StreamPorts::begin_tick). Media thread; a no-op before start().
     void begin_stream_tick() noexcept
     {
         if (bound_port_ != nullptr && tx_port_ != nullptr) {
@@ -432,10 +433,16 @@ class AvbEntityKit
     }
 
     // --- Stream socket health (after start()) ---------------------------------
-    /// Why start() could not open the stream TX socket (empty: it opened). The
-    /// kit carries on without it (a control-plane-only entity); a host that
-    /// needs the data plane checks here.
-    [[nodiscard]] auto stream_tx_error() const noexcept -> std::error_code { return stream_tx_error_; }
+
+    /// Why start() could not open the stream TX socket, or why AF_XDP kicks keep
+    /// being refused (empty: fine). The kit carries on. Any thread after start().
+    [[nodiscard]] auto stream_tx_error() const noexcept -> std::error_code
+    {
+        if (stream_tx_error_ || tx_port_ != &ports_.xdp()) {
+            return stream_tx_error_;
+        }
+        return ports_.xdp().tx_error();
+    }
     /// Why start() could not open the stream RX socket (empty: it opened, or
     /// the blob declares no stream inputs). Under xdp: the AF_XDP open's error.
     [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }

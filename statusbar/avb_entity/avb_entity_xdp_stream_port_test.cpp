@@ -1,28 +1,44 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// XdpStreamPort and StreamPorts tests: the transport words, the receive plan
-/// and its refusal, the AF_XDP options and UMEM split, opening on a missing
-/// interface, and (as root, with libxdp) AVTP received from a veth peer.
+/// XdpStreamPort and StreamPorts tests: the transport words, the port plan and
+/// its refusal, the AF_XDP options and UMEM split, the kick health, opening on a
+/// missing interface, and (as root, with libxdp) AVTP to and from a veth peer.
 
 #include "statusbar/avb_entity/avb_entity_xdp_stream_port.hpp"
 
 #include "statusbar/avb_entity/avb_entity_stream_ports.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_transport.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/net/net_xdp_avtp_rules.hpp"
+#include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <unistd.h>
 
+#if defined(__linux__)
+#    include <poll.h>
+
+#    include <linux/if_ether.h>
+#    include <linux/if_packet.h>
+#    include <net/if.h>
+#    include <sys/socket.h>
+#endif
+
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <fstream>
+#include <memory_resource>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -53,14 +69,14 @@ TEST(avb_entity_stream_transport, words_round_trip_and_others_are_refused)
 }
 
 // xdp drained on its own thread is refused; auto then stays on AF_PACKET.
-TEST(avb_entity_stream_ports, the_receive_plan_follows_the_transport_and_the_drain_thread)
+TEST(avb_entity_stream_ports, the_port_plan_follows_the_transport_and_the_drain_thread)
 {
-    EXPECT_TRUE(stream_rx_plan(StreamTransport::packet, false) == StreamRxPlan::packet);
-    EXPECT_TRUE(stream_rx_plan(StreamTransport::packet, true) == StreamRxPlan::packet);
-    EXPECT_TRUE(stream_rx_plan(StreamTransport::xdp, false) == StreamRxPlan::xdp);
-    EXPECT_TRUE(stream_rx_plan(StreamTransport::xdp, true) == StreamRxPlan::refused);
-    EXPECT_TRUE(stream_rx_plan(StreamTransport::auto_, false) == StreamRxPlan::xdp_then_packet);
-    EXPECT_TRUE(stream_rx_plan(StreamTransport::auto_, true) == StreamRxPlan::packet);
+    EXPECT_TRUE(stream_port_plan(StreamTransport::packet, false) == StreamPortPlan::packet);
+    EXPECT_TRUE(stream_port_plan(StreamTransport::packet, true) == StreamPortPlan::packet);
+    EXPECT_TRUE(stream_port_plan(StreamTransport::xdp, false) == StreamPortPlan::xdp);
+    EXPECT_TRUE(stream_port_plan(StreamTransport::xdp, true) == StreamPortPlan::refused);
+    EXPECT_TRUE(stream_port_plan(StreamTransport::auto_, false) == StreamPortPlan::xdp_then_packet);
+    EXPECT_TRUE(stream_port_plan(StreamTransport::auto_, true) == StreamPortPlan::packet);
 
     StreamPortsOptions options{.interface_name = MISSING, .transport = StreamTransport::xdp, .rx_on_own_thread = true};
     auto const refused = StreamPorts::check(options);
@@ -90,14 +106,15 @@ TEST(avb_entity_stream_ports, packet_does_not_try_af_xdp)
     EXPECT_TRUE(&ports.rx() == &ports.packet());
 }
 
-// Under xdp the failed AF_XDP open is the receive error; under auto the kit
-// falls back to AF_PACKET, whose own error is the receive error.
+// Under xdp the failed AF_XDP open is the transmit and receive error; under
+// auto the kit falls back to AF_PACKET, whose own errors are recorded.
 TEST(avb_entity_stream_ports, a_failed_af_xdp_open_is_recorded_with_the_fallback_taken)
 {
     StreamPorts xdp;
     EXPECT_TRUE(xdp.open({.interface_name = MISSING, .transport = StreamTransport::xdp}).has_value());
     EXPECT_TRUE(xdp.xdp_error());
     EXPECT_TRUE(xdp.rx_error() == xdp.xdp_error());
+    EXPECT_TRUE(xdp.tx_error() == xdp.xdp_error());
     EXPECT_TRUE(xdp.transport_in_force() == StreamTransport::packet);
 
     StreamPorts fallback;
@@ -106,11 +123,46 @@ TEST(avb_entity_stream_ports, a_failed_af_xdp_open_is_recorded_with_the_fallback
     EXPECT_TRUE(fallback.rx_error());
     EXPECT_TRUE(fallback.rx_error() != fallback.xdp_error());
     EXPECT_TRUE(&fallback.rx() == &fallback.packet());
+    EXPECT_TRUE(&fallback.tx() == &fallback.packet());
+    EXPECT_FALSE(fallback.fell_back());  // AF_PACKET did not open either
 
+    // Transmit alone tries AF_XDP too, even with receive on its own thread.
     StreamPorts transmit_only;
-    EXPECT_TRUE(transmit_only.open({.interface_name = MISSING, .receive = false, .transport = StreamTransport::xdp}).has_value());
-    EXPECT_FALSE(transmit_only.xdp_error());  // AF_XDP receives only, for now
+    EXPECT_TRUE(
+        transmit_only
+            .open({.interface_name = MISSING, .receive = false, .transport = StreamTransport::xdp, .rx_on_own_thread = true})
+            .has_value());
+    EXPECT_TRUE(transmit_only.xdp_error());
+    EXPECT_TRUE(transmit_only.tx_error() == transmit_only.xdp_error());
     EXPECT_FALSE(transmit_only.rx_error());
+    transmit_only.begin_tick();  // nothing open: nothing to drain
+    EXPECT_TRUE(transmit_only.end_tick().has_value());
+}
+
+// Eight refused kicks in a row put transmit in error with the last errno; one
+// accepted kick clears it, and fewer than eight never set it.
+TEST(avb_entity_xdp_stream_port, eight_refused_kicks_in_a_row_are_a_tx_error_until_one_succeeds)
+{
+    XdpStreamPort::TxHealth health;
+    for (uint32_t i = 0; i + 1 < XdpStreamPort::TX_FAILING_AFTER; ++i) {
+        health.record(false, EINVAL);
+    }
+    EXPECT_FALSE(health.failing());
+    health.record(true, 0);
+    for (uint32_t i = 0; i + 1 < XdpStreamPort::TX_FAILING_AFTER; ++i) {
+        health.record(false, EINVAL);
+    }
+    EXPECT_FALSE(health.failing());
+    health.record(false, ENXIO);
+    EXPECT_TRUE(health.failing());
+    EXPECT_TRUE(health.error() == std::error_code(ENXIO, std::system_category()));
+    EXPECT_EQ(health.failures(), uint64_t{2 * XdpStreamPort::TX_FAILING_AFTER - 1});
+    health.record(true, 0);
+    EXPECT_FALSE(health.failing());
+    EXPECT_TRUE(health.error());  // the last refusal is remembered
+    health.reset();
+    EXPECT_FALSE(health.error());
+    EXPECT_EQ(health.failures(), uint64_t{0});
 }
 
 TEST(avb_entity_xdp_stream_port, the_options_follow_the_xdp_mode_and_pin_per_interface)
@@ -140,6 +192,7 @@ TEST(avb_entity_xdp_stream_port, the_config_splits_the_umem_and_stamps_no_frames
     EXPECT_EQ(config.queue_id, uint32_t{1});
     EXPECT_EQ(config.rx_clock_id, -1);
     EXPECT_EQ(config.rx_drain_max, size_t{0});
+    EXPECT_EQ(config.completion_drain_max, XdpStreamPort::TX_RING);
     EXPECT_EQ(config.filter_rules.size(), size_t{6});
     EXPECT_TRUE(config.default_action == net::XdpAction::pass_kernel);
     EXPECT_TRUE(config.pin_path == options.pin_path);
@@ -158,9 +211,12 @@ TEST(avb_entity_xdp_stream_port, open_fails_cleanly)
     EXPECT_EQ(port.rx_poll([](std::span<uint8_t const>, std::span<uint8_t const>) {}, 8), size_t{0});
     EXPECT_TRUE(port.end_cycle().has_value());
     EXPECT_TRUE(port.tx_begin(64).empty());
-    auto const committed = port.tx_commit({}, ieee::Eui48{}, 2, 3);
-    EXPECT_TRUE(!committed && committed.error() == std::errc::not_supported);
+    EXPECT_EQ(port.tx_pool_empty_count(), uint64_t{0});  // closed, not empty
+    std::array<uint8_t, 8> const elsewhere{};
+    auto const committed = port.tx_commit(elsewhere, ieee::Eui48{}, 2, 3);
+    EXPECT_TRUE(!committed && committed.error() == std::errc::invalid_argument);
     EXPECT_TRUE(port.tx_flush().has_value());
+    EXPECT_FALSE(port.tx_error());
     EXPECT_FALSE(port.join_multicast(ieee::Eui48{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x01}).has_value());
     EXPECT_EQ(port.stats().rx_frames, uint64_t{0});
     EXPECT_EQ(port.stats().tx_errors, uint64_t{1});
@@ -333,6 +389,324 @@ TEST(avb_entity_xdp_stream_port, receives_avtp_from_a_veth_peer_when_privileged)
     EXPECT_TRUE(port.leave_multicast(group).has_value());
     EXPECT_FALSE(in_dev_mcast(VETH_RX, group));
     port.close();
+}
+
+namespace {
+
+/// Every AVTP frame arriving on an interface, as on the wire: AF_PACKET with
+/// the VLAN tag the stack strips put back from PACKET_AUXDATA (root only).
+class Capture
+{
+  public:
+    explicit Capture(char const* const interface)
+    {
+        fd_ = ::socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, htons(ETH_P_ALL));
+        sockaddr_ll address{};
+        address.sll_family = AF_PACKET;
+        address.sll_protocol = htons(ETH_P_ALL);
+        address.sll_ifindex = static_cast<int>(::if_nametoindex(interface));
+        int const one = 1;
+        ok_ = fd_ >= 0 && ::bind(fd_, reinterpret_cast<sockaddr const*>(&address), sizeof(address)) == 0 &&
+            ::setsockopt(fd_, SOL_PACKET, PACKET_AUXDATA, &one, sizeof(one)) == 0;
+    }
+    ~Capture()
+    {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+    }
+    Capture(Capture const&) = delete;
+    auto operator=(Capture const&) -> Capture& = delete;
+    Capture(Capture&&) = delete;
+    auto operator=(Capture&&) -> Capture& = delete;
+
+    [[nodiscard]] auto ok() const noexcept -> bool { return ok_; }
+
+    /// The next AVTP frame within @p timeout; empty when none came.
+    auto next(std::chrono::milliseconds const timeout) -> std::vector<uint8_t>
+    {
+        auto const deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            pollfd pfd{.fd = fd_, .events = POLLIN, .revents = 0};
+            if (::poll(&pfd, 1, 10) <= 0) {
+                continue;
+            }
+            std::array<uint8_t, 2048> buffer{};
+            alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(tpacket_auxdata))> control{};
+            iovec iov{.iov_base = buffer.data(), .iov_len = buffer.size()};
+            msghdr msg{};
+            msg.msg_iov = &iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.data();
+            msg.msg_controllen = control.size();
+            auto const length = ::recvmsg(fd_, &msg, 0);
+            if (length < 14) {
+                continue;
+            }
+            std::vector<uint8_t> frame(buffer.begin(), buffer.begin() + length);
+            for (auto* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
+                if (c->cmsg_level != SOL_PACKET || c->cmsg_type != PACKET_AUXDATA) {
+                    continue;
+                }
+                tpacket_auxdata aux{};
+                std::memcpy(&aux, CMSG_DATA(c), sizeof(aux));
+                if ((aux.tp_status & TP_STATUS_VLAN_VALID) != 0) {
+                    uint16_t const tpid = (aux.tp_status & TP_STATUS_VLAN_TPID_VALID) != 0 ? aux.tp_vlan_tpid : 0x8100;
+                    std::array<uint8_t, 4> const tag{
+                        static_cast<uint8_t>(tpid >> 8),
+                        static_cast<uint8_t>(tpid),
+                        static_cast<uint8_t>(aux.tp_vlan_tci >> 8),
+                        static_cast<uint8_t>(aux.tp_vlan_tci)};
+                    frame.insert(frame.begin() + 12, tag.begin(), tag.end());
+                }
+            }
+            if (net::avtp_payload_offset(frame)) {
+                return frame;
+            }
+        }
+        return {};
+    }
+
+  private:
+    int fd_{-1};
+    bool ok_{false};
+};
+
+/// Open @p port in copy mode on @p interface, pinned nowhere; false (with a
+/// skip line) when AF_XDP is unavailable.
+auto open_copy_port(XdpStreamPort& port, char const* const interface) -> bool
+{
+    auto options = xdp_stream_port_options(StreamXdpMode::copy, interface, 0);
+    options.pin_path.clear();  // leave nothing in bpffs
+    if (auto opened = port.open(interface, options); !opened) {
+        std::println("  skipped: AF_XDP unavailable ({})", opened.error().message());
+        return false;
+    }
+    return true;
+}
+
+ieee::Eui48 const TX_DEST{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x07};
+
+/// A talker with an AAF output (index 0) and a Milan CRF output (index 1) on @p port.
+struct TestTalker
+{
+    explicit TestTalker(StreamPort& port)
+    {
+        auto const spec = [](uint16_t const index, uint64_t const word) {
+            StreamSpec s{};
+            s.index = index;
+            s.format_word = word;
+            s.format = decode_stream_format(word);
+            return s;
+        };
+        tsn::StreamId const id{ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x07}, 7};
+        ok = talker.open_stream(spec(0, 0x020702200200C000ULL), id, TX_DEST).has_value() &&
+            talker.open_stream(spec(1, 0x041060010000BB80ULL), id, TX_DEST).has_value() && talker.open_tx(port).has_value();
+    }
+    /// One AAF and one CRF frame; true when both were committed.
+    auto send(uint64_t const n) -> bool
+    {
+        StreamRawRenderFn const render = [](std::span<uint8_t> payload, uint32_t, uint64_t first_index, uint64_t) {
+            for (size_t i = 0; i < payload.size(); ++i) {
+                payload[i] = static_cast<uint8_t>(first_index + i);
+            }
+            return true;
+        };
+        std::array<uint64_t, 1> const ts{0x0123'4567'0000'0000ULL + n};
+        bool const aaf = talker.transmit_aaf_raw(*talker.slot_for(0), n * 12, 1'000'000 + (n * 125'000), 12, render);
+        bool const crf = talker.transmit_crf_raw(*talker.slot_for(1), ts);
+        return aaf && crf;
+    }
+
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<uint64_t> last_gptp_ns{0};
+    TalkerStreams talker{
+        TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    bool ok{false};
+};
+
+/// Kicks and skipped kicks: one per tx_flush.
+auto flush_calls(XdpStreamPort const& port) -> uint64_t
+{
+    return port.socket_stats().tx_flush_count + port.socket_stats().tx_flush_skipped;
+}
+
+/// Run cycles until @p port's TX pool is full again (completions reaped).
+auto await_full_pool(XdpStreamPort& port) -> bool
+{
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
+    while (std::chrono::steady_clock::now() < deadline) {
+        (void)port.tx_flush();
+        port.begin_cycle();
+        (void)port.end_cycle();
+        if (port.tx_pool_size() == XdpStreamPort::TX_POOL) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    return false;
+}
+
+}  // namespace
+
+// The AAF and CRF frames an XdpStreamPort transmits arrive at the veth peer
+// byte for byte as the PacketStreamPort sends them for the same input; the tap
+// sees each, and tx_flush is one kick (or skipped kick) per call.
+TEST(avb_entity_xdp_stream_port, transmits_the_frames_the_packet_port_sends_when_privileged)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: not root");
+        return;
+    }
+    Veth const veth;
+    if (!veth.ok) {
+        std::println("  skipped: cannot create the veth pair");
+        return;
+    }
+    XdpStreamPort xdp;
+    if (!open_copy_port(xdp, VETH_TX)) {
+        return;
+    }
+    PacketStreamPort packet;
+    EXPECT_TRUE(packet.open_tx(VETH_TX, 3).has_value());
+    Capture capture{VETH_RX};
+    EXPECT_TRUE(capture.ok());
+    std::vector<std::vector<uint8_t>> tapped;
+    xdp.set_tx_tap([&tapped](std::span<uint8_t const> const frame) { tapped.emplace_back(frame.begin(), frame.end()); });
+
+    TestTalker over_xdp{xdp};
+    TestTalker over_packet{packet};
+    EXPECT_TRUE(over_xdp.ok && over_packet.ok);
+    for (uint64_t n = 0; n < 3; ++n) {
+        xdp.begin_cycle();
+        EXPECT_TRUE(over_xdp.send(n));
+        uint64_t const before = flush_calls(xdp);
+        EXPECT_TRUE(over_xdp.talker.flush().has_value());
+        EXPECT_EQ(flush_calls(xdp), before + 1);
+        EXPECT_TRUE(xdp.end_cycle().has_value());
+        auto const xdp_aaf = capture.next(std::chrono::milliseconds{500});
+        auto const xdp_crf = capture.next(std::chrono::milliseconds{500});
+
+        EXPECT_TRUE(over_packet.send(n));
+        auto const packet_aaf = capture.next(std::chrono::milliseconds{500});
+        auto const packet_crf = capture.next(std::chrono::milliseconds{500});
+
+        EXPECT_FALSE(xdp_aaf.empty());
+        EXPECT_FALSE(xdp_crf.empty());
+        EXPECT_TRUE(xdp_aaf == packet_aaf);
+        EXPECT_TRUE(xdp_crf == packet_crf);
+        EXPECT_EQ(xdp_aaf.size(), size_t{18 + 24 + (12 * 8 * 4)});
+        EXPECT_EQ(tapped.size(), size_t{2 * (n + 1)});
+        if (tapped.size() == 2 * (n + 1)) {
+            EXPECT_TRUE(tapped[2 * n] == xdp_aaf);
+            EXPECT_TRUE(tapped[(2 * n) + 1] == xdp_crf);
+        }
+    }
+    EXPECT_EQ(xdp.stats().tx_frames, uint64_t{6});
+    EXPECT_EQ(xdp.stats().tx_errors, uint64_t{0});
+    EXPECT_FALSE(xdp.tx_error());
+
+    // Nothing outstanding: the flush is a skipped kick.
+    EXPECT_TRUE(await_full_pool(xdp));
+    uint64_t const skipped = xdp.socket_stats().tx_flush_skipped;
+    EXPECT_TRUE(xdp.tx_flush().has_value());
+    EXPECT_EQ(xdp.socket_stats().tx_flush_skipped, skipped + 1);
+    xdp.close();
+    packet.close();
+}
+
+// tx_begin reuses one pooled frame until committed; a completion returns it. An empty pool or a
+// full ring refuses the frame without taking a sequence number, and a full ring keeps it pooled.
+TEST(avb_entity_xdp_stream_port, the_tx_pool_accounts_for_every_frame_when_privileged)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: not root");
+        return;
+    }
+    Veth const veth;
+    if (!veth.ok) {
+        std::println("  skipped: cannot create the veth pair");
+        return;
+    }
+    XdpStreamPort port;
+    if (!open_copy_port(port, VETH_TX)) {
+        return;
+    }
+    size_t tapped = 0;
+    port.set_tx_tap([&tapped](std::span<uint8_t const>) { ++tapped; });
+    port.begin_cycle();
+    EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL);
+    EXPECT_TRUE(port.tx_begin(StreamPort::MAX_TX_PAYLOAD + 1).empty());
+    EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL);
+
+    auto const first = port.tx_begin(64);
+    EXPECT_EQ(first.size(), size_t{64});
+    EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL - 1);
+    auto const again = port.tx_begin(128);
+    EXPECT_TRUE(again.data() == first.data());  // not committed: the same frame
+    EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL - 1);
+    std::array<uint8_t, 8> const elsewhere{};
+    auto const stray = port.tx_commit(elsewhere, TX_DEST, 2, 3);
+    EXPECT_TRUE(!stray && stray.error() == std::errc::invalid_argument);
+    auto const too_long = port.tx_commit(std::span<uint8_t const>{again.data(), again.size() + 1}, TX_DEST, 2, 3);
+    EXPECT_TRUE(!too_long && too_long.error() == std::errc::invalid_argument);
+    std::ranges::fill(again, uint8_t{0x02});
+    EXPECT_TRUE(port.tx_commit(again.first(46), TX_DEST, 2, 3).has_value());
+    EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL - 1);  // consumed
+    EXPECT_TRUE(await_full_pool(port));                          // completed, back
+
+    // Empty the pool: the talker is refused and its sequence numbers stay.
+    auto const commit_one = [&port]() {
+        auto const window = port.tx_begin(46);
+        if (window.empty()) {
+            return false;
+        }
+        std::ranges::fill(window, uint8_t{0x02});
+        return port.tx_commit(window, TX_DEST, 2, 3).has_value();
+    };
+    TestTalker talker{port};
+    EXPECT_TRUE(talker.ok);
+    port.begin_cycle();
+    size_t committed = 0;
+    while (commit_one()) {
+        ++committed;
+    }
+    EXPECT_EQ(committed, XdpStreamPort::TX_POOL);
+    EXPECT_EQ(port.tx_pool_empty_count(), uint64_t{1});
+    EXPECT_FALSE(talker.send(0));
+    EXPECT_EQ(talker.talker.slot_for(0)->aaf->sequence_num, uint8_t{0});
+    EXPECT_EQ(talker.talker.slot_for(1)->crf->sequence_num, uint8_t{0});
+
+    // Without a kick copy mode sends nothing: a second pool's worth fills the
+    // TX ring, and the next commit finds it full.
+    port.begin_cycle();
+    EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL);
+    for (size_t i = 0; i < XdpStreamPort::TX_RING - XdpStreamPort::TX_POOL; ++i) {
+        EXPECT_TRUE(commit_one());
+    }
+    port.begin_cycle();
+    size_t const pool = port.tx_pool_size();
+    EXPECT_TRUE(pool > 0);
+    uint64_t const errors = port.stats().tx_errors;
+    EXPECT_FALSE(talker.send(1));
+    EXPECT_EQ(port.socket_stats().tx_ring_full_count, uint64_t{2});  // the AAF and the CRF frame
+    EXPECT_EQ(port.stats().tx_errors, errors + 2);
+    EXPECT_EQ(port.tx_pool_size(), pool);  // both frames back in the pool
+    EXPECT_EQ(talker.talker.slot_for(0)->aaf->sequence_num, uint8_t{0});
+    EXPECT_EQ(talker.talker.slot_for(1)->crf->sequence_num, uint8_t{0});
+    EXPECT_EQ(talker.talker.slot_for(0)->tx_packets, uint64_t{0});
+
+    // Kicked, the ring drains and every frame comes back.
+    EXPECT_TRUE(await_full_pool(port));
+    EXPECT_TRUE(talker.send(2));
+    EXPECT_EQ(talker.talker.slot_for(0)->aaf->sequence_num, uint8_t{1});
+    EXPECT_EQ(tapped, size_t{1 + XdpStreamPort::TX_RING + 2});
+    EXPECT_FALSE(port.tx_error());
+    port.close();
+    EXPECT_EQ(port.tx_pool_size(), size_t{0});
 }
 
 #endif  // __linux__ && HAVE_XDP
