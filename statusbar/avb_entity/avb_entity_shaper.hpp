@@ -185,6 +185,11 @@ struct CbsParameters
 /// The share of the link the SR classes may reserve together (802.1Q 34.3.1's
 /// default deltaBandwidth for class A, which class B shares).
 inline constexpr uint32_t SR_BANDWIDTH_PERCENT = 75;
+/// SR_BANDWIDTH_PERCENT of a @p link_kbps link, in kbit/s.
+[[nodiscard]] constexpr auto sr_budget_kbps(uint32_t const link_kbps) noexcept -> int64_t
+{
+    return int64_t{link_kbps} * SR_BANDWIDTH_PERCENT / 100;
+}
 
 /// The cbs a class keeps while it has no admitted stream, at @p idleslope_kbps (at least 1% of the
 /// link), so igb/igc never switch transmit mode while running. Empty for a zero link.
