@@ -5,22 +5,32 @@
 
 /// XdpStreamPort: the StreamPort over one AF_XDP socket on the SR class A NIC queue (queue 0 on
 /// igb/igc); see docs/STREAM_PORTS.md. Without libxdp, or off Linux, open() fails with
-/// not_supported_on_platform.
+/// not_supported_on_platform. The libbpf-facing net::XdpContext stays in the .cpp.
 
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_transport.hpp"
-#include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/net/net_compiled_rule.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+
+namespace statusbar::net {
+class XdpContext;
+struct XdpConfig;
+struct XdpSocketStats;
+enum class XdpBindMode : uint8_t;
+enum class XdpAttachMode : uint8_t;
+}  // namespace statusbar::net
 
 namespace statusbar::avb_entity {
 
@@ -29,9 +39,11 @@ struct XdpStreamPortOptions
 {
     /// The NIC queue the socket binds (the SR class A queue).
     uint32_t queue_id{0};
-    net::XdpBindMode bind_mode{net::XdpBindMode::auto_};
-    /// How a fresh attach attaches the program (net::XdpConfig::attach_mode).
-    net::XdpAttachMode attach_mode{net::XdpAttachMode::native};
+    /// net::XdpBindMode::auto_ (the zero value).
+    net::XdpBindMode bind_mode{};
+    /// How a fresh attach attaches the program (net::XdpConfig::attach_mode);
+    /// net::XdpAttachMode::native (the zero value).
+    net::XdpAttachMode attach_mode{};
     /// Where the program is pinned and adopted from; empty: not pinned.
     std::string pin_path{};
 };
@@ -146,8 +158,8 @@ class XdpStreamPort final : public StreamPort
         XdpStreamPortOptions const& options,
         std::span<net::CompiledRule<32> const> rules) noexcept -> net::XdpConfig;
 
-    XdpStreamPort() = default;
-    ~XdpStreamPort() override = default;
+    XdpStreamPort();
+    ~XdpStreamPort() override;
     XdpStreamPort(XdpStreamPort const&) = delete;
     auto operator=(XdpStreamPort const&) -> XdpStreamPort& = delete;
     XdpStreamPort(XdpStreamPort&&) = delete;
@@ -162,19 +174,19 @@ class XdpStreamPort final : public StreamPort
     void close() noexcept;
 
     /// Whether the socket is open.
-    [[nodiscard]] auto is_open() const noexcept -> bool { return context_.valid(); }
+    [[nodiscard]] auto is_open() const noexcept -> bool;
     /// The queue the socket is bound to (open()'s).
     [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return queue_id_; }
     /// The mode the program runs in, and whether open() adopted a pinned one.
-    [[nodiscard]] auto attach_mode() const noexcept -> net::XdpAttachMode { return context_.attach_mode(); }
-    [[nodiscard]] auto adopted() const noexcept -> bool { return context_.adopted(); }
+    [[nodiscard]] auto attach_mode() const noexcept -> net::XdpAttachMode;
+    [[nodiscard]] auto adopted() const noexcept -> bool;
     /// Whether the program is pinned (by open() or adopted from the pins); false
     /// while closed, without a pin path, or when pinning failed (no bpffs).
-    [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
+    [[nodiscard]] auto pinned() const noexcept -> bool;
     /// The bind mode open() asked for.
-    [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode { return context_.bind_mode(); }
+    [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode;
     /// The socket's counters. On the thread that drains the port only.
-    [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats const& { return context_.stats(); }
+    [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats const&;
     /// The frames held back for transmit, the uncommitted tx_begin frame not
     /// counted (internal; public for tests).
     [[nodiscard]] auto tx_pool_size() const noexcept -> size_t { return tx_pool_.size(); }
@@ -213,14 +225,14 @@ class XdpStreamPort final : public StreamPort
     [[nodiscard]] auto join_multicast(ieee::Eui48 const& group) noexcept -> Status override;
     [[nodiscard]] auto leave_multicast(ieee::Eui48 const& group) noexcept -> Status override;
     void set_tx_tap(TxTap tap) noexcept override { tx_tap_ = std::move(tap); }
-    [[nodiscard]] auto hardware_address() const noexcept -> ieee::Eui48 override { return context_.hardware_address(); }
+    [[nodiscard]] auto hardware_address() const noexcept -> ieee::Eui48 override;
     /// True only under a native program with a zero-copy bind.
-    [[nodiscard]] auto zero_copy() const noexcept -> bool override { return context_.zero_copy(); }
+    [[nodiscard]] auto zero_copy() const noexcept -> bool override;
 
   private:
     void refill_tx_pool() noexcept;
 
-    net::XdpContext context_{};
+    std::unique_ptr<net::XdpContext> context_;  ///< never null
     TxPool tx_pool_{};
     std::optional<net::EthernetTxSlot> tx_pending_{};  ///< the tx_begin frame not yet committed
     size_t tx_window_{0};                              ///< the last tx_begin capacity

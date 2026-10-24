@@ -10,6 +10,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_ports.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_transport.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
+#include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/net/net_xdp_avtp_rules.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"

@@ -5,15 +5,20 @@
 
 #include "statusbar/avb_entity/avb_entity_xdp_stream_port.hpp"
 
+#include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/net/net_xdp_avtp_rules.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <system_error>
 
 namespace statusbar::avb_entity {
+
+static_assert(net::XdpBindMode{} == net::XdpBindMode::auto_);
+static_assert(net::XdpAttachMode{} == net::XdpAttachMode::native);
 
 auto xdp_stream_port_options(StreamXdpMode const mode, std::string_view const interface_name, uint32_t const queue_id)
     -> XdpStreamPortOptions
@@ -59,11 +64,55 @@ auto XdpStreamPort::config_for(
     };
 }
 
+XdpStreamPort::XdpStreamPort() : context_{std::make_unique<net::XdpContext>()} {}
+
+XdpStreamPort::~XdpStreamPort() = default;
+
+auto XdpStreamPort::is_open() const noexcept -> bool
+{
+    return context_->valid();
+}
+
+auto XdpStreamPort::attach_mode() const noexcept -> net::XdpAttachMode
+{
+    return context_->attach_mode();
+}
+
+auto XdpStreamPort::adopted() const noexcept -> bool
+{
+    return context_->adopted();
+}
+
+auto XdpStreamPort::pinned() const noexcept -> bool
+{
+    return context_->program().pinned();
+}
+
+auto XdpStreamPort::bind_mode() const noexcept -> net::XdpBindMode
+{
+    return context_->bind_mode();
+}
+
+auto XdpStreamPort::socket_stats() const noexcept -> net::XdpSocketStats const&
+{
+    return context_->stats();
+}
+
+auto XdpStreamPort::hardware_address() const noexcept -> ieee::Eui48
+{
+    return context_->hardware_address();
+}
+
+auto XdpStreamPort::zero_copy() const noexcept -> bool
+{
+    return context_->zero_copy();
+}
+
 auto XdpStreamPort::open(std::string_view const interface_name, XdpStreamPortOptions const& options) -> Status
 {
     close();
     auto const rules = net::avtp_stream_rules();
-    if (auto opened = context_.open(config_for(interface_name, options, rules)); !opened) {
+    if (auto opened = context_->open(config_for(interface_name, options, rules)); !opened) {
         return opened;
     }
     queue_id_ = options.queue_id;
@@ -76,12 +125,12 @@ void XdpStreamPort::close() noexcept
     tx_pending_.reset();
     tx_window_ = 0;
     tx_pool_.clear();
-    context_.close();
+    context_->close();
 }
 
 auto XdpStreamPort::tx_begin(size_t const capacity) noexcept -> std::span<uint8_t>
 {
-    if (!context_.valid() || capacity > MAX_TX_PAYLOAD) {
+    if (!context_->valid() || capacity > MAX_TX_PAYLOAD) {
         return {};
     }
     if (!tx_pending_) {
@@ -104,11 +153,11 @@ auto XdpStreamPort::tx_commit(
     }
     auto const slot = *tx_pending_;
     tx_pending_.reset();
-    write_stream_header(slot.buffer, dest, context_.hardware_address(), vid, pcp);
+    write_stream_header(slot.buffer, dest, context_->hardware_address(), vid, pcp);
     size_t const length = TX_PAYLOAD_OFFSET + payload.size();
-    if (auto committed = context_.tx_commit(slot.handle, length); !committed) {
+    if (auto committed = context_->tx_commit(slot.handle, length); !committed) {
         // The socket freed the frame: take one back so the pool stays whole.
-        if (auto again = context_.tx_start()) {
+        if (auto again = context_->tx_start()) {
             (void)tx_pool_.put(*again);
         }
         count_tx(false);
@@ -123,18 +172,18 @@ auto XdpStreamPort::tx_commit(
 
 auto XdpStreamPort::tx_flush() noexcept -> Status
 {
-    if (!context_.valid()) {
+    if (!context_->valid()) {
         return success();
     }
-    auto flushed = context_.tx_flush();
-    tx_health_.record(flushed.has_value(), flushed ? 0 : context_.stats().tx_flush_errno);
+    auto flushed = context_->tx_flush();
+    tx_health_.record(flushed.has_value(), flushed ? 0 : context_->stats().tx_flush_errno);
     return flushed;
 }
 
 void XdpStreamPort::refill_tx_pool() noexcept
 {
     while (tx_pool_.size() < TX_POOL) {
-        auto slot = context_.tx_start();
+        auto slot = context_->tx_start();
         if (!slot) {
             break;
         }
@@ -144,11 +193,11 @@ void XdpStreamPort::refill_tx_pool() noexcept
 
 void XdpStreamPort::begin_cycle() noexcept
 {
-    if (!context_.valid()) {
+    if (!context_->valid()) {
         return;
     }
-    context_.begin_cycle();
-    (void)context_.tx_complete();
+    context_->begin_cycle();
+    (void)context_->tx_complete();
     refill_tx_pool();
 }
 
@@ -159,12 +208,12 @@ auto XdpStreamPort::end_cycle() noexcept -> Status
 
 auto XdpStreamPort::rx_poll(RxFn const& fn, size_t const max_frames) noexcept -> size_t
 {
-    if (!context_.valid()) {
+    if (!context_->valid()) {
         return 0;
     }
     size_t delivered = 0;
     for (size_t taken = 0; taken < max_frames; ++taken) {
-        auto slot = context_.rx_start();
+        auto slot = context_->rx_start();
         if (!slot || !*slot) {
             break;
         }
@@ -174,20 +223,20 @@ auto XdpStreamPort::rx_poll(RxFn const& fn, size_t const max_frames) noexcept ->
             fn(rx.buffer.subspan(*offset), rx.buffer);
             ++delivered;
         }
-        (void)context_.rx_release(rx.handle);
+        (void)context_->rx_release(rx.handle);
     }
-    (void)context_.fill_replenish();
+    (void)context_->fill_replenish();
     return delivered;
 }
 
 auto XdpStreamPort::join_multicast(ieee::Eui48 const& group) noexcept -> Status
 {
-    return context_.join_multicast(group);
+    return context_->join_multicast(group);
 }
 
 auto XdpStreamPort::leave_multicast(ieee::Eui48 const& group) noexcept -> Status
 {
-    return context_.leave_multicast(group);
+    return context_->leave_multicast(group);
 }
 
 }  // namespace statusbar::avb_entity
