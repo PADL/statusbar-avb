@@ -42,10 +42,12 @@ struct DataSetSize
     uint16_t id;
     size_t size;
 };
-constexpr std::array<DataSetSize, 3> DATA_SET_SIZES{{
+constexpr std::array<DataSetSize, 5> DATA_SET_SIZES{{
     {.id = management_id::parent_data_set, .size = ParentDataSet::SIZE},
     {.id = management_id::current_data_set, .size = CurrentDataSet::SIZE},
     {.id = management_id::time_properties_data_set, .size = TimePropertiesDataSet::SIZE},
+    {.id = management_id::port_data_set, .size = PortDataSet::SIZE},
+    {.id = management_id::port_properties_np, .size = PortPropertiesNp::SIZE},
 }};
 
 void put16(uint8_t* p, uint16_t v) noexcept
@@ -199,6 +201,38 @@ auto parse_management_message(std::span<uint8_t const> const bytes) noexcept -> 
                 .time_source = data[3],
             };
             break;
+        case management_id::port_data_set:
+            message.data = PortDataSet{
+                .port_identity = load<gptp::SourcePortIdentity>(data),
+                .port_state = static_cast<PortState>(data[10]),
+                .log_min_delay_req_interval = static_cast<int8_t>(data[11]),
+                .peer_mean_path_delay_scaled = static_cast<int64_t>(get64(data + 12)),
+                .log_announce_interval = static_cast<int8_t>(data[20]),
+                .announce_receipt_timeout = data[21],
+                .log_sync_interval = static_cast<int8_t>(data[22]),
+                .delay_mechanism = static_cast<DelayMechanism>(data[23]),
+                .log_min_pdelay_req_interval = static_cast<int8_t>(data[24]),
+                .version_number = data[25],
+            };
+            break;
+        case management_id::port_properties_np: {
+            size_t const text_length = data[12];
+            if (PortPropertiesNp::SIZE + text_length > data_length) {
+                return bad_message();
+            }
+            PortPropertiesNp properties{
+                .port_identity = load<gptp::SourcePortIdentity>(data),
+                .port_state = static_cast<PortState>(data[10]),
+                .timestamping = data[11],
+            };
+            properties.interface_length = static_cast<uint8_t>(std::min(text_length, properties.interface.size()));
+            std::ranges::transform(
+                std::span<uint8_t const>{data + PortPropertiesNp::SIZE, properties.interface_length},
+                properties.interface.begin(),
+                [](uint8_t const c) { return static_cast<char>(c); });
+            message.data = properties;
+            break;
+        }
         default:
             break;
     }
@@ -245,18 +279,33 @@ void PtpManagementClient::handle(std::span<uint8_t const> const bytes, int64_t c
         state_.current = *current;
     } else if (auto const* properties = std::get_if<TimePropertiesDataSet>(&message->data)) {
         state_.time_properties = *properties;
+    } else if (auto const* port = std::get_if<PortPropertiesNp>(&message->data)) {
+        if (!config_.port_interface.empty() && port->interface_name() == config_.port_interface) {
+            state_.port = port->port_identity;
+        }
+    } else if (auto const* port_data = std::get_if<PortDataSet>(&message->data)) {
+        if (state_.port == port_data->port_identity) {
+            state_.peer_mean_path_delay_ns = time_interval_ns(port_data->peer_mean_path_delay_scaled);
+            state_.port_state = port_data->port_state;
+            state_.delay_mechanism = port_data->delay_mechanism;
+        }
     }
     publish_if_changed();
 }
 
 void PtpManagementClient::publish_if_changed()
 {
-    if (state_.status == reported_status_ && state_.grandmaster == reported_grandmaster_ && state_.error == reported_error_) {
+    if (state_.status == reported_status_ && state_.grandmaster == reported_grandmaster_ && state_.error == reported_error_ &&
+        state_.peer_mean_path_delay_ns == reported_peer_delay_ns_ && state_.port_state == reported_port_state_ &&
+        state_.delay_mechanism == reported_delay_mechanism_) {
         return;
     }
     reported_status_ = state_.status;
     reported_grandmaster_ = state_.grandmaster;
     reported_error_ = state_.error;
+    reported_peer_delay_ns_ = state_.peer_mean_path_delay_ns;
+    reported_port_state_ = state_.port_state;
+    reported_delay_mechanism_ = state_.delay_mechanism;
     if (listener_) {
         listener_(state_);
     }
@@ -338,8 +387,14 @@ auto PtpManagementClient::create(PtpManagementConfig config, Listener listener) 
 
 void PtpManagementClient::query(int64_t const now_ns)
 {
-    for (uint16_t const id :
-         {management_id::parent_data_set, management_id::current_data_set, management_id::time_properties_data_set}) {
+    // PORT_PROPERTIES_NP before PORT_DATA_SET: ptp4l answers in order, so the port is known first.
+    std::array<uint16_t, 5> const ids{
+        management_id::parent_data_set,
+        management_id::current_data_set,
+        management_id::time_properties_data_set,
+        management_id::port_properties_np,
+        management_id::port_data_set};
+    for (uint16_t const id : std::span{ids}.first(config_.port_interface.empty() ? 3 : 5)) {
         std::array<uint8_t, MANAGEMENT_GET_SIZE> message{};
         size_t const length = build_management_get(message, id, config_.domain, sequence_++, source_);
         if (::sendto(fd_.get(), message.data(), length, 0, server_.sockaddr(), server_.length()) < 0) {
