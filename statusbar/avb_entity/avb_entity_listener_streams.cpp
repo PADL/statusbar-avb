@@ -814,7 +814,7 @@ void ListenerStreams::update_stream_input_counters(
         ts_sparse,
         now.count(),
         lock_tolerance_ns_,
-        sample_rate_);
+        slot.spec.format.sample_rate_hz);
 }
 
 auto ListenerStreams::fill_stream_input_counters(
