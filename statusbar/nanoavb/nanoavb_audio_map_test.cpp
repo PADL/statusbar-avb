@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 // Dynamic audio mappings on a STREAM_PORT_INPUT (Milan v1.2 Sections 5.3.10,
-// 5.4.2.26-28): partitions, BAD_ARGUMENTS rules, atomicity, the lock and notifications.
+// 5.4.2.26-28): partitions, BAD_ARGUMENTS rules, atomicity, the lock and notifications;
+// a dynamic STREAM_PORT_OUTPUT's, the entity's own.
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/buffer/buffer.hpp"
@@ -35,7 +36,8 @@ constexpr uint64_t AAF_8CH_96K = 0x020702200200C000ULL;
 constexpr uint64_t CRF_48K = 0x041060010000BB80ULL;
 
 /// AUDIO_UNIT 0 at 48 kHz; port 0: four 1-channel clusters, port 1: one 200-channel cluster,
-/// port 2: a static map. STREAM_INPUT 0: 4 ch 48 kHz, 1: 8 ch 96 kHz, 2: CRF.
+/// port 2: a static map. STREAM_INPUT 0: 4 ch 48 kHz, 1: 8 ch 96 kHz, 2: CRF. STREAM_PORT_OUTPUT 0:
+/// two 1-channel clusters, dynamic; STREAM_OUTPUT 0: 4 ch 48 kHz.
 class Model final : public AemEntityHandler
 {
   public:
@@ -46,11 +48,17 @@ class Model final : public AemEntityHandler
         }
         desc.number_of_stream_input_ports = uint16_t{3};
         desc.base_stream_input_port = uint16_t{0};
+        desc.number_of_stream_output_ports = uint16_t{1};
         desc.current_sampling_rate = uint32_t{48000};
         return true;
     }
     auto on_get_stream_port(DescriptorId id, DescriptorStreamPort& desc) -> bool override
     {
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_PORT_OUTPUT && id.ref.descriptor_index == 0) {
+            desc.number_of_clusters = uint16_t{2};
+            desc.base_cluster = uint16_t{6};
+            return true;
+        }
         if (id.ref.descriptor_type != DESCRIPTOR_STREAM_PORT_INPUT || id.ref.descriptor_index > 2) {
             return false;
         }
@@ -74,7 +82,7 @@ class Model final : public AemEntityHandler
     }
     auto on_get_audio_cluster(DescriptorId id, DescriptorAudioCluster& desc) -> bool override
     {
-        if (id.ref.descriptor_index > 5) {
+        if (id.ref.descriptor_index > 7) {
             return false;
         }
         desc.channel_count = static_cast<uint16_t>(id.ref.descriptor_index == 4 ? 200 : 1);
@@ -82,6 +90,10 @@ class Model final : public AemEntityHandler
     }
     auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override
     {
+        if (id.ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT && id.ref.descriptor_index == 0) {
+            desc.current_format.from_uint64(AAF_4CH_48K);
+            return true;
+        }
         if (id.ref.descriptor_type != DESCRIPTOR_STREAM_INPUT || id.ref.descriptor_index > 2) {
             return false;
         }
@@ -148,12 +160,16 @@ struct Bench
         return {};
     }
 
-    auto mappings(bool const add, uint16_t const port, std::vector<DynamicAudioMapping> const& list, Eui64 const& from = CONTROLLER_A)
-        -> uint8_t
+    auto mappings(
+        bool const add,
+        uint16_t const port,
+        std::vector<DynamicAudioMapping> const& list,
+        Eui64 const& from = CONTROLLER_A,
+        uint16_t const type = DESCRIPTOR_STREAM_PORT_INPUT) -> uint8_t
     {
         std::vector<uint8_t> body(8 + (list.size() * 8));
         AemAudioMappingsCommandHeader header{};
-        header.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT;
+        header.descriptor_type = type;
         header.descriptor_index = port;
         header.number_of_mappings = static_cast<uint16_t>(list.size());
         span_store(std::span{body}.first(8), header);
@@ -442,6 +458,39 @@ TEST(audio_map, a_local_change_is_routed_once_told_in_pdus_and_saved)
     EXPECT_EQ(b.command(CONTROLLER_B, MAC_B, AEM_COMMAND_LOCK_ENTITY, lock_body).header.status(), AEM_STATUS_SUCCESS);
     EXPECT_EQ(b.aem.apply_local_audio_mappings(1, {}, new_one), AEM_STATUS_ENTITY_LOCKED);
     EXPECT_EQ(b.get_map(1, 0).mappings.size(), size_t{99});
+}
+
+// A dynamic output port's mappings are the entity's own (Milan v1.2 Section 5.3.9.1):
+// set and validated by it, told to every controller, served by GET_AUDIO_MAP,
+// never changed by a controller
+TEST(audio_map, an_output_port_carries_the_entitys_own_mappings)
+{
+    Bench b;
+    EXPECT_TRUE(b.aem.has_dynamic_output_map(0));
+    EXPECT_FALSE(b.aem.has_dynamic_output_map(1));
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings.empty());
+    std::vector<DynamicAudioMapping> const pair{m(0, 0, 0), m(0, 1, 1)};
+    EXPECT_EQ(b.aem.set_output_mappings(0, pair), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == pair);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 1);
+    EXPECT_TRUE(b.applied.empty());  // nothing for the input hook
+    // The same set again is told nothing; a channel the stream lacks, a stream that is
+    // not there, or no such port changes nothing.
+    EXPECT_EQ(b.aem.set_output_mappings(0, pair), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_EQ(b.aem.set_output_mappings(0, std::vector{m(0, 4, 0)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(b.aem.set_output_mappings(0, std::vector{m(1, 0, 0)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(b.aem.set_output_mappings(1, pair), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == pair);
+    // A controller's ADD or REMOVE is NOT_SUPPORTED.
+    EXPECT_EQ(b.mappings(false, 0, pair, CONTROLLER_A, DESCRIPTOR_STREAM_PORT_OUTPUT), AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(b.mappings(true, 0, {m(0, 2, 0)}, CONTROLLER_A, DESCRIPTOR_STREAM_PORT_OUTPUT), AEM_STATUS_NOT_SUPPORTED);
+    // Emptied: a REMOVE told; the inputs' mappings are a store of their own.
+    EXPECT_EQ(b.aem.set_output_mappings(0, {}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 1);
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings.empty());
+    EXPECT_EQ(b.aem.dynamic_audio_maps().size(), size_t{0});
 }
 
 TEST_MAIN(statusbar_nanoavb, nanoavb_audio_map_test)
