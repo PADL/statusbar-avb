@@ -354,6 +354,11 @@ class AemCommandHandler
     /// The AEM status; nothing changes unless SUCCESS.
     [[nodiscard]] auto set_audio_mappings(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings, bool apply)
         -> uint8_t;
+    /// REMOVE_AUDIO_MAPPINGS of @p remove, then ADD_AUDIO_MAPPINGS of @p add, on STREAM_PORT_INPUT @p port_index by
+    /// the entity itself: ENTITY_LOCKED while locked or acquired (Milan v1.2 Sections 5.4.2.27-28), else as a
+    /// controller's, all or nothing; a change is notified and reported to the settings hook. The AEM status.
+    [[nodiscard]] auto apply_local_audio_mappings(
+        uint16_t port_index, std::span<DynamicAudioMapping const> add, std::span<DynamicAudioMapping const> remove) -> uint8_t;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -690,6 +695,25 @@ class AemCommandHandler
         DynamicAudioMaps::Mappings const& current,
         std::span<DynamicAudioMapping const> mappings,
         DynamicAudioMaps::Mappings& merged) const -> uint8_t;
+    /// Port (@p port_type, @p port_index)'s model in @p port when the mapping commands may change it
+    /// (a dynamic STREAM_PORT_INPUT, a data plane hook); else the status they refuse with.
+    [[nodiscard]] auto mappable_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
+    /// The set a REMOVE of @p listed would leave @p current at, in @p kept (its order), or the
+    /// status to refuse with.
+    [[nodiscard]] auto removed_mappings(
+        uint16_t port_index,
+        PortModel const& port,
+        DynamicAudioMaps::Mappings const& current,
+        std::span<DynamicAudioMapping const> listed,
+        DynamicAudioMaps::Mappings& kept) const -> uint8_t;
+    /// Hand @p next (cluster order) to the data plane, then keep it in place of @p current;
+    /// NO_RESOURCES past the store's capacity; nothing changes unless SUCCESS.
+    [[nodiscard]] auto commit_mappings(
+        uint16_t port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t;
+    /// Unsolicited ADD (@p add) or REMOVE_AUDIO_MAPPINGS on STREAM_PORT_INPUT @p port_index of the
+    /// mappings in @p of but not in @p but (both in cluster order), as many AECPDUs as they take.
+    void notify_mappings(
+        bool add, uint16_t port_index, std::span<DynamicAudioMapping const> of, std::span<DynamicAudioMapping const> but);
     /// Read descriptor (@p type, @p index) of the current configuration.
     template <typename T>
     [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;

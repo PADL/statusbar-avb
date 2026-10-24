@@ -178,6 +178,12 @@ stream input is refused BAD_ARGUMENTS (Section 5.4.2.7): the controller removes
 those mappings first. A saved set the data plane cannot route once its hook is
 installed falls back to the default.
 
+`request_audio_mappings(port, add, remove)` is the same change made locally
+(a narrower input format's lost channels, a host's routing socket): a REMOVE of
+`remove` then an ADD of `add` under the controller's rules, all or nothing, one
+hook call, refused ENTITY_LOCKED while a controller holds the lock (Sections
+5.4.2.27-28); a change is notified as the REMOVE and ADD it amounts to and saved.
+
 ## Persistence
 
 With `persistent_state_path` set, `start()` loads the file before the control

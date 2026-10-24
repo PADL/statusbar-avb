@@ -383,4 +383,65 @@ TEST(audio_map, set_audio_mappings_for_defaults_and_restores)
     EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 0);
 }
 
+// apply_local_audio_mappings: a REMOVE then an ADD by the entity, one data plane call,
+// every controller told what changed (63 mappings an AECPDU), saved; locked out.
+TEST(audio_map, a_local_change_is_routed_once_told_in_pdus_and_saved)
+{
+    Bench b;
+    int saves = 0;
+    uint16_t saved_as = 0;
+    b.aem.set_on_settings_changed([&](uint16_t const command) {
+        ++saves;
+        saved_as = command;
+    });
+    std::vector<DynamicAudioMapping> hundred;
+    for (uint16_t ch = 0; ch < 100; ++ch) {
+        hundred.push_back(m(0, static_cast<uint16_t>(ch % 4), 0, ch));
+    }
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, hundred, {}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.applied.size(), size_t{1});
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 2);  // 63 + 37
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 2);
+    EXPECT_EQ(saves, 1);
+    size_t told = 0;
+    for (auto const& s : b.sent) {
+        AemAudioMappingsCommandHeader header{};
+        span_load(header, std::span<uint8_t const>{s.body}.first(AemAudioMappingsCommandHeader::LENGTH));
+        EXPECT_EQ(s.body.size(), AemAudioMappingsCommandHeader::LENGTH + (size_t{header.number_of_mappings.get()} * 8));
+        told += s.dest == MAC_A ? header.number_of_mappings.get() : 0U;
+    }
+    EXPECT_EQ(told, size_t{100});
+    EXPECT_EQ(saved_as, AEM_COMMAND_ADD_AUDIO_MAPPINGS);
+
+    // Remap cluster channel 0 from stream channel 1: a REMOVE and an ADD of one each.
+    b.sent.clear();
+    std::vector<DynamicAudioMapping> const old_one{m(0, 0, 0, 0)};
+    std::vector<DynamicAudioMapping> const new_one{m(0, 1, 0, 0)};
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, new_one, old_one), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.applied.size(), size_t{2});
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_TRUE(b.get_map(1, 0).mappings.front() == new_one.front());
+    EXPECT_EQ(saves, 2);
+
+    // The same again changes nothing; a bad ADD refuses the REMOVE with it.
+    b.sent.clear();
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, new_one, {}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, std::vector{m(0, 9, 0, 1)}, new_one), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(2, new_one, {}), AEM_STATUS_NOT_SUPPORTED);  // static maps
+    EXPECT_TRUE(b.sent.empty());
+    EXPECT_EQ(b.applied.size(), size_t{2});
+    EXPECT_EQ(saves, 2);
+    // Only removed: saved as a REMOVE.
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, {}, std::vector{m(0, 1, 0, 1)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(saved_as, AEM_COMMAND_REMOVE_AUDIO_MAPPINGS);
+
+    AemLockEntityPayload lock{};
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> lock_body{};
+    span_store(lock_body, lock);
+    EXPECT_EQ(b.command(CONTROLLER_B, MAC_B, AEM_COMMAND_LOCK_ENTITY, lock_body).header.status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, {}, new_one), AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(b.get_map(1, 0).mappings.size(), size_t{99});
+}
+
 TEST_MAIN(statusbar_nanoavb, nanoavb_audio_map_test)

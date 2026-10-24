@@ -658,6 +658,14 @@ auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
     return aem.apply_local_name(body);
 }
 
+auto AvbEntityKit::request_audio_mappings(
+    uint16_t const port_index,
+    std::span<nanoavb::DynamicAudioMapping const> const add,
+    std::span<nanoavb::DynamicAudioMapping const> const remove) -> uint8_t
+{
+    return host_.components().aem_handler.apply_local_audio_mappings(port_index, add, remove);
+}
+
 void AvbEntityKit::flush_format_notifications()
 {
     auto& aem = host_.components().aem_handler;

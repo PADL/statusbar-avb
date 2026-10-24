@@ -346,6 +346,13 @@ class AvbEntityKit
     /// Without one a change is refused NOT_SUPPORTED. Empty function removes it.
     using InputMappingsFn = sg14::inplace_function<uint8_t(uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings), 32>;
     void set_on_input_mappings_changed(InputMappingsFn fn) noexcept { on_input_mappings_changed_ = std::move(fn); }
+    /// A dynamic mappings change by other than ATDECC on STREAM_PORT_INPUT @p port_index: as a
+    /// REMOVE_AUDIO_MAPPINGS of @p remove then an ADD_AUDIO_MAPPINGS of @p add, all or nothing,
+    /// through the hook; ENTITY_LOCKED while locked or acquired. Notified and saved. Reactor thread.
+    [[nodiscard]] auto request_audio_mappings(
+        uint16_t port_index,
+        std::span<nanoavb::DynamicAudioMapping const> add,
+        std::span<nanoavb::DynamicAudioMapping const> remove) -> uint8_t;
     /// STREAM_PORT_INPUT @p port_index's dynamic mappings, in cluster order.
     [[nodiscard]] auto input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
     /// The channels of STREAM_OUTPUT @p stream_index the model's static

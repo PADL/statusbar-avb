@@ -2632,6 +2632,88 @@ TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
     std::filesystem::remove_all(dir);
 }
 
+// request_audio_mappings: a local REMOVE then ADD, all or nothing, through the hook,
+// notified and saved; refused as a controller's would be, and while locked
+TEST(avb_entity_kit_mappings, request_audio_mappings_is_a_local_remove_and_add)
+{
+    auto const dir = state_dir("local-maps");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<nanoavb::DynamicAudioMapping> identity;
+    for (uint16_t ch = 0; ch < 8; ++ch) {
+        identity.push_back(mapping(ch, ch));
+    }
+    std::vector<nanoavb::DynamicAudioMapping> const upper(identity.begin() + 2, identity.end());
+    std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1)};
+    {
+        RateKit m{path, 0x75, true};
+        std::vector<std::vector<nanoavb::DynamicAudioMapping>> routed;
+        uint8_t verdict = atdecc::AEM_STATUS_SUCCESS;
+        m.kit.set_on_input_mappings_changed([&](uint16_t, std::span<nanoavb::DynamicAudioMapping const> list) {
+            routed.emplace_back(list.begin(), list.end());
+            return verdict;
+        });
+        EXPECT_TRUE(m.start_ready());
+        register_other_controller(m);
+        routed.clear();
+
+        // Drop channels 2-7, then the narrower format is taken.
+        m.aem.clear();
+        EXPECT_EQ(m.kit.request_audio_mappings(0, {}, upper), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).size(), size_t{1});
+        EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS).empty());
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 2))),
+            atdecc::AEM_STATUS_SUCCESS);
+
+        // Swap the two channels in one call: one hook call, a REMOVE and an ADD told, saved.
+        m.aem.clear();
+        std::vector<nanoavb::DynamicAudioMapping> const both{mapping(0, 0), mapping(1, 1)};
+        EXPECT_EQ(m.kit.request_audio_mappings(0, swapped, both), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(routed.size() == 2 && routed.back() == swapped);
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).size(), size_t{1});
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS).size(), size_t{1});
+        auto saved = load_persistent_state(path, 0, {}).state;
+        EXPECT_TRUE(saved.audio_maps.size() == 1 && saved.audio_maps[0].mappings.size() == 2);
+
+        // No change: no hook, nothing told.
+        m.aem.clear();
+        EXPECT_EQ(m.kit.request_audio_mappings(0, swapped, std::vector{mapping(0, 5)}), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(routed.size(), size_t{2});
+        EXPECT_TRUE(m.aem.empty());
+
+        // Refused as a controller's: a channel the format lacks, a cluster channel
+        // mapped twice, no such port, the hook's verdict; nothing changes or is told.
+        EXPECT_EQ(m.kit.request_audio_mappings(0, std::vector{mapping(2, 2)}, {}), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_EQ(m.kit.request_audio_mappings(0, std::vector{mapping(0, 0)}, {}), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_EQ(m.kit.request_audio_mappings(0, {}, std::vector{mapping(0, 99)}), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_EQ(m.kit.request_audio_mappings(9, std::vector{mapping(0, 2)}, {}), atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
+        verdict = atdecc::AEM_STATUS_NOT_SUPPORTED;
+        EXPECT_EQ(m.kit.request_audio_mappings(0, std::vector{mapping(0, 2)}, {}), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        verdict = atdecc::AEM_STATUS_SUCCESS;
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+        EXPECT_TRUE(m.aem.empty());
+
+        // Milan v1.2 Sections 5.4.2.27-28: no local change while a controller holds the lock.
+        std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+        nanoavb::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+        header.controller_entity_id = OTHER_CONTROLLER;
+        std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+        EXPECT_EQ(m.kit.host().components().aem_handler.handle_command(header, lock, out).status, atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.kit.request_audio_mappings(0, std::vector{mapping(0, 2)}, {}), atdecc::AEM_STATUS_ENTITY_LOCKED);
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+    }
+    {
+        RateKit m{path, 0x75, true};
+        m.kit.set_on_input_mappings_changed(
+            [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));  // restored
+    }
+    std::filesystem::remove_all(dir);
+}
+
 // Milan v1.2 Section 5.4.2.7 for an output: a format narrower than the
 // channels its static AUDIO_MAP names is BAD_ARGUMENTS (after
 // STREAM_IS_RUNNING), a wide enough one taken
