@@ -56,6 +56,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -128,6 +129,9 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (manage_entity_name_) {
             desc.entity_name = entity_name_;
         }
+        if (group_name_) {
+            desc.group_name = *group_name_;  // and SET_NAME (name_index 1)
+        }
         return true;
     }
 
@@ -140,10 +144,12 @@ class DescriptorStorageHandler : public AemEntityHandler
     // and it resets to the seed on restart. To make it survive a restart, set the change
     // callback and persist there, then seed manage_entity_name() from that store at boot.
 
-    /// Enable built-in entity-name get/set, seeded with @p initial.
+    /// Enable built-in entity-name get/set, seeded with @p initial, the
+    /// configured name: a SET_NAME with an empty name goes back to it.
     void manage_entity_name(AtdeccString initial) noexcept
     {
         entity_name_ = initial;
+        configured_entity_name_ = initial;
         manage_entity_name_ = true;
     }
 
@@ -160,16 +166,23 @@ class DescriptorStorageHandler : public AemEntityHandler
     }
 
     // ---- Managed per-descriptor object_names (Clause 7.4.17/7.4.18) ------
-    //
-    // Opt-in like the entity name: call manage_object_names(), and this
-    // handler serves GET_NAME and applies SET_NAME (name_index 0) for the
-    // renameable widget descriptors — CONTROL, SIGNAL_SELECTOR, MATRIX,
-    // CONTROL_BLOCK — with READ_DESCRIPTOR reflecting the override (the
-    // on_get_* loads below patch object_name in). Overrides live in RAM
-    // and reset to the blob's authored object_name on restart; SET_NAME
-    // with an empty name clears back to the authored name.
+    // Opt-in (manage_object_names()): GET_NAME/SET_NAME for the renameable descriptors
+    // (Milan v1.2 Section 5.3.13), overrides in RAM; docs/NANOAVB_ARCHITECTURE.md.
 
     void manage_object_names() noexcept { manage_object_names_ = true; }
+
+    /// Told after every name this handler changes but the group_name (the authored one again
+    /// when an override is cleared), whoever changed it. An empty function removes it.
+    using NameChangedFn =
+        statusbar::sg14::inplace_function<void(uint16_t descriptor_type, uint16_t descriptor_index, AtdeccString const& name), 32>;
+    void set_on_name_changed(NameChangedFn fn) noexcept { on_name_changed_ = std::move(fn); }
+
+    /// The group_name a controller set (ENTITY name_index 1), or nullptr
+    /// while the authored one stands.
+    [[nodiscard]] auto group_name_override() const noexcept -> AtdeccString const*
+    {
+        return group_name_ ? &*group_name_ : nullptr;
+    }
 
     /// The RAM override for (type, index), or nullptr when unset.
     [[nodiscard]] auto object_name_override(uint16_t const descriptor_type, uint16_t const descriptor_index) const noexcept
@@ -188,6 +201,9 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (manages_entity_name_field(id.ref, name_index)) {
             return entity_name_;
         }
+        if (manages_group_name_field(id.ref, name_index)) {
+            return group_name_ ? group_name_ : authored_group_name(id.ref);
+        }
         if (manages_object_name_field(id.ref, name_index)) {
             if (auto const* over = object_name_override(id.ref.descriptor_type, id.ref.descriptor_index)) {
                 return *over;
@@ -200,19 +216,50 @@ class DescriptorStorageHandler : public AemEntityHandler
     auto on_set_name(DescriptorId id, uint16_t const name_index, AtdeccString const& name) -> uint8_t override
     {
         if (manages_entity_name_field(id.ref, name_index)) {
-            uint8_t const status = on_entity_name_changed_ ? on_entity_name_changed_(name) : atdecc::AEM_STATUS_SUCCESS;
+            // An empty name clears a controller's: the configured one again.
+            AtdeccString const effective = name.length() == 0 ? configured_entity_name_ : name;
+            uint8_t const status = on_entity_name_changed_ ? on_entity_name_changed_(effective) : atdecc::AEM_STATUS_SUCCESS;
             if (status == atdecc::AEM_STATUS_SUCCESS) {
-                entity_name_ = name;
+                entity_name_ = effective;
+                if (on_name_changed_) {
+                    on_name_changed_(id.ref.descriptor_type, id.ref.descriptor_index, entity_name_);
+                }
             }
             return status;
         }
+        if (manages_group_name_field(id.ref, name_index)) {
+            // An empty name clears a controller's: the authored one again.
+            // (Not told to on_name_changed, which names the entity by
+            // DESCRIPTOR_ENTITY 0: the group name is no entity name.)
+            if (name.length() == 0) {
+                group_name_.reset();
+            } else {
+                group_name_ = name;
+            }
+            return atdecc::AEM_STATUS_SUCCESS;
+        }
         if (manages_object_name_field(id.ref, name_index)) {
-            return apply_object_name_override(id.ref, name);
+            uint8_t const status = apply_object_name_override(id.ref, name);
+            if (status == atdecc::AEM_STATUS_SUCCESS && on_name_changed_) {
+                auto const* over = object_name_override(id.ref.descriptor_type, id.ref.descriptor_index);
+                on_name_changed_(
+                    id.ref.descriptor_type,
+                    id.ref.descriptor_index,
+                    over != nullptr ? *over : authored_object_name(id.ref).value_or(AtdeccString{}));
+            }
+            return status;
         }
         return atdecc::AEM_STATUS_NOT_IMPLEMENTED;
     }
 
-    auto on_get_configuration(DescriptorId id, DescriptorConfiguration& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_configuration(DescriptorId id, DescriptorConfiguration& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);  // READ_DESCRIPTOR agrees with SET_NAME
+        return true;
+    }
 
     // ---- Unit descriptors -----------------------------------------------
 
@@ -226,6 +273,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (auto const* state = find_sampling_rate_state(id.ref.descriptor_index)) {
             desc.current_sampling_rate = state->rate;
         }
+        apply_object_name(id.ref, desc.object_name);
         return true;
     }
 
@@ -246,6 +294,7 @@ class DescriptorStorageHandler : public AemEntityHandler
             state != nullptr && state->has_format) {
             desc.current_format = state->format;
         }
+        apply_object_name(id.ref, desc.object_name);  // and SET_NAME
         return true;
     }
 
@@ -276,6 +325,7 @@ class DescriptorStorageHandler : public AemEntityHandler
                 desc.log_pdelay_interval = static_cast<uint8_t>(rt->log_pdelay_interval);
             }
         }
+        apply_object_name(id.ref, desc.object_name);
         return true;
     }
 
@@ -304,7 +354,14 @@ class DescriptorStorageHandler : public AemEntityHandler
         return nullptr;
     }
 
-    auto on_get_clock_source(DescriptorId id, DescriptorClockSource& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_clock_source(DescriptorId id, DescriptorClockSource& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
     auto on_get_clock_domain(DescriptorId id, DescriptorClockDomain& desc) -> bool override
     {
@@ -316,6 +373,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (auto const* state = find_clock_domain_state(id.ref.descriptor_index)) {
             desc.clock_source_index = state->clock_source_index;
         }
+        apply_object_name(id.ref, desc.object_name);
         return true;
     }
 
@@ -337,7 +395,14 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // ---- Clusters / Maps / Controls -------------------------------------
 
-    auto on_get_audio_cluster(DescriptorId id, DescriptorAudioCluster& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_audio_cluster(DescriptorId id, DescriptorAudioCluster& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
     auto on_get_video_cluster(DescriptorId id, DescriptorVideoCluster& desc) -> bool override { return load(id.ref, desc); }
 
@@ -414,11 +479,32 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // ---- Timing / PTP ---------------------------------------------------
 
-    auto on_get_timing(DescriptorId id, DescriptorTiming& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_timing(DescriptorId id, DescriptorTiming& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
-    auto on_get_ptp_instance(DescriptorId id, DescriptorPtpInstance& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_ptp_instance(DescriptorId id, DescriptorPtpInstance& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
-    auto on_get_ptp_port(DescriptorId id, DescriptorPtpPort& desc) -> bool override { return load(id.ref, desc); }
+    auto on_get_ptp_port(DescriptorId id, DescriptorPtpPort& desc) -> bool override
+    {
+        if (!load(id.ref, desc)) {
+            return false;
+        }
+        apply_object_name(id.ref, desc.object_name);
+        return true;
+    }
 
     // ---- Built-in IDENTIFY control (automatic when the blob has one) ------
     //
@@ -1705,12 +1791,53 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     // ---- Managed object_names (see the public section) --------------------
 
-    /// The four widget descriptor types whose object_name (offset 4) the
-    /// built-in management renames.
+    /// The descriptor types whose object_name (offset 4) the built-in
+    /// management renames: the four widgets and Milan's Section 5.3.13 list
+    /// (v1.3's TIMING, PTP_INSTANCE and PTP_PORT included).
     [[nodiscard]] static constexpr auto object_name_renameable(uint16_t const descriptor_type) noexcept -> bool
     {
-        return descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL || descriptor_type == atdecc::aem::DESCRIPTOR_SIGNAL_SELECTOR ||
-            descriptor_type == atdecc::aem::DESCRIPTOR_MATRIX || descriptor_type == atdecc::aem::DESCRIPTOR_CONTROL_BLOCK;
+        using namespace atdecc::aem;
+        switch (descriptor_type) {
+            case DESCRIPTOR_CONTROL:
+            case DESCRIPTOR_SIGNAL_SELECTOR:
+            case DESCRIPTOR_MATRIX:
+            case DESCRIPTOR_CONTROL_BLOCK:
+            case DESCRIPTOR_CONFIGURATION:
+            case DESCRIPTOR_AUDIO_UNIT:
+            case DESCRIPTOR_STREAM_INPUT:
+            case DESCRIPTOR_STREAM_OUTPUT:
+            case DESCRIPTOR_AVB_INTERFACE:
+            case DESCRIPTOR_CLOCK_SOURCE:
+            case DESCRIPTOR_AUDIO_CLUSTER:
+            case DESCRIPTOR_CLOCK_DOMAIN:
+            case DESCRIPTOR_TIMING:
+            case DESCRIPTOR_PTP_INSTANCE:
+            case DESCRIPTOR_PTP_PORT:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// True when built-in management answers for the ENTITY's group_name
+    /// (descriptor 0, name_index 1): with manage_object_names().
+    [[nodiscard]] auto manages_group_name_field(DescriptorRef const ref, uint16_t const name_index) const noexcept -> bool
+    {
+        return manage_object_names_ && ref.descriptor_type == atdecc::aem::DESCRIPTOR_ENTITY && ref.descriptor_index == 0 &&
+            name_index == 1 && storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, 0).has_value();
+    }
+
+    /// The blob's authored group_name.
+    [[nodiscard]] auto authored_group_name(DescriptorRef const ref) const noexcept -> std::optional<AtdeccString>
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        constexpr size_t GROUP_NAME_AT = offsetof(atdecc::aem::DescriptorEntity, group_name);
+        if (!blob.has_value() || blob->size() < GROUP_NAME_AT + AtdeccString::LENGTH) {
+            return std::nullopt;
+        }
+        AtdeccString name{};
+        std::copy(blob->begin() + GROUP_NAME_AT, blob->begin() + GROUP_NAME_AT + AtdeccString::LENGTH, name.value.begin());
+        return name;
     }
 
     /// True when built-in object-name management answers for @p ref's
@@ -1779,10 +1906,13 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     DescriptorStorage storage_;
     AtdeccString entity_name_{};
+    AtdeccString configured_entity_name_{};  ///< manage_entity_name()'s seed
     bool manage_entity_name_{false};
     bool manage_object_names_{false};
+    std::optional<AtdeccString> group_name_{};  ///< a controller's group_name (manage_object_names)
     statusbar::sg14::inplace_vector<ObjectNameState, MAX_OBJECT_NAMES> object_names_;
     statusbar::sg14::inplace_function<uint8_t(AtdeccString const&), 64> on_entity_name_changed_{};
+    NameChangedFn on_name_changed_{};
 };
 
 }  // namespace statusbar::nanoavb

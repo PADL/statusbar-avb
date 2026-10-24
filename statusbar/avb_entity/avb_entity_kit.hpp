@@ -33,10 +33,10 @@
 #include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_declarations.hpp"
-#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -47,6 +47,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -57,6 +58,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -297,6 +299,43 @@ class AvbEntityKit
     /// locked or acquired (Milan v1.2 Section 5.4.2.13), else as SET_SAMPLING_RATE
     /// on AUDIO_UNIT 0, notified and saved. Answers the AEM status. Reactor thread.
     [[nodiscard]] auto request_sampling_rate(uint32_t rate) -> uint8_t;
+    /// An entity-name change by other than ATDECC: ENTITY_LOCKED while locked or
+    /// acquired, BAD_ARGUMENTS over 64 bytes, else as SET_NAME (empty: configured
+    /// name). Notified and saved; answers the AEM status. Reactor thread.
+    [[nodiscard]] auto request_entity_name(std::string_view name) -> uint8_t;
+    // --- Dynamic input audio mappings (Milan v1.2 Section 5.3.10) ---------------
+    // Ports without a static AUDIO_MAP keep dynamic mappings, starting at a
+    // default; the rules are in docs/AVB_ENTITY_KIT.md.
+
+    /// The entity routes input port @p port_index's new mappings (all, in cluster
+    /// order) before the kit keeps them (reactor thread), answering an AEM status.
+    /// Without one a change is refused NOT_SUPPORTED. Empty function removes it.
+    using InputMappingsFn = sg14::inplace_function<uint8_t(uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings), 32>;
+    void set_on_input_mappings_changed(InputMappingsFn fn) noexcept { on_input_mappings_changed_ = std::move(fn); }
+    /// STREAM_PORT_INPUT @p port_index's dynamic mappings, in cluster order.
+    [[nodiscard]] auto input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
+    /// The channels of STREAM_OUTPUT @p stream_index the model's static
+    /// AUDIO_MAPs name (1 + the highest; 0: none): a
+    /// SET_STREAM_FORMAT narrower than that is BAD_ARGUMENTS.
+    [[nodiscard]] auto output_static_map_channels(uint16_t stream_index) const -> uint16_t;
+    /// The data plane cannot route STREAM_PORT_INPUT @p port_index's mappings in
+    /// force: fall back to the default (unmapped if that is refused too), warned,
+    /// without the hook. Returns the mappings now in force.
+    auto fall_back_to_default_mappings(uint16_t port_index) -> nanoavb::DynamicAudioMaps::Mappings;
+    /// Whether STREAM_PORT_INPUT @p port_index keeps dynamic mappings.
+    [[nodiscard]] auto has_dynamic_input_map(uint16_t const port_index) const noexcept -> bool
+    {
+        return std::ranges::find(dynamic_input_ports_, port_index) != dynamic_input_ports_.end();
+    }
+    /// The position of @p mapping's cluster channel among STREAM_PORT_INPUT
+    /// @p port_index's (its clusters' channels in order: with one channel a
+    /// cluster, the cluster offset), or nullopt when it names none.
+    [[nodiscard]] auto input_cluster_channel(uint16_t port_index, nanoavb::DynamicAudioMapping const& mapping) const
+        -> std::optional<uint16_t>;
+    /// The mappings STREAM_PORT_INPUT @p port_index starts with (see above),
+    /// for the stream input's current format.
+    [[nodiscard]] auto default_input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
+
     /// Whether STREAM_INPUT @p idx is bound (Milan) or connected (classic):
     /// its format is not to change (Milan v1.2 Section 5.4.2.7).
     [[nodiscard]] auto input_running(uint16_t idx) const noexcept -> bool;
@@ -470,6 +509,14 @@ class AvbEntityKit
     /// read by the data plane and GET_STREAM_INFO).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
     PresentationOffsetFn on_presentation_offset_changed_{};
+    InputMappingsFn on_input_mappings_changed_{};
+    /// The STREAM_PORT_INPUTs with dynamic mappings.
+    std::vector<uint16_t> dynamic_input_ports_{};
+    /// Every dynamic input port back to its default (start, before the saved
+    /// formats: the saved mappings follow them).
+    void reset_input_mappings();
+    /// Restore the saved mappings (after the formats), defaults elsewhere.
+    void apply_saved_audio_maps(PersistentState const& saved);
     StreamFormatFn on_stream_format_changed_{};
     SamplingRateFn on_sampling_rate_changed_{};
     /// Streams (descriptor type, index) a rate change re-timed, for their

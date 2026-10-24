@@ -12,6 +12,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_base.hpp"
+#include "statusbar/nanoavb/nanoavb_dynamic_audio_maps.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model_adapter.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
@@ -41,10 +42,9 @@ using statusbar::container::SlotTable;
 //
 // AEM Command Handler Response
 //
-/// Maximum size for AEM response data (8 byte header + largest descriptor).
-/// Used by process_packet() to allocate one stack-local output buffer that
-/// is passed into the per-command handlers.
-constexpr size_t MAX_AEM_RESPONSE_SIZE = 1024;
+/// Maximum size for AEM response data: one Ethernet frame after the AEM header (1500 - 24),
+/// as Milan v1.3 Section 5.4.1 allows. Sizes the stack-local buffer of process_packet().
+constexpr size_t MAX_AEM_RESPONSE_SIZE = 1476;
 
 /// Small value returned by each AEM command handler.
 ///
@@ -118,7 +118,7 @@ using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16
 using SettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t command_type), 32>;
 
 /// The AEM commands whose effect Milan v1.2 has the entity keep in non-volatile memory
-/// (Sections 5.3.5.1, 5.3.7.1, 5.3.7.6, 5.3.8.1, 5.3.11.1, 5.3.13).
+/// (Sections 5.3.5.1, 5.3.7.1, 5.3.7.6, 5.3.8.1, 5.3.9.1, 5.3.10.1, 5.3.11.1, 5.3.13).
 [[nodiscard]] constexpr auto is_persistent_setting_command(uint16_t const command_type) noexcept -> bool
 {
     switch (command_type) {
@@ -128,11 +128,20 @@ using SettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t comman
         case atdecc::AEM_COMMAND_SET_CLOCK_SOURCE:
         case atdecc::AEM_COMMAND_SET_STREAM_INFO:
         case atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME:
+        case atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS:
+        case atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS:
             return true;
         default:
             return false;
     }
 }
+
+/// Apply stream port (@p port_type, @p port_index)'s new dynamic mappings (all of them, in
+/// cluster order) to the data plane: SUCCESS takes them, any other status refuses and leaves
+/// the port as it was. Reactor thread, before the response.
+using AudioMappingsChangedFn = statusbar::sg14::inplace_function<
+    uint8_t(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings),
+    32>;
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
@@ -217,6 +226,10 @@ struct AemCommandHandlerCallbacks
 
     /// A persistent setting changed (SettingsChangedFn). Optional.
     SettingsChangedFn on_settings_changed;
+
+    /// Apply a stream port's dynamic audio mappings (AudioMappingsChangedFn).
+    /// Optional; if unset, ADD/REMOVE_AUDIO_MAPPINGS reply NOT_IMPLEMENTED.
+    AudioMappingsChangedFn on_audio_mappings_changed;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -322,6 +335,25 @@ class AemCommandHandler
 
     /// Observe changes to the persistent settings (SettingsChangedFn).
     void set_on_settings_changed(SettingsChangedFn fn) { callbacks_.on_settings_changed = std::move(fn); }
+
+    // ---- Dynamic audio mappings (Milan v1.2 Sections 5.3.10, 5.4.2.26-28) ---
+    // A STREAM_PORT_INPUT with no static AUDIO_MAP keeps dynamic mappings; the command rules
+    // are in docs/NANOAVB_ARCHITECTURE.md.
+
+    /// Milan v1.2 Section 5.4.2.26: a GET_AUDIO_MAP partition's size.
+    static constexpr size_t MAX_AUDIO_MAP_MAPPINGS = 176;
+
+    void set_on_audio_mappings_changed(AudioMappingsChangedFn fn) { callbacks_.on_audio_mappings_changed = std::move(fn); }
+    /// The dynamic mappings in force.
+    [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const& { return dynamic_maps_; }
+    /// Whether (@p port_type, @p port_index) is a STREAM_PORT_INPUT of the
+    /// current configuration with dynamic mappings (no static AUDIO_MAP).
+    [[nodiscard]] auto has_dynamic_input_map(uint16_t port_type, uint16_t port_index) const -> bool;
+    /// Make @p mappings input port (@p port_type, @p port_index)'s dynamic mappings, validated as
+    /// an ADD onto an empty port, applied when @p apply; no notification, no settings report.
+    /// The AEM status; nothing changes unless SUCCESS.
+    [[nodiscard]] auto set_audio_mappings(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings, bool apply)
+        -> uint8_t;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -501,6 +533,9 @@ class AemCommandHandler
     /// AEM status from the handler's symbol-keyed set hook; notifications are
     /// emitted only on AEM_STATUS_SUCCESS.
     [[nodiscard]] auto apply_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
+    /// A SET_NAME by the entity itself (@p command_body as the command's), applied, notified and
+    /// reported to the settings hook as a controller's. The AEM status.
+    [[nodiscard]] auto apply_local_name(std::span<uint8_t const> command_body) -> uint8_t;
 
     /// Emit an unsolicited AEM response (U-bit set) carrying @p command_type and
     /// @p body to every registered controller (plus the IDENTIFY multicast when the
@@ -596,6 +631,11 @@ class AemCommandHandler
     /// AemEntityModel::apply_set_name -> the handler's symbol-keyed
     /// on_set_name, echoing the command as the response.
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// SET_NAME, its notification leaving out @p requester (none: every controller).
+    [[nodiscard]] auto set_name(
+        std::span<uint8_t const> command_data,
+        std::span<uint8_t> out_buffer,
+        std::optional<Eui64> const& requester) -> AemCommandResponse;
 
     /// AVDECC exclusive-access gate (IEEE 1722.1 7.4). Returns the AEM status a
     /// mutating command must be rejected with when the entity is acquired or locked
@@ -612,6 +652,47 @@ class AemCommandHandler
     [[nodiscard]] auto handle_get_stream_format(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
+    /// GET_AUDIO_MAP on a stream port with dynamic maps: partition map_index of its mappings.
+    /// A port with static maps is NOT_SUPPORTED.
+    [[nodiscard]] auto handle_get_audio_map(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// ADD_AUDIO_MAPPINGS (@p add) or REMOVE_AUDIO_MAPPINGS on a dynamic
+    /// STREAM_PORT_INPUT (see the public section).
+    [[nodiscard]] auto handle_audio_mappings(bool add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// A stream port's model, for the mapping commands.
+    struct PortModel
+    {
+        uint16_t base_cluster{0};
+        uint16_t number_of_clusters{0};
+        uint16_t number_of_maps{0};
+        uint16_t port_flags{0};
+        uint32_t total_channels{0};  ///< over its clusters
+        /// Each cluster's channel_count, read once (at most this many clusters).
+        sg14::inplace_vector<uint16_t, 512> cluster_channel_counts{};
+    };
+    [[nodiscard]] auto port_model(uint16_t port_type, uint16_t port_index) const -> std::optional<PortModel>;
+    /// The channels of cluster @p cluster_offset of @p port (0: none).
+    [[nodiscard]] static auto cluster_channels(PortModel const& port, uint16_t cluster_offset) -> uint16_t;
+    /// The position of @p mapping's cluster channel among @p port's (its
+    /// clusters' channels in order), or nullopt when it names none.
+    [[nodiscard]] static auto cluster_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) -> std::optional<uint32_t>;
+    /// SUCCESS when @p mapping names a cluster channel of the input port and a STREAM_INPUT and,
+    /// with @p check_channel, a channel of its current format at the unit's rate; else BAD_ARGUMENTS.
+    [[nodiscard]] auto check_mapping(uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const
+        -> uint8_t;
+    /// The set @p mappings would leave input port (@p port_index, @p port)
+    /// with, added to @p current (validated as ADD_AUDIO_MAPPINGS), or the
+    /// status to refuse with.
+    [[nodiscard]] auto merged_mappings(
+        uint16_t port_index,
+        PortModel const& port,
+        DynamicAudioMaps::Mappings const& current,
+        std::span<DynamicAudioMapping const> mappings,
+        DynamicAudioMaps::Mappings& merged) const -> uint8_t;
+    /// Read descriptor (@p type, @p index) of the current configuration.
+    template <typename T>
+    [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;
     /// Handle GET_SAMPLING_RATE — returns the AUDIO_UNIT descriptor's current_sampling_rate.
     [[nodiscard]] auto handle_get_sampling_rate(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
@@ -909,6 +990,13 @@ class AemCommandHandler
     // When valid, a SET_CONTROL on this index also notifies the IDENTIFY multicast.
     uint16_t identify_control_index_{0};
     bool identify_control_index_valid_{false};
+
+    // The stream ports' dynamic audio mappings.
+    DynamicAudioMaps dynamic_maps_{};
+    // The command being dispatched succeeded without changing a persistent
+    // setting (an ADD/REMOVE_AUDIO_MAPPINGS that left the port as it was):
+    // process_packet does not report it to on_settings_changed.
+    bool setting_unchanged_{false};
 };
 
 }  // namespace statusbar::nanoavb

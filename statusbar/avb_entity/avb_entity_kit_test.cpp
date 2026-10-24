@@ -20,7 +20,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -94,10 +96,10 @@ constexpr auto base_format(uint32_t const rate, uint16_t const channels) -> uint
 }
 static_assert(base_format(48000, 2) == 0x0205022000806000ULL && base_format(96000, 8) == 0x020702200200C000ULL);
 
-/// A bridge-like multi-rate model: STREAM_OUTPUT 0 (INT_24 8 ch at 48 and 96 kHz, then the CRF),
-/// STREAM_INPUT 0 (every Base format at both rates, then a CRF input) and an AUDIO_UNIT at
-/// 48 kHz listing 48 and 96 kHz.
-auto make_multirate_blob() -> std::vector<uint8_t>
+/// A multi-rate model: 8 ch INT_24 output and input (+ CRF each) at 48/96 kHz.
+/// With @p ports, STREAM_PORT_INPUT 0 has eight 1-channel clusters and no
+/// AUDIO_MAP, plus every Milan v1.2 Section 5.3.13 name's descriptor.
+auto make_multirate_blob(bool const ports = false) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -115,7 +117,7 @@ auto make_multirate_blob() -> std::vector<uint8_t>
         for (uint32_t const rate : {48000U, 96000U}) {
             (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(rate == 48000 ? INT24_8CH_48K : INT24_8CH_96K));
             for (uint16_t const channels : {1, 2, 4, 6, 8}) {
-                if (type == DESCRIPTOR_STREAM_INPUT || channels == 8) {
+                if (type == DESCRIPTOR_STREAM_INPUT || channels == 8 || ports) {
                     (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(base_format(rate, channels)));
                 }
             }
@@ -132,6 +134,55 @@ auto make_multirate_blob() -> std::vector<uint8_t>
     unit.sampling_rates_count = uint16_t{2};
     unit.sampling_rates[0] = uint32_t{48000};
     unit.sampling_rates[1] = uint32_t{96000};
+    if (ports) {
+        unit.number_of_stream_input_ports = uint16_t{1};
+        atdecc::aem::DescriptorStreamPort port{};
+        port.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
+        port.number_of_clusters = uint16_t{8};
+        w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, 0, make_const_span(port));
+        for (uint16_t c = 0; c < 8; ++c) {
+            atdecc::aem::DescriptorAudioCluster cluster{};
+            cluster.descriptor_index = c;
+            cluster.channel_count = uint16_t{1};
+            w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, c, make_const_span(cluster));
+        }
+        // STREAM_PORT_OUTPUT 0: one 8-channel cluster under a static
+        // identity AUDIO_MAP (and the output lists narrower Base formats
+        // than its map: the kit's backstop refuses them).
+        unit.number_of_stream_output_ports = uint16_t{1};
+        atdecc::aem::DescriptorStreamPort out_port{};
+        out_port.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
+        out_port.number_of_clusters = uint16_t{1};
+        out_port.base_cluster = uint16_t{8};
+        out_port.number_of_maps = uint16_t{1};
+        w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 0, make_const_span(out_port));
+        atdecc::aem::DescriptorAudioCluster out_cluster{};
+        out_cluster.descriptor_index = uint16_t{8};
+        out_cluster.channel_count = uint16_t{8};
+        w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, 8, make_const_span(out_cluster));
+        atdecc::aem::DescriptorAudioMap map{};
+        for (uint16_t ch = 0; ch < 8; ++ch) {
+            (void)map.push_mapping(
+                {.mapping_stream_index = uint16_t{0},
+                 .mapping_stream_channel = ch,
+                 .mapping_cluster_offset = uint16_t{0},
+                 .mapping_cluster_channel = ch});
+        }
+        w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_MAP, 0, wire(map));
+        atdecc::aem::DescriptorClockSource source{};
+        w.add(0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 0, make_const_span(source));
+        atdecc::aem::DescriptorClockDomain domain{};
+        w.add(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0, wire(domain));
+        atdecc::aem::DescriptorControl control{};
+        control.control_type = atdecc::aem::CONTROL_TYPE_IDENTIFY;
+        w.add(0, atdecc::aem::DESCRIPTOR_CONTROL, 0, wire(control));
+        atdecc::aem::DescriptorTiming timing{};
+        w.add(0, atdecc::aem::DESCRIPTOR_TIMING, 0, wire(timing));
+        atdecc::aem::DescriptorPtpInstance instance{};
+        w.add(0, atdecc::aem::DESCRIPTOR_PTP_INSTANCE, 0, make_const_span(instance));
+        atdecc::aem::DescriptorPtpPort ptp_port{};
+        w.add(0, atdecc::aem::DESCRIPTOR_PTP_PORT, 0, make_const_span(ptp_port));
+    }
     w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_UNIT, 0, wire(unit));
     atdecc::aem::DescriptorAvbInterface iface{};
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
@@ -990,6 +1041,33 @@ struct PersistentKit : MilanKit
         std::ranges::copy(name, body.begin() + 8);
         return aem_packet(atdecc::AEM_COMMAND_SET_NAME, body);
     }
+
+    /// SET_NAME of a descriptor's object_name (name_index 0)
+    auto set_object_name(uint16_t const type, uint16_t const index, std::string_view const name) -> uint8_t
+    {
+        std::array<uint8_t, 8 + 64> body{};  // descriptor type, index, name_index 0, configuration 0, the name
+        body[0] = static_cast<uint8_t>(type >> 8U);
+        body[1] = static_cast<uint8_t>(type);
+        body[2] = static_cast<uint8_t>(index >> 8U);
+        body[3] = static_cast<uint8_t>(index);
+        std::ranges::copy(name, body.begin() + 8);
+        return aem_packet(atdecc::AEM_COMMAND_SET_NAME, body);
+    }
+
+    /// READ_DESCRIPTOR of a stream: its object_name
+    auto stream_name(uint16_t const type, uint16_t const index) -> std::string
+    {
+        atdecc::aem::AemReadDescriptorCommandPayload read{};
+        read.descriptor_type = type;
+        read.descriptor_index = index;
+        std::array<uint8_t, atdecc::aem::AemReadDescriptorCommandPayload::LENGTH> body{};
+        span_store(body, read);
+        auto const r = aem_command(atdecc::AEM_COMMAND_READ_DESCRIPTOR, body);
+        EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
+        atdecc::aem::DescriptorStream stream{};
+        span_load_padded(stream, std::span<uint8_t const>{r.body}.subspan(atdecc::aem::AemReadDescriptorResponsePayload::LENGTH));
+        return std::string{stream.object_name.as_string_view()};
+    }
 };
 
 }  // namespace
@@ -1019,6 +1097,97 @@ TEST(avb_entity_kit_persistence, set_name_survives_a_rebuild)
         EXPECT_EQ(m.set_entity_name("kit milan"), atdecc::AEM_STATUS_SUCCESS);
         EXPECT_TRUE(load_persistent_state(path, 0, {}).state.names.empty());
     }
+    std::filesystem::remove_all(dir);
+}
+
+// With managed object names, a stream's SET_NAME is served, saved and
+// restored, and every name change (the entity's too) is told to the hook
+TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
+{
+    auto const dir = state_dir("stream-name");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<std::tuple<uint16_t, uint16_t, std::string>> told;
+    auto const hook = [&told](uint16_t const type, uint16_t const index, atdecc::aem::AtdeccString const& name) {
+        told.emplace_back(type, index, std::string{name.as_string_view()});
+    };
+    {
+        // without managed object names a stream's SET_NAME is not implemented
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.set_object_name(DESCRIPTOR_STREAM_INPUT, 0, "Desk"), atdecc::AEM_STATUS_NOT_IMPLEMENTED);
+    }
+    {
+        PersistentKit m{path};
+        m.handler.manage_object_names();
+        m.handler.set_on_name_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.set_object_name(DESCRIPTOR_STREAM_INPUT, 0, "Desk"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.set_object_name(DESCRIPTOR_STREAM_OUTPUT, 0, "To FOH"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.set_entity_name("FOH bridge"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(m.stream_name(DESCRIPTOR_STREAM_INPUT, 0) == "Desk");
+        EXPECT_TRUE(m.stream_name(DESCRIPTOR_STREAM_OUTPUT, 0) == "To FOH");
+        std::vector<std::tuple<uint16_t, uint16_t, std::string>> const expected{
+            {DESCRIPTOR_STREAM_INPUT, 0, "Desk"}, {DESCRIPTOR_STREAM_OUTPUT, 0, "To FOH"}, {DESCRIPTOR_ENTITY, 0, "FOH bridge"}};
+        EXPECT_TRUE(told == expected);
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{3});
+    }
+    told.clear();
+    {
+        // restored at start, through the hook
+        PersistentKit m{path};
+        m.handler.manage_object_names();
+        m.handler.set_on_name_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(m.stream_name(DESCRIPTOR_STREAM_INPUT, 0) == "Desk");
+        EXPECT_EQ(told.size(), size_t{3});
+        // an empty name clears back to the authored one (empty in this model)
+        told.clear();
+        EXPECT_EQ(m.set_object_name(DESCRIPTOR_STREAM_INPUT, 0, ""), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(m.stream_name(DESCRIPTOR_STREAM_INPUT, 0).empty());
+        EXPECT_TRUE(told.size() == 1 && std::get<2>(told[0]).empty());
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{2});
+        // ... and an empty entity name to the configured one, which GET_NAME,
+        // READ_DESCRIPTOR and the SET_NAME response report; nothing left to keep
+        told.clear();
+        EXPECT_EQ(m.set_entity_name(""), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(m.entity_name() == "kit milan");
+        EXPECT_TRUE(told.size() == 1 && std::get<2>(told[0]) == "kit milan");
+        nanoavb::AemDu reply{};
+        auto const& response = m.aem.front();
+        span_load(reply, std::span<uint8_t const>{response}.first(nanoavb::AemDu::LENGTH));
+        EXPECT_TRUE(
+            std::string_view{reinterpret_cast<char const*>(response.data()) + nanoavb::AemDu::LENGTH + 8}.starts_with("kit milan"));
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{1});
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// The entity renamed by other than ATDECC (the bridge's control socket): as
+// a controller's SET_NAME, saved and told to every controller; refused while
+// a controller has the entity locked; an empty name is the configured one
+TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
+{
+    auto const dir = state_dir("request-name");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentKit m{path};
+    std::vector<std::string> told;
+    m.handler.set_on_name_changed(
+        [&told](uint16_t, uint16_t, atdecc::aem::AtdeccString const& name) { told.emplace_back(name.as_string_view()); });
+    EXPECT_TRUE(m.start_ready());
+    m.aem.clear();
+    EXPECT_EQ(m.kit.request_entity_name("Stage bridge"), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.entity_name() == "Stage bridge");
+    EXPECT_TRUE(told.size() == 1 && told[0] == "Stage bridge");
+    EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{1});
+    EXPECT_EQ(m.kit.request_entity_name(std::string(65, 'x')), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.request_entity_name("Other"), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    lock[3] = 0x01;  // UNLOCK
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.request_entity_name(""), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.entity_name() == "kit milan");
+    EXPECT_TRUE(load_persistent_state(path, 0, {}).state.names.empty());
     std::filesystem::remove_all(dir);
 }
 
@@ -1268,8 +1437,8 @@ auto rate_body(uint32_t const rate) -> std::array<uint8_t, 8>
 /// asked (the rate hook applies the rate, as an entity re-clocking would).
 struct RateKit : PersistentKit
 {
-    explicit RateKit(std::string const& path = {}, uint64_t const entity_low = 0x70)
-        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob()}
+    explicit RateKit(std::string const& path = {}, uint64_t const entity_low = 0x70, bool const ports = false)
+        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports)}
     {
         kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
             formats.push_back({type, index, format});
@@ -2216,5 +2385,299 @@ TEST(avb_entity_kit_counters, a_restored_binding_unbinds_without_an_interruption
     counters = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
     EXPECT_EQ(counters.counters[2].get(), 0U);
     EXPECT_EQ(counters.counters[0].get(), counters.counters[1].get());
+    std::filesystem::remove_all(dir);
+}
+
+// ---- Names and dynamic input mappings ------------------------------------------
+
+namespace {
+
+ieee::Eui64 const OTHER_CONTROLLER{0x02, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x02};
+ieee::Eui48 const OTHER_CONTROLLER_MAC{0x02, 0x00, 0x00, 0xC0, 0x00, 0x02};
+
+/// Register a second controller for unsolicited notifications.
+void register_other_controller(PersistentKit& m)
+{
+    nanoavb::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, nanoavb::AemDu::AEM_DATA_LENGTH);
+    header.target_entity_id = m.config.entity_id;
+    header.controller_entity_id = OTHER_CONTROLLER;
+    std::array<uint8_t, nanoavb::AemDu::LENGTH> frame{};
+    span_store(frame, header);
+    (void)m.kit.host().components().aem_handler.process_packet(OTHER_CONTROLLER_MAC, frame, m.config.entity_id);
+}
+
+/// SET_NAME of (@p type, @p index, @p name_index).
+auto set_name(PersistentKit& m, uint16_t const type, uint16_t const index, uint16_t const name_index, std::string_view const name)
+    -> uint8_t
+{
+    std::array<uint8_t, 8 + 64> body{};
+    body[0] = static_cast<uint8_t>(type >> 8U);
+    body[1] = static_cast<uint8_t>(type);
+    body[2] = static_cast<uint8_t>(index >> 8U);
+    body[3] = static_cast<uint8_t>(index);
+    body[5] = static_cast<uint8_t>(name_index);
+    std::ranges::copy(name, body.begin() + 8);
+    return m.aem_packet(atdecc::AEM_COMMAND_SET_NAME, body);
+}
+
+/// READ_DESCRIPTOR of (@p type, @p index): its object_name (offset 4; the
+/// ENTITY's group_name at @p name_at).
+auto read_name(PersistentKit& m, uint16_t const type, uint16_t const index, size_t const name_at = 4) -> std::string
+{
+    atdecc::aem::AemReadDescriptorCommandPayload read{};
+    read.descriptor_type = type;
+    read.descriptor_index = index;
+    std::array<uint8_t, atdecc::aem::AemReadDescriptorCommandPayload::LENGTH> body{};
+    span_store(body, read);
+    auto const r = m.aem_command(atdecc::AEM_COMMAND_READ_DESCRIPTOR, body);
+    size_t const at = atdecc::aem::AemReadDescriptorResponsePayload::LENGTH + name_at;
+    if (r.status != atdecc::AEM_STATUS_SUCCESS || r.body.size() < at + 64) {
+        return "(none)";
+    }
+    auto const* p = reinterpret_cast<char const*>(r.body.data()) + at;
+    return std::string{p, ::strnlen(p, 64)};
+}
+
+/// ADD (@p add) or REMOVE_AUDIO_MAPPINGS of @p list on STREAM_PORT_INPUT 0.
+auto map_command(PersistentKit& m, bool const add, std::vector<nanoavb::DynamicAudioMapping> const& list) -> uint8_t
+{
+    std::vector<uint8_t> body(8 + (list.size() * 8));
+    atdecc::aem::AemAudioMappingsCommandHeader header{};
+    header.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
+    header.number_of_mappings = static_cast<uint16_t>(list.size());
+    span_store(std::span{body}.first(8), header);
+    for (size_t i = 0; i < list.size(); ++i) {
+        atdecc::aem::AemAudioMapping wire{};
+        wire.stream_index = list[i].stream_index;
+        wire.stream_channel = list[i].stream_channel;
+        wire.cluster_offset = list[i].cluster_offset;
+        wire.cluster_channel = list[i].cluster_channel;
+        span_store(std::span{body}.subspan(8 + (i * 8), 8), wire);
+    }
+    return m.aem_packet(add ? atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS : atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, body);
+}
+
+auto mapping(uint16_t const stream_ch, uint16_t const cluster) -> nanoavb::DynamicAudioMapping
+{
+    return {.stream_index = 0, .stream_channel = stream_ch, .cluster_offset = cluster, .cluster_channel = 0};
+}
+
+}  // namespace
+
+// Milan v1.2 Section 5.3.13: every kept name is settable, notified, saved,
+// restored, and cleared by an empty name; group_name is ENTITY name_index 1.
+TEST(avb_entity_kit_names, every_milan_name_is_settable_saved_and_notified)
+{
+    auto const dir = state_dir("stage7-names");
+    auto const path = (dir / "avb-state.toml").string();
+    using namespace atdecc::aem;
+    std::vector<std::pair<uint16_t, uint16_t>> const named{
+        {DESCRIPTOR_CONFIGURATION, 0},
+        {DESCRIPTOR_AUDIO_UNIT, 0},
+        {DESCRIPTOR_STREAM_INPUT, 0},
+        {DESCRIPTOR_STREAM_OUTPUT, 0},
+        {DESCRIPTOR_AVB_INTERFACE, 0},
+        {DESCRIPTOR_CLOCK_SOURCE, 0},
+        {DESCRIPTOR_AUDIO_CLUSTER, 3},
+        {DESCRIPTOR_CLOCK_DOMAIN, 0},
+        {DESCRIPTOR_CONTROL, 0},  // the IDENTIFY control
+        {DESCRIPTOR_TIMING, 0},
+        {DESCRIPTOR_PTP_INSTANCE, 0},
+        {DESCRIPTOR_PTP_PORT, 0}};
+    auto const name_of = [](uint16_t const type) { return "name " + std::to_string(type); };
+    constexpr size_t GROUP_NAME_AT = offsetof(DescriptorEntity, group_name);
+    {
+        RateKit m{path, 0x71, true};
+        m.handler.manage_object_names();
+        std::vector<uint16_t> told;
+        m.handler.set_on_name_changed([&told](uint16_t const type, uint16_t, AtdeccString const&) { told.push_back(type); });
+        EXPECT_TRUE(m.start_ready());
+        register_other_controller(m);
+        for (auto const& [type, index] : named) {
+            EXPECT_EQ(set_name(m, type, index, 0, name_of(type)), atdecc::AEM_STATUS_SUCCESS);
+            EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_NAME).size(), size_t{1});
+            EXPECT_TRUE(read_name(m, type, index) == name_of(type));
+        }
+        EXPECT_EQ(set_name(m, DESCRIPTOR_ENTITY, 0, 1, "Stage left"), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_NAME).size(), size_t{1});
+        EXPECT_TRUE(read_name(m, DESCRIPTOR_ENTITY, 0, GROUP_NAME_AT) == "Stage left");
+        EXPECT_EQ(told.size(), named.size());  // the group name is no entity name: not told
+        // No such descriptor, or a name the entity does not keep.
+        EXPECT_EQ(set_name(m, DESCRIPTOR_AUDIO_CLUSTER, 9, 0, "x"), atdecc::AEM_STATUS_NOT_IMPLEMENTED);
+        EXPECT_EQ(set_name(m, DESCRIPTOR_ENTITY, 0, 2, "x"), atdecc::AEM_STATUS_NOT_IMPLEMENTED);
+        // Milan v1.2 Section 5.4.2.11: refused while another controller holds the lock.
+        std::array<uint8_t, AemLockEntityPayload::LENGTH> lock{};
+        nanoavb::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+        header.controller_entity_id = OTHER_CONTROLLER;
+        std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+        EXPECT_EQ(m.kit.host().components().aem_handler.handle_command(header, lock, out).status, atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(set_name(m, DESCRIPTOR_CLOCK_DOMAIN, 0, 0, "locked out"), atdecc::AEM_STATUS_ENTITY_LOCKED);
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), named.size() + 1);
+    }
+    {
+        RateKit m{path, 0x71, true};
+        m.handler.manage_object_names();
+        EXPECT_TRUE(m.start_ready());
+        for (auto const& [type, index] : named) {
+            EXPECT_TRUE(read_name(m, type, index) == name_of(type));
+        }
+        EXPECT_TRUE(read_name(m, DESCRIPTOR_ENTITY, 0, GROUP_NAME_AT) == "Stage left");
+        // Empty: the authored name again (empty in this model), nothing kept.
+        EXPECT_EQ(set_name(m, DESCRIPTOR_ENTITY, 0, 1, ""), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(set_name(m, DESCRIPTOR_AUDIO_CLUSTER, 3, 0, ""), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(read_name(m, DESCRIPTOR_ENTITY, 0, GROUP_NAME_AT).empty());
+        EXPECT_TRUE(read_name(m, DESCRIPTOR_AUDIO_CLUSTER, 3).empty());
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), named.size() - 1);
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// Input port mappings: identity default, hook, notify, persist, restore; a
+// format dropping a mapped channel is BAD_ARGUMENTS (Milan v1.2 Section 5.4.2.7);
+// mappings change while bound (Section 5.3.10.1).
+TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
+{
+    auto const dir = state_dir("stage7-maps");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<nanoavb::DynamicAudioMapping> identity;
+    for (uint16_t ch = 0; ch < 8; ++ch) {
+        identity.push_back(mapping(ch, ch));
+    }
+    {
+        RateKit m{path, 0x72, true};
+        std::vector<std::vector<nanoavb::DynamicAudioMapping>> routed;
+        m.kit.set_on_input_mappings_changed([&routed](uint16_t const port, std::span<nanoavb::DynamicAudioMapping const> list) {
+            EXPECT_EQ(port, uint16_t{0});
+            routed.emplace_back(list.begin(), list.end());
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
+        EXPECT_TRUE(m.start_ready());
+        register_other_controller(m);
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), identity));
+        EXPECT_TRUE(routed.size() == 1 && routed.back() == identity);  // the default, told at start
+
+        // A 2-channel format would drop mapped channels 2-7.
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 2))),
+            atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_TRUE(m.formats.empty());
+        std::vector<nanoavb::DynamicAudioMapping> upper(identity.begin() + 2, identity.end());
+        EXPECT_EQ(map_command(m, false, upper), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).size(), size_t{1});
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 2))),
+            atdecc::AEM_STATUS_SUCCESS);
+        // The identity for a 2-channel stream is the default: nothing kept.
+        EXPECT_TRUE(load_persistent_state(path, 0, {}).state.audio_maps.empty());
+
+        // Swap the two channels and feed cluster 5 from channel 0 as well.
+        EXPECT_EQ(map_command(m, false, {mapping(0, 0), mapping(1, 1)}), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(map_command(m, true, {mapping(1, 0), mapping(0, 1), mapping(0, 5)}), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS).size(), size_t{1});
+        std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1), mapping(0, 5)};
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+        EXPECT_TRUE(!routed.empty() && routed.back() == swapped);
+        // A channel the 2-channel format lacks.
+        EXPECT_EQ(map_command(m, true, {mapping(2, 2)}), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        auto const saved = load_persistent_state(path, 0, {}).state;
+        EXPECT_EQ(saved.audio_maps.size(), size_t{1});
+        EXPECT_TRUE(saved.audio_maps.size() == 1 && saved.audio_maps[0].mappings.size() == 3);
+    }
+    // Restart, bound: the saved format, then the saved mappings, through the hooks.
+    PersistentState state = load_persistent_state(path, 0, {}).state;
+    state.listener_bindings.push_back(
+        {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 0, .format = base_format(48000, 2)});
+    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    {
+        RateKit m{path, 0x72, true};
+        std::vector<std::vector<nanoavb::DynamicAudioMapping>> routed;
+        m.kit.set_on_input_mappings_changed([&routed](uint16_t, std::span<nanoavb::DynamicAudioMapping const> list) {
+            routed.emplace_back(list.begin(), list.end());
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 2));
+        std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1), mapping(0, 5)};
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+        EXPECT_TRUE(routed.size() == 1 && routed.back() == swapped);  // the saved set, once
+        EXPECT_TRUE(m.kit.input_running(0));
+        // Bound: the format stays, the mappings change.
+        EXPECT_EQ(map_command(m, false, {mapping(0, 5)}), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(map_command(m, true, {mapping(1, 7)}), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.kit.input_mappings(0).size(), size_t{3});
+        // The entity refusing a set changes nothing.
+        m.kit.set_on_input_mappings_changed(
+            [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_BAD_ARGUMENTS; });
+        EXPECT_EQ(map_command(m, true, {mapping(0, 6)}), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_EQ(m.kit.input_mappings(0).size(), size_t{3});
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.audio_maps[0].mappings.size(), size_t{3});
+    }
+    // A saved set the model no longer takes falls back to the default.
+    state = load_persistent_state(path, 0, {}).state;
+    state.audio_maps[0].mappings.push_back({.stream_index = 0, .stream_channel = 9, .cluster_offset = 6, .cluster_channel = 0});
+    state.listener_bindings.clear();
+    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    {
+        RateKit m{path, 0x72, true};
+        m.kit.set_on_input_mappings_changed(
+            [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), m.kit.default_input_mappings(0)));
+        EXPECT_EQ(m.kit.input_mappings(0).size(), size_t{2});  // the 2-channel identity
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// Milan v1.2 Section 5.4.2.7 for an output: a format narrower than the
+// channels its static AUDIO_MAP names is BAD_ARGUMENTS (after
+// STREAM_IS_RUNNING), a wide enough one taken
+TEST(avb_entity_kit_mappings, an_output_keeps_the_channels_its_static_map_names)
+{
+    RateKit m{{}, 0x73, true};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.kit.output_static_map_channels(0), uint16_t{8});
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 2))),
+        atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(m.formats.empty());
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
+        atdecc::AEM_STATUS_SUCCESS);
+    // Streaming, STREAM_IS_RUNNING comes first.
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 2))),
+        atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+}
+
+// A kit started before the entity's mapping hook (its data plane not up
+// yet) keeps the saved mappings, validated; a later save keeps them too
+TEST(avb_entity_kit_mappings, saved_mappings_survive_a_start_before_the_hook)
+{
+    auto const dir = state_dir("stage7-maps-nohook");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1), mapping(2, 2)};
+    {
+        RateKit m{path, 0x74, true};
+        m.kit.set_on_input_mappings_changed([](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+        EXPECT_TRUE(m.start_ready());
+        std::vector<nanoavb::DynamicAudioMapping> rest;
+        for (uint16_t ch = 0; ch < 8; ++ch) {
+            rest.push_back(mapping(ch, ch));
+        }
+        EXPECT_EQ(map_command(m, false, rest), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(map_command(m, true, swapped), atdecc::AEM_STATUS_SUCCESS);
+    }
+    {
+        RateKit m{path, 0x74, true};  // no hook
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+        m.kit.persist();
+        auto const saved = load_persistent_state(path, 0, {}).state;
+        EXPECT_TRUE(saved.audio_maps.size() == 1 && saved.audio_maps[0].mappings.size() == 3);
+    }
     std::filesystem::remove_all(dir);
 }

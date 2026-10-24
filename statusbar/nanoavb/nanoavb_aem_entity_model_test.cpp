@@ -448,6 +448,36 @@ auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::
 
 }  // namespace
 
+TEST(descriptor_storage_handler, timing_serves_its_ptp_instances)
+{
+    // TIMING's ptp_instances trailer (IEEE 1722.1-2021 7.2.34) is served as
+    // authored; without it a controller reads past the descriptor's end.
+    using atdecc::aem::DESCRIPTOR_TIMING;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageTocEntry;
+    using atdecc::aem::DescriptorTiming;
+
+    constexpr uint32_t desc_offset = DescriptorStorageHeader::LENGTH + DescriptorStorageTocEntry::LENGTH;
+    constexpr uint16_t desc_len = DescriptorTiming::LENGTH + 2;  // one PTP_INSTANCE index
+    std::vector<uint8_t> blob(desc_offset + desc_len, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_TIMING, desc_len, desc_offset);
+    DescriptorTiming desc{};
+    desc.ptp_instances_offset = uint16_t{DescriptorTiming::LENGTH};
+    desc.number_of_ptp_instances = uint16_t{1};
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+    blob[desc_offset + DescriptorTiming::LENGTH + 1] = 0x03;  // PTP_INSTANCE 3
+
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_TIMING, .descriptor_index = 0}, make_span(buf));
+    EXPECT_EQ(n, size_t(desc_len));
+    EXPECT_TRUE(buf[DescriptorTiming::LENGTH] == 0 && buf[DescriptorTiming::LENGTH + 1] == 0x03);
+}
+
 TEST(descriptor_storage_handler, matrix_signal_serves_blob_trailer)
 {
     // MATRIX_SIGNAL's signals trailer is not modeled inline in the wire
