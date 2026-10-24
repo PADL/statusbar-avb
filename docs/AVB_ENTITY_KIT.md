@@ -144,6 +144,14 @@ STREAM_IS_RUNNING on a bound input or a streaming output. The entity's hook
 re-shapes the stream (its spec, its TX or RX slot, a declared talker's TSpec).
 Without a hook only the stream's current format is taken.
 
+A talker format, or a sampling rate, that raises every talker's TSpec bandwidth
+together (Milan v1.2 Table 4.4, the shaper's arithmetic) past the class A
+budget, 75% of `link_mbps()` (IEEE 802.1Q-2022 Clause 34.3.1; the shaper keeps
+the speed current, 1000 Mbit/s until it does), is refused NO_RESOURCES. Every
+talker counts, admitted or not: an output's format changes only while it does
+not stream, so the check is the last chance to keep them all admissible.
+Milan v1.2 Section 5.4.2.7 names no status for this. Listeners do not count.
+
 SET_SAMPLING_RATE (AUDIO_UNIT 0, the kit's one media clock) re-times every AAF
 stream's current format to the new rate, so it is taken only when each stream
 lists its format at that rate, and refused STREAM_IS_RUNNING while any input is
