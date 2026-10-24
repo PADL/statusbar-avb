@@ -454,9 +454,13 @@ auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, s
 
 auto AemCommandHandler::name_in_force(std::span<uint8_t const> const command_data) const -> bool
 {
+    auto const ref = name_ref_of(command_data);
+    if (!ref) {
+        return false;
+    }
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> current{};
     AemEntityModel const aem_model{*handler_};
-    size_t const n = aem_model.get_name_for_wire(name_ref_of(command_data), current);
+    size_t const n = aem_model.get_name_for_wire(*ref, current);
     return n != 0 && n <= command_data.size() && std::ranges::equal(std::span{current}.first(n), command_data.first(n));
 }
 
@@ -493,8 +497,10 @@ auto AemCommandHandler::applied_set_name(std::span<uint8_t const> command_data, 
     // like handle_set_descriptor_value does for values, with the name in force
     // (an empty one is the configured or authored name again).
     size_t const size = echo_command(command_data, out_buffer);
-    AemEntityModel const aem_model{*handler_};
-    (void)aem_model.get_name_for_wire(name_ref_of(command_data), out_buffer);
+    if (auto const ref = name_ref_of(command_data)) {
+        AemEntityModel const aem_model{*handler_};
+        (void)aem_model.get_name_for_wire(*ref, out_buffer);
+    }
     emit_unsolicited(AEM_COMMAND_SET_NAME, out_buffer.first(size));
     return {.status = AEM_STATUS_SUCCESS, .size = size};
 }
