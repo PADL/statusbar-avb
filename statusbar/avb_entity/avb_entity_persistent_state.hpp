@@ -85,6 +85,27 @@ struct PersistedMediaClockReference
     auto operator==(PersistedMediaClockReference const&) const -> bool = default;
 };
 
+/// One dynamic audio mapping (IEEE 1722.1 7.4.44).
+struct PersistedAudioMapping
+{
+    uint16_t stream_index{0};
+    uint16_t stream_channel{0};
+    uint16_t cluster_offset{0};
+    uint16_t cluster_channel{0};
+
+    auto operator==(PersistedAudioMapping const&) const -> bool = default;
+};
+
+/// A stream port's dynamic mappings, all of them (possibly none).
+struct PersistedAudioMap
+{
+    uint16_t descriptor_type{0};
+    uint16_t descriptor_index{0};
+    std::vector<PersistedAudioMapping> mappings;
+
+    auto operator==(PersistedAudioMap const&) const -> bool = default;
+};
+
 struct PersistentState
 {
     static constexpr int64_t VERSION = 1;
@@ -105,6 +126,7 @@ struct PersistentState
     std::vector<PersistedListenerBinding> listener_bindings;
     uint32_t system_unique_id{0};
     std::vector<PersistedMediaClockReference> media_clock_references;
+    std::vector<PersistedAudioMap> audio_maps;
 
     auto operator==(PersistentState const&) const -> bool = default;
 };
