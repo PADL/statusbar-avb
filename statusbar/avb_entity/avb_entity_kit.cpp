@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <system_error>
 #include <utility>
 
 namespace statusbar::avb_entity {
@@ -1268,6 +1269,23 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor) -> Statu
 
 auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
 {
+    // An AF_XDP socket has one consumer: the media thread that ticks it.
+    StreamPortsOptions const ports{
+        .interface_name = config_.interface_name,
+        .tx_priority = config_.stream_pcp,
+        .receive = listener_ != nullptr,
+        .transport = config_.stream_transport,
+        .xdp_mode = config_.stream_xdp_mode,
+        .xdp_queue = config_.stream_xdp_queue,
+        .rx_on_own_thread = config_.stream_rx_rt_timer && !config_.stream_rx_on_media_thread,
+    };
+    bool const refused = bound_port_ != nullptr ? ports.receive && ports.rx_on_own_thread && bound_port_->rx_fd() < 0
+                                                : !StreamPorts::check(ports).has_value();
+    if (refused) {
+        host_.ctl_log().error("kit: an AF_XDP (or bound, unpollable) stream RX port is drained on the media thread only: "
+                              "stream_rx_rt_timer needs stream_rx_on_media_thread");
+        return failure(std::errc::invalid_argument);
+    }
     // Bring up the shared control plane (net handlers + generic SM wiring),
     // then attach the stream-specific callbacks (hooks + ACMP + AEM handlers).
     gate_.set_logger(host_.ctl_log());
@@ -1346,28 +1364,30 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         }
     }
 
-    // The stream port: the kit's own AF_PACKET one unless a port is bound.
-    // Tolerated here (the entity stays a control-plane-only node); recorded
-    // for a host that needs the data plane (stream_tx_error()).
+    // The stream ports: the kit's own (config.stream_transport) unless a port
+    // is bound. Tolerated here (the entity stays a control-plane-only node);
+    // recorded for a host that needs the data plane (stream_tx_error()).
     stream_tx_error_ = {};
     stream_rx_error_ = {};
+    rx_on_tick_ = false;
+    StreamPort* rx_port = bound_port_;
     if (bound_port_ != nullptr) {
-        stream_port_ = bound_port_;
+        tx_port_ = bound_port_;
     } else {
-        stream_port_ = &packet_port_;
-        if (auto tx = packet_port_.open_tx(config_.interface_name, config_.stream_pcp); !tx) {
-            stream_tx_error_ = tx.error();
-        } else if (auto const priority = packet_port_.tx_priority_error(); priority) {
+        if (auto opened = ports_.open(ports); !opened) {
+            return opened;  // check()ed above
+        }
+        tx_port_ = &ports_.tx();
+        rx_port = &ports_.rx();
+        stream_tx_error_ = ports_.tx_error();
+        stream_rx_error_ = ports_.rx_error();
+        if (auto const priority = ports_.packet().tx_priority_error(); !stream_tx_error_ && priority) {
             host_.ctl_log().warning(
                 "talker: SO_PRIORITY {} on the stream TX socket failed: errno {}; streams use the default TX queue",
                 config_.stream_pcp,
                 priority.value());
         }
-        if (listener_ != nullptr) {
-            if (auto rx = packet_port_.open_rx(config_.interface_name); !rx) {
-                stream_rx_error_ = rx.error();
-            }
-        }
+        log_xdp_error(host_.ctl_log(), ports_, config_.interface_name);
     }
 
     // RX slots per blob-declared stream input. CRF inputs feed the media-clock
@@ -1393,15 +1413,17 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
             }
             (void)rx_groups.try_push_back(group);
         }
-        // In RT-timer mode the returned handler is kept here; the tool's
-        // SCHED_FIFO RX timer drains the port via drain_stream_rx() with its
-        // wake gPTP time, so RX can't be starved by the control plane.
+        // The handler is kept for the tool's SCHED_FIFO RX timer
+        // (drain_stream_rx() with its wake gPTP time), or for the media tick
+        // when the port has no descriptor (tick_stream_rx()).
         if (!stream_rx_error_) {
-            if (auto rx = listener_->attach_rx(*stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+            bool const pollable = rx_port->rx_fd() >= 0;
+            if (auto rx = listener_->attach_rx(*rx_port, rx_groups, reactor, config_.stream_rx_rt_timer || !pollable)) {
                 rt_rx_handler_ = std::move(*rx);
+                rx_on_tick_ = !pollable && !config_.stream_rx_rt_timer;
             } else {
                 stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
-                packet_port_.close_rx();        // nobody reads it
+                ports_.close_rx();              // nobody reads it
             }
         }
 #if defined(__linux__)
@@ -1443,7 +1465,7 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
     // TX on the port + optional pcap capture (TalkerStreams assembles its own I/O).
     if (!stream_tx_error_) {
         if (auto tx = talker_->open_tx(
-                *stream_port_,
+                *tx_port_,
                 TalkerStreams::TxPcapConfig{
                     .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
             !tx) {
@@ -1482,7 +1504,8 @@ auto AvbEntityKit::stop() -> Status
 #if defined(__linux__)
     listener_vlan_.release();
 #endif
-    packet_port_.close();
+    rx_on_tick_ = false;
+    ports_.close();
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {
         persist();  // a listener goal change of this pass

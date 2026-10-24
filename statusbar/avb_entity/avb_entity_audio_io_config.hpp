@@ -7,6 +7,7 @@
 /// @brief Configuration for AvbEntityAudioIO, in its own header so the
 /// EntityUdptunBridge can hold a config_ ref without an include cycle.
 
+#include "statusbar/avb_entity/avb_entity_stream_transport.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
@@ -292,6 +293,18 @@ struct AvbEntityAudioIOConfig
     /// RX drain tick period in microseconds when stream_rx_rt_timer is set. 50 us
     /// (2.5x the 125 us packet interval) keeps the per-tick backlog to 0-3 frames.
     uint32_t stream_rx_period_us{50};
+
+    /// With stream_rx_rt_timer, the host calls drain_stream_rx from its media
+    /// thread rather than a timer thread of its own; an AF_XDP receive needs it.
+    bool stream_rx_on_media_thread{false};
+
+    /// The link the streams use: packet (AF_PACKET), xdp (receive on an AF_XDP
+    /// socket on stream_xdp_queue) or auto (xdp when it opens, else packet).
+    StreamTransport stream_transport{StreamTransport::packet};
+    /// How the AF_XDP socket binds and its program attaches.
+    StreamXdpMode stream_xdp_mode{StreamXdpMode::auto_};
+    /// The NIC queue of the AF_XDP socket: the SR class A queue.
+    uint32_t stream_xdp_queue{0};
 
     /// Pin the media-clock rate ratio r to exactly 1.0 (media clock = gPTP) instead
     /// of tracking r = gPTP/CLOCK_REALTIME via the GPS ratio Kalman. Use when the

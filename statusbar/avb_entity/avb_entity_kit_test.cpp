@@ -19,6 +19,7 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -2701,7 +2702,8 @@ TEST(avb_entity_kit_stream_port, a_bound_port_carries_the_streams_and_the_tick)
     EXPECT_TRUE(std::ranges::find(port.joined(), aaf->dest_mac) != port.joined().end());
 
     StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
-    EXPECT_EQ(k.kit.drain_stream_rx(1'000'000), size_t{0});  // the reactor drains
+    EXPECT_TRUE(k.kit.stream_rx_on_tick());  // no descriptor: the media tick drains it
+    EXPECT_EQ(k.kit.tick_stream_rx(1'000'000), size_t{0});
     k.kit.begin_stream_tick();
     EXPECT_TRUE(k.kit.talker().transmit_aaf_raw(*aaf, 0, 2'000'000, 6, render));
     EXPECT_TRUE(k.kit.flush_stream_tx().has_value());
@@ -2716,4 +2718,84 @@ TEST(avb_entity_kit_stream_port, a_bound_port_carries_the_streams_and_the_tick)
 
     EXPECT_TRUE(k.kit.stop().has_value());
     EXPECT_TRUE(k.kit.talker().transmit_aaf_raw(*aaf, 6, 2'125'000, 6, render));  // the bound port stays open
+}
+
+// A receive port with no descriptor is drained by the media tick: a frame
+// injected into a bound one comes out of tick_stream_rx, not the reactor.
+TEST(avb_entity_kit_stream_port, the_tick_drains_a_port_without_a_descriptor)
+{
+    TestStreamPort port{ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x52}};
+    MilanKit k{false, 0x52, /*gate=*/false};
+    k.kit.bind_stream_port(port);
+    EXPECT_TRUE(k.kit.start(k.reactor).has_value());
+    EXPECT_TRUE(k.kit.stream_rx_on_tick());
+    std::array<uint8_t, 14 + 24> frame{};
+    std::ranges::copy(std::array<uint8_t, 6>{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x52}, frame.begin());
+    frame[12] = 0x22;
+    frame[13] = 0xF0;
+    frame[14] = 0x02;  // AAF, for no stream of this kit
+    EXPECT_TRUE(port.inject_rx(frame).has_value());
+    EXPECT_EQ(k.kit.tick_stream_rx(1'000'000), size_t{1});
+    EXPECT_EQ(port.stats().rx_frames, uint64_t{1});
+}
+
+// An unpollable receive port has one consumer, the media thread: an RX timer
+// thread of its own is refused before anything starts, unless the host says
+// it drains from the media thread.
+TEST(avb_entity_kit_stream_port, an_rx_timer_thread_is_refused_for_a_port_without_a_descriptor)
+{
+    {
+        TestStreamPort port{ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x53}};
+        MilanKit k{false, 0x53, /*gate=*/false};
+        k.config.stream_rx_rt_timer = true;
+        k.kit.bind_stream_port(port);
+        auto const started = k.kit.start(k.reactor);
+        EXPECT_TRUE(!started && started.error() == std::errc::invalid_argument);
+        EXPECT_FALSE(k.kit.host().is_running());
+    }
+    {
+        MilanKit k{false, 0x54, /*gate=*/false};
+        k.config.stream_rx_rt_timer = true;
+        k.config.stream_transport = StreamTransport::xdp;
+        auto const started = k.kit.start(k.reactor);
+        EXPECT_TRUE(!started && started.error() == std::errc::invalid_argument);
+    }
+    {
+        MilanKit k{false, 0x55, /*gate=*/false};
+        k.config.stream_rx_rt_timer = true;
+        k.config.stream_rx_on_media_thread = true;  // the bridge's tick drains it
+        k.config.stream_transport = StreamTransport::xdp;
+        EXPECT_TRUE(k.kit.start(k.reactor).has_value());
+        EXPECT_FALSE(k.kit.stream_rx_on_tick());  // the host drains it with drain_stream_rx
+    }
+}
+
+// The transport's fallback is recorded: under xdp a failed AF_XDP open is the
+// stream RX error; under auto the kit falls back to AF_PACKET (whose own
+// error, here, is the RX error) and keeps the AF_XDP reason.
+TEST(avb_entity_kit_stream_port, the_transport_fallback_is_recorded)
+{
+    {
+        MilanKit k{false, 0x56, /*gate=*/false};
+        EXPECT_TRUE(k.kit.start(k.reactor).has_value());
+        EXPECT_FALSE(k.kit.stream_xdp_error());  // packet: never tried
+        EXPECT_TRUE(k.kit.stream_transport_in_force() == StreamTransport::packet);
+    }
+    {
+        MilanKit k{false, 0x57, /*gate=*/false};
+        k.config.stream_transport = StreamTransport::xdp;
+        EXPECT_TRUE(k.kit.start(k.reactor).has_value());
+        EXPECT_TRUE(k.kit.stream_xdp_error());
+        EXPECT_TRUE(k.kit.stream_rx_error() == k.kit.stream_xdp_error());
+        EXPECT_TRUE(k.kit.stream_transport_in_force() == StreamTransport::packet);
+    }
+    {
+        MilanKit k{false, 0x58, /*gate=*/false};
+        k.config.stream_transport = StreamTransport::auto_;
+        EXPECT_TRUE(k.kit.start(k.reactor).has_value());
+        EXPECT_TRUE(k.kit.stream_xdp_error());
+        EXPECT_TRUE(k.kit.stream_rx_error());
+        EXPECT_TRUE(k.kit.stream_rx_error() != k.kit.stream_xdp_error());
+        EXPECT_TRUE(k.kit.stream_transport_in_force() == StreamTransport::packet);
+    }
 }

@@ -1,0 +1,152 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+/// XdpStreamPort: the receive side, the TX pool and the multicast filter.
+
+#include "statusbar/avb_entity/avb_entity_xdp_stream_port.hpp"
+
+#include "statusbar/net/net_xdp_avtp_rules.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+#include <system_error>
+
+namespace statusbar::avb_entity {
+
+auto xdp_stream_port_options(StreamXdpMode const mode, std::string_view const interface_name, uint32_t const queue_id)
+    -> XdpStreamPortOptions
+{
+    XdpStreamPortOptions options{.queue_id = queue_id, .pin_path = net::XdpProgram::pin_path_for(interface_name)};
+    switch (mode) {
+        case StreamXdpMode::zerocopy:
+            options.bind_mode = net::XdpBindMode::zero_copy;
+            options.attach_mode = net::XdpAttachMode::native;
+            break;
+        case StreamXdpMode::copy:
+            options.bind_mode = net::XdpBindMode::copy;
+            options.attach_mode = net::XdpAttachMode::generic;
+            break;
+        case StreamXdpMode::auto_:
+            options.bind_mode = net::XdpBindMode::auto_;
+            options.attach_mode = net::XdpAttachMode::native;
+            break;
+    }
+    return options;
+}
+
+auto XdpStreamPort::config_for(
+    std::string_view const interface_name,
+    XdpStreamPortOptions const& options,
+    std::span<net::CompiledRule<32> const> const rules) noexcept -> net::XdpConfig
+{
+    return net::XdpConfig{
+        .interface_name = interface_name,
+        .filter_rules = rules,
+        .default_action = net::XdpAction::pass_kernel,
+        .queue_id = options.queue_id,
+        .rx_ring_size = RX_RING,
+        .tx_ring_size = TX_RING,
+        .fill_ring_size = FILL_RING,
+        .umem_frame_count = UMEM_FRAMES,
+        .rx_drain_max = 0,
+        .rx_clock_id = -1,
+        .bind_mode = options.bind_mode,
+        .attach_mode = options.attach_mode,
+        .pin_path = options.pin_path,
+    };
+}
+
+auto XdpStreamPort::open(std::string_view const interface_name, XdpStreamPortOptions const& options) -> Status
+{
+    close();
+    auto const rules = net::avtp_stream_rules();
+    if (auto opened = context_.open(config_for(interface_name, options, rules)); !opened) {
+        return opened;
+    }
+    queue_id_ = options.queue_id;
+    return success();
+}
+
+void XdpStreamPort::close() noexcept
+{
+    tx_pool_.clear();
+    context_.close();
+}
+
+auto XdpStreamPort::tx_begin(size_t const /*capacity*/) noexcept -> std::span<uint8_t>
+{
+    return {};
+}
+
+auto XdpStreamPort::tx_commit(
+    std::span<uint8_t const> const /*payload*/,
+    ieee::Eui48 const& /*dest*/,
+    uint16_t const /*vid*/,
+    uint8_t const /*pcp*/) noexcept -> Status
+{
+    count_tx(false);
+    return failure(std::errc::not_supported);
+}
+
+void XdpStreamPort::refill_tx_pool() noexcept
+{
+    while (tx_pool_.size() < TX_POOL) {
+        auto slot = context_.tx_start();
+        if (!slot) {
+            break;
+        }
+        (void)tx_pool_.put(*slot);
+    }
+}
+
+void XdpStreamPort::begin_cycle() noexcept
+{
+    if (!context_.valid()) {
+        return;
+    }
+    context_.begin_cycle();
+    (void)context_.tx_complete();
+    refill_tx_pool();
+}
+
+auto XdpStreamPort::end_cycle() noexcept -> Status
+{
+    return success();
+}
+
+auto XdpStreamPort::rx_poll(RxFn const& fn, size_t const max_frames) noexcept -> size_t
+{
+    if (!context_.valid()) {
+        return 0;
+    }
+    size_t delivered = 0;
+    for (size_t taken = 0; taken < max_frames; ++taken) {
+        auto slot = context_.rx_start();
+        if (!slot || !*slot) {
+            break;
+        }
+        auto const& rx = **slot;
+        if (auto const offset = net::avtp_payload_offset(rx.buffer)) {
+            count_rx();
+            fn(rx.buffer.subspan(*offset), rx.buffer);
+            ++delivered;
+        }
+        (void)context_.rx_release(rx.handle);
+    }
+    (void)context_.fill_replenish();
+    return delivered;
+}
+
+auto XdpStreamPort::join_multicast(ieee::Eui48 const& group) noexcept -> Status
+{
+    return context_.join_multicast(group);
+}
+
+auto XdpStreamPort::leave_multicast(ieee::Eui48 const& group) noexcept -> Status
+{
+    return context_.leave_multicast(group);
+}
+
+}  // namespace statusbar::avb_entity

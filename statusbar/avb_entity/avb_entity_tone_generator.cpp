@@ -298,6 +298,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
 {
     kit_.begin_stream_tick();
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
+    (void)kit_.tick_stream_rx(static_cast<int64_t>(base_now_ns));  // an AF_XDP receive
     uint64_t const packet_interval_ns = (static_cast<uint64_t>(samples_per_packet_) * 1'000'000'000ULL) / sample_rate_;
 
     for (size_t p = 0; p < config_.packets_per_wake; ++p) {

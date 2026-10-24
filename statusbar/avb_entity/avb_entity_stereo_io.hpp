@@ -11,7 +11,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
-#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_ports.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
@@ -99,6 +99,12 @@ struct AvbEntityStereoIOConfig
     bool stream_rx_rt_timer{false};
     int stream_rx_cpu_affinity{2};     ///< isolated core for the RX timer (media timer = 3)
     uint32_t stream_rx_period_us{50};  ///< RX drain tick
+
+    /// The stream link and AF_XDP bind (see AvbEntityAudioIOConfig::stream_transport).
+    /// An AF_XDP receive is drained by the media thread, so xdp refuses stream_rx_rt_timer.
+    StreamTransport stream_transport{StreamTransport::packet};
+    StreamXdpMode stream_xdp_mode{StreamXdpMode::auto_};
+    uint32_t stream_xdp_queue{0};
 };
 
 /// Audio processing callback type
@@ -305,9 +311,11 @@ class AvbEntityStereoIO
     /// separate GPS media clock). Advanced once per media-timer wake.
     ptpclient::MediaClockGenerator media_clock_{};
 
-    /// The stream sockets (start() opens them); the talker and listener paths
-    /// borrow it, so it is declared before both.
-    PacketStreamPort stream_port_{};
+    /// The stream ports (start() opens them); the talker and listener paths
+    /// borrow them, so they are declared before both.
+    StreamPorts stream_ports_{};
+    /// The media tick drains the stream RX (an AF_XDP receive, no RX timer).
+    bool rx_on_tick_{false};
 
     /// Shared TX path (48 kHz via TalkerStreamsConfig). Declared after config_/
     /// media_clock_/audio_buffer_/channels_/last_gptp_ns_/mem_resource_.

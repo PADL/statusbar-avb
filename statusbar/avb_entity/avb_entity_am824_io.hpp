@@ -13,7 +13,7 @@
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
-#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_ports.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp.hpp"
@@ -114,6 +114,12 @@ struct AvbEntityAm824IOConfig
     bool stream_rx_rt_timer{false};
     int stream_rx_cpu_affinity{2};     ///< isolated core for the RX timer (media timer = 3)
     uint32_t stream_rx_period_us{50};  ///< RX drain tick
+
+    /// The stream link and AF_XDP bind (see AvbEntityAudioIOConfig::stream_transport).
+    /// An AF_XDP receive is drained by the media thread, so xdp refuses stream_rx_rt_timer.
+    StreamTransport stream_transport{StreamTransport::packet};
+    StreamXdpMode stream_xdp_mode{StreamXdpMode::auto_};
+    uint32_t stream_xdp_queue{0};
 };
 
 /// Audio processing callback type
@@ -365,9 +371,11 @@ class AvbEntityAm824IO
     /// STREAM_INPUT LATE/EARLY classification. Declared before listener_ + talker_.
     std::atomic<uint64_t> last_gptp_ns_{0};
 
-    /// The stream sockets (start() opens them); the listener and talker paths
-    /// borrow it, so it is declared before both.
-    PacketStreamPort stream_port_{};
+    /// The stream ports (start() opens them); the listener and talker paths
+    /// borrow them, so they are declared before both.
+    StreamPorts stream_ports_{};
+    /// The media tick drains the stream RX (an AF_XDP receive, no RX timer).
+    bool rx_on_tick_{false};
 
     /// The shared RX path: owns the AM824 deserialize context, the IEEE 1722.1
     /// STREAM_INPUT health counters, and the borrowed stream port. Counting-only here

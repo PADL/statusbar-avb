@@ -23,8 +23,9 @@
 ///
 /// Threading: construction + start()/stop() + on_*() run on the main/reactor
 /// side; talker_should_transmit() / media_rate() / begin_stream_tick() /
-/// flush_stream_tx() are the media-thread (RT) calls, drain_stream_rx() the
-/// RX timer's; the CONTROL/lifecycle callbacks fire on the reactor thread.
+/// flush_stream_tx() / tick_stream_rx() are the media-thread (RT) calls,
+/// drain_stream_rx() the RX timer's; the CONTROL/lifecycle callbacks fire on
+/// the reactor thread.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
@@ -35,6 +36,7 @@
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_ports.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_declarations.hpp"
@@ -189,31 +191,41 @@ class AvbEntityKit
     }
 
     /// Batch-drain the stream RX from the tool's dedicated SCHED_FIFO RX
-    /// timer (config.stream_rx_rt_timer). No-op when RX is on the reactor.
+    /// timer (config.stream_rx_rt_timer) or, for a receive port with no
+    /// descriptor (AF_XDP), the media thread. No-op when RX is on the reactor.
     auto drain_stream_rx(int64_t const wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
     }
 
-    /// Begin a media tick on the stream port (StreamPort::begin_cycle), before
-    /// its receive and transmit. Media thread; a no-op before start().
+    /// Drain the stream RX from the media tick, stamped @p gptp_now_ns, when the
+    /// tick must (stream_rx_on_tick()); else a no-op. Media thread, once a tick.
+    auto tick_stream_rx(int64_t const gptp_now_ns) -> size_t { return rx_on_tick_ ? drain_stream_rx(gptp_now_ns) : 0; }
+    /// Whether the media tick drains the stream RX: the receive port has no
+    /// descriptor for the reactor and no RX timer drains it (after start()).
+    [[nodiscard]] auto stream_rx_on_tick() const noexcept -> bool { return rx_on_tick_; }
+
+    /// Begin a media tick on the stream ports (StreamPort::begin_cycle), before
+    /// their receive and transmit. Media thread; a no-op before start().
     void begin_stream_tick() noexcept
     {
-        if (stream_port_ != nullptr) {
-            stream_port_->begin_cycle();
+        if (bound_port_ != nullptr && tx_port_ != nullptr) {
+            bound_port_->begin_cycle();
+        } else if (tx_port_ != nullptr) {
+            ports_.begin_tick();
         }
     }
 
     /// End a media tick: hand the tick's committed stream frames to the link
-    /// (TalkerStreams::flush), then StreamPort::end_cycle. Once per tick, after
-    /// its last transmit. Errors: the port's; success before start().
+    /// (TalkerStreams::flush), then StreamPort::end_cycle on each port. Once per
+    /// tick, after its last transmit. Errors: the first failure; success before start().
     [[nodiscard]] auto flush_stream_tx() noexcept -> Status
     {
-        if (stream_port_ == nullptr) {
+        if (tx_port_ == nullptr) {
             return success();
         }
         auto flushed = talker_->flush();
-        auto ended = stream_port_->end_cycle();
+        auto ended = bound_port_ != nullptr ? bound_port_->end_cycle() : ports_.end_tick();
         return flushed ? ended : flushed;
     }
 
@@ -406,10 +418,18 @@ class AvbEntityKit
     }
 
     // --- The stream port ------------------------------------------------------
-    /// Stream through @p port instead of the kit's own PacketStreamPort, which
-    /// start() then does not open (tests bind a TestStreamPort). Before
-    /// start(); @p port must outlive the kit.
+
+    /// Stream through @p port, both ways, instead of the kit's own ports (tests
+    /// bind a TestStreamPort). Before start(); @p port must outlive the kit.
     void bind_stream_port(StreamPort& port) noexcept { bound_port_ = &port; }
+    /// The kit's own ports (config.stream_transport), for their modes and counters.
+    [[nodiscard]] auto stream_ports() const noexcept -> StreamPorts const& { return ports_; }
+    /// The transport the kit's own ports run (xdp: receive is on AF_XDP);
+    /// packet before start() and with a bound port.
+    [[nodiscard]] auto stream_transport_in_force() const noexcept -> StreamTransport
+    {
+        return bound_port_ == nullptr ? ports_.transport_in_force() : StreamTransport::packet;
+    }
 
     // --- Stream socket health (after start()) ---------------------------------
     /// Why start() could not open the stream TX socket (empty: it opened). The
@@ -417,14 +437,17 @@ class AvbEntityKit
     /// needs the data plane checks here.
     [[nodiscard]] auto stream_tx_error() const noexcept -> std::error_code { return stream_tx_error_; }
     /// Why start() could not open the stream RX socket (empty: it opened, or
-    /// the blob declares no stream inputs).
+    /// the blob declares no stream inputs). Under xdp: the AF_XDP open's error.
     [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }
+    /// Why start() could not open the AF_XDP receive port (empty: it opened or
+    /// was not tried); under auto the kit then receives over AF_PACKET.
+    [[nodiscard]] auto stream_xdp_error() const noexcept -> std::error_code { return ports_.xdp_error(); }
     /// Why start() could not give the stream TX socket the stream PCP as its
     /// SO_PRIORITY (empty: it did, or the kit streams through a bound port).
     /// The socket stays open on the default TX queue.
     [[nodiscard]] auto stream_tx_priority_error() const noexcept -> std::error_code
     {
-        return stream_port_ == &packet_port_ ? packet_port_.tx_priority_error() : std::error_code{};
+        return tx_port_ == &ports_.packet() ? ports_.packet().tx_priority_error() : std::error_code{};
     }
     /// Whether "maap" address mode fell back to the static per-kind
     /// destination MACs (the MAAP socket would not open).
@@ -579,12 +602,14 @@ class AvbEntityKit
     /// streaming while it may transmit (talker_should_transmit).
     void update_output_streaming(int64_t now_ns);
 
-    /// The kit's own stream port (AF_PACKET), opened by start() unless a port
-    /// is bound; the port in use (nullptr before start()); the bound one.
-    /// Declared before the talker and listener paths that borrow it.
-    PacketStreamPort packet_port_{};
-    StreamPort* stream_port_{nullptr};
+    /// The kit's own stream ports, opened by start() unless a port is bound;
+    /// the port transmit uses (nullptr before start()); the bound one.
+    /// Declared before the talker and listener paths that borrow them.
+    StreamPorts ports_{};
+    StreamPort* tx_port_{nullptr};
     StreamPort* bound_port_{nullptr};
+    /// The media tick drains the stream RX (stream_rx_on_tick()).
+    bool rx_on_tick_{false};
 
     /// Stream TX path: spec-shaped serializer slots + TX counters + capture
     /// recorder over the stream port. Binds the ENTITY's media clock + gPTP atomic.
@@ -593,8 +618,8 @@ class AvbEntityKit
     /// Stream RX path (only allocated when the blob declares stream inputs).
     std::unique_ptr<ListenerStreams> listener_{};
 
-    /// The stream RX socket handler when config.stream_rx_rt_timer keeps it
-    /// out of the reactor (drained via drain_stream_rx()).
+    /// The stream RX handler when config.stream_rx_rt_timer, or a receive port
+    /// with no descriptor, keeps it out of the reactor (drain_stream_rx()).
     std::unique_ptr<net::Pollable> rt_rx_handler_{};
 
     /// What opening the stream port's TX / RX failed with (see stream_tx_error()).

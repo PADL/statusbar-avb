@@ -281,6 +281,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
 {
     kit_.begin_stream_tick();
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
+    (void)kit_.tick_stream_rx(static_cast<int64_t>(base_now_ns));  // an AF_XDP receive
     // One packet's worth of gPTP time: 12 samples @ 96 kHz = 125 us.
     constexpr uint64_t PACKET_INTERVAL_NS = (static_cast<uint64_t>(SAMPLES_PER_PACKET) * 1'000'000'000ULL) / SAMPLE_RATE;
 

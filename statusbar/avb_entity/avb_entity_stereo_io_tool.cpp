@@ -20,6 +20,7 @@
 // - MVRP/MSRP stream reservation
 
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_runner.hpp"
 #include "statusbar/avb_entity/avb_entity_stereo_io.hpp"
 #include "statusbar/avb_entity/avb_entity_version.hpp"
 #include "statusbar/config/config.hpp"
@@ -153,6 +154,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "RX drain tick period in microseconds (stream_rx.rt_timer). Default 50",
         static_cast<uint64_t>(config.entity.stream_rx_period_us),
         [&](auto v) { config.entity.stream_rx_period_us = static_cast<uint32_t>((v < 5) ? 5 : ((v > 1000) ? 1000 : v)); });
+    avb_entity::add_stream_transport_arg_specs(specs, config.entity.stream_transport, config.entity.stream_xdp_mode);
 
     return specs;
 }

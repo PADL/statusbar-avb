@@ -98,10 +98,30 @@ struct EntityToolOptions
     std::string media_timer_duration_csv_path{};
 };
 
+/// Register --stream-transport and --stream-xdp-mode, setting @p transport and
+/// @p xdp_mode (the am824 and stereo tools call it on their own configs).
+inline void add_stream_transport_arg_specs(args::ArgumentSpecs& specs, StreamTransport& transport, StreamXdpMode& xdp_mode)
+{
+    specs.add_choice(
+        "stream-transport",
+        "Stream link: 'packet' (AF_PACKET), 'xdp' (receive on an AF_XDP socket, drained by the media timer; refuses "
+        "stream_rx.rt_timer) or 'auto' (xdp when it opens, else packet). Default packet.",
+        {"packet", "xdp", "auto"},
+        stream_transport_name(transport),
+        [&transport](std::string_view const v) { transport = parse_stream_transport(v).value_or(StreamTransport::packet); });
+    specs.add_choice(
+        "stream-xdp-mode",
+        "AF_XDP bind: 'auto' (native attach, zero-copy when the driver offers it), 'zerocopy' (or fail) or 'copy' "
+        "(generic attach, no adapter reset). Default auto.",
+        {"auto", "zerocopy", "copy"},
+        stream_xdp_mode_name(xdp_mode),
+        [&xdp_mode](std::string_view const v) { xdp_mode = parse_stream_xdp_mode(v).value_or(StreamXdpMode::auto_); });
+}
+
 /// Register the CLI arguments every entity tool shares: entity identity,
 /// interface, ATDECC wire version, VLAN, stream addressing, SRP
-/// workarounds, the talker gate, stream destination MACs, presentation
-/// offset, media pacing, listener bindings, TX pcap, histogram CSVs and
+/// workarounds, the talker gate, stream destination MACs, the stream
+/// transport, presentation offset, media pacing, listener bindings, TX pcap, histogram CSVs and
 /// the verbosity/stats/PTP-strictness flags. Tools add their own specs
 /// (and the PTP specs) around this.
 inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
@@ -127,6 +147,7 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "the 1722 dynamic pool via MAAP at startup). Default static.",
         entity.stream_address_mode,
         [&entity](auto v) { entity.stream_address_mode = std::string{v}; });
+    add_stream_transport_arg_specs(specs, entity.stream_transport, entity.stream_xdp_mode);
     specs.add<bool>(
         "srp.redeclare_registered_listeners",
         "Sticky-Listener MSRP workaround: re-declare REGISTERED Listener attributes every periodic/LeaveAll pass. "

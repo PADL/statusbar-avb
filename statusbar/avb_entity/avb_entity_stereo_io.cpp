@@ -231,6 +231,19 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
     // attach this entity's stream-specific callbacks. The host has no data plane of
     // its own to set up here -- this entity's TX/RX runs through the nanoavb handlers.
     gate_.set_logger(host_.ctl_log());
+    StreamPortsOptions const ports{
+        .interface_name = config_.interface_name,
+        .tx_priority = talker_.config_.stream_pcp,
+        .receive = true,
+        .transport = config_.stream_transport,
+        .xdp_mode = config_.stream_xdp_mode,
+        .xdp_queue = config_.stream_xdp_queue,
+        .rx_on_own_thread = config_.stream_rx_rt_timer,
+    };
+    if (auto checked = StreamPorts::check(ports); !checked) {
+        host_.ctl_log().error("stereo: an AF_XDP stream RX is drained on the media thread: stream_rx_rt_timer is refused");
+        return checked;
+    }
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
@@ -291,19 +304,26 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         }
     });
 
-    // TX socket (media-timer egress; TalkerStreams transmits on the port).
-    if (stream_port_.open_tx(config_.interface_name, talker_.config_.stream_pcp)) {
-        (void)talker_.open_tx(stream_port_);
+    // The stream ports per config.stream_transport (media-timer egress,
+    // qdisc-bypass so we do not re-receive our own stream frames).
+    (void)stream_ports_.open(ports);  // checked above
+    log_xdp_error(host_.ctl_log(), stream_ports_, config_.interface_name);
+    if (!stream_ports_.tx_error()) {
+        (void)talker_.open_tx(stream_ports_.tx());
     }
 
-    // RX socket joined to the stream group; kept for the tool's SCHED_FIFO RX
-    // timer when stream_rx_rt_timer is set, reactor-drained otherwise.
+    // Receive joined to the stream group; the handler is kept for the tool's
+    // SCHED_FIFO RX timer (stream_rx_rt_timer), or for the media tick when the
+    // port has no descriptor (AF_XDP); reactor-drained otherwise.
     std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
-    if (stream_port_.open_rx(config_.interface_name)) {
-        if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+    rx_on_tick_ = false;
+    if (!stream_ports_.rx_error()) {
+        bool const pollable = stream_ports_.rx().rx_fd() >= 0;
+        if (auto rx = listener_->attach_rx(stream_ports_.rx(), rx_groups, reactor, config_.stream_rx_rt_timer || !pollable)) {
             rt_rx_handler_ = std::move(*rx);
+            rx_on_tick_ = !pollable && !config_.stream_rx_rt_timer;
         } else {
-            stream_port_.close_rx();  // nobody reads it
+            stream_ports_.close_rx();  // nobody reads it
         }
     }
 
@@ -443,6 +463,10 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
     // Publish this media-timer wake's gPTP time so the reactor-path RX drain stamps
     // ingress against it for the STREAM_INPUT LATE/EARLY classification.
     last_gptp_ns_.store(gptp_now, std::memory_order_relaxed);
+    stream_ports_.begin_tick();
+    if (rx_on_tick_ && listener_ != nullptr) {
+        (void)listener_->drain_rx(static_cast<int64_t>(gptp_now));
+    }
 
     // Advance the deterministic media clock (r=1.0, gPTP-locked -- stereo has no
     // separate GPS media clock). first_index anchors the smooth presentation
@@ -482,6 +506,7 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
         }
     }
     (void)talker_.flush();
+    (void)stream_ports_.end_tick();
 }
 
 void AvbEntityStereoIO::configure_filter(double const freq_hz, double const gain_db, double const q)
