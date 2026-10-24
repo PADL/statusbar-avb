@@ -115,6 +115,8 @@ claim more than 75% and legacy traffic keeps a quarter of the link even with
 both busy (on igb, SP_WAIT_SR holds the strict-priority queues while an SR
 queue has credit). A placeholder never falls under 1% of the link; only when
 admitted streams leave less than that does the total pass the budget.
+The shaper also hands the kit the link speed (`set_link_mbps`), whose budget
+refuses a talker format or rate change that would oversubscribe class A.
 
 A driver without cbs offload (EOPNOTSUPP: igb on anything but an i210, a
 driver with no cbs `ndo_setup_tc`) is logged once and the shaper sends no
