@@ -49,7 +49,7 @@ namespace statusbar::avb_entity {
 /// a concrete entity config. Destructured at the call site (mirrors ListenerStreams).
 struct TalkerStreamsConfig
 {
-    uint32_t sample_rate;  ///< stream sample rate (Hz), e.g. 96000 or 48000
+    uint32_t sample_rate;  ///< the media clock's rate (Hz), e.g. 96000 or 48000: transmit_if_due's streams'
     uint16_t vlan_id;      ///< AVB VLAN id
     uint8_t stream_pcp;    ///< AVB priority code point
 };
@@ -175,7 +175,7 @@ struct TalkerStreams
     /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
     auto reformat_stream(StreamSpec const& spec) -> Status;
 
-    /// The stream rate (config_.sample_rate), for a SET_SAMPLING_RATE (each slot's
+    /// The media clock's rate (config_.sample_rate), for a SET_SAMPLING_RATE (each slot's
     /// frames per PDU follow its format at reformat_stream). Same discipline as reformat_stream.
     void set_sample_rate(uint32_t const sample_rate) noexcept { config_.sample_rate = sample_rate; }
 
