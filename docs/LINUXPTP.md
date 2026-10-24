@@ -95,80 +95,49 @@ Note: at Site A the GPS grandmaster has a 3D GPS lock but is **not** the active 
 (the AVB switch free-runs as GM); fix is on the GPS grandmaster's PTP Config page
 (`Packet Output = 802.1AS`).
 
-## ptpclient: PHC cross-timestamps, the PHC servo and the follower
 
-`PhcDevice` opens a `/dev/ptpN` and reads it against CLOCK_MONOTONIC_RAW by the
-best method the device and kernel offer: `PTP_SYS_OFFSET_PRECISE` (a hardware
-cross-timestamp over PCIe PTM, as on an I226) when the capabilities say so;
-`PTP_SYS_OFFSET_EXTENDED` with `clockid` CLOCK_MONOTONIC_RAW (Linux 6.11 and
-later; an older kernel refuses the field with EINVAL); else a software bracket of
-`clock_gettime` RAW, PHC, RAW. Each read uses `samples` brackets (9 by default)
-and keeps the narrowest, its midpoint as the instant. A failed hardware
-cross-timestamp (a PTM timeout) falls back to the next method for that read.
-`frequency_ppb()` needs a writable device, as the kernel refuses
-`clock_adjtime` on a read-only PHC descriptor.
+## ptpclient: grandmaster status from ptp4l
 
-`PhcCrossTimestamp` pairs two PHCs, as phc2sys's `sysoff_measure` does but with
-RAW in place of the system clock: read PHC0, PHC_d, PHC0, and interpolate PHC0 at
-PHC_d's instant (over tens of microseconds, where the clocks' rate difference
-is negligible). A sample's `uncertainty_ns` is half PHC_d's bracket plus half
-PHC0's mean bracket. The two may be the same device, which checks the
-arithmetic: the pair then agrees to within its brackets.
+`ptpclient::PtpManagementClient` asks ptp4l which grandmaster the local clock
+follows, as `pmc -u` does. ptp4l answers IEEE 1588 management messages on a
+datagram socket (`uds_address`, `/var/run/ptp4l` by default), and only in its
+own domain: a message whose domainNumber differs is ignored, so
+`PtpManagementConfig::domain` must be ptp4l's (pmc `-d` semantics), else the
+client sees no answer and reports unreachable.
 
-`PhcServo` steers a PHC to a target given per sample, as `error_ns = t_phc -
-t_target`: linuxptp's `pi.c` with its hardware-timestamping constants (kp =
-0.7 × interval^-0.3, at most 0.7 / interval; ki = 0.3 × interval^0.4, at most
-0.3 / interval; at 16 updates a second kp = 1.61, ki = 0.099), the first
-frequency estimate after 0.016 / ki seconds, and an anti-windup clamp at
-`max_frequency_ppb` (give the device's `max_frequency_ppb()`). It steps only on
-that first estimate and only before its first lock, past
-`first_step_threshold_ns` (20 µs, linuxptp's `first_step_threshold`); afterwards
-it slews. It is locked after 16 samples under 100 ns and unlocked after 16 over
-1 µs. `freeze()` holds the frequency (the PHC free-runs on its last correction)
-until `thaw()`; `reset()` starts over from the frequency in force and allows a
-step again. A known target rate goes in as `feed_forward_ppb`, so the integrator
-learns only the PHC's own oscillator error. The servo is arithmetic only;
-`apply()` sets the frequency (ADJ_FREQUENCY) and steps (ADJ_SETOFFSET).
+The client is a `net::Pollable` for the reactor thread. On its first tick, and
+every `period_ns` after, it sends GET PARENT_DATA_SET, GET CURRENT_DATA_SET and
+GET TIME_PROPERTIES_DATA_SET, parses the responses as they arrive, and calls
+its listener when the status or grandmaster changes. Its own socket is a path
+beside ptp4l's, as pmc's is (`dirname(uds_address)/statusbar-ptpmgmt.<pid>`),
+removed on destruction.
 
-`PhcFollower` is the loop that steers one PHC to follow another, or a line over
-it, as phc2sys does between two PHCs but over a `PhcCrossTimestamp` pair. Each
-`sample(line)` reads one pair, computes the error `phc_d - line.at(phc0)`, feeds
-it to a `PhcServo` at the pair's own CLOCK_MONOTONIC_RAW instant (`raw_ns`) with
-the line's rate as its feed-forward, and applies the action: the frequency, then
-any step. A `PhcLine` is a target time at a PHC0 anchor and a rate offset in
-ppb (finite, else the sample is refused); `PhcLine::offset_from_phc0(offset_ns)`
-follows PHC0 itself with a constant calibration. A caller whose line is not
-running passes its rate as 0, or freezes the follower. The servo starts from the
-followed PHC's frequency and is clamped to the smaller of its parameters' range
-and the device's. `freeze()` steers nothing (the pair is still measured) until
-`thaw()`, for a line that stopped running; after `thaw()` the servo estimates
-its rate again. An optional restep rule starts the servo over, so it may step
-again, after `restep_count` samples past `restep_threshold_ns` once the servo's
-rate estimate is done (`PhcServo::estimated()`): a timescale change of PHC0,
-before or after a lock, or a line that resumed elsewhere after a freeze. The
-samples it counts are held, not fed to the servo, so a glitch does not wind it
-up, and the follower reports itself unlocked meanwhile. A sample reports what
-failed (`PhcFollowerStage`) and its error, and carries the pair it measured: a
-failed measure or a refused frequency leaves the follower as it was, so a step
-it wanted is still owed; a refused step after the frequency went through starts
-the servo over from that frequency, so device and servo agree and the step is
-owed again; refused twice running (a device without ADJ_SETOFFSET), it slews
-from then on, and the restep rule stays off until the caller's `reset()`. A
-line's rate at or past the servo's clamp (the smaller of its parameters' and the
-device's range) is refused: the servo would have no headroom to follow it. The pair is a `PhcFollowerPort` (measure, frequency, step,
-range): `open_phc_follower_port(phc0, followed)` is the device pair, one
-`PhcCrossTimestamp` opened with PHC_d writable (`PhcCrossAccess::phcd_writable`)
-and adjusted through it; a test gives the loop a fake.
+The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
+`gptp::MessageHeader`), the management header (15.4.1), the MANAGEMENT TLV
+(15.5.2) and the data sets (15.5.3). `build_management_get()` and
+`parse_management_message()` are pure and portable, so the wire format is unit
+tested without a ptp4l.
 
-The tests that touch real clocks skip unless the devices open. On a box with
-PHCs, as root:
+## ptpclient: waking on a PTP deadline
 
-```
-STATUSBAR_PHC0=/dev/ptp0 STATUSBAR_PHCD=/dev/ptp1 STATUSBAR_PHC_SERVO_DEVICE=/dev/ptp1 \
-    ctest --test-dir build -R 'ptpclient_phc' -V
-```
+`PtpTimeBridge::sleep_until_ptp` converts the PTP deadline to CLOCK_MONOTONIC,
+sleeps with `clock_nanosleep` to `wake_refine_spin_ns` (plus a slew term)
+before it, then busy-waits on CLOCK_MONOTONIC_RAW (a vDSO read, no syscall)
+with a CPU pause hint to the deadline itself. The spin calls `sched_yield` only
+every 20 us and not in the last 10 us: a yield lets an equal-priority
+SCHED_FIFO thread sharing the core run during a long spin, but a yield per
+iteration costs a syscall round trip each (about 1 us) and coarsens where the
+wake lands.
 
-`STATUSBAR_PHC_SERVO_DEVICE` names a spare PHC the servo test may steer for ten
-seconds onto a line 1 ms ahead of its start at +100 ppm over PHC0. It restores the
-frequency afterwards, not the time, so never name a PHC that ptp4l or phc2sys
-disciplines.
+`wake_refine_spin_ns` must cover the worst OS wake latency on the timer's core.
+The default 50 us absorbs stray kernel work on a shared core; on an isolated
+core (isolcpus/nohz_full, IRQs and kworkers moved off, deep C-states held off)
+15-20 us is enough and halves the spin's CPU.
+
+The optional `spin_headroom_ns` result is how far before the deadline the sleep
+returned, less the slew term: what was left of the spin window, so the OS wake
+latency is the window minus it. It is negative when the sleep overran the
+deadline, and set only on success when the call slept (not when the deadline was
+already inside the window). `PtpTimer::wake_headroom()` aggregates it; its
+`min_ns` is the closest call, and a negative minimum shows up as a late wake in
+`stats()`.
