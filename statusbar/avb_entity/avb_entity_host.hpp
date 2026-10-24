@@ -352,7 +352,7 @@ class AvbEntityHost
     [[nodiscard]] auto as_path(uint16_t index, nanoavb::AsPath& path) const -> bool;
 
     /// Propagation delay (ns) to report in the observed (non-mirrored) state
-    /// (e.g. the entity's own peer-delay measurement).
+    /// (e.g. the gPTP port's neighborPropDelay); a change is notified (Clause 7.4.40).
     void set_propagation_delay_ns(uint32_t ns);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
