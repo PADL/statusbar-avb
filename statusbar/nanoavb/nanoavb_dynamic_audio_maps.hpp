@@ -110,6 +110,13 @@ class DynamicAudioMaps
     }
 
     [[nodiscard]] auto size() const noexcept -> size_t { return entries_.size(); }
+    /// Whether the store holds @p count mappings (distinct) for the port in place of its own.
+    [[nodiscard]] auto fits(uint16_t const port_type, uint16_t const port_index, size_t const count) const noexcept -> bool
+    {
+        size_t const others = static_cast<size_t>(std::ranges::count_if(
+            entries_, [&](Entry const& e) { return e.port_type != port_type || e.port_index != port_index; }));
+        return others + count <= MAX_MAPPINGS;
+    }
 
   private:
     struct Entry
