@@ -144,19 +144,14 @@ struct ListenerStreamSlot
 
 struct ListenerStreams
 {
-    /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns).
-    /// @param sample_rate        Stream sample rate in Hz (96000 for AudioIO/AM824, 48000
-    ///                           for StereoIO) -- used for the media-lock nominal step.
-    /// Taking the two values it actually needs (rather than a whole entity config) lets
-    /// any listener entity reuse ListenerStreams, not just AvbEntityAudioIO.
+    /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns); each
+    ///                           stream's nominal step is at its own format's rate.
     ListenerStreams(
         uint32_t lock_tolerance_ns,
-        uint32_t sample_rate,
         nanoavb::NanoAvbComponents& components,
         std::atomic<int64_t> const& last_gptp_ns,
         StreamRxAudioSink* audio_sink) noexcept
         : lock_tolerance_ns_{lock_tolerance_ns}
-        , sample_rate_{sample_rate}
         , components_{components}
         , last_gptp_ns_{last_gptp_ns}
         , audio_sink_{audio_sink}
@@ -186,10 +181,6 @@ struct ListenerStreams
     /// consumers and counters. Reactor thread; the slot is locked (SlotGuard) so RX drops its frames.
     /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
     auto reformat_stream(StreamSpec const& spec) -> Status;
-
-    /// The stream rate the media-lock step is measured at, for a
-    /// SET_SAMPLING_RATE. Same discipline as reformat_stream.
-    void set_sample_rate(uint32_t const sample_rate) noexcept { sample_rate_ = sample_rate; }
 
     /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:
     /// each decoded channel is delivered as floats with its reconstructed
@@ -375,7 +366,6 @@ struct ListenerStreams
     /// Margin histogram range for new slots (set_presentation_offset_ns).
     stats::AtomicHistogramConfig margin_histogram_config_{
         StreamInputCounters::margin_histogram_config_for(StreamInputCounters::DEFAULT_PRESENTATION_OFFSET_NS)};
-    uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
     nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
     std::atomic<int64_t> const& last_gptp_ns_;
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does
