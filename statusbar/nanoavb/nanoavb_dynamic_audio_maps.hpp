@@ -48,9 +48,9 @@ struct DynamicAudioMapping
 class DynamicAudioMaps
 {
   public:
-    /// Mappings kept over all ports: an input cluster channel takes at most
-    /// one (Milan v1.2 Section 5.3.10.1), so 16 ports of 32 channels fit.
-    static constexpr size_t MAX_MAPPINGS = 512;
+    /// Mappings kept over all ports: an input cluster channel takes at most one (Milan v1.2
+    /// Section 5.3.10.1), so 16 ports of 64 channels (Milan Formats 2.1 HC24's widest) fit.
+    static constexpr size_t MAX_MAPPINGS = 1024;
     using Mappings = sg14::inplace_vector<DynamicAudioMapping, MAX_MAPPINGS>;
 
     /// Port (@p port_type, @p port_index)'s mappings, in cluster order.
