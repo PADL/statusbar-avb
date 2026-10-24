@@ -448,6 +448,36 @@ auto make_blob_with_entity(std::string_view entity_name = "BlobEntity") -> std::
 
 }  // namespace
 
+TEST(descriptor_storage_handler, timing_serves_its_ptp_instances)
+{
+    // TIMING's ptp_instances trailer (IEEE 1722.1-2021 7.2.34) is served as
+    // authored; without it a controller reads past the descriptor's end.
+    using atdecc::aem::DESCRIPTOR_TIMING;
+    using atdecc::aem::DescriptorStorageHeader;
+    using atdecc::aem::DescriptorStorageTocEntry;
+    using atdecc::aem::DescriptorTiming;
+
+    constexpr uint32_t desc_offset = DescriptorStorageHeader::LENGTH + DescriptorStorageTocEntry::LENGTH;
+    constexpr uint16_t desc_len = DescriptorTiming::LENGTH + 2;  // one PTP_INSTANCE index
+    std::vector<uint8_t> blob(desc_offset + desc_len, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_TIMING, desc_len, desc_offset);
+    DescriptorTiming desc{};
+    desc.ptp_instances_offset = uint16_t{DescriptorTiming::LENGTH};
+    desc.number_of_ptp_instances = uint16_t{1};
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+    blob[desc_offset + DescriptorTiming::LENGTH + 1] = 0x03;  // PTP_INSTANCE 3
+
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_TIMING, .descriptor_index = 0}, make_span(buf));
+    EXPECT_EQ(n, size_t(desc_len));
+    EXPECT_TRUE(buf[DescriptorTiming::LENGTH] == 0 && buf[DescriptorTiming::LENGTH + 1] == 0x03);
+}
+
 TEST(descriptor_storage_handler, matrix_signal_serves_blob_trailer)
 {
     // MATRIX_SIGNAL's signals trailer is not modeled inline in the wire
@@ -1371,6 +1401,37 @@ auto name_from_response(std::span<uint8_t const> bytes) -> std::string
 }
 
 }  // namespace
+
+// A SET_NAME, or a SET_SAMPLING_RATE, to what is in force succeeds and has nothing for
+// on_settings_changed to save; a change does.
+TEST(entity_name, a_set_to_the_value_in_force_is_not_saved)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    handler.set_on_entity_name_changed([](AtdeccString const&) { return AEM_STATUS_SUCCESS; });
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_send_response([](Eui48 const&, std::span<uint8_t const>) { return true; });
+    int saves = 0;
+    cmd_handler.set_on_settings_changed([&saves](uint16_t) { ++saves; });
+    auto const set_name = [&cmd_handler](char const* name) {
+        auto const body = make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, name);
+        atdecc::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_SET_NAME, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        std::vector<uint8_t> packet(atdecc::AemDu::LENGTH + body.size());
+        span_store(std::span<uint8_t>{packet}.first(atdecc::AemDu::LENGTH), header);
+        std::ranges::copy(body, packet.begin() + atdecc::AemDu::LENGTH);
+        (void)cmd_handler.process_packet(Eui48{}, packet, Eui64{});
+    };
+    set_name("SeedName");
+    EXPECT_EQ(saves, 0);
+    set_name("LiveName");
+    EXPECT_EQ(saves, 1);
+    set_name("LiveName");
+    EXPECT_EQ(saves, 1);
+}
 
 TEST(entity_name, get_set_round_trip_and_callback_and_read_descriptor)
 {
