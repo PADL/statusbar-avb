@@ -66,6 +66,19 @@ enum class StreamKind : uint8_t
     }
 }
 
+/// Whether @p kind carries audio (AAF or AM824): an audio stream may change between the two.
+[[nodiscard]] constexpr auto is_audio_kind(StreamKind const kind) noexcept -> bool
+{
+    return kind == StreamKind::aaf || kind == StreamKind::am824;
+}
+
+/// Whether a stream of kind @p from may take a format of kind @p to: its own kind, or AAF and AM824
+/// either way. CRF never changes kind.
+[[nodiscard]] constexpr auto kind_change_allowed(StreamKind const from, StreamKind const to) noexcept -> bool
+{
+    return from == to || (is_audio_kind(from) && is_audio_kind(to));
+}
+
 /// Structured decode of one 8-byte IEEE 1722 stream-format word (the field
 /// counterpart of avtp::stream_format_to_string). Audio kinds fill
 /// sample_rate_hz/channels; AAF additionally fills aaf_format/bit_depth/
