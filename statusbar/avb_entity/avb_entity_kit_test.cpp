@@ -3290,6 +3290,34 @@ TEST(avb_entity_kit_clock_source, a_vetoed_clock_source_leaves_the_domain_unchan
     std::filesystem::remove_all(dir);
 }
 
+// A source the entity applied itself is reported by GET_CLOCK_SOURCE, notified and saved without
+// reaching its hook; a source the domain does not list is refused and changes nothing.
+TEST(avb_entity_kit_clock_source, a_host_clock_source_is_notified_without_the_hook)
+{
+    auto const dir = state_dir("clock-source-host");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentKit m{path, 0x83, std::nullopt, make_clock_domains_blob()};
+    int calls = 0;
+    m.kit.set_on_clock_source_changed([&calls](uint16_t, uint16_t) -> uint8_t {
+        ++calls;
+        return atdecc::AEM_STATUS_SUCCESS;
+    });
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    EXPECT_EQ(m.kit.request_clock_source(1, 2), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(get_clock_source(m, 1), uint16_t{2});
+    EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE).size(), size_t{1});
+    EXPECT_EQ(m.kit.collect_persistent_state().clock_sources.size(), size_t{1});
+
+    EXPECT_EQ(m.kit.request_clock_source(1, 0), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(get_clock_source(m, 1), uint16_t{2});
+    // A controller's change still asks the hook.
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(1, 1)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(calls, 1);
+    std::filesystem::remove_all(dir);
+}
+
 // IEEE 1722.1-2021 Clause 7.4.42.2.3: the entity's lock reports drive each CLOCK_DOMAIN's LOCKED and
 // UNLOCKED counters, a transition counting once and notified; a domain the model lacks is refused.
 TEST(avb_entity_kit_clock_source, clock_domain_counters_follow_the_host_lock)

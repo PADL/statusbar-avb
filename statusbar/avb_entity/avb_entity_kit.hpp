@@ -414,6 +414,10 @@ class AvbEntityKit
              .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN,
              .descriptor_index = clock_domain_index});
     }
+    /// A clock-source change by other than ATDECC, already applied by the entity: as SET_CLOCK_SOURCE
+    /// without the hook, even while locked or acquired (BAD_ARGUMENTS for a source the domain does not
+    /// list). Notified and saved; answers the AEM status. Reactor thread.
+    [[nodiscard]] auto request_clock_source(uint16_t clock_domain_index, uint16_t clock_source_index) -> uint8_t;
     /// CLOCK_DOMAIN @p clock_domain_index locked to its source or lost it: its LOCKED/UNLOCKED counters
     /// (AvbEntityHost::note_clock_domain_locked). False for a domain the model lacks. Reactor thread.
     [[nodiscard]] auto note_clock_domain_locked(uint16_t const clock_domain_index, bool const locked) -> bool
@@ -626,6 +630,7 @@ class AvbEntityKit
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
     PresentationOffsetFn on_presentation_offset_changed_{};
     ClockSourceFn on_clock_source_changed_{};
+    bool applying_local_clock_source_{false};  ///< request_clock_source(): the hook is not asked
     InputMappingsFn on_input_mappings_changed_{};
     /// The STREAM_PORT_INPUTs with dynamic mappings, and the STREAM_PORT_OUTPUTs.
     std::vector<uint16_t> dynamic_input_ports_{};

@@ -171,7 +171,7 @@ AvbEntityKit::AvbEntityKit(
     // SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN: the entity's hook
     // decides; domain 0's active source is what media_rate() reads per tick.
     storage_handler_.set_on_clock_source_changed([this](uint16_t const domain, uint16_t const source) -> uint8_t {
-        if (on_clock_source_changed_) {
+        if (on_clock_source_changed_ && !applying_local_clock_source_) {
             if (auto const status = on_clock_source_changed_(domain, source); status != atdecc::AEM_STATUS_SUCCESS) {
                 return status;
             }
@@ -650,6 +650,20 @@ auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
     std::array<uint8_t, 8 + atdecc::aem::AtdeccString::LENGTH> body{};
     std::ranges::copy(name, body.begin() + 8);
     return aem.apply_local_name(body);
+}
+
+auto AvbEntityKit::request_clock_source(uint16_t const clock_domain_index, uint16_t const clock_source_index) -> uint8_t
+{
+    auto& aem = host_.components().aem_handler;
+    // SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23.1): CLOCK_DOMAIN, its index, the source, reserved.
+    std::array<uint8_t, 8> body{};
+    span_store(std::span{body}.subspan(0, 2), atdecc::doublet_t{atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN});
+    span_store(std::span{body}.subspan(2, 2), atdecc::doublet_t{clock_domain_index});
+    span_store(std::span{body}.subspan(4, 2), atdecc::doublet_t{clock_source_index});
+    applying_local_clock_source_ = true;
+    auto const status = aem.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, body);
+    applying_local_clock_source_ = false;
+    return status;
 }
 
 auto AvbEntityKit::request_audio_mappings(
