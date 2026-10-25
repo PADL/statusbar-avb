@@ -42,12 +42,15 @@ struct DataSetSize
     uint16_t id;
     size_t size;
 };
-constexpr std::array<DataSetSize, 5> DATA_SET_SIZES{{
+constexpr std::array<DataSetSize, 8> DATA_SET_SIZES{{
     {.id = management_id::parent_data_set, .size = ParentDataSet::SIZE},
     {.id = management_id::current_data_set, .size = CurrentDataSet::SIZE},
     {.id = management_id::time_properties_data_set, .size = TimePropertiesDataSet::SIZE},
     {.id = management_id::port_data_set, .size = PortDataSet::SIZE},
     {.id = management_id::port_properties_np, .size = PortPropertiesNp::SIZE},
+    {.id = management_id::time_status_np, .size = TimeStatusNp::SIZE},
+    {.id = management_id::grandmaster_settings_np, .size = GrandmasterSettingsNp::SIZE},
+    {.id = management_id::subscribe_events_np, .size = SubscribeEventsNp::SIZE},
 }};
 
 void put16(uint8_t* p, uint16_t v) noexcept
@@ -93,14 +96,28 @@ auto build_management_get(
     uint16_t const sequence_id,
     gptp::SourcePortIdentity const& source) noexcept -> size_t
 {
-    if (out.size() < MANAGEMENT_GET_SIZE) {
+    return build_management_message(out, ManagementAction::get, management_id, {}, domain, sequence_id, source);
+}
+
+auto build_management_message(
+    std::span<uint8_t> const out,
+    ManagementAction const action,
+    uint16_t const management_id,
+    std::span<uint8_t const> const data,
+    uint8_t const domain,
+    uint16_t const sequence_id,
+    gptp::SourcePortIdentity const& source) noexcept -> size_t
+{
+    size_t const padded = data.size() + (data.size() % 2);
+    size_t const length = MANAGEMENT_GET_SIZE + padded;
+    if (out.size() < length || length > UINT16_MAX) {
         return 0;
     }
     gptp::MessageHeader header{};
     header.set_major_sdo_id(0);  // transportSpecific 0, as pmc
     header.set_message_type(MESSAGE_TYPE_MANAGEMENT);
     header.set_version_ptp(gptp::VERSION_PTP);
-    header.message_length = static_cast<uint16_t>(MANAGEMENT_GET_SIZE);
+    header.message_length = static_cast<uint16_t>(length);
     header.domain_number = domain;
     header.source_port_identity = source;
     header.sequence_id = sequence_id;
@@ -112,13 +129,36 @@ auto build_management_get(
     std::memset(management, 0xFF, 10);  // targetPortIdentity: every clock, every port
     management[10] = 0;                 // startingBoundaryHops (pmc -b 0)
     management[11] = 0;                 // boundaryHops
-    management[12] = static_cast<uint8_t>(ManagementAction::get);
+    management[12] = static_cast<uint8_t>(action);
     management[13] = 0;
-    uint8_t* const tlv = out.data() + TLV_OFFSET;  // MANAGEMENT TLV: the managementId alone
+    uint8_t* const tlv = out.data() + TLV_OFFSET;  // MANAGEMENT TLV: the managementId, then the data
     put16(tlv, TLV_MANAGEMENT);
-    put16(tlv + 2, 2);
+    put16(tlv + 2, static_cast<uint16_t>(2 + padded));
     put16(tlv + 4, management_id);
-    return MANAGEMENT_GET_SIZE;
+    auto const field = out.subspan(MANAGEMENT_GET_SIZE, padded);
+    std::ranges::copy(data, field.begin());
+    std::ranges::fill(field.subspan(data.size()), uint8_t{0});
+    return length;
+}
+
+auto encode(GrandmasterSettingsNp const& settings) noexcept -> std::array<uint8_t, GrandmasterSettingsNp::SIZE>
+{
+    std::array<uint8_t, GrandmasterSettingsNp::SIZE> out{};
+    out[0] = settings.clock_class;
+    out[1] = settings.clock_accuracy;
+    put16(&out[2], settings.offset_scaled_log_variance);
+    put16(&out[4], static_cast<uint16_t>(settings.current_utc_offset));
+    out[6] = settings.time_flags;
+    out[7] = settings.time_source;
+    return out;
+}
+
+auto encode(SubscribeEventsNp const& subscription) noexcept -> std::array<uint8_t, SubscribeEventsNp::SIZE>
+{
+    std::array<uint8_t, SubscribeEventsNp::SIZE> out{};
+    put16(out.data(), subscription.duration_s);
+    std::ranges::copy(subscription.bitmask, out.begin() + 2);
+    return out;
 }
 
 auto parse_management_message(std::span<uint8_t const> const bytes) noexcept -> StatusValue<ManagementMessage>
@@ -233,6 +273,33 @@ auto parse_management_message(std::span<uint8_t const> const bytes) noexcept -> 
             message.data = properties;
             break;
         }
+        case management_id::time_status_np:
+            message.data = TimeStatusNp{
+                .master_offset_ns = static_cast<int64_t>(get64(data)),
+                .ingress_time_ns = static_cast<int64_t>(get64(data + 8)),
+                .cumulative_scaled_rate_offset = static_cast<int32_t>(get32(data + 16)),
+                .scaled_last_gm_phase_change = static_cast<int32_t>(get32(data + 20)),
+                .gm_time_base_indicator = get16(data + 24),
+                .gm_present = get32(data + 38) != 0,  // after lastGmPhaseChange (ScaledNs, 12 octets)
+                .gm_identity = load<ieee::Eui64>(data + 42),
+            };
+            break;
+        case management_id::grandmaster_settings_np:
+            message.data = GrandmasterSettingsNp{
+                .clock_class = data[0],
+                .clock_accuracy = data[1],
+                .offset_scaled_log_variance = get16(data + 2),
+                .current_utc_offset = static_cast<int16_t>(get16(data + 4)),
+                .time_flags = data[6],
+                .time_source = data[7],
+            };
+            break;
+        case management_id::subscribe_events_np: {
+            SubscribeEventsNp subscription{.duration_s = get16(data)};
+            std::ranges::copy(std::span<uint8_t const>{data + 2, subscription.bitmask.size()}, subscription.bitmask.begin());
+            message.data = subscription;
+            break;
+        }
         default:
             break;
     }
@@ -269,8 +336,16 @@ void PtpManagementClient::handle(std::span<uint8_t const> const bytes, int64_t c
     state_.error = {};
     if (state_.status == PtpManagementStatus::unreachable) {
         state_.status = PtpManagementStatus::no_grandmaster;
+        send_settings();  // a restarted ptp4l has forgotten both
+        send_subscription(now_ns);
     }
-    if (auto const* parent = std::get_if<ParentDataSet>(&message->data)) {
+    bool const ours = message->management_id == management_id::grandmaster_settings_np ||
+        message->management_id == management_id::subscribe_events_np;
+    if (message->error) {
+        if (ours) {
+            state_.refused = message->error;
+        }
+    } else if (auto const* parent = std::get_if<ParentDataSet>(&message->data)) {
         state_.parent = *parent;
         state_.grandmaster = parent->grandmaster_identity;
         bool const self = parent->grandmaster_identity.get() == message->source.clock_identity.get();
@@ -289,6 +364,22 @@ void PtpManagementClient::handle(std::span<uint8_t const> const bytes, int64_t c
             state_.port_state = port_data->port_state;
             state_.delay_mechanism = port_data->delay_mechanism;
         }
+    } else if (auto const* time_status = std::get_if<TimeStatusNp>(&message->data)) {
+        state_.time_status = *time_status;
+    } else if (auto const* settings = std::get_if<GrandmasterSettingsNp>(&message->data)) {
+        state_.grandmaster_settings = *settings;
+        if (settings_ && *settings != *settings_) {
+            send_settings();  // ptp4l restarted between two queries
+        } else {
+            state_.refused.reset();
+        }
+    } else if (auto const* subscription = std::get_if<SubscribeEventsNp>(&message->data)) {
+        state_.subscribed = subscription->bitmask == config_.events.bitmask;
+        if (state_.subscribed) {
+            state_.refused.reset();
+        } else {
+            send_subscription(now_ns);
+        }
     }
     publish_if_changed();
 }
@@ -297,9 +388,13 @@ void PtpManagementClient::publish_if_changed()
 {
     if (state_.status == reported_status_ && state_.grandmaster == reported_grandmaster_ && state_.error == reported_error_ &&
         state_.peer_mean_path_delay_ns == reported_peer_delay_ns_ && state_.port_state == reported_port_state_ &&
-        state_.delay_mechanism == reported_delay_mechanism_) {
+        state_.delay_mechanism == reported_delay_mechanism_ && state_.grandmaster_settings == reported_settings_ &&
+        state_.refused == reported_refused_ && state_.subscribed == reported_subscribed_) {
         return;
     }
+    reported_settings_ = state_.grandmaster_settings;
+    reported_refused_ = state_.refused;
+    reported_subscribed_ = state_.subscribed;
     reported_status_ = state_.status;
     reported_grandmaster_ = state_.grandmaster;
     reported_error_ = state_.error;
@@ -325,6 +420,7 @@ void PtpManagementClient::tick(int64_t const now_ns)
         now_ns - last_answer_ns_ > config_.period_ns * config_.missed_periods) {
         std::error_code const error = state_.error;
         state_ = PtpManagementState{.error = error};
+        next_subscribe_ns_ = now_ns;  // resubscribe as soon as ptp4l is back
         publish_if_changed();
     }
 }
@@ -340,7 +436,7 @@ PtpManagementClient::~PtpManagementClient()
 
 auto PtpManagementClient::create(PtpManagementConfig config, Listener listener) -> StatusValue<std::unique_ptr<PtpManagementClient>>
 {
-    if (config.period_ns <= 0 || config.missed_periods < 1) {
+    if (config.period_ns <= 0 || config.missed_periods < 1 || config.subscription_duration_s < 2) {
         return failure(std::errc::invalid_argument);
     }
     auto server = net::SocketAddress::local(config.uds_address);  // absolute, no NUL, fits
@@ -395,18 +491,71 @@ void PtpManagementClient::query(int64_t const now_ns)
         management_id::port_properties_np,
         management_id::port_data_set};
     for (uint16_t const id : std::span{ids}.first(config_.port_interface.empty() ? 3 : 5)) {
-        std::array<uint8_t, MANAGEMENT_GET_SIZE> message{};
-        size_t const length = build_management_get(message, id, config_.domain, sequence_++, source_);
-        if (::sendto(fd_.get(), message.data(), length, 0, server_.sockaddr(), server_.length()) < 0) {
-            note_error(std::error_code{errno, std::generic_category()});  // ENOENT: no ptp4l; EACCES: its socket's mode
-            break;
+        if (!send(ManagementAction::get, id, {})) {
+            break;  // ENOENT: no ptp4l; EACCES: its socket's mode
         }
+    }
+    // ptp4l answers these GETs with what it holds: a restart shows as a difference.
+    if (settings_) {
+        (void)send(ManagementAction::get, management_id::grandmaster_settings_np, {});
+    }
+    if (subscribing()) {
+        if (now_ns >= next_subscribe_ns_) {
+            send_subscription(now_ns);
+        }
+        (void)send(ManagementAction::get, management_id::subscribe_events_np, {});
     }
     if (!queried_) {
         last_answer_ns_ = now_ns;  // the silence timeout runs from the first query
         queried_ = true;
     }
     next_query_ns_ = now_ns + config_.period_ns;
+}
+
+auto PtpManagementClient::send(ManagementAction const action, uint16_t const management_id, std::span<uint8_t const> const data)
+    -> Status
+{
+    std::array<uint8_t, MANAGEMENT_SET_MAX_SIZE> message{};
+    size_t const length = build_management_message(message, action, management_id, data, config_.domain, sequence_++, source_);
+    if (length == 0) {
+        return failure(std::errc::message_size);
+    }
+    if (::sendto(fd_.get(), message.data(), length, 0, server_.sockaddr(), server_.length()) < 0) {
+        std::error_code const error{errno, std::generic_category()};
+        note_error(error);
+        return failure(error);
+    }
+    return success();
+}
+
+auto PtpManagementClient::set_grandmaster_settings(GrandmasterSettingsNp const& settings) -> Status
+{
+    settings_ = settings;
+    return send(ManagementAction::set, management_id::grandmaster_settings_np, encode(settings));
+}
+
+void PtpManagementClient::send_settings()
+{
+    if (settings_) {
+        (void)send(ManagementAction::set, management_id::grandmaster_settings_np, encode(*settings_));
+    }
+}
+
+auto PtpManagementClient::subscribing() const noexcept -> bool
+{
+    return config_.events.bitmask != SubscribeEventsNp{}.bitmask;
+}
+
+void PtpManagementClient::send_subscription(int64_t const now_ns)
+{
+    if (!subscribing()) {
+        return;
+    }
+    SubscribeEventsNp subscription = config_.events;
+    subscription.duration_s = config_.subscription_duration_s;
+    if (send(ManagementAction::set, management_id::subscribe_events_np, encode(subscription))) {
+        next_subscribe_ns_ = now_ns + (int64_t{config_.subscription_duration_s} * 500'000'000);
+    }
 }
 
 void PtpManagementClient::on_ready(int64_t const now_ns)
@@ -442,6 +591,27 @@ auto PtpManagementClient::create(PtpManagementConfig /*config*/, Listener /*list
 }
 
 void PtpManagementClient::query(int64_t /*now_ns*/)
+{}
+
+auto PtpManagementClient::send(ManagementAction /*action*/, uint16_t /*management_id*/, std::span<uint8_t const> /*data*/) -> Status
+{
+    return failure(std::errc::not_supported);
+}
+
+auto PtpManagementClient::set_grandmaster_settings(GrandmasterSettingsNp const& /*settings*/) -> Status
+{
+    return failure(std::errc::not_supported);
+}
+
+void PtpManagementClient::send_settings()
+{}
+
+auto PtpManagementClient::subscribing() const noexcept -> bool
+{
+    return false;
+}
+
+void PtpManagementClient::send_subscription(int64_t /*now_ns*/)
 {}
 
 void PtpManagementClient::on_ready(int64_t /*now_ns*/)
