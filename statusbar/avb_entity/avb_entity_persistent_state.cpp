@@ -252,9 +252,6 @@ auto serialize_persistent_state(PersistentState const& state) -> std::string
             format.descriptor_index,
             toml_hex(format.format));
     }
-    for (auto const& rate : state.sampling_rates) {
-        out += std::format("\n[[sampling_rate]]\naudio_unit = {}\nrate = {}\n", rate.audio_unit, rate.rate);
-    }
     for (auto const& source : state.clock_sources) {
         out += std::format("\n[[clock_source]]\nclock_domain = {}\nclock_source = {}\n", source.clock_domain, source.clock_source);
     }
@@ -366,18 +363,6 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
                     return false;
                 }
                 state.stream_formats.push_back({.descriptor_type = *type, .descriptor_index = *index, .format = *format});
-                return true;
-            }) &&
-        each_table(
-            root,
-            "sampling_rate",
-            [&](Table const& t) {
-                auto const unit = u16_at(t, "audio_unit");
-                auto const rate = u32_at(t, "rate");
-                if (!unit || !rate) {
-                    return false;
-                }
-                state.sampling_rates.push_back({.audio_unit = *unit, .rate = *rate});
                 return true;
             }) &&
         each_table(

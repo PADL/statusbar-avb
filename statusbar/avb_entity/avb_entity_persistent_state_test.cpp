@@ -55,7 +55,6 @@ auto sample_state() -> PersistentState
     state.names.push_back({.descriptor_type = 0, .descriptor_index = 0, .name_index = 0, .value = "FOH \"left\" \\ bridge\t\xC3\xA9"});
     state.names.push_back({.descriptor_type = 0x1A, .descriptor_index = 3, .name_index = 0, .value = std::string(64, 'x')});
     state.stream_formats.push_back({.descriptor_type = 5, .descriptor_index = 1, .format = 0x0205022002006000ULL});
-    state.sampling_rates.push_back({.audio_unit = 0, .rate = 96000});
     state.clock_sources.push_back({.clock_domain = 0, .clock_source = 1});
     state.presentation_offsets.push_back({.stream_output = 2, .ns = 1500000});
     state.listener_bindings.push_back({.stream_input = 0, .talker_entity_id = 0xFFEEDDCCBBAA9988ULL, .talker_unique_id = 3, .format = 0x0205022002006000ULL});
@@ -115,7 +114,6 @@ TEST(avb_persistent_state, malformed_rejected)
     EXPECT_TRUE(is_malformed("version = 1\n"));
     EXPECT_TRUE(is_malformed("version = 1\nentity_model_id = 5\n"));
     EXPECT_TRUE(is_malformed(head + "system_unique_id = -1\n"));
-    EXPECT_TRUE(is_malformed(head + "[[sampling_rate]]\naudio_unit = 70000\nrate = 48000\n"));
     EXPECT_TRUE(is_malformed(head + "[[clock_source]]\nclock_domain = 0\n"));
     EXPECT_TRUE(is_malformed(head + "[[name]]\ndescriptor_type = 0\ndescriptor_index = 0\nname_index = 0\nvalue = \"" +
                              std::string(65, 'n') + "\"\n"));
@@ -134,6 +132,21 @@ TEST(avb_persistent_state, malformed_rejected)
     auto const v2 = parse_persistent_state("version = 2\nentity_model_id = \"0x01\"\n");
     EXPECT_FALSE(v2.has_value());
     EXPECT_TRUE(v2.error() == std::errc::not_supported);
+}
+
+// An older file's [[sampling_rate]] tables load and are ignored: the kit keeps
+// no unit rate, and the rewritten file has none
+TEST(avb_persistent_state, a_saved_sampling_rate_is_ignored)
+{
+    std::string const text = "version = 1\nentity_model_id = \"0x001b92fffe000001\"\n"
+                             "[[sampling_rate]]\naudio_unit = 0\nrate = 96000\n"
+                             "[[clock_source]]\nclock_domain = 0\nclock_source = 1\n";
+    auto const parsed = parse_persistent_state(text);
+    EXPECT_TRUE(parsed.has_value());
+    if (parsed) {
+        EXPECT_EQ(parsed->clock_sources.size(), size_t{1});
+        EXPECT_EQ(serialize_persistent_state(*parsed).find("sampling_rate"), std::string::npos);
+    }
 }
 
 // The write is whole and atomic: a temporary file beside the target renamed
