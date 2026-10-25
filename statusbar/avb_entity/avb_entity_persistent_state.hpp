@@ -37,14 +37,6 @@ struct PersistedStreamFormat
     auto operator==(PersistedStreamFormat const&) const -> bool = default;
 };
 
-struct PersistedSamplingRate
-{
-    uint16_t audio_unit{0};
-    uint32_t rate{0};
-
-    auto operator==(PersistedSamplingRate const&) const -> bool = default;
-};
-
 struct PersistedClockSource
 {
     uint16_t clock_domain{0};
@@ -120,7 +112,6 @@ struct PersistentState
     uint32_t configured_presentation_offset_ns{0};
     std::vector<PersistedName> names;
     std::vector<PersistedStreamFormat> stream_formats;
-    std::vector<PersistedSamplingRate> sampling_rates;
     std::vector<PersistedClockSource> clock_sources;
     std::vector<PersistedPresentationOffset> presentation_offsets;
     std::vector<PersistedListenerBinding> listener_bindings;
