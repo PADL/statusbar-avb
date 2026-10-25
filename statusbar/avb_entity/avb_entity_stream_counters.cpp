@@ -82,7 +82,7 @@ void tally_media_lock(
     uint32_t const lock_tolerance_ns,
     uint32_t const sample_rate_hz) noexcept
 {
-    if (!c.have_prev_ts || samples_per_ch == 0) {
+    if (!c.have_prev_ts || samples_per_ch == 0 || sample_rate_hz == 0) {
         return;
     }
     uint32_t const actual = avtp_ts - c.prev_ts;  // wrap-safe (uint32)
