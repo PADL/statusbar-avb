@@ -1026,422 +1026,98 @@ TEST(listener_timed, am824_raw_delivery_through_on_stream_rx_frame)
     EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
 }
 
-namespace {
-
-/// @p count consecutive AAF AVTPDUs of the eight channel format for STREAM_1
-/// from one talker: the sequence numbers run on, and the timestamps are a
-/// packet (twelve samples at 96 kHz, 125 us) apart from @p first.
-auto aaf_run(avtp::AafStreamOutputContext& talker, int const count, avtp::Nanoseconds const first)
-    -> std::vector<std::vector<uint8_t>>
+// An AAF input re-shaped to AM824 and back (reformat_stream): each kind's frames land while it is the
+// slot's, the other kind's are not matched (none parsed as the wrong kind), and a frame arriving while
+// the reactor holds the slot is dropped.
+TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
 {
-    std::vector<std::vector<uint8_t>> frames;
-    for (int i = 0; i < count; ++i) {
-        avtp::AafPdu pdu{};
-        std::vector<uint8_t> frame(avtp::AafPdu::HEADER_LENGTH + (size_t{12} * 8 * 4), 0);
-        auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
-        auto const at = first + avtp::Nanoseconds{int64_t{125'000} * i};
-        EXPECT_EQ(avtp::aaf_stream_serialize(talker, pdu, payload, 12, at, [](uint8_t, std::span<float>) {}), payload.size());
-        span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
-        span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
-        frames.push_back(std::move(frame));
-    }
-    return frames;
-}
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const aaf_spec = audio_specs()[1];
+    uint32_t const rate_hz = aaf_spec.format.sample_rate_hz;
+    StreamSpec am824_spec = aaf_spec;
+    am824_spec.format_word = avtp::make_am824_stream_format(rate_hz == 96000 ? 4 : 2, 2);
+    am824_spec.format = decode_stream_format(am824_spec.format_word);
+    EXPECT_TRUE(am824_spec.format.kind == StreamKind::am824 && am824_spec.format.sample_rate_hz == rate_hz);
+    std::atomic<int64_t> gptp{0};
+    RecordingSink sink;
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    publish_connections(ls, *donor);
+    ls.set_timed_audio_sink(&sink);
+    auto* const slot = ls.slot_for(1);
 
-/// A talker of the eight channel format the test inputs are opened with.
-auto aaf_talker() -> avtp::AafStreamOutputContext
-{
-    auto const format = decode_stream_format(AAF_96K_INT32_8CH);
-    return avtp::AafStreamOutputContext{
-        tsn::StreamId{},
-        format.aaf_format,
-        *avtp::aaf_sample_rate_from_hz(format.sample_rate_hz),
-        format.channels,
-        format.bit_depth,
+    auto const spp = static_cast<uint16_t>(class_a_samples_per_packet(rate_hz));
+    avtp::AafStreamOutputContext aaf_tx{
+        kAafId,
+        aaf_spec.format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(rate_hz),
+        aaf_spec.format.channels,
+        aaf_spec.format.bit_depth,
         0};
-}
-
-}  // namespace
-
-TEST(listener_lock, an_input_that_loses_its_stream_is_no_longer_locked)
-{
-    // Milan v1.3 5.3.8.10: MEDIA_LOCKED is MEDIA_UNLOCKED while "the input
-    // stream is not synchronized on the media clock", and one more while it
-    // is. An input with no stream is synchronized on nothing, and no AVTPDU
-    // comes to show it, so the lock is dropped as the stream is.
-    auto donor = make_donor();
-    std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto const& counters = ls.slot_for(0)->counters;
-    auto talker = aaf_talker();
-
-    for (auto const& frame : aaf_run(talker, 14, FORMAT_NOW)) {
-        ls.on_stream_rx_frame(frame, FORMAT_NOW);
-    }
-    EXPECT_EQ(counters.media_locked.load(), 1U);
-    EXPECT_EQ(counters.media_unlocked.load(), 0U);
-
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
-    EXPECT_EQ(counters.media_locked.load(), 1U);
-    EXPECT_EQ(counters.media_unlocked.load(), 1U);
-    EXPECT_FALSE(counters.is_locked.load());
-    // A second disconnect, of an input that has none, counts nothing.
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
-    EXPECT_EQ(counters.media_unlocked.load(), 1U);
-
-    // Connected again, the stream locks it again: one apart, as before.
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    for (auto const& frame : aaf_run(talker, 14, FORMAT_NOW + avtp::Nanoseconds{14 * 125'000})) {
-        ls.on_stream_rx_frame(frame, FORMAT_NOW);
-    }
-    EXPECT_EQ(counters.media_locked.load(), 2U);
-    EXPECT_EQ(counters.media_unlocked.load(), 1U);
-}
-
-TEST(listener_lock, an_avtpdu_taken_up_as_the_stream_is_lost_leaves_no_lock)
-{
-    // The receive thread may be handling an AVTPDU while the reactor thread
-    // disconnects the input: the stream id is cleared, then the lock dropped.
-    // That AVTPDU continues a good run and would lock the input again, with
-    // no stream. The receive thread sees the id gone and drops the lock.
-    auto donor = make_donor();
-    std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto& slot = *ls.slot_for(0);
-    auto talker = aaf_talker();
-    auto const frames = aaf_run(talker, 15, FORMAT_NOW);
-    for (size_t i = 0; i < 14; ++i) {
-        ls.on_stream_rx_frame(frames[i], FORMAT_NOW);
-    }
-    EXPECT_TRUE(slot.counters.is_locked.load());
-
-    // What on_listener_disconnected does to the lock, the last AVTPDU read before it and counted after.
-    slot.rx_stream_id.publish(0);
-    unlock_stream_input(slot.counters);
-    ls.receive_aaf_frame(slot, frames[14], FORMAT_NOW);
-
-    EXPECT_FALSE(slot.counters.is_locked.load());
-    EXPECT_EQ(slot.counters.media_locked.load(), slot.counters.media_unlocked.load());
-}
-
-TEST(listener_lock, the_stream_after_a_disconnect_follows_nothing_of_the_last)
-{
-    // A disconnect ends the stream; the next one, from a talker that numbers
-    // its AVTPDUs from zero, is no SEQ_NUM_MISMATCH of the first, and locks
-    // the input on a run of its own.
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto const& counters = ls.slot_for(0)->counters;
-    auto first = aaf_talker();
-    for (auto const& frame : aaf_run(first, 14, FORMAT_NOW)) {
-        ls.on_stream_rx_frame(frame, FORMAT_NOW);
-    }
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
-
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto second = aaf_talker();
-    for (auto const& frame : aaf_run(second, 14, FORMAT_NOW + avtp::Nanoseconds{40'000'000})) {
-        ls.on_stream_rx_frame(frame, FORMAT_NOW);
-    }
-    EXPECT_EQ(counters.seq_num_mismatch.load(), 0U);
-    EXPECT_EQ(counters.media_locked.load(), 2U);
-    EXPECT_EQ(counters.media_unlocked.load(), 1U);
-    EXPECT_EQ(counters.frames_rx.load(), 28U);
-}
-
-TEST(listener_lock, an_avtpdu_in_flight_at_a_disconnect_is_not_compared_with_the_next_stream)
-{
-    // The receive thread counts an AVTPDU of the old stream after the reactor
-    // thread disconnected the input: the next stream, numbered from zero,
-    // still starts afresh, with no SEQ_NUM_MISMATCH against that AVTPDU.
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto& slot = *ls.slot_for(0);
-    auto first = aaf_talker();
-    auto const frames = aaf_run(first, 15, FORMAT_NOW);
-    for (size_t i = 0; i < 14; ++i) {
-        ls.on_stream_rx_frame(frames[i], FORMAT_NOW);
-    }
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
-    ls.receive_aaf_frame(slot, frames[14], FORMAT_NOW);
-
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto second = aaf_talker();
-    for (auto const& frame : aaf_run(second, 14, FORMAT_NOW + avtp::Nanoseconds{40'000'000})) {
-        ls.on_stream_rx_frame(frame, FORMAT_NOW);
-    }
-    EXPECT_EQ(slot.counters.seq_num_mismatch.load(), 0U);
-    EXPECT_EQ(slot.counters.media_reset.load(), 0U);
-    EXPECT_EQ(slot.counters.frames_rx.load(), 29U);
-}
-
-TEST(listener_counters, an_input_whose_talker_goes_is_interrupted_and_a_released_one_is_not)
-{
-    // Milan v1.3 Table 5.6: STREAM_INTERRUPTED for any reason other than a
-    // controller's unbind, a Talker attribute withdrawn among them.
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    auto const& counters = ls.slot_for(0)->counters;
-    auto talker = aaf_talker();
-    avtp::Nanoseconds start = FORMAT_NOW;
-    for (auto const why : {StreamInputLoss::released, StreamInputLoss::talker_lost}) {
-        ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-        for (auto const& frame : aaf_run(talker, 14, start)) {
-            ls.on_stream_rx_frame(frame, FORMAT_NOW);
-        }
-        EXPECT_TRUE(counters.is_locked.load());
-        ls.on_listener_disconnected(0, sm::TimePoint{}, why);
-        start += avtp::Nanoseconds{14 * 125'000};
-    }
-    EXPECT_EQ(counters.media_locked.load(), 2U);
-    EXPECT_EQ(counters.media_unlocked.load(), 2U);
-    EXPECT_EQ(counters.stream_interrupted.load(), 1U);
-}
-
-TEST(listener_counters, get_counters_reports_an_interrupted_stream)
-{
-    // An AVTPDU lost from a locked stream breaks the timestamp step: the lock
-    // goes and STREAM_INTERRUPTED (bit 2, Milan v1.3 Table 5.13) counts it.
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{5'000, 96'000, donor->components(), gptp, nullptr};  // a 5 us step tolerance
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto talker = aaf_talker();
-    auto const frames = aaf_run(talker, 40, FORMAT_NOW);
-    for (size_t i = 0; i < frames.size(); ++i) {
-        if (i != 20) {
-            ls.on_stream_rx_frame(frames[i], FORMAT_NOW);
-        }
-    }
-
-    uint32_t valid = 0;
-    std::array<uint32_t, 32> out{};
-    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
-    EXPECT_EQ(valid & 0x0000'0FFFU, 0x0000'0FFFU);
-    EXPECT_EQ(out[0], 2U);  // MEDIA_LOCKED: before the loss and again after
-    EXPECT_EQ(out[1], 1U);  // MEDIA_UNLOCKED
-    EXPECT_EQ(out[2], 1U);  // STREAM_INTERRUPTED
-    EXPECT_EQ(out[3], 1U);  // SEQ_NUM_MISMATCH
-    EXPECT_EQ(out[11], 39U);
-}
-
-TEST(listener_counters, get_counters_reports_each_running_counter_at_its_own_bit)
-{
-    // IEEE 1722.1-2021 Clause 7.4.42: twelve STREAM_INPUT counters, bits 0 to 11 of counters_valid.
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    auto& c = ls.slot_for(0)->counters;
-    uint32_t value = 100;
-    for (auto* counter :
-         {&c.media_locked,
-          &c.media_unlocked,
-          &c.stream_interrupted,
-          &c.seq_num_mismatch,
-          &c.media_reset,
-          &c.timestamp_uncertain,
-          &c.timestamp_valid,
-          &c.timestamp_not_valid,
-          &c.unsupported_format,
-          &c.late_timestamp,
-          &c.early_timestamp,
-          &c.frames_rx}) {
-        counter->store(value++);
-    }
-
-    uint32_t valid = 0;
-    std::array<uint32_t, 32> out{};
-    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
-    EXPECT_EQ(valid, 0x0000'0FFFU);
-    for (uint32_t bit = 0; bit < 12; ++bit) {
-        EXPECT_EQ(out[bit], 100U + bit);
-    }
-    EXPECT_EQ(out[12], 0U);
-}
-
-// --- A listener stream received beside the stream port ---
-
-namespace {
-
-/// Each (input, state) the input hook is told.
-struct InputRecorder
-{
-    std::vector<std::pair<uint16_t, ListenerStreams::InputState>> told{};
-    bool agreed{true};  ///< input_state() in the hook said the stream told
-
-    void install(ListenerStreams& ls)
-    {
-        ls.set_on_input_changed([this, &ls](uint16_t const index, ListenerStreams::InputState const& state) {
-            told.emplace_back(index, state);
-            auto const now = ls.input_state(index).value_or(ListenerStreams::InputState{.stream_id = 1});
-            agreed = agreed && now.stream_id == state.stream_id;
-        });
-    }
-    [[nodiscard]] auto last_is(uint16_t const index, uint64_t const stream_id, bool const stopped, uint64_t const format) const
-        -> bool
-    {
-        if (told.empty()) {
-            return false;
-        }
-        auto const& [i, state] = told.back();
-        return i == index && state.stream_id == stream_id && state.stopped == stopped && state.format == format;
-    }
-};
-
-}  // namespace
-
-// What a data plane beside the port needs to receive an input: the stream it receives, whether it is
-// stopped (Milan v1.3 5.3.8.7) and the format in force (5.3.8.1), at open, at each change and at close.
-TEST(listener_offload, the_hook_is_told_what_each_input_receives)
-{
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    InputRecorder recorder;
-    recorder.install(ls);
-    ls.set_stream_stopped(1, true);
-    EXPECT_TRUE(recorder.told.empty());  // no slot: no notice
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(1)).has_value());
-    EXPECT_TRUE(recorder.last_is(1, 0, true, AAF_96K_INT32_8CH));  // the state in force at open
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    EXPECT_TRUE(recorder.last_is(0, 0, false, AAF_96K_INT32_8CH));
-
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    EXPECT_TRUE(recorder.last_is(0, STREAM_1.to_uint64(), false, AAF_96K_INT32_8CH));
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});  // the same stream: no change
-    EXPECT_EQ(recorder.told.size(), size_t{3});
-    ls.set_stream_stopped(0, true);
-    EXPECT_TRUE(recorder.last_is(0, STREAM_1.to_uint64(), true, AAF_96K_INT32_8CH));
-    ls.set_stream_stopped(0, true);
-    EXPECT_EQ(recorder.told.size(), size_t{4});
-    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
-    EXPECT_TRUE(recorder.last_is(0, STREAM_1.to_uint64(), true, aaf_96k_of(2)));
-    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
-    EXPECT_FALSE(ls.set_stream_format(0, CRF_MILAN_48K));  // refused: nothing changes
-    EXPECT_EQ(recorder.told.size(), size_t{5});
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
-    EXPECT_TRUE(recorder.last_is(0, 0, true, aaf_96k_of(2)));
-    EXPECT_FALSE(ls.input_state(2).has_value());
-    auto const state = ls.input_state(0);
-    EXPECT_TRUE(state.has_value());
-    EXPECT_EQ(state.value_or(ListenerStreams::InputState{}).format, aaf_96k_of(2));
-
-    ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
-    recorder.told.clear();
-    ls.close_rx();  // each input it releases, with stream ID 0
-    EXPECT_EQ(recorder.told.size(), size_t{2});
-    EXPECT_TRUE(recorder.last_is(0, 0, true, aaf_96k_of(2)));
-    EXPECT_EQ(recorder.told.front().first, uint16_t{1});
-    EXPECT_EQ(recorder.told.front().second.stream_id, uint64_t{0});
-    EXPECT_TRUE(recorder.agreed);
-    ls.set_stream_stopped(0, false);  // no slot any more
-    EXPECT_EQ(recorder.told.size(), size_t{2});
-    ls.set_on_input_changed({});
-}
-
-// What a data plane beside the port received reaches the input's counters, so GET_COUNTERS (IEEE 1722.1-2021
-// Clause 7.4.42) goes on, and its telemetry.
-TEST(listener_offload, a_report_reaches_the_counters_and_the_telemetry)
-{
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    EXPECT_FALSE(ls.notify_offload_received(5, StreamInputCounts{.frames_rx = 1}, 12));  // no such input
-    EXPECT_TRUE(ls.notify_offload_received(
-        0, StreamInputCounts{.frames_rx = 10, .timestamp_valid = 8, .unsupported_format = 2, .media_locked = true}, 96));
-    auto const* const slot = ls.slot_for(0);
-    EXPECT_EQ(slot->rx_packets.load(), uint64_t{8});
-    EXPECT_EQ(slot->rx_bad.load(), uint64_t{2});
-    EXPECT_EQ(slot->rx_samples.load(), uint64_t{96});
-    uint32_t valid = 0;
-    std::array<uint32_t, 32> out{};
-    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
-    EXPECT_EQ(out[11], 10U);  // FRAMES_RX
-    EXPECT_EQ(out[8], 2U);    // UNSUPPORTED_FORMAT
-    EXPECT_EQ(out[6], 8U);    // TIMESTAMP_VALID
-    EXPECT_EQ(out[0], 1U);    // MEDIA_LOCKED
-    EXPECT_TRUE(ls.notify_offload_received(0, StreamInputCounts{.frames_rx = 8, .media_locked = true}, 96));
-    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
-    EXPECT_EQ(out[0], 1U);  // still locked: no second count
-    EXPECT_EQ(out[11], 18U);
-}
-
-// Milan v1.3 5.3.8.7 and 5.3.8.10: a stopped input is not synchronized, so a lock reported lost then is no
-// interruption, and nothing reaches the telemetry; a started bound one's loss is one; with no stream, the
-// release decides.
-TEST(listener_offload, a_lock_lost_while_stopped_or_without_a_stream_is_no_interruption)
-{
-    auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
-    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    auto const& c = ls.slot_for(0)->counters;
-    auto lock = [&ls](bool const locked) {
-        EXPECT_TRUE(ls.notify_offload_received(0, StreamInputCounts{.frames_rx = 8, .media_locked = locked}, 48));
+    avtp::Am824StreamOutputContext am824_tx{kAafId, *avtp::am824_sample_rate_from_hz(rate_hz), 2, 0};
+    uint64_t const t0 = 9'000'000'000ULL;
+    auto const now = static_cast<int64_t>(t0 - 1'000'000);
+    uint64_t k = 0;
+    auto const aaf = [&] { return aaf_frame(aaf_tx, spp, t0 + (k++ * 125'000)); };
+    auto const am824 = [&] {
+        auto frame = am824_frame(am824_tx, spp, k * spp, t0 + (k * 125'000));
+        ++k;
+        return frame;
     };
-    lock(true);
-    lock(true);
-    EXPECT_TRUE(c.is_locked.load());
 
-    ls.set_stream_stopped(0, true);
-    lock(false);
-    EXPECT_EQ(c.media_unlocked.load(), 1U);
-    EXPECT_EQ(c.stream_interrupted.load(), 0U);
-    lock(true);  // discarded: not synchronized
-    EXPECT_FALSE(c.is_locked.load());
-    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{16});  // the two reports before the stop
-    ls.set_stream_stopped(0, false);
-    lock(true);
-    EXPECT_TRUE(c.is_locked.load());
-    lock(false);
-    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+    ls.on_stream_rx_frame(aaf(), now);
+    ls.on_stream_rx_frame(am824(), now);  // not this slot's kind yet
+    EXPECT_EQ(sink.seen.size(), size_t{1});
 
-    lock(true);
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
-    lock(false);
-    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+    EXPECT_TRUE(ls.reformat_stream(am824_spec).has_value());
+    EXPECT_TRUE(slot->kind.load() == StreamKind::am824 && slot->am824.has_value() && !slot->aaf.has_value());
+    ls.on_stream_rx_frame(am824(), now);
+    ls.on_stream_rx_frame(aaf(), now);  // no longer this slot's kind
+    slot->guard.lock();
+    ls.on_stream_rx_frame(am824(), now);  // the reactor holds the slot: dropped
+    slot->guard.unlock();
+    ls.on_stream_rx_frame(am824(), now);
+    EXPECT_EQ(sink.seen.size(), size_t{3});
+
+    EXPECT_TRUE(ls.reformat_stream(aaf_spec).has_value());
+    EXPECT_TRUE(slot->kind.load() == StreamKind::aaf && slot->aaf.has_value() && !slot->am824.has_value());
+    ls.on_stream_rx_frame(am824(), now);
+    ls.on_stream_rx_frame(aaf(), now);
+    EXPECT_EQ(sink.seen.size(), size_t{4});
+
+    if (sink.seen.size() == 4) {
+        EXPECT_TRUE(sink.seen[0].packet.fmt == StreamAudioFormat::aaf_int32);
+        EXPECT_TRUE(sink.seen[1].packet.fmt == StreamAudioFormat::am824_mbla);
+        EXPECT_TRUE(sink.seen[2].packet.fmt == StreamAudioFormat::am824_mbla);
+        EXPECT_TRUE(sink.seen[3].packet.fmt == StreamAudioFormat::aaf_int32);
+        EXPECT_EQ(sink.seen[1].packet.channels, uint16_t{2});
+        EXPECT_EQ(sink.seen[1].packet.frames, uint32_t{spp});
+        EXPECT_EQ(sink.seen[3].packet.channels, aaf_spec.format.channels);
+    }
+    EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
+    EXPECT_EQ(slot->rx_bad.load(), uint64_t{0});
+    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{0});
 }
 
-// Milan v1.3 Table 5.6: an input whose talker goes is interrupted, even when the data plane reports its
-// last counts, the lock lost, from inside the hook that tells it the stream is gone.
-TEST(listener_offload, a_talker_lost_is_an_interruption_with_a_report_from_the_hook)
+// A CRF slot never changes kind, nor an audio slot to CRF.
+TEST(listener_kind, crf_kind_changes_are_refused)
 {
     auto donor = make_donor();
-    std::atomic<int64_t> const gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
-    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
-    EXPECT_TRUE(ls.notify_offload_received(0, StreamInputCounts{.frames_rx = 8, .media_locked = true}, 48));
-    bool flushed = false;
-    ls.set_on_input_changed([&ls, &flushed](uint16_t const index, ListenerStreams::InputState const& state) {
-        if (state.stream_id == 0) {
-            flushed = ls.notify_offload_received(index, StreamInputCounts{.frames_rx = 2, .media_locked = false}, 12);
-        }
-    });
-    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::talker_lost);
-    EXPECT_TRUE(flushed);
-    auto const& c = ls.slot_for(0)->counters;
-    EXPECT_EQ(c.stream_interrupted.load(), 1U);
-    EXPECT_EQ(c.media_unlocked.load(), 1U);
-    EXPECT_EQ(c.frames_rx.load(), 10U);
-    ls.set_on_input_changed({});
+    StreamSpec crf{};
+    crf.index = 1;
+    crf.format_word = CRF_MILAN_48K;
+    crf.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(crf).has_value());
+    StreamSpec to_crf = crf;
+    to_crf.index = 0;
+    EXPECT_FALSE(ls.reformat_stream(to_crf).has_value());
+    EXPECT_TRUE(ls.slot_for(0)->kind.load() == StreamKind::aaf && ls.slot_for(0)->aaf.has_value());
+    StreamSpec to_aaf = make_aaf_spec(1);
+    EXPECT_FALSE(ls.reformat_stream(to_aaf).has_value());
+    EXPECT_TRUE(ls.slot_for(1)->kind.load() == StreamKind::crf && ls.slot_for(1)->crf.has_value());
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)
