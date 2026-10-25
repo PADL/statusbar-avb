@@ -173,13 +173,13 @@ struct StreamSpec
 /// talker and 16 listener streams (the media bridge's product limit).
 inline constexpr size_t MAX_ENTITY_AUDIO_STREAMS = 16;
 
-/// Clock-reference (CRF) streams per direction beside the audio: the
-/// media-clock talker (Milan 1.2 7.3) on the output side, or the one CRF input
-/// a kit entity may slave its media clock to on the input side.
-inline constexpr size_t MAX_ENTITY_CRF_STREAMS = 1;
+/// Clock-reference (CRF) streams per direction beside the audio: one media
+/// clock output (Milan v1.2 Section 7.3) and one media clock input per
+/// CLOCK_DOMAIN, up to AvbEntityHost::MAX_CLOCK_DOMAINS domains.
+inline constexpr size_t MAX_ENTITY_CRF_STREAMS = 4;
 
 /// Upper bound on the descriptors of one direction the data plane composes:
-/// 16 audio + 1 CRF. A blob declaring more is an error, not a truncation.
+/// 16 audio + 4 CRF. A blob declaring more is an error, not a truncation.
 /// What it sizes: docs/AVB_ENTITY_KIT.md.
 inline constexpr size_t MAX_ENTITY_STREAMS = MAX_ENTITY_AUDIO_STREAMS + MAX_ENTITY_CRF_STREAMS;
 

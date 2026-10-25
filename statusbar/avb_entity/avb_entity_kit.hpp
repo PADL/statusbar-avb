@@ -76,6 +76,7 @@ static_assert(
 static_assert(
     nanoavb::DescriptorStorageHandler::MAX_STREAM_STATES >= 2 * MAX_ENTITY_STREAMS,
     "AEM stream runtime state (SET_STREAM_FORMAT, START/STOP_STREAMING): inputs and outputs share the table");
+static_assert(MAX_ENTITY_CRF_STREAMS == AvbEntityHost::MAX_CLOCK_DOMAINS, "one CRF input and one CRF output per CLOCK_DOMAIN");
 static_assert(
     TalkerDeclarations::LISTENER_GRACE_NS == TalkerGate::GRACE_NS,
     "a departed Listener keeps its stream declared as long as it keeps the gate open");

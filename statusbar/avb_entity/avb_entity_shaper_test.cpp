@@ -293,8 +293,8 @@ TEST(shaper_cbs, class_b_sees_class_a_as_interference)
     EXPECT_TRUE(class_b_cbs({}, a, 1'000'000, 1500).empty());
 }
 
-// The kit's bound (MAX_ENTITY_AUDIO_STREAMS 32-channel 48 kHz INT_24 AAF talkers and the CRF,
-// gigabit) fits within 802.1Q's default 75% SR budget; the same at INT_32 does not.
+// The kit's bound (MAX_ENTITY_AUDIO_STREAMS 32-channel 48 kHz INT_24 AAF talkers and
+// MAX_ENTITY_CRF_STREAMS CRF talkers, gigabit) fits within 802.1Q's default 75% SR budget; the same at INT_32 does not.
 // Arithmetic in docs/SHAPER.md ("Worked examples").
 TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
 {
@@ -303,20 +303,20 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
     EXPECT_EQ(AvbEntityKit::talker_tspec(aaf).max_frame_size, uint16_t{601});
     EXPECT_EQ(stream_bandwidth_kbps(AvbEntityKit::talker_tspec(aaf), CLASS_A_INTERVALS_PER_SEC), uint32_t{41152});
     std::vector<TSpec> streams(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
-    streams.push_back(AvbEntityKit::talker_tspec(crf_one_timestamp()));
+    streams.insert(streams.end(), MAX_ENTITY_CRF_STREAMS, AvbEntityKit::talker_tspec(crf_one_timestamp()));
     EXPECT_EQ(streams.size(), MAX_ENTITY_STREAMS);
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
-    EXPECT_EQ(a.idleslope_kbps, int32_t{664064});
-    EXPECT_EQ(a.sendslope_kbps, int32_t{-335936});
-    EXPECT_EQ(a.hicredit, int32_t{997});
-    EXPECT_EQ(a.locredit, int32_t{-216});
+    EXPECT_EQ(a.idleslope_kbps, int32_t{680960});
+    EXPECT_EQ(a.sendslope_kbps, int32_t{-319040});
+    EXPECT_EQ(a.hicredit, int32_t{1022});
+    EXPECT_EQ(a.locredit, int32_t{-205});
     EXPECT_EQ(a.max_frame_size, uint32_t{643});
     EXPECT_TRUE(a.idleslope_kbps < 750'000);
 
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
     std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
-    wide.push_back(AvbEntityKit::talker_tspec(crf_one_timestamp()));
-    EXPECT_EQ(class_a_cbs(wide, 1'000'000, 1500).idleslope_kbps, int32_t{860672});
+    wide.insert(wide.end(), MAX_ENTITY_CRF_STREAMS, AvbEntityKit::talker_tspec(crf_one_timestamp()));
+    EXPECT_EQ(class_a_cbs(wide, 1'000'000, 1500).idleslope_kbps, int32_t{877568});
 }
 
 // The placeholder at half the 75% SR budget, 1 Gbit/s, MTU 1500 (wire frame 1542): idleSlope

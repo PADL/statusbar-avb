@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // The kit at its stream bound, with no network: MAX_ENTITY_STREAMS outputs and
-// inputs (16 AAF 32-channel + CRF each way) all open; one more is refused when
+// inputs (16 AAF 32-channel + 4 CRF each way) all open; one more is refused when
 // the tables are derived, and an extra slot by the stream paths themselves.
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
@@ -59,21 +59,21 @@ auto wire(Descriptor const& desc) -> std::span<uint8_t const>
     return std::span{reinterpret_cast<uint8_t const*>(&desc), desc.wire_size()};
 }
 
-/// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then one CRF
-/// in each direction.
-auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs) -> std::vector<uint8_t>
+/// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then @p crf CRF
+/// streams in each direction.
+auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
     entity.configurations_count = 1;
-    entity.talker_stream_sources = static_cast<uint16_t>(audio_outputs + 1);
-    entity.listener_stream_sinks = static_cast<uint16_t>(audio_inputs + 1);
+    entity.talker_stream_sources = static_cast<uint16_t>(audio_outputs + crf);
+    entity.listener_stream_sinks = static_cast<uint16_t>(audio_inputs + crf);
     w.add(0, DESCRIPTOR_ENTITY, 0, make_const_span(entity));
     atdecc::aem::DescriptorConfiguration config{};
     w.add(0, DESCRIPTOR_CONFIGURATION, 0, make_const_span(config));
     for (auto const [type, audio] :
          {std::pair{DESCRIPTOR_STREAM_OUTPUT, audio_outputs}, std::pair{DESCRIPTOR_STREAM_INPUT, audio_inputs}}) {
-        for (uint16_t index = 0; index <= audio; ++index) {
+        for (uint16_t index = 0; index < audio + crf; ++index) {
             atdecc::aem::DescriptorStream stream{};
             stream.descriptor_type = type;
             stream.descriptor_index = index;
@@ -403,8 +403,9 @@ TEST(avb_entity_kit_bounds, a_full_model_derives_its_tables_and_one_more_is_refu
 {
     static_assert(MAX_ENTITY_STREAMS == MAX_ENTITY_AUDIO_STREAMS + MAX_ENTITY_CRF_STREAMS);
     constexpr auto audio = static_cast<uint16_t>(MAX_ENTITY_AUDIO_STREAMS);
+    constexpr auto crf = static_cast<uint16_t>(MAX_ENTITY_CRF_STREAMS);
 
-    auto const full = make_blob(audio, audio);
+    auto const full = make_blob(audio, audio, crf);
     auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{full});
     EXPECT_TRUE(storage.has_value());
     auto const talkers = talker_stream_specs(*storage, 0);
@@ -415,21 +416,28 @@ TEST(avb_entity_kit_bounds, a_full_model_derives_its_tables_and_one_more_is_refu
     EXPECT_EQ(talkers->front().format.channels, uint16_t{32});
     EXPECT_EQ(talkers->back().format.kind, StreamKind::crf);
     EXPECT_EQ(listeners->back().format.kind, StreamKind::crf);
+    EXPECT_EQ((*talkers)[audio].format.kind, StreamKind::crf);
+    EXPECT_EQ((*listeners)[audio].format.kind, StreamKind::crf);
 
-    // A 17th audio stream (18 descriptors with the CRF) is past the bound.
-    auto const outputs_over = make_blob(audio + 1, audio);
+    // A 17th audio stream (21 descriptors with the CRFs) is past the bound, as is a fifth CRF.
+    auto const outputs_over = make_blob(audio + 1, audio, crf);
     auto const over_out = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{outputs_over});
     EXPECT_TRUE(talker_stream_specs(*over_out, 0).error() == std::errc::result_out_of_range);
     EXPECT_TRUE(listener_stream_specs(*over_out, 0).has_value());
-    auto const inputs_over = make_blob(audio, audio + 1);
+    auto const inputs_over = make_blob(audio, audio + 1, crf);
     auto const over_in = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{inputs_over});
     EXPECT_TRUE(listener_stream_specs(*over_in, 0).error() == std::errc::result_out_of_range);
+    auto const crf_over = make_blob(audio, audio, crf + 1);
+    auto const over_crf = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{crf_over});
+    EXPECT_TRUE(talker_stream_specs(*over_crf, 0).error() == std::errc::result_out_of_range);
+    EXPECT_TRUE(listener_stream_specs(*over_crf, 0).error() == std::errc::result_out_of_range);
 }
 
 TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
 {
     constexpr auto audio = static_cast<uint16_t>(MAX_ENTITY_AUDIO_STREAMS);
-    auto const blob = make_blob(audio, audio);
+    constexpr auto crf = static_cast<uint16_t>(MAX_ENTITY_CRF_STREAMS);
+    auto const blob = make_blob(audio, audio, crf);
     auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
     EXPECT_TRUE(storage.has_value());
     auto const talkers = *talker_stream_specs(*storage, 0);
@@ -467,7 +475,10 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
     }
     EXPECT_EQ(kit.talker().slots_.size(), MAX_ENTITY_STREAMS);
     EXPECT_TRUE(kit.talker().slot_for(0)->aaf.has_value());
-    EXPECT_TRUE(kit.talker().slot_for(audio)->crf.has_value());
+    for (uint16_t k = 0; k < crf; ++k) {
+        EXPECT_TRUE(kit.talker().slot_for(audio + k)->crf.has_value());
+        EXPECT_TRUE(kit.talker().toggle_media_clock_restart(audio + k).has_value());
+    }
     EXPECT_TRUE(
         kit.talker().open_stream(talkers.front(), tsn::StreamId{}, ieee::Eui48{}).error() == std::errc::result_out_of_range);
 
@@ -478,6 +489,9 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
     }
     EXPECT_EQ(kit.listener()->slots_.size(), MAX_ENTITY_STREAMS);
     EXPECT_EQ(kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{32});
+    for (uint16_t k = 0; k < crf; ++k) {
+        EXPECT_TRUE(kit.listener()->slot_for(audio + k)->crf.has_value());
+    }
     EXPECT_TRUE(kit.listener()->open_stream(listeners.front()).error() == std::errc::result_out_of_range);
 
     // MSRP: a Talker Advertise per talker stream and a Listener Ready per
@@ -500,7 +514,7 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
     }
 
     // AEM: every STREAM_INPUT and STREAM_OUTPUT latches its own runtime state
-    // (34 entries in a table both directions share); the outputs' STOP
+    // (40 entries in a table both directions share); the outputs' STOP
     // reaches the talker slots.
     for (auto const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
         for (uint16_t index = 0; index < MAX_ENTITY_STREAMS; ++index) {
