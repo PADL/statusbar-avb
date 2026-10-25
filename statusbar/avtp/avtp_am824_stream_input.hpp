@@ -43,12 +43,14 @@ struct Am824StreamInputContext
     uint64_t last_gptp_time_ns{0};   ///< Approximate gPTP time of last received packet
     uint32_t last_anchor_dbc{0};
     uint32_t running_dbc{0};
+    uint8_t last_sample_count{0};  ///< data blocks in the last packet
     bool has_valid_anchor{false};
 
     // Statistics
     uint32_t packets_received{0};
     uint32_t timestamp_updates{0};
     uint32_t sequence_gaps{0};
+    uint32_t dbc_discontinuities{0};  ///< packets whose DBC is not the last DBC plus its block count
 
     /// Construct with sample rate and channel count
     Am824StreamInputContext(Am824SampleRate rate, uint8_t channels);
