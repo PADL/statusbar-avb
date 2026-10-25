@@ -964,16 +964,21 @@ SF_AAF = Layout(
 SF_IEC61883 = Layout(
     "stream_format.iec61883",
     f"{SF_PREFIX}.iec61883",
-    "IEC 61883-6 stream format (IEEE 1722.1 Annex A.5)",
+    "IEC 61883-6 stream format (IEEE 1722-2016 Annex I)",
     (
         Field("sf", 1, 1, "bool", "sf (1 = IEC 61883)", mask=0x80),
         Field("fmt", 1, 1, "u8", "FMT", mask=0x7E, base="hex"),
-        Field("sfc", 2, 1, "u8", "sampling frequency code", values="am824_fdf"),
-        Field("dbs", 3, 1, "u8", "data block size (channels)"),
+        Field("evt", 2, 1, "u8", "FDF event type", mask=0xF8),
+        Field("sfc", 2, 1, "u8", "sampling frequency code", mask=0x07, values="am824_fdf"),
+        Field("dbs", 3, 1, "u8", "data block size (quadlets)"),
         Field("b", 4, 1, "bool", "blocking", mask=0x80),
         Field("nb", 4, 1, "bool", "non-blocking", mask=0x40),
-        Field("sph", 4, 1, "bool", "source packet header", mask=0x02),
-        Field("label", 5, 1, "u8", "AM824 label", base="hex", values="am824_label"),
+        Field("ut", 4, 1, "bool", "up to DBS channels", mask=0x20),
+        Field("sc", 4, 1, "bool", "synchronous clock", mask=0x10),
+        Field("label_iec_60958_cnt", 5, 1, "u8", "IEC 60958 label count"),
+        Field("label_mbla_cnt", 6, 1, "u8", "MBLA label count"),
+        Field("label_midi_cnt", 7, 1, "u8", "MIDI label count", mask=0xF0),
+        Field("label_smpte_cnt", 7, 1, "u8", "SMPTE label count", mask=0x0F),
     ),
 )
 SF_CRF = Layout(
