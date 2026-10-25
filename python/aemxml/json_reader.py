@@ -262,9 +262,13 @@ def _parse_cluster(c: dict, strings: _LocalizedStrings, context: str) -> AudioCl
 
 
 def _parse_port(
-    port_obj: dict, strings: _LocalizedStrings, context: str
+    port_obj: dict,
+    strings: _LocalizedStrings,
+    context: str,
+    clock_domain_index: int = 0,
 ) -> AudioStreamPort:
-    """Parse a stream port (input_port or output_port) from JSON."""
+    """Parse a stream port (input_port or output_port) from JSON; its clock domain
+    defaults to its unit's (`clock_domain_index`)."""
     clusters = [
         _parse_cluster(c, strings, f"{context}.clusters[{i}]")
         for i, c in enumerate(port_obj.get("clusters", []))
@@ -286,6 +290,7 @@ def _parse_port(
         for i, c in enumerate(port_obj.get("controls", []))
     ]
     return AudioStreamPort(
+        clock_domain_index=port_obj.get("clock_domain_index", clock_domain_index),
         clusters=clusters,
         maps=audio_maps,
         controls=controls,
@@ -691,13 +696,14 @@ def _parse_audio_unit(au: dict, strings: _LocalizedStrings, context: str) -> Aud
     """Parse an audio unit from JSON."""
     rates = [_encode_sampling_rate(r) for r in au.get("rates", [])]
     current_rate = rates[0] if rates else 0
+    clock_domain_index = au.get("clock_domain_index", 0)
 
     input_ports = [
-        _parse_port(p, strings, f"{context}.input_ports[{i}]")
+        _parse_port(p, strings, f"{context}.input_ports[{i}]", clock_domain_index)
         for i, p in enumerate(au.get("input_ports", []))
     ]
     output_ports = [
-        _parse_port(p, strings, f"{context}.output_ports[{i}]")
+        _parse_port(p, strings, f"{context}.output_ports[{i}]", clock_domain_index)
         for i, p in enumerate(au.get("output_ports", []))
     ]
 
@@ -718,6 +724,7 @@ def _parse_audio_unit(au: dict, strings: _LocalizedStrings, context: str) -> Aud
     return AudioUnit(
         object_name=au.get("name", ""),
         localized_description=_parse_localized(au, strings, context=context),
+        clock_domain_index=clock_domain_index,
         current_sampling_rate=current_rate,
         sampling_rates=rates,
         input_stream_ports=input_ports,
