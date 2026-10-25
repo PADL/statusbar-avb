@@ -2933,6 +2933,84 @@ def test_json_stream_buffer_length():
     print("  [+] JSON stream buffer_length: OK")
 
 
+def test_json_unit_and_port_clock_domains():
+    """An AUDIO_UNIT's "clock_domain_index" reaches its descriptor and its stream
+    ports' (a port may name its own), and survives the JSON and blob round trips,
+    as a stream's does (IEEE 1722.1-2021 Clauses 7.2.3, 7.2.13)."""
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+    from aemxml.unflatten import unflatten
+
+    def unit(name: str, **extra) -> dict:
+        return {
+            "name": name,
+            "rates": [48000],
+            "input_ports": [{"clusters": [{"name": f"{name} In", "channels": 2}]}],
+            "output_ports": [{"clusters": [{"name": f"{name} Out", "channels": 2}]}],
+            **extra,
+        }
+
+    second = unit("Two", clock_domain_index=1)
+    second["output_ports"][0]["clock_domain_index"] = 0
+    model = {
+        "entity": {
+            "vendor": "V",
+            "model": "M",
+            "name": "Domains",
+            "configurations": [
+                {
+                    "name": "C",
+                    "avb_interfaces": [{"name": "eth0"}],
+                    "clock_sources": [{"name": "Internal", "type": "INTERNAL"}],
+                    "clock_domains": [
+                        {"name": "CD0", "source": 0, "sources": [0]},
+                        {"name": "CD1", "source": 0, "sources": [0]},
+                    ],
+                    "streams_in": [
+                        {
+                            "name": "In",
+                            "format": {
+                                "type": "AAF",
+                                "rate": 48000,
+                                "channels": 2,
+                                "depth": 32,
+                            },
+                            "clock_domain_index": 1,
+                        }
+                    ],
+                    "audio_units": [unit("One"), second],
+                }
+            ],
+        }
+    }
+
+    def domains(entity) -> list:
+        config = entity.configurations[0]
+        return [config.streams_input[0].clock_domain_index] + [
+            (
+                u.clock_domain_index,
+                [
+                    p.clock_domain_index
+                    for p in u.input_stream_ports + u.output_stream_ports
+                ],
+            )
+            for u in config.audio_units
+        ]
+
+    expected = [1, (0, [0, 0]), (1, [1, 0])]
+    entity = read_json(json.dumps(model))
+    assert domains(entity) == expected, domains(entity)
+    # One configuration: the writer uses the singular key.
+    written = json.loads(write_json(entity))["entity"]["configuration"]
+    assert "clock_domain_index" not in written["audio_units"][0]
+    assert written["audio_units"][1]["clock_domain_index"] == 1
+    assert "clock_domain_index" not in written["audio_units"][1]["input_ports"][0]
+    assert written["audio_units"][1]["output_ports"][0]["clock_domain_index"] == 0
+    assert domains(read_json(write_json(entity))) == expected
+    assert domains(unflatten(*read_blob(write_blob(*flatten(entity))))) == expected
+    print("  [+] JSON unit and port clock domains: OK")
+
+
 def test_entity_milan_profile():
     """The entity's "milan" profile reaches the blob only as the ENTITY
     descriptor's well-known symbol (descriptor bytes unchanged), and survives
@@ -3008,6 +3086,7 @@ def main():
         test_json_read_simple_stereo,
         test_json_round_trip,
         test_json_stream_buffer_length,
+        test_json_unit_and_port_clock_domains,
         test_entity_milan_profile,
         test_json_to_blob,
         test_json_to_xml_round_trip,

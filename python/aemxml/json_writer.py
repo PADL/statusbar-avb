@@ -90,9 +90,11 @@ def _write_mapping(m) -> dict:
     }
 
 
-def _write_port(port: AudioStreamPort) -> dict:
-    """Write a stream port to JSON dict."""
+def _write_port(port: AudioStreamPort, unit_clock_domain_index: int = 0) -> dict:
+    """Write a stream port to JSON dict; its clock domain only where it is not its unit's."""
     result: dict = {}
+    if port.clock_domain_index != unit_clock_domain_index:
+        result["clock_domain_index"] = port.clock_domain_index
     if port.clusters:
         result["clusters"] = [_write_cluster(c) for c in port.clusters]
     if port.maps:
@@ -126,6 +128,10 @@ def _write_stream(stream: Stream) -> dict:
     flags = _flags_to_names(stream.stream_flags, STREAM_FLAGS_NAMES)
     if flags:
         result["flags"] = flags
+    if stream.avb_interface_index:
+        result["avb_interface_index"] = stream.avb_interface_index
+    if stream.clock_domain_index:
+        result["clock_domain_index"] = stream.clock_domain_index
     if stream.buffer_length:
         result["buffer_length"] = stream.buffer_length
     if stream.symbol:
@@ -178,10 +184,16 @@ def _write_audio_unit(au: AudioUnit) -> dict:
         result["name"] = au.object_name
     if au.sampling_rates:
         result["rates"] = [_decode_sampling_rate(r) for r in au.sampling_rates]
+    if au.clock_domain_index:
+        result["clock_domain_index"] = au.clock_domain_index
     if au.input_stream_ports:
-        result["input_ports"] = [_write_port(p) for p in au.input_stream_ports]
+        result["input_ports"] = [
+            _write_port(p, au.clock_domain_index) for p in au.input_stream_ports
+        ]
     if au.output_stream_ports:
-        result["output_ports"] = [_write_port(p) for p in au.output_stream_ports]
+        result["output_ports"] = [
+            _write_port(p, au.clock_domain_index) for p in au.output_stream_ports
+        ]
     if au.input_external_ports:
         result["external_ports_in"] = [
             _write_external_port(ep) for ep in au.input_external_ports

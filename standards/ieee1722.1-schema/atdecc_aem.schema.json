@@ -806,6 +806,11 @@
           },
           "description": "Audio mappings (stream channel to cluster channel)."
         },
+        "clock_domain_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Index of the CLOCK_DOMAIN this port belongs to. Defaults to its audio unit's."
+        },
         "symbol": {
           "$ref": "#/$defs/symbol"
         }
@@ -916,6 +921,12 @@
             ]
           },
           "description": "Supported sampling rates. Plain integer for nominal Hz, object for pull variants."
+        },
+        "clock_domain_index": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Index of the CLOCK_DOMAIN this audio unit belongs to."
         },
         "input_ports": {
           "type": "array",
