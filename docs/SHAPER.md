@@ -244,21 +244,21 @@ loCreditB  = ceil(-993248 x 211 / 1000000) = ceil(-209.575) = -209
 ```
 
 The kit's bound: MAX_ENTITY_AUDIO_STREAMS 32-channel 48 kHz INT_24 AAF talkers
-and the CRF, on a gigabit link:
+and MAX_ENTITY_CRF_STREAMS CRF talkers, on a gigabit link:
 
 ```
 AAF TSpec  = 18 x 32 + 24 + 1                 = 601 octets (srp_max_frame_size)
 wire frame = 601 + 22 + 20                    = 643 octets
 bandwidth  = 643 x 8 x 8000                   = 41152 kbit/s a stream
-idleSlope  = 16 x 41152 + 5632 (the CRF)      = 664064 kbit/s (66.4% of the link)
-sendSlope  = 664064 - 1000000                 = -335936
-hiCredit   = ceil(664064 x 1500 / 1000000)    = ceil(996.096)   = 997
-loCredit   = ceil(-335936 x 643 / 1000000)    = ceil(-216.007)  = -216
+idleSlope  = 16 x 41152 + 4 x 5632 (the CRFs) = 680960 kbit/s (68.1% of the link)
+sendSlope  = 680960 - 1000000                 = -319040
+hiCredit   = ceil(680960 x 1500 / 1000000)    = ceil(1021.440)  = 1022
+loCredit   = ceil(-319040 x 643 / 1000000)    = ceil(-205.143)  = -205
 ```
 
 That is within 802.1Q's default 75% for SR classes (IEEE 802.1Q-2022 Clause
 34.3, deltaBandwidth). The same at INT_32 (793-octet TSpec, 53440 kbit/s a
-stream, 860672 in all) is not.
+stream, 877568 in all) is not.
 
 The placeholder, 1 Gbit/s, MTU 1500 (wire frame 1542), at half the 75% budget
 as each class gets with nothing admitted:
