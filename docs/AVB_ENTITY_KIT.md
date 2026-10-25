@@ -33,13 +33,14 @@ machine and MSRP stack are only ever driven from one thread.
 
 `MAX_ENTITY_STREAMS` bounds one direction's descriptors. A CRF stream is a
 STREAM_OUTPUT (STREAM_INPUT) like any other and takes a slot in the same table,
-so the bound is the sum: 16 audio + 1 CRF = 17. The split is the host's to
-enforce; the kit composes any 17 it can serve. The blob may declare more (the
+so the bound is the sum: 16 audio + 4 CRF = 20, one CRF input and one CRF
+output per CLOCK_DOMAIN (`AvbEntityHost::MAX_CLOCK_DOMAINS`). The split is the
+host's to enforce; the kit composes any 20 it can serve. The blob may declare more (the
 spec allows 65535); deriving specs from such a blob is an error rather than a
 silent truncation. It sizes the stream tables (`StreamSpecs`, `TalkerStreams`,
 `ListenerStreams` and its pending registrations), the transmit gate, MAAP's
 stream list (one address per talker stream, CRF included: one block of up to
-17), the shaper's admitted set and the tone generator's renders. Collaborators
+20), the shaper's admitted set and the tone generator's renders. Collaborators
 sized elsewhere are checked against it in `avb_entity_kit.hpp`.
 
 `srp_max_frame_size` follows Milan v1.2 Section 4.3.3.2, Table 4.4: the AVTPDU
