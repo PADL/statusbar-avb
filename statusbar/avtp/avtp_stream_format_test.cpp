@@ -78,59 +78,63 @@ TEST(stream_format, aaf_unknown_rate_shows_nsr_code)
     EXPECT_TRUE(s.find("rate?") != std::string::npos);
 }
 
-// The Milan Base format at 96 kHz: AAF, 32 bit integer, 12 samples per AVTPDU
-// (Milan v1.3 Table 6.3), with @p channels channels.
-static constexpr auto base_96k(uint64_t const channels) noexcept -> uint64_t
+// IEEE 1722-2016 Annex I: byte 4 is b|nb|ut|sc, byte 5 the IEC 60958 label count, byte 6 the
+// MBLA count, byte 7 MIDI|SMPTE. The Annex-style word 0x00a0020840000800: 48 kHz, nb, 8 MBLA.
+TEST(am824_stream_format, annex_word_is_48k_non_blocking_8_mbla)
 {
-    return 0x0207022000000000ULL | (channels << 22) | (12ULL << 12);
+    constexpr auto f = Am824StreamFormat::from_u64(0x00a0020840000800ULL);
+    static_assert(f.is_61883_6());
+    EXPECT_EQ(f.evt(), uint8_t{0});
+    EXPECT_EQ(f.sfc(), uint8_t{2});
+    EXPECT_EQ(am824_sfc_to_hz(f.sfc()), 48'000U);
+    EXPECT_EQ(f.dbs.get(), uint8_t{8});
+    EXPECT_TRUE(f.non_blocking());
+    EXPECT_FALSE(f.blocking());
+    EXPECT_FALSE(f.up_to());
+    EXPECT_FALSE(f.synchronous_clock());
+    EXPECT_EQ(f.label_iec_60958_cnt.get(), uint8_t{0});
+    EXPECT_EQ(f.label_mbla_cnt.get(), uint8_t{8});
+    EXPECT_EQ(f.label_midi_cnt(), uint8_t{0});
+    EXPECT_EQ(f.label_smpte_cnt(), uint8_t{0});
 }
 
-TEST(stream_format_covers, an_entry_with_the_ut_bit_clear_describes_itself_alone)
+// The MOTU 16A lists 0x00a00N0860000800 on its inputs (nb + ut) and 0x00a00N0870000800 on its
+// outputs (nb + ut + sc): 8 MBLA quadlets, no IEC 60958 data, at each SFC.
+TEST(am824_stream_format, motu_16a_input_and_output_words)
 {
-    EXPECT_TRUE(stream_format_covers(base_96k(8), base_96k(8)));
-    EXPECT_FALSE(stream_format_covers(base_96k(8), base_96k(2)));
-    EXPECT_FALSE(stream_format_covers(base_96k(2), base_96k(8)));
-}
-
-TEST(stream_format_covers, an_up_to_entry_describes_every_channel_count_from_one_to_its_own)
-{
-    uint64_t const up_to_8 = base_96k(8) | AAF_STREAM_FORMAT_UT_BIT;
-    for (uint64_t channels = 1; channels <= 8; ++channels) {
-        EXPECT_TRUE(stream_format_covers(up_to_8, base_96k(channels)));
+    for (uint8_t const sfc : {uint8_t{2}, uint8_t{4}, uint8_t{6}}) {
+        uint64_t const sfc_bits = uint64_t{sfc} << 40U;
+        auto const in = Am824StreamFormat::from_u64(0x00a0000860000800ULL | sfc_bits);
+        auto const out = Am824StreamFormat::from_u64(0x00a0000870000800ULL | sfc_bits);
+        EXPECT_EQ(in.sfc(), sfc);
+        EXPECT_EQ(out.sfc(), sfc);
+        EXPECT_TRUE(in.non_blocking() && in.up_to() && !in.synchronous_clock());
+        EXPECT_TRUE(out.non_blocking() && out.up_to() && out.synchronous_clock());
+        EXPECT_EQ(in.label_iec_60958_cnt.get(), uint8_t{0});
+        EXPECT_EQ(in.label_mbla_cnt.get(), uint8_t{8});
+        EXPECT_EQ(out.label_mbla_cnt.get(), uint8_t{8});
+        EXPECT_EQ(in.dbs.get(), uint8_t{8});
     }
-    EXPECT_FALSE(stream_format_covers(up_to_8, base_96k(0)));
-    EXPECT_FALSE(stream_format_covers(up_to_8, base_96k(9)));
+    // The 16A's one-channel media-clock stream words.
+    EXPECT_EQ(Am824StreamFormat::from_u64(0x00a0020140000100ULL).label_mbla_cnt.get(), uint8_t{1});
+    EXPECT_TRUE(Am824StreamFormat::from_u64(0x00a0020150000100ULL).synchronous_clock());
 }
 
-TEST(stream_format_covers, an_up_to_entry_describes_no_format_that_differs_in_another_field)
+// make_am824_stream_format builds the non-blocking MBLA-only word the decoders read back.
+TEST(am824_stream_format, make_builds_the_annex_and_motu_words)
 {
-    uint64_t const up_to_8 = base_96k(8) | AAF_STREAM_FORMAT_UT_BIT;
-    uint64_t const at_48k = (base_96k(2) & ~0x000F000000000000ULL) | 0x0005000000000000ULL;
-    uint64_t const of_24_bits = (base_96k(2) & ~0x000000FF00000000ULL) | 0x0000001800000000ULL;
-    uint64_t const of_6_samples = (base_96k(2) & ~(0x3FFULL << 12)) | (6ULL << 12);
-    EXPECT_FALSE(stream_format_covers(up_to_8, at_48k));
-    EXPECT_FALSE(stream_format_covers(up_to_8, of_24_bits));
-    EXPECT_FALSE(stream_format_covers(up_to_8, of_6_samples));
+    static_assert(make_am824_stream_format(2, 8) == 0x00a0020840000800ULL);
+    static_assert(make_am824_stream_format(2, 2) == 0x00a0020240000200ULL);
+    static_assert(make_am824_stream_format(4, 8, /*up_to=*/true) == 0x00a0040860000800ULL);
+    static_assert(make_am824_stream_format(6, 8, /*up_to=*/true, /*synchronous_clock=*/true) == 0x00a0060870000800ULL);
+    EXPECT_TRUE(stream_format_to_string(make_am824_stream_format(4, 6)) == "AM824 6ch 96kHz");
 }
 
-TEST(stream_format_covers, a_wanted_format_with_the_ut_bit_set_is_described_by_no_entry)
+// A non-AM824 event type in the FDF is not read as a rate.
+TEST(am824_stream_format, a_non_am824_event_type_has_no_rate)
 {
-    // IEEE 1722-2025 I.2.4: the bit is zero in a current format and in a
-    // SET_STREAM_FORMAT, so the entry itself, sent back, is not a format.
-    uint64_t const up_to_8 = base_96k(8) | AAF_STREAM_FORMAT_UT_BIT;
-    EXPECT_FALSE(stream_format_covers(up_to_8, up_to_8));
-    EXPECT_FALSE(stream_format_covers(up_to_8, base_96k(2) | AAF_STREAM_FORMAT_UT_BIT));
-}
-
-TEST(stream_format_covers, an_entry_of_another_subtype_describes_itself_alone)
-{
-    uint64_t const am824 = 0x00A0040860000800ULL;
-    uint64_t const crf = 0x041060010000BB80ULL;
-    EXPECT_TRUE(stream_format_covers(am824, am824));
-    EXPECT_TRUE(stream_format_covers(crf, crf));
-    EXPECT_FALSE(stream_format_covers(am824, crf));
-    EXPECT_FALSE(stream_format_covers(am824, base_96k(8)));
-    EXPECT_FALSE(stream_format_covers(base_96k(8) | AAF_STREAM_FORMAT_UT_BIT, am824));
+    auto const s = stream_format_to_string(0x00a00a0840000800ULL);  // evt 1, sfc 2
+    EXPECT_TRUE(s == "AM824 8ch SFC=0x0a");
 }
 
 TEST_MAIN(statusbar_avtp, avtp_stream_format_test)
