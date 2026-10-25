@@ -39,7 +39,7 @@ auto kind_lit(ListenerStreamSlot const* slot)
     if (slot == nullptr) {
         return logging::lit("?");
     }
-    switch (slot->kind) {
+    switch (slot->kind.load(std::memory_order_relaxed)) {
         case StreamKind::am824:
             return logging::lit("AM824");
         case StreamKind::aaf:
@@ -317,7 +317,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
         slots_.pop_back();
         return status;
     }
-    slot.kind = spec.format.kind;
+    slot.kind.store(spec.format.kind, std::memory_order_relaxed);
     bind_pending_consume(slot);
     return success();
 }
@@ -328,22 +328,22 @@ auto ListenerStreams::reformat_stream(StreamSpec const& spec) -> Status
     if (slot == nullptr) {
         return failure(std::errc::no_such_device);
     }
-    if (spec.format.kind != slot->kind) {
+    if (!kind_change_allowed(slot->kind.load(std::memory_order_relaxed), spec.format.kind)) {
         return failure(std::errc::invalid_argument);
     }
     if (spec.format.kind == StreamKind::crf) {
         // One CRF format a stream: nothing to re-shape.
         return spec.format_word == slot->spec.format_word ? Status{} : Status{failure(std::errc::not_supported)};
     }
-    // Checked first, so that a refused format leaves the slot as it was.
-    bool const aaf = spec.format.kind == StreamKind::aaf;
-    if ((aaf ? !avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz).has_value()
-             : !avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz).has_value()) ||
-        spec.format.channels == 0) {
-        return failure(std::errc::invalid_argument);
+    // A trial first, so that a refused format leaves the slot as it was.
+    ListenerStreamSlot trial{};
+    if (auto status = shape(trial, spec); !status) {
+        return status;
     }
     SlotGuard::Lock const lock{slot->guard};
-    (void)shape(*slot, spec);
+    slot->am824 = trial.am824;
+    slot->aaf = trial.aaf;
+    slot->kind.store(spec.format.kind, std::memory_order_relaxed);
     // The index stays (slot_for reads it unlocked); the format is the new one.
     slot->spec.format_word = spec.format_word;
     slot->spec.format = spec.format;
@@ -464,7 +464,7 @@ auto ListenerStreams::slot_for(uint16_t const stream_index) const noexcept -> Li
 auto ListenerStreams::slot_of(StreamKind const kind) noexcept -> ListenerStreamSlot*
 {
     for (auto& slot : slots_) {
-        if (slot.kind == kind) {
+        if (slot.kind.load(std::memory_order_relaxed) == kind) {
             return &slot;
         }
     }
@@ -474,7 +474,7 @@ auto ListenerStreams::slot_of(StreamKind const kind) noexcept -> ListenerStreamS
 auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerStreamSlot const*
 {
     for (auto const& slot : slots_) {
-        if (slot.kind == kind) {
+        if (slot.kind.load(std::memory_order_relaxed) == kind) {
             return &slot;
         }
     }
@@ -614,7 +614,7 @@ auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> Lis
     // slot - our own transmit, another stream on the segment - pays the whole
     // walk on every frame.
     for (auto& s : slots_) {
-        if (s.kind == subtype_kind && slot_receives(s, frame)) {
+        if (s.kind.load(std::memory_order_relaxed) == subtype_kind && slot_receives(s, frame)) {
             return &s;
         }
     }
@@ -636,9 +636,13 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, avtp::N
         tally_discarded_stream_input_packet(slot->counters);  // Milan v1.3 5.3.8.7
         return;
     }
+    auto const subtype_kind = frame[0] == avtp::AvtpSubtype::iec_61883_iidc ? StreamKind::am824
+        : frame[0] == avtp::AvtpSubtype::aaf                                ? StreamKind::aaf
+        : frame[0] == avtp::AvtpSubtype::crf                                ? StreamKind::crf
+                                                                            : StreamKind::other;
     SlotGuard::Entry const entry{slot->guard};
-    if (!entry.entered()) {
-        return;  // being re-shaped (reformat_stream)
+    if (!entry.entered() || slot->kind.load(std::memory_order_relaxed) != subtype_kind) {
+        return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
     }
 
     if (slot->am824) {
