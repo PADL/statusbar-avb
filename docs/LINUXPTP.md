@@ -123,6 +123,32 @@ The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
 `parse_management_message()` are pure and portable, so the wire format is unit
 tested without a ptp4l.
 
+### Notifications and grandmaster settings
+
+With `PtpManagementConfig::events` set, the client sends linuxptp's SET
+SUBSCRIBE_EVENTS_NP at its first query and renews it at half
+`subscription_duration_s` (180 s by default, as phc2sys). ptp4l then pushes, to
+the client's socket, RESPONSE messages of the data set an event concerns: a port's
+PORT_DATA_SET on each state change (`port_state`), PARENT_DATA_SET when the
+grandmaster changes (`parent_data_set`) and TIME_STATUS_NP on each clock update
+(`time_sync`). They are parsed as the answers to GETs are, so a port leaving
+SLAVE reaches the listener without waiting for the next period; TIME_STATUS_NP is
+kept in `state().time_status` and reports nothing by itself.
+
+`set_grandmaster_settings()` sends SET GRANDMASTER_SETTINGS_NP: the clockQuality
+(clockClass, clockAccuracy, offsetScaledLogVariance), currentUtcOffset, the time
+flags and the time source that ptp4l announces while it is grandmaster. This is
+linuxptp's external-grandmaster path: a `serverOnly 1`, `free_running 1` ptp4l
+timestamps and announces while something else steers its PHC (`PhcServo`
+below), and the steering process states its quality, such as clockClass 13 when
+locked to an application-specific source and 248 when not (IEEE 1588-2019
+Table 4). ptp4l's answer lands in `state().grandmaster_settings`, a
+MANAGEMENT_ERROR_STATUS in `state().refused`. A restarted ptp4l has forgotten
+both the settings and the subscription, so each period's queries add GETs of
+GRANDMASTER_SETTINGS_NP and SUBSCRIBE_EVENTS_NP, and the client sends either again
+when ptp4l holds something else, and also when ptp4l answers after silence. Both
+need ptp4l's read-write socket (`uds_address`, not `uds_ro_address`).
+
 ## ptpclient: waking on a PTP deadline
 
 `PtpTimeBridge::sleep_until_ptp` converts the PTP deadline to CLOCK_MONOTONIC,
