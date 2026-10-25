@@ -19,7 +19,10 @@ from .model import (
     Entity,
     ExternalPort,
     Jack,
+    PtpInstance,
+    PtpPort,
     Stream,
+    Timing,
     DESCRIPTOR_TYPE_VALUES,
     ENTITY_CAPABILITIES_NAMES,
     TALKER_CAPABILITIES_NAMES,
@@ -29,6 +32,9 @@ from .model import (
     JACK_TYPE_VALUES,
     CLOCK_SOURCE_TYPE_VALUES,
     INTERFACE_FLAGS_NAMES,
+    PTP_INSTANCE_FLAGS_NAMES,
+    PTP_PORT_TYPE_VALUES,
+    TIMING_ALGORITHM_VALUES,
 )
 from .stream_formats import format_stream_format
 
@@ -90,9 +96,11 @@ def _write_mapping(m) -> dict:
     }
 
 
-def _write_port(port: AudioStreamPort) -> dict:
-    """Write a stream port to JSON dict."""
+def _write_port(port: AudioStreamPort, unit_clock_domain_index: int = 0) -> dict:
+    """Write a stream port to JSON dict; its clock domain only where it is not its unit's."""
     result: dict = {}
+    if port.clock_domain_index != unit_clock_domain_index:
+        result["clock_domain_index"] = port.clock_domain_index
     if port.clusters:
         result["clusters"] = [_write_cluster(c) for c in port.clusters]
     if port.maps:
@@ -126,6 +134,10 @@ def _write_stream(stream: Stream) -> dict:
     flags = _flags_to_names(stream.stream_flags, STREAM_FLAGS_NAMES)
     if flags:
         result["flags"] = flags
+    if stream.avb_interface_index:
+        result["avb_interface_index"] = stream.avb_interface_index
+    if stream.clock_domain_index:
+        result["clock_domain_index"] = stream.clock_domain_index
     if stream.buffer_length:
         result["buffer_length"] = stream.buffer_length
     if stream.symbol:
@@ -178,10 +190,16 @@ def _write_audio_unit(au: AudioUnit) -> dict:
         result["name"] = au.object_name
     if au.sampling_rates:
         result["rates"] = [_decode_sampling_rate(r) for r in au.sampling_rates]
+    if au.clock_domain_index:
+        result["clock_domain_index"] = au.clock_domain_index
     if au.input_stream_ports:
-        result["input_ports"] = [_write_port(p) for p in au.input_stream_ports]
+        result["input_ports"] = [
+            _write_port(p, au.clock_domain_index) for p in au.input_stream_ports
+        ]
     if au.output_stream_ports:
-        result["output_ports"] = [_write_port(p) for p in au.output_stream_ports]
+        result["output_ports"] = [
+            _write_port(p, au.clock_domain_index) for p in au.output_stream_ports
+        ]
     if au.input_external_ports:
         result["external_ports_in"] = [
             _write_external_port(ep) for ep in au.input_external_ports
@@ -215,8 +233,61 @@ def _write_clock_source(cs: ClockSource) -> dict:
         result["name"] = cs.object_name
     cs_type = CLOCK_SOURCE_TYPE_VALUES.get(cs.clock_source_type, "INTERNAL")
     result["type"] = cs_type
+    if cs.clock_source_location_type or cs.clock_source_location_index:
+        result["location_type"] = DESCRIPTOR_TYPE_VALUES.get(
+            cs.clock_source_location_type, cs.clock_source_location_type
+        )
+        result["location_index"] = cs.clock_source_location_index
     if cs.symbol:
         result["symbol"] = cs.symbol
+    return result
+
+
+def _write_timing(t: Timing) -> dict:
+    """Write a TIMING descriptor (IEEE 1722.1-2021 7.2.34) to JSON dict."""
+    result: dict = {}
+    if t.object_name:
+        result["name"] = t.object_name
+    result["algorithm"] = TIMING_ALGORITHM_VALUES.get(t.algorithm, "SINGLE")
+    if t.ptp_instance_indices:
+        result["ptp_instances"] = list(t.ptp_instance_indices)
+    if t.symbol:
+        result["symbol"] = t.symbol
+    return result
+
+
+def _write_ptp_port(pp: PtpPort) -> dict:
+    """Write a PTP_PORT descriptor (7.2.36) to JSON dict."""
+    result: dict = {}
+    if pp.object_name:
+        result["name"] = pp.object_name
+    result["port_number"] = pp.port_number
+    result["port_type"] = PTP_PORT_TYPE_VALUES.get(pp.port_type, "P2P_LINK_LAYER")
+    flags = _flags_to_names(pp.flags, PTP_INSTANCE_FLAGS_NAMES)
+    if flags:
+        result["flags"] = flags
+    result["avb_interface_index"] = pp.avb_interface_index
+    if pp.profile_identifier:
+        result["profile_identifier"] = pp.profile_identifier
+    if pp.symbol:
+        result["symbol"] = pp.symbol
+    return result
+
+
+def _write_ptp_instance(pi: PtpInstance) -> dict:
+    """Write a PTP_INSTANCE descriptor (7.2.35) and its PTP_PORTs to JSON dict."""
+    result: dict = {}
+    if pi.object_name:
+        result["name"] = pi.object_name
+    if pi.clock_identity:
+        result["clock_identity"] = pi.clock_identity
+    flags = _flags_to_names(pi.flags, PTP_INSTANCE_FLAGS_NAMES)
+    if flags:
+        result["flags"] = flags
+    if pi.ptp_ports:
+        result["ptp_ports"] = [_write_ptp_port(pp) for pp in pi.ptp_ports]
+    if pi.symbol:
+        result["symbol"] = pi.symbol
     return result
 
 
@@ -317,6 +388,14 @@ def _write_configuration(config: Configuration, entity: Entity) -> dict:
             _write_clock_domain,
         )
         result[key] = val
+
+    # TIMING and PTP_INSTANCE (IEEE 1722.1-2021)
+    if config.timings:
+        result["timings"] = [_write_timing(t) for t in config.timings]
+    if config.ptp_instances:
+        result["ptp_instances"] = [
+            _write_ptp_instance(pi) for pi in config.ptp_instances
+        ]
 
     # Jacks
     if config.jacks_input:
