@@ -168,11 +168,8 @@ void TalkerStreams::transmit_am824(
 
     size_t const channels = slot.spec.format.channels;
     avtp::Am824Pdu pdu{};
-    // Nominal AM824 rate (CIP FDF) from the configured sample rate: hardcoding
-    // 96 kHz would mislabel a 48 kHz stream on the wire; value_or keeps the
-    // 96 kHz default for any unmapped rate.
-    auto const am824_rate = avtp::am824_sample_rate_from_hz(config_.sample_rate).value_or(avtp::Am824SampleRate::rate_96_khz);
-    pdu.init(slot.am824->stream_id, static_cast<uint8_t>(channels), am824_rate);
+    // The FDF is the stream's own rate, which a SET_STREAM_FORMAT may have changed.
+    pdu.init(slot.am824->stream_id, static_cast<uint8_t>(channels), slot.am824->config.sample_rate);
 
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::am824_serialize_mbla(
@@ -185,6 +182,7 @@ void TalkerStreams::transmit_am824(
         return;
     }
 
+    pdu.stream_header.set_tu(timestamp_uncertain(steady_now_ns()));
     span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
     send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
@@ -260,6 +258,58 @@ auto TalkerStreams::transmit_aaf_raw(
     std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
     size_t const frame_len =
         serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
+    if (frame_len == 0) {
+        return false;
+    }
+    send_stream_frame(slot, std::span<uint8_t const>{frame.data(), frame_len});
+    return true;
+}
+
+auto serialize_am824_raw(
+    avtp::Am824StreamOutputContext& ctx,
+    std::span<uint8_t> const frame,
+    uint16_t const frames,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    StreamRawRenderFn const& render,
+    bool const timestamp_uncertain) -> size_t
+{
+    uint8_t const channels = ctx.config.channel_count;
+    size_t const payload_len = static_cast<size_t>(frames) * channels * avtp::Am824Pdu::BYTES_PER_SAMPLE;
+    if (frames == 0 || frames > avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET || channels == 0 || !render ||
+        frame.size() < avtp::Am824Pdu::HEADER_LENGTH + payload_len) {
+        return 0;
+    }
+    std::span<uint8_t> const payload = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH, payload_len);
+    // Render first: a refused packet must not consume a sequence number.
+    if (!render(payload, frames, first_index, pts_ns)) {
+        return 0;
+    }
+    avtp::Am824Pdu pdu{};
+    pdu.init(ctx.stream_id, channels, ctx.config.sample_rate);
+    // The DBC is the sample index; build_packet_header adds the context's offset, already in pts_ns.
+    ctx.running_dbc = static_cast<uint32_t>(first_index);
+    ctx.build_packet_header(pdu, static_cast<uint8_t>(frames), pts_ns - ctx.presentation_offset_ns);
+    pdu.stream_header.set_tu(timestamp_uncertain);
+    span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
+    return avtp::Am824Pdu::HEADER_LENGTH + payload_len;
+}
+
+auto TalkerStreams::transmit_am824_raw(
+    TalkerStreamSlot& slot,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    uint16_t const frames,
+    StreamRawRenderFn const& render) -> bool
+{
+    SlotGuard::Entry const entry{guards_[slot.spec.index]};
+    if (!entry.entered() || !slot.am824 || port_ == nullptr || stream_stopped(slot.spec.index)) {
+        return false;  // being re-shaped (reformat_stream), or not sending
+    }
+    // Not zeroed: serialize_am824_raw writes every byte it sends.
+    std::array<uint8_t, MAX_AUDIO_FRAME> frame;  // NOLINT(cppcoreguidelines-pro-type-member-init)
+    size_t const frame_len =
+        serialize_am824_raw(*slot.am824, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
     if (frame_len == 0) {
         return false;
     }
