@@ -9,7 +9,7 @@ settings to be saved in non-volatile memory.
 ## What is kept
 
 - user names (SET_NAME)
-- stream formats, sampling rates and clock sources
+- stream formats and clock sources
 - the talkers' presentation time offsets
 - the stream ports' dynamic audio mappings that differ from the entity's default
 - the listener's bindings: classic fast-connect goals and Milan bound state
@@ -17,6 +17,8 @@ settings to be saved in non-volatile memory.
 - the system unique id and the Media Clock Reference user settings
 
 Not kept (Milan v1.2 Section 5.3.4): the lock and the registered controllers.
+Nor is the AUDIO_UNIT's sampling rate: the kit re-times no unit (a stream's rate
+is its format's), so there is nothing to restore.
 
 A listener binding records the talker a stream input connects to and the
 input's stream format when it was saved (0: unknown, e.g. imported); a binding
@@ -27,7 +29,9 @@ it and whether it is started (Section 5.3.8.7).
 ## Format (version 1)
 
 Unknown keys are ignored, so a later version can add keys an older reader
-skips (the Milan bound state in `[[listener_binding]]` was added this way).
+skips (the Milan bound state in `[[listener_binding]]` was added this way) and
+drop keys a newer reader no longer uses: an older file's `[[sampling_rate]]`
+tables still load and are ignored, and the next write leaves them out.
 u64 values are hex strings.
 
 ```toml
@@ -47,10 +51,6 @@ value = "FOH bridge"
 descriptor_type = 5       # STREAM_INPUT, or 6 STREAM_OUTPUT
 descriptor_index = 0
 format = "0x0205022002006000"
-
-[[sampling_rate]]
-audio_unit = 0
-rate = 96000
 
 [[clock_source]]
 clock_domain = 0
