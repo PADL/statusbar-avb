@@ -177,6 +177,10 @@ class AvbEntityHost
     /// Clause 7.4.42.2.3) and is notified. From its first call for domain 0, domain 0 no longer follows
     /// gPTP. False for a domain the model lacks or past MAX_CLOCK_DOMAINS. Reactor thread.
     [[nodiscard]] auto note_clock_domain_locked(uint16_t index, bool locked) -> bool;
+    /// The entity stops reporting CLOCK_DOMAIN @p index: domain 0 follows gPTP again (a difference
+    /// counts as a transition); another counts UNLOCKED if locked, then reports no counters until
+    /// noted again. False as note_clock_domain_locked. Reactor thread.
+    [[nodiscard]] auto release_clock_domain_lock(uint16_t index) -> bool;
 
     /// The gPTP path for AVB_INTERFACE @p index (IEEE 1722.1-2021 Clause 7.4.41): the
     /// last Announce's path trace, then this entity's clock identity unless already
@@ -442,6 +446,8 @@ class AvbEntityHost
     void note_media_clock_locked(bool locked);
     /// Count CLOCK_DOMAIN @p index's transition to @p locked, if one, and notify it.
     void count_clock_domain_lock(uint16_t index, bool locked);
+    /// CLOCK_DOMAIN @p index is in the model and within MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto has_clock_domain(uint16_t index) const noexcept -> bool;
     /// The clock identity AVB_INTERFACE 0 reports (apply_interface_runtime).
     std::optional<ieee::Eui64> own_clock_identity_{};
 
