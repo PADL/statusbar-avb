@@ -19,6 +19,7 @@
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -99,7 +100,7 @@ static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-
     }
 }
 
-/// AM824/IEC 61883-6 SFC (sampling frequency code) → Hz
+/// AM824/IEC 61883-6 SFC (sampling frequency code, IEC 61883-6 Section 10.3.2) → Hz
 [[nodiscard]] constexpr auto am824_sfc_to_hz(uint8_t sfc) noexcept -> uint32_t
 {
     switch (sfc) {
@@ -146,31 +147,92 @@ static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-
     return std::format("AAF {}ch {}.{}kHz {}-bit", channels, rate / 1000, (rate / 100) % 10, depth);
 }
 
-/// Decode an AM824/IEC 61883-6 stream format.
-/// Layout per IEEE 1722.1 Annex A.5:
-///   Byte 0: subtype (0x00 iec_61883_iidc)
-///   Byte 1: sf[7] | fmt[6:1] | other — sf=1 + fmt=0x10 indicates IEC 61883-6 (AM824)
-///   Byte 2: SFC (sampling frequency code, whole byte) — e.g. 0x02 = 48 kHz
-///   Byte 3: DBS (data block size = channel count)
-///   Byte 4: b[7] | nb[6] | reserved[5:2] | sph[1] | reserved[0]
-///   Byte 5: label
-///   Bytes 6-7: reserved
-///
-/// Example from the audio interface: 0x00a0020840000800
-///   byte 2 = 0x02 → SFC 48 kHz
-///   byte 3 = 0x08 → 8-channel AM824
+//
+// IEC 61883-6 stream format - IEEE 1722-2016 Annex I
+//
+/// The IEC 61883-6 (AM824) stream-format word (IEEE 1722-2016 Annex I), viewed over the 8 octets:
+/// subtype, sf|fmt|r, FDF (evt[7:3] | sfc[2:0]), DBS, b|nb|ut|sc|rsv, then the IEC 60958, MBLA and
+/// MIDI|SMPTE label counts. E.g. 0x00a0020840000800 is 48 kHz, non-blocking, 8 MBLA quadlets.
+struct Am824StreamFormat
+{
+    ieee::octet_t subtype{0};               ///< 0x00, IEC 61883/IIDC
+    ieee::octet_t sf_fmt{0};                ///< sf[7] | fmt[6:1] | r[0]
+    ieee::octet_t fdf{0};                   ///< evt[7:3] | sfc[2:0]
+    ieee::octet_t dbs{0};                   ///< quadlets per data block
+    ieee::octet_t flags{0};                 ///< b | nb | ut | sc | reserved[3:0]
+    ieee::octet_t label_iec_60958_cnt{0};   ///< IEC 60958 quadlets per block
+    ieee::octet_t label_mbla_cnt{0};        ///< MBLA quadlets per block
+    ieee::octet_t label_midi_smpte_cnt{0};  ///< MIDI[7:4] | SMPTE[3:0] quadlets per block
+
+    static constexpr uint8_t SF_FMT_AM824 = 0xA0U;  ///< sf = 1, fmt = 0x10 (IEC 61883-6), r = 0
+    static constexpr uint8_t FLAG_B = 0x80U;        ///< blocking transmission
+    static constexpr uint8_t FLAG_NB = 0x40U;       ///< non-blocking transmission
+    static constexpr uint8_t FLAG_UT = 0x20U;       ///< up to DBS channels
+    static constexpr uint8_t FLAG_SC = 0x10U;       ///< synchronous clock
+
+    /// Whether byte 1 names IEC 61883-6 (sf = 1, fmt = 0x10).
+    [[nodiscard]] constexpr auto is_61883_6() const noexcept -> bool { return (sf_fmt.get() & 0xFEU) == SF_FMT_AM824; }
+    /// The FDF event type (0 = AM824 data, IEC 61883-6 Section 10.3).
+    [[nodiscard]] constexpr auto evt() const noexcept -> uint8_t { return static_cast<uint8_t>(fdf.get() >> 3U); }
+    /// The sampling frequency code (IEC 61883-6 Section 10.3.2).
+    [[nodiscard]] constexpr auto sfc() const noexcept -> uint8_t { return static_cast<uint8_t>(fdf.get() & 0x07U); }
+    /// b: blocking transmission.
+    [[nodiscard]] constexpr auto blocking() const noexcept -> bool { return (flags.get() & FLAG_B) != 0; }
+    /// nb: non-blocking transmission.
+    [[nodiscard]] constexpr auto non_blocking() const noexcept -> bool { return (flags.get() & FLAG_NB) != 0; }
+    /// ut: the stream carries up to DBS channels.
+    [[nodiscard]] constexpr auto up_to() const noexcept -> bool { return (flags.get() & FLAG_UT) != 0; }
+    /// sc: synchronous clock.
+    [[nodiscard]] constexpr auto synchronous_clock() const noexcept -> bool { return (flags.get() & FLAG_SC) != 0; }
+    /// MIDI quadlets per data block.
+    [[nodiscard]] constexpr auto label_midi_cnt() const noexcept -> uint8_t
+    {
+        return static_cast<uint8_t>(label_midi_smpte_cnt.get() >> 4U);
+    }
+    /// SMPTE time code quadlets per data block.
+    [[nodiscard]] constexpr auto label_smpte_cnt() const noexcept -> uint8_t
+    {
+        return static_cast<uint8_t>(label_midi_smpte_cnt.get() & 0x0FU);
+    }
+
+    /// View a u64 stream-format code as its IEC 61883-6 fields.
+    [[nodiscard]] static constexpr auto from_u64(uint64_t fmt) noexcept -> Am824StreamFormat
+    {
+        return std::bit_cast<Am824StreamFormat>(ieee::octlet_t{fmt});
+    }
+};
+
+static_assert(sizeof(Am824StreamFormat) == 8, "Am824StreamFormat must overlay the 8-byte format code");
+static_assert(offsetof(Am824StreamFormat, fdf) == 2);
+static_assert(offsetof(Am824StreamFormat, dbs) == 3);
+static_assert(offsetof(Am824StreamFormat, flags) == 4);
+static_assert(offsetof(Am824StreamFormat, label_iec_60958_cnt) == 5);
+static_assert(offsetof(Am824StreamFormat, label_mbla_cnt) == 6);
+static_assert(offsetof(Am824StreamFormat, label_midi_smpte_cnt) == 7);
+
+/// The non-blocking, MBLA-only IEC 61883-6 format word for @p channels at sampling frequency code
+/// @p sfc (IEEE 1722-2016 Annex I), with the ut and sc flags as given.
+[[nodiscard]] constexpr auto make_am824_stream_format(
+    uint8_t const sfc, uint8_t const channels, bool const up_to = false, bool const synchronous_clock = false) noexcept -> uint64_t
+{
+    uint8_t const flags = static_cast<uint8_t>(
+        Am824StreamFormat::FLAG_NB | (up_to ? Am824StreamFormat::FLAG_UT : 0U) |
+        (synchronous_clock ? Am824StreamFormat::FLAG_SC : 0U));
+    return (uint64_t{Am824StreamFormat::SF_FMT_AM824} << 48U) | (uint64_t{static_cast<uint8_t>(sfc & 0x07U)} << 40U) |
+        (uint64_t{channels} << 32U) | (uint64_t{flags} << 24U) | (uint64_t{channels} << 8U);
+}
+
+/// Decode an IEC 61883-6 stream format (layout: Am824StreamFormat) as "AM824 <DBS>ch <rate>";
+/// a word whose byte 1 is not IEC 61883-6 falls back to hex.
 [[nodiscard]] inline auto decode_am824_stream_format(uint64_t fmt) -> std::string
 {
-    auto const b = stream_format_bytes(fmt);
-    // Byte 1 must actually indicate IEC 61883-6 AM824 (sf=1, fmt=0x10 ->
-    // 0xA0 in bits 7:1); other 61883 formats (e.g. 61883-4 MPEG-TS) fall
-    // back to hex rather than being mislabeled as AM824.
-    if ((b[1] & 0xFEU) != 0xA0U) {
+    auto const f = Am824StreamFormat::from_u64(fmt);
+    if (!f.is_61883_6()) {
         return std::format("0x{:016x}", fmt);
     }
-    uint8_t const sfc = b[2];
-    uint8_t const channels = b[3];
-    uint32_t const rate = am824_sfc_to_hz(sfc);
+    uint8_t const sfc = f.fdf.get();
+    uint8_t const channels = f.dbs.get();
+    uint32_t const rate = f.evt() == 0 ? am824_sfc_to_hz(f.sfc()) : 0;
     if (rate == 0) {
         return std::format("AM824 {}ch SFC=0x{:02x}", channels, sfc);
     }
