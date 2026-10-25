@@ -84,7 +84,9 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
     if (auto status = shape(slot, spec, stream_id); !status) {
         return status;
     }
+    bool const crf = slot.crf.has_value();
     slots_.push_back(std::move(slot));
+    crf_open_[spec.index].store(crf, std::memory_order_release);
     return success();
 }
 
@@ -468,8 +470,7 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
 
 auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status
 {
-    auto const* slot = slot_for(stream_index);
-    if (slot == nullptr || !slot->crf) {
+    if (stream_index >= MAX_ENTITY_STREAMS || !crf_open_[stream_index].load(std::memory_order_acquire)) {
         return failure(std::errc::invalid_argument);
     }
     mr_pending_[stream_index].store(true, std::memory_order_relaxed);

@@ -182,8 +182,8 @@ struct TalkerStreams
     }
 
     /// A media clock restart on CRF STREAM_OUTPUT @p stream_index: mr toggles on its next PDU and stays
-    /// (IEEE 1722-2016 Clause 10.4); requests before that PDU toggle it once. Reactor thread;
-    /// invalid_argument for no CRF slot of that index.
+    /// (IEEE 1722-2016 Clause 10.4); requests before that PDU toggle it once. Any thread: two lock-free
+    /// atomic accesses, no allocation. invalid_argument for no CRF slot of that index.
     [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
 
     /// VLAN ID the stream frames are tagged with: config.vlan_id until the
@@ -278,6 +278,9 @@ struct TalkerStreams
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
     /// Per-stream media clock restart pending (toggle_media_clock_restart), by STREAM_OUTPUT index.
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> mr_pending_{};
+    /// A CRF slot is open at this STREAM_OUTPUT index (open_stream), for toggle_media_clock_restart.
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> crf_open_{};
+    static_assert(std::atomic<bool>::is_always_lock_free);
     StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the port egress tap can stamp the captured frame with the gPTP TX time.

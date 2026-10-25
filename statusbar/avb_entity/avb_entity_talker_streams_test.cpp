@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <memory_resource>
 #include <span>
+#include <thread>
 #include <vector>
 
 using namespace statusbar;
@@ -817,6 +818,7 @@ TEST(talker_crf, a_toggled_restart_sets_mr_on_the_next_pdu)
     auto* slot = talker.slot_for(1);
     EXPECT_FALSE(talker.toggle_media_clock_restart(0).has_value());
     EXPECT_FALSE(talker.toggle_media_clock_restart(5).has_value());
+    EXPECT_FALSE(talker.toggle_media_clock_restart(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)).has_value());
 
     std::array<uint64_t, 1> const ts{1'000'000};
     std::vector<bool> mr;
@@ -838,4 +840,11 @@ TEST(talker_crf, a_toggled_restart_sets_mr_on_the_next_pdu)
     send();
     EXPECT_TRUE(mr == (std::vector<bool>{false, true, true, false, false}));
     EXPECT_EQ(talker.tx_counters(1)->mr_toggles.load(), uint32_t{2});
+
+    // From another thread (a host's media tick), the request reaches the next PDU all the same.
+    std::thread tick{[&talker] { EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value()); }};
+    tick.join();
+    send();
+    EXPECT_TRUE(mr.back());
+    EXPECT_EQ(talker.tx_counters(1)->mr_toggles.load(), uint32_t{3});
 }
