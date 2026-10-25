@@ -1762,12 +1762,17 @@ M.f.atdecc_stream_format_aaf_channels_per_frame = ProtoField.uint16("avb.atdecc.
 M.f.atdecc_stream_format_aaf_samples_per_frame = ProtoField.uint16("avb.atdecc.stream_format.aaf.samples_per_frame", "samples_per_frame", base.DEC, nil, 0x3FF000, "samples per frame")
 M.f.atdecc_stream_format_iec61883_sf = ProtoField.bool("avb.atdecc.stream_format.iec61883.sf", "sf", 8, nil, 0x80, "sf (1 = IEC 61883)")
 M.f.atdecc_stream_format_iec61883_fmt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.fmt", "fmt", base.HEX, nil, 0x7E, "FMT")
-M.f.atdecc_stream_format_iec61883_sfc = ProtoField.uint8("avb.atdecc.stream_format.iec61883.sfc", "sfc", base.DEC, M.values_am824_fdf, nil, "sampling frequency code")
-M.f.atdecc_stream_format_iec61883_dbs = ProtoField.uint8("avb.atdecc.stream_format.iec61883.dbs", "dbs", base.DEC, nil, nil, "data block size (channels)")
+M.f.atdecc_stream_format_iec61883_evt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.evt", "evt", base.DEC, nil, 0xF8, "FDF event type")
+M.f.atdecc_stream_format_iec61883_sfc = ProtoField.uint8("avb.atdecc.stream_format.iec61883.sfc", "sfc", base.DEC, M.values_am824_fdf, 0x7, "sampling frequency code")
+M.f.atdecc_stream_format_iec61883_dbs = ProtoField.uint8("avb.atdecc.stream_format.iec61883.dbs", "dbs", base.DEC, nil, nil, "data block size (quadlets)")
 M.f.atdecc_stream_format_iec61883_b = ProtoField.bool("avb.atdecc.stream_format.iec61883.b", "b", 8, nil, 0x80, "blocking")
 M.f.atdecc_stream_format_iec61883_nb = ProtoField.bool("avb.atdecc.stream_format.iec61883.nb", "nb", 8, nil, 0x40, "non-blocking")
-M.f.atdecc_stream_format_iec61883_sph = ProtoField.bool("avb.atdecc.stream_format.iec61883.sph", "sph", 8, nil, 0x2, "source packet header")
-M.f.atdecc_stream_format_iec61883_label = ProtoField.uint8("avb.atdecc.stream_format.iec61883.label", "label", base.HEX, M.values_am824_label, nil, "AM824 label")
+M.f.atdecc_stream_format_iec61883_ut = ProtoField.bool("avb.atdecc.stream_format.iec61883.ut", "ut", 8, nil, 0x20, "up to DBS channels")
+M.f.atdecc_stream_format_iec61883_sc = ProtoField.bool("avb.atdecc.stream_format.iec61883.sc", "sc", 8, nil, 0x10, "synchronous clock")
+M.f.atdecc_stream_format_iec61883_label_iec_60958_cnt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.label_iec_60958_cnt", "label_iec_60958_cnt", base.DEC, nil, nil, "IEC 60958 label count")
+M.f.atdecc_stream_format_iec61883_label_mbla_cnt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.label_mbla_cnt", "label_mbla_cnt", base.DEC, nil, nil, "MBLA label count")
+M.f.atdecc_stream_format_iec61883_label_midi_cnt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.label_midi_cnt", "label_midi_cnt", base.DEC, nil, 0xF0, "MIDI label count")
+M.f.atdecc_stream_format_iec61883_label_smpte_cnt = ProtoField.uint8("avb.atdecc.stream_format.iec61883.label_smpte_cnt", "label_smpte_cnt", base.DEC, nil, 0xF, "SMPTE label count")
 M.f.atdecc_stream_format_crf_type = ProtoField.uint8("avb.atdecc.stream_format.crf.type", "type", base.DEC, M.values_crf_type, 0xF0, "CRF type")
 M.f.atdecc_stream_format_crf_timestamp_interval = ProtoField.uint16("avb.atdecc.stream_format.crf.timestamp_interval", "timestamp_interval", base.DEC, nil, 0xFFF, "timestamp interval")
 M.f.atdecc_stream_format_crf_timestamps_per_pdu = ProtoField.uint8("avb.atdecc.stream_format.crf.timestamps_per_pdu", "timestamps_per_pdu", base.DEC, nil, nil, "timestamps per PDU")
@@ -3091,12 +3096,17 @@ M.fields = {
     M.f.atdecc_stream_format_aaf_samples_per_frame,
     M.f.atdecc_stream_format_iec61883_sf,
     M.f.atdecc_stream_format_iec61883_fmt,
+    M.f.atdecc_stream_format_iec61883_evt,
     M.f.atdecc_stream_format_iec61883_sfc,
     M.f.atdecc_stream_format_iec61883_dbs,
     M.f.atdecc_stream_format_iec61883_b,
     M.f.atdecc_stream_format_iec61883_nb,
-    M.f.atdecc_stream_format_iec61883_sph,
-    M.f.atdecc_stream_format_iec61883_label,
+    M.f.atdecc_stream_format_iec61883_ut,
+    M.f.atdecc_stream_format_iec61883_sc,
+    M.f.atdecc_stream_format_iec61883_label_iec_60958_cnt,
+    M.f.atdecc_stream_format_iec61883_label_mbla_cnt,
+    M.f.atdecc_stream_format_iec61883_label_midi_cnt,
+    M.f.atdecc_stream_format_iec61883_label_smpte_cnt,
     M.f.atdecc_stream_format_crf_type,
     M.f.atdecc_stream_format_crf_timestamp_interval,
     M.f.atdecc_stream_format_crf_timestamps_per_pdu,
@@ -5080,16 +5090,21 @@ function M.add_stream_format_aaf(tree, tvb, off)
     tree:add(M.f.atdecc_stream_format_aaf_samples_per_frame, tvb(off + 4, 4))
 end
 
---- IEC 61883-6 stream format (IEEE 1722.1 Annex A.5)
+--- IEC 61883-6 stream format (IEEE 1722-2016 Annex I)
 function M.add_stream_format_iec61883(tree, tvb, off)
     tree:add(M.f.atdecc_stream_format_iec61883_sf, tvb(off + 1, 1))
     tree:add(M.f.atdecc_stream_format_iec61883_fmt, tvb(off + 1, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_evt, tvb(off + 2, 1))
     tree:add(M.f.atdecc_stream_format_iec61883_sfc, tvb(off + 2, 1))
     tree:add(M.f.atdecc_stream_format_iec61883_dbs, tvb(off + 3, 1))
     tree:add(M.f.atdecc_stream_format_iec61883_b, tvb(off + 4, 1))
     tree:add(M.f.atdecc_stream_format_iec61883_nb, tvb(off + 4, 1))
-    tree:add(M.f.atdecc_stream_format_iec61883_sph, tvb(off + 4, 1))
-    tree:add(M.f.atdecc_stream_format_iec61883_label, tvb(off + 5, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_ut, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_sc, tvb(off + 4, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_label_iec_60958_cnt, tvb(off + 5, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_label_mbla_cnt, tvb(off + 6, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_label_midi_cnt, tvb(off + 7, 1))
+    tree:add(M.f.atdecc_stream_format_iec61883_label_smpte_cnt, tvb(off + 7, 1))
 end
 
 --- CRF stream format (IEEE 1722 10.4 as carried in AEM)
