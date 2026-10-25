@@ -237,7 +237,6 @@ struct AvtpStreamHeader
     [[nodiscard]] constexpr auto tu() const noexcept -> bool { return reserved_tu.has_flag(0x01U); }
 
     /// Set the timestamp uncertain (tu) bit (IEEE 1722-2016 Clause 4.4.4.7)
-    /// @param value True to set tu, false to clear
     constexpr auto set_tu(bool value) noexcept -> void { reserved_tu.set_flag(0x01U, value); }
 
     /// Get the stream ID
