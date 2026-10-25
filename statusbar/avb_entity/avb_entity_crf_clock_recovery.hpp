@@ -97,7 +97,22 @@ class CrfClockRecovery
     /// The recovery must outlive the listener.
     [[nodiscard]] auto make_consumer() noexcept -> StreamCrfFn
     {
-        return [this](uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns) { on_crf_timestamp(ts_ns, rx_gptp_ns); };
+        return [this](uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns, bool mr) {
+            if (have_mr_ && mr != last_mr_) {
+                restart();
+            }
+            last_mr_ = mr;
+            have_mr_ = true;
+            on_crf_timestamp(ts_ns, rx_gptp_ns);
+        };
+    }
+
+    /// The talker's media clock restarted (a toggled mr): start the estimate afresh, unlocked. RX thread.
+    void restart() noexcept
+    {
+        kalman_.reset();
+        last_rx_ns_ = 0;
+        samples_ = 0;
     }
 
   private:
@@ -105,6 +120,8 @@ class CrfClockRecovery
     ptpclient::KalmanRatioTracker kalman_;
     int64_t last_rx_ns_{0};
     uint64_t samples_{0};
+    bool last_mr_{false};  ///< the last PDU's mr (make_consumer)
+    bool have_mr_{false};
     itc::AtomicTripleBuffer<Estimate> published_{};
 };
 
