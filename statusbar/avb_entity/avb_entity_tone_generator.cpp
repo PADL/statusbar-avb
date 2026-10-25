@@ -100,7 +100,7 @@ auto AvbEntityToneGenerator::create(
 
     size_t const channels = channels_from_storage(*storage_result, 8);
     for (auto const& spec : specs) {
-        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        bool const is_audio = is_audio_kind(spec.format.kind);
         if (is_audio && spec.format.channels != channels) {
             return failure(std::errc::invalid_argument);  // stream format vs AUDIO_CLUSTER channel mismatch
         }
@@ -183,7 +183,7 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     // Per-stream render buffers, parallel to the talker specs: audio slots get
     // an interleaved tick buffer; CRF/non-audio slots an empty one.
     for (auto const& spec : kit_.talker_specs()) {
-        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        bool const is_audio = is_audio_kind(spec.format.kind);
         render_buffers_.emplace_back(
             is_audio ? (static_cast<size_t>(samples_per_packet_) + 1) * channels_ : 0, 0.0F, mem_resource_);
     }
@@ -212,7 +212,7 @@ void AvbEntityToneGenerator::set_render(uint16_t const stream_index, StreamRende
     auto const& specs = kit_.talker_specs();
     for (size_t pos = 0; pos < specs.size(); ++pos) {
         auto const& spec = specs[pos];
-        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        bool const is_audio = is_audio_kind(spec.format.kind);
         if (is_audio && spec.index == stream_index) {
             renders_[pos] = std::move(fn);
             return;
@@ -228,7 +228,7 @@ void AvbEntityToneGenerator::set_render_symbol(uint32_t const symbol_code, Strea
     auto const& specs = kit_.talker_specs();
     for (size_t pos = 0; pos < specs.size(); ++pos) {
         auto const& spec = specs[pos];
-        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        bool const is_audio = is_audio_kind(spec.format.kind);
         auto const sym = kit_.host().symbol_of(DESCRIPTOR_STREAM_OUTPUT, spec.index);
         if (is_audio && sym.has_value() && *sym == symbol_code) {
             renders_[pos] = std::move(fn);
