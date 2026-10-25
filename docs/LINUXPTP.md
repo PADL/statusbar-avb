@@ -149,6 +149,54 @@ GRANDMASTER_SETTINGS_NP and SUBSCRIBE_EVENTS_NP, and the client sends either aga
 when ptp4l holds something else, and also when ptp4l answers after silence. Both
 need ptp4l's read-write socket (`uds_address`, not `uds_ro_address`).
 
+## ptpclient: PHC cross-timestamps and the PHC servo
+
+`PhcDevice` opens a `/dev/ptpN` and reads it against CLOCK_MONOTONIC_RAW by the
+best method the device and kernel offer: `PTP_SYS_OFFSET_PRECISE` (a hardware
+cross-timestamp over PCIe PTM, as on an I226) when the capabilities say so;
+`PTP_SYS_OFFSET_EXTENDED` with `clockid` CLOCK_MONOTONIC_RAW (Linux 6.11 and
+later; an older kernel refuses the field with EINVAL); else a software bracket of
+`clock_gettime` RAW, PHC, RAW. Each read takes `samples` brackets (9 by default)
+and keeps the narrowest, its midpoint as the instant. A failed hardware
+cross-timestamp (a PTM timeout) falls back to the next method for that read.
+`frequency_ppb()` needs a writable device, as the kernel refuses
+`clock_adjtime` on a read-only PHC descriptor.
+
+`PhcCrossTimestamp` pairs two PHCs, as phc2sys's `sysoff_measure` does but with
+RAW in place of the system clock: read PHC0, PHC_d, PHC0, and interpolate PHC0 at
+PHC_d's instant (over tens of microseconds, where the clocks' rate difference
+is negligible). A sample's `uncertainty_ns` is half PHC_d's bracket plus half
+PHC0's mean bracket. The two may be the same device, which checks the
+arithmetic: the pair then agrees to within its brackets.
+
+`PhcServo` steers a PHC to a target given per sample, as `error_ns = t_phc -
+t_target`: linuxptp's `pi.c` with its hardware-timestamping constants (kp =
+0.7 × interval^-0.3, at most 0.7 / interval; ki = 0.3 × interval^0.4, at most
+0.3 / interval; at 16 updates a second kp = 1.61, ki = 0.099), the first
+frequency estimate after 0.016 / ki seconds, and an anti-windup clamp at
+`max_frequency_ppb` (give the device's `max_frequency_ppb()`). It steps only on
+that first estimate and only before its first lock, past
+`first_step_threshold_ns` (20 µs, linuxptp's `first_step_threshold`); afterwards
+it slews. It is locked after 16 samples under 100 ns and unlocked after 16 over
+1 µs. `freeze()` holds the frequency (the PHC free-runs on its last correction)
+until `thaw()`; `reset()` starts over from the frequency in force and allows a
+step again. A known target rate goes in as `feed_forward_ppb`, so the integrator
+learns only the PHC's own oscillator error. The servo is arithmetic only;
+`apply()` sets the frequency (ADJ_FREQUENCY) and steps (ADJ_SETOFFSET).
+
+The tests that touch real clocks skip unless the devices open. On a box with
+PHCs, as root:
+
+```
+STATUSBAR_PHC0=/dev/ptp0 STATUSBAR_PHCD=/dev/ptp1 STATUSBAR_PHC_SERVO_DEVICE=/dev/ptp1 \
+    ctest --test-dir build -R 'ptpclient_phc' -V
+```
+
+`STATUSBAR_PHC_SERVO_DEVICE` names a spare PHC the servo test may steer for ten
+seconds onto a line 1 ms ahead of its start at +100 ppm over PHC0. It restores the
+frequency afterwards, not the time, so never name a PHC that ptp4l or phc2sys
+disciplines.
+
 ## ptpclient: waking on a PTP deadline
 
 `PtpTimeBridge::sleep_until_ptp` converts the PTP deadline to CLOCK_MONOTONIC,
