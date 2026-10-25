@@ -87,7 +87,29 @@ TEST(crf_recovery, consumer_adapter_feeds_the_filter)
     auto consumer = rec.make_consumer();
     for (int i = 0; i < 32; ++i) {
         int64_t const rx = 1'000'000'000 + (static_cast<int64_t>(i) * kRxStep);
-        consumer(static_cast<uint64_t>(rx), 0, rx);  // via the StreamCrfFn shape
+        consumer(static_cast<uint64_t>(rx), 0, rx, false);  // via the StreamCrfFn shape
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 32U);
+}
+
+// IEEE 1722-2016 Clause 10.4: a toggled mr is a media clock restart, so the estimate starts again;
+// a steady mr, set or clear, is none.
+TEST(crf_recovery, a_toggled_mr_restarts_the_estimate)
+{
+    CrfClockRecovery rec{};
+    auto consumer = rec.make_consumer();
+    int64_t rx = 1'000'000'000;
+    for (int i = 0; i < 32; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, false);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    consumer(static_cast<uint64_t>(rx), 0, rx, true);
+    rx += kRxStep;
+    EXPECT_FALSE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 1U);
+    for (int i = 0; i < 31; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, true);
     }
     EXPECT_TRUE(rec.estimate().locked);
     EXPECT_TRUE(rec.estimate().samples == 32U);

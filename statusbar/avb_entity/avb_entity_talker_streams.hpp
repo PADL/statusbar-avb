@@ -67,6 +67,8 @@ struct TalkerStreamSlot
     /// CRF decimation phase: transmit one PDU every pkts_per_crf audio packets.
     /// Reset to 0 whenever the CRF gate is closed so a reconnect starts fresh.
     uint16_t crf_decim{0};
+    /// The CRF mr bit sent (IEEE 1722-2016 Clause 10.4). Media thread.
+    bool crf_mr{false};
     std::optional<avtp::Am824StreamOutputContext> am824{};
     std::optional<avtp::AafStreamOutputContext> aaf{};
     std::optional<avtp::CrfStreamOutputContext> crf{};
@@ -179,6 +181,11 @@ struct TalkerStreams
         return gptp_lost_.load(std::memory_order_relaxed) || now_ns < tu_until_ns_.load(std::memory_order_relaxed);
     }
 
+    /// A media clock restart on CRF STREAM_OUTPUT @p stream_index: mr toggles on its next PDU and stays
+    /// (IEEE 1722-2016 Clause 10.4); requests before that PDU toggle it once. Reactor thread;
+    /// invalid_argument for no CRF slot of that index.
+    [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
+
     /// VLAN ID the stream frames are tagged with: config.vlan_id until the
     /// Class A VID in use changes (adopted from the bridge's MSRP Domain,
     /// Milan v1.2 Section 4.2.7.2.1). Reactor thread writes, media thread reads.
@@ -269,6 +276,8 @@ struct TalkerStreams
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
+    /// Per-stream media clock restart pending (toggle_media_clock_restart), by STREAM_OUTPUT index.
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> mr_pending_{};
     StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the port egress tap can stamp the captured frame with the gPTP TX time.
@@ -336,12 +345,13 @@ void fill_crf_timestamps(
     std::span<uint64_t> timestamps) noexcept;
 
 /// Build one CRF frame into @p frame carrying @p timestamps verbatim with @p ctx's stream id, type
-/// and sequence. Returns the length (counters advanced), or 0 with @p ctx untouched for a count
-/// other than ctx.timestamps_per_packet (or zero) or a short @p frame. Pure.
+/// and sequence, and the tu and mr bits given. Returns the length (counters advanced), or 0 with @p ctx
+/// untouched for a count other than ctx.timestamps_per_packet (or zero) or a short @p frame. Pure.
 [[nodiscard]] auto serialize_crf_raw(
     avtp::CrfStreamOutputContext& ctx,
     std::span<uint8_t> frame,
     std::span<uint64_t const> timestamps,
-    bool timestamp_uncertain = false) -> size_t;
+    bool timestamp_uncertain = false,
+    bool media_clock_restart = false) -> size_t;
 
 }  // namespace statusbar::avb_entity

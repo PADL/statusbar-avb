@@ -547,7 +547,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::aaf_int32, audio);
         }
     } else if (slot->crf) {
-        // --- CRF (kit phase 3): media-clock reference, no audio payload ---
+        // --- CRF: media clock reference, no audio payload ---
         if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
             return;
         }
@@ -560,11 +560,9 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
         update_stream_input_counters(
             *slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/true, 0, /*ts_sparse=*/true, gptp_now_ns);
-        slot->crf->process_packet(pdu, ts_data, [slot, gptp_now_ns](uint64_t ts_ns, uint16_t index) {
-            // Each (CRF timestamp, local receive time) pair feeds media-clock
-            // recovery via the registered consumer.
+        slot->crf->process_packet(pdu, ts_data, [slot, gptp_now_ns, mr = pdu.mr()](uint64_t ts_ns, uint16_t index) {
             if (slot->on_crf) {
-                slot->on_crf(ts_ns, index, gptp_now_ns);
+                slot->on_crf(ts_ns, index, gptp_now_ns, mr);
             }
         });
         slot->rx_packets.add(1);

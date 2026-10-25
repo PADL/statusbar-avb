@@ -5,7 +5,7 @@
 // the per-stream consume registration mechanics (pending-before-open, direct
 // rebind after open), and the menu/selection principle — a registration for a
 // stream index the model never declares stays pending and inert, never an
-// error. CRF input slots are rejected until media-clock recovery (phase 3).
+// error. A CRF slot hands each timestamp and its PDU's mr bit to its consumer.
 //
 // Positive frame->consume delivery requires a connected ACMP listener + live
 // frames and is exercised on hardware; the decode paths themselves are
@@ -133,11 +133,11 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
     static int calls = 0;
     last_ts = 0;
     calls = 0;
-    ls.set_crf(1, [](uint64_t ts, uint16_t /*idx*/, int64_t /*rx*/) {
+    ls.set_crf(1, [](uint64_t ts, uint16_t /*idx*/, int64_t /*rx*/, bool /*mr*/) {
         last_ts = ts;
         ++calls;
     });
-    ls.set_crf(9, [](uint64_t, uint16_t, int64_t) { ++calls; });
+    ls.set_crf(9, [](uint64_t, uint16_t, int64_t, bool) { ++calls; });
 
     StreamSpec crf{};
     crf.index = 1;
@@ -151,7 +151,7 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
 
     // The bound consumer is the slot's delivery path (frame->consume delivery
     // itself requires a connected ACMP listener; covered on hardware).
-    slot->on_crf(123456789ULL, 0, 1000);
+    slot->on_crf(123456789ULL, 0, 1000, false);
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(last_ts, 123456789ULL);
 }
@@ -951,3 +951,35 @@ TEST(listener_kind, crf_kind_changes_are_refused)
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)
+
+// IEEE 1722-2016 Clause 10.4: each received CRF PDU's timestamps reach the consumer with the
+// PDU's mr bit, so the host sees a media clock restart as the bit toggles.
+TEST(listener_crf, a_crf_pdu_delivers_its_mr_bit)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    StreamSpec crf{};
+    crf.index = 1;  // connected to kAafId
+    crf.format_word = CRF_MILAN_48K;
+    crf.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(crf).has_value());
+    std::vector<std::pair<uint64_t, bool>> seen;
+    ls.set_crf(1, [&seen](uint64_t const ts, uint16_t, int64_t, bool const mr) { seen.emplace_back(ts, mr); });
+
+    avtp::CrfStreamOutputContext tx{kAafId, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    for (uint64_t k = 0; k < 3; ++k) {
+        std::array<uint64_t, 1> const ts{9'000'000'000ULL + (k * 2'000'000)};
+        EXPECT_EQ(serialize_crf_raw(tx, frame, ts, /*timestamp_uncertain=*/false, /*media_clock_restart=*/k > 0), frame.size());
+        ls.on_stream_rx_frame(frame, 8'999'000'000);
+    }
+    EXPECT_EQ(seen.size(), size_t{3});
+    if (seen.size() == 3) {
+        EXPECT_EQ(seen[0].first, 9'000'000'000ULL);
+        EXPECT_FALSE(seen[0].second);
+        EXPECT_TRUE(seen[1].second && seen[2].second);
+        EXPECT_EQ(seen[2].first, 9'004'000'000ULL);
+    }
+    EXPECT_EQ(ls.slot_for(1)->rx_packets.load(), uint64_t{3});
+}

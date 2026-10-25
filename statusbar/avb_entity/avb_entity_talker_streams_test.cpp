@@ -798,3 +798,44 @@ TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numb
     EXPECT_FALSE(talker.reformat_stream(crf).has_value());  // never to CRF
     EXPECT_TRUE(slot->aaf.has_value());
 }
+
+// IEEE 1722-2016 Clause 10.4: a media clock restart toggles mr on the next CRF PDU and the bit
+// stays toggled; two requests before a PDU toggle it once; an AAF slot has no restart to toggle.
+TEST(talker_crf, a_toggled_restart_sets_mr_on_the_next_pdu)
+{
+    avb_entity::TestStreamPort port{kPortMac};
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x0205022000806000ULL), kStreamId, kDest).has_value());  // AAF
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());  // Milan CRF
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    auto* slot = talker.slot_for(1);
+    EXPECT_FALSE(talker.toggle_media_clock_restart(0).has_value());
+    EXPECT_FALSE(talker.toggle_media_clock_restart(5).has_value());
+
+    std::array<uint64_t, 1> const ts{1'000'000};
+    std::vector<bool> mr;
+    auto const send = [&] {
+        EXPECT_TRUE(talker.transmit_crf_raw(*slot, ts));
+        auto const sent = port.pop_tx();
+        EXPECT_TRUE(sent.has_value());
+        auto const pdu =
+            avtp::crf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(avb_entity::StreamPort::TX_PAYLOAD_OFFSET));
+        mr.push_back(pdu.has_value() && pdu->mr());
+    };
+    send();
+    EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
+    send();
+    send();
+    EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
+    EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
+    send();
+    send();
+    EXPECT_TRUE(mr == (std::vector<bool>{false, true, true, false, false}));
+    EXPECT_EQ(talker.tx_counters(1)->mr_toggles.load(), uint32_t{2});
+}

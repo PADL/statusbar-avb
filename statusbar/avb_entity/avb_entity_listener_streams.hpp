@@ -19,7 +19,7 @@
 /// AM824/AAF contexts — it is a vector of slots derived from StreamSpecs
 /// (see avb_entity_stream_spec.hpp), and a frame is matched to its slot by
 /// the connected stream_id, so an entity's RX shape follows its declarative
-/// model. CRF input slots are not yet supported (kit phase 3).
+/// model. A CRF slot hands each timestamp to its StreamCrfFn (set_crf).
 ///
 /// Reads the entity's config / gPTP-now through references and the ACMP/MSRP
 /// state through a NanoAvbComponents reference (all bound at construction).
@@ -68,8 +68,8 @@ struct ListenerStreamSlot
     /// decode for counters only (and the raw-byte StreamRxAudioSink, if any).
     StreamConsumeFn consume{};
 
-    /// Per-stream CRF ingest (kit phase 3): receives each CRF timestamp with
-    /// the local receive time — feed for media-clock recovery. CRF slots only.
+    /// Per-stream CRF ingest: each CRF timestamp with the local receive time
+    /// and the PDU's mr bit (see StreamCrfFn). CRF slots only.
     StreamCrfFn on_crf{};
 
     /// Per-slot data-plane counters (written on the reactor/RX thread, read for status).
@@ -160,8 +160,7 @@ struct ListenerStreams
 
     /// Add an RX slot shaped by @p spec, constructing the kind-matching
     /// deserializer. A pending set_consume() registration for spec.index is
-    /// bound here. Errors: unsupported kind (CRF input is kit phase 3;
-    /// `other` never), unknown rate, or more than MAX_ENTITY_STREAMS slots.
+    /// bound here. Errors: kind `other`, unknown rate, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec) -> Status;
 
     /// Re-shape the slot of @p spec.index for @p spec (Milan v1.2 Section 4.4.2.2), keeping its

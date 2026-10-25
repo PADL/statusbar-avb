@@ -395,7 +395,8 @@ auto serialize_crf_raw(
     avtp::CrfStreamOutputContext& ctx,
     std::span<uint8_t> const frame,
     std::span<uint64_t const> const timestamps,
-    bool const timestamp_uncertain) -> size_t
+    bool const timestamp_uncertain,
+    bool const media_clock_restart) -> size_t
 {
     uint16_t const n_ts = ctx.timestamps_per_packet;
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
@@ -406,6 +407,7 @@ auto serialize_crf_raw(
     pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, n_ts);
     pdu.set_sequence_num(ctx.sequence_num);
     pdu.set_tu(timestamp_uncertain);
+    pdu.set_mr(media_clock_restart);
     std::span<uint8_t> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH, frame_len - avtp::CrfPdu::HEADER_LENGTH);
     for (uint16_t i = 0; i < n_ts; ++i) {
         (void)avtp::crf_set_timestamp(ts_data, i, timestamps[i]);
@@ -448,8 +450,12 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
     if (frame.empty()) {
         return false;
     }
+    // Restart requests since the last PDU toggle mr once; a refused frame leaves it for the next.
+    if (mr_pending_[slot.spec.index].exchange(false, std::memory_order_relaxed)) {
+        slot.crf_mr = !slot.crf_mr;
+    }
     auto const saved = *slot.crf;  // restored when the port refuses the frame
-    size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()));
+    size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()), slot.crf_mr);
     if (frame_len == 0) {
         return false;
     }
@@ -458,6 +464,16 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
         return false;
     }
     return true;
+}
+
+auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status
+{
+    auto const* slot = slot_for(stream_index);
+    if (slot == nullptr || !slot->crf) {
+        return failure(std::errc::invalid_argument);
+    }
+    mr_pending_[stream_index].store(true, std::memory_order_relaxed);
+    return success();
 }
 
 auto TalkerStreams::open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status
