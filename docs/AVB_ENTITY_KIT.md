@@ -321,8 +321,14 @@ valid. Only configuration 0 is served.
 
 CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
 PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE
-1722-2016 Clause 10.4); `CrfClockRecovery` starts its estimate again on one. `TalkerStreams::toggle_media_clock_restart` toggles a
-CRF STREAM_OUTPUT's mr from its next PDU on, where it stays.
+1722-2016 Clause 10.4), and with a source generation that steps when the PDUs'
+stream_id changes or the input is connected again. `CrfClockRecovery`
+starts its estimate again on either. `start()` binds `crf_recovery()` to one
+CRF input, the one the CRF clock source locates (else the first), unless the
+host bound its own consumer there with `ListenerStreams::set_crf` before
+`start()`; the other CRF inputs are the host's.
+`TalkerStreams::toggle_media_clock_restart` toggles a CRF STREAM_OUTPUT's mr
+from its next PDU on, where it stays; it is callable from any thread.
 
 ## Local ATDECC socket
 
