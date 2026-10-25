@@ -95,7 +95,7 @@ auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t const fallback_
 {
     uint32_t rate = 0;
     for (auto const& spec : specs) {
-        if (spec.format.kind != StreamKind::am824 && spec.format.kind != StreamKind::aaf) {
+        if (!is_audio_kind(spec.format.kind)) {
             continue;
         }
         if (spec.format.sample_rate_hz == 0) {
