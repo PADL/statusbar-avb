@@ -314,8 +314,9 @@ valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: changes after the
 first grandmaster, the one found at start not being a change) and the
 CLOCK_DOMAINs (LOCKED, UNLOCKED: each transition once, notified). CLOCK_DOMAIN
 0 follows the gPTP lock until the entity reports its lock with
-`note_clock_domain_locked`; the others, up to four, count once the entity
-reports them. Other interfaces and domains the model has answer with none
+`note_clock_domain_locked`, and again after `release_clock_domain_lock(0)`;
+the others, up to four, count once the entity reports them and stop at their
+release. Other interfaces and domains the model has answer with none
 valid. Only configuration 0 is served.
 
 CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
