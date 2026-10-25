@@ -151,6 +151,10 @@ struct ListenerStreamSlot
 /// channel count and the FDF's SFC the nominal rate (IEC 61883-6 Section 10.3.2).
 [[nodiscard]] auto am824_header_matches_format(StreamFormatFields const& format, avtp::Am824Pdu const& pdu) noexcept -> bool;
 
+/// Whether @p pdu's CRF header carries @p format, the STREAM_INPUT's current format (Milan v1.2
+/// Section 4.4.2.2): type, timestamp interval, timestamps per PDU, pull and base frequency match.
+[[nodiscard]] auto crf_header_matches_format(StreamFormatFields const& format, avtp::CrfPdu const& pdu) noexcept -> bool;
+
 struct ListenerStreams
 {
     /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns); each

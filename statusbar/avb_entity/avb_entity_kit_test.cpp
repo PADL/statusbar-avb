@@ -1839,24 +1839,24 @@ struct MilanPair
         }
     }
 
-    auto command(uint8_t const type, uint16_t const flags = 0) -> atdecc::AcmpCommandResponse
+    auto command(uint8_t const type, uint16_t const flags = 0, uint16_t const unique_id = 0) -> atdecc::AcmpCommandResponse
     {
         atdecc::AcmpCommandResponse cmd{};
         cmd.init_command(type);
         cmd.controller_entity_id = BINDING_CONTROLLER;
         cmd.talker_entity_id = t.config.entity_id;
-        cmd.talker_unique_id = uint16_t{0};
+        cmd.talker_unique_id = unique_id;
         cmd.listener_entity_id = l.config.entity_id;
-        cmd.listener_unique_id = uint16_t{0};
+        cmd.listener_unique_id = unique_id;
         cmd.sequence_id = sequence++;
         cmd.flags = flags;
         return cmd;
     }
 
-    /// A controller's ACMP command to the listener; its response.
-    auto controller(uint8_t const type, uint16_t const flags = 0) -> atdecc::AcmpCommandResponse
+    /// A controller's ACMP command to the listener, for stream @p unique_id at both ends; its response.
+    auto controller(uint8_t const type, uint16_t const flags = 0, uint16_t const unique_id = 0) -> atdecc::AcmpCommandResponse
     {
-        auto const cmd = command(type, flags);
+        auto const cmd = command(type, flags, unique_id);
         (void)lc().acmp_listener.receive_controller_command(cmd, now);
         for (auto const& pdu : acmp) {
             if (pdu.message_type() == type + 1 && pdu.sequence_id.get() == cmd.sequence_id.get()) {
@@ -2236,6 +2236,51 @@ TEST(avb_entity_kit_counters, stream_input_reset_on_bind)
     // Unbound: kept.
     (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
     EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 1U);
+}
+
+// A CRF input locks on a steady timestamp step (timestamp_interval events, IEEE 1722-2016
+// Clause 10.4) and unlocks on a lost PDU; a PDU of another format is discarded (Milan v1.2
+// Section 4.4.2.2) and counted in UNSUPPORTED_FORMAT.
+TEST(avb_entity_kit_counters, a_crf_input_counts_media_lock_from_its_timestamps)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
+    p.talker_advertises();
+    p.pump(20);
+    auto* listener = p.l.kit.listener();
+    EXPECT_TRUE(listener != nullptr && listener->slot_for(1) != nullptr && listener->slot_for(1)->crf.has_value());
+
+    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    uint64_t ts = 9'000'000'000ULL;
+    auto const send = [&](avtp::CrfStreamOutputContext& ctx) {
+        std::array<uint64_t, 1> const one{ts};
+        EXPECT_EQ(serialize_crf_raw(ctx, frame, one), frame.size());
+        listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
+        ts += 2'000'000;  // 96 events at 48 kHz
+    };
+    int64_t t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);
+    for (int k = 0; k < 20; ++k) {
+        send(tx);
+    }
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[0].get(), 1U);   // MEDIA_LOCKED
+    EXPECT_EQ(c.counters[1].get(), 0U);   // MEDIA_UNLOCKED
+    EXPECT_EQ(c.counters[11].get(), 1U);  // FRAMES_RX: one interval, however many PDUs
+    EXPECT_EQ(c.counters[8].get(), 0U);   // UNSUPPORTED_FORMAT
+
+    ts += 2'000'000;  // one PDU lost
+    send(tx);
+    avtp::CrfStreamOutputContext other{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 160, 1};
+    send(other);
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[1].get(), 1U);  // MEDIA_UNLOCKED
+    EXPECT_EQ(c.counters[2].get(), 1U);  // STREAM_INTERRUPTED
+    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
 }
 
 // GET_AS_PATH (Milan v1.2 Section 5.4.2.24) from the Announces' path trace,

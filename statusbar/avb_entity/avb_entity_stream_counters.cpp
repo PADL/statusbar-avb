@@ -68,7 +68,7 @@ void tally_stream_input_packet(
         // and unlock. A coarse plausibility window vs the nominal packet period
         // rejects garbage so two equal junk steps cannot false-lock.
         constexpr int LOCK_RUN_THRESHOLD = 8;  // ~1 ms (AAF) / ~1.3 ms (AM824) of clean steps
-        if (c.have_prev_ts && samples_per_ch > 0) {
+        if (c.have_prev_ts && samples_per_ch > 0 && sample_rate_hz > 0) {
             uint32_t const actual = avtp_ts - c.prev_ts;                                    // wrap-safe (uint32)
             uint64_t const nominal = (samples_per_ch * 1'000'000'000ULL) / sample_rate_hz;  // 125 us @ 12/96k
             bool const plausible = (actual >= (nominal / 2)) && (actual < (nominal * 4));

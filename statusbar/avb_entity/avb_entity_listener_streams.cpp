@@ -157,6 +157,13 @@ auto am824_header_matches_format(StreamFormatFields const& format, avtp::Am824Pd
         avtp::am824_sample_rate_hz(pdu.sample_rate()) == format.sample_rate_hz;
 }
 
+auto crf_header_matches_format(StreamFormatFields const& format, avtp::CrfPdu const& pdu) noexcept -> bool
+{
+    return format.kind == StreamKind::crf && pdu.get_type() == format.crf_type &&
+        pdu.timestamp_interval() == format.crf_timestamp_interval && pdu.timestamp_count() == format.crf_timestamps_per_pdu &&
+        pdu.pull() == format.crf_pull && pdu.base_frequency() == format.crf_base_frequency_hz;
+}
+
 auto ListenerStreams::shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status
 {
     switch (spec.format.kind) {
@@ -558,8 +565,26 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             return;
         }
         std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
+        if (!crf_header_matches_format(slot->spec.format, pdu)) {
+            update_stream_input_counters(
+                *slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/false, 0, /*ts_sparse=*/true, 0);
+            return;
+        }
+        // Media lock on the first timestamps' step, timestamp_interval x timestamps_per_pdu
+        // events apart (IEEE 1722-2016 Clause 10.4); no AVTP timestamp to call late or early.
+        auto const first_ts = avtp::crf_get_timestamp(ts_data, 0);
+        uint64_t const events_per_pdu = uint64_t{pdu.timestamp_interval()} * pdu.timestamp_count();
         update_stream_input_counters(
-            *slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/true, 0, /*ts_sparse=*/true, gptp_now_ns);
+            *slot,
+            pdu.get_sequence_num(),
+            static_cast<uint32_t>(first_ts.value_or(0)),
+            first_ts.has_value(),
+            pdu.tu(),
+            pdu.mr(),
+            /*format_ok=*/true,
+            events_per_pdu,
+            /*ts_sparse=*/true,
+            /*gptp_now_ns=*/0);
         auto const stream_id = pdu.stream_id().to_uint64();
         auto const connection = slot->connections.load(std::memory_order_acquire);
         slot->crf->process_packet(
@@ -621,7 +646,7 @@ void ListenerStreams::update_stream_input_counters(
         ts_sparse,
         static_cast<uint64_t>(gptp_now_ns),
         lock_tolerance_ns_,
-        slot.spec.format.sample_rate_hz);
+        slot.spec.format.kind == StreamKind::crf ? slot.spec.format.crf_base_frequency_hz : slot.spec.format.sample_rate_hz);
 }
 
 auto ListenerStreams::fill_stream_input_counters(
