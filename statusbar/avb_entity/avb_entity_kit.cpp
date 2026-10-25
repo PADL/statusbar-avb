@@ -563,6 +563,27 @@ auto AvbEntityKit::static_rx_group(StreamSpec const& spec) const noexcept -> iee
     return slot != nullptr ? slot->dest_mac : ieee::Eui48{};
 }
 
+auto AvbEntityKit::crf_recovery_input() const -> std::optional<uint16_t>
+{
+    auto const is_crf_input = [this](uint16_t const index) {
+        return std::ranges::any_of(listener_specs_, [index](StreamSpec const& spec) {
+            return spec.index == index && spec.format.kind == StreamKind::crf;
+        });
+    };
+    if (crf_clock_source_index_) {
+        if (auto const desc = host_.get_descriptor(atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, *crf_clock_source_index_)) {
+            atdecc::aem::DescriptorClockSource source{};
+            span_load_padded(source, *desc);
+            if (source.clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
+                is_crf_input(source.clock_source_location_index.get())) {
+                return source.clock_source_location_index.get();
+            }
+        }
+    }
+    auto const first = std::ranges::find(listener_specs_, StreamKind::crf, [](StreamSpec const& spec) { return spec.format.kind; });
+    return first == listener_specs_.end() ? std::nullopt : std::optional{first->index};
+}
+
 void AvbEntityKit::rejoin_static_rx_groups()
 {
     StreamPort* const port = listener_ != nullptr ? listener_->port_ : nullptr;
@@ -1355,10 +1376,11 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         log_xdp_error(host_.ctl_log(), ports_, config_.interface_name);
     }
 
-    // RX slots per blob-declared stream input. CRF inputs feed the media-clock
-    // recovery (kit phase 3c); the ACMP listener callbacks (wired above) drive
-    // the MSRP attach + the multicast join per connection.
+    // RX slots per blob-declared stream input. One CRF input feeds the media-clock
+    // recovery unless the host bound it (set_crf before start); the ACMP listener
+    // callbacks (wired above) drive the MSRP attach + the multicast join per connection.
     if (listener_ != nullptr) {
+        auto const recovery_input = crf_recovery_input();
         // Static RX groups: an audio input pre-joins the same-kind talker
         // output's group (the loopback topology listens on its own output
         // group); everything else joins dynamically on ACMP connect (a zero
@@ -1369,7 +1391,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
             if (auto status = listener_->open_stream(spec); !status) {
                 return status;
             }
-            if (spec.format.kind == StreamKind::crf) {
+            if (auto const* slot = listener_->slot_for(spec.index);
+                spec.index == recovery_input && slot != nullptr && !slot->on_crf) {
                 listener_->set_crf(spec.index, crf_recovery_.make_consumer());
             }
             (void)rx_groups.try_push_back(static_rx_group(spec));

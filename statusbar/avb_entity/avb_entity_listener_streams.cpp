@@ -560,11 +560,19 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
         update_stream_input_counters(
             *slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/true, 0, /*ts_sparse=*/true, gptp_now_ns);
-        slot->crf->process_packet(pdu, ts_data, [slot, gptp_now_ns, mr = pdu.mr()](uint64_t ts_ns, uint16_t index) {
-            if (slot->on_crf) {
-                slot->on_crf(ts_ns, index, gptp_now_ns, mr);
-            }
-        });
+        auto const stream_id = pdu.stream_id().to_uint64();
+        auto const connection = slot->connections.load(std::memory_order_acquire);
+        slot->crf->process_packet(
+            pdu, ts_data, [slot, gptp_now_ns, mr = pdu.mr(), stream_id, connection](uint64_t ts_ns, uint16_t index) {
+                if (slot->crf_source == 0 || stream_id != slot->crf_stream_id || connection != slot->crf_connection) {
+                    slot->crf_stream_id = stream_id;
+                    slot->crf_connection = connection;
+                    ++slot->crf_source;
+                }
+                if (slot->on_crf) {
+                    slot->on_crf(ts_ns, index, gptp_now_ns, mr, slot->crf_source);
+                }
+            });
         slot->rx_packets.add(1);
         slot->rx_samples.add(slot->crf->last_timestamp_count);
     }
@@ -694,6 +702,9 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
 {
     tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
+    if (auto* const slot = slot_for(stream_index); slot != nullptr) {
+        slot->connections.fetch_add(1, std::memory_order_release);  // a new CRF source (StreamCrfFn)
+    }
     auto const now = sm::Clock::now();
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the

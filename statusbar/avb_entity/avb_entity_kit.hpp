@@ -437,6 +437,8 @@ class AvbEntityKit
     /// The clock-source index backed by the blob's CRF stream input, or
     /// nullopt when the model declares none (base-rate pacing only).
     [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return crf_clock_source_index_; }
+    /// The recovery start() binds to one CRF input (the one the CRF clock source locates, else the
+    /// first), unless the host bound its own consumer there with ListenerStreams::set_crf first.
     [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
 
     // --- The owned collaborators (entities + tools reach through) -------------
@@ -580,6 +582,9 @@ class AvbEntityKit
     /// The group an input pre-joins at start: the first talker output's of its audio kind, else none
     /// (the loopback topology listens on its own output group).
     [[nodiscard]] auto static_rx_group(StreamSpec const& spec) const noexcept -> ieee::Eui48;
+    /// The CRF STREAM_INPUT crf_recovery() follows: the one the CRF clock source locates, else the
+    /// first CRF input; nullopt with none.
+    [[nodiscard]] auto crf_recovery_input() const -> std::optional<uint16_t>;
     /// After a kind change, leave each input's pre-joined group that changed and join the new one.
     void rejoin_static_rx_groups();
     /// The stream kind of talker stream @p index ("other" when not in the table).

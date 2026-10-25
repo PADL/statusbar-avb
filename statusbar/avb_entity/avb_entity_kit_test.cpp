@@ -221,7 +221,11 @@ namespace {
 struct MilanKit
 {
     explicit MilanKit(
-        std::optional<bool> const milan, uint64_t const entity_low, bool const gate = true, std::vector<uint8_t> model = make_blob(1, 1))
+        std::optional<bool> const milan,
+        uint64_t const entity_low,
+        bool const gate = true,
+        std::vector<uint8_t> model = make_blob(1, 1),
+        std::optional<uint16_t> const crf_clock_source = std::nullopt)
         : blob{std::move(model)}
         , storage{*atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob})}
         , talkers{*talker_stream_specs(storage, 0)}
@@ -234,7 +238,7 @@ struct MilanKit
               listeners,
               48000,
               0,
-              std::nullopt,
+              crf_clock_source,
               media_clock,
               last_gptp_ns,
               nullptr,
@@ -3314,4 +3318,79 @@ TEST(avb_entity_kit_clock_source, a_released_clock_domain_hands_its_counters_bac
     EXPECT_EQ(c.counters[0].get(), 2U);
     EXPECT_EQ(c.counters[1].get(), 1U);
     EXPECT_FALSE(m.kit.release_clock_domain_lock(2));
+}
+
+// ---- CRF inputs and the kit's media clock recovery ----
+
+namespace {
+
+/// make_blob(1, 1, 3) (CRF STREAM_INPUTs 1-3) plus CLOCK_SOURCE 0, the INPUT_STREAM at STREAM_INPUT 2.
+auto make_crf_inputs_blob() -> std::vector<uint8_t>
+{
+    auto const base = make_blob(1, 1, 3);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{base});
+    nanoavb::AemBlobWriter w;
+    for (uint16_t const type : {DESCRIPTOR_ENTITY, DESCRIPTOR_CONFIGURATION, DESCRIPTOR_AVB_INTERFACE}) {
+        w.add(0, type, 0, *storage->get_descriptor(0, type, 0));
+    }
+    for (uint16_t const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
+        for (uint16_t index = 0; index < 4; ++index) {
+            w.add(0, type, index, *storage->get_descriptor(0, type, index));
+        }
+    }
+    atdecc::aem::DescriptorClockSource source{};
+    source.clock_source_type = atdecc::aem::CLOCK_SOURCE_TYPE_INPUT_STREAM;
+    source.clock_source_location_type = DESCRIPTOR_STREAM_INPUT;
+    source.clock_source_location_index = 2;
+    w.add(0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 0, make_const_span(source));
+    return w.write();
+}
+
+/// Hand STREAM_INPUT @p index's CRF consumer one timestamp, as the RX path does; false with none bound.
+auto feed_crf(AvbEntityKit& kit, uint16_t const index) -> bool
+{
+    auto* const slot = kit.listener()->slot_for(index);
+    if (slot == nullptr || !slot->on_crf) {
+        return false;
+    }
+    slot->on_crf(1'000'000'000ULL, 0, 1'000'000'000, false, 1);
+    return true;
+}
+
+}  // namespace
+
+// start() binds the kit's recovery to the one CRF input its CRF clock source locates, and to none
+// the host bound with set_crf before start.
+TEST(avb_entity_kit_crf, the_recovery_takes_the_crf_clock_sources_input_only)
+{
+    MilanKit m{std::nullopt, 0x90, true, make_crf_inputs_blob(), /*crf_clock_source=*/0};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_FALSE(feed_crf(m.kit, 1));
+    EXPECT_FALSE(feed_crf(m.kit, 3));
+    EXPECT_TRUE(feed_crf(m.kit, 2));
+    EXPECT_EQ(m.kit.crf_recovery().estimate().samples, uint64_t{1});
+}
+
+TEST(avb_entity_kit_crf, without_a_crf_clock_source_the_recovery_takes_the_first_crf_input)
+{
+    MilanKit m{std::nullopt, 0x91, true, make_crf_inputs_blob()};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_TRUE(feed_crf(m.kit, 1));
+    EXPECT_FALSE(feed_crf(m.kit, 2));
+    EXPECT_EQ(m.kit.crf_recovery().estimate().samples, uint64_t{1});
+}
+
+TEST(avb_entity_kit_crf, a_host_binding_made_before_start_is_kept)
+{
+    MilanKit m{std::nullopt, 0x92, true, make_crf_inputs_blob(), /*crf_clock_source=*/0};
+    std::array<int, 4> host_calls{};
+    for (uint16_t index = 1; index < 4; ++index) {
+        m.kit.listener()->set_crf(index, [&host_calls, index](uint64_t, uint16_t, int64_t, bool) { ++host_calls[index]; });
+    }
+    EXPECT_TRUE(m.start_ready());
+    for (uint16_t index = 1; index < 4; ++index) {
+        EXPECT_TRUE(feed_crf(m.kit, index));
+        EXPECT_EQ(host_calls[index], 1);
+    }
+    EXPECT_EQ(m.kit.crf_recovery().estimate().samples, uint64_t{0});
 }

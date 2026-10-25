@@ -151,7 +151,7 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
 
     // The bound consumer is the slot's delivery path (frame->consume delivery
     // itself requires a connected ACMP listener; covered on hardware).
-    slot->on_crf(123456789ULL, 0, 1000, false);
+    slot->on_crf(123456789ULL, 0, 1000, false, 1);
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(last_ts, 123456789ULL);
 }
@@ -207,6 +207,40 @@ auto audio_blob() -> std::vector<uint8_t>
     return load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_audio.bin");
 }
 
+/// Connect (or disconnect) @p donor's STREAM_INPUT @p sink and talker stream @p id: the classic
+/// CONNECT_RX / CONNECT_TX (DISCONNECT_RX / DISCONNECT_TX) exchange.
+void connect_sink(
+    AvbEntityAudioIO& donor, uint16_t const sink, tsn::StreamId const id, uint16_t const sequence_id, bool const connect = true)
+{
+    auto& listener = donor.components().acmp_listener;
+    ieee::Eui64 const talker_id{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, 0x33};
+    atdecc::AcmpCommandResponse cmd{};
+    cmd.set_message_type(connect ? atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND : atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    cmd.talker_entity_id = talker_id;
+    cmd.talker_unique_id = id.get_unique_id();  // one talker stream, one talker unique id
+    cmd.listener_entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    cmd.listener_unique_id = sink;
+    cmd.sequence_id = sequence_id;
+    EXPECT_TRUE(listener.receive_controller_command(cmd, sm::TimePoint{}));
+    atdecc::AcmpCommandResponse resp = cmd;
+    resp.set_message_type(
+        connect ? atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE : atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE);
+    resp.set_status(atdecc::ACMP_STATUS_SUCCESS);
+    auto const mac = id.get_system_address().value;
+    resp.stream_id = ieee::Eui64{
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5],
+        static_cast<uint8_t>(id.get_unique_id() >> 8U),
+        static_cast<uint8_t>(id.get_unique_id())};
+    resp.stream_dest_mac = ieee::Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, static_cast<uint8_t>(sink)};
+    EXPECT_TRUE(listener.receive_talker_response(resp, sm::TimePoint{}));
+    EXPECT_EQ(listener.is_connected(sink), connect);
+}
+
 /// An audio entity (it has listener streams) whose ACMP listener reports
 /// STREAM_INPUTs 0 (AM824) and 1 (AAF) connected to the given stream ids, by
 /// the real CONNECT_RX / CONNECT_TX handshake.
@@ -216,7 +250,6 @@ auto make_connected_donor(tsn::StreamId const am824_id, tsn::StreamId const aaf_
     config.entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
     config.descriptor_storage_blob = audio_blob();
     config.milan = false;  // the classic CONNECT_RX / CONNECT_TX handshake
-    auto const listener_id = config.entity_id;
     auto created = AvbEntityAudioIO::create(std::move(config));
     EXPECT_TRUE(created.has_value());
     auto& listener = (*created)->components().acmp_listener;
@@ -225,33 +258,8 @@ auto make_connected_donor(tsn::StreamId const am824_id, tsn::StreamId const aaf_
     cb.tx_response = [](atdecc::AcmpCommandResponse const&) { return true; };
     listener.set_callbacks(cb);
     listener.start();
-    ieee::Eui64 const talker_id{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, 0x33};
-    uint16_t seq = 1;
-    for (auto const& [sink, id] : {std::pair{uint16_t{0}, am824_id}, std::pair{uint16_t{1}, aaf_id}}) {
-        atdecc::AcmpCommandResponse cmd{};
-        cmd.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
-        cmd.talker_entity_id = talker_id;
-        cmd.listener_entity_id = listener_id;
-        cmd.listener_unique_id = sink;
-        cmd.sequence_id = seq++;
-        EXPECT_TRUE(listener.receive_controller_command(cmd, sm::TimePoint{}));
-        atdecc::AcmpCommandResponse resp = cmd;
-        resp.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
-        resp.set_status(atdecc::ACMP_STATUS_SUCCESS);
-        auto const mac = id.get_system_address().value;
-        resp.stream_id = ieee::Eui64{
-            mac[0],
-            mac[1],
-            mac[2],
-            mac[3],
-            mac[4],
-            mac[5],
-            static_cast<uint8_t>(id.get_unique_id() >> 8U),
-            static_cast<uint8_t>(id.get_unique_id())};
-        resp.stream_dest_mac = ieee::Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, static_cast<uint8_t>(sink)};
-        EXPECT_TRUE(listener.receive_talker_response(resp, sm::TimePoint{}));
-        EXPECT_TRUE(listener.is_connected(sink));
-    }
+    connect_sink(**created, 0, am824_id, 1);
+    connect_sink(**created, 1, aaf_id, 2);
     return std::move(*created);
 }
 
@@ -982,4 +990,44 @@ TEST(listener_crf, a_crf_pdu_delivers_its_mr_bit)
         EXPECT_EQ(seen[2].first, 9'004'000'000ULL);
     }
     EXPECT_EQ(ls.slot_for(1)->rx_packets.load(), uint64_t{3});
+}
+
+// The CRF consumer's source generation starts at 1 with the first PDU and steps when the input's
+// PDUs come from another talker stream or a new ACMP connection, not when the talker's mr toggles.
+TEST(listener_crf, a_rebind_steps_the_crf_source_generation)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    StreamSpec crf{};
+    crf.index = 1;  // connected to kAafId
+    crf.format_word = CRF_MILAN_48K;
+    crf.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(crf).has_value());
+    std::vector<uint32_t> sources;
+    ls.set_crf(1, [&sources](uint64_t, uint16_t, int64_t, bool, uint32_t const source) { sources.push_back(source); });
+
+    auto const send = [&ls](tsn::StreamId const id, bool const mr) {
+        avtp::CrfStreamOutputContext tx{id, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+        std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+        std::array<uint64_t, 1> const ts{9'000'000'000ULL};
+        EXPECT_EQ(serialize_crf_raw(tx, frame, ts, false, mr), frame.size());
+        ls.on_stream_rx_frame(frame, 8'999'000'000);
+    };
+    tsn::StreamId const other{ieee::Eui48{0x00, 0x1B, 0x21, 0x0A, 0x0B, 0x0C}, 7};
+    send(kAafId, false);
+    send(kAafId, true);
+    send(other, false);  // not connected: dropped
+    connect_sink(*donor, 1, kAafId, 3, /*connect=*/false);
+    connect_sink(*donor, 1, other, 4);
+    send(kAafId, false);  // the old talker's: dropped
+    send(other, false);
+    send(other, false);
+    connect_sink(*donor, 1, other, 5, /*connect=*/false);
+    connect_sink(*donor, 1, kAafId, 6);
+    send(kAafId, false);
+    // The same talker stream connected again (on_listener_connected): a new source all the same.
+    ls.on_listener_connected(1, donor->components().acmp_listener.get_stream(1)->stream_id, ieee::Eui48{});
+    send(kAafId, false);
+    EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2, 2, 3, 4}));
 }

@@ -46,6 +46,8 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <type_traits>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -71,6 +73,12 @@ struct ListenerStreamSlot
     /// Per-stream CRF ingest: each CRF timestamp with the local receive time
     /// and the PDU's mr bit (see StreamCrfFn). CRF slots only.
     StreamCrfFn on_crf{};
+    /// ACMP connections made to this input (on_listener_connected); reactor writes, RX reads.
+    std::atomic<uint32_t> connections{0};
+    /// The stream_id and connection of the last CRF timestamp, and StreamCrfFn's source generation. RX thread only.
+    uint64_t crf_stream_id{0};
+    uint32_t crf_connection{0};
+    uint32_t crf_source{0};
 
     /// Per-slot data-plane counters (written on the reactor/RX thread, read for status).
     itc::TelemetryCounter<uint64_t> rx_packets{};
@@ -180,6 +188,17 @@ struct ListenerStreams
     /// @p stream_index (a CRF input slot). Same menu/selection + pending
     /// semantics as set_consume. RX-thread callback.
     void set_crf(uint16_t stream_index, StreamCrfFn fn);
+    /// set_crf for a consumer that takes no source generation.
+    template <typename Fn>
+        requires(
+            std::is_invocable_v<Fn&, uint64_t, uint16_t, int64_t, bool> &&
+            !std::is_invocable_v<Fn&, uint64_t, uint16_t, int64_t, bool, uint32_t>)
+    void set_crf(uint16_t const stream_index, Fn fn)
+    {
+        set_crf(stream_index, StreamCrfFn{[fn = std::move(fn)](uint64_t ts, uint16_t index, int64_t rx, bool mr, uint32_t) mutable {
+                    fn(ts, index, rx, mr);
+                }});
+    }
 
     /// The slot whose spec.index == @p stream_index (the STREAM_INPUT
     /// descriptor index == ACMP listener unique id), or nullptr.
