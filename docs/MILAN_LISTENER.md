@@ -55,7 +55,8 @@ Both AAF receive paths, decoded and raw-only, build their timed packet with
 `aaf_timed_packet`, so a timed sink sees the same packet either way. With a
 timed sink attached (`set_timed_audio_sink`) and no `StreamConsumeFn`, an AAF
 stream is not decoded to float: its timing is taken from the header alone
-(`aaf_rx_packet`). `drain_rx` stamps the frames it drains with the caller's gPTP
+(`aaf_rx_packet`); an AM824 stream likewise (`am824_timed_packet`,
+`am824_rx_packet`). `drain_rx` stamps the frames it drains with the caller's gPTP
 "now": the reactor adapter's `current_gptp_ns()`, or a dedicated RX timer's
 wake time.
 
