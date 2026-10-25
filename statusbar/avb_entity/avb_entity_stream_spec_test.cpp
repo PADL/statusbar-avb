@@ -223,4 +223,42 @@ TEST(stream_spec_rate, with_format_redecodes)
 
 }  // namespace
 
+// The 16A's input (nb + ut) and output (nb + ut + sc) words are carried as DBS channels.
+TEST(stream_spec_decode, am824_motu_16a_words_are_accepted)
+{
+    constexpr auto in = decode_stream_format(0x00A0040860000800ULL);
+    static_assert(in.kind == StreamKind::am824);
+    EXPECT_EQ(in.sample_rate_hz, 96'000U);
+    EXPECT_EQ(in.channels, 8);
+    constexpr auto out = decode_stream_format(0x00A0020870000800ULL);
+    static_assert(out.kind == StreamKind::am824);
+    EXPECT_EQ(out.sample_rate_hz, 48'000U);
+    EXPECT_EQ(out.channels, 8);
+    EXPECT_EQ(decode_stream_format(0x00A0060140000100ULL).kind, StreamKind::am824);  // 192 kHz, 1 ch
+}
+
+// The kit carries 1, 2, 4, 6 or 8 AM824 channels; any other MBLA count is unsupported.
+TEST(stream_spec_decode, am824_channel_counts_outside_1_2_4_6_8_are_other)
+{
+    for (uint8_t ch = 0; ch <= 64; ++ch) {
+        auto const f = decode_stream_format(avtp::make_am824_stream_format(2, ch));
+        bool const carried = ch == 1 || ch == 2 || ch == 4 || ch == 6 || ch == 8;
+        EXPECT_EQ(f.kind == StreamKind::am824, carried);
+        EXPECT_EQ(f.channels, carried ? ch : 0);
+    }
+}
+
+// Blocking, mixed-label, mismatched-DBS, non-AM824 event and unknown-rate words are refused.
+TEST(stream_spec_decode, am824_blocking_mixed_and_odd_words_are_other)
+{
+    EXPECT_EQ(decode_stream_format(0x00A0020880000800ULL).kind, StreamKind::other);  // blocking
+    EXPECT_EQ(decode_stream_format(0x00A0020800000800ULL).kind, StreamKind::other);  // neither b nor nb
+    EXPECT_EQ(decode_stream_format(0x00A0020840020600ULL).kind, StreamKind::other);  // 2 IEC 60958 + 6 MBLA
+    EXPECT_EQ(decode_stream_format(0x00A0020940000810ULL).kind, StreamKind::other);  // 8 MBLA + 1 MIDI
+    EXPECT_EQ(decode_stream_format(0x00A0020840000600ULL).kind, StreamKind::other);  // DBS 8, 6 MBLA
+    EXPECT_EQ(decode_stream_format(0x00A00A0840000800ULL).kind, StreamKind::other);  // FDF evt 1
+    EXPECT_EQ(decode_stream_format(0x00A0070840000800ULL).kind, StreamKind::other);  // SFC 7
+    EXPECT_EQ(decode_stream_format(0x00A0021040001000ULL).kind, StreamKind::other);  // 16 MBLA
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_spec_test)

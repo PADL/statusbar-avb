@@ -48,7 +48,7 @@ enum class StreamKind : uint8_t
     am824,  ///< IEC 61883-6 AM824 (MBLA audio)
     aaf,    ///< AVTP Audio Format
     crf,    ///< Clock Reference Format (media clock, no audio payload)
-    other,  ///< unrecognized subtype / non-AM824 61883 format
+    other,  ///< unrecognized subtype, or a 61883 format the kit does not carry (am824_format_supported)
 };
 
 [[nodiscard]] constexpr auto stream_kind_name(StreamKind kind) noexcept -> std::string_view
@@ -87,6 +87,22 @@ struct StreamFormatFields
     uint32_t crf_base_frequency_hz{0};
 };
 
+/// The AM824 channel counts the kit carries: 1, 2, 4, 6 or 8 MBLA quadlets per data block.
+[[nodiscard]] constexpr auto am824_channel_count_supported(uint32_t const channels) noexcept -> bool
+{
+    return channels == 1 || channels == 2 || channels == 4 || channels == 6 || channels == 8;
+}
+
+/// Whether the kit carries @p format (IEEE 1722-2016 Annex I): IEC 61883-6 AM824 data, non-blocking,
+/// MBLA only (DBS = MBLA count, no IEC 60958/MIDI/SMPTE), 32-192 kHz, am824_channel_count_supported.
+[[nodiscard]] constexpr auto am824_format_supported(avtp::Am824StreamFormat const& format) noexcept -> bool
+{
+    return format.is_61883_6() && format.evt() == 0 && avtp::am824_sfc_to_hz(format.sfc()) != 0 && format.non_blocking() &&
+        !format.blocking() && format.label_iec_60958_cnt.get() == 0 && format.label_midi_cnt() == 0 &&
+        format.label_smpte_cnt() == 0 && format.label_mbla_cnt.get() == format.dbs.get() &&
+        am824_channel_count_supported(format.dbs.get());
+}
+
 [[nodiscard]] constexpr auto decode_stream_format(uint64_t fmt) noexcept -> StreamFormatFields
 {
     StreamFormatFields f{};
@@ -103,15 +119,13 @@ struct StreamFormatFields
             break;
         }
         case avtp::AvtpSubtype::iec_61883_iidc: {
-            // Byte 1 must indicate IEC 61883-6 AM824 (sf=1, fmt=0x10); other
-            // 61883 formats (e.g. 61883-4 MPEG-TS) decode as `other` rather
-            // than being mislabeled (same gate as decode_am824_stream_format).
-            if ((b[1] & 0xFEU) != 0xA0U) {
+            auto const am824 = avtp::Am824StreamFormat::from_u64(fmt);
+            if (!am824_format_supported(am824)) {
                 break;
             }
             f.kind = StreamKind::am824;
-            f.sample_rate_hz = avtp::am824_sfc_to_hz(b[2]);
-            f.channels = b[3];
+            f.sample_rate_hz = avtp::am824_sfc_to_hz(am824.sfc());
+            f.channels = am824.dbs.get();
             f.bit_depth = 24;
             break;
         }
