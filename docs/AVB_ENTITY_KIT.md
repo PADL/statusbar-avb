@@ -269,6 +269,16 @@ presentation offset command, a listener binding made or removed, a
 SET_SYSTEM_UNIQUE_ID or SET_MEDIA_CLOCK_REFERENCE_INFO. Nothing is written when
 the file already says it. See [PERSISTENT_STATE.md](PERSISTENT_STATE.md).
 
+## Clock sources and clock domains
+
+SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN takes a
+source the domain lists, then asks the entity's `set_on_clock_source_changed`
+hook, which re-clocks that domain or refuses with an AEM status (no hook:
+accepted). GET_CLOCK_SOURCE and READ_DESCRIPTOR report the selection; it is
+notified and saved, and a saved one goes through the hook again at `start()`,
+so a refusal there leaves the model's authored source. CLOCK_DOMAIN 0's
+selection is also `active_clock_source()`, which `media_rate()` reads.
+
 ## GET_STREAM_INFO
 
 Talker (Milan v1.2 Section 5.4.2.10.2, Tables 5.11-5.12): STREAM_FORMAT_VALID
@@ -300,10 +310,13 @@ of mr toggles (bit 3), tu PDUs (bit 4) and PDUs (FRAMES_TX, bit 7).
 
 The host accounts for ENTITY (no counters beyond ENTITY_SPECIFIC, so none
 valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: changes after the
-first grandmaster, the one found at start not being a change) and CLOCK_DOMAIN
-0 (LOCKED, UNLOCKED: the media clock follows gPTP, so its gPTP lock). Other
-interfaces and domains the model has answer with none valid. Only
-configuration 0 is served.
+first grandmaster, the one found at start not being a change) and the
+CLOCK_DOMAINs (LOCKED, UNLOCKED: each transition once, notified). CLOCK_DOMAIN
+0 follows the gPTP lock until the entity reports its lock with
+`note_clock_domain_locked`; the others, up to four, count once the entity
+reports them. Other interfaces and domains the model has answer with none
+valid. Only configuration 0 is served.
+
 
 ## Local ATDECC socket
 

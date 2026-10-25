@@ -471,13 +471,34 @@ void AvbEntityHost::note_grandmaster_lost()
 
 void AvbEntityHost::note_media_clock_locked(bool const locked)
 {
-    if (locked == media_locked_) {
+    if (!clock_domain_locks_[0].entity_driven) {
+        count_clock_domain_lock(0, locked);
+    }
+    refresh_avb_info();  // asCapable follows the gPTP lock
+}
+
+void AvbEntityHost::count_clock_domain_lock(uint16_t const index, bool const locked)
+{
+    auto& domain = clock_domain_locks_[index];
+    if (locked == domain.locked) {
         return;
     }
-    media_locked_ = locked;
-    ++(locked ? media_locked_count_ : media_unlocked_count_);
-    (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0);
-    refresh_avb_info();  // asCapable follows the gPTP lock
+    domain.locked = locked;
+    ++(locked ? domain.locked_count : domain.unlocked_count);
+    (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index);
+}
+
+auto AvbEntityHost::note_clock_domain_locked(uint16_t const index, bool const locked) -> bool
+{
+    auto const* store = descriptor_storage();
+    bool const exists =
+        store != nullptr ? store->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index).has_value() : index == 0;
+    if (!exists || index >= MAX_CLOCK_DOMAINS) {
+        return false;
+    }
+    clock_domain_locks_[index].entity_driven = true;
+    count_clock_domain_lock(index, locked);
+    return true;
 }
 
 auto AvbEntityHost::fill_counters(
@@ -511,12 +532,13 @@ auto AvbEntityHost::fill_counters(
             if (!exists()) {
                 return false;
             }
-            if (descriptor_index != 0) {
-                return true;  // only domain 0 follows gPTP: nothing accounted for others
+            if (descriptor_index >= MAX_CLOCK_DOMAINS ||
+                (descriptor_index != 0 && !clock_domain_locks_[descriptor_index].entity_driven)) {
+                return true;  // domain 0 follows gPTP; another is accounted for once the entity drives it
             }
             valid |= 0x00000001U | 0x00000002U;  // LOCKED, UNLOCKED
-            counters[0] = media_locked_count_;
-            counters[1] = media_unlocked_count_;
+            counters[0] = clock_domain_locks_[descriptor_index].locked_count;
+            counters[1] = clock_domain_locks_[descriptor_index].unlocked_count;
             return true;
         default:
             return false;

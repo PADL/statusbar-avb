@@ -171,6 +171,13 @@ class AvbEntityHost
     /// v1.2 Table 5.22). Reactor thread.
     void note_as_path_changed();
 
+    /// The most CLOCK_DOMAINs whose LOCKED/UNLOCKED counters the host keeps.
+    static constexpr uint16_t MAX_CLOCK_DOMAINS = 4;
+    /// CLOCK_DOMAIN @p index locked or unlocked: a transition counts LOCKED or UNLOCKED (IEEE 1722.1-2021
+    /// Clause 7.4.42.2.3) and is notified. From its first call for domain 0, domain 0 no longer follows
+    /// gPTP. False for a domain the model lacks or past MAX_CLOCK_DOMAINS. Reactor thread.
+    [[nodiscard]] auto note_clock_domain_locked(uint16_t index, bool locked) -> bool;
+
     /// The gPTP path for AVB_INTERFACE @p index (IEEE 1722.1-2021 Clause 7.4.41): the
     /// last Announce's path trace, then this entity's clock identity unless already
     /// last; empty with no grandmaster. False for an unknown interface. Reactor thread.
@@ -431,8 +438,10 @@ class AvbEntityHost
     /// Notify GET_AVB_INFO of interface 0 asynchronously (Milan v1.2 Table 5.22)
     /// when a listed field differs from the last one sent.
     void refresh_avb_info();
-    /// The media clock (gPTP) lock state changed: count it and notify.
+    /// The gPTP lock state changed: CLOCK_DOMAIN 0's lock unless the entity drives it, and asCapable.
     void note_media_clock_locked(bool locked);
+    /// Count CLOCK_DOMAIN @p index's transition to @p locked, if one, and notify it.
+    void count_clock_domain_lock(uint16_t index, bool locked);
     /// The clock identity AVB_INTERFACE 0 reports (apply_interface_runtime).
     std::optional<ieee::Eui64> own_clock_identity_{};
 
@@ -440,9 +449,15 @@ class AvbEntityHost
     uint32_t link_up_count_{0};
     uint32_t link_down_count_{0};
     uint32_t gm_changed_count_{0};
-    uint32_t media_locked_count_{0};
-    uint32_t media_unlocked_count_{0};
-    bool media_locked_{false};
+    /// One CLOCK_DOMAIN's lock and its LOCKED/UNLOCKED counts.
+    struct ClockDomainLock
+    {
+        uint32_t locked_count{0};
+        uint32_t unlocked_count{0};
+        bool locked{false};
+        bool entity_driven{false};  ///< note_clock_domain_locked was called: gPTP no longer drives it
+    };
+    std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
     bool grandmaster_seen_{false};
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
