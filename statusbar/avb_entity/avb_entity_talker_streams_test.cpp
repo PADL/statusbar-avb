@@ -539,3 +539,213 @@ TEST(talker_port, a_refused_commit_consumes_no_sequence_number)
     EXPECT_EQ(aaf->aaf->sequence_num, uint8_t{1});
     EXPECT_EQ(aaf->tx_packets, uint64_t{1});
 }
+
+//
+// Raw AM824 (IEC 61883-6, IEEE 1722-2016 Clause 5)
+//
+
+namespace {
+
+/// A render writing MBLA quadlets 0x40 | (index of the quadlet in the stream) for each block and channel.
+auto am824_render(uint8_t const channels) -> avb_entity::StreamRawRenderFn
+{
+    return [channels](std::span<uint8_t> payload, uint32_t frames, uint64_t first_index, uint64_t) {
+        for (uint32_t f = 0; f < frames; ++f) {
+            for (uint8_t ch = 0; ch < channels; ++ch) {
+                size_t const at = ((size_t{f} * channels) + ch) * 4U;
+                uint32_t const sample = static_cast<uint32_t>(((first_index + f) * channels) + ch) & 0x00FF'FFFFU;
+                payload[at] = avtp::AM824_LABEL_MBLA;
+                payload[at + 1] = static_cast<uint8_t>(sample >> 16U);
+                payload[at + 2] = static_cast<uint8_t>(sample >> 8U);
+                payload[at + 3] = static_cast<uint8_t>(sample);
+            }
+        }
+        return true;
+    };
+}
+
+struct Am824Cadence
+{
+    avtp::Am824SampleRate rate;
+    uint16_t frames;
+};
+constexpr std::array<Am824Cadence, 3> kAm824Cadences{
+    Am824Cadence{avtp::Am824SampleRate::rate_48_khz, 6},
+    Am824Cadence{avtp::Am824SampleRate::rate_96_khz, 12},
+    Am824Cadence{avtp::Am824SampleRate::rate_192_khz, 24}};
+
+}  // namespace
+
+// One class A packet at 48, 96 and 192 kHz: 6, 12 and 24 blocks of DBS quadlets, the payload as
+// rendered, the FDF the stream's rate, and the DBC the low byte of the first sample index.
+TEST(raw_am824, one_packet_per_cadence_at_each_rate)
+{
+    for (auto const& c : kAm824Cadences) {
+        for (uint8_t const channels : {uint8_t{1}, uint8_t{2}, uint8_t{8}}) {
+            avtp::Am824StreamOutputContext ctx{kStreamId, c.rate, channels, /*pres_offset=*/0};
+            std::array<uint8_t, 1500> frame{};
+            uint64_t const first = 1'000'003;
+            size_t const len =
+                avb_entity::serialize_am824_raw(ctx, frame, c.frames, first, 5'000'000'000ULL, am824_render(channels));
+            size_t const payload_len = size_t{c.frames} * channels * 4U;
+            EXPECT_EQ(len, avtp::Am824Pdu::HEADER_LENGTH + payload_len);
+            auto const pdu = avtp::am824_parse_header(std::span<uint8_t const>{frame.data(), len});
+            EXPECT_TRUE(pdu.has_value());
+            if (!pdu) {
+                continue;
+            }
+            EXPECT_TRUE(pdu->stream_id() == kStreamId);
+            EXPECT_EQ(pdu->channel_count(), channels);
+            EXPECT_EQ(pdu->sample_count(), static_cast<uint8_t>(c.frames));
+            EXPECT_TRUE(pdu->sample_rate() == c.rate);
+            EXPECT_EQ(pdu->cip_header.format_dependent_field(), static_cast<uint8_t>(c.rate));
+            EXPECT_EQ(pdu->data_block_count(), static_cast<uint8_t>(first & 0xFFU));
+            EXPECT_EQ(pdu->stream_data_length(), static_cast<uint16_t>(avtp::Cip61883Header::LENGTH + payload_len));
+            std::vector<uint8_t> expected(payload_len);
+            EXPECT_TRUE(am824_render(channels)(expected, c.frames, first, 0));
+            EXPECT_TRUE(same_bytes(std::span<uint8_t const>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH, payload_len), expected));
+            EXPECT_EQ(ctx.sequence_num, uint8_t{1});
+        }
+    }
+}
+
+// Packet after packet the DBC advances by the block count (mod 256) and the sequence by one, from any
+// starting index: the DBC is the sample index, so a restart lands on the same count.
+TEST(raw_am824, dbc_is_continuous_across_packets)
+{
+    for (auto const& c : kAm824Cadences) {
+        avtp::Am824StreamOutputContext ctx{kStreamId, c.rate, 2, 0};
+        std::array<uint8_t, 512> frame{};
+        uint64_t const first = 777;
+        uint8_t previous = 0;
+        for (uint64_t k = 0; k < 64; ++k) {
+            uint64_t const index = first + (k * c.frames);
+            EXPECT_NE(
+                avb_entity::serialize_am824_raw(ctx, frame, c.frames, index, 1'000'000'000ULL + (k * 125'000), am824_render(2)),
+                size_t{0});
+            auto const pdu = avtp::am824_parse_header(frame);
+            EXPECT_TRUE(pdu.has_value());
+            EXPECT_EQ(pdu->data_block_count(), static_cast<uint8_t>(index & 0xFFU));
+            EXPECT_EQ(pdu->sequence_num(), static_cast<uint8_t>(k));
+            if (k > 0) {
+                EXPECT_EQ(pdu->data_block_count(), static_cast<uint8_t>(previous + c.frames));
+            }
+            previous = pdu->data_block_count();
+        }
+    }
+}
+
+// tv, the AVTP timestamp and the SYT mark the block whose DBC is a multiple of SYT_INTERVAL (8, 16, 32):
+// 3 packets in 4 at each class A cadence; the timestamp is that block's time (the context's integer
+// sample period on from pts), the SYT the same time.
+TEST(raw_am824, syt_marks_the_syt_interval_block_three_packets_in_four)
+{
+    for (auto const& c : kAm824Cadences) {
+        uint32_t const rate_hz = avtp::am824_sample_rate_hz(c.rate);
+        uint64_t const interval = avtp::am824_syt_interval(c.rate);
+        avtp::Am824StreamOutputContext ctx{kStreamId, c.rate, 2, /*pres_offset=*/3'000'000};
+        std::array<uint8_t, 512> frame{};
+        int timed = 0;
+        for (uint64_t k = 0; k < 16; ++k) {
+            uint64_t const index = 480'000 + (k * c.frames);
+            uint64_t const pts = 10'000'000'000ULL + ((index - 480'000) * 1'000'000'000ULL / rate_hz);
+            EXPECT_NE(avb_entity::serialize_am824_raw(ctx, frame, c.frames, index, pts, am824_render(2)), size_t{0});
+            auto const pdu = avtp::am824_parse_header(frame);
+            EXPECT_TRUE(pdu.has_value());
+            uint64_t const block = (interval - (index % interval)) % interval;
+            bool const expect_tv = block < c.frames;
+            EXPECT_EQ(pdu->tv(), expect_tv);
+            EXPECT_EQ(pdu->tv(), (k % 4) != 3);
+            if (expect_tv) {
+                ++timed;
+                uint64_t const ts = pts + (block * ctx.config.sample_period_ns);
+                EXPECT_EQ(pdu->avtp_timestamp(), static_cast<uint32_t>(ts));
+                EXPECT_EQ(pdu->syt_timestamp(), avtp::am824_presentation_to_syt(ts));
+                EXPECT_EQ(static_cast<uint8_t>(pdu->data_block_count() + block) % interval, uint64_t{0});
+            } else {
+                EXPECT_EQ(pdu->avtp_timestamp(), uint32_t{0});
+                EXPECT_EQ(pdu->syt_timestamp(), uint16_t{0xFFFF});
+            }
+        }
+        EXPECT_EQ(timed, 12);
+        EXPECT_EQ(ctx.timestamp_inserts, uint32_t{12});
+    }
+    // At 48 kHz from index 0 the timestamps fall on blocks 0, 2 and 4 of the first three packets.
+    avtp::Am824StreamOutputContext ctx{kStreamId, avtp::Am824SampleRate::rate_48_khz, 2, 0};
+    std::array<uint8_t, 512> frame{};
+    std::array<uint32_t, 3> const offsets{0, 2 * 20'833, 4 * 20'833};
+    for (uint64_t k = 0; k < 3; ++k) {
+        uint64_t const pts = 2'000'000'000ULL + (k * 125'000);
+        EXPECT_NE(avb_entity::serialize_am824_raw(ctx, frame, 6, k * 6, pts, am824_render(2)), size_t{0});
+        EXPECT_EQ(avtp::am824_parse_header(frame)->avtp_timestamp(), static_cast<uint32_t>(pts + offsets[k]));
+    }
+}
+
+// A refused render, a short frame or more than 32 blocks builds nothing and keeps the sequence; tu is
+// carried as given.
+TEST(raw_am824, refusals_keep_the_context_and_tu_is_carried)
+{
+    avtp::Am824StreamOutputContext ctx{kStreamId, avtp::Am824SampleRate::rate_48_khz, 8, 0};
+    std::array<uint8_t, 1500> frame{};
+    avb_entity::StreamRawRenderFn const refuse = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return false; };
+    EXPECT_EQ(avb_entity::serialize_am824_raw(ctx, frame, 6, 0, 1'000, refuse), size_t{0});
+    EXPECT_EQ(avb_entity::serialize_am824_raw(ctx, std::span<uint8_t>{frame}.first(64), 6, 0, 1'000, am824_render(8)), size_t{0});
+    EXPECT_EQ(avb_entity::serialize_am824_raw(ctx, frame, 33, 0, 1'000, am824_render(8)), size_t{0});
+    EXPECT_EQ(avb_entity::serialize_am824_raw(ctx, frame, 0, 0, 1'000, am824_render(8)), size_t{0});
+    EXPECT_EQ(ctx.sequence_num, uint8_t{0});
+    EXPECT_EQ(ctx.packets_sent, uint32_t{0});
+    EXPECT_NE(avb_entity::serialize_am824_raw(ctx, frame, 6, 0, 1'000, am824_render(8), /*timestamp_uncertain=*/true), size_t{0});
+    EXPECT_TRUE(avtp::am824_parse_header(frame)->stream_header.tu());
+    EXPECT_NE(avb_entity::serialize_am824_raw(ctx, frame, 6, 6, 126'000, am824_render(8)), size_t{0});
+    EXPECT_FALSE(avtp::am824_parse_header(frame)->stream_header.tu());
+}
+
+// A 96 kHz AM824 stream under a 48 kHz media clock (reformatted from 48 kHz) is labelled 96 kHz on
+// the wire by both the raw and the float paths; the raw frame is the tagged frame around what
+// serialize_am824_raw builds, and a refused commit consumes no sequence number.
+TEST(talker_port, am824_frames_carry_the_streams_own_rate)
+{
+    avb_entity::TestStreamPort port{kPortMac};
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, avtp::make_am824_stream_format(2, 2)), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, avtp::make_am824_stream_format(4, 2))).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    auto* slot = talker.slot_for(0);
+    EXPECT_TRUE(slot != nullptr && slot->am824.has_value());
+
+    auto twin = *slot->am824;
+    uint64_t const pts = 0x0000'0002'0000'1000ULL;
+    EXPECT_TRUE(talker.transmit_am824_raw(*slot, 9600, pts, 12, am824_render(2)));
+    std::array<uint8_t, 512> expected{};
+    size_t const len = avb_entity::serialize_am824_raw(twin, expected, 12, 9600, pts, am824_render(2));
+    EXPECT_EQ(len, avtp::Am824Pdu::HEADER_LENGTH + (12U * 2U * 4U));
+    auto const raw = port.pop_tx();
+    EXPECT_TRUE(raw.has_value());
+    EXPECT_TRUE(same_bytes(raw->frame, vlan_frame(std::span{expected}.first(len), 2, 3)));
+    auto const raw_pdu = avtp::am824_parse_header(std::span<uint8_t const>{raw->frame}.subspan(18));
+    EXPECT_TRUE(raw_pdu.has_value() && raw_pdu->sample_rate() == avtp::Am824SampleRate::rate_96_khz);
+
+    std::vector<float> const src(12U * 2U, 0.25F);
+    talker.transmit_am824(*slot, 1'000'000, 12, src);
+    auto const decoded = port.pop_tx();
+    EXPECT_TRUE(decoded.has_value());
+    auto const float_pdu = avtp::am824_parse_header(std::span<uint8_t const>{decoded->frame}.subspan(18));
+    EXPECT_TRUE(float_pdu.has_value() && float_pdu->sample_rate() == avtp::Am824SampleRate::rate_96_khz);
+
+    port.refuse_commits(true);
+    uint8_t const seq = slot->am824->sequence_num;
+    EXPECT_FALSE(talker.transmit_am824_raw(*slot, 9612, pts + 125'000, 12, am824_render(2)));
+    EXPECT_EQ(slot->am824->sequence_num, seq);
+    port.refuse_commits(false);
+
+    // not an AM824 slot: nothing sent
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_FALSE(talker.transmit_am824_raw(*talker.slot_for(1), 0, pts, 12, am824_render(2)));
+    EXPECT_EQ(port.tx_pending(), size_t{0});
+}

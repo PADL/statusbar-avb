@@ -210,6 +210,11 @@ struct TalkerStreams
     /// sent, nor the sequence advanced, for a non-AAF slot, no port frame, or @p render false.
     auto transmit_aaf_raw(
         TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
+    /// Send one IEC 61883-6 AM824 packet of @p frames data blocks, the first at sample index @p first_index
+    /// presented at @p pts_ns, its payload filled by @p render (see serialize_am824_raw). Media-timer
+    /// thread; true if sent. As transmit_aaf_raw for a non-AM824 slot, no port frame or a refused render.
+    auto transmit_am824_raw(
+        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
     /// Commit @p frame, a prefix of the port's tx_begin window, on @p slot
     /// (VLAN-tagged, pcap-stamped) and count it; false, counting nothing, when
     /// the port refuses it (no port: only counted). Media-timer thread.
@@ -279,6 +284,18 @@ struct TalkerStreams
 /// or 0 with @p ctx untouched for a format with no byte layout, a short @p frame or @p render false.
 [[nodiscard]] auto serialize_aaf_raw(
     avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> frame,
+    uint16_t frames,
+    uint64_t first_index,
+    uint64_t pts_ns,
+    StreamRawRenderFn const& render,
+    bool timestamp_uncertain = false) -> size_t;
+
+/// Build one IEC 61883-6 AM824 frame of @p frames blocks from sample index @p first_index (the DBC, mod 256)
+/// at @p pts_ns (no offset added); @p render writes frames x channels big-endian quadlets. Returns the
+/// length (sequence advanced), or 0 with @p ctx untouched for > 32 blocks, a short @p frame or @p render false.
+[[nodiscard]] auto serialize_am824_raw(
+    avtp::Am824StreamOutputContext& ctx,
     std::span<uint8_t> frame,
     uint16_t frames,
     uint64_t first_index,
