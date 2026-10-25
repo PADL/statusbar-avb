@@ -278,7 +278,9 @@ using StreamConsumeFn =
 
 /// Per-stream CRF ingest: one received CRF timestamp (a full 64-bit gPTP media clock event time), its
 /// index within the PDU, the local gPTP receive time and the PDU's mr bit as sent (IEEE 1722-2016
-/// Clause 10.4): a change of @p mr from the last PDU's is a media clock restart. Reactor/RX thread.
-using StreamCrfFn = sg14::inplace_function<void(uint64_t crf_timestamp_ns, uint16_t index_in_pdu, int64_t rx_gptp_ns, bool mr), 64>;
+/// Clause 10.4): a change of @p mr from the last PDU's is a media clock restart. @p source is 1 from
+/// the input's first timestamp and steps on each ACMP connection or change of stream_id. RX thread.
+using StreamCrfFn = sg14::
+    inplace_function<void(uint64_t crf_timestamp_ns, uint16_t index_in_pdu, int64_t rx_gptp_ns, bool mr, uint32_t source), 64>;
 
 }  // namespace statusbar::avb_entity
