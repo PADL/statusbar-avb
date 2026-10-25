@@ -749,3 +749,52 @@ TEST(talker_port, am824_frames_carry_the_streams_own_rate)
     EXPECT_FALSE(talker.transmit_am824_raw(*talker.slot_for(1), 0, pts, 12, am824_render(2)));
     EXPECT_EQ(port.tx_pending(), size_t{0});
 }
+
+// A stream re-shaped from AAF to AM824 and back (reformat_stream) sends the new kind's PDUs, its
+// sequence numbers going on across each change; the AAF reframer goes and comes with the kind.
+TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numbers)
+{
+    avb_entity::TestStreamPort port{kPortMac};
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    constexpr uint64_t AAF_48K_INT32_2CH = 0x0205022000806000ULL;
+    EXPECT_TRUE(talker.open_stream(spec_of(0, AAF_48K_INT32_2CH), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    auto* const slot = talker.slot_for(0);
+    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
+    std::vector<std::pair<uint8_t, uint8_t>> sent;  // (subtype, sequence_num)
+    auto const pop = [&port, &sent] {
+        while (auto const frame = port.pop_tx()) {
+            sent.emplace_back(frame->frame[18], frame->frame[18 + 2]);
+        }
+    };
+    uint64_t index = 0;
+    for (int i = 0; i < 3; ++i, index += 6) {
+        EXPECT_TRUE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
+    }
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, avtp::make_am824_stream_format(2, 2))).has_value());
+    EXPECT_TRUE(slot->am824.has_value() && !slot->aaf.has_value() && !slot->reframer.has_value());
+    EXPECT_FALSE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
+    for (int i = 0; i < 2; ++i, index += 6) {
+        EXPECT_TRUE(talker.transmit_am824_raw(*slot, index, 1'000'000 + index, 6, am824_render(2)));
+    }
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, AAF_48K_INT32_2CH)).has_value());
+    EXPECT_TRUE(slot->aaf.has_value() && !slot->am824.has_value() && slot->reframer.has_value());
+    EXPECT_FALSE(talker.transmit_am824_raw(*slot, index, 1'000'000 + index, 6, am824_render(2)));
+    EXPECT_TRUE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
+    pop();
+    EXPECT_EQ(sent.size(), size_t{6});
+    for (size_t i = 0; i < sent.size(); ++i) {
+        bool const am824 = i == 3 || i == 4;
+        EXPECT_EQ(sent[i].first, am824 ? avtp::AvtpSubtype::iec_61883_iidc : avtp::AvtpSubtype::aaf);
+        EXPECT_EQ(sent[i].second, static_cast<uint8_t>(i));
+    }
+    auto const crf = spec_of(0, 0x041060010000BB80ULL);
+    EXPECT_FALSE(talker.reformat_stream(crf).has_value());  // never to CRF
+    EXPECT_TRUE(slot->aaf.has_value());
+}

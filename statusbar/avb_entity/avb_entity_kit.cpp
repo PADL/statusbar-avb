@@ -476,10 +476,12 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
     if (spec->format_word == format) {
         return atdecc::AEM_STATUS_SUCCESS;
     }
-    // The stream's kind, at any rate: an audio stream's format changes, a CRF's never.
+    // An audio stream's format changes at any rate and between AAF and AM824; a CRF's never.
     auto const updated = with_format(*spec, format);
-    bool const audio = updated.format.kind == StreamKind::aaf || updated.format.kind == StreamKind::am824;
-    if (!audio || updated.format.kind != spec->format.kind) {
+    if (!kind_change_allowed(spec->format.kind, updated.format.kind)) {
+        return atdecc::AEM_STATUS_BAD_ARGUMENTS;  // a listed format this stream cannot carry (IEEE 1722.1-2021 Clause 7.4.9)
+    }
+    if (!is_audio_kind(updated.format.kind)) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Milan v1.2 Section 5.4.2.7.
@@ -529,6 +531,9 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
         return status;
     }
     *spec = updated;
+    if (updated.format.kind != original.format.kind) {
+        rejoin_static_rx_groups();
+    }
     if (output) {
         // The handler records the format after this hook; the identity it maps is checked against it.
         (void)storage_handler_.set_runtime_stream_format(
@@ -545,6 +550,42 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
         update_talker_declarations(steady_now_ns(), true);  // its TSpec
     }
     return atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::static_rx_group(StreamSpec const& spec) const noexcept -> ieee::Eui48
+{
+    auto const* const slot = is_audio_kind(spec.format.kind) ? std::as_const(*talker_).slot_of(spec.format.kind) : nullptr;
+    return slot != nullptr ? slot->dest_mac : ieee::Eui48{};
+}
+
+void AvbEntityKit::rejoin_static_rx_groups()
+{
+    StreamPort* const port = listener_ != nullptr ? listener_->port_ : nullptr;
+    if (port == nullptr) {
+        return;
+    }
+    auto const before = rx_static_groups_;
+    for (size_t i = 0; i < rx_static_groups_.size() && i < listener_specs_.size(); ++i) {
+        rx_static_groups_[i] = static_rx_group(listener_specs_[i]);
+    }
+    // A port's memberships may not be counted (AF_XDP): a group goes once nothing holds it, statically
+    // or by an ACMP connection, and a new one comes once.
+    auto const connected = [this](ieee::Eui48 const& group) {
+        return std::ranges::any_of(listener_specs_, [this, &group](StreamSpec const& spec) {
+            auto const* const stream = host_.components().acmp_listener.get_stream(spec.index);
+            return stream != nullptr && stream->connected && stream->stream_dest_mac == group;
+        });
+    };
+    for (auto const& group : before) {
+        if (group != ieee::Eui48{} && std::ranges::find(rx_static_groups_, group) == rx_static_groups_.end() && !connected(group)) {
+            (void)port->leave_multicast(group);
+        }
+    }
+    for (auto const& group : rx_static_groups_) {
+        if (group != ieee::Eui48{} && std::ranges::find(before, group) == before.end()) {
+            (void)port->join_multicast(group);
+        }
+    }
 }
 
 auto AvbEntityKit::talkers_fit(uint16_t const index, uint64_t const word) const noexcept -> bool
@@ -1317,7 +1358,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         // output's group (the loopback topology listens on its own output
         // group); everything else joins dynamically on ACMP connect (a zero
         // MAC just opens the socket).
-        sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_groups{};
+        auto& rx_groups = rx_static_groups_;
+        rx_groups.clear();
         for (auto const& spec : listener_specs_) {
             if (auto status = listener_->open_stream(spec); !status) {
                 return status;
@@ -1325,12 +1367,7 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
             if (spec.format.kind == StreamKind::crf) {
                 listener_->set_crf(spec.index, crf_recovery_.make_consumer());
             }
-            ieee::Eui48 group{};
-            bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
-            if (auto const* slot = is_audio ? talker_->slot_of(spec.format.kind) : nullptr; slot != nullptr) {
-                group = slot->dest_mac;
-            }
-            (void)rx_groups.try_push_back(group);
+            (void)rx_groups.try_push_back(static_rx_group(spec));
         }
         // The handler is kept for the tool's SCHED_FIFO RX timer
         // (drain_stream_rx() with its wake gPTP time), or for the media tick
@@ -1424,6 +1461,7 @@ auto AvbEntityKit::stop() -> Status
     listener_vlan_.release();
 #endif
     rx_on_tick_ = false;
+    rx_static_groups_.clear();
     ports_.close();
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {

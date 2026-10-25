@@ -134,9 +134,10 @@ struct TalkerStreams
     /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
-    /// Re-shape the slot of @p spec.index for @p spec (new format, same stream id and destination,
-    /// fresh sequence). Reactor thread; the slot is locked (SlotGuard) so the media thread skips it.
-    /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
+    /// Re-shape the slot of @p spec.index for @p spec (new format, AAF or AM824, same stream id,
+    /// destination, sequence and sample count). Reactor thread; the slot is locked (SlotGuard) so the
+    /// media thread skips it. Errors (slot unchanged): no such slot, a kind change to or from CRF, or
+    /// a format open_stream would refuse.
     auto reformat_stream(StreamSpec const& spec) -> Status;
 
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT

@@ -60,7 +60,9 @@ SET_STREAM_FORMAT. The data-plane thread enters the slot for each packet with
 and that packet is skipped. The reactor's `lock()` waits for the data-plane
 thread to leave (one packet's work) and keeps it out until `unlock()`. One
 atomic with acquire/release ordering: what the reactor wrote before `unlock()`
-is what the data-plane thread reads after its next `try_enter()`.
+is what the data-plane thread reads after its next `try_enter()`. A receive slot's
+kind (AAF or AM824) also changes only under the lock: the RX thread matches a
+frame to its slot by kind unlocked, then checks the kind again once entered.
 
 ## Receive sinks
 

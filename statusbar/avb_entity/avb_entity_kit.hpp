@@ -545,12 +545,19 @@ class AvbEntityKit
     {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
+    /// The group an input pre-joins at start: the first talker output's of its audio kind, else none
+    /// (the loopback topology listens on its own output group).
+    [[nodiscard]] auto static_rx_group(StreamSpec const& spec) const noexcept -> ieee::Eui48;
+    /// After a kind change, leave each input's pre-joined group that changed and join the new one.
+    void rejoin_static_rx_groups();
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
     AvbEntityAudioIOConfig const& config_;
     StreamSpecs talker_specs_;
     StreamSpecs listener_specs_;
+    /// Each input's pre-joined group (static_rx_group), by listener_specs_ position, from start().
+    sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_static_groups_{};
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
     /// The owning entity's blob-backed descriptor handler; carries the

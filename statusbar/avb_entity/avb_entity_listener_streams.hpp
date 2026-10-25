@@ -50,15 +50,15 @@
 namespace statusbar::avb_entity {
 
 /// One RX stream slot: the StreamSpec that shaped it, its deserialize context
-/// (exactly one of am824/aaf engaged, per spec.format.kind), its data-plane
+/// (exactly one of am824/aaf/crf engaged, per kind), its data-plane
 /// telemetry, and its IEEE 1722.1 STREAM_INPUT health counters. Holds atomics,
 /// so slots are constructed in place and never moved.
 struct ListenerStreamSlot
 {
     StreamSpec spec{};
-    /// spec.format.kind, never changed after open_stream (a re-shape keeps the
-    /// kind): what the RX thread matches frames by, unlocked.
-    StreamKind kind{StreamKind::other};
+    /// spec.format.kind: what the RX thread matches frames by, unlocked. Changes (AAF and AM824
+    /// only) only under the guard, so the RX thread checks it again once entered.
+    std::atomic<StreamKind> kind{StreamKind::other};
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
     std::optional<avtp::CrfStreamInputContext> crf{};
@@ -165,8 +165,9 @@ struct ListenerStreams
     auto open_stream(StreamSpec const& spec) -> Status;
 
     /// Re-shape the slot of @p spec.index for @p spec (Milan v1.2 Section 4.4.2.2), keeping its
-    /// consumers and counters. Reactor thread; the slot is locked (SlotGuard) so RX drops its frames.
-    /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
+    /// consumers and counters; an audio slot may change kind (AAF, AM824). Reactor thread; the slot
+    /// is locked (SlotGuard) so RX drops its frames. Errors (slot unchanged): no such slot, a kind
+    /// change to or from CRF, or a format open_stream would refuse.
     auto reformat_stream(StreamSpec const& spec) -> Status;
 
     /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:

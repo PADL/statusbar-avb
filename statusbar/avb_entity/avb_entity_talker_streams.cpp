@@ -94,7 +94,7 @@ auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
     if (slot == nullptr) {
         return failure(std::errc::no_such_device);
     }
-    if (spec.format.kind != slot->spec.format.kind) {
+    if (!kind_change_allowed(slot->spec.format.kind, spec.format.kind)) {
         return failure(std::errc::invalid_argument);
     }
     if (spec.format.kind == StreamKind::crf || spec.format.kind == StreamKind::other) {
@@ -108,6 +108,17 @@ auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
         return status;
     }
     SlotGuard::Lock const lock{guards_[spec.index]};
+    // The stream goes on: its sequence number and sample count (the AM824 DBC) carry over.
+    uint8_t const sequence = slot->aaf ? slot->aaf->sequence_num : slot->am824 ? slot->am824->sequence_num : 0;
+    uint32_t const samples = slot->aaf ? slot->aaf->running_sample_count : slot->am824 ? slot->am824->running_dbc : 0;
+    if (trial.aaf) {
+        trial.aaf->sequence_num = sequence;
+        trial.aaf->running_sample_count = samples;
+    }
+    if (trial.am824) {
+        trial.am824->sequence_num = sequence;
+        trial.am824->running_dbc = samples;
+    }
     slot->am824 = trial.am824;
     slot->aaf = trial.aaf;
     slot->reframer = std::move(trial.reframer);

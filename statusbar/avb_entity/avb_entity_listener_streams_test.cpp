@@ -857,4 +857,97 @@ TEST(listener_timed, am824_raw_delivery_through_on_stream_rx_frame)
     EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
 }
 
+// An AAF input re-shaped to AM824 and back (reformat_stream): each kind's frames land while it is the
+// slot's, the other kind's are not matched (none parsed as the wrong kind), and a frame arriving while
+// the reactor holds the slot is dropped.
+TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const aaf_spec = audio_specs()[1];
+    uint32_t const rate_hz = aaf_spec.format.sample_rate_hz;
+    StreamSpec am824_spec = aaf_spec;
+    am824_spec.format_word = avtp::make_am824_stream_format(rate_hz == 96000 ? 4 : 2, 2);
+    am824_spec.format = decode_stream_format(am824_spec.format_word);
+    EXPECT_TRUE(am824_spec.format.kind == StreamKind::am824 && am824_spec.format.sample_rate_hz == rate_hz);
+    std::atomic<uint64_t> gptp{0};
+    RecordingSink sink;
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    ls.set_timed_audio_sink(&sink);
+    auto* const slot = ls.slot_for(1);
+
+    auto const spp = static_cast<uint16_t>(class_a_samples_per_packet(rate_hz));
+    avtp::AafStreamOutputContext aaf_tx{
+        kAafId,
+        aaf_spec.format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(rate_hz),
+        aaf_spec.format.channels,
+        aaf_spec.format.bit_depth,
+        0};
+    avtp::Am824StreamOutputContext am824_tx{kAafId, *avtp::am824_sample_rate_from_hz(rate_hz), 2, 0};
+    uint64_t const t0 = 9'000'000'000ULL;
+    auto const now = static_cast<int64_t>(t0 - 1'000'000);
+    uint64_t k = 0;
+    auto const aaf = [&] { return aaf_frame(aaf_tx, spp, t0 + (k++ * 125'000)); };
+    auto const am824 = [&] {
+        auto frame = am824_frame(am824_tx, spp, k * spp, t0 + (k * 125'000));
+        ++k;
+        return frame;
+    };
+
+    ls.on_stream_rx_frame(aaf(), now);
+    ls.on_stream_rx_frame(am824(), now);  // not this slot's kind yet
+    EXPECT_EQ(sink.seen.size(), size_t{1});
+
+    EXPECT_TRUE(ls.reformat_stream(am824_spec).has_value());
+    EXPECT_TRUE(slot->kind.load() == StreamKind::am824 && slot->am824.has_value() && !slot->aaf.has_value());
+    ls.on_stream_rx_frame(am824(), now);
+    ls.on_stream_rx_frame(aaf(), now);  // no longer this slot's kind
+    slot->guard.lock();
+    ls.on_stream_rx_frame(am824(), now);  // the reactor holds the slot: dropped
+    slot->guard.unlock();
+    ls.on_stream_rx_frame(am824(), now);
+    EXPECT_EQ(sink.seen.size(), size_t{3});
+
+    EXPECT_TRUE(ls.reformat_stream(aaf_spec).has_value());
+    EXPECT_TRUE(slot->kind.load() == StreamKind::aaf && slot->aaf.has_value() && !slot->am824.has_value());
+    ls.on_stream_rx_frame(am824(), now);
+    ls.on_stream_rx_frame(aaf(), now);
+    EXPECT_EQ(sink.seen.size(), size_t{4});
+
+    if (sink.seen.size() == 4) {
+        EXPECT_TRUE(sink.seen[0].packet.fmt == StreamAudioFormat::aaf_int32);
+        EXPECT_TRUE(sink.seen[1].packet.fmt == StreamAudioFormat::am824_mbla);
+        EXPECT_TRUE(sink.seen[2].packet.fmt == StreamAudioFormat::am824_mbla);
+        EXPECT_TRUE(sink.seen[3].packet.fmt == StreamAudioFormat::aaf_int32);
+        EXPECT_EQ(sink.seen[1].packet.channels, uint16_t{2});
+        EXPECT_EQ(sink.seen[1].packet.frames, uint32_t{spp});
+        EXPECT_EQ(sink.seen[3].packet.channels, aaf_spec.format.channels);
+    }
+    EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
+    EXPECT_EQ(slot->rx_bad.load(), uint64_t{0});
+    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{0});
+}
+
+// A CRF slot never changes kind, nor an audio slot to CRF.
+TEST(listener_kind, crf_kind_changes_are_refused)
+{
+    auto donor = make_donor();
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    StreamSpec crf{};
+    crf.index = 1;
+    crf.format_word = CRF_MILAN_48K;
+    crf.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(crf).has_value());
+    StreamSpec to_crf = crf;
+    to_crf.index = 0;
+    EXPECT_FALSE(ls.reformat_stream(to_crf).has_value());
+    EXPECT_TRUE(ls.slot_for(0)->kind.load() == StreamKind::aaf && ls.slot_for(0)->aaf.has_value());
+    StreamSpec to_aaf = make_aaf_spec(1);
+    EXPECT_FALSE(ls.reformat_stream(to_aaf).has_value());
+    EXPECT_TRUE(ls.slot_for(1)->kind.load() == StreamKind::crf && ls.slot_for(1)->crf.has_value());
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

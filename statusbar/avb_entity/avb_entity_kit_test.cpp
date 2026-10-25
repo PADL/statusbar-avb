@@ -98,11 +98,15 @@ constexpr auto base_format(uint32_t const rate, uint16_t const channels) -> uint
 }
 static_assert(base_format(48000, 2) == 0x0205022000806000ULL && base_format(96000, 8) == 0x020702200200C000ULL);
 
+/// IEC 61883-6 AM824, 8 MBLA channels at 48 kHz (SFC 2).
+constexpr uint64_t AM824_8CH_48K = avtp::make_am824_stream_format(2, 8);
+
 /// A multi-rate model: 8 ch INT_24 output and input (+ CRF each) at 48/96 kHz.
 /// With @p ports, STREAM_PORT_INPUT 0 has eight 1-channel clusters and no
 /// AUDIO_MAP, plus every Milan v1.2 Section 5.3.13 name's descriptor. With
 /// @p one_rate the unit lists 48 kHz only and STREAM_PORT_OUTPUT 0 is dynamic.
-auto make_multirate_blob(bool const ports = false, bool const one_rate = false) -> std::vector<uint8_t>
+/// With @p am824 both audio streams also list AM824_8CH_48K.
+auto make_multirate_blob(bool const ports = false, bool const one_rate = false, bool const am824 = false) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -125,11 +129,19 @@ auto make_multirate_blob(bool const ports = false, bool const one_rate = false) 
                 }
             }
         }
+        if (am824) {
+            // And each kind the other stream has, which the kit refuses.
+            (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(AM824_8CH_48K));
+            (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(CRF_MILAN_48K));
+        }
         w.add(0, type, 0, wire(stream));
         atdecc::aem::DescriptorStream crf{};
         crf.descriptor_type = type;
         crf.descriptor_index = 1;
         crf.current_format.from_uint64(CRF_MILAN_48K);
+        if (am824) {
+            (void)crf.push_stream_format(ieee::Eui64{}.from_uint64(AM824_8CH_48K));
+        }
         w.add(0, type, 1, wire(crf));
     }
     atdecc::aem::DescriptorAudioUnit unit{};
@@ -1443,8 +1455,12 @@ auto rate_body(uint32_t const rate) -> std::array<uint8_t, 8>
 struct RateKit : PersistentKit
 {
     explicit RateKit(
-        std::string const& path = {}, uint64_t const entity_low = 0x70, bool const ports = false, bool const one_rate = false)
-        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate)}
+        std::string const& path = {},
+        uint64_t const entity_low = 0x70,
+        bool const ports = false,
+        bool const one_rate = false,
+        bool const am824 = false)
+        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate, am824)}
     {
         kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
             formats.push_back({type, index, format});
@@ -2993,4 +3009,97 @@ TEST(avb_entity_kit_stream_port, the_transport_fallback_is_recorded)
         EXPECT_TRUE(k.kit.stream_rx_error() != k.kit.stream_xdp_error());
         EXPECT_TRUE(k.kit.stream_transport_in_force() == StreamTransport::packet);
     }
+}
+
+// --- An audio stream's kind (AAF, AM824) ---------------------------------------
+
+// SET_STREAM_FORMAT moves a stream that lists both kinds between AAF and AM824
+// while it is not running: the entity is told, controllers notified, the format
+// reads back, and the TX slot's sequence number and sample count go on
+TEST(avb_entity_kit_kind, an_audio_stream_switches_between_aaf_and_am824)
+{
+    RateKit m{{}, 0x74, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    auto const set = [&m](uint16_t const type, uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, word));
+    };
+
+    m.kit.talker().slot_for(0)->aaf->sequence_num = 41;
+    m.kit.talker().slot_for(0)->aaf->running_sample_count = 600;
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).size(), size_t{1});
+    EXPECT_TRUE(m.formats.size() == 1 && m.formats.back().fields.kind == StreamKind::am824);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), AM824_8CH_48K);
+    auto const* out = m.kit.talker().slot_for(0);
+    EXPECT_TRUE(out->am824.has_value() && !out->aaf.has_value() && !out->reframer.has_value());
+    EXPECT_EQ(out->am824->sequence_num, uint8_t{41});
+    EXPECT_EQ(out->am824->running_dbc, uint32_t{600});
+    EXPECT_EQ(
+        AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size,
+        srp_max_frame_size(decode_stream_format(AM824_8CH_48K)));
+
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    auto const* in = m.kit.listener()->slot_for(0);
+    EXPECT_TRUE(in->kind.load() == StreamKind::am824 && in->am824.has_value() && !in->aaf.has_value());
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), AM824_8CH_48K);
+
+    m.kit.talker().slot_for(0)->am824->sequence_num = 7;
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(out->aaf.has_value() && !out->am824.has_value() && out->reframer.has_value());
+    EXPECT_EQ(out->aaf->sequence_num, uint8_t{7});
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(in->kind.load() == StreamKind::aaf && in->aaf.has_value() && !in->am824.has_value());
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K);
+    EXPECT_EQ(m.formats.size(), size_t{4});
+}
+
+// Milan v1.2 Section 5.4.2.7: a streaming output keeps its kind as any format;
+// a CRF stream never changes kind, nor an audio stream to CRF
+TEST(avb_entity_kit_kind, refused_while_running_and_for_crf)
+{
+    RateKit m{{}, 0x75, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.start_ready());
+    auto const set = [&m](uint16_t const type, uint16_t const index, uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, index, word));
+    };
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::steady_ns()));
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, 0, AM824_8CH_48K), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf.has_value());
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    EXPECT_TRUE(m.formats.empty());
+
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, 1, AM824_8CH_48K), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, 1, AM824_8CH_48K), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, 0, CRF_MILAN_48K), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 1), CRF_MILAN_48K);
+    EXPECT_TRUE(m.formats.empty());
+    EXPECT_TRUE(m.kit.talker().slot_for(1)->crf.has_value());
+    EXPECT_TRUE(m.kit.listener()->slot_for(0)->kind.load() == StreamKind::aaf);
+}
+
+// An input pre-joins the group of the first talker output of its kind: a kind
+// change on either side leaves the old group and joins the new one
+TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
+{
+    TestStreamPort port{ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x76}};
+    RateKit m{{}, 0x76, false, false, /*am824=*/true};
+    m.kit.bind_stream_port(port);
+    EXPECT_TRUE(m.start_ready());
+    auto const group = m.kit.talker().slot_for(0)->dest_mac;
+    auto const joined = [&port, group] { return std::ranges::find(port.joined(), group) != port.joined().end(); };
+    auto const set = [&m](uint16_t const type, uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, word));
+    };
+    EXPECT_TRUE(joined());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(joined());  // no AM824 output
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(joined());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(joined());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(joined());
 }
