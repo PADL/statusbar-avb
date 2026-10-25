@@ -155,37 +155,26 @@ its media clock's rate; a stream at another rate is sent from the entity's own
 clock with `transmit_aaf_raw`). `ListenerStreams` measures each input's media
 lock at its own format's rate.
 
-A talker format, or a sampling rate, that raises every talker's TSpec bandwidth
-together (Milan v1.2 Table 4.4, the shaper's arithmetic) past the class A
-budget, 75% of `link_mbps()` (IEEE 802.1Q-2022 Clause 34.3.1; the shaper keeps
-the speed current, 1000 Mbit/s until it does), is refused NO_RESOURCES. Every
+A talker format that raises every talker's TSpec bandwidth together (Milan
+v1.2 Table 4.4, the shaper's arithmetic) past the class A budget, 75% of
+`link_mbps()` (IEEE 802.1Q-2022 Clause 34.3.1; the shaper keeps the speed
+current, 1000 Mbit/s until it does), is refused NO_RESOURCES. Every
 talker counts, admitted or not: an output's format changes only while it does
 not stream, so the check is the last chance to keep them all admissible.
 Milan v1.2 Section 5.4.2.7 names no status for this. Listeners do not count.
 
-SET_SAMPLING_RATE to the unit's current rate is a no-op SUCCESS, and a rate the
-AUDIO_UNIT does not list is NOT_SUPPORTED (the storage handler). A unit that
-lists one rate therefore keeps it: Milan v1.2 Section 5.4.2.13 requires the
+SET_SAMPLING_RATE to the unit's current rate is a no-op SUCCESS; any other rate
+is NOT_SUPPORTED, whether the AUDIO_UNIT lists it (the kit) or not (the storage
+handler). The kit re-times no unit: Milan v1.2 Section 5.4.2.13 requires the
 command per Audio Unit and Section 5.3.3.3 only that the list report the rates
-the unit supports. For a unit that lists more, SET_SAMPLING_RATE (AUDIO_UNIT 0,
-the kit's one media clock) re-times every AAF stream at the unit's rate to the
-new rate (a stream at another rate stays as it is), so it is taken only when
-each lists its format at that rate, and refused STREAM_IS_RUNNING while any
-input is bound or any output streams (each re-timing is a SET_STREAM_FORMAT that
-would be, and the talker's media clock is re-clocked). The entity's hook (`set_on_sampling_rate_changed`) stops whatever reads the
-kit's streams (its media thread, the RX drain), calls `apply_sampling_rate()`,
-rebuilds its data plane, and answers; a refusal after applying applies the old
-rate back, and a hook that accepts without applying has it applied for it. The
-storage handler records the rate once the hook answers. The streams re-timed
-are notified after the command's response to every registered controller (the
-requester too: it did not ask for them), each as if a controller had sent its
-SET_STREAM_FORMAT (Milan v1.2 Section 5.4.5.2). Without a hook only the kit's
-rate is taken. Both are persisted, rate first, then formats.
+the unit supports, so a unit lists one rate and keeps it, and a stream runs at
+another rate through its own format (above). A model whose unit lists more is
+answered honestly: the other rates are refused, never taken without the data
+plane following. The unit's rate is not persisted.
 
-`request_sampling_rate` and `request_entity_name` serve the same changes for a
-host's own control socket; they are applied with the same checks and hooks as
-the ATDECC commands, every registered controller is notified and the value is
-saved.
+`request_entity_name` serves SET_NAME for a host's own control socket: it is
+applied with the same checks as the ATDECC command, every registered controller
+is notified and the value is saved.
 
 ## Dynamic audio mappings
 
@@ -203,7 +192,7 @@ stays empty until its owner restores them (a controller's ADD, or the entity's
 Every STREAM_PORT_OUTPUT without a static AUDIO_MAP carries the kit's own
 identity, built as the input default from STREAM_OUTPUT k, while stream k is at
 the unit's rate, and none otherwise; the kit re-derives it after every format
-or rate change, told to the registered controllers as unsolicited
+change, told to the registered controllers as unsolicited
 REMOVE/ADD_AUDIO_MAPPINGS. GET_AUDIO_MAP answers it; a controller's ADD or
 REMOVE is NOT_SUPPORTED (Section 5.3.9.1). It is not persisted: it follows the
 formats. A model's static output maps stay as they are and keep their streams
@@ -227,7 +216,7 @@ With `persistent_state_path` set, `start()` loads the file before the control
 plane advertises and applies what it holds through the same validation a
 controller's command gets (a saved value the model no longer takes is dropped
 with a warning). From then on the kit rewrites it after every change: a
-successful SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE, SET_CLOCK_SOURCE or
+successful SET_NAME, SET_STREAM_FORMAT, SET_CLOCK_SOURCE or
 presentation offset command, a listener binding made or removed, a
 SET_SYSTEM_UNIQUE_ID or SET_MEDIA_CLOCK_REFERENCE_INFO. Nothing is written when
 the file already says it. See [PERSISTENT_STATE.md](PERSISTENT_STATE.md).
@@ -277,9 +266,6 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
 
 ## Notes on the kit's event wiring
 
-- SET_STREAM_FORMAT notifications after a sampling-rate change carry the
-  response body of a SET_STREAM_FORMAT: a controller such as la_avdecc takes a
-  format change from an unsolicited SET_STREAM_FORMAT, not from a GET's.
 - A stream streams only while declaring its Talker Advertise (Milan v1.2
   Section 5.3.7.3): a Listener still registered for a withdrawn stream (in its
   re-declare hold, or with the control plane down) opens nothing. When the

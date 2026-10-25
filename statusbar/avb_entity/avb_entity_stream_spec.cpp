@@ -7,7 +7,6 @@
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
 
-#include <bit>
 #include <system_error>
 
 namespace statusbar::avb_entity {
@@ -117,24 +116,6 @@ auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t const fallback_
         return failure(std::errc::no_message);  // no audio stream and no fallback
     }
     return success(rate);
-}
-
-auto aaf_format_at_rate(uint64_t const word, uint32_t const rate_hz) noexcept -> std::optional<uint64_t>
-{
-    if (decode_stream_format(word).kind != StreamKind::aaf) {
-        return std::nullopt;
-    }
-    auto const nsr = avtp::aaf_sample_rate_from_hz(rate_hz);
-    if (!nsr) {
-        return std::nullopt;
-    }
-    auto fields = avtp::AafStreamFormat::from_u64(word);
-    fields.nsr_field.set_bits(uint8_t{0x0F}, 0, static_cast<uint8_t>(*nsr));
-    if (fields.samples_per_frame() != 0) {
-        fields.packing.set_bits(
-            avtp::AafStreamFormat::SAMPLES_MASK, avtp::AafStreamFormat::SAMPLES_SHIFT, class_a_samples_per_packet(rate_hz));
-    }
-    return std::bit_cast<ieee::octlet_t>(fields).get();
 }
 
 auto with_format(StreamSpec const& spec, uint64_t const word) noexcept -> StreamSpec

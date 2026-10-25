@@ -139,14 +139,6 @@ struct TalkerStreams
     /// Errors (slot unchanged): no such slot, a kind change, or a format open_stream would refuse.
     auto reformat_stream(StreamSpec const& spec) -> Status;
 
-    /// The media clock's rate (config_.sample_rate) and its class A samples per
-    /// packet, for a SET_SAMPLING_RATE. Same discipline as reformat_stream.
-    void set_sample_rate(uint32_t const sample_rate) noexcept
-    {
-        config_.sample_rate = sample_rate;
-        samples_per_packet_ = sample_rate / CLASS_A_PACKETS_PER_SEC;
-    }
-
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
     /// descriptor index == ACMP talker unique id), or nullptr.
     [[nodiscard]] auto slot_for(uint16_t stream_index) noexcept -> TalkerStreamSlot*;
