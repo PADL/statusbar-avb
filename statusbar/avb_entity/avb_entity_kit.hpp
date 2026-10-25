@@ -420,6 +420,12 @@ class AvbEntityKit
     {
         return host_.note_clock_domain_locked(clock_domain_index, locked);
     }
+    /// The entity stops reporting CLOCK_DOMAIN @p clock_domain_index; domain 0 follows gPTP again
+    /// (AvbEntityHost::release_clock_domain_lock). False for a domain the model lacks. Reactor thread.
+    [[nodiscard]] auto release_clock_domain_lock(uint16_t const clock_domain_index) -> bool
+    {
+        return host_.release_clock_domain_lock(clock_domain_index);
+    }
 
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// CLOCK_DOMAIN 0's active clock-source index (runtime SET_CLOCK_SOURCE

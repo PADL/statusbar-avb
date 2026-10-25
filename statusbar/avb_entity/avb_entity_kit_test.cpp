@@ -3276,3 +3276,42 @@ TEST(avb_entity_kit_clock_source, clock_domain_counters_follow_the_host_lock)
     EXPECT_TRUE(after.counters[1].get() >= before.counters[1].get());
     EXPECT_FALSE(m.kit.note_clock_domain_locked(2, true));
 }
+
+// Released, CLOCK_DOMAIN 0 follows gPTP again from its lock as it is now; another domain counts as
+// unlocked and reports no counters until the entity notes it again.
+TEST(avb_entity_kit_clock_source, a_released_clock_domain_hands_its_counters_back)
+{
+    using atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
+    MilanKit m{std::nullopt, 0x83, true, make_clock_domains_blob()};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_TRUE(m.kit.host().gptp_locked());
+    auto const start = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(0, false));
+    m.kit.on_link_down(sm::Clock::now());  // the entity's domain 0: gPTP's loss does not count
+    m.kit.on_link_up(sm::Clock::now());
+    m.kit.on_gptp_announce(sm::Clock::now(), true);
+    auto c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
+    EXPECT_EQ(c.counters[0].get(), start.counters[0].get());
+    EXPECT_EQ(c.counters[1].get(), start.counters[1].get() + 1);
+
+    EXPECT_TRUE(m.kit.release_clock_domain_lock(0));  // gPTP is locked: one LOCKED
+    c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
+    EXPECT_EQ(c.counters_valid.get(), 0x3U);
+    EXPECT_EQ(c.counters[0].get(), start.counters[0].get() + 1);
+    m.kit.on_link_down(sm::Clock::now());  // gPTP's again
+    c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
+    EXPECT_EQ(c.counters[1].get(), start.counters[1].get() + 2);
+    EXPECT_TRUE(m.kit.release_clock_domain_lock(0));  // already gPTP's: no transition
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0).counters[1].get(), start.counters[1].get() + 2);
+
+    // Domain 1 released while locked counts UNLOCKED, so its next lock counts again.
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1).counters_valid.get(), 0x3U);
+    EXPECT_TRUE(m.kit.release_clock_domain_lock(1));
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1).counters_valid.get(), 0U);
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1);
+    EXPECT_EQ(c.counters[0].get(), 2U);
+    EXPECT_EQ(c.counters[1].get(), 1U);
+    EXPECT_FALSE(m.kit.release_clock_domain_lock(2));
+}

@@ -488,16 +488,44 @@ void AvbEntityHost::count_clock_domain_lock(uint16_t const index, bool const loc
     (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index);
 }
 
-auto AvbEntityHost::note_clock_domain_locked(uint16_t const index, bool const locked) -> bool
+auto AvbEntityHost::has_clock_domain(uint16_t const index) const noexcept -> bool
 {
     auto const* store = descriptor_storage();
     bool const exists =
         store != nullptr ? store->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index).has_value() : index == 0;
-    if (!exists || index >= MAX_CLOCK_DOMAINS) {
+    return exists && index < MAX_CLOCK_DOMAINS;
+}
+
+auto AvbEntityHost::note_clock_domain_locked(uint16_t const index, bool const locked) -> bool
+{
+    if (!has_clock_domain(index)) {
         return false;
     }
     clock_domain_locks_[index].entity_driven = true;
     count_clock_domain_lock(index, locked);
+    return true;
+}
+
+auto AvbEntityHost::release_clock_domain_lock(uint16_t const index) -> bool
+{
+    if (!has_clock_domain(index)) {
+        return false;
+    }
+    auto& domain = clock_domain_locks_[index];
+    if (!domain.entity_driven) {
+        return true;
+    }
+    if (index == 0) {
+        domain.entity_driven = false;
+        count_clock_domain_lock(0, gptp_locked());
+        return true;
+    }
+    bool const was_locked = domain.locked;
+    count_clock_domain_lock(index, false);  // a released domain is unlocked: its next lock counts
+    domain.entity_driven = false;
+    if (!was_locked) {
+        (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index);
+    }
     return true;
 }
 
