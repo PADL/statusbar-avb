@@ -108,6 +108,55 @@ auto aaf_rx_packet(
     return aaf_timed_packet(stream_index, ctx, pdu, payload, frames, pts);
 }
 
+auto am824_timed_packet(
+    uint16_t const stream_index,
+    avtp::Am824StreamInputContext const& ctx,
+    avtp::Am824Pdu const& pdu,
+    std::span<uint8_t const> const payload,
+    uint32_t const frames,
+    uint64_t const pts_ns) noexcept -> StreamRxPacket
+{
+    uint16_t const channels = ctx.config.channel_count;
+    size_t const bytes = size_t{frames} * channels * avtp::Am824Pdu::BYTES_PER_SAMPLE;
+    return StreamRxPacket{
+        .stream_index = stream_index,
+        .fmt = StreamAudioFormat::am824_mbla,
+        .bytes_per_sample = static_cast<uint8_t>(avtp::Am824Pdu::BYTES_PER_SAMPLE),
+        .payload = payload.first(std::min(payload.size(), bytes)),
+        .frames = frames,
+        .channels = channels,
+        .pts_ns = pts_ns,
+        .pts_valid = ctx.has_valid_anchor,
+        .tu = pdu.stream_header.tu(),
+        .mr = pdu.stream_header.mr(),
+        .sequence_num = pdu.sequence_num()};
+}
+
+auto am824_rx_packet(
+    uint16_t const stream_index,
+    avtp::Am824StreamInputContext& ctx,
+    avtp::Am824Pdu const& pdu,
+    std::span<uint8_t const> const payload,
+    uint64_t const gptp_now_ns) noexcept -> StreamRxPacket
+{
+    constexpr size_t MAX_BLOCKS = avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET;
+    uint8_t const channels = ctx.config.channel_count;
+    size_t const blocks = channels == 0 ? 0 : payload.size() / (avtp::Am824Pdu::BYTES_PER_SAMPLE * channels);
+    // The deserializer's admission (avtp::am824_deserialize_mbla).
+    uint8_t const samples = blocks > MAX_BLOCKS ? 0 : static_cast<uint8_t>(blocks);
+    if (!avtp::is_valid_am824_deserialize_params<avtp::Am824Pdu::MAX_CHANNELS, MAX_BLOCKS>(samples, channels)) {
+        return StreamRxPacket{.stream_index = stream_index, .fmt = StreamAudioFormat::am824_mbla, .channels = channels};
+    }
+    ctx.process_packet_header(pdu, samples, gptp_now_ns);
+    return am824_timed_packet(stream_index, ctx, pdu, payload, samples, ctx.compute_base_pts_ns());
+}
+
+auto am824_header_matches_format(StreamFormatFields const& format, avtp::Am824Pdu const& pdu) noexcept -> bool
+{
+    return format.kind == StreamKind::am824 && pdu.channel_count() == format.channels &&
+        avtp::am824_sample_rate_hz(pdu.sample_rate()) == format.sample_rate_hz;
+}
+
 auto ListenerStreams::shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status
 {
     switch (spec.format.kind) {
@@ -366,57 +415,64 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
             update_stream_input_counters(*slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
             return;
         }
-        std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
+        uint8_t const seq = pdu.sequence_num();
+        bool const tv = pdu.stream_header.tv();
+        bool const tu = pdu.stream_header.tu();
+        bool const mr = pdu.stream_header.mr();
+        if (!am824_header_matches_format(slot->spec.format, pdu)) {
+            // Discarded and counted in UNSUPPORTED_FORMAT, as for AAF.
+            update_stream_input_counters(
+                *slot, seq, pdu.avtp_timestamp(), tv, tu, mr, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
+            return;
+        }
+        // The declared audio length, not the Ethernet padding past it.
+        std::span<uint8_t const> const tail = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
+        std::span<uint8_t const> const audio = tail.first(std::min<size_t>(tail.size(), pdu.audio_payload_length()));
         uint64_t samples_this = 0;
-        uint64_t pts_first = 0;
-        avtp::am824_deserialize_mbla(
-            *slot->am824,
-            pdu,
-            audio,
-            static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this, &pts_first, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
-                samples_this = s.size();
-                pts_first = pts;
-                // Kit phase 2: decoded floats + reconstructed PTS reach the
-                // registered per-stream consumer (previously discarded).
-                if (slot->consume) {
-                    slot->consume(ch, s, pts, period);
-                }
-            });
+        if (timed_sink_ != nullptr && !slot->consume) {
+            // Raw-only: the timed sink takes the quadlets as they are; no float decode.
+            auto const packet = am824_rx_packet(slot->spec.index, *slot->am824, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
+            samples_this = packet.frames;
+            if (packet.frames != 0) {
+                timed_sink_->on_listener_packet(packet);
+            }
+        } else {
+            uint64_t pts_first = 0;
+            avtp::am824_deserialize_mbla(
+                *slot->am824,
+                pdu,
+                audio,
+                static_cast<uint64_t>(gptp_now_ns),
+                [&samples_this, &pts_first, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+                    samples_this = s.size();
+                    pts_first = pts;
+                    if (slot->consume) {
+                        slot->consume(ch, s, pts, period);
+                    }
+                });
+            if (timed_sink_ != nullptr && samples_this != 0) {
+                timed_sink_->on_listener_packet(
+                    am824_timed_packet(slot->spec.index, *slot->am824, pdu, audio, static_cast<uint32_t>(samples_this), pts_first));
+            }
+        }
         slot->rx_packets.add(1);
         slot->rx_samples.add(samples_this);
         update_stream_input_counters(
             *slot,
-            pdu.stream_header.sequence_num.get(),
+            seq,
             pdu.avtp_timestamp(),
-            pdu.stream_header.tv(),
-            pdu.stream_header.tu(),
-            pdu.stream_header.mr(),
+            tv,
+            tu,
+            mr,
             /*format_ok=*/true,
             samples_this,
             /*ts_sparse=*/true,  // 61883-6 SYT cadence: tv=0 between SYT packets is normal
             gptp_now_ns);
 
         // Hand the accepted audio to the RX sink (today the WAN tunnel; the sink
-        // decides whether to consume it -- e.g. only when this is the configured
-        // tunnel source). The listener does not know what the sink does with it.
+        // decides whether to consume it). The listener does not know what the sink does with it.
         if (audio_sink_ != nullptr) {
             audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::am824_mbla, audio);
-        }
-        if (timed_sink_ != nullptr && samples_this != 0) {
-            uint16_t const channels = slot->am824->config.channel_count;
-            timed_sink_->on_listener_packet(StreamRxPacket{
-                .stream_index = slot->spec.index,
-                .fmt = StreamAudioFormat::am824_mbla,
-                .bytes_per_sample = 4,
-                .payload = audio.first(std::min(audio.size(), samples_this * 4 * channels)),
-                .frames = static_cast<uint32_t>(samples_this),
-                .channels = channels,
-                .pts_ns = pts_first,
-                .pts_valid = slot->am824->has_valid_anchor,
-                .tu = pdu.stream_header.tu(),
-                .mr = pdu.stream_header.mr(),
-                .sequence_num = pdu.stream_header.sequence_num.get()});
         }
     } else if (slot->aaf) {
         // --- AAF ---

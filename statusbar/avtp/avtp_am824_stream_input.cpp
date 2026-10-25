@@ -18,10 +18,12 @@ void Am824StreamInputContext::reset() noexcept
     last_gptp_time_ns = 0;
     last_anchor_dbc = 0;
     running_dbc = 0;
+    last_sample_count = 0;
     has_valid_anchor = false;
     packets_received = 0;
     timestamp_updates = 0;
     sequence_gaps = 0;
+    dbc_discontinuities = 0;
 }
 
 void Am824StreamInputContext::update_dbc(uint8_t dbc) noexcept
@@ -77,6 +79,10 @@ void Am824StreamInputContext::process_packet_header(Am824Pdu const& pdu, uint8_t
 {
     uint8_t const dbc = pdu.data_block_count();
     update_sequence_num(pdu.sequence_num());
+    if (packets_received > 0 && dbc != static_cast<uint8_t>(last_dbc + last_sample_count)) {
+        ++dbc_discontinuities;
+    }
+    last_sample_count = sample_count;
     update_dbc(dbc);
     update_timestamp(pdu.tv(), pdu.avtp_timestamp(), dbc, gptp_now_ns);
     ++packets_received;

@@ -53,6 +53,48 @@ nominal+1 samples on a wake.
 The raw TX render (`StreamRawRenderFn`) is the fast path alongside the float
 `StreamRenderFn`: the payload is interleaved big-endian samples of the
 stream's AAF format, `payload.size() == frames x channels x bytes per sample`.
+For an AM824 stream it is `frames x channels` quadlets, block by block, each
+the label (0x40, MBLA) and a 24-bit two's-complement sample, big-endian.
+
+## IEC 61883-6 (AM824) streams
+
+The IEC 61883-6 stream-format word (IEEE 1722-2016 Annex I,
+`avtp::Am824StreamFormat`) is: octet 0 the subtype (0x00), octet 1 sf (1),
+fmt (0x10) and r, octet 2 the FDF (evt[7:3], sfc[2:0]), octet 3 DBS, octet 4
+b, nb, ut (up to DBS channels) and sc (synchronous clock), octet 5 the IEC 60958
+label count, octet 6 the MBLA label count, octet 7 the MIDI (high nibble) and
+SMPTE (low nibble) counts. `0x00a0020840000800` is 48 kHz, non-blocking, 8
+MBLA; the MOTU 16A lists `0x00a00N0860000800` (nb, ut) on its inputs and
+`0x00a00N0870000800` (nb, ut, sc) on its outputs.
+
+`decode_stream_format` decodes as `StreamKind::am824` only what the kit
+carries (`am824_format_supported`): AM824 data (evt 0), non-blocking, MBLA
+only (DBS equal to the MBLA count, no IEC 60958, MIDI or SMPTE), 32 to 192
+kHz, and 1, 2, 4, 6 or 8 channels. Any other 61883 word is `StreamKind::other`,
+so SET_STREAM_FORMAT refuses it NOT_SUPPORTED and a model naming it opens no
+slot. The `ut` and `sc` flags are read (`avtp::Am824StreamFormat`) but not
+honoured: the stream carries exactly DBS channels, and an input refuses packets
+with another DBS.
+
+`transmit_am824_raw` sends one packet on the caller's sample-index grid: 6, 12
+or 24 data blocks at 48, 96 or 192 kHz, the class A cadence AAF uses. It keeps
+no DBC of its own: the DBC is the first sample index mod 256, so the
+SYT_INTERVAL boundary (8, 16, 32 blocks) is on the index grid and a restart
+lands on the same count. `pts_ns` is the presentation time of the first block;
+the AVTP timestamp and the SYT carry that of the block whose DBC is a multiple
+of SYT_INTERVAL (IEEE 1722-2016 Equation (7)), `pts_ns` plus that many integer
+sample periods (`Am824StreamOutputContext::build_packet_header`, the same
+arithmetic the receiver extrapolates with), tv set, 3 packets in 4 at each
+rate; a packet without one has tv clear and SYT 0xFFFF. The FDF is the stream's
+own rate. Both AM824 send paths set tu as the AAF ones do.
+
+With a timed sink and no `StreamConsumeFn`, an AM824 input is not decoded to
+float either (`am824_rx_packet`): the sink gets the quadlets as received and
+the first block's presentation time, extrapolated by DBC from the last tv
+packet. A packet whose DBS or SFC is not the input's current format is
+discarded and counted in UNSUPPORTED_FORMAT; a DBC that does not follow the last
+packet's is counted in the context's `dbc_discontinuities`, a statistic beside
+`sequence_gaps` (no IEEE 1722.1 counter carries it).
 
 ## Profile
 

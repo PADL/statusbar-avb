@@ -691,4 +691,170 @@ TEST(listener_port, groups_are_joined_and_left_on_the_port)
     EXPECT_TRUE(port.joined()[0] == static_group);
 }
 
+//
+// Raw AM824 receive (IEC 61883-6, IEEE 1722-2016 Clause 5)
+//
+
+namespace {
+
+/// The presentation time of sample @p index on a 48/96/192 kHz grid anchored at @p t0 for @p i0.
+auto grid_pts(uint64_t const t0, uint64_t const i0, uint64_t const index, uint32_t const rate_hz) -> uint64_t
+{
+    return t0 + ((((index - i0) * 1'000'000'000ULL) + (rate_hz / 2U)) / rate_hz);
+}
+
+/// The sample index whose presentation time @p pts is nearest on that grid.
+auto grid_index(uint64_t const t0, uint64_t const i0, uint64_t const pts, uint32_t const rate_hz) -> uint64_t
+{
+    return i0 + ((((pts - t0) * rate_hz) + 500'000'000ULL) / 1'000'000'000ULL);
+}
+
+/// An AM824 frame built by the raw talker: block b, channel c carries 0x40 | (index * channels + c).
+auto am824_frame(avtp::Am824StreamOutputContext& tx, uint16_t const frames, uint64_t const first_index, uint64_t const pts)
+    -> std::vector<uint8_t>
+{
+    uint8_t const channels = tx.config.channel_count;
+    std::vector<uint8_t> frame(avtp::Am824Pdu::HEADER_LENGTH + (size_t{frames} * channels * 4U));
+    StreamRawRenderFn const render = [channels](std::span<uint8_t> payload, uint32_t n, uint64_t first, uint64_t) {
+        for (uint32_t i = 0; i < n * channels; ++i) {
+            uint32_t const v = static_cast<uint32_t>((first * channels) + i) & 0x00FF'FFFFU;
+            payload[(i * 4U) + 0] = avtp::AM824_LABEL_MBLA;
+            payload[(i * 4U) + 1] = static_cast<uint8_t>(v >> 16U);
+            payload[(i * 4U) + 2] = static_cast<uint8_t>(v >> 8U);
+            payload[(i * 4U) + 3] = static_cast<uint8_t>(v);
+        }
+        return true;
+    };
+    EXPECT_EQ(serialize_am824_raw(tx, frame, frames, first_index, pts, render), frame.size());
+    return frame;
+}
+
+}  // namespace
+
+// am824_rx_packet places each packet by its first block: tv 3 packets in 4, the rest extrapolated by
+// DBC, map to the sample index the talker sent; the quadlets pass as received. A lost packet is one
+// DBC discontinuity and one sequence gap, and the next packet still lands at its index.
+TEST(listener_timed, am824_rx_packet_frames_land_by_sample_index)
+{
+    for (auto const& [rate, frames] :
+         {std::pair{avtp::Am824SampleRate::rate_48_khz, uint16_t{6}},
+          std::pair{avtp::Am824SampleRate::rate_96_khz, uint16_t{12}},
+          std::pair{avtp::Am824SampleRate::rate_192_khz, uint16_t{24}}}) {
+        uint32_t const rate_hz = avtp::am824_sample_rate_hz(rate);
+        avtp::Am824StreamOutputContext tx{kAm824Id, rate, 2, 0};
+        avtp::Am824StreamInputContext rx{rate, 2};
+        uint64_t const i0 = 480'000;
+        uint64_t const t0 = (uint64_t{9} << 32U) - 1'000'000;  // crosses a 2^32 ns wrap
+        size_t delivered = 0;
+        for (uint64_t k = 0; k < 16; ++k) {
+            uint64_t const first = i0 + (k * frames);
+            uint64_t const pts = grid_pts(t0, i0, first, rate_hz);
+            auto const frame = am824_frame(tx, frames, first, pts);
+            if (k == 9) {
+                continue;  // lost on the wire
+            }
+            auto const pdu = avtp::am824_parse_header(frame);
+            EXPECT_TRUE(pdu.has_value());
+            auto const audio = avtp::am824_get_audio_payload(frame);
+            auto const packet = am824_rx_packet(2, rx, *pdu, audio, pts - 2'000'000);
+            ++delivered;
+            EXPECT_EQ(packet.stream_index, uint16_t{2});
+            EXPECT_TRUE(packet.fmt == StreamAudioFormat::am824_mbla);
+            EXPECT_EQ(packet.frames, uint32_t{frames});
+            EXPECT_EQ(packet.channels, uint16_t{2});
+            EXPECT_EQ(packet.bytes_per_sample, uint8_t{4});
+            EXPECT_EQ(packet.payload.size(), size_t{frames} * 2U * 4U);
+            EXPECT_EQ(packet.payload.data(), audio.data());
+            EXPECT_EQ(packet.payload[0], avtp::AM824_LABEL_MBLA);
+            EXPECT_TRUE(packet.pts_valid);
+            EXPECT_EQ(grid_index(t0, i0, packet.pts_ns, rate_hz), first);
+            uint64_t const err = packet.pts_ns > pts ? packet.pts_ns - pts : pts - packet.pts_ns;
+            EXPECT_TRUE(err < 50);
+        }
+        EXPECT_EQ(rx.packets_received, static_cast<uint32_t>(delivered));
+        EXPECT_EQ(rx.dbc_discontinuities, uint32_t{1});
+        EXPECT_EQ(rx.sequence_gaps, uint32_t{1});
+    }
+}
+
+// Before the first tv packet there is no anchor: pts_valid is false; an empty payload is refused
+// with the context untouched.
+TEST(listener_timed, am824_rx_packet_before_an_anchor_and_refusals)
+{
+    avtp::Am824StreamOutputContext tx{kAm824Id, avtp::Am824SampleRate::rate_48_khz, 2, 0};
+    avtp::Am824StreamInputContext rx{avtp::Am824SampleRate::rate_48_khz, 2};
+    auto const untimed = am824_frame(tx, 6, 18, 1'000'000'000ULL);  // blocks 18..23: no multiple of 8
+    auto const pdu = *avtp::am824_parse_header(untimed);
+    EXPECT_FALSE(pdu.tv());
+    auto const none = am824_rx_packet(0, rx, pdu, avtp::am824_get_audio_payload(untimed).first(7), 0);
+    EXPECT_EQ(none.frames, uint32_t{0});
+    EXPECT_EQ(rx.packets_received, uint32_t{0});
+    auto const first = am824_rx_packet(0, rx, pdu, avtp::am824_get_audio_payload(untimed), 999'000'000ULL);
+    EXPECT_EQ(first.frames, uint32_t{6});
+    EXPECT_FALSE(first.pts_valid);
+    auto const timed = am824_frame(tx, 6, 24, 1'000'125'000ULL);
+    auto const anchored =
+        am824_rx_packet(0, rx, *avtp::am824_parse_header(timed), avtp::am824_get_audio_payload(timed), 999'000'000ULL);
+    EXPECT_TRUE(anchored.pts_valid);
+    EXPECT_EQ(anchored.pts_ns, uint64_t{1'000'125'000ULL});
+    EXPECT_EQ(rx.dbc_discontinuities, uint32_t{0});
+}
+
+// Through on_stream_rx_frame: with no consumer the timed sink gets the quadlets without the float
+// decode, the same packets as the decoding path; a packet whose DBS or SFC is not the input's format
+// is discarded and counted in UNSUPPORTED_FORMAT.
+TEST(listener_timed, am824_raw_delivery_through_on_stream_rx_frame)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const specs = audio_specs();
+    auto const& spec = specs[0];
+    EXPECT_TRUE(spec.format.kind == StreamKind::am824);
+    std::atomic<uint64_t> gptp{0};
+    RecordingSink raw_sink;
+    RecordingSink decoded_sink;
+    ListenerStreams raw{1'000'000, donor->components(), gptp, nullptr};
+    ListenerStreams decoded{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(raw.open_stream(spec).has_value());
+    EXPECT_TRUE(decoded.open_stream(spec).has_value());
+    raw.set_timed_audio_sink(&raw_sink);
+    decoded.set_timed_audio_sink(&decoded_sink);
+    int decoded_channels = 0;
+    decoded.set_consume(0, [&](uint8_t, std::span<float const>, uint64_t, uint64_t) { ++decoded_channels; });
+
+    auto const rate = *avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
+    auto const channels = static_cast<uint8_t>(spec.format.channels);
+    auto const spp = static_cast<uint16_t>(class_a_samples_per_packet(spec.format.sample_rate_hz));
+    avtp::Am824StreamOutputContext tx{kAm824Id, rate, channels, 0};
+    uint64_t const t0 = 9'000'000'000ULL;
+    for (uint64_t k = 0; k < 4; ++k) {
+        auto frame = am824_frame(tx, spp, k * spp, t0 + (k * 125'000));
+        frame.resize(frame.size() + 4);  // padding past stream_data_length
+        raw.on_stream_rx_frame(frame, static_cast<int64_t>(t0 - 1'000'000));
+        decoded.on_stream_rx_frame(frame, static_cast<int64_t>(t0 - 1'000'000));
+    }
+    EXPECT_EQ(raw_sink.seen.size(), size_t{4});
+    EXPECT_EQ(decoded_sink.seen.size(), size_t{4});
+    EXPECT_EQ(decoded_channels, 4 * channels);
+    for (size_t i = 0; i < raw_sink.seen.size() && i < decoded_sink.seen.size(); ++i) {
+        auto const& a = raw_sink.seen[i];
+        auto const& b = decoded_sink.seen[i];
+        EXPECT_EQ(a.packet.pts_ns, b.packet.pts_ns);
+        EXPECT_EQ(a.packet.pts_valid, b.packet.pts_valid);
+        EXPECT_EQ(a.packet.frames, uint32_t{spp});
+        EXPECT_EQ(a.bytes.size(), size_t{spp} * channels * 4U);
+        EXPECT_TRUE(a.bytes == b.bytes);
+    }
+    auto const* slot = raw.slot_for(0);
+    EXPECT_EQ(slot->rx_packets.load(), decoded.slot_for(0)->rx_packets.load());
+    EXPECT_EQ(slot->am824->packets_received, decoded.slot_for(0)->am824->packets_received);
+
+    avtp::Am824StreamOutputContext narrow{kAm824Id, rate, 2, 0};
+    raw.on_stream_rx_frame(am824_frame(narrow, spp, 4U * spp, t0 + 500'000), static_cast<int64_t>(t0));
+    avtp::Am824StreamOutputContext slow{kAm824Id, avtp::Am824SampleRate::rate_48_khz, channels, 0};
+    raw.on_stream_rx_frame(am824_frame(slow, 6, 4U * spp, t0 + 500'000), static_cast<int64_t>(t0));
+    EXPECT_EQ(raw_sink.seen.size(), size_t{4});
+    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{2});
+    EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

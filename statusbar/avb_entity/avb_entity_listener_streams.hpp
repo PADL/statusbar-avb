@@ -118,6 +118,31 @@ struct ListenerStreamSlot
 /// bit depth is valid for the container. See docs/MILAN_LISTENER.md.
 [[nodiscard]] auto aaf_header_matches_format(StreamFormatFields const& format, avtp::AafPdu const& pdu) noexcept -> bool;
 
+/// The timed packet for @p frames data blocks of an accepted AM824 payload presented from @p pts_ns, after
+/// @p ctx processed its header: the payload trimmed to frames x channels quadlets, as received (label,
+/// 24-bit sample, big-endian). Both AM824 receive paths build their packet with it.
+[[nodiscard]] auto am824_timed_packet(
+    uint16_t stream_index,
+    avtp::Am824StreamInputContext const& ctx,
+    avtp::Am824Pdu const& pdu,
+    std::span<uint8_t const> payload,
+    uint32_t frames,
+    uint64_t pts_ns) noexcept -> StreamRxPacket;
+
+/// The timed packet for one AM824 frame without decoding it (the raw-only RX path): accepts what
+/// avtp::am824_deserialize_mbla accepts and updates @p ctx as it does; pts_ns is the first block's,
+/// from the last tv anchor (IEEE 1722-2016 Equation (7)). A refused payload returns frames == 0.
+[[nodiscard]] auto am824_rx_packet(
+    uint16_t stream_index,
+    avtp::Am824StreamInputContext& ctx,
+    avtp::Am824Pdu const& pdu,
+    std::span<uint8_t const> payload,
+    uint64_t gptp_now_ns) noexcept -> StreamRxPacket;
+
+/// Whether @p pdu's CIP header carries @p format, the STREAM_INPUT's current format: DBS is the
+/// channel count and the FDF's SFC the nominal rate (IEC 61883-6 Section 10.3.2).
+[[nodiscard]] auto am824_header_matches_format(StreamFormatFields const& format, avtp::Am824Pdu const& pdu) noexcept -> bool;
+
 struct ListenerStreams
 {
     /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns); each
@@ -247,7 +272,7 @@ struct ListenerStreams
     void on_listener_disconnected(uint16_t stream_index);
 
     /// Attach (nullptr detaches) the timed raw sink offered every accepted AM824/AAF packet with its
-    /// presentation time; an AAF stream with no StreamConsumeFn is then not decoded to float.
+    /// presentation time; a stream with no StreamConsumeFn is then not decoded to float.
     /// Set before streams flow; the RX thread reads it.
     void set_timed_audio_sink(StreamRxTimedAudioSink* sink) noexcept { timed_sink_ = sink; }
 
