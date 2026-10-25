@@ -3103,3 +3103,162 @@ TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
     EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(joined());
 }
+
+// ---- Clock sources and clock domain lock (IEEE 1722.1-2021 Clauses 7.2.32, 7.4.23-24, 7.4.42) ----
+
+namespace {
+
+/// make_blob(1, 1) plus three CLOCK_SOURCEs and two CLOCK_DOMAINs: domain 0 lists sources 0 and 1,
+/// domain 1 sources 1 and 2, each at its first.
+auto make_clock_domains_blob() -> std::vector<uint8_t>
+{
+    auto const base = make_blob(1, 1);
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{base});
+    nanoavb::AemBlobWriter w;
+    for (uint16_t const type : {DESCRIPTOR_ENTITY, DESCRIPTOR_CONFIGURATION, DESCRIPTOR_AVB_INTERFACE}) {
+        w.add(0, type, 0, *storage->get_descriptor(0, type, 0));
+    }
+    for (uint16_t const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
+        for (uint16_t index = 0; index < 2; ++index) {
+            w.add(0, type, index, *storage->get_descriptor(0, type, index));
+        }
+    }
+    for (uint16_t index = 0; index < 3; ++index) {
+        atdecc::aem::DescriptorClockSource source{};
+        source.descriptor_index = index;
+        w.add(0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, index, make_const_span(source));
+    }
+    for (uint16_t index = 0; index < 2; ++index) {
+        atdecc::aem::DescriptorClockDomain domain{};
+        domain.descriptor_index = index;
+        domain.clock_source_index = index;
+        (void)domain.push_clock_source(index);
+        (void)domain.push_clock_source(static_cast<uint16_t>(index + 1));
+        w.add(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index, wire(domain));
+    }
+    return w.write();
+}
+
+/// The SET/GET_CLOCK_SOURCE body for CLOCK_DOMAIN @p domain and source @p source.
+auto clock_source_body(uint16_t const domain, uint16_t const source) -> std::array<uint8_t, 8>
+{
+    return {
+        0x00,
+        static_cast<uint8_t>(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN),
+        0x00,
+        static_cast<uint8_t>(domain),
+        0x00,
+        static_cast<uint8_t>(source),
+        0x00,
+        0x00};
+}
+
+/// GET_CLOCK_SOURCE of CLOCK_DOMAIN @p domain: its clock_source_index.
+auto get_clock_source(MilanKit& m, uint16_t const domain) -> uint16_t
+{
+    auto const body = clock_source_body(domain, 0);
+    auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_CLOCK_SOURCE, std::span{body}.first(4));
+    EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
+    return r.body.size() >= 6 ? static_cast<uint16_t>((r.body[4] << 8U) | r.body[5]) : uint16_t{0xFFFF};
+}
+
+}  // namespace
+
+// SET_CLOCK_SOURCE on CLOCK_DOMAIN 1 reaches the entity's hook; GET_CLOCK_SOURCE reports it, it is
+// notified and saved, and the saved source reaches the hook again at the next start.
+TEST(avb_entity_kit_clock_source, set_clock_source_on_domain_one_reaches_the_host)
+{
+    auto const dir = state_dir("clock-source");
+    auto const path = (dir / "avb-state.toml").string();
+    std::vector<std::pair<uint16_t, uint16_t>> calls;
+    auto const hook = [&calls](uint16_t const domain, uint16_t const source) -> uint8_t {
+        calls.emplace_back(domain, source);
+        return atdecc::AEM_STATUS_SUCCESS;
+    };
+    {
+        PersistentKit m{path, 0x80, std::nullopt, make_clock_domains_blob()};
+        m.kit.set_on_clock_source_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(calls.empty());
+        EXPECT_EQ(get_clock_source(m, 1), uint16_t{1});
+        register_other_controller(m);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(1, 2)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(calls == (std::vector<std::pair<uint16_t, uint16_t>>{{1, 2}}));
+        EXPECT_EQ(m.kit.clock_source(1).value_or(0), uint16_t{2});
+        EXPECT_EQ(get_clock_source(m, 1), uint16_t{2});
+        EXPECT_EQ(m.kit.active_clock_source(), uint16_t{0});  // domain 0's is unchanged
+        EXPECT_EQ(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE).size(), size_t{1});
+        // A source the domain does not list never reaches the hook.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(1, 0)), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_EQ(calls.size(), size_t{1});
+    }
+    calls.clear();
+    {
+        PersistentKit m{path, 0x80, std::nullopt, make_clock_domains_blob()};
+        m.kit.set_on_clock_source_changed(hook);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_TRUE(calls == (std::vector<std::pair<uint16_t, uint16_t>>{{1, 2}}));
+        EXPECT_EQ(m.kit.clock_source(1).value_or(0), uint16_t{2});
+        EXPECT_FALSE(m.kit.clock_source(2).has_value());
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// A refused SET_CLOCK_SOURCE answers the hook's status and changes, notifies and saves nothing; on
+// domain 0 an accepted one is the active source media_rate() reads.
+TEST(avb_entity_kit_clock_source, a_vetoed_clock_source_leaves_the_domain_unchanged)
+{
+    auto const dir = state_dir("clock-source-veto");
+    auto const path = (dir / "avb-state.toml").string();
+    PersistentKit m{path, 0x81, std::nullopt, make_clock_domains_blob()};
+    m.kit.set_on_clock_source_changed([](uint16_t const domain, uint16_t) -> uint8_t {
+        return domain == 1 ? atdecc::AEM_STATUS_NOT_SUPPORTED : atdecc::AEM_STATUS_SUCCESS;
+    });
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(1, 2)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(get_clock_source(m, 1), uint16_t{1});
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE).empty());
+    EXPECT_TRUE(m.kit.collect_persistent_state().clock_sources.empty());
+
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(0, 1)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.active_clock_source(), uint16_t{1});
+    EXPECT_EQ(m.kit.collect_persistent_state().clock_sources.size(), size_t{1});
+    std::filesystem::remove_all(dir);
+}
+
+// IEEE 1722.1-2021 Clause 7.4.42.2.3: the entity's lock reports drive each CLOCK_DOMAIN's LOCKED and
+// UNLOCKED counters, a transition counting once and notified; a domain the model lacks is refused.
+TEST(avb_entity_kit_clock_source, clock_domain_counters_follow_the_host_lock)
+{
+    using atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
+    MilanKit m{std::nullopt, 0x82, true, make_clock_domains_blob()};
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    m.aem.clear();
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1).counters_valid.get(), 0U);  // not driven yet
+
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, false));  // already unlocked: no transition
+    auto c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1);
+    EXPECT_EQ(c.counters_valid.get(), 0x3U);
+    EXPECT_EQ(c.counters[0].get(), 0U);
+    EXPECT_EQ(c.counters[1].get(), 0U);
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, false));
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1);
+    EXPECT_EQ(c.counters[0].get(), 2U);  // LOCKED
+    EXPECT_EQ(c.counters[1].get(), 1U);  // UNLOCKED
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_COUNTERS), 3);
+
+    // Domain 0 is the entity's from its first report.
+    auto const before = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(0, false));
+    EXPECT_TRUE(m.kit.note_clock_domain_locked(0, true));
+    auto const after = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
+    EXPECT_EQ(after.counters[0].get(), before.counters[0].get() + 1);
+    EXPECT_TRUE(after.counters[1].get() >= before.counters[1].get());
+    EXPECT_FALSE(m.kit.note_clock_domain_locked(2, true));
+}

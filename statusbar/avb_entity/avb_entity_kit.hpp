@@ -395,8 +395,33 @@ class AvbEntityKit
     /// The state persist() would write now.
     [[nodiscard]] auto collect_persistent_state() const -> PersistentState;
 
+    //
+    // Clock sources and clock domain lock - IEEE 1722.1-2021 Clauses 7.4.23-24, 7.4.42
+    //
+
+    /// The entity applies SET_CLOCK_SOURCE's @p clock_source_index (one the CLOCK_DOMAIN lists) to
+    /// CLOCK_DOMAIN @p clock_domain_index, reactor thread, and answers an AEM status: any but SUCCESS
+    /// leaves the domain's source unchanged. Unset: accepted. Also called for a saved source at start().
+    using ClockSourceFn = sg14::inplace_function<uint8_t(uint16_t clock_domain_index, uint16_t clock_source_index), 32>;
+    void set_on_clock_source_changed(ClockSourceFn fn) noexcept { on_clock_source_changed_ = std::move(fn); }
+    /// CLOCK_DOMAIN @p clock_domain_index's current clock source (GET_CLOCK_SOURCE's), or nullopt
+    /// when the model has no such domain. Reactor thread.
+    [[nodiscard]] auto clock_source(uint16_t clock_domain_index) const noexcept -> std::optional<uint16_t>
+    {
+        return storage_handler_.current_clock_source(
+            {.configuration_index = 0,
+             .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN,
+             .descriptor_index = clock_domain_index});
+    }
+    /// CLOCK_DOMAIN @p clock_domain_index locked to its source or lost it: its LOCKED/UNLOCKED counters
+    /// (AvbEntityHost::note_clock_domain_locked). False for a domain the model lacks. Reactor thread.
+    [[nodiscard]] auto note_clock_domain_locked(uint16_t const clock_domain_index, bool const locked) -> bool
+    {
+        return host_.note_clock_domain_locked(clock_domain_index, locked);
+    }
+
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
-    /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
+    /// CLOCK_DOMAIN 0's active clock-source index (runtime SET_CLOCK_SOURCE
     /// state; the blob's authored default until a controller changes it).
     [[nodiscard]] auto active_clock_source() const noexcept -> uint16_t
     {
@@ -588,6 +613,7 @@ class AvbEntityKit
     /// read by the data plane and GET_STREAM_INFO).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
     PresentationOffsetFn on_presentation_offset_changed_{};
+    ClockSourceFn on_clock_source_changed_{};
     InputMappingsFn on_input_mappings_changed_{};
     /// The STREAM_PORT_INPUTs with dynamic mappings, and the STREAM_PORT_OUTPUTs.
     std::vector<uint16_t> dynamic_input_ports_{};

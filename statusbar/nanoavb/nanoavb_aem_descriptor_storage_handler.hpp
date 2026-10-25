@@ -1150,6 +1150,10 @@ class DescriptorStorageHandler : public AemEntityHandler
             return atdecc::AEM_STATUS_BAD_ARGUMENTS;
         }
 
+        // No room to keep the selection: refused before the application re-clocks.
+        if (find_clock_domain_state(ref.descriptor_index) == nullptr && clock_domain_states_.size() == MAX_CLOCK_DOMAIN_STATES) {
+            return atdecc::AEM_STATUS_NO_RESOURCES;
+        }
         if (on_clock_source_changed_) {
             if (auto const status = on_clock_source_changed_(ref.descriptor_index, requested.get());
                 status != atdecc::AEM_STATUS_SUCCESS) {

@@ -168,9 +168,14 @@ AvbEntityKit::AvbEntityKit(
     });
     storage_handler_.set_on_sampling_rate_changed(
         [this](uint16_t const unit, uint32_t const rate) -> uint8_t { return change_sampling_rate(unit, rate); });
-    // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
-    // source; the media thread reads it per tick (media_rate()).
-    storage_handler_.set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
+    // SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN: the entity's hook
+    // decides; domain 0's active source is what media_rate() reads per tick.
+    storage_handler_.set_on_clock_source_changed([this](uint16_t const domain, uint16_t const source) -> uint8_t {
+        if (on_clock_source_changed_) {
+            if (auto const status = on_clock_source_changed_(domain, source); status != atdecc::AEM_STATUS_SUCCESS) {
+                return status;
+            }
+        }
         if (domain == 0) {
             active_clock_source_.store(source, std::memory_order_release);
         }
