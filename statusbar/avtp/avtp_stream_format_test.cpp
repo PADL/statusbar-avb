@@ -78,4 +78,63 @@ TEST(stream_format, aaf_unknown_rate_shows_nsr_code)
     EXPECT_TRUE(s.find("rate?") != std::string::npos);
 }
 
+// IEEE 1722-2016 Annex I: byte 4 is b|nb|ut|sc, byte 5 the IEC 60958 label count, byte 6 the
+// MBLA count, byte 7 MIDI|SMPTE. The Annex-style word 0x00a0020840000800: 48 kHz, nb, 8 MBLA.
+TEST(am824_stream_format, annex_word_is_48k_non_blocking_8_mbla)
+{
+    constexpr auto f = Am824StreamFormat::from_u64(0x00a0020840000800ULL);
+    static_assert(f.is_61883_6());
+    EXPECT_EQ(f.evt(), uint8_t{0});
+    EXPECT_EQ(f.sfc(), uint8_t{2});
+    EXPECT_EQ(am824_sfc_to_hz(f.sfc()), 48'000U);
+    EXPECT_EQ(f.dbs.get(), uint8_t{8});
+    EXPECT_TRUE(f.non_blocking());
+    EXPECT_FALSE(f.blocking());
+    EXPECT_FALSE(f.up_to());
+    EXPECT_FALSE(f.synchronous_clock());
+    EXPECT_EQ(f.label_iec_60958_cnt.get(), uint8_t{0});
+    EXPECT_EQ(f.label_mbla_cnt.get(), uint8_t{8});
+    EXPECT_EQ(f.label_midi_cnt(), uint8_t{0});
+    EXPECT_EQ(f.label_smpte_cnt(), uint8_t{0});
+}
+
+// The MOTU 16A lists 0x00a00N0860000800 on its inputs (nb + ut) and 0x00a00N0870000800 on its
+// outputs (nb + ut + sc): 8 MBLA quadlets, no IEC 60958 data, at each SFC.
+TEST(am824_stream_format, motu_16a_input_and_output_words)
+{
+    for (uint8_t const sfc : {uint8_t{2}, uint8_t{4}, uint8_t{6}}) {
+        uint64_t const sfc_bits = uint64_t{sfc} << 40U;
+        auto const in = Am824StreamFormat::from_u64(0x00a0000860000800ULL | sfc_bits);
+        auto const out = Am824StreamFormat::from_u64(0x00a0000870000800ULL | sfc_bits);
+        EXPECT_EQ(in.sfc(), sfc);
+        EXPECT_EQ(out.sfc(), sfc);
+        EXPECT_TRUE(in.non_blocking() && in.up_to() && !in.synchronous_clock());
+        EXPECT_TRUE(out.non_blocking() && out.up_to() && out.synchronous_clock());
+        EXPECT_EQ(in.label_iec_60958_cnt.get(), uint8_t{0});
+        EXPECT_EQ(in.label_mbla_cnt.get(), uint8_t{8});
+        EXPECT_EQ(out.label_mbla_cnt.get(), uint8_t{8});
+        EXPECT_EQ(in.dbs.get(), uint8_t{8});
+    }
+    // The 16A's one-channel media-clock stream words.
+    EXPECT_EQ(Am824StreamFormat::from_u64(0x00a0020140000100ULL).label_mbla_cnt.get(), uint8_t{1});
+    EXPECT_TRUE(Am824StreamFormat::from_u64(0x00a0020150000100ULL).synchronous_clock());
+}
+
+// make_am824_stream_format builds the non-blocking MBLA-only word the decoders read back.
+TEST(am824_stream_format, make_builds_the_annex_and_motu_words)
+{
+    static_assert(make_am824_stream_format(2, 8) == 0x00a0020840000800ULL);
+    static_assert(make_am824_stream_format(2, 2) == 0x00a0020240000200ULL);
+    static_assert(make_am824_stream_format(4, 8, /*up_to=*/true) == 0x00a0040860000800ULL);
+    static_assert(make_am824_stream_format(6, 8, /*up_to=*/true, /*synchronous_clock=*/true) == 0x00a0060870000800ULL);
+    EXPECT_TRUE(stream_format_to_string(make_am824_stream_format(4, 6)) == "AM824 6ch 96kHz");
+}
+
+// A non-AM824 event type in the FDF is not read as a rate.
+TEST(am824_stream_format, a_non_am824_event_type_has_no_rate)
+{
+    auto const s = stream_format_to_string(0x00a00a0840000800ULL);  // evt 1, sfc 2
+    EXPECT_TRUE(s == "AM824 8ch SFC=0x0a");
+}
+
 TEST_MAIN(statusbar_avtp, avtp_stream_format_test)
