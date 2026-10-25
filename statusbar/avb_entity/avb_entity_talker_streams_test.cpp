@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <memory_resource>
 #include <span>
+#include <thread>
+#include <vector>
 
 using namespace statusbar;
 using statusbar::avb_entity::crf_aligned_base;
