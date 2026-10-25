@@ -828,12 +828,15 @@ void AvbEntityKit::run_talker_declarations(int64_t const now_ns, bool const refr
                 // Re-learn the gate from the live registration: a withdraw forgot it,
                 // and a registration that stayed raises no fresh MSRP event.
                 gate_.note_listener_ready(info.stream_id, msrp.listener_permit_debug(info.stream_id).permits, now_ns);
-                (void)refresh_talker_listener(spec.index, now_ns);
+                // A Listener registered or gone changes REGISTERING (Milan v1.2 Table 5.12).
+                bool const listener_changed = refresh_talker_listener(spec.index, now_ns);
                 if (!was_declared) {
                     host_.ctl_log().status(
                         "msrp: talker stream {} ({}) Talker Advertise declared",
                         spec.index,
                         logging::static_str(stream_kind_name(spec.format.kind)));
+                }
+                if (!was_declared || listener_changed) {
                     notify_talker_stream_info(spec.index);
                 }
                 break;

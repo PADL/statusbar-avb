@@ -2247,6 +2247,42 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
 }
 
+// Milan v1.2 Section 5.5.2.7 / Table 5.47: connection_count stays 0 whatever
+// listens; a Listener's registration and its departure reach a controller as
+// GET_STREAM_INFO notifications with REGISTERING set and cleared (Table 5.12).
+TEST(avb_entity_kit_milan_talker, listeners_are_notified_through_registering_not_connection_count)
+{
+    MilanKit m{std::nullopt, 0x1B};
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.aem.clear();
+
+    auto const registering = [&m]() -> std::optional<uint32_t> {
+        auto const notes = unsolicited(m.aem, atdecc::AEM_COMMAND_GET_STREAM_INFO);
+        if (notes.empty()) {
+            return std::nullopt;
+        }
+        auto const [info, ext] = load_info(notes.back());
+        EXPECT_EQ(info.descriptor_type.get(), DESCRIPTOR_STREAM_OUTPUT);
+        return ext.flags_ex.get() & atdecc::aem::stream_info_flags_ex::REGISTERING;
+    };
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_EQ(registering(), std::optional<uint32_t>{atdecc::aem::stream_info_flags_ex::REGISTERING});
+    EXPECT_EQ(m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, 0).connection_count.get(), uint16_t{0});
+
+    // The Leave ages the registration out on the entity's leave timer.
+    m.aem.clear();
+    m.bridge_withdraw(0);
+    for (int i = 0; i < 20; ++i) {
+        m.bridge_now += std::chrono::milliseconds(100);
+        m.kit.host().components().msrp_handler.tick(m.bridge_now);
+    }
+    EXPECT_EQ(registering(), std::optional<uint32_t>{0U});
+    EXPECT_EQ(m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, 0).connection_count.get(), uint16_t{0});
+}
+
 TEST(avb_entity_kit_counters, as_path_ends_with_this_entity)
 {
     nanoavb::AsPath trace{};
