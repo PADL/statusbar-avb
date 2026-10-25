@@ -544,32 +544,8 @@ class AvbEntityKit
     /// The clock-source index backed by the blob's CRF stream input, or
     /// nullopt when the model declares none (base-rate pacing only).
     [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return crf_clock_source_index_; }
-
-    // --- What each clock source is, and which the entity runs -------------
-    /// What CLOCK_SOURCE @p index of the model is; nullopt for one it lacks.
-    [[nodiscard]] auto clock_source_kind(uint16_t const index) const noexcept -> std::optional<ClockSourceKind>
-    {
-        return index < clock_source_kinds_.size() ? std::optional{clock_source_kinds_[index]} : std::nullopt;
-    }
-    /// What clock domain 0's source in force is, for the entity to run its
-    /// media clock by; Internal when the model does not describe it. Any thread.
-    [[nodiscard]] auto active_clock_source_kind() const noexcept -> ClockSourceKind
-    {
-        return clock_source_kind(active_clock_source()).value_or(ClockSourceKind::Internal);
-    }
-    /// The entity knows how to follow the clock source whose blob symbol is
-    /// @p symbol: from here on a SET_CLOCK_SOURCE to it is accepted. It is
-    /// for sources of the External kind; the others run without being named.
-    /// A symbol the blob lacks, or one of another descriptor, binds nothing
-    /// (the menu / selection pattern). Before start().
-    void run_clock_source(std::string_view symbol);
-    /// Whether SET_CLOCK_SOURCE to CLOCK_SOURCE @p index is accepted: every
-    /// source but one of the External kind that no run_clock_source() named.
-    /// The model lists such a source and nothing here can follow it.
-    [[nodiscard]] auto clock_source_runs(uint16_t const index) const noexcept -> bool
-    {
-        return clock_source_kind(index) != ClockSourceKind::External || external_clock_sources_run_.test(index);
-    }
+    /// The recovery start() binds to one CRF input (the one the CRF clock source locates, else the
+    /// first), unless the host bound its own consumer there with ListenerStreams::set_crf first.
     [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
 
     // --- The owned collaborators (entities + tools reach through) -------------
@@ -956,6 +932,9 @@ class AvbEntityKit
     /// The group an input pre-joins at start: the first talker output's of its audio kind, else none
     /// (the loopback topology listens on its own output group).
     [[nodiscard]] auto static_rx_group(StreamSpec const& spec) const noexcept -> ieee::Eui48;
+    /// The CRF STREAM_INPUT crf_recovery() follows: the one the CRF clock source locates, else the
+    /// first CRF input; nullopt with none.
+    [[nodiscard]] auto crf_recovery_input() const -> std::optional<uint16_t>;
     /// After a kind change, leave each input's pre-joined group that changed and join the new one.
     void rejoin_static_rx_groups();
     /// The stream kind of talker stream @p index ("other" when not in the table).

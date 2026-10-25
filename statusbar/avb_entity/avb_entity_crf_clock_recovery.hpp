@@ -92,17 +92,18 @@ class CrfClockRecovery
     /// Latest recovered estimate. Wait-free; media thread (single reader).
     [[nodiscard]] auto estimate() noexcept -> Estimate { return published_.consume(); }
 
-    /// This recovery as a ListenerStreams CRF consumer:
+    /// This recovery as a ListenerStreams CRF consumer, starting afresh on a toggled mr or a new source:
     ///   listener.set_crf(crf_input_index, recovery.make_consumer());
     /// The recovery must outlive the listener.
     [[nodiscard]] auto make_consumer() noexcept -> StreamCrfFn
     {
-        return [this](uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns, bool mr) {
-            if (have_mr_ && mr != last_mr_) {
-                restart();
+        return [this, last_source = uint32_t{0}, last_mr = false](
+                   uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns, bool mr, uint32_t source) mutable {
+            if (source != last_source || mr != last_mr) {
+                restart();  // also on this consumer's first timestamp
             }
-            last_mr_ = mr;
-            have_mr_ = true;
+            last_source = source;
+            last_mr = mr;
             on_crf_timestamp(ts_ns, rx_gptp_ns);
         };
     }
@@ -120,8 +121,6 @@ class CrfClockRecovery
     ptpclient::KalmanRatioTracker kalman_;
     int64_t last_rx_ns_{0};
     uint64_t samples_{0};
-    bool last_mr_{false};  ///< the last PDU's mr (make_consumer)
-    bool have_mr_{false};
     itc::AtomicTripleBuffer<Estimate> published_{};
 };
 

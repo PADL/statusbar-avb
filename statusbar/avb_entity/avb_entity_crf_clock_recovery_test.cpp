@@ -87,7 +87,7 @@ TEST(crf_recovery, consumer_adapter_feeds_the_filter)
     auto consumer = rec.make_consumer();
     for (int i = 0; i < 32; ++i) {
         int64_t const rx = 1'000'000'000 + (static_cast<int64_t>(i) * kRxStep);
-        consumer(static_cast<uint64_t>(rx), 0, rx, false);  // via the StreamCrfFn shape
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 1);  // via the StreamCrfFn shape
     }
     EXPECT_TRUE(rec.estimate().locked);
     EXPECT_TRUE(rec.estimate().samples == 32U);
@@ -101,18 +101,42 @@ TEST(crf_recovery, a_toggled_mr_restarts_the_estimate)
     auto consumer = rec.make_consumer();
     int64_t rx = 1'000'000'000;
     for (int i = 0; i < 32; ++i, rx += kRxStep) {
-        consumer(static_cast<uint64_t>(rx), 0, rx, false);
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 1);
     }
     EXPECT_TRUE(rec.estimate().locked);
-    consumer(static_cast<uint64_t>(rx), 0, rx, true);
+    consumer(static_cast<uint64_t>(rx), 0, rx, true, 1);
     rx += kRxStep;
     EXPECT_FALSE(rec.estimate().locked);
     EXPECT_TRUE(rec.estimate().samples == 1U);
     for (int i = 0; i < 31; ++i, rx += kRxStep) {
-        consumer(static_cast<uint64_t>(rx), 0, rx, true);
+        consumer(static_cast<uint64_t>(rx), 0, rx, true, 1);
     }
     EXPECT_TRUE(rec.estimate().locked);
     EXPECT_TRUE(rec.estimate().samples == 32U);
+}
+
+// A new source generation (the input rebound to another talker) starts the estimate again.
+TEST(crf_recovery, a_new_source_restarts_the_estimate)
+{
+    CrfClockRecovery rec{};
+    auto consumer = rec.make_consumer();
+    int64_t rx = 1'000'000'000;
+    for (int i = 0; i < 32; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 1);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    consumer(static_cast<uint64_t>(rx), 0, rx, false, 2);
+    EXPECT_FALSE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 1U);
+
+    // A second consumer (the recovery moved to another input) starts afresh at its source 1.
+    for (int i = 0; i < 32; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 2);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    auto moved = rec.make_consumer();
+    moved(static_cast<uint64_t>(rx), 0, rx, false, 2);
+    EXPECT_TRUE(rec.estimate().samples == 1U);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_crf_clock_recovery_test)
