@@ -15,6 +15,7 @@
 #include <format>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <sys/socket.h>
@@ -295,6 +296,120 @@ TEST(ptp_management, refuses_malformed_messages)
     EXPECT_EQ(e->management_id, management_id::parent_data_set);
 }
 
+TEST(ptp_management, grandmaster_settings_encode_as_linuxptp_reads_them)
+{
+    // linuxptp's struct grandmaster_settings_np: clockQuality, utc_offset, time_flags, time_source.
+    GrandmasterSettingsNp const settings{
+        .clock_class = 13,
+        .clock_accuracy = 0x21,
+        .offset_scaled_log_variance = 0x4E5D,
+        .current_utc_offset = 37,
+        .time_flags = time_flag::ptp_timescale | time_flag::utc_offset_valid,
+        .time_source = 0x90,
+    };
+    std::array<uint8_t, MANAGEMENT_SET_MAX_SIZE> out{};
+    gptp::SourcePortIdentity const me{gptp::ClockIdentity{0, 0, 0, 0xFF, 0xFE, 0, 0x30, 0x39}, 1};
+    size_t const n =
+        build_management_message(out, ManagementAction::set, management_id::grandmaster_settings_np, encode(settings), 127, 9, me);
+    EXPECT_EQ(n, size_t{62});
+    // clang-format off
+    std::array<uint8_t, 62> const expect{
+        0x0D, 0x02, 0x00, 0x3E, 0x7F, 0x00, 0x00, 0x00,                          // management, v2, length 62, domain 127
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // correction, typeSpecific
+        0x00, 0x00, 0x00, 0xFF, 0xFE, 0x00, 0x30, 0x39, 0x00, 0x01,              // sourcePortIdentity
+        0x00, 0x09, 0x04, 0x7F,                                                  // sequenceId, control, interval
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,              // targetPortIdentity: all
+        0x00, 0x00, 0x01, 0x00,                                                  // hops 0, SET, reserved
+        0x00, 0x01, 0x00, 0x0A, 0xC0, 0x01,                                      // MANAGEMENT TLV, GRANDMASTER_SETTINGS_NP
+        0x0D, 0x21, 0x4E, 0x5D,                                                  // clockClass, clockAccuracy, variance
+        0x00, 0x25, 0x0C, 0x90,                                                  // utc_offset 37, flags, GPS
+    };
+    // clang-format on
+    EXPECT_TRUE(std::equal(expect.begin(), expect.end(), out.begin()));
+    auto const parsed = parse_management_message(std::span<uint8_t const>{out.data(), n});
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->action == ManagementAction::set);
+    EXPECT_EQ(parsed->domain, uint8_t{127});
+    auto const* back = std::get_if<GrandmasterSettingsNp>(&parsed->data);
+    EXPECT_TRUE(back != nullptr && *back == settings);
+    EXPECT_EQ(
+        build_management_message(
+            std::span<uint8_t>{out}.first(61),
+            ManagementAction::set,
+            management_id::grandmaster_settings_np,
+            encode(settings),
+            0,
+            0,
+            me),
+        size_t{0});
+}
+
+TEST(ptp_management, a_subscription_encodes_its_duration_and_events)
+{
+    SubscribeEventsNp subscription{.duration_s = 180};
+    subscription.add(ManagementEvent::port_state);
+    subscription.add(ManagementEvent::parent_data_set);
+    EXPECT_TRUE(subscription.has(ManagementEvent::port_state));
+    EXPECT_FALSE(subscription.has(ManagementEvent::time_sync));
+    auto const data = encode(subscription);
+    EXPECT_EQ(data[0], uint8_t{0x00});
+    EXPECT_EQ(data[1], uint8_t{0xB4});
+    EXPECT_EQ(data[2], uint8_t{0x05});  // bits 0 and 2 of the first octet
+    EXPECT_TRUE(std::all_of(data.begin() + 3, data.end(), [](uint8_t const b) { return b == 0; }));
+    std::array<uint8_t, MANAGEMENT_SET_MAX_SIZE> out{};
+    size_t const n = build_management_message(out, ManagementAction::set, management_id::subscribe_events_np, data, 0, 1, {});
+    EXPECT_EQ(n, MANAGEMENT_SET_MAX_SIZE);
+    auto const parsed = parse_management_message(std::span<uint8_t const>{out.data(), n});
+    EXPECT_TRUE(parsed.has_value());
+    auto const* back = std::get_if<SubscribeEventsNp>(&parsed->data);
+    EXPECT_TRUE(back != nullptr);
+    EXPECT_EQ(back->duration_s, uint16_t{180});
+    EXPECT_TRUE(back->has(ManagementEvent::parent_data_set));
+    // odd data is padded to an even TLV
+    std::array<uint8_t, 3> const odd{1, 2, 3};
+    EXPECT_EQ(build_management_message(out, ManagementAction::set, 0xC0FF, odd, 0, 1, {}), MANAGEMENT_GET_SIZE + 4);
+    EXPECT_EQ(out[51], uint8_t{6});
+    EXPECT_EQ(out[57], uint8_t{0});
+}
+
+TEST(ptp_management, a_port_state_notification_is_parsed)
+{
+    // ptp4l's NOTIFY_PORT_STATE: a RESPONSE carrying the port's PORT_DATA_SET, now SLAVE.
+    std::vector<uint8_t> bytes(PORT_RESPONSE.begin(), PORT_RESPONSE.end());
+    bytes[54 + 10] = 0x09;
+    auto const parsed = parse_management_message(bytes);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->action == ManagementAction::response);
+    auto const* port = std::get_if<PortDataSet>(&parsed->data);
+    EXPECT_TRUE(port != nullptr);
+    EXPECT_TRUE(port->port_state == PortState::slave);
+}
+
+TEST(ptp_management, a_time_sync_notification_is_parsed)
+{
+    // linuxptp's TIME_STATUS_NP: master_offset -42 ns, ingress 1 s, gmPresent, grandmaster GM.
+    std::vector<uint8_t> data(TimeStatusNp::SIZE);
+    for (size_t i = 0; i < 8; ++i) {
+        data[i] = static_cast<uint8_t>(static_cast<uint64_t>(int64_t{-42}) >> (56 - (8 * i)));
+        data[8 + i] = static_cast<uint8_t>(uint64_t{1'000'000'000} >> (56 - (8 * i)));
+        data[42 + i] = static_cast<uint8_t>(GM.get() >> (56 - (8 * i)));
+    }
+    data[19] = 0x10;  // cumulativeScaledRateOffset
+    data[25] = 0x02;  // gmTimeBaseIndicator
+    data[41] = 0x01;  // gmPresent
+    auto const parsed = parse_management_message(response(management_id::time_status_np, data, 127));
+    EXPECT_TRUE(parsed.has_value());
+    auto const* status = std::get_if<TimeStatusNp>(&parsed->data);
+    EXPECT_TRUE(status != nullptr);
+    EXPECT_EQ(status->master_offset_ns, int64_t{-42});
+    EXPECT_EQ(status->ingress_time_ns, int64_t{1'000'000'000});
+    EXPECT_EQ(status->cumulative_scaled_rate_offset, int32_t{0x10});
+    EXPECT_EQ(status->gm_time_base_indicator, uint16_t{2});
+    EXPECT_TRUE(status->gm_present);
+    EXPECT_TRUE(status->gm_identity == GM);
+    EXPECT_FALSE(parse_management_message(response(management_id::time_status_np, std::vector<uint8_t>(48))).has_value());
+}
+
 #if defined(__linux__)
 
 namespace {
@@ -432,6 +547,7 @@ TEST(ptp_management, create_validates_its_configuration)
         PtpManagementClient::create(PtpManagementConfig{.uds_address = "/" + std::string(200, 'x')}, listener).has_value());
     EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.missed_periods = 0}, listener).has_value());
     EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.period_ns = 0}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.subscription_duration_s = 1}, listener).has_value());
 }
 
 TEST(ptp_management, client_talks_to_a_ptp4l_socket)
@@ -510,6 +626,175 @@ TEST(ptp_management, client_talks_to_a_ptp4l_socket)
              management_id::port_properties_np,
              management_id::port_data_set}));
     follower->reset();
+    ::close(server);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(ptp_management, client_reports_notifications_settings_and_refusals)
+{
+    auto const dir = socket_dir("notify");
+    int calls = 0;
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = (dir / "ptp4l").string(), .port_interface = "enp8s0"},
+        [&](PtpManagementState const& state) {
+            ++calls;
+            last = state;
+        });
+    EXPECT_TRUE(client.has_value());
+    auto& c = **client;
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 10);
+    c.handle(PORT_RESPONSE, 11);
+    EXPECT_TRUE(last.port_state == PortState::master);
+    int const before = calls;
+
+    // A pushed PORT_DATA_SET (NOTIFY_PORT_STATE): the port is SLAVE now.
+    auto slave = port_data(2, int64_t{74} * 65536);
+    slave[10] = 0x09;
+    c.handle(response(management_id::port_data_set, slave), 20);
+    EXPECT_EQ(calls, before + 1);
+    EXPECT_TRUE(last.port_state == PortState::slave);
+
+    // TIME_STATUS_NP is kept but reports nothing by itself.
+    c.handle(response(management_id::time_status_np, std::vector<uint8_t>(TimeStatusNp::SIZE)), 30);
+    EXPECT_EQ(calls, before + 1);
+    EXPECT_TRUE(c.state().time_status.has_value());
+
+    // A SET acknowledged, the SUBSCRIBE acknowledged, then a refusal.
+    GrandmasterSettingsNp const settings{.clock_class = 13, .clock_accuracy = 0x21};
+    auto const settings_data = encode(settings);
+    c.handle(response(management_id::grandmaster_settings_np, {settings_data.begin(), settings_data.end()}), 40);
+    EXPECT_EQ(calls, before + 2);
+    EXPECT_TRUE(last.grandmaster_settings == settings);
+    auto const subscribe_data = encode(SubscribeEventsNp{.duration_s = 180});
+    c.handle(response(management_id::subscribe_events_np, {subscribe_data.begin(), subscribe_data.end()}), 50);
+    EXPECT_EQ(calls, before + 3);
+    EXPECT_TRUE(last.subscribed);
+    auto error = response(0, {});
+    error.resize(48);
+    error.insert(error.end(), {0x00, 0x02, 0x00, 0x08, 0x00, 0x05, 0xC0, 0x01, 0x00, 0x00, 0x00, 0x00});  // NOT_SETABLE
+    error[3] = static_cast<uint8_t>(error.size());
+    c.handle(error, 60);
+    EXPECT_EQ(calls, before + 4);
+    EXPECT_EQ(last.refused.value_or(0), uint16_t{5});
+    // a refused GET is not a refusal of ours
+    error[54] = 0x20;
+    error[55] = 0x02;
+    c.handle(error, 70);
+    EXPECT_EQ(calls, before + 4);
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+TEST(ptp_management, client_subscribes_and_resends_its_settings_to_a_ptp4l_socket)
+{
+    auto const dir = socket_dir("subscribe");
+    auto const path = (dir / "ptp4l").string();
+    int const server = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    EXPECT_TRUE(server >= 0);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.data(), path.size());
+    EXPECT_EQ(::bind(server, reinterpret_cast<sockaddr const*>(&address), sizeof(address)), 0);
+
+    /// Every message the stand-in has received, by managementId and action.
+    auto drain = [&] {
+        std::vector<std::pair<uint16_t, ManagementAction>> seen;
+        sockaddr_un from{};
+        for (;;) {
+            std::array<uint8_t, 256> in{};
+            socklen_t from_length = sizeof(from);
+            ssize_t const n = ::recvfrom(server, in.data(), in.size(), 0, reinterpret_cast<sockaddr*>(&from), &from_length);
+            if (n <= 0) {
+                return std::pair{seen, from};
+            }
+            auto const message = parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(n)});
+            EXPECT_TRUE(message.has_value());
+            if (message) {
+                seen.emplace_back(message->management_id, message->action);
+                if (auto const* s = std::get_if<SubscribeEventsNp>(&message->data)) {
+                    EXPECT_EQ(s->duration_s, uint16_t{60});
+                    EXPECT_TRUE(s->has(ManagementEvent::port_state) && s->has(ManagementEvent::parent_data_set));
+                }
+            }
+        }
+    };
+    auto const count = [](auto const& seen, uint16_t const id, ManagementAction const action) {
+        return std::ranges::count(seen, std::pair{id, action});
+    };
+
+    SubscribeEventsNp events{};
+    events.add(ManagementEvent::port_state);
+    events.add(ManagementEvent::parent_data_set);
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = path, .period_ns = 1'000'000'000, .events = events, .subscription_duration_s = 60},
+        [](PtpManagementState const&) {});
+    EXPECT_TRUE(client.has_value());
+    auto& c = **client;
+
+    c.tick(0);  // GETs and the subscription
+    auto [first, from] = drain();
+    EXPECT_EQ(count(first, management_id::subscribe_events_np, ManagementAction::set), 1);
+    EXPECT_EQ(count(first, management_id::parent_data_set, ManagementAction::get), 1);
+
+    GrandmasterSettingsNp const settings{.clock_class = 13, .clock_accuracy = 0x22};
+    EXPECT_TRUE(c.set_grandmaster_settings(settings).has_value());
+    EXPECT_EQ(count(drain().first, management_id::grandmaster_settings_np, ManagementAction::set), 1);
+
+    // The first answer after silence resends them: the SET may have preceded ptp4l.
+    c.handle(PARENT_RESPONSE, 1);
+    EXPECT_EQ(count(drain().first, management_id::grandmaster_settings_np, ManagementAction::set), 1);
+
+    // ptp4l keeps answering: nothing resent, the subscription renewed at half its duration.
+    int64_t subscriptions = 0;
+    int64_t settings_sent = 0;
+    for (int64_t second = 1; second <= 31; ++second) {
+        c.handle(PARENT_RESPONSE, (second * 1'000'000'000) - 1);
+        c.tick(second * 1'000'000'000);
+        auto const seen = drain().first;
+        subscriptions += count(seen, management_id::subscribe_events_np, ManagementAction::set);
+        settings_sent += count(seen, management_id::grandmaster_settings_np, ManagementAction::set);
+    }
+    EXPECT_EQ(subscriptions, int64_t{1});
+    EXPECT_EQ(settings_sent, int64_t{0});
+
+    // Silent, then back (a restarted ptp4l): subscription and settings are sent again.
+    c.tick(34'000'000'000);
+    EXPECT_TRUE(c.state().status == PtpManagementStatus::unreachable);
+    EXPECT_FALSE(c.state().subscribed);
+    (void)drain();
+    c.tick(35'000'000'000);
+    EXPECT_EQ(count(drain().first, management_id::subscribe_events_np, ManagementAction::set), 1);
+    c.handle(PARENT_RESPONSE, 35'000'000'001);
+    auto const back = drain().first;
+    EXPECT_EQ(count(back, management_id::grandmaster_settings_np, ManagementAction::set), 1);
+    EXPECT_EQ(count(back, management_id::subscribe_events_np, ManagementAction::set), 1);
+
+    // A restart between two queries: ptp4l's GETs show its defaults, and both are sent again.
+    c.tick(36'000'000'000);
+    auto const gets = drain().first;
+    EXPECT_EQ(count(gets, management_id::grandmaster_settings_np, ManagementAction::get), 1);
+    EXPECT_EQ(count(gets, management_id::subscribe_events_np, ManagementAction::get), 1);
+    auto const defaults = encode(GrandmasterSettingsNp{});
+    c.handle(response(management_id::grandmaster_settings_np, {defaults.begin(), defaults.end()}), 36'000'000'001);
+    auto const nothing = encode(SubscribeEventsNp{.duration_s = 0});
+    c.handle(response(management_id::subscribe_events_np, {nothing.begin(), nothing.end()}), 36'000'000'002);
+    EXPECT_FALSE(c.state().subscribed);
+    auto const again = drain().first;
+    EXPECT_EQ(count(again, management_id::grandmaster_settings_np, ManagementAction::set), 1);
+    EXPECT_EQ(count(again, management_id::subscribe_events_np, ManagementAction::set), 1);
+    // ptp4l holding ours: nothing more
+    auto const held = encode(settings);
+    c.handle(response(management_id::grandmaster_settings_np, {held.begin(), held.end()}), 36'000'000'003);
+    auto mine = events;
+    mine.duration_s = 59;
+    auto const mine_data = encode(mine);
+    c.handle(response(management_id::subscribe_events_np, {mine_data.begin(), mine_data.end()}), 36'000'000'004);
+    EXPECT_TRUE(c.state().subscribed);
+    EXPECT_TRUE(c.state().grandmaster_settings == settings);
+    EXPECT_TRUE(drain().first.empty());
+    (void)from;
+    client->reset();
     ::close(server);
     std::filesystem::remove_all(dir);
 }
