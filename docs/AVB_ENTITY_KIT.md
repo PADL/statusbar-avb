@@ -317,6 +317,10 @@ CLOCK_DOMAINs (LOCKED, UNLOCKED: each transition once, notified). CLOCK_DOMAIN
 reports them. Other interfaces and domains the model has answer with none
 valid. Only configuration 0 is served.
 
+CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
+PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE
+1722-2016 Clause 10.4); `CrfClockRecovery` starts its estimate again on one. `TalkerStreams::toggle_media_clock_restart` toggles a
+CRF STREAM_OUTPUT's mr from its next PDU on, where it stays.
 
 ## Local ATDECC socket
 
