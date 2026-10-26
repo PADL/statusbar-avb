@@ -114,7 +114,7 @@ void UdptunEgressPath::drain_rx()
                 auto const role = !config_.udptun_redundant
                     ? udptun::PacketRole::RemoteLegacy
                     : (is_redun ? udptun::PacketRole::RemoteRedundant : udptun::PacketRole::RemotePrimary);
-                udptun::UdpTunCsvRecord rec{
+                udptun::UdpTunCsvRecord const rec{
                     .rx_gptp_ns = rx_tai,
                     .presentation_time_ns = pt_ns,
                     .latency_ns = rx_tai - pt_ns,
