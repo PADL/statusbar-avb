@@ -337,6 +337,37 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
         state.system_unique_id = *id;
     }
 
+    auto const load_audio_map = [&](Table const& t) {
+        auto const type = u16_at(t, "descriptor_type");
+        auto const index = u16_at(t, "descriptor_index");
+        auto const* value = t.get("mappings");
+        auto const* list = value != nullptr ? value->as_array() : nullptr;
+        if (!type || !index || list == nullptr) {
+            return false;
+        }
+        PersistedAudioMap map{.descriptor_type = *type, .descriptor_index = *index, .mappings = {}};
+        for (size_t i = 0; i < list->size(); ++i) {
+            auto const* entry = (*list)[i].as_array();
+            if (entry == nullptr || entry->size() != 4) {
+                return false;
+            }
+            std::array<uint16_t, 4> fields{};
+            for (size_t f = 0; f < fields.size(); ++f) {
+                auto const n = (*entry)[f].as_integer();
+                if (!n || *n < 0 || *n > std::numeric_limits<uint16_t>::max()) {
+                    return false;
+                }
+                fields[f] = static_cast<uint16_t>(*n);
+            }
+            map.mappings.push_back(
+                {.stream_index = fields[0],
+                 .stream_channel = fields[1],
+                 .cluster_offset = fields[2],
+                 .cluster_channel = fields[3]});
+        }
+        state.audio_maps.push_back(std::move(map));
+        return true;
+    };
     bool const ok = each_table(
                         root,
                         "name",
@@ -411,40 +442,7 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
                             .started = *started});
                        return true;
                    }) &&
-        each_table(root,
-                   "audio_map",
-                   [&](Table const& t) {
-                       auto const type = u16_at(t, "descriptor_type");
-                       auto const index = u16_at(t, "descriptor_index");
-                       auto const* value = t.get("mappings");
-                       auto const* list = value != nullptr ? value->as_array() : nullptr;
-                       if (!type || !index || list == nullptr) {
-                           return false;
-                       }
-                       PersistedAudioMap map{.descriptor_type = *type, .descriptor_index = *index, .mappings = {}};
-                       for (size_t i = 0; i < list->size(); ++i) {
-                           auto const* entry = (*list)[i].as_array();
-                           if (entry == nullptr || entry->size() != 4) {
-                               return false;
-                           }
-                           std::array<uint16_t, 4> fields{};
-                           for (size_t f = 0; f < fields.size(); ++f) {
-                               auto const n = (*entry)[f].as_integer();
-                               if (!n || *n < 0 || *n > std::numeric_limits<uint16_t>::max()) {
-                                   return false;
-                               }
-                               fields[f] = static_cast<uint16_t>(*n);
-                           }
-                           map.mappings.push_back(
-                               {.stream_index = fields[0],
-                                .stream_channel = fields[1],
-                                .cluster_offset = fields[2],
-                                .cluster_channel = fields[3]});
-                       }
-                       state.audio_maps.push_back(std::move(map));
-                       return true;
-                   }) &&
-        each_table(root, "media_clock_reference", [&](Table const& t) {
+        each_table(root, "audio_map", load_audio_map) && each_table(root, "media_clock_reference", [&](Table const& t) {
                         auto const domain = u16_at(t, "clock_domain");
                         auto const prio = int_at(t, "user_priority", 0, 255);
                         auto name = name_at(t, "domain_name");
