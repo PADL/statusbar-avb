@@ -60,22 +60,24 @@ void append_u16(std::vector<std::uint8_t>& out, std::uint16_t v)
 
 std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors)
 {
-    std::vector<AemRawDescriptor const*> order;
+    std::vector<std::size_t> order;
     order.reserve(descriptors.size());
-    for (auto const& d : descriptors) {
-        order.push_back(&d);
+    for (std::size_t i = 0; i < descriptors.size(); ++i) {
+        order.push_back(i);
     }
-    std::sort(order.begin(), order.end(), [](AemRawDescriptor const* a, AemRawDescriptor const* b) {
-        return std::tuple(a->configuration, a->descriptor_type, a->descriptor_index) <
-            std::tuple(b->configuration, b->descriptor_type, b->descriptor_index);
-    });
+    auto const key = [descriptors](std::size_t const i) {
+        auto const& d = descriptors[i];
+        return std::tuple(d.configuration, d.descriptor_type, d.descriptor_index);
+    };
+    std::sort(order.begin(), order.end(), [&key](std::size_t const a, std::size_t const b) { return key(a) < key(b); });
 
     std::vector<std::uint8_t> canonical;
-    for (auto const* d : order) {
-        auto bytes = canonical_bytes(*d);
-        append_u16(canonical, d->configuration);
-        append_u16(canonical, d->descriptor_type);
-        append_u16(canonical, d->descriptor_index);
+    for (auto const i : order) {
+        auto const& d = descriptors[i];
+        auto bytes = canonical_bytes(d);
+        append_u16(canonical, d.configuration);
+        append_u16(canonical, d.descriptor_type);
+        append_u16(canonical, d.descriptor_index);
         append_u16(canonical, std::uint16_t(bytes.size()));
         canonical.insert(canonical.end(), bytes.begin(), bytes.end());
     }
