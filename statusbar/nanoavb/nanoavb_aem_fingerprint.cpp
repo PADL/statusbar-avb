@@ -98,11 +98,17 @@ std::string aem_fingerprint(std::span<std::uint8_t const> const blob)
         return {};
     }
     std::vector<AemRawDescriptor> descriptors;
-    storage->for_each_descriptor(
-        [&descriptors](std::uint16_t const configuration, std::uint16_t const type, std::uint16_t const index, std::span<std::uint8_t const> const bytes) {
-            descriptors.push_back(
-                {.configuration = configuration, .descriptor_type = type, .descriptor_index = index, .bytes = {bytes.begin(), bytes.end()}});
-        });
+    storage->for_each_descriptor([&descriptors](
+                                     std::uint16_t const configuration,
+                                     std::uint16_t const type,
+                                     std::uint16_t const index,
+                                     std::span<std::uint8_t const> const bytes) {
+        descriptors.push_back(
+            {.configuration = configuration,
+             .descriptor_type = type,
+             .descriptor_index = index,
+             .bytes = {bytes.begin(), bytes.end()}});
+    });
     return aem_fingerprint(descriptors);
 }
 

@@ -468,7 +468,8 @@ class MsrpHandler
     {
         for (auto& stream : listener_streams_) {
             if (stream.stream_id == stream_id) {
-                bool const declared = stream.state != ListenerReservationState::Idle && stream.state != ListenerReservationState::Waiting;
+                bool const declared =
+                    stream.state != ListenerReservationState::Idle && stream.state != ListenerReservationState::Waiting;
                 stream.state = ListenerReservationState::Idle;
                 if (declared) {
                     (void)participant_.withdraw_listener(stream_id, now);
