@@ -123,9 +123,10 @@ inline constexpr std::string_view LISTENER_BINDINGS_MAGIC = "statusbar-listener-
     std::string text;
     char buf[512];
     size_t n = 0;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+    do {
+        n = std::fread(buf, 1, sizeof(buf), f);
         text.append(buf, n);
-    }
+    } while (n == sizeof(buf));
     (void)std::fclose(f);
     return parse_listener_bindings(text);
 }
