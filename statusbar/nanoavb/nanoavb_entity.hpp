@@ -139,9 +139,8 @@ using SettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t comman
 /// Apply stream port (@p port_type, @p port_index)'s new dynamic mappings (all of them, in
 /// cluster order) to the data plane: SUCCESS applies them, any other status refuses and leaves
 /// the port as it was. Reactor thread, before the response.
-using AudioMappingsChangedFn = statusbar::sg14::inplace_function<
-    uint8_t(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings),
-    32>;
+using AudioMappingsChangedFn = statusbar::sg14::
+    inplace_function<uint8_t(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings), 32>;
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
@@ -385,8 +384,8 @@ class AemCommandHandler
     /// Make @p mappings input port (@p port_type, @p port_index)'s dynamic mappings, validated as
     /// an ADD onto an empty port, applied when @p apply; no notification, no settings report.
     /// The AEM status; nothing changes unless SUCCESS.
-    [[nodiscard]] auto set_audio_mappings(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings, bool apply)
-        -> uint8_t;
+    [[nodiscard]] auto set_audio_mappings(
+        uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings, bool apply) -> uint8_t;
     /// REMOVE_AUDIO_MAPPINGS of @p remove, then ADD_AUDIO_MAPPINGS of @p add, on STREAM_PORT_INPUT @p port_index by
     /// the entity itself: ENTITY_LOCKED while locked or acquired (Milan v1.2 Sections 5.4.2.27-28), else as a
     /// controller's, all or nothing; a change is notified and reported to the settings hook. The AEM status.
@@ -708,8 +707,8 @@ class AemCommandHandler
 
     /// GET_AUDIO_MAP on a stream port with dynamic maps: partition map_index of its mappings.
     /// A port with static maps is NOT_SUPPORTED.
-    [[nodiscard]] auto handle_get_audio_map(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
+    [[nodiscard]] auto handle_get_audio_map(
+        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// ADD_AUDIO_MAPPINGS (@p add) or REMOVE_AUDIO_MAPPINGS on a dynamic
     /// STREAM_PORT_INPUT (see the public section).
     [[nodiscard]] auto handle_audio_mappings(bool add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -734,8 +733,8 @@ class AemCommandHandler
     [[nodiscard]] static auto cluster_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) -> std::optional<uint32_t>;
     /// SUCCESS when @p mapping names a cluster channel of the port and a stream of its direction and,
     /// with @p check_channel, a channel of its current format (an input's at the unit's rate); else BAD_ARGUMENTS.
-    [[nodiscard]] auto check_mapping(uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const
-        -> uint8_t;
+    [[nodiscard]] auto check_mapping(
+        uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const -> uint8_t;
     /// The set @p mappings would leave port (@p port_index, @p port)
     /// with, added to @p current (validated as ADD_AUDIO_MAPPINGS), or the
     /// status to refuse with.
@@ -1206,7 +1205,7 @@ class AemCommandHandler
     struct UnsolicitedRegistration
     {
         Eui64 controller_entity_id{};
-        Eui48 controller_mac{};  ///< Source MAC of the REGISTER command, for unicast notifications
+        Eui48 controller_mac{};       ///< Source MAC of the REGISTER command, for unicast notifications
         uint16_t sequence_id{0};      ///< of its next unsolicited AEM notification (Milan v1.2 Section 5.3.4.2)
         uint16_t mvu_sequence_id{0};  ///< of its next unsolicited MVU notification
         /// Controller monitor (Milan v1.2 Section 5.4.5.3): when it is next
@@ -1217,7 +1216,6 @@ class AemCommandHandler
         uint16_t available_sequence_id{0};
     };
     SlotTable<UnsolicitedRegistration, MAX_UNSOLICITED_REGISTRATIONS> unsolicited_registrations_{};
-
 
     // GET_COUNTERS notification hold-off per descriptor (COUNTERS_NOTIFICATION_INTERVAL).
     struct CountersNotification
