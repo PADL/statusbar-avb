@@ -999,7 +999,7 @@ auto AemCommandHandler::handle_get_avb_info(std::span<uint8_t const> command_dat
     // Response (7.4.40.2): the fixed payload then one 4-octet mapping per SR
     // class: traffic_class, priority, vlan_id.
     constexpr size_t MAPPING_LENGTH = 4;
-    size_t const size = AemAvbInfoPayload::LENGTH + info.msrp_mappings.size() * MAPPING_LENGTH;
+    size_t const size = AemAvbInfoPayload::LENGTH + (info.msrp_mappings.size() * MAPPING_LENGTH);
     if (out_buffer.size() < size) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
@@ -1028,7 +1028,7 @@ auto AemCommandHandler::notify_avb_info_changed(uint16_t const descriptor_index)
     AemGetAvbInfoCommandPayload const cmd{.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .descriptor_index = descriptor_index};
     std::array<uint8_t, AemGetAvbInfoCommandPayload::LENGTH> request{};
     span_store(request, cmd);
-    std::array<uint8_t, AemAvbInfoPayload::LENGTH + AvbInfo::MAX_MSRP_MAPPINGS * 4> out{};
+    std::array<uint8_t, AemAvbInfoPayload::LENGTH + (AvbInfo::MAX_MSRP_MAPPINGS * 4)> out{};
     auto const r = handle_get_avb_info(request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited_to_all(AEM_COMMAND_GET_AVB_INFO, std::span<uint8_t const>{out}.first(r.size));
@@ -1494,7 +1494,7 @@ struct FormatChannels
 [[nodiscard]] auto parse_mappings(std::span<uint8_t const> const bytes, size_t const count) -> DynamicAudioMaps::Mappings
 {
     DynamicAudioMaps::Mappings out{};
-    for (size_t i = 0; i < count && out.size() < out.capacity(); ++i) {
+    for (size_t i = 0; i < count && out.size() < DynamicAudioMaps::Mappings::capacity(); ++i) {
         AemAudioMapping wire{};
         span_load(wire, bytes.subspan(i * AemAudioMapping::LENGTH, AemAudioMapping::LENGTH));
         out.push_back(
@@ -1537,7 +1537,8 @@ auto AemCommandHandler::port_model(uint16_t const port_type, uint16_t const port
         .number_of_clusters = port->number_of_clusters.get(),
         .number_of_maps = port->number_of_maps.get(),
         .port_flags = port->port_flags.get()};
-    for (uint16_t offset = 0; offset < model.number_of_clusters && offset < model.cluster_channel_counts.capacity(); ++offset) {
+    for (uint16_t offset = 0; offset < model.number_of_clusters && offset < decltype(model.cluster_channel_counts)::capacity();
+         ++offset) {
         auto const cluster = read_model_descriptor<DescriptorAudioCluster>(
             DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(model.base_cluster + offset));
         uint16_t const channels = cluster ? cluster->channel_count.get() : uint16_t{0};
@@ -1640,7 +1641,7 @@ auto AemCommandHandler::merged_mappings(
             }
             continue;  // already there (or listed twice)
         }
-        if (merged.size() == merged.capacity()) {
+        if (merged.size() == DynamicAudioMaps::Mappings::capacity()) {
             return AEM_STATUS_NO_RESOURCES;
         }
         merged.push_back(mapping);
@@ -1677,6 +1678,69 @@ auto AemCommandHandler::set_audio_mappings(
             // Put the data plane back on the mappings in force.
             (void)callbacks_.on_audio_mappings_changed(port_type, port_index, dynamic_maps_.port(port_type, port_index));
         }
+        return AEM_STATUS_NO_RESOURCES;
+    }
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const port_index, PortModel& port) const -> uint8_t
+{
+    if (port_type != DESCRIPTOR_STREAM_PORT_INPUT && port_type != DESCRIPTOR_STREAM_PORT_OUTPUT) {
+        return AEM_STATUS_NOT_SUPPORTED;
+    }
+    auto model = port_model(port_type, port_index);
+    if (!model) {
+        return AEM_STATUS_NO_SUCH_DESCRIPTOR;
+    }
+    // Static maps (their AUDIO_MAP descriptors), or an output port (its
+    // mappings are static on this entity: Milan v1.2 Section 5.3.9.1 allows it).
+    if (model->number_of_maps != 0 || port_type != DESCRIPTOR_STREAM_PORT_INPUT) {
+        return AEM_STATUS_NOT_SUPPORTED;
+    }
+    if (!callbacks_.on_audio_mappings_changed) {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+    port = *model;
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::removed_mappings(
+    uint16_t const port_index,
+    PortModel const& port,
+    DynamicAudioMaps::Mappings const& current,
+    std::span<DynamicAudioMapping const> const listed,
+    DynamicAudioMaps::Mappings& kept) const -> uint8_t
+{
+    // Milan v1.2 Section 5.4.2.28: duplicates are ignored, and so is a mapping
+    // that is not there; one naming nothing in the model is not a mapping at all.
+    for (auto const& mapping : listed) {
+        if (auto const status = check_mapping(port_index, port, mapping, false); status != AEM_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    kept.clear();
+    for (auto const& mapping : current) {
+        if (std::ranges::find(listed, mapping) == listed.end()) {
+            kept.push_back(mapping);
+        }
+    }
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::commit_mappings(
+    uint16_t const port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t
+{
+    if (!dynamic_maps_.fits(DESCRIPTOR_STREAM_PORT_INPUT, port_index, next.size())) {
+        return AEM_STATUS_NO_RESOURCES;  // every port's together
+    }
+    // All or nothing: the data plane applies the whole new set, or nothing changes.
+    if (auto const status = callbacks_.on_audio_mappings_changed(DESCRIPTOR_STREAM_PORT_INPUT, port_index, next);
+        status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    if (!dynamic_maps_.replace(DESCRIPTOR_STREAM_PORT_INPUT, port_index, next)) {
+        // Cannot be: it fits. Put the data plane back.
+        (void)callbacks_.on_audio_mappings_changed(DESCRIPTOR_STREAM_PORT_INPUT, port_index, current);
         return AEM_STATUS_NO_RESOURCES;
     }
     return AEM_STATUS_SUCCESS;
