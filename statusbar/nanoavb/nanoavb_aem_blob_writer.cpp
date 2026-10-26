@@ -32,8 +32,8 @@ std::vector<std::uint8_t> AemBlobWriter::write() const
     };
 
     auto const toc_offset = std::uint32_t(DescriptorStorageHeader::LENGTH);
-    auto const symbol_offset = std::uint32_t(toc_offset + entries_.size() * DescriptorStorageTocEntry::LENGTH);
-    auto const data_offset = std::uint32_t(symbol_offset + symbols_.size() * DescriptorStorageSymbolEntry::LENGTH);
+    auto const symbol_offset = std::uint32_t(toc_offset + (entries_.size() * DescriptorStorageTocEntry::LENGTH));
+    auto const data_offset = std::uint32_t(symbol_offset + (symbols_.size() * DescriptorStorageSymbolEntry::LENGTH));
 
     std::vector<std::uint8_t> out;
     std::size_t total = data_offset;

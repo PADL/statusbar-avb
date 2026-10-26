@@ -3,6 +3,7 @@
 
 #include "statusbar/nanoavb/nanoavb_aem_model_store.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_fingerprint.hpp"
 
@@ -35,9 +36,10 @@ std::optional<std::vector<std::uint8_t>> read_file(std::string const& path)
     std::vector<std::uint8_t> out;
     char buf[16384];
     std::size_t n = 0;
-    while ((n = fread(buf, 1, sizeof buf, f)) > 0) {
+    do {
+        n = fread(buf, 1, sizeof buf, f);
         out.insert(out.end(), buf, buf + n);
-    }
+    } while (n == sizeof buf);
     fclose(f);
     return out;
 }
@@ -86,7 +88,7 @@ std::optional<std::string> AemModelStore::store(std::span<AemRawDescriptor const
         text += s.symbol;
         text += s.orphan ? "\torphan\n" : "\tok\n";
     }
-    if (!write_file(symbols_path(fingerprint), {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()})) {
+    if (!write_file(symbols_path(fingerprint), make_const_span(std::string_view{text}))) {
         return std::nullopt;
     }
     return fingerprint;
@@ -109,7 +111,7 @@ std::optional<std::vector<AemSymbol>> AemModelStore::load_symbols(std::string_vi
     if (!bytes) {
         return std::nullopt;
     }
-    std::string_view text(reinterpret_cast<char const*>(bytes->data()), bytes->size());
+    std::string_view const text = as_string_view(*bytes);
     std::vector<AemSymbol> out;
     std::size_t at = 0;
     while (at < text.size()) {
@@ -144,7 +146,7 @@ std::vector<std::string> AemModelStore::list() const
     std::vector<std::string> out;
     std::error_code ec;
     for (auto const& entry : fs::directory_iterator(directory_, ec)) {
-        auto path = entry.path();
+        auto const& path = entry.path();
         if (path.extension() == ".aem") {
             out.push_back(path.stem().string());
         }
