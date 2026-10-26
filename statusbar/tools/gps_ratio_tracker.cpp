@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <optional>
+#include <print>
 #include <string>
 
 using statusbar::ptpclient::KalmanRatioTracker;
@@ -56,7 +57,7 @@ std::optional<Reading> read_sample(int fd, clockid_t phc_clk)
     }
     clock_gettime(CLOCK_REALTIME, &g2);
     std::int64_t const mid = (to_i64(g1) + to_i64(g2)) / 2;
-    timespec gps{.tv_sec = static_cast<time_t>(mid / 1'000'000'000LL), .tv_nsec = static_cast<long>(mid % 1'000'000'000LL)};
+    timespec const gps{.tv_sec = static_cast<time_t>(mid / 1'000'000'000LL), .tv_nsec = static_cast<long>(mid % 1'000'000'000LL)};
     return Reading{.offset_ns = to_i64(p) - mid, .gps = gps};
 }
 
@@ -101,7 +102,7 @@ int main(int argc, char** argv)
     // a non-positive value yields inf/an invalid tv_nsec, so the sleep returns EINVAL
     // and the loop spins. Reject it up front.
     if (sample_hz <= 0.0) {
-        std::fprintf(stderr, "Error: --sample-hz must be positive\n");
+        std::println(stderr, "Error: --sample-hz must be positive");
         return 1;
     }
 
@@ -135,9 +136,9 @@ int main(int argc, char** argv)
                 since_report = 0;
                 RatioEstimate const e = use_kalman ? kf.estimate() : ols.estimate();
                 if (e.valid) {
-                    printf(
-                        "[%s] r=%.9f (%+0.4f ppm)  f_unc=%.3f ppb  drift=%+0.4f ppm/hr  "
-                        "PHC-GPS=%lld ns  avtp_ns/sample@%.0f=%.4f\n",
+                    std::println(
+                        "[{}] r={:.9f} ({:+.4f} ppm)  f_unc={:.3f} ppb  drift={:+.4f} ppm/hr  "
+                        "PHC-GPS={} ns  avtp_ns/sample@{:.0f}={:.4f}",
                         use_kalman ? "kalman" : "ols",
                         e.r,
                         e.ppm(),
@@ -150,7 +151,7 @@ int main(int argc, char** argv)
                 }
             }
         }
-        timespec ts{.tv_sec = 0, .tv_nsec = static_cast<long>(1e9 / sample_hz)};
+        timespec const ts{.tv_sec = 0, .tv_nsec = static_cast<long>(1e9 / sample_hz)};
         clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr);
     }
 }

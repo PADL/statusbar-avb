@@ -202,7 +202,8 @@ auto AvbEntityHost::as_path(uint16_t const index, nanoavb::AsPath& path) const -
 auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity) -> nanoavb::AsPath
 {
     nanoavb::AsPath path = path_trace;
-    if (!path.empty() && own_clock_identity.has_value() && path.back() != *own_clock_identity && path.size() < path.capacity()) {
+    if (!path.empty() && own_clock_identity.has_value() && path.back() != *own_clock_identity &&
+        path.size() < nanoavb::AsPath::capacity()) {
         path.push_back(*own_clock_identity);
     }
     return path;
@@ -260,7 +261,8 @@ void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
     if (!mirror_config_.has_value() || mirror_ != nullptr) {
         return;
     }
-    auto port = std::make_unique<AvbInfoMirrorPort>(interface_name_, *mirror_config_);
+    auto const& cfg = *mirror_config_;
+    auto port = std::make_unique<AvbInfoMirrorPort>(interface_name_, cfg);
     if (!port->valid()) {
         ctl_log().warning("avb info mirror: cannot open the ATDECC socket");
         return;
@@ -271,7 +273,7 @@ void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
         });
     mirror_ = port.get();
     reactor.add(std::move(port));
-    ctl_log().status("avb info mirror: following entity {:016x}", mirror_config_->target_entity_id.to_uint64());
+    ctl_log().status("avb info mirror: following entity {:016x}", cfg.target_entity_id.to_uint64());
 }
 
 void AvbEntityHost::set_propagation_delay_ns(uint32_t const ns)
@@ -344,8 +346,9 @@ void AvbEntityHost::apply_interface_runtime()
         auto const m = std::find_if(mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) {
             return x.index == index && x.descriptor.has_value();
         });
-        if (m != mirrored_.end()) {
-            auto const& d = *m->descriptor;
+        auto const* const mirrored = m != mirrored_.end() ? &*m : nullptr;
+        if (mirrored != nullptr && mirrored->descriptor.has_value()) {
+            auto const& d = *mirrored->descriptor;
             rt.identity_valid = true;
             if (!mac.has_value()) {
                 rt.mac_address = d.mac_address;
@@ -379,8 +382,9 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
     // A mirrored device's answer is reported as-is: it IS the state.
     auto const m = std::find_if(
         mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) { return x.index == index && x.info.has_value(); });
-    if (m != mirrored_.end()) {
-        return *m->info;
+    auto const* const mirrored = m != mirrored_.end() ? &*m : nullptr;
+    if (mirrored != nullptr && mirrored->info.has_value()) {
+        return *mirrored->info;
     }
     nanoavb::AvbInfo info{};
     info.flags = GPTP_ENABLED | AVTP_DOWN_VALID;

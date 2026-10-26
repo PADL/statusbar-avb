@@ -261,7 +261,9 @@ auto AvbEntityKit::identity_mappings(uint16_t const port_type, uint16_t const po
         }
         atdecc::aem::DescriptorAudioCluster cluster{};
         span_load_padded(cluster, *cluster_blob);
-        for (uint16_t ch = 0; ch < cluster.channel_count.get() && stream_channel < channels && out.size() < out.capacity(); ++ch) {
+        for (uint16_t ch = 0; ch < cluster.channel_count.get() && stream_channel < channels &&
+             out.size() < nanoavb::DynamicAudioMaps::Mappings::capacity();
+             ++ch) {
             out.push_back(
                 {.stream_index = port_index, .stream_channel = stream_channel++, .cluster_offset = offset, .cluster_channel = ch});
         }
@@ -375,7 +377,7 @@ void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
         if (saved_map != saved.audio_maps.end()) {
             nanoavb::DynamicAudioMaps::Mappings mappings{};
             for (auto const& m : saved_map->mappings) {
-                if (mappings.size() < mappings.capacity()) {
+                if (mappings.size() < nanoavb::DynamicAudioMaps::Mappings::capacity()) {
                     mappings.push_back(
                         {.stream_index = m.stream_index,
                          .stream_channel = m.stream_channel,
@@ -587,7 +589,8 @@ auto AvbEntityKit::crf_recovery_input() const -> std::optional<uint16_t>
             }
         }
     }
-    auto const first = std::ranges::find(listener_specs_, StreamKind::crf, [](StreamSpec const& spec) { return spec.format.kind; });
+    auto const* const first =
+        std::ranges::find(listener_specs_, StreamKind::crf, [](StreamSpec const& spec) { return spec.format.kind; });
     return first == listener_specs_.end() ? std::nullopt : std::optional{first->index};
 }
 

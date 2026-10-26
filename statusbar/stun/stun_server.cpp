@@ -403,13 +403,13 @@ auto StunServer<MaxSessions>::create(ServerConfig config, std::error_code& ec_ou
 
     // Open the IPv4 socket first. When bind_port was 0, its
     // OS-assigned port becomes the shared port the IPv6 socket binds.
-    int v4_fd = open_wildcard_socket(AF_INET, requested_port);
+    int const v4_fd = open_wildcard_socket(AF_INET, requested_port);
     uint16_t resolved_port = requested_port;
     if (v4_fd >= 0 && requested_port == 0) {
         resolved_port = socket_port(v4_fd);
     }
 
-    int v6_fd = open_wildcard_socket(AF_INET6, (v4_fd >= 0) ? resolved_port : requested_port);
+    int const v6_fd = open_wildcard_socket(AF_INET6, (v4_fd >= 0) ? resolved_port : requested_port);
     if (v6_fd >= 0 && v4_fd < 0 && requested_port == 0) {
         resolved_port = socket_port(v6_fd);
     }

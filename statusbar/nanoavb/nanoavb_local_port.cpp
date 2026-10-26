@@ -174,6 +174,7 @@ auto AtdeccLocalPort::open(Config const& config) -> StatusValue<std::unique_ptr<
         ::close(lock_fd);
         return failure(fd.error());
     }
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) - false positive: the unique_ptr owns it
     std::unique_ptr<AtdeccLocalPort> port{new AtdeccLocalPort{*fd, false, config}};
     port->path_ = config.path;
     port->path_dev_ = st.st_dev;
@@ -204,6 +205,7 @@ auto AtdeccLocalPort::adopt(int const fd) -> StatusValue<std::unique_ptr<AtdeccL
     if (!make_nonblocking(fd)) {
         return errno_failure();
     }
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) - false positive: the unique_ptr owns it
     return success(std::unique_ptr<AtdeccLocalPort>{new AtdeccLocalPort{fd, true, Config{}}});
 }
 
@@ -283,7 +285,7 @@ auto AtdeccLocalPort::next_mac() -> ieee::Eui48
 
 auto AtdeccLocalPort::add_client(sockaddr_un const& address, socklen_t const length, int64_t const now_ns) -> Client*
 {
-    if (clients_.size() == clients_.capacity()) {
+    if (clients_.size() == MAX_CLIENTS) {
         auto* oldest = std::ranges::min_element(clients_, {}, &Client::last_heard_ns);
         oldest->gone = true;
         reap();

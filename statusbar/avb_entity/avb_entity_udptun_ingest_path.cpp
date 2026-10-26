@@ -169,6 +169,7 @@ void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool c
     if (!enable_ || !ingest_) {
         return;
     }
+    auto& ingest = *ingest_;
     size_t const frame_bytes = static_cast<size_t>(channels_) * 4;
     if (frame_bytes == 0 || audio.size() < frame_bytes) {
         return;
@@ -219,7 +220,7 @@ void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool c
             }
             anchor_tai_ns = (static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL) + ts.tv_nsec + config_.udptun_tai_offset_ns;
         }
-        ingest_->start(anchor_tai_ns);
+        ingest.start(anchor_tai_ns);
         anchored_ = true;
     }
     // Discipline the free-running ingest TAI to the live GPS-TAI. The ingest counts
@@ -230,9 +231,9 @@ void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool c
     // processor follows our GPS-rate CRF). The slew is gentle, so the emitted timestamps stay
     // smooth. Only when the translator has a global-epoch sample.
     if (gps_tai.have_sample) {
-        ingest_->discipline(gps_tai.tai_ns);
+        ingest.discipline(gps_tai.tai_ns);
     }
-    (void)ingest_->submit(
+    (void)ingest.submit(
         audio.first(static_cast<size_t>(n_frames) * frame_bytes), n_frames, [this](auto const& pkt) { send(pkt.tai_ns, pkt.pcm); });
     lock.unlock();
 }

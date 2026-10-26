@@ -449,9 +449,9 @@ auto ControllerSimple::make_command_completion() -> atdecc::AemCommandCompletion
         ev.command_type = r.command_type;
         ev.delivery = r.delivery;
         ev.aem_status = r.status;
-        auto const n = std::min(r.response.size(), ev.response.capacity());
+        auto const n = std::min(r.response.size(), decltype(ev.response)::capacity());
         ev.response.assign(r.response.begin(), r.response.begin() + static_cast<ptrdiff_t>(n));
-        pending_events_.emplace_back(std::move(ev));
+        pending_events_.emplace_back(ev);
     };
 }
 
@@ -461,7 +461,7 @@ void ControllerSimple::emit_command_send_failure(ieee::Eui64 const& target, uint
     ev.entity_id = target;
     ev.command_type = command_type;
     ev.delivery = atdecc::AemCommandDelivery::SendFailed;
-    pending_events_.emplace_back(std::move(ev));
+    pending_events_.emplace_back(ev);
 }
 
 void ControllerSimple::EntityDetailBuilder::receive(
@@ -686,9 +686,9 @@ void ControllerSimple::wire_service()
                 ev.entity_id = target;
                 ev.command_type = cmd;
                 ev.aem_status = status;
-                auto const n = std::min(data.size(), ev.response.capacity());
+                auto const n = std::min(data.size(), decltype(ev.response)::capacity());
                 ev.response.assign(data.begin(), data.begin() + static_cast<ptrdiff_t>(n));
-                pending_events_.emplace_back(std::move(ev));
+                pending_events_.emplace_back(ev);
             },
         .on_acmp_response =
             [this](AcmpCommandResponse const& resp) {

@@ -82,7 +82,7 @@ auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept
         }
         if (type == TLV_TYPE_PATH_TRACE) {
             auto const value = tlvs.subspan(TlvHeader::LENGTH, length);
-            for (size_t at = 0; at + 8 <= value.size() && path.size() < path.capacity(); at += 8) {
+            for (size_t at = 0; at + 8 <= value.size() && path.size() < AsPath::capacity(); at += 8) {
                 Eui64 id{};
                 span_copy(id.span(), value.subspan(at, 8));
                 path.push_back(id);
