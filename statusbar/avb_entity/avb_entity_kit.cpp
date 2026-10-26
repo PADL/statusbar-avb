@@ -10,8 +10,8 @@
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_shaper.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
-#include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
 #include <algorithm>
@@ -163,9 +163,10 @@ AvbEntityKit::AvbEntityKit(
     // SET_STREAM_FORMAT: the kit's checks, then the entity's data plane (see the
     // header), so no descriptor reports a format the streams are not using (and
     // none is saved). SET_SAMPLING_RATE: the unit's current rate only.
-    storage_handler_.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t {
-        return change_stream_format(type, index, format);
-    });
+    storage_handler_.set_on_stream_format_changed(
+        [this](uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t {
+            return change_stream_format(type, index, format);
+        });
     storage_handler_.set_on_sampling_rate_changed(
         [this](uint16_t const unit, uint32_t const rate) -> uint8_t { return change_sampling_rate(unit, rate); });
     // SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN: the entity's hook
@@ -201,7 +202,8 @@ AvbEntityKit::AvbEntityKit(
     }
     refresh_output_mappings();
     aem.set_on_audio_mappings_changed(
-        [this](uint16_t const port_type, uint16_t const port_index, std::span<nanoavb::DynamicAudioMapping const> const mappings) -> uint8_t {
+        [this](uint16_t const port_type, uint16_t const port_index, std::span<nanoavb::DynamicAudioMapping const> const mappings)
+            -> uint8_t {
             if (port_type != atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT || !on_input_mappings_changed_) {
                 return atdecc::AEM_STATUS_NOT_SUPPORTED;
             }
@@ -305,12 +307,15 @@ auto AvbEntityKit::fall_back_to_default_mappings(uint16_t const port_index) -> n
 {
     auto& aem = host_.components().aem_handler;
     auto mappings = default_input_mappings(port_index);
-    if (aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, mappings, false) != atdecc::AEM_STATUS_SUCCESS) {
+    if (aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, mappings, false) !=
+        atdecc::AEM_STATUS_SUCCESS) {
         mappings.clear();
         (void)aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, {}, false);
     }
     host_.ctl_log().warning(
-        "kit: STREAM_PORT_INPUT {}: the entity cannot route its mappings: {} default mapping(s) instead", port_index, mappings.size());
+        "kit: STREAM_PORT_INPUT {}: the entity cannot route its mappings: {} default mapping(s) instead",
+        port_index,
+        mappings.size());
     return mappings;
 }
 
@@ -382,13 +387,15 @@ void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
             if (status == atdecc::AEM_STATUS_SUCCESS) {
                 continue;
             }
-            host_.ctl_log().warning("kit: saved audio mappings of STREAM_PORT_INPUT {} refused (status {}): the default", port, status);
+            host_.ctl_log().warning(
+                "kit: saved audio mappings of STREAM_PORT_INPUT {} refused (status {}): the default", port, status);
         }
         if (auto const status = aem.set_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, default_input_mappings(port), apply);
             status != atdecc::AEM_STATUS_SUCCESS) {
             // Unmapped (silent), and the data plane told so: never a map
             // the entity reports but does not route.
-            host_.ctl_log().warning("kit: STREAM_PORT_INPUT {}: its default mappings were refused (status {}): unmapped", port, status);
+            host_.ctl_log().warning(
+                "kit: STREAM_PORT_INPUT {}: its default mappings were refused (status {}): unmapped", port, status);
             (void)aem.set_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, {}, apply);
         }
     }
@@ -1033,7 +1040,8 @@ void AvbEntityKit::wire_stream_callbacks()
             bool const milan = host_.components().profile.milan;
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 return is_talker_index(descriptor_index) &&
-                    fill_talker_stream_counters(*talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
+                    fill_talker_stream_counters(
+                           *talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 // Classic keeps IEEE 1722.1's running totals.
@@ -1162,8 +1170,7 @@ void AvbEntityKit::wire_milan_listener()
                 sink->binding.talker_entity_id.to_uint64(),
                 sink->binding.talker_unique_id,
                 logging::static_str(atdecc::milan_sink_state_name(sink->state)),
-                sink->registration == atdecc::MilanTalkerRegistration::failed ? logging::lit(" talker failed")
-                                                                              : logging::lit(""),
+                sink->registration == atdecc::MilanTalkerRegistration::failed ? logging::lit(" talker failed") : logging::lit(""),
                 sink->acmp_status,
                 sink->binding.started ? logging::lit("") : logging::lit(", stopped"));
         }
@@ -1557,7 +1564,9 @@ void AvbEntityKit::load_persistent_state()
         return;
     }
     auto loaded = avb_entity::load_persistent_state(
-        config_.persistent_state_path, served_entity_model_id(), listener_ != nullptr ? config_.listener_bindings_path : std::string{});
+        config_.persistent_state_path,
+        served_entity_model_id(),
+        listener_ != nullptr ? config_.listener_bindings_path : std::string{});
     auto log = host_.ctl_log();
     persistence_active_ = true;
     // Every later change is saved: AEM settings, the MVU values (the
@@ -1612,7 +1621,8 @@ void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
     using atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
     auto log = host_.ctl_log();
     auto const id = [](uint16_t const type, uint16_t const index) {
-        return nanoavb::DescriptorId{.ref = {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, .symbol = 0};
+        return nanoavb::DescriptorId{
+            .ref = {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, .symbol = 0};
     };
     // A refused value is dropped (the file is rewritten without it).
     auto const refused = [&log](std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status) {
@@ -1695,8 +1705,8 @@ void AvbEntityKit::apply_saved_listener_bindings()
     bool const milan = host_.components().profile.milan;
     size_t armed = 0;
     for (auto const& binding : saved_bindings_) {
-        bool const known = std::ranges::any_of(
-            listener_specs_, [&binding](StreamSpec const& spec) { return spec.index == binding.stream_input; });
+        bool const known =
+            std::ranges::any_of(listener_specs_, [&binding](StreamSpec const& spec) { return spec.index == binding.stream_input; });
         if (!known) {
             host_.ctl_log().warning("kit: saved listener binding of STREAM_INPUT {}: no such input: dropped", binding.stream_input);
             continue;
@@ -1759,7 +1769,10 @@ auto AvbEntityKit::collect_persistent_state() const -> PersistentState
     state.configured_presentation_offset_ns = default_presentation_offset_ns();
     if (auto const name = storage_handler_.entity_name().as_string_view(); name != configured_entity_name_) {
         state.names.push_back(
-            {.descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0, .name_index = 0, .value = std::string{name}});
+            {.descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY,
+             .descriptor_index = 0,
+             .name_index = 0,
+             .value = std::string{name}});
     }
     if (auto const* group = storage_handler_.group_name_override()) {
         state.names.push_back(
@@ -1773,10 +1786,11 @@ auto AvbEntityKit::collect_persistent_state() const -> PersistentState
             state.names.push_back(
                 {.descriptor_type = type, .descriptor_index = index, .name_index = 0, .value = std::string{name.as_string_view()}});
         });
-    storage_handler_.for_each_runtime_stream_format([this, &state](uint16_t const type, uint16_t const index, ieee::Eui64 const& format) {
+    storage_handler_.for_each_runtime_stream_format([this,
+                                                     &state](uint16_t const type, uint16_t const index, ieee::Eui64 const& format) {
         // A stream's own format is the model's: nothing to keep.
-        auto const authored = storage_handler_.authored_stream_format(
-            {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index});
+        auto const authored =
+            storage_handler_.authored_stream_format({.configuration_index = 0, .descriptor_type = type, .descriptor_index = index});
         if (!authored || *authored != format) {
             state.stream_formats.push_back({.descriptor_type = type, .descriptor_index = index, .format = format.to_uint64()});
         }
@@ -1815,7 +1829,9 @@ auto AvbEntityKit::collect_persistent_state() const -> PersistentState
         } else {
             for (auto const& goal : host_.components().acmp_listener.fast_connect_goals()) {
                 auto const format = storage_handler_.current_stream_format(
-                    {.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = goal.listener_unique_id});
+                    {.configuration_index = 0,
+                     .descriptor_type = DESCRIPTOR_STREAM_INPUT,
+                     .descriptor_index = goal.listener_unique_id});
                 state.listener_bindings.push_back(
                     {.stream_input = goal.listener_unique_id,
                      .talker_entity_id = goal.talker_entity_id.to_uint64(),
@@ -1829,7 +1845,8 @@ auto AvbEntityKit::collect_persistent_state() const -> PersistentState
         if (std::ranges::equal(mappings, default_input_mappings(port))) {
             continue;  // the default: nothing to keep
         }
-        PersistedAudioMap map{.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, .descriptor_index = port, .mappings = {}};
+        PersistedAudioMap map{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, .descriptor_index = port, .mappings = {}};
         for (auto const& m : mappings) {
             map.mappings.push_back(
                 {.stream_index = m.stream_index,

@@ -154,9 +154,8 @@ class XdpStreamPort final : public StreamPort
     /// FILL_RING fill ring, a ring's worth of completions a cycle, @p rules, no per-frame
     /// clock, no drain budget (rx_poll bounds it) and @p options, both by view.
     [[nodiscard]] static auto config_for(
-        std::string_view interface_name,
-        XdpStreamPortOptions const& options,
-        std::span<net::CompiledRule<32> const> rules) noexcept -> net::XdpConfig;
+        std::string_view interface_name, XdpStreamPortOptions const& options, std::span<net::CompiledRule<32> const> rules) noexcept
+        -> net::XdpConfig;
 
     XdpStreamPort();
     ~XdpStreamPort() override;

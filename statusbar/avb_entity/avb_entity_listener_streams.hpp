@@ -216,10 +216,8 @@ struct ListenerStreams
     /// (only the first join's failure fails); add its drain handler to @p reactor, or
     /// with @p keep_handler return it for an RX timer. Reactor thread.
     [[nodiscard]] auto attach_rx(
-        StreamPort& port,
-        std::span<ieee::Eui48 const> static_groups,
-        net::MessageReactor& reactor,
-        bool keep_handler = false) -> StatusValue<std::unique_ptr<net::Pollable>>;
+        StreamPort& port, std::span<ieee::Eui48 const> static_groups, net::MessageReactor& reactor, bool keep_handler = false)
+        -> StatusValue<std::unique_ptr<net::Pollable>>;
 
     /// The most frames one drain_rx takes from the port: four a stream, room
     /// for a late tick's backlog.

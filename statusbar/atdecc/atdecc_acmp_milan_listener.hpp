@@ -245,10 +245,7 @@ class MilanListener
     void discovered(uint16_t index, TimePoint now);
     void departed(uint16_t index);
     void notify(uint16_t index);
-    [[nodiscard]] auto authorized(ieee::Eui64 const& controller) const -> bool
-    {
-        return !authorized_ || authorized_(controller);
-    }
+    [[nodiscard]] auto authorized(ieee::Eui64 const& controller) const -> bool { return !authorized_ || authorized_(controller); }
 
     ieee::Eui64 entity_id_{};
     sg14::inplace_vector<MilanSink, MAX_SINKS> sinks_{};

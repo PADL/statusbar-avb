@@ -119,8 +119,8 @@ auto MvuCommandHandler::locked_against(MvuDu const& header) const noexcept -> bo
     return aem_ != nullptr && aem_->exclusive_access_status(header.common.controller_entity_id).has_value();
 }
 
-auto MvuCommandHandler::set_system_unique_id_command(Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command)
-    -> bool
+auto MvuCommandHandler::set_system_unique_id_command(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command) -> bool
 {
     auto const data = command.subspan(MvuDu::LENGTH);
     uint64_t requested = 0;

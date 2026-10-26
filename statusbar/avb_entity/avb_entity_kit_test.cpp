@@ -19,6 +19,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -27,7 +28,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <algorithm>
 #include <iterator>
 #include <memory_resource>
 #include <optional>
@@ -1305,7 +1305,8 @@ TEST(avb_entity_kit_persistence, mvu_values_survive_a_rebuild)
         EXPECT_TRUE(m.start_ready());
         atdecc::mvu::MvuSystemUniqueIdPayload id{};
         id.system_unique_id = uint32_t{4242};
-        EXPECT_EQ(m.mvu_packet(atdecc::mvu::MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(id)), atdecc::mvu::MVU_STATUS_SUCCESS);
+        EXPECT_EQ(
+            m.mvu_packet(atdecc::mvu::MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(id)), atdecc::mvu::MVU_STATUS_SUCCESS);
         atdecc::mvu::MvuMediaClockReferenceInfoPayload mcr{};
         mcr.flags = atdecc::mvu::MVU_MCR_FLAGS_SUPPORTED;
         mcr.user_mcr_prio = uint8_t{210};
@@ -1450,7 +1451,10 @@ namespace {
 auto format_body(uint16_t const type, uint16_t const index, uint64_t const format) -> std::array<uint8_t, 12>
 {
     std::array<uint8_t, 12> body{
-        static_cast<uint8_t>(type >> 8U), static_cast<uint8_t>(type), static_cast<uint8_t>(index >> 8U), static_cast<uint8_t>(index)};
+        static_cast<uint8_t>(type >> 8U),
+        static_cast<uint8_t>(type),
+        static_cast<uint8_t>(index >> 8U),
+        static_cast<uint8_t>(index)};
     span_store(std::span{body}.subspan(4, 8), ieee::Eui64{}.from_uint64(format));
     return body;
 }
@@ -1458,14 +1462,15 @@ auto format_body(uint16_t const type, uint16_t const index, uint64_t const forma
 /// SET_SAMPLING_RATE's body: AUDIO_UNIT 0, the rate.
 auto rate_body(uint32_t const rate) -> std::array<uint8_t, 8>
 {
-    return {0x00,
-            0x02,
-            0x00,
-            0x00,
-            static_cast<uint8_t>(rate >> 24U),
-            static_cast<uint8_t>(rate >> 16U),
-            static_cast<uint8_t>(rate >> 8U),
-            static_cast<uint8_t>(rate)};
+    return {
+        0x00,
+        0x02,
+        0x00,
+        0x00,
+        static_cast<uint8_t>(rate >> 24U),
+        static_cast<uint8_t>(rate >> 16U),
+        static_cast<uint8_t>(rate >> 8U),
+        static_cast<uint8_t>(rate)};
 }
 
 /// The multi-rate model's kit, with a format hook that records what the
@@ -1490,7 +1495,10 @@ struct RateKit : PersistentKit
     auto current_format(uint16_t const type, uint16_t const index) -> uint64_t
     {
         std::array<uint8_t, 4> body{
-            static_cast<uint8_t>(type >> 8U), static_cast<uint8_t>(type), static_cast<uint8_t>(index >> 8U), static_cast<uint8_t>(index)};
+            static_cast<uint8_t>(type >> 8U),
+            static_cast<uint8_t>(type),
+            static_cast<uint8_t>(index >> 8U),
+            static_cast<uint8_t>(index)};
         auto const r = aem_command(atdecc::AEM_COMMAND_GET_STREAM_FORMAT, body);
         EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
         if (r.body.size() < 12) {
@@ -1685,7 +1693,7 @@ TEST(avb_entity_kit_formats, a_refused_reshape_leaves_the_slot)
     EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf->sample_rate == avtp::AafSampleRate::rate_48_khz);
     EXPECT_FALSE(m.kit.listener()->reformat_stream(spec).has_value());  // index 0 is an AAF input too
     EXPECT_EQ(m.kit.listener()->slot_for(0)->aaf->channel_count, uint16_t{8});
-    spec = m.kit.talker_specs().back();  // the CRF
+    spec = m.kit.talker_specs().back();                             // the CRF
     EXPECT_TRUE(m.kit.talker().reformat_stream(spec).has_value());  // its own format: nothing to do
     spec.format_word ^= 1;
     EXPECT_FALSE(m.kit.talker().reformat_stream(spec).has_value());
@@ -1886,8 +1894,7 @@ struct MilanPair
     void talker_advertises()
     {
         auto const& ours = lc().adp_advertiser.adpdu();
-        lc().acmp_listener.receive_adpdu(
-            tc().adp_advertiser.adpdu(), ours.gptp_grandmaster_id, ours.gptp_domain_number.get(), now);
+        lc().acmp_listener.receive_adpdu(tc().adp_advertiser.adpdu(), ours.gptp_grandmaster_id, ours.gptp_domain_number.get(), now);
     }
 
     [[nodiscard]] auto listener_reservation() -> nanoavb::ListenerReservationState
@@ -1964,9 +1971,8 @@ TEST(avb_entity_kit_milan_listener, binds_probes_settles_and_reserves)
     p.heard.clear();
     p.pump(10);
     EXPECT_TRUE(p.tc().msrp_handler.registered_listener(p.t.sid(0)) == srp::msrp::ListenerDeclaration::Ignore);
-    EXPECT_TRUE(std::ranges::none_of(p.heard, [](auto const& pdu) {
-        return pdu.message_type() == atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND;
-    }));
+    EXPECT_TRUE(std::ranges::none_of(
+        p.heard, [](auto const& pdu) { return pdu.message_type() == atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND; }));
     EXPECT_EQ(p.input_info().first.flags.get(), sif::STREAM_FORMAT_VALID);
 }
 
@@ -2111,7 +2117,8 @@ TEST(avb_entity_kit_persistence, milan_binding_survives_a_restart_and_reprobes)
         EXPECT_FALSE(p.sink().binding.started);
         EXPECT_TRUE(p.l.kit.listener()->slot_for(0)->stopped.load());
         auto const [info, ext] = p.input_info();
-        EXPECT_EQ(info.flags.get(), sif::STREAM_FORMAT_VALID | sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAMING_WAIT);
+        EXPECT_EQ(
+            info.flags.get(), sif::STREAM_FORMAT_VALID | sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAMING_WAIT);
         EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::PASSIVE);
         p.pump(30);  // no ADP from the talker: it waits
         EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_avail);
@@ -2161,7 +2168,10 @@ auto load_counters(std::vector<uint8_t> const& body) -> atdecc::aem::AemCounters
 auto counters_of(MilanKit& m, uint16_t const type, uint16_t const index) -> atdecc::aem::AemCountersPayload
 {
     std::array<uint8_t, 4> body{
-        static_cast<uint8_t>(type >> 8U), static_cast<uint8_t>(type), static_cast<uint8_t>(index >> 8U), static_cast<uint8_t>(index)};
+        static_cast<uint8_t>(type >> 8U),
+        static_cast<uint8_t>(type),
+        static_cast<uint8_t>(index >> 8U),
+        static_cast<uint8_t>(index)};
     auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_COUNTERS, body);
     EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
     return load_counters(r.body);
@@ -2308,9 +2318,8 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     trace.push_back(ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
     trace.push_back(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0002ULL));
     handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
-        .grandmaster_id_changed = [&m](int64_t, gptp::ClockIdentity const&, gptp::AnnounceMessage const&) {
-            m.kit.note_grandmaster_changed();
-        },
+        .grandmaster_id_changed =
+            [&m](int64_t, gptp::ClockIdentity const&, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(); },
         .path_trace_changed = [&m](int64_t) { m.kit.note_as_path_changed(); }});
     handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
@@ -2777,7 +2786,8 @@ TEST(avb_entity_kit_mappings, saved_mappings_survive_a_start_before_the_hook)
     std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1), mapping(2, 2)};
     {
         RateKit m{path, 0x74, true};
-        m.kit.set_on_input_mappings_changed([](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+        m.kit.set_on_input_mappings_changed(
+            [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
         EXPECT_TRUE(m.start_ready());
         std::vector<nanoavb::DynamicAudioMapping> rest;
         for (uint16_t ch = 0; ch < 8; ++ch) {

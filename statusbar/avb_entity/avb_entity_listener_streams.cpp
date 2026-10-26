@@ -345,10 +345,8 @@ auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerS
 }
 
 auto ListenerStreams::attach_rx(
-    StreamPort& port,
-    std::span<ieee::Eui48 const> const static_groups,
-    net::MessageReactor& reactor,
-    bool const keep_handler) -> StatusValue<std::unique_ptr<net::Pollable>>
+    StreamPort& port, std::span<ieee::Eui48 const> const static_groups, net::MessageReactor& reactor, bool const keep_handler)
+    -> StatusValue<std::unique_ptr<net::Pollable>>
 {
     for (size_t i = 0; i < static_groups.size(); ++i) {
         if (auto joined = port.join_multicast(static_groups[i]); !joined && i == 0) {

@@ -377,8 +377,7 @@ TEST(nanoavb_mvu, media_clock_reference_info)
     // One clock domain by default: index 1 does not exist
     EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(1), US));
     expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NO_SUCH_DESCRIPTOR);
-    EXPECT_TRUE(
-        handler.process_packet(SRC, set_mcr_command(1, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 1, ""), US));
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(1, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 1, ""), US));
     expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NO_SUCH_DESCRIPTOR);
     // Short commands
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, {}), US));
@@ -478,7 +477,8 @@ TEST(nanoavb_mvu, set_notifies_registered_controllers)
     EXPECT_EQ(sent.size(), size_t{5});
     EXPECT_TRUE(sent[4].mac == OTHER_MAC);
     EXPECT_TRUE(reply_header(sent[4].bytes).unsolicited());
-    EXPECT_EQ(reply_header(sent[4].bytes).common.sequence_id.get(), uint16_t(reply_header(sent[1].bytes).common.sequence_id.get() + 1));
+    EXPECT_EQ(
+        reply_header(sent[4].bytes).common.sequence_id.get(), uint16_t(reply_header(sent[1].bytes).common.sequence_id.get() + 1));
     EXPECT_EQ(sent[4].bytes.size(), MVU_MIN_PDU_LENGTH);
 }
 

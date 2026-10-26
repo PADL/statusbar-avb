@@ -179,10 +179,7 @@ class DescriptorStorageHandler : public AemEntityHandler
 
     /// The group_name a controller set (ENTITY name_index 1), or nullptr
     /// while the authored one stands.
-    [[nodiscard]] auto group_name_override() const noexcept -> AtdeccString const*
-    {
-        return group_name_ ? &*group_name_ : nullptr;
-    }
+    [[nodiscard]] auto group_name_override() const noexcept -> AtdeccString const* { return group_name_ ? &*group_name_ : nullptr; }
 
     /// The RAM override for (type, index), or nullptr when unset.
     [[nodiscard]] auto object_name_override(uint16_t const descriptor_type, uint16_t const descriptor_index) const noexcept

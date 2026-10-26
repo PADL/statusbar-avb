@@ -128,8 +128,7 @@ using statusbar::avb_entity::StreamInputIntervals;
 void feed_run(StreamInputCounters& c, uint8_t& seq, uint32_t& ts, int const n, bool const tu = false)
 {
     for (int i = 0; i < n; ++i) {
-        tally_stream_input_packet(
-            c, seq++, ts, true, tu, false, true, SAMPLES_PER_PKT, false, GPTP_OFF, LOCK_TOL_NS, FS);
+        tally_stream_input_packet(c, seq++, ts, true, tu, false, true, SAMPLES_PER_PKT, false, GPTP_OFF, LOCK_TOL_NS, FS);
         ts += 125'000;
     }
 }
@@ -159,7 +158,7 @@ TEST(stream_input_intervals, interval_counters_count_intervals_not_packets)
     EXPECT_EQ(iv.values[StreamInputIntervals::SEQ_NUM_MISMATCH], 1U);
     EXPECT_EQ(iv.values[StreamInputIntervals::TIMESTAMP_UNCERTAIN], 1U);
     EXPECT_EQ(iv.values[StreamInputIntervals::STREAM_INTERRUPTED], 0U);  // the timestamps stayed in step
-    EXPECT_EQ(StreamInputIntervals::VALID, 0x0F3FU);  // Table 5.16's ten counters
+    EXPECT_EQ(StreamInputIntervals::VALID, 0x0F3FU);                     // Table 5.16's ten counters
 }
 
 TEST(stream_input_intervals, a_timestamp_break_or_a_stopped_stream_interrupts)
@@ -169,7 +168,7 @@ TEST(stream_input_intervals, a_timestamp_break_or_a_stopped_stream_interrupts)
     uint8_t seq = 0;
     uint32_t ts = 0;
     feed_run(c, seq, ts, 20);
-    ts += 3'000'000;  // AVTPDUs lost: the timestamps jump
+    ts += 3'000'000;           // AVTPDUs lost: the timestamps jump
     feed_run(c, seq, ts, 20);  // and lock again
     (void)iv.fold(c);
     EXPECT_EQ(iv.values[StreamInputIntervals::MEDIA_LOCKED], 2U);

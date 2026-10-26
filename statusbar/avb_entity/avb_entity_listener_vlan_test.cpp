@@ -8,13 +8,12 @@
 
 #if defined(__linux__)
 
-#    include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
-
 #    include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #    include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #    include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #    include "statusbar/avb_entity/avb_entity_identity.hpp"
 #    include "statusbar/avb_entity/avb_entity_kit.hpp"
+#    include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #    include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 
 #    include <atomic>
@@ -241,7 +240,12 @@ TEST(listener_vlan, the_kit_follows_the_class_a_vid)
     });
     EXPECT_TRUE(same(
         fake.requests,
-        {"add 9 vlantest0.2 2", "add 9 vlantest0.7 7", "del vlantest0.2", "add 9 vlantest0.2 2", "del vlantest0.7", "del vlantest0.2"}));
+        {"add 9 vlantest0.2 2",
+         "add 9 vlantest0.7 7",
+         "del vlantest0.2",
+         "add 9 vlantest0.2 2",
+         "del vlantest0.7",
+         "del vlantest0.2"}));
 }
 
 TEST(listener_vlan, a_talker_only_kit_registers_nothing)

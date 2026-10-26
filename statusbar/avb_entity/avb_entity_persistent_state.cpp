@@ -227,9 +227,8 @@ auto write_all(int const fd, std::string_view text) -> bool
 
 auto serialize_persistent_state(PersistentState const& state) -> std::string
 {
-    std::string out =
-        "# The AVB entity's persistent state (Milan non-volatile settings), written by the\n"
-        "# entity whenever a controller changes one. Edit only while the entity is stopped.\n";
+    std::string out = "# The AVB entity's persistent state (Milan non-volatile settings), written by the\n"
+                      "# entity whenever a controller changes one. Edit only while the entity is stopped.\n";
     out += std::format("version = {}\n", PersistentState::VERSION);
     out += std::format("entity_model_id = {}\n", toml_hex(state.entity_model_id));
     out += std::format("configured_entity_name = {}\n", toml_string(state.configured_entity_name));
@@ -283,7 +282,9 @@ auto serialize_persistent_state(PersistentState const& state) -> std::string
     }
     for (auto const& map : state.audio_maps) {
         out += std::format(
-            "\n[[audio_map]]\ndescriptor_type = {}\ndescriptor_index = {}\nmappings = [", map.descriptor_type, map.descriptor_index);
+            "\n[[audio_map]]\ndescriptor_type = {}\ndescriptor_index = {}\nmappings = [",
+            map.descriptor_type,
+            map.descriptor_index);
         for (size_t i = 0; i < map.mappings.size(); ++i) {
             auto const& m = map.mappings[i];
             out += std::format(
@@ -336,124 +337,126 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
         state.system_unique_id = *id;
     }
 
-    bool const ok =
-        each_table(
-            root,
-            "name",
-            [&](Table const& t) {
-                auto const type = u16_at(t, "descriptor_type");
-                auto const index = u16_at(t, "descriptor_index");
-                auto const name_index = u16_at(t, "name_index");
-                auto value = name_at(t, "value");
-                if (!type || !index || !name_index || !value) {
-                    return false;
-                }
-                state.names.push_back(
-                    {.descriptor_type = *type, .descriptor_index = *index, .name_index = *name_index, .value = std::move(*value)});
-                return true;
-            }) &&
-        each_table(
-            root,
-            "stream_format",
-            [&](Table const& t) {
-                auto const type = u16_at(t, "descriptor_type");
-                auto const index = u16_at(t, "descriptor_index");
-                auto const format = hex_at(t, "format");
-                if (!type || !index || !format) {
-                    return false;
-                }
-                state.stream_formats.push_back({.descriptor_type = *type, .descriptor_index = *index, .format = *format});
-                return true;
-            }) &&
-        each_table(
-            root,
-            "clock_source",
-            [&](Table const& t) {
-                auto const domain = u16_at(t, "clock_domain");
-                auto const source = u16_at(t, "clock_source");
-                if (!domain || !source) {
-                    return false;
-                }
-                state.clock_sources.push_back({.clock_domain = *domain, .clock_source = *source});
-                return true;
-            }) &&
-        each_table(
-            root,
-            "presentation_offset",
-            [&](Table const& t) {
-                auto const output = u16_at(t, "stream_output");
-                auto const ns = u32_at(t, "ns");
-                if (!output || !ns) {
-                    return false;
-                }
-                state.presentation_offsets.push_back({.stream_output = *output, .ns = *ns});
-                return true;
-            }) &&
-        each_table(
-            root,
-            "listener_binding",
-            [&](Table const& t) {
-                auto const input = u16_at(t, "stream_input");
-                auto const talker = hex_at(t, "talker_entity_id");
-                auto const unique_id = u16_at(t, "talker_unique_id");
-                auto const format = t.contains("format") ? hex_at(t, "format") : std::optional<uint64_t>{0};
-                auto const controller =
-                    t.contains("controller_entity_id") ? hex_at(t, "controller_entity_id") : std::optional<uint64_t>{0};
-                auto const started = t.contains("started") ? bool_at(t, "started") : std::optional<bool>{true};
-                if (!input || !talker || !unique_id || !format || !controller || !started) {
-                    return false;
-                }
-                state.listener_bindings.push_back(
-                    {.stream_input = *input,
-                     .talker_entity_id = *talker,
-                     .talker_unique_id = *unique_id,
-                     .format = *format,
-                     .controller_entity_id = *controller,
-                     .started = *started});
-                return true;
-            }) &&
-        each_table(
-            root,
-            "audio_map",
-            [&](Table const& t) {
-                auto const type = u16_at(t, "descriptor_type");
-                auto const index = u16_at(t, "descriptor_index");
-                auto const* value = t.get("mappings");
-                auto const* list = value != nullptr ? value->as_array() : nullptr;
-                if (!type || !index || list == nullptr) {
-                    return false;
-                }
-                PersistedAudioMap map{.descriptor_type = *type, .descriptor_index = *index, .mappings = {}};
-                for (size_t i = 0; i < list->size(); ++i) {
-                    auto const* entry = (*list)[i].as_array();
-                    if (entry == nullptr || entry->size() != 4) {
-                        return false;
-                    }
-                    std::array<uint16_t, 4> fields{};
-                    for (size_t f = 0; f < fields.size(); ++f) {
-                        auto const n = (*entry)[f].as_integer();
-                        if (!n || *n < 0 || *n > std::numeric_limits<uint16_t>::max()) {
+    bool const ok = each_table(
+                        root,
+                        "name",
+                        [&](Table const& t) {
+                            auto const type = u16_at(t, "descriptor_type");
+                            auto const index = u16_at(t, "descriptor_index");
+                            auto const name_index = u16_at(t, "name_index");
+                            auto value = name_at(t, "value");
+                            if (!type || !index || !name_index || !value) {
+                                return false;
+                            }
+                            state.names.push_back(
+                                {.descriptor_type = *type,
+                                 .descriptor_index = *index,
+                                 .name_index = *name_index,
+                                 .value = std::move(*value)});
+                            return true;
+                        }) &&
+        each_table(root,
+                   "stream_format",
+                   [&](Table const& t) {
+                       auto const type = u16_at(t, "descriptor_type");
+                       auto const index = u16_at(t, "descriptor_index");
+                       auto const format = hex_at(t, "format");
+                       if (!type || !index || !format) {
+                           return false;
+                       }
+                       state.stream_formats.push_back({.descriptor_type = *type, .descriptor_index = *index, .format = *format});
+                       return true;
+                   }) &&
+        each_table(root,
+                   "clock_source",
+                   [&](Table const& t) {
+                       auto const domain = u16_at(t, "clock_domain");
+                       auto const source = u16_at(t, "clock_source");
+                       if (!domain || !source) {
+                           return false;
+                       }
+                       state.clock_sources.push_back({.clock_domain = *domain, .clock_source = *source});
+                       return true;
+                   }) &&
+        each_table(root,
+                   "presentation_offset",
+                   [&](Table const& t) {
+                       auto const output = u16_at(t, "stream_output");
+                       auto const ns = u32_at(t, "ns");
+                       if (!output || !ns) {
+                           return false;
+                       }
+                       state.presentation_offsets.push_back({.stream_output = *output, .ns = *ns});
+                       return true;
+                   }) &&
+        each_table(root,
+                   "listener_binding",
+                   [&](Table const& t) {
+                       auto const input = u16_at(t, "stream_input");
+                       auto const talker = hex_at(t, "talker_entity_id");
+                       auto const unique_id = u16_at(t, "talker_unique_id");
+                       auto const format = t.contains("format") ? hex_at(t, "format") : std::optional<uint64_t>{0};
+                       auto const controller =
+                           t.contains("controller_entity_id") ? hex_at(t, "controller_entity_id") : std::optional<uint64_t>{0};
+                       auto const started = t.contains("started") ? bool_at(t, "started") : std::optional<bool>{true};
+                       if (!input || !talker || !unique_id || !format || !controller || !started) {
+                           return false;
+                       }
+                       state.listener_bindings.push_back(
+                           {.stream_input = *input,
+                            .talker_entity_id = *talker,
+                            .talker_unique_id = *unique_id,
+                            .format = *format,
+                            .controller_entity_id = *controller,
+                            .started = *started});
+                       return true;
+                   }) &&
+        each_table(root,
+                   "audio_map",
+                   [&](Table const& t) {
+                       auto const type = u16_at(t, "descriptor_type");
+                       auto const index = u16_at(t, "descriptor_index");
+                       auto const* value = t.get("mappings");
+                       auto const* list = value != nullptr ? value->as_array() : nullptr;
+                       if (!type || !index || list == nullptr) {
+                           return false;
+                       }
+                       PersistedAudioMap map{.descriptor_type = *type, .descriptor_index = *index, .mappings = {}};
+                       for (size_t i = 0; i < list->size(); ++i) {
+                           auto const* entry = (*list)[i].as_array();
+                           if (entry == nullptr || entry->size() != 4) {
+                               return false;
+                           }
+                           std::array<uint16_t, 4> fields{};
+                           for (size_t f = 0; f < fields.size(); ++f) {
+                               auto const n = (*entry)[f].as_integer();
+                               if (!n || *n < 0 || *n > std::numeric_limits<uint16_t>::max()) {
+                                   return false;
+                               }
+                               fields[f] = static_cast<uint16_t>(*n);
+                           }
+                           map.mappings.push_back(
+                               {.stream_index = fields[0],
+                                .stream_channel = fields[1],
+                                .cluster_offset = fields[2],
+                                .cluster_channel = fields[3]});
+                       }
+                       state.audio_maps.push_back(std::move(map));
+                       return true;
+                   }) &&
+        each_table(root, "media_clock_reference", [&](Table const& t) {
+                        auto const domain = u16_at(t, "clock_domain");
+                        auto const prio = int_at(t, "user_priority", 0, 255);
+                        auto name = name_at(t, "domain_name");
+                        if (!domain || !prio || !name) {
                             return false;
                         }
-                        fields[f] = static_cast<uint16_t>(*n);
-                    }
-                    map.mappings.push_back(
-                        {.stream_index = fields[0], .stream_channel = fields[1], .cluster_offset = fields[2], .cluster_channel = fields[3]});
-                }
-                state.audio_maps.push_back(std::move(map));
-                return true;
-            }) &&
-        each_table(root, "media_clock_reference", [&](Table const& t) {
-            auto const domain = u16_at(t, "clock_domain");
-            auto const prio = int_at(t, "user_priority", 0, 255);
-            auto name = name_at(t, "domain_name");
-            if (!domain || !prio || !name) {
-                return false;
-            }
-            state.media_clock_references.push_back(
-                {.clock_domain = *domain, .user_priority = static_cast<uint8_t>(*prio), .domain_name = std::move(*name)});
-            return true;
-        });
+                        state.media_clock_references.push_back(
+                            {.clock_domain = *domain,
+                             .user_priority = static_cast<uint8_t>(*prio),
+                             .domain_name = std::move(*name)});
+                        return true;
+                    });
     if (!ok) {
         return failure(malformed());
     }

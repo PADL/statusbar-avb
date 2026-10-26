@@ -182,7 +182,10 @@ struct Bench
             span_store(std::span{body}.subspan(8 + (i * 8), 8), wire);
         }
         auto const r = command(
-            from, from == CONTROLLER_A ? MAC_A : MAC_B, add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, body);
+            from,
+            from == CONTROLLER_A ? MAC_A : MAC_B,
+            add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS,
+            body);
         // Every response echoes the command.
         EXPECT_TRUE(r.body == body);
         return r.header.status();
@@ -232,7 +235,8 @@ struct Bench
     }
 };
 
-auto m(uint16_t const stream, uint16_t const stream_ch, uint16_t const cluster, uint16_t const cluster_ch = 0) -> DynamicAudioMapping
+auto m(uint16_t const stream, uint16_t const stream_ch, uint16_t const cluster, uint16_t const cluster_ch = 0)
+    -> DynamicAudioMapping
 {
     return {.stream_index = stream, .stream_channel = stream_ch, .cluster_offset = cluster, .cluster_channel = cluster_ch};
 }

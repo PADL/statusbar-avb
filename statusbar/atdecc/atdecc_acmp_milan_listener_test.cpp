@@ -127,7 +127,8 @@ struct Fixture
         l.tick(now);
     }
 
-    auto adp(uint32_t const available_index, bool const available = true, tsn::ClockIdentity const& gm = GM, uint16_t const iface = 0)
+    auto adp(
+        uint32_t const available_index, bool const available = true, tsn::ClockIdentity const& gm = GM, uint16_t const iface = 0)
         -> AdpDu
     {
         AdpDu du{};
@@ -175,7 +176,10 @@ struct Fixture
     /// PRB_W_AVAIL by a saved binding.
     void restore(bool const started = true)
     {
-        EXPECT_TRUE(l.restore(SINK, MilanSinkBinding{.talker_entity_id = TALKER, .talker_unique_id = 3, .controller_entity_id = CONTROLLER, .started = started}));
+        EXPECT_TRUE(l.restore(
+            SINK,
+            MilanSinkBinding{
+                .talker_entity_id = TALKER, .talker_unique_id = 3, .controller_entity_id = CONTROLLER, .started = started}));
         EXPECT_TRUE(state() == State::prb_w_avail);
     }
 
@@ -380,8 +384,8 @@ TEST(acmp_milan_listener, startup_without_and_with_a_saved_binding)
     EXPECT_EQ(f.sink().acmp_status, uint8_t{0});
     EXPECT_FALSE(f.sink().discovered);
     EXPECT_FALSE(f.sink().binding.started);
-    EXPECT_TRUE(f.sent.empty());  // passive: waits for the talker's ADP
-    EXPECT_TRUE(f.binding_changes.empty());  // already saved
+    EXPECT_TRUE(f.sent.empty());                          // passive: waits for the talker's ADP
+    EXPECT_TRUE(f.binding_changes.empty());               // already saved
     EXPECT_FALSE(f.l.restore(SINK, MilanSinkBinding{}));  // already bound
     EXPECT_FALSE(f.l.restore(9, MilanSinkBinding{}));
 }
@@ -393,9 +397,8 @@ TEST(acmp_milan_listener, binding_hook_sees_the_bound_sink)
 {
     Fixture f;
     std::vector<std::pair<bool, bool>> seen;  // bound, started
-    f.l.set_on_binding_changed([&f, &seen](uint16_t const sink) {
-        seen.emplace_back(f.l.sink(sink)->bound(), f.l.sink(sink)->binding.started);
-    });
+    f.l.set_on_binding_changed(
+        [&f, &seen](uint16_t const sink) { seen.emplace_back(f.l.sink(sink)->bound(), f.l.sink(sink)->binding.started); });
     f.bind(acmp_flags::STREAMING_WAIT);
     EXPECT_TRUE((seen == std::vector<std::pair<bool, bool>>{{true, false}}));
     f.bind(0, OTHER_TALKER, 4);  // a rebinding
@@ -980,9 +983,8 @@ TEST(acmp_milan_listener, settled_registered)
 TEST(acmp_milan_listener, settled_registered_from_the_settle_hook)
 {
     Fixture f;
-    f.l.set_on_settled([&f](uint16_t const sink, MilanSinkStream const&) {
-        f.l.set_registration(sink, MilanTalkerRegistration::failed, f.now);
-    });
+    f.l.set_on_settled(
+        [&f](uint16_t const sink, MilanSinkStream const&) { f.l.set_registration(sink, MilanTalkerRegistration::failed, f.now); });
     f.bind();
     f.respond();
     EXPECT_TRUE(f.state() == State::settled_rsv_ok);

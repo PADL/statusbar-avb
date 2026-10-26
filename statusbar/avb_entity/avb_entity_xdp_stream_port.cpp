@@ -64,7 +64,9 @@ auto XdpStreamPort::config_for(
     };
 }
 
-XdpStreamPort::XdpStreamPort() : context_{std::make_unique<net::XdpContext>()} {}
+XdpStreamPort::XdpStreamPort()
+    : context_{std::make_unique<net::XdpContext>()}
+{}
 
 XdpStreamPort::~XdpStreamPort() = default;
 
