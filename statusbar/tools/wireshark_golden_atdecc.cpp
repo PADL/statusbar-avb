@@ -201,19 +201,25 @@ auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
         probe.sequence_id = 0x0103;
         probe.flags = acmp_flags::FAST_CONNECT;
         std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
-        auto const pdu = acmp_serialize_2016(milan_talker_respond(probe, &source, 0)->response, buf);
-        frames.push_back({"acmp_milan_probe_tx_response", {pdu.begin(), pdu.end()}});
+        if (auto const probed = milan_talker_respond(probe, &source, 0)) {
+            auto const pdu = acmp_serialize_2016(probed->response, buf);
+            frames.push_back({"acmp_milan_probe_tx_response", {pdu.begin(), pdu.end()}});
+        }
         auto unready = source;
         unready.dest_mac_valid = false;
-        auto const refused = acmp_serialize_2016(milan_talker_respond(probe, &unready, 0)->response, buf);
-        frames.push_back({"acmp_milan_probe_tx_response_dest_mac_fail", {refused.begin(), refused.end()}});
+        if (auto const refusal = milan_talker_respond(probe, &unready, 0)) {
+            auto const refused = acmp_serialize_2016(refusal->response, buf);
+            frames.push_back({"acmp_milan_probe_tx_response_dest_mac_fail", {refused.begin(), refused.end()}});
+        }
         AcmpCommandResponse state{};
         state.init_command(ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND);
         state.controller_entity_id = CONTROLLER;
         state.talker_entity_id = TALKER;
         state.sequence_id = 0x0104;
-        auto const answered = acmp_serialize_2016(milan_talker_respond(state, &source, 0)->response, buf);
-        frames.push_back({"acmp_milan_get_tx_state_response", {answered.begin(), answered.end()}});
+        if (auto const answer = milan_talker_respond(state, &source, 0)) {
+            auto const answered = acmp_serialize_2016(answer->response, buf);
+            frames.push_back({"acmp_milan_get_tx_state_response", {answered.begin(), answered.end()}});
+        }
     }
 
     // ---- AEM: ACQUIRE_ENTITY command + response ----
