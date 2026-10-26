@@ -52,16 +52,22 @@ auto sample_state() -> PersistentState
     state.entity_model_id = MODEL;
     state.configured_entity_name = "Bridge";
     state.configured_presentation_offset_ns = 2000000;
-    state.names.push_back({.descriptor_type = 0, .descriptor_index = 0, .name_index = 0, .value = "FOH \"left\" \\ bridge\t\xC3\xA9"});
+    state.names.push_back(
+        {.descriptor_type = 0, .descriptor_index = 0, .name_index = 0, .value = "FOH \"left\" \\ bridge\t\xC3\xA9"});
     state.names.push_back({.descriptor_type = 0x1A, .descriptor_index = 3, .name_index = 0, .value = std::string(64, 'x')});
     state.stream_formats.push_back({.descriptor_type = 5, .descriptor_index = 1, .format = 0x0205022002006000ULL});
     state.clock_sources.push_back({.clock_domain = 0, .clock_source = 1});
     state.presentation_offsets.push_back({.stream_output = 2, .ns = 1500000});
-    state.listener_bindings.push_back({.stream_input = 0, .talker_entity_id = 0xFFEEDDCCBBAA9988ULL, .talker_unique_id = 3, .format = 0x0205022002006000ULL});
+    state.listener_bindings.push_back(
+        {.stream_input = 0, .talker_entity_id = 0xFFEEDDCCBBAA9988ULL, .talker_unique_id = 3, .format = 0x0205022002006000ULL});
     state.listener_bindings.push_back({.stream_input = 1, .talker_entity_id = 0x01, .talker_unique_id = 0});
     // A Milan input's binding parameters: its controller, stopped
     state.listener_bindings.push_back(
-        {.stream_input = 2, .talker_entity_id = 0x02, .talker_unique_id = 1, .controller_entity_id = 0x001B92FFFE000003ULL, .started = false});
+        {.stream_input = 2,
+         .talker_entity_id = 0x02,
+         .talker_unique_id = 1,
+         .controller_entity_id = 0x001B92FFFE000003ULL,
+         .started = false});
     state.system_unique_id = 0xDEADBEEF;
     state.media_clock_references.push_back({.clock_domain = 0, .user_priority = 200, .domain_name = "Stage"});
     // A port's dynamic mappings (one swapped, one fanned out), and a
@@ -101,8 +107,10 @@ TEST(avb_persistent_state, round_trip)
 TEST(avb_persistent_state, malformed_rejected)
 {
     std::string const head = "version = 1\nentity_model_id = \"0x001b92fffe000001\"\n";
-    auto const extra = parse_persistent_state(head + "future = 3\n[[listener_binding]]\nstream_input = 1\n"
-                                                     "talker_entity_id = \"0x01\"\ntalker_unique_id = 0\nstarted = true\n");
+    auto const extra = parse_persistent_state(
+        head +
+        "future = 3\n[[listener_binding]]\nstream_input = 1\n"
+        "talker_entity_id = \"0x01\"\ntalker_unique_id = 0\nstarted = true\n");
     EXPECT_TRUE(extra.has_value());
     EXPECT_EQ(extra->listener_bindings.size(), size_t{1});
 
@@ -115,14 +123,18 @@ TEST(avb_persistent_state, malformed_rejected)
     EXPECT_TRUE(is_malformed("version = 1\nentity_model_id = 5\n"));
     EXPECT_TRUE(is_malformed(head + "system_unique_id = -1\n"));
     EXPECT_TRUE(is_malformed(head + "[[clock_source]]\nclock_domain = 0\n"));
-    EXPECT_TRUE(is_malformed(head + "[[name]]\ndescriptor_type = 0\ndescriptor_index = 0\nname_index = 0\nvalue = \"" +
-                             std::string(65, 'n') + "\"\n"));
+    EXPECT_TRUE(is_malformed(
+        head + "[[name]]\ndescriptor_type = 0\ndescriptor_index = 0\nname_index = 0\nvalue = \"" + std::string(65, 'n') + "\"\n"));
     EXPECT_TRUE(is_malformed(head + "[[media_clock_reference]]\nclock_domain = 0\nuser_priority = 256\ndomain_name = \"\"\n"));
     EXPECT_TRUE(is_malformed(head + "name = 3\n"));
-    EXPECT_TRUE(is_malformed(head + "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
-                                    "started = 1\n"));
-    EXPECT_TRUE(is_malformed(head + "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
-                                    "controller_entity_id = 3\n"));
+    EXPECT_TRUE(is_malformed(
+        head +
+        "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
+        "started = 1\n"));
+    EXPECT_TRUE(is_malformed(
+        head +
+        "[[listener_binding]]\nstream_input = 1\ntalker_entity_id = \"0x01\"\ntalker_unique_id = 0\n"
+        "controller_entity_id = 3\n"));
     EXPECT_TRUE(is_malformed(head + "[[audio_map]]\ndescriptor_type = 14\ndescriptor_index = 0\nmappings = [[0, 1, 0]]\n"));
     EXPECT_TRUE(is_malformed(head + "[[audio_map]]\ndescriptor_type = 14\ndescriptor_index = 0\nmappings = [[0, 1, 0, -1]]\n"));
     EXPECT_TRUE(is_malformed(head + "[[audio_map]]\ndescriptor_type = 14\ndescriptor_index = 0\n"));

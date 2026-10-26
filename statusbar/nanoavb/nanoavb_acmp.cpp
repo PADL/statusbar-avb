@@ -150,9 +150,8 @@ void NanoAvbAcmpListener::wire_milan()
 {
     // Commands (PROBE_TX) and responses alike go out through tx_command
     // (both are multicast).
-    milan_.set_send([this](AcmpCommandResponse const& pdu) -> bool {
-        return callbacks_.tx_command ? callbacks_.tx_command(pdu) : false;
-    });
+    milan_.set_send(
+        [this](AcmpCommandResponse const& pdu) -> bool { return callbacks_.tx_command ? callbacks_.tx_command(pdu) : false; });
     milan_.set_on_settled([this](uint16_t const index, MilanSinkStream const& stream) {
         auto* const s = ctx_.get_stream(index);
         if (s == nullptr) {
