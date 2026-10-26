@@ -246,7 +246,7 @@ void UdptunTransport::udptun_punch_loop()
         }
         eui_span[0] = responder ? 0x02U : 0x01U;
 
-        stun::RendezvousConfig rcfg{
+        stun::RendezvousConfig const rcfg{
             .server_address = *server_addr,
             .session_id = sid,
             .client_eui64 = client_eui,
