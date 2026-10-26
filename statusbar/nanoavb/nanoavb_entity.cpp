@@ -1538,8 +1538,8 @@ auto AemCommandHandler::port_model(uint16_t const port_type, uint16_t const port
         .number_of_maps = port->number_of_maps.get(),
         .port_flags = port->port_flags.get()};
     for (uint16_t offset = 0; offset < model.number_of_clusters && offset < model.cluster_channel_counts.capacity(); ++offset) {
-        auto const cluster =
-            read_model_descriptor<DescriptorAudioCluster>(DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(model.base_cluster + offset));
+        auto const cluster = read_model_descriptor<DescriptorAudioCluster>(
+            DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(model.base_cluster + offset));
         uint16_t const channels = cluster ? cluster->channel_count.get() : uint16_t{0};
         model.cluster_channel_counts.push_back(channels);
         model.total_channels += channels;
@@ -1554,7 +1554,8 @@ auto AemCommandHandler::cluster_channels(PortModel const& port, uint16_t const c
 
 auto AemCommandHandler::cluster_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) -> std::optional<uint32_t>
 {
-    if (mapping.cluster_offset >= port.number_of_clusters || mapping.cluster_channel >= cluster_channels(port, mapping.cluster_offset)) {
+    if (mapping.cluster_offset >= port.number_of_clusters ||
+        mapping.cluster_channel >= cluster_channels(port, mapping.cluster_offset)) {
         return std::nullopt;
     }
     uint32_t ordinal = mapping.cluster_channel;
@@ -1570,8 +1571,14 @@ auto AemCommandHandler::has_dynamic_input_map(uint16_t const port_type, uint16_t
     return port.has_value() && port->number_of_maps == 0;
 }
 
-auto AemCommandHandler::check_mapping(uint16_t const port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool const check_channel)
-    const -> uint8_t
+auto AemCommandHandler::has_dynamic_output_map(uint16_t const port_index) const -> bool
+{
+    auto const port = port_model(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
+    return port.has_value() && port->number_of_maps == 0;
+}
+
+auto AemCommandHandler::check_mapping(
+    uint16_t const port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool const check_channel) const -> uint8_t
 {
     if (!cluster_ordinal(port, mapping)) {
         return AEM_STATUS_BAD_ARGUMENTS;  // no such cluster channel
@@ -1642,7 +1649,8 @@ auto AemCommandHandler::merged_mappings(
 }
 
 auto AemCommandHandler::set_audio_mappings(
-    uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings, bool const apply) -> uint8_t
+    uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings, bool const apply)
+    -> uint8_t
 {
     auto const port = port_type == DESCRIPTOR_STREAM_PORT_INPUT ? port_model(port_type, port_index) : std::nullopt;
     if (!port) {
@@ -1741,12 +1749,128 @@ auto AemCommandHandler::handle_audio_mappings(bool const add, std::span<uint8_t 
         }
     }
     // The response echoes the command; the other controllers are told.
-    auto const r = reject_command(AEM_STATUS_SUCCESS, command_data.first(AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH)), out_buffer);
+    auto const r = reject_command(
+        AEM_STATUS_SUCCESS,
+        command_data.first(AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH)),
+        out_buffer);
     if (changed) {
         notify_on_success(add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, r, out_buffer);
     }
     setting_unchanged_ = !changed;  // nothing to save
     return r;
+}
+
+auto AemCommandHandler::apply_local_audio_mappings(
+    uint16_t const port_index, std::span<DynamicAudioMapping const> const add, std::span<DynamicAudioMapping const> const remove)
+    -> uint8_t
+{
+    if (locked_ || acquired_) {
+        return AEM_STATUS_ENTITY_LOCKED;
+    }
+    PortModel port{};
+    if (auto const status = mappable_port(DESCRIPTOR_STREAM_PORT_INPUT, port_index, port); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    auto const current = dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index);
+    DynamicAudioMaps::Mappings kept{};
+    DynamicAudioMaps::Mappings next{};
+    if (auto const status = removed_mappings(port_index, port, current, remove, kept); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    if (auto const status = merged_mappings(port_index, port, kept, add, next); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    std::ranges::sort(next, cluster_order);
+    if (std::ranges::equal(next, current)) {
+        return AEM_STATUS_SUCCESS;  // nothing to route, tell or save
+    }
+    if (auto const status = commit_mappings(port_index, current, next); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    // What changed, as a controller would see it: the mappings gone, then those new.
+    notify_mappings(false, DESCRIPTOR_STREAM_PORT_INPUT, port_index, current, next);
+    notify_mappings(true, DESCRIPTOR_STREAM_PORT_INPUT, port_index, next, current);
+    if (callbacks_.on_settings_changed) {
+        bool const added = !std::ranges::includes(current, next, cluster_order);
+        callbacks_.on_settings_changed(added ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS);
+    }
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::set_output_mappings(uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings)
+    -> uint8_t
+{
+    auto const port = port_model(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
+    if (!port) {
+        return AEM_STATUS_NO_SUCH_DESCRIPTOR;
+    }
+    if (port->number_of_maps != 0) {
+        return AEM_STATUS_NOT_SUPPORTED;  // static maps
+    }
+    DynamicAudioMaps::Mappings next{};
+    if (auto const status = merged_mappings(port_index, *port, {}, mappings, next); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    std::ranges::sort(next, cluster_order);
+    auto const current = output_maps_.port(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
+    if (std::ranges::equal(next, current)) {
+        return AEM_STATUS_SUCCESS;
+    }
+    if (!output_maps_.replace(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index, next)) {
+        return AEM_STATUS_NO_RESOURCES;
+    }
+    requester_ = {};  // the entity's own: every registered controller is told
+    notify_mappings(false, DESCRIPTOR_STREAM_PORT_OUTPUT, port_index, current, next);
+    notify_mappings(true, DESCRIPTOR_STREAM_PORT_OUTPUT, port_index, next, current);
+    return AEM_STATUS_SUCCESS;
+}
+
+void AemCommandHandler::notify_mappings(
+    bool const add,
+    uint16_t const port_type,
+    uint16_t const port_index,
+    std::span<DynamicAudioMapping const> const of,
+    std::span<DynamicAudioMapping const> const but)
+{
+    // IEEE 1722.1-2021 Clause 9.2.1.1.7: one AECPDU holds 63 mappings.
+    constexpr size_t PER_PDU = (MAX_AEM_BODY - AemAudioMappingsCommandHeader::LENGTH) / AemAudioMapping::LENGTH;
+    std::array<uint8_t, AemAudioMappingsCommandHeader::LENGTH + (PER_PDU * AemAudioMapping::LENGTH)> body{};
+    size_t count = 0;
+    auto const flush = [&] {
+        AemAudioMappingsCommandHeader header{};
+        header.descriptor_type = port_type;
+        header.descriptor_index = port_index;
+        header.number_of_mappings = static_cast<uint16_t>(count);
+        span_store(std::span<uint8_t>{body}.first(AemAudioMappingsCommandHeader::LENGTH), header);
+        emit_unsolicited(
+            add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS,
+            std::span<uint8_t const>{body}.first(AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH)));
+        count = 0;
+    };
+    auto other = but.begin();
+    for (auto const& mapping : of) {
+        while (other != but.end() && cluster_order(*other, mapping)) {
+            ++other;
+        }
+        if (other != but.end() && *other == mapping) {
+            continue;
+        }
+        AemAudioMapping wire{};
+        wire.stream_index = mapping.stream_index;
+        wire.stream_channel = mapping.stream_channel;
+        wire.cluster_offset = mapping.cluster_offset;
+        wire.cluster_channel = mapping.cluster_channel;
+        span_store(
+            std::span<uint8_t>{body}.subspan(
+                AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH), AemAudioMapping::LENGTH),
+            wire);
+        if (++count == PER_PDU) {
+            flush();
+        }
+    }
+    if (count != 0) {
+        flush();
+    }
 }
 
 auto AemCommandHandler::handle_get_audio_map(
@@ -3018,8 +3142,7 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
     span_store(out_buffer, resp);
     if (switching) {
         emit_unsolicited(
-            AEM_COMMAND_SET_CONFIGURATION,
-            std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
+            AEM_COMMAND_SET_CONFIGURATION, std::span<uint8_t const>{out_buffer.data(), AemSetConfigurationPayload::LENGTH});
     }
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
@@ -3668,7 +3791,8 @@ auto AemCommandHandler::monitor_period() noexcept -> sm::Clock::duration
 {
     // Numerical Recipes' LCG: uniform enough to spread the controllers' timers.
     monitor_random_ = (monitor_random_ * 1664525U) + 1013904223U;
-    auto const span_ms = std::chrono::duration_cast<std::chrono::milliseconds>(CONTROLLER_MONITOR_MAX - CONTROLLER_MONITOR_MIN).count();
+    auto const span_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(CONTROLLER_MONITOR_MAX - CONTROLLER_MONITOR_MIN).count();
     auto const offset = std::chrono::milliseconds((monitor_random_ >> 8U) % static_cast<uint32_t>(span_ms + 1));
     return std::chrono::duration_cast<sm::Clock::duration>(CONTROLLER_MONITOR_MIN + offset);
 }

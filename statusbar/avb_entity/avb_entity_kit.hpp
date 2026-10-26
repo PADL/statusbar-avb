@@ -412,7 +412,8 @@ class AvbEntityKit
     /// The entity routes input port @p port_index's new mappings (all, in cluster
     /// order) before the kit keeps them (reactor thread), answering an AEM status.
     /// Without one a change is refused NOT_SUPPORTED. Empty function removes it.
-    using InputMappingsFn = sg14::inplace_function<uint8_t(uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings), 32>;
+    using InputMappingsFn =
+        sg14::inplace_function<uint8_t(uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings), 32>;
     void set_on_input_mappings_changed(InputMappingsFn fn) noexcept { on_input_mappings_changed_ = std::move(fn); }
     /// STREAM_PORT_INPUT @p port_index's dynamic mappings, in cluster order.
     [[nodiscard]] auto input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;

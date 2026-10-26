@@ -278,16 +278,22 @@ inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc:
         if (bound) {
             flags |= stream_info_flags::BOUND | stream_info_flags::FAST_CONNECT | stream_info_flags::SAVED_STATE;
         }
-        ext.set_probing(
-            sink->connected ? probing_status::COMPLETED : (bound ? probing_status::ACTIVE : probing_status::DISABLED), 0);
-        bool registering = false;
-        if (sink->connected) {
-            statusbar::tsn::StreamId sid{};
-            (void)statusbar::tsn::load_unchecked(sink->stream_id.span(), &sid);
-            auto const& msrp = host.components().msrp_handler;
-            if (auto const* failed = msrp.registered_talker_failed(sid); failed != nullptr) {
-                registering = true;
-                flags |= stream_info_flags::REGISTERING_FAILED | stream_info_flags::MSRP_FAILURE_VALID;
+    }
+    if (sink->settled()) {
+        flags |=
+            stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID;
+        out.stream_id = sink->stream.stream_id;
+        out.stream_dest_mac = sink->stream.dest_mac;
+        out.stream_vlan_id = ieee::doublet_t{sink->stream.vlan_id};
+    }
+    if (sink->registering()) {
+        statusbar::tsn::StreamId sid{};
+        (void)statusbar::tsn::load_unchecked(sink->stream.stream_id.span(), &sid);
+        auto const& msrp = host.components().msrp_handler;
+        flags |= stream_info_flags::MSRP_ACC_LAT_VALID;
+        if (sink->registration == MilanTalkerRegistration::failed) {
+            flags |= stream_info_flags::REGISTERING_FAILED | stream_info_flags::MSRP_FAILURE_VALID;
+            if (auto const* failed = msrp.peer_talker_failed(sid); failed != nullptr) {
                 out.msrp_failure_code = failed->failure_code;
                 out.msrp_failure_bridge_id = failed->failure_bridge_id;
                 out.msrp_accumulated_latency = failed->advertise.accumulated_latency;
