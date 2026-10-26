@@ -148,7 +148,6 @@ auto deserialize_auth_add_key_nonce_header(span<uint8_t const, auth_add_key_nonc
     span_load(key_field, in.subspan(offset, sizeof(key_field)));
     header.key_type = static_cast<KeyType>(key_field.get_bits<uint8_t>(0xF000, 12));
     header.key_length = key_field.get_bits<uint16_t>(0x0FFF);
-    offset += 2;
     // Skip 2 reserved bytes (no validation needed)
     return header;
 }

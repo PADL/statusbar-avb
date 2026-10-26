@@ -72,15 +72,15 @@ std::string control_type_segment(ieee::Eui64 const& type)
 {
     auto name = control_type_name(type);
     bool identifying = !name.empty();
-    for (char c : name) {
-        if (!(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '_') {
+    for (char const c : name) {
+        if ((c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_') {
             identifying = false;
             break;
         }
     }
     std::string lowered;
     if (identifying) {
-        for (char c : name) {
+        for (char const c : name) {
             lowered.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
         }
         if (lowered == "reserved" || lowered == "vendor" || lowered == "vendor_defined" || lowered == "unknown" ||
@@ -433,7 +433,7 @@ struct Walker
 
 std::vector<AemSymbol> derive_aem_symbols(std::span<AemRawDescriptor const> descriptors)
 {
-    Walker w{descriptors, {}, {}};
+    Walker w{.descriptors = descriptors, .by_key = {}, .symbols = {}};
     for (auto const& d : descriptors) {
         w.by_key[{d.configuration, d.descriptor_type, d.descriptor_index}] = &d;
     }
@@ -484,7 +484,7 @@ std::vector<AemSymbol> derive_aem_symbols(std::span<AemRawDescriptor const> desc
     for (auto const& [key, raw] : w.by_key) {
         auto [config, type, index] = key;
         auto it = w.symbols.find(key);
-        AemSymbol entry{config, type, index, {}, false};
+        AemSymbol entry{.configuration = config, .descriptor_type = type, .descriptor_index = index, .symbol = {}, .orphan = false};
         if (it != w.symbols.end()) {
             entry.symbol = it->second;
         } else if (!owner_reached_only(type)) {
