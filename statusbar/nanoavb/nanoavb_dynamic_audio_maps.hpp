@@ -68,8 +68,8 @@ class DynamicAudioMaps
     /// Replace the port's mappings with @p mappings (sorted into cluster
     /// order, duplicates dropped). False, with nothing changed, when the
     /// store would overflow.
-    [[nodiscard]] auto replace(uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings)
-        -> bool
+    [[nodiscard]] auto replace(
+        uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings) -> bool
     {
         Mappings sorted{};
         for (auto const& mapping : mappings) {
