@@ -467,7 +467,7 @@ class AvbEntityHost
     bool grandmaster_seen_{false};
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
-    std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
+    std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
     nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
     bool running_{false};
 };

@@ -111,7 +111,7 @@ class TalkerDeclarations
         bool declared{false};
         bool listener_registered{false};
         bool address_valid{false};
-        int64_t probe_until_ns{0};  ///< 0: never probed
+        int64_t probe_until_ns{0};    ///< 0: never probed
         int64_t listener_seen_ns{0};  ///< the last moment a Listener was known registered (0: never)
         Params declared_params{};
         /// What was last withdrawn, and until when a different declaration waits.

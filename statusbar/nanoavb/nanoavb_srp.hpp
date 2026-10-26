@@ -453,7 +453,8 @@ class MsrpHandler
     {
         for (auto& stream : listener_streams_) {
             if (stream.stream_id == stream_id) {
-                bool const declared = stream.state != ListenerReservationState::Idle && stream.state != ListenerReservationState::Waiting;
+                bool const declared =
+                    stream.state != ListenerReservationState::Idle && stream.state != ListenerReservationState::Waiting;
                 stream.state = ListenerReservationState::Idle;
                 if (declared) {
                     (void)participant_.withdraw_listener(stream_id, now);
@@ -715,7 +716,8 @@ class MsrpHandler
             } else {
                 (void)participant_.declare_listener(
                     sid,
-                    ready ? statusbar::srp::msrp::ListenerDeclaration::Ready : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
+                    ready ? statusbar::srp::msrp::ListenerDeclaration::Ready
+                          : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
                     last_event_time_);
             }
             if (callbacks_.on_listener_state_change) {

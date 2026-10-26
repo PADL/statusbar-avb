@@ -171,7 +171,8 @@ struct TalkerStreamStatus
         }
     }
     if (sink->settled()) {
-        flags |= stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID;
+        flags |=
+            stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID;
         out.stream_id = sink->stream.stream_id;
         out.stream_dest_mac = sink->stream.dest_mac;
         out.stream_vlan_id = ieee::doublet_t{sink->stream.vlan_id};

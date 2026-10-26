@@ -15,8 +15,8 @@
 
 #include <array>
 #include <atomic>
-#include <climits>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <expected>
 #include <string_view>
@@ -227,10 +227,7 @@ class PtpTimer : public PtpTimerBase
         int64_t const callback_start = read_monotonic_ns();
 
         TimerWakeInfo info{
-            .scheduled_time_ns = next_wake,
-            .actual_time_ns = actual_wake_ptp,
-            .error_ns = error_ns,
-            .wake_count = stats_.count()};
+            .scheduled_time_ns = next_wake, .actual_time_ns = actual_wake_ptp, .error_ns = error_ns, .wake_count = stats_.count()};
         callback_(success(info));
 
         int64_t periods_behind = 0;

@@ -109,14 +109,14 @@ class MvuCommandHandler
     [[nodiscard]] auto send_not_implemented(Eui48 const& dest_mac, std::span<uint8_t const> command) const -> bool;
 
     /// The SET_SYSTEM_UNIQUE_ID command @p command (control data as declared)
-    [[nodiscard]] auto set_system_unique_id_command(Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command)
-        -> bool;
+    [[nodiscard]] auto set_system_unique_id_command(
+        Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command) -> bool;
     /// The SET_MEDIA_CLOCK_REFERENCE_INFO command @p command
-    [[nodiscard]] auto set_mcr_info_command(Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command)
-        -> bool;
+    [[nodiscard]] auto set_mcr_info_command(
+        Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command) -> bool;
     /// The GET_MEDIA_CLOCK_REFERENCE_INFO command @p command
-    [[nodiscard]] auto get_mcr_info_command(Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command)
-        -> bool;
+    [[nodiscard]] auto get_mcr_info_command(
+        Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command) -> bool;
     /// Clock domain @p index's MCR payload, as a response carries it
     [[nodiscard]] auto mcr_payload(uint16_t index) const noexcept -> atdecc::mvu::MvuMediaClockReferenceInfoPayload;
     /// Refuse a SET from @p header's controller while another holds the entity
