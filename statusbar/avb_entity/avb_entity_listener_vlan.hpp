@@ -13,7 +13,6 @@
 #    include "statusbar/net/net_vlan_link.hpp"
 
 #    include <cstdint>
-#    include <optional>
 #    include <string>
 #    include <string_view>
 
@@ -54,9 +53,15 @@ class ListenerVlan
     static constexpr uint16_t MAX_VID = 4094;
 
   private:
-    /// Create @p vid's link @p name: true when created here, false when it already
-    /// existed, nullopt when the create failed (logged).
-    [[nodiscard]] auto add_link(std::string const& name, uint16_t vid) -> std::optional<bool>;
+    /// What add_link did with a VID's link.
+    enum class LinkAdded : uint8_t
+    {
+        created,  ///< created here
+        existed,  ///< already there, used as it is
+        failed,   ///< not created (logged)
+    };
+    /// Create @p vid's link @p name.
+    [[nodiscard]] auto add_link(std::string const& name, uint16_t vid) -> LinkAdded;
     /// Delete the previous link if this created it, then follow @p vid through @p name.
     void replace_link(uint16_t vid, bool created, std::string name);
 
