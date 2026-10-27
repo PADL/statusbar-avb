@@ -368,10 +368,8 @@ class EntityShaper final : public net::Pollable
     void unhook() noexcept;
     /// Park both cbs at the placeholders and leave the qdiscs for the next start (logged).
     void park();
-    /// Install on @p ifindex, whose driver is @p driver, and follow admission from then on.
-    [[nodiscard]] auto install_on(int ifindex, std::string driver) -> Status;
-    /// Lay out the interface's TX queues for @p driver and install the qdiscs: the layout.
-    [[nodiscard]] auto install_qdiscs(int ifindex, std::string_view driver) -> StatusValue<QueueLayout>;
+    /// The interface's TX queues laid out for @p driver and the configured overrides.
+    [[nodiscard]] auto queue_layout(std::string_view driver) const -> StatusValue<QueueLayout>;
     /// Open the tc client and install the mqprio root for @p layout on @p ifindex.
     [[nodiscard]] auto install_layout(int ifindex, QueueLayout const& layout) -> Status;
     /// Keep and log the installed @p driver and @p layout, warning about what will not shape.
