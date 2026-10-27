@@ -373,8 +373,13 @@ class PtpManagementClient final : public net::Pollable
         Listener listener,
         FileDescriptor fd,
         net::SocketAddress server,
-        std::string local_path) noexcept;
+        std::string local_path,
+        gptp::SourcePortIdentity const& source) noexcept;
     void note_error(std::error_code error);
+    /// An answer from ptp4l at @p now_ns: it is reachable, and a restarted one is set up again.
+    void note_answer(int64_t now_ns);
+    /// Take what the RESPONSE @p message carries into state_.
+    void apply(ManagementMessage const& message, int64_t now_ns);
     void publish_if_changed();
     [[nodiscard]] auto send(ManagementAction action, uint16_t management_id, std::span<uint8_t const> data) -> Status;
     void send_settings();

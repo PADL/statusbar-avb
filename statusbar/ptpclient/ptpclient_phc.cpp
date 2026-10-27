@@ -63,16 +63,15 @@ PhcCrossTimestamp::PhcCrossTimestamp(PhcDevice phc0, PhcDevice phcd) noexcept
     , phcd_{std::move(phcd)}
 {}
 
-auto PhcCrossTimestamp::open(std::string_view const phc0_path, std::string_view const phcd_path, PhcDeviceConfig const config)
+auto PhcCrossTimestamp::open(std::string_view const phc0_path, std::string_view const phcd_path, PhcDeviceConfig config)
     -> StatusValue<PhcCrossTimestamp>
 {
-    PhcDeviceConfig read_only = config;
-    read_only.writable = false;
-    auto phc0 = PhcDevice::open(phc0_path, read_only);
+    config.writable = false;  // read only
+    auto phc0 = PhcDevice::open(phc0_path, config);
     if (!phc0) {
         return forward_failure(phc0);
     }
-    auto phcd = PhcDevice::open(phcd_path, read_only);
+    auto phcd = PhcDevice::open(phcd_path, config);
     if (!phcd) {
         return forward_failure(phcd);
     }
@@ -89,11 +88,7 @@ auto PhcCrossTimestamp::measure() const noexcept -> StatusValue<PhcCrossSample>
     if (!d) {
         return forward_failure(d);
     }
-    auto const second0 = phc0_.read();
-    if (!second0) {
-        return forward_failure(second0);
-    }
-    return cross_timestamp(*first0, *d, *second0);
+    return phc0_.read().and_then([&](PhcReading const& second0) { return cross_timestamp(*first0, *d, second0); });
 }
 
 #if defined(__linux__)
@@ -146,24 +141,47 @@ static_assert(sizeof(clockid_t) == sizeof(unsigned int));
     return PhcReading{.raw_ns = to_ns(precise.sys_monoraw), .phc_ns = to_ns(precise.device), .width_ns = 0};
 }
 
-[[nodiscard]] auto read_extended(int const fd, int const samples) noexcept -> StatusValue<PhcReading>
+/// The narrowest of @p brackets as a reading; invalid_argument when none is valid.
+[[nodiscard]] auto best_of(std::span<PhcBracket const> const brackets) noexcept -> StatusValue<PhcReading>
 {
-    SysOffsetExtended offset{};
+    auto const best = narrowest_bracket(brackets);
+    if (!best) {
+        return failure(std::errc::invalid_argument);
+    }
+    return *best;
+}
+
+/// CLOCK_MONOTONIC_RAW now, in ns.
+[[nodiscard]] auto monoraw_ns() noexcept -> int64_t
+{
+    timespec t{};
+    ::clock_gettime(CLOCK_MONOTONIC_RAW, &t);
+    return to_ns(t);
+}
+
+/// PTP_SYS_OFFSET_EXTENDED's @p samples brackets against CLOCK_MONOTONIC_RAW into @p offset.
+[[nodiscard]] auto sys_offset_extended(int const fd, int const samples, SysOffsetExtended& offset) noexcept -> Status
+{
     offset.n_samples = static_cast<unsigned int>(samples);
     offset.clockid = CLOCK_MONOTONIC_RAW;
     if (::ioctl(fd, PTP_SYS_OFFSET_EXTENDED, &offset) != 0) {
         return errno_failure();
+    }
+    return success();
+}
+
+[[nodiscard]] auto read_extended(int const fd, int const samples) noexcept -> StatusValue<PhcReading>
+{
+    SysOffsetExtended offset{};
+    if (auto const status = sys_offset_extended(fd, samples, offset); !status) {
+        return forward_failure(status);
     }
     std::array<PhcBracket, MAX_SAMPLES> brackets{};
     for (size_t i = 0; i < static_cast<size_t>(samples); ++i) {
         brackets[i] =
             PhcBracket{.before_ns = to_ns(offset.ts[i][0]), .phc_ns = to_ns(offset.ts[i][1]), .after_ns = to_ns(offset.ts[i][2])};
     }
-    auto const best = narrowest_bracket(std::span{brackets}.first(static_cast<size_t>(samples)));
-    if (!best) {
-        return failure(std::errc::invalid_argument);
-    }
-    return *best;
+    return best_of(std::span{brackets}.first(static_cast<size_t>(samples)));
 }
 
 [[nodiscard]] auto read_software(int const fd, int const samples) noexcept -> StatusValue<PhcReading>
@@ -171,21 +189,26 @@ static_assert(sizeof(clockid_t) == sizeof(unsigned int));
     clockid_t const clock = fd_to_clockid(fd);
     std::array<PhcBracket, MAX_SAMPLES> brackets{};
     for (size_t i = 0; i < static_cast<size_t>(samples); ++i) {
-        timespec before{};
+        int64_t const before_ns = monoraw_ns();
         timespec phc{};
-        timespec after{};
-        ::clock_gettime(CLOCK_MONOTONIC_RAW, &before);
         if (::clock_gettime(clock, &phc) != 0) {
             return errno_failure();
         }
-        ::clock_gettime(CLOCK_MONOTONIC_RAW, &after);
-        brackets[i] = PhcBracket{.before_ns = to_ns(before), .phc_ns = to_ns(phc), .after_ns = to_ns(after)};
+        brackets[i] = PhcBracket{.before_ns = before_ns, .phc_ns = to_ns(phc), .after_ns = monoraw_ns()};
     }
-    auto const best = narrowest_bracket(std::span{brackets}.first(static_cast<size_t>(samples)));
-    if (!best) {
-        return failure(std::errc::invalid_argument);
+    return best_of(std::span{brackets}.first(static_cast<size_t>(samples)));
+}
+
+/// @p delta_ns as ADJ_SETOFFSET | ADJ_NANO wants it: tv_usec (ns with ADJ_NANO) in [0, 1e9).
+[[nodiscard]] auto setoffset_time(int64_t const delta_ns) noexcept -> timeval
+{
+    int64_t seconds = delta_ns / NS_PER_SECOND;
+    int64_t nanoseconds = delta_ns % NS_PER_SECOND;
+    if (nanoseconds < 0) {
+        nanoseconds += NS_PER_SECOND;
+        --seconds;
     }
-    return *best;
+    return timeval{.tv_sec = static_cast<time_t>(seconds), .tv_usec = static_cast<suseconds_t>(nanoseconds)};
 }
 
 }  // namespace
@@ -195,21 +218,25 @@ auto PhcDevice::open(std::string_view const path, PhcDeviceConfig const config) 
     if (path.empty() || config.samples < 1 || config.samples > MAX_SAMPLES) {
         return failure(std::errc::invalid_argument);
     }
-    std::string const name{path};
-    FileDescriptor fd{::open(name.c_str(), (config.writable ? O_RDWR : O_RDONLY) | O_CLOEXEC)};
+    FileDescriptor fd{::open(std::string{path}.c_str(), (config.writable ? O_RDWR : O_RDONLY) | O_CLOEXEC)};
     if (!fd.valid()) {
         return errno_failure();
     }
-    PhcDevice device{std::move(fd), name, config};
-    ptp_clock_caps caps{};
-    bool const cross = ::ioctl(device.fd(), PTP_CLOCK_GETCAPS, &caps) == 0 && caps.cross_timestamping != 0;
-    device.extended_ = read_extended(device.fd(), 1).has_value();
-    if (config.allow_precise && cross && read_precise(device.fd())) {
-        device.method_ = PhcReadMethod::precise;
-    } else {
-        device.method_ = device.extended_ ? PhcReadMethod::extended : PhcReadMethod::software;
-    }
+    PhcDevice device{std::move(fd), std::string{path}, config};
+    device.probe_read_method();
     return device;
+}
+
+void PhcDevice::probe_read_method() noexcept
+{
+    ptp_clock_caps caps{};
+    bool const cross = ::ioctl(fd_.get(), PTP_CLOCK_GETCAPS, &caps) == 0 && caps.cross_timestamping != 0;
+    extended_ = read_extended(fd_.get(), 1).has_value();
+    if (config_.allow_precise && cross && read_precise(fd_.get())) {
+        method_ = PhcReadMethod::precise;
+    } else {
+        method_ = extended_ ? PhcReadMethod::extended : PhcReadMethod::software;
+    }
 }
 
 auto PhcDevice::read() const noexcept -> StatusValue<PhcReading>
@@ -260,14 +287,7 @@ auto PhcDevice::step_ns(int64_t const delta_ns) const noexcept -> Status
 {
     timex tx{};
     tx.modes = ADJ_SETOFFSET | ADJ_NANO;
-    int64_t seconds = delta_ns / NS_PER_SECOND;
-    int64_t nanoseconds = delta_ns % NS_PER_SECOND;
-    if (nanoseconds < 0) {  // the kernel wants tv_usec (ns with ADJ_NANO) in [0, 1e9)
-        nanoseconds += NS_PER_SECOND;
-        --seconds;
-    }
-    tx.time.tv_sec = static_cast<time_t>(seconds);
-    tx.time.tv_usec = static_cast<suseconds_t>(nanoseconds);
+    tx.time = setoffset_time(delta_ns);
     if (::clock_adjtime(fd_to_clockid(fd_.get()), &tx) < 0) {
         return errno_failure();
     }

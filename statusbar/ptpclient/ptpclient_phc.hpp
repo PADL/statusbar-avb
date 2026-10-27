@@ -99,6 +99,8 @@ class PhcDevice
 
   private:
     PhcDevice(FileDescriptor fd, std::string path, PhcDeviceConfig config) noexcept;
+    /// Choose method_ (and extended_) by what the device supports and config_ allows.
+    void probe_read_method() noexcept;
 
     FileDescriptor fd_;
     std::string path_;

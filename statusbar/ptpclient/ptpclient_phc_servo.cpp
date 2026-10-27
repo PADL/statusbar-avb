@@ -74,35 +74,49 @@ void PhcServo::track_lock(int64_t const error_ns) noexcept
 
 auto PhcServo::sample(int64_t const error_ns, int64_t const local_ns, double const feed_forward_ppb) noexcept -> PhcServoAction
 {
-    PhcServoAction action{.frequency_ppb = frequency_ppb_};
+    PhcServoAction const hold{.frequency_ppb = frequency_ppb_};
     if (frozen_) {
-        return action;
+        return hold;
     }
-    auto const error = static_cast<double>(error_ns);
     if (count_ == 0 || (count_ == 1 && local_ns <= first_local_ns_)) {
         first_error_ns_ = error_ns;
         first_local_ns_ = local_ns;
         count_ = 1;
-        return action;
+        return hold;
     }
     if (count_ == 1) {
-        auto const elapsed = static_cast<double>(local_ns - first_local_ns_);
-        double const wait_s = std::min(FREQ_EST_KI / ki_, FREQ_EST_MAX_S);
-        if (elapsed * (1.0 + FREQ_EST_MARGIN) / NS_PER_SECOND < wait_s) {
-            return action;
-        }
-        // The PHC gains `rate` ns per ns at frequency_ppb_; cancel it (pi.c's drift estimate).
-        double const rate = static_cast<double>(error_ns - first_error_ns_) / elapsed;
-        double const total = clamp(frequency_ppb_ - ((NS_PER_SECOND + frequency_ppb_) * rate));
-        drift_ppb_ = total - feed_forward_ppb;
-        frequency_ppb_ = total;
-        count_ = 2;
-        if (!ever_locked_ && params_.first_step_threshold_ns > 0 && std::abs(error_ns) > params_.first_step_threshold_ns) {
-            action.step_ns = -error_ns;
-        }
-        action.frequency_ppb = frequency_ppb_;
-        return action;
+        return estimate_drift(error_ns, local_ns, feed_forward_ppb);
     }
+    regulate(error_ns, feed_forward_ppb);
+    return PhcServoAction{.frequency_ppb = frequency_ppb_};
+}
+
+auto PhcServo::estimate_drift(int64_t const error_ns, int64_t const local_ns, double const feed_forward_ppb) noexcept
+    -> PhcServoAction
+{
+    auto const elapsed = static_cast<double>(local_ns - first_local_ns_);
+    double const wait_s = std::min(FREQ_EST_KI / ki_, FREQ_EST_MAX_S);
+    if (elapsed * (1.0 + FREQ_EST_MARGIN) / NS_PER_SECOND < wait_s) {
+        return PhcServoAction{.frequency_ppb = frequency_ppb_};
+    }
+    cancel_drift(error_ns, elapsed, feed_forward_ppb);
+    bool const step = !ever_locked_ && params_.first_step_threshold_ns > 0 && std::abs(error_ns) > params_.first_step_threshold_ns;
+    return PhcServoAction{.frequency_ppb = frequency_ppb_, .step_ns = step ? std::optional<int64_t>{-error_ns} : std::nullopt};
+}
+
+void PhcServo::cancel_drift(int64_t const error_ns, double const elapsed, double const feed_forward_ppb) noexcept
+{
+    // The PHC gains `rate` ns per ns at frequency_ppb_; cancel it (pi.c's drift estimate).
+    double const rate = static_cast<double>(error_ns - first_error_ns_) / elapsed;
+    double const total = clamp(frequency_ppb_ - ((NS_PER_SECOND + frequency_ppb_) * rate));
+    drift_ppb_ = total - feed_forward_ppb;
+    frequency_ppb_ = total;
+    count_ = 2;
+}
+
+void PhcServo::regulate(int64_t const error_ns, double const feed_forward_ppb) noexcept
+{
+    auto const error = static_cast<double>(error_ns);
     double const ki_term = ki_ * error;
     double const ppb = feed_forward_ppb + drift_ppb_ - (kp_ * error) - ki_term;
     frequency_ppb_ = clamp(ppb);
@@ -110,8 +124,6 @@ auto PhcServo::sample(int64_t const error_ns, int64_t const local_ns, double con
         drift_ppb_ -= ki_term;  // no wind-up while clamped
     }
     track_lock(error_ns);
-    action.frequency_ppb = frequency_ppb_;
-    return action;
 }
 
 void PhcServo::freeze() noexcept

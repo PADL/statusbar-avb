@@ -79,6 +79,12 @@ class PhcServo
     PhcServo(PhcServoParams const& params, double initial_frequency_ppb) noexcept;
     [[nodiscard]] auto clamp(double ppb) const noexcept -> double;
     void track_lock(int64_t error_ns) noexcept;
+    /// The second sample, once FREQ_EST_KI / ki_ has passed since the first: the drift cancelled.
+    [[nodiscard]] auto estimate_drift(int64_t error_ns, int64_t local_ns, double feed_forward_ppb) noexcept -> PhcServoAction;
+    /// Set the output and integrator to cancel the drift seen over @p elapsed ns since the first sample.
+    void cancel_drift(int64_t error_ns, double elapsed, double feed_forward_ppb) noexcept;
+    /// One PI step on @p error_ns (running), and the lock it shows.
+    void regulate(int64_t error_ns, double feed_forward_ppb) noexcept;
 
     PhcServoParams params_;
     double kp_{0.0};
