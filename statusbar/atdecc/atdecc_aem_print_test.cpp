@@ -1453,8 +1453,8 @@ TEST(aem_stream_formats_offset, rejects_count_past_end)
     auto const huge = raw_stream(140, 132, 0xFFFF);
     EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(huge)).has_value());
 
-    // formats_offset itself past the end.
-    auto const far = raw_stream(140, 400, 0);
+    // formats_offset itself past the end, with formats to read there.
+    auto const far = raw_stream(140, 400, 1);
     EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(far)).has_value());
 
     // A 2021 descriptor whose formats fit when read at 132 but not at 138.
@@ -1484,8 +1484,26 @@ TEST(aem_stream_formats_offset, rejects_offset_below_2013_header)
     auto const b = raw_stream(140, 128, 1);
     EXPECT_FALSE(stream_descriptor_trailers(std::span<uint8_t const>(b)).has_value());
     EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+}
+
+// A STREAM descriptor listing no formats parses whatever its formats_offset says, as before
+// formats_offset was honoured: there is nothing to read there.
+TEST(aem_stream_formats_offset, no_formats_parse_at_any_offset)
+{
     auto const zero = raw_stream(DescriptorStream::MINIMUM_LENGTH, 0, 0);
-    EXPECT_FALSE(parse_descriptor(std::span<uint8_t const>(zero)).has_value());
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(zero)).has_value());
+    auto const far = raw_stream(140, 400, 0);
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(far)).has_value());
+}
+
+// A 2013-layout descriptor of the full 508 octets (47 formats at 132) parses and prints every format.
+TEST(aem_stream_formats_offset, a_508_octet_2013_descriptor_prints_every_format)
+{
+    auto const b = raw_stream(AEM_DESCRIPTOR_SIZE, 132, 47);
+    EXPECT_TRUE(parse_descriptor(std::span<uint8_t const>(b)).has_value());
+    auto const out = format_raw(b);
+    EXPECT_EQ(out.find("out of bounds"), std::string::npos);
+    EXPECT_NE(out.find("[46] = 00:a0:02:40:40:00:00:2f"), std::string::npos);
 }
 
 //
