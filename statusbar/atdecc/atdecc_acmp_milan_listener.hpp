@@ -229,12 +229,37 @@ class MilanListener
         auto operator==(Status const&) const -> bool = default;
     };
 
+    /// A BIND_RX / UNBIND_RX / GET_RX_STATE command for sink @p index; false for another message type.
+    auto receive_command(uint8_t type, uint16_t index, AcmpCommandResponse const& pdu, TimePoint now) -> bool;
     void bind(uint16_t index, AcmpCommandResponse const& cmd, TimePoint now);
+    /// Step 2 of every bound state: the same talker and source keep the binding (and its
+    /// probing or settled state); only the controller and the started state are updated.
+    void update_binding(uint16_t index, AcmpCommandResponse const& cmd);
+    /// A new binding, or a rebinding to another talker: stop what runs and probe the talker.
+    void rebind(uint16_t index, AcmpCommandResponse const& cmd);
+    /// Stop what runs: the timer, the SRP reservation and the ADP discovery state machine.
+    void stop(uint16_t index);
     void unbind(uint16_t index, AcmpCommandResponse const& cmd);
     void get_rx_state(uint16_t index, AcmpCommandResponse const& cmd);
     void probe_response(uint16_t index, AcmpCommandResponse const& resp, TimePoint now);
+    /// Section 5.5.3.5.18 step 4: settle on the stream already in sink @p index.
+    void settle(uint16_t index, TimePoint now);
+    /// Table 5.33: the PROBE_TX_COMMAND for sink @p index, with the next sequence_id.
+    auto probe_command(uint16_t index) -> AcmpCommandResponse;
     void send_probe(uint16_t index, TimePoint now);
     void respond(AcmpCommandResponse const& cmd, uint8_t status);
+    void send(AcmpCommandResponse const& pdu)
+    {
+        if (send_) {
+            (void)send_(pdu);
+        }
+    }
+    void binding_changed(uint16_t const index)
+    {
+        if (on_binding_changed_) {
+            on_binding_changed_(index);
+        }
+    }
     /// Leave the settled states: clear the SRP parameters, stop SRP.
     void unsettle(uint16_t index);
     /// TMR_RETRY, TMR_NO_TK, EVT_TK_UNREGISTERED: wait for the talker, or
@@ -244,6 +269,12 @@ class MilanListener
     void start_timer(MilanSink& s, TimePoint now, Duration duration) noexcept;
     void discovered(uint16_t index, TimePoint now);
     void departed(uint16_t index);
+    /// Section 5.6.4.5.1: an ADP message from the talker of sink @p index, not yet discovered.
+    void adp_not_discovered(uint16_t index, AdpDu const& adp, bool same_gptp, TimePoint valid_until, TimePoint now);
+    /// Sections 5.6.4.5.2-3: an ADP message from the discovered talker of sink @p index.
+    void adp_discovered(uint16_t index, AdpDu const& adp, bool same_gptp, TimePoint valid_until, TimePoint now);
+    /// The timer of sink @p index expired (Section 5.5.3.5).
+    void expire(uint16_t index, TimePoint now);
     void notify(uint16_t index);
     [[nodiscard]] auto authorized(ieee::Eui64 const& controller) const -> bool { return !authorized_ || authorized_(controller); }
 
