@@ -144,6 +144,58 @@ struct TalkerStreamStatus
     return true;
 }
 
+/// The MSRP fields of a registering Milan input's GET_STREAM_INFO from the talker's
+/// declaration (Milan v1.2 Table 5.9); the flags they make valid.
+[[nodiscard]] inline auto fill_milan_registration(
+    AvbEntityHost const& host, atdecc::MilanSink const& sink, atdecc::aem::AemStreamInfoPayload& out) -> uint32_t
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+    statusbar::tsn::StreamId sid{};
+    (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
+    if (sink.registration == atdecc::MilanTalkerRegistration::failed) {
+        if (auto const* failed = host.components().msrp_handler.peer_talker_failed(sid); failed != nullptr) {
+            out.msrp_failure_code = failed->failure_code;
+            out.msrp_failure_bridge_id = failed->failure_bridge_id;
+            out.msrp_accumulated_latency = failed->advertise.accumulated_latency;
+        }
+        return stream_info_flags::MSRP_ACC_LAT_VALID | stream_info_flags::REGISTERING_FAILED |
+            stream_info_flags::MSRP_FAILURE_VALID;
+    }
+    if (auto const* advertise = host.components().msrp_handler.peer_talker_advertise(sid); advertise != nullptr) {
+        out.msrp_accumulated_latency = advertise->accumulated_latency;
+    }
+    return stream_info_flags::MSRP_ACC_LAT_VALID;
+}
+
+/// The fields of a Milan input's GET_STREAM_INFO that its format, binding, stream and
+/// registration give (Milan v1.2 Table 5.9); their flags.
+[[nodiscard]] inline auto fill_milan_listener_fields(
+    AvbEntityHost const& host,
+    uint16_t const descriptor_index,
+    atdecc::MilanSink const& sink,
+    atdecc::aem::AemStreamInfoPayload& out) -> uint32_t
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+    uint32_t flags = fill_stream_input_format(host, descriptor_index, out) ? stream_info_flags::STREAM_FORMAT_VALID : 0U;
+    if (sink.bound()) {
+        flags |= stream_info_flags::BOUND | stream_info_flags::FAST_CONNECT | stream_info_flags::SAVED_STATE;
+        if (!sink.binding.started) {
+            flags |= stream_info_flags::STREAMING_WAIT;
+        }
+    }
+    if (sink.settled()) {
+        flags |=
+            stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID;
+        out.stream_id = sink.stream.stream_id;
+        out.stream_dest_mac = sink.stream.dest_mac;
+        out.stream_vlan_id = ieee::doublet_t{sink.stream.vlan_id};
+    }
+    if (sink.registering()) {
+        flags |= fill_milan_registration(host, sink, out);
+    }
+    return flags;
+}
+
 /// Fill the Milan GET_STREAM_INFO response for a STREAM_INPUT from its sink state
 /// machine (Milan v1.2 Section 5.4.2.10.1, Tables 5.9-5.10; docs/AVB_ENTITY_KIT.md).
 /// False when the input or its sink does not exist.
@@ -153,49 +205,13 @@ struct TalkerStreamStatus
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
 {
-    namespace stream_info_flags = atdecc::aem::stream_info_flags;
-    using atdecc::MilanTalkerRegistration;
-
     auto const* sink = host.components().acmp_listener.milan_sinks().sink(descriptor_index);
     if (sink == nullptr) {
         return false;
     }
-    uint32_t flags = 0;
-    if (fill_stream_input_format(host, descriptor_index, out)) {
-        flags |= stream_info_flags::STREAM_FORMAT_VALID;
-    }
-    if (sink->bound()) {
-        flags |= stream_info_flags::BOUND | stream_info_flags::FAST_CONNECT | stream_info_flags::SAVED_STATE;
-        if (!sink->binding.started) {
-            flags |= stream_info_flags::STREAMING_WAIT;
-        }
-    }
-    if (sink->settled()) {
-        flags |=
-            stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID;
-        out.stream_id = sink->stream.stream_id;
-        out.stream_dest_mac = sink->stream.dest_mac;
-        out.stream_vlan_id = ieee::doublet_t{sink->stream.vlan_id};
-    }
-    if (sink->registering()) {
-        statusbar::tsn::StreamId sid{};
-        (void)statusbar::tsn::load_unchecked(sink->stream.stream_id.span(), &sid);
-        auto const& msrp = host.components().msrp_handler;
-        flags |= stream_info_flags::MSRP_ACC_LAT_VALID;
-        if (sink->registration == MilanTalkerRegistration::failed) {
-            flags |= stream_info_flags::REGISTERING_FAILED | stream_info_flags::MSRP_FAILURE_VALID;
-            if (auto const* failed = msrp.peer_talker_failed(sid); failed != nullptr) {
-                out.msrp_failure_code = failed->failure_code;
-                out.msrp_failure_bridge_id = failed->failure_bridge_id;
-                out.msrp_accumulated_latency = failed->advertise.accumulated_latency;
-            }
-        } else if (auto const* advertise = msrp.peer_talker_advertise(sid); advertise != nullptr) {
-            out.msrp_accumulated_latency = advertise->accumulated_latency;
-        }
-    }
+    out.flags = ieee::quadlet_t{fill_milan_listener_fields(host, descriptor_index, *sink, out)};
     ext.flags_ex = ieee::quadlet_t{sink->registering() ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
     ext.set_probing(sink->probing_status, sink->acmp_status);
-    out.flags = ieee::quadlet_t{flags};
     return true;
 }
 
@@ -208,6 +224,25 @@ struct TalkerStreamStatus
     }
     auto const relaxed = std::memory_order_relaxed;
     return {.pdus = c->pdus.load(relaxed), .tu_pdus = c->tu_pdus.load(relaxed), .mr_toggles = c->mr_toggles.load(relaxed)};
+}
+
+/// The classic GET_COUNTERS totals of STREAM_OUTPUT @p descriptor_index
+/// (IEEE 1722.1-2021 Clause 7.4.42.2.5) into @p out, their bits into @p valid.
+inline void fill_classic_talker_counters(
+    TalkerStreams const& talker,
+    uint16_t const descriptor_index,
+    StreamOutputIntervals const& intervals,
+    uint32_t& valid,
+    std::array<uint32_t, 32>& out)
+{  // NOLINT(statusbar-block-statements): one line per counter of IEEE 1722.1-2021 Clause 7.4.42.2.5
+    using I = StreamOutputIntervals;
+    auto const totals = talker_stream_totals(talker, descriptor_index);
+    valid |= (1U << 0U) | (1U << 1U) | (1U << 3U) | (1U << 4U) | (1U << 7U);
+    out[0] = intervals.values[I::STREAM_START];
+    out[1] = intervals.values[I::STREAM_STOP];
+    out[3] = totals.mr_toggles;
+    out[4] = totals.tu_pdus;
+    out[7] = totals.pdus;
 }
 
 /// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index: Milan v1.2 Section
@@ -224,19 +259,12 @@ struct TalkerStreamStatus
     if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    using I = StreamOutputIntervals;
     if (milan) {
-        valid |= I::VALID;
+        valid |= StreamOutputIntervals::VALID;
         std::copy(intervals.values.begin(), intervals.values.end(), out.begin());
         return true;
     }
-    auto const totals = talker_stream_totals(talker, descriptor_index);
-    valid |= (1U << 0U) | (1U << 1U) | (1U << 3U) | (1U << 4U) | (1U << 7U);
-    out[0] = intervals.values[I::STREAM_START];
-    out[1] = intervals.values[I::STREAM_STOP];
-    out[3] = totals.mr_toggles;
-    out[4] = totals.tu_pdus;
-    out[7] = totals.pdus;
+    fill_classic_talker_counters(talker, descriptor_index, intervals, valid, out);
     return true;
 }
 

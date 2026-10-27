@@ -348,6 +348,12 @@ struct ListenerStreams
     /// Build @p slot's deserializer for @p spec: what open_stream and
     /// reformat_stream share. Errors as open_stream's.
     static auto shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    /// Take @p spec on the newly shaped @p slot and bind its pending callbacks.
+    void begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec);
+    /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
+    static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    /// Take @p trial's deserializers and @p spec's format into @p slot. Under the guard.
+    static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
 
     /// A fresh slot for @p spec, its margin histogram sized for this listener.
     auto new_slot(StreamSpec const& spec) -> ListenerStreamSlot&;
