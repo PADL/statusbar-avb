@@ -60,33 +60,47 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
     }
 }
 
-auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept -> AsPath
+namespace {
+
+/// The TLVs after an Announce's 64-octet body, up to messageLength (empty when there are none).
+auto announce_tlvs(std::span<uint8_t const> const announce) noexcept -> std::span<uint8_t const>
 {
-    using namespace statusbar::gptp;
-    AsPath path{};
-    if (announce.size() < AnnounceMessage::LENGTH) {
-        return path;
+    if (announce.size() < gptp::AnnounceMessage::LENGTH) {
+        return {};
     }
-    // The TLVs follow the 64-octet Announce body, up to messageLength.
     size_t const message_length = (size_t{announce[2]} << 8U) | announce[3];
-    auto tlvs = announce.first(std::min(announce.size(), message_length));
-    tlvs = tlvs.size() > AnnounceMessage::LENGTH ? tlvs.subspan(AnnounceMessage::LENGTH) : std::span<uint8_t const>{};
+    auto const tlvs = announce.first(std::min(announce.size(), message_length));
+    return tlvs.size() > gptp::AnnounceMessage::LENGTH ? tlvs.subspan(gptp::AnnounceMessage::LENGTH) : std::span<uint8_t const>{};
+}
+
+/// The PATH_TRACE TLV's value among @p tlvs; empty when absent or cut short.
+auto path_trace_value(std::span<uint8_t const> tlvs) noexcept -> std::span<uint8_t const>
+{
+    using gptp::TlvHeader;
     while (tlvs.size() >= TlvHeader::LENGTH) {
         uint16_t const type = static_cast<uint16_t>((uint16_t{tlvs[0]} << 8U) | tlvs[1]);
         size_t const length = (size_t{tlvs[2]} << 8U) | tlvs[3];
         if (tlvs.size() < TlvHeader::LENGTH + length) {
-            break;
+            return {};
         }
-        if (type == TLV_TYPE_PATH_TRACE) {
-            auto const value = tlvs.subspan(TlvHeader::LENGTH, length);
-            for (size_t at = 0; at + 8 <= value.size() && path.size() < AsPath::capacity(); at += 8) {
-                Eui64 id{};
-                span_copy(id.span(), value.subspan(at, 8));
-                path.push_back(id);
-            }
-            break;
+        if (type == gptp::TLV_TYPE_PATH_TRACE) {
+            return tlvs.subspan(TlvHeader::LENGTH, length);
         }
         tlvs = tlvs.subspan(TlvHeader::LENGTH + length);
+    }
+    return {};
+}
+
+}  // namespace
+
+auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept -> AsPath
+{
+    AsPath path{};
+    auto const value = path_trace_value(announce_tlvs(announce));
+    for (size_t at = 0; at + 8 <= value.size() && path.size() < AsPath::capacity(); at += 8) {
+        Eui64 id{};
+        span_copy(id.span(), value.subspan(at, 8));
+        path.push_back(id);
     }
     return path;
 }

@@ -633,7 +633,6 @@ class AvbEntityKit
     //
     // start() and stop() phases
     //
-    [[nodiscard]] auto stream_ports_options() const -> StreamPortsOptions;
     /// Failure when the stream RX port cannot be drained the way the configuration asks.
     [[nodiscard]] auto check_stream_rx() -> Status;
     /// The control plane up, its stream callbacks wired, the declarations started.

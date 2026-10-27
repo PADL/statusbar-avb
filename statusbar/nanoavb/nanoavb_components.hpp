@@ -582,7 +582,7 @@ struct NanoAvbComponents
 /// never refuse ours with attribute_table_full (docs/NANOAVB_ARCHITECTURE.md).
 [[nodiscard]] constexpr auto entity_msrp_config(size_t const talker_streams, size_t const listener_streams) noexcept
     -> statusbar::srp::msrp::MsrpConfig
-{
+{  // NOLINT(statusbar-block-statements): the MSRP table limits, field by field
     using Limits = statusbar::srp::msrp::DefaultMsrpLimits;
     statusbar::srp::msrp::MsrpConfig config{};
     config.max_talker_advertise = Limits::max_talker_advertise;
