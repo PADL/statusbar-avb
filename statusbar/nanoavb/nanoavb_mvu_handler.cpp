@@ -61,18 +61,6 @@ constexpr size_t V1_2_MILAN_INFO_LENGTH = MvuGetMilanInfoResponse::LENGTH - 4;
     return std::nullopt;
 }
 
-/// A @p T from the front of @p data; nullopt when @p data is shorter.
-template <typename T>
-[[nodiscard]] auto load_request(std::span<uint8_t const> const data) -> std::optional<T>
-{
-    if (data.size() < T::LENGTH) {
-        return std::nullopt;
-    }
-    T request{};
-    span_load(request, data.first(T::LENGTH));
-    return request;
-}
-
 /// @p info with the fields @p request's flags mark valid; default_mcr_prio is read-only
 /// (ignored in a command).
 [[nodiscard]] auto merged_mcr_info(MvuCommandHandler::McrInfo info, MvuMediaClockReferenceInfoPayload const& request)
@@ -239,7 +227,7 @@ auto MvuCommandHandler::mcr_payload(uint16_t const index) const noexcept -> MvuM
 auto MvuCommandHandler::get_mcr_info_command(Eui48 const& src_mac, AecpMvuDu const& header, std::span<uint8_t const> const command)
     -> bool
 {
-    auto const request = load_request<MvuGetMediaClockReferenceInfoCommand>(command.subspan(AecpMvuDu::LENGTH));
+    auto const request = load_payload<MvuGetMediaClockReferenceInfoCommand>(command.subspan(AecpMvuDu::LENGTH));
     if (!request) {
         return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, {});
     }
@@ -255,7 +243,7 @@ auto MvuCommandHandler::set_mcr_info_command(Eui48 const& src_mac, AecpMvuDu con
     -> bool
 {
     auto const data = command.subspan(AecpMvuDu::LENGTH);
-    auto const request = load_request<MvuMediaClockReferenceInfoPayload>(data);
+    auto const request = load_payload<MvuMediaClockReferenceInfoPayload>(data);
     if (!request) {
         return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, data);
     }
