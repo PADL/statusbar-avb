@@ -647,21 +647,22 @@ class AvbEntityKit
     [[nodiscard]] auto check_stream_rx() -> Status;
     /// The control plane up, its stream callbacks wired, the declarations started.
     [[nodiscard]] auto start_control(net::MessageReactor& reactor) -> Status;
+    /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
     /// MAAP's addresses in "maap" mode (none offered until defended) and the declarations' timer.
     [[nodiscard]] auto start_declarations(net::MessageReactor& reactor) -> Status;
-    void add_declaration_timer(net::MessageReactor& reactor);
-    /// The TX slots, the stream ports, the listener streams and the TX path.
+    /// The TX slots, the stream ports, the listener streams and the TX path, in that order.
     [[nodiscard]] auto start_data_plane(net::MessageReactor& reactor) -> Status;
+    /// One TX slot per talker stream, with the identity the ACMP model carries.
     [[nodiscard]] auto open_talker_streams() -> Status;
-    /// The bound port or the kit's own; the RX port.
+    /// The bound port, or the kit's own; the RX port.
     [[nodiscard]] auto open_stream_ports() -> StatusValue<StreamPort*>;
+    /// The kit's own ports, their errors recorded and logged; the RX port.
     [[nodiscard]] auto open_own_stream_ports() -> StatusValue<StreamPort*>;
-    void log_stream_port_errors();
     /// The RX slots on @p rx_port, the VLAN filter and the saved bindings.
     [[nodiscard]] auto start_listener_streams(net::MessageReactor& reactor, StreamPort* rx_port) -> Status;
+    /// One RX slot per listener stream, the CRF recovery input and the static RX groups.
     [[nodiscard]] auto open_listener_streams() -> Status;
-    void attach_listener_rx(net::MessageReactor& reactor, StreamPort& rx_port);
 #if defined(__linux__)
     /// Bind the listener's VLAN filter control (rtnetlink), warning when it cannot.
     void open_listener_vlan_filter();
