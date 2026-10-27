@@ -134,6 +134,18 @@ class AtdeccLocalPort final : public net::Pollable
 
     AtdeccLocalPort(int fd, bool connected, Config config);
 
+    /// The rest of open() once the path's lock is held; closes @p lock_fd on failure.
+    [[nodiscard]] static auto open_locked(Config const& config, sockaddr_un const& address, socklen_t length, int lock_fd)
+        -> StatusValue<std::unique_ptr<AtdeccLocalPort>>;
+    /// Take on the socket file at @p path (its identity @p dev, @p ino) and the lock beside it.
+    void own_path(std::string const& path, dev_t dev, ino_t ino, int lock_fd);
+    /// One datagram into buffer_: its size, 0 to skip it (EINTR, a bad size), -1 when drained or closed.
+    [[nodiscard]] auto receive_datagram(sockaddr_un& address, socklen_t& length) -> ssize_t;
+    /// Hand a received datagram of @p size octets to receive_ with its sender's MAC.
+    void deliver(sockaddr_un const& address, socklen_t length, size_t size, int64_t now_ns);
+    /// The client at @p address (added if new), heard from at @p now_ns.
+    [[nodiscard]] auto heard_from(sockaddr_un const& address, socklen_t length, int64_t now_ns) -> Client&;
+
     [[nodiscard]] auto find_client(sockaddr_un const& address, socklen_t length) -> Client*;
     [[nodiscard]] auto add_client(sockaddr_un const& address, socklen_t length, int64_t now_ns) -> Client*;
     [[nodiscard]] auto next_mac() -> ieee::Eui48;
@@ -194,6 +206,8 @@ class AtdeccLocalClient
     void tick(int64_t now_ns) noexcept;
 
   private:
+    /// Bind @p fd for replies, then adopt and connect it; closes @p fd on failure.
+    [[nodiscard]] auto bind_and_connect(int fd) -> Status;
     [[nodiscard]] auto connect_to_entity() noexcept -> bool;
 
     int fd_{-1};
