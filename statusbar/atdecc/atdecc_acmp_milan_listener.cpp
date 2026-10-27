@@ -547,9 +547,7 @@ void MilanListener::expire(uint16_t const index, TimePoint const now)
             // Section 5.5.3.5.16: the duplicate, same sequence_id.
             start_timer(s, now, TMR_NO_RESP);
             s.state = MilanSinkState::prb_w_resp2;
-            if (send_) {
-                (void)send_(s.probe);
-            }
+            send(s.probe);
             break;
         case MilanSinkState::prb_w_resp2:
             // Section 5.5.3.5.23.

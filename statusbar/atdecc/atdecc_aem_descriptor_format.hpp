@@ -227,9 +227,15 @@ auto format_to(OutputIt out, DescriptorSensorUnit const& d) -> OutputIt
 /// @param out Output iterator to write formatted text to
 /// @param d Stream descriptor to format; @p type_name its human-readable stream type name
 /// @param data_size Valid bytes at @p d (the wire length; formats are read at formats_offset)
+/// @param received The descriptor as received, when it may be longer than DescriptorStream
+///        (a 2013 layout of 508 octets); empty: @p d's own bytes
 template <typename OutputIt>
 auto format_stream_descriptor(
-    OutputIt out, DescriptorStream const& d, char const* type_name, size_t const data_size = sizeof(DescriptorStream)) -> OutputIt
+    OutputIt out,
+    DescriptorStream const& d,
+    char const* type_name,
+    size_t const data_size = sizeof(DescriptorStream),
+    std::span<uint8_t const> const received = {}) -> OutputIt
 {
     out = std::format_to(out, "        {} Descriptor [{}]:\n", type_name, d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
@@ -242,7 +248,8 @@ auto format_stream_descriptor(
     out = std::format_to(out, "\n");
     out = std::format_to(out, "          formats: count={} offset={}\n", d.number_of_formats.get(), d.formats_offset.get());
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - view the struct as its wire bytes
-    std::span<uint8_t const> const wire{reinterpret_cast<uint8_t const*>(&d), std::min(data_size, sizeof(DescriptorStream))};
+    std::span<uint8_t const> const own{reinterpret_cast<uint8_t const*>(&d), std::min(data_size, sizeof(DescriptorStream))};
+    auto const wire = received.empty() ? own : received.first(std::min(data_size, received.size()));
     auto const trailers = stream_descriptor_trailers(wire);
     if (!trailers.has_value()) {
         out = std::format_to(out, "            <formats out of bounds>\n");
