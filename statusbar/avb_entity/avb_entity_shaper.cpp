@@ -137,7 +137,6 @@ namespace {
         reported.offset == wanted.offset;
 }
 
-
 /// ceil(n / d) for d > 0 (C++ division truncates toward zero, which is the
 /// ceiling for a negative quotient).
 [[nodiscard]] constexpr auto ceil_div(int64_t const n, int64_t const d) noexcept -> int64_t
