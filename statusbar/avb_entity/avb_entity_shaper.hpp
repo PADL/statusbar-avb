@@ -256,6 +256,15 @@ class ShaperQdiscs
     [[nodiscard]] auto program_one(uint16_t queue, CbsParameters const& params, CbsParameters& current, logging::StrLit label)
         -> Status;
     [[nodiscard]] auto parent_of(uint16_t queue) const noexcept -> uint32_t;
+    /// Lay @p mqprio as the root on @p ifindex, keeping one already laid so: whether it was kept.
+    [[nodiscard]] auto put_root(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio) -> StatusValue<bool>;
+    /// Replace the root with @p mqprio, deleting our own handle @p root and retrying once on EINVAL.
+    [[nodiscard]] auto replace_root(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, uint32_t root)
+        -> Status;
+    /// Graft the default qdisc back on both class queues (logged) and forget their cbs.
+    void remove_cbs();
+    /// Delete the mqprio root (logged).
+    [[nodiscard]] auto remove_root() -> Status;
 
     net::tc::TcControl& tc_;
     logging::Logger log_;
@@ -357,6 +366,18 @@ class EntityShaper final : public net::Pollable
     auto refresh_link_speed() -> bool;
     /// Clear the kit's admission hook if this shaper set it.
     void unhook() noexcept;
+    /// Park both cbs at the placeholders and leave the qdiscs for the next start (logged).
+    void park();
+    /// Install on @p ifindex, whose driver is @p driver, and follow admission from then on.
+    [[nodiscard]] auto install_on(int ifindex, std::string driver) -> Status;
+    /// Lay out the interface's TX queues for @p driver and install the qdiscs: the layout.
+    [[nodiscard]] auto install_qdiscs(int ifindex, std::string_view driver) -> StatusValue<QueueLayout>;
+    /// Open the tc client and install the mqprio root for @p layout on @p ifindex.
+    [[nodiscard]] auto install_layout(int ifindex, QueueLayout const& layout) -> Status;
+    /// Keep and log the installed @p driver and @p layout, warning about what will not shape.
+    void adopt(std::string driver, QueueLayout const& layout);
+    /// Hook the kit's admission changes and program the admitted set now.
+    void follow_admission();
 
     ShaperConfig config_;
     AvbEntityKit& kit_;

@@ -42,7 +42,10 @@ void ListenerVlan::follow(uint16_t const vid)
     }
     bool const created = *added == net::vlan::LinkOwnership::created;
     log_.status(
-        "listener: VID {} on the NIC's VLAN filter: {} {} (down)", vid, created ? logging::lit("created") : logging::lit("adopted"), logging::embed<16>(name));
+        "listener: VID {} on the NIC's VLAN filter: {} {} (down)",
+        vid,
+        created ? logging::lit("created") : logging::lit("adopted"),
+        logging::embed<16>(name));
     if (created_) {
         if (auto const status = control_->remove_link(name_); !status) {
             log_.warning("listener: deleting {} failed: errno {}", logging::embed<16>(name_), status.error().value());
