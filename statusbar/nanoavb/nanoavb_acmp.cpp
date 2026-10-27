@@ -5,6 +5,23 @@
 
 namespace statusbar::nanoavb {
 
+namespace {
+
+/// Record a settled Milan sink's binding and stream in the state machine's view of the input.
+void connect_settled(ListenerStreamInfo& s, MilanSinkBinding const& binding, MilanSinkStream const& stream) noexcept
+{  // NOLINT(statusbar-block-statements): one assignment per field of the connection
+    s.reset();
+    s.connected = true;
+    s.talker_entity_id = binding.talker_entity_id;
+    s.talker_unique_id = binding.talker_unique_id;
+    s.controller_entity_id = binding.controller_entity_id;
+    s.stream_id = stream.stream_id;
+    s.stream_dest_mac = stream.dest_mac;
+    s.stream_vlan_id = stream.vlan_id;
+}
+
+}  // namespace
+
 NanoAvbAcmpTalker::NanoAvbAcmpTalker(
     Eui64 entity_id, AcmpTalkerCallbacks callbacks, size_t max_streams, size_t max_listeners_per_stream)
     : callbacks_{std::move(callbacks)}
@@ -79,8 +96,7 @@ auto NanoAvbAcmpTalker::milan_source(uint16_t const stream_index) const -> std::
 auto NanoAvbAcmpTalker::receive_milan_command(
     AcmpCommandResponse const& cmd, TimePoint const event_time, uint16_t const ingress_interface) -> bool
 {
-    uint16_t const index = cmd.talker_unique_id.get();
-    auto const source = milan_source(index);
+    auto const source = milan_source(cmd.talker_unique_id.get());
     auto const reply = milan_talker_respond(cmd, source ? &*source : nullptr, ingress_interface);
     if (!reply) {
         return false;
@@ -88,7 +104,7 @@ auto NanoAvbAcmpTalker::receive_milan_command(
     // The window opens before the answer goes: the entity may declare the
     // Talker Advertise the listener is about to look for.
     if (reply->probe_counts && on_probe_) {
-        on_probe_(index, event_time);
+        on_probe_(cmd.talker_unique_id.get(), event_time);
     }
     if (callbacks_.tx_response) {
         (void)callbacks_.tx_response(reply->response);
@@ -157,15 +173,7 @@ void NanoAvbAcmpListener::wire_milan()
         if (s == nullptr) {
             return;
         }
-        auto const* const sink = milan_.sink(index);
-        s->reset();
-        s->connected = true;
-        s->talker_entity_id = sink->binding.talker_entity_id;
-        s->talker_unique_id = sink->binding.talker_unique_id;
-        s->controller_entity_id = sink->binding.controller_entity_id;
-        s->stream_id = stream.stream_id;
-        s->stream_dest_mac = stream.dest_mac;
-        s->stream_vlan_id = stream.vlan_id;
+        connect_settled(*s, milan_.sink(index)->binding, stream);
         if (callbacks_.on_connect) {
             callbacks_.on_connect(index, stream.stream_id, stream.dest_mac);
         }

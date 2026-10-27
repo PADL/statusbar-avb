@@ -611,30 +611,14 @@ class MsrpHandler
     [[nodiscard]] auto declare_listener_stream(StreamId const& stream_id, ListenerReservationState const state, TimePoint now)
         -> StatusValue<size_t>
     {
-        size_t idx = listener_streams_.size();
-        for (size_t i = 0; i < listener_streams_.size(); ++i) {
-            if (listener_streams_[i].stream_id == stream_id) {
-                idx = i;
-                break;
-            }
-        }
+        size_t const idx = listener_stream_index(stream_id);
         bool const added = idx == listener_streams_.size();
-        if (added) {
-            // Reject rather than throw when the reservation table is full (reactor path).
-            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = state}) == nullptr) {
-                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
-            }
+        // Reject rather than throw when the reservation table is full (reactor path).
+        if (added && listener_streams_.try_push_back({.stream_id = stream_id, .state = state}) == nullptr) {
+            return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
         }
-        ListenerReservationState const previous = listener_streams_[idx].state;
-        listener_streams_[idx].state = state;
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
-        auto const decl = state == ListenerReservationState::Ready ? statusbar::srp::msrp::ListenerDeclaration::Ready
-                                                                   : statusbar::srp::msrp::ListenerDeclaration::AskingFailed;
-        if (auto status = participant_.declare_listener(stream_id, decl, now); !status) {
+        ListenerReservationState const previous = std::exchange(listener_streams_[idx].state, state);
+        if (auto status = declare_listener_attribute(stream_id, state, now); !status) {
             // A full attribute table: never declared.
             if (added) {
                 listener_streams_.pop_back();
@@ -646,27 +630,57 @@ class MsrpHandler
         return idx;
     }
 
+    /// The index of @p stream_id's entry in listener_streams_, or its size when there is none.
+    [[nodiscard]] auto listener_stream_index(StreamId const& stream_id) const noexcept -> size_t
+    {
+        for (size_t i = 0; i < listener_streams_.size(); ++i) {
+            if (listener_streams_[i].stream_id == stream_id) {
+                return i;
+            }
+        }
+        return listener_streams_.size();
+    }
+
+    /// Declare the Listener attribute matching @p state (Ready, else AskingFailed), starting the participant first.
+    [[nodiscard]] auto declare_listener_attribute(StreamId const& stream_id, ListenerReservationState const state, TimePoint now)
+        -> Status
+    {
+        if (!started_) {
+            participant_.start(now);
+            started_ = true;
+        }
+        auto const decl = state == ListenerReservationState::Ready ? statusbar::srp::msrp::ListenerDeclaration::Ready
+                                                                   : statusbar::srp::msrp::ListenerDeclaration::AskingFailed;
+        return participant_.declare_listener(stream_id, decl, now);
+    }
+
     /// A peer declared a Domain: adopt a Class A SRclassVID at our SRclassPriority, at most once
     /// per link up (Milan v1.2 Section 4.2.7.2.1); docs/NANOAVB_ARCHITECTURE.md.
     void on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv)
     {
-        if (fv.sr_class_id.get() != statusbar::srp::msrp::SR_CLASS_A || fv.sr_class_priority.get() != domain_.sr_class_priority) {
+        uint16_t const vid = adoptable_domain_vid(fv);
+        if (vid == 0) {
             return;
         }
-        uint16_t const vid = fv.sr_class_vid.get();
-        if (vid == 0 || vid > 4094 || vid == domain_.sr_class_vid) {
-            return;
-        }
-        // Adopt at most once per link up (reset_domain restores the default).
-        if (domain_.sr_class_vid != default_domain_.sr_class_vid) {
-            return;
-        }
-        uint16_t const old_vid = domain_.sr_class_vid;
-        domain_.sr_class_vid = vid;
+        uint16_t const old_vid = std::exchange(domain_.sr_class_vid, vid);
         (void)declare_domain(last_event_time_);
         if (on_domain_vid_changed_) {
             on_domain_vid_changed_(old_vid, vid, last_event_time_);
         }
+    }
+
+    /// The Class A SRclassVID a peer's Domain @p fv offers for adoption, or 0 when there is none to adopt.
+    [[nodiscard]] auto adoptable_domain_vid(statusbar::srp::msrp::DomainFirstValue const& fv) const noexcept -> uint16_t
+    {
+        if (fv.sr_class_id.get() != statusbar::srp::msrp::SR_CLASS_A || fv.sr_class_priority.get() != domain_.sr_class_priority) {
+            return 0;
+        }
+        uint16_t const vid = fv.sr_class_vid.get();
+        // Adopt at most once per link up (reset_domain restores the default).
+        if (vid > 4094 || vid == domain_.sr_class_vid || domain_.sr_class_vid != default_domain_.sr_class_vid) {
+            return 0;
+        }
+        return vid;
     }
 
     /// Forward a listener register/leave for one of OUR talker streams to the
