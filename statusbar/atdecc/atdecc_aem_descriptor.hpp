@@ -865,20 +865,19 @@ static_assert(alignof(Eui64) == 1 && alignof(doublet_t) == 1, "trailer spans ali
 
 namespace detail {
 
-/// The big-endian doublet at @p off in @p wire (the caller checks the bounds).
-[[nodiscard]] inline auto wire_u16(std::span<uint8_t const> const wire, size_t const off) noexcept -> size_t
+/// The doublet at @p off in @p wire (the caller checks the bounds).
+[[nodiscard]] inline auto wire_doublet(std::span<uint8_t const> const wire, size_t const off) noexcept -> uint16_t
 {
-    return (static_cast<size_t>(wire[off]) << 8U) | static_cast<size_t>(wire[off + 1]);
+    doublet_t value{};
+    span_load(value, wire.subspan(off, sizeof(doublet_t)));
+    return value.get();
 }
 
-/// A STREAM descriptor's stream_formats at formats_offset; fails unless they lie within @p wire.
-[[nodiscard]] inline auto stream_formats(std::span<uint8_t const> const wire) noexcept -> StatusValue<std::span<Eui64 const>>
+/// A STREAM descriptor's stream_formats at @p formats_offset; fails unless they lie within @p wire.
+[[nodiscard]] inline auto stream_formats(std::span<uint8_t const> const wire, size_t const formats_offset) noexcept
+    -> StatusValue<std::span<Eui64 const>>
 {
-    if (wire.size() < DescriptorStream::MINIMUM_LENGTH) {
-        return failure(BufferError::insufficient_data);
-    }
-    size_t const formats_offset = wire_u16(wire, offsetof(DescriptorStream, formats_offset));
-    size_t const number_of_formats = wire_u16(wire, offsetof(DescriptorStream, number_of_formats));
+    size_t const number_of_formats = wire_doublet(wire, offsetof(DescriptorStream, number_of_formats));
     if (formats_offset < DescriptorStream::MINIMUM_LENGTH || formats_offset > wire.size() ||
         number_of_formats * sizeof(Eui64) > wire.size() - formats_offset) {
         return failure(BufferError::insufficient_data);
@@ -893,9 +892,9 @@ namespace detail {
     -> StatusValue<StreamDescriptorTrailers>
 {
     t.has_2021_fields = true;
-    t.redundant_offset = static_cast<uint16_t>(wire_u16(wire, offsetof(DescriptorStream, redundant_offset)));
-    t.number_of_redundant_streams = static_cast<uint16_t>(wire_u16(wire, offsetof(DescriptorStream, number_of_redundant_streams)));
-    t.timing = static_cast<uint16_t>(wire_u16(wire, offsetof(DescriptorStream, timing)));
+    t.redundant_offset = wire_doublet(wire, offsetof(DescriptorStream, redundant_offset));
+    t.number_of_redundant_streams = wire_doublet(wire, offsetof(DescriptorStream, number_of_redundant_streams));
+    t.timing = wire_doublet(wire, offsetof(DescriptorStream, timing));
     if (size_t const n = t.number_of_redundant_streams; n != 0) {
         size_t const off = t.redundant_offset;
         if (off < DescriptorStream::LENGTH || off > wire.size() || n * sizeof(doublet_t) > wire.size() - off) {
@@ -915,15 +914,18 @@ namespace detail {
 [[nodiscard]] inline auto stream_descriptor_trailers(std::span<uint8_t const> const wire) noexcept
     -> StatusValue<StreamDescriptorTrailers>
 {
-    auto const formats = detail::stream_formats(wire);
+    if (wire.size() < DescriptorStream::MINIMUM_LENGTH) {
+        return failure(BufferError::insufficient_data);
+    }
+    size_t const formats_offset = detail::wire_doublet(wire, offsetof(DescriptorStream, formats_offset));
+    auto const formats = detail::stream_formats(wire, formats_offset);
     if (!formats) {
         return forward_failure(formats);
     }
-    StreamDescriptorTrailers const t{.stream_formats = *formats};
-    if (detail::wire_u16(wire, offsetof(DescriptorStream, formats_offset)) < DescriptorStream::LENGTH) {
-        return success(t);
+    if (formats_offset < DescriptorStream::LENGTH) {
+        return success(StreamDescriptorTrailers{.stream_formats = *formats});
     }
-    return detail::stream_2021_fields(wire, t);
+    return detail::stream_2021_fields(wire, StreamDescriptorTrailers{.stream_formats = *formats});
 }
 
 //

@@ -248,12 +248,14 @@ class MilanListener
     auto probe_command(uint16_t index) -> AcmpCommandResponse;
     void send_probe(uint16_t index, TimePoint now);
     void respond(AcmpCommandResponse const& cmd, uint8_t status);
+    /// @p pdu through the send callback, when there is one.
     void send(AcmpCommandResponse const& pdu)
     {
         if (send_) {
             (void)send_(pdu);
         }
     }
+    /// Tell the binding-changed hook, when there is one, that sink @p index changed.
     void binding_changed(uint16_t const index)
     {
         if (on_binding_changed_) {
