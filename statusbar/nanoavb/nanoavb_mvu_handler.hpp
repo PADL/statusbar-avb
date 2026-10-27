@@ -99,6 +99,13 @@ class MvuCommandHandler
     [[nodiscard]] auto process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool;
 
   private:
+    /// Answer the Milan command @p command (control data as declared) by its command_type
+    [[nodiscard]] auto dispatch_command(Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command)
+        -> bool;
+    /// Send @p header with @p body as its command_specific_data, padded to
+    /// atdecc::mvu::MVU_MIN_PDU_LENGTH; false when it does not fit an AECPDU
+    [[nodiscard]] auto send_pdu(Eui48 const& dest_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> body) const
+        -> bool;
     /// Send a response to @p command with @p status and @p body as its
     /// command_specific_data, padded to atdecc::mvu::MVU_MIN_PDU_LENGTH
     [[nodiscard]] auto send_response(
@@ -117,6 +124,17 @@ class MvuCommandHandler
     /// The GET_MEDIA_CLOCK_REFERENCE_INFO command @p command
     [[nodiscard]] auto get_mcr_info_command(
         Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> command) -> bool;
+    /// SET_MEDIA_CLOCK_REFERENCE_INFO's @p request (a valid clock domain) applied and answered
+    [[nodiscard]] auto apply_mcr_info(
+        Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, atdecc::mvu::MvuMediaClockReferenceInfoPayload const& request)
+        -> bool;
+    /// Answer @p header with SUCCESS and @p body, then notify_changed() if @p changed
+    [[nodiscard]] auto respond_and_notify(
+        Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> body, bool changed) -> bool;
+    /// SET_SYSTEM_UNIQUE_ID's @p requested id applied and answered
+    [[nodiscard]] auto apply_system_unique_id(Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, uint64_t requested) -> bool;
+    /// The system unique id, as a response carries it
+    [[nodiscard]] auto system_unique_id_payload() const noexcept -> atdecc::mvu::MvuSystemUniqueIdPayload;
     /// Clock domain @p index's MCR payload, as a response carries it
     [[nodiscard]] auto mcr_payload(uint16_t index) const noexcept -> atdecc::mvu::MvuMediaClockReferenceInfoPayload;
     /// Refuse a SET from @p header's controller while another holds the entity

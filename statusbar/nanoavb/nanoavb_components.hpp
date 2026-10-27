@@ -457,6 +457,13 @@ class GptpAnnounceHandler : public net::Pollable
     void on_announce(gptp::AnnounceMessage const& announce, int64_t now_ns, AsPath const& path_trace = {});
 
   private:
+    /// Adopt @p announce's grandmaster, telling grandmaster_id_changed when it differs.
+    void note_grandmaster(gptp::AnnounceMessage const& announce, int64_t now_ns);
+    /// Adopt @p path_trace (or @p grandmaster alone), telling path_trace_changed when it differs.
+    void note_path_trace(AsPath const& path_trace, gptp::ClockIdentity const& grandmaster, int64_t now_ns);
+    /// The announce receipt timeout implied by @p announce's logMessageInterval, in ns.
+    [[nodiscard]] static auto announce_timeout_ns(gptp::AnnounceMessage const& announce) noexcept -> int64_t;
+
     net::RawnetContext context_{};
     GptpAnnounceCallbacks callbacks_;
     int64_t announce_timeout_ns_{0};  ///< from the last Announce's logMessageInterval
@@ -567,7 +574,7 @@ struct NanoAvbComponents
 /// never refuse ours with attribute_table_full (docs/NANOAVB_ARCHITECTURE.md).
 [[nodiscard]] constexpr auto entity_msrp_config(size_t const talker_streams, size_t const listener_streams) noexcept
     -> statusbar::srp::msrp::MsrpConfig
-{
+{  // NOLINT(statusbar-block-statements): the MSRP table limits, field by field
     using Limits = statusbar::srp::msrp::DefaultMsrpLimits;
     statusbar::srp::msrp::MsrpConfig config{};
     config.max_talker_advertise = Limits::max_talker_advertise;

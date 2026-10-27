@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <optional>
 #include <span>
 #include <utility>
@@ -497,6 +498,8 @@ class AemCommandHandler
     /// The controller at @p controller_mac is gone for good: drop its registrations, release its
     /// acquisition (to a waiting controller, if any) and abandon an acquire it was waiting for.
     void forget_controller_at(Eui48 const& controller_mac);
+    /// The entity is no longer acquired by anyone.
+    void drop_acquisition() noexcept;
 
     /// Set our own entity_id, used as the target_entity_id of unsolicited
     /// notifications. process_packet() also keeps this current; call this so
@@ -694,6 +697,65 @@ class AemCommandHandler
     /// with @p check_channel, a channel of its current format (an input's at the unit's rate); else BAD_ARGUMENTS.
     [[nodiscard]] auto check_mapping(
         uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const -> uint8_t;
+    /// SUCCESS when @p stream_channel is a channel of @p stream_format and, on an input port that
+    /// does not convert rates, the format is at its audio unit's rate; else BAD_ARGUMENTS.
+    [[nodiscard]] auto check_stream_channel(
+        uint16_t port_index, PortModel const& port, uint64_t stream_format, uint16_t stream_channel) const -> uint8_t;
+    /// Whether the audio unit holding stream input port @p port_index runs at base rate @p rate (true: no such unit).
+    [[nodiscard]] auto input_unit_rate_is(uint16_t port_index, uint32_t rate) const -> bool;
+    /// Port (@p port_type, @p port_index)'s model in @p port when its maps are dynamic; else
+    /// NOT_SUPPORTED (not a stream port, or static maps) or NO_SUCH_DESCRIPTOR.
+    [[nodiscard]] auto dynamic_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
+    /// Keep @p merged as input port @p port_index's mappings, handed first (sorted) to the data
+    /// plane when @p apply; NO_RESOURCES past the store's capacity; nothing changes unless SUCCESS.
+    [[nodiscard]] auto keep_input_mappings(uint16_t port_index, DynamicAudioMaps::Mappings& merged, bool apply) -> uint8_t;
+    /// Keep @p next (cluster order) as output port @p port_index's mappings, notifying a change.
+    [[nodiscard]] auto keep_output_mappings(uint16_t port_index, DynamicAudioMaps::Mappings const& next) -> uint8_t;
+    /// ADD (@p add) or REMOVE_AUDIO_MAPPINGS @p cmd (with @p command_data) on mappable @p port.
+    [[nodiscard]] auto change_audio_mappings(
+        bool add,
+        AemAudioMappingsCommandHeader const& cmd,
+        PortModel const& port,
+        std::span<uint8_t const> command_data,
+        std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// The set an ADD (@p add) or REMOVE of @p listed leaves @p current at, in @p next (cluster
+    /// order), or the status to refuse with.
+    [[nodiscard]] auto next_mappings(
+        bool add,
+        uint16_t port_index,
+        PortModel const& port,
+        DynamicAudioMaps::Mappings const& current,
+        std::span<DynamicAudioMapping const> listed,
+        DynamicAudioMaps::Mappings& next) const -> uint8_t;
+    /// Put a controller's ADD (@p add) or REMOVE_AUDIO_MAPPINGS @p cmd into force (@p next in
+    /// place of @p current) and answer it, telling the other controllers of a change.
+    [[nodiscard]] auto commit_mappings_command(
+        bool add,
+        AemAudioMappingsCommandHeader const& cmd,
+        DynamicAudioMaps::Mappings const& current,
+        DynamicAudioMaps::Mappings const& next,
+        std::span<uint8_t const> command_data,
+        std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// The set the entity's REMOVE of @p remove, then ADD of @p add, leaves input port @p port_index's
+    /// @p current at, in @p next (unsorted), or the status to refuse with.
+    [[nodiscard]] auto local_mappings(
+        uint16_t port_index,
+        DynamicAudioMaps::Mappings const& current,
+        std::span<DynamicAudioMapping const> add,
+        std::span<DynamicAudioMapping const> remove,
+        DynamicAudioMaps::Mappings& next) const -> uint8_t;
+    /// Put the entity's own @p next (cluster order) in place of @p current on input port @p port_index,
+    /// notified and reported to the settings hook; SUCCESS, with nothing done, when they are the same.
+    [[nodiscard]] auto commit_local_mappings(
+        uint16_t port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t;
+    /// GET_AUDIO_MAP's response for @p cmd on dynamic @p port.
+    [[nodiscard]] auto audio_map_response(
+        AemGetAudioMapCommandPayload const& cmd, PortModel const& port, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
+    /// The port's mappings whose cluster channel ordinals lie in [@p first, @p first + 176), after
+    /// the response header in @p out_buffer; their count, or nullopt when they do not fit.
+    [[nodiscard]] auto store_audio_map_entries(
+        uint16_t port_type, uint16_t port_index, PortModel const& port, size_t first, std::span<uint8_t> out_buffer) const
+        -> std::optional<uint16_t>;
     /// The set @p mappings would leave port (@p port_index, @p port)
     /// with, added to @p current (validated as ADD_AUDIO_MAPPINGS), or the
     /// status to refuse with.
@@ -729,6 +791,8 @@ class AemCommandHandler
     /// Read descriptor (@p type, @p index) of the current configuration.
     template <typename T>
     [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;
+    /// Descriptor (@p type, @p index) of the current configuration on the wire, in @p out; its length (0: none).
+    [[nodiscard]] auto model_descriptor_for_wire(uint16_t type, uint16_t index, std::span<uint8_t> out) const -> size_t;
     /// Handle GET_SAMPLING_RATE — returns the AUDIO_UNIT descriptor's current_sampling_rate.
     [[nodiscard]] auto handle_get_sampling_rate(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
@@ -808,9 +872,23 @@ class AemCommandHandler
         -> AemCommandResponse;
 
     /// The presentation offset checks common to SET_STREAM_INFO and SET_MAX_TRANSIT_TIME:
-    /// SUCCESS with the current offset in @p current, or the status to refuse with.
-    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
-        -> uint8_t;
+    /// the current offset, or the status to refuse with.
+    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index) const
+        -> std::expected<uint32_t, uint8_t>;
+    /// Set stream output @p index's presentation offset to @p offset_ns: BAD_ARGUMENTS past
+    /// Milan's maximum, else the set_presentation_offset hook's status.
+    [[nodiscard]] auto set_presentation_offset(uint16_t index, uint64_t offset_ns) -> uint8_t;
+    /// SET_STREAM_INFO's sub-commands of @p cmd on a stream output whose offset is @p current,
+    /// @p response (the echoed command) already in the output buffer.
+    [[nodiscard]] auto set_stream_info(AemStreamInfoPayload const& cmd, uint32_t current, std::span<uint8_t const> response)
+        -> AemCommandResponse;
+    /// Tell the controllers stream output @p index's offset is now @p offset: unsolicited
+    /// SET_STREAM_INFO (@p response), GET_STREAM_INFO and GET_MAX_TRANSIT_TIME.
+    void notify_stream_info_offset(uint16_t index, uint32_t offset, std::span<uint8_t const> response);
+    /// SET_MAX_TRANSIT_TIME @p cmd on a stream output whose offset is @p current, @p response
+    /// (the echoed command) already in the output buffer; a change is notified.
+    [[nodiscard]] auto set_max_transit_time(
+        AemSetMaxTransitTimePayload const& cmd, uint32_t current, std::span<uint8_t const> response) -> AemCommandResponse;
 
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.
@@ -879,6 +957,8 @@ class AemCommandHandler
     [[nodiscard]] auto monitor_period() noexcept -> sm::Clock::duration;
     /// Frame and send CONTROLLER_AVAILABLE to a registered controller.
     void send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t sequence_id);
+    /// The CONTROLLER_AVAILABLE command header to @p controller_id, with @p sequence_id.
+    [[nodiscard]] auto controller_available_command(Eui64 const& controller_id, uint16_t sequence_id) const -> AemDu;
     /// An AEM response to one of our commands (CONTROLLER_AVAILABLE).
     void handle_aem_response(AemDu const& header);
 

@@ -13,6 +13,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace statusbar::nanoavb {
@@ -71,19 +72,8 @@ class DynamicAudioMaps
     [[nodiscard]] auto replace(
         uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings) -> bool
     {
-        Mappings sorted{};
-        for (auto const& mapping : mappings) {
-            if (std::ranges::find(sorted, mapping) == sorted.end()) {
-                if (sorted.size() == sorted.capacity()) {
-                    return false;
-                }
-                sorted.push_back(mapping);
-            }
-        }
-        std::ranges::sort(sorted, cluster_order);
-        size_t const others = static_cast<size_t>(std::ranges::count_if(
-            entries_, [&](Entry const& e) { return e.port_type != port_type || e.port_index != port_index; }));
-        if (others + sorted.size() > MAX_MAPPINGS) {
+        auto const sorted = sorted_unique(mappings);
+        if (!sorted || !fits(port_type, port_index, sorted->size())) {
             return false;
         }
         entries_.erase(
@@ -92,7 +82,7 @@ class DynamicAudioMaps
                 entries_.end(),
                 [&](Entry const& e) { return e.port_type == port_type && e.port_index == port_index; }),
             entries_.end());
-        for (auto const& mapping : sorted) {
+        for (auto const& mapping : *sorted) {
             entries_.push_back({.port_type = port_type, .port_index = port_index, .mapping = mapping});
         }
         return true;
@@ -119,6 +109,22 @@ class DynamicAudioMaps
     }
 
   private:
+    /// @p mappings in cluster order without duplicates; nullopt when they overflow Mappings.
+    [[nodiscard]] static auto sorted_unique(std::span<DynamicAudioMapping const> const mappings) -> std::optional<Mappings>
+    {
+        Mappings sorted{};
+        for (auto const& mapping : mappings) {
+            if (std::ranges::find(sorted, mapping) == sorted.end()) {
+                if (sorted.size() == Mappings::capacity()) {
+                    return std::nullopt;
+                }
+                sorted.push_back(mapping);
+            }
+        }
+        std::ranges::sort(sorted, cluster_order);
+        return sorted;
+    }
+
     struct Entry
     {
         uint16_t port_type{0};

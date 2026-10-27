@@ -18,6 +18,56 @@ namespace statusbar::nanoavb {
 
 namespace {
 
+/// The name a SET_NAME command body (an AemNamePayload) names.
+[[nodiscard]] auto name_ref_of(std::span<uint8_t const> const command_data) noexcept -> NameRef
+{
+    atdecc::aem::AemNamePayload payload{};
+    span_load(payload, command_data);
+    return NameRef{
+        .descriptor =
+            DescriptorRef{
+                .configuration_index = payload.configuration_index.get(),
+                .descriptor_type = payload.descriptor_type.get(),
+                .descriptor_index = payload.descriptor_index.get()},
+        .name_index = payload.name_index.get()};
+}
+
+/// @p Payload from the head of @p data, which holds at least its LENGTH octets.
+template <typename Payload>
+[[nodiscard]] auto load_payload(std::span<uint8_t const> const data) noexcept -> Payload
+{
+    Payload payload{};
+    span_load(payload, data.first(Payload::LENGTH));
+    return payload;
+}
+
+/// A GET_AS_PATH response (IEEE 1722.1-2021 Clause 7.4.41.2) in @p out_buffer: descriptor_index,
+/// count, then count clock identities; NOT_SUPPORTED when it does not fit.
+[[nodiscard]] auto as_path_response(
+    uint16_t const descriptor_index, AsPath const& path, std::span<uint8_t> const out_buffer) noexcept -> AemCommandResponse
+{
+    size_t const size = 4 + (path.size() * 8);
+    if (out_buffer.size() < size) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    span_store(out_buffer.subspan(0, 2), doublet_t{descriptor_index});
+    span_store(out_buffer.subspan(2, 2), doublet_t{static_cast<uint16_t>(path.size())});
+    for (size_t i = 0; i < path.size(); ++i) {
+        span_copy(out_buffer.subspan(4 + (i * 8), 8), path[i].span());
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+/// A max_transit_time of stream output @p index (Milan v1.3 Section 5.4.2.30), the layout of
+/// GET_MAX_TRANSIT_TIME's response, at the head of @p out.
+void store_max_transit_time(std::span<uint8_t> const out, uint16_t const index, uint32_t const offset_ns) noexcept
+{
+    span_store(
+        out.first(AemGetMaxTransitTimeResponsePayload::LENGTH),
+        AemGetMaxTransitTimeResponsePayload{
+            .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = index, .max_transit_time = uint64_t{offset_ns}});
+}
+
 /// Rewrite a freshly serialized IEEE 1722.1-2021 descriptor (`out[0..n)`) to
 /// its 1722.1-2013/2016 wire form in place, returning the 2016 length. Only
 /// the descriptor types whose fixed length grew in 2021 are altered; every
@@ -508,16 +558,7 @@ auto AemCommandHandler::set_name(
         size = command_data.size();
         // The name in force, which an empty one (cleared to the configured or
         // authored name) is not: what GET_NAME now answers.
-        atdecc::aem::AemNamePayload payload{};
-        span_load(payload, command_data);
-        NameRef const ref{
-            .descriptor =
-                DescriptorRef{
-                    .configuration_index = payload.configuration_index.get(),
-                    .descriptor_type = payload.descriptor_type.get(),
-                    .descriptor_index = payload.descriptor_index.get()},
-            .name_index = payload.name_index.get()};
-        (void)aem_model.get_name_for_wire(ref, out_buffer);
+        (void)aem_model.get_name_for_wire(name_ref_of(command_data), out_buffer);
         // A controller renamed a descriptor: notify every registered
         // controller, like handle_set_descriptor_value does for values.
         emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size}, requester);
@@ -747,9 +788,8 @@ auto AemCommandHandler::handle_get_as_path(std::span<uint8_t const> command_data
     if (!callbacks_.get_as_path) {
         return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
-    // Command (7.4.41.1): descriptor_index (AVB_INTERFACE) + reserved.
-    constexpr size_t COMMAND_LENGTH = 4;
-    if (command_data.size() < COMMAND_LENGTH) {
+    // Command (7.4.41.1): descriptor_index (AVB_INTERFACE) + reserved, 4 octets.
+    if (command_data.size() < 4) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
     auto const descriptor_index = static_cast<uint16_t>((uint16_t{command_data[0]} << 8U) | command_data[1]);
@@ -757,17 +797,7 @@ auto AemCommandHandler::handle_get_as_path(std::span<uint8_t const> command_data
     if (!callbacks_.get_as_path(descriptor_index, path)) {
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
-    // Response (7.4.41.2): descriptor_index, count, then count clock identities.
-    size_t const size = 4 + (path.size() * 8);
-    if (out_buffer.size() < size) {
-        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
-    }
-    span_store(out_buffer.subspan(0, 2), doublet_t{descriptor_index});
-    span_store(out_buffer.subspan(2, 2), doublet_t{static_cast<uint16_t>(path.size())});
-    for (size_t i = 0; i < path.size(); ++i) {
-        span_copy(out_buffer.subspan(4 + (i * 8), 8), path[i].span());
-    }
-    return {.status = AEM_STATUS_SUCCESS, .size = size};
+    return as_path_response(descriptor_index, path, out_buffer);
 }
 
 auto AemCommandHandler::notify_as_path_changed(uint16_t const descriptor_index) -> uint8_t
@@ -1046,6 +1076,26 @@ struct FormatChannels
     return {};
 }
 
+/// IEEE 1722.1-2021 Clause 9.2.1.1.7: one AECPDU holds 63 mappings.
+constexpr size_t MAPPINGS_PER_PDU = (MAX_AEM_BODY - AemAudioMappingsCommandHeader::LENGTH) / AemAudioMapping::LENGTH;
+
+/// An ADD/REMOVE_AUDIO_MAPPINGS command's header; nullopt when the command is short of it or of
+/// the mappings it counts, or counts more than the store holds.
+[[nodiscard]] auto mappings_command(std::span<uint8_t const> const command_data) noexcept
+    -> std::optional<AemAudioMappingsCommandHeader>
+{
+    if (command_data.size() < AemAudioMappingsCommandHeader::LENGTH) {
+        return std::nullopt;
+    }
+    auto const cmd = load_payload<AemAudioMappingsCommandHeader>(command_data);
+    size_t const count = cmd.number_of_mappings.get();
+    if (count * AemAudioMapping::LENGTH > command_data.size() - AemAudioMappingsCommandHeader::LENGTH ||
+        count > DynamicAudioMaps::MAX_MAPPINGS) {
+        return std::nullopt;
+    }
+    return cmd;
+}
+
 /// The mappings of an ADD/REMOVE_AUDIO_MAPPINGS command body (after its header).
 [[nodiscard]] auto parse_mappings(std::span<uint8_t const> const bytes, size_t const count) -> DynamicAudioMaps::Mappings
 {
@@ -1068,15 +1118,21 @@ template <typename T>
 auto AemCommandHandler::read_model_descriptor(uint16_t const type, uint16_t const index) const -> std::optional<T>
 {
     std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
-    AemEntityModel const aem_model{*handler_};
-    DescriptorRef const ref{.configuration_index = current_configuration_, .descriptor_type = type, .descriptor_index = index};
-    auto const n = aem_model.get_descriptor_for_wire(ref, desc);
+    auto const n = model_descriptor_for_wire(type, index, desc);
     if (n == 0) {
         return std::nullopt;
     }
     T out{};
     span_load_padded(out, std::span<uint8_t const>{desc.data(), n});
     return out;
+}
+
+auto AemCommandHandler::model_descriptor_for_wire(uint16_t const type, uint16_t const index, std::span<uint8_t> const out) const
+    -> size_t
+{
+    AemEntityModel const aem_model{*handler_};
+    DescriptorRef const ref{.configuration_index = current_configuration_, .descriptor_type = type, .descriptor_index = index};
+    return aem_model.get_descriptor_for_wire(ref, out);
 }
 
 auto AemCommandHandler::port_model(uint16_t const port_type, uint16_t const port_index) const -> std::optional<PortModel>
@@ -1150,31 +1206,39 @@ auto AemCommandHandler::check_mapping(
     if (!check_channel) {
         return AEM_STATUS_SUCCESS;
     }
+    return check_stream_channel(port_index, port, stream->current_format.to_uint64(), mapping.stream_channel);
+}
+
+auto AemCommandHandler::check_stream_channel(
+    uint16_t const port_index, PortModel const& port, uint64_t const stream_format, uint16_t const stream_channel) const -> uint8_t
+{
     // Milan v1.2 Section 5.4.2.27: a channel of the stream's current format...
-    auto const format = format_channels(stream->current_format.to_uint64());
-    if (mapping.stream_channel >= format.channels) {
+    auto const format = format_channels(stream_format);
+    if (stream_channel >= format.channels) {
         return AEM_STATUS_BAD_ARGUMENTS;
     }
     // ... at the audio unit's rate, unless the port converts rates (an output's mappings are the
     // entity's own, kept at the rate by it, also through a re-time the unit has not recorded yet).
-    if (input && (port.port_flags & (PORT_FLAG_ASYNC_SAMPLE_RATE_CONV | PORT_FLAG_SYNC_SAMPLE_RATE_CONV)) == 0) {
-        for (uint16_t unit = 0;; ++unit) {
-            auto const audio_unit = read_model_descriptor<DescriptorAudioUnit>(DESCRIPTOR_AUDIO_UNIT, unit);
-            if (!audio_unit) {
-                break;
-            }
-            uint32_t const base = audio_unit->base_stream_input_port.get();
-            if (port_index < base || port_index >= base + audio_unit->number_of_stream_input_ports.get()) {
-                continue;
-            }
-            // The rate's base frequency (its top 3 bits are the pull).
-            if ((audio_unit->current_sampling_rate.get() & 0x1FFFFFFFU) != format.rate) {
-                return AEM_STATUS_BAD_ARGUMENTS;
-            }
-            break;
-        }
+    bool const converts = (port.port_flags & (PORT_FLAG_ASYNC_SAMPLE_RATE_CONV | PORT_FLAG_SYNC_SAMPLE_RATE_CONV)) != 0;
+    if (port.port_type == DESCRIPTOR_STREAM_PORT_INPUT && !converts && !input_unit_rate_is(port_index, format.rate)) {
+        return AEM_STATUS_BAD_ARGUMENTS;
     }
     return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::input_unit_rate_is(uint16_t const port_index, uint32_t const rate) const -> bool
+{
+    for (uint16_t unit = 0;; ++unit) {
+        auto const audio_unit = read_model_descriptor<DescriptorAudioUnit>(DESCRIPTOR_AUDIO_UNIT, unit);
+        if (!audio_unit) {
+            return true;
+        }
+        uint32_t const base = audio_unit->base_stream_input_port.get();
+        if (port_index >= base && port_index < base + audio_unit->number_of_stream_input_ports.get()) {
+            // The rate's base frequency (its top 3 bits are the pull).
+            return (audio_unit->current_sampling_rate.get() & 0x1FFFFFFFU) == rate;
+        }
+    }
 }
 
 auto AemCommandHandler::merged_mappings(
@@ -1213,37 +1277,21 @@ auto AemCommandHandler::set_audio_mappings(
     uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings, bool const apply)
     -> uint8_t
 {
-    auto const port = port_type == DESCRIPTOR_STREAM_PORT_INPUT ? port_model(port_type, port_index) : std::nullopt;
-    if (!port) {
+    if (port_type != DESCRIPTOR_STREAM_PORT_INPUT) {
         return AEM_STATUS_NO_SUCH_DESCRIPTOR;
     }
-    if (port->number_of_maps != 0) {
-        return AEM_STATUS_NOT_SUPPORTED;  // static maps
-    }
-    DynamicAudioMaps::Mappings merged{};
-    if (auto const status = merged_mappings(port_index, *port, {}, mappings, merged); status != AEM_STATUS_SUCCESS) {
+    PortModel port{};
+    if (auto const status = dynamic_port(port_type, port_index, port); status != AEM_STATUS_SUCCESS) {
         return status;
     }
-    if (apply) {
-        if (!callbacks_.on_audio_mappings_changed) {
-            return AEM_STATUS_NOT_IMPLEMENTED;
-        }
-        std::ranges::sort(merged, cluster_order);
-        if (auto const status = callbacks_.on_audio_mappings_changed(port_type, port_index, merged); status != AEM_STATUS_SUCCESS) {
-            return status;
-        }
+    DynamicAudioMaps::Mappings merged{};
+    if (auto const status = merged_mappings(port_index, port, {}, mappings, merged); status != AEM_STATUS_SUCCESS) {
+        return status;
     }
-    if (!dynamic_maps_.replace(port_type, port_index, merged)) {
-        if (apply) {
-            // Put the data plane back on the mappings in force.
-            (void)callbacks_.on_audio_mappings_changed(port_type, port_index, dynamic_maps_.port(port_type, port_index));
-        }
-        return AEM_STATUS_NO_RESOURCES;
-    }
-    return AEM_STATUS_SUCCESS;
+    return keep_input_mappings(port_index, merged, apply);
 }
 
-auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const port_index, PortModel& port) const -> uint8_t
+auto AemCommandHandler::dynamic_port(uint16_t const port_type, uint16_t const port_index, PortModel& port) const -> uint8_t
 {
     if (port_type != DESCRIPTOR_STREAM_PORT_INPUT && port_type != DESCRIPTOR_STREAM_PORT_OUTPUT) {
         return AEM_STATUS_NOT_SUPPORTED;
@@ -1252,16 +1300,47 @@ auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const p
     if (!model) {
         return AEM_STATUS_NO_SUCH_DESCRIPTOR;
     }
-    // Static maps (their AUDIO_MAP descriptors), or an output port (its
-    // mappings are static on this entity: Milan v1.2 Section 5.3.9.1 allows it).
-    if (model->number_of_maps != 0 || port_type != DESCRIPTOR_STREAM_PORT_INPUT) {
-        return AEM_STATUS_NOT_SUPPORTED;
-    }
-    if (!callbacks_.on_audio_mappings_changed) {
-        return AEM_STATUS_NOT_IMPLEMENTED;
+    if (model->number_of_maps != 0) {
+        return AEM_STATUS_NOT_SUPPORTED;  // static maps: its AUDIO_MAP descriptors
     }
     port = *model;
     return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::keep_input_mappings(uint16_t const port_index, DynamicAudioMaps::Mappings& merged, bool const apply)
+    -> uint8_t
+{
+    if (apply) {
+        if (!callbacks_.on_audio_mappings_changed) {
+            return AEM_STATUS_NOT_IMPLEMENTED;
+        }
+        std::ranges::sort(merged, cluster_order);
+        if (auto const status = callbacks_.on_audio_mappings_changed(DESCRIPTOR_STREAM_PORT_INPUT, port_index, merged);
+            status != AEM_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    if (!dynamic_maps_.replace(DESCRIPTOR_STREAM_PORT_INPUT, port_index, merged)) {
+        if (apply) {
+            // Put the data plane back on the mappings in force.
+            (void)callbacks_.on_audio_mappings_changed(
+                DESCRIPTOR_STREAM_PORT_INPUT, port_index, dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index));
+        }
+        return AEM_STATUS_NO_RESOURCES;
+    }
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const port_index, PortModel& port) const -> uint8_t
+{
+    if (auto const status = dynamic_port(port_type, port_index, port); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    // An output port: its mappings are static on this entity (Milan v1.2 Section 5.3.9.1 allows it).
+    if (port_type != DESCRIPTOR_STREAM_PORT_INPUT) {
+        return AEM_STATUS_NOT_SUPPORTED;
+    }
+    return callbacks_.on_audio_mappings_changed ? AEM_STATUS_SUCCESS : AEM_STATUS_NOT_IMPLEMENTED;
 }
 
 auto AemCommandHandler::removed_mappings(
@@ -1309,41 +1388,68 @@ auto AemCommandHandler::commit_mappings(
 auto AemCommandHandler::handle_audio_mappings(bool const add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
 {
-    if (command_data.size() < AemAudioMappingsCommandHeader::LENGTH) {
-        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
-    }
-    AemAudioMappingsCommandHeader cmd{};
-    span_load(cmd, command_data);
-    uint16_t const port_type = cmd.descriptor_type;
-    uint16_t const port_index = cmd.descriptor_index;
-    size_t const count = cmd.number_of_mappings.get();
-    auto const body = command_data.subspan(AemAudioMappingsCommandHeader::LENGTH);
-    if (count * AemAudioMapping::LENGTH > body.size() || count > DynamicAudioMaps::MAX_MAPPINGS) {
+    auto const cmd = mappings_command(command_data);
+    if (!cmd) {
         return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
     }
     PortModel port{};
-    if (auto const status = mappable_port(port_type, port_index, port); status != AEM_STATUS_SUCCESS) {
+    if (auto const status = mappable_port(cmd->descriptor_type, cmd->descriptor_index, port); status != AEM_STATUS_SUCCESS) {
         return reject_command(status, command_data, out_buffer);
     }
-    auto const listed = parse_mappings(body, count);
-    auto const current = dynamic_maps_.port(port_type, port_index);
+    return change_audio_mappings(add, *cmd, port, command_data, out_buffer);
+}
+
+auto AemCommandHandler::change_audio_mappings(
+    bool const add,
+    AemAudioMappingsCommandHeader const& cmd,
+    PortModel const& port,
+    std::span<uint8_t const> const command_data,
+    std::span<uint8_t> const out_buffer) -> AemCommandResponse
+{
+    uint16_t const port_index = cmd.descriptor_index;
+    auto const listed = parse_mappings(command_data.subspan(AemAudioMappingsCommandHeader::LENGTH), cmd.number_of_mappings.get());
+    auto const current = dynamic_maps_.port(cmd.descriptor_type, port_index);
     DynamicAudioMaps::Mappings next{};
-    auto const computed =
-        add ? merged_mappings(port_index, port, current, listed, next) : removed_mappings(port_index, port, current, listed, next);
-    if (computed != AEM_STATUS_SUCCESS) {
-        return reject_command(computed, command_data, out_buffer);
+    if (auto const status = next_mappings(add, port_index, port, current, listed, next); status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data, out_buffer);
     }
-    std::ranges::sort(next, cluster_order);
+    return commit_mappings_command(add, cmd, current, next, command_data, out_buffer);
+}
+
+auto AemCommandHandler::next_mappings(
+    bool const add,
+    uint16_t const port_index,
+    PortModel const& port,
+    DynamicAudioMaps::Mappings const& current,
+    std::span<DynamicAudioMapping const> const listed,
+    DynamicAudioMaps::Mappings& next) const -> uint8_t
+{
+    auto const status =
+        add ? merged_mappings(port_index, port, current, listed, next) : removed_mappings(port_index, port, current, listed, next);
+    if (status == AEM_STATUS_SUCCESS) {
+        std::ranges::sort(next, cluster_order);
+    }
+    return status;
+}
+
+auto AemCommandHandler::commit_mappings_command(
+    bool const add,
+    AemAudioMappingsCommandHeader const& cmd,
+    DynamicAudioMaps::Mappings const& current,
+    DynamicAudioMaps::Mappings const& next,
+    std::span<uint8_t const> const command_data,
+    std::span<uint8_t> const out_buffer) -> AemCommandResponse
+{
     bool const changed = !std::ranges::equal(next, current);
     if (changed) {
-        if (auto const status = commit_mappings(port_index, current, next); status != AEM_STATUS_SUCCESS) {
+        if (auto const status = commit_mappings(cmd.descriptor_index, current, next); status != AEM_STATUS_SUCCESS) {
             return reject_command(status, command_data, out_buffer);
         }
     }
     // The response echoes the command; the other controllers are told.
     auto const r = reject_command(
         AEM_STATUS_SUCCESS,
-        command_data.first(AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH)),
+        command_data.first(AemAudioMappingsCommandHeader::LENGTH + (cmd.number_of_mappings.get() * AemAudioMapping::LENGTH)),
         out_buffer);
     if (changed) {
         notify_on_success(add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, r, out_buffer);
@@ -1359,20 +1465,36 @@ auto AemCommandHandler::apply_local_audio_mappings(
     if (locked_ || acquired_) {
         return AEM_STATUS_ENTITY_LOCKED;
     }
+    auto const current = dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index);
+    DynamicAudioMaps::Mappings next{};
+    if (auto const status = local_mappings(port_index, current, add, remove, next); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    std::ranges::sort(next, cluster_order);
+    return commit_local_mappings(port_index, current, next);
+}
+
+auto AemCommandHandler::local_mappings(
+    uint16_t const port_index,
+    DynamicAudioMaps::Mappings const& current,
+    std::span<DynamicAudioMapping const> const add,
+    std::span<DynamicAudioMapping const> const remove,
+    DynamicAudioMaps::Mappings& next) const -> uint8_t
+{
     PortModel port{};
     if (auto const status = mappable_port(DESCRIPTOR_STREAM_PORT_INPUT, port_index, port); status != AEM_STATUS_SUCCESS) {
         return status;
     }
-    auto const current = dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index);
     DynamicAudioMaps::Mappings kept{};
-    DynamicAudioMaps::Mappings next{};
     if (auto const status = removed_mappings(port_index, port, current, remove, kept); status != AEM_STATUS_SUCCESS) {
         return status;
     }
-    if (auto const status = merged_mappings(port_index, port, kept, add, next); status != AEM_STATUS_SUCCESS) {
-        return status;
-    }
-    std::ranges::sort(next, cluster_order);
+    return merged_mappings(port_index, port, kept, add, next);
+}
+
+auto AemCommandHandler::commit_local_mappings(
+    uint16_t const port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t
+{
     if (std::ranges::equal(next, current)) {
         return AEM_STATUS_SUCCESS;  // nothing to route, tell or save
     }
@@ -1392,18 +1514,20 @@ auto AemCommandHandler::apply_local_audio_mappings(
 auto AemCommandHandler::set_output_mappings(uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings)
     -> uint8_t
 {
-    auto const port = port_model(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
-    if (!port) {
-        return AEM_STATUS_NO_SUCH_DESCRIPTOR;
-    }
-    if (port->number_of_maps != 0) {
-        return AEM_STATUS_NOT_SUPPORTED;  // static maps
+    PortModel port{};
+    if (auto const status = dynamic_port(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index, port); status != AEM_STATUS_SUCCESS) {
+        return status;
     }
     DynamicAudioMaps::Mappings next{};
-    if (auto const status = merged_mappings(port_index, *port, {}, mappings, next); status != AEM_STATUS_SUCCESS) {
+    if (auto const status = merged_mappings(port_index, port, {}, mappings, next); status != AEM_STATUS_SUCCESS) {
         return status;
     }
     std::ranges::sort(next, cluster_order);
+    return keep_output_mappings(port_index, next);
+}
+
+auto AemCommandHandler::keep_output_mappings(uint16_t const port_index, DynamicAudioMaps::Mappings const& next) -> uint8_t
+{
     auto const current = output_maps_.port(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
     if (std::ranges::equal(next, current)) {
         return AEM_STATUS_SUCCESS;
@@ -1423,16 +1547,13 @@ void AemCommandHandler::notify_mappings(
     std::span<DynamicAudioMapping const> const of,
     std::span<DynamicAudioMapping const> const but)
 {
-    // IEEE 1722.1-2021 Clause 9.2.1.1.7: one AECPDU holds 63 mappings.
-    constexpr size_t PER_PDU = (MAX_AEM_BODY - AemAudioMappingsCommandHeader::LENGTH) / AemAudioMapping::LENGTH;
-    std::array<uint8_t, AemAudioMappingsCommandHeader::LENGTH + (PER_PDU * AemAudioMapping::LENGTH)> body{};
+    std::array<uint8_t, AemAudioMappingsCommandHeader::LENGTH + (MAPPINGS_PER_PDU * AemAudioMapping::LENGTH)> body{};
     size_t count = 0;
     auto const flush = [&] {
-        AemAudioMappingsCommandHeader header{};
-        header.descriptor_type = port_type;
-        header.descriptor_index = port_index;
-        header.number_of_mappings = static_cast<uint16_t>(count);
-        span_store(std::span<uint8_t>{body}.first(AemAudioMappingsCommandHeader::LENGTH), header);
+        span_store(
+            std::span<uint8_t>{body}.first(AemAudioMappingsCommandHeader::LENGTH),
+            AemAudioMappingsCommandHeader{
+                .descriptor_type = port_type, .descriptor_index = port_index, .number_of_mappings = static_cast<uint16_t>(count)});
         emit_unsolicited(
             add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS,
             std::span<uint8_t const>{body}.first(AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH)));
@@ -1446,16 +1567,16 @@ void AemCommandHandler::notify_mappings(
         if (other != but.end() && *other == mapping) {
             continue;
         }
-        AemAudioMapping wire{};
-        wire.stream_index = mapping.stream_index;
-        wire.stream_channel = mapping.stream_channel;
-        wire.cluster_offset = mapping.cluster_offset;
-        wire.cluster_channel = mapping.cluster_channel;
+        AemAudioMapping const wire{
+            .stream_index = mapping.stream_index,
+            .stream_channel = mapping.stream_channel,
+            .cluster_offset = mapping.cluster_offset,
+            .cluster_channel = mapping.cluster_channel};
         span_store(
             std::span<uint8_t>{body}.subspan(
                 AemAudioMappingsCommandHeader::LENGTH + (count * AemAudioMapping::LENGTH), AemAudioMapping::LENGTH),
             wire);
-        if (++count == PER_PDU) {
+        if (++count == MAPPINGS_PER_PDU) {
             flush();
         }
     }
@@ -1470,57 +1591,69 @@ auto AemCommandHandler::handle_get_audio_map(
     if (command_data.size() < AemGetAudioMapCommandPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
-    AemGetAudioMapCommandPayload cmd{};
-    span_load(cmd, command_data);
-    uint16_t const descriptor_type = cmd.descriptor_type;
-    uint16_t const descriptor_index = cmd.descriptor_index;
-    if (descriptor_type != DESCRIPTOR_STREAM_PORT_INPUT && descriptor_type != DESCRIPTOR_STREAM_PORT_OUTPUT) {
-        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    auto const cmd = load_payload<AemGetAudioMapCommandPayload>(command_data);
+    PortModel port{};
+    if (auto const status = dynamic_port(cmd.descriptor_type, cmd.descriptor_index, port); status != AEM_STATUS_SUCCESS) {
+        return {.status = status, .size = 0};
     }
-    auto const port = port_model(descriptor_type, descriptor_index);
-    if (!port) {
-        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
-    }
-    if (port->number_of_maps != 0) {
-        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};  // static maps: its AUDIO_MAP descriptors
-    }
+    return audio_map_response(cmd, port, out_buffer);
+}
+
+auto AemCommandHandler::audio_map_response(
+    AemGetAudioMapCommandPayload const& cmd, PortModel const& port, std::span<uint8_t> const out_buffer) const -> AemCommandResponse
+{
     // Milan v1.2 Section 5.4.2.26: the port's cluster channels, in order, in
     // fixed partitions of at most 176; number_of_maps is their count whatever
     // is mapped (at least one).
-    size_t const maps = std::max<size_t>(1, (port->total_channels + MAX_AUDIO_MAP_MAPPINGS - 1) / MAX_AUDIO_MAP_MAPPINGS);
-    size_t const map_index = cmd.map_index.get();
-    if (map_index >= maps) {
+    size_t const maps = std::max<size_t>(1, (port.total_channels + MAX_AUDIO_MAP_MAPPINGS - 1) / MAX_AUDIO_MAP_MAPPINGS);
+    if (cmd.map_index.get() >= maps) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
-    size_t const first = map_index * MAX_AUDIO_MAP_MAPPINGS;
-    size_t size = AemAudioMapResponseHeader::LENGTH;
+    auto const mappings = store_audio_map_entries(
+        cmd.descriptor_type, cmd.descriptor_index, port, size_t{cmd.map_index.get()} * MAX_AUDIO_MAP_MAPPINGS, out_buffer);
+    if (!mappings) {
+        return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};  // cannot be: 176 fit
+    }
+    span_store(
+        out_buffer,
+        AemAudioMapResponseHeader{
+            .descriptor_type = cmd.descriptor_type,
+            .descriptor_index = cmd.descriptor_index,
+            .map_index = cmd.map_index,
+            .number_of_maps = static_cast<uint16_t>(maps),
+            .number_of_mappings = *mappings});
+    return {
+        .status = AEM_STATUS_SUCCESS, .size = AemAudioMapResponseHeader::LENGTH + (size_t{*mappings} * AemAudioMapping::LENGTH)};
+}
+
+auto AemCommandHandler::store_audio_map_entries(
+    uint16_t const port_type,
+    uint16_t const port_index,
+    PortModel const& port,
+    size_t const first,
+    std::span<uint8_t> const out_buffer) const -> std::optional<uint16_t>
+{
     uint16_t mappings = 0;
-    auto const& store = descriptor_type == DESCRIPTOR_STREAM_PORT_INPUT ? dynamic_maps_ : output_maps_;
-    for (auto const& mapping : store.port(descriptor_type, descriptor_index)) {
-        auto const ordinal = cluster_ordinal(*port, mapping);
+    auto const& store = port_type == DESCRIPTOR_STREAM_PORT_INPUT ? dynamic_maps_ : output_maps_;
+    for (auto const& mapping : store.port(port_type, port_index)) {
+        auto const ordinal = cluster_ordinal(port, mapping);
         if (!ordinal || *ordinal < first || *ordinal >= first + MAX_AUDIO_MAP_MAPPINGS) {
             continue;
         }
-        if (size + AemAudioMapping::LENGTH > out_buffer.size()) {
-            return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};  // cannot be: 176 fit
+        size_t const at = AemAudioMapResponseHeader::LENGTH + (size_t{mappings} * AemAudioMapping::LENGTH);
+        if (at + AemAudioMapping::LENGTH > out_buffer.size()) {
+            return std::nullopt;
         }
-        AemAudioMapping const wire{
-            .stream_index = mapping.stream_index,
-            .stream_channel = mapping.stream_channel,
-            .cluster_offset = mapping.cluster_offset,
-            .cluster_channel = mapping.cluster_channel};
-        span_store(out_buffer.subspan(size, AemAudioMapping::LENGTH), wire);
-        size += AemAudioMapping::LENGTH;
+        span_store(
+            out_buffer.subspan(at, AemAudioMapping::LENGTH),
+            AemAudioMapping{
+                .stream_index = mapping.stream_index,
+                .stream_channel = mapping.stream_channel,
+                .cluster_offset = mapping.cluster_offset,
+                .cluster_channel = mapping.cluster_channel});
         ++mappings;
     }
-    AemAudioMapResponseHeader resp{};
-    resp.descriptor_type = descriptor_type;
-    resp.descriptor_index = descriptor_index;
-    resp.map_index = static_cast<uint16_t>(map_index);
-    resp.number_of_maps = static_cast<uint16_t>(maps);
-    resp.number_of_mappings = mappings;
-    span_store(out_buffer, resp);
-    return {.status = AEM_STATUS_SUCCESS, .size = size};
+    return mappings;
 }
 
 auto AemCommandHandler::handle_get_sampling_rate(
@@ -1644,78 +1777,83 @@ auto AemCommandHandler::handle_get_stream_info(
     return {.status = AEM_STATUS_SUCCESS, .size = size};
 }
 
-auto AemCommandHandler::presentation_offset_target(
-    uint16_t const descriptor_type, uint16_t const descriptor_index, uint32_t& current) const -> uint8_t
+auto AemCommandHandler::presentation_offset_target(uint16_t const descriptor_type, uint16_t const descriptor_index) const
+    -> std::expected<uint32_t, uint8_t>
 {
     if (!callbacks_.get_presentation_offset || !callbacks_.set_presentation_offset) {
-        return AEM_STATUS_NOT_IMPLEMENTED;
+        return std::unexpected(AEM_STATUS_NOT_IMPLEMENTED);
     }
     // Milan v1.2 Section 5.4.2.9: "The PAAD-AE shall not implement the
     // SET_STREAM_INFO command on Stream Inputs"; MAX_TRANSIT_TIME is a talker's
     // (Milan v1.3 Section 5.4.2.30).
     if (descriptor_type == DESCRIPTOR_STREAM_INPUT) {
-        return AEM_STATUS_NOT_SUPPORTED;
+        return std::unexpected(AEM_STATUS_NOT_SUPPORTED);
     }
     if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
-        return AEM_STATUS_NO_SUCH_DESCRIPTOR;  // no stream there
+        return std::unexpected(AEM_STATUS_NO_SUCH_DESCRIPTOR);  // no stream there
     }
     auto const offset = callbacks_.get_presentation_offset(descriptor_index);
     if (!offset) {
-        return AEM_STATUS_NO_SUCH_DESCRIPTOR;
+        return std::unexpected(AEM_STATUS_NO_SUCH_DESCRIPTOR);
     }
-    current = *offset;
-    return AEM_STATUS_SUCCESS;
+    return *offset;
+}
+
+auto AemCommandHandler::set_presentation_offset(uint16_t const index, uint64_t const offset_ns) -> uint8_t
+{
+    if (offset_ns > MILAN_PRESENTATION_OFFSET_MAX_NS) {
+        return AEM_STATUS_BAD_ARGUMENTS;
+    }
+    return callbacks_.set_presentation_offset(index, static_cast<uint32_t>(offset_ns));
 }
 
 auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
 {
-    using namespace stream_info_flags;
     if (command_data.size() < AemStreamInfoPayload::LENGTH || out_buffer.size() < AemStreamInfoPayload::LENGTH) {
         return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
     }
-    auto const echoed = command_data.first(AemStreamInfoPayload::LENGTH);
-    AemStreamInfoPayload cmd{};
-    span_load(cmd, echoed);
-    uint16_t const index = cmd.descriptor_index.get();
-    uint32_t current = 0;
-    if (auto const status = presentation_offset_target(cmd.descriptor_type.get(), index, current); status != AEM_STATUS_SUCCESS) {
-        return reject_command(status, echoed, out_buffer);
+    auto const cmd = load_payload<AemStreamInfoPayload>(command_data);
+    auto const current = presentation_offset_target(cmd.descriptor_type.get(), cmd.descriptor_index.get());
+    if (!current) {
+        return reject_command(current.error(), command_data.first(AemStreamInfoPayload::LENGTH), out_buffer);
     }
+    span_copy(out_buffer.first(AemStreamInfoPayload::LENGTH), command_data.first(AemStreamInfoPayload::LENGTH));
+    return set_stream_info(cmd, *current, out_buffer.first(AemStreamInfoPayload::LENGTH));
+}
+
+auto AemCommandHandler::set_stream_info(
+    AemStreamInfoPayload const& cmd, uint32_t const current, std::span<uint8_t const> const response) -> AemCommandResponse
+{
     // "If the PAAD-AE receives a SET_STREAM_INFO command with any unsupported
     // sub-commands, the PAAD-AE shall refuse the entire command by returning
     // the NOT_SUPPORTED error code."
-    uint32_t const flags = cmd.flags.get();
-    if ((flags & SET_SUB_COMMANDS & ~MSRP_ACC_LAT_VALID) != 0) {
-        return reject_command(AEM_STATUS_NOT_SUPPORTED, echoed, out_buffer);
+    if ((cmd.flags.get() & stream_info_flags::SET_SUB_COMMANDS & ~stream_info_flags::MSRP_ACC_LAT_VALID) != 0) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = response.size()};
     }
-    span_copy(out_buffer.first(echoed.size()), echoed);
-    if ((flags & MSRP_ACC_LAT_VALID) == 0) {
-        return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};  // nothing asked
+    if ((cmd.flags.get() & stream_info_flags::MSRP_ACC_LAT_VALID) == 0) {
+        return {.status = AEM_STATUS_SUCCESS, .size = response.size()};  // nothing asked
     }
     uint32_t const offset = cmd.msrp_accumulated_latency.get();
-    if (offset > MILAN_PRESENTATION_OFFSET_MAX_NS) {
-        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = echoed.size()};
-    }
-    if (auto const status = callbacks_.set_presentation_offset(index, offset); status != AEM_STATUS_SUCCESS) {
-        return {.status = status, .size = echoed.size()};
-    }
+    auto const status = set_presentation_offset(cmd.descriptor_index.get(), offset);
     // The response echoes the command (MSRP_ACC_LAT_VALID and the offset), and
     // goes to the registered controllers when the offset changed.
-    if (offset != current) {
-        emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, out_buffer.first(echoed.size()), current_header_.controller_entity_id);
-        // A controller following GET_STREAM_INFO or MAX_TRANSIT_TIME (Milan
-        // 1.3) sees it too.
-        (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
-        AemGetMaxTransitTimeResponsePayload transit{};
-        transit.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
-        transit.descriptor_index = index;
-        transit.max_transit_time = uint64_t{offset};
-        std::array<uint8_t, AemGetMaxTransitTimeResponsePayload::LENGTH> body{};
-        span_store(body, transit);
-        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, body);
+    if (status == AEM_STATUS_SUCCESS && offset != current) {
+        notify_stream_info_offset(cmd.descriptor_index.get(), offset, response);
     }
-    return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};
+    return {.status = status, .size = response.size()};
+}
+
+void AemCommandHandler::notify_stream_info_offset(
+    uint16_t const index, uint32_t const offset, std::span<uint8_t const> const response)
+{
+    emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, response, current_header_.controller_entity_id);
+    // A controller following GET_STREAM_INFO or MAX_TRANSIT_TIME (Milan
+    // 1.3) sees it too.
+    (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
+    std::array<uint8_t, AemGetMaxTransitTimeResponsePayload::LENGTH> body{};
+    store_max_transit_time(body, index, offset);
+    emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, body);
 }
 
 auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -1724,30 +1862,28 @@ auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> com
     if (command_data.size() < AemSetMaxTransitTimePayload::LENGTH || out_buffer.size() < AemSetMaxTransitTimePayload::LENGTH) {
         return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
     }
-    auto const echoed = command_data.first(AemSetMaxTransitTimePayload::LENGTH);
-    AemSetMaxTransitTimePayload cmd{};
-    span_load(cmd, echoed);
+    auto const cmd = load_payload<AemSetMaxTransitTimePayload>(command_data);
+    auto const current = presentation_offset_target(cmd.descriptor_type.get(), cmd.descriptor_index.get());
+    if (!current) {
+        return reject_command(current.error(), command_data.first(AemSetMaxTransitTimePayload::LENGTH), out_buffer);
+    }
+    span_copy(out_buffer.first(AemSetMaxTransitTimePayload::LENGTH), command_data.first(AemSetMaxTransitTimePayload::LENGTH));
+    return set_max_transit_time(cmd, *current, out_buffer.first(AemSetMaxTransitTimePayload::LENGTH));
+}
+
+auto AemCommandHandler::set_max_transit_time(
+    AemSetMaxTransitTimePayload const& cmd, uint32_t const current, std::span<uint8_t const> const response) -> AemCommandResponse
+{
     uint16_t const index = cmd.descriptor_index.get();
-    uint32_t current = 0;
-    if (auto const status = presentation_offset_target(cmd.descriptor_type.get(), index, current); status != AEM_STATUS_SUCCESS) {
-        return reject_command(status, echoed, out_buffer);
-    }
-    span_copy(out_buffer.first(echoed.size()), echoed);
     uint64_t const requested = cmd.max_transit_time.get();
-    if (requested > MILAN_PRESENTATION_OFFSET_MAX_NS) {
-        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = echoed.size()};
-    }
-    auto const offset = static_cast<uint32_t>(requested);
-    if (auto const status = callbacks_.set_presentation_offset(index, offset); status != AEM_STATUS_SUCCESS) {
-        return {.status = status, .size = echoed.size()};
-    }
-    if (offset != current) {
-        emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()), current_header_.controller_entity_id);
+    auto const status = set_presentation_offset(index, requested);
+    if (status == AEM_STATUS_SUCCESS && requested != current) {
+        emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, response, current_header_.controller_entity_id);
         // GET_MAX_TRANSIT_TIME's response has SET's layout: the echoed command.
-        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, out_buffer.first(echoed.size()));
+        emit_unsolicited(AEM_COMMAND_GET_MAX_TRANSIT_TIME, response);
         (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     }
-    return {.status = AEM_STATUS_SUCCESS, .size = echoed.size()};
+    return {.status = status, .size = response.size()};
 }
 
 auto AemCommandHandler::handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -1757,18 +1893,12 @@ auto AemCommandHandler::handle_get_max_transit_time(std::span<uint8_t const> com
         out_buffer.size() < AemGetMaxTransitTimeResponsePayload::LENGTH) {
         return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
     }
-    AemGetMaxTransitTimeCommandPayload cmd{};
-    span_load(cmd, command_data.first(AemGetMaxTransitTimeCommandPayload::LENGTH));
-    uint32_t current = 0;
-    if (auto const status = presentation_offset_target(cmd.descriptor_type.get(), cmd.descriptor_index.get(), current);
-        status != AEM_STATUS_SUCCESS) {
-        return reject_command(status, command_data.first(AemGetMaxTransitTimeCommandPayload::LENGTH), out_buffer);
+    auto const cmd = load_payload<AemGetMaxTransitTimeCommandPayload>(command_data);
+    auto const current = presentation_offset_target(cmd.descriptor_type.get(), cmd.descriptor_index.get());
+    if (!current) {
+        return reject_command(current.error(), command_data.first(AemGetMaxTransitTimeCommandPayload::LENGTH), out_buffer);
     }
-    AemGetMaxTransitTimeResponsePayload resp{};
-    resp.descriptor_type = cmd.descriptor_type;
-    resp.descriptor_index = cmd.descriptor_index;
-    resp.max_transit_time = uint64_t{current};
-    span_store(out_buffer.first(AemGetMaxTransitTimeResponsePayload::LENGTH), resp);
+    store_max_transit_time(out_buffer, cmd.descriptor_index.get(), *current);
     return {.status = AEM_STATUS_SUCCESS, .size = AemGetMaxTransitTimeResponsePayload::LENGTH};
 }
 
@@ -2121,6 +2251,13 @@ void AemCommandHandler::send_controller_available_to(Eui48 const& dest_mac, Eui6
     if (!callbacks_.send_response) {
         return;
     }
+    std::array<uint8_t, AemDu::LENGTH> buffer{};
+    span_store(buffer, controller_available_command(controller_id, sequence_id));
+    (void)callbacks_.send_response(dest_mac, buffer);
+}
+
+auto AemCommandHandler::controller_available_command(Eui64 const& controller_id, uint16_t const sequence_id) const -> AemDu
+{
     // We are the controller of this command: the registered controller is its
     // target (IEEE 1722.1-2021 7.4.69, no payload).
     AemDu hdr{};
@@ -2128,9 +2265,7 @@ void AemCommandHandler::send_controller_available_to(Eui48 const& dest_mac, Eui6
     hdr.target_entity_id = controller_id;
     hdr.controller_entity_id = our_entity_id_;
     hdr.sequence_id = doublet_t{sequence_id};
-    std::array<uint8_t, AemDu::LENGTH> buffer{};
-    span_store(buffer, hdr);
-    (void)callbacks_.send_response(dest_mac, buffer);
+    return hdr;
 }
 
 void AemCommandHandler::tick_controller_monitor(sm::TimePoint const now)
@@ -2239,6 +2374,11 @@ void AemCommandHandler::forget_controller_at(Eui48 const& controller_mac)
         controller_available_timed_out();
         return;
     }
+    drop_acquisition();
+}
+
+void AemCommandHandler::drop_acquisition() noexcept
+{
     acquired_ = false;
     acquired_persistent_ = false;
     acquiring_controller_ = {};
