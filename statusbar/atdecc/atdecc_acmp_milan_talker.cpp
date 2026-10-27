@@ -28,6 +28,18 @@ void set_stream(AcmpCommandResponse& resp, MilanTalkerSource const& source) noex
     resp.stream_vlan_id = source.stream_vlan_id;
 }
 
+/// A SUCCESS response to @p cmd with no connections, @p flags, and the stream
+/// fields of @p source (Tables 5.43, 5.47; all zero for Table 5.45).
+auto succeeded(AcmpCommandResponse const& cmd, uint16_t const flags, MilanTalkerSource const& source) noexcept
+    -> AcmpCommandResponse
+{
+    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
+    resp.connection_count = uint16_t{0};
+    resp.flags = flags;
+    set_stream(resp, source);
+    return resp;
+}
+
 }  // namespace
 
 auto milan_talker_respond(
@@ -62,33 +74,20 @@ auto milan_talker_respond(
             }
             // Table 5.43. STREAMING_WAIT is echoed and otherwise ignored: a
             // Milan talker always streams while bandwidth is reserved.
-            auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
-            resp.connection_count = uint16_t{0};
-            resp.flags = static_cast<uint16_t>(cmd.flags.get() & (acmp_flags::FAST_CONNECT | acmp_flags::STREAMING_WAIT));
-            set_stream(resp, *source);
-            return MilanTalkerReply{.response = resp, .probe_counts = true};
+            auto const flags = static_cast<uint16_t>(cmd.flags.get() & (acmp_flags::FAST_CONNECT | acmp_flags::STREAMING_WAIT));
+            return MilanTalkerReply{.response = succeeded(cmd, flags, *source), .probe_counts = true};
         }
-        case ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND: {
+        case ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND:
             // Table 5.45: SUCCESS, the talker unchanged (it has no
             // connections), every stream field and flag zero.
-            auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
-            resp.connection_count = uint16_t{0};
-            resp.flags = uint16_t{0};
-            resp.stream_id = ieee::Eui64{};
-            resp.stream_dest_mac = ieee::Eui48{};
-            resp.stream_vlan_id = uint16_t{0};
-            return MilanTalkerReply{.response = resp};
-        }
+            return MilanTalkerReply{.response = succeeded(cmd, 0, MilanTalkerSource{})};
         case ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND:
         default: {
             // Table 5.47. The stream fields are only defined while a Talker
             // attribute is declared; they are reported whatever.
-            auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
+            auto resp = succeeded(cmd, source->registering_failed ? acmp_flags::REGISTERING_FAILED : uint16_t{0}, *source);
             resp.listener_entity_id = ieee::Eui64{};
             resp.listener_unique_id = uint16_t{0};
-            resp.connection_count = uint16_t{0};
-            resp.flags = source->registering_failed ? acmp_flags::REGISTERING_FAILED : uint16_t{0};
-            set_stream(resp, *source);
             return MilanTalkerReply{.response = resp};
         }
     }
