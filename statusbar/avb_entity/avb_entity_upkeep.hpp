@@ -47,6 +47,13 @@ class EntityUpkeep final : public net::Pollable
     void drain() { (void)collector_.poll(sink_); }
 
   private:
+    /// Log a change of the supervisor's state and restart the Init watchdog.
+    void note_state(std::chrono::steady_clock::time_point now);
+    /// A grandmaster regained under the same identity, and the gPTP lock watchdog.
+    void watch_gptp(std::chrono::steady_clock::time_point now);
+    /// Re-evaluate talker admission and the stream counters at @p now.
+    void reevaluate(std::chrono::steady_clock::time_point now);
+
     AvbEntityKit& kit_;
     logging::LogSink& sink_;
     logging::LogCollector<MAX_LOG_CHANNELS> collector_;
