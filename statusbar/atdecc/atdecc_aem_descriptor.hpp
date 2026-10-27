@@ -900,14 +900,17 @@ struct StreamFormatsExtent
 
 namespace detail {
 
-/// The big-endian doublet at @p off in @p wire (the caller checks the bounds).
-[[nodiscard]] inline auto wire_u16(std::span<uint8_t const> const wire, size_t const off) noexcept -> size_t
+/// The doublet at @p off in @p wire (the caller checks the bounds).
+[[nodiscard]] inline auto wire_doublet(std::span<uint8_t const> const wire, size_t const off) noexcept -> uint16_t
 {
-    return (static_cast<size_t>(wire[off]) << 8U) | static_cast<size_t>(wire[off + 1]);
+    doublet_t value{};
+    span_load(value, wire.subspan(off, sizeof(doublet_t)));
+    return value.get();
 }
 
-/// A STREAM descriptor's stream_formats at formats_offset; fails unless they lie within @p wire.
-[[nodiscard]] inline auto stream_formats(std::span<uint8_t const> const wire) noexcept -> StatusValue<std::span<Eui64 const>>
+/// A STREAM descriptor's stream_formats at @p formats_offset; fails unless they lie within @p wire.
+[[nodiscard]] inline auto stream_formats(std::span<uint8_t const> const wire, size_t const formats_offset) noexcept
+    -> StatusValue<std::span<Eui64 const>>
 {
     size_t const by_offset = formats.offset < DescriptorStream::MINIMUM_LENGTH ? DescriptorStream::LENGTH : formats.offset;
     return std::min({by_offset, DescriptorStream::LENGTH, wire_size});
@@ -986,11 +989,10 @@ inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const
     if (!formats) {
         return forward_failure(formats);
     }
-    StreamDescriptorTrailers const t{.stream_formats = *formats};
-    if (detail::wire_u16(wire, offsetof(DescriptorStream, formats_offset)) < DescriptorStream::LENGTH) {
-        return success(t);
+    if (formats_offset < DescriptorStream::LENGTH) {
+        return success(StreamDescriptorTrailers{.stream_formats = *formats});
     }
-    return detail::stream_2021_fields(wire, t);
+    return detail::stream_2021_fields(wire, StreamDescriptorTrailers{.stream_formats = *formats});
 }
 
 //
