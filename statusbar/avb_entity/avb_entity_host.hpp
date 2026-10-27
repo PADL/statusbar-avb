@@ -446,6 +446,8 @@ class AvbEntityHost
     void note_media_clock_locked(bool locked);
     /// Count CLOCK_DOMAIN @p index's transition to @p locked, if one, and notify it.
     void count_clock_domain_lock(uint16_t index, bool locked);
+    /// Return entity-driven CLOCK_DOMAIN @p index's lock to gPTP (domain 0) or to unlocked.
+    void hand_back_clock_domain(uint16_t index);
     /// CLOCK_DOMAIN @p index is in the model and within MAX_CLOCK_DOMAINS.
     [[nodiscard]] auto has_clock_domain(uint16_t index) const noexcept -> bool;
     /// The clock identity AVB_INTERFACE 0 reports (apply_interface_runtime).

@@ -118,6 +118,12 @@ class StreamPorts
     [[nodiscard]] auto end_tick() noexcept -> Status;
 
   private:
+    /// Open the AF_XDP port when @p plan asks for it: true when that settles the ports
+    /// (opened, or failed under xdp); false to go on with AF_PACKET.
+    [[nodiscard]] auto open_xdp(StreamPortsOptions const& options, StreamPortPlan plan) -> bool;
+    /// Open the AF_PACKET ports, recording tx_error() and rx_error().
+    void open_packet(StreamPortsOptions const& options);
+
     PacketStreamPort packet_{};
     XdpStreamPort xdp_{};
     StreamPort* tx_{&packet_};

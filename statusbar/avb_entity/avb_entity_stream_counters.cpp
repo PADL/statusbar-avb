@@ -116,35 +116,55 @@ void unlock_stream_input(StreamInputCounters& c) noexcept
     }
 }
 
-auto StreamInputIntervals::fold(StreamInputCounters& c) noexcept -> bool
+namespace {
+
+/// A locked input that received nothing since @p last_frames_rx has stopped: unlock it,
+/// counting an interruption.
+void stop_if_silent(StreamInputCounters& c, uint32_t const last_frames_rx) noexcept
 {
     auto const relaxed = std::memory_order_relaxed;
-    // Nothing received in the interval while locked: the stream stopped.
-    if (c.frames_rx.load(relaxed) == last[FRAMES_RX] && c.is_locked.load(relaxed)) {
-        c.restart_run.store(true, relaxed);
-        if (c.is_locked.exchange(false, relaxed)) {
-            c.media_unlocked.fetch_add(1, relaxed);
-            c.stream_interrupted.fetch_add(1, relaxed);
-        }
+    if (c.frames_rx.load(relaxed) != last_frames_rx || !c.is_locked.load(relaxed)) {
+        return;
     }
-    auto const before = values;
-    auto const interval = [&](Index const i, std::atomic<uint32_t> const& raw) {
+    c.restart_run.store(true, relaxed);
+    if (c.is_locked.exchange(false, relaxed)) {
+        c.media_unlocked.fetch_add(1, relaxed);
+        c.stream_interrupted.fetch_add(1, relaxed);
+    }
+}
+
+/// Count one for each interval counter of @p c that moved, and bring the event counters up to date.
+void fold_counters(StreamInputIntervals& in, StreamInputCounters const& c) noexcept
+{  // NOLINT(statusbar-block-statements): one line per counter of Milan v1.2 Table 5.16
+    using I = StreamInputIntervals;
+    auto const relaxed = std::memory_order_relaxed;
+    auto const interval = [&](I::Index const i, std::atomic<uint32_t> const& raw) {
         uint32_t const now = raw.load(relaxed);
-        if (now != last[i]) {
-            ++values[i];
-            last[i] = now;
+        if (now != in.last[i]) {
+            ++in.values[i];
+            in.last[i] = now;
         }
     };
-    interval(SEQ_NUM_MISMATCH, c.seq_num_mismatch);
-    interval(MEDIA_RESET, c.media_reset);
-    interval(TIMESTAMP_UNCERTAIN, c.timestamp_uncertain);
-    interval(UNSUPPORTED_FORMAT, c.unsupported_format);
-    interval(LATE_TIMESTAMP, c.late_timestamp);
-    interval(EARLY_TIMESTAMP, c.early_timestamp);
-    interval(FRAMES_RX, c.frames_rx);
-    values[MEDIA_LOCKED] = c.media_locked.load(relaxed) - last[MEDIA_LOCKED];
-    values[MEDIA_UNLOCKED] = c.media_unlocked.load(relaxed) - last[MEDIA_UNLOCKED];
-    values[STREAM_INTERRUPTED] = c.stream_interrupted.load(relaxed) - last[STREAM_INTERRUPTED];
+    interval(I::SEQ_NUM_MISMATCH, c.seq_num_mismatch);
+    interval(I::MEDIA_RESET, c.media_reset);
+    interval(I::TIMESTAMP_UNCERTAIN, c.timestamp_uncertain);
+    interval(I::UNSUPPORTED_FORMAT, c.unsupported_format);
+    interval(I::LATE_TIMESTAMP, c.late_timestamp);
+    interval(I::EARLY_TIMESTAMP, c.early_timestamp);
+    interval(I::FRAMES_RX, c.frames_rx);
+    in.values[I::MEDIA_LOCKED] = c.media_locked.load(relaxed) - in.last[I::MEDIA_LOCKED];
+    in.values[I::MEDIA_UNLOCKED] = c.media_unlocked.load(relaxed) - in.last[I::MEDIA_UNLOCKED];
+    in.values[I::STREAM_INTERRUPTED] = c.stream_interrupted.load(relaxed) - in.last[I::STREAM_INTERRUPTED];
+}
+
+}  // namespace
+
+auto StreamInputIntervals::fold(StreamInputCounters& c) noexcept -> bool
+{
+    // Nothing received in the interval while locked: the stream stopped.
+    stop_if_silent(c, last[FRAMES_RX]);
+    auto const before = values;
+    fold_counters(*this, c);
     return values != before;
 }
 
@@ -183,7 +203,7 @@ auto StreamOutputIntervals::fold(StreamOutputTotals const& totals) noexcept -> b
 }
 
 void StreamInputIntervals::reset(StreamInputCounters& c) noexcept
-{
+{  // NOLINT(statusbar-block-statements): one line per counter of Milan v1.2 Table 5.16
     auto const relaxed = std::memory_order_relaxed;
     unlock_stream_input(c);
     values = {};

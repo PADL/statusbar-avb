@@ -185,6 +185,10 @@ class PacketStreamPort final : public StreamPort
     [[nodiscard]] auto zero_copy() const noexcept -> bool override { return false; }
 
   private:
+    /// Receive one frame into @p frame behind a rebuilt untagged header: its payload
+    /// length, 0 when none is waiting.
+    [[nodiscard]] auto receive_into(std::span<uint8_t> frame) noexcept -> size_t;
+
     net::RawnetContext tx_{};
     net::RawnetContext rx_{};
     std::error_code tx_priority_error_{};

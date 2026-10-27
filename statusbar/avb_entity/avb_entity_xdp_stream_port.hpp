@@ -230,6 +230,8 @@ class XdpStreamPort final : public StreamPort
 
   private:
     void refill_tx_pool() noexcept;
+    /// Commit @p slot's first @p length octets (a written frame), counting it and tapping it.
+    [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length) noexcept -> Status;
 
     std::unique_ptr<net::XdpContext> context_;  ///< never null
     TxPool tx_pool_{};

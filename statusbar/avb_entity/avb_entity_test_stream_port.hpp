@@ -71,6 +71,9 @@ class TestStreamPort final : public StreamPort
     [[nodiscard]] auto joined() const noexcept -> std::span<ieee::Eui48 const> { return {joined_.data(), joined_.size()}; }
 
   private:
+    /// Commit @p slot's first @p length octets (a written frame), counting it and tapping it.
+    [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length) noexcept -> Status;
+
     net::TestPortContext port_{};
     std::optional<net::EthernetTxSlot> pending_{};  ///< the tx_begin frame not yet committed
     TxTap tap_{};

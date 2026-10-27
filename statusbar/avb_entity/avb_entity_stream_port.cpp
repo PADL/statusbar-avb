@@ -97,6 +97,19 @@ auto PacketStreamPort::tx_commit(
     return success();
 }
 
+auto PacketStreamPort::receive_into(std::span<uint8_t> const frame) noexcept -> size_t
+{
+    ieee::Eui48 src{};
+    ieee::Eui48 dst{};
+    auto const received = rx_.recv(&src, &dst, frame.subspan(UNTAGGED_PAYLOAD_OFFSET));
+    if (!received || *received <= 0) {
+        return 0;
+    }
+    (void)ieee::store_unchecked(
+        frame, ieee::EthernetFrame{.dest_mac = dst, .src_mac = src, .vlan_tag = {}, .ethertype = avtp::AVTP_ETHERTYPE});
+    return static_cast<size_t>(*received);
+}
+
 auto PacketStreamPort::rx_poll(RxFn const& fn, size_t const max_frames) noexcept -> size_t
 {
     if (!rx_.valid()) {
@@ -105,15 +118,10 @@ auto PacketStreamPort::rx_poll(RxFn const& fn, size_t const max_frames) noexcept
     std::span<uint8_t> const frame{rx_frame_};
     size_t delivered = 0;
     while (delivered < max_frames) {
-        ieee::Eui48 src{};
-        ieee::Eui48 dst{};
-        auto const received = rx_.recv(&src, &dst, frame.subspan(UNTAGGED_PAYLOAD_OFFSET));
-        if (!received || *received <= 0) {
+        auto const length = receive_into(frame);
+        if (length == 0) {
             break;
         }
-        auto const length = static_cast<size_t>(*received);
-        ieee::EthernetFrame const l2{.dest_mac = dst, .src_mac = src, .vlan_tag = {}, .ethertype = avtp::AVTP_ETHERTYPE};
-        (void)ieee::store_unchecked(frame, l2);
         count_rx();
         fn(frame.subspan(UNTAGGED_PAYLOAD_OFFSET, length), frame.first(UNTAGGED_PAYLOAD_OFFSET + length));
         ++delivered;

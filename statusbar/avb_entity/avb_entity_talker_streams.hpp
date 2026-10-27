@@ -266,6 +266,14 @@ struct TalkerStreams
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
     /// @p stream_id: what open_stream and reformat_stream share.
     auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
+    /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
+    auto reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    /// Take @p trial's serializers into @p slot, carrying the stream's counts over. Under the guard.
+    static void adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept;
+    /// Send the frame @p serialize writes into a tx_begin window of @p max_frame octets (its length,
+    /// 0: none), restoring @p ctx when the port refuses it. Media thread.
+    template <typename Context, typename Serialize>
+    auto send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t max_frame, Serialize const& serialize) -> bool;
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};

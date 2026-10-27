@@ -28,27 +28,41 @@ void ListenerVlan::follow(uint16_t const vid)
         return;
     }
     std::string name = net::vlan::vlan_link_name(interface_name_, vid);
-    bool created = false;
-    if (auto const status = control_->add_vlan(ifindex_, name, vid); status) {
-        created = true;
+    auto const created = add_link(name, vid);
+    if (!created) {
+        return;
+    }
+    replace_link(vid, *created, std::move(name));
+}
+
+auto ListenerVlan::add_link(std::string const& name, uint16_t const vid) -> std::optional<bool>
+{
+    auto const status = control_->add_vlan(ifindex_, name, vid);
+    if (status) {
         log_.status("listener: VID {} on the NIC's VLAN filter: created {} (down)", vid, logging::embed<16>(name));
-    } else if (status.error() == std::errc::file_exists) {
+        return true;
+    }
+    if (status.error() == std::errc::file_exists) {
         // Not checked: a link of this name on another VID or parent leaves
         // the VID unregistered.
         log_.warning(
             "listener: VID {}: {} (or a VLAN link on that VID) already exists; used as it is, unchecked",
             vid,
             logging::embed<16>(name));
-    } else {
-        // The previous VID's link stays; the next follow() tries again.
-        log_.warning(
-            "listener: VID {} not registered with the NIC's VLAN filter ({}: errno {} {}); a filtering NIC drops its streams",
-            vid,
-            logging::embed<16>(name),
-            status.error().value(),
-            logging::embed<32>(control_->last_message()));
-        return;
+        return false;
     }
+    // The previous VID's link stays; the next follow() tries again.
+    log_.warning(
+        "listener: VID {} not registered with the NIC's VLAN filter ({}: errno {} {}); a filtering NIC drops its streams",
+        vid,
+        logging::embed<16>(name),
+        status.error().value(),
+        logging::embed<32>(control_->last_message()));
+    return std::nullopt;
+}
+
+void ListenerVlan::replace_link(uint16_t const vid, bool const created, std::string name)
+{
     if (created_) {
         if (auto const status = control_->remove_link(name_); !status) {
             log_.warning("listener: deleting {} failed: errno {}", logging::embed<16>(name_), status.error().value());

@@ -71,13 +71,25 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
 void EntityUpkeep::tick(int64_t /*now_ns*/)
 {
     auto const now = std::chrono::steady_clock::now();
-    auto const sm_now = sm::TimePoint{now.time_since_epoch()};
+    note_state(now);
+    watch_gptp(now);
+    reevaluate(now);
+    drain();
+}
+
+void EntityUpkeep::note_state(std::chrono::steady_clock::time_point const now)
+{
     if (auto const state = kit_.host().state_string(); state != last_state_) {
         kit_.host().ctl_log().status("entity: {} -> {}", logging::static_str(last_state_), logging::static_str(state));
         last_state_ = state;
         state_since_ = now;
         lock_timeout_reported_ = false;
     }
+}
+
+void EntityUpkeep::watch_gptp(std::chrono::steady_clock::time_point const now)
+{
+    auto const sm_now = sm::TimePoint{now.time_since_epoch()};
     // Grandmaster regained under an unchanged identity; a changed identity is
     // handled by the announce callback. Here, so one thread drives the SM/MSRP.
     if (auto* handlers = kit_.host().net_handlers(); handlers != nullptr) {
@@ -93,13 +105,16 @@ void EntityUpkeep::tick(int64_t /*now_ns*/)
         kit_.on_timeout(sm_now);
         lock_timeout_reported_ = true;
     }
+}
+
+void EntityUpkeep::reevaluate(std::chrono::steady_clock::time_point const now)
+{
     // Talker admission is time-dependent (the Listener Ready grace window):
     // re-evaluate it so an expiry with no MSRP event still reaches the
     // admission-changed callback (the hardware shaper).
     auto const now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
     kit_.poll_admission(now_ns);
     kit_.poll_counters(now_ns);
-    drain();
 }
 
 }  // namespace statusbar::avb_entity

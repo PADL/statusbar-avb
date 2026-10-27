@@ -595,6 +595,110 @@ class AvbEntityKit
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
+    //
+    // Construction phases
+    //
+    /// The talker streams' ACMP identities, address validity and presentation offsets.
+    void configure_talker_streams();
+    /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
+    void note_talker_interface(uint16_t index);
+    /// MVRP/MSRP for the configured Class A VLAN, and following a Domain's VID.
+    void configure_class_a_domain();
+    /// The storage handler's, the dynamic mappings' and the Milan talker's and listener's hooks.
+    void wire_controller_hooks();
+    void wire_storage_hooks();
+    void wire_dynamic_mappings();
+    /// The AEM GET_COUNTERS and GET_STREAM_INFO fills.
+    void wire_aecp_queries();
+
+    //
+    // Stream formats and mappings
+    //
+    /// Stream @p port_index's @p channels onto @p port's cluster channels in order, as far as both go.
+    [[nodiscard]] auto cluster_identity_mappings(
+        uint16_t port_index, atdecc::aem::DescriptorStreamPort const& port, uint16_t channels) const
+        -> nanoavb::DynamicAudioMaps::Mappings;
+    /// change_stream_format() for a known stream whose format changes: checks, installs, announces.
+    [[nodiscard]] auto reformat_stream(uint16_t type, StreamSpec& spec, StreamSpec const& updated) -> uint8_t;
+    /// The AEM status refusing @p spec's change to @p updated (Milan v1.2 Section 5.4.2.7); SUCCESS if none.
+    [[nodiscard]] auto stream_format_refusal(bool output, StreamSpec const& spec, StreamSpec const& updated) const -> uint8_t;
+    /// Whether the port maps let a stream take @p updated (Milan v1.2 Section 5.4.2.27).
+    [[nodiscard]] auto mappings_allow_format(bool output, StreamSpec const& updated) const -> bool;
+    /// Reshape the stream path, then the entity's data plane; either refusing undoes both.
+    [[nodiscard]] auto install_stream_format(uint16_t type, bool output, StreamSpec& spec, StreamSpec const& updated) -> uint8_t;
+    /// After a format change: the runtime format, the output identity map, the log and the TSpec.
+    void announce_stream_format(uint16_t type, uint64_t before, StreamSpec const& updated);
+    /// Whether an ACMP-connected input listens on @p group.
+    [[nodiscard]] auto group_connected(ieee::Eui48 const& group) const -> bool;
+
+    //
+    // Declarations and registrations
+    //
+    /// Fold each stream's counters into the interval just ended, notifying the changed ones.
+    void fold_stream_counters();
+    /// Talker stream @p idx's registered Listener; nullopt for no such stream.
+    [[nodiscard]] auto registered_listener_of(uint16_t idx) const -> std::optional<srp::msrp::ListenerDeclaration>;
+    /// update_talker_declarations()'s passes: one, then those asked for meanwhile (at most 4).
+    void run_declaration_passes(int64_t now_ns, bool refresh);
+    /// Every talker stream undeclared, inactive and gated at steady-clock @p now_ns.
+    void note_all_talkers_withdrawn(int64_t now_ns);
+    /// The registration of the Talker that settled Milan sink @p sink probed.
+    [[nodiscard]] auto talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration;
+
+    //
+    // start() and stop() phases
+    //
+    [[nodiscard]] auto stream_ports_options() const -> StreamPortsOptions;
+    /// Failure when the stream RX port cannot be drained the way the configuration asks.
+    [[nodiscard]] auto check_stream_rx() -> Status;
+    /// The control plane up, its stream callbacks wired, the declarations started.
+    [[nodiscard]] auto start_control(net::MessageReactor& reactor) -> Status;
+    void prepare_control_plane();
+    /// MAAP's addresses in "maap" mode (none offered until defended) and the declarations' timer.
+    [[nodiscard]] auto start_declarations(net::MessageReactor& reactor) -> Status;
+    void add_declaration_timer(net::MessageReactor& reactor);
+    /// The TX slots, the stream ports, the listener streams and the TX path.
+    [[nodiscard]] auto start_data_plane(net::MessageReactor& reactor) -> Status;
+    [[nodiscard]] auto open_talker_streams() -> Status;
+    /// The bound port or the kit's own; the RX port.
+    [[nodiscard]] auto open_stream_ports() -> StatusValue<StreamPort*>;
+    [[nodiscard]] auto open_own_stream_ports() -> StatusValue<StreamPort*>;
+    void log_stream_port_errors();
+    /// The RX slots on @p rx_port, the VLAN filter and the saved bindings.
+    [[nodiscard]] auto start_listener_streams(net::MessageReactor& reactor, StreamPort* rx_port) -> Status;
+    [[nodiscard]] auto open_listener_streams() -> Status;
+    void attach_listener_rx(net::MessageReactor& reactor, StreamPort& rx_port);
+#if defined(__linux__)
+    /// Bind the listener's VLAN filter control (rtnetlink), warning when it cannot.
+    void open_listener_vlan_filter();
+#endif
+    /// stop(): the data plane down and a pending save written.
+    void close_data_plane();
+
+    //
+    // Persistent state
+    //
+    /// load_persistent_state() with a file configured.
+    void restore_persistent_state();
+    /// Save every later AEM and MVU settings change.
+    void save_settings_changes();
+    /// Log what loading found; false when the file must not be applied nor overwritten.
+    [[nodiscard]] auto note_persistent_state_outcome(LoadedPersistentState const& loaded) -> bool;
+    void apply_saved_descriptor_values(PersistentState const& saved);
+    void apply_saved_presentation_offsets(PersistentState const& saved);
+    void apply_saved_names(PersistentState const& saved);
+    void apply_saved_mvu_settings(PersistentState const& saved);
+    /// Arm each saved binding and drop them; how many were armed.
+    [[nodiscard]] auto restore_saved_bindings(bool milan) -> size_t;
+    [[nodiscard]] auto restore_listener_binding(PersistedListenerBinding const& binding, bool milan) -> bool;
+    /// Whether @p binding names an input that is there, at the format it was saved with.
+    [[nodiscard]] auto saved_binding_applies(PersistedListenerBinding const& binding) -> bool;
+    [[nodiscard]] auto restore_milan_binding(PersistedListenerBinding const& binding) -> bool;
+    void collect_entity_settings(PersistentState& state) const;
+    void collect_stream_settings(PersistentState& state) const;
+    void collect_listener_bindings(PersistentState& state) const;
+    void collect_mvu_settings(PersistentState& state) const;
+
     AvbEntityAudioIOConfig const& config_;
     StreamSpecs talker_specs_;
     StreamSpecs listener_specs_;

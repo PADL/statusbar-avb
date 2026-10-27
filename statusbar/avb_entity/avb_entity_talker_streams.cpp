@@ -31,6 +31,50 @@ constexpr size_t MAX_AUDIO_PAYLOAD = StreamPort::MAX_TX_PAYLOAD;
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+/// The stream's sequence number and sample count (the AM824 DBC) from @p from into
+/// @p to's serializer, so that a re-shaped stream goes on.
+void carry_over(TalkerStreamSlot const& from, TalkerStreamSlot& to) noexcept
+{
+    uint8_t const sequence = from.aaf ? from.aaf->sequence_num : from.am824 ? from.am824->sequence_num : 0;
+    uint32_t const samples = from.aaf ? from.aaf->running_sample_count : from.am824 ? from.am824->running_dbc : 0;
+    if (to.aaf) {
+        to.aaf->sequence_num = sequence;
+        to.aaf->running_sample_count = samples;
+    }
+    if (to.am824) {
+        to.am824->sequence_num = sequence;
+        to.am824->running_dbc = samples;
+    }
+}
+
+/// One more in a counter only the media thread writes.
+void bump(std::atomic<uint32_t>& n) noexcept
+{
+    n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+
+/// Count an mr toggle when @p mr differs from the last PDU's.
+void note_mr(TalkerTxCounters& c, bool const mr) noexcept
+{
+    if (c.have_mr && mr != c.last_mr) {
+        bump(c.mr_toggles);
+    }
+    c.last_mr = mr;
+    c.have_mr = true;
+}
+
+/// Count the sent AVTPDU @p frame (at least 4 octets): mr is bit 3 of octet 1; tu is bit 0 of
+/// octet 3, or of octet 1 in a CRF PDU (IEEE 1722-2016 4.4.4, 10.4).
+void count_pdu(TalkerTxCounters& c, std::span<uint8_t const> const frame) noexcept
+{
+    bool const tu = ((frame[0] == avtp::AvtpSubtype::crf ? frame[1] : frame[3]) & 0x01U) != 0;
+    bump(c.pdus);
+    if (tu) {
+        bump(c.tu_pdus);
+    }
+    note_mr(c, (frame[1] & 0x08U) != 0);
+}
+
 }  // namespace
 
 auto TalkerStreams::shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id) -> Status
@@ -79,15 +123,12 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
     if (slots_.size() == MAX_ENTITY_STREAMS || spec.index >= MAX_ENTITY_STREAMS) {
         return failure(std::errc::result_out_of_range);
     }
-    TalkerStreamSlot slot{};
-    slot.spec = spec;
-    slot.dest_mac = dest_mac;
+    TalkerStreamSlot slot{.spec = spec, .dest_mac = dest_mac};
     if (auto status = shape(slot, spec, stream_id); !status) {
         return status;
     }
-    bool const crf = slot.crf.has_value();
     slots_.push_back(std::move(slot));
-    crf_open_[spec.index].store(crf, std::memory_order_release);
+    crf_open_[spec.index].store(slots_.back().crf.has_value(), std::memory_order_release);
     return success();
 }
 
@@ -104,31 +145,31 @@ auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
         // One CRF format a stream: nothing to re-shape.
         return spec.format_word == slot->spec.format_word ? Status{} : Status{failure(std::errc::not_supported)};
     }
-    auto const stream_id = slot->aaf ? slot->aaf->stream_id : slot->am824 ? slot->am824->stream_id : tsn::StreamId{};
+    return reshape(*slot, spec);
+}
+
+auto TalkerStreams::reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> Status
+{
+    auto const stream_id = slot.aaf ? slot.aaf->stream_id : slot.am824 ? slot.am824->stream_id : tsn::StreamId{};
     // A trial first, so that a refused format leaves the slot as it was.
     TalkerStreamSlot trial{};
     if (auto status = shape(trial, spec, stream_id); !status) {
         return status;
     }
     SlotGuard::Lock const lock{guards_[spec.index]};
-    // The stream goes on: its sequence number and sample count (the AM824 DBC) carry over.
-    uint8_t const sequence = slot->aaf ? slot->aaf->sequence_num : slot->am824 ? slot->am824->sequence_num : 0;
-    uint32_t const samples = slot->aaf ? slot->aaf->running_sample_count : slot->am824 ? slot->am824->running_dbc : 0;
-    if (trial.aaf) {
-        trial.aaf->sequence_num = sequence;
-        trial.aaf->running_sample_count = samples;
-    }
-    if (trial.am824) {
-        trial.am824->sequence_num = sequence;
-        trial.am824->running_dbc = samples;
-    }
-    slot->am824 = trial.am824;
-    slot->aaf = trial.aaf;
-    slot->reframer = std::move(trial.reframer);
-    // The index stays (slot_for reads it unlocked); the format is the new one.
-    slot->spec.format_word = spec.format_word;
-    slot->spec.format = spec.format;
+    adopt_shape(slot, std::move(trial), spec);
     return success();
+}
+
+void TalkerStreams::adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept
+{
+    carry_over(slot, trial);
+    slot.am824 = trial.am824;
+    slot.aaf = trial.aaf;
+    slot.reframer = std::move(trial.reframer);
+    // The index stays (slot_for reads it unlocked); the format is the new one.
+    slot.spec.format_word = spec.format_word;
+    slot.spec.format = spec.format;
 }
 
 auto TalkerStreams::slot_for(uint16_t const stream_index) noexcept -> TalkerStreamSlot*
@@ -233,6 +274,46 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
     (void)send_stream_frame(slot, frame.first(avtp::AafPdu::HEADER_LENGTH + audio_bytes));
 }
 
+namespace {
+
+/// The AAF header of a raw packet of @p frames presented at @p pts_ns into @p frame.
+void store_aaf_raw_header(
+    avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> const frame,
+    uint16_t const frames,
+    uint64_t const pts_ns,
+    bool const timestamp_uncertain) noexcept
+{
+    avtp::AafPdu pdu{};
+    ctx.build_packet_header(pdu, frames, pts_ns);
+    // The wire timestamp is pts_ns itself: build_packet_header adds the context's
+    // presentation offset, which the caller has already applied to pts_ns.
+    pdu.set_avtp_timestamp(static_cast<uint32_t>(pts_ns & 0xFFFF'FFFFU));
+    pdu.set_tu(timestamp_uncertain);
+    span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+}
+
+/// The AM824 header of a raw packet of @p frames from sample @p first_index, presented at
+/// @p pts_ns, into @p frame.
+void store_am824_raw_header(
+    avtp::Am824StreamOutputContext& ctx,
+    std::span<uint8_t> const frame,
+    uint16_t const frames,
+    uint64_t const first_index,
+    uint64_t const pts_ns,
+    bool const timestamp_uncertain) noexcept
+{
+    avtp::Am824Pdu pdu{};
+    pdu.init(ctx.stream_id, ctx.config.channel_count, ctx.config.sample_rate);
+    // The DBC is the sample index; build_packet_header adds the context's offset, already in pts_ns.
+    ctx.running_dbc = static_cast<uint32_t>(first_index);
+    ctx.build_packet_header(pdu, static_cast<uint8_t>(frames), pts_ns - ctx.presentation_offset_ns);
+    pdu.stream_header.set_tu(timestamp_uncertain);
+    span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
+}
+
+}  // namespace
+
 auto serialize_aaf_raw(
     avtp::AafStreamOutputContext& ctx,
     std::span<uint8_t> const frame,
@@ -247,19 +328,28 @@ auto serialize_aaf_raw(
     if (bps == 0 || payload_len == 0 || !render || frame.size() < avtp::AafPdu::HEADER_LENGTH + payload_len) {
         return 0;
     }
-    std::span<uint8_t> const payload = frame.subspan(avtp::AafPdu::HEADER_LENGTH, payload_len);
     // Render first: a refused packet must not consume a sequence number.
-    if (!render(payload, frames, first_index, pts_ns)) {
+    if (!render(frame.subspan(avtp::AafPdu::HEADER_LENGTH, payload_len), frames, first_index, pts_ns)) {
         return 0;
     }
-    avtp::AafPdu pdu{};
-    ctx.build_packet_header(pdu, frames, pts_ns);
-    // The wire timestamp is pts_ns itself: build_packet_header adds the context's
-    // presentation offset, which the caller has already applied to pts_ns.
-    pdu.set_avtp_timestamp(static_cast<uint32_t>(pts_ns & 0xFFFF'FFFFU));
-    pdu.set_tu(timestamp_uncertain);
-    span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    store_aaf_raw_header(ctx, frame, frames, pts_ns, timestamp_uncertain);
     return avtp::AafPdu::HEADER_LENGTH + payload_len;
+}
+
+template <typename Context, typename Serialize>
+auto TalkerStreams::send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t const max_frame, Serialize const& serialize)
+    -> bool
+{
+    std::span<uint8_t> const frame = port_->tx_begin(max_frame);
+    if (frame.empty()) {
+        return false;
+    }
+    auto const saved = ctx;
+    if (size_t const frame_len = serialize(frame); frame_len != 0 && send_stream_frame(slot, frame.first(frame_len))) {
+        return true;
+    }
+    ctx = saved;  // the port refused the frame (nothing to undo when none was serialized)
+    return false;
 }
 
 auto TalkerStreams::transmit_aaf_raw(
@@ -274,21 +364,9 @@ auto TalkerStreams::transmit_aaf_raw(
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
-    std::span<uint8_t> const frame = port_->tx_begin(MAX_AUDIO_PAYLOAD);
-    if (frame.empty()) {
-        return false;
-    }
-    auto const saved = *slot.aaf;  // restored when the port refuses the frame
-    size_t const frame_len =
-        serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
-    if (frame_len == 0) {
-        return false;
-    }
-    if (!send_stream_frame(slot, frame.first(frame_len))) {
-        *slot.aaf = saved;
-        return false;
-    }
-    return true;
+    return send_serialized(slot, *slot.aaf, MAX_AUDIO_PAYLOAD, [&](std::span<uint8_t> const frame) {
+        return serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
+    });
 }
 
 auto serialize_am824_raw(
@@ -306,18 +384,11 @@ auto serialize_am824_raw(
         frame.size() < avtp::Am824Pdu::HEADER_LENGTH + payload_len) {
         return 0;
     }
-    std::span<uint8_t> const payload = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH, payload_len);
     // Render first: a refused packet must not consume a sequence number.
-    if (!render(payload, frames, first_index, pts_ns)) {
+    if (!render(frame.subspan(avtp::Am824Pdu::HEADER_LENGTH, payload_len), frames, first_index, pts_ns)) {
         return 0;
     }
-    avtp::Am824Pdu pdu{};
-    pdu.init(ctx.stream_id, channels, ctx.config.sample_rate);
-    // The DBC is the sample index; build_packet_header adds the context's offset, already in pts_ns.
-    ctx.running_dbc = static_cast<uint32_t>(first_index);
-    ctx.build_packet_header(pdu, static_cast<uint8_t>(frames), pts_ns - ctx.presentation_offset_ns);
-    pdu.stream_header.set_tu(timestamp_uncertain);
-    span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
+    store_am824_raw_header(ctx, frame, frames, first_index, pts_ns, timestamp_uncertain);
     return avtp::Am824Pdu::HEADER_LENGTH + payload_len;
 }
 
@@ -333,21 +404,9 @@ auto TalkerStreams::transmit_am824_raw(
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_am824_raw writes every byte it sends.
-    std::span<uint8_t> const frame = port_->tx_begin(MAX_AUDIO_PAYLOAD);
-    if (frame.empty()) {
-        return false;
-    }
-    auto const saved = *slot.am824;  // restored when the port refuses the frame
-    size_t const frame_len =
-        serialize_am824_raw(*slot.am824, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
-    if (frame_len == 0) {
-        return false;
-    }
-    if (!send_stream_frame(slot, frame.first(frame_len))) {
-        *slot.am824 = saved;
-        return false;
-    }
-    return true;
+    return send_serialized(slot, *slot.am824, MAX_AUDIO_PAYLOAD, [&](std::span<uint8_t> const frame) {
+        return serialize_am824_raw(*slot.am824, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
+    });
 }
 
 auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame) -> bool
@@ -360,23 +419,7 @@ auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
     }
     ++slot.tx_packets;
     if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
-        // AVTP stream header: mr is bit 3 of octet 1; tu is bit 0 of octet 3,
-        // or of octet 1 in a CRF PDU (IEEE 1722-2016 4.4.4, 10.4).
-        auto& c = tx_counters_[slot.spec.index];
-        auto const bump = [](std::atomic<uint32_t>& n) {
-            n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-        };
-        bool const mr = (frame[1] & 0x08U) != 0;
-        bool const tu = ((frame[0] == avtp::AvtpSubtype::crf ? frame[1] : frame[3]) & 0x01U) != 0;
-        bump(c.pdus);
-        if (tu) {
-            bump(c.tu_pdus);
-        }
-        if (c.have_mr && mr != c.last_mr) {
-            bump(c.mr_toggles);
-        }
-        c.last_mr = mr;
-        c.have_mr = true;
+        count_pdu(tx_counters_[slot.spec.index], frame);
     }
     return true;
 }
@@ -402,7 +445,7 @@ auto serialize_crf_raw(
     std::span<uint64_t const> const timestamps,
     bool const timestamp_uncertain,
     bool const media_clock_restart) -> size_t
-{
+{  // NOLINT(statusbar-block-statements): a codec: the CRF PDU in wire order, then the context's counters
     uint16_t const n_ts = ctx.timestamps_per_packet;
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
     if (n_ts == 0 || timestamps.size() != n_ts || frame.size() < frame_len) {
@@ -451,24 +494,13 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (MAX_CRF_TIMESTAMPS_PER_PDU * avtp::CrfPdu::TIMESTAMP_SIZE);
     static_assert(MAX_FRAME <= StreamPort::MAX_TX_PAYLOAD);
     // Not zeroed: serialize_crf_raw writes every byte it sends.
-    std::span<uint8_t> const frame = port_->tx_begin(MAX_FRAME);
-    if (frame.empty()) {
-        return false;
-    }
-    // Restart requests since the last PDU toggle mr once; a refused frame leaves it for the next.
-    if (mr_pending_[slot.spec.index].exchange(false, std::memory_order_relaxed)) {
-        slot.crf_mr = !slot.crf_mr;
-    }
-    auto const saved = *slot.crf;  // restored when the port refuses the frame
-    size_t const frame_len = serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()), slot.crf_mr);
-    if (frame_len == 0) {
-        return false;
-    }
-    if (!send_stream_frame(slot, frame.first(frame_len))) {
-        *slot.crf = saved;
-        return false;
-    }
-    return true;
+    return send_serialized(slot, *slot.crf, MAX_FRAME, [&](std::span<uint8_t> const frame) {
+        // Restart requests since the last PDU toggle mr once; a refused frame leaves it for the next.
+        if (mr_pending_[slot.spec.index].exchange(false, std::memory_order_relaxed)) {
+            slot.crf_mr = !slot.crf_mr;
+        }
+        return serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()), slot.crf_mr);
+    });
 }
 
 auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status

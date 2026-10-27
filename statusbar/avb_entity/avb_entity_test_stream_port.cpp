@@ -50,7 +50,11 @@ auto TestStreamPort::tx_commit(
         return failure(std::errc::no_buffer_space);
     }
     write_stream_header(slot.buffer, dest, port_.hardware_address(), vid, pcp);
-    size_t const length = TX_PAYLOAD_OFFSET + payload.size();
+    return commit_slot(slot, TX_PAYLOAD_OFFSET + payload.size());
+}
+
+auto TestStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const length) noexcept -> Status
+{
     auto const committed = port_.tx_commit(slot.handle, length);
     count_tx(committed.has_value());
     if (!committed) {

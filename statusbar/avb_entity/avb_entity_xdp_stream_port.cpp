@@ -146,17 +146,8 @@ auto XdpStreamPort::tx_begin(size_t const capacity) noexcept -> std::span<uint8_
     return tx_pending_->buffer.subspan(TX_PAYLOAD_OFFSET, capacity);
 }
 
-auto XdpStreamPort::tx_commit(
-    std::span<uint8_t const> const payload, ieee::Eui48 const& dest, uint16_t const vid, uint8_t const pcp) noexcept -> Status
+auto XdpStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const length) noexcept -> Status
 {
-    if (!tx_pending_ || payload.data() != tx_pending_->buffer.data() + TX_PAYLOAD_OFFSET || payload.size() > tx_window_) {
-        count_tx(false);
-        return failure(std::errc::invalid_argument);
-    }
-    auto const slot = *tx_pending_;
-    tx_pending_.reset();
-    write_stream_header(slot.buffer, dest, context_->hardware_address(), vid, pcp);
-    size_t const length = TX_PAYLOAD_OFFSET + payload.size();
     if (auto committed = context_->tx_commit(slot.handle, length); !committed) {
         // The socket freed the frame: take one back so the pool stays whole.
         if (auto again = context_->tx_start()) {
@@ -170,6 +161,19 @@ auto XdpStreamPort::tx_commit(
         tx_tap_(std::span<uint8_t const>{slot.buffer.data(), length});
     }
     return success();
+}
+
+auto XdpStreamPort::tx_commit(
+    std::span<uint8_t const> const payload, ieee::Eui48 const& dest, uint16_t const vid, uint8_t const pcp) noexcept -> Status
+{
+    if (!tx_pending_ || payload.data() != tx_pending_->buffer.data() + TX_PAYLOAD_OFFSET || payload.size() > tx_window_) {
+        count_tx(false);
+        return failure(std::errc::invalid_argument);
+    }
+    auto const slot = *tx_pending_;
+    tx_pending_.reset();
+    write_stream_header(slot.buffer, dest, context_->hardware_address(), vid, pcp);
+    return commit_slot(slot, TX_PAYLOAD_OFFSET + payload.size());
 }
 
 auto XdpStreamPort::tx_flush() noexcept -> Status
