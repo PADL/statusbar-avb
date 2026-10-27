@@ -2909,7 +2909,12 @@ def test_json_stream_buffer_length():
                     "streams_in": [
                         {
                             "name": "In",
-                            "format": {"type": "AAF", "rate": 48000, "channels": 8, "depth": 32},
+                            "format": {
+                                "type": "AAF",
+                                "rate": 48000,
+                                "channels": 8,
+                                "depth": 32,
+                            },
                             "flags": ["CLASS_A"],
                             "buffer_length": 2126000,
                         }
@@ -3027,13 +3032,18 @@ def test_entity_milan_profile():
     from aemxml.model import DESCRIPTOR_ENTITY
     from aemxml.unflatten import unflatten
 
-    json_path = str(Path(__file__).parent.parent.parent / "examples" / "simple_stereo.json")
+    json_path = str(
+        Path(__file__).parent.parent.parent / "examples" / "simple_stereo.json"
+    )
     with open(json_path, encoding="utf-8") as f:
         base = json.load(f)
     assert read_json(json.dumps(base)).milan is None
     plain_descs, plain_syms = flatten(read_json(json.dumps(base)))
 
-    for value, name in ((True, ENTITY_PROFILE_MILAN_SYMBOL), (False, ENTITY_PROFILE_CLASSIC_SYMBOL)):
+    for value, name in (
+        (True, ENTITY_PROFILE_MILAN_SYMBOL),
+        (False, ENTITY_PROFILE_CLASSIC_SYMBOL),
+    ):
         model = json.loads(json.dumps(base))
         model["entity"]["milan"] = value
         entity = read_json(json.dumps(model))
@@ -3041,7 +3051,12 @@ def test_entity_milan_profile():
         descs, syms = flatten(entity)
         # Not in any descriptor: the wire bytes are those of the plain model.
         assert [d.wire_bytes for d in descs] == [d.wire_bytes for d in plain_descs]
-        extra = [s for s in syms if (s.config_index, s.descriptor_type, s.descriptor_index) == (0, DESCRIPTOR_ENTITY, 0)]
+        extra = [
+            s
+            for s in syms
+            if (s.config_index, s.descriptor_type, s.descriptor_index)
+            == (0, DESCRIPTOR_ENTITY, 0)
+        ]
         assert len(extra) == 1 and extra[0].symbol_code == symbol_to_code(name)
         assert len(syms) == len(plain_syms) + 1
         assert unflatten(*read_blob(write_blob(descs, syms))).milan is value

@@ -322,7 +322,9 @@ def _parse_stream(s: dict, strings: _LocalizedStrings, context: str) -> Stream:
         stream_flags=flags,
         avb_interface_index=s.get("avb_interface_index", 0),
         clock_domain_index=s.get("clock_domain_index", 0),
-        buffer_length=_parse_buffer_length(s.get("buffer_length", 0), f"{context}.buffer_length"),
+        buffer_length=_parse_buffer_length(
+            s.get("buffer_length", 0), f"{context}.buffer_length"
+        ),
         symbol=s.get("symbol"),
     )
 
@@ -331,8 +333,14 @@ def _parse_buffer_length(value, context: str) -> int:
     """A STREAM_* buffer_length in nanoseconds (IEEE 1722.1-2021 7.2.6.1,
     a 32-bit field). Milan v1.2 Section 5.3.3.4 requires a STREAM_INPUT's to be
     at least 2126000 ns."""
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
-        raise ValueError(f"{context}: buffer_length must be an integer number of ns, 0 to 4294967295")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= 0xFFFFFFFF
+    ):
+        raise ValueError(
+            f"{context}: buffer_length must be an integer number of ns, 0 to 4294967295"
+        )
     return value
 
 

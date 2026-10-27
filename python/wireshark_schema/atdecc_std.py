@@ -301,7 +301,10 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
     "MvuSystemUniqueIdV13": _struct(
         "MvuSystemUniqueIdV13",
         "SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Milan 1.3 Figure 5.7)",
-        [_RSV2, ("system_unique_number", 8, "u64", "system unique id number (Milan 1.3)")],
+        [
+            _RSV2,
+            ("system_unique_number", 8, "u64", "system unique id number (Milan 1.3)"),
+        ],
     ),
     "MvuMediaClockReferenceInfo": _struct(
         "MvuMediaClockReferenceInfo",

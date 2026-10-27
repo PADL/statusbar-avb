@@ -733,14 +733,22 @@ def unflatten(descriptors, symbols) -> Entity:
         raise ValueError("No ENTITY descriptor found in flat descriptor list")
     entity, configurations_count = _parse_entity(entity_bytes)
     # The entity profile: the ENTITY descriptor's well-known symbol, if any.
-    from .flatten import ENTITY_PROFILE_CLASSIC_SYMBOL, ENTITY_PROFILE_MILAN_SYMBOL, symbol_to_code
+    from .flatten import (
+        ENTITY_PROFILE_CLASSIC_SYMBOL,
+        ENTITY_PROFILE_MILAN_SYMBOL,
+        symbol_to_code,
+    )
 
     profile_codes = {
         symbol_to_code(ENTITY_PROFILE_MILAN_SYMBOL): True,
         symbol_to_code(ENTITY_PROFILE_CLASSIC_SYMBOL): False,
     }
     for s in symbols:
-        if (s.config_index, s.descriptor_type, s.descriptor_index) == (0, DESCRIPTOR_ENTITY, 0) and s.symbol_code in profile_codes:
+        if (s.config_index, s.descriptor_type, s.descriptor_index) == (
+            0,
+            DESCRIPTOR_ENTITY,
+            0,
+        ) and s.symbol_code in profile_codes:
             entity.milan = profile_codes[s.symbol_code]
 
     for config_idx in range(configurations_count):

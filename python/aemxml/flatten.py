@@ -1142,7 +1142,9 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
             0,
             DESCRIPTOR_ENTITY,
             0,
-            ENTITY_PROFILE_MILAN_SYMBOL if entity.milan else ENTITY_PROFILE_CLASSIC_SYMBOL,
+            ENTITY_PROFILE_MILAN_SYMBOL
+            if entity.milan
+            else ENTITY_PROFILE_CLASSIC_SYMBOL,
         )
 
     for config_idx, config in enumerate(entity.configurations):

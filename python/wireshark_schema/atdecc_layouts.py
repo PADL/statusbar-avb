@@ -969,7 +969,9 @@ SF_IEC61883 = Layout(
         Field("sf", 1, 1, "bool", "sf (1 = IEC 61883)", mask=0x80),
         Field("fmt", 1, 1, "u8", "FMT", mask=0x7E, base="hex"),
         Field("evt", 2, 1, "u8", "FDF event type", mask=0xF8),
-        Field("sfc", 2, 1, "u8", "sampling frequency code", mask=0x07, values="am824_fdf"),
+        Field(
+            "sfc", 2, 1, "u8", "sampling frequency code", mask=0x07, values="am824_fdf"
+        ),
         Field("dbs", 3, 1, "u8", "data block size (quadlets)"),
         Field("b", 4, 1, "bool", "blocking", mask=0x80),
         Field("nb", 4, 1, "bool", "non-blocking", mask=0x40),

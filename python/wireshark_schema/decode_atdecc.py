@@ -310,7 +310,9 @@ def _aem(data: bytes, stop: int, is_command: bool, out: dict) -> None:
             elif trailer.kind == "tail":
                 size = A.ELEMENT_SIZE[trailer.element]
                 if stop - at >= size:
-                    out.update(decode_layout(A.TRAILER_ELEMENTS[trailer.element], data, at))
+                    out.update(
+                        decode_layout(A.TRAILER_ELEMENTS[trailer.element], data, at)
+                    )
                     at += size
             elif trailer.kind == "blob":
                 members = {
@@ -340,7 +342,11 @@ def _mvu(data: bytes, stop: int, is_command: bool, out: dict) -> None:
     specs = A.MVU_PAYLOADS.get(code)
     spec = (specs[0] if is_command else specs[1]) if specs else None
     at = A.MVU_HEADER_LENGTH
-    if spec is not None and spec.long_form is not None and stop - at >= spec.long_form.length:
+    if (
+        spec is not None
+        and spec.long_form is not None
+        and stop - at >= spec.long_form.length
+    ):
         spec = spec.long_form
     if spec is not None and stop - at >= spec.length:
         out.update(decode_layout(spec.layout, data))
