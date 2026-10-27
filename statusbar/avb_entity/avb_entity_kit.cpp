@@ -43,31 +43,25 @@ auto talker_dest_mac(AvbEntityAudioIOConfig const& config, StreamKind const kind
     }
 }
 
-/// STREAM_PORT (@p type, @p index) of @p host's model; nullopt when there is none.
-auto stream_port_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t const index)
-    -> std::optional<atdecc::aem::DescriptorStreamPort>
+/// Descriptor (@p type, @p index) of @p host's model as a @p T; nullopt when there is none.
+template <typename T>
+auto load_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t const index) -> std::optional<T>
 {
     auto const blob = host.get_descriptor(type, index);
     if (!blob.has_value()) {
         return std::nullopt;
     }
-    atdecc::aem::DescriptorStreamPort port{};
-    span_load_padded(port, *blob);
-    return port;
+    T desc{};
+    span_load_padded(desc, *blob);
+    return desc;
 }
 
 /// The AUDIO_CLUSTER at @p offset from @p port's base cluster; nullopt when there is none.
 auto audio_cluster(AvbEntityHost const& host, atdecc::aem::DescriptorStreamPort const& port, uint16_t const offset)
     -> std::optional<atdecc::aem::DescriptorAudioCluster>
 {
-    auto const blob =
-        host.get_descriptor(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(port.base_cluster.get() + offset));
-    if (!blob.has_value()) {
-        return std::nullopt;
-    }
-    atdecc::aem::DescriptorAudioCluster cluster{};
-    span_load_padded(cluster, *blob);
-    return cluster;
+    return load_descriptor<atdecc::aem::DescriptorAudioCluster>(
+        host, atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(port.base_cluster.get() + offset));
 }
 
 /// SET_CLOCK_SOURCE's body (IEEE 1722.1-2021 Clause 7.4.23.1): CLOCK_DOMAIN, its index, the source, reserved.
@@ -163,13 +157,11 @@ void AvbEntityKit::configure_talker_streams()
 
 void AvbEntityKit::note_talker_interface(uint16_t const index)
 {
-    auto const desc = host_.get_descriptor(DESCRIPTOR_STREAM_OUTPUT, index);
-    if (index >= talker_interface_.size() || !desc.has_value()) {
+    auto const stream = load_descriptor<atdecc::aem::DescriptorStream>(host_, DESCRIPTOR_STREAM_OUTPUT, index);
+    if (index >= talker_interface_.size() || !stream) {
         return;
     }
-    atdecc::aem::DescriptorStream stream_desc{};
-    span_load_padded(stream_desc, *desc);
-    talker_interface_[index] = stream_desc.avb_interface_index.get();
+    talker_interface_[index] = stream->avb_interface_index.get();
     if (talker_interface_[index] != 0) {
         // The entity runs on one AVB interface (0): probes for this
         // output will be refused INCOMPATIBLE_REQUEST.
@@ -322,7 +314,7 @@ auto AvbEntityKit::identity_mappings(uint16_t const port_type, uint16_t const po
 {
     auto const& specs = port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT ? talker_specs_ : listener_specs_;
     auto const* spec = std::ranges::find(specs, port_index, &StreamSpec::index);
-    auto const port = stream_port_descriptor(host_, port_type, port_index);
+    auto const port = load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, port_type, port_index);
     // Milan v1.2 Section 5.4.2.27: none for a stream at another rate than the unit's.
     if (spec == specs.end() || !port || spec->format.sample_rate_hz != sample_rate_) {
         return {};
@@ -354,7 +346,8 @@ auto AvbEntityKit::cluster_identity_mappings(
 auto AvbEntityKit::input_cluster_channel(uint16_t const port_index, nanoavb::DynamicAudioMapping const& mapping) const
     -> std::optional<uint16_t>
 {
-    auto const port = stream_port_descriptor(host_, atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
+    auto const port =
+        load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
     if (!port || mapping.cluster_offset >= port->number_of_clusters.get()) {
         return std::nullopt;
     }
@@ -486,22 +479,18 @@ auto AvbEntityKit::static_map_channels(uint16_t const port_type, uint16_t const 
     // stream @p stream_index of the port's direction they name.
     uint16_t needed = 0;
     for (uint16_t p = 0; p < UINT16_MAX; ++p) {
-        auto const port_blob = host_.get_descriptor(port_type, p);
-        if (!port_blob.has_value()) {
+        auto const port = load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, port_type, p);
+        if (!port) {
             break;
         }
-        atdecc::aem::DescriptorStreamPort port{};
-        span_load_padded(port, *port_blob);
-        for (uint16_t i = 0; i < port.number_of_maps.get(); ++i) {
-            auto const map_blob =
-                host_.get_descriptor(atdecc::aem::DESCRIPTOR_AUDIO_MAP, static_cast<uint16_t>(port.base_map.get() + i));
-            if (!map_blob.has_value()) {
+        for (uint16_t i = 0; i < port->number_of_maps.get(); ++i) {
+            auto map = load_descriptor<atdecc::aem::DescriptorAudioMap>(
+                host_, atdecc::aem::DESCRIPTOR_AUDIO_MAP, static_cast<uint16_t>(port->base_map.get() + i));
+            if (!map) {
                 continue;
             }
-            atdecc::aem::DescriptorAudioMap map{};
-            span_load_padded(map, *map_blob);
-            map.clamp_trailer_count();
-            for (auto const& m : map.used_mappings()) {
+            map->clamp_trailer_count();
+            for (auto const& m : map->used_mappings()) {
                 if (m.mapping_stream_index.get() == stream_index) {
                     needed = std::max<uint16_t>(needed, static_cast<uint16_t>(m.mapping_stream_channel.get() + 1));
                 }
@@ -681,13 +670,11 @@ auto AvbEntityKit::crf_recovery_input() const -> std::optional<uint16_t>
         });
     };
     if (crf_clock_source_index_) {
-        if (auto const desc = host_.get_descriptor(atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, *crf_clock_source_index_)) {
-            atdecc::aem::DescriptorClockSource source{};
-            span_load_padded(source, *desc);
-            if (source.clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
-                is_crf_input(source.clock_source_location_index.get())) {
-                return source.clock_source_location_index.get();
-            }
+        auto const source = load_descriptor<atdecc::aem::DescriptorClockSource>(
+            host_, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, *crf_clock_source_index_);
+        if (source && source->clock_source_location_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT &&
+            is_crf_input(source->clock_source_location_index.get())) {
+            return source->clock_source_location_index.get();
         }
     }
     auto const* const first =
@@ -1403,14 +1390,15 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor) -> Statu
 }
 
 auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
-{
-    if (auto status = check_stream_rx(); !status) {
+{  // NOLINT(statusbar-block-statements): the bring-up phases in order, then what they leave behind
+    auto const ports = stream_ports_options();
+    if (auto status = check_stream_rx(ports); !status) {
         return status;
     }
     if (auto status = start_control(reactor); !status) {
         return status;
     }
-    if (auto status = start_data_plane(reactor); !status) {
+    if (auto status = start_data_plane(reactor, ports); !status) {
         return status;
     }
     // Write what start() ended up with: an imported, fresh or pruned state
@@ -1439,10 +1427,9 @@ auto AvbEntityKit::stream_ports_options() const -> StreamPortsOptions
     };
 }
 
-auto AvbEntityKit::check_stream_rx() -> Status
+auto AvbEntityKit::check_stream_rx(StreamPortsOptions const& ports) -> Status
 {
     // An AF_XDP socket has one consumer: the media thread that ticks it.
-    auto const ports = stream_ports_options();
     bool const refused = bound_port_ != nullptr ? ports.receive && ports.rx_on_own_thread && bound_port_->rx_fd() < 0
                                                 : !StreamPorts::check(ports).has_value();
     if (refused) {
@@ -1503,12 +1490,6 @@ auto AvbEntityKit::start_declarations(net::MessageReactor& reactor) -> Status
             }
         }
     }
-    add_declaration_timer(reactor);
-    return success();
-}
-
-void AvbEntityKit::add_declaration_timer(net::MessageReactor& reactor)
-{
     // The declarations' timer: a probe window closing, a hold ending. It
     // reaches the kit through a token stop() (or the kit's end) drops, and
     // then finishes: the reactor discards it and a restart adds a new one.
@@ -1533,14 +1514,15 @@ void AvbEntityKit::add_declaration_timer(net::MessageReactor& reactor)
     };
     declaration_timer_token_ = std::make_shared<AvbEntityKit* const>(this);
     reactor.add(std::make_unique<DeclarationTimer>(declaration_timer_token_));
+    return success();
 }
 
-auto AvbEntityKit::start_data_plane(net::MessageReactor& reactor) -> Status
+auto AvbEntityKit::start_data_plane(net::MessageReactor& reactor, StreamPortsOptions const& ports) -> Status
 {
     if (auto status = open_talker_streams(); !status) {
         return status;
     }
-    auto const rx_port = open_stream_ports();
+    auto const rx_port = open_stream_ports(ports);
     if (!rx_port) {
         return forward_failure(rx_port);
     }
@@ -1580,7 +1562,7 @@ auto AvbEntityKit::open_talker_streams() -> Status
     return success();
 }
 
-auto AvbEntityKit::open_stream_ports() -> StatusValue<StreamPort*>
+auto AvbEntityKit::open_stream_ports(StreamPortsOptions const& ports) -> StatusValue<StreamPort*>
 {
     // The stream ports: the kit's own (config.stream_transport) unless a port
     // is bound. Tolerated here (the entity stays a control-plane-only node);
@@ -1592,23 +1574,17 @@ auto AvbEntityKit::open_stream_ports() -> StatusValue<StreamPort*>
         tx_port_ = bound_port_;
         return bound_port_;
     }
-    return open_own_stream_ports();
+    return open_own_stream_ports(ports);
 }
 
-auto AvbEntityKit::open_own_stream_ports() -> StatusValue<StreamPort*>
-{
-    if (auto opened = ports_.open(stream_ports_options()); !opened) {
+auto AvbEntityKit::open_own_stream_ports(StreamPortsOptions const& ports) -> StatusValue<StreamPort*>
+{  // NOLINT(statusbar-block-statements): the ports opened, then their errors recorded and logged
+    if (auto opened = ports_.open(ports); !opened) {
         return forward_failure(opened);  // check()ed above
     }
     tx_port_ = &ports_.tx();
     stream_tx_error_ = ports_.tx_error();
     stream_rx_error_ = ports_.rx_error();
-    log_stream_port_errors();
-    return &ports_.rx();
-}
-
-void AvbEntityKit::log_stream_port_errors()
-{
     if (auto const priority = ports_.packet().tx_priority_error(); !stream_tx_error_ && priority) {
         host_.ctl_log().warning(
             "talker: SO_PRIORITY {} on the stream TX socket failed: errno {}; streams use the default TX queue",
@@ -1616,6 +1592,7 @@ void AvbEntityKit::log_stream_port_errors()
             priority.value());
     }
     log_xdp_error(host_.ctl_log(), ports_, config_.interface_name);
+    return &ports_.rx();
 }
 
 auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor, StreamPort* const rx_port) -> Status
@@ -1627,7 +1604,14 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor, StreamPo
     // (drain_stream_rx() with its wake gPTP time), or for the media tick
     // when the port has no descriptor (tick_stream_rx()).
     if (!stream_rx_error_) {
-        attach_listener_rx(reactor, *rx_port);
+        bool const pollable = rx_port->rx_fd() >= 0;
+        if (auto rx = listener_->attach_rx(*rx_port, rx_static_groups_, reactor, config_.stream_rx_rt_timer || !pollable)) {
+            rt_rx_handler_ = std::move(*rx);
+            rx_on_tick_ = !pollable && !config_.stream_rx_rt_timer;
+        } else {
+            stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
+            ports_.close_rx();              // nobody reads it
+        }
     }
 #if defined(__linux__)
     // The VID's tagged stream frames must get past the NIC's VLAN filter.
@@ -1672,18 +1656,6 @@ auto AvbEntityKit::open_listener_streams() -> Status
         (void)rx_static_groups_.try_push_back(static_rx_group(spec));
     }
     return success();
-}
-
-void AvbEntityKit::attach_listener_rx(net::MessageReactor& reactor, StreamPort& rx_port)
-{
-    bool const pollable = rx_port.rx_fd() >= 0;
-    if (auto rx = listener_->attach_rx(rx_port, rx_static_groups_, reactor, config_.stream_rx_rt_timer || !pollable)) {
-        rt_rx_handler_ = std::move(*rx);
-        rx_on_tick_ = !pollable && !config_.stream_rx_rt_timer;
-    } else {
-        stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
-        ports_.close_rx();              // nobody reads it
-    }
 }
 
 #if defined(__linux__)

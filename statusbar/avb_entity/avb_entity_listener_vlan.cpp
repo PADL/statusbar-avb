@@ -28,19 +28,19 @@ void ListenerVlan::follow(uint16_t const vid)
         return;
     }
     std::string name = net::vlan::vlan_link_name(interface_name_, vid);
-    auto const created = add_link(name, vid);
-    if (!created) {
+    auto const added = add_link(name, vid);
+    if (added == LinkAdded::failed) {
         return;
     }
-    replace_link(vid, *created, std::move(name));
+    replace_link(vid, added == LinkAdded::created, std::move(name));
 }
 
-auto ListenerVlan::add_link(std::string const& name, uint16_t const vid) -> std::optional<bool>
+auto ListenerVlan::add_link(std::string const& name, uint16_t const vid) -> LinkAdded
 {
     auto const status = control_->add_vlan(ifindex_, name, vid);
     if (status) {
         log_.status("listener: VID {} on the NIC's VLAN filter: created {} (down)", vid, logging::embed<16>(name));
-        return true;
+        return LinkAdded::created;
     }
     if (status.error() == std::errc::file_exists) {
         // Not checked: a link of this name on another VID or parent leaves
@@ -49,7 +49,7 @@ auto ListenerVlan::add_link(std::string const& name, uint16_t const vid) -> std:
             "listener: VID {}: {} (or a VLAN link on that VID) already exists; used as it is, unchecked",
             vid,
             logging::embed<16>(name));
-        return false;
+        return LinkAdded::existed;
     }
     // The previous VID's link stays; the next follow() tries again.
     log_.warning(
@@ -58,7 +58,7 @@ auto ListenerVlan::add_link(std::string const& name, uint16_t const vid) -> std:
         logging::embed<16>(name),
         status.error().value(),
         logging::embed<32>(control_->last_message()));
-    return std::nullopt;
+    return LinkAdded::failed;
 }
 
 void ListenerVlan::replace_link(uint16_t const vid, bool const created, std::string name)

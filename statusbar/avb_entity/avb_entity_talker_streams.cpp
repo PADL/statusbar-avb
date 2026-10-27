@@ -339,17 +339,21 @@ auto serialize_aaf_raw(
 template <typename Context, typename Serialize>
 auto TalkerStreams::send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t const max_frame, Serialize const& serialize)
     -> bool
-{
+{  // NOLINT(statusbar-block-statements): one frame's transmit steps, in order
     std::span<uint8_t> const frame = port_->tx_begin(max_frame);
     if (frame.empty()) {
         return false;
     }
-    auto const saved = ctx;
-    if (size_t const frame_len = serialize(frame); frame_len != 0 && send_stream_frame(slot, frame.first(frame_len))) {
-        return true;
+    auto const saved = ctx;  // restored when the port refuses the frame
+    size_t const frame_len = serialize(frame);
+    if (frame_len == 0) {
+        return false;
     }
-    ctx = saved;  // the port refused the frame (nothing to undo when none was serialized)
-    return false;
+    if (!send_stream_frame(slot, frame.first(frame_len))) {
+        ctx = saved;
+        return false;
+    }
+    return true;
 }
 
 auto TalkerStreams::transmit_aaf_raw(

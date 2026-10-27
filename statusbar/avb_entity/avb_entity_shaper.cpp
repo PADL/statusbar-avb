@@ -505,7 +505,7 @@ void EntityShaper::park()
 }
 
 auto EntityShaper::install() -> Status
-{
+{  // NOLINT(statusbar-block-statements): the install sequence in order: lookups, layout, qdiscs, adoption
     if (qdiscs_.installed()) {
         return success();
     }
@@ -517,34 +517,25 @@ auto EntityShaper::install() -> Status
     if (!driver) {
         return failure(driver.error());
     }
-    return install_on(*ifindex, std::move(*driver));
-}
-
-auto EntityShaper::install_on(int const ifindex, std::string driver) -> Status
-{
-    auto const layout = install_qdiscs(ifindex, driver);
+    auto const layout = queue_layout(*driver);
     if (!layout) {
         return failure(layout.error());
     }
-    adopt(std::move(driver), *layout);
+    if (auto status = install_layout(*ifindex, *layout); !status) {
+        return status;
+    }
+    adopt(std::move(*driver), *layout);
     follow_admission();
     return success();
 }
 
-auto EntityShaper::install_qdiscs(int const ifindex, std::string_view const driver) -> StatusValue<QueueLayout>
+auto EntityShaper::queue_layout(std::string_view const driver) const -> StatusValue<QueueLayout>
 {
     auto const queues = net::tx_queue_count(config_.interface_name);
     if (!queues) {
         return failure(queues.error());
     }
-    auto const layout = make_queue_layout(driver, *queues, config_.queues);
-    if (!layout) {
-        return failure(layout.error());
-    }
-    if (auto status = install_layout(ifindex, *layout); !status) {
-        return failure(status.error());
-    }
-    return *layout;
+    return make_queue_layout(driver, *queues, config_.queues);
 }
 
 auto EntityShaper::install_layout(int const ifindex, QueueLayout const& layout) -> Status
