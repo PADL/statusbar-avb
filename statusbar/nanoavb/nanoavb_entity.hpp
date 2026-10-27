@@ -25,7 +25,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <expected>
 #include <optional>
 #include <span>
 #include <utility>
@@ -39,6 +38,18 @@ using ieee::quadlet_t;
 using namespace atdecc;
 using namespace atdecc::aem;
 using statusbar::container::SlotTable;
+
+/// A packed wire struct @p T from the front of @p data; nullopt when @p data is shorter than T::LENGTH.
+template <typename T>
+[[nodiscard]] auto load_payload(std::span<uint8_t const> const data) noexcept -> std::optional<T>
+{
+    if (data.size() < T::LENGTH) {
+        return std::nullopt;
+    }
+    T payload{};
+    span_load(payload, data.first(T::LENGTH));
+    return payload;
+}
 
 //
 // AEM Command Handler Response
@@ -498,8 +509,6 @@ class AemCommandHandler
     /// The controller at @p controller_mac is gone for good: drop its registrations, release its
     /// acquisition (to a waiting controller, if any) and abandon an acquire it was waiting for.
     void forget_controller_at(Eui48 const& controller_mac);
-    /// The entity is no longer acquired by anyone.
-    void drop_acquisition() noexcept;
 
     /// Set our own entity_id, used as the target_entity_id of unsolicited
     /// notifications. process_packet() also keeps this current; call this so
@@ -872,9 +881,9 @@ class AemCommandHandler
         -> AemCommandResponse;
 
     /// The presentation offset checks common to SET_STREAM_INFO and SET_MAX_TRANSIT_TIME:
-    /// the current offset, or the status to refuse with.
-    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index) const
-        -> std::expected<uint32_t, uint8_t>;
+    /// SUCCESS with the current offset in @p current, or the status to refuse with.
+    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
+        -> uint8_t;
     /// Set stream output @p index's presentation offset to @p offset_ns: BAD_ARGUMENTS past
     /// Milan's maximum, else the set_presentation_offset hook's status.
     [[nodiscard]] auto set_presentation_offset(uint16_t index, uint64_t offset_ns) -> uint8_t;
@@ -955,6 +964,8 @@ class AemCommandHandler
     void tick_controller_monitor(sm::TimePoint now);
     /// A random monitor period in [CONTROLLER_MONITOR_MIN, CONTROLLER_MONITOR_MAX].
     [[nodiscard]] auto monitor_period() noexcept -> sm::Clock::duration;
+    /// The entity is no longer acquired by anyone.
+    void drop_acquisition() noexcept;
     /// Frame and send CONTROLLER_AVAILABLE to a registered controller.
     void send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t sequence_id);
     /// The CONTROLLER_AVAILABLE command header to @p controller_id, with @p sequence_id.
