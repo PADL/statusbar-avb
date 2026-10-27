@@ -848,18 +848,9 @@ class Enumerator
                 expand_unit<DescriptorSensorUnit>(target, body, DESCRIPTOR_SENSOR_CLUSTER, DESCRIPTOR_SENSOR_MAP);
                 break;
             case DESCRIPTOR_STREAM_PORT_INPUT:
-            case DESCRIPTOR_STREAM_PORT_OUTPUT: {
-                DescriptorStreamPort port{};
-                span_load_padded(port, body);
-                // Clusters and maps of the kind of the unit that owns the port.
-                auto const owner = port_owners_.find(ReadKey{target, type, be16_at(body, 2)});
-                auto const [cluster, map] =
-                    owner != port_owners_.end() ? owner->second : std::pair{DESCRIPTOR_AUDIO_CLUSTER, DESCRIPTOR_AUDIO_MAP};
-                range(target, cluster, port.base_cluster.get(), port.number_of_clusters.get());
-                range(target, map, port.base_map.get(), port.number_of_maps.get());
-                range(target, DESCRIPTOR_CONTROL, port.base_control.get(), port.number_of_controls.get());
+            case DESCRIPTOR_STREAM_PORT_OUTPUT:
+                expand_port(target, type, body);
                 break;
-            }
             case DESCRIPTOR_LOCALE: {
                 DescriptorLocale locale{};
                 span_load_padded(locale, body);
@@ -888,9 +879,26 @@ class Enumerator
         }
     }
 
+    /// The cluster and map descriptor types of the kind of unit that owns a stream port.
+    auto port_children(Eui64 target, uint16_t type, uint16_t index) const -> std::pair<uint16_t, uint16_t>
+    {
+        auto const owner = port_owners_.find(ReadKey{target, type, index});
+        return owner != port_owners_.end() ? owner->second : std::pair{DESCRIPTOR_AUDIO_CLUSTER, DESCRIPTOR_AUDIO_MAP};
+    }
+
+    void expand_port(Eui64 target, uint16_t type, std::span<uint8_t const> body)
+    {
+        DescriptorStreamPort port{};
+        span_load_padded(port, body);
+        auto const [cluster, map] = port_children(target, type, be16_at(body, 2));
+        range(target, cluster, port.base_cluster.get(), port.number_of_clusters.get());
+        range(target, map, port.base_map.get(), port.number_of_maps.get());
+        range(target, DESCRIPTOR_CONTROL, port.base_control.get(), port.number_of_controls.get());
+    }
+
     template <typename Unit>
     void expand_unit(Eui64 target, std::span<uint8_t const> body, uint16_t cluster, uint16_t map)
-    {
+    {  // NOLINT(statusbar-block-statements): one range per kind of child descriptor
         Unit unit{};
         span_load_padded(unit, body);
         auto ports = [&](uint16_t port_type, uint16_t base, uint16_t count) {
