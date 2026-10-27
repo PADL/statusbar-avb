@@ -22,6 +22,28 @@
 
 namespace statusbar::avb_entity {
 
+namespace {
+
+/// Move the Class A VLAN from @p old_vid to @p new_vid: MVRP and every talker stream's ACMP VID.
+void move_class_a_vlan(
+    nanoavb::NanoAvbComponents& components, uint16_t const old_vid, uint16_t const new_vid, sm::TimePoint const time)
+{
+    (void)components.mvrp_handler.withdraw_vlan(old_vid, time);
+    (void)components.mvrp_handler.register_vlan(new_vid, time);
+    for (size_t i = 0; i < components.acmp_talker.max_streams(); ++i) {
+        (void)components.acmp_talker.set_stream_vlan_id(static_cast<uint16_t>(i), new_vid);
+    }
+}
+
+/// The Class A (traffic class 0) priority and VID of @p info; zeros when it has none.
+auto class_a_mapping(nanoavb::AvbInfo const& info) -> std::pair<uint8_t, uint16_t>
+{
+    auto const* const m = std::ranges::find_if(info.msrp_mappings, [](auto const& x) { return x.traffic_class == 0; });
+    return m != info.msrp_mappings.end() ? std::pair{m->priority, m->vlan_id} : std::pair<uint8_t, uint16_t>{};
+}
+
+}  // namespace
+
 AvbEntityHost::AvbEntityHost(
     nanoavb::EntityModel model,
     nanoavb::AdpAdvertiserConfig adp_config,
@@ -65,11 +87,7 @@ void AvbEntityHost::wire_domain_callbacks()
     components_.msrp_handler.set_on_domain_vid_changed(
         [this](uint16_t const old_vid, uint16_t const new_vid, TimePoint const time) {
             ctl_log().status("msrp: Class A VID {} -> {} (Domain)", old_vid, new_vid);
-            (void)components_.mvrp_handler.withdraw_vlan(old_vid, time);
-            (void)components_.mvrp_handler.register_vlan(new_vid, time);
-            for (size_t i = 0; i < components_.acmp_talker.max_streams(); ++i) {
-                (void)components_.acmp_talker.set_stream_vlan_id(static_cast<uint16_t>(i), new_vid);
-            }
+            move_class_a_vlan(components_, old_vid, new_vid, time);
             if (on_domain_vid_changed_) {
                 on_domain_vid_changed_(new_vid, time);
             }
@@ -221,14 +239,11 @@ void AvbEntityHost::refresh_avb_info()
     }
     using atdecc::aem::avb_info_flags::AS_CAPABLE;
     auto const info = avb_info(0);
-    auto const class_a = [](nanoavb::AvbInfo const& i) -> std::pair<uint8_t, uint16_t> {
-        auto const* const m = std::ranges::find_if(i.msrp_mappings, [](auto const& x) { return x.traffic_class == 0; });
-        return m != i.msrp_mappings.end() ? std::pair{m->priority, m->vlan_id} : std::pair<uint8_t, uint16_t>{};
-    };
     bool const changed = info.gptp_grandmaster_id != last_avb_info_.gptp_grandmaster_id ||
         info.propagation_delay != last_avb_info_.propagation_delay ||
         info.gptp_domain_number != last_avb_info_.gptp_domain_number ||
-        (info.flags & AS_CAPABLE) != (last_avb_info_.flags & AS_CAPABLE) || class_a(info) != class_a(last_avb_info_);
+        (info.flags & AS_CAPABLE) != (last_avb_info_.flags & AS_CAPABLE) ||
+        class_a_mapping(info) != class_a_mapping(last_avb_info_);
     last_avb_info_ = info;
     if (changed) {
         (void)components_.aem_handler.notify_avb_info_changed(0);
@@ -515,14 +530,19 @@ auto AvbEntityHost::release_clock_domain_lock(uint16_t const index) -> bool
     if (!has_clock_domain(index)) {
         return false;
     }
-    auto& domain = clock_domain_locks_[index];
-    if (!domain.entity_driven) {
-        return true;
+    if (clock_domain_locks_[index].entity_driven) {
+        hand_back_clock_domain(index);
     }
+    return true;
+}
+
+void AvbEntityHost::hand_back_clock_domain(uint16_t const index)
+{
+    auto& domain = clock_domain_locks_[index];
     if (index == 0) {
         domain.entity_driven = false;
         count_clock_domain_lock(0, gptp_locked());
-        return true;
+        return;
     }
     bool const was_locked = domain.locked;
     count_clock_domain_lock(index, false);  // a released domain is unlocked: its next lock counts
@@ -530,7 +550,6 @@ auto AvbEntityHost::release_clock_domain_lock(uint16_t const index) -> bool
     if (!was_locked) {
         (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, index);
     }
-    return true;
 }
 
 auto AvbEntityHost::fill_counters(
