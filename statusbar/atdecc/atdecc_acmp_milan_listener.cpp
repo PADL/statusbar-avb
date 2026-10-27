@@ -66,6 +66,85 @@ void clear_stream(AcmpCommandResponse& resp) noexcept
     resp.stream_vlan_id = uint16_t{0};
 }
 
+/// The talker, connection count and flags of a response.
+void set_talker(AcmpCommandResponse& resp, MilanSinkBinding const& binding, uint16_t const count, uint16_t const flags) noexcept
+{
+    resp.talker_entity_id = binding.talker_entity_id;
+    resp.talker_unique_id = binding.talker_unique_id;
+    resp.connection_count = count;
+    resp.flags = flags;
+}
+
+/// Table 5.32: the response to a BIND_RX_COMMAND.
+auto bind_response(AcmpCommandResponse const& cmd) noexcept -> AcmpCommandResponse
+{
+    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
+    resp.connection_count = uint16_t{1};
+    resp.flags = static_cast<uint16_t>(cmd.is_streaming_wait() ? acmp_flags::STREAMING_WAIT : 0U);
+    clear_stream(resp);
+    return resp;
+}
+
+/// Tables 5.34 and 5.36: the response to GET_RX_STATE or UNBIND_RX for an unbound sink.
+auto unbound_response(AcmpCommandResponse const& cmd) noexcept -> AcmpCommandResponse
+{
+    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
+    set_talker(resp, MilanSinkBinding{}, 0, 0);
+    clear_stream(resp);
+    return resp;
+}
+
+/// The flags GET_RX_STATE reports for bound sink @p s.
+auto rx_state_flags(MilanSink const& s) noexcept -> uint16_t
+{
+    uint16_t flags = acmp_flags::FAST_CONNECT;
+    if (!s.binding.started) {
+        flags |= acmp_flags::STREAMING_WAIT;
+    }
+    if (s.state == MilanSinkState::settled_rsv_ok && s.registration == MilanTalkerRegistration::failed) {
+        flags |= acmp_flags::REGISTERING_FAILED;
+    }
+    return flags;
+}
+
+/// Tables 5.37 (probing), 5.38 (SETTLED_NO_RSV), 5.39 (SETTLED_RSV_OK): GET_RX_STATE for bound sink @p s.
+auto bound_response(AcmpCommandResponse const& cmd, MilanSink const& s) noexcept -> AcmpCommandResponse
+{
+    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
+    set_talker(resp, s.binding, 1, rx_state_flags(s));
+    clear_stream(resp);
+    if (s.settled()) {
+        resp.stream_id = s.stream.stream_id;
+        resp.stream_dest_mac = s.stream.dest_mac;
+        resp.stream_vlan_id = s.stream.vlan_id;
+    }
+    return resp;
+}
+
+/// Sections 5.5.3.5.18 and 5.5.3.5.25 step 1: @p resp answers the probe @p s
+/// sent and is waiting for (Table 5.30: ignored in every other state).
+auto answers_probe(MilanSink const& s, AcmpCommandResponse const& resp) noexcept -> bool
+{
+    return (s.state == MilanSinkState::prb_w_resp || s.state == MilanSinkState::prb_w_resp2) &&
+        resp.controller_entity_id == s.probe.controller_entity_id && resp.talker_entity_id == s.probe.talker_entity_id &&
+        resp.talker_unique_id.get() == s.probe.talker_unique_id.get() && resp.sequence_id.get() == s.probe.sequence_id.get();
+}
+
+/// Sink @p s is bound to the talker and source @p cmd names.
+auto bound_to(MilanSink const& s, AcmpCommandResponse const& cmd) noexcept -> bool
+{
+    return s.bound() && s.binding.talker_entity_id == cmd.talker_entity_id &&
+        s.binding.talker_unique_id == cmd.talker_unique_id.get();
+}
+
+/// Enter @p state with probing status @p probing and no ACMP status.
+void enter(MilanSink& s, uint8_t const probing, MilanSinkState const state) noexcept
+{
+    s.probing_status = probing;
+    s.acmp_status = 0;
+    s.state = state;
+}
+
 }  // namespace
 
 auto MilanListener::receive(AcmpCommandResponse const& pdu, TimePoint const now) -> bool
@@ -83,6 +162,12 @@ auto MilanListener::receive(AcmpCommandResponse const& pdu, TimePoint const now)
         probe_response(index, pdu, now);
         return true;
     }
+    return receive_command(type, index, pdu, now);
+}
+
+auto MilanListener::receive_command(uint8_t const type, uint16_t const index, AcmpCommandResponse const& pdu, TimePoint const now)
+    -> bool
+{
     if (type != ACMP_MESSAGE_TYPE_BIND_RX_COMMAND && type != ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND &&
         type != ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND) {
         return false;  // "The listener shall ignore all other ACMP messages."
@@ -107,9 +192,7 @@ auto MilanListener::receive(AcmpCommandResponse const& pdu, TimePoint const now)
 
 void MilanListener::respond(AcmpCommandResponse const& cmd, uint8_t const status)
 {
-    if (send_) {
-        (void)send_(echo(cmd, status));
-    }
+    send(echo(cmd, status));
 }
 
 auto MilanListener::restore(uint16_t const index, MilanSinkBinding const& binding) -> bool
@@ -117,176 +200,122 @@ auto MilanListener::restore(uint16_t const index, MilanSinkBinding const& bindin
     if (index >= sinks_.size() || sinks_[index].bound()) {
         return false;
     }
-    auto& s = sinks_[index];
-    s = MilanSink{};
-    s.binding = binding;
-    s.discovered = false;  // the ADP discovery state machine starts: not discovered
-    s.probing_status = probing_status::PASSIVE;
-    s.state = MilanSinkState::prb_w_avail;
+    // The ADP discovery state machine starts: not discovered.
+    sinks_[index] = MilanSink{.state = MilanSinkState::prb_w_avail, .binding = binding, .probing_status = probing_status::PASSIVE};
     notify(index);
     return true;
 }
 
 void MilanListener::bind(uint16_t const index, AcmpCommandResponse const& cmd, TimePoint const now)
 {
-    auto& s = sinks_[index];
     // Step 1 of each RCV_BIND_RX_CMD row (Table 5.31).
     if (!authorized(cmd.controller_entity_id)) {
         respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
         return;
     }
-    bool const started = !cmd.is_streaming_wait();
-    // Table 5.32.
-    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
-    resp.connection_count = uint16_t{1};
-    resp.flags = static_cast<uint16_t>(started ? 0U : acmp_flags::STREAMING_WAIT);
-    clear_stream(resp);
-
-    // Step 2 of every bound state: the same talker and source keep the
-    // binding (and its probing or settled state); only the controller and the
-    // started state are updated.
-    if (s.bound() && s.binding.talker_entity_id == cmd.talker_entity_id &&
-        s.binding.talker_unique_id == cmd.talker_unique_id.get()) {
-        bool const changed = s.binding.controller_entity_id != cmd.controller_entity_id || s.binding.started != started;
-        s.binding.controller_entity_id = cmd.controller_entity_id;
-        s.binding.started = started;
-        if (changed && on_binding_changed_) {
-            on_binding_changed_(index);
-        }
-        if (send_) {
-            (void)send_(resp);
-        }
+    if (bound_to(sinks_[index], cmd)) {
+        update_binding(index, cmd);
+        send(bind_response(cmd));
         notify(index);
         return;
     }
+    rebind(index, cmd);
+    send(bind_response(cmd));
+    send_probe(index, now);
+    notify(index);
+}
 
-    // A new binding (or a rebinding to another talker): stop what runs, the
-    // SRP reservation included, and the ADP discovery state machine.
+void MilanListener::update_binding(uint16_t const index, AcmpCommandResponse const& cmd)
+{
+    auto& s = sinks_[index];
+    bool const started = !cmd.is_streaming_wait();
+    bool const changed = s.binding.controller_entity_id != cmd.controller_entity_id || s.binding.started != started;
+    s.binding.controller_entity_id = cmd.controller_entity_id;
+    s.binding.started = started;
+    if (changed) {
+        binding_changed(index);
+    }
+}
+
+void MilanListener::rebind(uint16_t const index, AcmpCommandResponse const& cmd)
+{
+    stop(index);
+    auto& s = sinks_[index];
+    s.binding = MilanSinkBinding{
+        .talker_entity_id = cmd.talker_entity_id,
+        .talker_unique_id = cmd.talker_unique_id.get(),
+        .controller_entity_id = cmd.controller_entity_id,
+        .started = !cmd.is_streaming_wait()};
+    // Restart discovery and probe at once: an immediate consequence of a bind skips
+    // waiting for ADP (Section 5.5.2.6). Bound before the hook runs: it sees the new state.
+    enter(s, probing_status::ACTIVE, MilanSinkState::prb_w_resp);
+    binding_changed(index);
+}
+
+void MilanListener::stop(uint16_t const index)
+{
+    auto& s = sinks_[index];
     s.timer_running = false;
     if (s.settled()) {
         unsettle(index);
     }
     s.discovered = false;
-    s.binding = MilanSinkBinding{
-        .talker_entity_id = cmd.talker_entity_id,
-        .talker_unique_id = cmd.talker_unique_id.get(),
-        .controller_entity_id = cmd.controller_entity_id,
-        .started = started};
-    // Restart discovery (talker not discovered) and probe at once: an
-    // immediate consequence of a bind skips waiting for ADP (Section 5.5.2.6).
-    // Bound before the hook runs: it sees the new binding's state.
-    s.probing_status = probing_status::ACTIVE;
-    s.acmp_status = 0;
-    s.state = MilanSinkState::prb_w_resp;
-    if (on_binding_changed_) {
-        on_binding_changed_(index);
-    }
-    if (send_) {
-        (void)send_(resp);
-    }
-    send_probe(index, now);
-    notify(index);
 }
 
 void MilanListener::unbind(uint16_t const index, AcmpCommandResponse const& cmd)
 {
-    auto& s = sinks_[index];
     if (!authorized(cmd.controller_entity_id)) {
         respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);  // Table 5.35
         return;
     }
-    if (s.bound()) {
-        s.timer_running = false;
-        if (s.settled()) {
-            unsettle(index);
-        }
-        s = MilanSink{};  // binding cleared, discovery stopped
-        s.probing_status = probing_status::DISABLED;
-        if (on_binding_changed_) {
-            on_binding_changed_(index);
-        }
+    if (sinks_[index].bound()) {
+        stop(index);
+        sinks_[index] = MilanSink{.probing_status = probing_status::DISABLED};  // binding cleared, discovery stopped
+        binding_changed(index);
     }
     // Table 5.36. No DISCONNECT_TX: the talker learns from MSRP.
-    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
-    resp.talker_entity_id = ieee::Eui64{};
-    resp.talker_unique_id = uint16_t{0};
-    resp.connection_count = uint16_t{0};
-    resp.flags = uint16_t{0};
-    clear_stream(resp);
-    if (send_) {
-        (void)send_(resp);
-    }
+    send(unbound_response(cmd));
     notify(index);
 }
 
 void MilanListener::get_rx_state(uint16_t const index, AcmpCommandResponse const& cmd)
 {
     auto const& s = sinks_[index];
-    auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
-    clear_stream(resp);
-    if (!s.bound()) {
-        // Table 5.34.
-        resp.talker_entity_id = ieee::Eui64{};
-        resp.talker_unique_id = uint16_t{0};
-        resp.connection_count = uint16_t{0};
-        resp.flags = uint16_t{0};
-    } else {
-        // Tables 5.37 (probing), 5.38 (SETTLED_NO_RSV), 5.39 (SETTLED_RSV_OK).
-        resp.talker_entity_id = s.binding.talker_entity_id;
-        resp.talker_unique_id = s.binding.talker_unique_id;
-        resp.connection_count = uint16_t{1};
-        uint16_t flags = acmp_flags::FAST_CONNECT;
-        if (!s.binding.started) {
-            flags |= acmp_flags::STREAMING_WAIT;
-        }
-        if (s.state == MilanSinkState::settled_rsv_ok && s.registration == MilanTalkerRegistration::failed) {
-            flags |= acmp_flags::REGISTERING_FAILED;
-        }
-        resp.flags = flags;
-        if (s.settled()) {
-            resp.stream_id = s.stream.stream_id;
-            resp.stream_dest_mac = s.stream.dest_mac;
-            resp.stream_vlan_id = s.stream.vlan_id;
-        }
-    }
-    if (send_) {
-        (void)send_(resp);
-    }
+    send(s.bound() ? bound_response(cmd, s) : unbound_response(cmd));
+}
+
+auto MilanListener::probe_command(uint16_t const index) -> AcmpCommandResponse
+{  // NOLINT(statusbar-block-statements): one assignment per field of Table 5.33
+    auto const& binding = sinks_[index].binding;
+    AcmpCommandResponse cmd{};
+    cmd.init_command(ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
+    cmd.controller_entity_id = binding.controller_entity_id;
+    cmd.talker_entity_id = binding.talker_entity_id;
+    cmd.listener_entity_id = entity_id_;
+    cmd.talker_unique_id = binding.talker_unique_id;
+    cmd.listener_unique_id = index;
+    cmd.sequence_id = sequence_id_++;
+    cmd.connection_count = uint16_t{0};
+    cmd.flags = acmp_flags::FAST_CONNECT;
+    return cmd;
 }
 
 void MilanListener::send_probe(uint16_t const index, TimePoint const now)
 {
     auto& s = sinks_[index];
-    // Table 5.33. A new sequence_id for each new probe; the duplicate sent
-    // on TMR_NO_RESP is this message unchanged.
-    AcmpCommandResponse cmd{};
-    cmd.init_command(ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
-    cmd.controller_entity_id = s.binding.controller_entity_id;
-    cmd.talker_entity_id = s.binding.talker_entity_id;
-    cmd.listener_entity_id = entity_id_;
-    cmd.talker_unique_id = s.binding.talker_unique_id;
-    cmd.listener_unique_id = index;
-    cmd.sequence_id = sequence_id_++;
-    cmd.connection_count = uint16_t{0};
-    cmd.flags = acmp_flags::FAST_CONNECT;
+    // A new sequence_id for each new probe; the duplicate sent on TMR_NO_RESP
+    // is this message unchanged.
+    auto const cmd = probe_command(index);
     s.probe = cmd;
     // The timer first: a response delivered within send_ settles the sink.
     start_timer(s, now, TMR_NO_RESP);
-    if (send_) {
-        (void)send_(cmd);
-    }
+    send(cmd);
 }
 
 void MilanListener::probe_response(uint16_t const index, AcmpCommandResponse const& resp, TimePoint const now)
 {
     auto& s = sinks_[index];
-    if (s.state != MilanSinkState::prb_w_resp && s.state != MilanSinkState::prb_w_resp2) {
-        return;  // Table 5.30: ignored in every other state
-    }
-    // Sections 5.5.3.5.18 and 5.5.3.5.25 step 1: only the answer to the
-    // command sent.
-    if (resp.controller_entity_id != s.probe.controller_entity_id || resp.talker_entity_id != s.probe.talker_entity_id ||
-        resp.talker_unique_id.get() != s.probe.talker_unique_id.get() || resp.sequence_id.get() != s.probe.sequence_id.get()) {
+    if (!answers_probe(s, resp)) {
         return;
     }
     s.timer_running = false;
@@ -301,10 +330,14 @@ void MilanListener::probe_response(uint16_t const index, AcmpCommandResponse con
     }
     // Step 4.
     s.stream = MilanSinkStream{.stream_id = resp.stream_id, .dest_mac = resp.stream_dest_mac, .vlan_id = resp.stream_vlan_id.get()};
+    settle(index, now);
+}
+
+void MilanListener::settle(uint16_t const index, TimePoint const now)
+{
+    auto& s = sinks_[index];
     s.registration = MilanTalkerRegistration::none;
-    s.probing_status = probing_status::COMPLETED;
-    s.acmp_status = 0;
-    s.state = MilanSinkState::settled_no_rsv;
+    enter(s, probing_status::COMPLETED, MilanSinkState::settled_no_rsv);
     start_timer(s, now, TMR_NO_TK);
     notify(index);
     if (on_settled_) {
@@ -331,9 +364,7 @@ void MilanListener::reprobe(uint16_t const index, TimePoint const now)
     auto& s = sinks_[index];
     if (!s.discovered) {
         s.timer_running = false;
-        s.probing_status = probing_status::PASSIVE;
-        s.acmp_status = 0;
-        s.state = MilanSinkState::prb_w_avail;
+        enter(s, probing_status::PASSIVE, MilanSinkState::prb_w_avail);
         return;
     }
     s.probing_status = probing_status::ACTIVE;
@@ -361,21 +392,17 @@ void MilanListener::start_timer(MilanSink& s, TimePoint const now, Duration cons
 
 void MilanListener::set_registration(uint16_t const index, MilanTalkerRegistration const registration, TimePoint const now)
 {
-    if (index >= sinks_.size()) {
-        return;
-    }
-    auto& s = sinks_[index];
-    if (!s.settled()) {
+    if (index >= sinks_.size() || !sinks_[index].settled()) {
         return;  // Section 5.3.8.8: not registering unless settled
     }
+    auto& s = sinks_[index];
     bool const was = s.registering();
     s.registration = registration;
-    bool const is = s.registering();
-    if (s.state == MilanSinkState::settled_no_rsv && !was && is) {
+    if (s.state == MilanSinkState::settled_no_rsv && !was && s.registering()) {
         // Section 5.5.3.5.42: EVT_TK_REGISTERED.
         s.timer_running = false;
         s.state = MilanSinkState::settled_rsv_ok;
-    } else if (s.state == MilanSinkState::settled_rsv_ok && was && !is) {
+    } else if (s.state == MilanSinkState::settled_rsv_ok && was && !s.registering()) {
         // Section 5.5.3.5.48: EVT_TK_UNREGISTERED.
         s.timer_running = false;
         unsettle(index);
@@ -387,17 +414,11 @@ void MilanListener::set_registration(uint16_t const index, MilanTalkerRegistrati
 
 auto MilanListener::set_started(uint16_t const index, bool const started) -> bool
 {
-    if (index >= sinks_.size()) {
+    if (index >= sinks_.size() || !sinks_[index].bound() || sinks_[index].binding.started == started) {
         return false;
     }
-    auto& s = sinks_[index];
-    if (!s.bound() || s.binding.started == started) {
-        return false;
-    }
-    s.binding.started = started;
-    if (on_binding_changed_) {
-        on_binding_changed_(index);
-    }
+    sinks_[index].binding.started = started;
+    binding_changed(index);
     notify(index);
     return true;
 }
@@ -427,9 +448,7 @@ void MilanListener::departed(uint16_t const index)
         case MilanSinkState::prb_w_resp2:
         case MilanSinkState::prb_w_retry:
             s.timer_running = false;
-            s.probing_status = probing_status::PASSIVE;
-            s.acmp_status = 0;
-            s.state = MilanSinkState::prb_w_avail;
+            enter(s, probing_status::PASSIVE, MilanSinkState::prb_w_avail);
             notify(index);
             break;
         default:
@@ -439,57 +458,67 @@ void MilanListener::departed(uint16_t const index)
 
 void MilanListener::receive_adp(AdpDu const& adp, tsn::ClockIdentity const& grandmaster, uint8_t const domain, TimePoint const now)
 {
-    bool const available = adp.is_entity_available();
-    if (!available && !adp.is_entity_departing()) {
+    if (!adp.is_entity_available() && !adp.is_entity_departing()) {
         return;
     }
     bool const same_gptp = adp.gptp_grandmaster_id == grandmaster && adp.gptp_domain_number.get() == domain;
     // TMR_NO_ADP: valid_time in 2 s units, at least one (a valid_time of 0).
-    auto const valid_for = std::chrono::seconds{2 * std::max<int64_t>(adp.valid_time(), 1)};
+    TimePoint const valid_until = now + std::chrono::seconds{2 * std::max<int64_t>(adp.valid_time(), 1)};
     for (size_t i = 0; i < sinks_.size(); ++i) {
-        auto& s = sinks_[i];
+        auto const& s = sinks_[i];
         if (!s.bound() || s.binding.talker_entity_id != adp.entity_id) {
             continue;
         }
-        auto const index = static_cast<uint16_t>(i);
-        uint16_t const interface_index = adp.interface_index.get();
-        if (!s.discovered) {
-            // Section 5.6.4.5.1 (TK_NOT_DISCOVERED ignores RCV_ADP_DEPARTING).
-            if (!available || !same_gptp) {
-                continue;
-            }
-            s.interface_index = interface_index;
-            s.available_index = adp.available_index.get();
-            s.adp_deadline = now + valid_for;
-            discovered(index, now);
-            continue;
+        if (s.discovered) {
+            adp_discovered(static_cast<uint16_t>(i), adp, same_gptp, valid_until, now);
+        } else {
+            adp_not_discovered(static_cast<uint16_t>(i), adp, same_gptp, valid_until, now);
         }
-        if (interface_index != s.interface_index) {
-            continue;  // Sections 5.6.4.5.2-3 step 1
-        }
-        if (!available) {
-            departed(index);  // Section 5.6.4.5.3
-            continue;
-        }
-        // Section 5.6.4.5.2: an available_index that did not move forward
-        // (wrap-safe) is a talker that restarted.
-        uint32_t const available_index = adp.available_index.get();
-        if (static_cast<int32_t>(available_index - s.available_index) <= 0) {
-            departed(index);
-            if (!same_gptp) {
-                continue;  // TK_NOT_DISCOVERED, the timer stopped
-            }
-            discovered(index, now);
-        }
-        s.available_index = available_index;
-        s.adp_deadline = now + valid_for;
     }
+}
+
+void MilanListener::adp_not_discovered(
+    uint16_t const index, AdpDu const& adp, bool const same_gptp, TimePoint const valid_until, TimePoint const now)
+{
+    // Section 5.6.4.5.1 (TK_NOT_DISCOVERED ignores RCV_ADP_DEPARTING).
+    if (!adp.is_entity_available() || !same_gptp) {
+        return;
+    }
+    auto& s = sinks_[index];
+    s.interface_index = adp.interface_index.get();
+    s.available_index = adp.available_index.get();
+    s.adp_deadline = valid_until;
+    discovered(index, now);
+}
+
+void MilanListener::adp_discovered(
+    uint16_t const index, AdpDu const& adp, bool const same_gptp, TimePoint const valid_until, TimePoint const now)
+{
+    auto& s = sinks_[index];
+    if (adp.interface_index.get() != s.interface_index) {
+        return;  // Sections 5.6.4.5.2-3 step 1
+    }
+    if (!adp.is_entity_available()) {
+        departed(index);  // Section 5.6.4.5.3
+        return;
+    }
+    // Section 5.6.4.5.2: an available_index that did not move forward
+    // (wrap-safe) is a talker that restarted.
+    if (static_cast<int32_t>(adp.available_index.get() - s.available_index) <= 0) {
+        departed(index);
+        if (!same_gptp) {
+            return;  // TK_NOT_DISCOVERED, the timer stopped
+        }
+        discovered(index, now);
+    }
+    s.available_index = adp.available_index.get();
+    s.adp_deadline = valid_until;
 }
 
 void MilanListener::tick(TimePoint const now)
 {
     for (size_t i = 0; i < sinks_.size(); ++i) {
-        auto& s = sinks_[i];
+        auto const& s = sinks_[i];
         auto const index = static_cast<uint16_t>(i);
         if (!s.bound()) {
             continue;
@@ -498,46 +527,51 @@ void MilanListener::tick(TimePoint const now)
         if (s.discovered && now >= s.adp_deadline) {
             departed(index);
         }
-        if (!s.timer_running || now < s.deadline) {
-            continue;
+        if (s.timer_running && now >= s.deadline) {
+            expire(index, now);
         }
-        s.timer_running = false;
-        switch (s.state) {
-            case MilanSinkState::prb_w_delay:
-                // Section 5.5.3.5.10.
-                s.state = MilanSinkState::prb_w_resp;
-                send_probe(index, now);
-                break;
-            case MilanSinkState::prb_w_resp:
-                // Section 5.5.3.5.16: the duplicate, same sequence_id.
-                start_timer(s, now, TMR_NO_RESP);
-                s.state = MilanSinkState::prb_w_resp2;
-                if (send_) {
-                    (void)send_(s.probe);
-                }
-                break;
-            case MilanSinkState::prb_w_resp2:
-                // Section 5.5.3.5.23.
-                start_timer(s, now, TMR_RETRY);
-                s.acmp_status = ACMP_STATUS_LISTENER_TALKER_TIMEOUT;
-                s.state = MilanSinkState::prb_w_retry;
-                break;
-            case MilanSinkState::prb_w_retry:
-                // Section 5.5.3.5.30 (the ACMP status of the last probe
-                // sequence is kept while probing again).
-                reprobe(index, now);
-                break;
-            case MilanSinkState::settled_no_rsv:
-                // Section 5.5.3.5.36: TMR_NO_TK.
-                unsettle(index);
-                s.acmp_status = 0;
-                reprobe(index, now);
-                break;
-            default:
-                break;
-        }
-        notify(index);
     }
+}
+
+void MilanListener::expire(uint16_t const index, TimePoint const now)
+{
+    auto& s = sinks_[index];
+    s.timer_running = false;
+    switch (s.state) {
+        case MilanSinkState::prb_w_delay:
+            // Section 5.5.3.5.10.
+            s.state = MilanSinkState::prb_w_resp;
+            send_probe(index, now);
+            break;
+        case MilanSinkState::prb_w_resp:
+            // Section 5.5.3.5.16: the duplicate, same sequence_id.
+            start_timer(s, now, TMR_NO_RESP);
+            s.state = MilanSinkState::prb_w_resp2;
+            if (send_) {
+                (void)send_(s.probe);
+            }
+            break;
+        case MilanSinkState::prb_w_resp2:
+            // Section 5.5.3.5.23.
+            start_timer(s, now, TMR_RETRY);
+            s.acmp_status = ACMP_STATUS_LISTENER_TALKER_TIMEOUT;
+            s.state = MilanSinkState::prb_w_retry;
+            break;
+        case MilanSinkState::prb_w_retry:
+            // Section 5.5.3.5.30 (the ACMP status of the last probe
+            // sequence is kept while probing again).
+            reprobe(index, now);
+            break;
+        case MilanSinkState::settled_no_rsv:
+            // Section 5.5.3.5.36: TMR_NO_TK.
+            unsettle(index);
+            s.acmp_status = 0;
+            reprobe(index, now);
+            break;
+        default:
+            break;
+    }
+    notify(index);
 }
 
 void MilanListener::notify(uint16_t const index)

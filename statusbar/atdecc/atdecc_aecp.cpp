@@ -55,6 +55,24 @@ auto aecp_status_name(uint8_t const status) noexcept -> std::string_view
     }
 }
 
+namespace {
+
+/// @p command's first @p response.size() octets into @p response as the response with
+/// @p status: @p header, the command's, with the response message type and length.
+auto echo_into(
+    std::span<uint8_t> const response, std::span<uint8_t const> const command, AecpDuCommon header, uint8_t const status) noexcept
+    -> std::span<uint8_t>
+{
+    span_copy(response, command.first(response.size()));
+    header.set_message_type(static_cast<uint8_t>(header.message_type() | 1U));
+    header.set_status(status);
+    header.set_control_data_length(static_cast<uint16_t>(response.size() - AecpDuCommon::HEADER_LENGTH));
+    span_store(response.first(AecpDuCommon::LENGTH), header);
+    return response;
+}
+
+}  // namespace
+
 auto aecp_echo_response(std::span<uint8_t const> const command, uint8_t const status, std::span<uint8_t> const out) noexcept
     -> std::span<uint8_t>
 {
@@ -63,20 +81,13 @@ auto aecp_echo_response(std::span<uint8_t const> const command, uint8_t const st
     }
     AecpDuCommon header{};
     span_load(header, command.first(AecpDuCommon::LENGTH));
-    size_t const declared = AecpDuCommon::HEADER_LENGTH + header.control_data_length();
-    size_t const size = std::min({declared, command.size(), out.size()});
+    size_t const size = std::min({AecpDuCommon::HEADER_LENGTH + header.control_data_length(), command.size(), out.size()});
     // A command whose control_data_length does not even cover the AECP common
     // fields (controller_entity_id, sequence_id) is malformed: not echoed.
     if (size < AecpDuCommon::LENGTH) {
         return {};
     }
-    auto const response = out.first(size);
-    span_copy(response, command.first(size));
-    header.set_message_type(static_cast<uint8_t>(header.message_type() | 1U));
-    header.set_status(status);
-    header.set_control_data_length(static_cast<uint16_t>(size - AecpDuCommon::HEADER_LENGTH));
-    span_store(response.first(AecpDuCommon::LENGTH), header);
-    return response;
+    return echo_into(out.first(size), command, header, status);
 }
 
 }  // namespace statusbar::atdecc
