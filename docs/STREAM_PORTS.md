@@ -36,6 +36,12 @@ the kernel, so ATDECC, gPTP and MRP keep using ordinary sockets. Frames are
 built in place in UMEM and sent on the same queue. Receive has no descriptor to
 poll; it is drained from the media tick.
 
+The UMEM is `UMEM_FRAMES` (2048) frames of `net::XdpConfig`'s default 4096
+octets, 8 MiB locked for the socket's life: a frame must fit one NIC receive
+buffer (NET_MODULE.md). That is the whole of a default 8 MiB `RLIMIT_MEMLOCK`,
+so a process opening it needs `CAP_IPC_LOCK` (the package's setcap grants it to
+`statusbar-avb-audio-io`) or a higher limit (`LimitMEMLOCK=` in its unit).
+
 An AF_XDP socket has one consumer, so it carries both directions or neither: when
 receive runs on a thread of its own, `StreamPorts` refuses `xdp`, and `auto`
 falls back to AF_PACKET.
