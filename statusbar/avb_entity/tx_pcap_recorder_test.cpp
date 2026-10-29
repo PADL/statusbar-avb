@@ -49,6 +49,28 @@ auto read_back(std::string const& path) -> std::vector<std::vector<uint8_t>>
     return out;
 }
 
+// The wire length each record reports, which is what tells a reader a
+// capture was snapped.
+auto read_back_wire_lengths(std::string const& path) -> std::vector<uint32_t>
+{
+    std::vector<uint32_t> out;
+    auto reader = statusbar::pcap::FileReader::open(path);
+    if (!reader) {
+        return out;
+    }
+    statusbar::pcap::Packet pkt;
+    uint64_t ts = 0;
+    uint32_t original = 0;
+    for (;;) {
+        auto const r = reader->read_packet(&ts, pkt, &original);
+        if (!r || !r.value()) {
+            break;
+        }
+        out.push_back(original);
+    }
+    return out;
+}
+
 }  // namespace
 
 TEST(tx_pcap_recorder, window_closes_after_duration_and_writes_file)
@@ -101,6 +123,13 @@ TEST(tx_pcap_recorder, snaplen_truncates_captured_bytes)
     EXPECT_EQ(frames.size(), 1U);
     EXPECT_EQ(frames[0].size(), 16U);  // truncated to snaplen
     EXPECT_TRUE(std::equal(frames[0].begin(), frames[0].end(), f.begin()));
+
+    // The record says the frame was 200 bytes on the wire. Before BUG-005 it
+    // said 16, so a snapped capture read as a complete one and the arena's
+    // carefully stored original length went nowhere.
+    auto const wire = read_back_wire_lengths(path);
+    EXPECT_EQ(wire.size(), 1U);
+    EXPECT_EQ(wire[0], 200U);
 }
 
 TEST(tx_pcap_recorder, arena_full_closes_window_cleanly)

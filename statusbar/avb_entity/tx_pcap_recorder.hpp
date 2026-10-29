@@ -113,12 +113,15 @@ class TxPcapRecorder
         while (off + REC_HDR <= used_) {
             uint64_t const ts_ns = load_u64(arena_.data() + off);
             uint32_t const cap_len = load_u32(arena_.data() + off + 8);
-            // orig_len at +12 is informational; FileWriter uses the span length.
+            // The untruncated length goes into the record's orig_len, so a
+            // snapped capture says so instead of claiming the frame was as
+            // short as the bytes we kept.
+            uint32_t const orig_len = load_u32(arena_.data() + off + 12);
             off += REC_HDR;
             if (off + cap_len > used_) {
                 break;
             }
-            (void)writer->write_packet(ts_ns / 1000, std::span<uint8_t const>{arena_.data() + off, cap_len});
+            (void)writer->write_packet(ts_ns / 1000, std::span<uint8_t const>{arena_.data() + off, cap_len}, orig_len);
             off += cap_len;
         }
         writer->flush();
