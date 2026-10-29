@@ -61,7 +61,7 @@ TEST(packet_stream_port, a_closed_port_has_no_window_and_receives_nothing)
 {
     PacketStreamPort port;
     EXPECT_TRUE(port.tx_begin(64).empty());
-    EXPECT_FALSE(port.tx_commit({}, kDest, 2, 3).has_value());
+    EXPECT_FALSE(port.tx_commit({}, kDest, 2, 3, 0).has_value());
     EXPECT_TRUE(port.tx_flush().has_value());
     EXPECT_EQ(port.rx_poll([](std::span<uint8_t const>, std::span<uint8_t const>) {}, 8), size_t{0});
     EXPECT_EQ(port.rx_fd(), -1);
@@ -84,12 +84,12 @@ TEST(test_stream_port, the_window_sits_behind_the_tagged_header)
     EXPECT_EQ(port.tx_begin(8).data(), window.data());  // not committed: reused
 
     std::array<uint8_t, 4> const elsewhere{};
-    EXPECT_FALSE(port.tx_commit(elsewhere, kDest, 2, 3).has_value());
+    EXPECT_FALSE(port.tx_commit(elsewhere, kDest, 2, 3, 0).has_value());
 
     std::vector<uint8_t> tapped;
     port.set_tx_tap([&tapped](std::span<uint8_t const> frame) { tapped.assign(frame.begin(), frame.end()); });
     std::ranges::copy(std::array<uint8_t, 4>{0x02, 0x81, 0x00, 0x00}, window.begin());
-    EXPECT_TRUE(port.tx_commit(window.first(4), kDest, 2, 3).has_value());
+    EXPECT_TRUE(port.tx_commit(window.first(4), kDest, 2, 3, 0).has_value());
     auto const sent = port.pop_tx();
     EXPECT_TRUE(sent.has_value());
     std::span<uint8_t const> const frame = sent->frame;
@@ -99,7 +99,7 @@ TEST(test_stream_port, the_window_sits_behind_the_tagged_header)
     EXPECT_TRUE(std::ranges::equal(tapped, frame));
     EXPECT_EQ(port.stats().tx_frames, uint64_t{1});
     EXPECT_EQ(port.stats().tx_errors, uint64_t{1});
-    EXPECT_FALSE(port.tx_commit(window.first(4), kDest, 2, 3).has_value());  // already committed
+    EXPECT_FALSE(port.tx_commit(window.first(4), kDest, 2, 3, 0).has_value());  // already committed
 }
 
 TEST(test_stream_port, rx_poll_stops_at_its_bound)

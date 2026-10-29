@@ -35,6 +35,12 @@ auto narrowest_bracket(std::span<PhcBracket const> const brackets) noexcept -> s
     return best;
 }
 
+auto clock_minus_phc_ns(PhcBracket const& clock, PhcReading const& phc) noexcept -> int64_t
+{
+    int64_t const clock_raw = clock.before_ns + ((clock.after_ns - clock.before_ns) / 2);
+    return clock.phc_ns + (phc.raw_ns - clock_raw) - phc.phc_ns;
+}
+
 auto cross_timestamp(PhcReading const& first0, PhcReading const& phcd, PhcReading const& second0) noexcept
     -> StatusValue<PhcCrossSample>
 {
@@ -294,7 +300,24 @@ auto PhcDevice::step_ns(int64_t const delta_ns) const noexcept -> Status
     return success();
 }
 
+auto system_clock_minus_phc_ns(PhcDevice const& phc, int const clock_id) noexcept -> StatusValue<int64_t>
+{
+    PhcBracket clock{.before_ns = monoraw_ns()};
+    timespec now{};
+    if (::clock_gettime(clock_id, &now) != 0) {
+        return errno_failure();
+    }
+    clock.phc_ns = to_ns(now);
+    clock.after_ns = monoraw_ns();
+    return phc.read().transform([&](PhcReading const& reading) { return clock_minus_phc_ns(clock, reading); });
+}
+
 #else
+
+auto system_clock_minus_phc_ns(PhcDevice const& /*phc*/, int /*clock_id*/) noexcept -> StatusValue<int64_t>
+{
+    return failure(std::errc::not_supported);
+}
 
 auto PhcDevice::open(std::string_view /*path*/, PhcDeviceConfig /*config*/) -> StatusValue<PhcDevice>
 {

@@ -46,6 +46,9 @@ struct XdpStreamPortOptions
     net::XdpAttachMode attach_mode{};
     /// Where the program is pinned and adopted from; empty: not pinned.
     std::string pin_path{};
+    /// Frames carry their launch time (net::XdpConfig::tx_launch_time). The caller has found the driver
+    /// honours it (launch_time_support()); open() still goes on without it when this build lacks it.
+    bool launch_time{false};
 };
 
 /// The options for @p mode on @p interface_name's queue @p queue_id: auto_ and
@@ -53,6 +56,11 @@ struct XdpStreamPortOptions
 /// net::XdpProgram::pin_path_for(@p interface_name), so a pinned program is adopted.
 [[nodiscard]] auto xdp_stream_port_options(StreamXdpMode mode, std::string_view interface_name, uint32_t queue_id)
     -> XdpStreamPortOptions;
+
+/// Whether AF_XDP frames can carry launch times, given whether the driver honours them (@p driver:
+/// net::netdev::launch_time_supported(), asked once). Errors: operation_not_supported (the driver),
+/// the query's, or net::XdpError::tx_metadata_not_supported (this build: libxdp before 1.5).
+[[nodiscard]] auto launch_time_support(StatusValue<bool> const& driver) noexcept -> Status;
 
 /// One AF_XDP socket, both ways. tx_begin/tx_commit/tx_flush, rx_poll and the
 /// cycle run on one thread only (the media thread): the rings have one producer
@@ -150,6 +158,65 @@ class XdpStreamPort final : public StreamPort
         std::atomic<bool> failing_{false};
     };
 
+    /// The launch times one socket's frames carry, in commit order (internal; public for tests). igc's
+    /// launch-time queue is a FIFO, so they never decrease; an untimed frame (0) goes at now(). next() on
+    /// the transmitting thread; the counters from any thread.
+    class LaunchOrder
+    {
+      public:
+        /// A wanted time this far behind the last is a clock step, not cross-slot rounding (nor a launch
+        /// lead, at most half this): the floor goes.
+        static constexpr uint64_t STEP_NS = 1'000'000;
+        /// A frame held back by more than this (a class A packet) is counted: by design, two slots on one
+        /// socket differ by under a packet.
+        static constexpr uint64_t CLAMP_TOLERANCE_NS = 125'000;
+
+        /// The time for a frame asked for at @p requested_ns (0: untimed, @p now() in gPTP ns instead):
+        /// at least the last one given, unless it is more than STEP_NS behind (a backward step).
+        template <typename Now>
+        [[nodiscard]] auto next(uint64_t const requested_ns, Now const& now) noexcept -> uint64_t
+        {
+            uint64_t const wanted = requested_ns != 0 ? requested_ns : now();
+            if (wanted >= last_ns_ || last_ns_ - wanted > STEP_NS) {
+                count_step(wanted < last_ns_);
+                last_ns_ = wanted;
+                return wanted;
+            }
+            count_clamp(last_ns_ - wanted);
+            return last_ns_;
+        }
+        /// Forget the last time (open()); the counters stay.
+        void reset() noexcept { last_ns_ = 0; }
+        /// Frames held back to the last time by more than CLAMP_TOLERANCE_NS, the most one was held (ns),
+        /// and floors dropped for a step (STEP_NS): each means trouble, not the design's rounding.
+        [[nodiscard]] auto clamped() const noexcept -> uint64_t { return clamped_.load(std::memory_order_relaxed); }
+        [[nodiscard]] auto max_clamp_ns() const noexcept -> uint64_t { return max_clamp_ns_.load(std::memory_order_relaxed); }
+        [[nodiscard]] auto steps() const noexcept -> uint64_t { return steps_.load(std::memory_order_relaxed); }
+
+      private:
+        void count_clamp(uint64_t const ns) noexcept
+        {
+            if (ns <= CLAMP_TOLERANCE_NS) {
+                return;
+            }
+            clamped_.store(clamped_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            if (ns > max_clamp_ns_.load(std::memory_order_relaxed)) {
+                max_clamp_ns_.store(ns, std::memory_order_relaxed);
+            }
+        }
+        void count_step(bool const stepped) noexcept
+        {
+            if (stepped) {
+                steps_.store(steps_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            }
+        }
+
+        uint64_t last_ns_{0};
+        std::atomic<uint64_t> clamped_{0};
+        std::atomic<uint64_t> max_clamp_ns_{0};
+        std::atomic<uint64_t> steps_{0};
+    };
+
     /// The XdpConfig open() uses on @p interface_name: UMEM_FRAMES frames, a
     /// FILL_RING fill ring, a ring's worth of completions a cycle, @p rules, no per-frame
     /// clock, no drain budget (rx_poll bounds it) and @p options, both by view.
@@ -184,6 +251,10 @@ class XdpStreamPort final : public StreamPort
     [[nodiscard]] auto pinned() const noexcept -> bool;
     /// The bind mode open() asked for.
     [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode;
+    /// Whether committed frames carry their launch time (opened with options.launch_time, supported).
+    [[nodiscard]] auto launch_time() const noexcept -> bool;
+    /// Why the last open() asking for launch time went on without it (empty: it did not).
+    [[nodiscard]] auto launch_time_error() const noexcept -> std::error_code { return launch_time_error_; }
     /// The socket's counters. On the thread that drains the port only.
     [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats const&;
     /// The frames held back for transmit, the uncommitted tx_begin frame not
@@ -199,14 +270,17 @@ class XdpStreamPort final : public StreamPort
     }
     /// The kick history behind tx_error(). Any thread.
     [[nodiscard]] auto tx_health() const noexcept -> TxHealth const& { return tx_health_; }
+    /// The launch-time ordering's counters (frames clamped, the largest clamp, steps). Any thread.
+    [[nodiscard]] auto launch_order() const noexcept -> LaunchOrder const& { return launch_order_; }
 
     /// The window at TX_PAYLOAD_OFFSET of a pooled UMEM frame; empty when the
     /// port is closed, the pool is empty or @p capacity exceeds MAX_TX_PAYLOAD.
     [[nodiscard]] auto tx_begin(size_t capacity) noexcept -> std::span<uint8_t> override;
-    /// Write the tagged header in front of @p payload, tap the frame and put it
-    /// on the TX ring. A full ring fails (net::XdpError::tx_ring_full) and the
-    /// frame goes back to the pool; a span not in the window: invalid_argument.
-    [[nodiscard]] auto tx_commit(std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp) noexcept
+    /// Write the tagged header in front of @p payload, tap the frame and put it on the TX ring; with
+    /// launch_time(), due at LaunchOrder::next(@p launch_time_ns). A full ring fails (tx_ring_full), the
+    /// frame back in the pool; a span not in the window: invalid_argument.
+    [[nodiscard]] auto tx_commit(
+        std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp, uint64_t launch_time_ns) noexcept
         -> Status override;
     /// One kick when the kernel asks for it (need_wakeup); a transient refusal
     /// (net::detail::is_transient_kick_error) is not one. Errors: tx_flush_failed.
@@ -230,8 +304,12 @@ class XdpStreamPort final : public StreamPort
 
   private:
     void refill_tx_pool() noexcept;
-    /// Commit @p slot's first @p length octets (a written frame), counting it and tapping it.
-    [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length) noexcept -> Status;
+    /// Open the socket with the AVTP stream rules as @p options say, launch time only where supported.
+    [[nodiscard]] auto open_socket(std::string_view interface_name, XdpStreamPortOptions const& options) -> Status;
+    /// @p options with launch_time kept only where this build has TX metadata (else recorded); a fresh LaunchOrder.
+    [[nodiscard]] auto with_launch_time(XdpStreamPortOptions const& options) -> XdpStreamPortOptions;
+    /// Commit @p slot's first @p length octets (a written frame) due at @p launch_time_ns, counting it and tapping it.
+    [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length, uint64_t launch_time_ns) noexcept -> Status;
 
     std::unique_ptr<net::XdpContext> context_;  ///< never null
     TxPool tx_pool_{};
@@ -241,6 +319,8 @@ class XdpStreamPort final : public StreamPort
     TxHealth tx_health_{};
     std::atomic<uint64_t> tx_pool_empty_{0};
     uint32_t queue_id_{0};
+    std::error_code launch_time_error_{};
+    LaunchOrder launch_order_{};
 };
 
 }  // namespace statusbar::avb_entity

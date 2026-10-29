@@ -57,6 +57,58 @@ mode and does not reset the adapter. Without libxdp, or off Linux, `open()`
 fails with `not_supported_on_platform`. Zero-copy behaviour is verified on
 hardware, not in unit tests; the AF_XDP tests need root and skip otherwise.
 
+## Launch time
+
+`tx_commit` takes `launch_time_ns`, the gPTP time the frame is due on the
+wire (0: untimed). `PacketStreamPort` sends at once (AF_PACKET without
+SO_TXTIME); `TestStreamPort` records the time of each frame the link took
+(`last_launch_time_ns`).
+
+The host asks the driver once (`net::netdev::launch_time_supported()`:
+netdev `tx-launch-time-fifo`, set by igc and stmmac, not igb), checks the
+build with `launch_time_support()` (AF_XDP TX metadata needs libxdp 1.5 or
+later) and hands the one answer to the stream ports and the shaper, so they
+cannot disagree. `XdpStreamPortOptions::launch_time`
+(`StreamPortsOptions::launch_time`, the kit's `stream_launch_time`) then asks
+`open()` for TX metadata; a build without it opens without and says why
+(`launch_time_error()`, `log_launch_time`). An igb port is exactly as without.
+
+Pooled frames are taken untimed at `begin_cycle`; the commit writes the
+frame's time into its metadata (`net::XdpContext::tx_set_launch_time`): two
+stores and a load, no syscall. On a socket with launch time every frame is
+timed, since igc writes a launch-time context descriptor only for a frame that
+asks and may otherwise reuse the previous one: an untimed frame goes at
+CLOCK_TAI now (vDSO). igc's launch-time queue is a FIFO, so `LaunchOrder`
+raises each time to at least the last one committed on the socket; two talkers
+whose departures fall a few frames apart wait at most for each other, under a
+packet. Talkers that hand packets over on the tick they depart, on a grid of
+whole packets, share that grid: in the steady state the clamp fires only on
+nanosecond rounding between rates or on a catch-up after a stall. A time more
+than `LaunchOrder::STEP_NS` (1 ms) behind the last is a clock step, not
+rounding (nor a launch lead, at most half that), and drops the floor, so a
+backward PTP step does not hold frames in the FIFO. `launch_order()` counts
+frames held by more than `CLAMP_TOLERANCE_NS` (a packet), the largest hold and
+steps: the design's own rounding is not counted, so a count means trouble. The NIC reads the time on its PHC, which carries gPTP (TAI) time when
+ptp4l disciplines it, and honours it only with the queue in launch-time mode,
+which the shaper's offloaded etf sets (SHAPER.md, "Launch time (etf)").
+
+The raw transmits (`transmit_aaf_raw`, `transmit_am824_raw`,
+`transmit_crf_raw`) take the time from the caller, which knows when the packet
+departs; the float paths pass 0. A caller that hands a packet over on the tick
+it departs gives it a lead (a whole tick or more, under its presentation time
+offset) on the wire only: the NIC then sends it at departure plus lead, free of
+the tick's send jitter, while its presentation time stays departure plus the
+offset. So launch time changes no latency and moves no timestamp (nor the CRF
+phase); it lets the offset be set to the lead plus the network transit. Launch
+times are always domain-0 (PTP, the NIC's PHC) times: a CRF talker in another
+clock domain launches at its first event's domain-0 time plus the lead.
+
+igc (`igc_tx_launchtime`) places the time in a 1 s cycle estimated from the
+system's CLOCK_TAI, so the system clock must follow the PHC (phc2sys). A time
+already past goes out at once; one more than a cycle ahead lands in the wrong
+cycle; a time within 5 µs of the cycle's end may not be honoured. None of
+this has run on an igc yet.
+
 ## SlotGuard
 
 A stream slot is shared by its data-plane thread (the media thread transmitting,

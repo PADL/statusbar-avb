@@ -337,8 +337,8 @@ auto serialize_aaf_raw(
 }
 
 template <typename Context, typename Serialize>
-auto TalkerStreams::send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t const max_frame, Serialize const& serialize)
-    -> bool
+auto TalkerStreams::send_serialized(
+    TalkerStreamSlot& slot, Context& ctx, size_t const max_frame, uint64_t const launch_time_ns, Serialize const& serialize) -> bool
 {  // NOLINT(statusbar-block-statements): one frame's transmit steps, in order
     std::span<uint8_t> const frame = port_->tx_begin(max_frame);
     if (frame.empty()) {
@@ -349,7 +349,7 @@ auto TalkerStreams::send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t
     if (frame_len == 0) {
         return false;
     }
-    if (!send_stream_frame(slot, frame.first(frame_len))) {
+    if (!send_stream_frame(slot, frame.first(frame_len), launch_time_ns)) {
         ctx = saved;
         return false;
     }
@@ -361,14 +361,15 @@ auto TalkerStreams::transmit_aaf_raw(
     uint64_t const first_index,
     uint64_t const pts_ns,
     uint16_t const frames,
-    StreamRawRenderFn const& render) -> bool
+    StreamRawRenderFn const& render,
+    uint64_t const launch_time_ns) -> bool
 {
     SlotGuard::Entry const entry{guards_[slot.spec.index]};
     if (!entry.entered() || !slot.aaf || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
-    return send_serialized(slot, *slot.aaf, MAX_AUDIO_PAYLOAD, [&](std::span<uint8_t> const frame) {
+    return send_serialized(slot, *slot.aaf, MAX_AUDIO_PAYLOAD, launch_time_ns, [&](std::span<uint8_t> const frame) {
         return serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
     });
 }
@@ -401,24 +402,27 @@ auto TalkerStreams::transmit_am824_raw(
     uint64_t const first_index,
     uint64_t const pts_ns,
     uint16_t const frames,
-    StreamRawRenderFn const& render) -> bool
+    StreamRawRenderFn const& render,
+    uint64_t const launch_time_ns) -> bool
 {
     SlotGuard::Entry const entry{guards_[slot.spec.index]};
     if (!entry.entered() || !slot.am824 || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_am824_raw writes every byte it sends.
-    return send_serialized(slot, *slot.am824, MAX_AUDIO_PAYLOAD, [&](std::span<uint8_t> const frame) {
+    return send_serialized(slot, *slot.am824, MAX_AUDIO_PAYLOAD, launch_time_ns, [&](std::span<uint8_t> const frame) {
         return serialize_am824_raw(*slot.am824, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
     });
 }
 
-auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame) -> bool
+auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> const frame, uint64_t const launch_time_ns)
+    -> bool
 {
     // Frames carry the SR class VID + PCP (untagged AVTP is in no SR class). The pcap stamp is the
     // gPTP wall-clock transmit time, so a capture shows avtp_ts - wall_clock = presentation_offset.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    if (port_ != nullptr && !port_->tx_commit(frame, slot.dest_mac, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp)) {
+    if (port_ != nullptr &&
+        !port_->tx_commit(frame, slot.dest_mac, vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp, launch_time_ns)) {
         return false;
     }
     ++slot.tx_packets;
@@ -490,7 +494,8 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     (void)transmit_crf_raw(slot, used);
 }
 
-auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> const timestamps_ns) -> bool
+auto TalkerStreams::transmit_crf_raw(
+    TalkerStreamSlot& slot, std::span<uint64_t const> const timestamps_ns, uint64_t const launch_time_ns) -> bool
 {
     if (!slot.crf || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;
@@ -498,7 +503,7 @@ auto TalkerStreams::transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t 
     static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (MAX_CRF_TIMESTAMPS_PER_PDU * avtp::CrfPdu::TIMESTAMP_SIZE);
     static_assert(MAX_FRAME <= StreamPort::MAX_TX_PAYLOAD);
     // Not zeroed: serialize_crf_raw writes every byte it sends.
-    return send_serialized(slot, *slot.crf, MAX_FRAME, [&](std::span<uint8_t> const frame) {
+    return send_serialized(slot, *slot.crf, MAX_FRAME, launch_time_ns, [&](std::span<uint8_t> const frame) {
         // Restart requests since the last PDU toggle mr once; a refused frame leaves it for the next.
         if (mr_pending_[slot.spec.index].exchange(false, std::memory_order_relaxed)) {
             slot.crf_mr = !slot.crf_mr;

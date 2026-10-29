@@ -62,11 +62,12 @@ class StreamPort
     /// empty when the port cannot transmit or @p capacity exceeds MAX_TX_PAYLOAD. An uncommitted
     /// window is reused by the next tx_begin.
     [[nodiscard]] virtual auto tx_begin(size_t capacity) noexcept -> std::span<uint8_t> = 0;
-    /// Send @p payload, a prefix of the last tx_begin window, to @p dest
-    /// tagged with @p vid and @p pcp. Errors: the link's, or invalid_argument
-    /// for a span that is not such a prefix.
+    /// Send @p payload, a prefix of the last tx_begin window, to @p dest tagged with @p vid and
+    /// @p pcp, at @p launch_time_ns (gPTP ns, when the frame is due on the wire; 0: at once; a port
+    /// without launch time ignores it). Errors: the link's, or invalid_argument for a span not such a prefix.
     [[nodiscard]] virtual auto tx_commit(
-        std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp) noexcept -> Status = 0;
+        std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp, uint64_t launch_time_ns) noexcept
+        -> Status = 0;
     /// Hand the frames committed since the last flush to the link: once per
     /// media tick, after the last commit. Errors: the link's.
     [[nodiscard]] virtual auto tx_flush() noexcept -> Status = 0;
@@ -168,7 +169,9 @@ class PacketStreamPort final : public StreamPort
     [[nodiscard]] auto rx_open() const noexcept -> bool { return rx_.valid(); }
 
     [[nodiscard]] auto tx_begin(size_t capacity) noexcept -> std::span<uint8_t> override;
-    [[nodiscard]] auto tx_commit(std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp) noexcept
+    /// Sends at once: the launch time is not used (AF_PACKET without SO_TXTIME).
+    [[nodiscard]] auto tx_commit(
+        std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp, uint64_t launch_time_ns) noexcept
         -> Status override;
     /// Nothing to flush: tx_commit sends.
     [[nodiscard]] auto tx_flush() noexcept -> Status override { return success(); }

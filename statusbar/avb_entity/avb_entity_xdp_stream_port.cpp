@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -41,6 +42,37 @@ auto xdp_stream_port_options(StreamXdpMode const mode, std::string_view const in
     return options;
 }
 
+auto launch_time_support(StatusValue<bool> const& driver) noexcept -> Status
+{
+    if (!driver) {
+        return failure(driver.error());
+    }
+    if (!*driver) {
+        return failure(std::errc::operation_not_supported);
+    }
+    if (!net::detail::tx_metadata_len(true)) {
+        return failure(net::XdpError::tx_metadata_not_supported);
+    }
+    return success();
+}
+
+namespace {
+
+/// CLOCK_TAI now (vDSO, no syscall), the time an untimed frame goes at; the host has checked that
+/// it follows the NIC's PHC before asking for launch time. 0 off Linux.
+[[nodiscard]] auto tai_now_ns() noexcept -> uint64_t
+{
+#if defined(__linux__)
+    timespec now{};
+    ::clock_gettime(CLOCK_TAI, &now);
+    return (static_cast<uint64_t>(now.tv_sec) * 1'000'000'000U) + static_cast<uint64_t>(now.tv_nsec);
+#else
+    return 0;
+#endif
+}
+
+}  // namespace
+
 auto XdpStreamPort::config_for(
     std::string_view const interface_name,
     XdpStreamPortOptions const& options,
@@ -61,6 +93,7 @@ auto XdpStreamPort::config_for(
         .bind_mode = options.bind_mode,
         .attach_mode = options.attach_mode,
         .pin_path = options.pin_path,
+        .tx_launch_time = options.launch_time,
     };
 }
 
@@ -110,11 +143,34 @@ auto XdpStreamPort::zero_copy() const noexcept -> bool
     return context_->zero_copy();
 }
 
+auto XdpStreamPort::launch_time() const noexcept -> bool
+{
+    return context_->tx_launch_time();
+}
+
+auto XdpStreamPort::with_launch_time(XdpStreamPortOptions const& options) -> XdpStreamPortOptions
+{
+    launch_time_error_ = {};
+    launch_order_.reset();
+    XdpStreamPortOptions effective = options;
+    if (auto const supported = options.launch_time ? launch_time_support(true) : Status{}; !supported) {
+        launch_time_error_ = supported.error();
+        effective.launch_time = false;
+    }
+    return effective;
+}
+
+auto XdpStreamPort::open_socket(std::string_view const interface_name, XdpStreamPortOptions const& options) -> Status
+{
+    auto const rules = net::avtp_stream_rules();
+    auto const effective = with_launch_time(options);
+    return context_->open(config_for(interface_name, effective, rules));
+}
+
 auto XdpStreamPort::open(std::string_view const interface_name, XdpStreamPortOptions const& options) -> Status
 {
     close();
-    auto const rules = net::avtp_stream_rules();
-    if (auto opened = context_->open(config_for(interface_name, options, rules)); !opened) {
+    if (auto opened = open_socket(interface_name, options); !opened) {
         return opened;
     }
     queue_id_ = options.queue_id;
@@ -146,8 +202,13 @@ auto XdpStreamPort::tx_begin(size_t const capacity) noexcept -> std::span<uint8_
     return tx_pending_->buffer.subspan(TX_PAYLOAD_OFFSET, capacity);
 }
 
-auto XdpStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const length) noexcept -> Status
+auto XdpStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const length, uint64_t const launch_time_ns) noexcept
+    -> Status
 {
+    // A pooled frame was taken untimed (tx_start): its launch time goes in now, every frame timed.
+    if (context_->tx_launch_time()) {
+        context_->tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_order_.next(launch_time_ns, tai_now_ns)));
+    }
     if (auto committed = context_->tx_commit(slot.handle, length); !committed) {
         // The socket freed the frame: take one back so the pool stays whole.
         if (auto again = context_->tx_start()) {
@@ -164,7 +225,11 @@ auto XdpStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const le
 }
 
 auto XdpStreamPort::tx_commit(
-    std::span<uint8_t const> const payload, ieee::Eui48 const& dest, uint16_t const vid, uint8_t const pcp) noexcept -> Status
+    std::span<uint8_t const> const payload,
+    ieee::Eui48 const& dest,
+    uint16_t const vid,
+    uint8_t const pcp,
+    uint64_t const launch_time_ns) noexcept -> Status
 {
     if (!tx_pending_ || payload.data() != tx_pending_->buffer.data() + TX_PAYLOAD_OFFSET || payload.size() > tx_window_) {
         count_tx(false);
@@ -173,7 +238,7 @@ auto XdpStreamPort::tx_commit(
     auto const slot = *tx_pending_;
     tx_pending_.reset();
     write_stream_header(slot.buffer, dest, context_->hardware_address(), vid, pcp);
-    return commit_slot(slot, TX_PAYLOAD_OFFSET + payload.size());
+    return commit_slot(slot, TX_PAYLOAD_OFFSET + payload.size(), launch_time_ns);
 }
 
 auto XdpStreamPort::tx_flush() noexcept -> Status

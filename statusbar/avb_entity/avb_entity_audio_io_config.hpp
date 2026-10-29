@@ -305,6 +305,9 @@ struct AvbEntityAudioIOConfig
     StreamXdpMode stream_xdp_mode{StreamXdpMode::auto_};
     /// The NIC queue of the AF_XDP socket: the SR class A queue.
     uint32_t stream_xdp_queue{0};
+    /// AF_XDP talker frames carry their launch time (docs/STREAM_PORTS.md, "Launch time"): set only when
+    /// the host found the driver honours it (launch_time_support) and the system clock follows its PHC.
+    bool stream_launch_time{false};
 
     /// Pin the media-clock rate ratio r to exactly 1.0 (media clock = gPTP) instead
     /// of tracking r = gPTP/CLOCK_REALTIME via the GPS ratio Kalman. Use when the

@@ -494,6 +494,36 @@ TEST(talker_port, a_refused_render_commits_nothing_and_flush_reaches_the_port)
     EXPECT_EQ(port.flushes(), size_t{2});
 }
 
+// Each raw transmit hands the port the launch time it was given (when the frame is due on the
+// wire); without one the port is told 0 and sends at once.
+TEST(talker_port, each_frame_carries_its_launch_time_to_the_port)
+{
+    avb_entity::TestStreamPort port{kPortMac};
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t> payload, uint32_t, uint64_t, uint64_t) {
+        std::ranges::fill(payload, uint8_t{0x5A});
+        return true;
+    };
+    uint64_t const pts = 5'002'000'000;  // presented 2 ms after it is due
+    EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, pts, 12, render, pts - 2'000'000));
+    EXPECT_EQ(port.last_launch_time_ns(), uint64_t{5'000'000'000});
+    std::array<uint64_t, 1> const ts{pts + 125'000};
+    EXPECT_TRUE(talker.transmit_crf_raw(*talker.slot_for(1), ts, 5'000'125'000));
+    EXPECT_EQ(port.last_launch_time_ns(), uint64_t{5'000'125'000});
+    EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 12, pts + 125'000, 12, render));
+    EXPECT_EQ(port.last_launch_time_ns(), uint64_t{0});
+    EXPECT_EQ(port.stats().tx_frames, uint64_t{3});
+}
+
 // A frame the port refuses (a full ring) consumes no sequence number and is
 // not counted; the next accepted frame carries the number it would have.
 TEST(talker_port, a_refused_commit_consumes_no_sequence_number)

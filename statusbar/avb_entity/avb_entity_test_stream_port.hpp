@@ -39,7 +39,9 @@ class TestStreamPort final : public StreamPort
     auto operator=(TestStreamPort&&) -> TestStreamPort& = delete;
 
     [[nodiscard]] auto tx_begin(size_t capacity) noexcept -> std::span<uint8_t> override;
-    [[nodiscard]] auto tx_commit(std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp) noexcept
+    /// Sends at once; a frame the link took records @p launch_time_ns (last_launch_time_ns()).
+    [[nodiscard]] auto tx_commit(
+        std::span<uint8_t const> payload, ieee::Eui48 const& dest, uint16_t vid, uint8_t pcp, uint64_t launch_time_ns) noexcept
         -> Status override;
     [[nodiscard]] auto tx_flush() noexcept -> Status override;
     void begin_cycle() noexcept override { ++cycles_begun_; }
@@ -67,17 +69,20 @@ class TestStreamPort final : public StreamPort
     /// Refuse every tx_commit from now on (@p refuse) as a full ring does: the
     /// frame is not sent and goes back to the pool (errc::no_buffer_space).
     void refuse_commits(bool const refuse) noexcept { refuse_commits_ = refuse; }
+    /// The launch time of the last frame the link took (0 before one).
+    [[nodiscard]] auto last_launch_time_ns() const noexcept -> uint64_t { return last_launch_time_ns_; }
     /// The groups joined and not left, in join order.
     [[nodiscard]] auto joined() const noexcept -> std::span<ieee::Eui48 const> { return {joined_.data(), joined_.size()}; }
 
   private:
-    /// Commit @p slot's first @p length octets (a written frame), counting it and tapping it.
-    [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length) noexcept -> Status;
+    /// Commit @p slot's first @p length octets (a written frame) due at @p launch_time_ns, counting it and tapping it.
+    [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length, uint64_t launch_time_ns) noexcept -> Status;
 
     net::TestPortContext port_{};
     std::optional<net::EthernetTxSlot> pending_{};  ///< the tx_begin frame not yet committed
     TxTap tap_{};
     bool refuse_commits_{false};
+    uint64_t last_launch_time_ns_{0};
     size_t flushes_{0};
     size_t cycles_begun_{0};
     size_t cycles_ended_{0};

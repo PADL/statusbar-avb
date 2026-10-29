@@ -213,20 +213,30 @@ struct TalkerStreams
     /// entities.)
     void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples, std::span<float const> src);
     void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
-    /// Send one AAF packet of @p frames frames at wire presentation time @p pts_ns (no offset added),
-    /// its payload filled by @p render as raw wire bytes. Media-timer thread; true if sent. Nothing is
-    /// sent, nor the sequence advanced, for a non-AAF slot, no port frame, or @p render false.
+    /// Send one AAF packet of @p frames frames presented at @p pts_ns (no offset added), its payload raw wire bytes
+    /// from @p render, due at @p launch_time_ns (StreamPort::tx_commit). Media-timer thread; true if sent. Nothing
+    /// is sent, nor the sequence advanced, for a non-AAF slot, no port frame, or @p render false.
     auto transmit_aaf_raw(
-        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
+        TalkerStreamSlot& slot,
+        uint64_t first_index,
+        uint64_t pts_ns,
+        uint16_t frames,
+        StreamRawRenderFn const& render,
+        uint64_t launch_time_ns = 0) -> bool;
     /// Send one IEC 61883-6 AM824 packet of @p frames data blocks, the first at sample index @p first_index
-    /// presented at @p pts_ns, its payload filled by @p render (see serialize_am824_raw). Media-timer
-    /// thread; true if sent. As transmit_aaf_raw for a non-AM824 slot, no port frame or a refused render.
+    /// presented at @p pts_ns, its payload filled by @p render (see serialize_am824_raw), due at
+    /// @p launch_time_ns. Media-timer thread; true if sent. As transmit_aaf_raw otherwise.
     auto transmit_am824_raw(
-        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
-    /// Commit @p frame, a prefix of the port's tx_begin window, on @p slot
-    /// (VLAN-tagged, pcap-stamped) and count it; false, counting nothing, when
-    /// the port refuses it (no port: only counted). Media-timer thread.
-    auto send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame) -> bool;
+        TalkerStreamSlot& slot,
+        uint64_t first_index,
+        uint64_t pts_ns,
+        uint16_t frames,
+        StreamRawRenderFn const& render,
+        uint64_t launch_time_ns = 0) -> bool;
+    /// Commit @p frame, a prefix of the port's tx_begin window, on @p slot (VLAN-tagged, pcap-stamped,
+    /// due at @p launch_time_ns) and count it; false, counting nothing, when the port refuses it (no
+    /// port: only counted). Media-timer thread.
+    auto send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame, uint64_t launch_time_ns = 0) -> bool;
 
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.
@@ -241,9 +251,9 @@ struct TalkerStreams
     /// them with transmit_crf_raw; nothing is sent before the media clock is anchored.
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
     /// Send one CRF PDU on @p slot carrying exactly @p timestamps_ns (64-bit gPTP times, offset
-    /// applied). Media-timer thread; true if sent. Nothing is sent for a non-CRF or stopped slot,
-    /// no port frame, or a count other than timestamps_per_packet.
-    auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns) -> bool;
+    /// applied), due at @p launch_time_ns. Media-timer thread; true if sent. Nothing is sent for a
+    /// non-CRF or stopped slot, no port frame, or a count other than timestamps_per_packet.
+    auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns, uint64_t launch_time_ns = 0) -> bool;
 
     /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
     /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
@@ -271,9 +281,10 @@ struct TalkerStreams
     /// Take @p trial's serializers into @p slot, carrying the stream's counts over. Under the guard.
     static void adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept;
     /// Send the frame @p serialize writes into a tx_begin window of @p max_frame octets (its length,
-    /// 0: none), restoring @p ctx when the port refuses it. Media thread.
+    /// 0: none), due at @p launch_time_ns, restoring @p ctx when the port refuses it. Media thread.
     template <typename Context, typename Serialize>
-    auto send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t max_frame, Serialize const& serialize) -> bool;
+    auto send_serialized(
+        TalkerStreamSlot& slot, Context& ctx, size_t max_frame, uint64_t launch_time_ns, Serialize const& serialize) -> bool;
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};

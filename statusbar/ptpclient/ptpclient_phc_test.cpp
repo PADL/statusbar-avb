@@ -59,6 +59,17 @@ TEST(ptpclient_phc, interpolation_holds_at_tai_times)
     EXPECT_EQ(pair->phc0_ns, tai + 20'002);
 }
 
+// CLOCK_TAI read at RAW 1000..1100 (midpoint 1050) as T; the PHC read at RAW 1250 as P: the clock
+// carried 200 ns on is T + 200, so it leads the PHC by T + 200 - P.
+TEST(ptpclient_phc, a_system_clock_is_compared_at_the_phc_reads_instant)
+{
+    int64_t const tai = int64_t{1'800'000'000} * 1'000'000'000;
+    PhcBracket const clock{.before_ns = 1000, .phc_ns = tai, .after_ns = 1100};
+    EXPECT_EQ(clock_minus_phc_ns(clock, PhcReading{.raw_ns = 1250, .phc_ns = tai + 200}), int64_t{0});
+    EXPECT_EQ(clock_minus_phc_ns(clock, PhcReading{.raw_ns = 1250, .phc_ns = tai + 37'200}), int64_t{-37'000});
+    EXPECT_EQ(clock_minus_phc_ns(clock, PhcReading{.raw_ns = 1050, .phc_ns = tai - 500'000}), int64_t{500'000});
+}
+
 TEST(ptpclient_phc, a_disordered_triple_is_refused)
 {
     PhcReading const a{.raw_ns = 1000, .phc_ns = 1};

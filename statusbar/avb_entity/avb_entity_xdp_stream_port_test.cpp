@@ -201,6 +201,91 @@ TEST(avb_entity_xdp_stream_port, the_config_splits_the_umem_and_stamps_no_frames
     EXPECT_TRUE(config.pin_path == options.pin_path);
 }
 
+// Launch time needs the driver (netdev tx-launch-time-fifo, asked once by the host) and this build
+// (libxdp >= 1.5); the config asks the socket for TX metadata only when the options do.
+TEST(avb_entity_xdp_stream_port, launch_time_needs_the_driver_and_the_build)
+{
+    EXPECT_TRUE(launch_time_support(false).error() == std::errc::operation_not_supported);
+    auto const no_query = std::make_error_code(std::errc::no_such_file_or_directory);
+    EXPECT_TRUE(launch_time_support(failure(no_query)).error() == no_query);
+    bool const built = net::detail::tx_metadata_len(true).has_value();
+    auto const supported = launch_time_support(true);
+    EXPECT_EQ(supported.has_value(), built);
+    EXPECT_TRUE(built || supported.error() == net::XdpError::tx_metadata_not_supported);
+
+    auto const rules = net::avtp_stream_rules();
+    auto options = xdp_stream_port_options(StreamXdpMode::zerocopy, "enp1s0", 0);
+    EXPECT_FALSE(options.launch_time);
+    EXPECT_FALSE(XdpStreamPort::config_for("enp1s0", options, rules).tx_launch_time);
+    options.launch_time = true;
+    EXPECT_TRUE(XdpStreamPort::config_for("enp1s0", options, rules).tx_launch_time);
+}
+
+// Two talker streams on one socket whose departures sit 4 frames apart on the 125 us grid (their
+// crossings differ), committed A then B each tick: launch times never decrease (igc's queue is a
+// FIFO), A is never held, B waits at most for A, under a packet (6 frames at 48 kHz). An untimed
+// frame goes at now, or after the last time given.
+TEST(avb_entity_xdp_stream_port, launch_times_never_decrease_across_streams)
+{
+    constexpr uint64_t FRAME_NS = 20'833;
+    constexpr uint64_t TICK_NS = 125'000;
+    uint64_t const base = 1'800'000'000ULL * 1'000'000'000ULL;
+    XdpStreamPort::LaunchOrder order;
+    auto const never = [] { return uint64_t{0}; };
+    uint64_t last = 0;
+    for (uint64_t k = 0; k < 8; ++k) {
+        uint64_t const a = base + (k * TICK_NS) + (4 * FRAME_NS);
+        uint64_t const b = base + (k * TICK_NS);
+        uint64_t const given_a = order.next(a, never);
+        uint64_t const given_b = order.next(b, never);
+        EXPECT_EQ(given_a, a);
+        EXPECT_TRUE(given_a >= last && given_b >= given_a);
+        EXPECT_TRUE(given_b - b < 6 * FRAME_NS);
+        last = given_b;
+    }
+    EXPECT_EQ(order.clamped(), uint64_t{0});  // under a packet: the design's rounding, not counted
+    EXPECT_EQ(order.max_clamp_ns(), uint64_t{0});
+    EXPECT_EQ(order.next(base + (8 * TICK_NS), never), base + (8 * TICK_NS));
+    EXPECT_EQ(order.next(base + (7 * TICK_NS) - 1, never), base + (8 * TICK_NS));  // over a packet: counted
+    EXPECT_EQ(order.clamped(), uint64_t{1});
+    EXPECT_EQ(order.max_clamp_ns(), TICK_NS + 1);
+    uint64_t const later = base + (100 * TICK_NS);
+    EXPECT_EQ(order.next(0, [&] { return later; }), later);
+    EXPECT_EQ(order.next(0, [&] { return later - 1000; }), later);  // now just behind: the last time
+    order.reset();
+    EXPECT_EQ(order.next(0, [&] { return base; }), base);
+    EXPECT_EQ(order.steps(), uint64_t{0});
+}
+
+// A backward PTP step (here 3 s) is not cross-slot rounding: the floor goes at once, counted, so the
+// frames after it are not held into the future in igc's FIFO.
+TEST(avb_entity_xdp_stream_port, a_backward_clock_step_drops_the_floor)
+{
+    uint64_t const t = 1'800'000'000ULL * 1'000'000'000ULL;
+    auto const never = [] { return uint64_t{0}; };
+    XdpStreamPort::LaunchOrder order;
+    EXPECT_EQ(order.next(t, never), t);
+    EXPECT_EQ(order.next(t - XdpStreamPort::LaunchOrder::STEP_NS, never), t);  // within the bound: held
+    EXPECT_EQ(order.next(t - 3'000'000'000ULL, never), t - 3'000'000'000ULL);
+    EXPECT_EQ(order.next(t - 3'000'000'000ULL + 125'000, never), t - 3'000'000'000ULL + 125'000);
+    EXPECT_EQ(order.steps(), uint64_t{1});
+    EXPECT_EQ(order.clamped(), uint64_t{1});  // the STEP_NS hold, over a packet
+}
+
+// An open asking for launch time on a build without TX metadata records why and goes on without.
+TEST(avb_entity_xdp_stream_port, a_refused_launch_time_is_recorded)
+{
+    XdpStreamPort port;
+    auto options = xdp_stream_port_options(StreamXdpMode::auto_, MISSING, 0);
+    EXPECT_FALSE(port.open(MISSING, options).has_value());
+    EXPECT_FALSE(port.launch_time_error());
+    options.launch_time = true;
+    EXPECT_FALSE(port.open(MISSING, options).has_value());
+    bool const built = net::detail::tx_metadata_len(true).has_value();
+    EXPECT_EQ(static_cast<bool>(port.launch_time_error()), !built);
+    EXPECT_FALSE(port.launch_time());
+}
+
 TEST(avb_entity_xdp_stream_port, open_fails_cleanly)
 {
     XdpStreamPort port;
@@ -217,7 +302,7 @@ TEST(avb_entity_xdp_stream_port, open_fails_cleanly)
     EXPECT_TRUE(port.tx_begin(64).empty());
     EXPECT_EQ(port.tx_pool_empty_count(), uint64_t{0});  // closed, not empty
     std::array<uint8_t, 8> const elsewhere{};
-    auto const committed = port.tx_commit(elsewhere, ieee::Eui48{}, 2, 3);
+    auto const committed = port.tx_commit(elsewhere, ieee::Eui48{}, 2, 3, 0);
     EXPECT_TRUE(!committed && committed.error() == std::errc::invalid_argument);
     EXPECT_TRUE(port.tx_flush().has_value());
     EXPECT_FALSE(port.tx_error());
@@ -683,12 +768,12 @@ TEST(avb_entity_xdp_stream_port, the_tx_pool_accounts_for_every_frame_when_privi
     EXPECT_TRUE(again.data() == first.data());  // not committed: the same frame
     EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL - 1);
     std::array<uint8_t, 8> const elsewhere{};
-    auto const stray = port.tx_commit(elsewhere, TX_DEST, 2, 3);
+    auto const stray = port.tx_commit(elsewhere, TX_DEST, 2, 3, 0);
     EXPECT_TRUE(!stray && stray.error() == std::errc::invalid_argument);
-    auto const too_long = port.tx_commit(std::span<uint8_t const>{again.data(), again.size() + 1}, TX_DEST, 2, 3);
+    auto const too_long = port.tx_commit(std::span<uint8_t const>{again.data(), again.size() + 1}, TX_DEST, 2, 3, 0);
     EXPECT_TRUE(!too_long && too_long.error() == std::errc::invalid_argument);
     std::ranges::fill(again, uint8_t{0x02});
-    EXPECT_TRUE(port.tx_commit(again.first(46), TX_DEST, 2, 3).has_value());
+    EXPECT_TRUE(port.tx_commit(again.first(46), TX_DEST, 2, 3, 0).has_value());
     EXPECT_EQ(port.tx_pool_size(), XdpStreamPort::TX_POOL - 1);  // consumed
     EXPECT_TRUE(await_full_pool(port));                          // completed, back
 
@@ -699,7 +784,7 @@ TEST(avb_entity_xdp_stream_port, the_tx_pool_accounts_for_every_frame_when_privi
             return false;
         }
         std::ranges::fill(window, uint8_t{0x02});
-        return port.tx_commit(window, TX_DEST, 2, 3).has_value();
+        return port.tx_commit(window, TX_DEST, 2, 3, 0).has_value();
     };
     TestTalker talker{port};
     EXPECT_TRUE(talker.ok);

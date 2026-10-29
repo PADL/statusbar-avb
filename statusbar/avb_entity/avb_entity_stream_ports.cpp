@@ -12,6 +12,18 @@
 
 namespace statusbar::avb_entity {
 
+namespace {
+
+/// The AF_XDP port's options for @p options: its mode, queue and launch time.
+[[nodiscard]] auto xdp_options_for(StreamPortsOptions const& options) -> XdpStreamPortOptions
+{
+    auto xdp = xdp_stream_port_options(options.xdp_mode, options.interface_name, options.xdp_queue);
+    xdp.launch_time = options.launch_time;
+    return xdp;
+}
+
+}  // namespace
+
 auto StreamPorts::check(StreamPortsOptions const& options) noexcept -> Status
 {
     if (options.receive && stream_port_plan(options.transport, options.rx_on_own_thread) == StreamPortPlan::refused) {
@@ -40,8 +52,7 @@ auto StreamPorts::open_xdp(StreamPortsOptions const& options, StreamPortPlan con
     if (plan != StreamPortPlan::xdp && plan != StreamPortPlan::xdp_then_packet) {
         return false;
     }
-    auto const opened =
-        xdp_.open(options.interface_name, xdp_stream_port_options(options.xdp_mode, options.interface_name, options.xdp_queue));
+    auto const opened = xdp_.open(options.interface_name, xdp_options_for(options));
     if (opened) {
         tx_ = &xdp_;
         rx_ = options.receive ? static_cast<StreamPort*>(&xdp_) : &packet_;
@@ -121,6 +132,23 @@ void log_xdp_error(logging::Logger log, StreamPorts const& ports, std::string_vi
     } else {
         log.warning("no streams: AF_XDP on {}: {}", logging::embed<16>(interface_name), logging::embed<40>(error.message()));
     }
+}
+
+void log_launch_time(logging::Logger log, StreamPorts const& ports, StreamPortsOptions const& options) noexcept
+{
+    if (!options.launch_time) {
+        return;
+    }
+    auto const name = logging::embed<16>(options.interface_name);
+    if (ports.transport_in_force() == StreamTransport::xdp && ports.xdp().launch_time()) {
+        log.status("streams: AF_XDP frames on {} carry their launch time", name);
+        return;
+    }
+    if (auto const error = ports.xdp().launch_time_error(); error) {
+        log.warning("streams: no launch time on {}: {}", name, logging::embed<40>(error.message()));
+        return;
+    }
+    log.warning("streams: no launch time on {}: the streams are not on AF_XDP", name);
 }
 
 }  // namespace statusbar::avb_entity

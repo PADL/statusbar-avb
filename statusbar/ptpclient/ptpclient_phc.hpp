@@ -53,6 +53,10 @@ struct PhcCrossSample
 [[nodiscard]] auto cross_timestamp(PhcReading const& first0, PhcReading const& phcd, PhcReading const& second0) noexcept
     -> StatusValue<PhcCrossSample>;
 
+/// A system clock's time minus the PHC's at one instant, ns: `clock` is the system clock read
+/// bracketed by CLOCK_MONOTONIC_RAW, carried to `phc`'s instant at RAW's rate (phc2sys's offset, negated).
+[[nodiscard]] auto clock_minus_phc_ns(PhcBracket const& clock, PhcReading const& phc) noexcept -> int64_t;
+
 /// How a PhcDevice reads its clock against CLOCK_MONOTONIC_RAW, best first.
 enum class PhcReadMethod : uint8_t
 {
@@ -108,6 +112,10 @@ class PhcDevice
     PhcReadMethod method_{PhcReadMethod::software};
     bool extended_{false};  ///< PTP_SYS_OFFSET_EXTENDED with clockid works here
 };
+
+/// System clock `clock_id` (e.g. CLOCK_TAI) minus `phc`'s time, ns (clock_minus_phc_ns). Fails with
+/// a read's errno; not_supported off Linux.
+[[nodiscard]] auto system_clock_minus_phc_ns(PhcDevice const& phc, int clock_id) noexcept -> StatusValue<int64_t>;
 
 /// PHC0 (the engine's) and PHC_d (another NIC's) read at one instant: three reads,
 /// PHC0 / PHC_d / PHC0, each the narrowest of `samples` (phc2sys's sysoff_measure, RAW-based).

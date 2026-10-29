@@ -277,6 +277,21 @@ auto cbs_targets(
     };
 }
 
+// ---------------------------------------------------------------------------
+// Launch time
+// ---------------------------------------------------------------------------
+
+auto launch_time_mode(bool const wanted, StatusValue<bool> const& driver) noexcept -> LaunchTimeMode
+{
+    if (!driver) {
+        return wanted ? LaunchTimeMode::unsupported : LaunchTimeMode::off;
+    }
+    if (!*driver) {
+        return LaunchTimeMode::unsupported;
+    }
+    return wanted ? LaunchTimeMode::on : LaunchTimeMode::off;
+}
+
 #if defined(__linux__)
 
 // ---------------------------------------------------------------------------
@@ -311,6 +326,8 @@ auto ShaperQdiscs::install(
     cbs_unsupported_ = false;
     class_a_ = {};
     class_b_ = {};
+    etf_a_ = {};
+    etf_error_ = {};
     return success();
 }
 
@@ -351,12 +368,107 @@ auto ShaperQdiscs::program(CbsTargets const& targets, uint32_t const link_mbps) 
         return success();
     }
     link_mbps_ = link_mbps;
+    auto status = program_classes(targets);
+    // Class A's queue alone carries the AF_XDP socket's timed frames; class B's (AF_PACKET) gets none.
+    settle_etf(layout_.class_a_queue, class_a_, etf_a_, logging::lit("A"));
+    return status;
+}
+
+auto ShaperQdiscs::program_classes(CbsTargets const& targets) -> Status
+{
     auto status_a = program_one(layout_.class_a_queue, targets.class_a, class_a_, logging::lit("A"));
     if (cbs_unsupported_) {
         return status_a;
     }
     auto status_b = program_one(layout_.class_b_queue, targets.class_b, class_b_, logging::lit("B"));
     return !status_a ? status_a : status_b;
+}
+
+void ShaperQdiscs::set_launch_time(LaunchTimeMode const mode, int32_t const delta_ns) noexcept
+{
+    if (mode != launch_time_mode_ || delta_ns != etf_delta_ns_) {
+        etf_a_ = {};  // settled again under the new mode
+        etf_error_ = {};
+    }
+    launch_time_mode_ = mode;
+    etf_delta_ns_ = delta_ns;
+}
+
+void ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current, EtfState& state, logging::StrLit const label)
+{
+    if (launch_time_mode_ == LaunchTimeMode::unsupported || state.settled || etf_error_ || current.empty()) {
+        return;
+    }
+    bool const on = launch_time_mode_ == LaunchTimeMode::on;
+    auto const status =
+        etf_slot(queue).and_then([&](EtfSlot const& slot) { return on ? put_etf(slot, label) : clear_etf(slot, label); });
+    if (!status) {
+        // No etf offload (EOPNOTSUPP) or another refusal: frames on the queue go out at once. Quiet
+        // when off: nothing was asked for, the leftover cleanup is best effort.
+        etf_error_ = status.error();
+        if (!on) {
+            return;
+        }
+        log_.warning(
+            "shaper: class {} etf on queue {} failed: errno {} {}: no launch time",
+            label,
+            queue,
+            etf_error_.value(),
+            logging::embed<32>(tc_.last_message()));
+        return;
+    }
+    state = EtfState{.settled = true, .placed = on};
+}
+
+auto ShaperQdiscs::etf_slot(uint16_t const queue) -> StatusValue<EtfSlot>
+{
+    auto const cbs = tc_.get(ifindex_, parent_of(queue));
+    if (!cbs) {
+        return failure(cbs.error());
+    }
+    // cbs has one class, major:1 (sch_cbs.c); the kernel numbered the cbs itself.
+    uint32_t const parent = net::tc::make_handle(static_cast<uint16_t>(cbs->handle >> 16U), 1);
+    return child_of(parent).transform(
+        [&](std::optional<net::tc::QdiscInfo> child) { return EtfSlot{.parent = parent, .child = std::move(child)}; });
+}
+
+auto ShaperQdiscs::child_of(uint32_t const parent) -> StatusValue<std::optional<net::tc::QdiscInfo>>
+{
+    auto child = tc_.get(ifindex_, parent);
+    if (child) {
+        return std::optional{std::move(*child)};
+    }
+    if (child.error() == std::errc::no_such_file_or_directory) {
+        return std::optional<net::tc::QdiscInfo>{};
+    }
+    return failure(child.error());
+}
+
+auto ShaperQdiscs::put_etf(EtfSlot const& slot, logging::StrLit const label) -> Status
+{
+    net::tc::EtfQdisc const etf{.parent = slot.parent, .delta_ns = etf_delta_ns_, .offload = true, .skip_sock_check = true};
+    if (slot.child && slot.child->etf == etf) {
+        log_.status("shaper: class {} kept its etf (delta {} ns)", label, etf_delta_ns_);
+        return success();
+    }
+    // etf has no change operation: another etf goes first. Neither resets igc while the cbs stays.
+    if (auto removed = slot.child && slot.child->kind == "etf" ? tc_.remove(ifindex_, slot.child->handle, slot.parent) : Status{};
+        !removed) {
+        return removed;
+    }
+    return tc_.replace_etf(ifindex_, etf).transform([&] {
+        log_.status("shaper: class {} etf under its cbs: offloaded launch time, delta {} ns", label, etf_delta_ns_);
+    });
+}
+
+auto ShaperQdiscs::clear_etf(EtfSlot const& slot, logging::StrLit const label) -> Status
+{
+    if (!slot.child || slot.child->kind != "etf") {
+        return success();
+    }
+    return tc_.remove(ifindex_, slot.child->handle, slot.parent).transform([&] {
+        log_.status("shaper: class {} etf removed: launch time not wanted", label);
+    });
 }
 
 auto ShaperQdiscs::program_one(
@@ -434,6 +546,7 @@ void ShaperQdiscs::remove_cbs()
     }
     class_a_ = {};
     class_b_ = {};
+    etf_a_ = {};
 }
 
 auto ShaperQdiscs::remove_root() -> Status
@@ -524,6 +637,7 @@ auto EntityShaper::install() -> Status
     if (auto status = install_layout(*ifindex, *layout); !status) {
         return status;
     }
+    qdiscs_.set_launch_time(config_.launch_time, config_.etf_delta_ns);
     adopt(std::move(*driver), *layout);
     follow_admission();
     return success();
@@ -588,6 +702,17 @@ void EntityShaper::follow_admission()
     admitted_.assign(admitted.begin(), admitted.end());
     (void)refresh_link_speed();
     (void)reprogram();
+}
+
+void EntityShaper::set_launch_time(LaunchTimeMode const mode) noexcept
+{
+    config_.launch_time = mode;
+    if (!qdiscs_.installed()) {
+        return;
+    }
+    qdiscs_.set_launch_time(mode, config_.etf_delta_ns);
+    dirty_ = true;  // tick() programs, the etf settled after the cbs
+    retry_at_ns_ = 0;
 }
 
 void EntityShaper::on_admission_changed(std::span<uint16_t const> const admitted) noexcept

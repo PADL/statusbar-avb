@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// EntityShaper: the talker side's hardware traffic shaping (mqprio root, offloaded cbs per
-/// SR-class queue, SO_PRIORITY steering of the bypass stream socket). Reactor thread, Linux,
-/// CAP_NET_ADMIN. See docs/SHAPER.md.
+/// SR-class queue, an offloaded etf under the stream socket's for launch time, SO_PRIORITY steering of the bypass
+/// stream socket). Reactor thread, Linux, CAP_NET_ADMIN. See docs/SHAPER.md.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
@@ -215,6 +215,26 @@ struct CbsTargets
     uint32_t max_interfering_frame) noexcept -> CbsTargets;
 
 // ---------------------------------------------------------------------------
+// Launch time: an offloaded etf under class A's cbs (tc-etf(8); pure)
+// ---------------------------------------------------------------------------
+
+/// What the shaper does with etf under its cbs.
+enum class LaunchTimeMode : uint8_t
+{
+    unsupported,  ///< the driver honours no AF_XDP launch time: etf is neither installed nor looked for
+    off,          ///< none wanted: an etf an earlier run left under our cbs is removed
+    on,           ///< an offloaded etf under class A's cbs (the AF_XDP socket's queue)
+};
+
+/// The mode for launch time @p wanted (and in force on the stream socket) given @p driver
+/// (net::netdev::launch_time_supported(), asked once): on only when it honours it; a failed query
+/// is off when not wanted (a leftover etf must go) and unsupported when wanted.
+[[nodiscard]] auto launch_time_mode(bool wanted, StatusValue<bool> const& driver) noexcept -> LaunchTimeMode;
+
+/// etf's default delta: how long before its launch time a frame queued in etf goes to the driver.
+inline constexpr int32_t DEFAULT_ETF_DELTA_NS = 150'000;
+
+// ---------------------------------------------------------------------------
 // ShaperQdiscs (the requests, Linux)
 // ---------------------------------------------------------------------------
 
@@ -237,6 +257,9 @@ class ShaperQdiscs
     /// replace. EOPNOTSUPP is logged once and stops further cbs requests. Errors: the first netlink
     /// failure (each is logged).
     auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
+    /// etf under class A's cbs as @p mode says, from the next program() on, settled once per install()
+    /// and again after each change of mode (put or removed under the cbs); offloaded, CLOCK_TAI, @p delta_ns, skip_sock_check. Unsupported until set.
+    void set_launch_time(LaunchTimeMode mode, int32_t delta_ns = DEFAULT_ETF_DELTA_NS) noexcept;
     /// Take everything away: pfifo_fast on class B's queue, then class A's, then delete the mqprio
     /// root (one adapter reset on igb/igc). A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
@@ -248,13 +271,44 @@ class ShaperQdiscs
     [[nodiscard]] auto reused() const noexcept -> bool { return reused_; }
     /// Whether the driver refused cbs offload (EOPNOTSUPP).
     [[nodiscard]] auto cbs_unsupported() const noexcept -> bool { return cbs_unsupported_; }
+    /// The mode set_launch_time() gave.
+    [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return launch_time_mode_; }
+    /// Whether our etf is on class A's queue (LaunchTimeMode::on, settled).
+    [[nodiscard]] auto launch_time() const noexcept -> bool { return etf_a_.placed; }
+    /// The etf request that failed (logged; no further etf requests until the next install()).
+    [[nodiscard]] auto etf_error() const noexcept -> std::error_code { return etf_error_; }
     /// What is programmed now (empty: no cbs of ours on that class's queue).
     [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return class_a_; }
     [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return class_b_; }
 
   private:
+    /// One class queue's etf: settled for this install(), and ours on it.
+    struct EtfState
+    {
+        bool settled{false};
+        bool placed{false};
+    };
+    /// Where an etf goes on a class queue: our cbs's class, and what is on it now (nullopt: its default).
+    struct EtfSlot
+    {
+        uint32_t parent{0};
+        std::optional<net::tc::QdiscInfo> child{};
+    };
+
     [[nodiscard]] auto program_one(uint16_t queue, CbsParameters const& params, CbsParameters& current, logging::StrLit label)
         -> Status;
+    /// program_one() for class A, then (unless cbs offload was refused) class B: the first failure.
+    [[nodiscard]] auto program_classes(CbsTargets const& targets) -> Status;
+    /// Bring class @p label's queue @p queue to the launch-time mode once our cbs is on it (@p current).
+    void settle_etf(uint16_t queue, CbsParameters const& current, EtfState& state, logging::StrLit label);
+    /// The etf slot under our cbs on @p queue. Errors: the netlink errno (ENOENT: no cbs there).
+    [[nodiscard]] auto etf_slot(uint16_t queue) -> StatusValue<EtfSlot>;
+    /// The qdisc on class @p parent (nullopt: none reported, its default). Errors: the netlink errno.
+    [[nodiscard]] auto child_of(uint32_t parent) -> StatusValue<std::optional<net::tc::QdiscInfo>>;
+    /// Our etf on @p slot, kept when it is already there, else put in place of what is.
+    [[nodiscard]] auto put_etf(EtfSlot const& slot, logging::StrLit label) -> Status;
+    /// No etf on @p slot: an etf found there is deleted.
+    [[nodiscard]] auto clear_etf(EtfSlot const& slot, logging::StrLit label) -> Status;
     [[nodiscard]] auto parent_of(uint16_t queue) const noexcept -> uint32_t;
     /// Lay @p mqprio as the root on @p ifindex, keeping one already laid so: whether it was kept.
     [[nodiscard]] auto put_root(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio) -> StatusValue<bool>;
@@ -277,6 +331,10 @@ class ShaperQdiscs
     bool cbs_unsupported_{false};
     CbsParameters class_a_{};
     CbsParameters class_b_{};
+    LaunchTimeMode launch_time_mode_{LaunchTimeMode::unsupported};
+    int32_t etf_delta_ns_{DEFAULT_ETF_DELTA_NS};
+    EtfState etf_a_{};
+    std::error_code etf_error_{};
 };
 
 #endif  // __linux__
@@ -298,6 +356,11 @@ struct ShaperConfig
     /// shutdown() removes the mqprio and its cbs (an adapter reset on igb/igc). false (the default)
     /// parks both cbs at their placeholders for the next install() to keep.
     bool restore_qdisc{false};
+    /// etf under class A's cbs (launch_time_mode()): on only with the streams on an AF_XDP socket on
+    /// class A's queue carrying launch times, as etf drops AF_PACKET frames; off removes a leftover one.
+    LaunchTimeMode launch_time{LaunchTimeMode::unsupported};
+    /// The etf's delta (ns): it bounds frames that pass through etf; AF_XDP frames bypass it.
+    int32_t etf_delta_ns{DEFAULT_ETF_DELTA_NS};
 };
 
 #if defined(__linux__)
@@ -324,6 +387,9 @@ class EntityShaper final : public net::Pollable
     /// argument) and mark the shaper dirty for the next tick(). Cheap; safe
     /// inside the kit's ACMP/MSRP callbacks.
     void on_admission_changed(std::span<uint16_t const> admitted) noexcept;
+    /// Another launch-time mode (launch time on or off at run time, as the system clock agrees with the
+    /// PHC): settled by the next tick(), under cbs that stay (no adapter reset). A no-op before install().
+    void set_launch_time(LaunchTimeMode mode) noexcept;
     /// Recompute and program the cbs for the recorded admitted set and the
     /// current link speed. A no-op success before install(). Errors: the
     /// first netlink failure (each is logged).
@@ -351,6 +417,10 @@ class EntityShaper final : public net::Pollable
     /// The link speed the shaper sizes against (Mbit/s).
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t;
     [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return client_.last_message(); }
+    /// config.launch_time, as install() gave it to the qdiscs.
+    [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return qdiscs_.launch_time_mode(); }
+    /// Whether our etf is on class A's queue.
+    [[nodiscard]] auto launch_time() const noexcept -> bool { return qdiscs_.launch_time(); }
 
     /// How often tick() re-reads the link speed.
     static constexpr int64_t LINK_CHECK_NS = 1'000'000'000;

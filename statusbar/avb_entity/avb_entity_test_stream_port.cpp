@@ -35,7 +35,11 @@ auto TestStreamPort::tx_begin(size_t const capacity) noexcept -> std::span<uint8
 }
 
 auto TestStreamPort::tx_commit(
-    std::span<uint8_t const> const payload, ieee::Eui48 const& dest, uint16_t const vid, uint8_t const pcp) noexcept -> Status
+    std::span<uint8_t const> const payload,
+    ieee::Eui48 const& dest,
+    uint16_t const vid,
+    uint8_t const pcp,
+    uint64_t const launch_time_ns) noexcept -> Status
 {
     if (!pending_ || payload.data() != pending_->buffer.data() + TX_PAYLOAD_OFFSET ||
         payload.size() > pending_->buffer.size() - TX_PAYLOAD_OFFSET) {
@@ -50,16 +54,18 @@ auto TestStreamPort::tx_commit(
         return failure(std::errc::no_buffer_space);
     }
     write_stream_header(slot.buffer, dest, port_.hardware_address(), vid, pcp);
-    return commit_slot(slot, TX_PAYLOAD_OFFSET + payload.size());
+    return commit_slot(slot, TX_PAYLOAD_OFFSET + payload.size(), launch_time_ns);
 }
 
-auto TestStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const length) noexcept -> Status
+auto TestStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const length, uint64_t const launch_time_ns) noexcept
+    -> Status
 {
     auto const committed = port_.tx_commit(slot.handle, length);
     count_tx(committed.has_value());
     if (!committed) {
         return committed;
     }
+    last_launch_time_ns_ = launch_time_ns;
     if (tap_) {
         tap_(std::span<uint8_t const>{slot.buffer.data(), length});
     }

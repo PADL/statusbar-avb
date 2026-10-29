@@ -83,7 +83,11 @@ auto PacketStreamPort::tx_begin(size_t const capacity) noexcept -> std::span<uin
 }
 
 auto PacketStreamPort::tx_commit(
-    std::span<uint8_t const> const payload, ieee::Eui48 const& dest, uint16_t const vid, uint8_t const pcp) noexcept -> Status
+    std::span<uint8_t const> const payload,
+    ieee::Eui48 const& dest,
+    uint16_t const vid,
+    uint8_t const pcp,
+    uint64_t const /*launch_time_ns*/) noexcept -> Status
 {
     if (payload.data() != tx_payload_.data() || payload.size() > tx_payload_.size()) {
         count_tx(false);

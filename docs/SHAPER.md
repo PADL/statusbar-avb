@@ -1,6 +1,6 @@
 <!-- Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com> -->
 
-# Talker traffic shaping: mqprio, cbs and SO_PRIORITY
+# Talker traffic shaping: mqprio, cbs, etf and SO_PRIORITY
 
 `avb_entity::EntityShaper` (`statusbar/avb_entity/avb_entity_shaper.hpp`) puts
 an entity's talker streams on a hardware credit-based shaper. It needs
@@ -127,6 +127,63 @@ leave the class unprogrammed and the shaper dirty: `tick()` retries after
 at once. On igb/igc an override putting class A on queue 1 and class B on
 queue 0 is refused (`bad_queue_override`): queue 0 outranks queue 1, and igc
 takes queue 1's cbs only after queue 0's.
+
+## Launch time (etf)
+
+With `ShaperConfig::launch_time` set to `LaunchTimeMode::on` the shaper puts
+an offloaded etf (tc-etf(8): `etf clockid CLOCK_TAI delta <ns> offload
+skip_sock_check`, no deadline mode) on class A's cbs class (`<cbs major>:1`;
+sch_cbs.c has one class). The offload puts the TX queue in the NIC's
+launch-time mode, and the driver then sends each AF_XDP frame at the launch
+time in its TX metadata (STREAM_PORTS.md, "Launch time"). AF_XDP frames bypass
+the qdisc (copy mode through `__dev_direct_xmit`, zero copy in the driver), so
+the offload flag is etf's only job here.
+
+Only class A's queue gets one: it is the queue the AF_XDP socket transmits on
+(the host makes class A the socket's queue), and every frame on it is timed.
+Class B carries AF_PACKET traffic, which an etf would drop (its own path
+drops a frame whose txtime is missing or past), and frames of no timed
+source.
+
+The host asks the driver once (`net::netdev::launch_time_supported()`) and
+gives the mode with `launch_time_mode(wanted, answer)`, `wanted` meaning the
+streams' AF_XDP socket carries launch times:
+
+| Mode | When | etf requests |
+| --- | --- | --- |
+| `unsupported` | the driver lacks it (igb); or the query failed and launch time is wanted | none, and none looked for: the requests are the cbs alone |
+| `off` | the driver has it, or the query failed, and launch time is not in force | an etf an earlier run left under class A's cbs is deleted |
+| `on` | the driver has it and the stream socket carries launch times | ours under class A's cbs |
+
+So a leftover etf never survives into an AF_PACKET or untimed run, even when
+the capability query fails. In `off` a failed request is quiet: nothing was
+asked for, and nothing more is requested. A host that turns launch time on or
+off at run time (`EntityShaper::set_launch_time`, as the system clock agrees
+with the PHC or not) has the etf put or removed at the next `tick()`, under the
+cbs that stays. `skip_sock_check` costs nothing and lets frames
+of sockets without SO_TXTIME through when they carry a txtime.
+
+`etf_delta_ns` (default 150 µs) is how long before its txtime etf hands a
+queued frame to the driver (sch_etf.c's watchdog); it bounds only frames that
+pass through the qdisc, so it does not touch the AF_XDP streams.
+
+Resets: the transmit mode follows only whether any queue is shaped
+(`igc_tsn_offload_apply` resets on a legacy/TSN switch; igb's `enable_fqtss`
+likewise), so an etf added, replaced or removed under a cbs that stays costs
+no reset. The shaper settles the etf once per `install()`, after both cbs
+(`program()`), and leaves it across restarts under the parked cbs. etf has no
+change operation (the kernel answers EINVAL): an identical etf is kept, one
+of another delta deleted and laid down again. `uninstall()`'s pfifo_fast
+graft takes the cbs and its etf together.
+
+A refused etf (EOPNOTSUPP: no etf offload, e.g. igc on a MAC other than
+i225/i226) is logged with the kernel's text and kept in `etf_error()`; no
+further etf is asked for until the next `install()`, the cbs stay, and frames
+on the queue go out at once. igc places the launch time in a 1 s cycle it
+estimates from the system's CLOCK_TAI (`igc_tx_launchtime`), so the system
+clock must follow the PHC (phc2sys). None of this has run on an igc yet: the
+requests are checked by `shaper_launch_time.*` against a recording
+`TcControl` and the etf bytes by `tc_qdisc.etf`.
 
 ## Threading
 

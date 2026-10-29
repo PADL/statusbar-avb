@@ -1424,6 +1424,7 @@ auto AvbEntityKit::stream_ports_options() const -> StreamPortsOptions
         .xdp_mode = config_.stream_xdp_mode,
         .xdp_queue = config_.stream_xdp_queue,
         .rx_on_own_thread = config_.stream_rx_rt_timer && !config_.stream_rx_on_media_thread,
+        .launch_time = config_.stream_launch_time,
     };
 }
 
@@ -1592,6 +1593,7 @@ auto AvbEntityKit::open_own_stream_ports(StreamPortsOptions const& ports) -> Sta
             priority.value());
     }
     log_xdp_error(host_.ctl_log(), ports_, config_.interface_name);
+    log_launch_time(host_.ctl_log(), ports_, ports);
     return &ports_.rx();
 }
 

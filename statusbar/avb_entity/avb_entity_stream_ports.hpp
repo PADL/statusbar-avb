@@ -34,6 +34,8 @@ struct StreamPortsOptions
     /// Receive is drained on a thread of its own, not the media thread that
     /// transmits; an AF_XDP socket has one consumer, so xdp is refused then.
     bool rx_on_own_thread{false};
+    /// AF_XDP frames carry their launch time: the host found the driver honours it (XdpStreamPortOptions).
+    bool launch_time{false};
 };
 
 /// Which ports StreamPorts::open() opens. An AF_XDP socket takes the stream
@@ -136,5 +138,9 @@ class StreamPorts
 /// Warn on @p log, when AF_XDP did not open on @p interface_name, what the
 /// streams do instead (AF_PACKET, or nothing). Reactor thread.
 void log_xdp_error(logging::Logger log, StreamPorts const& ports, std::string_view interface_name) noexcept;
+
+/// Say on @p log whether the streams' frames carry launch times, when @p options asked for them,
+/// and why not when they do not. Reactor thread.
+void log_launch_time(logging::Logger log, StreamPorts const& ports, StreamPortsOptions const& options) noexcept;
 
 }  // namespace statusbar::avb_entity

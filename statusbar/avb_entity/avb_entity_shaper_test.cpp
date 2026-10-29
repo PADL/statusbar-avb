@@ -12,6 +12,7 @@
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <format>
@@ -392,14 +393,17 @@ TEST(shaper_cbs, one_int32_talker_as_captured_on_an_i210)
 namespace {
 
 /// A TcControl that records each request as `tc` would spell it and answers
-/// from a canned root and canned errors.
+/// from a canned root and canned errors; the qdiscs below the root are kept as the kernel would.
 class RecordingTc final : public net::tc::TcControl
 {
   public:
     std::vector<std::string> requests{};
-    std::optional<net::tc::QdiscInfo> root{};  ///< get(ROOT)'s answer (none: ENOENT)
-    std::error_code mqprio_error{};            ///< replace_mqprio's first answer
-    std::error_code cbs_error{};               ///< every replace_cbs's answer
+    std::optional<net::tc::QdiscInfo> root{};    ///< get(ROOT)'s answer (none: ENOENT)
+    std::vector<net::tc::QdiscInfo> children{};  ///< the qdiscs below the root (get's answers)
+    std::error_code mqprio_error{};              ///< replace_mqprio's first answer
+    std::error_code cbs_error{};                 ///< every replace_cbs's answer
+    std::error_code etf_error{};                 ///< every replace_etf's answer
+    uint16_t next_major{0x8001};                 ///< the handle major the kernel gives the next new qdisc
 
     auto replace_mqprio(int /*ifindex*/, net::tc::MqprioQdisc const& q) -> Status override
     {
@@ -416,34 +420,99 @@ class RecordingTc final : public net::tc::TcControl
         if (cbs_error) {
             return failure(cbs_error);
         }
+        if (find(q.parent) == nullptr) {
+            place(net::tc::QdiscInfo{.parent = q.parent, .kind = "cbs", .cbs = q});
+        }
+        return success();
+    }
+    auto replace_etf(int /*ifindex*/, net::tc::EtfQdisc const& q) -> Status override
+    {
+        requests.push_back(std::format(
+            "replace {:x}:{:x} etf clockid {} delta {}{}{}{}",
+            q.parent >> 16U,
+            q.parent & 0xFFFFU,
+            q.clockid,
+            q.delta_ns,
+            q.offload ? " offload" : "",
+            q.deadline_mode ? " deadline_mode" : "",
+            q.skip_sock_check ? " skip_sock_check" : ""));
+        if (etf_error) {
+            return failure(etf_error);
+        }
+        erase(q.parent);
+        place(net::tc::QdiscInfo{.parent = q.parent, .kind = "etf", .etf = q});
         return success();
     }
     auto replace_kind(int /*ifindex*/, uint32_t const parent, std::string_view const kind) -> Status override
     {
         requests.push_back(std::format("replace {:x}:{:x} {}", parent >> 16U, parent & 0xFFFFU, kind));
+        erase(parent);
         return success();
     }
-    auto remove(int /*ifindex*/, uint32_t const handle, uint32_t /*parent*/) -> Status override
+    auto remove(int /*ifindex*/, uint32_t const handle, uint32_t const parent) -> Status override
     {
-        requests.push_back(std::format("del root {:x}:", handle >> 16U));
+        if (parent == net::tc::ROOT) {
+            requests.push_back(std::format("del root {:x}:", handle >> 16U));
+            return success();
+        }
+        requests.push_back(std::format("del {:x}:{:x} handle {:x}:", parent >> 16U, parent & 0xFFFFU, handle >> 16U));
+        erase(parent);
         return success();
     }
     auto get(int /*ifindex*/, uint32_t const parent) -> StatusValue<net::tc::QdiscInfo> override
     {
-        requests.push_back(parent == net::tc::ROOT ? std::string{"show root"} : std::format("show {:x}", parent));
+        requests.push_back(
+            parent == net::tc::ROOT ? std::string{"show root"} : std::format("show {:x}:{:x}", parent >> 16U, parent & 0xFFFFU));
         if (parent == net::tc::ROOT && root) {
             return *root;
+        }
+        if (auto const* const child = find(parent); child != nullptr && parent != net::tc::ROOT) {
+            return *child;
         }
         return failure(std::make_error_code(std::errc::no_such_file_or_directory));
     }
     [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
 
+    /// A qdisc of @p kind on @p parent with handle @p major:, as an earlier run left it.
+    void left(uint32_t const parent, uint16_t const major, std::string const& kind, std::optional<net::tc::EtfQdisc> etf = {})
+    {
+        children.push_back(
+            net::tc::QdiscInfo{.handle = net::tc::make_handle(major, 0), .parent = parent, .kind = kind, .etf = etf});
+    }
     /// The requests since the last take, cleared.
     auto take() -> std::vector<std::string> { return std::exchange(requests, {}); }
 
   private:
+    auto find(uint32_t const parent) -> net::tc::QdiscInfo*
+    {
+        auto const it = std::ranges::find(children, parent, &net::tc::QdiscInfo::parent);
+        return it != children.end() ? &*it : nullptr;
+    }
+    /// A new qdisc on its parent, numbered by the "kernel".
+    void place(net::tc::QdiscInfo info)
+    {
+        info.handle = net::tc::make_handle(next_major++, 0);
+        children.push_back(std::move(info));
+    }
+    /// The qdisc on @p parent goes, and its own children with it.
+    void erase(uint32_t const parent)
+    {
+        auto const* const gone = find(parent);
+        if (gone == nullptr) {
+            return;
+        }
+        uint32_t const major = gone->handle >> 16U;
+        std::erase_if(children, [&](net::tc::QdiscInfo const& q) { return q.parent == parent || (q.parent >> 16U) == major; });
+    }
+
     std::string message_{};
 };
+
+/// The etf the shaper asks for at @p delta_ns on @p parent.
+auto our_etf(uint32_t const parent, int32_t const delta_ns = DEFAULT_ETF_DELTA_NS) -> net::tc::EtfQdisc
+{
+    return net::tc::EtfQdisc{.parent = parent, .delta_ns = delta_ns, .offload = true, .skip_sock_check = true};
+}
 
 auto igb_layout() -> QueueLayout
 {
@@ -647,6 +716,188 @@ TEST(shaper_qdiscs, uninstall_and_release)
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(qdiscs.uninstall().has_value());
     EXPECT_TRUE(tc.take().empty());
+}
+// Launch time wanted on a driver that honours it (igc): after both cbs, an offloaded etf on class
+// A's cbs class (8001:1), the AF_XDP socket's queue, settled once; class B's gets none; admission
+// changes then touch the cbs only.
+TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+            "show 9000:1",
+            "show 8001:1",
+            "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check",
+        }));
+    EXPECT_TRUE(qdiscs.launch_time());
+    EXPECT_TRUE(qdiscs.launch_time_mode() == LaunchTimeMode::on);
+    EXPECT_FALSE(qdiscs.etf_error());
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+}
+
+// A restart onto what an earlier run left: an identical etf stays (etf cannot be changed in place),
+// one of another delta is deleted and laid down again; neither touches the cbs above it.
+TEST(shaper_launch_time, a_restart_keeps_an_identical_etf_and_replaces_another)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    for (int32_t const left_delta : {DEFAULT_ETF_DELTA_NS, 500'000}) {
+        RecordingTc tc{};
+        tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+        tc.left(0x9000'0001, 0x8001, "cbs");
+        tc.left(0x8001'0001, 0x8003, "etf", our_etf(0x8001'0001, left_delta));
+        tc.left(0x9000'0002, 0x8002, "cbs");
+        tc.next_major = 0x8005;
+        ShaperQdiscs qdiscs{tc, channel.logger()};
+        qdiscs.set_launch_time(LaunchTimeMode::on);
+        EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+        EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+        Requests want{
+            "show root",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+            "show 9000:1",
+            "show 8001:1",
+        };
+        if (left_delta != DEFAULT_ETF_DELTA_NS) {
+            want.emplace_back("del 8001:1 handle 8003:");
+            want.emplace_back("replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check");
+        }
+        EXPECT_TRUE(tc.take() == want);
+        EXPECT_TRUE(qdiscs.launch_time());
+    }
+}
+
+// Launch time not wanted on a driver that could have it: an etf an earlier run left is deleted
+// (it would drop AF_PACKET frames); a queue without one is only looked at.
+TEST(shaper_launch_time, an_etf_left_behind_goes_when_not_wanted)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    tc.left(0x9000'0001, 0x8001, "cbs");
+    tc.left(0x8001'0001, 0x8003, "etf", our_etf(0x8001'0001));
+    tc.left(0x9000'0002, 0x8002, "cbs");
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::off);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+            "show 9000:1",
+            "show 8001:1",
+            "del 8001:1 handle 8003:",
+        }));
+    EXPECT_FALSE(qdiscs.launch_time());
+}
+
+// Launch time enabled at run time (off at install: the clock not yet on the PHC), disabled when the
+// clock drifts and enabled again: each program() after a change of mode puts or removes the etf
+// under class A's cbs, which stays: no root or cbs change, so no adapter reset.
+TEST(shaper_launch_time, enabled_and_disabled_at_run_time_the_etf_follows_under_the_cbs)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::off);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    (void)tc.take();
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take().empty());  // off: settled, nothing more
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({"show 9000:1", "show 8001:1", "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
+    EXPECT_TRUE(qdiscs.launch_time());
+    qdiscs.set_launch_time(LaunchTimeMode::off);
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take() == Requests({"show 9000:1", "show 8001:1", "del 8001:1 handle 8003:"}));
+    EXPECT_FALSE(qdiscs.launch_time());
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({"show 9000:1", "show 8001:1", "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
+    EXPECT_TRUE(qdiscs.launch_time());
+}
+
+// A driver that honours no AF_XDP launch time (igb): the requests are the cbs alone, etf neither
+// installed nor looked for, whatever was asked.
+TEST(shaper_launch_time, a_driver_without_launch_time_gets_no_etf)
+{
+    EXPECT_TRUE(launch_time_mode(true, true) == LaunchTimeMode::on);
+    EXPECT_TRUE(launch_time_mode(false, true) == LaunchTimeMode::off);
+    EXPECT_TRUE(launch_time_mode(true, false) == LaunchTimeMode::unsupported);
+    EXPECT_TRUE(launch_time_mode(false, false) == LaunchTimeMode::unsupported);
+    // A failed query: wanted, nothing is done; not wanted, a leftover etf still goes.
+    EXPECT_TRUE(launch_time_mode(true, failure(std::errc::no_such_file_or_directory)) == LaunchTimeMode::unsupported);
+    EXPECT_TRUE(launch_time_mode(false, failure(std::errc::no_such_file_or_directory)) == LaunchTimeMode::off);
+
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(launch_time_mode(true, false));
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+        }));
+    EXPECT_FALSE(qdiscs.launch_time());
+}
+
+// A refused etf offload (EOPNOTSUPP) is recorded and logged once; the cbs stay, program() succeeds
+// (nothing for tick() to retry) and no further etf is asked for until the next install().
+TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.etf_error = std::make_error_code(std::errc::operation_not_supported);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::on, 200'000);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+            "show 9000:1",
+            "show 8001:1",
+            "replace 8001:1 etf clockid 11 delta 200000 offload skip_sock_check",
+        }));
+    EXPECT_TRUE(qdiscs.etf_error() == std::errc::operation_not_supported);
+    EXPECT_FALSE(qdiscs.launch_time());
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    // Uninstall is unchanged: grafting pfifo_fast on each class takes cbs and etf together.
+    EXPECT_TRUE(qdiscs.uninstall().has_value());
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
 #endif
 
