@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// ListenerVlan: keeps the listener's SR-class VID on the NIC's receive VLAN filter by holding a
-/// down `<interface>.<vid>` VLAN link. Never fatal; a failure is a warning. Linux only.
-/// See docs/SHAPER.md ("Listener VLAN").
+/// down `<interface>.<vid>` VLAN link, or an up one with no address for IP listeners. Never fatal;
+/// a failure is a warning. Linux only. See docs/SHAPER.md ("Listener VLAN").
 
 #if defined(__linux__)
 
@@ -18,11 +18,19 @@
 
 namespace statusbar::avb_entity {
 
+/// What the VLAN link is for.
+enum class ListenerLinkUse : uint8_t
+{
+    vlan_filter,   ///< the NIC's receive VLAN filter alone: the link stays down
+    ip_multicast,  ///< also IP group memberships on it, reported tagged (IGMP snooping): up, no address; one there is adopted
+};
+
 class ListenerVlan
 {
   public:
-    explicit ListenerVlan(logging::Logger log) noexcept
+    explicit ListenerVlan(logging::Logger log, ListenerLinkUse use = ListenerLinkUse::vlan_filter) noexcept
         : log_{log}
+        , use_{use}
     {}
     ListenerVlan(ListenerVlan const&) = delete;
     auto operator=(ListenerVlan const&) -> ListenerVlan& = delete;
@@ -45,8 +53,10 @@ class ListenerVlan
     [[nodiscard]] auto bound() const noexcept -> bool { return control_ != nullptr; }
     /// The VID followed (0: none).
     [[nodiscard]] auto vid() const noexcept -> uint16_t { return vid_; }
-    /// Whether this created the link for vid() (and will delete it).
+    /// Whether this created (or, for IP listeners, adopted) the link for vid(), and will delete it.
     [[nodiscard]] auto created() const noexcept -> bool { return created_; }
+    /// Whether this brought the link for vid() up (ListenerLinkUse::ip_multicast).
+    [[nodiscard]] auto up() const noexcept -> bool { return up_; }
     /// The link for vid() (empty: none followed).
     [[nodiscard]] auto link_name() const noexcept -> std::string const& { return name_; }
 
@@ -57,20 +67,27 @@ class ListenerVlan
     enum class LinkAdded : uint8_t
     {
         created,  ///< created here
+        adopted,  ///< already there, taken as created here (ListenerLinkUse::ip_multicast)
         existed,  ///< already there, used as it is
         failed,   ///< not created (logged)
     };
     /// Create @p vid's link @p name.
     [[nodiscard]] auto add_link(std::string const& name, uint16_t vid) -> LinkAdded;
-    /// Delete the previous link if this created it, then follow @p vid through @p name.
+    /// What becomes of @p vid's link @p name, already there.
+    [[nodiscard]] auto existing_link(std::string const& name, uint16_t vid) -> LinkAdded;
+    /// Delete the previous link if this created it, then follow @p vid through @p name (brought up if @p created).
     void replace_link(uint16_t vid, bool created, std::string name);
+    /// Bring the created link @p name up for ListenerLinkUse::ip_multicast: whether it is up.
+    [[nodiscard]] auto bring_up(std::string const& name) -> bool;
 
     net::vlan::VlanControl* control_{nullptr};
     std::string interface_name_{};
     int ifindex_{0};
     logging::Logger log_;
+    ListenerLinkUse use_;
     uint16_t vid_{0};
     bool created_{false};
+    bool up_{false};
     std::string name_{};
 };
 
