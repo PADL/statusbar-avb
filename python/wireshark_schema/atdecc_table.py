@@ -805,11 +805,11 @@ AEM_PAYLOAD_STRUCTS = {
                 "doc": "Bytes 44-45: Stream VLAN ID",
             },
             {
-                "name": "reserved2",
+                "name": "ip_flags",
                 "offset": 46,
                 "size": 2,
                 "kind": "u16",
-                "doc": "Bytes 46-47: Reserved",
+                "doc": "Bytes 46-47: ip_flags (IEEE 1722.1-2021 Clause 7.4.15.1; reserved in 1722.1-2013)",
             },
         ],
     },
@@ -5376,11 +5376,15 @@ AEM_PAYLOADS: dict[str, tuple[str | None, str | None]] = {
     "GET_CONFIGURATION": (None, "AemSetConfigurationPayload"),
     "SET_STREAM_FORMAT": ("AemStreamFormatPayload", "AemStreamFormatPayload"),
     "GET_STREAM_FORMAT": ("AemGetStreamFormatCommandPayload", "AemStreamFormatPayload"),
-    "SET_STREAM_INFO": ("AemStreamInfoPayload", "AemStreamInfoPayload"),
-    # Milan v1.2 appends an 8-octet tail (flags_ex, pbsta, acmpsta)
+    # IEEE 1722.1-2021 appends 36 octets of IP fields
+    "SET_STREAM_INFO": (
+        "AemStreamInfoPayload+tail:stream_info_2021",
+        "AemStreamInfoPayload+tail:stream_info_2021",
+    ),
+    # Milan v1.2 appends an 8-octet tail (flags_ex, pbsta, acmpsta); 2021 its IP fields
     "GET_STREAM_INFO": (
         "AemGetStreamInfoCommandPayload",
-        "AemStreamInfoPayload+tail:stream_info_milan",
+        "AemStreamInfoPayload+tail:stream_info_milan|stream_info_2021",
     ),
     "SET_NAME": ("AemNamePayload", "AemNamePayload"),
     "GET_NAME": ("AemNameCommandPayload", "AemNamePayload"),
