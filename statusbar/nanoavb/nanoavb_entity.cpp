@@ -49,6 +49,48 @@ namespace {
     return {.status = AEM_STATUS_SUCCESS, .size = size};
 }
 
+/// GET_STREAM_INFO's octets after the first 48 in @p layout: Milan v1.2's @p ext, or IEEE
+/// 1722.1-2021's IP fields, zero without IP transport (Clause 7.4.15.1).
+void store_stream_info_tail(
+    StreamInfoLayout const layout, AemStreamInfoMilanExtension const& ext, std::span<uint8_t> const tail) noexcept
+{
+    if (layout == StreamInfoLayout::milan_v1_2) {
+        span_store(tail, ext);
+        return;
+    }
+    if (layout == StreamInfoLayout::ieee_2021) {
+        span_store(tail, AemStreamInfoIpExtension{});
+    }
+}
+
+/// What SET_STREAM_INFO with sub-commands @p flags answers before setting the presentation
+/// time offset, or nullopt to set it (Milan v1.2 Section 5.4.2.9).
+[[nodiscard]] auto set_stream_info_refusal(uint32_t const flags) noexcept -> std::optional<uint8_t>
+{
+    if ((flags & stream_info_flags::SET_SUB_COMMANDS & ~stream_info_flags::MSRP_ACC_LAT_VALID) != 0) {
+        return AEM_STATUS_NOT_SUPPORTED;  // any unsupported sub-command refuses the whole command
+    }
+    if ((flags & stream_info_flags::MSRP_ACC_LAT_VALID) == 0) {
+        return AEM_STATUS_SUCCESS;  // nothing asked
+    }
+    return std::nullopt;
+}
+
+/// SET_STREAM_INFO's response in @p layout's form at the head of @p out: @p command echoed,
+/// zero-padded to 84 octets in IEEE 1722.1-2021's, else its 48. Empty when @p out is short.
+[[nodiscard]] auto echo_stream_info(
+    StreamInfoLayout const layout, std::span<uint8_t const> const command, std::span<uint8_t> const out) -> std::span<uint8_t const>
+{
+    size_t const size = layout == StreamInfoLayout::ieee_2021 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+    if (out.size() < size) {
+        return {};
+    }
+    std::ranges::fill(out.first(size), uint8_t{0});
+    size_t const echoed = std::min(size, command.size());
+    span_copy(out.first(echoed), command.first(echoed));
+    return out.first(size);
+}
+
 /// A max_transit_time of stream output @p index (Milan v1.3 Section 5.4.2.30), the layout of
 /// GET_MAX_TRANSIT_TIME's response, at the head of @p out.
 void store_max_transit_time(std::span<uint8_t> const out, uint16_t const index, uint32_t const offset_ns) noexcept
@@ -804,11 +846,8 @@ auto AemCommandHandler::notify_as_path_changed(uint16_t const descriptor_index) 
 
 auto AemCommandHandler::notify_stream_info_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
 {
-    AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
-    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
-    span_store(request, cmd);
-    std::array<uint8_t, AEM_STREAM_INFO_MILAN_LENGTH> out{};
-    auto const r = handle_get_stream_info(AemDu{}, request, out);
+    std::array<uint8_t, AEM_STREAM_INFO_2021_LENGTH> out{};
+    auto const r = answer_stream_info({.descriptor_type = descriptor_type, .descriptor_index = descriptor_index}, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
     }
@@ -1728,43 +1767,40 @@ auto AemCommandHandler::handle_get_counters(
 auto AemCommandHandler::handle_get_stream_info(
     AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // No stream-info provider wired => this entity does not implement
-    // GET_STREAM_INFO. Checked before argument validation so an entity without
-    // streams answers NOT_IMPLEMENTED rather than BAD_ARGUMENTS.
+    // An entity without streams answers NOT_IMPLEMENTED rather than BAD_ARGUMENTS.
+    auto const cmd = load_payload<AemGetStreamInfoCommandPayload>(command_data);
+    if (!cmd && callbacks_.get_stream_info) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    return answer_stream_info(cmd.value_or(AemGetStreamInfoCommandPayload{}), out_buffer);
+}
+
+auto AemCommandHandler::answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{
     if (!callbacks_.get_stream_info) {
         return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
-    // GET_STREAM_INFO command payload (AemGetStreamInfoCommandPayload):
-    //   descriptor_type(2) + descriptor_index(2)
-    if (command_data.size() < AemGetStreamInfoCommandPayload::LENGTH) {
-        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
-    }
-
-    AemGetStreamInfoCommandPayload cmd{};
-    span_load(cmd, command_data.first(AemGetStreamInfoCommandPayload::LENGTH));
-    uint16_t const descriptor_type = cmd.descriptor_type;
-    uint16_t const descriptor_index = cmd.descriptor_index;
-
     // Echo descriptor_type/index back; the app fills the rest plus the flag bits.
-    AemStreamInfoPayload resp{};
+    AemStreamInfoPayload resp{.descriptor_type = cmd.descriptor_type, .descriptor_index = cmd.descriptor_index};
     AemStreamInfoMilanExtension ext{};
-    resp.descriptor_type = ieee::doublet_t{descriptor_type};
-    resp.descriptor_index = ieee::doublet_t{descriptor_index};
-    if (!callbacks_.get_stream_info(descriptor_type, descriptor_index, resp, ext)) {
+    if (!callbacks_.get_stream_info(cmd.descriptor_type.get(), cmd.descriptor_index.get(), resp, ext)) {
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
+    return store_stream_info(resp, ext, out_buffer);
+}
 
-    // Milan v1.2 Section 5.4.2.10 (Figure 5.1): the Milan profile appends
-    // flags_ex, pbsta and acmpsta; a classic entity answers IEEE 1722.1-2013's
-    // 48 octets.
-    size_t const size = profile_.milan ? AEM_STREAM_INFO_MILAN_LENGTH : AemStreamInfoPayload::LENGTH;
+auto AemCommandHandler::store_stream_info(
+    AemStreamInfoPayload const& resp, AemStreamInfoMilanExtension const& ext, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    auto const layout = stream_info_layout();
+    size_t const size = stream_info_length(layout);
     if (out_buffer.size() < size) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
     span_store(out_buffer.first(AemStreamInfoPayload::LENGTH), resp);
-    if (profile_.milan) {
-        span_store(out_buffer.subspan(AemStreamInfoPayload::LENGTH, AemStreamInfoMilanExtension::LENGTH), ext);
-    }
+    store_stream_info_tail(layout, ext, out_buffer.first(size).subspan(AemStreamInfoPayload::LENGTH));
     return {.status = AEM_STATUS_SUCCESS, .size = size};
 }
 
@@ -1801,29 +1837,32 @@ auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_
     -> AemCommandResponse
 {
     auto const cmd = load_payload<AemStreamInfoPayload>(command_data);
-    if (!cmd || out_buffer.size() < AemStreamInfoPayload::LENGTH) {
+    auto const response = echo_stream_info(stream_info_layout(), command_data, out_buffer);
+    if (!cmd || response.empty()) {
         return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
     }
     uint32_t current = 0;
-    if (auto const status = presentation_offset_target(cmd->descriptor_type.get(), cmd->descriptor_index.get(), current);
-        status != AEM_STATUS_SUCCESS) {
-        return reject_command(status, command_data.first(AemStreamInfoPayload::LENGTH), out_buffer);
+    if (auto const status = stream_info_target(*cmd, current); status != AEM_STATUS_SUCCESS) {
+        return {.status = status, .size = response.size()};
     }
-    span_copy(out_buffer.first(AemStreamInfoPayload::LENGTH), command_data.first(AemStreamInfoPayload::LENGTH));
-    return set_stream_info(*cmd, current, out_buffer.first(AemStreamInfoPayload::LENGTH));
+    return set_stream_info(*cmd, current, response);
+}
+
+auto AemCommandHandler::stream_info_target(AemStreamInfoPayload const& cmd, uint32_t& current) const -> uint8_t
+{
+    // Milan v1.3 Section 5.4.2.9: SET_MAX_TRANSIT_TIME sets the offset in this layout.
+    bool const latency = (cmd.flags.get() & stream_info_flags::MSRP_ACC_LAT_VALID) != 0;
+    if (latency && stream_info_layout() == StreamInfoLayout::ieee_2021) {
+        return AEM_STATUS_BAD_ARGUMENTS;
+    }
+    return presentation_offset_target(cmd.descriptor_type.get(), cmd.descriptor_index.get(), current);
 }
 
 auto AemCommandHandler::set_stream_info(
     AemStreamInfoPayload const& cmd, uint32_t const current, std::span<uint8_t const> const response) -> AemCommandResponse
 {
-    // "If the PAAD-AE receives a SET_STREAM_INFO command with any unsupported
-    // sub-commands, the PAAD-AE shall refuse the entire command by returning
-    // the NOT_SUPPORTED error code."
-    if ((cmd.flags.get() & stream_info_flags::SET_SUB_COMMANDS & ~stream_info_flags::MSRP_ACC_LAT_VALID) != 0) {
-        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = response.size()};
-    }
-    if ((cmd.flags.get() & stream_info_flags::MSRP_ACC_LAT_VALID) == 0) {
-        return {.status = AEM_STATUS_SUCCESS, .size = response.size()};  // nothing asked
+    if (auto const refused = set_stream_info_refusal(cmd.flags.get())) {
+        return {.status = *refused, .size = response.size()};
     }
     uint32_t const offset = cmd.msrp_accumulated_latency.get();
     auto const status = set_presentation_offset(cmd.descriptor_index.get(), offset);

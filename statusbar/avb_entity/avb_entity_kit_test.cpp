@@ -11,6 +11,7 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_shaper.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_test_stream_port.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
@@ -396,7 +397,7 @@ auto load_info(std::vector<uint8_t> const& body)
     atdecc::aem::AemStreamInfoPayload info{};
     atdecc::aem::AemStreamInfoMilanExtension ext{};
     span_load(info, std::span<uint8_t const>{body}.first(atdecc::aem::AemStreamInfoPayload::LENGTH));
-    if (body.size() >= atdecc::aem::AEM_STREAM_INFO_MILAN_LENGTH) {
+    if (body.size() == atdecc::aem::AEM_STREAM_INFO_MILAN_LENGTH) {
         span_load(ext, std::span<uint8_t const>{body}.subspan(atdecc::aem::AemStreamInfoPayload::LENGTH, 8));
     }
     return {info, ext};
@@ -843,6 +844,94 @@ TEST(avb_entity_kit_milan_talker, presentation_offset_through_the_entity)
     std::array<uint8_t, 4> output{0x00, 0x06, 0x00, 0x00};
     EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_STOP_STREAMING, output).status, atdecc::AEM_STATUS_NOT_SUPPORTED);
     EXPECT_FALSE(m.kit.talker().stream_stopped(0));
+}
+
+// Milan v1.3 Section 5.4.2.10.2: in the IEEE 1722.1-2021 layout an output reports the
+// AccumulatedLatency its Talker Advertise declares; Milan v1.2's keeps the offset.
+TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_the_declared_accumulated_latency)
+{
+    MilanKit m{std::nullopt, 0x15};
+    EXPECT_TRUE(m.start_ready());
+    m.kit.set_on_presentation_offset_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
+    atdecc::aem::AemSetMaxTransitTimePayload transit{};
+    transit.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+    transit.max_transit_time = uint64_t{2'500'000};
+    std::array<uint8_t, atdecc::aem::AemSetMaxTransitTimePayload::LENGTH> transit_body{};
+    span_store(transit_body, transit);
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME, transit_body).status, atdecc::AEM_STATUS_SUCCESS);
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    auto const* declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
+    EXPECT_TRUE(declared != nullptr);
+
+    m.kit.host().components().aem_handler.set_stream_info_layout(atdecc::aem::StreamInfoLayout::ieee_2021);
+    auto const info = m.stream_info(0);
+    EXPECT_EQ(info.status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(info.body.size(), atdecc::aem::AEM_STREAM_INFO_2021_LENGTH);
+    auto const payload = load_info(info.body).first;
+    EXPECT_TRUE((payload.flags.get() & atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID) != 0);
+    EXPECT_EQ(payload.msrp_accumulated_latency.get(), declared != nullptr ? declared->accumulated_latency : 1U);
+    EXPECT_EQ(payload.msrp_accumulated_latency.get(), 0U);
+
+    // Milan v1.2's layout: the presentation time offset, as GET_MAX_TRANSIT_TIME reads it.
+    m.kit.host().components().aem_handler.set_stream_info_layout(atdecc::aem::StreamInfoLayout::milan_v1_2);
+    auto const v12 = m.stream_info(0);
+    EXPECT_EQ(v12.body.size(), atdecc::aem::AEM_STREAM_INFO_MILAN_LENGTH);
+    EXPECT_EQ(load_info(v12.body).first.msrp_accumulated_latency.get(), 2'500'000U);
+    std::array<uint8_t, 4> get{0x00, 0x06, 0x00, 0x00};
+    auto const read = m.aem_command(atdecc::AEM_COMMAND_GET_MAX_TRANSIT_TIME, get);
+    atdecc::aem::AemGetMaxTransitTimeResponsePayload resp{};
+    span_load(resp, std::span<uint8_t const>{read.body}.first(atdecc::aem::AemGetMaxTransitTimeResponsePayload::LENGTH));
+    EXPECT_EQ(resp.max_transit_time.get(), uint64_t{2'500'000});
+}
+
+// Milan v1.3 Table 5.9: the SRP flags of an output in the IEEE 1722.1-2021 layout.
+TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_v13_output_flags)
+{
+    MilanKit m{std::nullopt, 0x16};
+    EXPECT_TRUE(m.start_ready());
+    m.kit.host().components().aem_handler.set_stream_info_layout(atdecc::aem::StreamInfoLayout::ieee_2021);
+    namespace f = atdecc::aem::stream_info_flags;
+    uint32_t const srp = f::NOT_REGISTERING_SRP | f::REGISTERING_FAILED | f::CONNECTED | f::MSRP_FAILURE_VALID;
+    auto const srp_flags = [&m, srp] { return load_info(m.stream_info(0).body).first.flags.get() & srp; };
+
+    // Not declaring: none.
+    EXPECT_EQ(srp_flags(), 0U);
+    // Declaring, no Listener registered.
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    EXPECT_EQ(srp_flags(), f::NOT_REGISTERING_SRP);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::AskingFailed);
+    EXPECT_EQ(srp_flags(), f::REGISTERING_FAILED);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_EQ(srp_flags(), f::CONNECTED);
+    uint32_t const always = f::STREAM_FORMAT_VALID | f::MSRP_ACC_LAT_VALID | f::STREAM_ID_VALID | f::STREAM_VLAN_ID_VALID;
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.flags.get() & always, always);
+
+    // SET_STREAM_INFO's offset is BAD_ARGUMENTS here (Milan v1.3 Section 5.4.2.9).
+    m.kit.set_on_presentation_offset_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
+    atdecc::aem::AemStreamInfoPayload set{};
+    set.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+    set.descriptor_index = uint16_t{1};
+    set.flags = f::MSRP_ACC_LAT_VALID;
+    set.msrp_accumulated_latency = uint32_t{3'000'000};
+    std::array<uint8_t, atdecc::aem::AemStreamInfoPayload::LENGTH> body{};
+    span_store(body, set);
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_SET_STREAM_INFO, body).status, atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(m.kit.presentation_offset_ns(1), 2'000'000U);
+}
+
+// IEEE 1722.1-2021 Clause 7.4.16.2: a classic output's latency is valid while it declares;
+// Milan's always (v1.3 Table 5.9), and the older layouts carry the offset, always valid.
+TEST(avb_entity_kit_classic_talker, the_2021_layout_marks_the_latency_valid_while_declaring)
+{
+    using atdecc::aem::StreamInfoLayout;
+    auto const valid = [](bool const milan, StreamInfoLayout const layout, bool const declaring) {
+        TalkerStreamStatus const status{.milan = milan, .layout = layout, .declaring = declaring};
+        return talker_accumulated_latency_flag(status) == atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID;
+    };
+    EXPECT_FALSE(valid(false, StreamInfoLayout::ieee_2021, false));
+    EXPECT_TRUE(valid(false, StreamInfoLayout::ieee_2021, true));
+    EXPECT_TRUE(valid(true, StreamInfoLayout::ieee_2021, false));
+    EXPECT_TRUE(valid(false, StreamInfoLayout::ieee_2013, false));
 }
 
 TEST(avb_entity_kit_milan_talker, classic_declares_at_ready_and_counts_connect_tx)

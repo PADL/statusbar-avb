@@ -9,6 +9,7 @@
 /// entity's aem_handler callback delegates here; the entity keeps only
 /// what is genuinely per-entity (which descriptor types it serves).
 
+#include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 namespace statusbar::avb_entity {
@@ -30,6 +32,8 @@ namespace statusbar::avb_entity {
 struct TalkerStreamStatus
 {
     bool milan{true};
+    /// The response form, which gives msrp_accumulated_latency its meaning.
+    atdecc::aem::StreamInfoLayout layout{atdecc::aem::StreamInfoLayout::milan_v1_2};
     /// Declaring its Talker Advertise.
     bool declaring{false};
     /// The Listener declaration registered for it (Ignore: none).
@@ -37,11 +41,105 @@ struct TalkerStreamStatus
     /// Milan v1.2 Section 5.4.2.10.2: an output's msrp_accumulated_latency is
     /// its presentation time offset.
     uint32_t presentation_offset_ns{2'000'000};
+    /// The AccumulatedLatency its Talker Advertise declares, ns: the IEEE 1722.1-2021
+    /// layout's msrp_accumulated_latency (Milan v1.3 Section 5.4.2.10.2).
+    uint32_t accumulated_latency_ns{0};
 };
 
+/// MSRP_ACC_LAT_VALID for an output with @p status: Milan always (v1.3 Table 5.9); classic in
+/// the IEEE 1722.1-2021 layout while it declares the attribute the latency is (Clause 7.4.16.2).
+[[nodiscard]] constexpr auto talker_accumulated_latency_flag(TalkerStreamStatus const& status) noexcept -> uint32_t
+{
+    bool const valid = status.milan || status.declaring || status.layout != atdecc::aem::StreamInfoLayout::ieee_2021;
+    return valid ? atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID : 0U;
+}
+
+/// An output's msrp_accumulated_latency in @p status's layout: the declared AccumulatedLatency
+/// in IEEE 1722.1-2021's (Clause 7.4.16.2), the presentation time offset in the older ones.
+[[nodiscard]] constexpr auto talker_msrp_accumulated_latency(TalkerStreamStatus const& status) noexcept -> uint32_t
+{
+    bool const declared = status.layout == atdecc::aem::StreamInfoLayout::ieee_2021;
+    return declared ? status.accumulated_latency_ns : status.presentation_offset_ns;
+}
+
+/// The SRP flags of a Milan output in the IEEE 1722.1-2021 layout (Milan v1.3 Table 5.9). The
+/// entity declares no Talker Failed, so MSRP_FAILURE_VALID stays clear.
+[[nodiscard]] constexpr auto milan_v13_talker_srp_flags(TalkerStreamStatus const& status) noexcept -> uint32_t
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+    using srp::msrp::ListenerDeclaration;
+    if (!status.declaring) {
+        return 0;
+    }
+    switch (status.listener) {
+        case ListenerDeclaration::Ignore:
+            return stream_info_flags::NOT_REGISTERING_SRP;
+        case ListenerDeclaration::AskingFailed:
+            return stream_info_flags::REGISTERING_FAILED;
+        case ListenerDeclaration::Ready:
+        case ListenerDeclaration::ReadyFailed:
+        default:
+            return stream_info_flags::CONNECTED;
+    }
+}
+
+/// The flags of a Milan output with @p status (Milan v1.2 Tables 5.11-5.12, or v1.3 Table
+/// 5.9 in the IEEE 1722.1-2021 layout); in Milan v1.2's, flags_ex and pbsta into @p ext.
+[[nodiscard]] constexpr auto milan_talker_flags(
+    TalkerStreamStatus const& status, atdecc::aem::AemStreamInfoMilanExtension& ext) noexcept -> uint32_t
+{
+    if (status.layout == atdecc::aem::StreamInfoLayout::ieee_2021) {
+        return milan_v13_talker_srp_flags(status);
+    }
+    bool const registering = status.declaring && status.listener != srp::msrp::ListenerDeclaration::Ignore;
+    ext.flags_ex = ieee::quadlet_t{registering ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
+    ext.set_probing(atdecc::aem::probing_status::DISABLED, 0);
+    bool const failed = registering && status.listener == srp::msrp::ListenerDeclaration::AskingFailed;
+    return failed ? atdecc::aem::stream_info_flags::REGISTERING_FAILED : 0U;
+}
+
+/// The flags of classic output @p descriptor_index: CONNECTED from the ACMP connection count.
+/// SR class A is the entities' only class, so CLASS_B stays clear.
+[[nodiscard]] inline auto classic_talker_flags(AvbEntityHost const& host, uint16_t const descriptor_index) -> uint32_t
+{
+    bool const connected = host.components().acmp_talker.connection_count(descriptor_index) > 0;
+    return connected ? atdecc::aem::stream_info_flags::CONNECTED : 0U;
+}
+
+/// The STREAM_OUTPUT descriptor's current_format into @p out: STREAM_FORMAT_VALID when the
+/// model has the output, else 0.
+[[nodiscard]] inline auto fill_talker_format(
+    AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> uint32_t
+{
+    auto const desc = host.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, descriptor_index);
+    if (!desc.has_value()) {
+        return 0;
+    }
+    atdecc::aem::DescriptorStream stream_desc{};
+    span_load_padded(stream_desc, *desc);
+    span_copy(make_span(out.stream_format), stream_desc.current_format.span());
+    return atdecc::aem::stream_info_flags::STREAM_FORMAT_VALID;
+}
+
+/// An output's stream ID, address, VID and msrp_accumulated_latency into @p out; the first three's flags:
+/// the ID and VID always (valid while declaring, undefined otherwise), the address while MAAP
+/// has one (Milan v1.2 Table 5.3).
+template <size_t N>
+[[nodiscard]] inline auto fill_talker_identity(
+    atdecc::TalkerStreamInfoDynamic<N> const& stream, TalkerStreamStatus const& status, atdecc::aem::AemStreamInfoPayload& out)
+    -> uint32_t
+{
+    using namespace atdecc::aem::stream_info_flags;
+    out.stream_id = stream.stream_id;
+    out.stream_dest_mac = stream.stream_dest_mac;
+    out.stream_vlan_id = ieee::doublet_t{stream.stream_vlan_id};
+    out.msrp_accumulated_latency = ieee::quadlet_t{talker_msrp_accumulated_latency(status)};
+    return (stream.stream_dest_mac != ieee::Eui48{} ? STREAM_DEST_MAC_VALID : 0U) | STREAM_ID_VALID | STREAM_VLAN_ID_VALID;
+}
+
 /// Fill the GET_STREAM_INFO response for STREAM_OUTPUT @p index from the live ACMP
-/// stream identity and current_format (Milan v1.2 Section 5.4.2.10.2; flag rules
-/// in docs/AVB_ENTITY_KIT.md). False if it is not one of the host's talker streams.
+/// stream identity and current_format (Milan v1.2 Section 5.4.2.10.2, v1.3 in the 2021
+/// layout; flag rules in docs/AVB_ENTITY_KIT.md). False if it is not one of the host's talkers.
 [[nodiscard]] inline auto fill_talker_stream_info(
     AvbEntityHost const& host,
     uint16_t const descriptor_index,
@@ -49,54 +147,14 @@ struct TalkerStreamStatus
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
 {
-    using atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
-    namespace stream_info_flags = atdecc::aem::stream_info_flags;
-    using srp::msrp::ListenerDeclaration;
-
     auto const* stream = host.components().acmp_talker.get_stream(descriptor_index);
     if (stream == nullptr) {
         return false;
     }
-
-    uint32_t flags =
-        stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_VLAN_ID_VALID | stream_info_flags::MSRP_ACC_LAT_VALID;
-
-    // Stream format from the STREAM_OUTPUT descriptor's current_format,
-    // read from the blob via the symbol-aware host.
-    if (auto const desc = host.get_descriptor(DESCRIPTOR_STREAM_OUTPUT, descriptor_index); desc.has_value()) {
-        atdecc::aem::DescriptorStream stream_desc{};
-        span_load_padded(stream_desc, *desc);
-        span_copy(make_span(out.stream_format), stream_desc.current_format.span());
-        flags |= stream_info_flags::STREAM_FORMAT_VALID;
-    }
-
-    out.stream_id = stream->stream_id;
-    out.stream_dest_mac = stream->stream_dest_mac;
-    out.stream_vlan_id = ieee::doublet_t{stream->stream_vlan_id};
-    out.msrp_accumulated_latency = ieee::quadlet_t{status.presentation_offset_ns};
-
-    if (status.milan) {
-        // Zero while MAAP has no address (Milan v1.2 Table 5.3).
-        if (stream->stream_dest_mac != ieee::Eui48{}) {
-            flags |= stream_info_flags::STREAM_DEST_MAC_VALID;
-        }
-        bool const registering = status.declaring && status.listener != ListenerDeclaration::Ignore;
-        if (registering && status.listener == ListenerDeclaration::AskingFailed) {
-            flags |= stream_info_flags::REGISTERING_FAILED;
-        }
-        ext.flags_ex = ieee::quadlet_t{registering ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
-        ext.set_probing(atdecc::aem::probing_status::DISABLED, 0);
-    } else {
-        // SR class A is the entities' only class, so CLASS_B stays clear. Report
-        // the live ACMP connection state so a controller/listener sees CONNECTED.
-        if (stream->stream_dest_mac != ieee::Eui48{}) {
-            flags |= stream_info_flags::STREAM_DEST_MAC_VALID;  // zero until MAAP has one
-        }
-        if (host.components().acmp_talker.connection_count(descriptor_index) > 0) {
-            flags |= stream_info_flags::CONNECTED;
-        }
-    }
-    out.flags = ieee::quadlet_t{flags};
+    uint32_t const flags = fill_talker_identity(*stream, status, out) | fill_talker_format(host, descriptor_index, out) |
+        talker_accumulated_latency_flag(status);
+    out.flags =
+        ieee::quadlet_t{flags | (status.milan ? milan_talker_flags(status, ext) : classic_talker_flags(host, descriptor_index))};
     return true;
 }
 

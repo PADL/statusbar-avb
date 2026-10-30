@@ -142,7 +142,8 @@ Stopped. The host's `on_listener_ready` hook lands in `note_listener_ready`.
 
 The presentation time offset (Milan v1.2 Section 5.3.7.6) is changed with
 SET_STREAM_INFO (MSRP_ACC_LAT_VALID) or SET_MAX_TRANSIT_TIME while the stream
-is not streaming; GET_STREAM_INFO and GET_MAX_TRANSIT_TIME report it. The kit
+is not streaming; GET_STREAM_INFO (in Milan v1.2's form) and
+GET_MAX_TRANSIT_TIME report it. The kit
 refuses a change no entity hook applies: it never reports an offset the stream
 does not use.
 
@@ -291,6 +292,24 @@ SAVED_STATE, STREAMING_WAIT and BOUND 0; pbsta and acmpsta 0. The entity never
 declares Talker Failed, so MSRP_FAILURE_VALID stays 0. Classic: CONNECTED from
 the ACMP connection count. A Milan listener queries this to verify the stream
 before sustaining a connection.
+
+The response form is the AEM handler's `stream_info_layout()`: the profile's
+(Milan v1.2's 56 octets, classic IEEE 1722.1-2013's 48) unless
+`set_stream_info_layout` picks IEEE 1722.1-2021's 84. A controller tells them
+by length, and the form gives an output's msrp_accumulated_latency its meaning
+(Milan v1.3 Section 5.4.2.10.2): the presentation time offset in the older
+forms, the AccumulatedLatency the Talker Advertise declares (0, the bridges
+adding theirs) in 2021's. A Milan output in 2021's form takes Milan v1.3 Table
+5.9's flags instead of flags_ex: NOT_REGISTERING_SRP while declaring without
+a Listener, REGISTERING_FAILED with Listener Asking Failed, CONNECTED with
+Listener Ready or Ready Failed. A classic output in 2021's form has
+MSRP_ACC_LAT_VALID only while it declares (IEEE 1722.1-2021 Clause 7.4.16.2).
+
+Inputs keep Milan v1.2's flags in every form, which blocks selecting the 2021
+form for a Milan entity until the v1.3 input work lands: an input in 2021's
+form needs Milan v1.3 Table 5.8 (NOT_REGISTERING_SRP while bound and not
+registering), and its pbsta and acmpsta move to the MVU
+GET_STREAM_INPUT_INFO_EX command (Milan v1.3 Section 5.4.4.8).
 
 Milan listener (Milan v1.2 Section 5.4.2.10.1, Tables 5.9-5.10):
 STREAM_FORMAT_VALID always; BOUND, FAST_CONNECT and SAVED_STATE while bound,

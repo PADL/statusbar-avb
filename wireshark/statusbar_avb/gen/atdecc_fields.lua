@@ -647,7 +647,7 @@ M.f.atdecc_aem_stream_info_msrp_failure_code = ProtoField.uint8("avb.atdecc.aem.
 M.f.atdecc_aem_stream_info_reserved1 = ProtoField.uint8("avb.atdecc.aem.stream_info.reserved1", "reserved1", base.DEC, nil, nil, "Bytes 35: Reserved")
 M.f.atdecc_aem_stream_info_msrp_failure_bridge_id = ProtoField.uint64("avb.atdecc.aem.stream_info.msrp_failure_bridge_id", "msrp_failure_bridge_id", base.HEX, nil, nil, "Bytes 36-43: MSRP failure bridge ID")
 M.f.atdecc_aem_stream_info_stream_vlan_id = ProtoField.uint16("avb.atdecc.aem.stream_info.stream_vlan_id", "stream_vlan_id", base.DEC, nil, nil, "Bytes 44-45: Stream VLAN ID")
-M.f.atdecc_aem_stream_info_reserved2 = ProtoField.uint16("avb.atdecc.aem.stream_info.reserved2", "reserved2", base.DEC, nil, nil, "Bytes 46-47: Reserved")
+M.f.atdecc_aem_stream_info_ip_flags = ProtoField.uint16("avb.atdecc.aem.stream_info.ip_flags", "ip_flags", base.DEC, nil, nil, "Bytes 46-47: ip_flags (IEEE 1722.1-2021 Clause 7.4.15.1; reserved in 1722.1-2013)")
 M.f.atdecc_aem_name_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.name_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "Bytes 0-1: Descriptor type")
 M.f.atdecc_aem_name_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.name_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "Bytes 2-3: Descriptor index")
 M.f.atdecc_aem_name_command_name_index = ProtoField.uint16("avb.atdecc.aem.name_command.name_index", "name_index", base.DEC, nil, nil, "Bytes 4-5: Name index")
@@ -1706,6 +1706,10 @@ M.f.atdecc_desc_stream_info_milan_flags_ex = ProtoField.uint32("avb.atdecc.desc.
 M.f.atdecc_desc_stream_info_milan_pbsta = ProtoField.uint8("avb.atdecc.desc.stream_info_milan.pbsta", "pbsta", base.DEC, nil, 0xE0, "probing status (Milan 1.2 Table 5.5)")
 M.f.atdecc_desc_stream_info_milan_acmpsta = ProtoField.uint8("avb.atdecc.desc.stream_info_milan.acmpsta", "acmpsta", base.DEC, nil, 0x1F, "ACMP status of the last probe")
 M.f.atdecc_desc_stream_info_milan_reserved = ProtoField.bytes("avb.atdecc.desc.stream_info_milan.reserved", "reserved", base.NONE, "reserved")
+M.f.atdecc_desc_stream_info_2021_source_port = ProtoField.uint16("avb.atdecc.desc.stream_info_2021.source_port", "source_port", base.DEC, nil, nil, "UDP source port")
+M.f.atdecc_desc_stream_info_2021_destination_port = ProtoField.uint16("avb.atdecc.desc.stream_info_2021.destination_port", "destination_port", base.DEC, nil, nil, "UDP destination port")
+M.f.atdecc_desc_stream_info_2021_source_ip_address = ProtoField.bytes("avb.atdecc.desc.stream_info_2021.source_ip_address", "source_ip_address", base.NONE, "source IP address (IPv6)")
+M.f.atdecc_desc_stream_info_2021_destination_ip_address = ProtoField.bytes("avb.atdecc.desc.stream_info_2021.destination_ip_address", "destination_ip_address", base.NONE, "destination IP address (IPv6)")
 M.f.atdecc_control_value_i8 = ProtoField.int8("avb.atdecc.control.value_i8", "value_i8", base.DEC, nil, nil, "INT8 value")
 M.f.atdecc_control_value_u8 = ProtoField.uint8("avb.atdecc.control.value_u8", "value_u8", base.DEC, nil, nil, "UINT8 value")
 M.f.atdecc_control_value_i16 = ProtoField.int16("avb.atdecc.control.value_i16", "value_i16", base.DEC, nil, nil, "INT16 value")
@@ -1981,7 +1985,7 @@ M.fields = {
     M.f.atdecc_aem_stream_info_reserved1,
     M.f.atdecc_aem_stream_info_msrp_failure_bridge_id,
     M.f.atdecc_aem_stream_info_stream_vlan_id,
-    M.f.atdecc_aem_stream_info_reserved2,
+    M.f.atdecc_aem_stream_info_ip_flags,
     M.f.atdecc_aem_name_command_descriptor_type,
     M.f.atdecc_aem_name_command_descriptor_index,
     M.f.atdecc_aem_name_command_name_index,
@@ -3040,6 +3044,10 @@ M.fields = {
     M.f.atdecc_desc_stream_info_milan_pbsta,
     M.f.atdecc_desc_stream_info_milan_acmpsta,
     M.f.atdecc_desc_stream_info_milan_reserved,
+    M.f.atdecc_desc_stream_info_2021_source_port,
+    M.f.atdecc_desc_stream_info_2021_destination_port,
+    M.f.atdecc_desc_stream_info_2021_source_ip_address,
+    M.f.atdecc_desc_stream_info_2021_destination_ip_address,
     M.f.atdecc_control_value_i8,
     M.f.atdecc_control_value_u8,
     M.f.atdecc_control_value_i16,
@@ -3411,7 +3419,7 @@ function M.add_aem_stream_info(tree, tvb, off)
     tree:add(M.f.atdecc_aem_stream_info_reserved1, tvb(off + 59, 1))
     tree:add(M.f.atdecc_aem_stream_info_msrp_failure_bridge_id, tvb(off + 60, 8))
     tree:add(M.f.atdecc_aem_stream_info_stream_vlan_id, tvb(off + 68, 2))
-    tree:add(M.f.atdecc_aem_stream_info_reserved2, tvb(off + 70, 2))
+    tree:add(M.f.atdecc_aem_stream_info_ip_flags, tvb(off + 70, 2))
 end
 
 --- AEM AemNameCommandPayload (IEEE 1722.1-2021 7.4)
@@ -5010,6 +5018,14 @@ function M.add_desc_stream_info_milan(tree, tvb, off)
     tree:add(M.f.atdecc_desc_stream_info_milan_reserved, tvb(off + 5, 3))
 end
 
+--- SET/GET_STREAM_INFO IEEE 1722.1-2021 IP fields (Clause 7.4.15.1, Figure 7-40)
+function M.add_desc_stream_info_2021(tree, tvb, off)
+    tree:add(M.f.atdecc_desc_stream_info_2021_source_port, tvb(off + 0, 2))
+    tree:add(M.f.atdecc_desc_stream_info_2021_destination_port, tvb(off + 2, 2))
+    tree:add(M.f.atdecc_desc_stream_info_2021_source_ip_address, tvb(off + 4, 16))
+    tree:add(M.f.atdecc_desc_stream_info_2021_destination_ip_address, tvb(off + 20, 16))
+end
+
 --- control value elements
 function M.add_control(tree, tvb, off)
     tree:add(M.f.atdecc_control_value_i8, tvb(off + 0, 1))
@@ -5212,8 +5228,8 @@ M.aem_payloads[0x000A] = { cmd = { name = "video_format", length = 16, add = M.a
 M.aem_payloads[0x000B] = { cmd = { name = "get_video_format_command", length = 4, add = M.add_aem_get_video_format_command, trailer = nil }, rsp = { name = "video_format", length = 16, add = M.add_aem_video_format, trailer = nil } }
 M.aem_payloads[0x000C] = { cmd = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil }, rsp = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil } }
 M.aem_payloads[0x000D] = { cmd = { name = "get_sensor_format_command", length = 4, add = M.add_aem_get_sensor_format_command, trailer = nil }, rsp = { name = "sensor_format", length = 12, add = M.add_aem_sensor_format, trailer = nil } }
-M.aem_payloads[0x000E] = { cmd = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = nil } }
-M.aem_payloads[0x000F] = { cmd = { name = "get_stream_info_command", length = 4, add = M.add_aem_get_stream_info_command, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = { kind = "tail", element = "stream_info_milan", element_size = 8, element_add = M.add_desc_stream_info_milan } } }
+M.aem_payloads[0x000E] = { cmd = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = { kind = "tail", tails = { [36] = { element = "stream_info_2021", element_add = M.add_desc_stream_info_2021 } } } }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = { kind = "tail", tails = { [36] = { element = "stream_info_2021", element_add = M.add_desc_stream_info_2021 } } } } }
+M.aem_payloads[0x000F] = { cmd = { name = "get_stream_info_command", length = 4, add = M.add_aem_get_stream_info_command, trailer = nil }, rsp = { name = "stream_info", length = 48, add = M.add_aem_stream_info, trailer = { kind = "tail", tails = { [8] = { element = "stream_info_milan", element_add = M.add_desc_stream_info_milan }, [36] = { element = "stream_info_2021", element_add = M.add_desc_stream_info_2021 } } } } }
 M.aem_payloads[0x0010] = { cmd = { name = "name", length = 72, add = M.add_aem_name, trailer = nil }, rsp = { name = "name", length = 72, add = M.add_aem_name, trailer = nil } }
 M.aem_payloads[0x0011] = { cmd = { name = "name_command", length = 8, add = M.add_aem_name_command, trailer = nil }, rsp = { name = "name", length = 72, add = M.add_aem_name, trailer = nil } }
 M.aem_payloads[0x0012] = { cmd = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil }, rsp = { name = "association_id", length = 8, add = M.add_aem_association_id, trailer = nil } }

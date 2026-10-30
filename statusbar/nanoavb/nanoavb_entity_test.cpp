@@ -10,6 +10,7 @@
 #include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -1046,6 +1047,40 @@ TEST(nanoavb_entity_get_stream_info, no_such_descriptor_when_callback_declines)
     auto result = make_test_result(handler, header, cmd);
 
     EXPECT_EQ(result.status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(nanoavb_entity_get_stream_info, the_layout_sets_the_response_length)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_get_stream_info([](uint16_t, uint16_t, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext) -> bool {
+        ext.flags_ex = quadlet_t{stream_info_flags_ex::REGISTERING};
+        out.flags = quadlet_t{stream_info_flags::MSRP_ACC_LAT_VALID | stream_info_flags::NOT_REGISTERING_SRP};
+        out.msrp_accumulated_latency = quadlet_t{1234};
+        return true;
+    });
+    std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> cmd{0x00, 0x06, 0x00, 0x00};
+    auto header = create_aem_header(AEM_COMMAND_GET_STREAM_INFO);
+
+    // The profile's form until a layout is set (Milan v1.3 Section 5.4.2.10.2).
+    EXPECT_EQ(handler.stream_info_layout(), StreamInfoLayout::milan_v1_2);
+    handler.set_stream_info_layout(StreamInfoLayout::ieee_2021);
+    auto const v2021 = make_test_result(handler, header, cmd);
+    EXPECT_EQ(v2021.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(v2021.response_data().size(), size_t{84});
+    AemStreamInfoPayload resp{};
+    span_load(resp, v2021.response_data().first(AemStreamInfoPayload::LENGTH));
+    EXPECT_EQ(resp.flags.get(), stream_info_flags::MSRP_ACC_LAT_VALID | stream_info_flags::NOT_REGISTERING_SRP);
+    EXPECT_EQ(resp.msrp_accumulated_latency.get(), 1234U);
+    // No flags_ex in the IP tail: no IP transport, all zero.
+    auto const tail = v2021.response_data().subspan(AemStreamInfoPayload::LENGTH);
+    EXPECT_TRUE(std::ranges::all_of(tail, [](uint8_t const b) { return b == 0; }));
+
+    // Unset again: Milan's 56 octets, the classic profile's 48.
+    handler.set_stream_info_layout(std::nullopt);
+    EXPECT_EQ(make_test_result(handler, header, cmd).response_data().size(), AEM_STREAM_INFO_MILAN_LENGTH);
+    handler.set_profile(EntityProfile{.milan = false});
+    EXPECT_EQ(make_test_result(handler, header, cmd).response_data().size(), AemStreamInfoPayload::LENGTH);
 }
 
 //
@@ -2561,6 +2596,97 @@ TEST(nanoavb_entity_presentation_offset, max_transit_time_sets_and_gets_it)
     std::array<uint8_t, AemGetMaxTransitTimeCommandPayload::LENGTH> get_missing{0x00, 0x06, 0x00, 0x07};
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_MAX_TRANSIT_TIME, get_missing);
     EXPECT_EQ(status_of(sends), int{AEM_STATUS_NO_SUCH_DESCRIPTOR});
+}
+
+TEST(nanoavb_entity_presentation_offset, the_2021_layout_sets_it_by_max_transit_time_only)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    OffsetStore store;
+    store.install(handler);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    handler.set_stream_info_layout(StreamInfoLayout::ieee_2021);
+
+    // Milan v1.3 Section 5.4.2.9: MSRP_ACC_LAT_VALID is BAD_ARGUMENTS, the offset unchanged.
+    auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, stream_info_flags::MSRP_ACC_LAT_VALID, 3'000'000);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
+    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(store.sets, 0);
+    EXPECT_EQ(store.offsets[0], 2'000'000U);
+
+    // SET_MAX_TRANSIT_TIME sets it (Milan v1.3 Section 5.4.2.30).
+    sends.clear();
+    inject_command(
+        handler,
+        kEntity,
+        kControllerA,
+        kMacA,
+        AEM_COMMAND_SET_MAX_TRANSIT_TIME,
+        max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, 3'000'000));
+    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(store.offsets[0], 3'000'000U);
+
+    // Milan v1.2's layout keeps SET_STREAM_INFO's offset (v1.2 Section 5.4.2.9).
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);
+    sends.clear();
+    inject_command(
+        handler,
+        kEntity,
+        kControllerA,
+        kMacA,
+        AEM_COMMAND_SET_STREAM_INFO,
+        set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, stream_info_flags::MSRP_ACC_LAT_VALID, 2'500'000));
+    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(store.offsets[0], 2'500'000U);
+}
+
+TEST(nanoavb_entity_presentation_offset, set_stream_info_in_the_2021_layout)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    handler.set_stream_info_layout(StreamInfoLayout::ieee_2021);
+    auto const run = [&](std::span<uint8_t const> const body) {
+        sends.clear();
+        inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
+        return status_of(sends);
+    };
+    using namespace stream_info_flags;
+
+    // MSRP_ACC_LAT_VALID is BAD_ARGUMENTS before anything else (Milan v1.3 Section 5.4.2.9):
+    // without the offset hooks, on an input, with another sub-command.
+    EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, MSRP_ACC_LAT_VALID, 1)), int{AEM_STATUS_BAD_ARGUMENTS});
+    OffsetStore store;
+    store.install(handler);
+    EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_INPUT, 0, MSRP_ACC_LAT_VALID, 1)), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(
+        run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, MSRP_ACC_LAT_VALID | STREAM_ID_VALID, 1)),
+        int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(store.sets, 0);
+
+    // The echo is the 84-octet form: an 84-octet command's IP fields kept, a 48-octet one padded.
+    std::array<uint8_t, AEM_STREAM_INFO_2021_LENGTH> long_form{};
+    span_copy(
+        std::span<uint8_t>{long_form}.first(AemStreamInfoPayload::LENGTH), set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, 0, 0));
+    long_form[AemStreamInfoPayload::LENGTH + 1] = 0x42;  // source_port
+    EXPECT_EQ(run(long_form), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(body_of(*solicited(sends)).size(), AEM_STREAM_INFO_2021_LENGTH);
+    EXPECT_EQ(body_of(*solicited(sends))[AemStreamInfoPayload::LENGTH + 1], uint8_t{0x42});
+    EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, MSRP_ACC_LAT_VALID, 1)), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(body_of(*solicited(sends)).size(), AEM_STREAM_INFO_2021_LENGTH);
+    EXPECT_EQ(body_of(*solicited(sends))[AemStreamInfoPayload::LENGTH + 1], uint8_t{0});
+
+    // The IP sub-commands (IEEE 1722.1-2021 Table 7-145) are refused as unsupported, in either layout.
+    for (uint32_t const bit : {IP_FLAGS_VALID, IP_SRC_PORT_VALID, IP_DST_PORT_VALID, IP_SRC_ADDR_VALID, IP_DST_ADDR_VALID}) {
+        EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, bit, 0)), int{AEM_STATUS_NOT_SUPPORTED});
+    }
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);
+    EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, IP_DST_ADDR_VALID, 0)), int{AEM_STATUS_NOT_SUPPORTED});
+    EXPECT_EQ(body_of(*solicited(sends)).size(), AemStreamInfoPayload::LENGTH);
 }
 
 TEST(nanoavb_entity_milan, start_stop_streaming_not_supported_on_outputs)

@@ -102,7 +102,7 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 /// tear the connection down if the talker answers NOT_IMPLEMENTED.
 ///
 /// @p ext is Milan v1.2's tail (flags_ex, pbsta, acmpsta; Section 5.4.2.10):
-/// sent, making the response 56 octets, only in the Milan profile.
+/// sent only in the 56-octet StreamInfoLayout::milan_v1_2 form.
 using GetStreamInfoFn = statusbar::sg14::inplace_function<
     bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext),
     64>;
@@ -317,6 +317,14 @@ class AemCommandHandler
     /// NanoAvbComponents sets it at construction. Default: Milan.
     void set_profile(EntityProfile const profile) noexcept { profile_ = profile; }
     [[nodiscard]] auto profile() const noexcept -> EntityProfile { return profile_; }
+
+    /// The GET_STREAM_INFO response form (StreamInfoLayout); unset, the profile's: Milan
+    /// v1.2's for Milan, IEEE 1722.1-2013's for classic.
+    void set_stream_info_layout(std::optional<StreamInfoLayout> const layout) noexcept { stream_info_layout_ = layout; }
+    [[nodiscard]] auto stream_info_layout() const noexcept -> StreamInfoLayout
+    {
+        return stream_info_layout_.value_or(profile_.milan ? StreamInfoLayout::milan_v1_2 : StreamInfoLayout::ieee_2013);
+    }
 
     /// Set only the GET_COUNTERS provider, without disturbing the others
     /// (set_callbacks replaces the whole struct, which would clear send_response
@@ -867,9 +875,19 @@ class AemCommandHandler
     /// NO_SUCH_DESCRIPTOR if the descriptor is not one of this entity's streams.
     [[nodiscard]] auto handle_get_stream_info(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// GET_STREAM_INFO @p cmd answered from the get_stream_info callback into @p out_buffer:
+    /// NOT_IMPLEMENTED without one, NO_SUCH_DESCRIPTOR when it declines.
+    [[nodiscard]] auto answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// GET_STREAM_INFO's response in stream_info_layout()'s form: @p ext only in Milan v1.2's,
+    /// a zero IP tail in IEEE 1722.1-2021's. NOT_SUPPORTED when @p out_buffer is too short.
+    [[nodiscard]] auto store_stream_info(
+        AemStreamInfoPayload const& resp, AemStreamInfoMilanExtension const& ext, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
 
     /// SET_STREAM_INFO per Milan v1.2 Section 5.4.2.9: only MSRP_ACC_LAT_VALID on a STREAM_OUTPUT
-    /// (the presentation time offset); anything else NOT_SUPPORTED. The command echoed.
+    /// (the presentation time offset); anything else NOT_SUPPORTED. In the IEEE 1722.1-2021 layout
+    /// MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9) and the echo 84 octets.
     [[nodiscard]] auto handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
@@ -880,6 +898,9 @@ class AemCommandHandler
     [[nodiscard]] auto handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
+    /// SET_STREAM_INFO's checks of @p cmd before its sub-commands: BAD_ARGUMENTS for
+    /// MSRP_ACC_LAT_VALID in the IEEE 1722.1-2021 layout, else presentation_offset_target's.
+    [[nodiscard]] auto stream_info_target(AemStreamInfoPayload const& cmd, uint32_t& current) const -> uint8_t;
     /// The presentation offset checks common to SET_STREAM_INFO and SET_MAX_TRANSIT_TIME:
     /// SUCCESS with the current offset in @p current, or the status to refuse with.
     [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
@@ -991,6 +1012,7 @@ class AemCommandHandler
 
     AemCommandHandlerCallbacks callbacks_;
     EntityProfile profile_{};
+    std::optional<StreamInfoLayout> stream_info_layout_{};
 
     // One of two code paths:
     //  (1) Legacy `EntityModel&` constructor: adapter_storage_ holds an

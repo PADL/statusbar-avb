@@ -519,6 +519,9 @@ class AvbEntityKit
     /// GET_COUNTERS / GET_STREAM_INFO fills.
     void wire_stream_callbacks();
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
+    /// The AccumulatedLatency every Talker Advertise declares, ns: none of the talker's own
+    /// (IEEE 802.1Q-2022 Clause 35.2.2.8.6); the bridges add theirs.
+    static constexpr uint32_t TALKER_ACCUMULATED_LATENCY_NS = 0;
     void advertise_talker_streams(TimePoint time);
     void withdraw_talker_streams(TimePoint time);
     /// One pass of update_talker_declarations over the talker streams.
