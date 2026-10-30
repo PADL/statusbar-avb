@@ -11,9 +11,13 @@
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
+#include <charconv>
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace statusbar::avb_entity {
@@ -252,7 +256,12 @@ struct AvbEntityAudioIOConfig
     /// The Milan specification the device supports, as dotted numbers.
     std::string milan_specification_version{"1.3.0.0"};
 
-    /// Stream destination address source. "static" uses the
+    /// Each CLOCK_DOMAIN's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1), by
+    /// index; the last also serves the domains after it, extras are ignored. Empty keeps the MVU
+    /// handler's MVU_MCR_PRIO_NETWORK_INTERFACE (192). Read at start().
+    std::vector<uint8_t> default_mcr_priorities{};
+
+    /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
     /// addresses from the IEEE 1722 dynamic pool via MAAP at start() and assigns
     /// one per talker stream (block+0=AM824, +1=AAF, +2=CRF), then defends them for
@@ -482,50 +491,21 @@ struct AvbEntityAudioIOConfig
     std::string firmware_version{"1.0.0"};
 };
 
-/// The presentation offset of a talker that is given none, by profile: Milan
-/// v1.3 5.3.7.6 has 2 ms as the default of a PAAD; an entity held to 1722.1
-/// alone keeps 1 ms.
-inline constexpr uint64_t MILAN_DEFAULT_PRESENTATION_OFFSET_NS = 2'000'000;
-inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
-
-/// The most CRF timestamps one AVTPDU of this entity's CRF stream carries:
-/// the talker's own limit, TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU, which
-/// is below the 255 the stream format's one octet could say (IEEE 1722-2025
-/// I.2.6).
-inline constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PACKET = 64;
-/// The largest timestamp_interval a CRF stream format has room for (IEEE
-/// 1722-2025 I.2.6: "timestamp_interval field: 12 bits").
-inline constexpr uint16_t MAX_CRF_TIMESTAMP_INTERVAL = 0x0FFF;
-
-/// Whether the CRF cadence @p config asks for is one a CRF stream can have:
-/// 1 to MAX_CRF_TIMESTAMPS_PER_PACKET timestamps in an AVTPDU, and a
-/// timestamp_interval of 1 to MAX_CRF_TIMESTAMP_INTERVAL. The two fields are
-/// wider than what they stand for, so a value outside would otherwise be cut
-/// to its low bits on the way to the stream (300 timestamps to 44).
-[[nodiscard]] constexpr auto crf_cadence_fits(AvbEntityAudioIOConfig const& config) noexcept -> bool
+/// @p text as AvbEntityAudioIOConfig::default_mcr_priorities: comma-separated values 0-255 ("224",
+/// "224,192"), empty for none; nullopt when an item is not one.
+[[nodiscard]] inline auto parse_default_mcr_priorities(std::string_view const text) -> std::optional<std::vector<uint8_t>>
 {
-    bool const timestamps_fit =
-        config.crf_timestamps_per_packet >= 1 && config.crf_timestamps_per_packet <= MAX_CRF_TIMESTAMPS_PER_PACKET;
-    bool const interval_fits = config.crf_timestamp_interval >= 1 && config.crf_timestamp_interval <= MAX_CRF_TIMESTAMP_INTERVAL;
-    return timestamps_fit && interval_fits;
-}
-
-/// Whether @p config holds the entity to Milan v1.3: said outright by
-/// atdecc_profile ("milan13"), or, when that is empty, by the model being a
-/// Milan one.
-[[nodiscard]] inline auto is_milan_profile(AvbEntityAudioIOConfig const& config) noexcept -> bool
-{
-    return config.atdecc_profile.empty() ? config.milan : config.atdecc_profile == "milan13";
-}
-
-/// The presentation offset the entity's talkers use: what the configuration
-/// gives, or the profile's default when it gives none (0).
-[[nodiscard]] inline auto effective_presentation_offset_ns(AvbEntityAudioIOConfig const& config) noexcept -> uint64_t
-{
-    if (config.presentation_offset_ns != 0) {
-        return config.presentation_offset_ns;
+    std::vector<uint8_t> priorities;
+    for (auto const field : std::views::split(text, ',')) {
+        std::string_view const item{field.begin(), field.end()};
+        uint8_t value = 0;
+        auto const [end, ec] = std::from_chars(item.data(), item.data() + item.size(), value);
+        if (ec != std::errc{} || end != item.data() + item.size()) {
+            return std::nullopt;
+        }
+        priorities.push_back(value);
     }
-    return is_milan_profile(config) ? MILAN_DEFAULT_PRESENTATION_OFFSET_NS : CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS;
+    return priorities;
 }
 
 /// The ATDECC wire version the entity's descriptors are sent in: what the
