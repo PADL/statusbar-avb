@@ -365,9 +365,14 @@ VU_HEADER_LENGTH = 28
 class PayloadTrailer:
     """What follows a fixed AEM payload struct."""
 
-    kind: str  # descriptor | values | raw | elements
-    element: str | None = None  # TRAILER_ELEMENTS key for kind == elements
+    kind: str  # descriptor | values | raw | elements | tail | blob
+    element: str | None = None  # TRAILER_ELEMENTS key (tail: keys joined by '|')
     count_field: str | None = None  # member of the struct holding the element count
+
+    @property
+    def tails(self) -> tuple[str, ...]:
+        """kind == tail: the elements one of which follows, told by the octets left."""
+        return tuple((self.element or "").split("|"))
 
 
 @dataclass(frozen=True)
@@ -413,7 +418,7 @@ def _payload_spec(text: str | None) -> PayloadSpec | None:
         _, element, count = trailer_text.split(":")
         trailer = PayloadTrailer("elements", element, count)
     elif trailer_text.startswith("tail:"):
-        # an optional fixed element after the payload, decoded when present
+        # an optional fixed element after the payload, chosen by the octets left
         trailer = PayloadTrailer("tail", trailer_text.split(":")[1])
     elif trailer_text.startswith("blob:"):
         _, field, count = trailer_text.split(":")
@@ -754,6 +759,18 @@ STREAM_INFO_MILAN = _elem(
         Field("reserved", 5, 3, "bytes", "reserved"),
     ),
 )
+STREAM_INFO_2021 = _elem(
+    "stream_info_2021",
+    "SET/GET_STREAM_INFO IEEE 1722.1-2021 IP fields (Clause 7.4.15.1, Figure 7-40)",
+    (
+        Field("source_port", 0, 2, "u16", "UDP source port"),
+        Field("destination_port", 2, 2, "u16", "UDP destination port"),
+        Field("source_ip_address", 4, 16, "bytes", "source IP address (IPv6)"),
+        Field(
+            "destination_ip_address", 20, 16, "bytes", "destination IP address (IPv6)"
+        ),
+    ),
+)
 TRAILER_ELEMENTS: dict[str, Layout] = {
     "count_entry": COUNT_ENTRY,
     "sampling_rate": SAMPLING_RATE,
@@ -774,6 +791,7 @@ TRAILER_ELEMENTS: dict[str, Layout] = {
     "clock_identity": CLOCK_IDENTITY_ENTRY,
     "key_eui": KEY_EUI_ENTRY,
     "stream_info_milan": STREAM_INFO_MILAN,
+    "stream_info_2021": STREAM_INFO_2021,
 }
 ELEMENT_SIZE: dict[str, int] = {
     "count_entry": 4,
@@ -795,6 +813,7 @@ ELEMENT_SIZE: dict[str, int] = {
     "clock_identity": 8,
     "key_eui": 8,
     "stream_info_milan": 8,
+    "stream_info_2021": 36,
 }
 DESCRIPTOR_RAW = Field("value_details", 0, 0, "bytes", "raw descriptor trailer octets")
 JDKS_LOG_TEXT = Field("text", 0, 0, "string", "log text")

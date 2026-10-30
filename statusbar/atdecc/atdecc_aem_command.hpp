@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/ip/ip_ipv6.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -261,6 +262,14 @@ constexpr uint32_t STREAMING_WAIT = 0x00000008;
 constexpr uint32_t SUPPORTS_ENCRYPTED = 0x00000010;
 constexpr uint32_t ENCRYPTED_PDU = 0x00000020;
 constexpr uint32_t TALKER_FAILED = 0x00000040;
+/// IEEE 1722.1-2021 Table 7-145 bit 7: an output declaring and not registering a Listener.
+constexpr uint32_t NOT_REGISTERING_SRP = 0x01000000;
+/// IEEE 1722.1-2021 Table 7-145 bits 12-8: the IP fields' VALID flags.
+constexpr uint32_t IP_FLAGS_VALID = 0x00080000;
+constexpr uint32_t IP_SRC_PORT_VALID = 0x00100000;
+constexpr uint32_t IP_DST_PORT_VALID = 0x00200000;
+constexpr uint32_t IP_SRC_ADDR_VALID = 0x00400000;
+constexpr uint32_t IP_DST_ADDR_VALID = 0x00800000;
 constexpr uint32_t STREAM_VLAN_ID_VALID = 0x02000000;
 constexpr uint32_t CONNECTED = 0x04000000;
 constexpr uint32_t MSRP_FAILURE_VALID = 0x08000000;
@@ -273,8 +282,9 @@ constexpr uint32_t REGISTERING_FAILED = TALKER_FAILED;
 constexpr uint32_t BOUND = CONNECTED;
 /// The SET_STREAM_INFO sub-commands (IEEE 1722.1 7.4.15.1: "the XXX_VALID
 /// flags ... indicate which parameters are to be set").
-constexpr uint32_t SET_SUB_COMMANDS =
-    STREAM_VLAN_ID_VALID | MSRP_FAILURE_VALID | STREAM_DEST_MAC_VALID | MSRP_ACC_LAT_VALID | STREAM_ID_VALID | STREAM_FORMAT_VALID;
+constexpr uint32_t SET_SUB_COMMANDS = STREAM_VLAN_ID_VALID | MSRP_FAILURE_VALID | STREAM_DEST_MAC_VALID | MSRP_ACC_LAT_VALID |
+    STREAM_ID_VALID | STREAM_FORMAT_VALID | IP_FLAGS_VALID | IP_SRC_PORT_VALID | IP_DST_PORT_VALID | IP_SRC_ADDR_VALID |
+    IP_DST_ADDR_VALID;
 }  // namespace stream_info_flags
 
 /// GET_STREAM_INFO flags_ex (Milan v1.2 Table 5.8; written as masks, the
@@ -349,8 +359,8 @@ struct AemStreamInfoPayload
     /// Bytes 44-45: Stream VLAN ID
     doublet_t stream_vlan_id{0};
 
-    /// Bytes 46-47: Reserved
-    doublet_t reserved2{0};
+    /// Bytes 46-47: ip_flags (IEEE 1722.1-2021 Clause 7.4.15.1; reserved in 1722.1-2013)
+    doublet_t ip_flags{0};
 
     // Flag accessors
     [[nodiscard]] constexpr auto is_connected() const noexcept -> bool { return flags.has_flag(stream_info_flags::CONNECTED); }
@@ -368,6 +378,7 @@ struct AemStreamInfoPayload
 };
 
 static_assert(sizeof(AemStreamInfoPayload) == 48, "AemStreamInfoPayload must be 48 bytes");
+static_assert(offsetof(AemStreamInfoPayload, ip_flags) == 46, "ip_flags at SET/GET_STREAM_INFO octet 46");
 
 /// The Milan v1.2 tail of a GET_STREAM_INFO response (Section 5.4.2.10, Figure 5.1), after the
 /// 48 octets of AemStreamInfoPayload: a 56-octet response, told from 2013 (48) and 2021 (84) forms
@@ -409,6 +420,59 @@ static_assert(offsetof(AemStreamInfoMilanExtension, pbsta_acmpsta) == 4, "pbsta/
 /// A Milan v1.2 GET_STREAM_INFO response's length: the IEEE 1722.1-2013 form
 /// and the Milan tail.
 inline constexpr size_t AEM_STREAM_INFO_MILAN_LENGTH = AemStreamInfoPayload::LENGTH + AemStreamInfoMilanExtension::LENGTH;
+
+/// The IEEE 1722.1-2021 tail of SET/GET_STREAM_INFO (Clause 7.4.15.1, Figure 7-40) after the
+/// 48 octets of AemStreamInfoPayload (which ends with ip_flags): an 84-octet form.
+struct AemStreamInfoIpExtension
+{
+    static constexpr size_t LENGTH = 36;
+
+    /// Bytes 48-49: source_port
+    doublet_t source_port{0};
+
+    /// Bytes 50-51: destination_port
+    doublet_t destination_port{0};
+
+    /// Bytes 52-67: source_ip_address (IPv4 as RFC 4291 Section 2.5.5.2 maps it)
+    ip::IPv6Address source_ip_address{};
+
+    /// Bytes 68-83: destination_ip_address
+    ip::IPv6Address destination_ip_address{};
+
+    auto operator<=>(AemStreamInfoIpExtension const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemStreamInfoIpExtension) == 36, "AemStreamInfoIpExtension must be 36 bytes");
+static_assert(offsetof(AemStreamInfoIpExtension, source_port) == 0, "source_port at octet 48");
+static_assert(offsetof(AemStreamInfoIpExtension, destination_port) == 2, "destination_port at octet 50");
+static_assert(offsetof(AemStreamInfoIpExtension, source_ip_address) == 4, "source_ip_address at octet 52");
+static_assert(offsetof(AemStreamInfoIpExtension, destination_ip_address) == 20, "destination_ip_address at octet 68");
+
+/// An IEEE 1722.1-2021 GET_STREAM_INFO response's length.
+inline constexpr size_t AEM_STREAM_INFO_2021_LENGTH = AemStreamInfoPayload::LENGTH + AemStreamInfoIpExtension::LENGTH;
+
+/// The GET_STREAM_INFO response form an entity sends, which a controller tells by its length
+/// (Milan v1.3 Section 5.4.2.10.2): it also gives an output's msrp_accumulated_latency.
+enum class StreamInfoLayout : uint8_t
+{
+    ieee_2013,   ///< 48 octets, IEEE 1722.1-2013
+    milan_v1_2,  ///< 56 octets, Milan v1.2 Figure 5.1: an output reports its presentation time offset
+    ieee_2021,   ///< 84 octets, IEEE 1722.1-2021 Clause 7.4.16.2 (Milan v1.3): the declared latency
+};
+
+/// The response length of @p layout in octets.
+[[nodiscard]] constexpr auto stream_info_length(StreamInfoLayout const layout) noexcept -> size_t
+{
+    switch (layout) {
+        case StreamInfoLayout::milan_v1_2:
+            return AEM_STREAM_INFO_MILAN_LENGTH;
+        case StreamInfoLayout::ieee_2021:
+            return AEM_STREAM_INFO_2021_LENGTH;
+        case StreamInfoLayout::ieee_2013:
+        default:
+            return AemStreamInfoPayload::LENGTH;
+    }
+}
 
 /// Milan's presentation time offset range (v1.2 Sections 5.3.7.6, 5.4.2.9;
 /// v1.3 5.4.2.30), nanoseconds.
@@ -1420,6 +1484,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoMilanExtension> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoIpExtension> : std::true_type
 {};
 
 template <>
