@@ -9,7 +9,8 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
-#include "statusbar/nanoavb/nanoavb_components.hpp"
+#include "statusbar/sg14/inplace_function.h"
+#include "statusbar/tsn/tsn_stream_id.hpp"
 
 #include <array>
 #include <atomic>
@@ -17,20 +18,22 @@
 #include <cstdint>
 #include <optional>
 
+namespace statusbar::nanoavb {
+struct NanoAvbComponents;
+}  // namespace statusbar::nanoavb
+
 namespace statusbar::avb_entity {
 
 struct TalkerGate
 {
-    TalkerGate(bool gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept
-        : gate_enabled_{gate_enabled}
-        , components_{components}
-    {
-        // Stream Started defaults true: a stream is admitted once a listener's
-        // Ready is registered unless explicitly stopped via note_stream_started().
-        for (auto& started : stream_started_) {
-            started.store(true, std::memory_order_relaxed);
-        }
-    }
+    /// The talker stream index (below STREAM_COUNT) a StreamID is declared on, or nullopt.
+    using StreamIndexFn = sg14::inplace_function<std::optional<uint16_t>(tsn::StreamId const&), 32>;
+
+    /// A gate whose note_listener_ready() finds streams by @p stream_index (reactor thread); with
+    /// @p gate_enabled false every stream is admitted.
+    TalkerGate(bool gate_enabled, StreamIndexFn stream_index) noexcept;
+    /// The kit's gate: @p components' ACMP talker streams, which must outlive it.
+    TalkerGate(bool gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept;
 
     /// Install the reactor-thread logger for gate-transition status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
@@ -45,7 +48,7 @@ struct TalkerGate
     /// Reactor thread: whether a Listener declaration permitting transmission (Ready or Ready
     /// Failed) is registered for @p stream_id at steady-clock @p now_ns. Registration and
     /// withdrawal both stamp the last-ready time, from which GRACE_NS runs.
-    void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns);
+    void note_listener_ready(tsn::StreamId const& stream_id, bool ready, int64_t now_ns);
 
     /// Reactor thread: our Talker declarations were withdrawn. Every stream closes at once (no
     /// grace) and forgets its listener state until note_listener_ready re-learns it.
@@ -79,9 +82,9 @@ struct TalkerGate
     [[nodiscard]] auto should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool { return admitted(idx, now_ns); }
 
     // --- References / values (bound at construction) ---------------------------
-    bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
-    nanoavb::NanoAvbComponents const& components_;  ///< maps stream_id -> talker stream index (acmp_talker)
-    std::optional<logging::Logger> logger_{};       ///< reactor-thread gate-transition logging
+    bool gate_enabled_;                        ///< config.gate_talker_on_listener, destructured at the call site
+    StreamIndexFn stream_index_;               ///< maps stream_id -> talker stream index
+    std::optional<logging::Logger> logger_{};  ///< reactor-thread gate-transition logging
 
     // --- Owned gate state (cross-thread) ---------------------------------------
     /// A listener declaration permitting transmission is registered, per stream.

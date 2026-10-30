@@ -6,29 +6,63 @@
 
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 
+#include "statusbar/nanoavb/nanoavb_components.hpp"
+
 #include <cstdint>
+#include <optional>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
-void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, int64_t const now_ns)
+namespace {
+
+/// The kit's lookup: the first ACMP talker stream declaring @p stream_id.
+auto acmp_talker_index(nanoavb::NanoAvbComponents const& components, tsn::StreamId const& stream_id) noexcept
+    -> std::optional<uint16_t>
+{
+    for (uint16_t idx = 0; idx < static_cast<uint16_t>(TalkerGate::STREAM_COUNT); ++idx) {
+        auto const* s = components.acmp_talker.get_stream(idx);
+        if (s != nullptr && s->stream_id.to_uint64() == stream_id.to_uint64()) {
+            return idx;
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index) noexcept
+    : gate_enabled_{gate_enabled}
+    , stream_index_{std::move(stream_index)}
+{
+    // Stream Started defaults true: a stream is admitted once a listener's
+    // Ready is registered unless explicitly stopped via note_stream_started().
+    for (auto& started : stream_started_) {
+        started.store(true, std::memory_order_relaxed);
+    }
+}
+
+TalkerGate::TalkerGate(bool const gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept
+    : TalkerGate{gate_enabled, [&components](tsn::StreamId const& sid) { return acmp_talker_index(components, sid); }}
+{}
+
+void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const ready, int64_t const now_ns)
 {
     // Record whether this talker stream has a listener that permits transmit (Listener Ready /
     // Ready Failed), matched to the stream index by stream_id.
-    uint64_t const sid_u64 = stream_id.to_uint64();
-    for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
-        auto const* s = components_.acmp_talker.get_stream(idx);
-        if (s == nullptr || s->stream_id.to_uint64() != sid_u64) {
-            continue;
-        }
-        bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
-        if (ready || was) {
-            // The grace window runs from the last moment the declaration was known registered;
-            // a withdrawal seen while already withdrawn does not extend it.
-            ready_ns_[idx].store(now_ns, std::memory_order_relaxed);
-        }
-        if (was != ready && logger_) {
-            logger_->status("srp: talker stream {} MSRP listener-ready -> {} (SRP gate)", idx, ready);
-        }
+    auto const found = stream_index_ ? stream_index_(stream_id) : std::nullopt;
+    if (!found || *found >= listener_ready_.size()) {
+        return;
+    }
+    uint16_t const idx = *found;
+    bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
+    if (ready || was) {
+        // The grace window runs from the last moment the declaration was known registered;
+        // a withdrawal seen while already withdrawn does not extend it.
+        ready_ns_[idx].store(now_ns, std::memory_order_relaxed);
+    }
+    if (was != ready && logger_) {
+        logger_->status("srp: talker stream {} MSRP listener-ready -> {} (SRP gate)", idx, ready);
     }
 }
 
