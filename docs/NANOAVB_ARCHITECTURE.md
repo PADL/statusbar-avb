@@ -490,6 +490,10 @@ end station that only declares Talker Advertise and Listener attributes (IEEE
    received PDU is done, with their final state: a peer's Domain counts only
    at the SRclassPriority in use (Clause 35.2.1.4), and a talker whose
    Advertise turns into a Talker Failed has not left.
+5. `withdraw_all()` withdraws every talker, listener, the Domain and its VID
+   and sends the Leaves at once (`MsrpHandler::withdraw_all()`,
+   `MvrpHandler::withdraw_all()`), before the port closes: its peer drops the
+   registrations at its leave timer instead of its next LeaveAll.
 
 The participant is `DiscoveryMsrpLimits`: matching by destination needs every
 Talker attribute the bridge propagates (it does not prune, Clause 35.2.1.4 b),
