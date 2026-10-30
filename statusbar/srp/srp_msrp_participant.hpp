@@ -351,12 +351,16 @@ class MsrpParticipantT
     /// Look up a locally known Talker Failed by tsn::StreamId.
     [[nodiscard]] auto find_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
-    /// The Talker Advertise for @p id while a peer's declaration is registered (In or Leaving), or
-    /// nullptr: never a record the peer has left or one only we declare.
+    /// The Talker Advertise for @p id while a peer's declaration is registered (In, or Leaving until
+    /// its LeaveTime), or nullptr: never a record the peer's leave has timed out or one only we declare.
     [[nodiscard]] auto find_registered_talker_advertise(tsn::StreamId const& id) const noexcept -> TalkerAdvertiseFirstValue const*;
 
     /// The Talker Failed for @p id while registered, or nullptr.
     [[nodiscard]] auto find_registered_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
+
+    /// Whether a peer's Talker Advertise or Talker Failed for @p id is registered In, not Leaving:
+    /// what a leave just processed leaves behind.
+    [[nodiscard]] auto talker_registered_in(tsn::StreamId const& id) const noexcept -> bool;
 
     /// The registered Talker Advertise whose DataFrameParameters are @p destination and @p vid, or
     /// nullptr; the first if several (IEEE 802.1Q-2022 Clause 35.2.2.8.3 allows one per destination).
