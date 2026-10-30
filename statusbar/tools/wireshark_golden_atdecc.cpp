@@ -129,19 +129,9 @@ auto read_descriptor_response(std::vector<uint8_t> const& descriptor, uint16_t c
 
 using Frames = std::vector<AtdeccGoldenFrame>;
 
-/// The AECP common header of a Milan vendor-unique command or response with
-/// @p payload_size octets from the command_type on.
-auto mvu_common(bool const response, uint16_t const sequence, size_t const payload_size) -> AecpDuCommon
-{
-    AecpDuCommon du{};
-    du.init_command(
-        response ? AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE : AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND,
-        static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6 + payload_size));
-    du.target_entity_id = TARGET;
-    du.controller_entity_id = CONTROLLER;
-    du.sequence_id = sequence;
-    return du;
-}
+auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
+{  // NOLINT(statusbar-block-statements): the golden frame table, one scope per command
+    std::vector<AtdeccGoldenFrame> frames;
 
 /// A Milan vendor-unique AVTPDU: the common header, the MVU protocol id,
 /// then @p payload, which starts with the command_type.
@@ -391,7 +381,7 @@ void add_more_read_descriptor_frames(Frames& frames)
 void add_aem_command_frames(Frames& frames)
 {
     // ---- AEM: GET_STREAM_INFO command + response ----
-    {
+    {  // NOLINT(statusbar-block-statements): one frame per layout, each built field by field
         AemGetStreamInfoCommandPayload command{};
         command.descriptor_type = DESCRIPTOR_STREAM_INPUT;
         command.descriptor_index = 1;
@@ -458,6 +448,24 @@ void add_aem_command_frames(Frames& frames)
         frames.push_back(
             {"aem_get_max_transit_time_response",
              aem(AEM_COMMAND_GET_MAX_TRANSIT_TIME, true, 14, std::span<uint8_t const>(bytes_of(transit)))});
+
+        // IEEE 1722.1-2021 Clause 7.4.16.2 (Milan v1.3 Section 5.4.2.10.2): an output's 84-octet
+        // answer, the declared accumulated latency in msrp_accumulated_latency, then the IP fields.
+        AemStreamInfoPayload output_2021 = output;
+        output_2021.flags = f::STREAM_FORMAT_VALID | f::STREAM_ID_VALID | f::MSRP_ACC_LAT_VALID | f::STREAM_DEST_MAC_VALID |
+            f::STREAM_VLAN_ID_VALID | f::CONNECTED;
+        output_2021.msrp_accumulated_latency = 0U;
+        AemStreamInfoIpExtension ip{};
+        ip.source_port = 0x4E20;
+        ip.destination_port = 17220;
+        ip.destination_ip_address = statusbar::ip::IPv6Address{0xFF, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x17, 0x22};
+        frames.push_back(
+            {"aem_get_stream_info_response_2021_output",
+             aem(AEM_COMMAND_GET_STREAM_INFO,
+                 true,
+                 15,
+                 std::span<uint8_t const>(bytes_of(output_2021)),
+                 std::span<uint8_t const>(bytes_of(ip)))});
     }
 
     // ---- AEM: SET_NAME, GET_COUNTERS response, SET_CONTROL with a JDKS log blob ----
