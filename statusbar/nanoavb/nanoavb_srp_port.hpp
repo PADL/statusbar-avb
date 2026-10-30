@@ -120,6 +120,9 @@ class SrpPort
     [[nodiscard]] auto attach_listener(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>;
     /// Withdraw the Listener declaration for @p stream_id (idempotent).
     [[nodiscard]] auto withdraw_listener(StreamId const& stream_id, TimePoint now) -> Status;
+    /// Withdraw every talker, listener, the Domain and its VID, and send the Leaves now rather than
+    /// at the next join timer: before the port closes, so its peer need not wait out LeaveAll.
+    void withdraw_all(TimePoint now);
 
     /// The Class A Domain in use: the configured one, or the VID adopted from the peer.
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return msrp_.domain(); }
