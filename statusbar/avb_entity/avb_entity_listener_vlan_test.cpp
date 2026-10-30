@@ -1,8 +1,8 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// ListenerVlan over a recording VlanControl: create, move, release, EEXIST and EPERM handling,
-// and the kit's wiring (configured VID, adopted MSRP Domain VID, back on link up, stop()).
+// ListenerVlan over a recording VlanControl: create, move, release, EEXIST and EPERM handling, the
+// link brought up for IP listeners, and the kit's wiring (configured VID, adopted MSRP Domain VID, back on link up, stop()).
 
 #include "statusbar/test/test.hpp"
 
@@ -27,6 +27,7 @@
 #    include <string>
 #    include <string_view>
 #    include <system_error>
+#    include <utility>
 #    include <vector>
 
 using namespace statusbar;
@@ -40,6 +41,7 @@ class RecordingVlan final : public net::vlan::VlanControl
   public:
     std::vector<std::string> requests;
     std::optional<std::errc> next{};
+    std::optional<std::errc> next_up{};  ///< bring_up()'s answer, once
 
     auto add_vlan(int const parent_ifindex, std::string_view const name, uint16_t const vid) -> Status override
     {
@@ -50,6 +52,12 @@ class RecordingVlan final : public net::vlan::VlanControl
     {
         requests.push_back(std::format("del {}", name));
         return answer();
+    }
+    auto bring_up(std::string_view const name) -> Status override
+    {
+        requests.push_back(std::format("up {}", name));
+        auto const refused = std::exchange(next_up, std::nullopt);
+        return refused ? failure(std::make_error_code(*refused)) : success();
     }
     [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
 
@@ -128,6 +136,40 @@ TEST(listener_vlan, leaves_an_existing_link_and_survives_a_refusal)
     EXPECT_EQ(vlan.vid(), uint16_t{7});
     vlan.release();
     EXPECT_TRUE(same(fake.requests, {"add 3 enp8s0.2 2", "add 3 enp8s0.7 7", "add 3 enp8s0.7 7", "del enp8s0.7"}));
+}
+
+// For IP listeners the link comes up with no address; one already there (a crashed run's) is adopted, brought up
+// and deleted at the end as if created here
+TEST(listener_vlan, an_ip_multicast_link_is_brought_up_and_an_existing_one_adopted)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingVlan fake;
+    ListenerVlan vlan{channel.logger(), ListenerLinkUse::ip_multicast};
+    vlan.bind(fake, "ens4", 4);
+    vlan.follow(2);
+    EXPECT_TRUE(vlan.created() && vlan.up());
+    fake.next = std::errc::file_exists;  // a crashed run's ens4.3
+    vlan.follow(3);
+    EXPECT_TRUE(vlan.created() && vlan.up());
+    vlan.follow(7);
+    fake.next_up = std::errc::operation_not_permitted;  // the up refused: the VID stays on the filter
+    vlan.follow(8);
+    EXPECT_TRUE(vlan.created() && !vlan.up());
+    vlan.release();
+    EXPECT_TRUE(same(
+        fake.requests,
+        {"add 4 ens4.2 2",
+         "up ens4.2",
+         "add 4 ens4.3 3",
+         "del ens4.2",
+         "up ens4.3",
+         "add 4 ens4.7 7",
+         "del ens4.3",
+         "up ens4.7",
+         "add 4 ens4.8 8",
+         "del ens4.7",
+         "up ens4.8",
+         "del ens4.8"}));
 }
 
 namespace {

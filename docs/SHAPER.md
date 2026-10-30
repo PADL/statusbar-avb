@@ -398,6 +398,19 @@ entity creates nothing: transmitting tagged frames needs no filter entry.
 The VID followed is our own SR-class VID; a talker whose stream frames carry
 another VID (its Talker Advertise's DataFrameParameters) is not covered.
 
+A listener of IP streams on the SR class VLAN (AES67-2018 Annex C.1.1.2)
+constructs its `ListenerVlan` with `ListenerLinkUse::ip_multicast`: the link
+it creates is brought up with no address (`addrgenmode none`, then up), so a
+socket can join a group on it and the kernel reports the membership tagged
+with the VID, which an IGMP-snooping switch on that VLAN needs before it
+forwards the group (RFC 4541). IGMPv3 reports from an address-less link
+carry source 0.0.0.0 (RFC 3376 Section 4.2.13). A link already there (a
+crashed run's) is adopted: brought up the same way, and deleted at the end
+as if created. Up, the link sees the tagged frames an AF_XDP program passes
+to the stack (IGMP queries among them); frames redirected to a socket never
+reach it. A group left on the link is reported on a timer two jiffies on,
+which deleting the link cancels: leave before the link goes.
+
 ```
 ip -d link show type vlan     # <if>.2@<if>: ... state DOWN ... vlan protocol 802.1Q id 2
 ```
