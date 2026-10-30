@@ -23,5 +23,7 @@
 #include "statusbar/nanoavb/nanoavb_msrp_talker_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_mvrp_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/nanoavb/nanoavb_srp_net.hpp"
+#include "statusbar/nanoavb/nanoavb_srp_port.hpp"
 #include "statusbar/nanoavb/nanoavb_supervisor_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_talker_engine_sm.hpp"

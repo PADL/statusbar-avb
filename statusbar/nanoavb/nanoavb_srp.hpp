@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -151,6 +152,23 @@ struct DomainInfo
 
     [[nodiscard]] constexpr auto operator==(DomainInfo const&) const noexcept -> bool = default;
 };
+
+/// The MSRP participant's tables for an entity's components, at full capacity, with part of
+/// each reserved for this entity's own streams and their peers so other stations' attributes
+/// never refuse ours with attribute_table_full (docs/NANOAVB_ARCHITECTURE.md).
+template <class Limits = statusbar::srp::msrp::DefaultMsrpLimits>
+[[nodiscard]] constexpr auto entity_msrp_config(size_t const talker_streams, size_t const listener_streams) noexcept
+    -> statusbar::srp::msrp::MsrpConfig
+{  // NOLINT(statusbar-block-statements): the MSRP table limits, field by field
+    statusbar::srp::msrp::MsrpConfig config{};
+    config.max_talker_advertise = Limits::max_talker_advertise;
+    config.max_talker_failed = Limits::max_talker_failed;
+    config.max_listeners = Limits::max_listeners;
+    config.reserved_talker_advertise = std::min(talker_streams + listener_streams, config.max_talker_advertise);
+    config.reserved_talker_failed = std::min(listener_streams, config.max_talker_failed);
+    config.reserved_listeners = std::min(talker_streams + listener_streams, config.max_listeners);
+    return config;
+}
 
 //
 // MVRP Handler Callback Interface
@@ -393,8 +411,10 @@ struct MsrpCallbacks
 // MSRP Handler
 //
 /// MsrpHandler - skeleton class for MSRP stream reservation
-/// @tparam MaxStreams Compile-time capacity for talker/listener stream tracking
-template <size_t MaxStreams = 32>
+/// @tparam MaxStreams Compile-time capacity for talker/listener stream tracking; a withdrawn
+///         (Idle) entry is reused by the next new StreamID
+/// @tparam Limits The MSRP participant's table capacities
+template <size_t MaxStreams = 32, class Limits = statusbar::srp::msrp::DefaultMsrpLimits>
 class MsrpHandler
 {
   public:
@@ -555,103 +575,20 @@ class MsrpHandler
     /// MsrpParticipant::set_suppress_leaveall.
     void set_suppress_leaveall(bool enabled) noexcept { participant_.set_suppress_leaveall(enabled); }
 
-    /// How long a PROBE_TX_COMMAND keeps a stream's Talker attribute
-    /// declared with no Listener registered (Milan v1.3 4.3.3.1).
-    static constexpr std::chrono::seconds TALKER_PROBE_VALIDITY{15};
-
-    /// Milan v1.3 4.3.3.1: a Talker attribute is declared only while some
-    /// listener wants the stream, "to avoid declaring talker attributes for
-    /// Streams that are not requested by any Listener, saving network
-    /// resources". With this on, talker_advertise() hands the handler the
-    /// stream's parameters and the handler declares them while either
-    /// condition of 4.3.3.1 (2) holds: a PROBE_TX_COMMAND for the stream
-    /// came in the last 15 seconds (note_talker_probe), or this port is
-    /// registering a Listener attribute for its StreamID. It withdraws the
-    /// attribute when neither holds any more, and the stream is then
-    /// TalkerReservationState::Waiting. Off (the default, IEEE 1722.1's
-    /// way) every stream handed to talker_advertise() is declared at once.
-    /// Turning it off does not declare what is waiting: the entity
-    /// advertises again.
-    void set_talker_waits_for_listener(bool const wait) noexcept { talker_waits_for_listener_ = wait; }
-    [[nodiscard]] auto talker_waits_for_listener() const noexcept -> bool { return talker_waits_for_listener_; }
-
-    /// Milan v1.3 4.3.3.1 condition 1: whether the talker streams'
-    /// destination addresses are the entity's to use ("allocated by the MAAP
-    /// protocol and no conflict is being reported"). While they are not, a
-    /// handler that waits for a listener declares no Talker attribute and
-    /// withdraws, at its next tick(), the ones it had declared. True until
-    /// told otherwise; not consulted unless set_talker_waits_for_listener().
-    void set_talker_addresses_valid(bool const valid) noexcept { talker_addresses_valid_ = valid; }
-    [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool { return talker_addresses_valid_; }
-
-    /// A PROBE_TX_COMMAND (IEEE 1722.1's CONNECT_TX_COMMAND) for talker
-    /// stream @p stream_id arrived at @p now. Remembered for
-    /// TALKER_PROBE_VALIDITY whether or not the stream has been handed to
-    /// talker_advertise() yet, and a waiting stream is declared at once: the
-    /// listener that probed starts looking for the attribute as soon as it
-    /// has the response. Nothing unless set_talker_waits_for_listener().
-    void note_talker_probe(StreamId const& stream_id, TimePoint const now)
-    {
-        if (!talker_waits_for_listener_) {
-            return;
-        }
-        remember_talker_probe(stream_id, now);
-        follow_talker_demand(now);
-    }
-
-    /// This talker stream's parameters, to declare as a Talker Advertise: at
-    /// once, or under set_talker_waits_for_listener() while a listener wants
-    /// the stream. Called again with other parameters for a stream already
-    /// declared, the participant leaves the old value first and holds the
-    /// new one for two LeaveAll periods (IEEE 802.1Q 35.2.2.8).
+    /// Declare (or update) @p info's Talker Advertise and record it Advertising. Returns its entry's
+    /// index. Errors: NanoAvbError::SrpRegistrationFailed (table full), the participant's.
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
     {
-        size_t idx = 0;
-        bool found = false;
-        TalkerStreamSrpInfo previous{};
-        for (size_t i = 0; i < talker_streams_.size(); ++i) {
-            if (talker_streams_[i].stream_id == info.stream_id) {
-                previous = talker_streams_[i];
-                talker_streams_[i] = info;
-                talker_streams_[i].state = TalkerReservationState::Advertising;
-                idx = i;
-                found = true;
-                break;
-            }
+        auto const idx = stream_slot(talker_streams_, info.stream_id, TalkerReservationState::Idle);
+        if (!idx) {
+            return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
         }
-        ensure_started(now);
-        auto& stream = talker_streams_[*idx];
-        if (talker_wanted(stream.stream_id, now)) {
-            declare_talker(stream, now);
-        } else {
-            stand_talker_down(stream, now);
-        }
-
-        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
-        fv.stream_id = info.stream_id;
-        fv.destination_address = info.dest_address;
-        fv.vlan_identifier = info.vlan_id;
-        fv.max_frame_size = info.max_frame_size;
-        fv.max_interval_frames = info.max_interval_frames;
-        fv.set_priority(info.priority);
-        fv.set_rank(statusbar::srp::msrp::RANK_NON_EMERGENCY);
-        fv.accumulated_latency = info.accumulated_latency;
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
-        // A full attribute table is the caller's to see; put the reservation entry back as it
-        // was so the table never claims an Advertise that was never declared.
-        if (auto status = participant_.declare_talker_advertise(fv, now); !status) {
-            if (found) {
-                talker_streams_[idx] = previous;
-            } else {
-                talker_streams_.pop_back();
-            }
+        // Declared first: a full attribute table leaves the reservation entries as they were.
+        if (auto status = declare_talker_attribute(info, now); !status) {
             return failure(status.error());
         }
-        return idx;
+        store_stream(talker_streams_, *idx, advertising(info));
+        return *idx;
     }
 
     [[nodiscard]] auto talker_withdraw(StreamId const& stream_id, TimePoint now) -> Status
@@ -800,6 +737,45 @@ class MsrpHandler
         -> statusbar::srp::msrp::TalkerFailedFirstValue const*
     {
         return participant_.find_talker_failed(stream_id);
+    }
+
+    /// A peer's Talker Advertise / Talker Failed for @p stream_id while its registrar holds it,
+    /// or nullptr; never our own (Milan v1.2 Section 5.3.8.8).
+    [[nodiscard]] auto peer_talker_advertise(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
+    {
+        return participant_.find_registered_talker_advertise(stream_id);
+    }
+    [[nodiscard]] auto peer_talker_failed(StreamId const& stream_id) const noexcept
+        -> statusbar::srp::msrp::TalkerFailedFirstValue const*
+    {
+        return participant_.find_registered_talker_failed(stream_id);
+    }
+    /// Whether a peer's Talker Advertise or Failed for @p stream_id is registered In, not Leaving.
+    [[nodiscard]] auto peer_talker_in(StreamId const& stream_id) const noexcept -> bool
+    {
+        return participant_.talker_registered_in(stream_id);
+    }
+
+    /// A peer's registered Talker Advertise / Talker Failed for the stream sent to @p destination on
+    /// @p vid, or nullptr (IEEE 802.1Q-2022 Clause 35.2.2.8.3: one stream per destination).
+    [[nodiscard]] auto peer_talker_advertise(Eui48 const& destination, uint16_t const vid) const noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
+    {
+        return participant_.find_registered_talker_advertise(destination, vid);
+    }
+    [[nodiscard]] auto peer_talker_failed(Eui48 const& destination, uint16_t const vid) const noexcept
+        -> statusbar::srp::msrp::TalkerFailedFirstValue const*
+    {
+        return participant_.find_registered_talker_failed(destination, vid);
+    }
+
+    /// Subscribe @p observer to the participant's registrations beside this handler's own; it is
+    /// called after the handler has followed each one. See MsrpParticipant::subscribe.
+    [[nodiscard]] auto subscribe(statusbar::srp::msrp::Observer observer) ->
+        typename statusbar::srp::msrp::MsrpParticipantT<Limits>::SubscriptionId
+    {
+        return participant_.subscribe(std::move(observer));
     }
 
     /// The registered (peer-declared, registrar In or Leaving) Listener
@@ -1104,6 +1080,62 @@ class MsrpHandler
         return listener_streams_.size();
     }
 
+    /// The index of @p stream_id's entry in @p streams, else of a withdrawn (@p idle) entry to reuse,
+    /// else the end while there is room; nullopt when the table is full.
+    template <class Streams, class State>
+    [[nodiscard]] static auto stream_slot(Streams const& streams, StreamId const& stream_id, State const idle) noexcept
+        -> std::optional<size_t>
+    {
+        auto found = std::ranges::find(streams, stream_id, &Streams::value_type::stream_id);
+        if (found == streams.end()) {
+            found = std::ranges::find(streams, idle, &Streams::value_type::state);
+        }
+        if (found != streams.end()) {
+            return static_cast<size_t>(found - streams.begin());
+        }
+        return streams.size() < MaxStreams ? std::optional<size_t>{streams.size()} : std::nullopt;
+    }
+
+    /// Put @p entry at @p idx of @p streams (a stream_slot() index: an entry, or the end).
+    template <class Streams, class Entry>
+    static void store_stream(Streams& streams, size_t const idx, Entry const& entry) noexcept
+    {
+        if (idx < streams.size()) {
+            streams[idx] = entry;
+            return;
+        }
+        (void)streams.try_push_back(entry);
+    }
+
+    /// @p info, Advertising.
+    [[nodiscard]] static auto advertising(TalkerStreamSrpInfo info) noexcept -> TalkerStreamSrpInfo
+    {
+        info.state = TalkerReservationState::Advertising;
+        return info;
+    }
+
+    /// Declare @p info's Talker Advertise attribute (rank non-emergency), starting the participant first.
+    [[nodiscard]] auto declare_talker_attribute(TalkerStreamSrpInfo const& info, TimePoint now) -> Status
+    {
+        ensure_started(now);
+        return participant_.declare_talker_advertise(talker_first_value(info), now);
+    }
+
+    [[nodiscard]] static auto talker_first_value(TalkerStreamSrpInfo const& info) noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue
+    {  // NOLINT(statusbar-block-statements): the Talker Advertise FirstValue, field by field
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fv.stream_id = info.stream_id;
+        fv.destination_address = info.dest_address;
+        fv.vlan_identifier = info.vlan_id;
+        fv.max_frame_size = info.max_frame_size;
+        fv.max_interval_frames = info.max_interval_frames;
+        fv.set_priority(info.priority);
+        fv.set_rank(statusbar::srp::msrp::RANK_NON_EMERGENCY);
+        fv.accumulated_latency = info.accumulated_latency;
+        return fv;
+    }
+
     /// Declare @p stream_id's Listener @p decl, then attach one more input in @p state. A declaration
     /// the participant's full table refuses leaves the record as it was; a full record table
     /// withdraws a declaration made for a stream no record holds.
@@ -1128,16 +1160,18 @@ class MsrpHandler
     /// registration, not about the input. Fails when the table is full.
     [[nodiscard]] auto attach_listener_record(StreamId const& stream_id, ListenerReservationState state) -> StatusValue<size_t>
     {
-        size_t const idx = listener_index(stream_id);
-        if (idx == listener_streams_.size() &&
-            listener_streams_.try_push_back({.stream_id = stream_id, .state = state}) == nullptr) {
+        auto const idx = stream_slot(listener_streams_, stream_id, ListenerReservationState::Idle);
+        if (!idx) {
             // Reject rather than throw when the reservation table is full (reactor path).
             return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
         }
-        auto& record = listener_streams_[idx];
+        if (*idx == listener_streams_.size() || listener_streams_[*idx].stream_id != stream_id) {
+            store_stream(listener_streams_, *idx, ListenerStreamSrpInfo{.stream_id = stream_id});
+        }
+        auto& record = listener_streams_[*idx];
         record.state = state;
         ++record.attached;
-        return idx;
+        return *idx;
     }
 
     void ensure_started(TimePoint now)
@@ -1331,7 +1365,7 @@ class MsrpHandler
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
     statusbar::sg14::inplace_vector<TalkerProbe, MaxStreams> talker_probes_;
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
-    statusbar::srp::msrp::MsrpParticipant participant_;
+    statusbar::srp::msrp::MsrpParticipantT<Limits> participant_;
     TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)
     bool started_{false};
 };
