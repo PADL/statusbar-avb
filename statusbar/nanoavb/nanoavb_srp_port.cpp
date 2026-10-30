@@ -155,6 +155,12 @@ auto SrpPort::withdraw_listener(StreamId const& stream_id, TimePoint const now) 
     return msrp_.listener_withdraw(stream_id, now);
 }
 
+void SrpPort::withdraw_all(TimePoint const now)
+{
+    msrp_.withdraw_all(now);
+    mvrp_.withdraw_all(now);
+}
+
 auto SrpPort::peer_domain_registered() const noexcept -> bool
 {
     return peer_class_a_ && peer_priority_ == domain().sr_class_priority;
