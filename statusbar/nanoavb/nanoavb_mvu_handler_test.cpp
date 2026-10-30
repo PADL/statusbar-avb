@@ -296,7 +296,7 @@ TEST(nanoavb_mvu, system_unique_id_set_get)
     // A SET without the id
     std::array<uint8_t, 2> const reserved{};
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, reserved), US));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_PAYLOAD_TOO_SHORT);
     EXPECT_EQ(changes, 1);
 }
 
@@ -381,10 +381,10 @@ TEST(nanoavb_mvu, media_clock_reference_info)
     expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_NO_SUCH_DESCRIPTOR);
     // Short commands
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, {}), US));
-    expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_BAD_ARGUMENTS);
+    expect_mvu_response(sent.back(), MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_PAYLOAD_TOO_SHORT);
     std::array<uint8_t, 8> const partial{};
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, partial), US));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_BAD_ARGUMENTS);
+    expect_mvu_response(sent.back(), MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, MVU_STATUS_PAYLOAD_TOO_SHORT);
     EXPECT_EQ(changes, 2);
 
     // A new default carries a user priority still at the old default along
@@ -396,6 +396,33 @@ TEST(nanoavb_mvu, media_clock_reference_info)
     EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{224});
     EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(0), US));
     EXPECT_EQ(reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back()).user_mcr_prio.get(), uint8_t{200});
+}
+
+// Milan v1.3 Section 7.6.1.1: each clock domain has its own default priority; a user
+// priority set away from the old default stays, one at it follows, and a domain
+// the entity lacks is refused
+TEST(nanoavb_mvu, default_priority_per_clock_domain)
+{
+    std::vector<std::vector<uint8_t>> sent;
+    auto handler = make_handler(sent);
+    handler.set_clock_domain_count(2);
+    EXPECT_TRUE(handler.process_packet(SRC, set_mcr_command(1, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 100, ""), US));
+
+    EXPECT_TRUE(handler.set_default_mcr_priority(0, MVU_MCR_PRIO_ROUTER));
+    EXPECT_TRUE(handler.set_default_mcr_priority(1, MVU_MCR_PRIO_ROUTER));
+    EXPECT_FALSE(handler.set_default_mcr_priority(2, MVU_MCR_PRIO_ROUTER));
+    EXPECT_EQ(handler.default_mcr_priority(0), MVU_MCR_PRIO_ROUTER);
+    EXPECT_EQ(handler.default_mcr_priority(2), MVU_MCR_PRIO_NETWORK_INTERFACE);
+    EXPECT_EQ(handler.default_mcr_priority(MvuCommandHandler::MAX_CLOCK_DOMAINS), MVU_MCR_PRIO_DEFAULT);
+
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(0), US));
+    auto info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.default_mcr_prio.get(), MVU_MCR_PRIO_ROUTER);
+    EXPECT_EQ(info.user_mcr_prio.get(), MVU_MCR_PRIO_ROUTER);
+    EXPECT_TRUE(handler.process_packet(SRC, get_mcr_command(1), US));
+    info = reply_payload<MvuMediaClockReferenceInfoPayload>(sent.back());
+    EXPECT_EQ(info.default_mcr_prio.get(), MVU_MCR_PRIO_ROUTER);
+    EXPECT_EQ(info.user_mcr_prio.get(), uint8_t{100});
 }
 
 // The SETs honour the AEM lock: another controller's lock refuses them
