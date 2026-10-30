@@ -66,9 +66,12 @@ Implemented (Milan profile only):
 - SET/GET_MEDIA_CLOCK_REFERENCE_INFO (Sections 5.4.4.4-5, 7.6) per
   CLOCK_DOMAIN: default_mcr_prio, user_mcr_prio and media_clock_domain_name
   ("DEFAULT"). The default priority is MVU_MCR_PRIO_NETWORK_INTERFACE (192,
-  Table 7.2), set with `set_default_mcr_priority`; a user priority still at
-  the old default follows it. A SET changes only the fields its flags mark,
-  and the response carries every supported flag.
+  Milan v1.3 Table 7.3), set for every domain or for one with
+  `set_default_mcr_priority`; a user priority still at the old default follows
+  it (Section 7.6.1.2). A SET changes only the fields its flags mark, and the
+  response carries every supported flag. Milan v1.3 Section 5.4.4.4 makes the
+  default part of the entity model: an entity whose default changes reports a
+  different entity_model_id.
 
 SETs are refused ENTITY_LOCKED while another controller holds the AEM lock or
 acquisition (Section 5.4.4.4). A SET that changes something is sent, u bit
