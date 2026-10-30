@@ -1478,7 +1478,7 @@ void AvbEntityKit::apply_default_mcr_priorities()
 {
     auto const& priorities = config_.default_mcr_priorities;
     auto& mvu = host_.components().mvu_handler;
-    if (priorities.size() > mvu.clock_domain_count()) {
+    if (mvu.clock_domain_count() != 0 && priorities.size() > mvu.clock_domain_count()) {
         host_.ctl_log().warning(
             "kit: {} default media clock reference priorities for {} clock domain(s): the rest ignored",
             priorities.size(),
