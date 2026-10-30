@@ -200,6 +200,9 @@ class MvrpHandler
     /// @param now Current time for timer processing
     auto tick(TimePoint now) -> void;
 
+    /// Send what is pending now (MvrpParticipant::transmit()).
+    auto transmit(TimePoint now) -> void { participant_.transmit(now); }
+
     /// Get all registered VLANs
     [[nodiscard]] auto vlans() const noexcept -> std::span<VlanInfo const> { return vlans_; }
 
@@ -409,6 +412,15 @@ class MsrpHandler
         class_a.sr_class_vid = domain_.sr_class_vid;
         return participant_.declare_domain(class_a, now);
     }
+
+    /// Withdraw the Class A Domain declaration (before the port closes).
+    [[nodiscard]] auto withdraw_domain(TimePoint now) -> Status
+    {
+        return participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_A, now);
+    }
+
+    /// Send what is pending now (MsrpParticipant::transmit()).
+    void transmit(TimePoint now) { participant_.transmit(now); }
 
     [[nodiscard]] auto get_talker_stream(StreamId const& stream_id) const noexcept -> TalkerStreamSrpInfo const*
     {

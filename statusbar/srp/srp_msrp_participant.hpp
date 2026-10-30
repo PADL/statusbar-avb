@@ -443,6 +443,10 @@ class MsrpParticipantT
     /// observer notifications.
     void tick(TimePoint now);
 
+    /// A transmit opportunity now, not at the next join timer: what the applicants have pending
+    /// (a withdrawal's Leave) goes out, e.g. before the port closes.
+    void transmit(TimePoint now) { build_and_send_pdu(now); }
+
     /// Earliest upcoming timer deadline. Returns TimePoint::max() if
     /// no timers are running. Use to schedule a poll/epoll wait.
     [[nodiscard]] auto next_deadline() const noexcept -> TimePoint;

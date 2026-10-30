@@ -340,6 +340,37 @@ TEST(nanoavb_srp_port, a_stream_is_found_among_forty_foreign_advertises)
     EXPECT_TRUE(found != nullptr && found->stream_id == stream_id(0x100 + 39));
 }
 
+// withdraw_all() sends the Leaves at once: with the port silent after it, the bridge's registrations
+// of its talker and listener age out by the bridge's leave timer, not at its next LeaveAll.
+TEST(nanoavb_srp_port, withdraw_all_sends_the_leaves_at_once)
+{
+    Bridge b{};
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = stream_id(8);
+    fv.destination_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x20, 0x01};
+    fv.vlan_identifier = 2;
+    fv.max_frame_size = 185;
+    fv.max_interval_frames = 1;
+    (void)b.bridge.declare_talker_advertise(fv, b.now);
+    EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    EXPECT_TRUE(b.port.declare_talker(talker(4), b.now).has_value());
+    b.run(4);
+    EXPECT_TRUE(b.port.attach_listener(fv.stream_id, b.now).has_value());
+    b.run(4);
+    EXPECT_NE(b.bridge.find_registered_talker_advertise(stream_id(4)), nullptr);
+    EXPECT_TRUE(b.bridge.listener_permits_transmit(fv.stream_id));
+
+    b.port.withdraw_all(b.now);
+    EXPECT_FALSE(b.port_out.empty());  // sent now, not at the next join timer
+    for (auto const& p : std::exchange(b.port_out, {})) {
+        b.bridge.receive_pdu(p, b.now);
+    }
+    b.now += std::chrono::seconds{2};
+    b.bridge.tick(b.now);
+    EXPECT_EQ(b.bridge.find_registered_talker_advertise(stream_id(4)), nullptr);
+    EXPECT_FALSE(b.bridge.listener_permits_transmit(fv.stream_id));
+}
+
 // Without the interface (or the privilege to open raw sockets) nothing joins the reactor.
 TEST(nanoavb_srp_port, a_missing_interface_is_refused)
 {

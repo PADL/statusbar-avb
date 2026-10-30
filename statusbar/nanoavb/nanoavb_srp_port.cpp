@@ -153,6 +153,22 @@ auto SrpPort::withdraw_listener(StreamId const& stream_id, TimePoint const now) 
     return msrp_.listener_withdraw(stream_id, now);
 }
 
+void SrpPort::withdraw_all(TimePoint const now)
+{
+    for (auto const& talker : msrp_.talker_streams()) {
+        if (talker.state != TalkerReservationState::Idle) {
+            (void)msrp_.talker_withdraw(talker.stream_id, now);
+        }
+    }
+    for (auto const& listener : msrp_.listener_streams()) {
+        (void)msrp_.listener_withdraw(listener.stream_id, now);  // idempotent
+    }
+    (void)msrp_.withdraw_domain(now);
+    (void)mvrp_.withdraw_vlan(domain().sr_class_vid, now);
+    msrp_.transmit(now);
+    mvrp_.transmit(now);
+}
+
 auto SrpPort::peer_domain_registered() const noexcept -> bool
 {
     return peer_class_a_ && peer_priority_ == domain().sr_class_priority;
