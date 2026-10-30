@@ -137,7 +137,7 @@ TEST(shaper_mqprio, igb_four_queues)
     EXPECT_EQ(q.count[2], uint16_t{1});
     EXPECT_EQ(q.offset[2], uint16_t{0});
     EXPECT_EQ(q.count[3], uint16_t{0});
-    EXPECT_FALSE(q.hw);
+    EXPECT_FALSE(q.offload);
 }
 
 TEST(shaper_mqprio, marvell_eight_queues)
