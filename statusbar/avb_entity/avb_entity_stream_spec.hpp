@@ -219,6 +219,8 @@ struct TSpec
 {
     uint16_t max_frame_size{0};       ///< L2 payload octets (MaxFrameSize)
     uint16_t max_interval_frames{1};  ///< frames per class measurement interval (MaxIntervalFrames)
+
+    auto operator==(TSpec const&) const noexcept -> bool = default;
 };
 
 /// The single audio sample rate shared by every AM824/AAF stream in @p specs
