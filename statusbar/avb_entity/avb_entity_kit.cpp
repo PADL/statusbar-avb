@@ -1072,9 +1072,11 @@ void AvbEntityKit::wire_stream_callbacks()
                 }
                 TalkerStreamStatus const status{
                     .milan = milan,
+                    .layout = host_.components().aem_handler.stream_info_layout(),
                     .declaring = declarations_.declared(descriptor_index),
                     .listener = talker_listener_[descriptor_index],
                     .presentation_offset_ns = presentation_offset_ns(descriptor_index),
+                    .accumulated_latency_ns = TALKER_ACCUMULATED_LATENCY_NS,
                     .stopped = talker_->stream_stopped(descriptor_index)};
                 filled = fill_talker_stream_info(host_, descriptor_index, status, out, ext);
             } else if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
@@ -1906,7 +1908,7 @@ void AvbEntityKit::persist()
 
 auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo
 {
-    nanoavb::TalkerStreamSrpInfo info{};
+    nanoavb::TalkerStreamSrpInfo info{.accumulated_latency = TALKER_ACCUMULATED_LATENCY_NS};
     if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
         (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
         info.dest_address = stream->stream_dest_mac;
@@ -1919,7 +1921,6 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     auto const tspec = talker_tspec(spec);
     info.max_interval_frames = tspec.max_interval_frames;
     info.max_frame_size = tspec.max_frame_size;
-    info.accumulated_latency = 0;
     return info;
 }
 
