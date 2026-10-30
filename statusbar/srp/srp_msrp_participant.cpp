@@ -322,6 +322,16 @@ auto MsrpParticipantT<Limits>::find_registered_talker_advertise(tsn::StreamId co
 }
 
 template <class Limits>
+auto MsrpParticipantT<Limits>::talker_registered_in(tsn::StreamId const& id) const noexcept -> bool
+{
+    auto const advertise = std::ranges::any_of(
+        talker_adv_, [&id](auto const& rec) { return rec.first_value.stream_id == id && rec.registrar_is_in(); });
+    return advertise || std::ranges::any_of(talker_failed_, [&id](auto const& rec) {
+               return rec.first_value.advertise.stream_id == id && rec.registrar_is_in();
+           });
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::find_registered_talker_advertise(Eui48 const& destination, uint16_t const vid) const noexcept
     -> TalkerAdvertiseFirstValue const*
 {
