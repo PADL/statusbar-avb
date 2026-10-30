@@ -73,10 +73,13 @@ class MvuCommandHandler
     void set_clock_domain_count(size_t count) noexcept;
     [[nodiscard]] auto clock_domain_count() const noexcept -> size_t { return clock_domain_count_; }
 
-    /// The vendor's default Media Clock Reference priority (Table 7.2) for every clock domain;
-    /// a user priority still at the old default follows it. Default MVU_MCR_PRIO_NETWORK_INTERFACE.
+    /// The vendor's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1) for every
+    /// clock domain; a user priority still at the old default follows it. Default MVU_MCR_PRIO_NETWORK_INTERFACE.
     void set_default_mcr_priority(uint8_t prio) noexcept;
-    [[nodiscard]] auto default_mcr_priority() const noexcept -> uint8_t { return default_mcr_prio_; }
+    /// Clock domain @p index's default priority, as above; false past clock_domain_count().
+    [[nodiscard]] auto set_default_mcr_priority(size_t index, uint8_t prio) noexcept -> bool;
+    /// Clock domain @p index's default priority; MVU_MCR_PRIO_DEFAULT past MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto default_mcr_priority(size_t index) const noexcept -> uint8_t;
 
     /// One clock domain's user settings (Section 7.6): the user priority and
     /// the media clock domain name (64 octets, zero padded, no NUL needed).
@@ -135,6 +138,8 @@ class MvuCommandHandler
     [[nodiscard]] auto apply_system_unique_id(Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, uint64_t requested) -> bool;
     /// The system unique id, as a response carries it
     [[nodiscard]] auto system_unique_id_payload() const noexcept -> atdecc::mvu::MvuSystemUniqueIdPayload;
+    /// Clock domain @p index (< MAX_CLOCK_DOMAINS) takes default priority @p prio
+    void apply_default_mcr_priority(size_t index, uint8_t prio) noexcept;
     /// Clock domain @p index's MCR payload, as a response carries it
     [[nodiscard]] auto mcr_payload(uint16_t index) const noexcept -> atdecc::mvu::MvuMediaClockReferenceInfoPayload;
     /// Refuse a SET from @p header's controller while another holds the entity
@@ -150,7 +155,11 @@ class MvuCommandHandler
     MvuSettingsChangedFn on_settings_changed_{};
     Eui64 our_entity_id_{};
     uint32_t system_unique_id_{0};
-    uint8_t default_mcr_prio_{atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE};
+    std::array<uint8_t, MAX_CLOCK_DOMAINS> default_mcr_prio_{[] {
+        std::array<uint8_t, MAX_CLOCK_DOMAINS> prio{};
+        prio.fill(atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE);
+        return prio;
+    }()};
     size_t clock_domain_count_{1};
     std::array<McrInfo, MAX_CLOCK_DOMAINS> mcr_{};
 };

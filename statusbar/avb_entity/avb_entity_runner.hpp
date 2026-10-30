@@ -54,6 +54,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace statusbar::avb_entity {
@@ -200,6 +201,19 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
                 return;
             }
             entity.atdecc_socket_mode = static_cast<int>(mode);
+        });
+    specs.add<std::string>(
+        "mcr.default_priority",
+        "Default Media Clock Reference Priority of each CLOCK_DOMAIN by index, 0-255, comma-separated; the last also "
+        "serves the domains after it (Milan v1.3 Section 7.6.1.1: 192 audio interfaces, 224 signal routers). Empty = "
+        "192.",
+        "",
+        [&entity](auto v) {
+            if (auto parsed = parse_default_mcr_priorities(v)) {
+                entity.default_mcr_priorities = std::move(*parsed);
+                return;
+            }
+            std::println(stderr, "warning: mcr.default_priority '{}' is not a list of 0-255; keeping 192", std::string_view{v});
         });
     specs.add<std::string>(
         "tx_pcap.path",
