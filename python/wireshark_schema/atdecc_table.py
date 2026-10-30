@@ -5376,11 +5376,15 @@ AEM_PAYLOADS: dict[str, tuple[str | None, str | None]] = {
     "GET_CONFIGURATION": (None, "AemSetConfigurationPayload"),
     "SET_STREAM_FORMAT": ("AemStreamFormatPayload", "AemStreamFormatPayload"),
     "GET_STREAM_FORMAT": ("AemGetStreamFormatCommandPayload", "AemStreamFormatPayload"),
-    "SET_STREAM_INFO": ("AemStreamInfoPayload", "AemStreamInfoPayload"),
-    # Milan v1.2 appends an 8-octet tail (flags_ex, pbsta, acmpsta)
+    # IEEE 1722.1-2021 appends 36 octets of IP fields
+    "SET_STREAM_INFO": (
+        "AemStreamInfoPayload+tail:stream_info_2021",
+        "AemStreamInfoPayload+tail:stream_info_2021",
+    ),
+    # Milan v1.2 appends an 8-octet tail (flags_ex, pbsta, acmpsta); 2021 its IP fields
     "GET_STREAM_INFO": (
         "AemGetStreamInfoCommandPayload",
-        "AemStreamInfoPayload+tail:stream_info_milan",
+        "AemStreamInfoPayload+tail:stream_info_milan|stream_info_2021",
     ),
     "SET_NAME": ("AemNamePayload", "AemNamePayload"),
     "GET_NAME": ("AemNameCommandPayload", "AemNamePayload"),

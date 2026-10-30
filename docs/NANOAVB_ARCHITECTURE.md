@@ -421,7 +421,10 @@ arrive before MAAP has defended its block.
   (IEEE 1722.1-2021 Clauses 7.4.77-78, Milan v1.3 Sections 5.4.2.30-31) set
   the same offset. A change through either notifies SET_STREAM_INFO or
   SET_MAX_TRANSIT_TIME, GET_STREAM_INFO and GET_MAX_TRANSIT_TIME (a Milan 1.2
-  controller reads the offset in GET_STREAM_INFO).
+  controller reads the offset in GET_STREAM_INFO). In the IEEE 1722.1-2021
+  GET_STREAM_INFO layout (`set_stream_info_layout`) SET_STREAM_INFO's
+  MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9) and only
+  SET_MAX_TRANSIT_TIME sets the offset.
 - **Notifications.** Each registration has its own MVU sequence id, a space
   apart from the AEM one (Milan v1.2 Section 5.3.4.2, as v1.3 Section 5.4.5.1
   and controllers have it), incremented whether or not the send succeeds.
