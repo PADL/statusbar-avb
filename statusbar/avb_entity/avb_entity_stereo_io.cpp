@@ -323,12 +323,8 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor, TimePoint const now)
 
     // The per-stream transmit gate tracks the MSRP listener declaration (Ready /
     // Ready Failed); ACMP connections are only logged.
-    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool ready) {
-        gate_.note_listener_ready(
-            stream_id,
-            ready,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-    });
+    host_.set_on_listener_ready(
+        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
