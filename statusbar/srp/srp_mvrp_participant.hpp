@@ -354,6 +354,9 @@ class MvrpParticipantT
 
     // -------------------- Event loop --------------------
 
+    /// A transmit opportunity now, as MsrpParticipant::transmit().
+    void transmit(TimePoint now) { build_and_send_pdu(now); }
+
     void tick(TimePoint now)
     {
         auto const expired = port_.timers().tick(now);
