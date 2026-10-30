@@ -75,6 +75,18 @@ struct DefaultMsrpLimits
 /// Back-compat alias.
 using MsrpCapacityLimits = DefaultMsrpLimits;
 
+/// Limits for an end station that finds streams by destination among every Talker attribute a
+/// bridge propagates (IEEE 802.1Q-2022 Clause 35.2.2.8.3); the tables are fixed, about 70 KiB.
+struct DiscoveryMsrpLimits
+{
+    static constexpr size_t max_talker_advertise = 256;
+    static constexpr size_t max_talker_failed = 256;
+    static constexpr size_t max_listeners = 64;
+    static constexpr size_t max_domains = 8;
+    static constexpr size_t max_observers = 16;
+    static constexpr size_t max_interesting_stream_ids = 32;
+};
+
 using mrp::AttributeRecord;
 using mrp::Operation;
 using mrp::PortState;
@@ -345,6 +357,15 @@ class MsrpParticipantT
 
     /// The Talker Failed for @p id while registered, or nullptr.
     [[nodiscard]] auto find_registered_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
+
+    /// The registered Talker Advertise whose DataFrameParameters are @p destination and @p vid, or
+    /// nullptr; the first if several (IEEE 802.1Q-2022 Clause 35.2.2.8.3 allows one per destination).
+    [[nodiscard]] auto find_registered_talker_advertise(Eui48 const& destination, uint16_t vid) const noexcept
+        -> TalkerAdvertiseFirstValue const*;
+
+    /// The registered Talker Failed whose DataFrameParameters are @p destination and @p vid, or nullptr.
+    [[nodiscard]] auto find_registered_talker_failed(Eui48 const& destination, uint16_t vid) const noexcept
+        -> TalkerFailedFirstValue const*;
 
     /// Look up a locally known Listener by tsn::StreamId and return its
     /// current substate if found.
@@ -827,5 +848,7 @@ class MsrpParticipantT
 
 /// Back-compat alias — default capacity.
 using MsrpParticipant = MsrpParticipantT<>;
+/// A participant sized for stream discovery by destination.
+using DiscoveryMsrpParticipant = MsrpParticipantT<DiscoveryMsrpLimits>;
 
 }  // namespace statusbar::srp::msrp

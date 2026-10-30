@@ -1854,4 +1854,64 @@ TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
     run(4, true);   // 2 talker + 2 listener streams' worth reserved
 }
 
+// IEEE 802.1Q-2022 Clause 35.2.2.8.3: a listener that knows only a stream's destination and VID
+// finds the registered Talker Advertise (or Failed) carrying them; our own declarations and other
+// VIDs do not match, and a talker that leaves is no longer found.
+TEST(msrp_participant, a_registered_talker_is_found_by_destination_and_vid)
+{
+    MsrpParticipant a{test_msrp_config(), 0xaa31};
+    MsrpParticipant b{test_msrp_config(), 0xbb32};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+    ieee::Eui48 const group_a{0x01, 0x00, 0x5e, 0x01, 0x02, 0x03};
+    ieee::Eui48 const group_b{0x01, 0x00, 0x5e, 0x01, 0x02, 0x04};
+    ieee::Eui48 const group_c{0x01, 0x00, 0x5e, 0x01, 0x02, 0x05};
+    auto first = make_talker_adv(0x0101);
+    first.destination_address = group_a;
+    auto second = make_talker_adv(0x0102);
+    second.destination_address = group_b;
+    TalkerFailedFirstValue failed{};
+    failed.advertise = make_talker_adv(0x0103);
+    failed.advertise.destination_address = group_c;
+    failed.set_failure_code(FailureCode::InsufficientBandwidth);
+    EXPECT_TRUE(bool(a.declare_talker_advertise(first, clock.now)));
+    EXPECT_TRUE(bool(a.declare_talker_advertise(second, clock.now)));
+    EXPECT_TRUE(bool(a.declare_talker_failed(failed, clock.now)));
+    auto const run = [&](int const rounds) {
+        for (int i = 0; i < rounds; ++i) {
+            auto const t = clock.advance(std::chrono::milliseconds(250));
+            a.tick(t);
+            b.tick(t);
+            fab.deliver_a_to_b(b, t);
+            fab.deliver_b_to_a(a, t);
+        }
+    };
+    run(4);
+
+    auto const* found = b.find_registered_talker_advertise(group_b, default_sr_class_vid);
+    EXPECT_NE(found, nullptr);
+    if (found != nullptr) {
+        EXPECT_EQ(found->stream_id.get_unique_id(), 0x0102);
+    }
+    EXPECT_NE(b.find_registered_talker_advertise(group_a, default_sr_class_vid), nullptr);
+    EXPECT_EQ(b.find_registered_talker_advertise(group_a, 3), nullptr);
+    EXPECT_EQ(b.find_registered_talker_advertise(group_c, default_sr_class_vid), nullptr);
+    EXPECT_EQ(a.find_registered_talker_advertise(group_a, default_sr_class_vid), nullptr);  // ours, not registered
+    auto const* refused = b.find_registered_talker_failed(group_c, default_sr_class_vid);
+    EXPECT_NE(refused, nullptr);
+    if (refused != nullptr) {
+        EXPECT_TRUE(refused->get_failure_code() == FailureCode::InsufficientBandwidth);
+    }
+    EXPECT_EQ(b.find_registered_talker_failed(group_a, default_sr_class_vid), nullptr);
+
+    EXPECT_TRUE(bool(a.withdraw_talker(first.stream_id, clock.now)));
+    run(12);
+    EXPECT_EQ(b.find_registered_talker_advertise(group_a, default_sr_class_vid), nullptr);
+    EXPECT_NE(b.find_registered_talker_advertise(group_b, default_sr_class_vid), nullptr);
+}
+
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)
