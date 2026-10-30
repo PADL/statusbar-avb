@@ -96,7 +96,10 @@ transmitting the stream". A talker puts stream `idx` on the wire only when:
 ACMP connections play no part: a Milan listener binds with PROBE_TX_COMMAND and
 a Milan talker tracks no connections, while a classic IEEE 1722.1 listener
 declares Listener Ready after CONNECT_RX all the same. Streams are matched by
-the ACMP stream_id, the same value MSRP advertises.
+the ACMP stream_id, the same value MSRP advertises. The match is a StreamID to
+stream index lookup given to the gate (`TalkerGate::StreamIndexFn`); the kit's
+is its ACMP talker table, and a talker without an ATDECC entity (one driving an
+`nanoavb::SrpPort`) gives its own.
 
 The grace window covers the MRP LeaveAll cycle: the peer's Listener declaration
 ages out and re-declares on a roughly 10 s cycle, momentarily withdrawn for 1-3
