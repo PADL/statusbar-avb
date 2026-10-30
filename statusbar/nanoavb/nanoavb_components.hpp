@@ -24,6 +24,7 @@
 #include "statusbar/nanoavb/nanoavb_local_port.hpp"
 #include "statusbar/nanoavb/nanoavb_mvu_handler.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/nanoavb/nanoavb_srp_net.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_function.h"
@@ -55,136 +56,6 @@ using ieee::protocols::ETHERTYPE_MVRP;
 using ieee::protocols::MAAP_MULTICAST_MAC;
 using ieee::protocols::MSRP_MULTICAST_MAC;
 using ieee::protocols::MVRP_MULTICAST_MAC;
-
-//
-// MVRP Network Handler
-//
-
-/// MVRP Network Handler - receives/sends MVRP packets via Pollable interface.
-/// Handles periodic ticks for MVRP state machine.
-///
-/// Threading: All methods (on_ready, tick) are called from
-/// the reactor's poll thread. Must not block — long operations should
-/// be deferred. Must not throw — errors should be logged and dropped.
-class MvrpNetHandler : public net::Pollable
-{
-  public:
-    static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
-
-    /// @param interface_name The network interface name
-    /// @param handler Reference to the MVRP protocol handler
-    MvrpNetHandler(std::string_view interface_name, MvrpHandler& handler)
-        : handler_{handler}
-    {
-        (void)context_.open(interface_name, ETHERTYPE_MVRP, &MVRP_MULTICAST_MAC);
-    }
-
-    /// Check if the handler is valid (socket opened successfully)
-    [[nodiscard]] auto valid() const noexcept -> bool { return context_.valid(); }
-
-    /// Send a frame directly
-    [[nodiscard]] auto send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload) -> StatusValue<ssize_t>
-    {
-        return context_.send(&dest_mac, payload);
-    }
-
-    // -- Pollable interface --
-
-    [[nodiscard]] auto fd() const noexcept -> int override { return context_.fd(); }
-
-    void on_ready(int64_t now_ns) override
-    {
-        ieee::Eui48 src_mac{};
-        ieee::Eui48 dest_mac{};
-        while (true) {
-            auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
-            if (!result || *result <= 0) {
-                break;
-            }
-            auto const len = static_cast<size_t>(*result);
-            auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
-            handler_.receive_packet({payload_buf_.data(), len}, sm_now);
-        }
-    }
-
-    void tick(int64_t now_ns) override
-    {
-        auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
-        handler_.tick(sm_now);
-    }
-
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
-
-  private:
-    net::RawnetContext context_{};
-    MvrpHandler& handler_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
-    std::array<uint8_t, 2048> payload_buf_{};
-};
-
-//
-// MSRP Network Handler
-//
-
-/// MSRP Network Handler - receives/sends MSRP packets via Pollable interface.
-/// Handles periodic ticks for MSRP state machine.
-///
-/// Threading: All methods (on_ready, tick) are called from
-/// the reactor's poll thread. Must not block — long operations should
-/// be deferred. Must not throw — errors should be logged and dropped.
-class MsrpNetHandler : public net::Pollable
-{
-  public:
-    static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
-
-    /// @param interface_name The network interface name
-    /// @param handler Reference to the MSRP protocol handler
-    MsrpNetHandler(std::string_view interface_name, MsrpHandler<>& handler)
-        : handler_{handler}
-    {
-        (void)context_.open(interface_name, ETHERTYPE_MSRP, &MSRP_MULTICAST_MAC);
-    }
-
-    /// Check if the handler is valid (socket opened successfully)
-    [[nodiscard]] auto valid() const noexcept -> bool { return context_.valid(); }
-
-    /// Send a frame directly
-    [[nodiscard]] auto send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload) -> StatusValue<ssize_t>
-    {
-        return context_.send(&dest_mac, payload);
-    }
-
-    // -- Pollable interface --
-
-    [[nodiscard]] auto fd() const noexcept -> int override { return context_.fd(); }
-
-    void on_ready(int64_t now_ns) override
-    {
-        ieee::Eui48 src_mac{};
-        ieee::Eui48 dest_mac{};
-        while (true) {
-            auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
-            if (!result || *result <= 0) {
-                break;
-            }
-            auto const len = static_cast<size_t>(*result);
-            auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
-            handler_.receive_packet({payload_buf_.data(), len}, sm_now);
-        }
-    }
-
-    void tick(int64_t now_ns) override
-    {
-        auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
-        handler_.tick(sm_now);
-    }
-
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
-
-  private:
-    net::RawnetContext context_{};
-    MsrpHandler<>& handler_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
-    std::array<uint8_t, 2048> payload_buf_{};
-};
 
 //
 // MAAP Network Handler
@@ -568,23 +439,6 @@ struct NanoAvbComponents
     /// The handlers' Milan behaviour, from profile (both constructors).
     void wire_profile();
 };
-
-/// The MSRP participant's tables for an entity's components, at full capacity, with part of
-/// each reserved for this entity's own streams and their peers so other stations' attributes
-/// never refuse ours with attribute_table_full (docs/NANOAVB_ARCHITECTURE.md).
-[[nodiscard]] constexpr auto entity_msrp_config(size_t const talker_streams, size_t const listener_streams) noexcept
-    -> statusbar::srp::msrp::MsrpConfig
-{  // NOLINT(statusbar-block-statements): the MSRP table limits, field by field
-    using Limits = statusbar::srp::msrp::DefaultMsrpLimits;
-    statusbar::srp::msrp::MsrpConfig config{};
-    config.max_talker_advertise = Limits::max_talker_advertise;
-    config.max_talker_failed = Limits::max_talker_failed;
-    config.max_listeners = Limits::max_listeners;
-    config.reserved_talker_advertise = std::min(talker_streams + listener_streams, config.max_talker_advertise);
-    config.reserved_talker_failed = std::min(listener_streams, config.max_talker_failed);
-    config.reserved_listeners = std::min(talker_streams + listener_streams, config.max_listeners);
-    return config;
-}
 
 //
 // NanoAvbComponentsBuilder - Fluent builder for NanoAvbComponents
