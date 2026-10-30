@@ -146,7 +146,8 @@ drops a frame whose txtime is missing or past), and frames of no timed
 source.
 
 The host asks the driver once (`net::netdev::launch_time_supported()`) and
-gives the mode with `launch_time_mode(wanted, answer)`, `wanted` meaning the
+gives the mode with `launch_time_mode(wanted, answer)` (core's
+`net::tc::LaunchTimeMode`, which an unshaped port's queue uses too), `wanted` meaning the
 streams' AF_XDP socket carries launch times:
 
 | Mode | When | etf requests |

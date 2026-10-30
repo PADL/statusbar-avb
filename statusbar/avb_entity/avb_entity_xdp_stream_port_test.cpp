@@ -221,57 +221,6 @@ TEST(avb_entity_xdp_stream_port, launch_time_needs_the_driver_and_the_build)
     EXPECT_TRUE(XdpStreamPort::config_for("enp1s0", options, rules).tx_launch_time);
 }
 
-// Two talker streams on one socket whose departures sit 4 frames apart on the 125 us grid (their
-// crossings differ), committed A then B each tick: launch times never decrease (igc's queue is a
-// FIFO), A is never held, B waits at most for A, under a packet (6 frames at 48 kHz). An untimed
-// frame goes at now, or after the last time given.
-TEST(avb_entity_xdp_stream_port, launch_times_never_decrease_across_streams)
-{
-    constexpr uint64_t FRAME_NS = 20'833;
-    constexpr uint64_t TICK_NS = 125'000;
-    uint64_t const base = 1'800'000'000ULL * 1'000'000'000ULL;
-    XdpStreamPort::LaunchOrder order;
-    auto const never = [] { return uint64_t{0}; };
-    uint64_t last = 0;
-    for (uint64_t k = 0; k < 8; ++k) {
-        uint64_t const a = base + (k * TICK_NS) + (4 * FRAME_NS);
-        uint64_t const b = base + (k * TICK_NS);
-        uint64_t const given_a = order.next(a, never);
-        uint64_t const given_b = order.next(b, never);
-        EXPECT_EQ(given_a, a);
-        EXPECT_TRUE(given_a >= last && given_b >= given_a);
-        EXPECT_TRUE(given_b - b < 6 * FRAME_NS);
-        last = given_b;
-    }
-    EXPECT_EQ(order.clamped(), uint64_t{0});  // under a packet: the design's rounding, not counted
-    EXPECT_EQ(order.max_clamp_ns(), uint64_t{0});
-    EXPECT_EQ(order.next(base + (8 * TICK_NS), never), base + (8 * TICK_NS));
-    EXPECT_EQ(order.next(base + (7 * TICK_NS) - 1, never), base + (8 * TICK_NS));  // over a packet: counted
-    EXPECT_EQ(order.clamped(), uint64_t{1});
-    EXPECT_EQ(order.max_clamp_ns(), TICK_NS + 1);
-    uint64_t const later = base + (100 * TICK_NS);
-    EXPECT_EQ(order.next(0, [&] { return later; }), later);
-    EXPECT_EQ(order.next(0, [&] { return later - 1000; }), later);  // now just behind: the last time
-    order.reset();
-    EXPECT_EQ(order.next(0, [&] { return base; }), base);
-    EXPECT_EQ(order.steps(), uint64_t{0});
-}
-
-// A backward PTP step (here 3 s) is not cross-slot rounding: the floor goes at once, counted, so the
-// frames after it are not held into the future in igc's FIFO.
-TEST(avb_entity_xdp_stream_port, a_backward_clock_step_drops_the_floor)
-{
-    uint64_t const t = 1'800'000'000ULL * 1'000'000'000ULL;
-    auto const never = [] { return uint64_t{0}; };
-    XdpStreamPort::LaunchOrder order;
-    EXPECT_EQ(order.next(t, never), t);
-    EXPECT_EQ(order.next(t - XdpStreamPort::LaunchOrder::STEP_NS, never), t);  // within the bound: held
-    EXPECT_EQ(order.next(t - 3'000'000'000ULL, never), t - 3'000'000'000ULL);
-    EXPECT_EQ(order.next(t - 3'000'000'000ULL + 125'000, never), t - 3'000'000'000ULL + 125'000);
-    EXPECT_EQ(order.steps(), uint64_t{1});
-    EXPECT_EQ(order.clamped(), uint64_t{1});  // the STEP_NS hold, over a packet
-}
-
 // A kernel before 6.11 refuses the UMEM's TX metadata: probed once before anything is attached, launch
 // time goes off with the reason and the port opens once, attaching once; a probe that passes keeps
 // it; no launch time asked for, no probe.

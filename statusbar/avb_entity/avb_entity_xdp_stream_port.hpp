@@ -11,6 +11,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_transport.hpp"
 #include "statusbar/net/net_compiled_rule.hpp"
 #include "statusbar/net/net_ethernet_port.hpp"
+#include "statusbar/net/net_launch_order.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <array>
@@ -62,8 +63,8 @@ struct XdpStreamPortOptions
 /// the query's, or net::XdpError::tx_metadata_not_supported (this build: libxdp before 1.5).
 [[nodiscard]] auto launch_time_support(StatusValue<bool> const& driver) noexcept -> Status;
 
-/// Register a small UMEM with TX metadata and let it go, before anything is attached to an interface:
-/// what a kernel before 6.11 refuses (tx_metadata_not_supported); the build's refusal first.
+/// core's net::probe_tx_metadata: a small UMEM with TX metadata registered and let go, before anything
+/// is attached, for what a kernel before 6.11 refuses (tx_metadata_not_supported); the build's refusal first.
 [[nodiscard]] auto probe_tx_metadata() -> Status;
 
 /// @p options with launch_time off when @p probe (-> Status, e.g. probe_tx_metadata) refuses, the
@@ -178,64 +179,8 @@ class XdpStreamPort final : public StreamPort
         std::atomic<bool> failing_{false};
     };
 
-    /// The launch times one socket's frames carry, in commit order (internal; public for tests). igc's
-    /// launch-time queue is a FIFO, so they never decrease; an untimed frame (0) goes at now(). next() on
-    /// the transmitting thread; the counters from any thread.
-    class LaunchOrder
-    {
-      public:
-        /// A wanted time this far behind the last is a clock step, not cross-slot rounding (nor a launch
-        /// lead, at most half this): the floor goes.
-        static constexpr uint64_t STEP_NS = 1'000'000;
-        /// A frame held back by more than this (a class A packet) is counted: by design, two slots on one
-        /// socket differ by under a packet.
-        static constexpr uint64_t CLAMP_TOLERANCE_NS = 125'000;
-
-        /// The time for a frame asked for at @p requested_ns (0: untimed, @p now() in gPTP ns instead):
-        /// at least the last one given, unless it is more than STEP_NS behind (a backward step).
-        template <typename Now>
-        [[nodiscard]] auto next(uint64_t const requested_ns, Now const& now) noexcept -> uint64_t
-        {
-            uint64_t const wanted = requested_ns != 0 ? requested_ns : now();
-            if (wanted >= last_ns_ || last_ns_ - wanted > STEP_NS) {
-                count_step(wanted < last_ns_);
-                last_ns_ = wanted;
-                return wanted;
-            }
-            count_clamp(last_ns_ - wanted);
-            return last_ns_;
-        }
-        /// Forget the last time (open()); the counters stay.
-        void reset() noexcept { last_ns_ = 0; }
-        /// Frames held back to the last time by more than CLAMP_TOLERANCE_NS, the most one was held (ns),
-        /// and floors dropped for a step (STEP_NS): each means trouble, not the design's rounding.
-        [[nodiscard]] auto clamped() const noexcept -> uint64_t { return clamped_.load(std::memory_order_relaxed); }
-        [[nodiscard]] auto max_clamp_ns() const noexcept -> uint64_t { return max_clamp_ns_.load(std::memory_order_relaxed); }
-        [[nodiscard]] auto steps() const noexcept -> uint64_t { return steps_.load(std::memory_order_relaxed); }
-
-      private:
-        void count_clamp(uint64_t const ns) noexcept
-        {
-            if (ns <= CLAMP_TOLERANCE_NS) {
-                return;
-            }
-            clamped_.store(clamped_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-            if (ns > max_clamp_ns_.load(std::memory_order_relaxed)) {
-                max_clamp_ns_.store(ns, std::memory_order_relaxed);
-            }
-        }
-        void count_step(bool const stepped) noexcept
-        {
-            if (stepped) {
-                steps_.store(steps_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-            }
-        }
-
-        uint64_t last_ns_{0};
-        std::atomic<uint64_t> clamped_{0};
-        std::atomic<uint64_t> max_clamp_ns_{0};
-        std::atomic<uint64_t> steps_{0};
-    };
+    /// The launch times the socket's frames carry, in commit order (net::LaunchOrder: igc's FIFO).
+    using LaunchOrder = net::LaunchOrder;
 
     /// The XdpConfig open() uses on @p interface_name: UMEM_FRAMES frames, a
     /// FILL_RING fill ring, a ring's worth of completions a cycle, @p rules, no per-frame

@@ -9,6 +9,7 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
+#include "statusbar/net/net_tc_launch_time.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
@@ -215,24 +216,14 @@ struct CbsTargets
     uint32_t max_interfering_frame) noexcept -> CbsTargets;
 
 // ---------------------------------------------------------------------------
-// Launch time: an offloaded etf under class A's cbs (tc-etf(8); pure)
+// Launch time: an offloaded etf under class A's cbs (tc-etf(8); net_tc_launch_time.hpp)
 // ---------------------------------------------------------------------------
 
-/// What the shaper does with etf under its cbs.
-enum class LaunchTimeMode : uint8_t
-{
-    unsupported,  ///< the driver honours no AF_XDP launch time: etf is neither installed nor looked for
-    off,          ///< none wanted: an etf an earlier run left under our cbs is removed
-    on,           ///< an offloaded etf under class A's cbs (the AF_XDP socket's queue)
-};
-
-/// The mode for launch time @p wanted (and in force on the stream socket) given @p driver
-/// (net::netdev::launch_time_supported(), asked once): on only when it honours it; a failed query
-/// is off when not wanted (a leftover etf must go) and unsupported when wanted.
-[[nodiscard]] auto launch_time_mode(bool wanted, StatusValue<bool> const& driver) noexcept -> LaunchTimeMode;
-
-/// etf's default delta: how long before its launch time a frame queued in etf goes to the driver.
-inline constexpr int32_t DEFAULT_ETF_DELTA_NS = 150'000;
+/// What the shaper does with etf under class A's cbs (net::tc::LaunchTimeMode), the mode from the
+/// driver's one answer, and etf's default delta.
+using net::tc::DEFAULT_ETF_DELTA_NS;
+using net::tc::launch_time_mode;
+using net::tc::LaunchTimeMode;
 
 // ---------------------------------------------------------------------------
 // ShaperQdiscs (the requests, Linux)

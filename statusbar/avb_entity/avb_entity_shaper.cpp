@@ -277,21 +277,6 @@ auto cbs_targets(
     };
 }
 
-// ---------------------------------------------------------------------------
-// Launch time
-// ---------------------------------------------------------------------------
-
-auto launch_time_mode(bool const wanted, StatusValue<bool> const& driver) noexcept -> LaunchTimeMode
-{
-    if (!driver) {
-        return wanted ? LaunchTimeMode::unsupported : LaunchTimeMode::off;
-    }
-    if (!*driver) {
-        return LaunchTimeMode::unsupported;
-    }
-    return wanted ? LaunchTimeMode::on : LaunchTimeMode::off;
-}
-
 #if defined(__linux__)
 
 // ---------------------------------------------------------------------------

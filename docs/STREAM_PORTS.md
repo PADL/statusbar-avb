@@ -66,7 +66,7 @@ SO_TXTIME); `TestStreamPort` records the time of each frame the link took
 
 The host asks the driver once (`net::netdev::launch_time_supported()`:
 netdev `tx-launch-time-fifo`, set by igc and stmmac, not igb), checks the
-build with `launch_time_support()` (AF_XDP TX metadata needs libxdp 1.5 or
+build with `launch_time_support()` (core's `net::launch_time_support`; AF_XDP TX metadata needs libxdp 1.5 or
 later) and hands the one answer to the stream ports and the shaper, so they
 cannot disagree. `XdpStreamPortOptions::launch_time`
 (`StreamPortsOptions::launch_time`, the kit's `stream_launch_time`) then asks
@@ -78,8 +78,8 @@ frame's time into its metadata (`net::XdpContext::tx_set_launch_time`): two
 stores and a load, no syscall. On a socket with launch time every frame is
 timed, since igc writes a launch-time context descriptor only for a frame that
 asks and may otherwise reuse the previous one: an untimed frame goes at
-CLOCK_TAI now (vDSO). igc's launch-time queue is a FIFO, so `LaunchOrder`
-raises each time to at least the last one committed on the socket; two talkers
+CLOCK_TAI now (vDSO). igc's launch-time queue is a FIFO, so `net::LaunchOrder`
+(core's, shared with the AES67 transport) raises each time to at least the last one committed on the socket; two talkers
 whose departures fall a few frames apart wait at most for each other, under a
 packet. Talkers that hand packets over on the tick they depart, on a grid of
 whole packets, share that grid: in the steady state the clamp fires only on
@@ -87,8 +87,10 @@ nanosecond rounding between rates or on a catch-up after a stall. A time more
 than `LaunchOrder::STEP_NS` (1 ms) behind the last is a clock step, not
 rounding (nor a launch lead, at most half that), and drops the floor, so a
 backward PTP step does not hold frames in the FIFO. `launch_order()` counts
-frames held by more than `CLAMP_TOLERANCE_NS` (a packet), the largest hold and
-steps: the design's own rounding is not counted, so a count means trouble. The NIC reads the time on its PHC, which carries gPTP (TAI) time when
+frames held by more than `CLAMP_TOLERANCE_NS` (a packet), the largest hold,
+steps, and frames committed after their launch time (an overrunning tick: sent
+at now, `launched_late` / `max_late_ns`): the design's own rounding is not
+counted, so a count means trouble. The NIC reads the time on its PHC, which carries gPTP (TAI) time when
 ptp4l disciplines it, and honours it only with the queue in launch-time mode,
 which the shaper's offloaded etf sets (SHAPER.md, "Launch time (etf)").
 

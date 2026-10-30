@@ -10,8 +10,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <ctime>
-#include <expected>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -45,61 +43,12 @@ auto xdp_stream_port_options(StreamXdpMode const mode, std::string_view const in
 
 auto launch_time_support(StatusValue<bool> const& driver) noexcept -> Status
 {
-    if (!driver) {
-        return failure(driver.error());
-    }
-    if (!*driver) {
-        return failure(std::errc::operation_not_supported);
-    }
-    if (!net::detail::tx_metadata_len(true)) {
-        return failure(net::XdpError::tx_metadata_not_supported);
-    }
-    return success();
+    return net::launch_time_support(driver);
 }
-
-namespace {
-
-/// CLOCK_TAI now (vDSO, no syscall), the time an untimed frame goes at; the host has checked that
-/// it follows the NIC's PHC before asking for launch time. 0 off Linux.
-[[nodiscard]] auto tai_now_ns() noexcept -> uint64_t
-{
-#if defined(__linux__)
-    timespec now{};
-    ::clock_gettime(CLOCK_TAI, &now);
-    return (static_cast<uint64_t>(now.tv_sec) * 1'000'000'000U) + static_cast<uint64_t>(now.tv_nsec);
-#else
-    return 0;
-#endif
-}
-
-#if defined(__linux__) && defined(HAVE_XDP)
-/// Register and release a UMEM of @p geometry: the kernel's answer to its TX metadata.
-[[nodiscard]] auto probe_umem(std::expected<net::detail::UmemGeometry, net::XdpError> const& geometry) -> Status
-{
-    if (!geometry) {
-        return failure(geometry.error());
-    }
-    net::detail::RingSet rings{};
-    net::detail::UmemRegion region{};
-    auto const allocated = region.allocate(*geometry, rings);
-    return allocated ? success() : failure(allocated.error());
-}
-#endif
-
-}  // namespace
 
 auto probe_tx_metadata() -> Status
 {
-#if defined(__linux__) && defined(HAVE_XDP)
-    if (auto const built = launch_time_support(true); !built) {
-        return built;
-    }
-    // 16 frames and rings of 16: 64 KiB, locked for the probe alone.
-    net::XdpConfig const config{.fill_ring_size = 16, .completion_ring_size = 16, .umem_frame_count = 16, .tx_launch_time = true};
-    return probe_umem(net::detail::umem_geometry(config));
-#else
-    return failure(net::XdpError::not_supported_on_platform);
-#endif
+    return net::probe_tx_metadata();
 }
 
 auto XdpStreamPort::config_for(
@@ -230,7 +179,7 @@ auto XdpStreamPort::commit_slot(net::EthernetTxSlot const& slot, size_t const le
 {
     // A pooled frame was taken untimed (tx_start): its launch time goes in now, every frame timed.
     if (context_->tx_launch_time()) {
-        context_->tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_order_.next(launch_time_ns, tai_now_ns)));
+        context_->tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_order_.next(launch_time_ns, net::tai_now_ns)));
     }
     if (auto committed = context_->tx_commit(slot.handle, length); !committed) {
         // The socket freed the frame: take one back so the pool stays whole.
