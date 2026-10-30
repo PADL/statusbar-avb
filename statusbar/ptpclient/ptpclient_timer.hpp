@@ -162,14 +162,22 @@ class PtpTimer : public PtpTimerBase
             return failure(PtpError::bridge_not_running);  // Reuse error code
         }
 
-        stats_.reset();
-        headroom_.reset();
-        reset_recovery_count();
-        reset_missed_cycles();
+        reset_stats();
 
         timer_thread_ = std::thread([this]() -> void { timer_loop(); });
 
         return success();
+    }
+
+    /// Start the statistics afresh, as start() does: wakes, lateness, work, missed cycles,
+    /// recoveries and headroom (the atomics are cleared one by one; a wake meanwhile may count
+    /// in some and not others). Any thread.
+    void reset_stats() noexcept
+    {
+        stats_.reset();
+        headroom_.reset();
+        reset_recovery_count();
+        reset_missed_cycles();
     }
 
     /// Stop the timer (blocks until thread joins)

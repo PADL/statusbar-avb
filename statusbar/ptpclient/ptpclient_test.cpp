@@ -544,6 +544,22 @@ TEST(ptpclient_error, all_error_codes_have_messages)
 }
 
 //
+// Tests: PtpTimer - statistics
+//
+
+TEST(ptpclient_timer, reset_stats_starts_the_statistics_afresh)
+{
+    PtpTimeBridge bridge;
+    auto timer = make_ptp_timer(bridge, 125'000, [](StatusValue<TimerWakeInfo> const&) {}, 0, false, -1);
+    EXPECT_FALSE(timer.is_running());
+    EXPECT_EQ(timer.stats().error.count, int64_t{0});
+    timer.reset_stats();  // not running: nothing to reset, and nothing breaks
+    EXPECT_EQ(timer.stats().error.count, int64_t{0});
+    EXPECT_EQ(timer.wake_headroom().count, int64_t{0});
+    EXPECT_TRUE(timer.missed_cycles() == 0 && timer.recovery_count() == 0);
+}
+
+//
 // Main test runner
 //
 

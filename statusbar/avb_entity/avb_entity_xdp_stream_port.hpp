@@ -148,7 +148,7 @@ class XdpStreamPort final : public StreamPort
                 return;
             }
             errno_.store(error, std::memory_order_relaxed);
-            failures_.store(failures_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            failures_.fetch_add(1, std::memory_order_relaxed);
             if (++in_a_row_ >= TX_FAILING_AFTER && !failing_.load(std::memory_order_relaxed)) {
                 failing_.store(true, std::memory_order_relaxed);
             }
@@ -163,6 +163,8 @@ class XdpStreamPort final : public StreamPort
         }
         /// Kicks refused since the last reset. Any thread.
         [[nodiscard]] auto failures() const noexcept -> uint64_t { return failures_.load(std::memory_order_relaxed); }
+        /// Forget the kicks counted, not whether transmit is failing nor the last errno. Any thread.
+        void reset_failures() noexcept { failures_.store(0, std::memory_order_relaxed); }
         /// The last refusal's errno as an error code (none before the first). Any thread.
         [[nodiscard]] auto error() const noexcept -> std::error_code
         {
@@ -227,6 +229,9 @@ class XdpStreamPort final : public StreamPort
     [[nodiscard]] auto tx_pool_size() const noexcept -> size_t { return tx_pool_.size(); }
     /// tx_begin calls that found no pooled frame. Any thread.
     [[nodiscard]] auto tx_pool_empty_count() const noexcept -> uint64_t { return tx_pool_empty_.load(std::memory_order_relaxed); }
+    /// The refused kicks and pool misses to zero now, the socket's counters at the next begin_cycle()
+    /// (on the draining thread). Any thread.
+    void reset_counters() noexcept;
     /// While TX_FAILING_AFTER kicks in a row have been refused (until one is
     /// not): the last refusal's errno; else none. Any thread.
     [[nodiscard]] auto tx_error() const noexcept -> std::error_code
@@ -285,6 +290,7 @@ class XdpStreamPort final : public StreamPort
     TxTap tx_tap_{};
     TxHealth tx_health_{};
     std::atomic<uint64_t> tx_pool_empty_{0};
+    std::atomic<bool> reset_socket_stats_{false};  ///< reset_counters() asked; begin_cycle() takes it
     uint32_t queue_id_{0};
     std::error_code launch_time_error_{};
     LaunchOrder launch_order_{};

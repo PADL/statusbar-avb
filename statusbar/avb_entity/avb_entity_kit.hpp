@@ -472,7 +472,9 @@ class AvbEntityKit
     /// Stream through @p port, both ways, instead of the kit's own ports (tests
     /// bind a TestStreamPort). Before start(); @p port must outlive the kit.
     void bind_stream_port(StreamPort& port) noexcept { bound_port_ = &port; }
-    /// The kit's own ports (config.stream_transport), for their modes and counters.
+    /// The kit's own ports (config.stream_transport), for their modes and counters; mutable for the ports'
+    /// any-thread calls (XdpStreamPort::reset_counters), never to drive them off the media thread.
+    [[nodiscard]] auto stream_ports() noexcept -> StreamPorts& { return ports_; }
     [[nodiscard]] auto stream_ports() const noexcept -> StreamPorts const& { return ports_; }
     /// The transport the kit's own ports run (xdp: receive is on AF_XDP);
     /// packet before start() and with a bound port.

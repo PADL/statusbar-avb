@@ -234,10 +234,20 @@ void XdpStreamPort::refill_tx_pool() noexcept
     }
 }
 
+void XdpStreamPort::reset_counters() noexcept
+{
+    tx_health_.reset_failures();
+    tx_pool_empty_.store(0, std::memory_order_relaxed);
+    reset_socket_stats_.store(true, std::memory_order_relaxed);
+}
+
 void XdpStreamPort::begin_cycle() noexcept
 {
     if (!context_->valid()) {
         return;
+    }
+    if (reset_socket_stats_.exchange(false, std::memory_order_relaxed)) {
+        context_->reset_stats();
     }
     context_->begin_cycle();
     (void)context_->tx_complete();

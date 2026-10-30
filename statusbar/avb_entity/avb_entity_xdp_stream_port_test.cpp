@@ -163,6 +163,9 @@ TEST(avb_entity_xdp_stream_port, eight_refused_kicks_in_a_row_are_a_tx_error_unt
     health.record(true, 0);
     EXPECT_FALSE(health.failing());
     EXPECT_TRUE(health.error());  // the last refusal is remembered
+    health.reset_failures();
+    EXPECT_EQ(health.failures(), uint64_t{0});
+    EXPECT_TRUE(health.error());  // the count, not the history
     health.reset();
     EXPECT_FALSE(health.error());
     EXPECT_EQ(health.failures(), uint64_t{0});
@@ -281,6 +284,9 @@ TEST(avb_entity_xdp_stream_port, open_fails_cleanly)
     EXPECT_TRUE(port.end_cycle().has_value());
     EXPECT_TRUE(port.tx_begin(64).empty());
     EXPECT_EQ(port.tx_pool_empty_count(), uint64_t{0});  // closed, not empty
+    port.reset_counters();                               // nothing to reset while closed; the socket's at the next cycle
+    port.begin_cycle();
+    EXPECT_EQ(port.socket_stats().tx_count, uint64_t{0});
     std::array<uint8_t, 8> const elsewhere{};
     auto const committed = port.tx_commit(elsewhere, ieee::Eui48{}, 2, 3, 0);
     EXPECT_TRUE(!committed && committed.error() == std::errc::invalid_argument);

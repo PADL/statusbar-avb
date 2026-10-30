@@ -97,6 +97,8 @@ class StreamPorts
     /// The AF_PACKET and AF_XDP ports themselves.
     [[nodiscard]] auto packet() noexcept -> PacketStreamPort& { return packet_; }
     [[nodiscard]] auto packet() const noexcept -> PacketStreamPort const& { return packet_; }
+    /// The AF_XDP port; mutable for its any-thread calls (reset_counters), the drain thread's otherwise.
+    [[nodiscard]] auto xdp() noexcept -> XdpStreamPort& { return xdp_; }
     [[nodiscard]] auto xdp() const noexcept -> XdpStreamPort const& { return xdp_; }
 
     /// xdp when the streams go through the AF_XDP port, else packet.
