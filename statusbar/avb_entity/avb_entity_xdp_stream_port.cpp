@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <expected>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -71,7 +72,35 @@ namespace {
 #endif
 }
 
+#if defined(__linux__) && defined(HAVE_XDP)
+/// Register and release a UMEM of @p geometry: the kernel's answer to its TX metadata.
+[[nodiscard]] auto probe_umem(std::expected<net::detail::UmemGeometry, net::XdpError> const& geometry) -> Status
+{
+    if (!geometry) {
+        return failure(geometry.error());
+    }
+    net::detail::RingSet rings{};
+    net::detail::UmemRegion region{};
+    auto const allocated = region.allocate(*geometry, rings);
+    return allocated ? success() : failure(allocated.error());
+}
+#endif
+
 }  // namespace
+
+auto probe_tx_metadata() -> Status
+{
+#if defined(__linux__) && defined(HAVE_XDP)
+    if (auto const built = launch_time_support(true); !built) {
+        return built;
+    }
+    // 16 frames and rings of 16: 64 KiB, locked for the probe alone.
+    net::XdpConfig const config{.fill_ring_size = 16, .completion_ring_size = 16, .umem_frame_count = 16, .tx_launch_time = true};
+    return probe_umem(net::detail::umem_geometry(config));
+#else
+    return failure(net::XdpError::not_supported_on_platform);
+#endif
+}
 
 auto XdpStreamPort::config_for(
     std::string_view const interface_name,
@@ -152,19 +181,13 @@ auto XdpStreamPort::with_launch_time(XdpStreamPortOptions const& options) -> Xdp
 {
     launch_time_error_ = {};
     launch_order_.reset();
-    XdpStreamPortOptions effective = options;
-    if (auto const supported = options.launch_time ? launch_time_support(true) : Status{}; !supported) {
-        launch_time_error_ = supported.error();
-        effective.launch_time = false;
-    }
-    return effective;
+    return launch_time_as_probed(options, probe_tx_metadata, launch_time_error_);
 }
 
 auto XdpStreamPort::open_socket(std::string_view const interface_name, XdpStreamPortOptions const& options) -> Status
 {
     auto const rules = net::avtp_stream_rules();
-    auto const effective = with_launch_time(options);
-    return context_->open(config_for(interface_name, effective, rules));
+    return context_->open(config_for(interface_name, with_launch_time(options), rules));
 }
 
 auto XdpStreamPort::open(std::string_view const interface_name, XdpStreamPortOptions const& options) -> Status

@@ -62,6 +62,26 @@ struct XdpStreamPortOptions
 /// the query's, or net::XdpError::tx_metadata_not_supported (this build: libxdp before 1.5).
 [[nodiscard]] auto launch_time_support(StatusValue<bool> const& driver) noexcept -> Status;
 
+/// Register a small UMEM with TX metadata and let it go, before anything is attached to an interface:
+/// what a kernel before 6.11 refuses (tx_metadata_not_supported); the build's refusal first.
+[[nodiscard]] auto probe_tx_metadata() -> Status;
+
+/// @p options with launch_time off when @p probe (-> Status, e.g. probe_tx_metadata) refuses, the
+/// reason into @p launch_time_error: the port then opens once, attaching once, as the kernel allows.
+template <typename Probe>
+[[nodiscard]] auto launch_time_as_probed(XdpStreamPortOptions options, Probe const& probe, std::error_code& launch_time_error)
+    -> XdpStreamPortOptions
+{
+    if (!options.launch_time) {
+        return options;
+    }
+    if (auto const probed = probe(); !probed) {
+        launch_time_error = probed.error();
+        options.launch_time = false;
+    }
+    return options;
+}
+
 /// One AF_XDP socket, both ways. tx_begin/tx_commit/tx_flush, rx_poll and the
 /// cycle run on one thread only (the media thread): the rings have one producer
 /// and one consumer.
@@ -304,9 +324,11 @@ class XdpStreamPort final : public StreamPort
 
   private:
     void refill_tx_pool() noexcept;
-    /// Open the socket with the AVTP stream rules as @p options say, launch time only where supported.
+    /// Open the socket, once, with the AVTP stream rules as @p options say, launch time only where the
+    /// build and the kernel allow it (with_launch_time).
     [[nodiscard]] auto open_socket(std::string_view interface_name, XdpStreamPortOptions const& options) -> Status;
-    /// @p options with launch_time kept only where this build has TX metadata (else recorded); a fresh LaunchOrder.
+    /// @p options with launch_time kept only where the build and the kernel take TX metadata
+    /// (probe_tx_metadata; else recorded in launch_time_error()); a fresh LaunchOrder.
     [[nodiscard]] auto with_launch_time(XdpStreamPortOptions const& options) -> XdpStreamPortOptions;
     /// Commit @p slot's first @p length octets (a written frame) due at @p launch_time_ns, counting it and tapping it.
     [[nodiscard]] auto commit_slot(net::EthernetTxSlot const& slot, size_t length, uint64_t launch_time_ns) noexcept -> Status;

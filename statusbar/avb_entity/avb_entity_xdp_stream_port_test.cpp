@@ -272,7 +272,38 @@ TEST(avb_entity_xdp_stream_port, a_backward_clock_step_drops_the_floor)
     EXPECT_EQ(order.clamped(), uint64_t{1});  // the STEP_NS hold, over a packet
 }
 
-// An open asking for launch time on a build without TX metadata records why and goes on without.
+// A kernel before 6.11 refuses the UMEM's TX metadata: probed once before anything is attached, launch
+// time goes off with the reason and the port opens once, attaching once; a probe that passes keeps
+// it; no launch time asked for, no probe.
+TEST(avb_entity_xdp_stream_port, a_kernel_refusing_tx_metadata_is_probed_before_the_one_attach)
+{
+    int probes = 0;
+    auto const refuses = [&probes] {
+        ++probes;
+        return Status{failure(net::XdpError::tx_metadata_not_supported)};
+    };
+    auto const passes = [&probes] {
+        ++probes;
+        return Status{};
+    };
+    auto options = xdp_stream_port_options(StreamXdpMode::auto_, "enp1s0", 0);
+    options.launch_time = true;
+    std::error_code why;
+    auto const refused = launch_time_as_probed(options, refuses, why);
+    EXPECT_TRUE(!refused.launch_time && why == net::XdpError::tx_metadata_not_supported && probes == 1);
+    why = {};
+    auto const kept = launch_time_as_probed(options, passes, why);
+    EXPECT_TRUE(kept.launch_time && !why && probes == 2);
+    options.launch_time = false;
+    auto const unasked = launch_time_as_probed(options, refuses, why);
+    EXPECT_TRUE(!unasked.launch_time && !why && probes == 2);
+    // The real probe: refused by a build without TX metadata before the kernel is asked.
+    bool const built = net::detail::tx_metadata_len(true).has_value();
+    auto const probed = probe_tx_metadata();
+    EXPECT_TRUE(built || probed.error() == net::XdpError::tx_metadata_not_supported);
+}
+
+// An open asking for launch time on a build (or kernel) without TX metadata records why and goes on without.
 TEST(avb_entity_xdp_stream_port, a_refused_launch_time_is_recorded)
 {
     XdpStreamPort port;
@@ -282,7 +313,7 @@ TEST(avb_entity_xdp_stream_port, a_refused_launch_time_is_recorded)
     options.launch_time = true;
     EXPECT_FALSE(port.open(MISSING, options).has_value());
     bool const built = net::detail::tx_metadata_len(true).has_value();
-    EXPECT_EQ(static_cast<bool>(port.launch_time_error()), !built);
+    EXPECT_TRUE(built || port.launch_time_error() == net::XdpError::tx_metadata_not_supported);  // built: the kernel's say
     EXPECT_FALSE(port.launch_time());
 }
 

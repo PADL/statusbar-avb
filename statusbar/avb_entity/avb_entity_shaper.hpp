@@ -258,7 +258,8 @@ class ShaperQdiscs
     /// failure (each is logged).
     auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
     /// etf under class A's cbs as @p mode says, from the next program() on, settled once per install()
-    /// and again after each change of mode (put or removed under the cbs); offloaded, CLOCK_TAI, @p delta_ns, skip_sock_check. Unsupported until set.
+    /// and again after each change of mode (put or removed under the cbs); offloaded, CLOCK_TAI,
+    /// @p delta_ns, skip_sock_check. Unsupported until set.
     void set_launch_time(LaunchTimeMode mode, int32_t delta_ns = DEFAULT_ETF_DELTA_NS) noexcept;
     /// Take everything away: pfifo_fast on class B's queue, then class A's, then delete the mqprio
     /// root (one adapter reset on igb/igc). A no-op success when not installed.
