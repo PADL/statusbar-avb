@@ -10,6 +10,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_shaper.hpp"
 #include "statusbar/avb_entity/avb_entity_test_stream_port.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
@@ -1012,8 +1013,9 @@ struct PersistentKit : MilanKit
         std::string const& path,
         uint64_t const entity_low = 0x30,
         std::optional<bool> const milan = std::nullopt,
-        std::vector<uint8_t> model = make_blob(1, 1))
-        : MilanKit{milan, entity_low, true, std::move(model)}
+        std::vector<uint8_t> model = make_blob(1, 1),
+        bool const gate = true)
+        : MilanKit{milan, entity_low, gate, std::move(model)}
     {
         config.persistent_state_path = path;
         kit.host().components().mvu_handler.set_clock_domain_count(1);  // the test model has none
@@ -1482,8 +1484,9 @@ struct RateKit : PersistentKit
         uint64_t const entity_low = 0x70,
         bool const ports = false,
         bool const one_rate = false,
-        bool const am824 = false)
-        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate, am824)}
+        bool const am824 = false,
+        bool const gate = true)
+        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate, am824), gate}
     {
         kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
             formats.push_back({type, index, format});
@@ -3477,3 +3480,49 @@ TEST(avb_entity_kit_crf, a_host_binding_made_before_start_is_kept)
     }
     EXPECT_EQ(m.kit.crf_recovery().estimate().samples, uint64_t{0});
 }
+
+#if defined(__linux__)
+namespace {
+
+/// A TcControl that accepts every request (the shaper's qdisc requests are ShaperQdiscs' tests').
+class AcceptingTc final : public net::tc::TcControl
+{
+  public:
+    auto replace_mqprio(int, net::tc::MqprioQdisc const&) -> Status override { return success(); }
+    auto replace_cbs(int, net::tc::CbsQdisc const&) -> Status override { return success(); }
+    auto replace_etf(int, net::tc::EtfQdisc const&) -> Status override { return success(); }
+    auto replace_kind(int, uint32_t, std::string_view) -> Status override { return success(); }
+    auto remove(int, uint32_t, uint32_t) -> Status override { return success(); }
+    auto get(int, uint32_t) -> StatusValue<net::tc::QdiscInfo> override
+    {
+        return failure(std::make_error_code(std::errc::no_such_file_or_directory));
+    }
+    [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
+
+  private:
+    std::string message_{};
+};
+
+}  // namespace
+
+// With the gate off every output is admitted; a stopped one may change format (Milan v1.2
+// Section 5.4.2.7), and the shaper's class A follows the new TSpec at its next tick.
+TEST(avb_entity_kit_formats, the_shaper_follows_an_admitted_streams_format)
+{
+    RateKit m{{}, 0x72, false, false, false, /*gate=*/false};
+    EXPECT_TRUE(m.start_ready());
+    AcceptingTc tc{};
+    EntityShaper shaper{ShaperConfig{.interface_name = "kit-shaper0"}, m.kit, tc};
+    EXPECT_TRUE(shaper.install(ShaperPort{.ifindex = 3, .driver = "igb", .tx_queues = 4, .mtu = 1500}).has_value());
+    auto const before = shaper.class_a().idleslope_kbps;
+    EXPECT_FALSE(shaper.class_a().placeholder);
+
+    m.kit.talker().set_stream_stopped(0, true);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
+        atdecc::AEM_STATUS_SUCCESS);
+    shaper.tick(MilanKit::steady_ns());
+    EXPECT_TRUE(shaper.class_a().idleslope_kbps > before);
+    shaper.shutdown();
+}
+#endif

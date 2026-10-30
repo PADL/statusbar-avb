@@ -30,6 +30,8 @@ auto ShaperErrorCategory::message(int const ev) const -> std::string
             return "bad SR class queue override (out of range, shared, or leaving a non-contiguous legacy range)";
         case ShaperError::bad_priority:
             return "bad SR class priority (a PCP of 8 or more, or class A and class B on one PCP)";
+        case ShaperError::too_many_streams:
+            return "more class A streams than the shaper sizes for";
     }
     return "unknown shaper error";
 }
@@ -553,31 +555,27 @@ void ShaperQdiscs::release() noexcept
 }
 
 // ---------------------------------------------------------------------------
-// EntityShaper
+// PortShaper
 // ---------------------------------------------------------------------------
 
-EntityShaper::EntityShaper(ShaperConfig config, AvbEntityKit& kit)
+PortShaper::PortShaper(ShaperConfig config, logging::Logger const log, uint8_t const class_a_pcp)
     : config_{std::move(config)}
-    , kit_{kit}
-    , qdiscs_{client_, kit.host().ctl_log()}
+    , log_{log}
+    , class_a_pcp_{class_a_pcp}
+    , tc_{&client_}
+    , qdiscs_{client_, log}
 {}
 
-EntityShaper::~EntityShaper()
-{
-    unhook();
-}
+PortShaper::PortShaper(ShaperConfig config, logging::Logger const log, net::tc::TcControl& tc, uint8_t const class_a_pcp)
+    : config_{std::move(config)}
+    , log_{log}
+    , class_a_pcp_{class_a_pcp}
+    , tc_{&tc}
+    , qdiscs_{tc, log}
+{}
 
-void EntityShaper::unhook() noexcept
+void PortShaper::shutdown()
 {
-    if (hooked_) {
-        kit_.set_on_admission_changed({});
-        hooked_ = false;
-    }
-}
-
-void EntityShaper::shutdown()
-{
-    unhook();
     if (!qdiscs_.installed()) {
         return;
     }
@@ -589,21 +587,21 @@ void EntityShaper::shutdown()
     park();
 }
 
-void EntityShaper::park()
+void PortShaper::park()
 {
     // Leave the root and both cbs for the next install(), parked at the
     // placeholders: no stream is ours any more, and taking the last cbs away
     // would reset an igb/igc adapter now and again at the next start.
     (void)qdiscs_.program(targets(false), link_mbps());  // logged
     qdiscs_.release();
-    kit_.host().ctl_log().status(
+    log_.status(
         "shaper: left mqprio {:x}: and its cbs on {} for the next start",
         config_.qdisc_major,
         logging::embed<16>(config_.interface_name));
 }
 
-auto EntityShaper::install() -> Status
-{  // NOLINT(statusbar-block-statements): the install sequence in order: lookups, layout, qdiscs, adoption
+auto PortShaper::install() -> Status
+{  // NOLINT(statusbar-block-statements): the interface lookups in order, then the install
     if (qdiscs_.installed()) {
         return success();
     }
@@ -615,51 +613,58 @@ auto EntityShaper::install() -> Status
     if (!driver) {
         return failure(driver.error());
     }
-    auto const layout = queue_layout(*driver);
-    if (!layout) {
-        return failure(layout.error());
-    }
-    if (auto status = install_layout(*ifindex, *layout); !status) {
-        return status;
-    }
-    qdiscs_.set_launch_time(config_.launch_time, config_.etf_delta_ns);
-    adopt(std::move(*driver), *layout);
-    follow_admission();
-    return success();
-}
-
-auto EntityShaper::queue_layout(std::string_view const driver) const -> StatusValue<QueueLayout>
-{
     auto const queues = net::tx_queue_count(config_.interface_name);
     if (!queues) {
         return failure(queues.error());
     }
-    return make_queue_layout(driver, *queues, config_.queues);
+    auto const mtu = net::interface_mtu(config_.interface_name);
+    return install(ShaperPort{.ifindex = *ifindex, .driver = std::move(*driver), .tx_queues = *queues, .mtu = mtu ? *mtu : 1500U});
 }
 
-auto EntityShaper::install_layout(int const ifindex, QueueLayout const& layout) -> Status
+auto PortShaper::install(ShaperPort const& port) -> Status
 {
-    // Class A is the kit's stream PCP (the stream port made it its TX
-    // socket's SO_PRIORITY); class B the 802.1Q default.
-    auto const mqprio = mqprio_for(layout, config_.qdisc_major, kit_.config().stream_pcp, DEFAULT_CLASS_B_PCP);
+    if (qdiscs_.installed()) {
+        return success();
+    }
+    auto const layout = make_queue_layout(port.driver, port.tx_queues, config_.queues);
+    if (!layout) {
+        return failure(layout.error());
+    }
+    if (auto status = install_layout(port, *layout); !status) {
+        return status;
+    }
+    settle(port.driver, *layout);
+    return success();
+}
+
+auto PortShaper::install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status
+{
+    auto const mqprio = mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP);
     if (!mqprio) {
         return failure(mqprio.error());
     }
-    if (auto const mtu = net::interface_mtu(config_.interface_name)) {
-        mtu_ = *mtu;
+    mtu_ = port.mtu;
+    if (tc_ == &client_) {
+        if (auto status = client_.open(); !status) {
+            return status;
+        }
     }
-    if (auto status = client_.open(); !status) {
-        return status;
-    }
-    return qdiscs_.install(ifindex, config_.interface_name, *mqprio, layout);
+    return qdiscs_.install(port.ifindex, config_.interface_name, *mqprio, layout);
 }
 
-void EntityShaper::adopt(std::string driver, QueueLayout const& layout)
+void PortShaper::settle(std::string driver, QueueLayout const& layout)
 {
-    auto log = kit_.host().ctl_log();
+    qdiscs_.set_launch_time(config_.launch_time, config_.etf_delta_ns);
+    adopt(std::move(driver), layout);
+    (void)refresh_link_speed();
+    (void)reprogram();
+}
+
+void PortShaper::adopt(std::string driver, QueueLayout const& layout)
+{
     driver_ = std::move(driver);
     layout_ = layout;
-    log.status(
+    log_.status(
         "shaper: mqprio {:x}: on {} ({}, {} TX queues): class A queue {}, class B queue {}, legacy {}@{}",
         config_.qdisc_major,
         logging::embed<16>(config_.interface_name),
@@ -670,26 +675,23 @@ void EntityShaper::adopt(std::string driver, QueueLayout const& layout)
         layout_.legacy_count,
         layout_.legacy_offset);
     if (is_intel_qav_driver(driver_) && (layout_.class_a_queue > 1 || layout_.class_b_queue > 1)) {
-        log.warning(
+        log_.warning(
             "shaper: {} offloads cbs only on queues 0 and 1; the override puts an SR class elsewhere", logging::embed<16>(driver_));
     }
-    if (auto const priority = kit_.stream_tx_priority_error(); priority) {
-        log.warning("shaper: the stream socket has no SO_PRIORITY (errno {}): its frames miss the shaped queue", priority.value());
-    }
 }
 
-void EntityShaper::follow_admission()
+auto PortShaper::program(std::span<TSpec const> const class_a) noexcept -> Status
 {
-    // From here on the kit reports admission changes; tick() reprograms.
-    kit_.set_on_admission_changed([this](std::span<uint16_t const> admitted) { on_admission_changed(admitted); });
-    hooked_ = true;
-    auto const admitted = kit_.admitted_talker_streams();
-    admitted_.assign(admitted.begin(), admitted.end());
-    (void)refresh_link_speed();
-    (void)reprogram();
+    if (class_a.size() > MAX_PORT_SHAPER_STREAMS) {
+        return failure(make_error_code(ShaperError::too_many_streams));
+    }
+    class_a_streams_.assign(class_a.begin(), class_a.end());
+    dirty_ = true;
+    retry_at_ns_ = 0;  // a new set goes out at once
+    return success();
 }
 
-void EntityShaper::set_launch_time(LaunchTimeMode const mode) noexcept
+void PortShaper::set_launch_time(LaunchTimeMode const mode) noexcept
 {
     config_.launch_time = mode;
     if (!qdiscs_.installed()) {
@@ -700,17 +702,7 @@ void EntityShaper::set_launch_time(LaunchTimeMode const mode) noexcept
     retry_at_ns_ = 0;
 }
 
-void EntityShaper::on_admission_changed(std::span<uint16_t const> const admitted) noexcept
-{
-    admitted_.clear();
-    for (uint16_t const index : admitted) {
-        (void)admitted_.try_push_back(index);
-    }
-    dirty_ = true;
-    retry_at_ns_ = 0;  // a new admitted set goes out at once
-}
-
-void EntityShaper::tick(int64_t const now_ns)
+void PortShaper::tick(int64_t const now_ns)
 {
     if (!qdiscs_.installed()) {
         return;
@@ -733,12 +725,12 @@ void EntityShaper::tick(int64_t const now_ns)
     }
 }
 
-auto EntityShaper::link_mbps() const noexcept -> uint32_t
+auto PortShaper::link_mbps() const noexcept -> uint32_t
 {
     return known_link_mbps_ != 0 ? known_link_mbps_ : config_.fallback_link_mbps;
 }
 
-auto EntityShaper::refresh_link_speed() -> bool
+auto PortShaper::refresh_link_speed() -> bool
 {
     auto const speed = net::link_speed_mbps(config_.interface_name);
     if (speed) {
@@ -748,33 +740,21 @@ auto EntityShaper::refresh_link_speed() -> bool
         // Unknown speed (link down) keeps the last known one: a flap does not
         // churn the shaper. A real read error is logged once.
         link_error_ = speed.error();
-        kit_.host().ctl_log().warning("shaper: reading the link speed failed: errno {}", link_error_.value());
+        log_.warning("shaper: reading the link speed failed: errno {}", link_error_.value());
     }
-    kit_.set_link_mbps(link_mbps());  // its class A budget
     return link_mbps() != programmed_link_mbps_;
 }
 
-auto EntityShaper::targets(bool const admitted) -> CbsTargets
+auto PortShaper::targets(bool const streams) -> CbsTargets
 {
-    // Every talker stream of the kit is class A: it declares only the class A
-    // SR domain (MSRP sr_class_id 6). Class B stays empty (its placeholder)
-    // until it talks class B, and is laid out (queue, TC) regardless.
-    sg14::inplace_vector<TSpec, MAX_ENTITY_STREAMS> class_a_streams{};
-    if (admitted) {
-        for (uint16_t const index : admitted_) {
-            for (auto const& spec : kit_.talker_specs()) {
-                if (spec.index == index) {
-                    (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
-                }
-            }
-        }
-    }
+    // Class B stays empty (its placeholder) and is laid out (queue, TC) regardless.
     uint32_t const mbps = link_mbps();
     programmed_link_mbps_ = mbps;
-    return cbs_targets(class_a_streams, {}, mbps * 1000U, mtu_);
+    std::span<TSpec const> const class_a = streams ? std::span<TSpec const>{class_a_streams_} : std::span<TSpec const>{};
+    return cbs_targets(class_a, {}, mbps * 1000U, mtu_);
 }
 
-auto EntityShaper::reprogram() -> Status
+auto PortShaper::reprogram() -> Status
 {
     if (!qdiscs_.installed()) {
         return success();
@@ -787,11 +767,132 @@ auto EntityShaper::reprogram() -> Status
     return status;
 }
 
+auto PortShaper::uninstall() -> Status
+{
+    dirty_ = false;
+    return qdiscs_.uninstall();
+}
+
+// ---------------------------------------------------------------------------
+// EntityShaper
+// ---------------------------------------------------------------------------
+
+EntityShaper::EntityShaper(ShaperConfig config, AvbEntityKit& kit)
+    : kit_{kit}
+    , port_{std::move(config), kit.host().ctl_log(), kit.config().stream_pcp}
+{}
+
+EntityShaper::EntityShaper(ShaperConfig config, AvbEntityKit& kit, net::tc::TcControl& tc)
+    : kit_{kit}
+    , port_{std::move(config), kit.host().ctl_log(), tc, kit.config().stream_pcp}
+{}
+
+EntityShaper::~EntityShaper()
+{
+    unhook();
+}
+
+void EntityShaper::unhook() noexcept
+{
+    if (hooked_) {
+        kit_.set_on_admission_changed({});
+        hooked_ = false;
+    }
+}
+
+void EntityShaper::shutdown()
+{
+    unhook();
+    port_.shutdown();
+}
+
+auto EntityShaper::install() -> Status
+{
+    if (port_.installed()) {
+        return success();
+    }
+    follow_admission();
+    return installed_on(port_.install());
+}
+
+auto EntityShaper::install(ShaperPort const& port) -> Status
+{
+    if (port_.installed()) {
+        return success();
+    }
+    follow_admission();
+    return installed_on(port_.install(port));
+}
+
+auto EntityShaper::installed_on(Status status) -> Status
+{
+    if (!status) {
+        unhook();
+        return status;
+    }
+    kit_.set_link_mbps(port_.link_mbps());  // its class A budget
+    if (auto const priority = kit_.stream_tx_priority_error(); priority) {
+        kit_.host().ctl_log().warning(
+            "shaper: the stream socket has no SO_PRIORITY (errno {}): its frames miss the shaped queue", priority.value());
+    }
+    return success();
+}
+
+void EntityShaper::follow_admission()
+{
+    // From here on the kit reports admission changes; tick() reprograms.
+    kit_.set_on_admission_changed([this](std::span<uint16_t const> admitted) { on_admission_changed(admitted); });
+    hooked_ = true;
+    auto const admitted = kit_.admitted_talker_streams();
+    admitted_.assign(admitted.begin(), admitted.end());
+    program_admitted();
+}
+
+void EntityShaper::on_admission_changed(std::span<uint16_t const> const admitted) noexcept
+{
+    admitted_.clear();
+    for (uint16_t const index : admitted) {
+        (void)admitted_.try_push_back(index);
+    }
+    program_admitted();
+}
+
+void EntityShaper::program_admitted() noexcept
+{
+    sg14::inplace_vector<TSpec, MAX_ENTITY_STREAMS> class_a_streams{};
+    for (uint16_t const index : admitted_) {
+        for (auto const& spec : kit_.talker_specs()) {
+            if (spec.index == index) {
+                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
+            }
+        }
+    }
+    if (std::ranges::equal(class_a_streams, given_)) {
+        return;  // a reprogram only for a change
+    }
+    given_ = class_a_streams;
+    (void)port_.program(class_a_streams);  // MAX_ENTITY_STREAMS fits
+}
+
+void EntityShaper::tick(int64_t const now_ns)
+{
+    program_admitted();  // an admitted stream's format may have changed (gate off)
+    port_.tick(now_ns);
+    if (port_.installed()) {
+        kit_.set_link_mbps(port_.link_mbps());  // its class A budget
+    }
+}
+
+auto EntityShaper::reprogram() -> Status
+{
+    program_admitted();
+    return port_.reprogram();
+}
+
 auto EntityShaper::uninstall() -> Status
 {
     unhook();
-    dirty_ = false;
-    return qdiscs_.uninstall();
+    return port_.uninstall();
 }
 
 #endif  // __linux__

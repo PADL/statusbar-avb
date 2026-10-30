@@ -3,7 +3,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// EntityShaper: the talker side's hardware traffic shaping (mqprio root, offloaded cbs per
+/// PortShaper / EntityShaper: the talker side's hardware traffic shaping (mqprio root, offloaded cbs per
 /// SR-class queue, an offloaded etf under the stream socket's for launch time, SO_PRIORITY steering of the bypass
 /// stream socket). Reactor thread, Linux, CAP_NET_ADMIN. See docs/SHAPER.md.
 
@@ -35,6 +35,7 @@ enum class ShaperError
     not_avb_capable = 1,  ///< fewer than 3 TX queues (legacy + class B + class A)
     bad_queue_override,   ///< an override queue out of range, both classes on one queue, or a legacy range that is not contiguous
     bad_priority,         ///< an SR class PCP of 8 or more, or class A and class B on one PCP
+    too_many_streams,     ///< more class A streams than MAX_PORT_SHAPER_STREAMS
 };
 
 class ShaperErrorCategory final : public std::error_category
@@ -332,7 +333,7 @@ class ShaperQdiscs
 #endif  // __linux__
 
 // ---------------------------------------------------------------------------
-// EntityShaper (reactor thread, Linux)
+// PortShaper and EntityShaper (reactor thread, Linux)
 // ---------------------------------------------------------------------------
 
 struct ShaperConfig
@@ -355,43 +356,57 @@ struct ShaperConfig
     int32_t etf_delta_ns{DEFAULT_ETF_DELTA_NS};
 };
 
+/// The most class A streams a PortShaper sizes its shaper for.
+inline constexpr size_t MAX_PORT_SHAPER_STREAMS = 64;
+
+/// What PortShaper::install() reads from the interface: its index, driver, TX queues and MTU.
+struct ShaperPort
+{
+    int ifindex{0};
+    std::string driver{};
+    uint16_t tx_queues{0};
+    uint32_t mtu{1500};
+};
+
 #if defined(__linux__)
 
-/// The kit's hardware shaper: a tick-only net::Pollable on the reactor (docs/SHAPER.md,
-/// "Threading"). The kit must outlive it. After install() every failure is logged on the kit's ctl
-/// log, never fatal: the streams keep flowing, unshaped.
-class EntityShaper final : public net::Pollable
+/// One AVB port's hardware shaper, sized from the class A TSpecs its user programs: a tick-only
+/// net::Pollable on the reactor (docs/SHAPER.md, "Threading"). After install() every failure is
+/// logged on @p log, never fatal: the streams keep flowing, unshaped.
+class PortShaper final : public net::Pollable
 {
   public:
-    EntityShaper(ShaperConfig config, AvbEntityKit& kit);
+    /// Over its own rtnetlink client, class A's frames on PCP @p class_a_pcp.
+    PortShaper(ShaperConfig config, logging::Logger log, uint8_t class_a_pcp = DEFAULT_CLASS_A_PCP);
+    /// Over @p tc (a recorder in tests), which must outlive it.
+    PortShaper(ShaperConfig config, logging::Logger log, net::tc::TcControl& tc, uint8_t class_a_pcp = DEFAULT_CLASS_A_PCP);
 
-    EntityShaper(EntityShaper const&) = delete;
-    auto operator=(EntityShaper const&) -> EntityShaper& = delete;
-    EntityShaper(EntityShaper&&) = delete;
-    auto operator=(EntityShaper&&) -> EntityShaper& = delete;
-    ~EntityShaper() override;
+    PortShaper(PortShaper const&) = delete;
+    auto operator=(PortShaper const&) -> PortShaper& = delete;
+    PortShaper(PortShaper&&) = delete;
+    auto operator=(PortShaper&&) -> PortShaper& = delete;
+    ~PortShaper() override = default;
 
-    /// Errors: the interface's, ShaperError::not_avb_capable, bad_queue_override or bad_priority,
-    /// or the netlink errno (last_kernel_message() has the kernel's reason). Nothing of ours is left
-    /// installed on failure.
+    /// Read the interface (index, driver, TX queues, MTU) and install(ShaperPort) on it. Errors: the
+    /// interface's, then install(ShaperPort)'s.
     [[nodiscard]] auto install() -> Status;
-    /// Record @p admitted (talker stream indices: the kit's admission hook
-    /// argument) and mark the shaper dirty for the next tick(). Cheap; safe
-    /// inside the kit's ACMP/MSRP callbacks.
-    void on_admission_changed(std::span<uint16_t const> admitted) noexcept;
+    /// Lay the mqprio root down on @p port and program the TSpecs given so far. Errors:
+    /// ShaperError::not_avb_capable, bad_queue_override or bad_priority, or the netlink errno
+    /// (last_kernel_message() has the kernel's reason). Nothing of ours is left installed on failure.
+    [[nodiscard]] auto install(ShaperPort const& port) -> Status;
+    /// Size class A for @p class_a, every stream that may send on its queue, from the next tick()
+    /// (before install(): from install()). Errors: ShaperError::too_many_streams; nothing changes.
+    [[nodiscard]] auto program(std::span<TSpec const> class_a) noexcept -> Status;
     /// Another launch-time mode (launch time on or off at run time, as the system clock agrees with the
     /// PHC): settled by the next tick(), under cbs that stay (no adapter reset). A no-op before install().
     void set_launch_time(LaunchTimeMode mode) noexcept;
-    /// Recompute and program the cbs for the recorded admitted set and the
-    /// current link speed. A no-op success before install(). Errors: the
-    /// first netlink failure (each is logged).
+    /// Program the cbs for the TSpecs given and the current link speed now. A no-op success before
+    /// install(). Errors: the first netlink failure (each is logged).
     auto reprogram() -> Status;
-    /// Unregister the admission hook, take both cbs away and delete the
-    /// mqprio root. A no-op success when not installed.
+    /// Take both cbs away and delete the mqprio root. A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
-    /// Unregister the admission hook, then uninstall() if config.restore_qdisc,
-    /// else program the placeholders and leave the qdiscs in place (failures
-    /// are logged). Idempotent.
+    /// uninstall() if config.restore_qdisc, else program the placeholders and leave the qdiscs in
+    /// place (failures are logged). Idempotent.
     void shutdown();
 
     // net::Pollable: tick-only.
@@ -408,7 +423,7 @@ class EntityShaper final : public net::Pollable
     [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return qdiscs_.class_b(); }
     /// The link speed the shaper sizes against (Mbit/s).
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t;
-    [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return client_.last_message(); }
+    [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return tc_->last_message(); }
     /// config.launch_time, as install() gave it to the qdiscs.
     [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return qdiscs_.launch_time_mode(); }
     /// Whether our etf is on class A's queue.
@@ -421,27 +436,24 @@ class EntityShaper final : public net::Pollable
     static constexpr int64_t RETRY_MAX_NS = 32'000'000'000;
 
   private:
-    /// cbs_targets() for the recorded admitted set (@p admitted false: none)
-    /// at the current link speed.
-    [[nodiscard]] auto targets(bool admitted) -> CbsTargets;
+    /// cbs_targets() for the TSpecs given (@p streams false: none) at the current link speed.
+    [[nodiscard]] auto targets(bool streams) -> CbsTargets;
     /// Read the link speed; true if the speed the shaper sizes against changed.
     auto refresh_link_speed() -> bool;
-    /// Clear the kit's admission hook if this shaper set it.
-    void unhook() noexcept;
     /// Park both cbs at the placeholders and leave the qdiscs for the next start (logged).
     void park();
-    /// The interface's TX queues laid out for @p driver and the configured overrides.
-    [[nodiscard]] auto queue_layout(std::string_view driver) const -> StatusValue<QueueLayout>;
-    /// Open the tc client and install the mqprio root for @p layout on @p ifindex.
-    [[nodiscard]] auto install_layout(int ifindex, QueueLayout const& layout) -> Status;
+    /// Open the tc client (our own) and install the mqprio root for @p layout on @p port.
+    [[nodiscard]] auto install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status;
+    /// The root is down: settle launch time, keep @p driver and @p layout, program the TSpecs given.
+    void settle(std::string driver, QueueLayout const& layout);
     /// Keep and log the installed @p driver and @p layout, warning about what will not shape.
     void adopt(std::string driver, QueueLayout const& layout);
-    /// Hook the kit's admission changes and program the admitted set now.
-    void follow_admission();
 
     ShaperConfig config_;
-    AvbEntityKit& kit_;
+    logging::Logger log_;
+    uint8_t class_a_pcp_;
     net::tc::TcClient client_{};
+    net::tc::TcControl* tc_;  ///< client_, or the one given
     ShaperQdiscs qdiscs_;
     std::string driver_{};
     QueueLayout layout_{};
@@ -449,11 +461,84 @@ class EntityShaper final : public net::Pollable
     uint32_t known_link_mbps_{0};   ///< last speed the kernel reported (0: never)
     std::error_code link_error_{};  ///< last non-"unknown" speed read error (logged on change)
     uint32_t programmed_link_mbps_{0};
-    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> admitted_{};
+    sg14::inplace_vector<TSpec, MAX_PORT_SHAPER_STREAMS> class_a_streams_{};
     bool dirty_{false};
     int64_t next_link_check_ns_{0};
     int64_t retry_at_ns_{0};
     int64_t retry_backoff_ns_{RETRY_MIN_NS};
+};
+
+/// The kit's hardware shaper: a PortShaper programmed from the kit's admitted talker streams, the
+/// kit's stream PCP as class A's, and its link speed handed back for the class A budget. The kit
+/// must outlive it.
+class EntityShaper final : public net::Pollable
+{
+  public:
+    EntityShaper(ShaperConfig config, AvbEntityKit& kit);
+    /// Over @p tc (a recorder in tests), which must outlive it.
+    EntityShaper(ShaperConfig config, AvbEntityKit& kit, net::tc::TcControl& tc);
+
+    EntityShaper(EntityShaper const&) = delete;
+    auto operator=(EntityShaper const&) -> EntityShaper& = delete;
+    EntityShaper(EntityShaper&&) = delete;
+    auto operator=(EntityShaper&&) -> EntityShaper& = delete;
+    ~EntityShaper() override;
+
+    /// PortShaper::install(), then follow the kit's admission changes. Errors: PortShaper::install()'s.
+    [[nodiscard]] auto install() -> Status;
+    /// The same on a given @p port (PortShaper::install(ShaperPort)).
+    [[nodiscard]] auto install(ShaperPort const& port) -> Status;
+    /// Record @p admitted (the kit's admission hook argument) for the next tick(), which also follows
+    /// an admitted stream's format change. Cheap; safe inside the kit's ACMP/MSRP callbacks.
+    void on_admission_changed(std::span<uint16_t const> admitted) noexcept;
+    /// See PortShaper::set_launch_time.
+    void set_launch_time(LaunchTimeMode mode) noexcept { port_.set_launch_time(mode); }
+    /// Recompute and program the cbs for the recorded admitted set and the
+    /// current link speed. A no-op success before install(). Errors: the
+    /// first netlink failure (each is logged).
+    auto reprogram() -> Status;
+    /// Unregister the admission hook, take both cbs away and delete the
+    /// mqprio root. A no-op success when not installed.
+    [[nodiscard]] auto uninstall() -> Status;
+    /// Unregister the admission hook, then PortShaper::shutdown(). Idempotent.
+    void shutdown();
+
+    // net::Pollable: tick-only.
+    [[nodiscard]] auto fd() const noexcept -> int override { return -1; }
+    void on_ready(int64_t /*now_ns*/) override {}
+    void tick(int64_t now_ns) override;
+    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+
+    [[nodiscard]] auto installed() const noexcept -> bool { return port_.installed(); }
+    [[nodiscard]] auto layout() const noexcept -> QueueLayout const& { return port_.layout(); }
+    [[nodiscard]] auto driver() const noexcept -> std::string const& { return port_.driver(); }
+    [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return port_.class_a(); }
+    [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return port_.class_b(); }
+    [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return port_.link_mbps(); }
+    [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return port_.last_kernel_message(); }
+    [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return port_.launch_time_mode(); }
+    [[nodiscard]] auto launch_time() const noexcept -> bool { return port_.launch_time(); }
+
+    static constexpr int64_t LINK_CHECK_NS = PortShaper::LINK_CHECK_NS;
+    static constexpr int64_t RETRY_MIN_NS = PortShaper::RETRY_MIN_NS;
+    static constexpr int64_t RETRY_MAX_NS = PortShaper::RETRY_MAX_NS;
+
+  private:
+    /// Give the port the TSpecs of the recorded admitted streams when they differ from the last
+    /// given. Every talker stream of the kit is class A (MSRP sr_class_id 6 only).
+    void program_admitted() noexcept;
+    /// The port's install returned @p status: on success, hand back the link speed and warn
+    /// about the stream socket's priority; on failure, unhook.
+    [[nodiscard]] auto installed_on(Status status) -> Status;
+    /// Clear the kit's admission hook if this shaper set it.
+    void unhook() noexcept;
+    /// Hook the kit's admission changes and record the admitted set now.
+    void follow_admission();
+
+    AvbEntityKit& kit_;
+    PortShaper port_;
+    sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> admitted_{};
+    sg14::inplace_vector<TSpec, MAX_ENTITY_STREAMS> given_{};  ///< the TSpecs last given to the port
     bool hooked_{false};
 };
 

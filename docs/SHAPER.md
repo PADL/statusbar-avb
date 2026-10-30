@@ -7,6 +7,15 @@ an entity's talker streams on a hardware credit-based shaper. It needs
 CAP_NET_ADMIN, Linux and a NIC with at least 3 TX queues. The rtnetlink
 requests are `net::tc::TcClient` (`core/statusbar/net/net_tc_qdisc.hpp`).
 
+The shaper itself is `avb_entity::PortShaper`: one interface, its driver and
+link speed, and the class A TSpecs its user gives with `program()`; it knows
+no entity. `EntityShaper` is the kit's adapter over it: it programs the TSpecs
+of the kit's admitted talker streams (below, "Admission"), uses the kit's
+`stream_pcp` as class A's priority, and hands the link speed back for the kit's
+class A budget. A talker without the kit (a `nanoavb::SrpPort` user) drives a
+`PortShaper` directly with the TSpecs of every stream that may send on class
+A's queue.
+
 ## Why bypass + mqprio + SO_PRIORITY works
 
 The kit sends stream frames on a `PACKET_QDISC_BYPASS` socket (its stream
@@ -194,11 +203,14 @@ shaper dirty: no netlink request runs inside the kit's ACMP/MSRP callbacks.
 `tick()` re-reads the link speed at most once a second and calls `reprogram()`
 when the admitted set or the link speed changed, so a burst of admission
 changes costs one reprogramming and a renegotiated link is corrected within a
-second. `shutdown()` unregisters the hook and, when `restore_qdisc` is set,
+second. `EntityShaper::tick()` also recomputes the admitted streams' TSpecs and
+gives them to the `PortShaper` when they changed: with the gate off a stopped,
+still admitted output may change format. `shutdown()` unregisters the hook and, when `restore_qdisc` is set,
 uninstalls; otherwise (the default) it parks both cbs at their placeholders
 and leaves the qdiscs for the next start. The destructor unregisters too. The
 kit must outlive the shaper. The requests themselves are `ShaperQdiscs`, over
-`net::tc::TcControl`; its tests record them.
+`net::tc::TcControl`; its tests record them, and a `PortShaper` built over a
+recorder and installed on a given `ShaperPort` runs whole in the tests.
 
 `netdev_set_num_tc` resets any XPS maps; do not configure XPS on the AVB port
 afterwards (XPS is consulted before the TC hash in `netdev_pick_tx`).

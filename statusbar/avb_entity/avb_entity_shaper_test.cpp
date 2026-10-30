@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 // The shaper's pure parts (queue layout, mqprio, IEEE 802.1Q Annex L cbs parameters, placeholders)
-// and ShaperQdiscs against a recording TcControl; EntityShaper needs rtnetlink and is not run here.
+// and ShaperQdiscs and PortShaper against a recording TcControl; EntityShaper needs rtnetlink and is
+// not run here.
 // The arithmetic is worked in docs/SHAPER.md ("Worked examples").
 
 #include "statusbar/avb_entity/avb_entity_shaper.hpp"
@@ -899,6 +900,120 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
     EXPECT_TRUE(qdiscs.uninstall().has_value());
     EXPECT_TRUE(tc.take() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
+
+namespace {
+
+/// An igb port of 4 TX queues the PortShaper is told about rather than reads.
+auto igb_port() -> ShaperPort
+{
+    return ShaperPort{.ifindex = 3, .driver = "igb", .tx_queues = 4, .mtu = 1500};
+}
+
+/// The AAF + CRF TSpecs of admitted_targets().
+auto aaf_and_crf() -> std::array<TSpec, 2>
+{
+    return {AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+}
+
+}  // namespace
+
+// A port's user gives the class A TSpecs itself, before or after install(); the shaper is the
+// kit's without the kit (IEEE 802.1Q-2022 Annex L sizing as in admitted_targets()).
+TEST(port_shaper, the_tspecs_given_before_install_are_programmed_at_install)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
+    auto const streams = aaf_and_crf();
+    EXPECT_TRUE(shaper.program(streams).has_value());
+    EXPECT_TRUE(tc.take().empty());
+    EXPECT_TRUE(shaper.install(igb_port()).has_value());
+    EXPECT_TRUE(shaper.installed());
+    EXPECT_TRUE(
+        tc.take() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 19136",
+            "replace 9000:2 cbs idleslope 730864",
+        }));
+    EXPECT_TRUE(shaper.class_a() == admitted_targets().class_a);
+    EXPECT_TRUE(shaper.layout() == igb_layout());
+    EXPECT_EQ(shaper.driver(), std::string{"igb"});
+}
+
+TEST(port_shaper, tspecs_given_after_install_go_out_on_the_next_tick)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
+    EXPECT_TRUE(shaper.install(igb_port()).has_value());
+    EXPECT_TRUE(shaper.class_a().placeholder);
+    (void)tc.take();
+    auto const streams = aaf_and_crf();
+    EXPECT_TRUE(shaper.program(streams).has_value());
+    EXPECT_TRUE(tc.take().empty());
+    shaper.tick(1'000'000'000);
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(shaper.program({}).has_value());
+    shaper.tick(1'010'000'000);
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    shaper.tick(1'020'000'000);
+    EXPECT_TRUE(tc.take().empty());
+}
+
+TEST(port_shaper, more_streams_than_it_sizes_for_are_refused)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
+    EXPECT_TRUE(shaper.install(igb_port()).has_value());
+    (void)tc.take();
+    std::vector<TSpec> const many(MAX_PORT_SHAPER_STREAMS + 1, TSpec{.max_frame_size = 185, .max_interval_frames = 1});
+    auto const refused = shaper.program(many);
+    EXPECT_FALSE(refused.has_value());
+    EXPECT_TRUE(!refused.has_value() && refused.error() == make_error_code(ShaperError::too_many_streams));
+    shaper.tick(1'000'000'000);
+    EXPECT_TRUE(tc.take().empty());
+    EXPECT_TRUE(shaper.class_a().placeholder);
+}
+
+TEST(port_shaper, a_bad_class_a_priority_installs_nothing)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc, DEFAULT_CLASS_B_PCP};
+    auto const status = shaper.install(igb_port());
+    EXPECT_TRUE(!status.has_value() && status.error() == make_error_code(ShaperError::bad_priority));
+    EXPECT_FALSE(shaper.installed());
+    EXPECT_TRUE(tc.take().empty());
+}
+
+// shutdown() parks the cbs at the placeholders and leaves the qdiscs, or with restore_qdisc
+// takes them away (docs/SHAPER.md, "Adapter resets").
+TEST(port_shaper, shutdown_parks_or_restores)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    auto const streams = aaf_and_crf();
+    RecordingTc tc{};
+    PortShaper parked{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
+    EXPECT_TRUE(parked.program(streams).has_value());
+    EXPECT_TRUE(parked.install(igb_port()).has_value());
+    (void)tc.take();
+    parked.shutdown();
+    EXPECT_TRUE(tc.take() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_FALSE(parked.installed());
+    parked.shutdown();
+    EXPECT_TRUE(tc.take().empty());
+
+    RecordingTc restored_tc{};
+    PortShaper restored{ShaperConfig{.interface_name = "port-shaper0", .restore_qdisc = true}, channel.logger(), restored_tc};
+    EXPECT_TRUE(restored.install(igb_port()).has_value());
+    (void)restored_tc.take();
+    restored.shutdown();
+    EXPECT_TRUE(restored_tc.take() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+}
+
 #endif
 
 TEST(shaper_errors, messages)
