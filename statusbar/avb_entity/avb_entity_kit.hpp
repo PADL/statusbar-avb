@@ -661,6 +661,8 @@ class AvbEntityKit
     [[nodiscard]] auto start_control(net::MessageReactor& reactor) -> Status;
     /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
+    /// config_.default_mcr_priorities onto the MVU handler's clock domains (Milan v1.3 Section 7.6.1.1).
+    void apply_default_mcr_priorities();
     /// MAAP's addresses in "maap" mode (none offered until defended) and the declarations' timer.
     [[nodiscard]] auto start_declarations(net::MessageReactor& reactor) -> Status;
     /// The TX slots, the stream ports (@p ports), the listener streams and the TX path, in that order.

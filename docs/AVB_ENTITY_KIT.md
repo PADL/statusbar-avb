@@ -271,6 +271,17 @@ presentation offset command, a listener binding made or removed, a
 SET_SYSTEM_UNIQUE_ID or SET_MEDIA_CLOCK_REFERENCE_INFO. Nothing is written when
 the file already says it. See [PERSISTENT_STATE.md](PERSISTENT_STATE.md).
 
+## Media clock reference priority
+
+`default_mcr_priorities` sets each CLOCK_DOMAIN's Default Media Clock Reference
+Priority by index (Milan v1.3 Section 7.6.1.1, Table 7.3); the last entry also
+serves the domains after it, so one entry sets the whole entity. `start()`
+applies it before the saved state, so a user priority still at the old default
+follows it and a saved one stays (Section 7.6.1.2). Empty keeps 192. The
+default is part of the entity model (Section 5.4.4.4): an entity that changes
+it must change its entity_model_id too. The tools take
+`--mcr.default_priority=224[,192...]`.
+
 ## Clock sources and clock domains
 
 SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN takes a

@@ -145,12 +145,31 @@ void MvuCommandHandler::set_clock_domain_count(size_t const count) noexcept
 
 void MvuCommandHandler::set_default_mcr_priority(uint8_t const prio) noexcept
 {
-    for (auto& info : mcr_) {
-        if (info.user_mcr_prio == default_mcr_prio_) {
-            info.user_mcr_prio = prio;
-        }
+    for (size_t index = 0; index < MAX_CLOCK_DOMAINS; ++index) {
+        apply_default_mcr_priority(index, prio);
     }
-    default_mcr_prio_ = prio;
+}
+
+auto MvuCommandHandler::set_default_mcr_priority(size_t const index, uint8_t const prio) noexcept -> bool
+{
+    if (index >= clock_domain_count_) {
+        return false;
+    }
+    apply_default_mcr_priority(index, prio);
+    return true;
+}
+
+void MvuCommandHandler::apply_default_mcr_priority(size_t const index, uint8_t const prio) noexcept
+{
+    if (mcr_[index].user_mcr_prio == default_mcr_prio_[index]) {
+        mcr_[index].user_mcr_prio = prio;
+    }
+    default_mcr_prio_[index] = prio;
+}
+
+auto MvuCommandHandler::default_mcr_priority(size_t const index) const noexcept -> uint8_t
+{
+    return index < MAX_CLOCK_DOMAINS ? default_mcr_prio_[index] : MVU_MCR_PRIO_DEFAULT;
 }
 
 auto MvuCommandHandler::mcr_info(size_t const index) const noexcept -> McrInfo const*
@@ -209,7 +228,7 @@ auto MvuCommandHandler::mcr_payload(uint16_t const index) const noexcept -> MvuM
     MvuMediaClockReferenceInfoPayload payload{};
     payload.clock_domain_index = index;
     payload.flags = MVU_MCR_FLAGS_SUPPORTED;
-    payload.default_mcr_prio = default_mcr_prio_;
+    payload.default_mcr_prio = default_mcr_priority(index);
     if (auto const* info = mcr_info(index); info != nullptr) {
         payload.user_mcr_prio = info->user_mcr_prio;
         payload.media_clock_domain_name = info->domain_name;

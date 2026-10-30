@@ -1417,6 +1417,56 @@ TEST(avb_entity_kit_persistence, mvu_values_survive_a_rebuild)
     std::filesystem::remove_all(dir);
 }
 
+// Milan v1.3 Sections 7.6.1.1-2: the configured default priority is the clock domain's
+// default and its user priority's; unset keeps 192. A user priority is saved only away
+// from the default, so a saved 192 survives a default of 224
+TEST(avb_entity_kit_persistence, default_mcr_priority_from_the_config)
+{
+    auto const dir = state_dir("mcr-default");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        PersistentKit m{path};
+        EXPECT_TRUE(m.start_ready());
+        auto const& mvu = m.kit.host().components().mvu_handler;
+        EXPECT_EQ(mvu.default_mcr_priority(0), atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE);
+        EXPECT_EQ(mvu.mcr_info(0)->user_mcr_prio, atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE);
+    }
+    {
+        PersistentKit m{path};
+        m.config.default_mcr_priorities = {atdecc::mvu::MVU_MCR_PRIO_ROUTER, uint8_t{100}};
+        EXPECT_TRUE(m.start_ready());
+        auto const& mvu = m.kit.host().components().mvu_handler;
+        EXPECT_EQ(mvu.default_mcr_priority(0), atdecc::mvu::MVU_MCR_PRIO_ROUTER);
+        EXPECT_EQ(mvu.mcr_info(0)->user_mcr_prio, atdecc::mvu::MVU_MCR_PRIO_ROUTER);
+        EXPECT_TRUE(load_persistent_state(path, 0, {}).state.media_clock_references.empty());
+        atdecc::mvu::MvuMediaClockReferenceInfoPayload mcr{};
+        mcr.flags = atdecc::mvu::MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID;
+        mcr.user_mcr_prio = atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE;
+        EXPECT_EQ(
+            m.mvu_packet(atdecc::mvu::MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(mcr)),
+            atdecc::mvu::MVU_STATUS_SUCCESS);
+    }
+    {
+        PersistentKit m{path};
+        m.config.default_mcr_priorities = {atdecc::mvu::MVU_MCR_PRIO_ROUTER};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.kit.host().components().mvu_handler.mcr_info(0)->user_mcr_prio, atdecc::mvu::MVU_MCR_PRIO_NETWORK_INTERFACE);
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// The text form of default_mcr_priorities: comma-separated octets, empty for none
+TEST(avb_entity_kit, default_mcr_priorities_parse)
+{
+    EXPECT_TRUE(parse_default_mcr_priorities("224") == std::vector<uint8_t>{224});
+    EXPECT_TRUE(parse_default_mcr_priorities("224,0,255") == (std::vector<uint8_t>{224, 0, 255}));
+    EXPECT_TRUE(parse_default_mcr_priorities("")->empty());
+    EXPECT_FALSE(parse_default_mcr_priorities("256").has_value());
+    EXPECT_FALSE(parse_default_mcr_priorities("224,").has_value());
+    EXPECT_FALSE(parse_default_mcr_priorities("-1").has_value());
+    EXPECT_FALSE(parse_default_mcr_priorities("0x10").has_value());
+}
+
 // No state file yet: the listener bindings file's bindings are imported and
 // armed as fast-connect goals (the classic listener), and the state file is
 // written with them; the old file is no longer written

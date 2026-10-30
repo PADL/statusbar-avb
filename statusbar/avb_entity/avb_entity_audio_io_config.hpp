@@ -11,9 +11,13 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
+#include <charconv>
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace statusbar::avb_entity {
@@ -169,6 +173,11 @@ struct AvbEntityAudioIOConfig
     /// the model's (Milan when it says nothing). Under Milan, ACQUIRE_ENTITY answers
     /// NOT_SUPPORTED (Milan v1.2 Section 5.4.2.1).
     std::optional<bool> milan{};
+
+    /// Each CLOCK_DOMAIN's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1), by
+    /// index; the last also serves the domains after it, extras are ignored. Empty keeps the MVU
+    /// handler's MVU_MCR_PRIO_NETWORK_INTERFACE (192). Read at start().
+    std::vector<uint8_t> default_mcr_priorities{};
 
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
@@ -346,5 +355,22 @@ struct AvbEntityAudioIOConfig
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
 };
+
+/// @p text as AvbEntityAudioIOConfig::default_mcr_priorities: comma-separated values 0-255 ("224",
+/// "224,192"), empty for none; nullopt when an item is not one.
+[[nodiscard]] inline auto parse_default_mcr_priorities(std::string_view const text) -> std::optional<std::vector<uint8_t>>
+{
+    std::vector<uint8_t> priorities;
+    for (auto const field : std::views::split(text, ',')) {
+        std::string_view const item{field.begin(), field.end()};
+        uint8_t value = 0;
+        auto const [end, ec] = std::from_chars(item.data(), item.data() + item.size(), value);
+        if (ec != std::errc{} || end != item.data() + item.size()) {
+            return std::nullopt;
+        }
+        priorities.push_back(value);
+    }
+    return priorities;
+}
 
 }  // namespace statusbar::avb_entity

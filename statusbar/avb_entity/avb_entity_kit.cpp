@@ -1469,8 +1469,24 @@ void AvbEntityKit::prepare_control_plane()
         listener_->set_logger(host_.ctl_log());
     }
     host_.set_local_atdecc_socket(config_.atdecc_socket_path, config_.atdecc_socket_mode);
-    // The saved settings, before the entity shows itself to the network.
+    // The vendor's defaults, then the saved settings, before the entity shows itself to the network.
+    apply_default_mcr_priorities();
     load_persistent_state();
+}
+
+void AvbEntityKit::apply_default_mcr_priorities()
+{
+    auto const& priorities = config_.default_mcr_priorities;
+    auto& mvu = host_.components().mvu_handler;
+    if (priorities.size() > mvu.clock_domain_count()) {
+        host_.ctl_log().warning(
+            "kit: {} default media clock reference priorities for {} clock domain(s): the rest ignored",
+            priorities.size(),
+            mvu.clock_domain_count());
+    }
+    for (size_t index = 0; !priorities.empty() && index < mvu.clock_domain_count(); ++index) {
+        (void)mvu.set_default_mcr_priority(index, priorities[std::min(index, priorities.size() - 1)]);
+    }
 }
 
 auto AvbEntityKit::start_declarations(net::MessageReactor& reactor) -> Status
@@ -2126,8 +2142,8 @@ void AvbEntityKit::collect_mvu_settings(PersistentState& state) const
 {
     auto const& mvu = host_.components().mvu_handler;
     state.system_unique_id = mvu.system_unique_id();
-    nanoavb::MvuCommandHandler::McrInfo const defaults{.user_mcr_prio = mvu.default_mcr_priority()};
     for (size_t index = 0; index < mvu.clock_domain_count(); ++index) {
+        nanoavb::MvuCommandHandler::McrInfo const defaults{.user_mcr_prio = mvu.default_mcr_priority(index)};
         if (auto const* info = mvu.mcr_info(index); info != nullptr && !(*info == defaults)) {
             auto const& field = info->domain_name;
             auto const length = static_cast<size_t>(std::ranges::find(field, '\0') - field.begin());
