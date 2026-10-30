@@ -852,6 +852,33 @@ TEST(nanoavb_srp_msrp, listener_withdraw_nonexistent)
     EXPECT_TRUE(result.has_value());
 }
 
+// A withdrawn stream's reservation entry is reused: an end station that attaches and withdraws
+// more distinct StreamIDs than the table holds keeps declaring.
+TEST(nanoavb_srp_msrp, withdrawn_streams_free_their_entries)
+{
+    MsrpHandler<> handler{entity_msrp_config(4, 4), MsrpCallbacks{.send_packet = [](std::span<uint8_t const>) { return true; }}};
+    TimePoint now{std::chrono::seconds{1}};
+    for (uint16_t uid = 0; uid < 48; ++uid) {
+        statusbar::tsn::StreamId sid;
+        sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+        sid.set_unique_id(uid);
+        TalkerStreamSrpInfo info{};
+        info.stream_id = sid;
+        info.max_frame_size = 185;
+        info.max_interval_frames = 1;
+        EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
+        EXPECT_TRUE(handler.listener_attach(sid, now).has_value());
+        EXPECT_TRUE(handler.talker_withdraw(sid, now).has_value());
+        EXPECT_TRUE(handler.listener_withdraw(sid, now).has_value());
+        for (int i = 0; i < 8; ++i) {  // the participant reclaims what was withdrawn
+            now += std::chrono::milliseconds{500};
+            handler.tick(now);
+        }
+    }
+    EXPECT_TRUE(handler.talker_streams().size() <= 1);
+    EXPECT_TRUE(handler.listener_streams().size() <= 1);
+}
+
 TEST(nanoavb_srp_msrp, multiple_streams)
 {
     MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}};

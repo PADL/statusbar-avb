@@ -23,6 +23,7 @@ statusbar_add_module(
   nanoavb_mvrp_sm.cpp
   nanoavb_mvu_handler.cpp
   nanoavb_srp.cpp
+  nanoavb_srp_port.cpp
   nanoavb_supervisor_sm.cpp
   nanoavb_components.cpp
   nanoavb_controller.cpp
@@ -58,6 +59,7 @@ statusbar_add_module(
   nanoavb_audio_map_test.cpp
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
+  nanoavb_srp_port_test.cpp
   nanoavb_controller_test.cpp
   nanoavb_integration_test.cpp
   nanoavb_local_port_test.cpp)
