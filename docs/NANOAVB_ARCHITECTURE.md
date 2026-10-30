@@ -464,6 +464,40 @@ STREAM_INPUT; a stream channel may feed several.
   but for the unit's rate, which the entity keeps; a change notified as
   REMOVE then ADD) and ADD/REMOVE NOT_SUPPORTED (Milan v1.2 Section 5.3.9.1).
 
+### SrpPort
+
+`SrpPort` (`nanoavb_srp_port.hpp`) is MSRP and MVRP on one interface without
+an ATDECC entity: the two handlers, their net handlers (`nanoavb_srp_net.hpp`,
+the same ones `NanoAvbNetHandlers` adds) and the Class A Domain. It serves an
+end station that only declares Talker Advertise and Listener attributes (IEEE
+802.1Q-2022 Clause 35.2.4) and adopts the bridge's Domain as below:
+
+1. `add_to_reactor()` opens the sockets (or `set_senders()` and the
+   `receive_*()` / `tick()` calls stand in for them);
+2. `declare_domain()` declares the configured Class A Domain and joins its VID,
+   at start and on each link up;
+3. `declare_talker()` advertises a stream on the Domain's VID and priority;
+   `attach_listener()` declares a Listener for a StreamID, found from a
+   stream's destination with `find_registered_talker_advertise(destination,
+   vid)` (Clause 35.2.2.8.3: one stream per destination);
+4. `SrpPortObserver` reports peers' registrations as they happen: the Domain
+   (SRP is in force while the peer's is registered), Talker Advertise, Talker
+   Failed and their leaving, the Listener declaration for each of our talker
+   streams, and an attached listener following its talker. A Domain VID
+   adopted from the bridge moves the MVRP join and re-advertises the talkers.
+   The Domain and a talker's leaving are reported once the received PDU is
+   done, with their final state: a peer's Domain counts only at our
+   SRclassPriority (Clause 35.2.1.4), and a talker whose Advertise turns into
+   a Talker Failed has not left.
+
+The participant is `DiscoveryMsrpLimits`: matching by destination needs every
+Talker attribute the bridge propagates (it does not prune, Clause 35.2.1.4 b),
+so it holds 256 of each, 32 kept for the port's own streams. A withdrawn
+stream's entry in the handler's tables is reused by the next new StreamID.
+
+The listener behaves as the Milan listener below (nothing declared until the
+talker's attribute is registered).
+
 ## MSRP: domain, listener and table sizing
 
 - **Domain declaration.** Without an explicit MSRP Domain declaration a
