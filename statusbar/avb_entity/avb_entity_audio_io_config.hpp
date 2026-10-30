@@ -11,9 +11,13 @@
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
+#include <charconv>
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace statusbar::avb_entity {
@@ -232,6 +236,11 @@ struct AvbEntityAudioIOConfig
     std::string milan_certification_version{"0.0.0.0"};
     /// The Milan specification the device supports, as dotted numbers.
     std::string milan_specification_version{"1.3.0.0"};
+
+    /// Each CLOCK_DOMAIN's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1), by
+    /// index; the last also serves the domains after it, extras are ignored. Empty keeps the MVU
+    /// handler's MVU_MCR_PRIO_NETWORK_INTERFACE (192). Read at start().
+    std::vector<uint8_t> default_mcr_priorities{};
 
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
@@ -456,28 +465,21 @@ struct AvbEntityAudioIOConfig
     std::string firmware_version{"1.0.0"};
 };
 
-/// The presentation offset of a talker that is given none, by profile: Milan
-/// v1.3 5.3.7.6 has 2 ms as the default of a PAAD; an entity held to 1722.1
-/// alone keeps 1 ms.
-inline constexpr uint64_t MILAN_DEFAULT_PRESENTATION_OFFSET_NS = 2'000'000;
-inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
-
-/// Whether @p config holds the entity to Milan v1.3: said outright by
-/// atdecc_profile ("milan13"), or, when that is empty, by the model being a
-/// Milan one.
-[[nodiscard]] inline auto is_milan_profile(AvbEntityAudioIOConfig const& config) noexcept -> bool
+/// @p text as AvbEntityAudioIOConfig::default_mcr_priorities: comma-separated values 0-255 ("224",
+/// "224,192"), empty for none; nullopt when an item is not one.
+[[nodiscard]] inline auto parse_default_mcr_priorities(std::string_view const text) -> std::optional<std::vector<uint8_t>>
 {
-    return config.atdecc_profile.empty() ? config.milan : config.atdecc_profile == "milan13";
-}
-
-/// The presentation offset the entity's talkers use: what the configuration
-/// gives, or the profile's default when it gives none (0).
-[[nodiscard]] inline auto effective_presentation_offset_ns(AvbEntityAudioIOConfig const& config) noexcept -> uint64_t
-{
-    if (config.presentation_offset_ns != 0) {
-        return config.presentation_offset_ns;
+    std::vector<uint8_t> priorities;
+    for (auto const field : std::views::split(text, ',')) {
+        std::string_view const item{field.begin(), field.end()};
+        uint8_t value = 0;
+        auto const [end, ec] = std::from_chars(item.data(), item.data() + item.size(), value);
+        if (ec != std::errc{} || end != item.data() + item.size()) {
+            return std::nullopt;
+        }
+        priorities.push_back(value);
     }
-    return is_milan_profile(config) ? MILAN_DEFAULT_PRESENTATION_OFFSET_NS : CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS;
+    return priorities;
 }
 
 }  // namespace statusbar::avb_entity
