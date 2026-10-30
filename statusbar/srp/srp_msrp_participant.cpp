@@ -294,6 +294,32 @@ auto MsrpParticipantT<Limits>::find_registered_talker_advertise(tsn::StreamId co
 }
 
 template <class Limits>
+auto MsrpParticipantT<Limits>::find_registered_talker_advertise(Eui48 const& destination, uint16_t const vid) const noexcept
+    -> TalkerAdvertiseFirstValue const*
+{
+    for (auto const& rec : talker_adv_) {
+        auto const& fv = rec.first_value;
+        if (fv.destination_address == destination && fv.vlan_identifier.get() == vid && rec.registrar_is_registered()) {
+            return &fv;
+        }
+    }
+    return nullptr;
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::find_registered_talker_failed(Eui48 const& destination, uint16_t const vid) const noexcept
+    -> TalkerFailedFirstValue const*
+{
+    for (auto const& rec : talker_failed_) {
+        auto const& fv = rec.first_value.advertise;
+        if (fv.destination_address == destination && fv.vlan_identifier.get() == vid && rec.registrar_is_registered()) {
+            return &rec.first_value;
+        }
+    }
+    return nullptr;
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::find_registered_talker_failed(tsn::StreamId const& id) const noexcept
     -> TalkerFailedFirstValue const*
 {
@@ -1457,5 +1483,6 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
 // ============================================================
 
 template class MsrpParticipantT<DefaultMsrpLimits>;
+template class MsrpParticipantT<DiscoveryMsrpLimits>;
 
 }  // namespace statusbar::srp::msrp
