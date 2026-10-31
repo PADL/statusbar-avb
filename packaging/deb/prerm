@@ -1,14 +1,21 @@
 #!/bin/sh
 # prerm for the statusbar-avb runtime package.
 #
-# Stop the entity / tone-generator services before the package is
-# removed/upgraded, so an in-flight binary is not yanked out from under a
-# running unit. Neither unit is ever enabled by the package (disabled by
-# default), so this only matters when an operator has enabled and started one.
+# Stop the entity / tone-generator services when the package is going away,
+# so an in-flight binary is not yanked out from under a running unit. Neither
+# unit is ever enabled by the package (disabled by default), so this only
+# matters when an operator has enabled and started one.
+#
+# Deliberately NOT on `upgrade`: a unit stopped here would have to be started
+# again by the new package's postinst, and nothing told it which units had
+# been running -- so an upgrade took the node off the wire and left it there.
+# The postinst now does the whole job with `try-restart`, which restarts only
+# what was already running. An upgrade keeps the old process alive on its own
+# inode until that restart.
 set -e
 
 case "$1" in
-    remove|upgrade|deconfigure)
+    remove|deconfigure)
         if [ -d /run/systemd/system ]; then
             systemctl --quiet stop statusbar-avb-entity.service 2>/dev/null || true
             systemctl --quiet stop statusbar-avb-tone-generator.service 2>/dev/null || true
