@@ -169,6 +169,8 @@ class AtdeccNetHandler : public net::Pollable
         static constexpr std::array<uint8_t, 3> atdecc_subtypes{
             avtp::AvtpSubtype::adp, avtp::AvtpSubtype::aecp, avtp::AvtpSubtype::acmp};
         (void)context_.set_subtype_filter(atdecc_subtypes);
+        // IEEE 1722.1-2021 Clause 6.2.4.2.2: randomDeviceDelay() seeded from the MAC and clock.
+        adp_advertiser_.seed_random(context_.my_mac(), adp_adv_sm::realtime_ns());
     }
 
     /// Check if the handler is valid (socket opened successfully)
@@ -225,8 +227,6 @@ class AtdeccNetHandler : public net::Pollable
 
     net::RawnetContext context_{};
     AtdeccLocalPort* local_port_{nullptr};
-    /// Answering a local ENTITY_DISCOVER: multicast goes to that controller only.
-    std::optional<ieee::Eui48> local_reply_to_{};
     NanoAvbAdpAdvertiser& adp_advertiser_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpTalker& acmp_talker_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpListener& acmp_listener_;    // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
@@ -640,12 +640,13 @@ template <typename T>
     return ::statusbar::make_const_span(obj);
 }
 
-/// Report @p grandmaster_id in @p domain as the grandmaster in force: ADP's
+/// Report @p grandmaster_id in @p domain as the grandmaster in force at @p now: ADP's
 /// gptp_grandmaster_id follows it (with an ADP re-announce) and the registered
 /// controllers get an unsolicited GET_AVB_INFO (IEEE 1722.1 7.5.2). An unset
 /// identity reports that no grandmaster is in force. One function for the
 /// change and the loss, so the two reports cannot drift apart.
-void report_grandmaster(NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t domain);
+void report_grandmaster(
+    NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t domain, sm::TimePoint now);
 
 /// Wire up all callbacks between NanoAvbComponents and NanoAvbNetHandlers
 /// @param components The NanoAVB protocol components to wire up

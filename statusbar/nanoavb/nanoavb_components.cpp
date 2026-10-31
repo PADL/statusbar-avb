@@ -226,12 +226,10 @@ auto AtdeccNetHandler::send(ieee::Eui48 const& dest_mac, std::span<uint8_t const
         }
         return failure(std::errc::host_unreachable);
     }
-    if (local_port_ != nullptr) {
-        if (dest_mac.is_multicast()) {
-            bool const local = local_port_->send(local_reply_to_.value_or(dest_mac), payload);
-            if (local_reply_to_ || !context_.valid()) {
-                return local ? StatusValue<ssize_t>{sent} : failure(std::errc::network_unreachable);
-            }
+    if (local_port_ != nullptr && dest_mac.is_multicast()) {
+        bool const local = local_port_->send(dest_mac, payload);
+        if (!context_.valid()) {
+            return local ? StatusValue<ssize_t>{sent} : failure(std::errc::network_unreachable);
         }
     }
     return context_.send(&dest_mac, payload);
@@ -280,6 +278,25 @@ void AtdeccNetHandler::tick(int64_t now_ns)
     }
 }
 
+namespace {
+
+/// The advertise state for the status line.
+[[nodiscard]] auto adp_state_label(AdpAdvertiserState const state) noexcept -> logging::StrLit
+{
+    switch (state) {
+        case AdpAdvertiserState::Down:
+            return logging::lit("Down");
+        case AdpAdvertiserState::Waiting:
+            return logging::lit("Waiting");
+        case AdpAdvertiserState::Delay:
+            return logging::lit("Delay");
+        default:
+            return logging::lit("Start");
+    }
+}
+
+}  // namespace
+
 void AtdeccNetHandler::log_status()
 {
     int64_t const wakes = ptp_wake_count_ != nullptr ? ptp_wake_count_->load() : 0;
@@ -303,7 +320,7 @@ void AtdeccNetHandler::log_status()
         "ticks={} ptp_wakes={} adp={} acmp_t={} acmp_l={}",
         tick_count_,
         wakes,
-        adp_advertiser_.state() == AdpAdvertiserState::Advertising ? logging::lit("Advertising") : logging::lit("Stopped"),
+        adp_state_label(adp_advertiser_.state()),
         talker_connections,
         listener_connections);
 }
@@ -311,20 +328,12 @@ void AtdeccNetHandler::log_status()
 void AtdeccNetHandler::advertiser_receive(
     atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint const now, bool const local)
 {
-    // A local controller's ENTITY_DISCOVER is answered to it alone:
-    // its discovery is no reason to advertise on the network (or to
-    // the other local controllers) every few seconds.
-    if (local) {
-        local_reply_to_ = src_mac;
-    }
-    adp_advertiser_.receive_adpdu(adp, now);
-    local_reply_to_.reset();
-    // The local socket does not depend on the network: with the
-    // advertiser stopped (link down), a local discover is still
-    // answered with the entity's ADPDU.
-    if (local && local_port_ != nullptr && adp.is_entity_discover() && adp_advertiser_.state() != AdpAdvertiserState::Advertising &&
-        (adp.entity_id == Eui64{} || adp.entity_id == adp_advertiser_.adpdu().entity_id)) {
-        (void)local_port_->send(src_mac, as_bytes(adp_advertiser_.adpdu()));
+    // The local socket is not an AVB interface (Milan v1.2 Section 5.6.3): a local discover
+    // is answered at once, to that controller alone, outside the advertise state machine.
+    if (!local) {
+        adp_advertiser_.receive_adpdu(adp, now);
+    } else if (local_port_ != nullptr && adp_advertiser_.is_discover_for_us(adp)) {
+        (void)adp_advertiser_.reply_available([&](AdpDu const& du) { return local_port_->send(src_mac, as_bytes(du)); });
     }
 }
 
@@ -766,7 +775,6 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
         .grandmaster_id_changed =
             [&components](
                 int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) -> void {
-            (void)now_ns;
             std::string gm_str;
             gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
             std::print(
@@ -775,19 +783,25 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
                 announce.grandmaster_priority1.get(),
                 announce.grandmaster_priority2.get(),
                 announce.steps_removed.get());
-            report_grandmaster(components, grandmaster_id, announce.header.domain_number.get());
+            report_grandmaster(
+                components, grandmaster_id, announce.header.domain_number.get(), sm::TimePoint{std::chrono::nanoseconds{now_ns}});
         },
-        .grandmaster_lost = [&components, &handlers](int64_t /*now_ns*/) -> void {
+        .grandmaster_lost = [&components, &handlers](int64_t const now_ns) -> void {
             std::print("gPTP: Grandmaster lost (no Announce for the receipt timeout)\n");
             auto const* last = handlers.gptp_handler().last_announce();
-            report_grandmaster(components, gptp::ClockIdentity{}, last != nullptr ? last->header.domain_number.get() : 0);
+            report_grandmaster(
+                components,
+                gptp::ClockIdentity{},
+                last != nullptr ? last->header.domain_number.get() : 0,
+                sm::TimePoint{std::chrono::nanoseconds{now_ns}});
         }});
 }
 
-void report_grandmaster(NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t const domain)
+void report_grandmaster(
+    NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t const domain, sm::TimePoint const now)
 {
-    components.adp_advertiser.set_gptp_info(grandmaster_id, domain);
-    components.adp_advertiser.notify_entity_changed();
+    // ADP carries it after TMR_DELAY (Milan v1.2 Section 5.6.3.5.7).
+    components.adp_advertiser.set_gptp_info(grandmaster_id, domain, now);
     // IEEE 1722.1 7.5.2: a grandmaster change is also an unsolicited
     // GET_AVB_INFO to the registered controllers (no-op until an entity wires
     // get_avb_info).
