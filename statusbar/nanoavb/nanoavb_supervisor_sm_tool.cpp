@@ -23,7 +23,7 @@ constexpr auto state_machines = std::array{
     make_sm_info<statusbar::nanoavb::mvrp_sm::Machine>(
         "mvrp_sm", "MVRP VLAN", "IEEE 802.1Q-2014 Clause 11 (MVRP — Multiple VLAN Registration Protocol)"),
     make_sm_info<statusbar::nanoavb::adp_adv_sm::Machine>(
-        "adp_adv_sm", "ADP Advertise", "IEEE 1722.1-2021 Clause 6.2.5 (ADP Advertise / entity-side)"),
+        "adp_adv_sm", "ADP Advertise", "Milan v1.2 Section 5.6.3; IEEE 1722.1-2021 Clause 6.2.4 (ADP Advertise)"),
     make_sm_info<statusbar::nanoavb::acmp_talker_sm::Machine>(
         "acmp_talker_sm", "ACMP Talker", "IEEE 1722.1-2021 Clause 8.2.4 (minimal entity-side connection-state tracker)"),
     make_sm_info<statusbar::nanoavb::acmp_listener_sm::Machine>(
