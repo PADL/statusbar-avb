@@ -460,8 +460,12 @@ STREAM_INPUT; a stream channel may feed several.
   into maps of `MAX_AUDIO_MAP_MAPPINGS` (fixed for the model) and answers
   map_index P with the mappings of partition P. A port with static maps
   answers NOT_SUPPORTED (its AUDIO_MAP descriptors say them). A dynamic
-  STREAM_PORT_OUTPUT answers GET_AUDIO_MAP (empty) but ADD/REMOVE
-  NOT_SUPPORTED: the outputs' mappings are static.
+  STREAM_PORT_OUTPUT answers GET_AUDIO_MAP with the entity's own mappings
+  (`set_output_mappings`, a store apart from the inputs', validated as an ADD
+  but for the unit's rate, which the entity keeps; a change notified as
+  REMOVE then ADD) and ADD/REMOVE NOT_SUPPORTED: controller mappings on it are
+  not implemented, which Milan v1.2 Sections 5.4.2.27-28 require of a port
+  without AUDIO_MAP; a Milan model gives its output ports static AUDIO_MAPs.
 
 ### SrpPort
 
