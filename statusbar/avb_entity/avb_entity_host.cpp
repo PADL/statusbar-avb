@@ -152,7 +152,7 @@ void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
     // for the join timer would never go. Then ENTITY_DEPARTING.
     components_.msrp_handler.withdraw_all(now);
     components_.mvrp_handler.withdraw_all(now);
-    (void)components_.adp_advertiser.stop(now);
+    (void)components_.adp_advertiser.shutdown(now);  // Milan v1.2 Section 5.6.3.5.8
 }
 
 void AvbEntityHost::release_net_handlers()
@@ -316,8 +316,8 @@ void AvbEntityHost::on_mirror_update(
             info->propagation_delay);
         if (index == 0) {
             // ADP carries the grandmaster too; keep it in step with what we report.
-            components_.adp_advertiser.set_gptp_info(tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number);
-            components_.adp_advertiser.notify_entity_changed();
+            components_.adp_advertiser.set_gptp_info(
+                tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number, sm::Clock::now());
         }
         // IEEE 1722.1 7.5.2: gPTP changes are unsolicited GET_AVB_INFO notifications.
         (void)components_.aem_handler.notify_avb_info_changed(index);
@@ -660,10 +660,7 @@ void AvbEntityHost::wire_supervisor_callbacks()
 
     supervisor_ctx_.callbacks.start_protocols = [this](auto& /*ctx*/, TimePoint time) -> void {
         gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
-        auto result = components_.adp_advertiser.start(time);
-        if (!result) {
-            ctl_log().error("ADP start failed: errno {}", result.error().value());
-        }
+        components_.adp_advertiser.link_up(time);
     };
 
     supervisor_ctx_.callbacks.enter_ready = [this](auto& /*ctx*/, TimePoint time) -> void {
@@ -680,7 +677,7 @@ void AvbEntityHost::wire_supervisor_callbacks()
     };
 
     supervisor_ctx_.callbacks.stop_all = [this](auto& /*ctx*/, TimePoint time) -> void {
-        (void)components_.adp_advertiser.stop(time);
+        components_.adp_advertiser.link_down(time);
         note_media_clock_locked(false);  // the gPTP reset below drops the lock
         close_stream_gates(time, nanoavb::talker_engine_sm::Def::Event::Fatal);
         gptp_.reset();

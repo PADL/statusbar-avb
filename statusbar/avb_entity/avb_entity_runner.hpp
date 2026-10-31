@@ -447,14 +447,15 @@ auto run_entity_main_loop(
                         gm_str,
                         announce.grandmaster_priority1.get(),
                         announce.grandmaster_priority2.get());
-                    nanoavb::report_grandmaster(entity.components(), grandmaster_id, announce.header.domain_number.get());
+                    nanoavb::report_grandmaster(
+                        entity.components(), grandmaster_id, announce.header.domain_number.get(), std::chrono::steady_clock::now());
                     auto const sm_now = std::chrono::steady_clock::now();
                     entity.on_gptp_announce(sm_now, true);
                 },
             .grandmaster_lost =
                 [&entity](int64_t /*now_ns*/) {
                     std::print("gPTP: Grandmaster lost (no Announce for the receipt timeout)\n");
-                    nanoavb::report_grandmaster(entity.components(), gptp::ClockIdentity{}, 0);
+                    nanoavb::report_grandmaster(entity.components(), gptp::ClockIdentity{}, 0, std::chrono::steady_clock::now());
                 }});
     }
 
