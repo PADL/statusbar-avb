@@ -354,6 +354,9 @@ struct AvbEntityAudioIOConfig
 
     /// Firmware version string
     std::string firmware_version{"1.0.0"};
+
+    /// This unit's ENTITY serial_number (IEEE 1722.1-2021 Clause 7.2.1); empty serves the blob's.
+    std::string serial_number{};
 };
 
 /// @p text as AvbEntityAudioIOConfig::default_mcr_priorities: comma-separated values 0-255 ("224",

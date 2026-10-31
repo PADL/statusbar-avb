@@ -175,6 +175,7 @@ AvbEntityAudioIO::AvbEntityAudioIO(
           udptun_.get(),
           mem_resource_}
 {
+    handler_.set_serial_number(config_.serial_number);
     // Per-channel sine source: identical frequency, distinct initial phase.
     double const sr_recip = 1.0 / static_cast<double>(SAMPLE_RATE);
     for (size_t ch = 0; ch < channels_; ++ch) {

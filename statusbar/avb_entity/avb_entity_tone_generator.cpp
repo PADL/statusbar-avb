@@ -169,6 +169,7 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
           /*audio_sink=*/nullptr,
           mem_resource_}
 {
+    handler_.set_serial_number(config_.serial_number);
     // Per-channel continuous sine: each channel is the next white piano key up
     // from base_midi_note (default C4). Amplitude is shared (config tone level).
     double const sr_recip = 1.0 / static_cast<double>(sample_rate_);
