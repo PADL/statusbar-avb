@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// PortShaper / EntityShaper: the talker side's hardware traffic shaping (mqprio root, offloaded cbs per
-/// SR-class queue, an offloaded etf under the stream socket's for launch time, SO_PRIORITY steering of the bypass
-/// stream socket). Reactor thread, Linux, CAP_NET_ADMIN. See docs/SHAPER.md.
+/// SR-class queue, PTP event traffic on its own queue, an offloaded etf under the stream socket's for launch
+/// time, SO_PRIORITY steering of the bypass stream socket). Reactor thread, Linux, CAP_NET_ADMIN. See docs/SHAPER.md.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
@@ -34,7 +34,7 @@ enum class ShaperError
 {
     not_avb_capable = 1,  ///< fewer than 3 TX queues (legacy + class B + class A)
     bad_queue_override,   ///< an override queue out of range, both classes on one queue, or a legacy range that is not contiguous
-    bad_priority,         ///< an SR class PCP of 8 or more, or class A and class B on one PCP
+    bad_priority,         ///< an SR class PCP of 8 or more, a PTP priority of 16 or more, or two classes on one priority
     too_many_streams,     ///< more class A streams than MAX_PORT_SHAPER_STREAMS
 };
 
@@ -73,16 +73,17 @@ struct QueueOverride
     auto operator==(QueueOverride const&) const noexcept -> bool = default;
 };
 
-/// Which TX queue each SR class takes on one interface and where the legacy
-/// (best-effort) traffic class lies. Queues are 0-based, as the driver numbers
-/// them; tc's per-queue classes are mqprio_major:(queue + 1).
+/// Which TX queue each SR class takes on one interface, where PTP event traffic goes and where the
+/// legacy (best-effort) traffic class lies. Queues are 0-based, as the driver numbers them; tc's
+/// per-queue classes are mqprio_major:(queue + 1).
 struct QueueLayout
 {
     uint16_t queue_count{0};
     uint16_t class_a_queue{0};
     uint16_t class_b_queue{0};
-    uint16_t legacy_offset{0};  ///< first legacy queue
-    uint16_t legacy_count{0};   ///< legacy queues: [legacy_offset, legacy_offset + legacy_count)
+    uint16_t legacy_offset{0};            ///< first legacy queue
+    uint16_t legacy_count{0};             ///< legacy queues: [legacy_offset, legacy_offset + legacy_count)
+    std::optional<uint16_t> ptp_queue{};  ///< PTP event traffic's own queue (none: it is legacy traffic)
 
     auto operator==(QueueLayout const&) const noexcept -> bool = default;
 };
@@ -93,8 +94,8 @@ struct QueueLayout
 [[nodiscard]] auto is_intel_qav_driver(std::string_view driver) noexcept -> bool;
 
 /// The queue layout for @p driver with @p tx_queues TX queues (docs/SHAPER.md, "Queue order per
-/// driver"); an explicit @p override wins. Errors: ShaperError::not_avb_capable below
-/// MIN_AVB_TX_QUEUES; ShaperError::bad_queue_override.
+/// driver"); an explicit @p override wins. With two legacy queues or more, PTP takes the one next to
+/// the SR classes. Errors: ShaperError::not_avb_capable below MIN_AVB_TX_QUEUES; bad_queue_override.
 [[nodiscard]] auto make_queue_layout(std::string_view driver, uint16_t tx_queues, QueueOverride const& override = {})
     -> StatusValue<QueueLayout>;
 
@@ -102,24 +103,30 @@ struct QueueLayout
 inline constexpr uint8_t DEFAULT_CLASS_A_PCP = 3;
 inline constexpr uint8_t DEFAULT_CLASS_B_PCP = 2;
 
-/// mqprio traffic classes: TC0 legacy, TC1 class B, TC2 class A.
+/// The skb priority PTP event traffic is sent with (ptp4l's socket_priority).
+inline constexpr uint8_t DEFAULT_PTP_PRIORITY = net::tc::PTP_PRIORITY;
+
+/// mqprio traffic classes: TC0 legacy, TC1 class B, TC2 class A, TC3 PTP (with a PTP queue).
 inline constexpr uint8_t LEGACY_TC = 0;
 inline constexpr uint8_t CLASS_B_TC = 1;
 inline constexpr uint8_t CLASS_A_TC = 2;
+inline constexpr uint8_t PTP_TC = 3;
 
-/// Whether @p class_a_pcp and @p class_b_pcp can key an mqprio map: both
-/// below 8 and distinct. Errors: ShaperError::bad_priority.
-[[nodiscard]] auto validate_priorities(uint8_t class_a_pcp, uint8_t class_b_pcp) noexcept -> Status;
+/// Whether @p class_a_pcp, @p class_b_pcp and @p ptp_priority can key an mqprio map: the PCPs below 8,
+/// the PTP priority below 16, all three distinct. Errors: ShaperError::bad_priority.
+[[nodiscard]] auto validate_priorities(
+    uint8_t class_a_pcp, uint8_t class_b_pcp, uint8_t ptp_priority = DEFAULT_PTP_PRIORITY) noexcept -> Status;
 
 #if defined(__linux__)
-/// The mqprio root for @p layout with handle @p major:0: num_tc 3, @p class_a_pcp and
-/// @p class_b_pcp on their SR classes' TCs, every other priority on TC0, hw 0.
-/// Errors: ShaperError::bad_priority (validate_priorities).
+/// The mqprio root for @p layout with handle @p major:0, hw 0: @p class_a_pcp and @p class_b_pcp on their
+/// SR classes' TCs, @p ptp_priority on PTP_TC when the layout has a PTP queue (num_tc 4, else 3), every
+/// other priority on TC0. Errors: ShaperError::bad_priority (validate_priorities).
 [[nodiscard]] auto mqprio_for(
     QueueLayout const& layout,
     uint16_t major,
     uint8_t class_a_pcp = DEFAULT_CLASS_A_PCP,
-    uint8_t class_b_pcp = DEFAULT_CLASS_B_PCP) noexcept -> StatusValue<net::tc::MqprioQdisc>;
+    uint8_t class_b_pcp = DEFAULT_CLASS_B_PCP,
+    uint8_t ptp_priority = DEFAULT_PTP_PRIORITY) noexcept -> StatusValue<net::tc::MqprioQdisc>;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -354,6 +361,8 @@ struct ShaperConfig
     LaunchTimeMode launch_time{LaunchTimeMode::unsupported};
     /// The etf's delta (ns): it bounds frames that pass through etf; AF_XDP frames bypass it.
     int32_t etf_delta_ns{DEFAULT_ETF_DELTA_NS};
+    /// The skb priority mapped to the PTP queue (the layout's ptp_queue): ptp4l's socket_priority.
+    uint8_t ptp_priority{DEFAULT_PTP_PRIORITY};
 };
 
 /// The most class A streams a PortShaper sizes its shaper for.
