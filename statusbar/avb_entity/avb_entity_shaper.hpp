@@ -119,8 +119,8 @@ inline constexpr uint8_t PTP_TC = 3;
 
 #if defined(__linux__)
 /// The mqprio root for @p layout with handle @p major:0, hw 0: @p class_a_pcp and @p class_b_pcp on their
-/// SR classes' TCs, @p ptp_priority on PTP_TC when the layout has a PTP queue (num_tc 4, else 3), every
-/// other priority on TC0. Errors: ShaperError::bad_priority (validate_priorities).
+/// SR classes' TCs, @p ptp_priority on PTP_TC when the layout has a PTP queue (num_tc 4, else 3, the PTP
+/// priority unchecked), every other priority on TC0. Errors: ShaperError::bad_priority.
 [[nodiscard]] auto mqprio_for(
     QueueLayout const& layout,
     uint16_t major,
@@ -312,6 +312,10 @@ class ShaperQdiscs
     [[nodiscard]] auto parent_of(uint16_t queue) const noexcept -> uint32_t;
     /// Lay @p mqprio as the root on @p ifindex, keeping one already laid so: whether it was kept.
     [[nodiscard]] auto put_root(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio) -> StatusValue<bool>;
+    /// Delete @p current, the root, if it is another handle's mqprio or taprio (net::tc::remove_other_tc_root),
+    /// which replaced in place would clear our TC map as it goes. Errors: the netlink errno.
+    [[nodiscard]] auto take_over(int ifindex, std::string_view name, StatusValue<net::tc::QdiscInfo> const& current, uint16_t major)
+        -> Status;
     /// Replace the root with @p mqprio, deleting our own handle @p root and retrying once on EINVAL.
     [[nodiscard]] auto replace_root(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, uint32_t root)
         -> Status;
