@@ -33,7 +33,8 @@ it although they never meet mqprio itself. The shaper therefore:
 1. replaces the root with mqprio, 3 traffic classes: TC0 legacy, TC1 class B,
    TC2 class A; priority 3 (class A's PCP) maps to TC2, priority 2 (class B's)
    to TC1, every other priority to TC0; one TX queue per SR class, the rest
-   to TC0;
+   to TC0. With two legacy queues or more a fourth class, TC3, takes PTP event
+   traffic on a queue of its own (see "PTP event traffic's queue");
 2. relies on the stream TX socket's `SO_PRIORITY` being the class A PCP:
    `PacketStreamPort::open_tx` sets it to the kit's `stream_pcp` (best
    effort: priority 7 needs CAP_NET_ADMIN, and on failure the kit logs a
@@ -217,19 +218,48 @@ afterwards (XPS is consulted before the TC hash in `netdev_pick_tx`).
 
 ## Queue order per driver
 
-| Driver | Class A | Class B | Legacy (TC0) | Why |
-| --- | --- | --- | --- | --- |
-| `igb` (i210), `igc` (i225/i226) | queue 0 | queue 1 | [2, N) | Qav mode: the lowest queue has the highest priority, and cbs offload is honoured only on queues 0 and 1 (`igb_offload_cbs` refuses others) |
-| anything else (e.g. mv88e6xxx switch ports) | N-1 | N-2 | [0, N-2) | the highest queue has the highest priority |
+| Driver | Class A | Class B | PTP (TC3) | Legacy (TC0) | Why |
+| --- | --- | --- | --- | --- | --- |
+| `igb` (i210), `igc` (i225/i226) | queue 0 | queue 1 | queue 2 | [3, N) | Qav mode: the lowest queue has the highest priority, and cbs offload is honoured only on queues 0 and 1 (`igb_offload_cbs` refuses others) |
+| anything else (e.g. mv88e6xxx switch ports) | N-1 | N-2 | N-3 | [0, N-3) | the highest queue has the highest priority |
+
+With 3 TX queues there is no PTP queue: PTP stays legacy traffic and mqprio
+has 3 classes.
 
 `ShaperConfig::queues` overrides either queue; the queues left must form one range, and fewer than 3
 TX queues is refused (`ShaperError::not_avb_capable`): an AVB port must keep
 its queues (no `ethtool -L <if> combined 1`). SwiftMRP's README notes the same
 igb inversion ("pass `--class-a-qdisc-handle 1 --class-b-qdisc-handle 2`").
 
-The igb layout maps TCs to queues in reverse order (TC0 on 2-3, TC2 on 0);
+The igb layout maps TCs to queues out of order (TC0 on 3, TC2 on 0, TC3 on 2);
 mqprio accepts that since Linux 6.5 ("allow reverse TC:TXQ mappings"); older
 kernels refuse it with EINVAL.
+
+## PTP event traffic's queue
+
+PTP event messages (Sync, Delay_Req, Pdelay_Req and _Resp) carry their transmit
+time in a hardware timestamp: queued behind a full legacy ring, they leave late
+and their TX timestamp comes late too. The layout therefore gives them the
+legacy queue next to the SR classes, keyed on skb priority 7
+(`net::tc::PTP_PRIORITY`, `ShaperConfig::ptp_priority`): ptp4l sets it with
+`socket_priority 7`. The kernel gives the same priority (TC_PRIO_CONTROL) to
+IGMP and MLD reports, which share the queue.
+
+On the i210 the order is the datasheet's: "the queue priority is pre-assigned
+such that queue0 has the highest priority and priorities decrease through
+queue1, queue2 and queue3 has the lowest priority" (Intel Ethernet Controller
+I210 Datasheet, Section 7.2.7.4), and in Qav mode transmission arbitration
+"starts from the highest priority queue (index 0) and up to the lowest priority
+queue (index 3)", the SR queues under their credit shapers (Section 7.2.7.5,
+Table 7-46). Queue 2 is thus served before legacy's queue 3 and after both SR
+classes. On igc the TSN mode's TXARB register holds the same order unless the
+`reverse-tsn-txq-prio` private flag is set or mqprio is offloaded on an i225
+(`igc_tsn_tx_arb`: "Priority 0 has the highest priority and is assigned to
+queue 0"); the shaper's mqprio is never offloaded.
+
+Outside Qav mode (no cbs or launch time on the port: the i210's legacy mode,
+Section 7.2.7.2) every queue feeds one packet buffer in fetch order: the
+queue then only keeps PTP clear of the legacy ring's backlog.
 
 ## The cbs parameters - IEEE 802.1Q-2022 Annex L
 
@@ -422,8 +452,8 @@ class A talker and the CRF talker gated (the first worked example above):
 
 ```
 tc qdisc show dev <if>
-#  qdisc mqprio 9000: root tc 3 map 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0
-#               queues:(2:3) (1:1) (0:0)
+#  qdisc mqprio 9000: root tc 4 map 0 0 1 2 0 0 0 3 0 0 0 0 0 0 0 0
+#               queues:(3:3) (1:1) (0:0) (2:2)
 #               mode:dcb
 #               shaper:dcb
 #  qdisc pfifo 0: parent 8002: limit 1000p
@@ -433,6 +463,7 @@ tc qdisc show dev <if>
 #  qdisc fq_codel 0: parent 9000:3 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
 #  qdisc cbs 8002: parent 9000:2 hicredit 1101 locredit -411 sendslope -266576 idleslope 733424 offload 1
 tc -s class show dev <if>        # per-queue counters (non-bypass traffic only)
+tc -s qdisc show dev <if> parent 9000:3   # PTP's queue 2: ptp4l's frames (socket_priority 7) alone
 ethtool -S <if> | grep tx_queue  # per-queue packet counters, bypass frames included
 ```
 

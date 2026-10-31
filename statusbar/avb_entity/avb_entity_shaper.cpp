@@ -29,7 +29,7 @@ auto ShaperErrorCategory::message(int const ev) const -> std::string
         case ShaperError::bad_queue_override:
             return "bad SR class queue override (out of range, shared, or leaving a non-contiguous legacy range)";
         case ShaperError::bad_priority:
-            return "bad SR class priority (a PCP of 8 or more, or class A and class B on one PCP)";
+            return "bad SR class or PTP priority (a PCP of 8 or more, a PTP priority of 16 or more, or two on one priority)";
         case ShaperError::too_many_streams:
             return "more class A streams than the shaper sizes for";
     }
@@ -105,6 +105,19 @@ auto with_legacy_range(QueueLayout const& layout) -> StatusValue<QueueLayout>
     };
 }
 
+/// @p layout with PTP on the legacy queue next to the SR classes, when that leaves a legacy queue.
+auto with_ptp_queue(QueueLayout layout) noexcept -> QueueLayout
+{
+    if (layout.legacy_count < 2) {
+        return layout;
+    }
+    bool const above = layout.legacy_offset > std::min(layout.class_a_queue, layout.class_b_queue);
+    layout.ptp_queue = above ? layout.legacy_offset : static_cast<uint16_t>(layout.legacy_offset + layout.legacy_count - 1);
+    layout.legacy_offset = above ? static_cast<uint16_t>(layout.legacy_offset + 1) : layout.legacy_offset;
+    layout.legacy_count = static_cast<uint16_t>(layout.legacy_count - 1);
+    return layout;
+}
+
 }  // namespace
 
 auto make_queue_layout(std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override)
@@ -117,22 +130,45 @@ auto make_queue_layout(std::string_view const driver, uint16_t const tx_queues, 
     if (!layout) {
         return forward_failure(layout);
     }
-    return with_legacy_range(*layout);
+    return with_legacy_range(*layout).transform(with_ptp_queue);
 }
 
-auto validate_priorities(uint8_t const class_a_pcp, uint8_t const class_b_pcp) noexcept -> Status
+auto validate_priorities(uint8_t const class_a_pcp, uint8_t const class_b_pcp, uint8_t const ptp_priority) noexcept -> Status
 {
     if (class_a_pcp >= 8 || class_b_pcp >= 8 || class_a_pcp == class_b_pcp) {
+        return failure(ShaperError::bad_priority);
+    }
+    if (ptp_priority >= net::tc::PRIORITY_COUNT || ptp_priority == class_a_pcp || ptp_priority == class_b_pcp) {
         return failure(ShaperError::bad_priority);
     }
     return success();
 }
 
 #if defined(__linux__)
-auto mqprio_for(QueueLayout const& layout, uint16_t const major, uint8_t const class_a_pcp, uint8_t const class_b_pcp) noexcept
-    -> StatusValue<net::tc::MqprioQdisc>
+namespace {
+
+/// PTP's traffic class on @p q, when @p layout has a PTP queue.
+void add_ptp_class(net::tc::MqprioQdisc& q, QueueLayout const& layout, uint8_t const ptp_priority) noexcept
+{
+    if (!layout.ptp_queue) {
+        return;
+    }
+    q.num_tc = PTP_TC + 1;
+    q.prio_tc_map[ptp_priority] = PTP_TC;
+    q.count[PTP_TC] = 1;
+    q.offset[PTP_TC] = *layout.ptp_queue;
+}
+
+}  // namespace
+
+auto mqprio_for(
+    QueueLayout const& layout,
+    uint16_t const major,
+    uint8_t const class_a_pcp,
+    uint8_t const class_b_pcp,
+    uint8_t const ptp_priority) noexcept -> StatusValue<net::tc::MqprioQdisc>
 {  // NOLINT(statusbar-block-statements): one line per mqprio field
-    if (auto status = validate_priorities(class_a_pcp, class_b_pcp); !status) {
+    if (auto status = validate_priorities(class_a_pcp, class_b_pcp, ptp_priority); !status) {
         return failure(status.error());
     }
     net::tc::MqprioQdisc q{};
@@ -147,6 +183,7 @@ auto mqprio_for(QueueLayout const& layout, uint16_t const major, uint8_t const c
     q.offset[CLASS_B_TC] = layout.class_b_queue;
     q.count[CLASS_A_TC] = 1;
     q.offset[CLASS_A_TC] = layout.class_a_queue;
+    add_ptp_class(q, layout, ptp_priority);
     q.hw = false;
     return q;
 }
@@ -663,7 +700,7 @@ auto PortShaper::install(ShaperPort const& port) -> Status
 
 auto PortShaper::install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status
 {
-    auto const mqprio = mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP);
+    auto const mqprio = mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP, config_.ptp_priority);
     if (!mqprio) {
         return failure(mqprio.error());
     }
@@ -698,6 +735,9 @@ void PortShaper::adopt(std::string driver, QueueLayout const& layout)
         layout_.class_b_queue,
         layout_.legacy_count,
         layout_.legacy_offset);
+    if (layout_.ptp_queue) {
+        log_.status("shaper: PTP event traffic (priority {}) on queue {}", config_.ptp_priority, *layout_.ptp_queue);
+    }
     if (is_intel_qav_driver(driver_) && (layout_.class_a_queue > 1 || layout_.class_b_queue > 1)) {
         log_.warning(
             "shaper: {} offloads cbs only on queues 0 and 1; the override puts an SR class elsewhere", logging::embed<16>(driver_));
