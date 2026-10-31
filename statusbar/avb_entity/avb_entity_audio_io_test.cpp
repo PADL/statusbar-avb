@@ -31,6 +31,7 @@
 #include <filesystem>
 #include <fstream>
 #include <span>
+#include <string_view>
 #include <vector>
 
 using namespace statusbar;
@@ -82,6 +83,22 @@ auto make_connect_rx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, ui
     cmd.listener_unique_id = listener_uid;
     cmd.sequence_id = seq;
     return cmd;
+}
+
+// The ENTITY descriptor as a controller's READ_DESCRIPTOR reads it.
+auto served_entity(AvbEntityAudioIO& entity) -> atdecc::aem::DescriptorEntity
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_READ_DESCRIPTOR, 12);
+    std::array<uint8_t, 8> const cmd{0, 0, 0, 0, 0, 0, 0, 0};  // config 0, ENTITY (type 0), index 0
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> buf{};
+    auto const resp = entity.components().aem_handler.handle_command(header, cmd, buf);
+    atdecc::aem::DescriptorEntity desc{};
+    constexpr size_t hdr = atdecc::aem::AemReadDescriptorResponsePayload::LENGTH;
+    if (resp.status == atdecc::AEM_STATUS_SUCCESS && resp.size > hdr) {
+        span_load_padded(desc, std::span<uint8_t const>{buf.data() + hdr, resp.size - hdr});
+    }
+    return desc;
 }
 
 }  // namespace
@@ -171,6 +188,25 @@ TEST(audio_io_create, dual_blob_succeeds)
     EXPECT_TRUE(blob.size() > 0);
     auto result = AvbEntityAudioIO::create(make_config_with_blob(std::move(blob)));
     EXPECT_TRUE(result.has_value());
+}
+
+// The configured serial_number is served in the ENTITY descriptor (IEEE 1722.1-2021 Clause 7.2.1),
+// the blob's without one; the model ID is the configured one either way.
+TEST(audio_io_create, the_configured_serial_number_is_served)
+{
+    auto const blob = load_file(entity_audio_bin_path());
+    auto const authored = AvbEntityAudioIO::create(make_config_with_blob(blob));
+    auto config = make_config_with_blob(blob);
+    config.serial_number = "SGH733SYJ3";
+    auto const configured = AvbEntityAudioIO::create(std::move(config));
+    EXPECT_TRUE(authored.has_value() && configured.has_value());
+    if (!authored || !configured) {
+        return;
+    }
+    auto const served = served_entity(**configured);
+    EXPECT_EQ(served.serial_number.as_string_view(), std::string_view{"SGH733SYJ3"});
+    EXPECT_EQ(served.entity_model_id, served_entity(**authored).entity_model_id);
+    EXPECT_NE(served_entity(**authored).serial_number.as_string_view(), std::string_view{"SGH733SYJ3"});
 }
 
 TEST(audio_io_create, empty_blob_fails)
