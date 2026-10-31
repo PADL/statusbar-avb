@@ -113,7 +113,7 @@ template <typename T>
 
 /// Serves an entity's descriptors from its .aem blob (symbol-aware), patching the
 /// runtime-only seams that cannot live in a static blob: the ENTITY identity
-/// (entity_id/model_id/name/firmware, from config) and — when patch_avb_interface
+/// (entity_id/model_id/name/firmware/serial, from config) and — when patch_avb_interface
 /// is set — the AVB_INTERFACE network + gPTP identity (live NIC MAC, its
 /// modified-EUI-64 clock identity, and the slave-only gPTP params the blob leaves
 /// zero). Every other descriptor is served verbatim; with patch_avb_interface
@@ -152,8 +152,15 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
         desc.entity_id = entity_id_;
         desc.entity_model_id = entity_model_id_;
         desc.firmware_version = AtdeccString{firmware_version_};
+        if (!serial_number_.as_string_view().empty()) {
+            desc.serial_number = serial_number_;
+        }
         return true;
     }
+
+    /// This unit's ENTITY serial_number (IEEE 1722.1-2021 Clause 7.2.1), cut to 64 octets;
+    /// empty serves the blob's. Set before the entity starts: it never changes after.
+    void set_serial_number(std::string_view const serial_number) { serial_number_ = AtdeccString{serial_number}; }
 
     auto on_get_avb_interface(nanoavb::DescriptorId id, DescriptorAvbInterface& desc) -> bool override
     {
@@ -183,6 +190,7 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
     ieee::Eui64 entity_id_;
     ieee::Eui64 entity_model_id_;
     std::string firmware_version_;
+    AtdeccString serial_number_{};
     std::optional<ieee::Eui48> iface_mac_;
     bool patch_avb_;
 };
