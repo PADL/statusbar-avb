@@ -229,6 +229,13 @@ auto stream_id(uint64_t const value) -> tsn::StreamId
     return sid;
 }
 
+/// Whether ADP is advertising: up, waiting out TMR_ADVERTISE or TMR_DELAY (Milan v1.2 Table 5.51).
+auto adp_advertising(nanoavb::NanoAvbAdpAdvertiser const& adp) -> bool
+{
+    auto const state = adp.state();
+    return state == nanoavb::AdpAdvertiserState::Waiting || state == nanoavb::AdpAdvertiserState::Delay;
+}
+
 }  // namespace
 
 namespace {
@@ -778,6 +785,156 @@ TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)
         EXPECT_EQ(info.vlan_id, 7U);
         EXPECT_EQ(info.priority, 3U);
     }
+}
+
+TEST(avb_entity_kit_maap, a_maap_kit_is_stopped_started_and_bounced_without_a_port_left_behind)
+{
+    // The interface does not exist, so the MAAP socket never opens and the
+    // kit keeps its static addresses — the fallback. The stop/start and Link
+    // Up bookkeeping around the acquirer must hold all the same: no deadline
+    // from a port that is not there, TX never gated, nothing dangling across
+    // a restart (Table B.7 Release! on stop, PortOperational! on Link Up).
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    for (int round = 0; round < 2; ++round) {
+        auto const base = std::chrono::seconds{1 + (round * 10)};
+        EXPECT_TRUE(kit.start(TimePoint{base}));
+        kit->on_link_up(TimePoint{base + std::chrono::seconds{1}});
+        EXPECT_EQ(kit->poll_timeout_ms(100, 0), 100);                // no MAAP deadline bounds the loop
+        kit->on_link_up(TimePoint{base + std::chrono::seconds{2}});  // a bounce
+        EXPECT_TRUE(kit.stop(TimePoint{base + std::chrono::seconds{3}}));
+    }
+}
+
+TEST(avb_entity_kit_maap, an_adopted_vlan_survives_the_acquisition_of_a_block)
+{
+    // The block is acquired on every Link Up (B.3.5.9); publishing it writes
+    // each stream's dest MAC into ACMP's picture of the stream, and that
+    // picture also carries the VLAN. The VLAN is the Domain's - here the one
+    // adopted from the bridge - and must come through the publication as it
+    // was, or every Link Up would move the Talker Advertise, the
+    // CONNECT_TX_RESPONSE and GET_STREAM_INFO back to the default VLAN while
+    // the frames stayed on the adopted one.
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));  // the talker slots exist from here
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    expect_kit_on_vlan(kit, 5, 5);
+
+    std::vector<uint16_t> indices;
+    for (auto const& spec : kit.talker_specs()) {
+        indices.push_back(spec.index);
+    }
+    Eui48 const block{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, block);
+
+    for (size_t pos = 0; pos < indices.size(); ++pos) {
+        auto const* stream = kit->host().components().acmp_talker.get_stream(indices[pos]);
+        EXPECT_TRUE(stream != nullptr);
+        if (stream != nullptr) {
+            EXPECT_EQ(stream->stream_vlan_id, 5U);
+            EXPECT_TRUE(stream->stream_dest_mac == avtp::maap_block_address(block, static_cast<uint16_t>(pos)));
+        }
+        auto const* slot = kit->talker().slot_for(indices[pos]);
+        EXPECT_TRUE(slot != nullptr && slot->dest_mac == avtp::maap_block_address(block, static_cast<uint16_t>(pos)));
+    }
+    expect_kit_on_vlan(kit, 5, 5);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+TEST(avb_entity_kit_maap, a_link_up_while_the_link_is_up_is_a_repeat_and_a_restart_starts_afresh)
+{
+    // The runner raises the start-up Link Up itself and then installs a link
+    // monitor that reports the first state it sees, so a kit sees two Link
+    // Ups within milliseconds. The second must not reach MAAP, or it restarts
+    // the probe sequence the first began (B.3.5.9 PortOperational! from
+    // PROBE: five PROBEs for four). What on_link_up() tells the two apart by
+    // is the link-up state, which a Link Down ends, and which stop() ends so
+    // that the Link Up after a restart begins the acquisition again.
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_FALSE(kit->link_up());
+
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_FALSE(kit->link_up());
+    auto const down = std::string{kit->host().state_string()};
+    kit->on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_TRUE(kit->link_up());
+    auto const after_first = std::string{kit->host().state_string()};
+    EXPECT_NE(after_first, down);                                                        // the supervisor left Down on the first
+    kit->on_link_up(TimePoint{std::chrono::seconds{2} + std::chrono::milliseconds{3}});  // the monitor's first report
+    EXPECT_TRUE(kit->link_up());
+    EXPECT_EQ(std::string{kit->host().state_string()}, after_first);  // and the repeat changed nothing
+
+    kit->on_link_down(TimePoint{std::chrono::seconds{3}});
+    EXPECT_FALSE(kit->link_up());
+    kit->on_link_up(TimePoint{std::chrono::seconds{4}});  // a genuine bounce
+    EXPECT_TRUE(kit->link_up());
+
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+    EXPECT_FALSE(kit->link_up());  // the next start's Link Up is a first one
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{6}}));
+    EXPECT_FALSE(kit->link_up());
+    kit->on_link_up(TimePoint{std::chrono::seconds{7}});
+    EXPECT_TRUE(kit->link_up());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{8}}));
+}
+
+TEST(avb_entity_kit_maap, the_first_entity_available_waits_for_the_talker_addresses)
+{
+    // A Milan listener that hears ENTITY_AVAILABLE while the block is still
+    // being probed probes at once, is told TALKER_DEST_MAC_FAIL and sits out
+    // TMR_RETRY. Under the hold the host's Link Up starts everything but ADP
+    // and owes it; the acquirer's ready callback releases it. A Link Down
+    // cancels the debt and the next Link Up incurs it again. Driven at the
+    // host, since the fixture's MAAP socket never opens (see below).
+    KitUnderTest kit{make_config(2, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    auto& host = kit->host();
+    auto const advertising = [&host] { return adp_advertising(host.components().adp_advertiser); };
+    host.hold_adp(true);
+    host.on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_FALSE(advertising());  // held
+    EXPECT_TRUE(host.adp_owed());
+    host.release_adp(TimePoint{std::chrono::seconds{3}});  // the block is defended
+    EXPECT_TRUE(advertising());
+    EXPECT_FALSE(host.adp_owed());
+    host.release_adp(TimePoint{std::chrono::seconds{3}});  // a re-defend owes nothing
+    EXPECT_TRUE(advertising());
+
+    host.on_link_down(TimePoint{std::chrono::seconds{4}});
+    EXPECT_FALSE(host.adp_owed());
+    EXPECT_FALSE(advertising());
+    host.on_link_up(TimePoint{std::chrono::seconds{5}});
+    EXPECT_TRUE(host.adp_owed());  // the bounce asks again
+    host.on_link_down(TimePoint{std::chrono::seconds{6}});
+    EXPECT_FALSE(host.adp_owed());  // and a Link Down before the defend cancels it
+    host.release_adp(TimePoint{std::chrono::seconds{7}});
+    EXPECT_FALSE(advertising());
+
+    host.hold_adp(false);
+    host.on_link_up(TimePoint{std::chrono::seconds{8}});
+    EXPECT_TRUE(advertising());  // no hold: at once, as a static kit
+    EXPECT_FALSE(host.adp_owed());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{9}}));
+}
+
+TEST(avb_entity_kit_maap, without_a_maap_socket_adp_starts_at_link_up_as_before)
+{
+    // The fixture's interface does not exist, so the acquirer falls back to
+    // the static addresses and is ready from the start: the kit's Link Up
+    // holds nothing and ADP starts at once, as it does in static mode.
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    kit->on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_TRUE(adp_advertising(kit->host().components().adp_advertiser));
+    EXPECT_FALSE(kit->host().adp_owed());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{3}}));
 }
 
 TEST(avb_entity_kit_maap, the_range_file_holds_one_line_and_reads_back_what_was_written)
