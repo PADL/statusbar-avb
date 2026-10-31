@@ -393,6 +393,10 @@ class AvbEntityHost
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();
     void wire_supervisor_callbacks();
+    /// Stop the talker (with @p talker_event) and listener engines and close their gates.
+    void close_stream_gates(TimePoint time, nanoavb::talker_engine_sm::Def::Event talker_event);
+    /// Reset the MVRP and MSRP state machines.
+    void reset_srp();
     void wire_gptp_callbacks();
     void wire_mvrp_callbacks();
     /// Class A VID changes (adopted MSRP Domain / link-up reset): MVRP, ACMP
