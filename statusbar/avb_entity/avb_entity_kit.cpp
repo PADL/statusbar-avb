@@ -246,16 +246,30 @@ auto AvbEntityKit::default_output_mappings(uint16_t const port_index) const -> n
 auto AvbEntityKit::identity_mappings(uint16_t const port_type, uint16_t const port_index) const
     -> nanoavb::DynamicAudioMaps::Mappings
 {
-    nanoavb::DynamicAudioMaps::Mappings out{};
-    auto const& specs = port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT ? talker_specs_ : listener_specs_;
-    auto const* spec = std::ranges::find(specs, port_index, &StreamSpec::index);
-    auto const port_blob = host_.get_descriptor(port_type, port_index);
-    // Milan v1.2 Section 5.4.2.27: none for a stream at another rate than the unit's.
-    if (spec == specs.end() || !port_blob.has_value() || spec->format.sample_rate_hz != sample_rate_) {
-        return out;
+    auto const* const spec = identity_spec(port_type, port_index);
+    auto const port = load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, port_type, port_index);
+    if (spec == nullptr || !port) {
+        return {};
     }
-    atdecc::aem::DescriptorStreamPort port{};
-    span_load_padded(port, *port_blob);
+    return cluster_identity_mappings(port_index, *port, spec->format.channels);
+}
+
+auto AvbEntityKit::identity_spec(uint16_t const port_type, uint16_t const port_index) const -> StreamSpec const*
+{
+    bool const output = port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
+    auto const& specs = output ? talker_specs_ : listener_specs_;
+    auto const* const spec = std::ranges::find(specs, port_index, &StreamSpec::index);
+    // Milan v1.2 Section 5.4.2.27: none at another rate than the unit's, unless outputs opted out.
+    bool const at_rate =
+        spec != specs.end() && (spec->format.sample_rate_hz == sample_rate_ || (output && output_mappings_across_rates_));
+    return at_rate ? &*spec : nullptr;
+}
+
+auto AvbEntityKit::cluster_identity_mappings(
+    uint16_t const port_index, atdecc::aem::DescriptorStreamPort const& port, uint16_t const channels) const
+    -> nanoavb::DynamicAudioMaps::Mappings
+{
+    nanoavb::DynamicAudioMaps::Mappings out{};
     uint16_t stream_channel = 0;
     uint16_t const channels = spec->format.channels;
     for (uint16_t offset = 0; offset < port.number_of_clusters.get() && stream_channel < channels; ++offset) {
@@ -460,6 +474,13 @@ auto AvbEntityKit::stream_mapped(bool const output, uint16_t const index) const 
     return named;
 }
 
+auto AvbEntityKit::held_at_unit_rate(bool const output, uint16_t const index) const -> bool
+{
+    // Milan v1.2 Sections 5.4.2.7, 5.4.2.27: a mapped stream keeps the unit's rate. That rate rule is a
+    // should, not part of Section 5.3.3.4's validity, so an entity may opt its outputs out of it.
+    return !(output && output_mappings_across_rates_) && stream_mapped(output, index);
+}
+
 auto AvbEntityKit::input_running(uint16_t const idx) const noexcept -> bool
 {
     auto const& components = host_.components();
@@ -535,8 +556,13 @@ auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const inde
     }
     // IEEE 802.1Q-2022 Clause 34.3.1: class A's share of the link. Milan v1.2 Section
     // 5.4.2.7 names no status for it; NO_RESOURCES says what is short.
-    if (output && !talkers_fit(index, format)) {
-        return atdecc::AEM_STATUS_NO_RESOURCES;
+    return output && !talkers_fit(spec.index, updated.format_word) ? atdecc::AEM_STATUS_NO_RESOURCES : atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::mappings_allow_format(bool const output, StreamSpec const& updated) const -> bool
+{
+    if (updated.format.sample_rate_hz != sample_rate_ && held_at_unit_rate(output, updated.index)) {
+        return false;
     }
     // The stream path first (it may refuse the format; no slot before
     // start(), which opens it with the spec), then the entity's data plane;
