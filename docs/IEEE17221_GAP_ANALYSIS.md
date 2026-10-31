@@ -91,13 +91,13 @@ SRP integration hooks), the unsolicited notification subsystem, and the AEM `cr`
 
 | Finding | Severity |
 |---------|----------|
-| Advertise Entity SM: `randomDeviceDelay()` not implemented (RST requires uniform random 0 to valid_time/5) | **Missing** |
+| Advertise Entity SM: `randomDeviceDelay()` ~~not implemented~~ uniform 0 to valid_time/5, seeded from the MAC and real-time clock (6.2.4.2.2) | **Fixed (2026-10-31)** |
 | Advertise Entity SM: reannounce timer uses config value instead of RST formula `MAX(valid_time/2 - 2, 1)` | **Divergent** |
 | Advertise Interface SM: not implemented as separate per-interface SM | **Missing** |
 | Discovery SM: entirely absent (needed for controller/discovery functionality) | **Missing** |
 | Discovery Interface SM: entirely absent | **Missing** |
 | `available_index` on ENTITY_DEPARTING: ~~sends current value instead of zero~~ now zeroed | **Fixed (2026-06-20)** |
-| `adp_adv_sm` state topology: Off/Advertising vs RST's Advertise/Waiting | **Divergent** |
+| `adp_adv_sm` state topology: ~~Off/Advertising~~ Milan v1.2 Section 5.6.3 DOWN/WAITING/DELAY (6.2.4 with link state) | **Fixed (2026-10-31)** |
 
 ---
 
