@@ -15,9 +15,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -53,12 +55,16 @@ auto crf_one_timestamp() -> StreamSpec
 
 }  // namespace
 
+// i210 7.2.7.4: queue 0 has the highest priority, queue 3 the lowest; PTP goes on queue 2, just below
+// the SR classes, and legacy keeps queue 3.
 TEST(shaper_layout, igb_puts_the_sr_classes_on_the_bottom_queues)
 {
     auto const layout = make_queue_layout("igb", 4);
     EXPECT_TRUE(layout.has_value());
     EXPECT_TRUE(
-        *layout == (QueueLayout{.queue_count = 4, .class_a_queue = 0, .class_b_queue = 1, .legacy_offset = 2, .legacy_count = 2}));
+        *layout ==
+        (QueueLayout{
+            .queue_count = 4, .class_a_queue = 0, .class_b_queue = 1, .legacy_offset = 3, .legacy_count = 1, .ptp_queue = 2}));
     auto const igc = make_queue_layout("igc", 4);
     EXPECT_TRUE(igc.has_value() && *igc == *layout);
     EXPECT_TRUE(is_intel_qav_driver("igb"));
@@ -70,7 +76,10 @@ TEST(shaper_layout, other_drivers_put_the_sr_classes_on_the_top_queues)
     auto const layout = make_queue_layout("mv88e6085", 8);
     EXPECT_TRUE(layout.has_value());
     EXPECT_TRUE(
-        *layout == (QueueLayout{.queue_count = 8, .class_a_queue = 7, .class_b_queue = 6, .legacy_offset = 0, .legacy_count = 6}));
+        *layout ==
+        (QueueLayout{
+            .queue_count = 8, .class_a_queue = 7, .class_b_queue = 6, .legacy_offset = 0, .legacy_count = 5, .ptp_queue = 5}));
+    // one legacy queue: PTP stays legacy traffic
     auto const three = make_queue_layout("dsa", 3);
     EXPECT_TRUE(three.has_value());
     EXPECT_TRUE(
@@ -83,17 +92,23 @@ TEST(shaper_layout, an_override_wins)
     auto const top = make_queue_layout("igb", 4, QueueOverride{.class_a = 3, .class_b = 2});
     EXPECT_TRUE(top.has_value());
     EXPECT_TRUE(
-        *top == (QueueLayout{.queue_count = 4, .class_a_queue = 3, .class_b_queue = 2, .legacy_offset = 0, .legacy_count = 2}));
+        *top ==
+        (QueueLayout{
+            .queue_count = 4, .class_a_queue = 3, .class_b_queue = 2, .legacy_offset = 0, .legacy_count = 1, .ptp_queue = 1}));
     // a Marvell port, made to look like an i210
     auto const bottom = make_queue_layout("mv88e6085", 8, QueueOverride{.class_a = 0, .class_b = 1});
     EXPECT_TRUE(bottom.has_value());
     EXPECT_TRUE(
-        *bottom == (QueueLayout{.queue_count = 8, .class_a_queue = 0, .class_b_queue = 1, .legacy_offset = 2, .legacy_count = 6}));
+        *bottom ==
+        (QueueLayout{
+            .queue_count = 8, .class_a_queue = 0, .class_b_queue = 1, .legacy_offset = 3, .legacy_count = 5, .ptp_queue = 2}));
     // class B alone: A follows the policy (N-1)
     auto const b_only = make_queue_layout("mv88e6085", 8, QueueOverride{.class_b = 0});
     EXPECT_TRUE(b_only.has_value());
     EXPECT_TRUE(
-        *b_only == (QueueLayout{.queue_count = 8, .class_a_queue = 7, .class_b_queue = 0, .legacy_offset = 1, .legacy_count = 6}));
+        *b_only ==
+        (QueueLayout{
+            .queue_count = 8, .class_a_queue = 7, .class_b_queue = 0, .legacy_offset = 2, .legacy_count = 5, .ptp_queue = 1}));
 }
 
 TEST(shaper_layout, refuses_what_cannot_work)
@@ -125,19 +140,38 @@ TEST(shaper_mqprio, igb_four_queues)
     EXPECT_TRUE(made.has_value());
     auto const& q = *made;
     EXPECT_EQ(q.major, uint16_t{0x9000});
-    EXPECT_EQ(q.num_tc, uint8_t{3});
-    // PCP 3 (class A) -> TC2, PCP 2 (class B) -> TC1, everything else TC0
-    std::array<uint8_t, 16> const map{0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    EXPECT_EQ(q.num_tc, uint8_t{4});
+    // PCP 3 (class A) -> TC2, PCP 2 (class B) -> TC1, PTP 7 -> TC3, everything else TC0
+    std::array<uint8_t, 16> const map{0, 0, 1, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0};
     EXPECT_TRUE(q.prio_tc_map == map);
-    // TC0 2@2, TC1 1@1, TC2 1@0: `queues 2@2 1@1 1@0`
-    EXPECT_EQ(q.count[0], uint16_t{2});
-    EXPECT_EQ(q.offset[0], uint16_t{2});
-    EXPECT_EQ(q.count[1], uint16_t{1});
-    EXPECT_EQ(q.offset[1], uint16_t{1});
-    EXPECT_EQ(q.count[2], uint16_t{1});
-    EXPECT_EQ(q.offset[2], uint16_t{0});
-    EXPECT_EQ(q.count[3], uint16_t{0});
+    // `queues 1@3 1@1 1@0 1@2`
+    std::array<uint16_t, 16> const count{1, 1, 1, 1};
+    std::array<uint16_t, 16> const offset{3, 1, 0, 2};
+    EXPECT_TRUE(q.count == count);
+    EXPECT_TRUE(q.offset == offset);
     EXPECT_FALSE(q.hw);
+}
+
+// The request on the wire, byte for byte: what core's net_tc_qdisc_test checks for the same command,
+// `tc qdisc replace dev <if3> root handle 9000: mqprio num_tc 4 map 0 0 1 2 0 0 0 3 0 0 0 0 0 0 0 0
+// queues 1@3 1@1 1@0 1@2 hw 0`. Every PortShaper lays it, with cbs, etf or both under it.
+TEST(shaper_mqprio, igb_four_queues_request_bytes)
+{
+    if constexpr (std::endian::native != std::endian::little) {
+        return;
+    }
+    auto const made = mqprio_for(*make_queue_layout("igb", 4), 0x9000);
+    net::tc::RequestBuffer out{};
+    auto const length = made.and_then([&](net::tc::MqprioQdisc const& q) { return net::tc::build_replace_mqprio(out, 3, q, 7); });
+    EXPECT_TRUE(length.has_value() && *length == 136);
+    // tcmsg handle 9000:0 at 24, num_tc at 52, prio_tc_map at 53, hw at 69, count at 70, offset at 102
+    EXPECT_TRUE(out[26] == 0x00 && out[27] == 0x90 && out[52] == 4 && out[69] == 0);
+    std::array<uint8_t, 16> const map{0, 0, 1, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0};
+    EXPECT_TRUE(std::ranges::equal(std::span{out}.subspan(53, 16), map));
+    std::array<uint8_t, 8> const counts{1, 0, 1, 0, 1, 0, 1, 0};
+    std::array<uint8_t, 8> const offsets{3, 0, 1, 0, 0, 0, 2, 0};
+    EXPECT_TRUE(std::ranges::equal(std::span{out}.subspan(70, 8), counts));
+    EXPECT_TRUE(std::ranges::equal(std::span{out}.subspan(102, 8), offsets));
 }
 
 TEST(shaper_mqprio, marvell_eight_queues)
@@ -147,8 +181,12 @@ TEST(shaper_mqprio, marvell_eight_queues)
     auto const made = mqprio_for(*layout, 0x9000);
     EXPECT_TRUE(made.has_value());
     auto const& q = *made;
-    // `queues 6@0 1@6 1@7`
-    EXPECT_EQ(q.count[0], uint16_t{6});
+    // `queues 5@0 1@6 1@7 1@5`
+    EXPECT_EQ(q.num_tc, uint8_t{4});
+    EXPECT_EQ(q.count[3], uint16_t{1});
+    EXPECT_EQ(q.offset[3], uint16_t{5});
+    EXPECT_EQ(q.prio_tc_map[7], PTP_TC);
+    EXPECT_EQ(q.count[0], uint16_t{5});
     EXPECT_EQ(q.offset[0], uint16_t{0});
     EXPECT_EQ(q.count[1], uint16_t{1});
     EXPECT_EQ(q.offset[1], uint16_t{6});
@@ -157,7 +195,10 @@ TEST(shaper_mqprio, marvell_eight_queues)
     EXPECT_EQ(q.prio_tc_map[3], CLASS_A_TC);
     EXPECT_EQ(q.prio_tc_map[2], CLASS_B_TC);
     EXPECT_EQ(q.prio_tc_map[0], LEGACY_TC);
-    EXPECT_EQ(q.prio_tc_map[7], LEGACY_TC);
+    EXPECT_EQ(q.prio_tc_map[6], LEGACY_TC);
+    // three queues: no PTP queue, num_tc 3, priority 7 legacy traffic
+    auto const three = mqprio_for(*make_queue_layout("dsa", 3), 0x9000);
+    EXPECT_TRUE(three && three->num_tc == 3 && three->prio_tc_map[7] == LEGACY_TC && three->count[3] == 0);
 }
 #endif
 
@@ -172,7 +213,11 @@ TEST(shaper_mqprio, refuses_bad_priorities)
     EXPECT_TRUE(bad(3, 3));  // one PCP for both classes
     EXPECT_TRUE(bad(8, 2));
     EXPECT_TRUE(bad(3, 8));
+    EXPECT_TRUE(bad(7, 2));  // class A on PTP's priority
     EXPECT_FALSE(bad(5, 4));
+    EXPECT_FALSE(validate_priorities(3, 2, 16).has_value());
+    EXPECT_FALSE(validate_priorities(3, 2, 2).has_value());
+    EXPECT_TRUE(validate_priorities(3, 2, 12).has_value());
     auto const custom = mqprio_for(*layout, 0x9000, 5, 4);
     EXPECT_TRUE(custom.has_value() && custom->prio_tc_map[5] == CLASS_A_TC && custom->prio_tc_map[4] == CLASS_B_TC);
     EXPECT_TRUE(custom.has_value() && custom->prio_tc_map[3] == LEGACY_TC);
