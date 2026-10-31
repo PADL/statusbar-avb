@@ -53,8 +53,30 @@ case "$1" in
         #   systemctl enable --now statusbar-avb-entity
         #   systemctl enable --now statusbar-avb-tone-generator
         # so a plain package install never puts a stream on the wire.
+        #
+        # On an upgrade, though, a unit the operator HAD running has to come
+        # back, or the upgrade quietly takes the node off the wire: that is
+        # exactly what happened to the tone generator on jdk01f, which the
+        # prerm stopped and nothing started again. `try-restart` is what makes
+        # restarting safe here -- it restarts a running unit and does nothing
+        # whatever to a stopped one, so neither a fresh install nor a unit the
+        # operator deliberately stopped is started by this script. dpkg
+        # replaces an executable by rename, so the old process keeps running
+        # on its own inode until this restart swaps it for the new one; the
+        # prerm therefore leaves the units alone on upgrade, and stops them
+        # only when the package is really going away.
+        #
+        # dpkg passes the version being replaced as $2 on an upgrade and
+        # nothing on a first install, which is the test for "this is an
+        # upgrade".
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload 2>/dev/null || true
+            if [ -n "$2" ]; then
+                for unit in statusbar-avb-entity statusbar-avb-tone-generator; do
+                    systemctl --quiet try-restart "$unit.service" \
+                        2>/dev/null || true
+                done
+            fi
         fi
         ;;
     abort-upgrade | abort-remove | abort-deconfigure) ;;

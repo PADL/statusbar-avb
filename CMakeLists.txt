@@ -91,12 +91,13 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
 
     # ---- entity systemd service + /etc config (runtime component) ----
     # Optional run-at-boot for the AVB audio entity. The unit is shipped
-    # DISABLED (postinst only daemon-reloads); an operator enables it after
-    # editing the conffile. Absolute DESTINATIONs (outside the /usr/local
-    # prefix) so systemd and the operator find them in the standard places.
-    # entity.toml is registered as a dpkg conffile (see CONTROL_EXTRA below), so
-    # per-site edits survive package upgrades. It ships GENERIC defaults only --
-    # no site-specific peers/keys.
+    # DISABLED (the postinst never starts it, and restarts it across an upgrade
+    # only if it was already running); an operator enables it after editing the
+    # conffile. Absolute DESTINATIONs (outside the /usr/local prefix) so systemd
+    # and the operator find them in the standard places. entity.toml is
+    # registered as a dpkg conffile (see CONTROL_EXTRA below), so per-site edits
+    # survive package upgrades. It ships GENERIC defaults only -- no
+    # site-specific peers/keys.
     install(
       FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/statusbar-avb-entity.service
@@ -230,8 +231,9 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
       GROUP_EXECUTE
       WORLD_READ
       WORLD_EXECUTE)
-    # postinst (setcap + daemon-reload), prerm (stop the entity unit on
-    # remove/upgrade), postrm (daemon-reload), and conffiles (mark
+    # postinst (setcap, daemon-reload, and try-restart of a unit that was
+    # running before an upgrade), prerm (stop the entity unit on remove, not on
+    # upgrade -- see its comment), postrm (daemon-reload), and conffiles (mark
     # /etc/statusbar-avb/entity.toml so per-site edits survive upgrades).
     set(CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA
         "${CMAKE_CURRENT_BINARY_DIR}/packaging/deb/postinst"
