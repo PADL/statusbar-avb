@@ -53,7 +53,7 @@ Manages 802.1Q VLAN registration via MVRP.
 
 ### adp_adv_sm (ADP Advertise)
 
-Manages IEEE 1722.1 ADP entity advertisement.
+The ADP advertise state machine of Milan v1.2 Section 5.6.3 (IEEE 1722.1-2021 Clause 6.2.4 with link state): a random TMR_DELAY before every ENTITY_AVAILABLE, ENTITY_DEPARTING only on shutdown.
 
 ```{graphviz} ../sm/nanoavb/adp_adv_sm.dot
 ```
