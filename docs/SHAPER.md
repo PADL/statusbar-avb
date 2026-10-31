@@ -70,7 +70,12 @@ replaced; if that fails with EINVAL, which is what mqprio answers when the
 root is already an mqprio with our handle (a "change", which it refuses: our
 handle with another layout), it deletes the root with our handle and tries
 once more. So a foreign mqprio that happens to hold our handle
-(`ShaperConfig::qdisc_major`, default 0x9000) is taken over. Nothing of ours is left installed when `install()`
+(`ShaperConfig::qdisc_major`, default 0x9000) is taken over. An mqprio or
+taprio root under another handle (an AF_XDP socket's launch-time root, say) is
+deleted first (`net::tc::remove_other_tc_root`): replaced in place, the new
+root's init would set its traffic classes and the old root's destroy then clear
+them (`mqprio_destroy` calls `netdev_set_num_tc(dev, 0)`, `taprio_destroy`
+`netdev_reset_tc`), leaving every queue to the kernel's hash for the run. Nothing of ours is left installed when `install()`
 fails.
 
 ## Adapter resets (igb, igc)

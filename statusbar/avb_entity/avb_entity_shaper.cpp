@@ -133,10 +133,23 @@ auto make_queue_layout(std::string_view const driver, uint16_t const tx_queues, 
     return with_legacy_range(*layout).transform(with_ptp_queue);
 }
 
-auto validate_priorities(uint8_t const class_a_pcp, uint8_t const class_b_pcp, uint8_t const ptp_priority) noexcept -> Status
+namespace {
+
+/// The SR class PCPs alone: both below 8 and distinct.
+auto validate_pcps(uint8_t const class_a_pcp, uint8_t const class_b_pcp) noexcept -> Status
 {
     if (class_a_pcp >= 8 || class_b_pcp >= 8 || class_a_pcp == class_b_pcp) {
         return failure(ShaperError::bad_priority);
+    }
+    return success();
+}
+
+}  // namespace
+
+auto validate_priorities(uint8_t const class_a_pcp, uint8_t const class_b_pcp, uint8_t const ptp_priority) noexcept -> Status
+{
+    if (auto status = validate_pcps(class_a_pcp, class_b_pcp); !status) {
+        return status;
     }
     if (ptp_priority >= net::tc::PRIORITY_COUNT || ptp_priority == class_a_pcp || ptp_priority == class_b_pcp) {
         return failure(ShaperError::bad_priority);
@@ -168,7 +181,9 @@ auto mqprio_for(
     uint8_t const class_b_pcp,
     uint8_t const ptp_priority) noexcept -> StatusValue<net::tc::MqprioQdisc>
 {  // NOLINT(statusbar-block-statements): one line per mqprio field
-    if (auto status = validate_priorities(class_a_pcp, class_b_pcp, ptp_priority); !status) {
+    auto const status =
+        layout.ptp_queue ? validate_priorities(class_a_pcp, class_b_pcp, ptp_priority) : validate_pcps(class_a_pcp, class_b_pcp);
+    if (!status) {
         return failure(status.error());
     }
     net::tc::MqprioQdisc q{};
@@ -365,10 +380,27 @@ auto ShaperQdiscs::put_root(int const ifindex, std::string_view const name, net:
         log_.status("shaper: kept the mqprio root {:x}: already on {}", mqprio.major, logging::embed<16>(name));
         return true;
     }
+    if (auto taken = take_over(ifindex, name, current, mqprio.major); !taken) {
+        return forward_failure(taken);
+    }
     if (auto replaced = replace_root(ifindex, name, mqprio, root); !replaced) {
         return forward_failure(replaced);
     }
     return false;
+}
+
+auto ShaperQdiscs::take_over(
+    int const ifindex, std::string_view const name, StatusValue<net::tc::QdiscInfo> const& current, uint16_t const major) -> Status
+{
+    auto const removed = current ? net::tc::remove_other_tc_root(tc_, ifindex, *current, major) : StatusValue<bool>{false};
+    if (removed && *removed) {
+        log_.status(
+            "shaper: removed the {} root {:x}: on {} before laying ours",
+            logging::embed<16>(current->kind),
+            current->handle >> 16U,
+            logging::embed<16>(name));
+    }
+    return removed.transform([](bool) {});
 }
 
 auto ShaperQdiscs::replace_root(

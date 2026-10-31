@@ -218,6 +218,9 @@ TEST(shaper_mqprio, refuses_bad_priorities)
     EXPECT_FALSE(validate_priorities(3, 2, 16).has_value());
     EXPECT_FALSE(validate_priorities(3, 2, 2).has_value());
     EXPECT_TRUE(validate_priorities(3, 2, 12).has_value());
+    // no PTP queue (3 TX queues): the PTP priority is not used, so not checked
+    EXPECT_TRUE(mqprio_for(*make_queue_layout("dsa", 3), 0x9000, 3, 2, 3).has_value());
+    EXPECT_FALSE(mqprio_for(*layout, 0x9000, 3, 2, 3).has_value());
     auto const custom = mqprio_for(*layout, 0x9000, 5, 4);
     EXPECT_TRUE(custom.has_value() && custom->prio_tc_map[5] == CLASS_A_TC && custom->prio_tc_map[4] == CLASS_B_TC);
     EXPECT_TRUE(custom.has_value() && custom->prio_tc_map[3] == LEGACY_TC);
@@ -685,12 +688,31 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
             "del root 9000:",
             "replace root mqprio 9000:",
         }));
-    // And a foreign root of another handle is simply replaced.
+    // A root that sets no traffic classes is simply replaced.
     RecordingTc foreign{};
-    foreign.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    foreign.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "fq"};
     ShaperQdiscs taken{foreign, channel.logger()};
     EXPECT_TRUE(taken.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(foreign.take() == Requests({"show root", "replace root mqprio 9000:"}));
+}
+
+// Another handle's mqprio (an AES67 socket's 9100:, a profile switch ago) or taprio is deleted before ours goes
+// on: replaced in place, its destroy would run netdev_set_num_tc(0) after our init and clear our map.
+TEST(shaper_qdiscs, another_handle_s_mqprio_or_taprio_is_deleted_before_ours_is_laid)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = net::tc::QdiscInfo{.handle = 0x9100'0000, .parent = net::tc::ROOT, .kind = "mqprio"};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "eth1", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_FALSE(qdiscs.reused());
+    EXPECT_TRUE(tc.take() == Requests({"show root", "del root 9100:", "replace root mqprio 9000:"}));
+    // taprio_destroy resets the TCs too (netdev_reset_tc)
+    RecordingTc gated{};
+    gated.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "taprio"};
+    ShaperQdiscs after_taprio{gated, channel.logger()};
+    EXPECT_TRUE(after_taprio.install(3, "eth1", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(gated.take() == Requests({"show root", "del root 1:", "replace root mqprio 9000:"}));
 }
 
 // A driver without cbs offload (EOPNOTSUPP): logged once, then no further
