@@ -600,25 +600,49 @@ void PortShaper::park()
         logging::embed<16>(config_.interface_name));
 }
 
-auto PortShaper::install() -> Status
-{  // NOLINT(statusbar-block-statements): the interface lookups in order, then the install
-    if (qdiscs_.installed()) {
-        return success();
-    }
-    auto const ifindex = net::interface_index(config_.interface_name);
+namespace {
+
+/// The interface @p name's index and driver; TX queues and MTU are left to size_port().
+[[nodiscard]] auto identify_port(std::string_view const name) -> StatusValue<ShaperPort>
+{
+    auto const ifindex = net::interface_index(name);
     if (!ifindex) {
         return failure(ifindex.error());
     }
-    auto driver = net::driver_name(config_.interface_name);
+    auto driver = net::driver_name(name);
     if (!driver) {
         return failure(driver.error());
     }
-    auto const queues = net::tx_queue_count(config_.interface_name);
+    return ShaperPort{.ifindex = *ifindex, .driver = std::move(*driver)};
+}
+
+/// Fill @p port's TX queue count and MTU (1500 when unreadable) from the interface @p name.
+[[nodiscard]] auto size_port(std::string_view const name, ShaperPort& port) -> Status
+{
+    auto const queues = net::tx_queue_count(name);
     if (!queues) {
         return failure(queues.error());
     }
-    auto const mtu = net::interface_mtu(config_.interface_name);
-    return install(ShaperPort{.ifindex = *ifindex, .driver = std::move(*driver), .tx_queues = *queues, .mtu = mtu ? *mtu : 1500U});
+    port.tx_queues = *queues;
+    port.mtu = net::interface_mtu(name).value_or(1500U);
+    return success();
+}
+
+}  // namespace
+
+auto PortShaper::install() -> Status
+{
+    if (qdiscs_.installed()) {
+        return success();
+    }
+    auto port = identify_port(config_.interface_name);
+    if (!port) {
+        return forward_failure(port);
+    }
+    if (auto status = size_port(config_.interface_name, *port); !status) {
+        return status;
+    }
+    return install(*port);
 }
 
 auto PortShaper::install(ShaperPort const& port) -> Status
