@@ -166,6 +166,8 @@ class AtdeccNetHandler : public net::Pollable
         static constexpr std::array<uint8_t, 3> atdecc_subtypes{
             avtp::AvtpSubtype::adp, avtp::AvtpSubtype::aecp, avtp::AvtpSubtype::acmp};
         (void)context_.set_subtype_filter(atdecc_subtypes);
+        // IEEE 1722.1-2021 Clause 6.2.4.2.2: randomDeviceDelay() seeded from the MAC and clock.
+        adp_advertiser_.seed_random(context_.my_mac(), adp_adv_sm::realtime_ns());
     }
 
     /// Check if the handler is valid (socket opened successfully)
@@ -222,8 +224,6 @@ class AtdeccNetHandler : public net::Pollable
 
     net::RawnetContext context_{};
     AtdeccLocalPort* local_port_{nullptr};
-    /// Answering a local ENTITY_DISCOVER: multicast goes to that controller only.
-    std::optional<ieee::Eui48> local_reply_to_{};
     NanoAvbAdpAdvertiser& adp_advertiser_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpTalker& acmp_talker_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAcmpListener& acmp_listener_;    // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)

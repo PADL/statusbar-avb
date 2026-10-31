@@ -10,6 +10,7 @@
 #include "statusbar/atdecc/atdecc_adp_discovery.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/nanoavb/nanoavb_adp_adv_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
@@ -49,10 +50,19 @@ struct AdpAdvertiserConfig
     /// ENTITY_AVAILABLE messages".
     uint8_t valid_time = 10;
 
-    /// Reannounce interval (should be less than valid_time * 2 seconds).
-    /// Default 5 s: Milan v1.2 Section 5.6.2, "a PAAD-AE shall advertise
-    /// itself every 5 seconds".
+    /// TMR_ADVERTISE, from an ENTITY_AVAILABLE to the next TMR_DELAY: 5 s (Milan v1.2
+    /// Table 5.50; IEEE 1722.1-2021 Clause 6.2.4.3, valid_time / 2).
     std::chrono::milliseconds reannounce_interval{5000};
+
+    /// TMR_DELAY's range when started with the link up (Milan v1.2 Section 5.6.3.5.2).
+    /// Elsewhere it is valid_time / 5 (IEEE 1722.1-2021 Clause 6.2.4.2.2): 4 s at 10.
+    std::chrono::milliseconds startup_delay_max{2000};
+
+    /// randomDeviceDelay()'s range for @p valid_time in 2-second units (Clause 6.2.4.2.2).
+    [[nodiscard]] constexpr auto delay_max() const noexcept -> std::chrono::milliseconds
+    {
+        return std::chrono::milliseconds{valid_time * 400};
+    }
 };
 
 //
@@ -72,16 +82,8 @@ struct AdpAdvertiserCallbacks
     statusbar::sg14::inplace_function<void(uint32_t available_index), 64> on_available_index_change;
 };
 
-//
-// ADP Advertiser State
-//
-/// State of the ADP advertiser
-enum class AdpAdvertiserState : uint8_t
-{
-    Stopped,      /// Not advertising
-    Advertising,  /// Sending periodic Entity Available messages
-    Departing,    /// Sent Entity Departing, transitioning to Stopped
-};
+/// State of the ADP advertiser: Start (no link state yet), Down, Waiting or Delay.
+using AdpAdvertiserState = adp_adv_sm::Def::State;
 
 //
 // NanoAVB ADP Advertiser
@@ -106,17 +108,16 @@ class NanoAvbAdpAdvertiser
     ///               are readily available.
     /// @param callbacks Callback interface for sending ADPDUs
     /// @param config Optional configuration for advertiser behavior
-    explicit NanoAvbAdpAdvertiser(DescriptorEntity entity, AdpAdvertiserCallbacks callbacks = {}, AdpAdvertiserConfig config = {})
-        : entity_{entity}
-        , callbacks_{std::move(callbacks)}
-        , config_{config}
-    {
-        // Initialize the ADPDU from the owned entity snapshot.
-        update_adpdu_from_model();
-    }
+    explicit NanoAvbAdpAdvertiser(DescriptorEntity entity, AdpAdvertiserCallbacks callbacks = {}, AdpAdvertiserConfig config = {});
 
     /// Get the current advertiser state
-    [[nodiscard]] auto state() const noexcept -> AdpAdvertiserState { return state_; }
+    [[nodiscard]] auto state() const noexcept -> AdpAdvertiserState { return machine_.current_state(); }
+
+    /// True while the link is up (Waiting or Delay).
+    [[nodiscard]] auto advertising() const noexcept -> bool
+    {
+        return state() == AdpAdvertiserState::Waiting || state() == AdpAdvertiserState::Delay;
+    }
 
     /// Get the current available index
     [[nodiscard]] auto available_index() const noexcept -> uint32_t { return available_index_; }
@@ -132,24 +133,29 @@ class NanoAvbAdpAdvertiser
     /// @param callbacks The new callback interface
     auto set_callbacks(AdpAdvertiserCallbacks callbacks) -> void { callbacks_ = std::move(callbacks); }
 
-    // State Control
+    // State Control - Milan v1.2 Section 5.6.3.5
 
-    /// Start advertising (begin sending Entity Available messages)
-    /// @param now Current time for scheduling
-    /// @return Success or error if already advertising
-    [[nodiscard]] auto start(TimePoint now) -> Status;
+    /// LINK_UP: ENTITY_AVAILABLE after TMR_DELAY: 0-2 s while no link state has been reported since
+    /// construction or a shutdown() with the link up (Section 5.6.3.5.2), else 0-4 s from DOWN
+    /// (Section 5.6.3.5.3; a shutdown() while down is ignored). Ignored while up.
+    auto link_up(TimePoint now) -> void;
 
-    /// Stop advertising (send Entity Departing and stop)
-    /// @param now Current time
-    /// @return Success or error if not advertising
-    [[nodiscard]] auto stop(TimePoint now) -> Status;
+    /// LINK_DOWN: stop the timers and send nothing (Sections 5.6.3.5.6 and 5.6.3.5.10).
+    auto link_down(TimePoint now) -> void;
+
+    /// SHUTDOWN: ENTITY_DEPARTING if the link is up, available_index reset to 0 (Sections
+    /// 5.6.3.5.8 and 5.6.3.5.11; IEEE 1722.1-2021 Clause 6.2.2.15). True if one was sent.
+    auto shutdown(TimePoint now) -> bool;
+
+    /// Seed randomDeviceDelay() from @p mac and the real-time clock @p realtime_ns
+    /// (IEEE 1722.1-2021 Clause 6.2.4.2.2). The constructor seeds from the entity ID.
+    auto seed_random(ieee::Eui48 const& mac, uint64_t realtime_ns) noexcept -> void { ctx_.random.seed(mac, realtime_ns); }
 
     // Entity State Changes
 
-    /// Notify that entity state has changed
-    /// This should be called whenever the entity model changes
-    /// If currently advertising, sends an updated Entity Available immediately
-    auto notify_entity_changed() -> void;
+    /// Rebuild the ADPDU from the entity and, while Waiting, advertise it after TMR_DELAY
+    /// (IEEE 1722.1-2021 Clause 6.2.7, needsAdvertise).
+    auto notify_entity_changed(TimePoint now) -> void;
 
     /// Update the ADPDU from the current owned entity snapshot.
     /// Call this if `set_entity()` has been used to install an updated
@@ -158,21 +164,16 @@ class NanoAvbAdpAdvertiser
 
     /// Replace the owned entity descriptor. Does not send a new
     /// advertisement on its own — call `notify_entity_changed()` after
-    /// `set_entity()` to push the change onto the wire.
+    /// `set_entity()` to advertise the change.
     /// @param entity The new entity descriptor.
     auto set_entity(DescriptorEntity const& entity) -> void { entity_ = entity; }
 
     /// Read-only access to the owned entity snapshot.
     [[nodiscard]] auto entity() const noexcept -> DescriptorEntity const& { return entity_; }
 
-    /// Set the gPTP grandmaster information
-    /// @param grandmaster_id The gPTP grandmaster ID (ClockIdentity)
-    /// @param domain_number The gPTP domain number
-    void set_gptp_info(ClockIdentity const& grandmaster_id, uint8_t domain_number)
-    {
-        adpdu_.gptp_grandmaster_id = grandmaster_id;
-        adpdu_.gptp_domain_number = domain_number;
-    }
+    /// Set the advertised gPTP grandmaster and domain (IEEE 1722.1-2021 Clauses 6.2.2.16-17);
+    /// a new grandmaster ID is GM_CHANGE (Milan v1.2 Section 5.6.3.5.7).
+    auto set_gptp_info(ClockIdentity const& grandmaster_id, uint8_t domain_number, TimePoint now) -> void;
 
     /// Set the AVB_INTERFACE index the ADPDU carries, always with AEM_INTERFACE_INDEX_VALID
     /// (IEEE 1722.1-2021 Clause 6.2.1.10, Milan v1.2 Section 5.6.2); default 0, kept across
@@ -200,13 +201,22 @@ class NanoAvbAdpAdvertiser
 
     // Packet Processing
 
-    /// Process a received ADP packet
-    /// @param adpdu The received ADPDU
-    /// @param now Current time for timeout tracking
+    /// True for an ENTITY_DISCOVER for every entity or for this one (Milan v1.2 Section 5.6.3.1).
+    [[nodiscard]] auto is_discover_for_us(AdpDu const& adpdu) const noexcept -> bool;
+
+    /// Hand the current ENTITY_AVAILABLE to @p send (a local controller's DISCOVER) now, outside
+    /// the state machine. A sent reply is a transmission: available_index advances (Clause 6.2.2.15);
+    /// its result is not counted in consecutive_send_failures(), which is the network's.
+    template <typename Send>
+    auto reply_available(Send&& send) -> bool
+    {
+        return note_available(std::forward<Send>(send)(available_adpdu()));
+    }
+
+    /// Process an ADPDU received from the network: a discover for us is RCV_ADP_DISCOVER.
     auto receive_adpdu(AdpDu const& adpdu, TimePoint now) -> void;
 
-    /// Periodic tick - call this regularly to process timers
-    /// @param now Current time for timer processing
+    /// Fire TMR_DELAY and TMR_ADVERTISE once @p now reaches their deadlines.
     auto tick(TimePoint now) -> void;
 
     // Configuration
@@ -220,15 +230,31 @@ class NanoAvbAdpAdvertiser
     {
         config_ = config;
         adpdu_.set_valid_time(config_.valid_time);
+        apply_timer_config();
     }
 
     /// Get the number of consecutive send failures
     [[nodiscard]] auto consecutive_send_failures() const noexcept -> uint32_t { return consecutive_send_failures_; }
 
   private:
+    /// Copy the configured timer ranges into the machine's variables.
+    auto apply_timer_config() noexcept -> void;
+
+    /// Run @p event, then transmit what it asked for (IEEE 1722.1-2021 Clause 6.2.5).
+    auto handle(adp_adv_sm::Def::Event event, TimePoint now) -> void;
+
     /// Send Entity Available message
     /// @return true if send succeeded, false if send failed or no callback
     auto send_entity_available() -> bool;
+
+    /// The ADPDU, as an ENTITY_AVAILABLE.
+    auto available_adpdu() noexcept -> AdpDu const&;
+
+    /// Advance available_index after a sent ENTITY_AVAILABLE; returns @p sent. No failure counting.
+    auto note_available(bool sent) -> bool;
+
+    /// Count a send's failure (or clear the count on success); returns @p sent.
+    auto note_send(bool sent) noexcept -> bool;
 
     /// Send Entity Departing message
     /// @return true if send succeeded, false if send failed or no callback
@@ -241,11 +267,11 @@ class NanoAvbAdpAdvertiser
     bool identify_control_index_valid_ = false;
     uint16_t interface_index_ = 0;
 
-    AdpAdvertiserState state_ = AdpAdvertiserState::Stopped;
+    adp_adv_sm::Machine machine_{};
+    adp_adv_sm::Context ctx_{};
     AdpDu adpdu_;
     uint32_t available_index_ = 0;
     uint32_t consecutive_send_failures_ = 0;  // Track send failures for diagnostics
-    TimePoint last_announce_time_;
 };
 
 //

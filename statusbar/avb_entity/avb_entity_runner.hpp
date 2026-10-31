@@ -358,7 +358,8 @@ void attach_log_channels(LogDrain& logs, Entity& entity, bool const verbose)
     entity.set_log_verbosity(verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 }
 
-/// On a grandmaster change, log it, update the ADP advertiser and drive the entity.
+/// On a grandmaster change, log it, update the ADP advertiser (with the Announce's domain)
+/// and drive the entity.
 template <typename Entity>
 void wire_grandmaster_announce(Entity& entity)
 {
@@ -376,9 +377,9 @@ void wire_grandmaster_announce(Entity& entity)
                     gm_str,
                     announce.grandmaster_priority1.get(),
                     announce.grandmaster_priority2.get());
-                entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                entity.components().adp_advertiser.notify_entity_changed();
-                entity.on_gptp_announce(std::chrono::steady_clock::now(), true);
+                auto const sm_now = std::chrono::steady_clock::now();
+                entity.components().adp_advertiser.set_gptp_info(grandmaster_id, announce.header.domain_number.get(), sm_now);
+                entity.on_gptp_announce(sm_now, true);
             }});
 }
 

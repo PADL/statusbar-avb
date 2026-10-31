@@ -3,47 +3,71 @@
 
 #include "statusbar/nanoavb/nanoavb_adp.hpp"
 
+#include <chrono>
+#include <cstdint>
+#include <utility>
+
 namespace statusbar::nanoavb {
 
-auto NanoAvbAdpAdvertiser::start(TimePoint now) -> Status
+NanoAvbAdpAdvertiser::NanoAvbAdpAdvertiser(DescriptorEntity entity, AdpAdvertiserCallbacks callbacks, AdpAdvertiserConfig config)
+    : entity_{entity}
+    , callbacks_{std::move(callbacks)}
+    , config_{config}
 {
-    if (state_ == AdpAdvertiserState::Advertising) {
-        return success();  // Already advertising, idempotent
-    }
-
-    state_ = AdpAdvertiserState::Advertising;
-
-    // Send initial Entity Available
-    send_entity_available();
-
-    // Record the time we sent so tick() waits for the reannounce interval
-    last_announce_time_ = now;
-
-    return success();
-}
-
-auto NanoAvbAdpAdvertiser::stop(TimePoint /*now*/) -> Status
-{
-    if (state_ == AdpAdvertiserState::Stopped) {
-        return success();  // Already stopped, idempotent
-    }
-
-    // Send Entity Departing
-    send_entity_departing();
-
-    state_ = AdpAdvertiserState::Stopped;
-    return success();
-}
-
-auto NanoAvbAdpAdvertiser::notify_entity_changed() -> void
-{
-    // Update ADPDU from current model state
     update_adpdu_from_model();
+    apply_timer_config();
+    ieee::Eui48 id{};  // the entity ID's low 48 bits until seed_random() gives the MAC
+    ctx_.random.seed(id.from_uint64(entity_.entity_id.to_uint64()), adp_adv_sm::realtime_ns());
+}
 
-    // If advertising, send updated Entity Available immediately
-    // (send_entity_available will increment available_index per IEEE 1722.1)
-    if (state_ == AdpAdvertiserState::Advertising) {
+auto NanoAvbAdpAdvertiser::apply_timer_config() noexcept -> void
+{
+    ctx_.advertise_interval = config_.reannounce_interval;
+    ctx_.delay_max = config_.delay_max();
+    ctx_.startup_delay_max = config_.startup_delay_max;
+}
+
+auto NanoAvbAdpAdvertiser::handle(adp_adv_sm::Def::Event const event, TimePoint const now) -> void
+{
+    machine_.handle_event(ctx_, event, now);
+    if (std::exchange(ctx_.do_advertise, false)) {
         send_entity_available();
+    }
+    if (std::exchange(ctx_.do_terminate, false)) {
+        send_entity_departing();
+    }
+}
+
+auto NanoAvbAdpAdvertiser::link_up(TimePoint const now) -> void
+{
+    handle(adp_adv_sm::Def::Event::LinkUp, now);
+}
+
+auto NanoAvbAdpAdvertiser::link_down(TimePoint const now) -> void
+{
+    handle(adp_adv_sm::Def::Event::LinkDown, now);
+}
+
+auto NanoAvbAdpAdvertiser::shutdown(TimePoint const now) -> bool
+{
+    machine_.handle_event(ctx_, adp_adv_sm::Def::Event::Shutdown, now);
+    return std::exchange(ctx_.do_terminate, false) && send_entity_departing();
+}
+
+auto NanoAvbAdpAdvertiser::notify_entity_changed(TimePoint const now) -> void
+{
+    update_adpdu_from_model();
+    handle(adp_adv_sm::Def::Event::EntityChange, now);
+}
+
+auto NanoAvbAdpAdvertiser::set_gptp_info(ClockIdentity const& grandmaster_id, uint8_t const domain_number, TimePoint const now)
+    -> void
+{
+    bool const changed = adpdu_.gptp_grandmaster_id != grandmaster_id;
+    adpdu_.gptp_grandmaster_id = grandmaster_id;
+    adpdu_.gptp_domain_number = domain_number;
+    if (changed) {
+        handle(adp_adv_sm::Def::Event::GmChange, now);
     }
 }
 
@@ -82,86 +106,65 @@ auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
     // For now, leave at defaults (0)
 }
 
-auto NanoAvbAdpAdvertiser::receive_adpdu(AdpDu const& adpdu, TimePoint /*now*/) -> void
+auto NanoAvbAdpAdvertiser::is_discover_for_us(AdpDu const& adpdu) const noexcept -> bool
 {
-    // Check if this is a Discover message targeting us or all entities
-    if (adpdu.is_entity_discover()) {
-        // Entity Discover with entity_id = 0 is a broadcast discover
-        // Entity Discover with our entity_id is targeted at us
-        bool const is_broadcast = (adpdu.entity_id == Eui64{});
-        bool const is_targeted = (adpdu.entity_id == entity_.entity_id);
-
-        if ((is_broadcast || is_targeted) && state_ == AdpAdvertiserState::Advertising) {
-            // Respond with Entity Available
-            send_entity_available();
-        }
-    }
-
-    // In a full implementation, this would also:
-    // 1. Track other entities that we've discovered
-    // 2. Maintain a database of known entities
-    // 3. Handle entity departing messages
+    return adpdu.is_entity_discover() && (adpdu.entity_id == Eui64{} || adpdu.entity_id == entity_.entity_id);
 }
 
-auto NanoAvbAdpAdvertiser::tick(TimePoint now) -> void
+auto NanoAvbAdpAdvertiser::receive_adpdu(AdpDu const& adpdu, TimePoint const now) -> void
 {
-    if (state_ != AdpAdvertiserState::Advertising) {
-        return;
+    if (is_discover_for_us(adpdu)) {
+        handle(adp_adv_sm::Def::Event::RcvDiscover, now);
     }
+}
 
-    // Check if it's time to reannounce
-    auto const elapsed = now - last_announce_time_;
-    if (elapsed >= config_.reannounce_interval) {
-        send_entity_available();
-        last_announce_time_ = now;
+auto NanoAvbAdpAdvertiser::tick(TimePoint const now) -> void
+{
+    if (ctx_.advertise_at && now >= *ctx_.advertise_at) {
+        handle(adp_adv_sm::Def::Event::TmrAdvertise, now);
+    }
+    if (ctx_.delay_until && now >= *ctx_.delay_until) {
+        handle(adp_adv_sm::Def::Event::TmrDelay, now);
     }
 }
 
 auto NanoAvbAdpAdvertiser::send_entity_available() -> bool
 {
-    if (!callbacks_.send_adpdu) {
-        return false;
-    }
+    return callbacks_.send_adpdu && note_send(note_available(callbacks_.send_adpdu(available_adpdu())));
+}
 
-    // Ensure we're sending Entity Available
+auto NanoAvbAdpAdvertiser::available_adpdu() noexcept -> AdpDu const&
+{
     adpdu_.set_message_type(ADP_MESSAGE_TYPE_ENTITY_AVAILABLE);
-    bool const send_ok = callbacks_.send_adpdu(adpdu_);
+    return adpdu_;
+}
 
-    if (send_ok) {
-        // Per IEEE 1722.1, increment available_index after each successful transmission
-        ++available_index_;
-        adpdu_.available_index = available_index_;
-        consecutive_send_failures_ = 0;
-
+auto NanoAvbAdpAdvertiser::note_available(bool const sent) -> bool
+{
+    if (sent) {
+        // IEEE 1722.1-2021 Clause 6.2.2.15: incremented after transmitting ENTITY_AVAILABLE.
+        adpdu_.available_index = ++available_index_;
         if (callbacks_.on_available_index_change) {
             callbacks_.on_available_index_change(available_index_);
         }
-    } else {
-        ++consecutive_send_failures_;
     }
-
-    return send_ok;
+    return sent;
 }
 
 auto NanoAvbAdpAdvertiser::send_entity_departing() -> bool
 {
-    if (!callbacks_.send_adpdu) {
-        return false;
-    }
-
-    // Create a departing message
+    // IEEE 1722.1-2021 Clause 6.2.2.15: reset to zero when transmitting ENTITY_DEPARTING.
+    available_index_ = 0;
+    adpdu_.available_index = available_index_;
     AdpDu departing = adpdu_;
     departing.init_entity_departing(entity_.entity_id);
-    departing.available_index = quadlet_t{0};
-    bool const send_ok = callbacks_.send_adpdu(departing);
+    return callbacks_.send_adpdu && note_send(callbacks_.send_adpdu(departing));
+}
 
-    if (send_ok) {
-        consecutive_send_failures_ = 0;
-    } else {
-        ++consecutive_send_failures_;
-    }
-
-    return send_ok;
+auto NanoAvbAdpAdvertiser::note_send(bool const sent) noexcept -> bool
+{
+    consecutive_send_failures_ = sent ? 0 : consecutive_send_failures_ + 1;
+    return sent;
 }
 
 //
