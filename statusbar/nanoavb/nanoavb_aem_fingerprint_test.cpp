@@ -32,6 +32,7 @@ std::vector<AemRawDescriptor> model_for_unit(std::uint64_t serial_ish)
     e.entity_id = ieee::Eui64{0, 0x1C, 0xAB, 0xFF, 0xFE, 0, std::uint8_t(serial_ish >> 8), std::uint8_t(serial_ish)};
     e.entity_name = AtdeccString{"Venue Rack " + std::to_string(serial_ish)};
     e.group_name = AtdeccString{"FOH"};
+    e.serial_number = AtdeccString{"SN" + std::to_string(serial_ish)};
     e.association_id = e.entity_id;
     e.available_index = std::uint32_t(serial_ish * 17);
     e.current_configuration = serial_ish % 2 ? 1 : 0;
