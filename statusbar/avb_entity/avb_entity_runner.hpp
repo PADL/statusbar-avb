@@ -330,6 +330,305 @@ struct EntityRunnerHooks
     statusbar::sg14::inplace_function<void(), 128> extra_telemetry{};
 };
 
+/// What a media-timer callback publishes for the control loop: it runs on a
+/// SCHED_FIFO thread, so it must not std::print (alloc/throw/block).
+struct MediaTimerTelemetry
+{
+    itc::TelemetryCounter<int64_t> errors;
+    itc::Published<int64_t> wake_count;
+    itc::Published<int64_t> wake_error_ns;
+};
+
+/// The entity's SPSC log channels (ctl = reactor thread, media = RT media timer),
+/// drained on the main thread: the entities and libraries only ever enqueue.
+struct LogDrain
+{
+    logging::LogCollector<4> collector;
+    logging::StderrSink sink;
+
+    void poll() { (void)collector.poll(sink); }
+};
+
+/// Add @p entity's ctl and media log channels to @p logs at the tool's verbosity.
+template <typename Entity>
+void attach_log_channels(LogDrain& logs, Entity& entity, bool const verbose)
+{
+    (void)logs.collector.add(entity.ctl_log_channel());
+    (void)logs.collector.add(entity.media_log_channel());
+    entity.set_log_verbosity(verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
+}
+
+/// On a grandmaster change, log it, update the ADP advertiser and drive the entity.
+template <typename Entity>
+void wire_grandmaster_announce(Entity& entity)
+{
+    auto* const net_handlers = entity.net_handlers();
+    if (net_handlers == nullptr) {
+        return;
+    }
+    net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
+        .grandmaster_id_changed =
+            [&entity](int64_t /*now_ns*/, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
+                std::string gm_str;
+                gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
+                std::print(
+                    "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
+                    gm_str,
+                    announce.grandmaster_priority1.get(),
+                    announce.grandmaster_priority2.get());
+                entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
+                entity.components().adp_advertiser.notify_entity_changed();
+                entity.on_gptp_announce(std::chrono::steady_clock::now(), true);
+            }});
+}
+
+/// Grandmaster edge-detect on the reactor/main thread (NOT the SCHED_FIFO media timer), so
+/// on_gptp_announce drives the non-atomic SM/MSRP stack from one thread. It covers a
+/// grandmaster regained with an unchanged identity; the announce callback covers the rest.
+template <typename Entity>
+void detect_grandmaster_edge(Entity& entity, bool& had_grandmaster, sm::TimePoint const now)
+{
+    auto* const net_handlers = entity.net_handlers();
+    if (net_handlers == nullptr) {
+        return;
+    }
+    bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
+    if (has_gm && !had_grandmaster) {
+        entity.on_gptp_announce(now, has_gm);
+    }
+    had_grandmaster = has_gm;
+}
+
+/// What the runner's media timer publishes, plus its callback-duration histogram:
+/// how long process_audio() takes per wake (the timer's stats() track only wake error).
+struct RunnerTelemetry
+{
+    MediaTimerTelemetry media{};
+    stats::AtomicHistogram<128> duration{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 100'000, .bin_width_ns = 1000}};
+};
+
+/// The control loop's watch on the entity (reactor/main thread only).
+struct RunnerWatch
+{
+    std::string_view last_state;
+    std::chrono::steady_clock::time_point last_state_change{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point last_telemetry{std::chrono::steady_clock::now()};
+    bool lock_timeout_reported{false};  ///< the gPTP watchdog fired in this stay in the state
+    bool had_grandmaster{false};
+};
+
+/// The PTP media timer: Entity::process_audio on the SCHED_FIFO thread each @p period_ns.
+template <typename Entity>
+[[nodiscard]] auto make_runner_media_timer(
+    ptpclient::PtpAppContext& ctx, Entity& entity, int64_t const period_ns, RunnerTelemetry& telemetry)
+{
+    return ptpclient::make_ptp_timer(
+        *ctx.bridge,
+        period_ns,
+        [&entity, &telemetry](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
+            if (!wake_info) {
+                telemetry.media.errors.add(1);
+                return;
+            }
+            auto const cb_t0 = std::chrono::steady_clock::now();
+            entity.process_audio(sm::TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}});
+            telemetry.duration.update(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
+            telemetry.media.wake_count.publish(wake_info->wake_count);
+            telemetry.media.wake_error_ns.publish(wake_info->error_ns);
+        },
+        ctx.compensation_ns,
+        ctx.enable_realtime,
+        ctx.cpu_affinity);
+}
+
+/// Drive the initial link-up synchronously (before the reactor runs) so the supervisor
+/// leaves Down -> Init before any gPTP announce is processed, then track the link state.
+template <typename Entity>
+void start_link_tracking(net::MessageReactor& reactor, Entity& entity)
+{
+    entity.on_link_up(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    reactor.add(std::make_unique<net::LinkMonitor>(entity.config().interface_name, [&entity](bool up, int64_t now_ns) {
+        auto const tp = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
+        if (up) {
+            entity.on_link_up(tp);
+        } else {
+            entity.on_link_down(tp);
+        }
+    }));
+}
+
+/// Track the link state and follow grandmaster changes.
+template <typename Entity>
+void follow_link_and_grandmaster(net::MessageReactor& reactor, Entity& entity)
+{
+    start_link_tracking(reactor, entity);
+    wire_grandmaster_announce(entity);
+}
+
+/// TX pcap capture finished (window elapsed / ring full): write the file here, off the
+/// media RT thread.
+template <typename Entity>
+void flush_tx_pcap_if_ready(Entity& entity)
+{
+    if (!entity.tx_pcap_ready_to_write()) {
+        return;
+    }
+    auto const wr = entity.flush_tx_pcap();
+    if (wr) {
+        std::print("TX pcap: wrote {} frames to {}\n", entity.tx_pcap_frame_count(), entity.config().tx_pcap_path);
+    } else {
+        std::print(stderr, "TX pcap: write failed: {}\n", wr.error().message());
+    }
+}
+
+/// Note a state change: it resets the gPTP watchdog.
+template <typename Entity>
+void observe_state(RunnerWatch& watch, Entity const& entity, bool const verbose)
+{
+    auto const current_state = entity.state_string();
+    if (current_state == watch.last_state) {
+        return;
+    }
+    if (verbose) {
+        std::print("State: {} -> {}\n", watch.last_state, current_state);
+    }
+    watch.last_state_change = std::chrono::steady_clock::now();
+    watch.last_state = current_state;
+    watch.lock_timeout_reported = false;
+}
+
+/// The gPTP watchdog reports once per stay in Init (as EntityUpkeep): on_timeout leaves the
+/// entity in Init, so re-arming it would log the lock timeout every GPTP_LOCK_TIMEOUT.
+template <typename Entity>
+void supervise(RunnerWatch& watch, Entity& entity, std::chrono::steady_clock::time_point const now)
+{
+    constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
+    auto const sm_now = sm::TimePoint{now.time_since_epoch()};
+    detect_grandmaster_edge(entity, watch.had_grandmaster, sm_now);
+    if (watch.last_state == "Init" && !watch.lock_timeout_reported && now - watch.last_state_change > GPTP_LOCK_TIMEOUT) {
+        entity.on_timeout(sm_now);
+        watch.lock_timeout_reported = true;
+    }
+}
+
+/// Once a second when verbose: the PTP bridge, the media timer and the hooks' extras.
+template <typename Entity, typename Timer>
+void report_telemetry(
+    RunnerWatch& watch,
+    std::chrono::steady_clock::time_point const now,
+    ptpclient::PtpAppContext& ctx,
+    Entity const& entity,
+    Timer const& timer,
+    MediaTimerTelemetry const& media,
+    EntityRunnerHooks const& hooks)
+{
+    if (!ctx.bridge || now - watch.last_telemetry < std::chrono::seconds(1)) {
+        return;
+    }
+    watch.last_telemetry = now;
+    auto const bt = ctx.bridge->telemetry();
+    std::print(
+        stderr,
+        "[bridge] healthy={} epoch={} rms={}ns reject={} step={} overruns={} | timer recovery={} missed={} "
+        "wake={} err={:+}ns state={} timer_errors={}\n",
+        bt.healthy,
+        bt.epoch,
+        bt.rms_residual_ns,
+        bt.reject_count,
+        bt.step_count,
+        bt.regression_overruns,
+        timer.recovery_count(),
+        timer.missed_cycles(),
+        media.wake_count.load(),
+        media.wake_error_ns.load(),
+        entity.state_string(),
+        media.errors.load());
+    if (hooks.extra_telemetry) {
+        hooks.extra_telemetry();
+    }
+}
+
+/// The watch at the loop's start: the entity's state and whether it has a grandmaster.
+template <typename Entity>
+[[nodiscard]] auto make_runner_watch(Entity& entity) -> RunnerWatch
+{
+    auto* const net_handlers = entity.net_handlers();
+    return RunnerWatch{
+        .last_state = entity.state_string(),
+        .had_grandmaster = net_handlers != nullptr && net_handlers->gptp_handler().has_grandmaster()};
+}
+
+/// One pass of the main thread's I/O: drain the logs, poll the reactor, run the hook.
+inline void poll_io(LogDrain& logs, net::MessageReactor& reactor, EntityRunnerHooks const& hooks)
+{
+    logs.poll();
+    (void)reactor.poll_once(100);
+    if (hooks.poll) {
+        hooks.poll();
+    }
+}
+
+/// Poll the logs, the reactor and the hooks until shutdown is requested; drain the logs once more.
+template <typename Entity, typename Timer>
+void run_runner_control_loop(
+    net::MessageReactor& reactor,
+    ptpclient::PtpAppContext& ctx,
+    Entity& entity,
+    EntityToolOptions const& tool,
+    EntityRunnerHooks const& hooks,
+    Timer const& timer,
+    MediaTimerTelemetry const& media)
+{
+    RunnerWatch watch = make_runner_watch(entity);
+    LogDrain logs;
+    attach_log_channels(logs, entity, tool.verbose);
+    if (hooks.add_log_channels) {
+        hooks.add_log_channels(logs.collector);
+    }
+    while (!realtime::is_shutdown_requested()) {
+        poll_io(logs, reactor, hooks);
+        flush_tx_pcap_if_ready(entity);
+        observe_state(watch, entity, tool.verbose);
+        auto const now = std::chrono::steady_clock::now();
+        supervise(watch, entity, now);
+        if (tool.verbose) {
+            report_telemetry(watch, now, ctx, entity, timer, media, hooks);
+        }
+    }
+    logs.poll();  // flush log entries produced during shutdown
+}
+
+/// Write the wake-error and callback-duration histograms to the CSVs asked for.
+inline void write_timer_csvs(EntityToolOptions const& tool, MainLoopResult const& result, RunnerTelemetry const& telemetry)
+{
+    if (!tool.media_timer_wake_csv_path.empty()) {
+        (void)write_histogram_csv(tool.media_timer_wake_csv_path, result.wake_stats.error_histogram);
+    }
+    if (!tool.media_timer_duration_csv_path.empty()) {
+        (void)write_histogram_csv(tool.media_timer_duration_csv_path, telemetry.duration.snapshot());
+    }
+}
+
+/// Stop the media timer and PTP sampling; collect the counters and write the CSVs asked for.
+template <typename Timer>
+[[nodiscard]] auto stop_runner_timer(
+    Timer& timer, RunnerTelemetry const& telemetry, ptpclient::PtpAppContext& ctx, EntityToolOptions const& tool) -> MainLoopResult
+{
+    timer.stop();
+    if (auto const errs = telemetry.media.errors.load(); errs > 0) {
+        std::print(stderr, "Warning: media timer had {} wake error(s) (likely gPTP sync loss)\n", errs);
+    }
+    MainLoopResult result{
+        .wake_stats = timer.stats(),
+        .compensation_ns = ctx.compensation_ns,
+        .recovery_count = timer.recovery_count(),
+        .missed_cycles = timer.missed_cycles()};
+    ctx.guard.stop();
+    write_timer_csvs(tool, result, telemetry);
+    return result;
+}
+
 /// The shared main loop: PTP media timer -> Entity::process_audio on the
 /// SCHED_FIFO thread; link monitor, grandmaster edge-detect, Init
 /// timeout, log draining, TX-pcap flushing and telemetry on this thread.
@@ -343,201 +642,15 @@ auto run_entity_main_loop(
     int64_t const packet_period_ns,
     EntityRunnerHooks const& hooks = {}) -> MainLoopResult
 {
-    using TimePoint = sm::TimePoint;
-
-    MainLoopResult result;
-    result.compensation_ns = ctx.compensation_ns;
-
-    auto* net_handlers = entity.net_handlers();
-    bool had_grandmaster = net_handlers != nullptr ? net_handlers->gptp_handler().has_grandmaster() : false;
-
-    // Callback-duration histogram for the media timer: how long
-    // process_audio() takes per wake (the timer's own stats() track only
-    // wake-error). Dumped to --media-timer-duration-csv at exit.
-    stats::AtomicHistogram<128> media_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 100'000, .bin_width_ns = 1000}};
-
-    // The media-timer callback runs on a SCHED_FIFO RT thread, so it must NOT
-    // std::print (alloc/throw/block) — it publishes to these lock-free itc
-    // channels and the control loop below surfaces them off-thread.
-    itc::TelemetryCounter<int64_t> timer_error_count;
-    itc::Published<int64_t> last_wake_count;
-    itc::Published<int64_t> last_wake_error_ns;
-
-    auto timer = ptpclient::make_ptp_timer(
-        *ctx.bridge,
-        packet_period_ns,
-        [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
-            if (!wake_info) {
-                timer_error_count.add(1);
-                return;
-            }
-            auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
-            auto const cb_t0 = std::chrono::steady_clock::now();
-            entity.process_audio(now);
-            media_dur_hist.update(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
-            last_wake_count.publish(wake_info->wake_count);
-            last_wake_error_ns.publish(wake_info->error_ns);
-        },
-        ctx.compensation_ns,
-        ctx.enable_realtime,
-        ctx.cpu_affinity);
-
-    auto start_result = timer.start();
-    if (!start_result) {
-        std::print(stderr, "Error: Failed to start timer: {}\n", start_result.error().message());
-        result.exit_code = EXIT_FAILURE;
-        return result;
+    RunnerTelemetry telemetry{};
+    auto timer = make_runner_media_timer(ctx, entity, packet_period_ns, telemetry);
+    if (auto const started = timer.start(); !started) {
+        std::print(stderr, "Error: Failed to start timer: {}\n", started.error().message());
+        return MainLoopResult{.exit_code = EXIT_FAILURE, .compensation_ns = ctx.compensation_ns};
     }
-
-    // Drive the initial link-up synchronously (before the reactor runs) so the
-    // supervisor leaves Down -> Init before any gPTP announce is processed,
-    // then track the interface link state continuously.
-    auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.on_link_up(startup_time);
-    reactor.add(std::make_unique<net::LinkMonitor>(entity.config().interface_name, [&entity](bool up, int64_t now_ns) {
-        auto const tp = TimePoint{std::chrono::nanoseconds{now_ns}};
-        if (up) {
-            entity.on_link_up(tp);
-        } else {
-            entity.on_link_down(tp);
-        }
-    }));
-
-    constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
-    auto last_state_change_time = std::chrono::steady_clock::now();
-    auto last_state = entity.state_string();
-    bool lock_timeout_reported = false;  // the gPTP watchdog fired in this stay in the state
-    auto last_telemetry_time = std::chrono::steady_clock::now();
-
-    if (net_handlers != nullptr) {
-        net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
-            .grandmaster_id_changed =
-                [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
-                    std::string gm_str;
-                    gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-                    std::print(
-                        "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
-                        gm_str,
-                        announce.grandmaster_priority1.get(),
-                        announce.grandmaster_priority2.get());
-                    entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                    entity.components().adp_advertiser.notify_entity_changed();
-                    (void)now_ns;
-                    auto const sm_now = std::chrono::steady_clock::now();
-                    entity.on_gptp_announce(sm_now, true);
-                }});
-    }
-
-    // Drain the entity's SPSC log channels (ctl = reactor thread, media = RT
-    // media timer) here on the main thread — the entities/libraries only ever
-    // enqueue; formatting and stderr I/O happen in this loop.
-    logging::LogCollector<4> log_collector;
-    logging::StderrSink log_sink;
-    (void)log_collector.add(entity.ctl_log_channel());
-    (void)log_collector.add(entity.media_log_channel());
-    if (hooks.add_log_channels) {
-        hooks.add_log_channels(log_collector);
-    }
-    entity.set_log_verbosity(tool.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
-
-    while (!realtime::is_shutdown_requested()) {
-        (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
-        if (hooks.poll) {
-            hooks.poll();
-        }
-
-        // TX pcap capture finished (window elapsed / ring full): write the file
-        // here, off the media RT thread.
-        if (entity.tx_pcap_ready_to_write()) {
-            auto const wr = entity.flush_tx_pcap();
-            if (wr) {
-                std::print("TX pcap: wrote {} frames to {}\n", entity.tx_pcap_frame_count(), entity.config().tx_pcap_path);
-            } else {
-                std::print(stderr, "TX pcap: write failed: {}\n", wr.error().message());
-            }
-        }
-
-        auto const current_state = entity.state_string();
-        if (current_state != last_state) {
-            if (tool.verbose) {
-                std::print("State: {} -> {}\n", last_state, current_state);
-            }
-            last_state_change_time = std::chrono::steady_clock::now();
-            last_state = current_state;
-            lock_timeout_reported = false;
-        }
-
-        auto const now = std::chrono::steady_clock::now();
-        auto const time_in_state = now - last_state_change_time;
-        auto const sm_now = TimePoint{now.time_since_epoch()};
-
-        // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
-        // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
-        // SM/MSRP stack is only ever driven from one thread. First-acquire is
-        // also handled promptly by the grandmaster_id_changed reactor callback;
-        // this poll additionally covers GM regained with an unchanged identity.
-        if (net_handlers != nullptr) {
-            bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
-            if (has_gm && !had_grandmaster) {
-                entity.on_gptp_announce(sm_now, has_gm);
-            }
-            had_grandmaster = has_gm;
-        }
-
-        // The gPTP watchdog reports once per stay in Init (as EntityUpkeep):
-        // on_timeout leaves the entity in Init, so re-arming it would log the
-        // lock timeout every GPTP_LOCK_TIMEOUT for as long as gPTP is unlocked.
-        if (current_state == "Init" && !lock_timeout_reported && time_in_state > GPTP_LOCK_TIMEOUT) {
-            entity.on_timeout(sm_now);
-            lock_timeout_reported = true;
-        }
-
-        if (tool.verbose && ctx.bridge && now - last_telemetry_time >= std::chrono::seconds(1)) {
-            last_telemetry_time = now;
-            auto const bt = ctx.bridge->telemetry();
-            std::print(
-                stderr,
-                "[bridge] healthy={} epoch={} rms={}ns reject={} step={} overruns={} | timer recovery={} missed={} "
-                "wake={} err={:+}ns state={} timer_errors={}\n",
-                bt.healthy,
-                bt.epoch,
-                bt.rms_residual_ns,
-                bt.reject_count,
-                bt.step_count,
-                bt.regression_overruns,
-                timer.recovery_count(),
-                timer.missed_cycles(),
-                last_wake_count.load(),
-                last_wake_error_ns.load(),
-                entity.state_string(),
-                timer_error_count.load());
-            if (hooks.extra_telemetry) {
-                hooks.extra_telemetry();
-            }
-        }
-    }
-
-    // Final drain: flush log entries produced during shutdown.
-    (void)log_collector.poll(log_sink);
-
-    timer.stop();
-    if (auto const errs = timer_error_count.load(); errs > 0) {
-        std::print(stderr, "Warning: media timer had {} wake error(s) (likely gPTP sync loss)\n", errs);
-    }
-    result.wake_stats = timer.stats();
-    result.recovery_count = timer.recovery_count();
-    result.missed_cycles = timer.missed_cycles();
-    ctx.guard.stop();
-
-    if (!tool.media_timer_wake_csv_path.empty()) {
-        (void)write_histogram_csv(tool.media_timer_wake_csv_path, result.wake_stats.error_histogram);
-    }
-    if (!tool.media_timer_duration_csv_path.empty()) {
-        (void)write_histogram_csv(tool.media_timer_duration_csv_path, media_dur_hist.snapshot());
-    }
-    return result;
+    follow_link_and_grandmaster(reactor, entity);
+    run_runner_control_loop(reactor, ctx, entity, tool, hooks, timer, telemetry.media);
+    return stop_runner_timer(timer, telemetry, ctx, tool);
 }
 
 /// The shared exit banner: entity state + timer counters + entity

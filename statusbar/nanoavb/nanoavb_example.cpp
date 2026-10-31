@@ -37,6 +37,7 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -108,9 +109,26 @@ struct SupervisedNanoAvb
     statusbar::nanoavb::listener_engine_sm::Context listener_engine_ctx{};
     statusbar::nanoavb::listener_engine_sm::Machine listener_engine{};
 
+    /// Stop the talker (with @p talker_event) and listener engines and close their gates.
+    void close_stream_gates(TimePoint const time, statusbar::nanoavb::talker_engine_sm::Def::Event const talker_event)
+    {
+        talker_engine.handle_event(talker_engine_ctx, talker_event, time);
+        listener_engine.handle_event(listener_engine_ctx, statusbar::nanoavb::listener_engine_sm::Def::Event::GateStop, time);
+        talker_engine_ctx.send_allowed = false;
+        listener_engine_ctx.play_allowed = false;
+    }
+
+    /// Reset the MVRP and MSRP state machines.
+    void reset_srp()
+    {
+        mvrp.reset();
+        msrp_talker.reset();
+        msrp_listener.reset();
+    }
+
     /// Wire callbacks to connect state machines with components and each other
     void wire_callbacks(statusbar::nanoavb::NanoAvbComponents& components, statusbar::nanoavb::NanoAvbNetHandlers& handlers)
-    {
+    {  // NOLINT(statusbar-block-statements): one callback per state machine hook
         //
         // Supervisor callbacks - coordinate protocol lifecycle
         //
@@ -151,13 +169,8 @@ struct SupervisedNanoAvb
         supervisor_ctx.callbacks.degrade_stop_streams = [this](auto& ctx, TimePoint time) {
             (void)ctx;
             std::print("[supervisor] degrade_stop_streams: gPTP lost - stopping SRP + streams\n");
-            talker_engine.handle_event(talker_engine_ctx, statusbar::nanoavb::talker_engine_sm::Def::Event::GateStop, time);
-            listener_engine.handle_event(listener_engine_ctx, statusbar::nanoavb::listener_engine_sm::Def::Event::GateStop, time);
-            talker_engine_ctx.send_allowed = false;
-            listener_engine_ctx.play_allowed = false;
-            mvrp.reset();
-            msrp_talker.reset();
-            msrp_listener.reset();
+            close_stream_gates(time, statusbar::nanoavb::talker_engine_sm::Def::Event::GateStop);
+            reset_srp();
         };
 
         supervisor_ctx.callbacks.stop_all = [this, &components](auto& ctx, TimePoint time) {
@@ -165,16 +178,10 @@ struct SupervisedNanoAvb
             std::print("[supervisor] stop_all: Stopping all protocols and engines\n");
             // Stop ADP
             (void)components.adp_advertiser.stop(time);
-            // Stop stream engines
-            talker_engine.handle_event(talker_engine_ctx, statusbar::nanoavb::talker_engine_sm::Def::Event::Fatal, time);
-            listener_engine.handle_event(listener_engine_ctx, statusbar::nanoavb::listener_engine_sm::Def::Event::GateStop, time);
-            // Reset protocol state machines
+            // Stop stream engines, then reset the protocol state machines
+            close_stream_gates(time, statusbar::nanoavb::talker_engine_sm::Def::Event::Fatal);
             gptp.reset();
-            mvrp.reset();
-            msrp_talker.reset();
-            msrp_listener.reset();
-            talker_engine_ctx.send_allowed = false;
-            listener_engine_ctx.play_allowed = false;
+            reset_srp();
         };
 
         // Timeout handlers - called when state machine times out in a waiting state
@@ -862,6 +869,146 @@ void print_final_status(
     std::print("{}", stats_report);
 }
 
+/// Parse the command line into @p config; an exit code when the program should stop now.
+[[nodiscard]] auto parse_config(int const argc, char** const argv, Config& config) -> std::optional<int>
+{
+    auto specs = build_arg_specs(config);
+    // --completion, --help, --config-load, --config-save, then the bindings
+    auto cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage);
+    if (!cli_result) {
+        return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+    if (config.interface_name.empty()) {
+        std::println(stderr, "Error: --interface=<iface> is required");
+        print_usage(argv[0], specs);
+        return EXIT_FAILURE;
+    }
+    return std::nullopt;
+}
+
+/// The demo's bring-up: components (non-movable, so on the heap), network handlers wired to
+/// them, the supervised state machines and the reactor the handlers run on.
+struct Demo
+{
+    explicit Demo(Config const& config)
+        : components_owner{create_nanoavb_components()}
+        , net_handlers{config.interface_name, *components_owner}
+    {
+        net_handlers.print_warnings(config.interface_name);
+        statusbar::nanoavb::setup_nanoavb_callbacks(components(), net_handlers);
+        supervised.wire_callbacks(components(), net_handlers);
+        net_handlers.add_to_reactor(reactor);
+        net_handlers.atdecc_handler().set_ptp_wake_counter(&ptp_wake_count);  // for the status display
+        wire_grandmaster_announce();
+    }
+
+    /// A grandmaster change updates ADP and notifies the supervised state machine.
+    void wire_grandmaster_announce()
+    {
+        net_handlers.gptp_handler().set_callbacks(statusbar::nanoavb::GptpAnnounceCallbacks{
+            .grandmaster_id_changed = [this](
+                                          int64_t now_ns,
+                                          statusbar::gptp::ClockIdentity const& grandmaster_id,
+                                          statusbar::gptp::AnnounceMessage const& announce) {
+                std::string gm_str;
+                statusbar::gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
+                std::print(
+                    "gPTP: Grandmaster changed to {} (priority1={}, priority2={}, steps={})\n",
+                    gm_str,
+                    announce.grandmaster_priority1.get(),
+                    announce.grandmaster_priority2.get(),
+                    announce.steps_removed.get());
+                components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
+                components().adp_advertiser.notify_entity_changed();
+                supervised.on_gptp_announce(statusbar::sm::TimePoint{std::chrono::nanoseconds{now_ns}}, true);
+            }});
+    }
+
+    [[nodiscard]] auto components() const noexcept -> statusbar::nanoavb::NanoAvbComponents& { return *components_owner; }
+
+    std::unique_ptr<statusbar::nanoavb::NanoAvbComponents> components_owner;
+    statusbar::nanoavb::NanoAvbNetHandlers net_handlers;
+    SupervisedNanoAvb supervised{};
+    statusbar::itc::StopToken shutdown_flag{};
+    statusbar::net::MessageReactor reactor{shutdown_flag, statusbar::net::monotonic_ns, 10};
+    statusbar::itc::TelemetryCounter<int64_t> ptp_wake_count{};
+};
+
+/// Set up clean shutdown on signals, then the PTP application, falling back to the system clock.
+[[nodiscard]] auto setup_ptp(statusbar::ptpclient::PtpAppConfig& ptp_app)
+    -> statusbar::StatusValue<statusbar::ptpclient::PtpAppContext>
+{
+    statusbar::realtime::setup_shutdown_signal_handlers();
+    auto is_shutdown = [] { return statusbar::realtime::is_shutdown_requested(); };
+    return statusbar::ptpclient::setup_ptp_app_with_fallback(ptp_app, is_shutdown);
+}
+
+/// The exit code for a PTP setup that failed: success when Ctrl-C interrupted it.
+[[nodiscard]] auto ptp_setup_failed(std::error_code const error) -> int
+{
+    if (statusbar::realtime::is_shutdown_requested()) {
+        std::print("Shutdown requested during setup\n");
+        return EXIT_SUCCESS;
+    }
+    std::print(stderr, "Error: Failed to setup PTP: {}\n", error.message());
+    return EXIT_FAILURE;
+}
+
+void print_state_machines()
+{
+    std::print("\nState machines initialized:\n");
+    std::print("  - supervisor_sm (coordinates protocol lifecycle)\n");
+    std::print("  - gptp_sm (gPTP synchronization)\n");
+    std::print("  - mvrp_sm (VLAN registration)\n");
+    std::print("  - msrp_talker_sm / msrp_listener_sm (stream reservation)\n");
+    std::print("  - talker_engine_sm / listener_engine_sm (audio pipelines)\n");
+}
+
+void print_ptp_config(statusbar::ptpclient::PtpAppConfig const& ptp_app)
+{
+    std::string config_summary;
+    statusbar::ptpclient::format_ptp_config_to(std::back_inserter(config_summary), ptp_app, "\nPTP Configuration");
+    std::print("{}\n", config_summary);
+}
+
+/// The configuration, after PTP setup so a fallback is reflected, and the components.
+void print_startup(Demo& demo, Config const& config)
+{
+    print_entity_info(demo.components().entity_model.get_entity(), config.interface_name, config.ptp_app);
+    print_ptp_config(config.ptp_app);
+    demo.components().print_info();
+    demo.net_handlers.print_status();
+    print_state_machines();
+}
+
+/// Notify the state machine (a simulated link down), stop ADP and print the final status.
+void shut_down_and_report(Demo& demo, MainLoopResult const& loop_result)
+{
+    std::print("\n\nShutting down...\n");
+    auto stop_time = statusbar::sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    demo.supervised.on_link_down(stop_time);
+    (void)demo.components().adp_advertiser.stop(stop_time);  // sends Entity Departing
+    std::print("ADP: Sent Entity Departing\n");
+    print_final_status(
+        demo.components(),
+        demo.supervised,
+        demo.net_handlers.atdecc_handler().tick_count(),
+        loop_result.wake_stats,
+        loop_result.compensation_ns,
+        loop_result.recovery_count,
+        loop_result.missed_cycles);
+}
+
+/// Run the loops until Ctrl-C, then shut down; returns the exit code.
+[[nodiscard]] auto run(Demo& demo, Config const& config, statusbar::ptpclient::PtpAppContext& ctx) -> int
+{
+    print_startup(demo, config);
+    std::print("\nStarting loops (Ctrl-C to stop)...\n\n");
+    auto const loop_result = run_main_loop(demo.reactor, ctx, demo.ptp_wake_count, demo.supervised, demo.net_handlers);
+    shut_down_and_report(demo, loop_result);
+    return loop_result.exit_code;
+}
+
 }  // namespace
 
 //
@@ -870,143 +1017,14 @@ void print_final_status(
 
 auto main(int argc, char** argv) -> int
 {
-    using TimePoint = statusbar::sm::TimePoint;
-    using namespace statusbar::ptpclient;
-
-    // Build config and specs with bindings
     Config config;
-    auto specs = build_arg_specs(config);
-
-    // Parse CLI arguments, handle --completion, --help, --config-load, --config-save, apply bindings
-    auto cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage);
-    if (!cli_result) {
-        return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
+    if (auto const exit_code = parse_config(argc, argv, config)) {
+        return *exit_code;
     }
-
-    if (config.interface_name.empty()) {
-        std::println(stderr, "Error: --interface=<iface> is required");
-        print_usage(argv[0], specs);
-        return EXIT_FAILURE;
-    }
-
-    // Create all NanoAVB components. NanoAvbComponents is non-movable, so it
-    // lives on the heap (owned here); `components` is a reference alias so the
-    // rest of main reads naturally.
-    auto components_owner = create_nanoavb_components();
-    auto& components = *components_owner;
-    auto const& entity = components.entity_model.get_entity();
-
-    // Create network handlers
-    statusbar::nanoavb::NanoAvbNetHandlers net_handlers{config.interface_name, components};
-    net_handlers.print_warnings(config.interface_name);
-
-    // Wire up all callbacks between components and network handlers
-    statusbar::nanoavb::setup_nanoavb_callbacks(components, net_handlers);
-
-    // Create supervised state machine controller
-    SupervisedNanoAvb supervised;
-    supervised.wire_callbacks(components, net_handlers);
-
-    // Create message reactor with shutdown flag and monotonic clock
-    statusbar::itc::StopToken shutdown_flag{};
-    statusbar::net::MessageReactor reactor{shutdown_flag, statusbar::net::monotonic_ns, 10};
-
-    // Add network handlers to reactor
-    net_handlers.add_to_reactor(reactor);
-
-    // Set up signal handlers for clean shutdown
-    statusbar::realtime::setup_shutdown_signal_handlers();
-
-    // Counter for PTP wakes
-    statusbar::itc::TelemetryCounter<int64_t> ptp_wake_count{};
-
-    // Wire up PTP wake counter to ATDECC handler for status display
-    net_handlers.atdecc_handler().set_ptp_wake_counter(&ptp_wake_count);
-
-    // Wire up gPTP announce callback to notify supervised state machine
-    auto original_gm_callback = net_handlers.gptp_handler().grandmaster_identity();
-    net_handlers.gptp_handler().set_callbacks(statusbar::nanoavb::GptpAnnounceCallbacks{
-        .grandmaster_id_changed = [&components, &supervised](
-                                      int64_t now_ns,
-                                      statusbar::gptp::ClockIdentity const& grandmaster_id,
-                                      statusbar::gptp::AnnounceMessage const& announce) {
-            // Print notification
-            std::string gm_str;
-            statusbar::gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-            std::print(
-                "gPTP: Grandmaster changed to {} (priority1={}, priority2={}, steps={})\n",
-                gm_str,
-                announce.grandmaster_priority1.get(),
-                announce.grandmaster_priority2.get(),
-                announce.steps_removed.get());
-
-            // Update ADP advertiser with new grandmaster info
-            components.adp_advertiser.set_gptp_info(grandmaster_id, 0);
-            components.adp_advertiser.notify_entity_changed();
-
-            // Notify state machine
-            auto const sm_now = TimePoint{std::chrono::nanoseconds{now_ns}};
-            supervised.on_gptp_announce(sm_now, true);
-        }});
-
-    // Setup PTP application with automatic fallback to system clock if needed
-    auto is_shutdown = [] { return statusbar::realtime::is_shutdown_requested(); };
-    auto ctx_result = setup_ptp_app_with_fallback(config.ptp_app, is_shutdown);
-
+    Demo demo{config};
+    auto ctx_result = setup_ptp(config.ptp_app);
     if (!ctx_result) {
-        if (statusbar::realtime::is_shutdown_requested()) {
-            std::print("Shutdown requested during setup\n");
-            return EXIT_SUCCESS;
-        }
-        std::print(stderr, "Error: Failed to setup PTP: {}\n", ctx_result.error().message());
-        return EXIT_FAILURE;
+        return ptp_setup_failed(ctx_result.error());
     }
-
-    auto& ctx = *ctx_result;
-
-    // Print configuration (after PTP setup so fallback is reflected)
-    print_entity_info(entity, config.interface_name, config.ptp_app);
-
-    // Print PTP configuration
-    std::string config_summary;
-    format_ptp_config_to(std::back_inserter(config_summary), config.ptp_app, "\nPTP Configuration");
-    std::print("{}\n", config_summary);
-
-    components.print_info();
-    net_handlers.print_status();
-
-    std::print("\nState machines initialized:\n");
-    std::print("  - supervisor_sm (coordinates protocol lifecycle)\n");
-    std::print("  - gptp_sm (gPTP synchronization)\n");
-    std::print("  - mvrp_sm (VLAN registration)\n");
-    std::print("  - msrp_talker_sm / msrp_listener_sm (stream reservation)\n");
-    std::print("  - talker_engine_sm / listener_engine_sm (audio pipelines)\n");
-
-    std::print("\nStarting loops (Ctrl-C to stop)...\n\n");
-
-    // Run main loop with PTP timer and state machine integration
-    auto loop_result = run_main_loop(reactor, ctx, ptp_wake_count, supervised, net_handlers);
-
-    // Clean shutdown
-    std::print("\n\nShutting down...\n");
-
-    // Notify state machine of shutdown (simulated link down)
-    auto stop_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    supervised.on_link_down(stop_time);
-
-    // Stop ADP advertising (sends Entity Departing)
-    (void)components.adp_advertiser.stop(stop_time);
-    std::print("ADP: Sent Entity Departing\n");
-
-    // Print final status including wake statistics and state machine states
-    print_final_status(
-        components,
-        supervised,
-        net_handlers.atdecc_handler().tick_count(),
-        loop_result.wake_stats,
-        loop_result.compensation_ns,
-        loop_result.recovery_count,
-        loop_result.missed_cycles);
-
-    return loop_result.exit_code;
+    return run(demo, config, *ctx_result);
 }

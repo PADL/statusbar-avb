@@ -379,12 +379,18 @@ class AvbEntityHost
     // AVB_INTERFACE / GET_AVB_INFO plumbing (see mirror_avb_info_from).
     void wire_avb_info();
     void attach_mirror(net::MessageReactor& reactor);
+    /// Close the local ATDECC port, the network handlers and the AVB info mirror.
+    void close_ports();
     void apply_interface_runtime();
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();
     void wire_supervisor_callbacks();
+    /// Stop the talker (with @p talker_event) and listener engines and close their gates.
+    void close_stream_gates(TimePoint time, nanoavb::talker_engine_sm::Def::Event talker_event);
+    /// Reset the MVRP and MSRP state machines.
+    void reset_srp();
     void wire_gptp_callbacks();
     void wire_mvrp_callbacks();
     /// Class A VID changes (adopted MSRP Domain / link-up reset): MVRP, ACMP

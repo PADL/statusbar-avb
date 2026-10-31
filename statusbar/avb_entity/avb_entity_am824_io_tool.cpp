@@ -52,6 +52,7 @@
 #include <print>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -260,245 +261,296 @@ struct MainLoopResult
 // Main Loop with PTP Timer
 //
 
-MainLoopResult run_main_loop(
-    net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, avb_entity::AvbEntityAm824IO& entity, Config const& config)
+/// What the optional RT RX timer publishes for the control loop.
+struct RxTimerTelemetry
 {
-    MainLoopResult result;
-    result.compensation_ns = ctx.compensation_ns;
-
-    // Packet rate timer period: 6 samples @ 48 kHz = 125 µs
-    constexpr int64_t PACKET_PERIOD_NS = 125'000;
-
-    // Track gPTP announce status
-    auto* net_handlers = entity.net_handlers();
-    bool had_grandmaster = net_handlers != nullptr ? net_handlers->gptp_handler().has_grandmaster() : false;
-
-    // The media-timer callback runs on a SCHED_FIFO RT thread, so it must NOT
-    // std::print (alloc/throw/block) — it publishes to these lock-free itc
-    // channels and the control loop below surfaces them off-thread.
-    itc::TelemetryCounter<int64_t> timer_error_count;
-    itc::Published<int64_t> last_wake_count;
+    itc::TelemetryCounter<int64_t> errors;
+    itc::TelemetryCounter<uint64_t> frames_drained;
     itc::Published<int64_t> last_wake_error_ns;
+    itc::Published<int64_t> last_batch;
+};
 
-    // Create PTP timer for realtime audio packet handling
-    auto timer = ptpclient::make_ptp_timer(
+/// Everything the RT timers publish (they must NOT std::print: alloc/throw/block).
+struct ToolTelemetry
+{
+    avb_entity::MediaTimerTelemetry media{};
+    RxTimerTelemetry rx{};
+};
+
+/// The control loop's watch on the entity (main thread only).
+struct ToolWatch
+{
+    std::string_view last_state;
+    std::chrono::steady_clock::time_point last_state_change{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point last_telemetry{std::chrono::steady_clock::now()};
+    bool had_grandmaster{false};
+};
+
+/// The PTP media timer: process_audio (DSP and packet handling) every 125 us, 6 samples at 48 kHz.
+auto make_media_timer(ptpclient::PtpAppContext& ctx, avb_entity::AvbEntityAm824IO& entity, avb_entity::MediaTimerTelemetry& media)
+{
+    constexpr int64_t PACKET_PERIOD_NS = 125'000;
+    return ptpclient::make_ptp_timer(
         *ctx.bridge,
         PACKET_PERIOD_NS,
-        [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
+        [&entity, &media](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
             if (!wake_info) {
-                timer_error_count.add(1);
+                media.errors.add(1);
                 return;
             }
-
-            auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
-
-            // Process audio (DSP and packet handling)
-            entity.process_audio(now);
-
-            last_wake_count.publish(wake_info->wake_count);
-            last_wake_error_ns.publish(wake_info->error_ns);
+            entity.process_audio(TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}});
+            media.wake_count.publish(wake_info->wake_count);
+            media.wake_error_ns.publish(wake_info->error_ns);
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
         ctx.cpu_affinity);
+}
 
-    // Start PTP timer
-    auto start_result = timer.start();
-    if (!start_result) {
-        std::print(stderr, "Error: Failed to start timer: {}\n", start_result.error().message());
-        result.exit_code = EXIT_FAILURE;
-        return result;
-    }
-
-    // ---- Optional dedicated RT RX timer (stream_rx.rt_timer) -------------------
-    // Drain AM824 on its own SCHED_FIFO core so the reactor/control-plane can't delay
-    // RX (which otherwise batch-tallies queued frames against a now-later clock and
-    // reads as spurious LATE_TIMESTAMP). Stats mirror the media timer.
-    itc::TelemetryCounter<int64_t> rx_timer_error_count;
-    itc::TelemetryCounter<uint64_t> rx_frames_drained;
-    itc::Published<int64_t> rx_last_wake_error_ns;
-    itc::Published<int64_t> rx_last_batch;
-
+/// The optional dedicated RT RX timer (stream_rx.rt_timer) drains AM824 on its own SCHED_FIFO
+/// core, so the reactor cannot delay RX (which otherwise batch-tallies queued frames against a
+/// now-later clock and reads as spurious LATE_TIMESTAMP). Stats mirror the media timer.
+auto make_rx_timer(ptpclient::PtpAppContext& ctx, avb_entity::AvbEntityAm824IO& entity, Config const& config, RxTimerTelemetry& rx)
+{
     int64_t const RX_PERIOD_NS = static_cast<int64_t>(config.entity.stream_rx_period_us) * 1'000;
-    auto rx_timer = ptpclient::make_ptp_timer(
+    return ptpclient::make_ptp_timer(
         *ctx.bridge,
         RX_PERIOD_NS,
-        [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
+        [&entity, &rx](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
             if (!wake_info) {
-                rx_timer_error_count.add(1);
+                rx.errors.add(1);
                 return;
             }
             size_t const n = entity.drain_stream_rx(wake_info->actual_time_ns);
-            rx_frames_drained.add(n);
-            rx_last_batch.publish(static_cast<int64_t>(n));
-            rx_last_wake_error_ns.publish(wake_info->error_ns);
+            rx.frames_drained.add(n);
+            rx.last_batch.publish(static_cast<int64_t>(n));
+            rx.last_wake_error_ns.publish(wake_info->error_ns);
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
         config.entity.stream_rx_cpu_affinity);
+}
 
-    if (config.entity.stream_rx_rt_timer) {
-        rx_timer.set_thread_name("stream-rx");
-        if (auto const rs = rx_timer.start(); !rs) {
-            std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
-        } else {
-            std::print(
-                "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick\n",
-                config.entity.stream_rx_cpu_affinity,
-                config.entity.stream_rx_period_us);
-        }
+/// Start the RX timer when configured; on failure RX stays on the reactor.
+template <typename Timer>
+void start_rx_timer(Timer& rx_timer, Config const& config)
+{
+    if (!config.entity.stream_rx_rt_timer) {
+        return;
     }
-
-    // Simulate link up on startup
-    auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.on_link_up(startup_time);
-
-    // Watchdog timeout configuration (gPTP lock only; there is no VLAN gate).
-    constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
-    auto last_state_change_time = std::chrono::steady_clock::now();
-    auto last_state = entity.state_string();
-    auto last_telemetry_time = std::chrono::steady_clock::now();
-
-    // Wire up gPTP announce callback to update ADP advertiser
-    if (net_handlers != nullptr) {
-        net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
-            .grandmaster_id_changed =
-                [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
-                    std::string gm_str;
-                    gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-                    std::print(
-                        "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
-                        gm_str,
-                        announce.grandmaster_priority1.get(),
-                        announce.grandmaster_priority2.get());
-
-                    // Update ADP advertiser with new grandmaster info
-                    entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                    entity.components().adp_advertiser.notify_entity_changed();
-
-                    // Notify entity state machine
-                    (void)now_ns;
-                    auto const sm_now = std::chrono::steady_clock::now();
-                    entity.on_gptp_announce(sm_now, true);
-                }});
-    }
-
-    // Poll reactor for network I/O until shutdown
-    // Drain the entity's SPSC log channels (ctl = reactor thread, media = RT
-    // media timer) here on the main thread — the entities/libraries only ever
-    // enqueue; formatting and stderr I/O happen in this loop.
-    logging::LogCollector<4> log_collector;
-    logging::StderrSink log_sink;
-    (void)log_collector.add(entity.ctl_log_channel());
-    (void)log_collector.add(entity.media_log_channel());
-    entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
-
-    while (!realtime::is_shutdown_requested()) {
-        (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
-
-        // Check for state changes to reset watchdog
-        auto const current_state = entity.state_string();
-        if (current_state != last_state) {
-            if (config.verbose) {
-                std::print("State: {} -> {}\n", last_state, current_state);
-            }
-            last_state_change_time = std::chrono::steady_clock::now();
-            last_state = current_state;
-        }
-
-        // Check for watchdog timeout in waiting states
-        auto const now = std::chrono::steady_clock::now();
-        auto const time_in_state = now - last_state_change_time;
-        auto const sm_now = TimePoint{now.time_since_epoch()};
-
-        // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
-        // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
-        // SM/MSRP stack is only ever driven from one thread. First-acquire is
-        // also handled promptly by the grandmaster_id_changed reactor callback;
-        // this poll additionally covers GM regained with an unchanged identity.
-        if (net_handlers != nullptr) {
-            bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
-            if (has_gm && !had_grandmaster) {
-                entity.on_gptp_announce(sm_now, has_gm);
-            }
-            had_grandmaster = has_gm;
-        }
-
-        if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
-            entity.on_timeout(sm_now);
-            last_state_change_time = now;
-        }
-
-        // Periodic PTP-bridge / timer telemetry on the main thread, so it keeps
-        // reporting even when the media timer stalls (that's the diagnostic
-        // point). stderr is unbuffered → visible immediately under systemd/nohup.
-        if (config.verbose && ctx.bridge && now - last_telemetry_time >= std::chrono::seconds(1)) {
-            last_telemetry_time = now;
-            auto const bt = ctx.bridge->telemetry();
-            std::print(
-                stderr,
-                "[bridge] healthy={} epoch={} samp={} rms={}ns bracket(min/mean/max)={}/{}/{}ns "
-                "reject={} step={} last_step_resid={}ns overruns={} | timer recovery={} missed={}\n",
-                bt.healthy,
-                bt.epoch,
-                bt.sample_count,
-                bt.rms_residual_ns,
-                bt.bracket_min_ns,
-                bt.bracket_mean_ns,
-                bt.bracket_max_ns,
-                bt.reject_count,
-                bt.step_count,
-                bt.last_step_residual_ns,
-                bt.regression_overruns,
-                timer.recovery_count(),
-                timer.missed_cycles());
-            std::print(
-                stderr,
-                "[media] wake={} err={:+}ns state={} timer_errors={}\n",
-                last_wake_count.load(),
-                last_wake_error_ns.load(),
-                entity.state_string(),
-                timer_error_count.load());
-            if (config.entity.stream_rx_rt_timer) {
-                std::print(
-                    stderr,
-                    "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
-                    rx_last_wake_error_ns.load(),
-                    rx_last_batch.load(),
-                    rx_frames_drained.load(),
-                    rx_timer.recovery_count(),
-                    rx_timer.missed_cycles(),
-                    rx_timer_error_count.load());
-            }
-        }
-    }
-
-    if (config.entity.stream_rx_rt_timer) {
-        rx_timer.stop();
+    rx_timer.set_thread_name("stream-rx");
+    if (auto const rs = rx_timer.start(); !rs) {
+        std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
+    } else {
         std::print(
-            stderr,
-            "[rx-timer] final: frames_drained={} wake_errors={} recovery={} missed={}\n",
-            rx_frames_drained.load(),
-            rx_timer_error_count.load(),
-            rx_timer.recovery_count(),
-            rx_timer.missed_cycles());
+            "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick\n",
+            config.entity.stream_rx_cpu_affinity,
+            config.entity.stream_rx_period_us);
     }
+}
 
-    // Final drain: flush log entries produced during shutdown.
-    (void)log_collector.poll(log_sink);
+/// Stop the RX timer, if it ran, and report its totals.
+template <typename Timer>
+void stop_rx_timer(Timer& rx_timer, Config const& config, RxTimerTelemetry const& rx)
+{
+    if (!config.entity.stream_rx_rt_timer) {
+        return;
+    }
+    rx_timer.stop();
+    std::print(
+        stderr,
+        "[rx-timer] final: frames_drained={} wake_errors={} recovery={} missed={}\n",
+        rx.frames_drained.load(),
+        rx.errors.load(),
+        rx_timer.recovery_count(),
+        rx_timer.missed_cycles());
+}
 
-    // Stop timer and capture statistics
+/// Note a state change: it resets the watchdog.
+void observe_state(ToolWatch& watch, avb_entity::AvbEntityAm824IO const& entity, bool const verbose)
+{
+    auto const current_state = entity.state_string();
+    if (current_state == watch.last_state) {
+        return;
+    }
+    if (verbose) {
+        std::print("State: {} -> {}\n", watch.last_state, current_state);
+    }
+    watch.last_state_change = std::chrono::steady_clock::now();
+    watch.last_state = current_state;
+}
+
+/// Grandmaster edge-detect, then the watchdog (gPTP lock only; there is no VLAN gate).
+void supervise(ToolWatch& watch, avb_entity::AvbEntityAm824IO& entity, std::chrono::steady_clock::time_point const now)
+{
+    constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
+    auto const sm_now = TimePoint{now.time_since_epoch()};
+    avb_entity::detect_grandmaster_edge(entity, watch.had_grandmaster, sm_now);
+    if (watch.last_state == "Init" && now - watch.last_state_change > GPTP_LOCK_TIMEOUT) {
+        entity.on_timeout(sm_now);
+        watch.last_state_change = now;
+    }
+}
+
+/// Report the RX timer's counters (when it runs).
+template <typename Timer>
+void report_rx_timer(Timer const& rx_timer, Config const& config, RxTimerTelemetry const& rx)
+{
+    if (!config.entity.stream_rx_rt_timer) {
+        return;
+    }
+    std::print(
+        stderr,
+        "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
+        rx.last_wake_error_ns.load(),
+        rx.last_batch.load(),
+        rx.frames_drained.load(),
+        rx_timer.recovery_count(),
+        rx_timer.missed_cycles(),
+        rx.errors.load());
+}
+
+/// Once a second: PTP-bridge and timer telemetry on the main thread, so it keeps reporting
+/// even when the media timer stalls (the diagnostic point). stderr is unbuffered.
+template <typename Timer, typename RxTimer>
+void report_telemetry(
+    ToolWatch& watch,
+    std::chrono::steady_clock::time_point const now,
+    ptpclient::PtpAppContext& ctx,
+    Timer const& timer,
+    RxTimer const& rx_timer,
+    ToolTelemetry const& telemetry,
+    Config const& config)
+{
+    if (!ctx.bridge || now - watch.last_telemetry < std::chrono::seconds(1)) {
+        return;
+    }
+    watch.last_telemetry = now;
+    auto const bt = ctx.bridge->telemetry();
+    std::print(
+        stderr,
+        "[bridge] healthy={} epoch={} samp={} rms={}ns bracket(min/mean/max)={}/{}/{}ns "
+        "reject={} step={} last_step_resid={}ns overruns={} | timer recovery={} missed={}\n",
+        bt.healthy,
+        bt.epoch,
+        bt.sample_count,
+        bt.rms_residual_ns,
+        bt.bracket_min_ns,
+        bt.bracket_mean_ns,
+        bt.bracket_max_ns,
+        bt.reject_count,
+        bt.step_count,
+        bt.last_step_residual_ns,
+        bt.regression_overruns,
+        timer.recovery_count(),
+        timer.missed_cycles());
+    std::print(
+        stderr,
+        "[media] wake={} err={:+}ns state={} timer_errors={}\n",
+        telemetry.media.wake_count.load(),
+        telemetry.media.wake_error_ns.load(),
+        watch.last_state,
+        telemetry.media.errors.load());
+    report_rx_timer(rx_timer, config, telemetry.rx);
+}
+
+/// Whether the entity has a grandmaster now (false without network handlers).
+[[nodiscard]] auto had_grandmaster(avb_entity::AvbEntityAm824IO& entity) -> bool
+{
+    auto* const net_handlers = entity.net_handlers();
+    return net_handlers != nullptr && net_handlers->gptp_handler().has_grandmaster();
+}
+
+/// One pass of the control loop: logs, reactor, state, watchdog and (verbose) telemetry.
+template <typename Timer, typename RxTimer>
+void poll_once(
+    ToolWatch& watch,
+    net::MessageReactor& reactor,
+    ptpclient::PtpAppContext& ctx,
+    avb_entity::AvbEntityAm824IO& entity,
+    Config const& config,
+    Timer const& timer,
+    RxTimer const& rx_timer,
+    ToolTelemetry const& telemetry,
+    avb_entity::LogDrain& logs)
+{
+    logs.poll();
+    (void)reactor.poll_once(100);
+    observe_state(watch, entity, config.verbose);
+    auto const now = std::chrono::steady_clock::now();
+    supervise(watch, entity, now);
+    if (config.verbose) {
+        report_telemetry(watch, now, ctx, timer, rx_timer, telemetry, config);
+    }
+}
+
+/// Poll the logs and the reactor until shutdown is requested, then stop the RX timer and
+/// drain the logs once more.
+template <typename Timer, typename RxTimer>
+void run_control_loop(
+    net::MessageReactor& reactor,
+    ptpclient::PtpAppContext& ctx,
+    avb_entity::AvbEntityAm824IO& entity,
+    Config const& config,
+    Timer const& timer,
+    RxTimer& rx_timer,
+    ToolTelemetry const& telemetry)
+{
+    ToolWatch watch{.last_state = entity.state_string(), .had_grandmaster = had_grandmaster(entity)};
+    avb_entity::LogDrain logs;
+    avb_entity::attach_log_channels(logs, entity, config.verbose);
+    while (!realtime::is_shutdown_requested()) {
+        poll_once(watch, reactor, ctx, entity, config, timer, rx_timer, telemetry, logs);
+    }
+    stop_rx_timer(rx_timer, config, telemetry.rx);
+    logs.poll();  // flush log entries produced during shutdown
+}
+
+/// Run the RX timer, the simulated link-up and the grandmaster announce around the control loop.
+template <typename Timer>
+void run_with_rx_timer(
+    net::MessageReactor& reactor,
+    ptpclient::PtpAppContext& ctx,
+    avb_entity::AvbEntityAm824IO& entity,
+    Config const& config,
+    Timer const& timer,
+    ToolTelemetry& telemetry)
+{
+    auto rx_timer = make_rx_timer(ctx, entity, config, telemetry.rx);
+    start_rx_timer(rx_timer, config);
+    entity.on_link_up(TimePoint{std::chrono::steady_clock::now().time_since_epoch()});  // simulated
+    avb_entity::wire_grandmaster_announce(entity);
+    run_control_loop(reactor, ctx, entity, config, timer, rx_timer, telemetry);
+}
+
+/// Stop the media timer and PTP sampling and collect the timer's statistics.
+template <typename Timer>
+auto stop_media_timer(Timer& timer, avb_entity::MediaTimerTelemetry const& media, ptpclient::PtpAppContext& ctx) -> MainLoopResult
+{
     timer.stop();
-    if (auto const errs = timer_error_count.load(); errs > 0) {
+    if (auto const errs = media.errors.load(); errs > 0) {
         std::print(stderr, "Warning: media timer had {} wake error(s) (likely gPTP sync loss)\n", errs);
     }
-    result.wake_stats = timer.stats();
-    result.recovery_count = timer.recovery_count();
-    result.missed_cycles = timer.missed_cycles();
+    MainLoopResult result{
+        .wake_stats = timer.stats(),
+        .compensation_ns = ctx.compensation_ns,
+        .recovery_count = timer.recovery_count(),
+        .missed_cycles = timer.missed_cycles()};
     ctx.guard.stop();
-
     return result;
+}
+
+MainLoopResult run_main_loop(
+    net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, avb_entity::AvbEntityAm824IO& entity, Config const& config)
+{
+    ToolTelemetry telemetry{};
+    auto timer = make_media_timer(ctx, entity, telemetry.media);
+    if (auto const started = timer.start(); !started) {
+        std::print(stderr, "Error: Failed to start timer: {}\n", started.error().message());
+        return MainLoopResult{.exit_code = EXIT_FAILURE, .compensation_ns = ctx.compensation_ns};
+    }
+    run_with_rx_timer(reactor, ctx, entity, config, timer, telemetry);
+    return stop_media_timer(timer, telemetry.media, ctx);
 }
 
 //

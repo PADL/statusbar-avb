@@ -214,6 +214,10 @@ class AtdeccNetHandler : public net::Pollable
   private:
     /// @p local: from a local controller (see attach_local_port).
     void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, bool local = false);
+    /// An ADPDU's way through the entity: the advertiser, discovery and the ACMP listener.
+    void dispatch_adp(atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint now, bool local);
+    /// Hand @p adp to the ADP advertiser (a local controller's discover is answered locally).
+    void advertiser_receive(atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint now, bool local);
     void log_status();
 
     net::RawnetContext context_{};

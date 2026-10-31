@@ -311,6 +311,46 @@ void AtdeccNetHandler::log_status()
         listener_connections);
 }
 
+void AtdeccNetHandler::advertiser_receive(
+    atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint const now, bool const local)
+{
+    // A local controller's ENTITY_DISCOVER is answered to it alone:
+    // its discovery is no reason to advertise on the network (or to
+    // the other local controllers) every few seconds.
+    if (local) {
+        local_reply_to_ = src_mac;
+    }
+    adp_advertiser_.receive_adpdu(adp, now);
+    local_reply_to_.reset();
+    // The local socket does not depend on the network: with the
+    // advertiser stopped (link down), a local discover is still
+    // answered with the entity's ADPDU.
+    if (local && local_port_ != nullptr && adp.is_entity_discover() && adp_advertiser_.state() != AdpAdvertiserState::Advertising &&
+        (adp.entity_id == Eui64{} || adp.entity_id == adp_advertiser_.adpdu().entity_id)) {
+        (void)local_port_->send(src_mac, as_bytes(adp_advertiser_.adpdu()));
+    }
+}
+
+void AtdeccNetHandler::dispatch_adp(atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint const now, bool const local)
+{
+    advertiser_receive(adp, src_mac, now, local);
+    if (adp_discovery_ != nullptr) {
+        adp_discovery_->receive_adpdu(adp, src_mac, now);
+    }
+    // The Milan listener's per-sink talker discovery (Section 5.6.4)
+    // compares the talker's gPTP grandmaster and domain with ours.
+    acmp_listener_.receive_adpdu(
+        adp, adp_advertiser_.adpdu().gptp_grandmaster_id, adp_advertiser_.adpdu().gptp_domain_number.get(), now);
+    // A departing talker tears down the sinks still connected to it: ACMP clears a sink only
+    // on a controller's DISCONNECT_RX, so it would otherwise stay connected (and hold its SRP
+    // reservation) forever.
+    if (adp.is_entity_departing()) {
+        (void)acmp_listener_.on_talker_departed(adp.entity_id);
+        // A departing controller's unsolicited registration is now stale.
+        (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
+    }
+}
+
 void AtdeccNetHandler::dispatch_frame(
     int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, bool const local)
 {
@@ -335,38 +375,7 @@ void AtdeccNetHandler::dispatch_frame(
             }
             AdpDu adp{};
             span_load(adp, payload);
-            // A local controller's ENTITY_DISCOVER is answered to it alone:
-            // its discovery is no reason to advertise on the network (or to
-            // the other local controllers) every few seconds.
-            if (local) {
-                local_reply_to_ = src_mac;
-            }
-            adp_advertiser_.receive_adpdu(adp, sm_now);
-            local_reply_to_.reset();
-            // The local socket does not depend on the network: with the
-            // advertiser stopped (link down), a local discover is still
-            // answered with the entity's ADPDU.
-            if (local && local_port_ != nullptr && adp.is_entity_discover() &&
-                adp_advertiser_.state() != AdpAdvertiserState::Advertising &&
-                (adp.entity_id == Eui64{} || adp.entity_id == adp_advertiser_.adpdu().entity_id)) {
-                (void)local_port_->send(src_mac, as_bytes(adp_advertiser_.adpdu()));
-            }
-            if (adp_discovery_ != nullptr) {
-                adp_discovery_->receive_adpdu(adp, src_mac, sm_now);
-            }
-            // The Milan listener's per-sink talker discovery (Section 5.6.4)
-            // compares the talker's gPTP grandmaster and domain with ours.
-            acmp_listener_.receive_adpdu(
-                adp, adp_advertiser_.adpdu().gptp_grandmaster_id, adp_advertiser_.adpdu().gptp_domain_number.get(), sm_now);
-            // A talker announcing ENTITY_DEPARTING must tear down any listener sink
-            // still connected to it: ACMP alone only clears a sink on an explicit
-            // controller DISCONNECT_RX, so otherwise the sink would report connected
-            // (and hold its SRP reservation) forever after the talker left.
-            if (adp.is_entity_departing()) {
-                (void)acmp_listener_.on_talker_departed(adp.entity_id);
-                // A departing controller's unsolicited registration is now stale.
-                (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
-            }
+            dispatch_adp(adp, src_mac, sm_now, local);
             break;
         }
 
@@ -683,7 +692,10 @@ void NanoAvbNetHandlers::print_warnings(std::string_view interface_name) const
     }
 }
 
-void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
+namespace {
+
+/// ADP and ACMP transmit to the ATDECC multicast address.
+void wire_adp_acmp(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
 {
     // ADP: send Entity Available/Departing to multicast
     components.adp_advertiser.set_callbacks(AdpAdvertiserCallbacks{.send_adpdu = [&handlers](atdecc::AdpDu const& adpdu) -> bool {
@@ -714,7 +726,11 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
             std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
             return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
         }});
+}
 
+/// AECP responses go unicast to the controller.
+void wire_aecp(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
+{
     // AECP AEM: send responses unicast to controller (unlike ADP/ACMP which use
     // multicast). Field setter, NOT set_callbacks: replacing the whole struct
     // would wipe callbacks installed before start (identify_changed,
@@ -735,7 +751,11 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // command (e.g. an IDENTIFY button pressed at startup). process_packet keeps it
     // current thereafter.
     components.aem_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
+}
 
+/// MVRP and MSRP transmit to their multicast addresses.
+void wire_srp(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
+{
     // MVRP: send packets to multicast
     components.mvrp_handler.set_callbacks(MvrpCallbacks{.send_packet = [&handlers](std::span<uint8_t const> packet) -> bool {
         auto& mvrp = handlers.mvrp_handler();
@@ -753,14 +773,16 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
         }
         return msrp.send(MSRP_MULTICAST_MAC, packet).has_value();
     }});
+}
 
+/// A grandmaster change updates ADP and notifies GET_AVB_INFO subscribers.
+void wire_gptp_announce(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
+{
     // gPTP Announce: notify when grandmaster changes
     handlers.gptp_handler().set_callbacks(GptpAnnounceCallbacks{
         .grandmaster_id_changed =
             [&components](
-                int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) -> void {
-            (void)now_ns;
-
+                int64_t /*now_ns*/, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) -> void {
             // Print notification
             std::string gm_str;
             gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
@@ -783,6 +805,16 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
             // entity wires get_avb_info).
             (void)components.aem_handler.notify_avb_info_changed(0);
         }});
+}
+
+}  // namespace
+
+void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
+{
+    wire_adp_acmp(components, handlers);
+    wire_aecp(components, handlers);
+    wire_srp(components, handlers);
+    wire_gptp_announce(components, handlers);
 }
 
 }  // namespace statusbar::nanoavb
