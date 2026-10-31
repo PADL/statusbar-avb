@@ -171,15 +171,20 @@ auto AvbEntityHost::stop_control_plane(TimePoint const now) -> Status
         return failure(std::make_error_code(std::errc::not_connected));
     }
     (void)components_.adp_advertiser.stop(now);
+    close_ports();
+    reactor_ = nullptr;
+    running_ = false;
+    return success();
+}
+
+void AvbEntityHost::close_ports()
+{
     net_handlers_->close_local_port();
     net_handlers_.reset();
     if (mirror_ != nullptr) {
         mirror_->mirror().set_on_update({});
         mirror_ = nullptr;
     }
-    reactor_ = nullptr;
-    running_ = false;
-    return success();
 }
 
 //
@@ -668,32 +673,37 @@ void AvbEntityHost::wire_supervisor_callbacks()
     };
 
     supervisor_ctx_.callbacks.degrade_stop_streams = [this](auto& /*ctx*/, TimePoint time) -> void {
-        talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::GateStop, time);
-        listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
-        talker_engine_ctx_.send_allowed = false;
-        listener_engine_ctx_.play_allowed = false;
+        close_stream_gates(time, nanoavb::talker_engine_sm::Def::Event::GateStop);
         msrp_talker_.handle_event(msrp_talker_ctx_, nanoavb::msrp_talker_sm::Def::Event::StopAdvertise, time);
-        mvrp_.reset();
-        msrp_talker_.reset();
-        msrp_listener_.reset();
+        reset_srp();
     };
 
     supervisor_ctx_.callbacks.stop_all = [this](auto& /*ctx*/, TimePoint time) -> void {
         (void)components_.adp_advertiser.stop(time);
         note_media_clock_locked(false);  // the gPTP reset below drops the lock
-        talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::Fatal, time);
-        listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
+        close_stream_gates(time, nanoavb::talker_engine_sm::Def::Event::Fatal);
         gptp_.reset();
-        mvrp_.reset();
-        msrp_talker_.reset();
-        msrp_listener_.reset();
-        talker_engine_ctx_.send_allowed = false;
-        listener_engine_ctx_.play_allowed = false;
+        reset_srp();
     };
 
     supervisor_ctx_.callbacks.timeout_gptp = [log = ctl_log()](auto& /*ctx*/, TimePoint /*time*/) mutable -> void {
         log.warning("supervisor: gPTP lock timeout");
     };
+}
+
+void AvbEntityHost::close_stream_gates(TimePoint const time, nanoavb::talker_engine_sm::Def::Event const talker_event)
+{
+    talker_engine_.handle_event(talker_engine_ctx_, talker_event, time);
+    listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
+    talker_engine_ctx_.send_allowed = false;
+    listener_engine_ctx_.play_allowed = false;
+}
+
+void AvbEntityHost::reset_srp()
+{
+    mvrp_.reset();
+    msrp_talker_.reset();
+    msrp_listener_.reset();
 }
 
 void AvbEntityHost::wire_gptp_callbacks()
