@@ -10,7 +10,7 @@
 
 // Model fingerprints: a hash over the descriptor bytes
 // in canonical order with the per-unit volatile fields zeroed first —
-// entity_id, entity_name, group_name, current_configuration,
+// entity_id, entity_name, group_name, serial_number, current_configuration,
 // association_id (plus available_index, equally volatile), and
 // AVB_INTERFACE's MAC address, interface_flags (link state), and
 // clock_identity (MAC-derived). Miss any of those and every physical unit
