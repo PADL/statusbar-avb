@@ -29,12 +29,13 @@ std::vector<std::uint8_t> canonical_bytes(AemRawDescriptor const& d)
 {
     using namespace statusbar::atdecc::aem;
     std::vector<std::uint8_t> bytes = d.bytes;
-    if (d.descriptor_type == DESCRIPTOR_ENTITY) {
+    if (d.descriptor_type == DESCRIPTOR_ENTITY) {  // NOLINT(statusbar-block-statements): the per-unit fields, a reset
         zero_range(bytes, offsetof(DescriptorEntity, entity_id), 8);
         zero_range(bytes, offsetof(DescriptorEntity, available_index), 4);
         zero_range(bytes, offsetof(DescriptorEntity, association_id), 8);
         zero_range(bytes, offsetof(DescriptorEntity, entity_name), AtdeccString::LENGTH);
         zero_range(bytes, offsetof(DescriptorEntity, group_name), AtdeccString::LENGTH);
+        zero_range(bytes, offsetof(DescriptorEntity, serial_number), AtdeccString::LENGTH);
         zero_range(bytes, offsetof(DescriptorEntity, current_configuration), 2);
     } else if (d.descriptor_type == DESCRIPTOR_AVB_INTERFACE) {
         zero_range(bytes, offsetof(DescriptorAvbInterface, mac_address), 6);
