@@ -3097,10 +3097,11 @@ TEST(avb_entity_kit_mixed_rates, a_dynamic_output_identity_follows_the_rate)
     EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{4}}));
 }
 
-// A static output map names its stream: no format at another rate while it does
+// A static output map names its stream: no format at another rate while it does (the default)
 TEST(avb_entity_kit_mixed_rates, a_static_output_map_keeps_the_unit_rate)
 {
     RateKit m{{}, 0x79, true};
+    EXPECT_FALSE(m.kit.output_mappings_across_rates());
     EXPECT_TRUE(m.start_ready());
     EXPECT_FALSE(m.kit.has_dynamic_output_map(0));
     EXPECT_EQ(
@@ -3108,6 +3109,94 @@ TEST(avb_entity_kit_mixed_rates, a_static_output_map_keeps_the_unit_rate)
         atdecc::AEM_STATUS_BAD_ARGUMENTS);
     EXPECT_TRUE(m.formats.empty());
     EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_NOT_SUPPORTED, uint16_t{0}}));  // its AUDIO_MAP says it
+}
+
+// Opted out of Milan v1.2 Section 5.4.2.27's rate should: an output under a static identity
+// map takes a listed format at another rate, still mapped; its channels still bound it (Section 5.4.2.7)
+TEST(avb_entity_kit_mixed_rates, a_static_output_map_holds_across_rates_when_opted_in)
+{
+    RateKit m{{}, 0x7A, true};
+    m.kit.set_output_mappings_across_rates(true);
+    EXPECT_TRUE(m.kit.output_mappings_across_rates());
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.formats.size() == 1 && m.formats.back().fields.sample_rate_hz == 96000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+    EXPECT_EQ(m.kit.output_static_map_channels(0), uint16_t{8});
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_NOT_SUPPORTED, uint16_t{0}}));
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(96000, 2))),
+        atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_48K)),
+        atdecc::AEM_STATUS_SUCCESS);
+}
+
+// Opted out, an output's saved 96 kHz format is restored under its static map after a restart;
+// a kit that follows the should refuses it at restore and keeps the model's format
+TEST(avb_entity_kit_mixed_rates, a_saved_off_rate_output_format_is_restored_when_opted_in)
+{
+    auto const dir = state_dir("mixed-output-restore");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        RateKit m{path, 0x7D, true};
+        m.kit.set_output_mappings_across_rates(true);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+            atdecc::AEM_STATUS_SUCCESS);
+        auto const saved = load_persistent_state(path, 0, {}).state;
+        EXPECT_TRUE(saved.stream_formats.size() == 1 && saved.stream_formats[0].format == INT24_8CH_96K);
+    }
+    {
+        RateKit m{path, 0x7D, true};
+        m.kit.set_output_mappings_across_rates(true);
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+        EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format.sample_rate_hz, 96000U);
+        EXPECT_EQ(m.kit.output_static_map_channels(0), uint16_t{8});
+        EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    }
+    {
+        RateKit m{path, 0x7D, true};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// Opted out, a dynamic output port keeps the kit's identity at another rate: nothing removed or told
+TEST(avb_entity_kit_mixed_rates, a_dynamic_output_identity_holds_across_rates_when_opted_in)
+{
+    RateKit m{{}, 0x7B, false, true};
+    m.kit.set_output_mappings_across_rates(true);
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).empty());
+    EXPECT_EQ(m.kit.output_mappings(0).size(), size_t{8});
+    EXPECT_TRUE(std::ranges::equal(m.kit.output_mappings(0), m.kit.default_output_mappings(0)));
+    EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{8}}));
+}
+
+// The switch covers outputs only: a mapped input still keeps the unit's rate
+TEST(avb_entity_kit_mixed_rates, a_mapped_input_keeps_the_unit_rate_when_outputs_opt_in)
+{
+    RateKit m{{}, 0x7C, true};
+    m.kit.set_output_mappings_across_rates(true);
+    m.kit.set_on_input_mappings_changed(
+        [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.kit.input_mappings(0).size(), size_t{8});
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(m.formats.empty());
 }
 
 // A port bound before start() is the kit's stream port: the talker transmits

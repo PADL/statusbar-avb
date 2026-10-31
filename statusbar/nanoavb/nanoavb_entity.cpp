@@ -1366,7 +1366,8 @@ auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const p
     if (auto const status = dynamic_port(port_type, port_index, port); status != AEM_STATUS_SUCCESS) {
         return status;
     }
-    // An output port: its mappings are static on this entity (Milan v1.2 Section 5.3.9.1 allows it).
+    // An output port without AUDIO_MAP: controller mappings are not implemented, though Milan v1.2
+    // Sections 5.4.2.27-28 require them; a Milan model gives its output ports static AUDIO_MAPs.
     if (port_type != DESCRIPTOR_STREAM_PORT_INPUT) {
         return AEM_STATUS_NOT_SUPPORTED;
     }

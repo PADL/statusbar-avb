@@ -317,7 +317,8 @@ class AvbEntityKit
 
     /// The entity applies a stream's new (decoded) format to its data plane (reactor
     /// thread, before the kit takes it) and answers an AEM status; one at another rate
-    /// than the unit's comes unmapped, refused by a data plane run at the unit's rate.
+    /// than the unit's comes unmapped (an output mapped under set_output_mappings_across_rates),
+    /// refused by a data plane run at the unit's rate.
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
@@ -325,6 +326,11 @@ class AvbEntityKit
     /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that takes every
     /// talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
     void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
+    /// With @p across, an output stream's mappings (static AUDIO_MAPs, or the kit's identity) also hold at
+    /// another listed rate than the unit's, so SET_STREAM_FORMAT takes it mapped (Milan v1.2 Section 5.4.2.27's
+    /// rate rule is a should). Default false: such a format only unmapped. Inputs are unchanged. Before start().
+    void set_output_mappings_across_rates(bool const across) noexcept { output_mappings_across_rates_ = across; }
+    [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
     /// An entity-name change by other than ATDECC: ENTITY_LOCKED while locked or
     /// acquired, BAD_ARGUMENTS over 64 bytes, else as SET_NAME (empty: configured
@@ -351,7 +357,7 @@ class AvbEntityKit
     [[nodiscard]] auto input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
     /// The channels of STREAM_OUTPUT @p stream_index the model's static AUDIO_MAPs name (1 + the
     /// highest; 0: none): a SET_STREAM_FORMAT narrower than that, or while any at another rate
-    /// than the unit's, is BAD_ARGUMENTS.
+    /// than the unit's (unless set_output_mappings_across_rates), is BAD_ARGUMENTS.
     [[nodiscard]] auto output_static_map_channels(uint16_t stream_index) const -> uint16_t;
     /// The data plane cannot route STREAM_PORT_INPUT @p port_index's mappings in
     /// force: fall back to the default (unmapped if that is refused too), warned,
@@ -577,11 +583,17 @@ class AvbEntityKit
     /// Whether a port map names stream @p index of the direction (@p output): a static AUDIO_MAP,
     /// or an input's dynamic mapping; the kit's own output identity does not count.
     [[nodiscard]] auto stream_mapped(bool output, uint16_t index) const -> bool;
+    /// Whether stream @p index of that direction must stay at the unit's rate: mapped, and not an output
+    /// under set_output_mappings_across_rates().
+    [[nodiscard]] auto held_at_unit_rate(bool output, uint16_t index) const -> bool;
     /// The channels of stream @p stream_index the static AUDIO_MAPs of @p port_type's ports name.
     [[nodiscard]] auto static_map_channels(uint16_t port_type, uint16_t stream_index) const -> uint16_t;
     /// Stream @p port_index's channels in order onto port (@p port_type, @p port_index)'s cluster
     /// channels in order, as far as both go; none for a stream at another rate than the unit's.
     [[nodiscard]] auto identity_mappings(uint16_t port_type, uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
+    /// The spec of the stream port (@p port_type, @p port_index)'s identity names; nullptr when it has none or it is
+    /// at another rate than the unit's, unless an output under set_output_mappings_across_rates.
+    [[nodiscard]] auto identity_spec(uint16_t port_type, uint16_t port_index) const -> StreamSpec const*;
     /// Every dynamic output port onto its identity for the formats now in force.
     void refresh_output_mappings();
     /// The steady clock in ns: the gate's time base (grace window stamps).
@@ -715,6 +727,7 @@ class AvbEntityKit
     sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_static_groups_{};
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
+    bool output_mappings_across_rates_{false};  ///< set_output_mappings_across_rates()
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
     nanoavb::DescriptorStorageHandler& storage_handler_;
