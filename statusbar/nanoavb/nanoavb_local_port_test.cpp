@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -103,7 +104,17 @@ struct Bench
         handlers.set_local_port_config(std::move(config));
         handlers.add_to_reactor(reactor);
         setup_nanoavb_callbacks(components, handlers);
-        (void)components.adp_advertiser.start(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
+        components.adp_advertiser.link_up(time());
+        components.adp_advertiser.tick(time() + std::chrono::seconds{2});  // the startup TMR_DELAY
+    }
+
+    [[nodiscard]] auto time() const -> sm::TimePoint { return sm::TimePoint{std::chrono::nanoseconds{now_ns}}; }
+
+    /// One ENTITY_AVAILABLE multicast: an entity change, then its TMR_DELAY (at most 4 s).
+    void advertise()
+    {
+        components.adp_advertiser.notify_entity_changed(time());
+        components.adp_advertiser.tick(time() + std::chrono::seconds{4});
     }
 
     /// A few reactor cycles, 1 ms apart.
@@ -244,16 +255,53 @@ TEST(nanoavb_local_port, a_local_discover_is_answered_to_that_client_alone)
     EXPECT_EQ(count_of(drain(a), avtp::AvtpSubtype::adp, ADP_MESSAGE_TYPE_ENTITY_AVAILABLE), size_t{1});
     EXPECT_EQ(drain(b).size(), size_t{0});
     // The entity's own advertisements reach every client.
-    bench.components.adp_advertiser.notify_entity_changed();
+    bench.advertise();
     bench.pump();
     EXPECT_EQ(count_of(drain(a), avtp::AvtpSubtype::adp, ADP_MESSAGE_TYPE_ENTITY_AVAILABLE), size_t{1});
     EXPECT_EQ(count_of(drain(b), avtp::AvtpSubtype::adp, ADP_MESSAGE_TYPE_ENTITY_AVAILABLE), size_t{1});
 }
 
+TEST(nanoavb_local_port, a_local_discover_is_answered_at_once_outside_the_state_machine)
+{
+    Bench bench;
+    auto const index = bench.components.adp_advertiser.available_index();
+    auto client = open_client(bench.path);
+    EXPECT_TRUE(send(client, entity_discover()));
+    bench.pump();
+    auto const frames = drain(client);
+    EXPECT_EQ(count_of(frames, avtp::AvtpSubtype::adp, ADP_MESSAGE_TYPE_ENTITY_AVAILABLE), size_t{1});
+    AdpDu adp{};
+    span_load(adp, std::span<uint8_t const>{frames.front()});
+    EXPECT_EQ(adp.available_index.get(), index);
+    EXPECT_EQ(bench.components.adp_advertiser.available_index(), index + 1);  // a transmission
+    EXPECT_TRUE(bench.components.adp_advertiser.state() == AdpAdvertiserState::Waiting);
+}
+
+TEST(nanoavb_local_port, a_local_client_sees_available_index_strictly_increase)
+{
+    Bench bench;
+    auto client = open_client(bench.path);
+    EXPECT_TRUE(send(client, entity_discover()));  // joins the port
+    bench.pump();
+    (void)drain(client);
+    bench.advertise();
+    EXPECT_TRUE(send(client, entity_discover()));
+    bench.pump();
+    bench.advertise();
+    std::vector<uint32_t> indices;
+    for (auto const& f : drain(client)) {
+        AdpDu adp{};
+        span_load(adp, std::span<uint8_t const>{f});
+        indices.push_back(adp.available_index.get());
+    }
+    EXPECT_EQ(indices.size(), size_t{3});  // multicast, local reply, multicast
+    EXPECT_TRUE(std::ranges::adjacent_find(indices, std::greater_equal<>{}) == indices.end());
+}
+
 TEST(nanoavb_local_port, a_local_discover_is_answered_while_the_network_is_down)
 {
     Bench bench;
-    (void)bench.components.adp_advertiser.stop(sm::TimePoint{});  // e.g. link down
+    bench.components.adp_advertiser.link_down(bench.time());
     auto client = open_client(bench.path);
     EXPECT_TRUE(send(client, entity_discover()));
     bench.pump();
@@ -382,7 +430,7 @@ TEST(nanoavb_local_port, a_closed_client_is_forgotten_with_its_registration)
     }
     // The next multicast finds a gone (ECONNREFUSED); a reactor cycle later
     // it is forgotten, and its registration with it.
-    bench.components.adp_advertiser.notify_entity_changed();
+    bench.advertise();
     bench.pump();
     EXPECT_EQ(bench.port().client_count(), size_t{1});
     EXPECT_EQ(bench.port().counters().clients_forgotten, uint64_t{1});
@@ -404,7 +452,7 @@ TEST(nanoavb_local_port, a_closed_client_releases_its_acquisition)
         EXPECT_EQ(to_a.size(), size_t{1});
         EXPECT_EQ(to_a.front().status(), AEM_STATUS_SUCCESS);
     }
-    bench.components.adp_advertiser.notify_entity_changed();
+    bench.advertise();
     bench.pump();
     EXPECT_EQ(bench.port().client_count(), size_t{1});
     (void)drain(b);
@@ -630,7 +678,7 @@ TEST(nanoavb_local_port, closing_detaches_from_the_entity)
     EXPECT_TRUE(bench.handlers.local_port() == nullptr);
     bench.pump();  // the reactor drops the finished port
     // The entity's multicast no longer has anywhere local to go.
-    bench.components.adp_advertiser.notify_entity_changed();
+    bench.advertise();
     bench.pump();
     EXPECT_EQ(drain(client).size(), size_t{0});
     struct stat st{};
@@ -692,7 +740,7 @@ TEST(nanoavb_local_port, a_reacquire_from_a_new_address_moves_the_acquisition)
     auto const r = solicited(drain(restarted));
     EXPECT_EQ(r.size(), size_t{1});
     EXPECT_EQ(r.front().status(), AEM_STATUS_SUCCESS);
-    bench.components.adp_advertiser.notify_entity_changed();  // the first is found gone
+    bench.advertise();  // the first is found gone
     bench.pump();
     // Forgetting the old address did not release the controller's acquisition.
     auto b = open_client(bench.path);

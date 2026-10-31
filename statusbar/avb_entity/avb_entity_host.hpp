@@ -524,7 +524,7 @@ class AvbEntityHost
     bool adp_held_{false};  ///< see hold_adp()
     bool adp_owed_{false};  ///< a Link Up under the hold has not started ADP yet
 
-    /// Start the ADP advertiser, the failure logged.
+    /// The ADP advertiser told the link is up: it advertises after TMR_DELAY (Milan v1.2 Section 5.6.3.5.3).
     void start_adp(TimePoint time);
 };
 
