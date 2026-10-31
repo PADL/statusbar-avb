@@ -9,12 +9,15 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 using namespace statusbar::nanoavb;
 using namespace statusbar::atdecc;
@@ -56,7 +59,7 @@ TEST(nanoavb_adp_advertiser, default_construction)
     auto entity = create_test_entity_descriptor();
     NanoAvbAdpAdvertiser advertiser{entity};
 
-    EXPECT_EQ(advertiser.state(), AdpAdvertiserState::Stopped);
+    EXPECT_TRUE(advertiser.state() == AdpAdvertiserState::Start);
     EXPECT_EQ(advertiser.available_index(), 0);
     EXPECT_EQ(advertiser.valid_time(), 10);  // Milan v1.2 Section 5.6.2
     EXPECT_EQ(advertiser.config().reannounce_interval, std::chrono::milliseconds{5000});
@@ -101,337 +104,403 @@ TEST(nanoavb_adp_advertiser, adpdu_populated_from_model)
 }
 
 //
-// NanoAvbAdpAdvertiser State Control Tests
+// NanoAvbAdpAdvertiser State Machine Tests - Milan v1.2 Section 5.6.3
 //
-TEST(nanoavb_adp_advertiser, start_advertising)
-{
-    auto entity = create_test_entity_descriptor();
+namespace {
 
-    bool sent = false;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const& adpdu) {
-        sent = true;
-        EXPECT_TRUE(adpdu.is_entity_available());
-        return true;
+using Ms = std::chrono::milliseconds;
+using AdvEvent = adp_adv_sm::Def::Event;
+
+constexpr Eui48 TEST_MAC{0x00, 0x1B, 0x92, 0x00, 0x00, 0x01};
+
+/// An advertiser on a fake 1 ms clock with a fixed seed, recording what it sends.
+struct AdvertiserBench
+{
+    struct Sent
+    {
+        TimePoint at;
+        AdpDu adpdu;
     };
 
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
+    explicit AdvertiserBench(uint64_t const seed = 1)
+        : advertiser{create_test_entity_descriptor(), AdpAdvertiserCallbacks{.send_adpdu = [this](AdpDu const& du) {
+                         sent.push_back({now, du});
+                         return true;
+                     }}}
+    {
+        advertiser.seed_random(TEST_MAC, seed);
+    }
 
-    auto result = advertiser.start(TimePoint{});
-    EXPECT_TRUE(result.has_value());
-    EXPECT_EQ(advertiser.state(), AdpAdvertiserState::Advertising);
-    EXPECT_TRUE(sent);  // Initial Entity Available should be sent
-}
-
-TEST(nanoavb_adp_advertiser, start_idempotent)
-{
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    (void)advertiser.start(TimePoint{});
-    EXPECT_EQ(send_count, 1);
-
-    // Second start should be idempotent (no extra send)
-    auto result = advertiser.start(TimePoint{});
-    EXPECT_TRUE(result.has_value());
-    EXPECT_EQ(send_count, 1);  // No additional send
-}
-
-TEST(nanoavb_adp_advertiser, stop_advertising)
-{
-    auto entity = create_test_entity_descriptor();
-
-    bool departing_sent = false;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const& adpdu) {
-        if (adpdu.is_entity_departing()) {
-            departing_sent = true;
+    void run_for(Ms const span)
+    {
+        auto const until = now + span;
+        while (now < until) {
+            now += Ms{1};
+            advertiser.tick(now);
         }
-        return true;
-    };
+    }
 
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    (void)advertiser.start(TimePoint{});
-    EXPECT_EQ(advertiser.state(), AdpAdvertiserState::Advertising);
-
-    auto result = advertiser.stop(TimePoint{});
-    EXPECT_TRUE(result.has_value());
-    EXPECT_EQ(advertiser.state(), AdpAdvertiserState::Stopped);
-    EXPECT_TRUE(departing_sent);
-}
-
-TEST(nanoavb_adp_advertiser, departing_available_index_zero)
-{
-    auto entity = create_test_entity_descriptor();
-
-    AdpDu captured_departing{};
-    int available_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const& adpdu) {
-        if (adpdu.is_entity_available()) {
-            ++available_count;
+    /// Run until the next frame is sent (at most @p limit); returns its time.
+    auto run_to_next_send(Ms const limit = Ms{20'000}) -> TimePoint
+    {
+        auto const before = sent.size();
+        auto const until = now + limit;
+        while (sent.size() == before && now < until) {
+            now += Ms{1};
+            advertiser.tick(now);
         }
-        if (adpdu.is_entity_departing()) {
-            captured_departing = adpdu;
-        }
-        return true;
-    };
+        return sent.size() > before ? sent.back().at : TimePoint::max();
+    }
 
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-    (void)advertiser.start(TimePoint{});
+    [[nodiscard]] auto since(TimePoint const t) const -> Ms { return std::chrono::duration_cast<Ms>(now - t); }
 
-    // Tick several times to send multiple available announcements (incrementing available_index)
-    auto t = TimePoint{} + std::chrono::seconds(65);
-    advertiser.tick(t);
-    t += std::chrono::seconds(65);
-    advertiser.tick(t);
-    EXPECT_TRUE(available_count >= 2);
+    void discover(Eui64 const& id = Eui64{})
+    {
+        AdpDu du{};
+        du.init_entity_discover();
+        du.entity_id = id;
+        advertiser.receive_adpdu(du, now);
+    }
 
-    // Stop should send departing with available_index == 0
-    (void)advertiser.stop(t);
-    EXPECT_EQ(captured_departing.available_index.get(), 0U);
+    [[nodiscard]] auto count(bool const departing) const -> size_t
+    {
+        return static_cast<size_t>(
+            std::ranges::count_if(sent, [&](Sent const& s) { return s.adpdu.is_entity_departing() == departing; }));
+    }
+
+    std::vector<Sent> sent;
+    TimePoint now{std::chrono::seconds{100}};
+    NanoAvbAdpAdvertiser advertiser;
+};
+
+}  // namespace
+
+TEST(nanoavb_adp_advertiser, nothing_is_sent_before_the_link_is_up)
+{
+    AdvertiserBench bench;
+    bench.run_for(Ms{30'000});
+    bench.discover();
+    bench.run_for(Ms{5'000});
+    EXPECT_EQ(bench.sent.size(), size_t{0});
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Start);
 }
 
-TEST(nanoavb_adp_advertiser, stop_idempotent)
+TEST(nanoavb_adp_advertiser, startup_with_the_link_up_advertises_within_two_seconds)
 {
-    auto entity = create_test_entity_descriptor();
-    NanoAvbAdpAdvertiser advertiser{entity};
-
-    // Stop when already stopped should succeed
-    auto result = advertiser.stop(TimePoint{});
-    EXPECT_TRUE(result.has_value());
-    EXPECT_EQ(advertiser.state(), AdpAdvertiserState::Stopped);
+    Ms lo{Ms::max()};
+    Ms hi{0};
+    for (uint64_t seed = 1; seed <= 64; ++seed) {
+        AdvertiserBench bench{seed};
+        auto const start = bench.now;
+        bench.advertiser.link_up(start);
+        EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
+        auto const at = bench.run_to_next_send();
+        auto const delay = std::chrono::duration_cast<Ms>(at - start);
+        EXPECT_TRUE(delay <= Ms{2'000});
+        lo = std::min(lo, delay);
+        hi = std::max(hi, delay);
+        EXPECT_TRUE(bench.sent.front().adpdu.is_entity_available());
+    }
+    EXPECT_TRUE(lo < Ms{500});
+    EXPECT_TRUE(hi > Ms{1'500});
 }
 
-//
-// NanoAvbAdpAdvertiser Entity State Change Tests
-//
-TEST(nanoavb_adp_advertiser, notify_entity_changed)
+TEST(nanoavb_adp_advertiser, link_up_after_down_advertises_within_four_seconds)
 {
-    auto entity = create_test_entity_descriptor();
-
-    uint32_t notified_index = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.on_available_index_change = [&](uint32_t index) { notified_index = index; };
-    callbacks.send_adpdu = [](AdpDu const&) { return true; };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    EXPECT_EQ(advertiser.available_index(), 0);
-
-    // Start advertising first so notify_entity_changed will send
-    (void)advertiser.start(TimePoint{});
-    // available_index incremented after start() sends Entity Available
-    EXPECT_EQ(advertiser.available_index(), 1);
-    EXPECT_EQ(notified_index, 1);
-
-    // notify_entity_changed should trigger another send and increment
-    advertiser.notify_entity_changed();
-
-    EXPECT_EQ(advertiser.available_index(), 2);
-    EXPECT_EQ(notified_index, 2);
-    EXPECT_EQ(advertiser.adpdu().available_index.get(), 2);
+    Ms hi{0};
+    for (uint64_t seed = 1; seed <= 64; ++seed) {
+        AdvertiserBench bench{seed};
+        bench.advertiser.link_down(bench.now);  // started with the link down
+        EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Down);
+        auto const start = bench.now;
+        bench.advertiser.link_up(start);
+        auto const delay = std::chrono::duration_cast<Ms>(bench.run_to_next_send() - start);
+        EXPECT_TRUE(delay <= Ms{4'000});
+        hi = std::max(hi, delay);
+    }
+    EXPECT_TRUE(hi > Ms{3'000});
 }
 
-TEST(nanoavb_adp_advertiser, notify_sends_update_when_advertising)
+TEST(nanoavb_adp_advertiser, the_period_is_five_seconds_plus_zero_to_four)
 {
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    (void)advertiser.start(TimePoint{});
-    EXPECT_EQ(send_count, 1);
-
-    // Notify should trigger another Entity Available
-    advertiser.notify_entity_changed();
-    EXPECT_EQ(send_count, 2);
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    auto last = bench.run_to_next_send();
+    Ms lo{Ms::max()};
+    Ms hi{0};
+    for (int i = 0; i < 100; ++i) {
+        auto const at = bench.run_to_next_send();
+        auto const gap = std::chrono::duration_cast<Ms>(at - last);
+        EXPECT_TRUE(gap >= Ms{5'000} && gap <= Ms{9'000});
+        lo = std::min(lo, gap);
+        hi = std::max(hi, gap);
+        last = at;
+    }
+    EXPECT_TRUE(lo < Ms{5'500});
+    EXPECT_TRUE(hi > Ms{8'500});
 }
 
-TEST(nanoavb_adp_advertiser, notify_no_send_when_stopped)
+TEST(nanoavb_adp_advertiser, a_discover_is_answered_within_four_seconds_and_restarts_the_period)
 {
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    // Notify while stopped should not send
-    advertiser.notify_entity_changed();
-    EXPECT_EQ(send_count, 0);
-    // Per IEEE 1722.1, available_index only increments on actual transmission
-    EXPECT_EQ(advertiser.available_index(), 0);
+    for (uint64_t seed = 1; seed <= 32; ++seed) {
+        AdvertiserBench bench{seed};
+        bench.advertiser.link_up(bench.now);
+        (void)bench.run_to_next_send();
+        bench.run_for(Ms{4'900});  // TMR_ADVERTISE is 100 ms away
+        auto const asked = bench.now;
+        bench.discover();
+        EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
+        auto const reply = bench.run_to_next_send();
+        EXPECT_TRUE(reply - asked <= Ms{4'000});
+        auto const next = bench.run_to_next_send();
+        EXPECT_TRUE(next - reply >= Ms{5'000} && next - reply <= Ms{9'000});
+    }
 }
 
-//
-// NanoAvbAdpAdvertiser Discover Response Tests
-//
-TEST(nanoavb_adp_advertiser, respond_to_broadcast_discover)
+TEST(nanoavb_adp_advertiser, a_discover_for_us_by_id_is_answered_another_is_not)
 {
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const& adpdu) {
-        if (adpdu.is_entity_available()) {
-            ++send_count;
-        }
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    (void)advertiser.start(TimePoint{});
-    EXPECT_EQ(send_count, 1);
-
-    // Receive a broadcast discover (entity_id = 0)
-    AdpDu discover{};
-    discover.init_entity_discover();
-
-    advertiser.receive_adpdu(discover, TimePoint{});
-    EXPECT_EQ(send_count, 2);  // Should respond with Entity Available
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    bench.discover(Eui64{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
+    bench.discover(create_test_entity_descriptor().entity_id);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
 }
 
-TEST(nanoavb_adp_advertiser, respond_to_targeted_discover)
+TEST(nanoavb_adp_advertiser, discovers_are_ignored_in_delay)
 {
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    (void)advertiser.start(TimePoint{});
-    EXPECT_EQ(send_count, 1);
-
-    // Receive a targeted discover (entity_id = our ID)
-    AdpDu discover{};
-    discover.init_entity_discover();
-    discover.entity_id = entity.entity_id;
-
-    advertiser.receive_adpdu(discover, TimePoint{});
-    EXPECT_EQ(send_count, 2);  // Should respond
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    bench.run_for(Ms{1'000});
+    bench.discover();
+    auto const sent = bench.sent.size();
+    for (int i = 0; i < 20 && bench.advertiser.state() == AdpAdvertiserState::Delay; ++i) {
+        bench.discover();
+        bench.run_for(Ms{1});
+    }
+    (void)bench.run_to_next_send();
+    EXPECT_EQ(bench.sent.size(), sent + 1);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
 }
 
-TEST(nanoavb_adp_advertiser, ignore_discover_for_other_entity)
+TEST(nanoavb_adp_advertiser, a_grandmaster_change_readvertises_after_the_delay_with_its_domain)
 {
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    (void)advertiser.start(TimePoint{});
-    EXPECT_EQ(send_count, 1);
-
-    // Receive a targeted discover for a different entity
-    AdpDu discover{};
-    discover.init_entity_discover();
-    discover.entity_id = Eui64{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-    advertiser.receive_adpdu(discover, TimePoint{});
-    EXPECT_EQ(send_count, 1);  // Should NOT respond
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    bench.run_for(Ms{1'000});
+    ClockIdentity const gm{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0xDD, 0xEE, 0x01};
+    auto const changed = bench.now;
+    bench.advertiser.set_gptp_info(gm, 7, bench.now);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
+    auto const at = bench.run_to_next_send();
+    EXPECT_TRUE(at - changed <= Ms{4'000});
+    EXPECT_TRUE(bench.sent.back().adpdu.gptp_grandmaster_id == gm);
+    EXPECT_EQ(bench.sent.back().adpdu.gptp_domain_number.get(), 7);
+    // The same grandmaster again is no GM_CHANGE.
+    bench.advertiser.set_gptp_info(gm, 7, bench.now);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
 }
 
-TEST(nanoavb_adp_advertiser, ignore_discover_when_stopped)
+TEST(nanoavb_adp_advertiser, a_grandmaster_change_in_delay_rides_the_pending_send)
 {
-    auto entity = create_test_entity_descriptor();
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
-
-    // Receive discover while stopped
-    AdpDu discover{};
-    discover.init_entity_discover();
-
-    advertiser.receive_adpdu(discover, TimePoint{});
-    EXPECT_EQ(send_count, 0);  // Should NOT respond when stopped
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    ClockIdentity const gm{0x01, 0x02, 0x03, 0xFF, 0xFE, 0x04, 0x05, 0x06};
+    bench.advertiser.set_gptp_info(gm, 0, bench.now);
+    (void)bench.run_to_next_send();
+    EXPECT_EQ(bench.sent.size(), size_t{1});
+    EXPECT_TRUE(bench.sent.back().adpdu.gptp_grandmaster_id == gm);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
 }
 
-//
-// NanoAvbAdpAdvertiser Tick/Reannounce Tests
-//
-TEST(nanoavb_adp_advertiser, tick_reannounce)
+TEST(nanoavb_adp_advertiser, an_entity_change_readvertises_after_the_delay)
 {
-    auto entity = create_test_entity_descriptor();
-
-    AdpAdvertiserConfig config;
-    config.reannounce_interval = std::chrono::milliseconds{100};
-
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
-
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks, config};
-
-    TimePoint now{};
-    (void)advertiser.start(now);
-    EXPECT_EQ(send_count, 1);
-
-    // Tick immediately - should not reannounce yet
-    advertiser.tick(now);
-    EXPECT_EQ(send_count, 1);
-
-    // Tick after reannounce interval
-    now += std::chrono::milliseconds{100};
-    advertiser.tick(now);
-    EXPECT_EQ(send_count, 2);
+    AdvertiserBench bench;
+    bench.advertiser.notify_entity_changed(bench.now);  // link not up: nothing
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    bench.run_for(Ms{1'000});
+    auto const changed = bench.now;
+    bench.advertiser.notify_entity_changed(bench.now);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
+    EXPECT_TRUE(bench.run_to_next_send() - changed <= Ms{4'000});
 }
 
-TEST(nanoavb_adp_advertiser, tick_no_send_when_stopped)
+TEST(nanoavb_adp_advertiser, link_down_sends_no_departing)
 {
-    auto entity = create_test_entity_descriptor();
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    bench.advertiser.link_down(bench.now);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Down);
+    bench.run_for(Ms{30'000});
+    EXPECT_EQ(bench.sent.size(), size_t{1});
+    EXPECT_EQ(bench.count(true), size_t{0});
+    // From DELAY too: the pending send is dropped.
+    bench.advertiser.link_up(bench.now);
+    bench.advertiser.link_down(bench.now);
+    bench.run_for(Ms{30'000});
+    EXPECT_EQ(bench.sent.size(), size_t{1});
+}
 
-    int send_count = 0;
-    AdpAdvertiserCallbacks callbacks;
-    callbacks.send_adpdu = [&](AdpDu const&) {
-        ++send_count;
-        return true;
-    };
+TEST(nanoavb_adp_advertiser, available_index_advances_once_per_entity_available)
+{
+    uint32_t notified = 0;
+    AdvertiserBench bench;
+    auto callbacks = AdpAdvertiserCallbacks{
+        .send_adpdu =
+            [&bench](AdpDu const& du) {
+                bench.sent.push_back({bench.now, du});
+                return true;
+            },
+        .on_available_index_change = [&notified](uint32_t const index) { notified = index; }};
+    bench.advertiser.set_callbacks(std::move(callbacks));
+    bench.advertiser.link_up(bench.now);
+    for (int i = 0; i < 4; ++i) {
+        (void)bench.run_to_next_send();
+    }
+    bench.discover();
+    (void)bench.run_to_next_send();
+    EXPECT_EQ(bench.sent.size(), size_t{5});
+    for (size_t i = 0; i < bench.sent.size(); ++i) {
+        EXPECT_EQ(bench.sent[i].adpdu.available_index.get(), static_cast<uint32_t>(i));
+    }
+    EXPECT_EQ(bench.advertiser.available_index(), 5U);
+    EXPECT_EQ(notified, 5U);
+}
 
-    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
+TEST(nanoavb_adp_advertiser, a_reply_outside_the_state_machine_advances_available_index)
+{
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    std::vector<uint32_t> replied;
+    EXPECT_TRUE(bench.advertiser.reply_available([&](AdpDu const& du) {
+        replied.push_back(du.available_index.get());
+        return du.is_entity_available();
+    }));
+    EXPECT_FALSE(bench.advertiser.reply_available([](AdpDu const&) { return false; }));  // not sent: no advance
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
+    (void)bench.run_to_next_send();
+    EXPECT_EQ(replied.size(), size_t{1});
+    EXPECT_EQ(replied.front(), 1U);
+    EXPECT_EQ(bench.sent.back().adpdu.available_index.get(), 2U);
+}
 
-    // Tick while stopped - should not send
-    advertiser.tick(TimePoint{});
-    EXPECT_EQ(send_count, 0);
+TEST(nanoavb_adp_advertiser, a_reply_leaves_the_network_failure_count_alone)
+{
+    AdvertiserBench bench;
+    bench.advertiser.set_callbacks(AdpAdvertiserCallbacks{.send_adpdu = [](AdpDu const&) { return false; }});
+    bench.advertiser.link_up(bench.now);
+    bench.run_for(Ms{2'001});
+    EXPECT_EQ(bench.advertiser.consecutive_send_failures(), 1U);
+    EXPECT_TRUE(bench.advertiser.reply_available([](AdpDu const&) { return true; }));
+    EXPECT_EQ(bench.advertiser.consecutive_send_failures(), 1U);  // a sent reply clears no streak
+    EXPECT_FALSE(bench.advertiser.reply_available([](AdpDu const&) { return false; }));
+    EXPECT_EQ(bench.advertiser.consecutive_send_failures(), 1U);  // a gone local client is no failure
+    EXPECT_EQ(bench.advertiser.available_index(), 1U);
+}
+
+TEST(nanoavb_adp_advertiser, shutdown_departs_and_resets_available_index)
+{
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    (void)bench.run_to_next_send();
+    EXPECT_EQ(bench.advertiser.available_index(), 2U);
+    EXPECT_TRUE(bench.advertiser.shutdown(bench.now));
+    EXPECT_EQ(bench.count(true), size_t{1});
+    EXPECT_EQ(bench.sent.back().adpdu.available_index.get(), 0U);
+    EXPECT_EQ(bench.advertiser.available_index(), 0U);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Start);
+    // Restarted: the next ENTITY_AVAILABLE starts again at 0, after the startup delay.
+    auto const start = bench.now;
+    bench.advertiser.link_up(bench.now);
+    EXPECT_TRUE(bench.run_to_next_send() - start <= Ms{2'000});
+    EXPECT_EQ(bench.sent.back().adpdu.available_index.get(), 0U);
+}
+
+TEST(nanoavb_adp_advertiser, shutdown_from_delay_departs_without_the_pending_send)
+{
+    AdvertiserBench bench;
+    bench.advertiser.link_up(bench.now);
+    EXPECT_TRUE(bench.advertiser.shutdown(bench.now));
+    bench.run_for(Ms{10'000});
+    EXPECT_EQ(bench.sent.size(), size_t{1});
+    EXPECT_EQ(bench.count(true), size_t{1});
+}
+
+TEST(nanoavb_adp_advertiser, shutdown_with_the_link_down_sends_nothing)
+{
+    AdvertiserBench bench;
+    bench.advertiser.link_down(bench.now);
+    EXPECT_FALSE(bench.advertiser.shutdown(bench.now));
+    EXPECT_EQ(bench.sent.size(), size_t{0});
+    // Ignored while down: the next link up is from DOWN, 0-4 s (Section 5.6.3.5.3).
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Down);
+}
+
+TEST(nanoavb_adp_advertiser, a_failed_send_does_not_advance_available_index)
+{
+    AdvertiserBench bench;
+    bench.advertiser.set_callbacks(AdpAdvertiserCallbacks{.send_adpdu = [](AdpDu const&) { return false; }});
+    bench.advertiser.link_up(bench.now);
+    bench.run_for(Ms{2'001});
+    EXPECT_EQ(bench.advertiser.available_index(), 0U);
+    EXPECT_EQ(bench.advertiser.consecutive_send_failures(), 1U);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
+}
+
+TEST(nanoavb_adp_advertiser, the_delay_range_follows_valid_time)
+{
+    AdpAdvertiserConfig config{};
+    EXPECT_TRUE(config.delay_max() == Ms{4'000});  // Milan v1.2 Table 5.50
+    config.valid_time = 31;
+    EXPECT_TRUE(config.delay_max() == Ms{12'400});  // IEEE 1722.1-2021 Clause 6.2.4.2.2
+}
+
+TEST(nanoavb_adp_delay_random, a_seed_from_the_mac_and_clock_fixes_the_sequence)
+{
+    adp_adv_sm::DelayRandom a{};
+    adp_adv_sm::DelayRandom b{};
+    adp_adv_sm::DelayRandom c{};
+    a.seed(TEST_MAC, 1'700'000'000'000'000'000ULL);
+    b.seed(TEST_MAC, 1'700'000'000'000'000'000ULL);
+    c.seed(Eui48{0x00, 0x1B, 0x92, 0x00, 0x00, 0x02}, 1'700'000'000'000'000'000ULL);
+    int same = 0;
+    for (int i = 0; i < 16; ++i) {
+        auto const x = a.next(Ms{4'000});
+        EXPECT_TRUE(x == b.next(Ms{4'000}));
+        same += x == c.next(Ms{4'000}) ? 1 : 0;
+    }
+    EXPECT_TRUE(same < 4);
+}
+
+TEST(nanoavb_adp_delay_random, delays_stay_within_the_range)
+{
+    adp_adv_sm::DelayRandom r{};
+    r.seed(TEST_MAC, 0);
+    for (int i = 0; i < 1000; ++i) {
+        auto const d = r.next(Ms{4'000});
+        EXPECT_TRUE(d >= Ms{0} && d <= Ms{4'000});
+    }
+    EXPECT_TRUE(r.next(Ms{0}) == Ms{0});
+}
+
+TEST(nanoavb_adp_adv_sm, table_5_51_ignores_and_impossible_events_leave_the_state)
+{
+    sm_test::Observed<adp_adv_sm::Def, adp_adv_sm::table> machine;
+    adp_adv_sm::Context ctx;
+    machine.handle_event(ctx, AdvEvent::LinkDown, TimePoint{});
+    EXPECT_TRUE(machine.current_state() == AdpAdvertiserState::Down);
+    for (auto const e : {AdvEvent::RcvDiscover, AdvEvent::GmChange, AdvEvent::Shutdown, AdvEvent::TmrDelay}) {
+        machine.handle_event(ctx, e, TimePoint{});
+        EXPECT_TRUE(machine.current_state() == AdpAdvertiserState::Down);
+    }
+    EXPECT_FALSE(ctx.do_advertise || ctx.do_terminate);
 }
 
 //
@@ -443,7 +512,7 @@ TEST(nanoavb_adp_advertiser, set_gptp_info)
     NanoAvbAdpAdvertiser advertiser{entity};
 
     ClockIdentity gm_id{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11};
-    advertiser.set_gptp_info(gm_id, 0);
+    advertiser.set_gptp_info(gm_id, 0, TimePoint{});
 
     EXPECT_EQ(advertiser.adpdu().gptp_grandmaster_id, gm_id);
     EXPECT_EQ(advertiser.adpdu().gptp_domain_number, 0);
@@ -474,7 +543,7 @@ TEST(nanoavb_adp_advertiser, set_identify_control_index)
     // The identify advertisement must survive an ADPDU rebuild from the model
     // (notify_entity_changed runs on startup MAC/entity-id patching) — it is
     // discovered from the descriptor storage, not the ENTITY descriptor.
-    advertiser.notify_entity_changed();
+    advertiser.notify_entity_changed(TimePoint{});
     EXPECT_EQ(advertiser.adpdu().identify_control_index.get(), 123);
     EXPECT_TRUE(advertiser.adpdu().has_entity_capability(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
 }
@@ -599,98 +668,6 @@ TEST(nanoavb_adp_discovery, tick_expires_entities)
 
     EXPECT_EQ(discovery.entity_count(), 0U);
     EXPECT_EQ(departed.size(), 1U);
-}
-
-// ===========================================================================
-// ADP Advertiser State Machine (adp_adv_sm)
-// ===========================================================================
-
-namespace adp_adv = statusbar::nanoavb::adp_adv_sm;
-
-TEST(nanoavb_adp_adv_sm, uct_to_off_calls_init)
-{
-    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
-    adp_adv::Context ctx;
-    machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
-    EXPECT_EQ(machine.current_state(), adp_adv::Def::State::Off);
-    EXPECT_EQ(machine.last_action, "init");
-    EXPECT_FALSE(ctx.enabled);
-}
-
-TEST(nanoavb_adp_adv_sm, enable_calls_start_adp)
-{
-    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
-    adp_adv::Context ctx;
-    bool called = false;
-    ctx.callbacks.start_adp = [&](adp_adv::Context&, TimePoint) { called = true; };
-    machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
-    EXPECT_EQ(machine.current_state(), adp_adv::Def::State::Advertising);
-    EXPECT_TRUE(ctx.enabled);
-    EXPECT_TRUE(called);
-}
-
-TEST(nanoavb_adp_adv_sm, disable_calls_stop_adp)
-{
-    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
-    adp_adv::Context ctx;
-    bool called = false;
-    ctx.callbacks.start_adp = [](adp_adv::Context&, TimePoint) {};
-    ctx.callbacks.stop_adp = [&](adp_adv::Context&, TimePoint) { called = true; };
-    machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Disable, TimePoint{});
-    EXPECT_EQ(machine.current_state(), adp_adv::Def::State::Off);
-    EXPECT_FALSE(ctx.enabled);
-    EXPECT_TRUE(called);
-}
-
-TEST(nanoavb_adp_adv_sm, tick_calls_maybe_announce)
-{
-    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
-    adp_adv::Context ctx;
-    bool called = false;
-    ctx.callbacks.start_adp = [](adp_adv::Context&, TimePoint) {};
-    ctx.callbacks.maybe_announce = [&](adp_adv::Context&, TimePoint) { called = true; };
-    machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Tick, TimePoint{});
-    EXPECT_EQ(machine.current_state(), adp_adv::Def::State::Advertising);
-    EXPECT_TRUE(called);
-}
-
-TEST(nanoavb_adp_adv_sm, error_calls_stop_adp)
-{
-    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
-    adp_adv::Context ctx;
-    bool called = false;
-    ctx.callbacks.start_adp = [](adp_adv::Context&, TimePoint) {};
-    ctx.callbacks.stop_adp = [&](adp_adv::Context&, TimePoint) { called = true; };
-    machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Error, TimePoint{});
-    EXPECT_EQ(machine.current_state(), adp_adv::Def::State::Off);
-    EXPECT_TRUE(called);
-}
-
-TEST(nanoavb_adp_adv_sm, full_cycle)
-{
-    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
-    adp_adv::Context ctx;
-    int starts = 0, stops = 0;
-    ctx.callbacks.start_adp = [&](adp_adv::Context&, TimePoint) { ++starts; };
-    ctx.callbacks.stop_adp = [&](adp_adv::Context&, TimePoint) { ++stops; };
-    ctx.callbacks.maybe_announce = [](adp_adv::Context&, TimePoint) {};
-
-    machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
-    stops = 0;  // the Off entry hook fires stop_adp on the initial UCT
-    machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
-    EXPECT_EQ(starts, 1);
-    machine.handle_event(ctx, adp_adv::Def::Event::Tick, TimePoint{});
-    machine.handle_event(ctx, adp_adv::Def::Event::Disable, TimePoint{});
-    EXPECT_EQ(stops, 1);
-    machine.handle_event(ctx, adp_adv::Def::Event::Enable, TimePoint{});
-    EXPECT_EQ(starts, 2);
 }
 
 //
