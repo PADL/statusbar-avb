@@ -59,7 +59,7 @@ DEB_REVISION="${STATUSBAR_DEB_REVISION:-$(date -u +%Y%m%d%H%M%S)}"
 # Package version = the tree's latest release tag, resolved HERE on the host:
 # the container mounts the tree read-only, so git describe cannot work
 # inside it and CMake would silently fall back to its baked default.
-PKG_VERSION="${STATUSBAR_PKG_VERSION:-$(git -C "$TREE_DIR" describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)}"
+PKG_VERSION="${STATUSBAR_PKG_VERSION:-$(git -C "$TREE_DIR" describe --tags --exact-match --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)}"
 
 mkdir -p "$DEB_OUTPUT"
 
