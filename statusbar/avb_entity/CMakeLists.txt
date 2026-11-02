@@ -125,3 +125,5 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                       avb_entity_tone_generator_tool)
 endif()
+
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avb_entity_persistent_state_fuzzer.cpp)
