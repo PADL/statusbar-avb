@@ -1321,6 +1321,100 @@ void MsrpParticipantT<Limits>::finish_receive(TimePoint now)
 }
 
 template <class Limits>
+void MsrpParticipantT<Limits>::decode_attribute_list(
+    AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
+{
+    while (pos + 2 <= payload.size()) {
+        uint16_t const end_check = mrp::read_doublet_at(payload, pos);
+        if (end_check == mrp::END_MARK) {
+            pos += 2;
+            return;
+        }
+        decode_vector_attribute(attr_type, attr_length, payload, pos, now);
+    }
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::decode_vector_attribute(
+    AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
+{
+    if (pos + VectorAttributeHeader::LENGTH > payload.size()) {
+        return;
+    }
+    VectorAttributeHeader vec_hdr;
+    (void)load_unchecked(payload.subspan(pos), &vec_hdr);
+    pos += VectorAttributeHeader::LENGTH;
+
+    bool const leave_all = vec_hdr.get_leave_all();
+    uint16_t const num_values = vec_hdr.get_number_of_values();
+
+    // If the vector carries a LeaveAll flag, deliver it to every
+    // attribute of this type.
+    if (leave_all) {
+        rx_leaveall_seen_ = true;  // receive_pdu re-declares immediately (see there)
+        if (attr_type == AttributeType::Listener) {
+            // Every listener registrar goes to LV; it stays registered (registrar_is_registered)
+            // until the leavetimer, so a re-Join within LeaveTime keeps the reservation.
+            if (logger_) {
+                logger_->debug("msrp: Listener LeaveAll (num_values={}) -> all listener registrars leave", num_values);
+            }
+        }
+        auto drive_leaveall = [&](auto& records) {
+            for (auto& rec : records) {
+                mrp::dispatch_applicant(rec, applicant_sm::Def::Event::RLeaveAll, now);
+                mrp::dispatch_registrar(rec, registrar_sm::Def::Event::RLeaveAll, now, port_.timers());
+            }
+        };
+        switch (attr_type) {
+            case AttributeType::TalkerAdvertise:
+                drive_leaveall(talker_adv_);
+                break;
+            case AttributeType::TalkerFailed:
+                drive_leaveall(talker_failed_);
+                break;
+            case AttributeType::Listener:
+                drive_leaveall(listeners_);
+                break;
+            case AttributeType::Domain:
+                drive_leaveall(domains_);
+                break;
+        }
+        // Also ack the LeaveAll into our LeaveAll FSM to restart its timer.
+        port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::RLeaveAll, now);
+    }
+
+    if (pos + attr_length > payload.size()) {
+        return;
+    }
+    auto const first_value_bytes = payload.subspan(pos, attr_length);
+    pos += attr_length;
+
+    size_t const num_event_octets = mrp::threepacked_octet_count(num_values);
+    bool const has_declarations = (attr_type == AttributeType::Listener);
+    size_t const num_decl_octets = has_declarations ? mrp::fourpacked_octet_count(num_values) : 0;
+
+    if (pos + num_event_octets + num_decl_octets > payload.size()) {
+        return;
+    }
+    auto const event_bytes = payload.subspan(pos, num_event_octets);
+    auto const decl_bytes =
+        has_declarations ? payload.subspan(pos + num_event_octets, num_decl_octets) : std::span<uint8_t const>{};
+    pos += num_event_octets + num_decl_octets;
+
+    // Walk each of the num_values attributes in this vector.
+    for (uint16_t i = 0; i < num_values; ++i) {
+        AttributeEvent const event = mrp::nth_of_three(mrp::unpack3_events(event_bytes[i / 3]), i);
+
+        ListenerDeclaration decl = ListenerDeclaration::Ignore;
+        if (has_declarations) {
+            decl = static_cast<ListenerDeclaration>(mrp::nth_of_four(mrp::unpack4_declarations(decl_bytes[i / 4]), i));
+        }
+
+        handle_rx_event(attr_type, attr_length, first_value_bytes, i, event, decl, now);
+    }
+}
+
+template <class Limits>
 void MsrpParticipantT<Limits>::handle_rx_event(
     AttributeType attr_type,
     uint8_t attr_length,
