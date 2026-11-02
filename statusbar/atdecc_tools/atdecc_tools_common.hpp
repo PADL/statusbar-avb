@@ -112,7 +112,7 @@ inline void add_common_arg_specs(args::ArgumentSpecs& specs, CommonConfig& confi
         "interface", "Network interface name (e.g., eth0, en0)", "", [&](auto v) { config.interface_name = std::string{v}; });
     specs.add_file(
         "socket",
-        "Reach a local entity through its ATDECC socket (AF_UNIX datagram, e.g. /run/mediabridge/atdecc.sock) instead "
+        "Reach a local entity through its ATDECC socket (AF_UNIX datagram, e.g. /run/atdecc.sock) instead "
         "of an interface; needs no raw-socket privileges",
         "",
         [&](auto v) { config.socket_path = std::string{v}; });

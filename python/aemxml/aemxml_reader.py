@@ -988,7 +988,7 @@ def read_aemxml(path_or_string: str) -> Entity:
 
 def _milan_attribute(root: ET.Element) -> bool | None:
     """The entity element's optional milan attribute (xs:boolean): the entity's
-    ATDECC profile, a PADL extension like the symbol attributes."""
+    ATDECC profile, a statusbar extension like the symbol attributes."""
     value = root.get("milan")
     if value is None:
         return None

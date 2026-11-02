@@ -245,10 +245,9 @@ host reach the entity without raw sockets: an AF_UNIX `SOCK_DGRAM` socket
 at a configured path (`set_local_port_config()` before `add_to_reactor()`;
 `AvbEntityHost::set_local_atdecc_socket()`; the kit's
 `AvbEntityAudioIOConfig::atdecc_socket_path`, `--atdecc.socket` on the
-entity tools). The wire protocol is la_avdecc's local protocol interface,
-as ATDECCSwift's `UnixSocketPort` speaks it: one bare AVTPDU per datagram
-(AVTP control header and ADP/AECP/ACMP data; no Ethernet header, padding
-or COBS), at most 1500 octets. Empty, short (< 12) and oversize datagrams
+entity tools). The wire protocol is la_avdecc's local protocol interface:
+one bare AVTPDU per datagram (AVTP control header and ADP/AECP/ACMP data;
+no Ethernet header, padding or COBS), at most 1500 octets. Empty, short (< 12) and oversize datagrams
 are dropped. Controllers bind an address of their own (an autobound
 abstract one on Linux) and connect to the path; `AtdeccLocalClient` is that
 end, shaped like `RawnetContext`.
@@ -258,7 +257,7 @@ end, shaped like `RawnetContext`.
   next one). It is forgotten when a send to it fails with
   ECONNREFUSED/ENOENT (its socket closed), when the table (16) is full and
   it is the least recently heard, or after an optional idle timeout (off by
-  default: la_avdecc and ATDECCSwift controllers need not send anything
+  default: local controllers need not send anything
   while idle). Forgetting is deferred to the next reactor point outside
   the entity's own processing, and drops the unsolicited-notification
   registration made from that controller and any acquisition it holds
@@ -525,10 +524,9 @@ talker's attribute is registered).
   our SRclassPriority (3): stream frames always carry that PCP (the shaper's
   queue map is keyed by it), so adopting another priority would declare a
   TSpec the frames do not use. A Class A Domain at another priority leaves the
-  port an SRP domain boundary (IEEE 802.1Q-2018 Clause 35.2.1.4 h), as in
-  GenAVB and lib_avb. The VID is the same at every position of a Domain
-  vector (a bridge's default `{5,2,VID},{6,3,VID}`); the participant hands
-  over the per-position value. Adoption happens at most once per link up: two
+  port an SRP domain boundary (IEEE 802.1Q-2018 Clause 35.2.1.4 h). The VID
+  is the same at every position of a Domain vector (a bridge's default
+  `{5,2,VID},{6,3,VID}`); the participant hands over the per-position value. Adoption happens at most once per link up: two
   adopting end stations on a direct link with different configured VIDs would
   otherwise swap each other's previous value on every periodic PDU, churning
   MVRP, ACMP, the TX tag and the advertisements. A VID change is reported so
