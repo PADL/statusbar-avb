@@ -255,7 +255,7 @@ class ShaperQdiscs
     /// Put @p targets on the SR-class queues, class A's first, each only when changed; always a cbs
     /// replace. EOPNOTSUPP is logged once and stops further cbs requests. Errors: the first netlink
     /// failure (each is logged).
-    auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
+    [[nodiscard]] auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
     /// etf under class A's cbs as @p mode says, from the next program() on, settled once per install()
     /// and again after each change of mode (put or removed under the cbs); offloaded, CLOCK_TAI,
     /// @p delta_ns, skip_sock_check. Unsupported until set.
@@ -415,7 +415,7 @@ class PortShaper final : public net::Pollable
     void set_launch_time(LaunchTimeMode mode) noexcept;
     /// Program the cbs for the TSpecs given and the current link speed now. A no-op success before
     /// install(). Errors: the first netlink failure (each is logged).
-    auto reprogram() -> Status;
+    [[nodiscard]] auto reprogram() -> Status;
     /// Remove both cbs and delete the mqprio root. A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
     /// uninstall() if config.restore_qdisc, else program the placeholders and leave the qdiscs in
@@ -452,7 +452,7 @@ class PortShaper final : public net::Pollable
     /// cbs_targets() for the TSpecs given (@p streams false: none) at the current link speed.
     [[nodiscard]] auto targets(bool streams) -> CbsTargets;
     /// Read the link speed; true if the speed the shaper sizes against changed.
-    auto refresh_link_speed() -> bool;
+    [[nodiscard]] auto refresh_link_speed() -> bool;
     /// Park both cbs at the placeholders and leave the qdiscs for the next start (logged).
     void park();
     /// Open the tc client (our own) and install the mqprio root for @p layout on @p port.
@@ -509,7 +509,7 @@ class EntityShaper final : public net::Pollable
     /// Recompute and program the cbs for the recorded admitted set and the
     /// current link speed. A no-op success before install(). Errors: the
     /// first netlink failure (each is logged).
-    auto reprogram() -> Status;
+    [[nodiscard]] auto reprogram() -> Status;
     /// Unregister the admission hook, remove both cbs and delete the
     /// mqprio root. A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;

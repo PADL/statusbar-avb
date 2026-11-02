@@ -25,6 +25,70 @@ using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
 using statusbar::nanoavb::DomainInfo;
 
+namespace {
+
+/// The static destination MAC @p config gives a talker stream of @p kind (none for "other").
+auto talker_dest_mac(AvbEntityAudioIOConfig const& config, StreamKind const kind) noexcept -> ieee::Eui48
+{
+    switch (kind) {
+        case StreamKind::am824:
+            return config.am824_talker_dest_mac;
+        case StreamKind::aaf:
+            return config.aaf_talker_dest_mac;
+        case StreamKind::crf:
+            return config.crf_talker_dest_mac;
+        case StreamKind::other:
+        default:
+            return ieee::Eui48{};
+    }
+}
+
+/// Descriptor (@p type, @p index) of @p host's model as a @p T; nullopt when there is none.
+template <typename T>
+[[nodiscard]] auto load_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t const index) -> std::optional<T>
+{
+    auto const blob = host.get_descriptor(type, index);
+    if (!blob.has_value()) {
+        return std::nullopt;
+    }
+    T desc{};
+    span_load_padded(desc, *blob);
+    return desc;
+}
+
+/// The AUDIO_CLUSTER at @p offset from @p port's base cluster; nullopt when there is none.
+[[nodiscard]] auto audio_cluster(AvbEntityHost const& host, atdecc::aem::DescriptorStreamPort const& port, uint16_t const offset)
+    -> std::optional<atdecc::aem::DescriptorAudioCluster>
+{
+    return load_descriptor<atdecc::aem::DescriptorAudioCluster>(
+        host, atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(port.base_cluster.get() + offset));
+}
+
+/// SET_CLOCK_SOURCE's body (IEEE 1722.1-2021 Clause 7.4.23.1): CLOCK_DOMAIN, its index, the source, reserved.
+auto clock_source_command(uint16_t const clock_domain_index, uint16_t const clock_source_index) -> std::array<uint8_t, 8>
+{
+    std::array<uint8_t, 8> body{};
+    span_store(std::span{body}.subspan(0, 2), atdecc::doublet_t{atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN});
+    span_store(std::span{body}.subspan(2, 2), atdecc::doublet_t{clock_domain_index});
+    span_store(std::span{body}.subspan(4, 2), atdecc::doublet_t{clock_source_index});
+    return body;
+}
+
+/// Descriptor (@p type, @p index) of configuration 0.
+auto descriptor_id(uint16_t const type, uint16_t const index) -> nanoavb::DescriptorId
+{
+    return nanoavb::DescriptorId{
+        .ref = {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, .symbol = 0};
+}
+
+/// A saved value the model refused is dropped (the file is rewritten without it).
+void log_refused(logging::Logger log, std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status)
+{
+    log.warning("kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
+}
+
+}  // namespace
+
 AvbEntityKit::AvbEntityKit(
     AvbEntityAudioIOConfig const& config,
     nanoavb::DescriptorStorageHandler& handler,
@@ -1716,9 +1780,11 @@ void AvbEntityKit::apply_saved_descriptor_values(PersistentState const& saved)
         ieee::Eui64 value{};
         value.from_uint64(format.format);
         if (auto const status = storage_handler_.on_set_descriptor_value(
-                atdecc::AEM_COMMAND_SET_STREAM_FORMAT, id(format.descriptor_type, format.descriptor_index), make_const_span(value));
-            status != AEM_STATUS_SUCCESS) {
-            refused("stream format", format.descriptor_type, format.descriptor_index, status);
+                atdecc::AEM_COMMAND_SET_STREAM_FORMAT,
+                descriptor_id(format.descriptor_type, format.descriptor_index),
+                make_const_span(value));
+            status != atdecc::AEM_STATUS_SUCCESS) {
+            log_refused(host_.ctl_log(), "stream format", format.descriptor_type, format.descriptor_index, status);
         }
     }
     for (auto const& source : saved.clock_sources) {
@@ -1726,52 +1792,65 @@ void AvbEntityKit::apply_saved_descriptor_values(PersistentState const& saved)
         std::array<uint8_t, 4> const value{
             static_cast<uint8_t>(source.clock_source >> 8U), static_cast<uint8_t>(source.clock_source & 0xFFU), 0, 0};
         if (auto const status = storage_handler_.on_set_descriptor_value(
-                atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, id(DESCRIPTOR_CLOCK_DOMAIN, source.clock_domain), value);
-            status != AEM_STATUS_SUCCESS) {
-            refused("clock source", DESCRIPTOR_CLOCK_DOMAIN, source.clock_domain, status);
+                atdecc::AEM_COMMAND_SET_CLOCK_SOURCE,
+                descriptor_id(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, source.clock_domain),
+                value);
+            status != atdecc::AEM_STATUS_SUCCESS) {
+            log_refused(host_.ctl_log(), "clock source", atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, source.clock_domain, status);
         }
     }
-    apply_saved_audio_maps(saved);
-    bool const offsets_stand = saved.configured_presentation_offset_ns == default_presentation_offset_ns();
-    if (!saved.presentation_offsets.empty() && !offsets_stand) {
-        log.status("kit: the configured presentation offset changed: the saved ones are dropped");
+}
+
+void AvbEntityKit::apply_saved_presentation_offsets(PersistentState const& saved)
+{
+    if (saved.configured_presentation_offset_ns != default_presentation_offset_ns()) {
+        if (!saved.presentation_offsets.empty()) {
+            host_.ctl_log().status("kit: the configured presentation offset changed: the saved ones are dropped");
+        }
+        return;
     }
     for (auto const& offset : saved.presentation_offsets) {
-        if (!offsets_stand) {
-            break;
-        }
         uint8_t status = atdecc::AEM_STATUS_NOT_SUPPORTED;
         if (is_talker_index(offset.stream_output) && offset.ns <= atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS &&
             on_presentation_offset_changed_) {
             status = on_presentation_offset_changed_(offset.stream_output, offset.ns);
         }
-        if (status != AEM_STATUS_SUCCESS) {
-            refused("presentation offset", DESCRIPTOR_STREAM_OUTPUT, offset.stream_output, status);
+        if (status != atdecc::AEM_STATUS_SUCCESS) {
+            log_refused(host_.ctl_log(), "presentation offset", DESCRIPTOR_STREAM_OUTPUT, offset.stream_output, status);
             continue;
         }
         presentation_offset_ns_[offset.stream_output].store(offset.ns, std::memory_order_relaxed);
     }
+}
+
+void AvbEntityKit::apply_saved_names(PersistentState const& saved)
+{
     for (auto const& name : saved.names) {
         // A saved entity name stands only while the configuration still
         // names the entity as it did when it was saved.
         if (name.descriptor_type == atdecc::aem::DESCRIPTOR_ENTITY && name.descriptor_index == 0 && name.name_index == 0 &&
             saved.configured_entity_name != configured_entity_name_) {
-            log.status("kit: the configured entity name changed: the saved one is dropped");
+            host_.ctl_log().status("kit: the configured entity name changed: the saved one is dropped");
             continue;
         }
         if (auto const status = storage_handler_.on_set_name(
-                id(name.descriptor_type, name.descriptor_index), name.name_index, atdecc::aem::AtdeccString{name.value});
-            status != AEM_STATUS_SUCCESS) {
-            refused("name", name.descriptor_type, name.descriptor_index, status);
+                descriptor_id(name.descriptor_type, name.descriptor_index), name.name_index, atdecc::aem::AtdeccString{name.value});
+            status != atdecc::AEM_STATUS_SUCCESS) {
+            log_refused(host_.ctl_log(), "name", name.descriptor_type, name.descriptor_index, status);
         }
     }
+}
+
+void AvbEntityKit::apply_saved_mvu_settings(PersistentState const& saved)
+{
     auto& mvu = host_.components().mvu_handler;
     mvu.set_system_unique_id(saved.system_unique_id);
     for (auto const& mcr : saved.media_clock_references) {
         nanoavb::MvuCommandHandler::McrInfo const info{
             .user_mcr_prio = mcr.user_priority, .domain_name = nanoavb::mcr_domain_name(mcr.domain_name)};
         if (!mvu.set_mcr_info(mcr.clock_domain, info)) {
-            log.warning("kit: saved media clock reference of CLOCK_DOMAIN {}: no such clock domain: dropped", mcr.clock_domain);
+            host_.ctl_log().warning(
+                "kit: saved media clock reference of CLOCK_DOMAIN {}: no such clock domain: dropped", mcr.clock_domain);
         }
     }
 }

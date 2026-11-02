@@ -215,14 +215,16 @@ class NanoAvbAcmpTalker
     /// @param ingress_interface The AVB interface it arrived on (Milan's
     ///        PROBE_TX interface check); the entity has one, 0.
     /// @return true if the command was handled
-    auto receive_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface = 0) -> bool;
+    [[nodiscard]] auto receive_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface = 0)
+        -> bool;
 
     /// Get the current state machine state
     [[nodiscard]] auto current_state() const noexcept -> TalkerState { return sm_.current_state(); }
 
   private:
     void wire_talker_tx_response();
-    auto receive_milan_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface) -> bool;
+    [[nodiscard]] auto receive_milan_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface)
+        -> bool;
 
     AcmpTalkerCallbacks callbacks_;
     TalkerContext<> ctx_;
