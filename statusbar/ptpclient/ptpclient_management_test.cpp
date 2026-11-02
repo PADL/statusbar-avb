@@ -115,10 +115,12 @@ auto port_properties(uint16_t const port, std::string_view const name) -> std::v
     return data;
 }
 
-/// A RESPONSE carrying `data` for `id`, in `domain`, built as the bytes above are.
-auto response(uint16_t const id, std::vector<uint8_t> const& data, uint8_t const domain = 0) -> std::vector<uint8_t>
+/// A RESPONSE carrying `data` for `id`, in `domain` and transportSpecific `ts`, built as the bytes above are.
+auto response(uint16_t const id, std::vector<uint8_t> const& data, uint8_t const domain = 0, uint8_t const ts = 0)
+    -> std::vector<uint8_t>
 {
     std::vector<uint8_t> out(PARENT_RESPONSE.begin(), PARENT_RESPONSE.begin() + 48);
+    out[0] = static_cast<uint8_t>((ts << 4U) | 0x0DU);
     out[4] = domain;
     size_t const length = 48 + 6 + data.size();
     out[2] = static_cast<uint8_t>(length >> 8U);
@@ -146,7 +148,7 @@ TEST(ptp_management, builds_a_pmc_get)
 {
     std::array<uint8_t, 64> out{};
     gptp::SourcePortIdentity const me{gptp::ClockIdentity{0, 0, 0, 0xFF, 0xFE, 0, 0x30, 0x39}, 1};
-    size_t const n = build_management_get(out, management_id::parent_data_set, 0, 7, me);
+    size_t const n = build_management_get(out, management_id::parent_data_set, {.sequence_id = 7, .source = me});
     EXPECT_EQ(n, MANAGEMENT_GET_SIZE);
     // clang-format off
     std::array<uint8_t, 54> const expect{
@@ -160,7 +162,9 @@ TEST(ptp_management, builds_a_pmc_get)
     };
     // clang-format on
     EXPECT_TRUE(std::equal(expect.begin(), expect.end(), out.begin()));
-    EXPECT_EQ(build_management_get(std::span<uint8_t>{out}.first(53), management_id::parent_data_set, 0, 7, me), size_t{0});
+    EXPECT_EQ(
+        build_management_get(std::span<uint8_t>{out}.first(53), management_id::parent_data_set, {.sequence_id = 7, .source = me}),
+        size_t{0});
     // and it parses back as a GET with no data
     auto const parsed = parse_management_message(std::span<uint8_t const>{out.data(), n});
     EXPECT_TRUE(parsed.has_value());
@@ -309,8 +313,12 @@ TEST(ptp_management, grandmaster_settings_encode_as_linuxptp_reads_them)
     };
     std::array<uint8_t, MANAGEMENT_SET_MAX_SIZE> out{};
     gptp::SourcePortIdentity const me{gptp::ClockIdentity{0, 0, 0, 0xFF, 0xFE, 0, 0x30, 0x39}, 1};
-    size_t const n =
-        build_management_message(out, ManagementAction::set, management_id::grandmaster_settings_np, encode(settings), 127, 9, me);
+    size_t const n = build_management_message(
+        out,
+        ManagementAction::set,
+        management_id::grandmaster_settings_np,
+        encode(settings),
+        {.domain = 127, .sequence_id = 9, .source = me});
     EXPECT_EQ(n, size_t{62});
     // clang-format off
     std::array<uint8_t, 62> const expect{
@@ -338,9 +346,7 @@ TEST(ptp_management, grandmaster_settings_encode_as_linuxptp_reads_them)
             ManagementAction::set,
             management_id::grandmaster_settings_np,
             encode(settings),
-            0,
-            0,
-            me),
+            {.source = me}),
         size_t{0});
 }
 
@@ -357,7 +363,8 @@ TEST(ptp_management, a_subscription_encodes_its_duration_and_events)
     EXPECT_EQ(data[2], uint8_t{0x05});  // bits 0 and 2 of the first octet
     EXPECT_TRUE(std::all_of(data.begin() + 3, data.end(), [](uint8_t const b) { return b == 0; }));
     std::array<uint8_t, MANAGEMENT_SET_MAX_SIZE> out{};
-    size_t const n = build_management_message(out, ManagementAction::set, management_id::subscribe_events_np, data, 0, 1, {});
+    size_t const n =
+        build_management_message(out, ManagementAction::set, management_id::subscribe_events_np, data, {.sequence_id = 1});
     EXPECT_EQ(n, MANAGEMENT_SET_MAX_SIZE);
     auto const parsed = parse_management_message(std::span<uint8_t const>{out.data(), n});
     EXPECT_TRUE(parsed.has_value());
@@ -367,7 +374,7 @@ TEST(ptp_management, a_subscription_encodes_its_duration_and_events)
     EXPECT_TRUE(back->has(ManagementEvent::parent_data_set));
     // odd data is padded to an even TLV
     std::array<uint8_t, 3> const odd{1, 2, 3};
-    EXPECT_EQ(build_management_message(out, ManagementAction::set, 0xC0FF, odd, 0, 1, {}), MANAGEMENT_GET_SIZE + 4);
+    EXPECT_EQ(build_management_message(out, ManagementAction::set, 0xC0FF, odd, {.sequence_id = 1}), MANAGEMENT_GET_SIZE + 4);
     EXPECT_EQ(out[51], uint8_t{6});
     EXPECT_EQ(out[57], uint8_t{0});
 }
@@ -410,6 +417,19 @@ TEST(ptp_management, a_time_sync_notification_is_parsed)
     EXPECT_FALSE(parse_management_message(response(management_id::time_status_np, std::vector<uint8_t>(48))).has_value());
 }
 
+TEST(ptp_management, accepts_any_minor_version_and_transport_specific)
+{
+    // linuxptp's default ptp_minor_version 1 sends 0x12, and a gPTP port's transportSpecific is 1.
+    auto bytes = response(management_id::parent_data_set, parent_data(GM), 0, 1);
+    bytes[1] = 0x12;
+    auto const parsed = parse_management_message(bytes);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->transport_specific, uint8_t{1});
+    EXPECT_TRUE(std::holds_alternative<ParentDataSet>(parsed->data));
+    bytes[1] = 0x13;  // PTPv3: not ours
+    EXPECT_FALSE(parse_management_message(bytes).has_value());
+}
+
 #if defined(__linux__)
 
 namespace {
@@ -423,113 +443,113 @@ auto socket_dir(char const* name) -> std::filesystem::path
     return dir;
 }
 
-}  // namespace
-
-TEST(ptp_management, client_reports_status_grandmaster_and_silence)
+/// The address @p fd is bound to.
+auto bound_address(int const fd) -> std::pair<sockaddr_un, socklen_t>
 {
-    auto const dir = socket_dir("status");
-    auto const uds = (dir / "ptp4l").string();  // nothing listens there
-    int calls = 0;
-    PtpManagementState last{};
-    auto client = PtpManagementClient::create(
-        PtpManagementConfig{.uds_address = uds, .domain = 0, .period_ns = 1'000'000'000, .missed_periods = 3},
-        [&](PtpManagementState const& state) {
-            ++calls;
-            last = state;
-        });
-    EXPECT_TRUE(client.has_value());
-    auto& c = **client;
-
-    // No ptp4l: the send's error is recorded once, the status unreachable.
-    c.tick(0);
-    EXPECT_EQ(calls, 1);
-    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
-    EXPECT_TRUE(last.error == std::errc::no_such_file_or_directory || last.error == std::errc::connection_refused);
-    c.tick(1'000'000'000);
-    EXPECT_EQ(calls, 1);  // the same error is not reported again
-
-    // ptp4l answers: locked to the grandmaster, the error cleared.
-    c.handle(PARENT_RESPONSE, 1'000'000'010);
-    EXPECT_EQ(calls, 2);
-    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
-    EXPECT_TRUE(last.grandmaster == GM);
-    EXPECT_FALSE(last.error);
-    c.handle(PARENT_RESPONSE, 1'000'000'020);  // unchanged: no call
-    EXPECT_EQ(calls, 2);
-    c.handle(response(management_id::current_data_set, std::vector<uint8_t>(18)), 1'000'000'030);
-    c.handle(response(management_id::time_properties_data_set, {0x00, 0x25, 0x0C, 0x20}), 1'000'000'040);
-    EXPECT_EQ(calls, 2);  // kept, but not a change
-    EXPECT_TRUE(c.state().current.has_value() && c.state().time_properties.has_value());
-
-    // ptp4l's PARENT_DATA_SET names its own clock: it follows no grandmaster.
-    ieee::Eui64 const self{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0xAA, 0xBB, 0xCC};
-    c.handle(response(management_id::parent_data_set, parent_data(self)), 1'000'000'050);
-    EXPECT_EQ(calls, 3);
-    EXPECT_TRUE(last.status == PtpManagementStatus::no_grandmaster);
-    EXPECT_TRUE(last.grandmaster == self);
-
-    // Silent for more than three periods: unreachable, everything learnt forgotten.
-    c.tick(4'500'000'000);
-    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
-    EXPECT_FALSE(c.state().grandmaster.has_value());
-    EXPECT_FALSE(c.state().parent.has_value());
-    EXPECT_FALSE(c.state().current.has_value());
-    EXPECT_FALSE(c.state().time_properties.has_value());
-    EXPECT_FALSE(c.finished());
-
-    client->reset();
-    EXPECT_TRUE(std::filesystem::is_empty(dir));  // nothing bound in the filesystem
-    std::filesystem::remove_all(dir);
+    sockaddr_un address{};
+    socklen_t length = sizeof(address);
+    EXPECT_EQ(::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length), 0);
+    return {address, length};
 }
 
-TEST(ptp_management, client_follows_the_named_port_s_peer_delay)
+/// A message the stand-in received: its managementId, action and transportSpecific.
+struct Received
 {
-    auto const dir = socket_dir("port");
-    int calls = 0;
-    PtpManagementState last{};
-    auto client = PtpManagementClient::create(
-        PtpManagementConfig{.uds_address = (dir / "ptp4l").string(), .port_interface = "enp8s0"},
-        [&](PtpManagementState const& state) {
-            ++calls;
-            last = state;
-        });
-    EXPECT_TRUE(client.has_value());
-    auto& c = **client;
-    c.handle(PARENT_RESPONSE, 10);
-    EXPECT_EQ(calls, 1);
+    uint16_t id;
+    ManagementAction action;
+    uint8_t transport_specific;
+};
 
-    // A PORT_DATA_SET before PORT_PROPERTIES_NP names the port: not ours yet.
-    c.handle(PORT_RESPONSE, 20);
-    EXPECT_EQ(calls, 1);
-    EXPECT_FALSE(c.state().peer_mean_path_delay_ns.has_value());
+/// A stand-in for ptp4l: a datagram socket at `dir`/ptp4l that records requests and answers the
+/// last sender, as ptp4l's uds transport does.
+struct Ptp4l
+{
+    explicit Ptp4l(std::filesystem::path const& dir)
+        : path{(dir / "ptp4l").string()}
+        , fd{::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0)}
+    {
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path, path.data(), path.size());
+        EXPECT_EQ(::bind(fd, reinterpret_cast<sockaddr const*>(&address), sizeof(address)), 0);
+    }
+    Ptp4l(Ptp4l const&) = delete;
+    auto operator=(Ptp4l const&) -> Ptp4l& = delete;
+    ~Ptp4l() { ::close(fd); }
 
-    // ptp4l's ports, as pmc -b 0 sees them: port 1 ens4, port 2 enp8s0.
-    c.handle(response(management_id::port_properties_np, port_properties(1, "ens4")), 30);
-    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 31);
-    EXPECT_TRUE((c.state().port == gptp::SourcePortIdentity{BRIDGE, 2}));
-    EXPECT_EQ(calls, 1);                                                                       // the port alone is not a change
-    c.handle(response(management_id::port_data_set, port_data(1, int64_t{900} * 65536)), 40);  // ens4's: ignored
-    EXPECT_EQ(calls, 1);
-    c.handle(PORT_RESPONSE, 41);
-    EXPECT_EQ(calls, 2);
-    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{74});
-    EXPECT_TRUE(last.port_state == PortState::master);
-    EXPECT_TRUE(last.delay_mechanism == DelayMechanism::p2p);
-    EXPECT_TRUE(last.grandmaster == GM);
+    /// Every request since the last drain.
+    auto drain() -> std::vector<Received>
+    {
+        std::vector<Received> seen;
+        for (;;) {
+            std::array<uint8_t, 256> in{};
+            sockaddr_un sender{};
+            socklen_t sender_length = sizeof(sender);
+            ssize_t const n = ::recvfrom(fd, in.data(), in.size(), 0, reinterpret_cast<sockaddr*>(&sender), &sender_length);
+            if (n <= 0) {
+                return seen;
+            }
+            from = sender;
+            from_length = sender_length;
+            auto const message = parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(n)});
+            EXPECT_TRUE(message.has_value());
+            if (message) {
+                seen.push_back(Received{message->management_id, message->action, message->transport_specific});
+            }
+        }
+    }
 
-    // The same delay to the ns: no call; a new one: a call.
-    c.handle(response(management_id::port_data_set, port_data(2, int64_t{74} * 65536 + 100)), 50);
-    EXPECT_EQ(calls, 2);
-    c.handle(response(management_id::port_data_set, port_data(2, int64_t{77} * 65536)), 60);
-    EXPECT_EQ(calls, 3);
-    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{77});
+    /// Answer the last sender with @p bytes.
+    void answer(std::span<uint8_t const> const bytes) const
+    {
+        EXPECT_EQ(
+            ::sendto(fd, bytes.data(), bytes.size(), 0, reinterpret_cast<sockaddr const*>(&from), from_length),
+            static_cast<ssize_t>(bytes.size()));
+    }
 
-    // Silence forgets the port with the rest.
-    c.tick(0);
-    c.tick(10'000'000'000);
-    EXPECT_FALSE(c.state().port.has_value());
-    EXPECT_FALSE(last.peer_mean_path_delay_ns.has_value());
-    client->reset();
+    std::string path;
+    int fd;
+    sockaddr_un from{};
+    socklen_t from_length{0};
+};
+
+auto count(std::vector<Received> const& seen, uint16_t const id, ManagementAction const action) -> int64_t
+{
+    return std::ranges::count_if(seen, [&](Received const& r) { return r.id == id && r.action == action; });
+}
+
+/// The subscription a client holds once ptp4l answers its SET or GET.
+auto held_subscription(uint16_t const duration_s) -> std::vector<uint8_t>
+{
+    SubscribeEventsNp held{.duration_s = duration_s};
+    held.add(ManagementEvent::port_state);
+    held.add(ManagementEvent::parent_data_set);
+    auto const data = encode(held);
+    return response(management_id::subscribe_events_np, {data.begin(), data.end()});
+}
+
+constexpr int64_t SECOND = 1'000'000'000;
+
+}  // namespace
+
+// Each client autobinds an abstract address of its own (Linux), so two in one process never
+// share a reply address
+TEST(ptp_management, two_clients_in_a_process_have_their_own_addresses)
+{
+    auto const dir = socket_dir("autobind");
+    PtpManagementConfig const config{.uds_address = (dir / "ptp4l").string()};
+    auto a = PtpManagementClient::create(config, [](PtpManagementState const&) {});
+    auto b = PtpManagementClient::create(config, [](PtpManagementState const&) {});
+    EXPECT_TRUE(a.has_value() && b.has_value());
+    if (!a || !b) {
+        return;
+    }
+    auto const [address_a, length_a] = bound_address((*a)->fd());
+    auto const [address_b, length_b] = bound_address((*b)->fd());
+    EXPECT_TRUE(length_a > offsetof(sockaddr_un, sun_path) && address_a.sun_path[0] == '\0');  // abstract
+    EXPECT_TRUE(length_b > offsetof(sockaddr_un, sun_path) && address_b.sun_path[0] == '\0');
+    EXPECT_FALSE(length_a == length_b && std::memcmp(&address_a, &address_b, length_a) == 0);
+    EXPECT_TRUE(std::filesystem::is_empty(dir));
     std::filesystem::remove_all(dir);
 }
 
@@ -542,284 +562,362 @@ TEST(ptp_management, create_validates_its_configuration)
         PtpManagementClient::create(PtpManagementConfig{.uds_address = std::string("/tmp/a\0b", 8)}, listener).has_value());
     EXPECT_FALSE(
         PtpManagementClient::create(PtpManagementConfig{.uds_address = "/" + std::string(200, 'x')}, listener).has_value());
-    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.missed_periods = 0}, listener).has_value());
-    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.period_ns = 0}, listener).has_value());
-    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.subscription_duration_s = 1}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.poll_period_ns = 0}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.retry_period_ns = 0}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.subscription_duration_s = 2}, listener).has_value());
+    EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.subscription_duration_s = 65535}, listener).has_value());
 }
 
-/// The address @p fd is bound to.
-auto bound_address(int const fd) -> std::pair<sockaddr_un, socklen_t>
+// Unreachable, the client probes in both transportSpecific values; the first answer fetches every
+// data set once and subscribes, after which only what ptp4l never notifies is polled
+TEST(ptp_management, client_probes_then_fetches_once_and_polls_only_the_unnotified)
 {
-    sockaddr_un address{};
-    socklen_t length = sizeof(address);
-    EXPECT_EQ(::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length), 0);
-    return {address, length};
-}
-
-// Each client autobinds an abstract address of its own (Linux), so two in one process never
-// share a reply address
-TEST(ptp_management, two_clients_in_a_process_have_their_own_addresses)
-{
-    auto const dir = socket_dir("autobind");
-    PtpManagementConfig const config{.uds_address = (dir / "ptp4l").string()};
-    auto a = PtpManagementClient::create(config, [](PtpManagementState const&) {});
-    auto b = PtpManagementClient::create(config, [](PtpManagementState const&) {});
-    EXPECT_TRUE(a.has_value() && b.has_value());
-    auto const [address_a, length_a] = bound_address((*a)->fd());
-    auto const [address_b, length_b] = bound_address((*b)->fd());
-    EXPECT_TRUE(length_a > offsetof(sockaddr_un, sun_path) && address_a.sun_path[0] == '\0');  // abstract
-    EXPECT_TRUE(length_b > offsetof(sockaddr_un, sun_path) && address_b.sun_path[0] == '\0');
-    EXPECT_FALSE(length_a == length_b && std::memcmp(&address_a, &address_b, length_a) == 0);
-    EXPECT_TRUE(std::filesystem::is_empty(dir));
-    std::filesystem::remove_all(dir);
-}
-
-TEST(ptp_management, client_talks_to_a_ptp4l_socket)
-{
-    // A stand-in for ptp4l: a datagram socket at a path, answering each GET
-    // PARENT_DATA_SET with the response above.
-    auto const dir = socket_dir("talk");
-    auto const path = (dir / "ptp4l").string();
-    int const server = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    EXPECT_TRUE(server >= 0);
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    std::memcpy(address.sun_path, path.data(), path.size());
-    EXPECT_EQ(::bind(server, reinterpret_cast<sockaddr const*>(&address), sizeof(address)), 0);
-
+    auto const dir = socket_dir("fetch");
+    Ptp4l ptp4l{dir};
     int calls = 0;
     PtpManagementState seen{};
-    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = path}, [&](PtpManagementState const& state) {
-        ++calls;
-        seen = state;
-    });
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .subscription_duration_s = 60}, [&](PtpManagementState const& state) {
+            ++calls;
+            seen = state;
+        });
     EXPECT_TRUE(client.has_value());
-    (*client)->tick(0);  // three GETs
-    EXPECT_FALSE((*client)->state().error);
-
-    int gets = 0;
-    for (int i = 0; i < 3; ++i) {
-        std::array<uint8_t, 128> in{};
-        sockaddr_un from{};
-        socklen_t from_length = sizeof(from);
-        ssize_t const n = ::recvfrom(server, in.data(), in.size(), 0, reinterpret_cast<sockaddr*>(&from), &from_length);
-        EXPECT_TRUE(n > 0);
-        auto const get = parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(n)});
-        EXPECT_TRUE(get.has_value());
-        EXPECT_TRUE(get->action == ManagementAction::get);
-        ++gets;
-        if (get->management_id == management_id::parent_data_set) {
-            EXPECT_EQ(
-                ::sendto(
-                    server,
-                    PARENT_RESPONSE.data(),
-                    PARENT_RESPONSE.size(),
-                    0,
-                    reinterpret_cast<sockaddr const*>(&from),
-                    from_length),
-                static_cast<ssize_t>(PARENT_RESPONSE.size()));
-        }
+    if (!client) {
+        return;
     }
-    EXPECT_EQ(gets, 3);
-    (*client)->on_ready(1);
-    EXPECT_EQ(calls, 1);
-    EXPECT_TRUE(seen.status == PtpManagementStatus::locked);
-    EXPECT_TRUE(seen.grandmaster == GM);
-    EXPECT_FALSE((*client)->finished());
+    auto& c = **client;
+    c.tick(0);
+    auto probes = ptp4l.drain();
+    EXPECT_EQ(probes.size(), size_t{2});
+    EXPECT_TRUE(probes.size() == 2 && probes[0].transport_specific == 0 && probes[1].transport_specific == 1);
+    c.tick(SECOND / 2);
+    EXPECT_TRUE(ptp4l.drain().empty());  // the next probe waits for retry_period_ns
 
-    // Following a port adds PORT_PROPERTIES_NP, then PORT_DATA_SET.
-    std::vector<uint16_t> ids;
-    auto follower = PtpManagementClient::create(
-        PtpManagementConfig{.uds_address = path, .port_interface = "enp8s0"}, [](PtpManagementState const&) {});
-    EXPECT_TRUE(follower.has_value());
-    (*follower)->tick(0);
-    for (int i = 0; i < 5; ++i) {
-        std::array<uint8_t, 128> in{};
-        ssize_t const n = ::recv(server, in.data(), in.size(), 0);
-        EXPECT_TRUE(n > 0);
-        auto const get =
-            parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(std::max<ssize_t>(n, 0))});
-        ids.push_back(get ? get->management_id : 0);
-    }
-    EXPECT_TRUE(
-        (ids ==
-         std::vector<uint16_t>{
-             management_id::parent_data_set,
-             management_id::current_data_set,
-             management_id::time_properties_data_set,
-             management_id::port_properties_np,
-             management_id::port_data_set}));
-    follower->reset();
-    ::close(server);
+    // ptp4l (a gPTP port, transportSpecific 1, minor version 1) answers the second probe.
+    auto parent = response(management_id::parent_data_set, parent_data(GM), 0, 1);
+    parent[1] = 0x12;
+    ptp4l.answer(parent);
+    c.on_ready(SECOND / 2 + 1);
+    EXPECT_TRUE(seen.status == PtpManagementStatus::locked && seen.grandmaster == GM);
+    auto const fetch = ptp4l.drain();
+    EXPECT_EQ(count(fetch, management_id::parent_data_set, ManagementAction::get), 1);
+    EXPECT_EQ(count(fetch, management_id::current_data_set, ManagementAction::get), 1);
+    EXPECT_EQ(count(fetch, management_id::time_properties_data_set, ManagementAction::get), 1);
+    EXPECT_EQ(count(fetch, management_id::subscribe_events_np, ManagementAction::set), 1);
+    EXPECT_TRUE(std::ranges::all_of(fetch, [](Received const& r) { return r.transport_specific == 1; }));
+
+    // Subscribed: a poll asks only for TIME_PROPERTIES_DATA_SET.
+    c.handle(held_subscription(6), SECOND);
+    EXPECT_TRUE(c.state().subscribed);
+    c.tick(SECOND * 5 / 2);
+    EXPECT_TRUE(ptp4l.drain().empty());  // one poll period after the fetch is not yet over
+    c.tick(3 * SECOND);
+    auto const poll = ptp4l.drain();
+    EXPECT_EQ(poll.size(), size_t{1});
+    EXPECT_EQ(count(poll, management_id::time_properties_data_set, ManagementAction::get), 1);
+    EXPECT_EQ(calls, 2);  // locked, then subscribed
+    client->reset();
     std::filesystem::remove_all(dir);
 }
 
-TEST(ptp_management, client_reports_notifications_settings_and_refusals)
+// Notifications: a port state change and a new parent arrive as RESPONSEs; a new parent fetches
+// what ptp4l notifies nothing for, and TIME_STATUS_NP is kept without a report
+TEST(ptp_management, client_receives_notifications)
 {
     auto const dir = socket_dir("notify");
+    Ptp4l ptp4l{dir};
     int calls = 0;
     PtpManagementState last{};
     auto client = PtpManagementClient::create(
-        PtpManagementConfig{.uds_address = (dir / "ptp4l").string(), .port_interface = "enp8s0"},
-        [&](PtpManagementState const& state) {
+        PtpManagementConfig{.uds_address = ptp4l.path, .port_interface = "enp8s0"}, [&](PtpManagementState const& state) {
             ++calls;
             last = state;
         });
     EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
     auto& c = **client;
-    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 10);
-    c.handle(PORT_RESPONSE, 11);
+    c.handle(PARENT_RESPONSE, 10);
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 11);
+    c.handle(PORT_RESPONSE, 12);
     EXPECT_TRUE(last.port_state == PortState::master);
+    (void)ptp4l.drain();
     int const before = calls;
 
-    // A pushed PORT_DATA_SET (NOTIFY_PORT_STATE): the port is SLAVE now.
     auto slave = port_data(2, int64_t{74} * 65536);
     slave[10] = 0x09;
     c.handle(response(management_id::port_data_set, slave), 20);
     EXPECT_EQ(calls, before + 1);
     EXPECT_TRUE(last.port_state == PortState::slave);
 
-    // TIME_STATUS_NP is kept but reports nothing by itself.
-    c.handle(response(management_id::time_status_np, std::vector<uint8_t>(TimeStatusNp::SIZE)), 30);
-    EXPECT_EQ(calls, before + 1);
+    ieee::Eui64 const other{0x00, 0x1D, 0xC1, 0xFF, 0xFE, 0x65, 0x43, 0x21};
+    c.handle(response(management_id::parent_data_set, parent_data(other)), 30);
+    EXPECT_TRUE(last.grandmaster == other);
+    auto const refetch = ptp4l.drain();
+    EXPECT_EQ(count(refetch, management_id::current_data_set, ManagementAction::get), 1);
+    EXPECT_EQ(count(refetch, management_id::time_properties_data_set, ManagementAction::get), 1);
+    int const after = calls;
+    c.handle(response(management_id::time_status_np, std::vector<uint8_t>(TimeStatusNp::SIZE)), 40);
+    EXPECT_EQ(calls, after);
     EXPECT_TRUE(c.state().time_status.has_value());
-
-    // A SET acknowledged, the SUBSCRIBE acknowledged, then a refusal.
-    GrandmasterSettingsNp const settings{.clock_class = 13, .clock_accuracy = 0x21};
-    auto const settings_data = encode(settings);
-    c.handle(response(management_id::grandmaster_settings_np, {settings_data.begin(), settings_data.end()}), 40);
-    EXPECT_EQ(calls, before + 2);
-    EXPECT_TRUE(last.grandmaster_settings == settings);
-    auto const subscribe_data = encode(SubscribeEventsNp{.duration_s = 180});
-    c.handle(response(management_id::subscribe_events_np, {subscribe_data.begin(), subscribe_data.end()}), 50);
-    EXPECT_EQ(calls, before + 3);
-    EXPECT_TRUE(last.subscribed);
-    auto error = response(0, {});
-    error.resize(48);
-    error.insert(error.end(), {0x00, 0x02, 0x00, 0x08, 0x00, 0x05, 0xC0, 0x01, 0x00, 0x00, 0x00, 0x00});  // NOT_SETABLE
-    error[3] = static_cast<uint8_t>(error.size());
-    c.handle(error, 60);
-    EXPECT_EQ(calls, before + 4);
-    EXPECT_EQ(last.refused.value_or(0), uint16_t{5});
-    // a refused GET is not a refusal of ours
-    error[54] = 0x20;
-    error[55] = 0x02;
-    c.handle(error, 70);
-    EXPECT_EQ(calls, before + 4);
     client->reset();
     std::filesystem::remove_all(dir);
 }
 
-TEST(ptp_management, client_subscribes_and_resends_its_settings_to_a_ptp4l_socket)
+// The followed port: PORT_PROPERTIES_NP names it, its PORT_DATA_SET gives the peer delay to the ns
+TEST(ptp_management, client_follows_the_named_port_s_peer_delay)
 {
-    auto const dir = socket_dir("subscribe");
-    auto const path = (dir / "ptp4l").string();
-    int const server = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    EXPECT_TRUE(server >= 0);
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    std::memcpy(address.sun_path, path.data(), path.size());
-    EXPECT_EQ(::bind(server, reinterpret_cast<sockaddr const*>(&address), sizeof(address)), 0);
-
-    /// Every message the stand-in has received, by managementId and action.
-    auto drain = [&] {
-        std::vector<std::pair<uint16_t, ManagementAction>> seen;
-        sockaddr_un from{};
-        for (;;) {
-            std::array<uint8_t, 256> in{};
-            socklen_t from_length = sizeof(from);
-            ssize_t const n = ::recvfrom(server, in.data(), in.size(), 0, reinterpret_cast<sockaddr*>(&from), &from_length);
-            if (n <= 0) {
-                return std::pair{seen, from};
-            }
-            auto const message = parse_management_message(std::span<uint8_t const>{in.data(), static_cast<size_t>(n)});
-            EXPECT_TRUE(message.has_value());
-            if (message) {
-                seen.emplace_back(message->management_id, message->action);
-                if (auto const* s = std::get_if<SubscribeEventsNp>(&message->data)) {
-                    EXPECT_EQ(s->duration_s, uint16_t{60});
-                    EXPECT_TRUE(s->has(ManagementEvent::port_state) && s->has(ManagementEvent::parent_data_set));
-                }
-            }
-        }
-    };
-    auto const count = [](auto const& seen, uint16_t const id, ManagementAction const action) {
-        return std::ranges::count(seen, std::pair{id, action});
-    };
-
-    SubscribeEventsNp events{};
-    events.add(ManagementEvent::port_state);
-    events.add(ManagementEvent::parent_data_set);
+    auto const dir = socket_dir("port");
+    Ptp4l ptp4l{dir};
+    int calls = 0;
+    PtpManagementState last{};
     auto client = PtpManagementClient::create(
-        PtpManagementConfig{.uds_address = path, .period_ns = 1'000'000'000, .events = events, .subscription_duration_s = 60},
+        PtpManagementConfig{.uds_address = ptp4l.path, .port_interface = "enp8s0"}, [&](PtpManagementState const& state) {
+            ++calls;
+            last = state;
+        });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 10);
+    EXPECT_EQ(calls, 1);
+    c.handle(PORT_RESPONSE, 20);  // before PORT_PROPERTIES_NP names the port: not ours yet
+    EXPECT_FALSE(c.state().peer_mean_path_delay_ns.has_value());
+    c.handle(response(management_id::port_properties_np, port_properties(1, "ens4")), 30);
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 31);
+    EXPECT_TRUE((c.state().port == gptp::SourcePortIdentity{BRIDGE, 2}));
+    c.handle(response(management_id::port_data_set, port_data(1, int64_t{900} * 65536)), 40);  // ens4's: ignored
+    EXPECT_EQ(calls, 1);
+    c.handle(PORT_RESPONSE, 41);
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{74});
+    EXPECT_TRUE(last.delay_mechanism == DelayMechanism::p2p);
+    c.handle(response(management_id::port_data_set, port_data(2, int64_t{74} * 65536 + 100)), 50);
+    EXPECT_EQ(calls, 2);  // the same delay to the ns
+    c.handle(response(management_id::port_data_set, port_data(2, int64_t{77} * 65536)), 60);
+    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{77});
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// The renewal: GET then SET SUBSCRIBE_EVENTS_NP three times per duration; a GET answered with no
+// subscription is a restarted ptp4l, so everything is fetched and the settings sent again
+TEST(ptp_management, a_renewal_finding_no_subscription_fetches_again)
+{
+    auto const dir = socket_dir("renew");
+    Ptp4l ptp4l{dir};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .poll_period_ns = 10 * SECOND, .subscription_duration_s = 6},
         [](PtpManagementState const&) {});
     EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
     auto& c = **client;
-
-    c.tick(0);  // GETs and the subscription
-    auto [first, from] = drain();
-    EXPECT_EQ(count(first, management_id::subscribe_events_np, ManagementAction::set), 1);
-    EXPECT_EQ(count(first, management_id::parent_data_set, ManagementAction::get), 1);
-
     GrandmasterSettingsNp const settings{.clock_class = 13, .clock_accuracy = 0x22};
     EXPECT_TRUE(c.set_grandmaster_settings(settings).has_value());
-    EXPECT_EQ(count(drain().first, management_id::grandmaster_settings_np, ManagementAction::set), 1);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::grandmaster_settings_np, ManagementAction::set), 1);
+    c.handle(PARENT_RESPONSE, 0);  // reachable: fetch, the settings again (they may have preceded ptp4l), subscription
+    EXPECT_EQ(count(ptp4l.drain(), management_id::grandmaster_settings_np, ManagementAction::set), 1);
+    c.handle(held_subscription(6), 1);
+    EXPECT_TRUE(c.state().subscribed);
 
-    // The first answer after silence resends them: the SET may have preceded ptp4l.
-    c.handle(PARENT_RESPONSE, 1);
-    EXPECT_EQ(count(drain().first, management_id::grandmaster_settings_np, ManagementAction::set), 1);
+    c.handle(PARENT_RESPONSE, SECOND);
+    c.tick(SECOND);
+    EXPECT_TRUE(ptp4l.drain().empty());  // nothing due before 2 s
+    c.handle(PARENT_RESPONSE, 2 * SECOND);
+    c.tick(2 * SECOND);
+    auto const renewal = ptp4l.drain();
+    EXPECT_EQ(count(renewal, management_id::grandmaster_settings_np, ManagementAction::get), 1);  // ours given
+    EXPECT_EQ(count(renewal, management_id::subscribe_events_np, ManagementAction::get), 1);
+    EXPECT_EQ(count(renewal, management_id::subscribe_events_np, ManagementAction::set), 1);
+    c.handle(held_subscription(4), 2 * SECOND + 1);  // still held: nothing more
+    EXPECT_TRUE(ptp4l.drain().empty());
 
-    // ptp4l keeps answering: nothing resent, the subscription renewed at half its duration.
-    int64_t subscriptions = 0;
-    int64_t settings_sent = 0;
-    for (int64_t second = 1; second <= 31; ++second) {
-        c.handle(PARENT_RESPONSE, (second * 1'000'000'000) - 1);
-        c.tick(second * 1'000'000'000);
-        auto const seen = drain().first;
-        subscriptions += count(seen, management_id::subscribe_events_np, ManagementAction::set);
-        settings_sent += count(seen, management_id::grandmaster_settings_np, ManagementAction::set);
-    }
-    EXPECT_EQ(subscriptions, int64_t{1});
-    EXPECT_EQ(settings_sent, int64_t{0});
-
-    // Silent, then back (a restarted ptp4l): subscription and settings are sent again.
-    c.tick(34'000'000'000);
-    EXPECT_TRUE(c.state().status == PtpManagementStatus::unreachable);
-    EXPECT_FALSE(c.state().subscribed);
-    (void)drain();
-    c.tick(35'000'000'000);
-    EXPECT_EQ(count(drain().first, management_id::subscribe_events_np, ManagementAction::set), 1);
-    c.handle(PARENT_RESPONSE, 35'000'000'001);
-    auto const back = drain().first;
-    EXPECT_EQ(count(back, management_id::grandmaster_settings_np, ManagementAction::set), 1);
-    EXPECT_EQ(count(back, management_id::subscribe_events_np, ManagementAction::set), 1);
-
-    // A restart between two queries: ptp4l's GETs show its defaults, and both are sent again.
-    c.tick(36'000'000'000);
-    auto const gets = drain().first;
-    EXPECT_EQ(count(gets, management_id::grandmaster_settings_np, ManagementAction::get), 1);
-    EXPECT_EQ(count(gets, management_id::subscribe_events_np, ManagementAction::get), 1);
-    auto const defaults = encode(GrandmasterSettingsNp{});
-    c.handle(response(management_id::grandmaster_settings_np, {defaults.begin(), defaults.end()}), 36'000'000'001);
     auto const nothing = encode(SubscribeEventsNp{.duration_s = 0});
-    c.handle(response(management_id::subscribe_events_np, {nothing.begin(), nothing.end()}), 36'000'000'002);
+    c.handle(response(management_id::subscribe_events_np, {nothing.begin(), nothing.end()}), 2 * SECOND + 2);
     EXPECT_FALSE(c.state().subscribed);
-    auto const again = drain().first;
+    auto const again = ptp4l.drain();
+    EXPECT_EQ(count(again, management_id::parent_data_set, ManagementAction::get), 1);
     EXPECT_EQ(count(again, management_id::grandmaster_settings_np, ManagementAction::set), 1);
     EXPECT_EQ(count(again, management_id::subscribe_events_np, ManagementAction::set), 1);
-    // ptp4l holding ours: nothing more
-    auto const held = encode(settings);
-    c.handle(response(management_id::grandmaster_settings_np, {held.begin(), held.end()}), 36'000'000'003);
-    auto mine = events;
-    mine.duration_s = 59;
-    auto const mine_data = encode(mine);
-    c.handle(response(management_id::subscribe_events_np, {mine_data.begin(), mine_data.end()}), 36'000'000'004);
-    EXPECT_TRUE(c.state().subscribed);
-    EXPECT_TRUE(c.state().grandmaster_settings == settings);
-    EXPECT_TRUE(drain().first.empty());
-    (void)from;
     client->reset();
-    ::close(server);
+    std::filesystem::remove_all(dir);
+}
+
+// Silence for two renewals is unreachable, everything learnt forgotten; with no ptp4l socket a
+// send fails at once, and the probes go on
+TEST(ptp_management, silence_or_a_vanished_socket_is_unreachable)
+{
+    auto const dir = socket_dir("silence");
+    int calls = 0;
+    PtpManagementState last{};
+    auto ptp4l = std::make_unique<Ptp4l>(dir);
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l->path, .subscription_duration_s = 6}, [&](PtpManagementState const& state) {
+            ++calls;
+            last = state;
+        });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 0);
+    c.handle(response(management_id::time_properties_data_set, {0x00, 0x25, 0x0C, 0x20}), 1);
+    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
+    EXPECT_TRUE(c.state().time_properties.has_value());
+    c.tick(4 * SECOND);
+    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
+    c.tick(5 * SECOND);  // no answer for more than two 2 s renewals and two polls
+    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
+    EXPECT_FALSE(c.state().grandmaster.has_value() || c.state().time_properties.has_value());
+
+    // ptp4l back, then gone: its socket refuses the next send, and the client is unreachable at once.
+    c.handle(PARENT_RESPONSE, 6 * SECOND);
+    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
+    ptp4l.reset();
+    std::filesystem::remove(dir / "ptp4l");
+    c.tick(9 * SECOND);  // a poll
+    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
+    EXPECT_TRUE(last.error == std::errc::no_such_file_or_directory || last.error == std::errc::connection_refused);
+    EXPECT_FALSE(c.finished());
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// The grandmaster settings: acknowledged, refused, and sent again when ptp4l holds others
+TEST(ptp_management, client_reports_settings_and_refusals)
+{
+    auto const dir = socket_dir("settings");
+    Ptp4l ptp4l{dir};
+    int calls = 0;
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = ptp4l.path}, [&](PtpManagementState const& state) {
+        ++calls;
+        last = state;
+    });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    GrandmasterSettingsNp const settings{.clock_class = 13, .clock_accuracy = 0x21};
+    c.handle(PARENT_RESPONSE, 0);
+    EXPECT_TRUE(c.set_grandmaster_settings(settings).has_value());
+    (void)ptp4l.drain();
+    int const before = calls;
+    auto const settings_data = encode(settings);
+    c.handle(response(management_id::grandmaster_settings_np, {settings_data.begin(), settings_data.end()}), 10);
+    EXPECT_EQ(calls, before + 1);
+    EXPECT_TRUE(last.grandmaster_settings == settings);
+    EXPECT_TRUE(ptp4l.drain().empty());
+    auto const defaults = encode(GrandmasterSettingsNp{});
+    c.handle(response(management_id::grandmaster_settings_np, {defaults.begin(), defaults.end()}), 20);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::grandmaster_settings_np, ManagementAction::set), 1);
+
+    auto error = response(0, {});
+    error.resize(48);
+    error.insert(error.end(), {0x00, 0x02, 0x00, 0x08, 0x00, 0x05, 0xC0, 0x01, 0x00, 0x00, 0x00, 0x00});  // NOT_SETABLE
+    error[3] = static_cast<uint8_t>(error.size());
+    c.handle(error, 30);
+    EXPECT_EQ(last.refused.value_or(0), uint16_t{5});
+    int const refused = calls;
+    error[54] = 0x20;  // a refused GET is not a refusal of ours
+    error[55] = 0x02;
+    c.handle(error, 40);
+    EXPECT_EQ(calls, refused);
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// A port's notification arriving first, after a silence, makes ptp4l neither reachable nor gives
+// the client its transportSpecific: the next clock data set's answer does
+TEST(ptp_management, a_notification_first_does_not_set_the_transport_specific)
+{
+    auto const dir = socket_dir("tsfirst");
+    Ptp4l ptp4l{dir};
+    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = ptp4l.path}, [](PtpManagementState const&) {});
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(response(management_id::port_data_set, port_data(2, 0), 0, 1), 0);  // the gPTP port: 1
+    EXPECT_TRUE(c.state().status == PtpManagementStatus::unreachable);
+    c.handle(PARENT_RESPONSE, 1);  // the UDS port: 0
+    (void)ptp4l.drain();
+    c.tick(3 * SECOND);
+    auto const poll = ptp4l.drain();
+    EXPECT_FALSE(poll.empty());
+    EXPECT_TRUE(std::ranges::all_of(poll, [](Received const& r) { return r.transport_specific == 0; }));
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// A port's notification carries that port's transportSpecific (port.c port_management_construct),
+// which the client does not adopt: it keeps the UDS port's, from its first answer
+TEST(ptp_management, a_port_notification_leaves_the_transport_specific)
+{
+    auto const dir = socket_dir("ts");
+    Ptp4l ptp4l{dir};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .port_interface = "enp8s0"}, [](PtpManagementState const&) {});
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 0);  // the UDS port: transportSpecific 0
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 1);
+    auto slave = port_data(2, int64_t{74} * 65536);
+    slave[10] = 0x09;
+    c.handle(response(management_id::port_data_set, slave, 0, 1), 2);  // the gPTP port: 1
+    EXPECT_TRUE(c.state().port_state == PortState::slave);
+    (void)ptp4l.drain();
+    c.tick(3 * SECOND);  // a poll
+    auto const poll = ptp4l.drain();
+    EXPECT_FALSE(poll.empty());
+    EXPECT_TRUE(std::ranges::all_of(poll, [](Received const& r) { return r.transport_specific == 0; }));
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// On the read-only socket ptp4l refuses SUBSCRIBE_EVENTS_NP: no refusal of ours is reported, the
+// status waits for PARENT_DATA_SET, and with no notifications the poll asks for it too
+TEST(ptp_management, without_a_subscription_the_parent_is_polled)
+{
+    auto const dir = socket_dir("ro");
+    Ptp4l ptp4l{dir};
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .subscription_duration_s = 60},
+        [&](PtpManagementState const& state) { last = state; });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(response(management_id::time_properties_data_set, {0x00, 0x25, 0x0C, 0x20}), 0);
+    EXPECT_TRUE(c.state().status == PtpManagementStatus::unreachable);  // no grandmaster known yet
+    auto error = response(0, {});
+    error.resize(48);
+    error.insert(error.end(), {0x00, 0x02, 0x00, 0x08, 0x00, 0x03, 0xC0, 0x03, 0x00, 0x00, 0x00, 0x00});  // NOT_SUPPORTED
+    error[3] = static_cast<uint8_t>(error.size());
+    c.handle(error, 1);
+    EXPECT_FALSE(last.refused.has_value());
+    EXPECT_FALSE(c.state().subscribed);
+    c.handle(PARENT_RESPONSE, 2);
+    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
+    (void)ptp4l.drain();
+    c.tick(2 * SECOND);
+    auto const poll = ptp4l.drain();
+    EXPECT_EQ(count(poll, management_id::parent_data_set, ManagementAction::get), 1);
+    EXPECT_EQ(count(poll, management_id::time_properties_data_set, ManagementAction::get), 1);
+    client->reset();
     std::filesystem::remove_all(dir);
 }
 
