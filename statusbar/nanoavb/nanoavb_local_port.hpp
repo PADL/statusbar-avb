@@ -7,8 +7,10 @@
 /// socket (la_avdecc's local protocol interface), and AtdeccLocalClient is the controller end.
 /// Reactor thread only. See docs/NANOAVB_ARCHITECTURE.md "Local ATDECC socket".
 
+#include "statusbar/buffer/file_descriptor.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/logging/logging.hpp"
+#include "statusbar/net/net_address.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
@@ -23,9 +25,7 @@
 #include <string>
 #include <string_view>
 
-#include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/un.h>
 
 namespace statusbar::nanoavb {
 
@@ -55,7 +55,7 @@ class AtdeccLocalPort final : public net::Pollable
 
     struct Config
     {
-        std::string path{};
+        std::string path{};  ///< absolute
         /// The socket file's mode (like the control socket's unix_mode).
         int mode{0660};
         /// Forget a controller not heard from for this long; 0 never does.
@@ -116,51 +116,50 @@ class AtdeccLocalPort final : public net::Pollable
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
 
     // -- Pollable --
-    [[nodiscard]] auto fd() const noexcept -> int override { return fd_; }
+    [[nodiscard]] auto fd() const noexcept -> int override { return fd_.get(); }
     void on_ready(int64_t now_ns) override;
     void tick(int64_t now_ns) override;
-    [[nodiscard]] auto finished() const noexcept -> bool override { return fd_ < 0; }
+    [[nodiscard]] auto finished() const noexcept -> bool override { return !fd_.valid(); }
 
   private:
     struct Client
     {
-        sockaddr_un address{};
-        socklen_t address_length{0};
+        net::SocketAddress address{};  ///< empty: the peer of an adopted connected socket
         ieee::Eui48 mac{};
         int64_t last_heard_ns{0};
         uint32_t send_failures{0};  ///< consecutive sends that failed for want of buffer
         bool gone{false};
     };
 
-    AtdeccLocalPort(int fd, bool connected, Config config);
+    AtdeccLocalPort(FileDescriptor fd, bool connected, Config config);
 
-    /// The rest of open() once the path's lock is held; closes @p lock_fd on failure.
-    [[nodiscard]] static auto open_locked(Config const& config, sockaddr_un const& address, socklen_t length, int lock_fd)
+    /// The rest of open() once the path's lock is held.
+    [[nodiscard]] static auto open_locked(Config const& config, net::SocketAddress const& address, FileDescriptor lock)
         -> StatusValue<std::unique_ptr<AtdeccLocalPort>>;
     /// Take on the socket file at @p path (its identity @p dev, @p ino) and the lock beside it.
-    void own_path(std::string const& path, dev_t dev, ino_t ino, int lock_fd);
+    void own_path(std::string const& path, dev_t dev, ino_t ino, FileDescriptor lock);
     /// One datagram into buffer_: its size, 0 to skip it (EINTR, a bad size), -1 when drained or closed.
-    [[nodiscard]] auto receive_datagram(sockaddr_un& address, socklen_t& length) -> ssize_t;
+    [[nodiscard]] auto receive_datagram(net::SocketAddress& address) -> ssize_t;
     /// Hand a received datagram of @p size octets to receive_ with its sender's MAC.
-    void deliver(sockaddr_un const& address, socklen_t length, size_t size, int64_t now_ns);
+    void deliver(net::SocketAddress const& address, size_t size, int64_t now_ns);
     /// The client at @p address (added if new), heard from at @p now_ns.
-    [[nodiscard]] auto heard_from(sockaddr_un const& address, socklen_t length, int64_t now_ns) -> Client&;
+    [[nodiscard]] auto heard_from(net::SocketAddress const& address, int64_t now_ns) -> Client&;
 
-    [[nodiscard]] auto find_client(sockaddr_un const& address, socklen_t length) -> Client*;
-    [[nodiscard]] auto add_client(sockaddr_un const& address, socklen_t length, int64_t now_ns) -> Client*;
+    [[nodiscard]] auto find_client(net::SocketAddress const& address) -> Client*;
+    [[nodiscard]] auto add_client(net::SocketAddress const& address, int64_t now_ns) -> Client*;
     [[nodiscard]] auto next_mac() -> ieee::Eui48;
     /// Send one datagram to @p client, marking it gone if it has gone.
     [[nodiscard]] auto send_to(Client& client, std::span<uint8_t const> frame) -> bool;
     /// Remove the clients marked gone, telling client_gone_.
     void reap();
 
-    int fd_{-1};
+    FileDescriptor fd_{};
     bool connected_{false};  ///< adopted connected socket: unnamed peers can be replied to
     Config config_{};
     std::string path_{};
     dev_t path_dev_{0};
     ino_t path_ino_{0};
-    int lock_fd_{-1};
+    FileDescriptor lock_{};
     sg14::inplace_vector<Client, MAX_CLIENTS> clients_{};
     uint16_t next_mac_suffix_{0x0101};
     ReceiveFn receive_{};
@@ -187,14 +186,14 @@ class AtdeccLocalClient
     auto operator=(AtdeccLocalClient&& other) noexcept -> AtdeccLocalClient&;
     ~AtdeccLocalClient() { close(); }
 
-    /// Bind an address of our own (Linux: autobound abstract) and connect to
-    /// the entity at @p path. The entity need not be there yet: a send that
+    /// Bind an address of our own (Linux: autobound abstract) and connect to the entity
+    /// at @p path (a relative one from the working directory). The entity need not be there yet: a send that
     /// finds it absent connects again.
     [[nodiscard]] auto open(std::string_view path) -> Status;
     void close() noexcept;
 
-    [[nodiscard]] auto valid() const noexcept -> bool { return fd_ >= 0; }
-    [[nodiscard]] auto fd() const noexcept -> int { return fd_; }
+    [[nodiscard]] auto valid() const noexcept -> bool { return fd_.valid(); }
+    [[nodiscard]] auto fd() const noexcept -> int { return fd_.get(); }
 
     [[nodiscard]] auto send(ieee::Eui48 const* dest_mac, std::span<uint8_t const> payload) noexcept -> StatusValue<ssize_t>;
     /// One frame, or failure (EAGAIN when none is waiting). Oversize and
@@ -206,13 +205,12 @@ class AtdeccLocalClient
     void tick(int64_t now_ns) noexcept;
 
   private:
-    /// Bind @p fd for replies, then adopt and connect it; closes @p fd on failure.
-    [[nodiscard]] auto bind_and_connect(int fd) -> Status;
+    /// Bind @p fd for replies, then adopt and connect it.
+    [[nodiscard]] auto bind_and_connect(FileDescriptor fd) -> Status;
     [[nodiscard]] auto connect_to_entity() noexcept -> bool;
 
-    int fd_{-1};
-    sockaddr_un entity_{};
-    socklen_t entity_length_{0};
+    FileDescriptor fd_{};
+    net::SocketAddress entity_{};
     std::string bound_path_{};  ///< non-Linux: the path we bound, removed on close
     int64_t last_send_ns_{0};
     bool sent_since_tick_{false};
