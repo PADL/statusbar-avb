@@ -439,7 +439,6 @@ TEST(ptp_management, client_reports_status_grandmaster_and_silence)
         });
     EXPECT_TRUE(client.has_value());
     auto& c = **client;
-    EXPECT_TRUE(std::filesystem::exists(dir / std::format("statusbar-ptpmgmt.{}", ::getpid())));  // pmc-style path
 
     // No ptp4l: the send's error is recorded once, the status unreachable.
     c.tick(0);
@@ -479,7 +478,7 @@ TEST(ptp_management, client_reports_status_grandmaster_and_silence)
     EXPECT_FALSE(c.finished());
 
     client->reset();
-    EXPECT_FALSE(std::filesystem::exists(dir / std::format("statusbar-ptpmgmt.{}", ::getpid())));  // unlinked
+    EXPECT_TRUE(std::filesystem::is_empty(dir));  // nothing bound in the filesystem
     std::filesystem::remove_all(dir);
 }
 
@@ -546,6 +545,33 @@ TEST(ptp_management, create_validates_its_configuration)
     EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.missed_periods = 0}, listener).has_value());
     EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.period_ns = 0}, listener).has_value());
     EXPECT_FALSE(PtpManagementClient::create(PtpManagementConfig{.subscription_duration_s = 1}, listener).has_value());
+}
+
+/// The address @p fd is bound to.
+auto bound_address(int const fd) -> std::pair<sockaddr_un, socklen_t>
+{
+    sockaddr_un address{};
+    socklen_t length = sizeof(address);
+    EXPECT_EQ(::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length), 0);
+    return {address, length};
+}
+
+// Each client autobinds an abstract address of its own (Linux), so two in one process never
+// share a reply address
+TEST(ptp_management, two_clients_in_a_process_have_their_own_addresses)
+{
+    auto const dir = socket_dir("autobind");
+    PtpManagementConfig const config{.uds_address = (dir / "ptp4l").string()};
+    auto a = PtpManagementClient::create(config, [](PtpManagementState const&) {});
+    auto b = PtpManagementClient::create(config, [](PtpManagementState const&) {});
+    EXPECT_TRUE(a.has_value() && b.has_value());
+    auto const [address_a, length_a] = bound_address((*a)->fd());
+    auto const [address_b, length_b] = bound_address((*b)->fd());
+    EXPECT_TRUE(length_a > offsetof(sockaddr_un, sun_path) && address_a.sun_path[0] == '\0');  // abstract
+    EXPECT_TRUE(length_b > offsetof(sockaddr_un, sun_path) && address_b.sun_path[0] == '\0');
+    EXPECT_FALSE(length_a == length_b && std::memcmp(&address_a, &address_b, length_a) == 0);
+    EXPECT_TRUE(std::filesystem::is_empty(dir));
+    std::filesystem::remove_all(dir);
 }
 
 TEST(ptp_management, client_talks_to_a_ptp4l_socket)
