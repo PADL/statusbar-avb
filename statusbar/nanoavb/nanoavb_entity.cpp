@@ -2109,24 +2109,12 @@ auto AemCommandHandler::set_stream_info(
     }
     uint32_t const offset = cmd.msrp_accumulated_latency.get();
     auto const status = set_presentation_offset(cmd.descriptor_index.get(), offset);
-    // The response echoes the command (MSRP_ACC_LAT_VALID and the offset), and
-    // goes to the registered controllers when the offset changed.
+    // The response echoes the command (MSRP_ACC_LAT_VALID and the offset); a change goes to the
+    // other registered controllers as that response (Milan v1.2 Section 5.4.5.2).
     if (status == AEM_STATUS_SUCCESS && offset != current) {
-        notify_stream_info_offset(cmd.descriptor_index.get(), offset, response);
+        emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, response);
     }
     return {.status = status, .size = response.size()};
-}
-
-void AemCommandHandler::notify_stream_info_offset(
-    uint16_t const index, uint32_t const offset, std::span<uint8_t const> const response)
-{
-    emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, response);
-    // A controller following GET_STREAM_INFO or MAX_TRANSIT_TIME (Milan
-    // 1.3) sees it too.
-    (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
-    std::array<uint8_t, AemGetMaxTransitTimeResponsePayload::LENGTH> body{};
-    store_max_transit_time(body, index, offset);
-    emit_unsolicited_to_all(AEM_COMMAND_GET_MAX_TRANSIT_TIME, body);
 }
 
 auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -2152,10 +2140,8 @@ auto AemCommandHandler::set_max_transit_time(
     uint64_t const requested = cmd.max_transit_time.get();
     auto const status = set_presentation_offset(index, requested);
     if (status == AEM_STATUS_SUCCESS && requested != current) {
+        // Milan v1.3 Section 5.4.5.3: the response, to the other registered controllers.
         emit_unsolicited(AEM_COMMAND_SET_MAX_TRANSIT_TIME, response);
-        // GET_MAX_TRANSIT_TIME's response has SET's layout: the echoed command.
-        emit_unsolicited_to_all(AEM_COMMAND_GET_MAX_TRANSIT_TIME, response);
-        (void)notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     }
     return {.status = status, .size = response.size()};
 }
