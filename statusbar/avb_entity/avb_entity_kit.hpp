@@ -466,6 +466,8 @@ class AvbEntityKit
     [[nodiscard]] auto maap_fell_back_to_static() const noexcept -> bool { return maap_.fell_back_to_static(); }
 
   private:
+    /// Write @p text as the persistent state and remember it as saved; a failure is logged.
+    void save_persisted(std::string text);
     /// Attach the stream-specific control-plane behavior to the host: MSRP
     /// advertise/withdraw (+ the transmit gate's MSRP listener feed), the
     /// ACMP talker connection log,
