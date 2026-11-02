@@ -210,6 +210,10 @@ class NanoAvbAcmpTalker
 
   private:
     void wire_talker_tx_response();
+    /// A CONNECT_TX for a stream with no destination address yet, answered TALKER_DEST_MAC_FAIL: true.
+    [[nodiscard]] auto refused_without_dest_mac(AcmpCommandResponse const& cmd) -> bool;
+    /// The classic talker state machine on @p cmd's @p event.
+    void run_state_machine(AcmpCommandResponse const& cmd, TalkerEvent event, TimePoint event_time);
     [[nodiscard]] auto receive_milan_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface)
         -> bool;
 
