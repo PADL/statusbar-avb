@@ -4,6 +4,8 @@
 #include "statusbar/ptpclient/ptpclient_phc.hpp"
 
 #if defined(__linux__)
+#    include "statusbar/net/net_socket.hpp"
+
 #    include <fcntl.h>
 #    include <unistd.h>
 
@@ -99,11 +101,6 @@ constexpr int64_t NS_PER_SECOND = 1'000'000'000;
 constexpr int MAX_SAMPLES = 25;             ///< PTP_MAX_SAMPLES
 constexpr double FREQUENCY_SCALE = 65.536;  ///< timex.freq is ppm with a 16-bit fraction
 
-[[nodiscard]] auto errno_failure() noexcept -> std::unexpected<std::error_code>
-{
-    return failure(std::error_code{errno, std::generic_category()});
-}
-
 /// struct ptp_sys_offset_extended as Linux 6.11 has it, with `clockid` in place of rsv[0];
 /// older headers lack the field, older kernels refuse a non-zero one with EINVAL.
 struct SysOffsetExtended
@@ -136,7 +133,7 @@ static_assert(sizeof(clockid_t) == sizeof(unsigned int));
 {
     ptp_sys_offset_precise precise{};
     if (::ioctl(fd, PTP_SYS_OFFSET_PRECISE, &precise) != 0) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     return PhcReading{.raw_ns = to_ns(precise.sys_monoraw), .phc_ns = to_ns(precise.device), .width_ns = 0};
 }
@@ -165,7 +162,7 @@ static_assert(sizeof(clockid_t) == sizeof(unsigned int));
     offset.n_samples = static_cast<unsigned int>(samples);
     offset.clockid = CLOCK_MONOTONIC_RAW;
     if (::ioctl(fd, PTP_SYS_OFFSET_EXTENDED, &offset) != 0) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     return success();
 }
@@ -192,7 +189,7 @@ static_assert(sizeof(clockid_t) == sizeof(unsigned int));
         int64_t const before_ns = monoraw_ns();
         timespec phc{};
         if (::clock_gettime(clock, &phc) != 0) {
-            return errno_failure();
+            return failure(net::errno_code());
         }
         brackets[i] = PhcBracket{.before_ns = before_ns, .phc_ns = to_ns(phc), .after_ns = monoraw_ns()};
     }
@@ -220,7 +217,7 @@ auto PhcDevice::open(std::string_view const path, PhcDeviceConfig const config) 
     }
     FileDescriptor fd{::open(std::string{path}.c_str(), (config.writable ? O_RDWR : O_RDONLY) | O_CLOEXEC)};
     if (!fd.valid()) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     PhcDevice device{std::move(fd), std::string{path}, config};
     device.probe_read_method();
@@ -258,7 +255,7 @@ auto PhcDevice::max_frequency_ppb() const noexcept -> StatusValue<double>
 {
     ptp_clock_caps caps{};
     if (::ioctl(fd_.get(), PTP_CLOCK_GETCAPS, &caps) != 0) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     return static_cast<double>(caps.max_adj);
 }
@@ -267,7 +264,7 @@ auto PhcDevice::frequency_ppb() const noexcept -> StatusValue<double>
 {
     timex tx{};
     if (::clock_adjtime(fd_to_clockid(fd_.get()), &tx) < 0) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     return static_cast<double>(tx.freq) / FREQUENCY_SCALE;
 }
@@ -278,7 +275,7 @@ auto PhcDevice::set_frequency_ppb(double const ppb) const noexcept -> Status
     tx.modes = ADJ_FREQUENCY;
     tx.freq = std::lround(ppb * FREQUENCY_SCALE);
     if (::clock_adjtime(fd_to_clockid(fd_.get()), &tx) < 0) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     return success();
 }
@@ -289,7 +286,7 @@ auto PhcDevice::step_ns(int64_t const delta_ns) const noexcept -> Status
     tx.modes = ADJ_SETOFFSET | ADJ_NANO;
     tx.time = setoffset_time(delta_ns);
     if (::clock_adjtime(fd_to_clockid(fd_.get()), &tx) < 0) {
-        return errno_failure();
+        return failure(net::errno_code());
     }
     return success();
 }
