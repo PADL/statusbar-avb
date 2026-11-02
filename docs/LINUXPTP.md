@@ -105,36 +105,64 @@ own domain: a message whose domainNumber differs is ignored, so
 `PtpManagementConfig::domain` must be ptp4l's (pmc `-d` semantics), else the
 client sees no answer and reports unreachable.
 
-The client is a `net::Pollable` for the reactor thread. On its first tick, and
-every `period_ns` after, it sends GET PARENT_DATA_SET, GET CURRENT_DATA_SET and
-GET TIME_PROPERTIES_DATA_SET, parses the responses as they arrive, and calls
-its listener when the status or grandmaster changes. With `port_interface` set
-it also sends linuxptp's GET PORT_PROPERTIES_NP (each port's interface name, so
-the port identity is learnt, not configured) and GET PORT_DATA_SET (15.5.3.6.1),
-and reports that port's `peerMeanPathDelay` in ns: on a gPTP port it is
-802.1AS-2020's neighborPropDelay, measured whatever the port's role (11.2.2), the
-`propagation_delay` of IEEE 1722.1-2021 Clause 7.4.40. Its own socket is
-autobound to an abstract address (Linux `bind()` with only the address family),
-unique to each client and gone with the socket; ptp4l answers to the sender's
-address (`recvfrom`, then `sendto`), so nothing is created in the filesystem.
+The client is a `net::Pollable` for the reactor thread, event-driven: one fetch
+of the data sets it follows, then ptp4l's notifications. While ptp4l is
+unreachable it sends GET PARENT_DATA_SET every `retry_period_ns`, once with
+transportSpecific 0 and once with 1, since ptp4l drops a request whose
+transportSpecific is not its UDS port's (the global `transportSpecific`, 1 in a
+gPTP configuration, unless `ignore_transport_specific`). The first answer gives
+the UDS port's value, used from then on (a port's notifications carry that port's
+own, which is not taken), and starts the fetch: GET PARENT_DATA_SET,
+CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET; with `port_interface` set also
+linuxptp's PORT_PROPERTIES_NP (each port's interface name, so the port identity is
+learnt, not configured) and PORT_DATA_SET (15.5.3.6.1); the grandmaster settings,
+if any; and SET SUBSCRIBE_EVENTS_NP. The status stays unreachable until
+PARENT_DATA_SET says which grandmaster ptp4l follows. The header's
+minorVersionPTP is not checked (linuxptp sends 0x12 by default). The client
+reports that port's
+`peerMeanPathDelay` in ns: on a gPTP port it is 802.1AS-2020's neighborPropDelay,
+measured whatever the port's role (11.2.2), the `propagation_delay` of IEEE
+1722.1-2021 Clause 7.4.40. Its own socket is autobound to an abstract address
+(Linux `bind()` with only the address family), unique to each client and gone
+with the socket; ptp4l answers to the sender's address (`recvfrom`, then
+`sendto`), so nothing is created in the filesystem. Each client has its own source
+port identity (the pid and a per-client port number), which ptp4l keys a
+subscription by.
 
 The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
 `gptp::MessageHeader`), the management header (15.4.1), the MANAGEMENT TLV
-(15.5.2) and the data sets (15.5.3). `build_management_get()` and
+(15.5.2) and the data sets (15.5.3), as packed structs
+(`ptpclient_management_format.hpp`, with linuxptp's implementation-specific data
+sets as its `tlv.h` lays them out). `build_management_message()` and
 `parse_management_message()` are pure and portable, so the wire format is unit
-tested without a ptp4l.
+tested without a ptp4l, and fuzzed.
 
-### Notifications and grandmaster settings
+### Notifications, polling and grandmaster settings
 
-With `PtpManagementConfig::events` set, the client sends linuxptp's SET
-SUBSCRIBE_EVENTS_NP at its first query and renews it at half
-`subscription_duration_s` (180 s by default, as phc2sys). ptp4l then pushes, to
-the client's socket, RESPONSE messages of the data set an event concerns: a port's
-PORT_DATA_SET on each state change (`port_state`), PARENT_DATA_SET when the
-grandmaster changes (`parent_data_set`) and TIME_STATUS_NP on each clock update
-(`time_sync`). They are parsed as the answers to GETs are, so a port leaving
-SLAVE reaches the listener without waiting for the next period; TIME_STATUS_NP is
-kept in `state().time_status` and reports nothing by itself.
+The client always subscribes to `port_state` and `parent_data_set`, and to the
+further events in `PtpManagementConfig::events` (`time_sync`). ptp4l pushes, to
+the socket that last subscribed with the client's source port identity, an
+unsolicited RESPONSE carrying the whole data set an event concerns: a port's
+PORT_DATA_SET on each state change, PARENT_DATA_SET when it changes (linuxptp
+4.2) and TIME_STATUS_NP on each clock update. They are parsed as the answers to
+GETs are. A new parent also fetches CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET
+again; TIME_STATUS_NP is kept in `state().time_status` and reports nothing by
+itself. ptp4l notifies nothing for TIME_PROPERTIES_DATA_SET or for a port's
+peerMeanPathDelay, so those are polled every `poll_period_ns`, with
+PARENT_DATA_SET too while ptp4l holds no subscription (it refuses one on the
+read-only socket; that refusal is not reported in `state().refused`).
+
+The subscription lasts `subscription_duration_s` (6 s by default; 65535 would
+never expire and is refused) and is renewed three times per duration, as phc2sys
+does (pmc_agent.c), so one renewal can be lost before ptp4l prunes it
+(clock.c `clock_prune_subscriptions`). A renewal is a GET then a SET of
+SUBSCRIBE_EVENTS_NP, with a GET of GRANDMASTER_SETTINGS_NP when the client set
+some: an answer to the GET without our events is a restarted ptp4l, so the client
+fetches everything again and sends its settings, and settings other than ours are
+sent again. It is also the keepalive: two renewals without any answer from ptp4l
+make the client unreachable, and so does a send ptp4l's socket refuses (ENOENT,
+ECONNREFUSED: it exited or is restarting); everything learnt is then forgotten and
+the probes resume. A client being destroyed unsubscribes (an empty bitmask).
 
 `set_grandmaster_settings()` sends SET GRANDMASTER_SETTINGS_NP: the clockQuality
 (clockClass, clockAccuracy, offsetScaledLogVariance), currentUtcOffset, the time
@@ -144,11 +172,9 @@ timestamps and announces while something else steers its PHC (`PhcServo`
 below), and the steering process states its quality, such as clockClass 13 when
 locked to an application-specific source and 248 when not (IEEE 1588-2019
 Table 4). ptp4l's answer lands in `state().grandmaster_settings`, a
-MANAGEMENT_ERROR_STATUS in `state().refused`. A restarted ptp4l has forgotten
-both the settings and the subscription, so each period's queries add GETs of
-GRANDMASTER_SETTINGS_NP and SUBSCRIBE_EVENTS_NP, and the client sends either again
-when ptp4l holds something else, and also when ptp4l answers after silence. Both
-need ptp4l's read-write socket (`uds_address`, not `uds_ro_address`).
+MANAGEMENT_ERROR_STATUS in `state().refused`; an answer with other settings than
+ours sends ours again. The settings and the subscription need ptp4l's read-write
+socket (`uds_address`, not `uds_ro_address`).
 
 ## ptpclient: PHC cross-timestamps and the PHC servo
 
