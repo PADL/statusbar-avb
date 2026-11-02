@@ -9,8 +9,10 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/nanoavb/nanoavb_srp.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -22,9 +24,8 @@ class TalkerDeclarations
   public:
     /// Section 4.3.3.1: a probe keeps the stream declared this long.
     static constexpr int64_t PROBE_WINDOW_NS = 15'000'000'000;
-    /// Table 5.3: 2 LeaveAll periods, at the longest LeaveAll the MRP timers draw (they
-    /// draw from [10 s, 15 s); Milan v1.2 Table 4.3 allows 10-15 s).
-    static constexpr int64_t REDECLARE_HOLD_NS = 2 * 15'000'000'000;
+    /// Table 5.3: 2 LeaveAll periods, at the longest leavealltimer Milan's MRP timers draw.
+    static constexpr int64_t REDECLARE_HOLD_NS = 2 * std::chrono::nanoseconds{nanoavb::MILAN_MRP_TIMERS.leave_all_time_max}.count();
     /// How long a departed Listener still counts as registered: the transmit
     /// gate's grace window (TalkerGate::GRACE_NS), across a LeaveAll blip.
     static constexpr int64_t LISTENER_GRACE_NS = 5'000'000'000;
