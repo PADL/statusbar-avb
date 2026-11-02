@@ -156,7 +156,7 @@ class NanoAvbAdpAdvertiser
 
     /// SHUTDOWN: ENTITY_DEPARTING if the link is up, available_index reset to 0 (Sections
     /// 5.6.3.5.8 and 5.6.3.5.11; IEEE 1722.1-2021 Clause 6.2.2.15). True if one was sent.
-    auto shutdown(TimePoint now) -> bool;
+    [[nodiscard]] auto shutdown(TimePoint now) -> bool;
 
     /// Seed randomDeviceDelay() from @p mac and the real-time clock @p realtime_ns
     /// (IEEE 1722.1-2021 Clause 6.2.4.2.2). The constructor seeds from the entity ID.
@@ -219,7 +219,7 @@ class NanoAvbAdpAdvertiser
     /// the state machine. A sent reply is a transmission: available_index advances (Clause 6.2.2.15);
     /// its result is not counted in consecutive_send_failures(), which is the network's.
     template <typename Send>
-    auto reply_available(Send&& send) -> bool
+    [[nodiscard]] auto reply_available(Send&& send) -> bool
     {
         return note_available(std::forward<Send>(send)(available_adpdu()));
     }
