@@ -113,9 +113,10 @@ it also sends linuxptp's GET PORT_PROPERTIES_NP (each port's interface name, so
 the port identity is learnt, not configured) and GET PORT_DATA_SET (15.5.3.6.1),
 and reports that port's `peerMeanPathDelay` in ns: on a gPTP port it is
 802.1AS-2020's neighborPropDelay, measured whatever the port's role (11.2.2), the
-`propagation_delay` of IEEE 1722.1-2021 Clause 7.4.40. Its own socket is a path
-beside ptp4l's, as pmc's is (`dirname(uds_address)/statusbar-ptpmgmt.<pid>`),
-removed on destruction.
+`propagation_delay` of IEEE 1722.1-2021 Clause 7.4.40. Its own socket is
+autobound to an abstract address (Linux `bind()` with only the address family),
+unique to each client and gone with the socket; ptp4l answers to the sender's
+address (`recvfrom`, then `sendto`), so nothing is created in the filesystem.
 
 The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
 `gptp::MessageHeader`), the management header (15.4.1), the MANAGEMENT TLV
