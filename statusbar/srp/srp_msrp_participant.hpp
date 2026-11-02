@@ -206,6 +206,12 @@ struct MsrpConfig
     size_t reserved_talker_failed = 0;
     size_t reserved_listeners = 0;
 
+    /// The MRP timers (IEEE 802.1Q-2018 Table 10-7 by default; Milan sets its own).
+    mrp::TimerConfig timers{};
+    /// An rLv! moves the registrar from IN straight to MT instead of running the leavetimer
+    /// (Milan v1.2 Section 4.2.7.2.2); off in IEEE 802.1Q-2018 Clause 10.7.8.
+    bool leave_immediate = false;
+
     /// Check invariants. Returns Success if the config is
     /// self-consistent, otherwise a tsn::TsnError.
     [[nodiscard]] auto validate() const noexcept -> Status
@@ -214,7 +220,7 @@ struct MsrpConfig
             reserved_listeners > max_listeners) {
             return failure(make_error_code(tsn::TsnError::invalid_configuration));
         }
-        if (max_interesting_stream_ids > max_talker_advertise) {
+        if (max_interesting_stream_ids > max_talker_advertise || !timers.valid()) {
             return failure(make_error_code(tsn::TsnError::invalid_configuration));
         }
         return success();
@@ -296,6 +302,9 @@ class MsrpParticipantT
     /// Set or replace the outbound PDU callback. Called by the
     /// participant whenever it needs to transmit an MSRPDU.
     void set_send_pdu(SendPduFn fn);
+
+    /// The configuration the participant runs with.
+    [[nodiscard]] auto config() const noexcept -> MsrpConfig const& { return config_; }
 
     /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
     /// initial timers. Must be called once after construction.
