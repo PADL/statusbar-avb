@@ -247,7 +247,7 @@ void add_adp_acmp_and_acquire_frames(Frames& frames)
 
     // ---- ACMP: the Milan talker's answers (milan_talker_respond, Milan v1.2
     // Section 5.5.4), in the 56-octet form the entity sends ----
-    {
+    {  // NOLINT(statusbar-block-statements): golden frames, one per statement
         MilanTalkerSource const source{
             .stream_id = Eui64{0x70, 0xB3, 0xD5, 0xED, 0xC8, 0xF0, 0x00, 0x00},
             .stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x83, 0x7E},
@@ -1071,7 +1071,7 @@ void add_hdcp_avc_and_extended_frames(Frames& frames)
 
     // ---- Milan 1.2 MVU built with the entity's structs (atdecc_aecp_mvu.hpp): GET_MILAN_INFO without
     // specification_version, and a NOT_IMPLEMENTED echo, both padded past control_data_length ----
-    {
+    {  // NOLINT(statusbar-block-statements): golden frames, one per statement
         auto const padded = [](std::vector<uint8_t> out) {
             out.resize(std::max(out.size(), MVU_MIN_PDU_LENGTH), 0);
             return out;
