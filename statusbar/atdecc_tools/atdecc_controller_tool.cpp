@@ -5,7 +5,7 @@
 // Discovers entities via ADP, reads ENTITY descriptors via AEM,
 // and manages stream connections via ACMP.
 // Usage: statusbar-atdecc-controller --interface=eth0 [--instance=N] [--controller-entity-id=EUI64]
-//        statusbar-atdecc-controller --socket=/run/mediabridge/atdecc.sock
+//        statusbar-atdecc-controller --socket=/run/atdecc.sock
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_service.hpp"

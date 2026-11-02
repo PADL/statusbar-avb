@@ -34,8 +34,8 @@ version.
 ### SYSTEM_UNIQUE_ID
 
 The v1.2 text calls system_unique_id "64 bit" but Figure 5.5 draws one
-quadlet. The figure is followed, as GenAVB's v1.2 layout and la_avdecc (whose
-1.2 payload is 6 octets, the id a u32) do. v1.3 widens it
+quadlet. The figure is followed, as la_avdecc (whose 1.2 payload is 6
+octets, the id a u32) does. v1.3 widens it
 (`MvuSystemUniqueIdPayloadV13`, v1.3 Figure 5.7: a u64 number and a 64-octet
 name). la_avdecc (Hive) always sends the v1.3 form, so a v1.2 entity accepts its
 number when it fits the u32 and answers in the v1.2 layout, which la_avdecc
