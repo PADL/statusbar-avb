@@ -662,14 +662,14 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
     return success(std::move(state));
 }
 
-auto save_persistent_state(std::string const& path, PersistentState const& state) -> Status
+auto save_persistent_state(std::string const& path, std::string_view const text) -> Status
 {
     std::string const tmp = path + ".tmp";
     int const fd = open_for_write(tmp, path);
     if (fd < 0) {
         return failure(errno_code());
     }
-    if (auto const written = write_and_close(fd, tmp, serialize_persistent_state(state)); !written) {
+    if (auto const written = write_and_close(fd, tmp, text); !written) {
         return written;
     }
     return replace_with(tmp, path);
