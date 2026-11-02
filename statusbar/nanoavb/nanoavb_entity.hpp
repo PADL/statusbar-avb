@@ -912,9 +912,6 @@ class AemCommandHandler
     /// @p response (the echoed command) already in the output buffer.
     [[nodiscard]] auto set_stream_info(AemStreamInfoPayload const& cmd, uint32_t current, std::span<uint8_t const> response)
         -> AemCommandResponse;
-    /// Tell the controllers stream output @p index's offset is now @p offset: unsolicited
-    /// SET_STREAM_INFO (@p response), GET_STREAM_INFO and GET_MAX_TRANSIT_TIME.
-    void notify_stream_info_offset(uint16_t index, uint32_t offset, std::span<uint8_t const> response);
     /// SET_MAX_TRANSIT_TIME @p cmd on a stream output whose offset is @p current, @p response
     /// (the echoed command) already in the output buffer; a change is notified.
     [[nodiscard]] auto set_max_transit_time(
