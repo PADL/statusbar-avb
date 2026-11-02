@@ -3,6 +3,7 @@
 
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
 
+#include "statusbar/net/net_socket.hpp"
 #include "statusbar/toml/toml.hpp"
 
 #include <fcntl.h>
@@ -12,6 +13,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <limits>
 #include <optional>
@@ -175,11 +177,6 @@ auto malformed() -> std::error_code
     return std::make_error_code(std::errc::illegal_byte_sequence);
 }
 
-auto errno_code() -> std::error_code
-{
-    return {errno, std::generic_category()};
-}
-
 /// The rest of @p f; nullopt on a read error.
 [[nodiscard]] auto read_stream(std::FILE* const f) -> std::optional<std::string>
 {
@@ -201,7 +198,7 @@ auto errno_code() -> std::error_code
 {
     std::FILE* const f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) {
-        error = errno_code();
+        error = net::errno_code();
         return std::nullopt;
     }
     auto text = read_stream(f);
@@ -213,13 +210,10 @@ auto errno_code() -> std::error_code
 }
 
 /// The directory part of @p path ("." for a bare file name)
-auto parent_of(std::string const& path) -> std::string
+[[nodiscard]] auto parent_of(std::string const& path) -> std::string
 {
-    auto const slash = path.rfind('/');
-    if (slash == std::string::npos) {
-        return ".";
-    }
-    return slash == 0 ? std::string{"/"} : path.substr(0, slash);
+    auto const parent = std::filesystem::path{path}.parent_path();
+    return parent.empty() ? std::string{"."} : parent.string();
 }
 
 [[nodiscard]] auto write_all(int const fd, std::string_view text) -> bool
@@ -545,11 +539,11 @@ auto open_for_write(std::string const& tmp, std::string const& path) -> int
 [[nodiscard]] auto write_and_close(int const fd, std::string const& tmp, std::string_view const text) -> Status
 {
     bool const written = write_all(fd, text) && ::fsync(fd) == 0;
-    auto const write_error = errno_code();
+    auto const write_error = net::errno_code();
     bool const closed = ::close(fd) == 0;
     if (!written || !closed) {
         (void)::unlink(tmp.c_str());
-        return failure(written ? errno_code() : write_error);
+        return failure(written ? net::errno_code() : write_error);
     }
     return success();
 }
@@ -558,7 +552,7 @@ auto open_for_write(std::string const& tmp, std::string const& path) -> int
 [[nodiscard]] auto replace_with(std::string const& tmp, std::string const& path) -> Status
 {
     if (::rename(tmp.c_str(), path.c_str()) != 0) {
-        auto const error = errno_code();
+        auto const error = net::errno_code();
         (void)::unlink(tmp.c_str());
         return failure(error);
     }
@@ -667,7 +661,7 @@ auto save_persistent_state(std::string const& path, std::string_view const text)
     std::string const tmp = path + ".tmp";
     int const fd = open_for_write(tmp, path);
     if (fd < 0) {
-        return failure(errno_code());
+        return failure(net::errno_code());
     }
     if (auto const written = write_and_close(fd, tmp, text); !written) {
         return written;

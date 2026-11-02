@@ -5,6 +5,7 @@
 
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/buffer/buffer.hpp"
+#include "statusbar/net/net_socket.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -13,6 +14,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <system_error>
 #include <utility>
 
@@ -31,29 +33,29 @@ constexpr int SEND_FLAGS = MSG_DONTWAIT | MSG_NOSIGNAL;
 constexpr int SEND_FLAGS = MSG_DONTWAIT;
 #endif
 
-[[nodiscard]] auto errno_failure(int const err = errno) -> std::unexpected<std::error_code>
-{
-    return failure(std::error_code{err, std::system_category()});
-}
+using net::errno_code;
+using net::SocketAddress;
 
 /// Non-blocking and close-on-exec, portably (no SOCK_NONBLOCK on macOS).
-[[nodiscard]] auto make_nonblocking(int const fd) noexcept -> bool
+[[nodiscard]] auto make_nonblocking(int const fd) noexcept -> Status
 {
-    int const flags = ::fcntl(fd, F_GETFL);
-    return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 && ::fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
+    if (::fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || !net::set_nonblocking(fd)) {
+        return failure(errno_code());
+    }
+    return success();
 }
 
-[[nodiscard]] auto make_address(std::string_view const path, sockaddr_un& address, socklen_t& length) noexcept -> bool
+/// The AF_UNIX address of the absolute @p path; NetError::invalid_address for a relative one,
+/// one that does not fit sun_path or one holding a NUL.
+[[nodiscard]] auto local_address(std::string_view const path) noexcept -> StatusValue<SocketAddress>
 {
-    // A path the length of sun_path would lack its terminating zero.
-    if (path.empty() || path.size() >= sizeof(address.sun_path)) {
-        return false;
-    }
-    address = sockaddr_un{};
-    address.sun_family = AF_UNIX;
-    std::memcpy(address.sun_path, path.data(), path.size());
-    length = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + path.size() + 1);
-    return true;
+    return SocketAddress::local(path);
+}
+
+/// Whether @p a and @p b are the same socket address.
+[[nodiscard]] auto same_address(SocketAddress const& a, SocketAddress const& b) noexcept -> bool
+{
+    return a.length() == b.length() && std::memcmp(a.sockaddr(), b.sockaddr(), a.length()) == 0;
 }
 
 /// The peer has gone: nothing is bound to its address any more, or (EPERM)
@@ -65,54 +67,40 @@ constexpr int SEND_FLAGS = MSG_DONTWAIT;
 
 /// Whether the socket file at @p address may be replaced: 0 when nothing serves it, else
 /// EADDRINUSE (a live socket answers) or the error that leaves it alone.
-[[nodiscard]] auto socket_replaceable(sockaddr_un const& address, socklen_t const length) noexcept -> int
+[[nodiscard]] auto socket_replaceable(SocketAddress const& address) noexcept -> int
 {
-    int const probe = ::socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (probe < 0) {
+    FileDescriptor const probe{::socket(AF_UNIX, SOCK_DGRAM, 0)};
+    if (!probe.valid()) {
         return errno;
     }
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
-    int const result = ::connect(probe, reinterpret_cast<sockaddr const*>(&address), length) == 0 ? EADDRINUSE : errno;
-    ::close(probe);
+    int const result = ::connect(probe.get(), address.sockaddr(), address.length()) == 0 ? EADDRINUSE : errno;
     return result == ECONNREFUSED || result == ENOENT ? 0 : result;
 }
 
-/// The directory part of @p path ("." for none).
+/// The directory of the absolute @p path.
 [[nodiscard]] auto directory_of(std::string const& path) -> std::string
 {
-    auto const slash = path.rfind('/');
-    if (slash == std::string::npos) {
-        return ".";
-    }
-    return slash == 0 ? std::string{"/"} : path.substr(0, slash);
-}
-
-/// Close @p fd after a failed call, keeping that call's errno.
-[[nodiscard]] auto close_failure(int const fd) -> std::unexpected<std::error_code>
-{
-    int const err = errno;
-    ::close(fd);
-    return errno_failure(err);
+    return std::filesystem::path{path}.parent_path().string();
 }
 
 /// A non-blocking, close-on-exec datagram socket.
-[[nodiscard]] auto nonblocking_socket() -> StatusValue<int>
+[[nodiscard]] auto nonblocking_socket() -> StatusValue<FileDescriptor>
 {
-    int const fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        return errno_failure();
+    FileDescriptor fd{::socket(AF_UNIX, SOCK_DGRAM, 0)};
+    if (!fd.valid()) {
+        return failure(errno_code());
     }
-    if (!make_nonblocking(fd)) {
-        return close_failure(fd);
+    if (auto made = make_nonblocking(fd.get()); !made) {
+        return forward_failure(made);
     }
-    return success(fd);
+    return fd;
 }
 
 /// mkdtemp(@p pattern), then the path @p leaf names in the new directory.
 [[nodiscard]] auto private_socket_path(std::string pattern, std::string_view const leaf) -> StatusValue<std::string>
 {
     if (::mkdtemp(pattern.data()) == nullptr) {
-        return errno_failure();
+        return failure(errno_code());
     }
     return success(pattern.append(leaf));
 }
@@ -125,43 +113,37 @@ void remove_private_socket(std::string const& path)
 }
 
 /// A non-blocking datagram socket bound at @p address.
-[[nodiscard]] auto bound_socket(sockaddr_un const& address, socklen_t const length) -> StatusValue<int>
+[[nodiscard]] auto bound_socket(SocketAddress const& address) -> StatusValue<FileDescriptor>
 {
-    auto const fd = nonblocking_socket();
+    auto fd = nonblocking_socket();
     if (!fd) {
         return fd;
     }
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
-    if (::bind(*fd, reinterpret_cast<sockaddr const*>(&address), length) != 0) {
-        return close_failure(*fd);
+    if (::bind(fd->get(), address.sockaddr(), address.length()) != 0) {
+        return failure(errno_code());
     }
     // Room for a burst to every controller; the kernel caps it (wmem_max).
     int const sndbuf = 1 << 20;
-    (void)::setsockopt(*fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    (void)::setsockopt(fd->get(), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     return fd;
 }
 
 /// A socket bound at @p private_path with @p mode and renamed to @p path (its identity in @p st).
 [[nodiscard]] auto bind_and_rename(std::string const& private_path, std::string const& path, mode_t const mode, struct stat& st)
-    -> StatusValue<int>
+    -> StatusValue<FileDescriptor>
 {
-    sockaddr_un address{};
-    socklen_t length = 0;
-    if (!make_address(private_path, address, length)) {
-        return failure(std::errc::filename_too_long);
-    }
-    return bound_socket(address, length).and_then([&](int const fd) -> StatusValue<int> {
+    return local_address(private_path).and_then(bound_socket).and_then([&](FileDescriptor fd) -> StatusValue<FileDescriptor> {
         if (::chmod(private_path.c_str(), mode) != 0 || ::lstat(private_path.c_str(), &st) != 0 ||
             ::rename(private_path.c_str(), path.c_str()) != 0) {
-            return close_failure(fd);
+            return failure(errno_code());
         }
-        return success(fd);
+        return fd;
     });
 }
 
 /// A non-blocking datagram socket bound at @p path with @p mode (its identity in @p st), bound
 /// in a private 0700 directory and renamed into place. Replaces whatever is at @p path.
-[[nodiscard]] auto bind_in_place(std::string const& path, mode_t const mode, struct stat& st) -> StatusValue<int>
+[[nodiscard]] auto bind_in_place(std::string const& path, mode_t const mode, struct stat& st) -> StatusValue<FileDescriptor>
 {
     std::string const dir = directory_of(path);
     // Short: it must fit sun_path.
@@ -176,71 +158,78 @@ void remove_private_socket(std::string const& path)
 
 /// One entity per path: a lock beside it, held while the port is open, so two
 /// starting at once cannot both find the path free. The lock's descriptor.
-[[nodiscard]] auto lock_beside(std::string const& path) -> StatusValue<int>
+[[nodiscard]] auto lock_beside(std::string const& path) -> StatusValue<FileDescriptor>
 {
     std::string const lock_path = path + ".lock";
-    int const lock_fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (lock_fd < 0) {
-        return errno_failure();
+    FileDescriptor lock{::open(lock_path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600)};
+    if (!lock.valid()) {
+        return failure(errno_code());
     }
-    if (::flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-        int const err = errno == EWOULDBLOCK ? EADDRINUSE : errno;
-        ::close(lock_fd);
-        return errno_failure(err);
+    if (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
+        return failure(errno_code(errno == EWOULDBLOCK ? EADDRINUSE : errno));
     }
-    return success(lock_fd);
+    return lock;
 }
 
 /// The socket bound at @p config's path, replacing a socket left by an entity that did not
 /// exit cleanly, but never one something still serves, nor anything else at the path.
-[[nodiscard]] auto claim_path(
-    AtdeccLocalPort::Config const& config, sockaddr_un const& address, socklen_t const length, struct stat& st) -> StatusValue<int>
+[[nodiscard]] auto claim_path(AtdeccLocalPort::Config const& config, SocketAddress const& address, struct stat& st)
+    -> StatusValue<FileDescriptor>
 {
     if (::lstat(config.path.c_str(), &st) == 0) {
         if (!S_ISSOCK(st.st_mode)) {
-            return errno_failure(EEXIST);
+            return failure(errno_code(EEXIST));
         }
-        if (int const err = socket_replaceable(address, length); err != 0) {
-            return errno_failure(err);
+        if (int const err = socket_replaceable(address); err != 0) {
+            return failure(errno_code(err));
         }
     }
     return bind_in_place(config.path, static_cast<mode_t>(config.mode) & 0777U, st);
 }
 
 /// Whether @p address is an unnamed sender's (an unbound socket).
-[[nodiscard]] auto is_unnamed([[maybe_unused]] sockaddr_un const& address, socklen_t const length) noexcept -> bool
+[[nodiscard]] auto is_unnamed(SocketAddress const& address) noexcept -> bool
 {
+    bool const no_path = address.length() <= static_cast<socklen_t>(offsetof(sockaddr_un, sun_path));
 #ifdef __linux__
-    return length <= static_cast<socklen_t>(offsetof(sockaddr_un, sun_path));
+    return no_path;
 #else
     // No abstract namespace: an unbound sender may come back with an empty path rather than none.
-    return length <= static_cast<socklen_t>(offsetof(sockaddr_un, sun_path)) || address.sun_path[0] == '\0';
+    return no_path || address.path().empty();
 #endif
 }
 
 #ifndef __linux__
 /// Bind @p fd at a path of our own in a private directory under the temporary directory,
-/// which nobody else can bind or replace; the path. Closes @p fd on failure.
+/// which nobody else can bind or replace; the path.
 [[nodiscard]] auto bind_client_path(int const fd) -> StatusValue<std::string>
 {
     char const* tmpdir = std::getenv("TMPDIR");
     auto const own_path =
         private_socket_path(std::string{tmpdir != nullptr && *tmpdir != '\0' ? tmpdir : "/tmp"} + "/atdecc-client-XXXXXX", "/c");
     if (!own_path) {
-        return close_failure(fd);
+        return forward_failure(own_path);
     }
-    sockaddr_un own{};
-    socklen_t own_length = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
-    if (!make_address(*own_path, own, own_length) || ::bind(fd, reinterpret_cast<sockaddr const*>(&own), own_length) != 0) {
-        int const err = errno != 0 ? errno : ENAMETOOLONG;
-        ::close(fd);
+    auto const own = local_address(*own_path);
+    if (!own || ::bind(fd, own->sockaddr(), own->length()) != 0) {
+        auto const error = own ? errno_code() : own.error();
         (void)::rmdir(directory_of(*own_path).c_str());
-        return errno_failure(err);
+        return failure(error);
     }
     return own_path;
 }
 #endif
+
+/// A received frame's addresses: from the entity, to the controller.
+void set_local_macs(ieee::Eui48* const src_mac, ieee::Eui48* const dest_mac) noexcept
+{
+    if (src_mac != nullptr) {
+        *src_mac = LOCAL_ENTITY_MAC;
+    }
+    if (dest_mac != nullptr) {
+        *dest_mac = LOCAL_CONTROLLER_MAC;
+    }
+}
 
 /// The value of the integer socket option @p option of @p fd.
 [[nodiscard]] auto socket_option(int const fd, int const option) -> StatusValue<int>
@@ -248,7 +237,7 @@ void remove_private_socket(std::string const& path)
     int value = 0;
     socklen_t len = sizeof(value);
     if (::getsockopt(fd, SOL_SOCKET, option, &value, &len) != 0) {
-        return errno_failure();
+        return failure(errno_code());
     }
     return success(value);
 }
@@ -261,39 +250,37 @@ void remove_private_socket(std::string const& path)
 
 auto AtdeccLocalPort::open(Config const& config) -> StatusValue<std::unique_ptr<AtdeccLocalPort>>
 {
-    sockaddr_un address{};
-    socklen_t length = 0;
-    if (!make_address(config.path, address, length)) {
-        return failure(std::errc::filename_too_long);
+    auto const address = local_address(config.path);
+    if (!address) {
+        return forward_failure(address);
     }
-    auto const lock_fd = lock_beside(config.path);
-    if (!lock_fd) {
-        return forward_failure(lock_fd);
+    auto lock = lock_beside(config.path);
+    if (!lock) {
+        return forward_failure(lock);
     }
-    return open_locked(config, address, length, *lock_fd);
+    return open_locked(config, *address, std::move(*lock));
 }
 
-auto AtdeccLocalPort::open_locked(Config const& config, sockaddr_un const& address, socklen_t const length, int const lock_fd)
+auto AtdeccLocalPort::open_locked(Config const& config, SocketAddress const& address, FileDescriptor lock)
     -> StatusValue<std::unique_ptr<AtdeccLocalPort>>
 {
     struct stat st{};
-    auto const fd = claim_path(config, address, length, st);
+    auto fd = claim_path(config, address, st);
     if (!fd) {
-        ::close(lock_fd);
         return forward_failure(fd);
     }
     // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) - false positive: the unique_ptr owns it
-    std::unique_ptr<AtdeccLocalPort> port{new AtdeccLocalPort{*fd, false, config}};
-    port->own_path(config.path, st.st_dev, st.st_ino, lock_fd);
+    std::unique_ptr<AtdeccLocalPort> port{new AtdeccLocalPort{std::move(*fd), false, config}};
+    port->own_path(config.path, st.st_dev, st.st_ino, std::move(lock));
     return success(std::move(port));
 }
 
-void AtdeccLocalPort::own_path(std::string const& path, dev_t const dev, ino_t const ino, int const lock_fd)
+void AtdeccLocalPort::own_path(std::string const& path, dev_t const dev, ino_t const ino, FileDescriptor lock)
 {
     path_ = path;
     path_dev_ = dev;
     path_ino_ = ino;
-    lock_fd_ = lock_fd;
+    lock_ = std::move(lock);
 }
 
 auto AtdeccLocalPort::adopt(int const fd) -> StatusValue<std::unique_ptr<AtdeccLocalPort>>
@@ -310,15 +297,15 @@ auto AtdeccLocalPort::adopt(int const fd) -> StatusValue<std::unique_ptr<AtdeccL
     if (*domain != AF_UNIX || *type != SOCK_DGRAM) {
         return failure(std::errc::wrong_protocol_type);
     }
-    if (!make_nonblocking(fd)) {
-        return errno_failure();
+    if (auto made = make_nonblocking(fd); !made) {
+        return forward_failure(made);
     }
     // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) - false positive: the unique_ptr owns it
-    return success(std::unique_ptr<AtdeccLocalPort>{new AtdeccLocalPort{fd, true, Config{}}});
+    return success(std::unique_ptr<AtdeccLocalPort>{new AtdeccLocalPort{FileDescriptor{fd}, true, Config{}}});
 }
 
-AtdeccLocalPort::AtdeccLocalPort(int const fd, bool const connected, Config config)
-    : fd_{fd}
+AtdeccLocalPort::AtdeccLocalPort(FileDescriptor fd, bool const connected, Config config)
+    : fd_{std::move(fd)}
     , connected_{connected}
     , config_{std::move(config)}
 {}
@@ -333,10 +320,7 @@ AtdeccLocalPort::~AtdeccLocalPort()
 
 void AtdeccLocalPort::close()
 {
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
-    }
+    fd_.close();
     if (!path_.empty()) {
         // Only our own socket file: a newer entity may have bound the path.
         struct stat st{};
@@ -345,12 +329,9 @@ void AtdeccLocalPort::close()
         }
         path_.clear();
     }
-    if (lock_fd_ >= 0) {
-        // The lock file stays: removing it would let a newcomer lock a new
-        // file while an old one still holds the unlinked one.
-        ::close(lock_fd_);
-        lock_fd_ = -1;
-    }
+    // The lock file stays: removing it would let a newcomer lock a new
+    // file while an old one still holds the unlinked one.
+    lock_.close();
     for (auto& client : clients_) {
         client.gone = true;
     }
@@ -362,10 +343,10 @@ auto AtdeccLocalPort::client_count() const noexcept -> size_t
     return static_cast<size_t>(std::ranges::count_if(clients_, [](Client const& c) { return !c.gone; }));
 }
 
-auto AtdeccLocalPort::find_client(sockaddr_un const& address, socklen_t const length) -> Client*
+auto AtdeccLocalPort::find_client(SocketAddress const& address) -> Client*
 {
     for (auto& client : clients_) {
-        if (!client.gone && client.address_length == length && std::memcmp(&client.address, &address, length) == 0) {
+        if (!client.gone && same_address(client.address, address)) {
             return &client;
         }
     }
@@ -391,15 +372,14 @@ auto AtdeccLocalPort::next_mac() -> ieee::Eui48
     }
 }
 
-auto AtdeccLocalPort::add_client(sockaddr_un const& address, socklen_t const length, int64_t const now_ns) -> Client*
+auto AtdeccLocalPort::add_client(SocketAddress const& address, int64_t const now_ns) -> Client*
 {
     if (clients_.size() == MAX_CLIENTS) {
         auto* oldest = std::ranges::min_element(clients_, {}, &Client::last_heard_ns);
         oldest->gone = true;
         reap();
     }
-    auto& client = clients_.emplace_back(Client{.address_length = length, .mac = next_mac(), .last_heard_ns = now_ns});
-    std::memcpy(&client.address, &address, length);
+    auto& client = clients_.emplace_back(Client{.address = address, .mac = next_mac(), .last_heard_ns = now_ns});
     if (logger_) {
         logger_->status("local ATDECC controller joined ({} connected)", client_count());
     }
@@ -427,30 +407,28 @@ void AtdeccLocalPort::reap()
 
 void AtdeccLocalPort::on_ready(int64_t const now_ns)
 {
-    for (size_t n = 0; n < MAX_DATAGRAMS_PER_READY && fd_ >= 0; ++n) {
+    for (size_t n = 0; n < MAX_DATAGRAMS_PER_READY && fd_.valid(); ++n) {
         // A safe point to tell the entity about controllers found gone while
         // it was sending: it is not in the middle of anything now.
         reap();
-        sockaddr_un address{};
-        socklen_t length = sizeof(address);
-        ssize_t const received = receive_datagram(address, length);
+        SocketAddress address{};
+        ssize_t const received = receive_datagram(address);
         if (received < 0) {
             return;
         }
         if (received > 0) {
-            deliver(address, length, static_cast<size_t>(received), now_ns);
+            deliver(address, static_cast<size_t>(received), now_ns);
         }
     }
 }
 
-auto AtdeccLocalPort::receive_datagram(sockaddr_un& address, socklen_t& length) -> ssize_t
+auto AtdeccLocalPort::receive_datagram(SocketAddress& address) -> ssize_t
 {
     // MSG_TRUNC: the datagram's real length, so oversize is seen as such.
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
+    address.set_length(sizeof(sockaddr_un));
     ssize_t const received =
-        ::recvfrom(fd_, buffer_.data(), buffer_.size(), MSG_TRUNC | MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&address), &length);
-    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    length = std::min<socklen_t>(length, sizeof(address));  // a truncated address is reported at full length
+        ::recvfrom(fd_.get(), buffer_.data(), buffer_.size(), MSG_TRUNC | MSG_DONTWAIT, address.sockaddr(), address.length_ptr());
+    address.set_length(std::min<socklen_t>(address.length(), sizeof(sockaddr_un)));  // a truncated one reports its full length
     if (received < 0) {
         if (errno == EINTR) {
             return 0;
@@ -469,27 +447,27 @@ auto AtdeccLocalPort::receive_datagram(sockaddr_un& address, socklen_t& length) 
     return received;
 }
 
-void AtdeccLocalPort::deliver(sockaddr_un const& address, socklen_t const length, size_t const size, int64_t const now_ns)
+void AtdeccLocalPort::deliver(SocketAddress const& address, size_t const size, int64_t const now_ns)
 {
-    bool const unnamed = is_unnamed(address, length);
+    bool const unnamed = is_unnamed(address);
     // An unnamed peer can be answered only on a connected socket.
     if (unnamed && !connected_) {
         ++counters_.rx_dropped;
         return;
     }
     ieee::Eui48 const mac =
-        heard_from(address, unnamed ? 0 : length, now_ns).mac;  // the receiver may add no clients, but copy anyway
+        heard_from(unnamed ? SocketAddress{} : address, now_ns).mac;  // the receiver may add no clients, but copy anyway
     ++counters_.rx_frames;
     if (receive_) {
         receive_(now_ns, mac, std::span<uint8_t const>{buffer_.data(), size});
     }
 }
 
-auto AtdeccLocalPort::heard_from(sockaddr_un const& address, socklen_t const length, int64_t const now_ns) -> Client&
+auto AtdeccLocalPort::heard_from(SocketAddress const& address, int64_t const now_ns) -> Client&
 {
-    Client* client = find_client(address, length);
+    Client* client = find_client(address);
     if (client == nullptr) {
-        client = add_client(address, length, now_ns);
+        client = add_client(address, now_ns);
     }
     client->last_heard_ns = now_ns;
     return *client;
@@ -509,10 +487,9 @@ void AtdeccLocalPort::tick(int64_t const now_ns)
 
 auto AtdeccLocalPort::send_to(Client& client, std::span<uint8_t const> const frame) -> bool
 {
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
-    auto const* address = client.address_length != 0 ? reinterpret_cast<sockaddr const*>(&client.address) : nullptr;
+    auto const* address = client.address.length() != 0 ? client.address.sockaddr() : nullptr;
     for (;;) {
-        ssize_t const sent = ::sendto(fd_, frame.data(), frame.size(), SEND_FLAGS, address, client.address_length);
+        ssize_t const sent = ::sendto(fd_.get(), frame.data(), frame.size(), SEND_FLAGS, address, client.address.length());
         if (sent >= 0) {
             ++counters_.tx_frames;
             client.send_failures = 0;
@@ -538,7 +515,7 @@ auto AtdeccLocalPort::send_to(Client& client, std::span<uint8_t const> const fra
 
 auto AtdeccLocalPort::send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> const frame) -> bool
 {
-    if (fd_ < 0 || frame.size() > LOCAL_PORT_MAX_DATAGRAM) {
+    if (!fd_.valid() || frame.size() > LOCAL_PORT_MAX_DATAGRAM) {
         return false;
     }
     bool delivered = false;
@@ -563,9 +540,8 @@ auto AtdeccLocalPort::send(ieee::Eui48 const& dest_mac, std::span<uint8_t const>
 //
 
 AtdeccLocalClient::AtdeccLocalClient(AtdeccLocalClient&& other) noexcept
-    : fd_{std::exchange(other.fd_, -1)}
+    : fd_{std::move(other.fd_)}
     , entity_{other.entity_}
-    , entity_length_{other.entity_length_}
     , bound_path_{std::move(other.bound_path_)}
     , last_send_ns_{other.last_send_ns_}
     , sent_since_tick_{other.sent_since_tick_}
@@ -577,9 +553,8 @@ auto AtdeccLocalClient::operator=(AtdeccLocalClient&& other) noexcept -> AtdeccL
 {
     if (this != &other) {  // NOLINT(statusbar-block-statements): a member-wise move
         close();
-        fd_ = std::exchange(other.fd_, -1);
+        fd_ = std::move(other.fd_);
         entity_ = other.entity_;
-        entity_length_ = other.entity_length_;
         bound_path_ = std::move(other.bound_path_);
         other.bound_path_.clear();
         last_send_ns_ = other.last_send_ns_;
@@ -591,17 +566,16 @@ auto AtdeccLocalClient::operator=(AtdeccLocalClient&& other) noexcept -> AtdeccL
 auto AtdeccLocalClient::open(std::string_view const path) -> Status
 {
     close();
-    if (!make_address(path, entity_, entity_length_)) {
-        return failure(std::errc::filename_too_long);
+    std::error_code ignored;  // a relative path is the caller's, from the working directory
+    auto entity = local_address(std::filesystem::absolute(path, ignored).string());
+    if (!entity) {
+        return forward_failure(entity);
     }
-    auto const fd = nonblocking_socket();
-    if (!fd) {
-        return forward_failure(fd);
-    }
-    return bind_and_connect(*fd);
+    entity_ = *entity;
+    return nonblocking_socket().and_then([this](FileDescriptor fd) { return bind_and_connect(std::move(fd)); });
 }
 
-auto AtdeccLocalClient::bind_and_connect(int const fd) -> Status
+auto AtdeccLocalClient::bind_and_connect(FileDescriptor fd) -> Status
 {
     // An unbound socket has no address for the entity to reply to.
 #ifdef __linux__
@@ -609,17 +583,17 @@ auto AtdeccLocalClient::bind_and_connect(int const fd) -> Status
     own.sun_family = AF_UNIX;
     // Autobind: an abstract address of the kernel's choosing.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
-    if (::bind(fd, reinterpret_cast<sockaddr const*>(&own), sizeof(sa_family_t)) != 0) {
-        return close_failure(fd);
+    if (::bind(fd.get(), reinterpret_cast<sockaddr const*>(&own), sizeof(sa_family_t)) != 0) {
+        return failure(errno_code());
     }
 #else
-    auto bound = bind_client_path(fd);
+    auto bound = bind_client_path(fd.get());
     if (!bound) {
         return forward_failure(bound);
     }
     bound_path_ = std::move(*bound);
 #endif
-    fd_ = fd;
+    fd_ = std::move(fd);
     // The entity may not be listening yet; the first send connects then.
     (void)connect_to_entity();
     return success();
@@ -627,10 +601,7 @@ auto AtdeccLocalClient::bind_and_connect(int const fd) -> Status
 
 void AtdeccLocalClient::close() noexcept
 {
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
-    }
+    fd_.close();
     if (!bound_path_.empty()) {
         remove_private_socket(bound_path_);
         bound_path_.clear();
@@ -639,14 +610,13 @@ void AtdeccLocalClient::close() noexcept
 
 auto AtdeccLocalClient::connect_to_entity() noexcept -> bool
 {
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
-    return ::connect(fd_, reinterpret_cast<sockaddr const*>(&entity_), entity_length_) == 0;
+    return ::connect(fd_.get(), entity_.sockaddr(), entity_.length()) == 0;
 }
 
 auto AtdeccLocalClient::send(ieee::Eui48 const* /*dest_mac*/, std::span<uint8_t const> const payload) noexcept
     -> StatusValue<ssize_t>
 {
-    if (fd_ < 0) {
+    if (!fd_.valid()) {
         return failure(std::errc::bad_file_descriptor);
     }
     if (payload.size() > LOCAL_PORT_MAX_DATAGRAM) {
@@ -654,7 +624,7 @@ auto AtdeccLocalClient::send(ieee::Eui48 const* /*dest_mac*/, std::span<uint8_t 
     }
     bool reconnected = false;
     for (;;) {
-        ssize_t const sent = ::send(fd_, payload.data(), payload.size(), SEND_FLAGS);
+        ssize_t const sent = ::send(fd_.get(), payload.data(), payload.size(), SEND_FLAGS);
         if (sent >= 0) {
             sent_since_tick_ = true;
             return success(sent);
@@ -668,41 +638,36 @@ auto AtdeccLocalClient::send(ieee::Eui48 const* /*dest_mac*/, std::span<uint8_t 
             reconnected = true;
             continue;
         }
-        return errno_failure(err);
+        return failure(errno_code(err));
     }
 }
 
 auto AtdeccLocalClient::recv(ieee::Eui48* const src_mac, ieee::Eui48* const dest_mac, std::span<uint8_t> const payload_buf) noexcept
     -> StatusValue<ssize_t>
 {
-    if (fd_ < 0) {
+    if (!fd_.valid()) {
         return failure(std::errc::bad_file_descriptor);
     }
     for (;;) {
-        ssize_t const received = ::recv(fd_, payload_buf.data(), payload_buf.size(), MSG_TRUNC | MSG_DONTWAIT);
+        ssize_t const received = ::recv(fd_.get(), payload_buf.data(), payload_buf.size(), MSG_TRUNC | MSG_DONTWAIT);
         if (received < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            return errno_failure();
+            return failure(errno_code());
         }
         auto const size = static_cast<size_t>(received);
         if (size < LOCAL_PORT_MIN_DATAGRAM || size > LOCAL_PORT_MAX_DATAGRAM || size > payload_buf.size()) {
             continue;
         }
-        if (src_mac != nullptr) {
-            *src_mac = LOCAL_ENTITY_MAC;
-        }
-        if (dest_mac != nullptr) {
-            *dest_mac = LOCAL_CONTROLLER_MAC;
-        }
+        set_local_macs(src_mac, dest_mac);
         return success(received);
     }
 }
 
 void AtdeccLocalClient::tick(int64_t const now_ns) noexcept
 {
-    if (fd_ < 0) {
+    if (!fd_.valid()) {
         return;
     }
     if (sent_since_tick_) {
