@@ -22,9 +22,8 @@ class TalkerDeclarations
   public:
     /// Section 4.3.3.1: a probe keeps the stream declared this long.
     static constexpr int64_t PROBE_WINDOW_NS = 15'000'000'000;
-    /// Table 5.3: 2 LeaveAll periods, at the longest LeaveAll the MRP timers
-    /// pick (srp_mrp_timers.hpp: uniform in [10 s, 15 s); Milan's 15.5 s
-    /// upper tolerance is GenAVB's MRP_LVATIMER_VAL_MAX).
+    /// Table 5.3: 2 LeaveAll periods, at the longest LeaveAll the MRP timers draw (they
+    /// draw from [10 s, 15 s); Milan v1.2 Table 4.3 allows 10-15 s).
     static constexpr int64_t REDECLARE_HOLD_NS = 2 * 15'000'000'000;
     /// How long a departed Listener still counts as registered: the transmit
     /// gate's grace window (TalkerGate::GRACE_NS), across a LeaveAll blip.
