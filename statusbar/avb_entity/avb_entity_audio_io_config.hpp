@@ -288,10 +288,12 @@ struct AvbEntityAudioIOConfig
     /// control plane (gPTP/MSRP/ACMP/MAAP), so under load or media-timer preemption it
     /// services RX with jitter; queued frames are then batch-tallied against a now-later
     /// clock and read as spurious LATE_TIMESTAMP. A ~50 us RT drain keeps frames tallied
-    /// within one tick of arrival, against the timer's own fresh gPTP wake time. Off
-    /// (default) = reactor path. Requires a spare core; on the Pi5 rig core 3 is the
-    /// media timer, so the RX timer takes isolated core 2.
-    bool stream_rx_rt_timer{false};
+    /// within one tick of arrival, against the timer's own fresh gPTP wake time. On by
+    /// default (measured 2026-11-01 on the Pi 5 pair: the reactor path's late frames,
+    /// a stall tail of 0.3 to 1.2 ms, went to zero). Off = reactor path. Wants a spare
+    /// core; on the Pi5 rig core 3 is the media timer, so the RX timer takes isolated
+    /// core 2. A core that does not exist only costs the pinning, logged.
+    bool stream_rx_rt_timer{true};
 
     /// CPU core for the RX timer thread when stream_rx_rt_timer is set (should be an
     /// isolated core, distinct from the media timer's).
@@ -321,8 +323,10 @@ struct AvbEntityAudioIOConfig
     /// instead of a timer of its own: one SCHED_FIFO thread on the spare core
     /// drains then kicks, so there is no second timer for it to contend with.
     /// Takes the kick off the media tick like stream_tx.kicker, which it
-    /// overrides; nothing without stream_rx.rt_timer.
-    bool stream_tx_kick_in_rx_timer{false};
+    /// overrides; nothing without stream_rx.rt_timer. On by default: it cut
+    /// the media tick from 16 to 6 us on mmap and xdp with no second timer
+    /// to contend with (2026-11-01, Pi 5 pair).
+    bool stream_tx_kick_in_rx_timer{true};
 
     /// Pin the media-clock rate ratio r to exactly 1.0 (media clock = gPTP) instead
     /// of tracking r = gPTP/CLOCK_REALTIME via the GPS ratio Kalman. Use when the

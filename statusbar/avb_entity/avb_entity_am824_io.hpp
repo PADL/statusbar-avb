@@ -116,7 +116,7 @@ struct AvbEntityAm824IOConfig
     /// Drain the AM824 stream RX on a dedicated SCHED_FIFO timer (its own isolated
     /// core) instead of the shared reactor -- see AvbEntityAudioIOConfig::stream_rx_rt_timer.
     /// Off (default) = reactor path.
-    bool stream_rx_rt_timer{false};
+    bool stream_rx_rt_timer{true};     ///< on by default: see AvbEntityAudioIOConfig::stream_rx_rt_timer
     int stream_rx_cpu_affinity{2};     ///< isolated core for the RX timer (media timer = 3)
     uint32_t stream_rx_period_us{50};  ///< RX drain tick
 };

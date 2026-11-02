@@ -149,7 +149,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "stream_rx.rt_timer",
         "Drain the AM824 stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the shared "
         "reactor -- deterministic low-latency draining stamps ingress against a fresh gPTP wake time, eliminating "
-        "spurious LATE_TIMESTAMP from reactor scheduling jitter. Default false (reactor); needs a spare isolated core",
+        "spurious LATE_TIMESTAMP from reactor scheduling jitter. Default true; false = reactor. Wants a spare isolated core",
         config.entity.stream_rx_rt_timer,
         [&](auto v) { config.entity.stream_rx_rt_timer = v; });
     specs.add<int64_t>(

@@ -126,8 +126,8 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "stream_rx.rt_timer",
         "Drain the AM824/AAF stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the "
         "shared reactor. Deterministic low-latency draining stamps ingress frames against a fresh gPTP wake time, "
-        "eliminating spurious LATE_TIMESTAMP from reactor scheduling jitter. Default false (reactor). Needs a spare "
-        "core -- set stream_rx.cpu to an isolated core distinct from the media timer",
+        "eliminating spurious LATE_TIMESTAMP from reactor scheduling jitter. Default true; false = reactor. Wants a "
+        "spare core -- set stream_rx.cpu to an isolated core distinct from the media timer",
         config.entity.stream_rx_rt_timer,
         [&](auto v) { config.entity.stream_rx_rt_timer = v; });
     specs.add<int64_t>(
@@ -157,7 +157,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "stream_tx.kick_in_rx_timer",
         "Issue the TX kick from the RX drain timer's callback (stream_rx.rt_timer) instead of a kicker timer of its "
         "own: one SCHED_FIFO thread on the spare core drains then kicks. Overrides stream_tx.kicker; nothing without "
-        "stream_rx.rt_timer. Default false",
+        "stream_rx.rt_timer. Default true",
         config.entity.stream_tx_kick_in_rx_timer,
         [&](auto v) { config.entity.stream_tx_kick_in_rx_timer = v; });
     specs.add<uint64_t>(
