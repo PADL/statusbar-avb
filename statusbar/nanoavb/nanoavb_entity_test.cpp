@@ -2454,6 +2454,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
     store.install(handler);
     std::vector<CapturedSend> sends;
     capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
     register_controller(handler, kEntity, kControllerB, kMacB);
     sends.clear();
 
@@ -2468,8 +2469,11 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
     EXPECT_EQ(echoed.flags.get(), stream_info_flags::MSRP_ACC_LAT_VALID);
     EXPECT_EQ(echoed.msrp_accumulated_latency.get(), 3'000'000U);
     EXPECT_EQ(body_of(*solicited(sends)).size(), AemStreamInfoPayload::LENGTH);
+    // Milan v1.2 Section 5.4.5.2: the response alone, to the other registered controller.
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_INFO, kMacB), 1);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_MAX_TRANSIT_TIME, kMacB), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_STREAM_INFO, kMacB), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_MAX_TRANSIT_TIME, kMacB), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_INFO, kMacA), 0);
 
     // The same offset again changes nothing: no notification.
     sends.clear();
@@ -2583,6 +2587,7 @@ TEST(nanoavb_entity_presentation_offset, max_transit_time_sets_and_gets_it)
         });
     std::vector<CapturedSend> sends;
     capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
     register_controller(handler, kEntity, kControllerB, kMacB);
 
     sends.clear();
@@ -2598,11 +2603,11 @@ TEST(nanoavb_entity_presentation_offset, max_transit_time_sets_and_gets_it)
     AemSetMaxTransitTimePayload echoed{};
     span_load(echoed, body_of(*solicited(sends)).first(AemSetMaxTransitTimePayload::LENGTH));
     EXPECT_EQ(echoed.max_transit_time.get(), uint64_t{4'250'000});
-    // Registered controllers hear it, and a Milan 1.2 controller reads it in
-    // GET_STREAM_INFO.
+    // The other registered controllers hear the response alone (Milan v1.3 Section 5.4.5.3).
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacB), 1);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_MAX_TRANSIT_TIME, kMacB), 1);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_STREAM_INFO, kMacB), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_MAX_TRANSIT_TIME, kMacB), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_STREAM_INFO, kMacB), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacA), 0);
 
     sends.clear();
     std::array<uint8_t, AemGetMaxTransitTimeCommandPayload::LENGTH> get{0x00, 0x06, 0x00, 0x01};
