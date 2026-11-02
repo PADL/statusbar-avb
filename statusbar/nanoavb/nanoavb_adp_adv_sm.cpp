@@ -16,19 +16,16 @@ void DelayRandom::seed(ieee::Eui48 const& mac, uint64_t const realtime_ns) noexc
     uint64_t const a = mac.to_uint64();
     uint64_t sum = a + realtime_ns;
     sum += sum < a ? 1U : 0U;  // end-around carry
-    state_ = sum != 0 ? sum : 0x9E37'79B9'7F4A'7C15ULL;
+    engine_.seed(static_cast<std::minstd_rand::result_type>(sum ^ (sum >> 32U)));
 }
 
 auto DelayRandom::next(std::chrono::milliseconds const max) noexcept -> std::chrono::milliseconds
 {
-    state_ ^= state_ >> 12U;
-    state_ ^= state_ << 25U;
-    state_ ^= state_ >> 27U;
-    auto const r = (state_ * 0x2545'F491'4F6C'DD1DULL) >> 32U;
     if (max.count() <= 0) {
         return std::chrono::milliseconds{0};
     }
-    return std::chrono::milliseconds{static_cast<int64_t>(r % (static_cast<uint64_t>(max.count()) + 1U))};
+    std::uniform_int_distribution<int64_t> pick{0, max.count()};
+    return std::chrono::milliseconds{pick(engine_)};
 }
 
 void start_startup_delay(Context& ctx, TimePoint const time) noexcept
