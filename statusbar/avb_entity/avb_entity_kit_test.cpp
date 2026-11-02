@@ -36,7 +36,6 @@
 #include <span>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <vector>
 
 using namespace statusbar;
@@ -1839,33 +1838,6 @@ TEST(avb_entity_kit_formats, a_refused_reshape_leaves_the_slot)
     EXPECT_TRUE(m.kit.talker().reformat_stream(spec).has_value());  // its own format: nothing to do
     spec.format_word ^= 1;
     EXPECT_FALSE(m.kit.talker().reformat_stream(spec).has_value());
-}
-
-// SlotGuard: the data-plane thread never waits, the reactor waits for it
-TEST(avb_entity_slot_guard, enter_never_waits_lock_waits_for_leave)
-{
-    SlotGuard guard;
-    EXPECT_TRUE(guard.try_enter());
-    std::atomic<bool> locked{false};
-    std::thread reactor{[&] {
-        guard.lock();
-        locked = true;
-        guard.unlock();
-    }};
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
-    EXPECT_FALSE(locked.load());  // still in the data-plane thread's packet
-    guard.leave();
-    reactor.join();
-    EXPECT_TRUE(locked.load());
-    guard.lock();
-    EXPECT_FALSE(guard.try_enter());  // re-shaping: the packet is skipped
-    guard.unlock();
-    {
-        SlotGuard::Entry const entry{guard};
-        EXPECT_TRUE(entry.entered());
-    }
-    EXPECT_TRUE(guard.try_enter());
-    guard.leave();
 }
 
 // IEEE 802.1Q-2022 Clause 34.3.1: a talker format change that takes every talker's

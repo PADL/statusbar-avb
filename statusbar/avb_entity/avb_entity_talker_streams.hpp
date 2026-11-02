@@ -20,7 +20,6 @@
 /// TX shape follows its declarative model instead of per-entity C++ enums.
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
-#include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
@@ -28,6 +27,7 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -137,7 +137,7 @@ struct TalkerStreams
     [[nodiscard]] auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
     /// Re-shape the slot of @p spec.index for @p spec (new format, AAF or AM824, same stream id,
-    /// destination, sequence and sample count). Reactor thread; the slot is locked (SlotGuard) so the
+    /// destination, sequence and sample count). Reactor thread; the slot is locked (itc::SpinLock) so the
     /// media thread skips it. Errors (slot unchanged): no such slot, a kind change to or from CRF, or
     /// a format open_stream would refuse.
     [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
@@ -290,9 +290,9 @@ struct TalkerStreams
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
-    /// Per-stream guards between the media thread's transmits and the
-    /// reactor's reformat_stream, by STREAM_OUTPUT index.
-    std::array<SlotGuard, MAX_ENTITY_STREAMS> guards_{};
+    /// Per-stream locks between the media thread's transmits (try_lock, never waits) and the
+    /// reactor's reformat_stream (lock), by STREAM_OUTPUT index.
+    std::array<itc::SpinLock, MAX_ENTITY_STREAMS> guards_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
