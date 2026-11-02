@@ -25,7 +25,6 @@
 /// state through a NanoAvbComponents reference (all bound at construction).
 /// It knows nothing about where the audio goes -- only the StreamRxAudioSink.
 
-#include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
@@ -35,6 +34,7 @@
 #include "statusbar/avtp/avtp_crf_stream_input.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_published.hpp"
+#include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -120,8 +120,9 @@ struct ListenerStreamSlot
     /// 5.3.8.7). Written on the reactor, read on the RX thread.
     std::atomic<bool> stopped{false};
 
-    /// The RX thread's per-frame work against the reactor's reformat_stream.
-    SlotGuard guard{};
+    /// The RX thread's per-frame work (try_lock, never waits) against the reactor's reformat_stream
+    /// and consumer changes (lock).
+    itc::SpinLock guard{};
 };
 
 /// The timed packet for @p frames whole frames of an accepted AAF payload presented from @p pts_ns,
@@ -215,7 +216,7 @@ struct ListenerStreams
 
     /// Re-shape the slot of @p spec.index for @p spec (Milan v1.2 Section 4.4.2.2), keeping its
     /// consumers and counters; an audio slot may change kind (AAF, AM824). Reactor thread; the slot
-    /// is locked (SlotGuard) so RX drops its frames. Errors (slot unchanged): no such slot, a kind
+    /// is locked (itc::SpinLock) so RX drops its frames. Errors (slot unchanged): no such slot, a kind
     /// change to or from CRF, or a format open_stream would refuse.
     [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
 
@@ -223,12 +224,13 @@ struct ListenerStreams
     /// each decoded channel is delivered as floats with its reconstructed
     /// presentation time. Callable before or after the slot exists — the code
     /// is a menu, the model is the selection: an index the model never
-    /// declares stays pending and inert (never an error). RX-thread callback.
+    /// declares stays pending and inert (never an error). RX-thread callback. Reactor thread: it
+    /// locks the slot, so never call it from a consumer.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn);
 
     /// Register a per-stream CRF timestamp consumer for STREAM_INPUT
     /// @p stream_index (a CRF input slot). Same menu/selection + pending
-    /// semantics as set_consume. RX-thread callback.
+    /// semantics as set_consume (never called from a consumer). RX-thread callback.
     void set_crf(uint16_t stream_index, StreamCrfFn fn);
     /// set_crf for a consumer that accepts no source generation.
     template <typename Fn>
@@ -409,8 +411,6 @@ struct ListenerStreams
     void begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec);
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
-    /// Move @p trial's deserializers and @p spec's format into @p slot. Under the guard.
-    static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
 
     /// A fresh slot for @p spec, its margin histogram sized for this listener.
     auto new_slot(StreamSpec const& spec) -> ListenerStreamSlot&;
