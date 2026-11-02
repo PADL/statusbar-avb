@@ -109,7 +109,7 @@ struct Def
         RLeaveAll,   ///< rLA!       (10.7.5.20) received LeaveAll
         TxLeaveAll,  ///< txLA!      (10.7.5.8)  paired Applicant emitted LeaveAll
         Redeclare,   ///< ReDeclare! (10.7.5.3)  port role change
-        LvTimer,     ///< LeaveTimer expiry (10.7.4.1)
+        LvTimer,     ///< LeaveTimer expiry (10.7.4.2)
         Flush,       ///< Flush!     (10.7.5.2)  port role change — forget registrations
         Count,
     };
