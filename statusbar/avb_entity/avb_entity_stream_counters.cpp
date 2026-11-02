@@ -3,7 +3,49 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 
+#include <algorithm>
+
 namespace statusbar::avb_entity {
+
+namespace {
+
+constexpr int LOCK_RUN_THRESHOLD = 8;  // ~1 ms (AAF) / ~1.3 ms (AM824) of clean steps
+
+/// Whether @p actual, the step since the last valid timestamp, is plausible against the nominal
+/// packet period and within @p tolerance_ns of the step before.
+[[nodiscard]] auto steady_step(
+    StreamInputCounters const& c,
+    uint32_t const actual,
+    uint64_t const samples_per_ch,
+    uint32_t const sample_rate_hz,
+    uint32_t const tolerance_ns) noexcept -> bool
+{
+    uint64_t const nominal = (samples_per_ch * 1'000'000'000ULL) / sample_rate_hz;  // 125 us @ 12/96k
+    bool const plausible = (actual >= (nominal / 2)) && (actual < (nominal * 4));
+    uint64_t const step_err = (actual > c.prev_delta) ? (actual - c.prev_delta) : (c.prev_delta - actual);
+    return plausible && c.have_prev_delta && step_err <= tolerance_ns;
+}
+
+/// A steady step lengthens the run of them, locking at LOCK_RUN_THRESHOLD; any other unlocks.
+void note_lock_step(StreamInputCounters& c, bool const steady) noexcept
+{
+    auto const relaxed = std::memory_order_relaxed;
+    if (steady) {
+        c.locked_run = std::min(c.locked_run + 1, LOCK_RUN_THRESHOLD);
+        if (c.locked_run >= LOCK_RUN_THRESHOLD && !c.is_locked.load(relaxed) && !c.is_locked.exchange(true, relaxed)) {
+            c.media_locked.fetch_add(1, relaxed);
+        }
+        return;
+    }
+    c.locked_run = 0;
+    // The reactor may have dropped the lock already (fold, unbind): the exchange counts each loss once.
+    if (c.is_locked.load(relaxed) && c.is_locked.exchange(false, relaxed)) {
+        c.media_unlocked.fetch_add(1, relaxed);
+        c.stream_interrupted.fetch_add(1, relaxed);
+    }
+}
+
+}  // namespace
 
 void tally_stream_input_packet(
     StreamInputCounters& c,
@@ -67,28 +109,9 @@ void tally_stream_input_packet(
         // gPTP-slaved so the step is correct by construction; jitter/drops change it
         // and unlock. A coarse plausibility window vs the nominal packet period
         // rejects garbage so two equal junk steps cannot false-lock.
-        constexpr int LOCK_RUN_THRESHOLD = 8;  // ~1 ms (AAF) / ~1.3 ms (AM824) of clean steps
         if (c.have_prev_ts && samples_per_ch > 0 && sample_rate_hz > 0) {
-            uint32_t const actual = avtp_ts - c.prev_ts;                                    // wrap-safe (uint32)
-            uint64_t const nominal = (samples_per_ch * 1'000'000'000ULL) / sample_rate_hz;  // 125 us @ 12/96k
-            bool const plausible = (actual >= (nominal / 2)) && (actual < (nominal * 4));
-            uint64_t const step_err = (actual > c.prev_delta) ? (actual - c.prev_delta) : (c.prev_delta - actual);
-            if (plausible && c.have_prev_delta && step_err <= lock_tolerance_ns) {
-                if (c.locked_run < LOCK_RUN_THRESHOLD) {
-                    ++c.locked_run;
-                }
-                if (c.locked_run >= LOCK_RUN_THRESHOLD && !c.is_locked.load(relaxed) && !c.is_locked.exchange(true, relaxed)) {
-                    c.media_locked.fetch_add(1, relaxed);
-                }
-            } else {
-                c.locked_run = 0;
-                // The reactor may have dropped the lock already (fold, unbind):
-                // the exchange counts each loss once.
-                if (c.is_locked.load(relaxed) && c.is_locked.exchange(false, relaxed)) {
-                    c.media_unlocked.fetch_add(1, relaxed);
-                    c.stream_interrupted.fetch_add(1, relaxed);
-                }
-            }
+            uint32_t const actual = avtp_ts - c.prev_ts;  // wrap-safe (uint32)
+            note_lock_step(c, steady_step(c, actual, samples_per_ch, sample_rate_hz, lock_tolerance_ns));
             c.prev_delta = actual;
             c.have_prev_delta = true;
         }

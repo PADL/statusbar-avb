@@ -534,6 +534,23 @@ class AvbEntityKit
     void withdraw_talker_streams(TimePoint time);
     /// One pass of update_talker_declarations over the talker streams.
     void run_talker_declarations(int64_t now_ns, bool refresh);
+    /// One talker stream's turn of run_talker_declarations: declare, withdraw or leave it.
+    void run_talker_declaration(StreamSpec const& spec, int64_t now_ns, bool refresh);
+    /// Advertise @p spec's Talker; on success note it, re-learn the gate and announce it.
+    void declare_talker(
+        StreamSpec const& spec,
+        nanoavb::TalkerStreamSrpInfo const& info,
+        TalkerDeclarations::Params const& params,
+        bool was_declared,
+        int64_t now_ns);
+    /// Log a first declaration and notify GET_STREAM_INFO when it or the Listener changed.
+    void announce_talker_declared(StreamSpec const& spec, bool was_declared, bool listener_changed);
+    /// Withdraw @p spec's Talker Advertise and close its transmit gate.
+    void withdraw_talker(StreamSpec const& spec, nanoavb::TalkerStreamSrpInfo const& info, int64_t now_ns);
+    /// SET_STREAM_INFO / SET_MAX_TRANSIT_TIME's offset @p offset_ns for talker @p idx: its AEM status.
+    [[nodiscard]] auto change_presentation_offset(uint16_t idx, uint32_t offset_ns) -> uint8_t;
+    /// Apply a changed offset through on_presentation_offset_changed_: its AEM status.
+    [[nodiscard]] auto commit_presentation_offset(uint16_t idx, uint32_t before, uint32_t offset_ns) -> uint8_t;
     /// The ACMP talker's Milan hooks, the AEM presentation offset store and
     /// the GET_STREAM_INFO fills.
     void wire_milan_talker();
