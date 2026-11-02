@@ -556,7 +556,7 @@ namespace {
 {
     FileDescriptor fd{::socket(AF_UNIX, SOCK_DGRAM, 0)};
     if (!fd.valid()) {
-        return failure(std::error_code{errno, std::generic_category()});
+        return failure(net::errno_code());
     }
     if (auto status = net::set_nonblocking(fd.get()); !status) {
         return std::unexpected(status.error());
@@ -575,7 +575,7 @@ namespace {
     return local_socket().and_then([&](FileDescriptor fd) -> StatusValue<FileDescriptor> {
         ::unlink(path.c_str());
         if (::bind(fd.get(), local->sockaddr(), local->length()) != 0) {
-            return failure(std::error_code{errno, std::generic_category()});
+            return failure(net::errno_code());
         }
         return fd;
     });
@@ -655,7 +655,7 @@ auto PtpManagementClient::send(ManagementAction const action, uint16_t const man
         return failure(std::errc::message_size);
     }
     if (::sendto(fd_.get(), message.data(), length, 0, server_.sockaddr(), server_.length()) < 0) {
-        std::error_code const error{errno, std::generic_category()};
+        std::error_code const error = net::errno_code();
         note_error(error);
         return failure(error);
     }
@@ -707,7 +707,7 @@ void PtpManagementClient::on_ready(int64_t const now_ns)
         if (error != EAGAIN && error != EWOULDBLOCK) {
             // A dead socket would only spin the reactor: stop.
             finished_ = true;
-            state_.error = std::error_code{error, std::generic_category()};
+            state_.error = net::errno_code(error);
             publish_if_changed();
         }
         return;
