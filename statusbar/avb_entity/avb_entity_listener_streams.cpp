@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <format>
 #include <print>
+#include <mutex>
 #include <span>
 #include <string>
 #include <system_error>
@@ -283,7 +284,7 @@ auto ListenerStreams::reformat_stream(StreamSpec const& spec) -> Status
     if (auto status = shape(trial, spec); !status) {
         return status;
     }
-    SlotGuard::Lock const lock{slot->guard};
+    std::scoped_lock const lock{slot->guard};
     slot->am824 = trial.am824;
     slot->aaf = trial.aaf;
     slot->kind.store(spec.format.kind, std::memory_order_relaxed);
@@ -296,6 +297,7 @@ auto ListenerStreams::reformat_stream(StreamSpec const& spec) -> Status
 void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn fn)
 {
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        std::scoped_lock const lock{slot->guard};  // the RX thread skips the frame meanwhile
         slot->consume = std::move(fn);
         return;
     }
@@ -320,6 +322,7 @@ void ListenerStreams::defer_consume(uint16_t const stream_index, StreamConsumeFn
 void ListenerStreams::set_crf(uint16_t const stream_index, StreamCrfFn fn)
 {
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        std::scoped_lock const lock{slot->guard};
         slot->on_crf = std::move(fn);
         return;
     }
@@ -534,8 +537,8 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
     if (slot == nullptr || slot->stopped.load(std::memory_order_relaxed)) {
         return;
     }
-    SlotGuard::Entry const entry{slot->guard};
-    if (!entry.entered() || slot->kind.load(std::memory_order_relaxed) != subtype_kind) {
+    std::unique_lock const entry{slot->guard, std::try_to_lock};
+    if (!entry.owns_lock() || slot->kind.load(std::memory_order_relaxed) != subtype_kind) {
         return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
     }
 
