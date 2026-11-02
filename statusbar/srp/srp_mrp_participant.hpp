@@ -38,8 +38,8 @@ namespace statusbar::srp::mrp {
 class PortState
 {
   public:
-    /// Construct with optional deterministic RNG seed for tests.
-    explicit PortState(uint64_t rng_seed = 0);
+    /// Construct with @p timers' durations and an optional deterministic RNG seed for tests.
+    explicit PortState(uint64_t rng_seed = 0, TimerConfig const& timers = {});
 
     /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
     /// initial LeaveAll + Periodic timers. Call once during startup.

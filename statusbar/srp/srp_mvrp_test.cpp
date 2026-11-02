@@ -408,8 +408,8 @@ TEST(mvrp_participant, withdraw_notifies_leave)
 }
 
 // MVRP keeps the standard registrar on rLv!: IN -> LV with the LeaveTimer
-// (Milan v1.2 Table 4.3: 5 s), unlike MSRP's immediate IN -> MT (Section
-// 4.2.7.2.2). The registration is Leaving until the timer expires.
+// (IEEE 802.1Q-2018 Table 10-7: 1 s), even where MSRP leaves at once (Milan
+// v1.2 Section 4.2.7.2.2). The registration is Leaving until the timer expires.
 TEST(mvrp_participant, received_leave_runs_the_leave_timer)
 {
     MvrpParticipant a{test_mvrp_config(), 0xcc35};
@@ -431,11 +431,39 @@ TEST(mvrp_participant, received_leave_runs_the_leave_timer)
     fab.deliver_a_to_b(b, t);
     EXPECT_FALSE(b.is_vlan_registered(300));
     EXPECT_TRUE(b.is_vlan_leaving(300));  // LV, not MT
+    b.tick(c.advance(std::chrono::milliseconds(500)));
+    EXPECT_TRUE(b.is_vlan_leaving(300));  // still inside the 1 s LeaveTime
+    b.tick(c.advance(std::chrono::milliseconds(600)));
+    EXPECT_FALSE(b.is_vlan_leaving(300));
+    EXPECT_FALSE(b.is_vlan_registered(300));
+}
+
+// With Milan's timers (Milan v1.2 Table 4.3 covers every MRP application) the same Lv waits for
+// a 5 s LeaveTime; MVRP still takes no immediate leave.
+TEST(mvrp_participant, milan_timers_lengthen_the_leave_timer)
+{
+    auto config = test_mvrp_config();
+    config.timers.leave_time = std::chrono::milliseconds(5000);
+    MvrpParticipant a{test_mvrp_config(), 0xcc35};
+    MvrpParticipant b{config, 0xdd46};
+    MvrpFabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    MvrpTestClock c{};
+    a.start(c.now);
+    b.start(c.now);
+    (void)a.declare_vlan(300, c.now);
+    auto t = c.advance(std::chrono::milliseconds(250));
+    a.tick(t);
+    fab.deliver_a_to_b(b, t);
+    (void)a.withdraw_vlan(300, c.now);
+    t = c.advance(std::chrono::milliseconds(250));
+    a.tick(t);
+    fab.deliver_a_to_b(b, t);
     b.tick(c.advance(std::chrono::milliseconds(4000)));
     EXPECT_TRUE(b.is_vlan_leaving(300));  // still inside the 5 s LeaveTime
     b.tick(c.advance(std::chrono::milliseconds(1100)));
     EXPECT_FALSE(b.is_vlan_leaving(300));
-    EXPECT_FALSE(b.is_vlan_registered(300));
 }
 
 TEST(mvrp_participant, receive_too_short)
