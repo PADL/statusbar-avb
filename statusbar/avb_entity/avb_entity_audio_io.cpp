@@ -278,7 +278,7 @@ void AvbEntityAudioIO::print_state() const
 //
 
 void AvbEntityAudioIO::process_audio(TimePoint time)
-{
+{  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
     // One packet's worth of gPTP time: 12 samples @ 96 kHz = 125 us.
     constexpr uint64_t PACKET_INTERVAL_NS = (static_cast<uint64_t>(SAMPLES_PER_PACKET) * 1'000'000'000ULL) / SAMPLE_RATE;
@@ -329,7 +329,8 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
     // See EntityUdptunBridge::should_emit_silence for the full contract.
     bool const udptun_emit_silence = udptun_->should_emit_silence(udptun_now_tai_ns);
 
-    for (size_t p = 0; p < config_.packets_per_wake; ++p) {
+    for (size_t p = 0; p < config_.packets_per_wake;
+         ++p) {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
         uint64_t const wake_ns = base_now_ns + (static_cast<uint64_t>(p) * PACKET_INTERVAL_NS);
         // Publish the gPTP media time so the RX thread can judge LATE/EARLY_TIMESTAMP
         // against gPTP (the reactor's own clock is monotonic, not gPTP).
@@ -399,6 +400,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
             kit_.talker().transmit_if_due(
                 slot, tick, kit_.talker_should_transmit(slot.spec.index, now_steady_ns), samples, audio_buffer_);
         }
+        kit_.talker().flush_tx();
     }
 }
 

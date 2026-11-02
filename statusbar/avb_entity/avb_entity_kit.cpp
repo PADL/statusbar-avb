@@ -9,6 +9,7 @@
 
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -243,7 +244,7 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor) -> Statu
 }
 
 auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
-{
+{  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     // Bring up the shared control plane (net handlers + generic SM wiring),
     // then attach the stream-specific callbacks (hooks + ACMP + AEM handlers).
     gate_.set_logger(host_.ctl_log());
@@ -254,6 +255,26 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         return status;
     }
     wire_stream_callbacks();
+
+    // The stream port, backend by name. Not fatal: an entity whose port
+    // would not open keeps its control plane and has no streams, which is
+    // what it did before when the socket would not open.
+    if (auto status = stream_port_.open(
+            {.backend = config_.net_backend,
+             .interface_name = config_.interface_name,
+             .stream_pcp = config_.stream_pcp,
+             .xdp_queue = config_.net_xdp_queue});
+        !status) {
+        host_.ctl_log().error(
+            "stream port: {} did not open: {}",
+            logging::embed<8>(config_.net_backend),
+            logging::embed<40>(status.error().message()));
+    } else {
+        host_.ctl_log().status(
+            "stream port: {}{}",
+            logging::embed<48>(stream_port_.describe()),
+            stream_port_.serialized() ? logging::lit(", TX and RX serialised") : logging::lit(""));
+    }
 
     // In "maap" mode, claim the talker stream destination addresses via MAAP and
     // overwrite the static defaults BEFORE the data plane reads them below.
@@ -304,7 +325,7 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         // In RT-timer mode the returned handler (its socket) is kept alive
         // here; the tool's SCHED_FIFO RX timer drains it via drain_stream_rx()
         // with its wake gPTP time, so RX can't be starved by the control plane.
-        if (auto rx = listener_->attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+        if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
         }
         // Persisted fast-connect bindings (kit phase 5b): a restarted entity
@@ -312,9 +333,9 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         host_.enable_listener_binding_persistence(config_.listener_bindings_path);
     }
 
-    // TX socket + optional pcap capture (TalkerStreams assembles its own I/O).
+    // TX on the stream port + optional pcap capture.
     (void)talker_->open_tx(
-        config_.interface_name,
+        stream_port_,
         TalkerStreams::TxPcapConfig{
             .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
 

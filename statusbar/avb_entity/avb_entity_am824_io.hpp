@@ -75,6 +75,12 @@ struct AvbEntityAm824IOConfig
     /// VLAN ID for AVB streams (default: SR Class A VLAN 2)
     uint16_t vlan_id{2};
 
+    /// Stream packet I/O backend: rawnet (default), mmap or xdp. See
+    /// AvbEntityAudioIOConfig::net_backend.
+    std::string net_backend{"rawnet"};
+    /// NIC queue for the xdp backend.
+    uint32_t net_xdp_queue{0};
+
     /// DSP filter center frequency (Hz)
     double filter_freq_hz{1000.0};
 
@@ -369,6 +375,11 @@ class AvbEntityAm824IO
     /// (sink=nullptr) -- this entity's process_audio generates its own tone independent
     /// of RX. Declared after config_ + host_ (components) + last_gptp_ns_.
     ListenerStreams listener_{config_.lock_tolerance_ns, SAMPLE_RATE, host_.components(), last_gptp_ns_, nullptr};
+
+    /// The port every stream frame goes through (backend config_.net_backend).
+    /// Declared after listener_ only for layout; it is opened in start() before
+    /// the talker and listener bind to it, and they never touch it after stop.
+    StreamPort stream_port_{};
 
     /// The stream RX socket handler. Default: moved into the reactor by start(). With
     /// stream_rx_rt_timer set it is kept HERE (owning the socket) + drained by the

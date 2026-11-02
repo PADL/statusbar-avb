@@ -19,6 +19,7 @@
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_acmp.hpp"
 #include "statusbar/nanoavb/nanoavb_adp.hpp"
@@ -225,7 +226,7 @@ void AvbEntityStereoIO::wire_stream_callbacks()
 //
 
 auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
-{
+{  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks. The host has no data plane of
     // its own to set up here -- this entity's TX/RX runs through the nanoavb handlers.
@@ -290,13 +291,33 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         }
     });
 
-    // TX socket (media-timer egress; TalkerStreams assembles its own I/O).
-    (void)talker_.open_tx(config_.interface_name);
+    // The stream port, backend by name. Not fatal: an entity whose port
+    // would not open keeps its control plane and has no streams, which is
+    // what it did before when the socket would not open.
+    if (auto status = stream_port_.open(
+            {.backend = config_.net_backend,
+             .interface_name = config_.interface_name,
+             .stream_pcp = 3,
+             .xdp_queue = config_.net_xdp_queue});
+        !status) {
+        host_.ctl_log().error(
+            "stream port: {} did not open: {}",
+            logging::embed<8>(config_.net_backend),
+            logging::embed<40>(status.error().message()));
+    } else {
+        host_.ctl_log().status(
+            "stream port: {}{}",
+            logging::embed<48>(stream_port_.describe()),
+            stream_port_.serialized() ? logging::lit(", TX and RX serialised") : logging::lit(""));
+    }
 
-    // RX socket joined to the stream group; kept for the tool's SCHED_FIFO RX
+    // TX on the stream port (media-timer egress).
+    (void)talker_.open_tx(stream_port_);
+
+    // RX joined to the stream group; kept for the tool's SCHED_FIFO RX
     // timer when stream_rx_rt_timer is set, reactor-drained otherwise.
     std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
-    if (auto rx = listener_->attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+    if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
         rt_rx_handler_ = std::move(*rx);
     }
 
@@ -433,7 +454,7 @@ void AvbEntityStereoIO::on_timeout(TimePoint time)
 //
 
 void AvbEntityStereoIO::process_audio(TimePoint time)
-{
+{  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     auto const gptp_now = static_cast<uint64_t>(time.time_since_epoch().count());
     // Publish this media-timer wake's gPTP time so the reactor-path RX drain stamps
     // ingress against it for the STREAM_INPUT LATE/EARLY classification.
@@ -475,6 +496,7 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
                 talker_.transmit_am824(*slot, pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
             }
         }
+        talker_.flush_tx();
     }
 }
 

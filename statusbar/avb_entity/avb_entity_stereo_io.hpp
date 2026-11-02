@@ -71,6 +71,12 @@ struct AvbEntityStereoIOConfig
     /// VLAN ID for AVB streams (default: SR Class A VLAN 2)
     uint16_t vlan_id{2};
 
+    /// Stream packet I/O backend: rawnet (default), mmap or xdp. See
+    /// AvbEntityAudioIOConfig::net_backend.
+    std::string net_backend{"rawnet"};
+    /// NIC queue for the xdp backend.
+    uint32_t net_xdp_queue{0};
+
     /// DSP filter center frequency (Hz)
     double filter_freq_hz{1000.0};
 
@@ -319,6 +325,10 @@ class AvbEntityStereoIO
     /// STREAM_INPUT health counters, MSRP listener attach). Allocated in start()
     /// (binds host_.components(), which outlives it).
     std::unique_ptr<ListenerStreams> listener_{};
+
+    /// The port every stream frame goes through (backend config_.net_backend),
+    /// opened in start() before the talker and listener bind to it.
+    StreamPort stream_port_{};
 
     /// RX-thread scratch: the loopback block being assembled from the per-channel
     /// consume callbacks; published to the pipe on the last channel of each packet.

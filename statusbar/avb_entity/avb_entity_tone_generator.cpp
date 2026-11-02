@@ -299,7 +299,8 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
     uint64_t const packet_interval_ns = (static_cast<uint64_t>(samples_per_packet_) * 1'000'000'000ULL) / sample_rate_;
 
-    for (size_t p = 0; p < config_.packets_per_wake; ++p) {
+    for (size_t p = 0; p < config_.packets_per_wake;
+         ++p) {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
         uint64_t const wake_ns = base_now_ns + (static_cast<uint64_t>(p) * packet_interval_ns);
         last_gptp_ns_.store(wake_ns, std::memory_order_relaxed);
 
@@ -343,6 +344,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
                     *slot, tick, kit_.talker_should_transmit(slot->spec.index, now_steady_ns), samples, src);
             }
         }
+        kit_.talker().flush_tx();
     }
 }
 

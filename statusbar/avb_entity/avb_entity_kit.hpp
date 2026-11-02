@@ -31,6 +31,7 @@
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
@@ -195,8 +196,13 @@ class AvbEntityKit
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_;
 
-    /// Stream TX path: qdisc-bypass socket + spec-shaped serializer slots + TX
-    /// counters + capture recorder. Binds the ENTITY's media clock + gPTP atomic.
+    /// The one port every stream frame goes through, backend from
+    /// config_.net_backend. Declared before the talker, the listener and the
+    /// RX handler, which hold it by reference.
+    StreamPort stream_port_{};
+
+    /// Stream TX path: spec-shaped serializer slots + TX counters + capture
+    /// recorder on stream_port_. Binds the ENTITY's media clock + gPTP atomic.
     std::unique_ptr<TalkerStreams> talker_;
 
     /// Stream RX path (only allocated when the blob declares stream inputs).

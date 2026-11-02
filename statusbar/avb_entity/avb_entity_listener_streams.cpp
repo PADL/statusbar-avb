@@ -192,16 +192,14 @@ auto ListenerStreams::slot_of(StreamKind const kind) const noexcept -> ListenerS
 }
 
 auto ListenerStreams::attach_rx(
-    std::string_view const interface_name,
-    std::span<ieee::Eui48 const> const static_groups,
-    net::MessageReactor& reactor,
-    bool const keep_handler) -> StatusValue<std::unique_ptr<net::Pollable>>
+    StreamPort& port, std::span<ieee::Eui48 const> const static_groups, net::MessageReactor& reactor, bool const keep_handler)
+    -> StatusValue<std::unique_ptr<net::Pollable>>
 {
-    auto rx = std::make_unique<StreamRxHandler>(interface_name, static_groups, [this] { drain_rx(current_gptp_ns()); });
-    if (!rx->valid()) {
+    if (!port.valid()) {
         return failure(std::errc::io_error);
     }
-    rx_sock_ = rx->socket();  // borrow before any move; used for dynamic ACMP-connect joins
+    port_ = &port;
+    auto rx = std::make_unique<StreamRxHandler>(port, static_groups, [this] { drain_rx(current_gptp_ns()); });
     if (keep_handler) {
         return success(std::unique_ptr<net::Pollable>{std::move(rx)});
     }
@@ -209,25 +207,51 @@ auto ListenerStreams::attach_rx(
     return success(std::unique_ptr<net::Pollable>{});
 }
 
+auto ListenerStreams::take_rx_frame() -> size_t
+{
+    StreamPort::Guard const guard{*port_};
+    auto rx = port_->port().rx_start();
+    if (!rx || !rx->has_value()) {
+        return 0;
+    }
+    size_t const length = copy_avtpdu((*rx)->buffer);
+    (void)port_->port().rx_release((*rx)->handle);
+    return length;
+}
+
+auto ListenerStreams::copy_avtpdu(std::span<uint8_t const> const frame) -> size_t
+{
+    // Where the AVTPDU starts depends on whether the frame arrived tagged;
+    // a frame that is not AVTP at all is dropped here.
+    auto const offset = net::avtp_payload_offset(frame);
+    if (!offset || *offset >= frame.size()) {
+        return 0;
+    }
+    size_t const length = std::min(frame.size() - *offset, rx_buf_.size());
+    span_copy(std::span<uint8_t>{rx_buf_}.first(length), frame.subspan(*offset, length));
+    return length;
+}
+
 auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
 {
-    if (rx_sock_ == nullptr) {
+    if (port_ == nullptr) {
         return 0;
     }
     // Drain every queued frame in one pass (the arrival rate is 8000/s = 125 us apart;
     // a 50 us RX-timer tick or a reactor wake sees 0-3 frames). All frames in this pass
     // share gptp_now_ns -- the caller's fresh gPTP "now".
-    ieee::Eui48 src{};
-    ieee::Eui48 dst{};
     size_t drained = 0;
-    while (true) {
-        auto const r = rx_sock_->recv(&src, &dst, rx_buf_);
-        if (!r || *r <= 0) {
+    while (drained < MAX_DRAIN_PER_CALL) {
+        size_t const length = take_rx_frame();
+        if (length == 0) {
             break;
         }
-        on_stream_rx_frame({rx_buf_.data(), static_cast<size_t>(*r)}, gptp_now_ns);
+        on_stream_rx_frame({rx_buf_.data(), length}, gptp_now_ns);
         ++drained;
     }
+    // The ring backends refill their receive ring here; rawnet has nothing to do.
+    StreamPort::Guard const guard{*port_};
+    (void)port_->port().end_cycle();
     return drained;
 }
 
@@ -374,7 +398,7 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
 {
     // AVTP stream_id is 8 bytes at offset 4 (subtype@0, sv/ver/flags@1, seq@2,
-    // ...). The VLAN tag is already stripped by RawnetContext::recv.
+    // ...). The frame arrives here as the AVTPDU: the L2 header and any VLAN tag are gone.
     if (frame.size() < 12) {
         return false;
     }
@@ -447,7 +471,7 @@ auto ListenerStreams::fill_stream_input_counters(
 }
 
 void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac)
-{
+{  // NOLINT(statusbar-block-statements) the connect: declare, join, log; pre-dates the gate
     tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
     auto const now = sm::Clock::now();
@@ -457,7 +481,11 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     auto const result = components_.msrp_handler.listener_attach(sid, now);
     bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
     // Join the talker's stream group so the NIC delivers its frames to us.
-    bool const joined = rx_sock_ != nullptr && rx_sock_->join_multicast(dest_mac).has_value();
+    bool joined = false;
+    if (port_ != nullptr) {
+        StreamPort::Guard const guard{*port_};
+        joined = port_->port().join_multicast(dest_mac).has_value();
+    }
     if (logger_) {
         logger_->status(
             "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener {}, mcast join {}",
@@ -479,8 +507,9 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
         (void)components_.msrp_handler.listener_withdraw(sid, sm::Clock::now());
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
-        if (rx_sock_ != nullptr) {
-            (void)rx_sock_->leave_multicast(stream->stream_dest_mac);
+        if (port_ != nullptr) {
+            StreamPort::Guard const guard{*port_};
+            (void)port_->port().leave_multicast(stream->stream_dest_mac);
         }
     }
     if (logger_) {

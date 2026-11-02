@@ -26,6 +26,7 @@
 /// It knows nothing about where the audio goes -- only the StreamRxAudioSink.
 
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_input.hpp"
@@ -35,7 +36,6 @@
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
-#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
@@ -124,19 +124,16 @@ struct ListenerStreams
     [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> ListenerStreamSlot*;
     [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> ListenerStreamSlot const*;
 
-    /// Open the RX socket on @p interface_name — joined to @p static_groups
-    /// up front (pass zero MACs when every join is dynamic, i.e. made on ACMP
-    /// connect) — borrow it for those dynamic joins, and hand its drain
-    /// handler to @p reactor. When @p keep_handler is true the handler is
-    /// returned instead of added, so the entity can drain it from a dedicated
+    /// Receive on @p port - the entity's stream port, already open - joined
+    /// to @p static_groups up front (pass zero MACs when every join is
+    /// dynamic, i.e. made on ACMP connect), and hand its drain handler to
+    /// @p reactor. When @p keep_handler is true the handler is returned
+    /// instead of added, so the entity can drain it from a dedicated
     /// SCHED_FIFO RX timer (drain_rx with the timer's wake time). One call
-    /// from the owning entity's start() — the socket borrow is THIS class's
-    /// concern, so this class assembles it (refactor phase A).
+    /// from the owning entity's start().
     [[nodiscard]] auto attach_rx(
-        std::string_view interface_name,
-        std::span<ieee::Eui48 const> static_groups,
-        net::MessageReactor& reactor,
-        bool keep_handler = false) -> StatusValue<std::unique_ptr<net::Pollable>>;
+        StreamPort& port, std::span<ieee::Eui48 const> static_groups, net::MessageReactor& reactor, bool keep_handler = false)
+        -> StatusValue<std::unique_ptr<net::Pollable>>;
 
     /// Non-blocking-drain every queued frame from the RX socket and process each via
     /// on_stream_rx_frame, stamping them all with @p gptp_now_ns (the caller's fresh
@@ -207,15 +204,23 @@ struct ListenerStreams
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does
     /// not know what the sink does with it. Nullable.
     StreamRxAudioSink* audio_sink_{nullptr};
-    /// Non-owning handle to the StreamRxHandler's RX socket (owned by the reactor).
-    /// Set by the entity in start() before the handler is moved into the reactor;
-    /// used to join/leave a remote talker's stream multicast group on connect/disconnect.
-    net::RawnetContext* rx_sock_{nullptr};
+    /// The entity's stream port (outlives this class). Set by attach_rx; used
+    /// to drain, and to join/leave a remote talker's stream multicast group on
+    /// connect/disconnect.
+    StreamPort* port_{nullptr};
     /// Reactor-thread connect/disconnect logging (nullable).
     std::optional<logging::Logger> logger_{};
-    /// Receive scratch for drain_rx (was owned by the StreamRxHandler). 2 KB covers a
-    /// full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
+    /// Receive scratch for drain_rx: one AVTPDU copied out of the port's slot. 2 KB
+    /// covers a full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
     std::array<uint8_t, 2048> rx_buf_{};
+    /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when
+    /// nothing was queued or the frame was not AVTP. Holds the port guard for
+    /// exactly that - the decode happens outside it.
+    [[nodiscard]] auto take_rx_frame() -> size_t;
+    /// The AVTPDU of @p frame into rx_buf_: its length, 0 for a frame that is not AVTP.
+    [[nodiscard]] auto copy_avtpdu(std::span<uint8_t const> frame) -> size_t;
+    /// Frames per drain_rx call at most, so a flood cannot pin the RX thread.
+    static constexpr size_t MAX_DRAIN_PER_CALL = 256;
 
     // --- Owned RX state --------------------------------------------------------
     /// The RX slots (atomics inside: constructed in place, never moved/erased).

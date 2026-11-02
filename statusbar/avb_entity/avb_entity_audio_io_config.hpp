@@ -32,6 +32,18 @@ struct AvbEntityAudioIOConfig
     /// Network interface name (e.g., "en0" on macOS, "eth0" on Linux)
     std::string interface_name{"eth0"};
 
+    /// How the stream frames reach the wire (net::ETHERNET_BACKEND_CHOICES):
+    /// "rawnet" (default) is a transmit socket and a receive socket, plain
+    /// AF_PACKET, one syscall per frame, on any platform; "mmap" is
+    /// PACKET_MMAP rings on one socket (Linux); "xdp" is AF_XDP on one NIC
+    /// queue with the stream subtypes steered into it (Linux, needs the XDP
+    /// program loadable, zero-copy only on a NIC with a native driver). The
+    /// control plane stays on its own raw socket whichever this is.
+    std::string net_backend{"rawnet"};
+
+    /// The NIC queue the xdp backend binds to.
+    uint32_t net_xdp_queue{0};
+
     // Destination multicast MACs for the talker streams. NOTE: the IEEE-1722
     // AVTP multicast OUI 91:E0:F0 (00:00:00..00:FD:FF) is the MAAP dynamic
     // allocation pool and must NOT be hardcoded -- only used once claimed via

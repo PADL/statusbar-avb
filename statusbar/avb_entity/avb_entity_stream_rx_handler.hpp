@@ -4,9 +4,9 @@
 // SPDX-License-Identifier: MIT
 
 /// @file avb_entity_stream_rx_handler.hpp
-/// @brief StreamRxHandler — the shared reactor adapter that owns one RX socket joined to
-/// a stream's multicast group(s) and delegates each batch drain to a caller-supplied
-/// callback.
+/// @brief StreamRxHandler — the shared reactor adapter that watches the entity's
+/// stream port for receive readiness, joins it to a stream's multicast group(s), and
+/// delegates each batch drain to a caller-supplied callback.
 ///
 /// Replaces the three near-identical per-entity copies (AvbEntityAudioIO / AvbEntityAm824IO
 /// / AvbEntityStereoIO). Each differed only in how many groups it joined (AudioIO joins
@@ -19,10 +19,10 @@
 /// borrowable via socket() for dynamic multicast join/leave on ACMP connect/disconnect;
 /// the pointer stays valid across the move into the reactor (heap-allocated Pollable).
 
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
-#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
 #include <cstddef>
@@ -39,30 +39,28 @@ class StreamRxHandler : public net::Pollable
     /// source. One pointer fits the small inplace capacity (RT-safe, no heap).
     using DrainFn = statusbar::sg14::inplace_function<void(), 16>;
 
-    /// Open a non-promiscuous raw AVTP socket joined to @p groups[0] (then join any
-    /// further groups), draining via @p drain. @p groups must be non-empty.
-    StreamRxHandler(std::string_view interface_name, std::span<ieee::Eui48 const> groups, DrainFn drain)
-        : drain_{std::move(drain)}
+    /// Join @p port to each of @p groups and drain it via @p drain on readiness.
+    StreamRxHandler(StreamPort& port, std::span<ieee::Eui48 const> groups, DrainFn drain)
+        : port_{port}
+        , drain_{std::move(drain)}
     {
-        (void)sock_.open(interface_name, avtp::AVTP_ETHERTYPE, groups.empty() ? nullptr : &groups[0], /*qdisc_bypass=*/false);
-        for (size_t i = 1; i < groups.size(); ++i) {
-            (void)sock_.join_multicast(groups[i]);
+        StreamPort::Guard const guard{port_};
+        for (auto const& group : groups) {
+            if (group.is_set()) {
+                (void)port_.port().join_multicast(group);
+            }
         }
     }
 
-    [[nodiscard]] auto valid() const noexcept -> bool { return sock_.fd() >= 0; }
+    [[nodiscard]] auto valid() const noexcept -> bool { return port_.valid(); }
 
-    /// Non-owning access to the RX socket, for dynamic multicast join/leave on ACMP
-    /// connect/disconnect. Stable across the move into the reactor.
-    [[nodiscard]] auto socket() noexcept -> net::RawnetContext* { return &sock_; }
-
-    [[nodiscard]] auto fd() const noexcept -> int override { return sock_.fd(); }
+    [[nodiscard]] auto fd() const noexcept -> int override { return port_.fd(); }
     void on_ready(int64_t /*reactor_now_ns*/) override { drain_(); }
     void tick(int64_t /*now_ns*/) override {}
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
   private:
-    net::RawnetContext sock_{};
+    StreamPort& port_;
     DrainFn drain_;
 };
 

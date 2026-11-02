@@ -107,8 +107,8 @@ auto TalkerStreams::slot_of(StreamKind const kind) const noexcept -> TalkerStrea
 
 void TalkerStreams::transmit_am824(
     TalkerStreamSlot& slot, uint64_t const now_ns, uint32_t const samples, std::span<float const> src)
-{
-    if (!slot.am824 || stream_tx_.fd() < 0) {
+{  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
+    if (!slot.am824 || port_ == nullptr) {
         return;
     }
     static constexpr size_t MAX_FRAME =
@@ -143,14 +143,13 @@ void TalkerStreams::transmit_am824(
     // the wall clock lets a capture reveal the real presentation lead
     // (avtp_ts - wall_clock = presentation_offset).
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
     ++slot.tx_packets;
 }
 
 void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
-{
-    if (!slot.aaf || stream_tx_.fd() < 0) {
+{  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
+    if (!slot.aaf || port_ == nullptr) {
         return;
     }
     static constexpr size_t MAX_FRAME =
@@ -175,8 +174,7 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
     // pcap stamp = gPTP WALL-CLOCK transmit time (see transmit_am824); now_ns here
     // is the media-clock PRESENTATION time, also written into the AVTP header.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
     ++slot.tx_packets;
 }
 
@@ -198,8 +196,8 @@ void fill_crf_timestamps(
 }
 
 void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_index)
-{
-    if (!slot.crf || stream_tx_.fd() < 0 || !media_clock_.anchored()) {
+{  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
+    if (!slot.crf || port_ == nullptr || !media_clock_.anchored()) {
         return;
     }
     uint16_t const n_ts = slot.crf->timestamps_per_packet;
@@ -226,26 +224,58 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);  // gPTP timestamp for the optional TX pcap tap
-    (void)stream_tx_.send_vlan(
-        &slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len}, config_.vlan_id, config_.stream_pcp);
+    send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
     ++slot.tx_packets;
 }
 
-auto TalkerStreams::open_tx(std::string_view const interface_name, TxPcapConfig const& pcap) -> Status
+auto TalkerStreams::open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status
 {
-    // qdisc-bypass: our own egress must not be re-received by our RX socket.
-    auto status = stream_tx_.open(interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
-    if (!status) {
-        return status;
-    }
-    // Optional TX stream capture: qdisc-bypass egress is invisible to any
-    // local capture, so tap the frames at the socket, gPTP-timestamped.
+    // A port that did not open is not bound: the slots then stay silent, as
+    // they did when the socket would not open.
+    port_ = port.valid() ? &port : nullptr;
+    // Optional TX stream capture: the egress of a bypass socket or a ring
+    // is invisible to any local capture, so the frames are recorded here as
+    // they are built, gPTP-timestamped.
     if (!pcap.path.empty()) {
         tx_pcap_recorder_.configure(
             std::string{pcap.path}, pcap.max_bytes, /*snaplen=*/1522, static_cast<uint64_t>(pcap.seconds) * 1'000'000'000ULL);
-        stream_tx_.set_tx_tap([this](std::span<uint8_t const> frame) { tx_pcap_recorder_.record(frame, last_tx_gptp_ns_); });
     }
-    return success();
+    return port.valid() ? success() : failure(std::errc::not_connected);
+}
+
+void TalkerStreams::send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> const payload)
+{
+    StreamPort::Guard const guard{*port_};
+    auto slot = port_->port().tx_start();
+    if (!slot) {
+        return;
+    }
+    size_t const length =
+        build_stream_frame(slot->buffer, dest_mac, port_->port().hardware_address(), config_.vlan_id, config_.stream_pcp, payload);
+    if (length == 0) {
+        (void)port_->port().tx_cancel(slot->handle);
+        return;
+    }
+    commit_stream_frame(*slot, length);
+}
+
+void TalkerStreams::commit_stream_frame(net::EthernetTxSlot const& slot, size_t const length)
+{
+    // Recorded before the commit: a ring slot belongs to the kernel after it.
+    if (tx_pcap_recorder_.recording()) {
+        tx_pcap_recorder_.record(slot.buffer.first(length), last_tx_gptp_ns_);
+    }
+    (void)port_->port().tx_commit(slot.handle, length);
+}
+
+void TalkerStreams::flush_tx()
+{
+    if (port_ == nullptr) {
+        return;
+    }
+    StreamPort::Guard const guard{*port_};
+    (void)port_->port().tx_flush();
+    (void)port_->port().end_cycle();
 }
 
 void TalkerStreams::transmit_if_due(

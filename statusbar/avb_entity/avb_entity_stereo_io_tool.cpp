@@ -92,7 +92,7 @@ struct Config
 //
 
 auto build_arg_specs(Config& config) -> args::ArgumentSpecs
-{
+{  // NOLINT(statusbar-block-statements) one option after another; pre-dates the gate
     args::ArgumentSpecs specs;
 
     // Add PTP options
@@ -114,6 +114,15 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     });
 
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", config.entity.vlan_id, [&](auto v) { config.entity.vlan_id = v; });
+    specs.add<std::string>(
+        "net.backend",
+        "Stream packet I/O: rawnet (default; AF_PACKET, any platform), mmap (PACKET_MMAP rings, Linux) or xdp "
+        "(AF_XDP on one NIC queue, Linux). The ATDECC control plane keeps its own raw socket regardless.",
+        config.entity.net_backend,
+        [&](auto v) { config.entity.net_backend = std::string{v}; });
+    specs.add<uint32_t>("net.xdp_queue", "NIC queue for net.backend=xdp (default 0)", config.entity.net_xdp_queue, [&](auto v) {
+        config.entity.net_xdp_queue = v;
+    });
 
     specs.add<ieee::Eui48>("talker.dest_mac", "Talker destination multicast MAC", config.entity.talker_dest_mac, [&](auto v) {
         config.entity.talker_dest_mac = v;

@@ -19,13 +19,13 @@
 /// TX shape follows its declarative model instead of per-entity C++ enums.
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
-#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -93,13 +93,17 @@ struct TalkerStreams
         uint32_t seconds{0};
     };
 
-    /// Open the qdisc-bypass TX socket on @p interface_name and (optionally)
-    /// arm the TX pcap capture with its socket egress tap. One call from the
-    /// owning entity's start() — the socket, the recorder and the tap are
-    /// THIS class's state, so this class assembles them (refactor phase A:
-    /// entities no longer reach into stream_tx_/tx_pcap_recorder_).
-    auto open_tx(std::string_view interface_name, TxPcapConfig const& pcap) -> Status;
-    auto open_tx(std::string_view const interface_name) -> Status { return open_tx(interface_name, TxPcapConfig{}); }
+    /// Send through @p port - the entity's stream port, already open - and
+    /// (optionally) arm the TX pcap capture. One call from the owning
+    /// entity's start(). The port outlives this class; the recorder is this
+    /// class's state.
+    auto open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status;
+    auto open_tx(StreamPort& port) -> Status { return open_tx(port, TxPcapConfig{}); }
+
+    /// Push this tick's frames to the wire. The ring backends batch what
+    /// transmit_* committed until this kick; rawnet sent each frame as it
+    /// was committed and this is free. Once per media tick, after the slots.
+    void flush_tx();
 
     /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
     /// the file awaits the non-RT flush.
@@ -175,9 +179,15 @@ struct TalkerStreams
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
-    net::RawnetContext stream_tx_{};
+    /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
+    /// the port's address, recorded to the pcap tap when that is armed.
+    void send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload);
+    /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
+    void commit_stream_frame(net::EthernetTxSlot const& slot, size_t length);
+
+    StreamPort* port_{nullptr};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
-    /// send so the socket egress tap can stamp the captured frame with the gPTP TX time.
+    /// send so the captured frame carries the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};
     uint64_t last_tx_gptp_ns_{0};
 };

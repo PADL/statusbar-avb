@@ -17,6 +17,7 @@
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/dsp/dsp_biquad.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_acmp.hpp"
 #include "statusbar/nanoavb/nanoavb_adp.hpp"
@@ -193,7 +194,7 @@ void AvbEntityAm824IO::wire_stream_callbacks()
 //
 
 auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
-{
+{  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks.
     gate_.set_logger(host_.ctl_log());
@@ -232,14 +233,33 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         return status;
     }
 
-    // Transmit socket (PTP-thread egress). qdisc-bypass so we do not re-receive
-    // our own stream frames on this host.
-    (void)talker_.open_tx(config_.interface_name);
+    // The stream port, backend by name. Not fatal: an entity whose port
+    // would not open keeps its control plane and has no streams, which is
+    // what it did before when the socket would not open.
+    if (auto status = stream_port_.open(
+            {.backend = config_.net_backend,
+             .interface_name = config_.interface_name,
+             .stream_pcp = 3,
+             .xdp_queue = config_.net_xdp_queue});
+        !status) {
+        host_.ctl_log().error(
+            "stream port: {} did not open: {}",
+            logging::embed<8>(config_.net_backend),
+            logging::embed<40>(status.error().message()));
+    } else {
+        host_.ctl_log().status(
+            "stream port: {}{}",
+            logging::embed<48>(stream_port_.describe()),
+            stream_port_.serialized() ? logging::lit(", TX and RX serialised") : logging::lit(""));
+    }
 
-    // Receive port: join the stream multicast group; the shared ListenerStreams owns
-    // the socket + drain (decode, STREAM_INPUT health counters).
+    // Transmit on the stream port (PTP-thread egress).
+    (void)talker_.open_tx(stream_port_);
+
+    // Receive: join the stream multicast group; the shared ListenerStreams owns
+    // the drain (decode, STREAM_INPUT health counters).
     std::array<ieee::Eui48, 1> const rx_groups{stream_dest_mac_};
-    if (auto rx = listener_.attach_rx(config_.interface_name, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+    if (auto rx = listener_.attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
         rt_rx_handler_ = std::move(*rx);  // kept alive; drained by the tool's SCHED_FIFO RX timer
     }
 
@@ -380,7 +400,7 @@ void AvbEntityAm824IO::on_timeout(TimePoint time)
 //
 
 void AvbEntityAm824IO::process_audio(TimePoint time)
-{
+{  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     // Publish this media-timer wake's gPTP time for the listener RX tally (the reactor /
     // RX-timer path reads it as the "now" for the STREAM_INPUT LATE/EARLY classification).
     last_gptp_ns_.store(static_cast<uint64_t>(time.time_since_epoch().count()), std::memory_order_relaxed);
@@ -427,6 +447,7 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
             talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
         }
     }
+    talker_.flush_tx();
 }
 
 void AvbEntityAm824IO::configure_filter(double const freq_hz, double const gain_db, double const q)

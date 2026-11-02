@@ -102,7 +102,7 @@ struct EntityToolOptions
 /// the verbosity/stats/PTP-strictness flags. Tools add their own specs
 /// (and the PTP specs) around this.
 inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
-{
+{  // NOLINT(statusbar-block-statements) one option after another; pre-dates the gate
     specs.add<ieee::Eui64>("entity.id", "Entity ID (EUI-64)", entity.entity_id, [&entity](auto v) { entity.entity_id = v; });
     specs.add<ieee::Eui64>(
         "entity.model_id", "Entity Model ID (EUI-64)", entity.entity_model_id, [&entity](auto v) { entity.entity_model_id = v; });
@@ -118,6 +118,15 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         entity.atdecc_version,
         [&entity](auto v) { entity.atdecc_version = std::string{v}; });
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
+    specs.add<std::string>(
+        "net.backend",
+        "Stream packet I/O: rawnet (default; AF_PACKET, any platform), mmap (PACKET_MMAP rings, Linux) or xdp "
+        "(AF_XDP on one NIC queue, Linux). The ATDECC control plane keeps its own raw socket regardless.",
+        entity.net_backend,
+        [&entity](auto v) { entity.net_backend = std::string{v}; });
+    specs.add<uint32_t>("net.xdp_queue", "NIC queue for net.backend=xdp (default 0)", entity.net_xdp_queue, [&entity](auto v) {
+        entity.net_xdp_queue = v;
+    });
     specs.add<std::string>(
         "stream.address_mode",
         "Talker stream dest-address source: 'static' (the configured *_dest_mac) or 'maap' (acquire a block from "
