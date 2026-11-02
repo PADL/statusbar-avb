@@ -445,9 +445,7 @@ TEST(ptp_management, client_reports_status_grandmaster_and_silence)
     c.tick(0);
     EXPECT_EQ(calls, 1);
     EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
-    EXPECT_TRUE(
-        last.error == std::make_error_code(std::errc::no_such_file_or_directory) ||
-        last.error == std::make_error_code(std::errc::connection_refused));
+    EXPECT_TRUE(last.error == std::errc::no_such_file_or_directory || last.error == std::errc::connection_refused);
     c.tick(1'000'000'000);
     EXPECT_EQ(calls, 1);  // the same error is not reported again
 
