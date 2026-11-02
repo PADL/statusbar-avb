@@ -63,11 +63,14 @@ auto NanoAvbAdpAdvertiser::notify_entity_changed(TimePoint const now) -> void
 auto NanoAvbAdpAdvertiser::set_gptp_info(ClockIdentity const& grandmaster_id, uint8_t const domain_number, TimePoint const now)
     -> void
 {
-    bool const changed = adpdu_.gptp_grandmaster_id != grandmaster_id;
+    bool const new_grandmaster = adpdu_.gptp_grandmaster_id != grandmaster_id;
+    bool const new_domain = adpdu_.gptp_domain_number != domain_number;
     adpdu_.gptp_grandmaster_id = grandmaster_id;
     adpdu_.gptp_domain_number = domain_number;
-    if (changed) {
+    if (new_grandmaster) {
         handle(adp_adv_sm::Def::Event::GmChange, now);
+    } else if (new_domain) {
+        handle(adp_adv_sm::Def::Event::EntityChange, now);
     }
 }
 
@@ -101,9 +104,6 @@ auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
     // (IEEE 1722.1-2021 6.2.2.20).
     adpdu_.interface_index = interface_index_;
     adpdu_.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_INTERFACE_INDEX_VALID);
-
-    // gPTP fields would typically come from gPTP stack
-    // For now, leave at defaults (0)
 }
 
 auto NanoAvbAdpAdvertiser::is_discover_for_us(AdpDu const& adpdu) const noexcept -> bool
