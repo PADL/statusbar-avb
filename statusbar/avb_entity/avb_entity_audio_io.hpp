@@ -227,6 +227,11 @@ class AvbEntityAudioIO
     /// set (see start()); a no-op when the RX handler is on the reactor instead.
     auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t { return kit_.drain_stream_rx(wake_gptp_ns); }
 
+    /// Kick the stream port's TX ring. Called from the tool's dedicated SCHED_FIFO
+    /// kicker timer when config.stream_tx_kicker is set; the media tick then
+    /// leaves the kick to it (see TalkerStreams::kick_tx).
+    void kick_stream_tx() { kit_.kick_stream_tx(); }
+
   private:
     /// Periodically (re)estimate the GPS frequency ratio r = switch/GPS by
     /// sampling CLOCK_REALTIME (GPS, via chrony) against the gPTP media time, and

@@ -133,6 +133,9 @@ class AvbEntityKit
 
     /// Batch-drain the stream RX socket from the tool's dedicated SCHED_FIFO RX
     /// timer (config.stream_rx_rt_timer). No-op when RX is on the reactor.
+    /// The TX kick from the tool's SCHED_FIFO kicker timer (config.stream_tx_kicker).
+    void kick_stream_tx() { talker_->kick_tx(); }
+
     auto drain_stream_rx(int64_t const wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;

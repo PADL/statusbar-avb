@@ -301,6 +301,23 @@ struct AvbEntityAudioIOConfig
     /// (2.5x the 125 us packet interval) keeps the per-tick backlog to 0-3 frames.
     uint32_t stream_rx_period_us{50};
 
+    /// Kick the stream port's TX ring (the wake-up syscall the mmap and xdp
+    /// backends need) from a dedicated SCHED_FIFO timer instead of at the end
+    /// of each media tick, so the media thread never enters the kernel for
+    /// transmit: the syscall's latency is interference on the realtime core.
+    /// The media thread still fills the ring and reclaims completions. Free
+    /// on rawnet (each frame is its own syscall there). Not yet on xdp, whose
+    /// flush keeps a plain pending flag the two threads would race for.
+    bool stream_tx_kicker{false};
+
+    /// CPU core for the TX kicker thread when stream_tx_kicker is set (an
+    /// isolated core; it may share the RX timer's).
+    int stream_tx_cpu_affinity{2};
+
+    /// TX kick period in microseconds when stream_tx_kicker is set. Frames
+    /// committed in a tick leave within one period of it.
+    uint32_t stream_tx_period_us{50};
+
     /// Pin the media-clock rate ratio r to exactly 1.0 (media clock = gPTP) instead
     /// of tracking r = gPTP/CLOCK_REALTIME via the GPS ratio Kalman. Use when the
     /// gPTP grandmaster IS the reference the listener recovers against (e.g. the

@@ -274,8 +274,24 @@ void TalkerStreams::flush_tx()
         return;
     }
     StreamPort::Guard const guard{*port_};
-    (void)port_->port().tx_flush();
+    if (!external_kick_) {
+        (void)port_->port().tx_flush();
+    }
     (void)port_->port().end_cycle();
+}
+
+auto TalkerStreams::set_external_kick(bool const enable) noexcept -> bool
+{
+    bool const kickable = port_ != nullptr && port_->port().backend() != net::EthernetBackend::xdp;
+    external_kick_ = enable && kickable;
+    return !enable || kickable;
+}
+
+void TalkerStreams::kick_tx()
+{
+    if (port_ != nullptr) {
+        (void)port_->port().tx_flush();
+    }
 }
 
 void TalkerStreams::transmit_if_due(

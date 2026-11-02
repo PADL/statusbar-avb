@@ -31,6 +31,7 @@
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/stats/stats_atomic_histogram.hpp"
+#include "statusbar/stats/stats_atomic_time_stats.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <array>
@@ -76,7 +77,7 @@ struct Config
 };
 
 auto build_arg_specs(Config& config) -> args::ArgumentSpecs
-{
+{  // NOLINT(statusbar-block-statements) the argument table, one spec after another; pre-dates the gate
     args::ArgumentSpecs specs;
     ptpclient::add_ptp_arg_specs(specs, config.ptp_app);
     avb_entity::add_common_entity_arg_specs(specs, config.entity, config.tool);
@@ -139,6 +140,24 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "RX drain tick period in microseconds (stream_rx.rt_timer). Default 50 (2.5x the 125us packet interval)",
         static_cast<uint64_t>(config.entity.stream_rx_period_us),
         [&](auto v) { config.entity.stream_rx_period_us = static_cast<uint32_t>((v < 5) ? 5 : ((v > 1000) ? 1000 : v)); });
+
+    specs.add<bool>(
+        "stream_tx.kicker",
+        "Kick the stream port's TX ring from a dedicated SCHED_FIFO timer instead of at the end of each media tick, so "
+        "the media thread never enters the kernel to transmit (the kick syscall's latency is interference on the "
+        "realtime core). Free on rawnet; not yet on xdp (kicks in the tick there). Default false",
+        config.entity.stream_tx_kicker,
+        [&](auto v) { config.entity.stream_tx_kicker = v; });
+    specs.add<int64_t>(
+        "stream_tx.cpu",
+        "CPU core for the TX kicker thread (stream_tx.kicker). An isolated core; may share the RX timer's",
+        static_cast<int64_t>(config.entity.stream_tx_cpu_affinity),
+        [&](auto v) { config.entity.stream_tx_cpu_affinity = static_cast<int>(v); });
+    specs.add<uint64_t>(
+        "stream_tx.period_us",
+        "TX kick period in microseconds (stream_tx.kicker). Default 50",
+        static_cast<uint64_t>(config.entity.stream_tx_period_us),
+        [&](auto v) { config.entity.stream_tx_period_us = static_cast<uint32_t>((v < 5) ? 5 : ((v > 1000) ? 1000 : v)); });
 
     specs.add<bool>(
         "udptun.enable",
@@ -333,7 +352,7 @@ void print_entity_config(Config const& config, Entity const& entity)
 /// udptun log channel, and the per-second RX-timer telemetry line.
 auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, Entity& entity, Config const& config)
     -> avb_entity::MainLoopResult
-{
+{  // NOLINT(statusbar-block-statements) the loop's optional RT timers, set up then torn down in order; pre-dates the gate
     // ---- Optional dedicated RT RX timer (stream_rx.rt_timer) -------------------
     // Drain AM824/AAF on its own SCHED_FIFO core so the reactor/control-plane (and
     // media-timer preemption) can't delay RX -- which otherwise batch-tallies queued
@@ -366,6 +385,51 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
         ctx.enable_realtime,
         entity.config().stream_rx_cpu_affinity);
 
+    // ---- Optional dedicated TX kicker timer (stream_tx.kicker) --------------------
+    // The ring backends' transmit wake-up is a syscall; on this timer it leaves
+    // the media thread, which then only fills the ring and closes its cycle.
+    itc::TelemetryCounter<int64_t> tx_kick_error_count;
+    itc::TelemetryCounter<uint64_t> tx_kicks;
+    itc::Published<int64_t> tx_last_wake_error_ns;
+    stats::AtomicHistogram<128> tx_kick_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 50'000, .bin_width_ns = 500}};
+    stats::AtomicTimeStats tx_kick_dur_stats{};
+
+    auto const note_kick = [&](std::chrono::steady_clock::time_point const cb_t0, int64_t const wake_error_ns) {
+        auto const dur_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count();
+        tx_kick_dur_hist.update(dur_ns);
+        tx_kick_dur_stats.update(dur_ns);
+        tx_kicks.add(1);
+        tx_last_wake_error_ns.publish(wake_error_ns);
+    };
+    int64_t const tx_period_ns = static_cast<int64_t>(entity.config().stream_tx_period_us) * 1'000;
+    auto tx_kicker = ptpclient::make_ptp_timer(
+        *ctx.bridge,
+        tx_period_ns,
+        [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
+            if (!wake_info) {
+                tx_kick_error_count.add(1);
+                return;
+            }
+            auto const cb_t0 = std::chrono::steady_clock::now();
+            entity.kick_stream_tx();
+            note_kick(cb_t0, wake_info->error_ns);
+        },
+        ctx.compensation_ns,
+        ctx.enable_realtime,
+        entity.config().stream_tx_cpu_affinity);
+
+    bool const tx_kick = entity.config().stream_tx_kicker;
+    if (tx_kick) {
+        if (auto const ks = tx_kicker.start(); !ks) {
+            std::print(stderr, "Warning: stream TX kicker failed to start ({}); the media tick kicks\n", ks.error().message());
+        } else {
+            std::print(
+                "Stream TX: dedicated SCHED_FIFO kicker on core {} @ {} us tick\n",
+                entity.config().stream_tx_cpu_affinity,
+                entity.config().stream_tx_period_us);
+        }
+    }
+
     bool const rx_rt = entity.config().stream_rx_rt_timer;
     if (rx_rt) {
         if (auto const rs = rx_timer.start(); !rs) {
@@ -393,6 +457,16 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
                         rx_timer.missed_cycles(),
                         rx_timer_error_count.load());
                 }
+                if (tx_kick) {
+                    std::print(
+                        stderr,
+                        "[tx-kicker] wake_err={:+}ns kicks={} recovery={} missed={} errors={}\n",
+                        tx_last_wake_error_ns.load(),
+                        tx_kicks.load(),
+                        tx_kicker.recovery_count(),
+                        tx_kicker.missed_cycles(),
+                        tx_kick_error_count.load());
+                }
             },
     };
 
@@ -402,6 +476,20 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
 
     auto result = avb_entity::run_entity_main_loop(reactor, ctx, entity, config.tool, packet_period_ns, hooks);
 
+    if (tx_kick) {
+        tx_kicker.stop();
+        auto const d = tx_kick_dur_stats.snapshot();
+        std::print(
+            stderr,
+            "[tx-kicker] final: kicks={} wake_errors={} recovery={} missed={} kick_duration avg={:.1f}ns min={}ns max={}ns\n",
+            tx_kicks.load(),
+            tx_kick_error_count.load(),
+            tx_kicker.recovery_count(),
+            tx_kicker.missed_cycles(),
+            d.average_ns(),
+            d.min_ns,
+            d.max_ns);
+    }
     if (rx_rt) {
         rx_timer.stop();
         std::print(

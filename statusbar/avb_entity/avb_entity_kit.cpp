@@ -339,6 +339,11 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         stream_port_,
         TalkerStreams::TxPcapConfig{
             .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+    // The TX kick off the media thread (the tool's kicker timer), where the
+    // backend allows a second thread at the ring.
+    if (!talker_->set_external_kick(config_.stream_tx_kicker)) {
+        host_.ctl_log().warning("stream_tx.kicker: this backend cannot be kicked from another thread; kicking in the media tick");
+    }
 
     // Menu/selection diagnostics: registrations the model left inert. Status
     // level -- typo-finding, never an error.

@@ -37,6 +37,7 @@
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/stats/stats_atomic_histogram.hpp"
+#include "statusbar/stats/stats_atomic_time_stats.hpp"
 #include "statusbar/stats/stats_atomic_wake_stats.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -44,6 +45,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -245,6 +247,9 @@ struct MainLoopResult
 {
     int exit_code{EXIT_SUCCESS};
     stats::AtomicWakeStats::Snapshot wake_stats{};
+    /// process_audio() per wake: how long the media thread's work took.
+    stats::AtomicTimeStats::Snapshot media_duration{};
+    stats::AtomicHistogram<128>::Snapshot media_duration_histogram{};
     int64_t compensation_ns{0};
     int64_t recovery_count{0};
     int64_t missed_cycles{0};
@@ -276,7 +281,7 @@ auto run_entity_main_loop(
     EntityToolOptions const& tool,
     int64_t const packet_period_ns,
     EntityRunnerHooks const& hooks = {}) -> MainLoopResult
-{
+{  // NOLINT(statusbar-block-statements) the shared main loop: timer, monitors, telemetry, shutdown in order; pre-dates the gate
     using TimePoint = sm::TimePoint;
 
     MainLoopResult result;
@@ -289,6 +294,7 @@ auto run_entity_main_loop(
     // process_audio() takes per wake (the timer's own stats() track only
     // wake-error). Dumped to --media-timer-duration-csv at exit.
     stats::AtomicHistogram<128> media_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 100'000, .bin_width_ns = 1000}};
+    stats::AtomicTimeStats media_dur_stats{};
 
     // The media-timer callback runs on a SCHED_FIFO RT thread, so it must NOT
     // std::print (alloc/throw/block) — it publishes to these lock-free itc
@@ -296,6 +302,14 @@ auto run_entity_main_loop(
     itc::TelemetryCounter<int64_t> timer_error_count;
     itc::Published<int64_t> last_wake_count;
     itc::Published<int64_t> last_wake_error_ns;
+    /// After process_audio: its duration into the stats, the wake into the channels.
+    auto const note_wake = [&](std::chrono::steady_clock::time_point const cb_t0, ptpclient::TimerWakeInfo const& wake_info) {
+        auto const dur_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count();
+        media_dur_hist.update(dur_ns);
+        media_dur_stats.update(dur_ns);
+        last_wake_count.publish(wake_info.wake_count);
+        last_wake_error_ns.publish(wake_info.error_ns);
+    };
 
     auto timer = ptpclient::make_ptp_timer(
         *ctx.bridge,
@@ -308,10 +322,7 @@ auto run_entity_main_loop(
             auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
             auto const cb_t0 = std::chrono::steady_clock::now();
             entity.process_audio(now);
-            media_dur_hist.update(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
-            last_wake_count.publish(wake_info->wake_count);
-            last_wake_error_ns.publish(wake_info->error_ns);
+            note_wake(cb_t0, *wake_info);
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
@@ -456,6 +467,8 @@ auto run_entity_main_loop(
         std::print(stderr, "Warning: media timer had {} wake error(s) (likely gPTP sync loss)\n", errs);
     }
     result.wake_stats = timer.stats();
+    result.media_duration = media_dur_stats.snapshot();
+    result.media_duration_histogram = media_dur_hist.snapshot();
     result.recovery_count = timer.recovery_count();
     result.missed_cycles = timer.missed_cycles();
     ctx.guard.stop();
@@ -469,11 +482,42 @@ auto run_entity_main_loop(
     return result;
 }
 
+/// The media thread's per-wake work (process_audio: fill, flush, kick) as
+/// avg/min/max/sd and a histogram, appended to @p out. Nothing without samples.
+inline void format_media_duration_to(std::string& out, MainLoopResult const& result)
+{
+    auto const& d = result.media_duration;
+    if (!d.has_samples()) {
+        return;
+    }
+    std::format_to(
+        std::back_inserter(out),
+        "=== Media Timer Callback Duration ===\n"
+        "  Wakes:           {}\n"
+        "  Average:         {:.1f} ns ({:.3f} us)\n"
+        "  Minimum:         {} ns ({:.3f} us)\n"
+        "  Maximum:         {} ns ({:.3f} us)\n"
+        "  Std deviation:   {:.1f} ns ({:.3f} us)\n"
+        "  --- Duration Distribution ({} ns bins) ---\n",
+        d.count,
+        d.average_ns(),
+        d.average_ns() / 1000.0,
+        d.min_ns,
+        static_cast<double>(d.min_ns) / 1000.0,
+        d.max_ns,
+        static_cast<double>(d.max_ns) / 1000.0,
+        d.stddev_ns(),
+        d.stddev_ns() / 1000.0,
+        result.media_duration_histogram.config.bin_width_ns);
+    result.media_duration_histogram.format_to(std::back_inserter(out));
+    std::format_to(std::back_inserter(out), "=====================================\n");
+}
+
 /// The shared exit banner: entity state + timer counters + entity
 /// print_state(), plus the wake-stats report when requested.
 template <typename Entity>
 void print_final_status(Entity const& entity, MainLoopResult const& result, bool const dump_stats)
-{
+{  // NOLINT(statusbar-block-statements) the banner, line by line; pre-dates the gate
     std::print("\n=== Final Status ===\n");
     std::print("  Entity State:    {}\n", entity.state_string());
     std::print("  Timer Recovery:  {}\n", result.recovery_count);
@@ -484,6 +528,7 @@ void print_final_status(Entity const& entity, MainLoopResult const& result, bool
     if (dump_stats) {
         std::string stats_report;
         result.wake_stats.format_report_to(std::back_inserter(stats_report), result.compensation_ns);
+        format_media_duration_to(stats_report, result);
         std::print("{}", stats_report);
     }
 }

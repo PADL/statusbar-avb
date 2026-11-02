@@ -105,6 +105,19 @@ struct TalkerStreams
     /// was committed and this is free. Once per media tick, after the slots.
     void flush_tx();
 
+    /// Hand the TX kick to another thread (see kick_tx): flush_tx then only
+    /// closes the cycle. Returns false, and leaves the kick in flush_tx, when
+    /// the port's backend cannot be kicked from a second thread (xdp today).
+    auto set_external_kick(bool enable) noexcept -> bool;
+    [[nodiscard]] auto external_kick() const noexcept -> bool { return external_kick_; }
+
+    /// The TX kick alone, from the kicker thread: the wake-up syscall over the
+    /// ring the media thread fills. Taken without the port guard on purpose:
+    /// the mmap kick touches no user-space state (the kernel's ring protocol
+    /// is built for a filler and a kicker), and holding the guard would make
+    /// the media thread spin for the length of the syscall it was spared.
+    void kick_tx();
+
     /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
     /// the file awaits the non-RT flush.
     [[nodiscard]] auto tx_pcap_ready_to_write() const noexcept -> bool { return tx_pcap_recorder_.ready_to_write(); }
@@ -186,6 +199,8 @@ struct TalkerStreams
     void commit_stream_frame(net::EthernetTxSlot const& slot, size_t length);
 
     StreamPort* port_{nullptr};
+    /// The TX kick lives on another thread (set_external_kick).
+    bool external_kick_{false};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the captured frame carries the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};
