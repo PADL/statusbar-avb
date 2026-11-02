@@ -581,9 +581,9 @@ TEST(mrp_timer_scheduler, tick_join_expires)
     TimerScheduler ts{1};
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_join(now);
-    auto e1 = ts.tick(now + std::chrono::milliseconds(199));
+    auto e1 = ts.tick(now + std::chrono::milliseconds(99));
     EXPECT_FALSE(e1.any());
-    auto e2 = ts.tick(now + std::chrono::milliseconds(200));
+    auto e2 = ts.tick(now + std::chrono::milliseconds(100));
     EXPECT_TRUE(e2.join);
     EXPECT_FALSE(ts.join_running());
 }
@@ -593,9 +593,9 @@ TEST(mrp_timer_scheduler, tick_leave_expires)
     TimerScheduler ts{1};
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_leave(now);
-    auto e0 = ts.tick(now + std::chrono::milliseconds(4999));
+    auto e0 = ts.tick(now + std::chrono::milliseconds(999));
     EXPECT_FALSE(e0.leave);
-    auto e = ts.tick(now + std::chrono::milliseconds(5000));
+    auto e = ts.tick(now + std::chrono::milliseconds(1000));
     EXPECT_TRUE(e.leave);
 }
 
@@ -614,21 +614,29 @@ TEST(mrp_timer_scheduler, next_deadline_picks_earliest)
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_join(now);
     ts.start_periodic(now);
-    EXPECT_EQ(ts.next_deadline(), now + std::chrono::milliseconds(200));
+    EXPECT_EQ(ts.next_deadline(), now + std::chrono::milliseconds(100));
 }
 
-// Milan v1.2 Section 4.2.7.1.1 Table 4.3 defaults and tolerances.
-TEST(mrp_timer_scheduler, milan_table_4_3_values)
+// mrp.c's defaults, within IEEE 802.1Q-2018 Clause 10.7.4; a configuration's durations are the ones armed.
+TEST(mrp_timer_scheduler, defaults_are_generic_and_a_config_overrides_them)
 {
     using namespace std::chrono_literals;
-    EXPECT_EQ(TimerScheduler::JOIN_TIME.count(), 200);
-    EXPECT_EQ(TimerScheduler::LEAVE_TIME.count(), 5000);
-    EXPECT_EQ(TimerScheduler::PERIODIC_TIME.count(), 1000);
-    EXPECT_EQ(TimerScheduler::LEAVE_ALL_TIME_MIN.count(), 10000);
-    EXPECT_EQ(TimerScheduler::LEAVE_ALL_TIME_MAX.count(), 15000);
+    TimerConfig const defaults{};
+    EXPECT_EQ(defaults.join_time.count(), 100);
+    EXPECT_EQ(defaults.leave_time.count(), 1000);
+    EXPECT_EQ(defaults.periodic_time.count(), 1000);
+    EXPECT_EQ(defaults.leave_all_time_min.count(), 5000);
+    EXPECT_EQ(defaults.leave_all_time_max.count(), 15000);
+    TimerScheduler ts{1, TimerConfig{.leave_time = 5000ms}};
+    auto const now = TimePoint{} + std::chrono::seconds(1);
+    ts.start_leave(now);
+    EXPECT_EQ(ts.next_deadline(), now + 5000ms);
+    TimerScheduler standard{1};
+    standard.start_leave(now);
+    EXPECT_EQ(standard.next_deadline(), now + 1000ms);
 }
 
-TEST(mrp_timer_scheduler, leaveall_is_randomised_within_milan_default_range)
+TEST(mrp_timer_scheduler, leaveall_is_randomised_within_the_default_range)
 {
     using namespace std::chrono_literals;
     TimerScheduler ts{7};
@@ -638,13 +646,13 @@ TEST(mrp_timer_scheduler, leaveall_is_randomised_within_milan_default_range)
     for (int i = 0; i < 2000; ++i) {
         ts.arm_leaveall(now);
         auto const d = ts.next_deadline();
-        EXPECT_TRUE(d >= now + 10000ms);
+        EXPECT_TRUE(d >= now + 5000ms);
         EXPECT_TRUE(d < now + 15000ms);
         lo = std::min(lo, d);
         hi = std::max(hi, d);
     }
     // Randomised, not a constant: the draws spread over most of the range.
-    EXPECT_TRUE(lo < now + 10500ms);
+    EXPECT_TRUE(lo < now + 5500ms);
     EXPECT_TRUE(hi > now + 14500ms);
 }
 
