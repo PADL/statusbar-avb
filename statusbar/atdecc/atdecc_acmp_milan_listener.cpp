@@ -123,7 +123,7 @@ auto bound_response(AcmpCommandResponse const& cmd, MilanSink const& s) noexcept
 
 /// Sections 5.5.3.5.18 and 5.5.3.5.25 step 1: @p resp answers the probe @p s
 /// sent and is waiting for (Table 5.30: ignored in every other state).
-auto answers_probe(MilanSink const& s, AcmpCommandResponse const& resp) noexcept -> bool
+[[nodiscard]] auto answers_probe(MilanSink const& s, AcmpCommandResponse const& resp) noexcept -> bool
 {
     return (s.state == MilanSinkState::prb_w_resp || s.state == MilanSinkState::prb_w_resp2) &&
         resp.controller_entity_id == s.probe.controller_entity_id && resp.talker_entity_id == s.probe.talker_entity_id &&
@@ -131,7 +131,7 @@ auto answers_probe(MilanSink const& s, AcmpCommandResponse const& resp) noexcept
 }
 
 /// Sink @p s is bound to the talker and source @p cmd names.
-auto bound_to(MilanSink const& s, AcmpCommandResponse const& cmd) noexcept -> bool
+[[nodiscard]] auto bound_to(MilanSink const& s, AcmpCommandResponse const& cmd) noexcept -> bool
 {
     return s.bound() && s.binding.talker_entity_id == cmd.talker_entity_id &&
         s.binding.talker_unique_id == cmd.talker_unique_id.get();

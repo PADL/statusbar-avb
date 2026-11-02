@@ -182,12 +182,12 @@ class MilanListener
     /// Section 5.5.3.5.2, startup with a saved binding: start discovering the
     /// talker and wait for it in PRB_W_AVAIL. False for an unknown or already
     /// bound sink.
-    auto restore(uint16_t index, MilanSinkBinding const& binding) -> bool;
+    [[nodiscard]] auto restore(uint16_t index, MilanSinkBinding const& binding) -> bool;
 
     /// A BIND_RX / UNBIND_RX / GET_RX_STATE command or PROBE_TX_RESPONSE addressed to this listener
     /// (Milan v1.2 Section 5.5.3.1; an unknown sink is answered LISTENER_UNKNOWN_ID, Table 5.27).
     /// False for any other ACMPDU.
-    auto receive(AcmpCommandResponse const& pdu, TimePoint now) -> bool;
+    [[nodiscard]] auto receive(AcmpCommandResponse const& pdu, TimePoint now) -> bool;
 
     /// Section 5.6.4.1: an ENTITY_AVAILABLE / ENTITY_DEPARTING, for every
     /// bound sink whose talker sent it. @p grandmaster and @p domain are this
@@ -202,7 +202,7 @@ class MilanListener
     /// START_STREAMING / STOP_STREAMING (Sections 5.4.2.19-20): a bound sink
     /// becomes started / stopped. True when its state changed (no effect on
     /// an unbound sink, or one already so).
-    auto set_started(uint16_t index, bool started) -> bool;
+    [[nodiscard]] auto set_started(uint16_t index, bool started) -> bool;
 
     /// Run the timers that expired by @p now (TMR_DELAY, TMR_NO_RESP,
     /// TMR_RETRY, TMR_NO_TK, TMR_NO_ADP).
@@ -230,7 +230,7 @@ class MilanListener
     };
 
     /// A BIND_RX / UNBIND_RX / GET_RX_STATE command for sink @p index; false for another message type.
-    auto receive_command(uint8_t type, uint16_t index, AcmpCommandResponse const& pdu, TimePoint now) -> bool;
+    [[nodiscard]] auto receive_command(uint8_t type, uint16_t index, AcmpCommandResponse const& pdu, TimePoint now) -> bool;
     void bind(uint16_t index, AcmpCommandResponse const& cmd, TimePoint now);
     /// Step 2 of every bound state: the same talker and source keep the binding (and its
     /// probing or settled state); only the controller and the started state are updated.
