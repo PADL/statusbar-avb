@@ -483,20 +483,6 @@ class MsrpHandler
         return nullptr;
     }
 
-    /// A remote talker's registered Talker Advertise / Talker Failed for
-    /// @p stream_id, or nullptr (what a listener's GET_STREAM_INFO reports:
-    /// accumulated latency, failure bridge and code).
-    [[nodiscard]] auto registered_talker_advertise(StreamId const& stream_id) const noexcept
-        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
-    {
-        return participant_.find_talker_advertise(stream_id);
-    }
-    [[nodiscard]] auto registered_talker_failed(StreamId const& stream_id) const noexcept
-        -> statusbar::srp::msrp::TalkerFailedFirstValue const*
-    {
-        return participant_.find_talker_failed(stream_id);
-    }
-
     /// A peer's Talker Advertise / Talker Failed for @p stream_id while its registrar holds it,
     /// or nullptr; never our own (Milan v1.2 Section 5.3.8.8).
     [[nodiscard]] auto peer_talker_advertise(StreamId const& stream_id) const noexcept
