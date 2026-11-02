@@ -5,14 +5,14 @@
 
 namespace statusbar::srp::mrp {
 
-TimerScheduler::TimerScheduler(uint64_t seed)
-    : rng_{seed != 0 ? seed : std::random_device{}()}
+TimerScheduler::TimerScheduler(uint64_t seed, TimerConfig const& config)
+    : config_{config}
+    , rng_{seed != 0 ? seed : std::random_device{}()}
 {}
 
 auto TimerScheduler::randomized_leaveall_duration() -> std::chrono::milliseconds
 {
-    // Milan v1.2 Table 4.3: uniform in [10 s, 15 s).
-    std::uniform_int_distribution<int64_t> dist{LEAVE_ALL_TIME_MIN.count(), LEAVE_ALL_TIME_MAX.count() - 1};
+    std::uniform_int_distribution<int64_t> dist{config_.leave_all_time_min.count(), config_.leave_all_time_max.count() - 1};
     return std::chrono::milliseconds(dist(rng_));
 }
 
@@ -23,14 +23,14 @@ auto TimerScheduler::randomized_leaveall_duration() -> std::chrono::milliseconds
 void TimerScheduler::start_join(TimePoint now) noexcept
 {
     if (!join_.has_value()) {
-        join_ = now + JOIN_TIME;
+        join_ = now + config_.join_time;
     }
 }
 
 void TimerScheduler::start_leave(TimePoint now) noexcept
 {
     if (!leave_.has_value()) {
-        leave_ = now + LEAVE_TIME;
+        leave_ = now + config_.leave_time;
     }
 }
 
@@ -44,7 +44,7 @@ void TimerScheduler::start_leaveall(TimePoint now)
 void TimerScheduler::start_periodic(TimePoint now) noexcept
 {
     if (!periodic_.has_value()) {
-        periodic_ = now + PERIODIC_TIME;
+        periodic_ = now + config_.periodic_time;
     }
 }
 
@@ -54,12 +54,12 @@ void TimerScheduler::start_periodic(TimePoint now) noexcept
 
 void TimerScheduler::arm_join(TimePoint now) noexcept
 {
-    join_ = now + JOIN_TIME;
+    join_ = now + config_.join_time;
 }
 
 void TimerScheduler::arm_leave(TimePoint now) noexcept
 {
-    leave_ = now + LEAVE_TIME;
+    leave_ = now + config_.leave_time;
 }
 
 void TimerScheduler::arm_leaveall(TimePoint now)
@@ -69,7 +69,7 @@ void TimerScheduler::arm_leaveall(TimePoint now)
 
 void TimerScheduler::arm_periodic(TimePoint now) noexcept
 {
-    periodic_ = now + PERIODIC_TIME;
+    periodic_ = now + config_.periodic_time;
 }
 
 //
