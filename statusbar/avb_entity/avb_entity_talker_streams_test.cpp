@@ -326,12 +326,12 @@ TEST(talker_tx_counters, pdus_tu_and_mr_toggles)
     avb_entity::TalkerStreamSlot slot{};
     slot.spec.index = 3;
     std::array<uint8_t, 24> aaf{avtp::AvtpSubtype::aaf, 0x81, 0x00, 0x00};
-    talker.send_stream_frame(slot, aaf);
+    (void)talker.send_stream_frame(slot, aaf);
     aaf[3] = 0x01;  // tu
-    talker.send_stream_frame(slot, aaf);
+    (void)talker.send_stream_frame(slot, aaf);
     aaf[1] = 0x89;  // mr toggled
-    talker.send_stream_frame(slot, aaf);
-    talker.send_stream_frame(slot, aaf);
+    (void)talker.send_stream_frame(slot, aaf);
+    (void)talker.send_stream_frame(slot, aaf);
     auto const* c = talker.tx_counters(3);
     EXPECT_TRUE(c != nullptr);
     EXPECT_EQ(c->pdus.load(), 4U);
@@ -341,7 +341,7 @@ TEST(talker_tx_counters, pdus_tu_and_mr_toggles)
     avb_entity::TalkerStreamSlot crf_slot{};
     crf_slot.spec.index = 4;
     std::array<uint8_t, 24> crf{avtp::AvtpSubtype::crf, 0x81, 0x00, 0x00};  // tu in octet 1
-    talker.send_stream_frame(crf_slot, crf);
+    (void)talker.send_stream_frame(crf_slot, crf);
     EXPECT_EQ(talker.tx_counters(4)->tu_pdus.load(), 1U);
     EXPECT_TRUE(talker.tx_counters(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)) == nullptr);
 }

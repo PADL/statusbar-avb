@@ -496,7 +496,7 @@ class AvbEntityKit
     /// Re-read talker stream @p idx's registered Listener at steady-clock
     /// @p now_ns; true when it changed (the declaration predicate and
     /// GET_STREAM_INFO follow it).
-    auto refresh_talker_listener(uint16_t idx, int64_t now_ns) -> bool;
+    [[nodiscard]] auto refresh_talker_listener(uint16_t idx, int64_t now_ns) -> bool;
     /// The talker spec index for @p stream_id, or nullopt.
     [[nodiscard]] auto talker_index_of(nanoavb::StreamId const& stream_id) const noexcept -> std::optional<uint16_t>;
     [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
