@@ -267,6 +267,10 @@ struct EntityRunnerHooks
     statusbar::sg14::inplace_function<void(), 128> poll{};
     /// Called once per verbose telemetry tick, after the bridge line.
     statusbar::sg14::inplace_function<void(), 128> extra_telemetry{};
+    /// Called at shutdown after the media timer has stopped and BEFORE the
+    /// PTP bridge's sampling stops: a tool stops its own PTP timers here. A
+    /// timer left running on a stopped bridge has nothing to sleep on.
+    statusbar::sg14::inplace_function<void(), 128> stop_timers{};
 };
 
 /// The shared main loop: PTP media timer -> Entity::process_audio on the
@@ -471,6 +475,9 @@ auto run_entity_main_loop(
     result.media_duration_histogram = media_dur_hist.snapshot();
     result.recovery_count = timer.recovery_count();
     result.missed_cycles = timer.missed_cycles();
+    if (hooks.stop_timers) {
+        hooks.stop_timers();
+    }
     ctx.guard.stop();
 
     if (!tool.media_timer_wake_csv_path.empty()) {

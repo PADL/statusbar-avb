@@ -344,9 +344,14 @@ class PtpTimeBridge : public PtpTimeBridgeBase
 
     /// Sleep until a PTP deadline by converting to monotonic and sleeping
     /// @param ptp_deadline_ns Target PTP time in nanoseconds
+    /// @param keep_going Optional: the caller's own running flag. The final
+    ///        spin to the deadline bails with bridge_not_running once it reads
+    ///        false, as it already does when this bridge stops, so a timer
+    ///        being stopped mid-sleep returns to its loop at once.
     /// @return Current PTP time on success (allows caller to measure wake accuracy), error otherwise
     /// @note On Linux, uses clock_nanosleep for precision. On other platforms, uses std::this_thread::sleep_until.
-    [[nodiscard]] auto sleep_until_ptp(int64_t ptp_deadline_ns) noexcept -> StatusValue<int64_t>;
+    [[nodiscard]] auto sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going = nullptr) noexcept
+        -> StatusValue<int64_t>;
 
     // Manual Epoch Control
 

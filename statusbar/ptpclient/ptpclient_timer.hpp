@@ -252,8 +252,11 @@ class PtpTimer : public PtpTimerBase
         while (is_running_atomic()) {
             if (!aligned) {
                 auto const mapping = bridge_.get_mapping();
-                if (!mapping.healthy) {
-                    // No sync: report and retry without blocking forever.
+                if (!mapping.healthy || !bridge_.is_running()) {
+                    // No sync: report and retry without blocking forever. A
+                    // bridge that has stopped keeps its last mapping, so it
+                    // is asked as well: aligning to it would only fail at the
+                    // next sleep, and this path would spin.
                     callback_(failure(PtpError::bridge_not_healthy));
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     continue;
@@ -266,7 +269,7 @@ class PtpTimer : public PtpTimerBase
                 aligned = true;
             }
 
-            auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_);
+            auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_, running_flag_ptr());
 
             if (!wake_result) {
                 if (!is_running_atomic()) {

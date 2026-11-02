@@ -423,8 +423,8 @@ auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcep
     return result;
 }
 
-auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns) noexcept -> StatusValue<int64_t>
-{
+auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<int64_t>
+{  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
     auto prep = prepare_sleep(ptp_deadline_ns);
     if (!prep) {
         return forward_failure(prep);
@@ -480,7 +480,7 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns) noexcept -> StatusV
         if (now_raw >= raw_deadline) {
             break;
         }
-        if (!is_running_atomic()) {
+        if (!is_running_atomic() || (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed))) {
             return failure(PtpError::bridge_not_running);
         }
         if (raw_deadline - now_raw > 10'000) {

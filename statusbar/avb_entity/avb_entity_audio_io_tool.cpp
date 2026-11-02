@@ -468,6 +468,35 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
                         tx_kick_error_count.load());
                 }
             },
+        // Before the runner stops the PTP bridge, or these would spin on it.
+        .stop_timers =
+            [&]() {
+                if (tx_kick) {
+                    tx_kicker.stop();
+                    auto const d = tx_kick_dur_stats.snapshot();
+                    std::print(
+                        stderr,
+                        "[tx-kicker] final: kicks={} wake_errors={} recovery={} missed={} kick_duration avg={:.1f}ns min={}ns "
+                        "max={}ns\n",
+                        tx_kicks.load(),
+                        tx_kick_error_count.load(),
+                        tx_kicker.recovery_count(),
+                        tx_kicker.missed_cycles(),
+                        d.average_ns(),
+                        d.min_ns,
+                        d.max_ns);
+                }
+                if (rx_rt) {
+                    rx_timer.stop();
+                    std::print(
+                        stderr,
+                        "[rx-timer] final: frames_drained={} wake_errors={} recovery={} missed={}\n",
+                        rx_frames_drained.load(),
+                        rx_timer_error_count.load(),
+                        rx_timer.recovery_count(),
+                        rx_timer.missed_cycles());
+                }
+            },
     };
 
     // Base packet interval (12 samples @ 96 kHz = 125 µs) times packets_per_wake.
@@ -476,30 +505,6 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
 
     auto result = avb_entity::run_entity_main_loop(reactor, ctx, entity, config.tool, packet_period_ns, hooks);
 
-    if (tx_kick) {
-        tx_kicker.stop();
-        auto const d = tx_kick_dur_stats.snapshot();
-        std::print(
-            stderr,
-            "[tx-kicker] final: kicks={} wake_errors={} recovery={} missed={} kick_duration avg={:.1f}ns min={}ns max={}ns\n",
-            tx_kicks.load(),
-            tx_kick_error_count.load(),
-            tx_kicker.recovery_count(),
-            tx_kicker.missed_cycles(),
-            d.average_ns(),
-            d.min_ns,
-            d.max_ns);
-    }
-    if (rx_rt) {
-        rx_timer.stop();
-        std::print(
-            stderr,
-            "[rx-timer] final: frames_drained={} wake_errors={} recovery={} missed={}\n",
-            rx_frames_drained.load(),
-            rx_timer_error_count.load(),
-            rx_timer.recovery_count(),
-            rx_timer.missed_cycles());
-    }
     return result;
 }
 
