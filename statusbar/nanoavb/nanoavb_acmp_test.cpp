@@ -1019,7 +1019,7 @@ TEST(nanoavb_acmp_callbacks, talker_on_connect_called)
     talker.start();
 
     auto cmd = make_connect_tx_command(talker_id, 0, listener_id, 0);
-    talker.receive_command(cmd, statusbar::sm::TimePoint{});
+    (void)talker.receive_command(cmd, statusbar::sm::TimePoint{});
 
     EXPECT_TRUE(on_connect_called);
     EXPECT_EQ(connected_stream_index, 0U);
@@ -1043,10 +1043,10 @@ TEST(nanoavb_acmp_callbacks, talker_on_disconnect_called)
 
     // Connect then disconnect
     auto cmd = make_connect_tx_command(talker_id, 0, listener_id, 0);
-    talker.receive_command(cmd, statusbar::sm::TimePoint{});
+    (void)talker.receive_command(cmd, statusbar::sm::TimePoint{});
 
     auto dcmd = make_disconnect_tx_command(talker_id, 0, listener_id, 0);
-    talker.receive_command(dcmd, statusbar::sm::TimePoint{});
+    (void)talker.receive_command(dcmd, statusbar::sm::TimePoint{});
 
     EXPECT_TRUE(on_disconnect_called);
 }
@@ -1067,7 +1067,7 @@ TEST(nanoavb_acmp_callbacks, talker_on_connect_not_called_on_failure)
 
     // Connect to invalid stream index (99)
     auto cmd = make_connect_tx_command(talker_id, 99, listener_id, 0);
-    talker.receive_command(cmd, statusbar::sm::TimePoint{});
+    (void)talker.receive_command(cmd, statusbar::sm::TimePoint{});
 
     EXPECT_FALSE(on_connect_called);
 }

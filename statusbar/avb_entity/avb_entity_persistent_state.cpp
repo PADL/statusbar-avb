@@ -73,7 +73,8 @@ auto toml_hex(uint64_t const value) -> std::string
 using toml::Table;
 
 /// An integer key in [min, max]; nullopt when absent, mistyped or out of range.
-auto int_at(Table const& table, std::string_view const key, int64_t const min, int64_t const max) -> std::optional<int64_t>
+[[nodiscard]] auto int_at(Table const& table, std::string_view const key, int64_t const min, int64_t const max)
+    -> std::optional<int64_t>
 {
     auto const* value = table.get(key);
     if (value == nullptr) {
@@ -86,7 +87,7 @@ auto int_at(Table const& table, std::string_view const key, int64_t const min, i
     return n;
 }
 
-auto u16_at(Table const& table, std::string_view const key) -> std::optional<uint16_t>
+[[nodiscard]] auto u16_at(Table const& table, std::string_view const key) -> std::optional<uint16_t>
 {
     if (auto const n = int_at(table, key, 0, std::numeric_limits<uint16_t>::max())) {
         return static_cast<uint16_t>(*n);
@@ -94,7 +95,7 @@ auto u16_at(Table const& table, std::string_view const key) -> std::optional<uin
     return std::nullopt;
 }
 
-auto u32_at(Table const& table, std::string_view const key) -> std::optional<uint32_t>
+[[nodiscard]] auto u32_at(Table const& table, std::string_view const key) -> std::optional<uint32_t>
 {
     if (auto const n = int_at(table, key, 0, std::numeric_limits<uint32_t>::max())) {
         return static_cast<uint32_t>(*n);
@@ -103,14 +104,14 @@ auto u32_at(Table const& table, std::string_view const key) -> std::optional<uin
 }
 
 /// A string key; nullopt when absent or mistyped
-auto string_at(Table const& table, std::string_view const key) -> std::optional<std::string_view>
+[[nodiscard]] auto string_at(Table const& table, std::string_view const key) -> std::optional<std::string_view>
 {
     auto const* value = table.get(key);
     return value != nullptr ? value->as_string() : std::nullopt;
 }
 
 /// A u64 in hex ("0x" optional); nullopt unless all of @p text is hex digits.
-auto parse_hex(std::string_view text) -> std::optional<uint64_t>
+[[nodiscard]] auto parse_hex(std::string_view text) -> std::optional<uint64_t>
 {
     if (text.starts_with("0x") || text.starts_with("0X")) {
         text.remove_prefix(2);
@@ -124,21 +125,21 @@ auto parse_hex(std::string_view text) -> std::optional<uint64_t>
 }
 
 /// A u64 written as a hex string ("0x" optional)
-auto hex_at(Table const& table, std::string_view const key) -> std::optional<uint64_t>
+[[nodiscard]] auto hex_at(Table const& table, std::string_view const key) -> std::optional<uint64_t>
 {
     auto const text = string_at(table, key);
     return text ? parse_hex(*text) : std::nullopt;
 }
 
 /// A boolean key; nullopt when absent or mistyped
-auto bool_at(Table const& table, std::string_view const key) -> std::optional<bool>
+[[nodiscard]] auto bool_at(Table const& table, std::string_view const key) -> std::optional<bool>
 {
     auto const* value = table.get(key);
     return value != nullptr ? value->as_boolean() : std::nullopt;
 }
 
 /// A string of at most 64 octets (an ATDECC string)
-auto name_at(Table const& table, std::string_view const key) -> std::optional<std::string>
+[[nodiscard]] auto name_at(Table const& table, std::string_view const key) -> std::optional<std::string>
 {
     auto const text = string_at(table, key);
     if (!text || text->size() > 64 || text->contains('\0')) {
@@ -149,8 +150,8 @@ auto name_at(Table const& table, std::string_view const key) -> std::optional<st
 
 /// Each table of the array of tables @p key (absent: none) through @p load into
 /// @p state; false when one is malformed.
-auto each_table(Table const& root, std::string_view const key, PersistentState& state, bool (*load)(Table const&, PersistentState&))
-    -> bool
+[[nodiscard]] auto each_table(
+    Table const& root, std::string_view const key, PersistentState& state, bool (*load)(Table const&, PersistentState&)) -> bool
 {
     auto const* value = root.get(key);
     if (value == nullptr) {
@@ -180,7 +181,7 @@ auto errno_code() -> std::error_code
 }
 
 /// The rest of @p f; nullopt on a read error.
-auto read_stream(std::FILE* const f) -> std::optional<std::string>
+[[nodiscard]] auto read_stream(std::FILE* const f) -> std::optional<std::string>
 {
     std::string text;
     char buf[4096];
@@ -196,7 +197,7 @@ auto read_stream(std::FILE* const f) -> std::optional<std::string>
 }
 
 /// Read the whole of @p path; nullopt with @p error set (ENOENT: absent).
-auto read_file(std::string const& path, std::error_code& error) -> std::optional<std::string>
+[[nodiscard]] auto read_file(std::string const& path, std::error_code& error) -> std::optional<std::string>
 {
     std::FILE* const f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) {
@@ -221,7 +222,7 @@ auto parent_of(std::string const& path) -> std::string
     return slash == 0 ? std::string{"/"} : path.substr(0, slash);
 }
 
-auto write_all(int const fd, std::string_view text) -> bool
+[[nodiscard]] auto write_all(int const fd, std::string_view text) -> bool
 {
     while (!text.empty()) {
         auto const n = ::write(fd, text.data(), text.size());
@@ -334,7 +335,7 @@ auto append_stream_tables(std::string& out, PersistentState const& state) -> voi
 
 /// Copy optional key @p key through @p get into @p out; false when present but malformed.
 template <typename Get, typename T>
-auto optional_into(Table const& table, std::string_view const key, Get const get, T& out) -> bool
+[[nodiscard]] auto optional_into(Table const& table, std::string_view const key, Get const get, T& out) -> bool
 {
     if (!table.contains(key)) {
         return true;
@@ -348,7 +349,7 @@ auto optional_into(Table const& table, std::string_view const key, Get const get
 }
 
 /// The file's version: not_supported unless it is this one.
-auto check_version(Table const& root) -> Status
+[[nodiscard]] auto check_version(Table const& root) -> Status
 {
     auto const version = int_at(root, "version", 0, std::numeric_limits<int64_t>::max());
     if (!version) {
@@ -361,7 +362,7 @@ auto check_version(Table const& root) -> Status
 }
 
 /// The entity model id and the optional scalar keys; false when one is malformed.
-auto parse_scalars(Table const& root, PersistentState& state) -> bool
+[[nodiscard]] auto parse_scalars(Table const& root, PersistentState& state) -> bool
 {
     auto const model_id = hex_at(root, "entity_model_id");
     if (!model_id) {
@@ -380,7 +381,7 @@ struct DescriptorKey
 };
 
 /// A table's descriptor_type and descriptor_index
-auto descriptor_at(Table const& t) -> std::optional<DescriptorKey>
+[[nodiscard]] auto descriptor_at(Table const& t) -> std::optional<DescriptorKey>
 {
     auto const type = u16_at(t, "descriptor_type");
     auto const index = u16_at(t, "descriptor_index");
@@ -390,7 +391,7 @@ auto descriptor_at(Table const& t) -> std::optional<DescriptorKey>
     return DescriptorKey{.type = *type, .index = *index};
 }
 
-auto load_name(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_name(Table const& t, PersistentState& state) -> bool
 {
     auto const key = descriptor_at(t);
     auto const name_index = u16_at(t, "name_index");
@@ -403,7 +404,7 @@ auto load_name(Table const& t, PersistentState& state) -> bool
     return true;
 }
 
-auto load_stream_format(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_stream_format(Table const& t, PersistentState& state) -> bool
 {
     auto const key = descriptor_at(t);
     auto const format = hex_at(t, "format");
@@ -414,7 +415,7 @@ auto load_stream_format(Table const& t, PersistentState& state) -> bool
     return true;
 }
 
-auto load_clock_source(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_clock_source(Table const& t, PersistentState& state) -> bool
 {
     auto const domain = u16_at(t, "clock_domain");
     auto const source = u16_at(t, "clock_source");
@@ -425,7 +426,7 @@ auto load_clock_source(Table const& t, PersistentState& state) -> bool
     return true;
 }
 
-auto load_presentation_offset(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_presentation_offset(Table const& t, PersistentState& state) -> bool
 {
     auto const output = u16_at(t, "stream_output");
     auto const ns = u32_at(t, "ns");
@@ -437,7 +438,7 @@ auto load_presentation_offset(Table const& t, PersistentState& state) -> bool
 }
 
 /// A listener binding; the optional keys keep PersistedListenerBinding's defaults when absent.
-auto load_listener_binding(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_listener_binding(Table const& t, PersistentState& state) -> bool
 {
     auto const input = u16_at(t, "stream_input");
     auto const talker = hex_at(t, "talker_entity_id");
@@ -452,7 +453,7 @@ auto load_listener_binding(Table const& t, PersistentState& state) -> bool
         optional_into(t, "started", bool_at, binding.started);
 }
 
-auto load_media_clock_reference(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_media_clock_reference(Table const& t, PersistentState& state) -> bool
 {
     auto const domain = u16_at(t, "clock_domain");
     auto const prio = int_at(t, "user_priority", 0, 255);
@@ -466,7 +467,7 @@ auto load_media_clock_reference(Table const& t, PersistentState& state) -> bool
 }
 
 /// One [stream_index, stream_channel, cluster_offset, cluster_channel] entry
-auto mapping_at(toml::Value const& value) -> std::optional<PersistedAudioMapping>
+[[nodiscard]] auto mapping_at(toml::Value const& value) -> std::optional<PersistedAudioMapping>
 {
     auto const* entry = value.as_array();
     if (entry == nullptr || entry->size() != 4) {
@@ -485,7 +486,7 @@ auto mapping_at(toml::Value const& value) -> std::optional<PersistedAudioMapping
 }
 
 /// The array @p value of mappings onto @p out; false when it is not one.
-auto mappings_into(toml::Value const* const value, std::vector<PersistedAudioMapping>& out) -> bool
+[[nodiscard]] auto mappings_into(toml::Value const* const value, std::vector<PersistedAudioMapping>& out) -> bool
 {
     auto const* list = value != nullptr ? value->as_array() : nullptr;
     if (list == nullptr) {
@@ -501,7 +502,7 @@ auto mappings_into(toml::Value const* const value, std::vector<PersistedAudioMap
     return true;
 }
 
-auto load_audio_map(Table const& t, PersistentState& state) -> bool
+[[nodiscard]] auto load_audio_map(Table const& t, PersistentState& state) -> bool
 {
     auto const key = descriptor_at(t);
     if (!key) {
@@ -512,7 +513,7 @@ auto load_audio_map(Table const& t, PersistentState& state) -> bool
 }
 
 /// Every array of tables, in file order; false when a table is malformed.
-auto parse_tables(Table const& root, PersistentState& state) -> bool
+[[nodiscard]] auto parse_tables(Table const& root, PersistentState& state) -> bool
 {
     return each_table(root, "name", state, load_name) && each_table(root, "stream_format", state, load_stream_format) &&
         each_table(root, "clock_source", state, load_clock_source) &&
@@ -541,7 +542,7 @@ auto open_for_write(std::string const& tmp, std::string const& path) -> int
 }
 
 /// Write @p text to @p fd, fsync and close it; on failure @p tmp is removed.
-auto write_and_close(int const fd, std::string const& tmp, std::string_view const text) -> Status
+[[nodiscard]] auto write_and_close(int const fd, std::string const& tmp, std::string_view const text) -> Status
 {
     bool const written = write_all(fd, text) && ::fsync(fd) == 0;
     auto const write_error = errno_code();
@@ -554,7 +555,7 @@ auto write_and_close(int const fd, std::string const& tmp, std::string_view cons
 }
 
 /// Rename @p tmp over @p path, then sync the directory so the rename survives a power cut.
-auto replace_with(std::string const& tmp, std::string const& path) -> Status
+[[nodiscard]] auto replace_with(std::string const& tmp, std::string const& path) -> Status
 {
     if (::rename(tmp.c_str(), path.c_str()) != 0) {
         auto const error = errno_code();
