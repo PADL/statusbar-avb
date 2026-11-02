@@ -171,8 +171,9 @@ class NanoAvbAdpAdvertiser
     /// Read-only access to the owned entity snapshot.
     [[nodiscard]] auto entity() const noexcept -> DescriptorEntity const& { return entity_; }
 
-    /// Set the advertised gPTP grandmaster and domain (IEEE 1722.1-2021 Clauses 6.2.2.16-17);
-    /// a new grandmaster ID is GM_CHANGE (Milan v1.2 Section 5.6.3.5.7).
+    /// Set the advertised gPTP grandmaster and domain (IEEE 1722.1-2021 Clauses 6.2.2.16-17); a new
+    /// grandmaster ID is GM_CHANGE (Milan v1.2 Section 5.6.3.5.7), a new domain alone an advertised
+    /// change (IEEE 1722.1-2021 Clause 6.2.7).
     auto set_gptp_info(ClockIdentity const& grandmaster_id, uint8_t domain_number, TimePoint now) -> void;
 
     /// Set the AVB_INTERFACE index the ADPDU carries, always with AEM_INTERFACE_INDEX_VALID
