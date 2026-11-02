@@ -373,7 +373,6 @@ class PtpManagementClient final : public net::Pollable
         Listener listener,
         FileDescriptor fd,
         net::SocketAddress server,
-        std::string local_path,
         gptp::SourcePortIdentity const& source) noexcept;
     void note_error(std::error_code error);
     /// An answer from ptp4l at @p now_ns: it is reachable, and a restarted one is set up again.
@@ -390,7 +389,6 @@ class PtpManagementClient final : public net::Pollable
     Listener listener_;
     FileDescriptor fd_;
     net::SocketAddress server_;
-    std::string local_path_;
     gptp::SourcePortIdentity source_{};
     uint16_t sequence_{0};
     int64_t next_query_ns_{0};
