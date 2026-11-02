@@ -492,7 +492,7 @@ def _parse_control(c: dict, strings: _LocalizedStrings, context: str) -> Control
     control_type = _parse_control_type(c, context)
     identify = control_type == CONTROL_TYPE_NAMES["IDENTIFY"]
     # An IDENTIFY control has no signal: signal_type INVALID and
-    # signal_index 0 (IEEE 1722.1-2021 7.2.22, as la_avdecc checks it).
+    # signal_index 0 (IEEE 1722.1-2021 7.2.22).
     sig_type = _parse_enum(
         c.get("signal_type", "INVALID" if identify else "ENTITY"),
         DESCRIPTOR_TYPE_NAMES,
