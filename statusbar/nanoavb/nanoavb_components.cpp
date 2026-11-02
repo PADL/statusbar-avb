@@ -460,6 +460,20 @@ auto clock_domain_count(atdecc::aem::DescriptorStorage const* const storage) noe
     return count;
 }
 
+/// The entity's MSRP configuration: Milan's timers for a Milan entity (the immediate leave is set_instant_leave),
+/// IEEE 802.1Q's for a classic one.
+[[nodiscard]] auto profile_msrp_config(EntityProfile const profile, statusbar::srp::msrp::MsrpConfig const& config) noexcept
+    -> statusbar::srp::msrp::MsrpConfig
+{
+    return profile.milan ? milan_msrp_config(config) : config;
+}
+
+/// The entity's MVRP configuration: Milan's timers for a Milan entity, IEEE 802.1Q's otherwise.
+[[nodiscard]] auto profile_mvrp_config(EntityProfile const profile) noexcept -> statusbar::srp::mvrp::MvrpConfig
+{
+    return profile.milan ? milan_mvrp_config({}) : statusbar::srp::mvrp::MvrpConfig{};
+}
+
 }  // namespace
 
 // Wire each handler against the *member* `entity_model`. Member init runs in
@@ -479,8 +493,8 @@ NanoAvbComponents::NanoAvbComponents(
     , adp_advertiser{entity_model.get_entity(), AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity_model.get_entity().entity_id, AcmpListenerCallbacks{}, listener_max_streams}
-    , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
-    , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
+    , mvrp_handler{profile_mvrp_config(profile), MvrpCallbacks{}}
+    , msrp_handler{profile_msrp_config(profile, entity_msrp_config(talker_max_streams, listener_max_streams)), MsrpCallbacks{}}
 {
     aem_handler.set_entity_profile(profile);
     mvu_handler.set_profile(profile);
@@ -538,8 +552,8 @@ NanoAvbComponents::NanoAvbComponents(
     , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity.entity_id, AcmpListenerCallbacks{}, listener_max_streams}
-    , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
-    , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
+    , mvrp_handler{profile_mvrp_config(profile), MvrpCallbacks{}}
+    , msrp_handler{profile_msrp_config(profile, entity_msrp_config(talker_max_streams, listener_max_streams)), MsrpCallbacks{}}
 {
     aem_handler.set_entity_profile(profile);
     mvu_handler.set_profile(profile);

@@ -39,8 +39,8 @@ namespace statusbar::srp::mrp {
 class PortState
 {
   public:
-    /// Construct with optional deterministic RNG seed for tests.
-    explicit PortState(uint64_t rng_seed = 0);
+    /// Construct with @p timers' durations and an optional deterministic RNG seed for tests.
+    explicit PortState(uint64_t rng_seed = 0, TimerConfig const& timers = {});
 
     /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
     /// initial LeaveAll + Periodic timers. Call once during startup.
@@ -119,7 +119,7 @@ template <MrpAttributeLike Record>
 void note_leave_timer(Record& rec, TimePoint now, TimerScheduler& timers)
 {
     if (rec.registrar_ctx.lvtimer_request) {
-        rec.leave_deadline = now + TimerScheduler::LEAVE_TIME;
+        rec.leave_deadline = now + timers.config().leave_time;
         timers.start_leave_at(*rec.leave_deadline);
     } else if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
         rec.leave_deadline.reset();

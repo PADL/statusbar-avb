@@ -68,6 +68,10 @@ struct MvrpConfig
 
     /// Runtime-requested Observer slot count. Must be <= Limits::max_observers.
     size_t max_observers = DefaultMvrpLimits::max_observers;
+
+    /// The MRP timers (IEEE 802.1Q-2018 Table 10-7 by default; Milan sets its own). MVRP keeps
+    /// the standard registrar on rLv! whatever the timers.
+    mrp::TimerConfig timers{};
 };
 
 //
@@ -181,17 +185,23 @@ class MvrpParticipantT
     /// is forwarded to the TimerScheduler for LeaveAll randomization.
     ///
     /// Throws std::bad_alloc if config_.max_vlans > Limits::max_vlans
-    /// or config_.max_observers > Limits::max_observers.
+    /// or config_.max_observers > Limits::max_observers, and invalid_configuration for bad timers.
     explicit MvrpParticipantT(MvrpConfig const& config, uint64_t rng_seed = 0)
         : config_{config}
-        , port_{rng_seed}
+        , port_{rng_seed, config.timers}
     {
+        if (!config_.timers.valid()) {
+            statusbar::throw_or_abort(make_error_code(tsn::TsnError::invalid_configuration));
+        }
         vlans_.reserve(config_.max_vlans);
         observers_.resize(config_.max_observers);
     }
 
     /// Set or replace the outbound PDU callback.
     void set_send_pdu(SendPduFn fn) { send_pdu_ = std::move(fn); }
+
+    /// The configuration the participant runs with.
+    [[nodiscard]] auto config() const noexcept -> MvrpConfig const& { return config_; }
 
     /// Run BEGIN! on the per-port FSMs and arm initial timers.
     void start(TimePoint now)

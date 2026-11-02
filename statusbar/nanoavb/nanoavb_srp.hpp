@@ -133,6 +133,32 @@ template <class Limits = statusbar::srp::msrp::DefaultMsrpLimits>
     return config;
 }
 
+/// Milan's MRP timers (Milan v1.2 Section 4.2.7.1.1, Table 4.3): JoinTime 200 ms, LeaveTime
+/// 5000 ms, leavealltimer 10-15 s, periodictimer 1000 ms.
+inline constexpr statusbar::srp::mrp::TimerConfig MILAN_MRP_TIMERS{
+    .join_time = std::chrono::milliseconds{200},
+    .leave_time = std::chrono::milliseconds{5000},
+    .leave_all_time_min = std::chrono::milliseconds{10000},
+    .leave_all_time_max = std::chrono::milliseconds{15000},
+    .periodic_time = std::chrono::milliseconds{1000},
+};
+
+/// @p config with Milan's MRP timers; the registrar's immediate leave on rLv! (Milan v1.2 Section
+/// 4.2.7.2.2) is MsrpHandler::set_instant_leave.
+[[nodiscard]] constexpr auto milan_msrp_config(statusbar::srp::msrp::MsrpConfig config) noexcept -> statusbar::srp::msrp::MsrpConfig
+{
+    config.timers = MILAN_MRP_TIMERS;
+    return config;
+}
+
+/// @p config with Milan's MRP timers (Table 4.3 covers every MRP application); MVRP keeps
+/// IEEE 802.1Q's registrar.
+[[nodiscard]] constexpr auto milan_mvrp_config(statusbar::srp::mvrp::MvrpConfig config) noexcept -> statusbar::srp::mvrp::MvrpConfig
+{
+    config.timers = MILAN_MRP_TIMERS;
+    return config;
+}
+
 //
 // MVRP Handler Callback Interface
 //
@@ -226,6 +252,9 @@ class MvrpHandler
     /// Periodic tick - call this regularly to process timers
     /// @param now Current time for timer processing
     auto tick(TimePoint now) -> void;
+
+    /// The MVRP participant's configuration (its tables and MRP timers).
+    [[nodiscard]] auto mvrp_config() const noexcept -> statusbar::srp::mvrp::MvrpConfig const& { return participant_.config(); }
 
     /// Get all registered VLANs
     [[nodiscard]] auto vlans() const noexcept -> std::span<VlanInfo const> { return vlans_; }
@@ -356,6 +385,8 @@ class MsrpHandler
     /// Forward a reactor-thread logger to the MSRP participant (Debug-level
     /// MRP event diagnostics).
     void set_logger(logging::Logger const log) noexcept { participant_.set_logger(log); }
+    /// The MSRP participant's configuration (its tables, MRP timers and leave rule).
+    [[nodiscard]] auto msrp_config() const noexcept -> statusbar::srp::msrp::MsrpConfig const& { return participant_.config(); }
 
     /// Set just the on_talker_listener hook without disturbing the others
     /// (set_callbacks replaces the whole struct; this updates one field).
