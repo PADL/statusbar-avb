@@ -15,7 +15,6 @@
 | `avb_entity_xdp_stream_port.hpp` | `XdpStreamPort` | one AF_XDP socket |
 | `avb_entity_test_stream_port.hpp` | `TestStreamPort` | `net::TestPortContext`, in process |
 | `avb_entity_stream_ports.hpp` | `StreamPorts` | picks and opens one of the above |
-| `avb_entity_slot_guard.hpp` | `SlotGuard` | stream slot shared with the reactor |
 | `avb_entity_stream_rx_sink.hpp` | `StreamRxAudioSink`, `StreamRxTimedAudioSink` | where received audio goes |
 
 ## Transmit
@@ -55,14 +54,15 @@ hardware, not in unit tests; the AF_XDP tests need root and skip otherwise.
 
 A stream slot is shared by its data-plane thread (the media thread transmitting,
 the RX thread receiving) and the reactor that re-shapes it on a
-SET_STREAM_FORMAT. The data-plane thread enters the slot for each packet with
-`try_enter()`, which never waits: while the reactor re-shapes the slot it fails
-and that packet is skipped. The reactor's `lock()` waits for the data-plane
-thread to leave (one packet's work) and keeps it out until `unlock()`. One
-atomic with acquire/release ordering: what the reactor wrote before `unlock()`
-is what the data-plane thread reads after its next `try_enter()`. A receive slot's
-kind (AAF or AM824) also changes only under the lock: the RX thread matches a
-frame to its slot by kind unlocked, then checks the kind again once entered.
+SET_STREAM_FORMAT or, on a receive slot, replaces its consumer (`set_consume`,
+`set_crf`). Each slot has a core `itc::SpinLock`. The data-plane thread takes it
+for each packet with `try_lock()`, which never waits: while the reactor holds it
+that packet is skipped. The reactor's `lock()` spins until the data-plane thread
+has finished its packet (one packet's work) and keeps it out until `unlock()`;
+what the reactor wrote before `unlock()` is what the data-plane thread reads
+after its next `try_lock()`. A receive slot's kind (AAF or AM824) also changes
+only under the lock: the RX thread matches a frame to its slot by kind unlocked,
+then checks the kind again once it holds the lock.
 
 ## Receive sinks
 
