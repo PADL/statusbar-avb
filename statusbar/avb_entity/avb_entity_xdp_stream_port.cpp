@@ -121,6 +121,16 @@ auto XdpStreamPort::zero_copy() const noexcept -> bool
     return context_->zero_copy();
 }
 
+void XdpStreamPort::set_napi_busy_poll(bool const on) noexcept
+{
+    context_->set_napi_busy_poll(on);
+}
+
+auto XdpStreamPort::napi_busy_poll() const noexcept -> bool
+{
+    return context_->napi_busy_poll();
+}
+
 auto XdpStreamPort::launch_time() const noexcept -> bool
 {
     return context_->tx_launch_time();

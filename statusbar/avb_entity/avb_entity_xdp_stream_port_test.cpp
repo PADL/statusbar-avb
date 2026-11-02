@@ -269,6 +269,18 @@ TEST(avb_entity_xdp_stream_port, a_refused_launch_time_is_recorded)
     EXPECT_FALSE(port.launch_time());
 }
 
+TEST(avb_entity_xdp_stream_port, a_busy_polled_queue_is_remembered_until_close)
+{
+    XdpStreamPort port;
+    EXPECT_FALSE(port.napi_busy_poll());
+    port.set_napi_busy_poll(true);
+#if defined(__linux__) && defined(HAVE_XDP)
+    EXPECT_TRUE(port.napi_busy_poll());
+#endif
+    port.close();
+    EXPECT_FALSE(port.napi_busy_poll());
+}
+
 TEST(avb_entity_xdp_stream_port, open_fails_cleanly)
 {
     XdpStreamPort port;

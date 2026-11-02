@@ -271,6 +271,10 @@ class XdpStreamPort final : public StreamPort
     [[nodiscard]] auto hardware_address() const noexcept -> ieee::Eui48 override;
     /// True only under a native program with a zero-copy bind.
     [[nodiscard]] auto zero_copy() const noexcept -> bool override;
+    /// The queue's NAPI busy polls from its kthread: zero-copy tx_flush() then skips its kick
+    /// (net::XdpSocket::set_napi_busy_poll()). Any thread; close() clears it.
+    void set_napi_busy_poll(bool on) noexcept;
+    [[nodiscard]] auto napi_busy_poll() const noexcept -> bool;
 
   private:
     void refill_tx_pool() noexcept;
