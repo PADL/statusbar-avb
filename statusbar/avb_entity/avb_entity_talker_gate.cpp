@@ -16,7 +16,7 @@ namespace statusbar::avb_entity {
 namespace {
 
 /// The kit's lookup: the first ACMP talker stream declaring @p stream_id.
-auto acmp_talker_index(nanoavb::NanoAvbComponents const& components, tsn::StreamId const& stream_id) noexcept
+[[nodiscard]] auto acmp_talker_index(nanoavb::NanoAvbComponents const& components, tsn::StreamId const& stream_id) noexcept
     -> std::optional<uint16_t>
 {
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(TalkerGate::STREAM_COUNT); ++idx) {
