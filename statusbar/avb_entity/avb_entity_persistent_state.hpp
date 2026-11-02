@@ -130,10 +130,9 @@ struct PersistentState
 /// range) and not_supported for another version.
 [[nodiscard]] auto parse_persistent_state(std::string_view text) -> StatusValue<PersistentState>;
 
-/// Write @p state to @p path atomically: a temporary file beside it, fsync,
-/// rename over it, then fsync the directory. A missing directory (one level)
-/// is created.
-[[nodiscard]] auto save_persistent_state(std::string const& path, PersistentState const& state) -> Status;
+/// Write @p text (serialize_persistent_state's) to @p path atomically: a temporary file beside it,
+/// fsync, rename over it, then fsync the directory. A missing directory (one level) is created.
+[[nodiscard]] auto save_persistent_state(std::string const& path, std::string_view text) -> Status;
 
 /// What load_persistent_state found.
 enum class PersistentStateOutcome : uint8_t
