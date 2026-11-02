@@ -57,6 +57,17 @@ void append_u16(std::vector<std::uint8_t>& out, std::uint16_t v)
     out.push_back(std::uint8_t(v & 0xFF));
 }
 
+/// @p d's identity, length and canonical bytes onto @p canonical.
+void append_descriptor(std::vector<std::uint8_t>& canonical, AemRawDescriptor const& d)
+{
+    auto const bytes = canonical_bytes(d);
+    append_u16(canonical, d.configuration);
+    append_u16(canonical, d.descriptor_type);
+    append_u16(canonical, d.descriptor_index);
+    append_u16(canonical, std::uint16_t(bytes.size()));
+    canonical.insert(canonical.end(), bytes.begin(), bytes.end());
+}
+
 }  // namespace
 
 std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors)
@@ -74,13 +85,7 @@ std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors)
 
     std::vector<std::uint8_t> canonical;
     for (auto const i : order) {
-        auto const& d = descriptors[i];
-        auto bytes = canonical_bytes(d);
-        append_u16(canonical, d.configuration);
-        append_u16(canonical, d.descriptor_type);
-        append_u16(canonical, d.descriptor_index);
-        append_u16(canonical, std::uint16_t(bytes.size()));
-        canonical.insert(canonical.end(), bytes.begin(), bytes.end());
+        append_descriptor(canonical, descriptors[i]);
     }
 
     auto digest = crypto::sha256_sw(canonical);

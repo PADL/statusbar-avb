@@ -20,6 +20,15 @@ void connect_settled(ListenerStreamInfo& s, MilanSinkBinding const& binding, Mil
     s.stream_vlan_id = stream.vlan_id;
 }
 
+/// A CONNECT_TX_RESPONSE to @p cmd with @p status.
+[[nodiscard]] auto connect_tx_response(AcmpCommandResponse const& cmd, uint8_t const status) noexcept -> AcmpCommandResponse
+{
+    auto resp = cmd;
+    resp.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    resp.set_status(status);
+    return resp;
+}
+
 }  // namespace
 
 NanoAvbAcmpTalker::NanoAvbAcmpTalker(
@@ -128,26 +137,31 @@ auto NanoAvbAcmpTalker::receive_command(AcmpCommandResponse const& cmd, TimePoin
         return false;
     }
 
-    // IEEE 1722.1-2021 Table 8-3 TALKER_DEST_MAC_FAIL: a talker without a destination
-    // address yet (MAAP still acquiring) refuses CONNECT_TX; nothing is connected.
-    if (*event == TalkerEvent::RcvdConnectTx) {
-        if (auto const source = milan_source(cmd.talker_unique_id.get()); source && !source->dest_mac_valid) {
-            auto resp = cmd;
-            resp.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
-            resp.set_status(ACMP_STATUS_TALKER_DEST_MAC_FAIL);
-            if (callbacks_.tx_response) {
-                (void)callbacks_.tx_response(resp);
-            }
-            return true;
-        }
+    if (*event == TalkerEvent::RcvdConnectTx && refused_without_dest_mac(cmd)) {
+        return true;
     }
 
-    // Store the command in context
+    run_state_machine(cmd, *event, event_time);
+    return true;
+}
+
+void NanoAvbAcmpTalker::run_state_machine(AcmpCommandResponse const& cmd, TalkerEvent const event, TimePoint const event_time)
+{
     ctx_.rcvd_cmd_resp = cmd;
+    sm_.handle_event(ctx_, event, event_time);
+}
 
-    // Handle the event with the state machine
-    sm_.handle_event(ctx_, *event, event_time);
-
+auto NanoAvbAcmpTalker::refused_without_dest_mac(AcmpCommandResponse const& cmd) -> bool
+{
+    // IEEE 1722.1-2021 Table 8-3 TALKER_DEST_MAC_FAIL: a talker without a destination
+    // address yet (MAAP still acquiring) refuses CONNECT_TX; nothing is connected.
+    auto const source = milan_source(cmd.talker_unique_id.get());
+    if (!source || source->dest_mac_valid) {
+        return false;
+    }
+    if (callbacks_.tx_response) {
+        (void)callbacks_.tx_response(connect_tx_response(cmd, ACMP_STATUS_TALKER_DEST_MAC_FAIL));
+    }
     return true;
 }
 
