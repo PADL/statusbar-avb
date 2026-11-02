@@ -1672,21 +1672,18 @@ void AvbEntityKit::load_persistent_state()
 
 void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
 {
-    using atdecc::AEM_STATUS_SUCCESS;
-    using atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN;
-    auto log = host_.ctl_log();
-    auto const id = [](uint16_t const type, uint16_t const index) {
-        return nanoavb::DescriptorId{
-            .ref = {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, .symbol = 0};
-    };
-    // A refused value is dropped (the file is rewritten without it).
-    auto const refused = [&log](std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status) {
-        log.warning(
-            "kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
-    };
-    // Milan's restore order (lib_avb 70c93a1) less the rate the kit never changes, each
-    // through the handler's validation: formats (the mappings, which name their channels,
-    // off meanwhile, then apply_saved_audio_maps), clock source, then the rest.
+    // Each value through the handler's validation, formats first (the mappings, which name their
+    // channels, off meanwhile, then apply_saved_audio_maps), clock source, then the rest; the
+    // rate is not restored (SET_SAMPLING_RATE, Clause 7.4.21, accepts only the current rate).
+    apply_saved_descriptor_values(saved);
+    apply_saved_audio_maps(saved);
+    apply_saved_presentation_offsets(saved);
+    apply_saved_names(saved);
+    apply_saved_mvu_settings(saved);
+}
+
+void AvbEntityKit::apply_saved_descriptor_values(PersistentState const& saved)
+{
     for (auto const port : dynamic_input_ports_) {
         (void)host_.components().aem_handler.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, {}, false);
     }
