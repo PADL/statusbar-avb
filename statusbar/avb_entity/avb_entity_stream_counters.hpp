@@ -122,7 +122,7 @@ struct StreamInputIntervals
     /// End one observation interval of @p c: a locked stream that received nothing has stopped,
     /// each interval counter whose per-packet counter moved counts one, and the event counters
     /// are brought up to date. True when a value changed.
-    auto fold(StreamInputCounters& c) noexcept -> bool;
+    [[nodiscard]] auto fold(StreamInputCounters& c) noexcept -> bool;
 
     /// Zero every counter (Milan v1.2 Section 5.3.8.10: the input became
     /// bound), dropping any media lock first (unlock_stream_input).
@@ -159,10 +159,10 @@ struct StreamOutputIntervals
 
     /// The talker is (@p on) or is not streaming, @p totals sent so far. True
     /// when that starts or stops it.
-    auto set_streaming(bool on, StreamOutputTotals const& totals) noexcept -> bool;
+    [[nodiscard]] auto set_streaming(bool on, StreamOutputTotals const& totals) noexcept -> bool;
 
     /// End one observation interval at @p totals. True when a value changed.
-    auto fold(StreamOutputTotals const& totals) noexcept -> bool;
+    [[nodiscard]] auto fold(StreamOutputTotals const& totals) noexcept -> bool;
 };
 
 /// Update one StreamInputCounters from a received stream packet.
