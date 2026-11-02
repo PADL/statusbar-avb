@@ -17,11 +17,8 @@
 // deadlines it learns from next_deadline(). Expired timers are
 // reported and then cleared; the caller decides whether to rearm.
 //
-// Timer durations are the Milan v1.2 defaults (Section 4.2.7.1.1,
-// Table 4.3: joinTime 200 ms [180, 240], LeaveTime 5000 ms [4500, 7500],
-// leavealltimer 10-15 s [9.5, 15.5], periodictimer 1000 ms [900, 1500]).
-// Each value is also inside the IEEE 802.1Q-2018 Clause 10.7.11 ranges, so
-// classic MRP peers interoperate unchanged.
+// Timer durations come from a TimerConfig: IEEE 802.1Q-2018 Clause 10.7.11
+// (Table 10-7) by default; a profile such as Milan sets its own.
 //
 
 #include "statusbar/sm/sm.hpp"
@@ -36,30 +33,41 @@ namespace statusbar::srp::mrp {
 using sm::Clock;
 using sm::TimePoint;
 
+/// MRP timer durations; the defaults are IEEE 802.1Q-2018's (Clause 10.7.4, Table 10-7).
+struct TimerConfig
+{
+    /// JoinTime (Clause 10.7.4.1).
+    std::chrono::milliseconds join_time{200};
+    /// LeaveTime (Clause 10.7.4.2), 600-1000 ms.
+    std::chrono::milliseconds leave_time{1000};
+    /// The leavealltimer is drawn uniformly from [leave_all_time_min, leave_all_time_max):
+    /// LeaveAllTime (10 s) times [1, 1.5) (Clause 10.7.4.3).
+    std::chrono::milliseconds leave_all_time_min{10000};
+    std::chrono::milliseconds leave_all_time_max{15000};
+    /// The periodictimer (Clause 10.7.4.4).
+    std::chrono::milliseconds periodic_time{1000};
+
+    /// Every duration positive and the leavealltimer's range not empty.
+    [[nodiscard]] constexpr auto valid() const noexcept -> bool
+    {
+        return join_time.count() > 0 && leave_time.count() > 0 && periodic_time.count() > 0 && leave_all_time_min.count() > 0 &&
+            leave_all_time_max > leave_all_time_min;
+    }
+
+    friend auto operator==(TimerConfig const&, TimerConfig const&) -> bool = default;
+};
+
 /// Per-port MRP timer scheduler. Not thread-safe; a participant is
 /// assumed to be driven from a single event loop thread.
 class TimerScheduler
 {
   public:
-    /// JoinTime — Milan v1.2 Table 4.3 default 200 ms (802.1Q 10.7.4.1).
-    static constexpr auto JOIN_TIME = std::chrono::milliseconds(200);
-
-    /// LeaveTime: Milan v1.2 Table 4.3 default 5000 ms (IEEE 802.1Q 10.7.4.2), paired with the MSRP
-    /// IN/rLv! -> MT rule (Milan v1.2 Section 4.2.7.2.2) so an explicit withdrawal is seen at once.
-    static constexpr auto LEAVE_TIME = std::chrono::milliseconds(5000);
-
-    /// LeaveAllTime: Milan v1.2 Table 4.3 "10-15 s" (IEEE 802.1Q 10.7.4.3); each period is drawn
-    /// uniformly from [LEAVE_ALL_TIME_MIN, LEAVE_ALL_TIME_MAX).
-    static constexpr auto LEAVE_ALL_TIME_MIN = std::chrono::milliseconds(10000);
-    static constexpr auto LEAVE_ALL_TIME_MAX = std::chrono::milliseconds(15000);
-
-    /// PeriodicTransmissionTime — Milan v1.2 Table 4.3 default 1000 ms
-    /// (802.1Q 10.7.5.23).
-    static constexpr auto PERIODIC_TIME = std::chrono::milliseconds(1000);
-
-    /// Construct. Pass a nonzero seed for deterministic tests; the
+    /// Construct with @p config's durations. Pass a nonzero seed for deterministic tests; the
     /// default 0 seeds from std::random_device.
-    explicit TimerScheduler(uint64_t seed = 0);
+    explicit TimerScheduler(uint64_t seed = 0, TimerConfig const& config = {});
+
+    /// The durations the timers are armed with.
+    [[nodiscard]] auto config() const noexcept -> TimerConfig const& { return config_; }
 
     // --- Idempotent starts --------------------------------------------
     // If the timer is already running, these are a no-op (deadline is
@@ -118,9 +126,10 @@ class TimerScheduler
     [[nodiscard]] auto tick(TimePoint now) noexcept -> Expired;
 
   private:
-    /// Uniform random interval in [LEAVE_ALL_TIME_MIN, LEAVE_ALL_TIME_MAX).
-    auto randomized_leaveall_duration() -> std::chrono::milliseconds;
+    /// Uniform random interval in [leave_all_time_min, leave_all_time_max).
+    [[nodiscard]] auto randomized_leaveall_duration() -> std::chrono::milliseconds;
 
+    TimerConfig config_;
     std::optional<TimePoint> join_{};
     std::optional<TimePoint> leave_{};
     std::optional<TimePoint> leaveall_{};

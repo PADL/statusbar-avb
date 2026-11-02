@@ -177,6 +177,25 @@ TEST(nanoavb_base_builder, full_configuration)
     EXPECT_EQ((*result)->adp_advertiser.valid_time(), 31);
 }
 
+// A Milan entity runs MSRP and MVRP with Milan's timers (Milan v1.2 Section 4.2.7.1.1); a
+// classic one keeps IEEE 802.1Q-2018's.
+TEST(nanoavb_base_builder, the_profile_picks_the_msrp_timers)
+{
+    using namespace statusbar::atdecc::aem;
+    auto const components = [](bool const milan) {
+        EntityModel model{EntityModelConfig{}};
+        model.set_entity(DescriptorEntity{});
+        return std::make_unique<NanoAvbComponents>(std::move(model), AdpAdvertiserConfig{}, 1, 1, 1, milan);
+    };
+    auto const milan = components(true);
+    EXPECT_TRUE(milan->msrp_handler.msrp_config().timers == MILAN_MRP_TIMERS);
+    auto const classic = components(false);
+    EXPECT_TRUE(classic->msrp_handler.msrp_config().timers == statusbar::srp::mrp::TimerConfig{});
+    EXPECT_EQ(classic->msrp_handler.msrp_config().timers.leave_time.count(), 1000);
+    EXPECT_TRUE(milan->mvrp_handler.mvrp_config().timers == MILAN_MRP_TIMERS);
+    EXPECT_TRUE(classic->mvrp_handler.mvrp_config().timers == statusbar::srp::mrp::TimerConfig{});
+}
+
 //
 // Test Runner
 //

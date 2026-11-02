@@ -485,16 +485,17 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
 
     std::vector<std::vector<uint8_t>> talker_out;
     std::vector<std::vector<uint8_t>> listener_out;
-    MsrpParticipant talker{MsrpConfig{}, 0x7a1};
+    MsrpParticipant talker{milan_msrp_config(MsrpConfig{}), 0x7a1};
     talker.set_send_pdu([&talker_out](std::span<uint8_t const> p) {
         talker_out.emplace_back(p.begin(), p.end());
         return true;
     });
     talker.start(now);
-    MsrpHandler<> listener{MsrpConfig{}, MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
-                               listener_out.emplace_back(p.begin(), p.end());
-                               return true;
-                           }}};
+    MsrpHandler<> listener{
+        milan_msrp_config(MsrpConfig{}), MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
+            listener_out.emplace_back(p.begin(), p.end());
+            return true;
+        }}};
     listener.set_listener_waits_for_talker(true);
     int hooks = 0;
     listener.set_on_remote_talker([&](StreamId const& s) {

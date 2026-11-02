@@ -123,14 +123,15 @@ See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
 ## Timer scheduler — `mrp_timers.hpp`
 
 `TimerScheduler` tracks four deadline-based timers as `std::optional<TimePoint>`
-fields:
+fields, with the durations of its `TimerConfig` (IEEE 802.1Q-2018 Table 10-7 by
+default; `MsrpConfig::timers` sets MSRP's):
 
-| Timer       | Duration                 | Clause       |
-|-------------|--------------------------|--------------|
-| JoinTimer   | 100 ms                   | 10.7.4.1     |
-| LeaveTimer  | 1000 ms                  | 10.7.4.3     |
-| LeaveAllTimer | randomized 5–15 s      | 10.7.4.2     |
-| PeriodicTimer | 1000 ms                | 10.7.5.23    |
+| Timer         | Default                  | Clause       |
+|---------------|--------------------------|--------------|
+| JoinTimer     | 200 ms                   | 10.7.4.1     |
+| LeaveTimer    | 1000 ms                  | 10.7.4.2     |
+| LeaveAllTimer | randomized [10 s, 15 s)  | 10.7.4.3     |
+| PeriodicTimer | 1000 ms                  | 10.7.4.4     |
 
 ### Operations
 
@@ -351,13 +352,15 @@ A full declare → peer notification → withdraw cycle:
 
 - **Immediate leave for MSRP.** Milan v1.2 Section 4.2.7.2.2 replaces the
   registrar's `IN / rLv! -> (start leavetimer) -> LV` with
-  `IN / rLv! -> (Lv) -> MT` for MSRP (`Event::RLeaveImmediate`); Lv and Mt
-  behave as for the standard rLv!. MVRP keeps the standard transition.
-- **Timers.** LeaveTime defaults to 5000 ms (Milan v1.2 Table 4.3,
-  IEEE 802.1Q 10.7.4.2). The long LeaveTime is safe only because of the
-  immediate-leave rule: an explicit withdrawal is still seen at once.
-  LeaveAllTime is drawn uniformly from [10 s, 15 s) per period, inside the
-  9.5 s to 15.5 s tolerance (IEEE 802.1Q 10.7.4.3).
+  `IN / rLv! -> (Lv) -> MT` for MSRP (`Event::RLeaveImmediate`), used when
+  `MsrpConfig::leave_immediate` is set; Lv and Mt behave as for the standard
+  rLv!. MVRP keeps the standard transition.
+- **Timers.** Milan v1.2 Table 4.3 sets LeaveTime to 5000 ms, outside IEEE
+  802.1Q-2018's 600-1000 ms, so the defaults stay 802.1Q's and an entity sets
+  Milan's through `MsrpConfig::timers` (nanoavb's `milan_msrp_config`, used for
+  a Milan entity profile). The long LeaveTime is safe only with the
+  immediate-leave rule: an explicit withdrawal is still seen at once. Both
+  draw LeaveAllTime uniformly from [10 s, 15 s) per period. MVRP keeps 802.1Q's.
 - **Changed values are declared New.** When an attribute we declare is
   re-declared with a different value (a talker moved to an adopted VID),
   the participant declares it New (IEEE 802.1Q-2018 10.7.5.1) so the change
