@@ -376,7 +376,7 @@ from its next PDU on, where it stays; it is callable from any thread.
 ## Local ATDECC socket
 
 Controllers on the same host (la_avdecc's local protocol interface,
-ATDECCSwift's `UnixSocketPort`, `statusbar-atdecc-monitor --socket`) reach the
+`statusbar-atdecc-monitor --socket`) reach the
 entity over an AF_UNIX datagram socket, without raw-socket privileges
 (`nanoavb_local_port.hpp`).
 
