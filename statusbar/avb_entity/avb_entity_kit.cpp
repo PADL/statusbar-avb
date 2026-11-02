@@ -2031,18 +2031,18 @@ auto AvbEntityKit::collect_persistent_state() const -> PersistentState
 void AvbEntityKit::persist()
 {
     persist_pending_ = false;
-    if (!persistence_active_) {
-        return;
+    if (!persistence_active_ || persistence_blocked_) {
+        return;  // off, or the file did not read at start: never overwritten this run
     }
-    if (persistence_blocked_) {
-        return;  // the file did not read at start: it is never overwritten this run
+    auto text = serialize_persistent_state(collect_persistent_state());
+    if (text != persisted_text_) {
+        save_persisted(std::move(text));
     }
-    auto const state = collect_persistent_state();
-    auto text = serialize_persistent_state(state);
-    if (text == persisted_text_) {
-        return;
-    }
-    if (auto const saved = save_persistent_state(config_.persistent_state_path, state); !saved) {
+}
+
+void AvbEntityKit::save_persisted(std::string text)
+{
+    if (auto const saved = save_persistent_state(config_.persistent_state_path, text); !saved) {
         host_.ctl_log().warning("kit: could not save the persistent state: error {}", saved.error().value());
         return;
     }

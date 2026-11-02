@@ -1451,7 +1451,7 @@ TEST(avb_entity_kit_persistence, other_model_and_corrupt_files)
     other.entity_model_id = 0x99;
     other.configured_entity_name = "kit milan";
     other.names.push_back({.descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0, .name_index = 0, .value = "Stale"});
-    EXPECT_TRUE(save_persistent_state(path, other).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(other)).has_value());
     {
         PersistentKit m{path};
         EXPECT_TRUE(m.start_ready());
@@ -1485,7 +1485,7 @@ TEST(avb_entity_kit_persistence, other_model_and_corrupt_files)
     // A saved entity name gives way to a changed configured name
     other.entity_model_id = 0;
     other.configured_entity_name = "an older configured name";
-    EXPECT_TRUE(save_persistent_state(path, other).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(other)).has_value());
     {
         PersistentKit m{path};
         EXPECT_TRUE(m.start_ready());
@@ -1690,7 +1690,7 @@ TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
     PersistentState state = load_persistent_state(path, 0, {}).state;
     state.listener_bindings.push_back(
         {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 0, .format = base_format(48000, 6)});
-    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     {
         RateKit m{path};
         EXPECT_TRUE(m.start_ready());
@@ -1837,7 +1837,7 @@ TEST(avb_entity_kit_persistence, binding_for_a_changed_input_format_dropped)
     saved.configured_presentation_offset_ns = 2'000'000;
     saved.listener_bindings.push_back(
         {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 2, .format = CRF_MILAN_48K});
-    EXPECT_TRUE(save_persistent_state(path, saved).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(saved)).has_value());
     PersistentKit m{path};
     EXPECT_TRUE(m.start_ready());
     EXPECT_TRUE(m.kit.host().components().acmp_listener.fast_connect_goals().empty());
@@ -2472,7 +2472,7 @@ TEST(avb_entity_kit_counters, a_restored_binding_unbinds_without_an_interruption
     saved.configured_presentation_offset_ns = 2'000'000;
     saved.listener_bindings.push_back(
         {.stream_input = 0, .talker_entity_id = 0x020000fffe000041ULL, .talker_unique_id = 0, .started = true});
-    EXPECT_TRUE(save_persistent_state(path, saved).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(saved)).has_value());
     MilanPair p{path};
     EXPECT_TRUE(p.start());
     EXPECT_TRUE(p.sink().bound());
@@ -2703,7 +2703,7 @@ TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
     PersistentState state = load_persistent_state(path, 0, {}).state;
     state.listener_bindings.push_back(
         {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 0, .format = base_format(48000, 2)});
-    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     {
         RateKit m{path, 0x72, true};
         std::vector<std::vector<nanoavb::DynamicAudioMapping>> routed;
@@ -2732,7 +2732,7 @@ TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
     state = load_persistent_state(path, 0, {}).state;
     state.audio_maps[0].mappings.push_back({.stream_index = 0, .stream_channel = 9, .cluster_offset = 6, .cluster_channel = 0});
     state.listener_bindings.clear();
-    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     {
         RateKit m{path, 0x72, true};
         m.kit.set_on_input_mappings_changed(
