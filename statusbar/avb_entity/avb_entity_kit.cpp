@@ -45,7 +45,7 @@ auto talker_dest_mac(AvbEntityAudioIOConfig const& config, StreamKind const kind
 
 /// Descriptor (@p type, @p index) of @p host's model as a @p T; nullopt when there is none.
 template <typename T>
-auto load_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t const index) -> std::optional<T>
+[[nodiscard]] auto load_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t const index) -> std::optional<T>
 {
     auto const blob = host.get_descriptor(type, index);
     if (!blob.has_value()) {
@@ -57,7 +57,7 @@ auto load_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t co
 }
 
 /// The AUDIO_CLUSTER at @p offset from @p port's base cluster; nullopt when there is none.
-auto audio_cluster(AvbEntityHost const& host, atdecc::aem::DescriptorStreamPort const& port, uint16_t const offset)
+[[nodiscard]] auto audio_cluster(AvbEntityHost const& host, atdecc::aem::DescriptorStreamPort const& port, uint16_t const offset)
     -> std::optional<atdecc::aem::DescriptorAudioCluster>
 {
     return load_descriptor<atdecc::aem::DescriptorAudioCluster>(

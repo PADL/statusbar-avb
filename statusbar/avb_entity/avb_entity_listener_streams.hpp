@@ -173,13 +173,13 @@ struct ListenerStreams
     /// Add an RX slot shaped by @p spec, constructing the kind-matching
     /// deserializer. A pending set_consume() registration for spec.index is
     /// bound here. Errors: kind `other`, unknown rate, or more than MAX_ENTITY_STREAMS slots.
-    auto open_stream(StreamSpec const& spec) -> Status;
+    [[nodiscard]] auto open_stream(StreamSpec const& spec) -> Status;
 
     /// Re-shape the slot of @p spec.index for @p spec (Milan v1.2 Section 4.4.2.2), keeping its
     /// consumers and counters; an audio slot may change kind (AAF, AM824). Reactor thread; the slot
     /// is locked (SlotGuard) so RX drops its frames. Errors (slot unchanged): no such slot, a kind
     /// change to or from CRF, or a format open_stream would refuse.
-    auto reformat_stream(StreamSpec const& spec) -> Status;
+    [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
 
     /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:
     /// each decoded channel is delivered as floats with its reconstructed
@@ -313,11 +313,11 @@ struct ListenerStreams
     void bind_pending_consume(ListenerStreamSlot& slot);
     /// Build @p slot's deserializer for @p spec: what open_stream and
     /// reformat_stream share. Errors as open_stream's.
-    static auto shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    [[nodiscard]] static auto shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Take @p spec on the newly shaped @p slot and bind its pending callbacks.
     void begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec);
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
-    static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Take @p trial's deserializers and @p spec's format into @p slot. Under the guard.
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
 

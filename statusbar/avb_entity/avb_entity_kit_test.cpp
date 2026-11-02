@@ -516,7 +516,7 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
         EXPECT_TRUE(components.msrp_handler.listener_ready(stream_id(0x0200000000000200ULL + spec.index), now).has_value());
     }
     for (auto const& spec : talkers) {
-        EXPECT_TRUE(components.msrp_handler.registered_talker_advertise(stream_id(0x0200000000000100ULL + spec.index)) != nullptr);
+        EXPECT_TRUE(components.msrp_handler.get_talker_stream(stream_id(0x0200000000000100ULL + spec.index)) != nullptr);
     }
 
     // AEM: every STREAM_INPUT and STREAM_OUTPUT latches its own runtime state

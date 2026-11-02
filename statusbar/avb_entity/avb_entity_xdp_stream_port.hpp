@@ -115,7 +115,7 @@ class XdpStreamPort final : public StreamPort
             return slots_[--count_];
         }
         /// False when full.
-        auto put(net::EthernetTxSlot const& slot) noexcept -> bool
+        [[nodiscard]] auto put(net::EthernetTxSlot const& slot) noexcept -> bool
         {
             if (count_ == TX_POOL) {
                 return false;
