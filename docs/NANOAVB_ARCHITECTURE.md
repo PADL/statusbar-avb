@@ -418,9 +418,10 @@ arrive before MAAP has defended its block.
   MSRP_ACC_LAT_VALID (BAD_ARGUMENTS past 0x7FFFFFFF ns; any other
   sub-command refuses the whole command NOT_SUPPORTED). SET/GET_MAX_TRANSIT_TIME
   (IEEE 1722.1-2021 Clauses 7.4.77-78, Milan v1.3 Sections 5.4.2.30-31) set
-  the same offset. A change through either notifies SET_STREAM_INFO or
-  SET_MAX_TRANSIT_TIME, GET_STREAM_INFO and GET_MAX_TRANSIT_TIME (a Milan 1.2
-  controller reads the offset in GET_STREAM_INFO). In the IEEE 1722.1-2021
+  the same offset. A change through either is notified as that command's
+  response, to every registered controller but the requester in Milan
+  (v1.2 Section 5.4.5.2, v1.3 Section 5.4.5.3; Table 5.22 lists no
+  GET_STREAM_INFO for an output's offset). In the IEEE 1722.1-2021
   GET_STREAM_INFO layout (`set_stream_info_layout`) SET_STREAM_INFO's
   MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9) and only
   SET_MAX_TRANSIT_TIME sets the offset.
