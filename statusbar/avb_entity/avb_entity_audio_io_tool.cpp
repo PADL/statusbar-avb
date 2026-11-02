@@ -438,11 +438,9 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
         entity.config().stream_tx_cpu_affinity);
 
     bool const tx_kick = entity.config().stream_tx_kicker && !kick_in_rx;
-    if (kick_in_rx) {
-        std::print("Stream TX: kicked from the RX timer's tick (core {})\n", entity.config().stream_rx_cpu_affinity);
-    }
     if (tx_kick) {
         if (auto const ks = tx_kicker.start(); !ks) {
+            entity.kick_from_media_tick();
             std::print(stderr, "Warning: stream TX kicker failed to start ({}); the media tick kicks\n", ks.error().message());
         } else {
             std::print(
@@ -455,12 +453,18 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
     bool const rx_rt = entity.config().stream_rx_rt_timer;
     if (rx_rt) {
         if (auto const rs = rx_timer.start(); !rs) {
-            std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
+            entity.rx_to_reactor(reactor);
+            std::print(
+                stderr,
+                "Warning: stream RX timer failed to start ({}); RX returns to the reactor{}\n",
+                rs.error().message(),
+                kick_in_rx ? " and the media tick kicks" : "");
         } else {
             std::print(
-                "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick\n",
+                "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick{}\n",
                 entity.config().stream_rx_cpu_affinity,
-                entity.config().stream_rx_period_us);
+                entity.config().stream_rx_period_us,
+                kick_in_rx ? ", kicking TX from it" : "");
         }
     }
 
@@ -505,8 +509,8 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
                         kick_in_rx ? "rx-timer" : "kicker-timer",
                         tx_kicks.load(),
                         tx_kick_error_count.load(),
-                        tx_kicker.recovery_count(),
-                        tx_kicker.missed_cycles(),
+                        tx_kick ? tx_kicker.recovery_count() : 0,
+                        tx_kick ? tx_kicker.missed_cycles() : 0,
                         d.average_ns(),
                         d.min_ns,
                         d.max_ns);

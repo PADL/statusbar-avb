@@ -408,6 +408,35 @@ TEST(ptp_bridge_sleep, sleep_fails_when_unhealthy)
     bridge.stop_sampling();
 }
 
+TEST(ptp_bridge_sleep, sleep_bails_when_the_caller_stops)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    // A caller that has already been told to stop: the sleep's final spin
+    // reads the flag and returns bridge_not_running instead of the wake time.
+    std::atomic<bool> const keep_going{false};
+    auto now = std::chrono::steady_clock::now();
+    auto mono_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    auto deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 10'000'000LL);
+
+    auto result = bridge.sleep_until_ptp(deadline_ptp.time_ns, &keep_going);
+
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_running));
+
+    bridge.stop_sampling();
+}
+
 TEST(ptp_bridge_sleep, sleep_returns_wake_time)
 {
     PtpTimeBridge bridge;

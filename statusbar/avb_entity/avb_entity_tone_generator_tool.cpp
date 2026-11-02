@@ -85,10 +85,17 @@ struct Config
 };
 
 auto build_arg_specs(Config& config) -> args::ArgumentSpecs
-{
+{  // NOLINT(statusbar-block-statements) the argument table, one spec after another; pre-dates the gate
     args::ArgumentSpecs specs;
     ptpclient::add_ptp_arg_specs(specs, config.ptp_app);
     avb_entity::add_common_entity_arg_specs(specs, config.entity, config.tool);
+    // This tool runs neither the RX drain timer nor the TX kicker the audio-io
+    // tool runs, so the shared config's defaults for them must not apply: the
+    // reactor drains its inputs and the media tick kicks. Set here, not
+    // exposed as arguments, so nothing can turn them on.
+    config.entity.stream_rx_rt_timer = false;
+    config.entity.stream_tx_kicker = false;
+    config.entity.stream_tx_kick_in_rx_timer = false;
 
     specs.add<double>(
         "tone.amplitude",

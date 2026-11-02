@@ -14,7 +14,11 @@
 /// between the two sides). This class carries that answer as a lock that
 /// is taken only when it is needed, so the rawnet path - the default, and
 /// what the entities have always run on - pays nothing for the ring
-/// backends' constraint, and the ring backends are correct.
+/// backends' constraint, and the ring backends are correct. The lock is a
+/// plain spin: it assumes the two sides run on different cores, as the
+/// media timer and the RX drain do on the rigs this is for. A holder that
+/// shares a core with a SCHED_FIFO waiter would be spun against until the
+/// kernel's RT throttling let it run.
 ///
 /// Guard holds that lock for the shortest stretch that is still right: a
 /// tx_start/tx_commit pair, or an rx_start/copy/rx_release triple. The

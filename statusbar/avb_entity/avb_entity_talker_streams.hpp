@@ -6,7 +6,7 @@
 /// @file avb_entity_talker_streams.hpp
 /// @brief TalkerStreams — the local AVB stream TX path.
 ///
-/// Owns the qdisc-bypass TX socket, N per-stream TX slots (each holding the
+/// Sends on the entity's StreamPort, owns N per-stream TX slots (each holding the
 /// kind-matching AM824/AAF/CRF serializer shaped by its StreamSpec), the TX
 /// packet counters, and the TX-capture recorder. Runs on the SCHED_FIFO
 /// media-timer thread (called from the entities' process_audio). Reads the

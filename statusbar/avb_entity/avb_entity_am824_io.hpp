@@ -114,9 +114,9 @@ struct AvbEntityAm824IOConfig
     uint32_t lock_tolerance_ns{5'000};
 
     /// Drain the AM824 stream RX on a dedicated SCHED_FIFO timer (its own isolated
-    /// core) instead of the shared reactor -- see AvbEntityAudioIOConfig::stream_rx_rt_timer.
-    /// Off (default) = reactor path.
-    bool stream_rx_rt_timer{true};     ///< on by default: see AvbEntityAudioIOConfig::stream_rx_rt_timer
+    /// core) instead of the shared reactor -- see AvbEntityAudioIOConfig::stream_rx_rt_timer,
+    /// on by default as there. Off = reactor path.
+    bool stream_rx_rt_timer{true};
     int stream_rx_cpu_affinity{2};     ///< isolated core for the RX timer (media timer = 3)
     uint32_t stream_rx_period_us{50};  ///< RX drain tick
 };
@@ -277,6 +277,15 @@ class AvbEntityAm824IO
         return (rt_rx_handler_ != nullptr) ? listener_.drain_rx(wake_gptp_ns) : 0;
     }
 
+    /// The tool's RX timer did not start: the kept handler goes onto @p reactor,
+    /// which drains RX as it does without stream_rx_rt_timer.
+    void rx_to_reactor(net::MessageReactor& reactor)
+    {
+        if (rt_rx_handler_ != nullptr) {
+            reactor.add(std::move(rt_rx_handler_));
+        }
+    }
+
     /// Set custom audio processing callback (in addition to biquad filter)
     /// @param callback Function called with interleaved N-channel samples for processing
     auto set_audio_callback(Am824AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }
@@ -381,10 +390,11 @@ class AvbEntityAm824IO
     /// the talker and listener bind to it, and they never touch it after stop.
     StreamPort stream_port_{};
 
-    /// The stream RX socket handler. Default: moved into the reactor by start(). With
-    /// stream_rx_rt_timer set it is kept HERE (owning the socket) + drained by the
-    /// tool's SCHED_FIFO RX timer via drain_stream_rx(). Base type so the concrete
-    /// handler stays private to the .cpp.
+    /// The stream RX handler (it drains the entity's stream port). Without
+    /// stream_rx_rt_timer start() moves it into the reactor; with it, it is kept
+    /// HERE and drained by the tool's SCHED_FIFO RX timer via drain_stream_rx(),
+    /// or handed to the reactor by rx_to_reactor() if that timer does not start.
+    /// Base type so the concrete handler stays private to the .cpp.
     std::unique_ptr<net::Pollable> rt_rx_handler_{};
 
     /// Resolved stream destination MAC (from ACMP talker stream 0).

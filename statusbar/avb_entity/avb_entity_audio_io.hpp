@@ -231,6 +231,10 @@ class AvbEntityAudioIO
     /// kicker timer when config.stream_tx_kicker is set; the media tick then
     /// leaves the kick to it (see TalkerStreams::kick_tx).
     void kick_stream_tx() { kit_.kick_stream_tx(); }
+    /// The tool's kicker timer did not start: the media tick kicks again.
+    void kick_from_media_tick() { kit_.kick_from_media_tick(); }
+    /// The tool's RX timer did not start: RX back onto @p reactor (see AvbEntityKit).
+    void rx_to_reactor(net::MessageReactor& reactor) { kit_.rx_to_reactor(reactor); }
 
   private:
     /// Periodically (re)estimate the GPS frequency ratio r = switch/GPS by

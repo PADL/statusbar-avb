@@ -323,9 +323,10 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
             }
             (void)rx_groups.try_push_back(group);
         }
-        // In RT-timer mode the returned handler (its socket) is kept alive
-        // here; the tool's SCHED_FIFO RX timer drains it via drain_stream_rx()
-        // with its wake gPTP time, so RX can't be starved by the control plane.
+        // In RT-timer mode the returned handler is kept alive here; the tool's
+        // SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake gPTP
+        // time, so RX can't be starved by the control plane. rx_to_reactor()
+        // is the way back should that timer not start.
         if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
         }
@@ -339,7 +340,9 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         stream_port_,
         TalkerStreams::TxPcapConfig{
             .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
-    // The TX kick off the media thread (the tool's kicker timer).
+    // The TX kick off the media thread (the tool's kicker timer, or its RX
+    // timer's tick). The tool must then run that timer, or call
+    // kick_from_media_tick() / rx_to_reactor() when it cannot.
     bool const kick_elsewhere = config_.stream_tx_kicker || (config_.stream_tx_kick_in_rx_timer && config_.stream_rx_rt_timer);
     if (!talker_->set_external_kick(kick_elsewhere)) {
         host_.ctl_log().warning("stream_tx.kicker: no stream port to kick; kicking in the media tick");
@@ -354,6 +357,16 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
     }
 
     return success();
+}
+
+void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
+{
+    if (rt_rx_handler_ != nullptr) {
+        reactor.add(std::move(rt_rx_handler_));
+    }
+    if (config_.stream_tx_kick_in_rx_timer) {
+        kick_from_media_tick();
+    }
 }
 
 auto AvbEntityKit::stop() -> Status

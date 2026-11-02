@@ -269,7 +269,7 @@ struct MainLoopResult
 
 MainLoopResult run_main_loop(
     net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, avb_entity::AvbEntityAm824IO& entity, Config const& config)
-{
+{  // NOLINT(statusbar-block-statements) the loop's optional RT timer, set up then torn down in order; pre-dates the gate
     MainLoopResult result;
     result.compensation_ns = ctx.compensation_ns;
 
@@ -346,7 +346,8 @@ MainLoopResult run_main_loop(
 
     if (config.entity.stream_rx_rt_timer) {
         if (auto const rs = rx_timer.start(); !rs) {
-            std::print(stderr, "Warning: stream RX timer failed to start ({}); RX stays on the reactor\n", rs.error().message());
+            entity.rx_to_reactor(reactor);
+            std::print(stderr, "Warning: stream RX timer failed to start ({}); RX returns to the reactor\n", rs.error().message());
         } else {
             std::print(
                 "Stream RX: dedicated SCHED_FIFO timer on core {} @ {} us tick\n",

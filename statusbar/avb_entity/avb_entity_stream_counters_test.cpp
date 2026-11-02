@@ -177,6 +177,24 @@ TEST(stream_counters, margin_histogram_bins_by_presentation_offset)
     EXPECT_EQ(h.overflow, 0);
 }
 
+TEST(stream_counters, margin_histogram_config_holds_128_bins_for_any_offset)
+{
+    // 2 ms: [-1 ms, +3 ms) in 31.25 us bins. 100 ns: the bin floors at 1 ns and
+    // the range narrows to what 128 of them cover. Both keep exactly 128 bins,
+    // which is what the AtomicHistogram<128> behind them can hold.
+    auto const two_ms = StreamInputCounters::margin_histogram_config_for(2'000'000);
+    EXPECT_EQ(two_ms.low_ns, -1'000'000);
+    EXPECT_EQ(two_ms.high_ns, 3'000'000);
+    EXPECT_EQ(two_ms.bin_width_ns, 31'250);
+    EXPECT_EQ(two_ms.num_bins(), 128);
+    auto const tiny = StreamInputCounters::margin_histogram_config_for(100);
+    EXPECT_EQ(tiny.bin_width_ns, 1);
+    EXPECT_EQ(tiny.low_ns, -50);
+    EXPECT_EQ(tiny.high_ns, 78);
+    EXPECT_EQ(tiny.num_bins(), 128);
+    EXPECT_TRUE(tiny.is_valid());
+}
+
 TEST(stream_counters, margin_skipped_without_gptp_now)
 {
     StreamInputCounters c;

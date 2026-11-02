@@ -15,9 +15,8 @@
 ///
 /// The reactor's monotonic now is intentionally ignored: the RX tally + the AM824/AAF
 /// deserialize need a gPTP "now", which the drain callback sources itself (the media-timer
-/// wake for the reactor path, or the RX timer's wake in RT-timer mode). The socket is
-/// borrowable via socket() for dynamic multicast join/leave on ACMP connect/disconnect;
-/// the pointer stays valid across the move into the reactor (heap-allocated Pollable).
+/// wake for the reactor path, or the RX timer's wake in RT-timer mode). The port it
+/// drains belongs to the entity, which joins and leaves multicast groups on it directly.
 
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avtp/avtp.hpp"

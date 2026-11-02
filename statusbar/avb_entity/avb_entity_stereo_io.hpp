@@ -243,6 +243,15 @@ class AvbEntityStereoIO
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
     }
 
+    /// The tool's RX timer did not start: the kept handler goes onto @p reactor,
+    /// which drains RX as it does without stream_rx_rt_timer.
+    void rx_to_reactor(net::MessageReactor& reactor)
+    {
+        if (rt_rx_handler_ != nullptr) {
+            reactor.add(std::move(rt_rx_handler_));
+        }
+    }
+
     /// Set custom audio processing callback (in addition to biquad filter)
     /// @param callback Function called with interleaved stereo samples for processing
     auto set_audio_callback(AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }

@@ -131,11 +131,21 @@ class AvbEntityKit
         return base_r;
     }
 
-    /// Batch-drain the stream RX socket from the tool's dedicated SCHED_FIFO RX
-    /// timer (config.stream_rx_rt_timer). No-op when RX is on the reactor.
-    /// The TX kick from the tool's SCHED_FIFO kicker timer (config.stream_tx_kicker).
+    /// The TX kick from the tool's SCHED_FIFO kicker timer (config.stream_tx_kicker)
+    /// or from its RX timer's tick (config.stream_tx_kick_in_rx_timer).
     void kick_stream_tx() { talker_->kick_tx(); }
 
+    /// The tool could not run the timer that was to kick: the media tick kicks
+    /// again, as it does when neither option is set.
+    void kick_from_media_tick() { (void)talker_->set_external_kick(false); }
+
+    /// The tool could not run the RX timer start() kept the handler for: hand
+    /// the handler to @p reactor so the reactor drains RX as it does by default,
+    /// and, when the kick was to come from that timer, kick from the media tick.
+    void rx_to_reactor(net::MessageReactor& reactor);
+
+    /// Batch-drain the stream RX socket from the tool's dedicated SCHED_FIFO RX
+    /// timer (config.stream_rx_rt_timer). No-op when RX is on the reactor.
     auto drain_stream_rx(int64_t const wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;

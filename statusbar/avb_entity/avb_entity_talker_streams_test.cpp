@@ -15,7 +15,9 @@
 #include "statusbar/test/test.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <memory_resource>
 
 using namespace statusbar;
 using statusbar::avb_entity::crf_aligned_base;
@@ -102,6 +104,23 @@ TEST(crf_math, live_base_tracks_now_not_anchor)
     // ~1 s elapsed; allow a few ms of slack for pacing quantization.
     EXPECT_TRUE(delta > 995'000'000ULL);
     EXPECT_TRUE(delta < 1'005'000'000ULL);
+}
+
+// --- The TX kick hand-off, with no port behind it -----------------------------
+
+TEST(talker_streams, external_kick_needs_a_port)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<uint64_t> const gptp_now{0};
+    statusbar::avb_entity::TalkerStreams talker{
+        statusbar::avb_entity::TalkerStreamsConfig{.sample_rate = 96000}, mc, gptp_now, std::pmr::get_default_resource()};
+    // No open_tx: nothing to kick, so the request is refused and the state
+    // stays "the tick kicks" -- which is a no-op too, with no port.
+    EXPECT_FALSE(talker.set_external_kick(true));
+    EXPECT_FALSE(talker.external_kick());
+    EXPECT_TRUE(talker.set_external_kick(false));
+    talker.flush_tx();  // no port: nothing happens, nothing crashes
+    talker.kick_tx();
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

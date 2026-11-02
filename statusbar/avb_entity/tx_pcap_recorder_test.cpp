@@ -124,7 +124,7 @@ TEST(tx_pcap_recorder, snaplen_truncates_captured_bytes)
     EXPECT_EQ(frames[0].size(), 16U);  // truncated to snaplen
     EXPECT_TRUE(std::equal(frames[0].begin(), frames[0].end(), f.begin()));
 
-    // The record says the frame was 200 bytes on the wire. Before BUG-005 it
+    // The record says the frame was 200 bytes on the wire. Before the fix it
     // said 16, so a snapped capture read as a complete one and the arena's
     // carefully stored original length went nowhere.
     auto const wire = read_back_wire_lengths(path);
