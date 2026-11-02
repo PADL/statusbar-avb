@@ -240,6 +240,12 @@ auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
     // Drain every queued frame in one pass (the arrival rate is 8000/s = 125 us apart;
     // a 50 us RX-timer tick or a reactor wake sees 0-3 frames). All frames in this pass
     // share gptp_now_ns -- the caller's fresh gPTP "now".
+    //
+    // One pass is one port cycle. The XDP backend hands out at most its
+    // per-cycle budget of frames between begin_cycle() and end_cycle(), and
+    // without the begin the budget is never reset: the first 32 frames
+    // arrive and nothing after them.
+    begin_port_cycle();
     size_t drained = 0;
     while (drained < MAX_DRAIN_PER_CALL) {
         size_t const length = take_rx_frame();
@@ -249,10 +255,21 @@ auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
         on_stream_rx_frame({rx_buf_.data(), length}, gptp_now_ns);
         ++drained;
     }
+    end_port_cycle();
+    return drained;
+}
+
+void ListenerStreams::begin_port_cycle()
+{
+    StreamPort::Guard const guard{*port_};
+    port_->port().begin_cycle();
+}
+
+void ListenerStreams::end_port_cycle()
+{
     // The ring backends refill their receive ring here; rawnet has nothing to do.
     StreamPort::Guard const guard{*port_};
     (void)port_->port().end_cycle();
-    return drained;
 }
 
 void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)

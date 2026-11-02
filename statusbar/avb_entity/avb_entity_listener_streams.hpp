@@ -217,6 +217,10 @@ struct ListenerStreams
     /// nothing was queued or the frame was not AVTP. Holds the port guard for
     /// exactly that - the decode happens outside it.
     [[nodiscard]] auto take_rx_frame() -> size_t;
+    /// One drain_rx pass is one port cycle: begin resets the XDP backend's
+    /// per-cycle receive budget, end refills its ring. Each under the guard.
+    void begin_port_cycle();
+    void end_port_cycle();
     /// The AVTPDU of @p frame into rx_buf_: its length, 0 for a frame that is not AVTP.
     [[nodiscard]] auto copy_avtpdu(std::span<uint8_t const> frame) -> size_t;
     /// Frames per drain_rx call at most, so a flood cannot pin the RX thread.
