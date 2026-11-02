@@ -186,7 +186,7 @@ rate and of either audio kind: a stream's rate is set through its format, and a
 descriptor may list AAF and IEC 61883-6 AM824 formats together (up to the
 descriptor's 46 formats), so a controller moves the stream between them. A CRF
 stream keeps its format, and no stream changes to or from CRF (BAD_ARGUMENTS).
-A kind change re-shapes the slot under its `SlotGuard` as any format change
+A kind change re-shapes the slot under its lock as any format change
 does, the talker's sequence number and sample count going on, and moves an
 input's pre-joined loopback group to the output of its new kind. Milan
 v1.2 Section 5.4.2.7 refuses it STREAM_IS_RUNNING on a bound input or a

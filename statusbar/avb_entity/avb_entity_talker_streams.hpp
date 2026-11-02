@@ -19,7 +19,6 @@
 /// TX shape follows its declarative model instead of per-entity C++ enums.
 
 #include "statusbar/avb_entity/avb_entity_aaf_reframe.hpp"
-#include "statusbar/avb_entity/avb_entity_slot_guard.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/tx_pcap_recorder.hpp"
@@ -27,6 +26,7 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
@@ -173,7 +173,7 @@ struct TalkerStreams
     [[nodiscard]] auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
     /// Re-shape the slot of @p spec.index for @p spec (new format, AAF or AM824, same stream id,
-    /// destination, sequence and sample count). Reactor thread; the slot is locked (SlotGuard) so the
+    /// destination, sequence and sample count). Reactor thread; the slot is locked (itc::SpinLock) so the
     /// media thread skips it. Errors (slot unchanged): no such slot, a kind change to or from CRF, or
     /// a format open_stream would refuse.
     [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
@@ -318,8 +318,6 @@ struct TalkerStreams
     [[nodiscard]] auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
     [[nodiscard]] auto reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> Status;
-    /// Move @p trial's serializers into @p slot, carrying the stream's counts over. Under the guard.
-    static void adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept;
     /// Send the frame @p serialize writes into a tx_begin window of @p max_frame octets (its length,
     /// 0: none), restoring @p ctx when the port refuses it. Media thread.
     template <typename Context, typename Serialize>
@@ -327,9 +325,9 @@ struct TalkerStreams
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
-    /// Per-stream guards between the media thread's transmits and the
-    /// reactor's reformat_stream, by STREAM_OUTPUT index.
-    std::array<SlotGuard, MAX_ENTITY_STREAMS> guards_{};
+    /// Per-stream locks between the media thread's transmits (try_lock, never waits) and the
+    /// reactor's reformat_stream (lock), by STREAM_OUTPUT index.
+    std::array<itc::SpinLock, MAX_ENTITY_STREAMS> guards_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
