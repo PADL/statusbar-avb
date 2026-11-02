@@ -12,13 +12,14 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <random>
 
 namespace statusbar::nanoavb::adp_adv_sm {
 
 using namespace statusbar::sm;
 
-/// randomDeviceDelay()'s generator (IEEE 1722.1-2021 Clause 6.2.4.2.2): xorshift64*,
-/// period 2^64 - 1, no heap.
+/// randomDeviceDelay()'s generator (IEEE 1722.1-2021 Clause 6.2.4.2.2): minstd_rand and an
+/// unbiased uniform distribution, no heap.
 class DelayRandom
 {
   public:
@@ -29,7 +30,7 @@ class DelayRandom
     [[nodiscard]] auto next(std::chrono::milliseconds max) noexcept -> std::chrono::milliseconds;
 
   private:
-    uint64_t state_{0x9E37'79B9'7F4A'7C15ULL};
+    std::minstd_rand engine_{};
 };
 
 /// CLOCK_REALTIME in nanoseconds, the clock that seeds DelayRandom.
