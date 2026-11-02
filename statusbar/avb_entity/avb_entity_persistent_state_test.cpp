@@ -168,7 +168,7 @@ TEST(avb_persistent_state, atomic_write)
     auto const dir = temp_dir("atomic");
     auto const path = (dir / "state" / "avb-state.toml").string();
     auto state = sample_state();
-    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     EXPECT_TRUE(read_text(path) == serialize_persistent_state(state));
 
     // A stale temporary file (a write cut short) is replaced, and the new
@@ -176,7 +176,7 @@ TEST(avb_persistent_state, atomic_write)
     write_text(path + ".tmp", "torn");
     state.names.clear();
     state.system_unique_id = 7;
-    EXPECT_TRUE(save_persistent_state(path, state).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     EXPECT_TRUE(read_text(path) == serialize_persistent_state(state));
     EXPECT_FALSE(std::filesystem::exists(path + ".tmp"));
     auto const loaded = load_persistent_state(path, MODEL, {});
@@ -184,7 +184,8 @@ TEST(avb_persistent_state, atomic_write)
     EXPECT_TRUE(loaded.state == state);
 
     // An unwritable place fails and leaves the old file alone
-    EXPECT_FALSE(save_persistent_state((dir / "no" / "such" / "dir" / "f.toml").string(), state).has_value());
+    EXPECT_FALSE(
+        save_persistent_state((dir / "no" / "such" / "dir" / "f.toml").string(), serialize_persistent_state(state)).has_value());
     std::filesystem::remove_all(dir);
 }
 
@@ -236,7 +237,7 @@ TEST(avb_persistent_state, model_change_discards)
 {
     auto const dir = temp_dir("model");
     auto const path = (dir / "avb-state.toml").string();
-    EXPECT_TRUE(save_persistent_state(path, sample_state()).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(sample_state())).has_value());
     auto const loaded = load_persistent_state(path, MODEL + 1, {});
     EXPECT_TRUE(loaded.outcome == PersistentStateOutcome::model_changed);
     EXPECT_EQ(loaded.discarded_model_id, MODEL);
@@ -265,7 +266,7 @@ TEST(avb_persistent_state, bindings_imported_once)
         (imported.state.listener_bindings[1] ==
          PersistedListenerBinding{.stream_input = 3, .talker_entity_id = 0xFFEEDDCCBBAA9988ULL, .talker_unique_id = 0}));
 
-    EXPECT_TRUE(save_persistent_state(path, imported.state).has_value());
+    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(imported.state)).has_value());
     write_text(legacy, std::string{LISTENER_BINDINGS_MAGIC} + "\n1 0000000000000001 1\n");
     auto const reloaded = load_persistent_state(path, MODEL, legacy);
     EXPECT_TRUE(reloaded.outcome == PersistentStateOutcome::loaded);
