@@ -306,8 +306,7 @@ struct AvbEntityAudioIOConfig
     /// of each media tick, so the media thread never enters the kernel for
     /// transmit: the syscall's latency is interference on the realtime core.
     /// The media thread still fills the ring and reclaims completions. Free
-    /// on rawnet (each frame is its own syscall there). Not yet on xdp, whose
-    /// flush keeps a plain pending flag the two threads would race for.
+    /// on rawnet (each frame is its own syscall there).
     bool stream_tx_kicker{false};
 
     /// CPU core for the TX kicker thread when stream_tx_kicker is set (an

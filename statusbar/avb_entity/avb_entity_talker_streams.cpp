@@ -282,7 +282,7 @@ void TalkerStreams::flush_tx()
 
 auto TalkerStreams::set_external_kick(bool const enable) noexcept -> bool
 {
-    bool const kickable = port_ != nullptr && port_->port().backend() != net::EthernetBackend::xdp;
+    bool const kickable = port_ != nullptr;
     external_kick_ = enable && kickable;
     return !enable || kickable;
 }

@@ -145,7 +145,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "stream_tx.kicker",
         "Kick the stream port's TX ring from a dedicated SCHED_FIFO timer instead of at the end of each media tick, so "
         "the media thread never enters the kernel to transmit (the kick syscall's latency is interference on the "
-        "realtime core). Free on rawnet; not yet on xdp (kicks in the tick there). Default false",
+        "realtime core). Free on rawnet. Default false",
         config.entity.stream_tx_kicker,
         [&](auto v) { config.entity.stream_tx_kicker = v; });
     specs.add<int64_t>(

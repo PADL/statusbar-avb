@@ -107,15 +107,16 @@ struct TalkerStreams
 
     /// Hand the TX kick to another thread (see kick_tx): flush_tx then only
     /// closes the cycle. Returns false, and leaves the kick in flush_tx, when
-    /// the port's backend cannot be kicked from a second thread (xdp today).
+    /// there is no port to kick.
     auto set_external_kick(bool enable) noexcept -> bool;
     [[nodiscard]] auto external_kick() const noexcept -> bool { return external_kick_; }
 
     /// The TX kick alone, from the kicker thread: the wake-up syscall over the
     /// ring the media thread fills. Taken without the port guard on purpose:
-    /// the mmap kick touches no user-space state (the kernel's ring protocol
-    /// is built for a filler and a kicker), and holding the guard would make
-    /// the media thread spin for the length of the syscall it was spared.
+    /// the mmap kick touches no user-space state and the xdp kick only its
+    /// atomic pending flag (the kernel's ring protocol is built for a filler
+    /// and a kicker), and holding the guard would make the media thread spin
+    /// for the length of the syscall it was spared.
     void kick_tx();
 
     /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
