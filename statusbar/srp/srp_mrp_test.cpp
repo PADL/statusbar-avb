@@ -641,9 +641,9 @@ TEST(mrp_timer_scheduler, tick_leave_expires)
     TimerScheduler ts{1};
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_leave(now);
-    auto e0 = ts.tick(now + std::chrono::milliseconds(4999));
+    auto e0 = ts.tick(now + std::chrono::milliseconds(999));
     EXPECT_FALSE(e0.leave);
-    auto e = ts.tick(now + std::chrono::milliseconds(5000));
+    auto e = ts.tick(now + std::chrono::milliseconds(1000));
     EXPECT_TRUE(e.leave);
 }
 
@@ -663,6 +663,45 @@ TEST(mrp_timer_scheduler, next_deadline_picks_earliest)
     ts.start_join(now);
     ts.start_periodic(now);
     EXPECT_EQ(ts.next_deadline(), now + std::chrono::milliseconds(200));
+}
+
+// mrp.c's defaults, within IEEE 802.1Q-2018 Clause 10.7.4; a configuration's durations are the ones armed.
+TEST(mrp_timer_scheduler, defaults_are_generic_and_a_config_overrides_them)
+{
+    using namespace std::chrono_literals;
+    TimerConfig const defaults{};
+    EXPECT_EQ(defaults.join_time.count(), 100);
+    EXPECT_EQ(defaults.leave_time.count(), 1000);
+    EXPECT_EQ(defaults.periodic_time.count(), 1000);
+    EXPECT_EQ(defaults.leave_all_time_min.count(), 5000);
+    EXPECT_EQ(defaults.leave_all_time_max.count(), 15000);
+    TimerScheduler ts{1, TimerConfig{.leave_time = 5000ms}};
+    auto const now = TimePoint{} + std::chrono::seconds(1);
+    ts.start_leave(now);
+    EXPECT_EQ(ts.next_deadline(), now + 5000ms);
+    TimerScheduler standard{1};
+    standard.start_leave(now);
+    EXPECT_EQ(standard.next_deadline(), now + 1000ms);
+}
+
+TEST(mrp_timer_scheduler, leaveall_is_randomised_within_the_default_range)
+{
+    using namespace std::chrono_literals;
+    TimerScheduler ts{7};
+    auto const now = TimePoint{} + std::chrono::seconds(1);
+    auto lo = TimePoint::max();
+    auto hi = TimePoint::min();
+    for (int i = 0; i < 2000; ++i) {
+        ts.arm_leaveall(now);
+        auto const d = ts.next_deadline();
+        EXPECT_TRUE(d >= now + 5000ms);
+        EXPECT_TRUE(d < now + 15000ms);
+        lo = std::min(lo, d);
+        hi = std::max(hi, d);
+    }
+    // Randomised, not a constant: the draws spread over most of the range.
+    EXPECT_TRUE(lo < now + 5500ms);
+    EXPECT_TRUE(hi > now + 14500ms);
 }
 
 TEST(mrp_timer_scheduler, multiple_timers_expire)
