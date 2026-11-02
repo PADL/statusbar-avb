@@ -423,11 +423,10 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
     }
     if (net_handlers_ != nullptr && net_handlers_->msrp_handler().valid()) {
         info.flags |= SRP_ENABLED;
-        // One mapping per declared SR class: MSRP SRclassID 6 is class A
-        // (traffic class 0), 5 is class B (traffic class 1).
+        // One mapping per declared SR class: class A is traffic class 0, class B 1.
         auto const& domain = components_.msrp_handler.domain();
         info.msrp_mappings.push_back(
-            {.traffic_class = static_cast<uint8_t>(domain.sr_class_id == 6 ? 0 : 1),
+            {.traffic_class = static_cast<uint8_t>(domain.sr_class_id == srp::msrp::SR_CLASS_A ? 0 : 1),
              .priority = domain.sr_class_priority,
              .vlan_id = domain.sr_class_vid});
     }

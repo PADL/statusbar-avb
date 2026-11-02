@@ -94,7 +94,7 @@ class MvuCommandHandler
     [[nodiscard]] auto mcr_info(size_t index) const noexcept -> McrInfo const*;
     /// Restore clock domain @p index's saved settings (no notification); false
     /// past clock_domain_count().
-    auto set_mcr_info(size_t index, McrInfo const& info) noexcept -> bool;
+    [[nodiscard]] auto set_mcr_info(size_t index, McrInfo const& info) noexcept -> bool;
 
     /// Process an MVU command (atdecc::mvu::is_mvu_command) from @p src_mac, @p payload starting
     /// at the AECP common header, for @p our_entity_id, and send the response.

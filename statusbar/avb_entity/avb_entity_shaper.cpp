@@ -51,7 +51,7 @@ auto make_error_code(ShaperError const e) noexcept -> std::error_code
 // Queue layout
 // ---------------------------------------------------------------------------
 
-auto is_intel_qav_driver(std::string_view const driver) noexcept -> bool
+[[nodiscard]] auto is_intel_qav_driver(std::string_view const driver) noexcept -> bool
 {
     return driver == "igb" || driver == "igc";
 }
@@ -87,7 +87,7 @@ constexpr auto skip_class_queues(uint16_t queue, int const step, uint16_t const 
 }
 
 /// @p layout with the legacy TC on every other queue, as one count@offset range.
-auto with_legacy_range(QueueLayout const& layout) -> StatusValue<QueueLayout>
+[[nodiscard]] auto with_legacy_range(QueueLayout const& layout) -> StatusValue<QueueLayout>
 {
     uint16_t const a = layout.class_a_queue;
     uint16_t const b = layout.class_b_queue;
@@ -136,7 +136,7 @@ auto make_queue_layout(std::string_view const driver, uint16_t const tx_queues, 
 namespace {
 
 /// The SR class PCPs alone: both below 8 and distinct.
-auto validate_pcps(uint8_t const class_a_pcp, uint8_t const class_b_pcp) noexcept -> Status
+[[nodiscard]] auto validate_pcps(uint8_t const class_a_pcp, uint8_t const class_b_pcp) noexcept -> Status
 {
     if (class_a_pcp >= 8 || class_b_pcp >= 8 || class_a_pcp == class_b_pcp) {
         return failure(ShaperError::bad_priority);

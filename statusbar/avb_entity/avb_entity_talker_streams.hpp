@@ -156,13 +156,13 @@ struct TalkerStreams
     /// blob is the single source. Errors: unknown/unsupported format kind or
     /// rate, a CRF format with no timestamps or more than
     /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
-    auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
+    [[nodiscard]] auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
     /// Re-shape the slot of @p spec.index for @p spec (new format, AAF or AM824, same stream id,
     /// destination, sequence and sample count). Reactor thread; the slot is locked (SlotGuard) so the
     /// media thread skips it. Errors (slot unchanged): no such slot, a kind change to or from CRF, or
     /// a format open_stream would refuse.
-    auto reformat_stream(StreamSpec const& spec) -> Status;
+    [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
 
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
     /// descriptor index == ACMP talker unique id), or nullptr.
@@ -249,12 +249,12 @@ struct TalkerStreams
     /// Send one AAF packet of @p frames frames at wire presentation time @p pts_ns (no offset added),
     /// its payload filled by @p render as raw wire bytes. Media-timer thread; true if sent. Nothing is
     /// sent, nor the sequence advanced, for a non-AAF slot, no socket, or @p render false.
-    auto transmit_aaf_raw(
+    [[nodiscard]] auto transmit_aaf_raw(
         TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
     /// Send one IEC 61883-6 AM824 packet of @p frames data blocks, the first at sample index @p first_index
     /// presented at @p pts_ns, its payload filled by @p render (see serialize_am824_raw). Media-timer
     /// thread; true if sent. As transmit_aaf_raw for a non-AM824 slot, no port frame or a refused render.
-    auto transmit_am824_raw(
+    [[nodiscard]] auto transmit_am824_raw(
         TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
     /// Send one built stream frame on @p slot (VLAN-tagged, pcap-stamped) and
     /// count it. The tail every audio transmit shares. Media-timer thread.
@@ -275,7 +275,7 @@ struct TalkerStreams
     /// Send one CRF PDU on @p slot carrying exactly @p timestamps_ns (64-bit gPTP times, offset
     /// applied). Media-timer thread; true if sent. Nothing is sent for a non-CRF or stopped slot,
     /// no socket, or a count other than timestamps_per_packet.
-    auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns) -> bool;
+    [[nodiscard]] auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns) -> bool;
 
     /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
     /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
@@ -297,15 +297,15 @@ struct TalkerStreams
 
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
     /// @p stream_id: what open_stream and reformat_stream share.
-    auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
+    [[nodiscard]] auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
-    auto reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    [[nodiscard]] auto reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Move @p trial's serializers into @p slot, carrying the stream's counts over. Under the guard.
     static void adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept;
     /// Send the frame @p serialize writes into a tx_begin window of @p max_frame octets (its length,
     /// 0: none), restoring @p ctx when the port refuses it. Media thread.
     template <typename Context, typename Serialize>
-    auto send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t max_frame, Serialize const& serialize) -> bool;
+    [[nodiscard]] auto send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t max_frame, Serialize const& serialize) -> bool;
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};

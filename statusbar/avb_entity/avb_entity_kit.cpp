@@ -25,6 +25,70 @@ using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
 using statusbar::nanoavb::DomainInfo;
 
+namespace {
+
+/// The static destination MAC @p config gives a talker stream of @p kind (none for "other").
+auto talker_dest_mac(AvbEntityAudioIOConfig const& config, StreamKind const kind) noexcept -> ieee::Eui48
+{
+    switch (kind) {
+        case StreamKind::am824:
+            return config.am824_talker_dest_mac;
+        case StreamKind::aaf:
+            return config.aaf_talker_dest_mac;
+        case StreamKind::crf:
+            return config.crf_talker_dest_mac;
+        case StreamKind::other:
+        default:
+            return ieee::Eui48{};
+    }
+}
+
+/// Descriptor (@p type, @p index) of @p host's model as a @p T; nullopt when there is none.
+template <typename T>
+[[nodiscard]] auto load_descriptor(AvbEntityHost const& host, uint16_t const type, uint16_t const index) -> std::optional<T>
+{
+    auto const blob = host.get_descriptor(type, index);
+    if (!blob.has_value()) {
+        return std::nullopt;
+    }
+    T desc{};
+    span_load_padded(desc, *blob);
+    return desc;
+}
+
+/// The AUDIO_CLUSTER at @p offset from @p port's base cluster; nullopt when there is none.
+[[nodiscard]] auto audio_cluster(AvbEntityHost const& host, atdecc::aem::DescriptorStreamPort const& port, uint16_t const offset)
+    -> std::optional<atdecc::aem::DescriptorAudioCluster>
+{
+    return load_descriptor<atdecc::aem::DescriptorAudioCluster>(
+        host, atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(port.base_cluster.get() + offset));
+}
+
+/// SET_CLOCK_SOURCE's body (IEEE 1722.1-2021 Clause 7.4.23.1): CLOCK_DOMAIN, its index, the source, reserved.
+auto clock_source_command(uint16_t const clock_domain_index, uint16_t const clock_source_index) -> std::array<uint8_t, 8>
+{
+    std::array<uint8_t, 8> body{};
+    span_store(std::span{body}.subspan(0, 2), atdecc::doublet_t{atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN});
+    span_store(std::span{body}.subspan(2, 2), atdecc::doublet_t{clock_domain_index});
+    span_store(std::span{body}.subspan(4, 2), atdecc::doublet_t{clock_source_index});
+    return body;
+}
+
+/// Descriptor (@p type, @p index) of configuration 0.
+auto descriptor_id(uint16_t const type, uint16_t const index) -> nanoavb::DescriptorId
+{
+    return nanoavb::DescriptorId{
+        .ref = {.configuration_index = 0, .descriptor_type = type, .descriptor_index = index}, .symbol = 0};
+}
+
+/// A saved value the model refused is dropped (the file is rewritten without it).
+void log_refused(logging::Logger log, std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status)
+{
+    log.warning("kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
+}
+
+}  // namespace
+
 AvbEntityKit::AvbEntityKit(
     AvbEntityAudioIOConfig const& config,
     nanoavb::DescriptorStorageHandler& handler,
