@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 
 namespace statusbar::avb_entity {
 
@@ -103,6 +104,20 @@ struct ListenerStreams
     /// bound here. Errors: unsupported kind (CRF input is kit phase 3;
     /// `other` never), unknown rate, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec) -> Status;
+
+    /// Size every input's presentation-margin histogram for a talker that
+    /// presents @p presentation_offset_ns ahead (see
+    /// StreamInputCounters::margin_histogram_config_for). Applies to the
+    /// slots open now, which it resets, and to those opened later. Default 1 ms.
+    void set_presentation_offset_ns(uint64_t presentation_offset_ns);
+
+    /// Print each input's presentation-margin report (late/early counts,
+    /// margin and lateness statistics, histogram) to stdout. Exit report.
+    void print_timing() const;
+
+    /// Write each input's presentation-margin histogram as CSV to
+    /// "<stem>-in<index><ext>" of @p path. Returns how many were written.
+    auto write_margin_histogram_csvs(std::string const& path) const -> size_t;
 
     /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:
     /// each decoded channel is delivered as floats with its reconstructed
@@ -196,8 +211,14 @@ struct ListenerStreams
     /// Move a pending set_consume registration into its newly-opened slot.
     void bind_pending_consume(ListenerStreamSlot& slot);
 
+    /// A fresh slot for @p spec, its margin histogram sized for this listener.
+    auto new_slot(StreamSpec const& spec) -> ListenerStreamSlot&;
+
     // --- References / collaborators (bound at construction) --------------------
-    uint32_t lock_tolerance_ns_;              ///< MEDIA_LOCKED step tolerance
+    uint32_t lock_tolerance_ns_;  ///< MEDIA_LOCKED step tolerance
+    /// Margin histogram range for new slots (set_presentation_offset_ns).
+    stats::AtomicHistogramConfig margin_histogram_config_{
+        StreamInputCounters::margin_histogram_config_for(StreamInputCounters::DEFAULT_PRESENTATION_OFFSET_NS)};
     uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
     nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
     std::atomic<uint64_t> const& last_gptp_ns_;

@@ -229,6 +229,7 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
     if (auto status = talker_.open_stream(am824_spec, sid, stream_dest_mac_); !status) {
         return status;
     }
+    listener_.set_presentation_offset_ns(PRESENTATION_OFFSET_NS);
     if (auto status = listener_.open_stream(am824_spec); !status) {  // RX slot mirrors the TX spec
         return status;
     }
@@ -338,6 +339,7 @@ void AvbEntityAm824IO::print_state() const
         listener_.slot_for(0) != nullptr ? listener_.slot_for(0)->rx_packets.load() : 0,
         listener_.slot_for(0) != nullptr ? listener_.slot_for(0)->rx_samples.load() : 0,
         listener_.slot_for(0) != nullptr ? listener_.slot_for(0)->rx_bad.load() : 0);
+    listener_.print_timing();
 }
 
 //

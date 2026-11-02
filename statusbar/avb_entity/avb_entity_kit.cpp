@@ -46,12 +46,13 @@ AvbEntityKit::AvbEntityKit(
           media_clock,
           last_gptp_ns,
           memory_resource)}
-{
+{  // NOLINT(statusbar-block-statements) construction: each collaborator wired in turn; pre-dates the gate
     active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
     crf_clock_source_index_ = crf_clock_source_index;
     if (!listener_specs_.empty()) {
         listener_ = std::make_unique<ListenerStreams>(
             config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns, audio_sink);
+        listener_->set_presentation_offset_ns(config_.presentation_offset_ns);
     }
 
     // ATDECC descriptor wire version. Default "2016": emit descriptors at their

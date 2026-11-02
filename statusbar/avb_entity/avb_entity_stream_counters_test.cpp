@@ -12,6 +12,7 @@
 #include "statusbar/test/test.hpp"
 
 #include <cstdint>
+#include <string>
 
 using statusbar::avb_entity::StreamInputCounters;
 using statusbar::avb_entity::tally_stream_input_packet;
@@ -116,6 +117,89 @@ TEST(stream_counters, jittered_step_does_not_lock)
         feed(c, i, ts, /*tv=*/true, /*ts_sparse=*/false);
     }
     EXPECT_EQ(c.media_locked.load(), 0U);
+}
+
+// --- Presentation margin: how late is late ----------------------------------
+
+TEST(stream_counters, margin_stats_record_how_late_and_how_early)
+{
+    StreamInputCounters c;
+    // gPTP now = 10 ms. Stamps at +900 us, +950 us (healthy), -20 us, -40 us (late).
+    constexpr uint64_t NOW = 10'000'000;
+    int64_t const margins[] = {900'000, 950'000, -20'000, -40'000};
+    uint8_t seq = 0;
+    for (auto const m : margins) {
+        tally_stream_input_packet(
+            c,
+            seq++,
+            static_cast<uint32_t>(static_cast<int64_t>(NOW) + m),
+            true,
+            false,
+            false,
+            true,
+            SAMPLES_PER_PKT,
+            false,
+            NOW,
+            LOCK_TOL_NS,
+            FS);
+    }
+    EXPECT_EQ(c.late_timestamp.load(), 2U);
+    EXPECT_EQ(c.early_timestamp.load(), 0U);
+    auto const margin = c.margin.snapshot();
+    EXPECT_EQ(margin.count, 4);
+    EXPECT_EQ(margin.min_ns, -40'000);
+    EXPECT_EQ(margin.max_ns, 950'000);
+    auto const late = c.lateness.snapshot();
+    EXPECT_EQ(late.count, 2);
+    EXPECT_EQ(late.min_ns, 20'000);
+    EXPECT_EQ(late.max_ns, 40'000);
+    EXPECT_EQ(late.sum_ns, 60'000);
+}
+
+TEST(stream_counters, margin_histogram_bins_by_presentation_offset)
+{
+    StreamInputCounters c;
+    // 1 ms offset: [-500 us, +1.5 ms) in 15.625 us bins. A stamp 900 us ahead
+    // lands in bin (900000 + 500000) / 15625 = 89; one 20 us late in bin 30.
+    auto const cfg = StreamInputCounters::margin_histogram_config_for(1'000'000);
+    EXPECT_EQ(cfg.low_ns, -500'000);
+    EXPECT_EQ(cfg.high_ns, 1'500'000);
+    EXPECT_EQ(cfg.bin_width_ns, 15'625);
+    EXPECT_EQ(cfg.num_bins(), 128);
+    constexpr uint64_t NOW = 10'000'000;
+    tally_stream_input_packet(c, 0, NOW + 900'000, true, false, false, true, SAMPLES_PER_PKT, false, NOW, LOCK_TOL_NS, FS);
+    tally_stream_input_packet(c, 1, NOW - 20'000, true, false, false, true, SAMPLES_PER_PKT, false, NOW, LOCK_TOL_NS, FS);
+    auto const h = c.margin_histogram.snapshot();
+    EXPECT_EQ(h.total_count(), 2);
+    EXPECT_EQ(h.bins[89], 1);
+    EXPECT_EQ(h.bins[30], 1);
+    EXPECT_EQ(h.underflow, 0);
+    EXPECT_EQ(h.overflow, 0);
+}
+
+TEST(stream_counters, margin_skipped_without_gptp_now)
+{
+    StreamInputCounters c;
+    feed(c, 0, 125'000, /*tv=*/true, /*ts_sparse=*/false);  // GPTP_OFF: no reference clock
+    EXPECT_EQ(c.margin.count(), 0);
+    EXPECT_EQ(c.late_timestamp.load(), 0U);
+    EXPECT_EQ(c.margin_histogram.snapshot().total_count(), 0);
+}
+
+TEST(stream_counters, timing_report_names_the_input_and_the_late_frames)
+{
+    StreamInputCounters c;
+    std::string report;
+    statusbar::avb_entity::format_stream_input_timing_to(report, 2, c);
+    EXPECT_TRUE(report.empty());  // nothing to say before a timestamped frame
+    constexpr uint64_t NOW = 10'000'000;
+    tally_stream_input_packet(c, 0, NOW + 900'000, true, false, false, true, SAMPLES_PER_PKT, false, NOW, LOCK_TOL_NS, FS);
+    tally_stream_input_packet(c, 1, NOW - 20'000, true, false, false, true, SAMPLES_PER_PKT, false, NOW, LOCK_TOL_NS, FS);
+    statusbar::avb_entity::format_stream_input_timing_to(report, 2, c);
+    EXPECT_NE(report.find("STREAM_INPUT 2"), std::string::npos);
+    EXPECT_NE(report.find("Late:            1 (50.000%)"), std::string::npos);
+    EXPECT_NE(report.find("Late by:         avg 20.0 us"), std::string::npos);
+    EXPECT_NE(report.find("Histogram (15625 ns bins)"), std::string::npos);
 }
 
 // Test runner

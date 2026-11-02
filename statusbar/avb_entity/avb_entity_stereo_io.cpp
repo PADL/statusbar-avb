@@ -392,6 +392,9 @@ void AvbEntityStereoIO::print_state() const
         talker_.slot_for(0) != nullptr ? talker_.slot_for(0)->tx_packets : 0,
         listener_ != nullptr && listener_->slot_for(0) != nullptr ? listener_->slot_for(0)->rx_packets.load() : 0,
         listener_ != nullptr && listener_->slot_for(0) != nullptr ? listener_->slot_for(0)->rx_bad.load() : 0);
+    if (listener_ != nullptr) {
+        listener_->print_timing();
+    }
 }
 
 //

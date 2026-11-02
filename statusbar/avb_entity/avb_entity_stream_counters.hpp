@@ -9,8 +9,13 @@
 /// Pulled out of AvbEntityAudioIO so the counter bookkeeping (and its lock /
 /// timestamp-cadence logic) is unit-testable without standing up a full entity.
 
+#include "statusbar/stats/stats_atomic_histogram.hpp"
+#include "statusbar/stats/stats_atomic_time_stats.hpp"
+
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace statusbar::avb_entity {
 
@@ -31,6 +36,32 @@ struct StreamInputCounters
     std::atomic<uint32_t> late_timestamp{0};
     std::atomic<uint32_t> early_timestamp{0};
     std::atomic<uint32_t> frames_rx{0};
+
+    /// How much of the presentation offset was left when the listener examined
+    /// each timestamped frame: avtp_timestamp minus the listener's gPTP now, in
+    /// ns. Positive = time to spare; negative = LATE_TIMESTAMP, and by how much.
+    /// Every tv=1 frame when gPTP now is known. Lock-free (written on the RX
+    /// thread, read for the exit report). The histogram answers "how late" and
+    /// "how much margin" at once: see margin_histogram_config_for().
+    stats::AtomicTimeStats margin{};
+    /// The late frames alone: how far past presentation each one was, in ns (>0).
+    stats::AtomicTimeStats lateness{};
+    stats::AtomicHistogram<128> margin_histogram{margin_histogram_config_for(DEFAULT_PRESENTATION_OFFSET_NS)};
+
+    static constexpr uint64_t DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
+
+    /// The margin histogram's range for a talker presenting @p
+    /// presentation_offset_ns ahead: [-offset/2, +1.5 offset) in 128 bins, so
+    /// a healthy stream sits in the upper half and a late frame is resolved to
+    /// a 64th of the offset (15.6 us at 1 ms). Both ends of a statusbar link
+    /// use the same offset, so the listener's own value is the right guess.
+    [[nodiscard]] static constexpr auto margin_histogram_config_for(uint64_t const presentation_offset_ns) noexcept
+        -> stats::AtomicHistogramConfig
+    {
+        auto const offset = static_cast<int64_t>(presentation_offset_ns);
+        int64_t const bin = std::max<int64_t>(1, (2 * offset) / 128);
+        return stats::AtomicHistogramConfig{.low_ns = -offset / 2, .high_ns = (-offset / 2) + (128 * bin), .bin_width_ns = bin};
+    }
 
     bool have_prev{false};
     bool have_prev_ts{false};
@@ -73,5 +104,11 @@ void tally_stream_input_packet(
     uint64_t gptp_now_ns,
     uint32_t lock_tolerance_ns,
     uint32_t sample_rate_hz);
+
+/// Append the presentation-margin report for one STREAM_INPUT to @p out:
+/// late/early counts, margin and lateness statistics, and the margin histogram
+/// as an ASCII bar chart. Nothing is appended when no frame carried a usable
+/// timestamp. Exit-time reporting; reads the atomics relaxed.
+void format_stream_input_timing_to(std::string& out, uint16_t stream_index, StreamInputCounters const& c);
 
 }  // namespace statusbar::avb_entity

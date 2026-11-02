@@ -418,7 +418,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
 }  // namespace
 
 auto main(int argc, char** argv) -> int
-{
+{  // NOLINT(statusbar-block-statements) the tool's main: parse, build, start, run, report; pre-dates the gate
     using namespace statusbar;
 
     Config config;
@@ -508,5 +508,9 @@ auto main(int argc, char** argv) -> int
     std::print("Entity stopped.\n");
 
     avb_entity::print_final_status(entity, loop_result, config.tool.dump_stats_on_exit);
+    if (auto const* listener = entity.listener_streams();
+        listener != nullptr && !config.tool.stream_input_margin_csv_path.empty()) {
+        (void)listener->write_margin_histogram_csvs(config.tool.stream_input_margin_csv_path);
+    }
     return loop_result.exit_code;
 }

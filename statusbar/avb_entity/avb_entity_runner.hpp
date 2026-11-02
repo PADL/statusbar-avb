@@ -20,6 +20,7 @@
 /// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
@@ -66,23 +67,6 @@ namespace statusbar::avb_entity {
     return data;
 }
 
-/// Dump an AtomicHistogram snapshot as bin_low_ns,bin_high_ns,count CSV.
-[[nodiscard]] inline auto write_histogram_csv(std::string const& path, stats::AtomicHistogram<128>::Snapshot const& hist) -> bool
-{
-    std::ofstream out{path};
-    if (!out) {
-        std::println(stderr, "warning: cannot open {} for writing", path);
-        return false;
-    }
-    out << "bin_low_ns,bin_high_ns,count\n";
-    out << ',' << hist.config.low_ns << ',' << hist.underflow << '\n';
-    for (size_t i = 0; i < hist.num_bins; ++i) {
-        out << hist.bin_low(i) << ',' << hist.bin_high(i) << ',' << hist.bins[i] << '\n';
-    }
-    out << hist.config.high_ns << ',' << ',' << hist.overflow << '\n';
-    return static_cast<bool>(out);
-}
-
 /// The tool-level knobs every entity tool shares (parsed alongside the
 /// entity config by add_common_entity_arg_specs).
 struct EntityToolOptions
@@ -93,6 +77,8 @@ struct EntityToolOptions
     bool require_ptp{false};
     std::string media_timer_wake_csv_path{};
     std::string media_timer_duration_csv_path{};
+    /// Per-STREAM_INPUT presentation-margin histogram CSVs: "<stem>-in<index><ext>".
+    std::string stream_input_margin_csv_path{};
 };
 
 /// Register the CLI arguments every entity tool shares: entity identity,
@@ -202,6 +188,12 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "Dump the media-timer callback-DURATION histogram to this CSV at exit",
         tool.media_timer_duration_csv_path,
         [&tool](auto v) { tool.media_timer_duration_csv_path = v; });
+    specs.add<std::string>(
+        "stream-input-margin-csv",
+        "Dump each STREAM_INPUT's presentation-margin histogram (avtp_timestamp - gPTP now) to <stem>-in<index><ext> "
+        "of this path at exit. Empty = off",
+        tool.stream_input_margin_csv_path,
+        [&tool](auto v) { tool.stream_input_margin_csv_path = v; });
     specs.add<std::string>(
         "descriptor-storage",
         "Path to the AEM descriptor storage .bin blob (build with statusbar-aemxml json2bin)",

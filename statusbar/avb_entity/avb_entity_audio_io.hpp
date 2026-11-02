@@ -168,6 +168,8 @@ class AvbEntityAudioIO
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
     [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;
+    /// The listener RX path (its per-input counters and margin histograms), or nullptr.
+    [[nodiscard]] auto listener_streams() const noexcept -> ListenerStreams const* { return kit_.listener(); }
 
     auto on_link_up(TimePoint time) -> void { kit_.on_link_up(time); }
     auto on_link_down(TimePoint time) -> void { kit_.on_link_down(time); }

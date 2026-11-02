@@ -8,6 +8,7 @@
 
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 
+#include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
@@ -17,7 +18,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
+#include <format>
+#include <print>
 #include <span>
+#include <string>
 #include <system_error>
 
 namespace statusbar::avb_entity {
@@ -57,8 +62,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             if (!rate || spec.format.channels == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            auto& slot = slots_.emplace_back();  // in place: the slot holds atomics
-            slot.spec = spec;
+            auto& slot = new_slot(spec);
             slot.am824.emplace(*rate, static_cast<uint8_t>(spec.format.channels));
             bind_pending_consume(slot);
             return success();
@@ -68,8 +72,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             if (!rate || spec.format.channels == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            auto& slot = slots_.emplace_back();
-            slot.spec = spec;
+            auto& slot = new_slot(spec);
             slot.aaf.emplace(spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth);
             bind_pending_consume(slot);
             return success();
@@ -81,8 +84,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
             if (spec.format.crf_base_frequency_hz == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            auto& slot = slots_.emplace_back();
-            slot.spec = spec;
+            auto& slot = new_slot(spec);
             slot.crf.emplace(
                 static_cast<avtp::CrfType>(spec.format.crf_type),
                 spec.format.crf_base_frequency_hz,
@@ -95,6 +97,45 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
         default:
             return failure(std::errc::not_supported);
     }
+}
+
+auto ListenerStreams::new_slot(StreamSpec const& spec) -> ListenerStreamSlot&
+{
+    auto& slot = slots_.emplace_back();  // in place: the slot holds atomics
+    slot.spec = spec;
+    slot.counters.margin_histogram.configure(margin_histogram_config_);
+    return slot;
+}
+
+void ListenerStreams::set_presentation_offset_ns(uint64_t const presentation_offset_ns)
+{
+    margin_histogram_config_ = StreamInputCounters::margin_histogram_config_for(presentation_offset_ns);
+    for (auto& slot : slots_) {
+        slot.counters.margin_histogram.configure(margin_histogram_config_);
+    }
+}
+
+void ListenerStreams::print_timing() const
+{
+    std::string report;
+    for (auto const& slot : slots_) {
+        format_stream_input_timing_to(report, slot.spec.index, slot.counters);
+    }
+    std::print("{}", report);
+}
+
+auto ListenerStreams::write_margin_histogram_csvs(std::string const& path) const -> size_t
+{
+    std::filesystem::path const p{path};
+    size_t written = 0;
+    for (auto const& slot : slots_) {
+        if (slot.counters.margin.count() == 0) {
+            continue;
+        }
+        auto const file = p.parent_path() / std::format("{}-in{}{}", p.stem().string(), slot.spec.index, p.extension().string());
+        written += write_histogram_csv(file.string(), slot.counters.margin_histogram.snapshot()) ? 1U : 0U;
+    }
+    return written;
 }
 
 void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn fn)

@@ -271,6 +271,9 @@ void AvbEntityAudioIO::print_state() const
         rx_aaf != nullptr ? rx_aaf->rx_bad.load() : 0,
         udptun_->telemetry().egress_reset_count().load(),
         udptun_->telemetry().egress_repunch_count().load());
+    if (auto const* listener = kit_.listener(); listener != nullptr) {
+        listener->print_timing();
+    }
 }
 
 //

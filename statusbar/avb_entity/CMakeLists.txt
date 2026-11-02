@@ -35,6 +35,7 @@ statusbar_add_module(
   statusbar::ptpclient
   statusbar::realtime
   statusbar::sm
+  statusbar::stats
   statusbar::status
   statusbar::stun
   statusbar::tsn
