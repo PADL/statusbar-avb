@@ -340,7 +340,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         TalkerStreams::TxPcapConfig{
             .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
     // The TX kick off the media thread (the tool's kicker timer).
-    if (!talker_->set_external_kick(config_.stream_tx_kicker)) {
+    bool const kick_elsewhere = config_.stream_tx_kicker || (config_.stream_tx_kick_in_rx_timer && config_.stream_rx_rt_timer);
+    if (!talker_->set_external_kick(kick_elsewhere)) {
         host_.ctl_log().warning("stream_tx.kicker: no stream port to kick; kicking in the media tick");
     }
 

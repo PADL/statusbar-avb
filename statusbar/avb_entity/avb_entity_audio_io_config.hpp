@@ -317,6 +317,13 @@ struct AvbEntityAudioIOConfig
     /// committed in a tick leave within one period of it.
     uint32_t stream_tx_period_us{50};
 
+    /// Issue the TX kick from the RX drain timer's callback (stream_rx.rt_timer)
+    /// instead of a timer of its own: one SCHED_FIFO thread on the spare core
+    /// drains then kicks, so there is no second timer for it to contend with.
+    /// Takes the kick off the media tick like stream_tx.kicker, which it
+    /// overrides; nothing without stream_rx.rt_timer.
+    bool stream_tx_kick_in_rx_timer{false};
+
     /// Pin the media-clock rate ratio r to exactly 1.0 (media clock = gPTP) instead
     /// of tracking r = gPTP/CLOCK_REALTIME via the GPS ratio Kalman. Use when the
     /// gPTP grandmaster IS the reference the listener recovers against (e.g. the

@@ -153,6 +153,13 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "CPU core for the TX kicker thread (stream_tx.kicker). An isolated core; may share the RX timer's",
         static_cast<int64_t>(config.entity.stream_tx_cpu_affinity),
         [&](auto v) { config.entity.stream_tx_cpu_affinity = static_cast<int>(v); });
+    specs.add<bool>(
+        "stream_tx.kick_in_rx_timer",
+        "Issue the TX kick from the RX drain timer's callback (stream_rx.rt_timer) instead of a kicker timer of its "
+        "own: one SCHED_FIFO thread on the spare core drains then kicks. Overrides stream_tx.kicker; nothing without "
+        "stream_rx.rt_timer. Default false",
+        config.entity.stream_tx_kick_in_rx_timer,
+        [&](auto v) { config.entity.stream_tx_kick_in_rx_timer = v; });
     specs.add<uint64_t>(
         "stream_tx.period_us",
         "TX kick period in microseconds (stream_tx.kicker). Default 50",
@@ -364,6 +371,28 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
     itc::Published<int64_t> rx_last_batch;
     stats::AtomicHistogram<128> rx_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 50'000, .bin_width_ns = 500}};
 
+    // TX kick telemetry: filled by the kicker timer (stream_tx.kicker) or by
+    // the RX timer's callback (stream_tx.kick_in_rx_timer), whichever kicks.
+    itc::TelemetryCounter<int64_t> tx_kick_error_count;
+    itc::TelemetryCounter<uint64_t> tx_kicks;
+    itc::Published<int64_t> tx_last_wake_error_ns;
+    stats::AtomicHistogram<128> tx_kick_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 50'000, .bin_width_ns = 500}};
+    stats::AtomicTimeStats tx_kick_dur_stats{};
+    auto const note_kick = [&](std::chrono::steady_clock::time_point const cb_t0, int64_t const wake_error_ns) {
+        auto const dur_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count();
+        tx_kick_dur_hist.update(dur_ns);
+        tx_kick_dur_stats.update(dur_ns);
+        tx_kicks.add(1);
+        tx_last_wake_error_ns.publish(wake_error_ns);
+    };
+    auto const note_rx = [&](std::chrono::steady_clock::time_point const cb_t0, size_t const n, int64_t const wake_error_ns) {
+        rx_dur_hist.update(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
+        rx_frames_drained.add(n);
+        rx_last_batch.publish(static_cast<int64_t>(n));
+        rx_last_wake_error_ns.publish(wake_error_ns);
+    };
+    bool const kick_in_rx = entity.config().stream_tx_kick_in_rx_timer && entity.config().stream_rx_rt_timer;
+
     int64_t const rx_period_ns = static_cast<int64_t>(entity.config().stream_rx_period_us) * 1'000;
     auto rx_timer = ptpclient::make_ptp_timer(
         *ctx.bridge,
@@ -375,11 +404,12 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
             }
             auto const cb_t0 = std::chrono::steady_clock::now();
             size_t const n = entity.drain_stream_rx(wake_info->actual_time_ns);
-            rx_dur_hist.update(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
-            rx_frames_drained.add(n);
-            rx_last_batch.publish(static_cast<int64_t>(n));
-            rx_last_wake_error_ns.publish(wake_info->error_ns);
+            note_rx(cb_t0, n, wake_info->error_ns);
+            if (kick_in_rx) {  // the drain released the port guard; the kick needs none
+                auto const k0 = std::chrono::steady_clock::now();
+                entity.kick_stream_tx();
+                note_kick(k0, wake_info->error_ns);
+            }
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
@@ -388,19 +418,8 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
     // ---- Optional dedicated TX kicker timer (stream_tx.kicker) --------------------
     // The ring backends' transmit wake-up is a syscall; on this timer it leaves
     // the media thread, which then only fills the ring and closes its cycle.
-    itc::TelemetryCounter<int64_t> tx_kick_error_count;
-    itc::TelemetryCounter<uint64_t> tx_kicks;
-    itc::Published<int64_t> tx_last_wake_error_ns;
-    stats::AtomicHistogram<128> tx_kick_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 50'000, .bin_width_ns = 500}};
-    stats::AtomicTimeStats tx_kick_dur_stats{};
-
-    auto const note_kick = [&](std::chrono::steady_clock::time_point const cb_t0, int64_t const wake_error_ns) {
-        auto const dur_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count();
-        tx_kick_dur_hist.update(dur_ns);
-        tx_kick_dur_stats.update(dur_ns);
-        tx_kicks.add(1);
-        tx_last_wake_error_ns.publish(wake_error_ns);
-    };
+    // (Its telemetry is declared above the RX timer, which may issue the kick
+    // itself: stream_tx.kick_in_rx_timer.)
     int64_t const tx_period_ns = static_cast<int64_t>(entity.config().stream_tx_period_us) * 1'000;
     auto tx_kicker = ptpclient::make_ptp_timer(
         *ctx.bridge,
@@ -418,7 +437,10 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
         ctx.enable_realtime,
         entity.config().stream_tx_cpu_affinity);
 
-    bool const tx_kick = entity.config().stream_tx_kicker;
+    bool const tx_kick = entity.config().stream_tx_kicker && !kick_in_rx;
+    if (kick_in_rx) {
+        std::print("Stream TX: kicked from the RX timer's tick (core {})\n", entity.config().stream_rx_cpu_affinity);
+    }
     if (tx_kick) {
         if (auto const ks = tx_kicker.start(); !ks) {
             std::print(stderr, "Warning: stream TX kicker failed to start ({}); the media tick kicks\n", ks.error().message());
@@ -473,11 +495,14 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
             [&]() {
                 if (tx_kick) {
                     tx_kicker.stop();
+                }
+                if (tx_kick || kick_in_rx) {
                     auto const d = tx_kick_dur_stats.snapshot();
                     std::print(
                         stderr,
-                        "[tx-kicker] final: kicks={} wake_errors={} recovery={} missed={} kick_duration avg={:.1f}ns min={}ns "
-                        "max={}ns\n",
+                        "[tx-kicker] final: via={} kicks={} wake_errors={} recovery={} missed={} kick_duration avg={:.1f}ns "
+                        "min={}ns max={}ns\n",
+                        kick_in_rx ? "rx-timer" : "kicker-timer",
                         tx_kicks.load(),
                         tx_kick_error_count.load(),
                         tx_kicker.recovery_count(),
