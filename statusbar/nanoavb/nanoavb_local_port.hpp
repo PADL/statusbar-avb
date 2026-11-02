@@ -96,7 +96,7 @@ class AtdeccLocalPort final : public net::Pollable
     /// Send @p frame to the controllers @p dest_mac addresses: every one for a
     /// multicast MAC, the one it names for a local MAC, none otherwise.
     /// Returns whether it went to at least one controller.
-    auto send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> frame) -> bool;
+    [[nodiscard]] auto send(ieee::Eui48 const& dest_mac, std::span<uint8_t const> frame) -> bool;
 
     /// Stop: close the socket, remove the socket file if it is still ours,
     /// and forget every controller. finished() is then true.
@@ -150,7 +150,7 @@ class AtdeccLocalPort final : public net::Pollable
     [[nodiscard]] auto add_client(sockaddr_un const& address, socklen_t length, int64_t now_ns) -> Client*;
     [[nodiscard]] auto next_mac() -> ieee::Eui48;
     /// Send one datagram to @p client, marking it gone if it has gone.
-    auto send_to(Client& client, std::span<uint8_t const> frame) -> bool;
+    [[nodiscard]] auto send_to(Client& client, std::span<uint8_t const> frame) -> bool;
     /// Remove the clients marked gone, telling client_gone_.
     void reap();
 
