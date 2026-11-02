@@ -431,6 +431,13 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
     }
     auto const plan = *prep;
     int64_t const raw_deadline = plan.raw_deadline_ns;
+    // A caller already told to stop does not sleep at all; the spin below
+    // reads the flag too, for a stop that arrives during the sleep. Here
+    // first because a host whose coarse sleep overshoots the deadline would
+    // otherwise hand a stopped caller a wake time it no longer wants.
+    if (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed)) {
+        return failure(PtpError::bridge_not_running);
+    }
 
     // clock_nanosleep can only sleep on CLOCK_MONOTONIC, whose rate is slewed by
     // phc2sys/NTP. So we wake EARLY on CLOCK_MONOTONIC, then spin on the
