@@ -2317,9 +2317,9 @@ void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
         log.warning(
             "kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
     };
-    // Milan's restore order (lib_avb 70c93a1) less the rate the kit never changes, each
-    // through the handler's validation: formats (the mappings, which name their channels,
-    // off meanwhile, then apply_saved_audio_maps), clock source, then the rest.
+    // Each value through the handler's validation, formats first (the mappings, which name their
+    // channels, off meanwhile, then apply_saved_audio_maps), clock source, then the rest; the
+    // rate is not restored (SET_SAMPLING_RATE, Clause 7.4.21, accepts only the current rate).
     for (auto const port : dynamic_input_ports_) {
         (void)host_.components().aem_handler.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, {}, false);
     }
