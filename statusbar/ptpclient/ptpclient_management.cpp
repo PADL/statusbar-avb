@@ -17,9 +17,9 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
-#include <format>
 #include <utility>
 
 namespace statusbar::ptpclient {
@@ -392,13 +392,11 @@ PtpManagementClient::PtpManagementClient(
     Listener listener,
     FileDescriptor fd,
     net::SocketAddress server,
-    std::string local_path,
     gptp::SourcePortIdentity const& source) noexcept
     : config_{std::move(config)}
     , listener_{std::move(listener)}
     , fd_{std::move(fd)}
     , server_{server}
-    , local_path_{std::move(local_path)}
     , source_{source}
 {}
 
@@ -522,12 +520,7 @@ void PtpManagementClient::tick(int64_t const now_ns)
 
 #if defined(__linux__)
 
-PtpManagementClient::~PtpManagementClient()
-{
-    if (fd_.valid() && !local_path_.empty()) {
-        ::unlink(local_path_.c_str());
-    }
-}
+PtpManagementClient::~PtpManagementClient() = default;
 
 namespace {
 
@@ -544,13 +537,6 @@ namespace {
     return *server;
 }
 
-/// Our socket's path beside ptp4l's at @p uds_address, as pmc's: ptp4l answers to the sender's path.
-[[nodiscard]] auto local_path_beside(std::string_view const uds_address) -> std::string
-{
-    auto const slash = uds_address.rfind('/');
-    return std::format("{}/statusbar-ptpmgmt.{}", uds_address.substr(0, slash), ::getpid());
-}
-
 /// A non-blocking, close-on-exec datagram socket.
 [[nodiscard]] auto local_socket() -> StatusValue<FileDescriptor>
 {
@@ -565,25 +551,26 @@ namespace {
     return fd;
 }
 
-/// A local socket bound at @p path, replacing a stale socket from an earlier run of this pid.
-[[nodiscard]] auto bind_local(std::string const& path) -> StatusValue<FileDescriptor>
+/// A local socket autobound to an abstract address of the kernel's choosing (Linux), unique to
+/// this client: ptp4l answers each request to its sender's address (recvfrom, then sendto).
+[[nodiscard]] auto bind_autobound() -> StatusValue<FileDescriptor>
 {
-    auto local = net::SocketAddress::local(path);
-    if (!local) {
-        return failure(std::errc::invalid_argument);
-    }
-    return local_socket().and_then([&](FileDescriptor fd) -> StatusValue<FileDescriptor> {
-        ::unlink(path.c_str());
-        if (::bind(fd.get(), local->sockaddr(), local->length()) != 0) {
+    return local_socket().and_then([](FileDescriptor fd) -> StatusValue<FileDescriptor> {
+        sockaddr_un own{};
+        own.sun_family = AF_UNIX;
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_un passed as sockaddr
+        if (::bind(fd.get(), reinterpret_cast<sockaddr const*>(&own), sizeof(sa_family_t)) != 0) {
             return failure(net::errno_code());
         }
         return fd;
     });
 }
 
-/// Our port identity: unique to this process; ptp4l echoes it as the target.
-[[nodiscard]] auto process_port_identity() -> gptp::SourcePortIdentity
+/// Our port identity: the pid in the clock identity and a port number per client, so two clients
+/// in one process differ (ptp4l keys a subscription by it); ptp4l echoes it as the target.
+[[nodiscard]] auto client_port_identity() -> gptp::SourcePortIdentity
 {
+    static std::atomic<uint16_t> next_port{1};
     auto const pid = static_cast<uint32_t>(::getpid());
     return gptp::SourcePortIdentity{
         gptp::ClockIdentity{
@@ -595,7 +582,7 @@ namespace {
             static_cast<uint8_t>(pid >> 16U),
             static_cast<uint8_t>(pid >> 8U),
             static_cast<uint8_t>(pid)},
-        1};
+        next_port.fetch_add(1, std::memory_order_relaxed)};
 }
 
 }  // namespace
@@ -606,13 +593,12 @@ auto PtpManagementClient::create(PtpManagementConfig config, Listener listener) 
     if (!server) {
         return forward_failure(server);
     }
-    auto const local_path = local_path_beside(config.uds_address);
-    auto fd = bind_local(local_path);
+    auto fd = bind_autobound();
     if (!fd) {
         return forward_failure(fd);
     }
-    return std::unique_ptr<PtpManagementClient>{new PtpManagementClient{
-        std::move(config), std::move(listener), std::move(*fd), *server, local_path, process_port_identity()}};
+    return std::unique_ptr<PtpManagementClient>{
+        new PtpManagementClient{std::move(config), std::move(listener), std::move(*fd), *server, client_port_identity()}};
 }
 
 void PtpManagementClient::query(int64_t const now_ns)
