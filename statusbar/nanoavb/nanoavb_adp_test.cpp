@@ -304,6 +304,24 @@ TEST(nanoavb_adp_advertiser, a_grandmaster_change_readvertises_after_the_delay_w
     EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
 }
 
+TEST(nanoavb_adp_advertiser, a_domain_change_alone_readvertises_after_the_delay)
+{
+    AdvertiserBench bench;
+    ClockIdentity const gm{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0xDD, 0xEE, 0x02};
+    bench.advertiser.set_gptp_info(gm, 0, bench.now);
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    bench.run_for(Ms{1'000});
+    auto const sent = bench.sent.size();
+    auto const changed = bench.now;
+    bench.advertiser.set_gptp_info(gm, 3, bench.now);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
+    auto const at = bench.run_to_next_send();
+    EXPECT_TRUE(at - changed <= Ms{4'000});
+    EXPECT_EQ(bench.sent.size(), sent + 1);
+    EXPECT_EQ(bench.sent.back().adpdu.gptp_domain_number.get(), 3);
+}
+
 TEST(nanoavb_adp_advertiser, a_grandmaster_change_in_delay_rides_the_pending_send)
 {
     AdvertiserBench bench;
@@ -327,6 +345,24 @@ TEST(nanoavb_adp_advertiser, an_entity_change_readvertises_after_the_delay)
     bench.advertiser.notify_entity_changed(bench.now);
     EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Delay);
     EXPECT_TRUE(bench.run_to_next_send() - changed <= Ms{4'000});
+}
+
+// An entity change while the link is down sends nothing, and a repeated link up while
+// advertising neither restarts the delay nor sends again
+TEST(nanoavb_adp_advertiser, a_change_while_down_or_a_repeated_link_up_sends_nothing)
+{
+    AdvertiserBench bench;
+    bench.advertiser.link_down(bench.now);
+    bench.advertiser.notify_entity_changed(bench.now);
+    bench.run_for(Ms{10'000});
+    EXPECT_EQ(bench.sent.size(), size_t{0});
+    bench.advertiser.link_up(bench.now);
+    (void)bench.run_to_next_send();
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
+    bench.advertiser.link_up(bench.now);
+    EXPECT_TRUE(bench.advertiser.state() == AdpAdvertiserState::Waiting);
+    bench.run_for(Ms{4'900});
+    EXPECT_EQ(bench.sent.size(), size_t{1});
 }
 
 TEST(nanoavb_adp_advertiser, link_down_sends_no_departing)
