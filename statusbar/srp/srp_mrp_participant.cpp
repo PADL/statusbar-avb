@@ -5,8 +5,8 @@
 
 namespace statusbar::srp::mrp {
 
-PortState::PortState(uint64_t rng_seed)
-    : timers_{rng_seed}
+PortState::PortState(uint64_t rng_seed, TimerConfig const& timers)
+    : timers_{rng_seed, timers}
 {}
 
 void PortState::start(TimePoint now)
