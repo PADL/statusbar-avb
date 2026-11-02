@@ -4,10 +4,10 @@
 // ATDECC Monitor Tool — monitors ATDECC entities via ADP, reads ENTITY descriptors,
 // and tracks ACMP stream connections/disconnections. Frames can come from a live
 // interface (--interface=eth0), a local entity's ATDECC socket
-// (--socket=/run/mediabridge/atdecc.sock), or a pcap/pcapng capture (--pcap=file.pcapng).
+// (--socket=/run/atdecc.sock), or a pcap/pcapng capture (--pcap=file.pcapng).
 //
 // Usage: statusbar-atdecc-monitor --interface=eth0 [--instance=N] [--controller-entity-id=EUI64] [--show-descriptors]
-//        statusbar-atdecc-monitor --socket=/run/mediabridge/atdecc.sock [--show-descriptors]
+//        statusbar-atdecc-monitor --socket=/run/atdecc.sock [--show-descriptors]
 //        statusbar-atdecc-monitor --pcap=file.pcapng [--show-descriptors]
 
 #include "statusbar/atdecc/atdecc_acmp.hpp"

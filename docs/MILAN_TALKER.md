@@ -54,10 +54,9 @@ valid (Section 4.3.3.1):
 so a stream nobody asked for costs the network nothing. While declaring, a MAAP
 conflict withdraws the attribute; the stream "waits for 2 LeaveAll periods and
 allocates a new Destination MAC Address, then declares a new Talker attribute"
-(Table 5.3). As in GenAVB (`acmp_milan.c`), the hold follows every withdrawal
-but binds only a re-declaration with different parameters: the same stream ID,
-address and VID come back at once (a probe after the 15 s window ran out
-re-declares without waiting). A parameter change the control plane chose (the
+(Table 5.3). The hold follows every withdrawal but binds only a re-declaration
+with different parameters: the same stream ID, address and VID come back at
+once (a probe after the 15 s window ran out re-declares without waiting). A parameter change the control plane chose (the
 adopted Class A VID) is re-declared without a hold.
 
 A departed Listener keeps condition 2 true for `LISTENER_GRACE_NS`, the same
