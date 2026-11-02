@@ -397,9 +397,8 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_register_unsolicited(header);
 
         case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION:
-            // Not fanned out: a controller treats an unsolicited DEREGISTER as
-            // its own deregistration (Milan v1.2 Table 5.22 sends one only to
-            // a controller the entity drops; lib_avb 14c6ee2).
+            // Not fanned out: a controller treats an unsolicited DEREGISTER as its own
+            // deregistration (Milan v1.2 Table 5.22 sends one only to a controller the entity drops).
             return handle_deregister_unsolicited(header);
 
         default:

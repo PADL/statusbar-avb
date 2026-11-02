@@ -268,7 +268,7 @@ auto class_a_cbs(std::span<TSpec const> const streams, uint32_t const link_kbps,
 
 namespace {
 
-/// Class B's hiCredit (Annex L, L-11), in floating point as SwiftMRP's calcClassBCredits.
+/// Class B's hiCredit (IEEE 802.1Q-2022 Annex L, Equation L-11), in floating point.
 [[nodiscard]] auto class_b_hicredit(
     int64_t const idleslope, CbsParameters const& class_a, uint32_t const link_kbps, uint32_t const max_interfering_frame) noexcept
     -> int64_t
