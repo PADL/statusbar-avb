@@ -39,7 +39,7 @@ it although they never meet mqprio itself. The shaper therefore:
    `PacketStreamPort::open_tx` sets it to the kit's `stream_pcp` (best
    effort: priority 7 needs CAP_NET_ADMIN, and on failure the kit logs a
    warning and the socket stays open on the default queue), so the steering
-   holds whoever installs the map: SwiftMRP's mrpd, a hand-run `tc`, or this shaper. The shaper keys
+   holds whoever installs the map: an MRP daemon, a hand-run `tc`, or this shaper. The shaper keys
    class A on that same PCP (`kit.config().stream_pcp`) and class B on the
    802.1Q default 2, and refuses a PCP of 8 or more or one PCP for both
    (`ShaperError::bad_priority`);
@@ -233,8 +233,7 @@ has 3 classes.
 
 `ShaperConfig::queues` overrides either queue; the queues left must form one range, and fewer than 3
 TX queues is refused (`ShaperError::not_avb_capable`): an AVB port must keep
-its queues (no `ethtool -L <if> combined 1`). SwiftMRP's README notes the same
-igb inversion ("pass `--class-a-qdisc-handle 1 --class-b-qdisc-handle 2`").
+its queues (no `ethtool -L <if> combined 1`).
 
 The igb layout maps TCs to queues out of order (TC0 on 3, TC2 on 0, TC3 on 2);
 mqprio accepts that since Linux 6.5 ("allow reverse TC:TXQ mappings"); older
@@ -284,7 +283,7 @@ hiCredit (B)  = ceil(idleSlopeB * (maxInterferingFrame / (link - idleSlopeA)
 ```
 
 maxFrameSize is the class's largest wire frame; maxInterferingFrame is the
-port MTU, as SwiftMRP passes it. The link speed comes from
+port MTU. The link speed comes from
 `/sys/class/net/<if>/speed`, re-read once a second. When the kernel has no
 speed (EINVAL or -1: link down, or a NIC that never reports one) the last
 known speed is kept, so a flap does not churn the shaper; before any is known,
@@ -325,7 +324,7 @@ loCredit     = ceil(-266576 x 1542 / 1000000) = ceil(-411.060)  = -411
 ```
 
 One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s (1,000,000
-kbit/s), MTU 1500 as the largest interfering frame (SwiftMRP's frameNonSr):
+kbit/s), MTU 1500 as the largest interfering frame:
 
 ```
 idleSlope = 13504 + 5632                     = 19136 kbit/s

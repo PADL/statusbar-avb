@@ -1859,9 +1859,9 @@ auto AvbEntityKit::note_persistent_state_outcome(LoadedPersistentState const& lo
 
 void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
 {
-    // Milan's restore order (lib_avb 70c93a1) less the rate the kit never changes, each
-    // through the handler's validation: formats (the mappings, which name their channels,
-    // off meanwhile, then apply_saved_audio_maps), clock source, then the rest.
+    // Each value through the handler's validation, formats first (the mappings, which name their
+    // channels, off meanwhile, then apply_saved_audio_maps), clock source, then the rest; the
+    // rate is not restored (SET_SAMPLING_RATE, Clause 7.4.21, takes only the current rate).
     apply_saved_descriptor_values(saved);
     apply_saved_audio_maps(saved);
     apply_saved_presentation_offsets(saved);
