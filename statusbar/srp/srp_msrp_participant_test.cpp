@@ -694,38 +694,69 @@ TEST(msrp_participant, listener_declare_reaches_peer)
     }
 }
 
-// Milan v1.2 Section 4.2.7.2.2: an explicit Lv takes the MSRP registrar
-// straight from IN to MT (no 5 s leavetimer), so the talker sees the listener
-// go the moment the Lv arrives.
+/// Two participants, @p b's Ready listener registered on @p a (a's config @p config_a), then
+/// withdrawn and its Lv delivered to @p a.
+struct ListenerLeaveRig
+{
+    explicit ListenerLeaveRig(MsrpConfig const& config_a)
+        : a{config_a, 0xee55}
+        , b{test_msrp_config(), 0xff66}
+    {
+        a.set_send_pdu(fab.make_a_sender());
+        b.set_send_pdu(fab.make_b_sender());
+        a.start(clock.now);
+        b.start(clock.now);
+        Observer obs{};
+        obs.on_listener_leave = [this](tsn::StreamId const& id) { left = id; };
+        a.subscribe(obs);
+    }
+    void exchange()
+    {
+        auto const t = clock.advance(std::chrono::milliseconds(250));
+        b.tick(t);
+        fab.deliver_b_to_a(a, t);
+    }
+    void declare_then_withdraw()
+    {
+        (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
+        exchange();
+        EXPECT_TRUE(a.listener_permits_transmit(sid));
+        (void)b.withdraw_listener(sid, clock.now);
+        exchange();
+    }
+
+    MsrpParticipant a;
+    MsrpParticipant b;
+    Fabric fab{};
+    TestClock clock{};
+    std::optional<tsn::StreamId> left{};
+    tsn::StreamId sid{make_stream_id(0x0077)};
+};
+
+// Milan v1.2 Section 4.2.7.2.2 (MsrpConfig::leave_immediate): an explicit Lv takes the MSRP
+// registrar straight from IN to MT, so the talker sees the listener go the moment it arrives.
 TEST(msrp_participant, listener_leave_deregisters_immediately_without_leavetimer)
 {
-    MsrpParticipant a{test_msrp_config(), 0xee55};
-    MsrpParticipant b{test_msrp_config(), 0xff66};
-    Fabric fab{};
-    a.set_send_pdu(fab.make_a_sender());
-    b.set_send_pdu(fab.make_b_sender());
-    TestClock clock{};
-    a.start(clock.now);
-    b.start(clock.now);
-    std::optional<tsn::StreamId> left{};
-    Observer obs{};
-    obs.on_listener_leave = [&](tsn::StreamId const& id) { left = id; };
-    a.subscribe(obs);
-    auto const sid = make_stream_id(0x0077);
-    (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
-    auto t = clock.advance(std::chrono::milliseconds(250));
-    b.tick(t);
-    fab.deliver_b_to_a(a, t);
-    EXPECT_TRUE(a.listener_permits_transmit(sid));
+    auto config = test_msrp_config();
+    config.leave_immediate = true;
+    config.timers.leave_time = std::chrono::milliseconds{5000};
+    ListenerLeaveRig rig{config};
+    rig.declare_then_withdraw();
+    EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
+    EXPECT_TRUE(rig.left.has_value());
+}
 
-    (void)b.withdraw_listener(sid, clock.now);
-    t = clock.advance(std::chrono::milliseconds(250));
-    b.tick(t);
-    fab.deliver_b_to_a(a, t);
-    // No time has passed on A since the Lv arrived: the registration is gone
-    // and no leave timer was needed for it.
-    EXPECT_FALSE(a.listener_permits_transmit(sid));
-    EXPECT_TRUE(left.has_value());
+// IEEE 802.1Q-2018 Clause 10.7.8 (the default): an Lv takes the registrar to LV, still
+// registered, and the leavetimer (1 s) ends the registration.
+TEST(msrp_participant, listener_leave_runs_the_leavetimer_by_default)
+{
+    ListenerLeaveRig rig{test_msrp_config()};
+    rig.declare_then_withdraw();
+    EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
+    rig.a.tick(rig.clock.advance(std::chrono::milliseconds(500)));
+    EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
+    rig.a.tick(rig.clock.advance(std::chrono::milliseconds(600)));
+    EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
 }
 
 // A declared Talker Advertise whose value changes (the talker moved to an
@@ -1103,6 +1134,16 @@ TEST(msrp_config_validate, valid_default)
 {
     MsrpConfig cfg{};
     EXPECT_TRUE(is_success(cfg.validate()));
+}
+
+TEST(msrp_config_validate, bad_timers_are_refused)
+{
+    MsrpConfig empty_range{};
+    empty_range.timers.leave_all_time_max = empty_range.timers.leave_all_time_min;
+    EXPECT_TRUE(is_failure(empty_range.validate()));
+    MsrpConfig no_join{};
+    no_join.timers.join_time = std::chrono::milliseconds{0};
+    EXPECT_TRUE(is_failure(no_join.validate()));
 }
 
 TEST(msrp_config_validate, reserved_exceeds_table)

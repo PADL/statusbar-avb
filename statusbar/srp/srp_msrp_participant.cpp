@@ -62,7 +62,7 @@ struct RxEvents
     registrar_sm::Def::Event registrar;
 };
 
-constexpr auto rx_events_for(AttributeEvent event) noexcept -> RxEvents
+constexpr auto rx_events_for(AttributeEvent event, bool const leave_immediate) noexcept -> RxEvents
 {
     switch (event) {
         case AttributeEvent::New:
@@ -78,9 +78,10 @@ constexpr auto rx_events_for(AttributeEvent event) noexcept -> RxEvents
             // Registrar ignores rMt! per Clause 10.7.8 Table 10-4
             return {.applicant = applicant_sm::Def::Event::RMt, .registrar = registrar_sm::Def::Event::Count};
         case AttributeEvent::Lv:
-            // Milan v1.2 Section 4.2.7.2.2: the MSRP registrar goes IN -> MT
-            // on rLv! without running the leavetimer.
-            return {.applicant = applicant_sm::Def::Event::RLeave, .registrar = registrar_sm::Def::Event::RLeaveImmediate};
+            // MsrpConfig::leave_immediate: IN -> MT on rLv! without the leavetimer.
+            return {
+                .applicant = applicant_sm::Def::Event::RLeave,
+                .registrar = leave_immediate ? registrar_sm::Def::Event::RLeaveImmediate : registrar_sm::Def::Event::RLeave};
         default:
             return {.applicant = applicant_sm::Def::Event::Count, .registrar = registrar_sm::Def::Event::Count};
     }
@@ -134,7 +135,7 @@ using mrp::VectorAttributeHeader;
 template <class Limits>
 MsrpParticipantT<Limits>::MsrpParticipantT(MsrpConfig const& config, uint64_t rng_seed)
     : config_{config}
-    , port_{rng_seed}
+    , port_{rng_seed, config.timers}
 {
     if (auto const valid = config_.validate(); !valid) {
         statusbar::throw_or_abort(valid.error());
@@ -923,9 +924,8 @@ void MsrpParticipantT<Limits>::decode_vector_attribute(
     if (leave_all) {
         rx_leaveall_seen_ = true;  // receive_pdu re-declares immediately (see there)
         if (attr_type == AttributeType::Listener) {
-            // Diagnostic: a LeaveAll on the Listener type drives EVERY listener
-            // registrar to Leaving (registrar_in -> false) until the next Join
-            // re-registers it -- a prime suspect for the listener-ready flap.
+            // Every listener registrar goes to LV; it stays registered (registrar_is_registered)
+            // until the leavetimer, so a re-Join within LeaveTime keeps the reservation.
             if (logger_) {
                 logger_->debug("msrp: Listener LeaveAll (num_values={}) -> all listener registrars leave", num_values);
             }
@@ -995,7 +995,7 @@ void MsrpParticipantT<Limits>::handle_rx_event(
     ListenerDeclaration decl,
     TimePoint now)
 {
-    auto const rx = detail_msrp::rx_events_for(event);
+    auto const rx = detail_msrp::rx_events_for(event, config_.leave_immediate);
     if (rx.applicant == applicant_sm::Def::Event::Count) {
         return;  // unknown event
     }

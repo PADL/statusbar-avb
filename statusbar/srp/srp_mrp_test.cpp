@@ -578,9 +578,9 @@ TEST(mrp_timer_scheduler, tick_leave_expires)
     TimerScheduler ts{1};
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_leave(now);
-    auto e0 = ts.tick(now + std::chrono::milliseconds(4999));
+    auto e0 = ts.tick(now + std::chrono::milliseconds(999));
     EXPECT_FALSE(e0.leave);
-    auto e = ts.tick(now + std::chrono::milliseconds(5000));
+    auto e = ts.tick(now + std::chrono::milliseconds(1000));
     EXPECT_TRUE(e.leave);
 }
 
@@ -602,18 +602,26 @@ TEST(mrp_timer_scheduler, next_deadline_picks_earliest)
     EXPECT_EQ(ts.next_deadline(), now + std::chrono::milliseconds(200));
 }
 
-// Milan v1.2 Section 4.2.7.1.1 Table 4.3 defaults and tolerances.
-TEST(mrp_timer_scheduler, milan_table_4_3_values)
+// IEEE 802.1Q-2018 Table 10-7 defaults; a configuration's durations are the ones armed.
+TEST(mrp_timer_scheduler, defaults_are_ieee_802_1q_and_a_config_overrides_them)
 {
     using namespace std::chrono_literals;
-    EXPECT_EQ(TimerScheduler::JOIN_TIME.count(), 200);
-    EXPECT_EQ(TimerScheduler::LEAVE_TIME.count(), 5000);
-    EXPECT_EQ(TimerScheduler::PERIODIC_TIME.count(), 1000);
-    EXPECT_EQ(TimerScheduler::LEAVE_ALL_TIME_MIN.count(), 10000);
-    EXPECT_EQ(TimerScheduler::LEAVE_ALL_TIME_MAX.count(), 15000);
+    TimerConfig const defaults{};
+    EXPECT_EQ(defaults.join_time.count(), 200);
+    EXPECT_EQ(defaults.leave_time.count(), 1000);
+    EXPECT_EQ(defaults.periodic_time.count(), 1000);
+    EXPECT_EQ(defaults.leave_all_time_min.count(), 10000);
+    EXPECT_EQ(defaults.leave_all_time_max.count(), 15000);
+    TimerScheduler ts{1, TimerConfig{.leave_time = 5000ms}};
+    auto const now = TimePoint{} + std::chrono::seconds(1);
+    ts.start_leave(now);
+    EXPECT_EQ(ts.next_deadline(), now + 5000ms);
+    TimerScheduler standard{1};
+    standard.start_leave(now);
+    EXPECT_EQ(standard.next_deadline(), now + 1000ms);
 }
 
-TEST(mrp_timer_scheduler, leaveall_is_randomised_within_milan_default_range)
+TEST(mrp_timer_scheduler, leaveall_is_randomised_within_the_default_range)
 {
     using namespace std::chrono_literals;
     TimerScheduler ts{7};
