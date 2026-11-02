@@ -367,7 +367,7 @@ void AvbEntityHost::apply_interface_runtime()
             return x.index == index && x.descriptor.has_value();
         });
         auto const* const mirrored = m != mirrored_.end() ? &*m : nullptr;
-        if (mirrored != nullptr && mirrored->descriptor.has_value()) {
+        if (mirrored != nullptr && mirrored->descriptor.has_value()) {  // NOLINT(statusbar-block-statements): field copy
             auto const& d = *mirrored->descriptor;
             rt.identity_valid = true;
             if (!mac.has_value()) {
