@@ -14,6 +14,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <span>
 #include <system_error>
 
@@ -135,7 +136,7 @@ auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
     if (auto status = shape(trial, spec, stream_id); !status) {
         return status;
     }
-    SlotGuard::Lock const lock{guards_[spec.index]};
+    std::scoped_lock const lock{guards_[spec.index]};
     // The stream goes on: its sequence number and sample count (the AM824 DBC) carry over.
     uint8_t const sequence = slot->aaf ? slot->aaf->sequence_num : slot->am824 ? slot->am824->sequence_num : 0;
     uint32_t const samples = slot->aaf ? slot->aaf->running_sample_count : slot->am824 ? slot->am824->running_dbc : 0;
@@ -298,8 +299,8 @@ auto TalkerStreams::transmit_aaf_raw(
     uint16_t const frames,
     StreamRawRenderFn const& render) -> bool
 {
-    SlotGuard::Entry const entry{guards_[slot.spec.index]};
-    if (!entry.entered() || !slot.aaf || port_ == nullptr || stream_stopped(slot.spec.index)) {
+    std::unique_lock const entry{guards_[slot.spec.index], std::try_to_lock};
+    if (!entry.owns_lock() || !slot.aaf || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
@@ -350,8 +351,8 @@ auto TalkerStreams::transmit_am824_raw(
     uint16_t const frames,
     StreamRawRenderFn const& render) -> bool
 {
-    SlotGuard::Entry const entry{guards_[slot.spec.index]};
-    if (!entry.entered() || !slot.am824 || port_ == nullptr || stream_stopped(slot.spec.index)) {
+    std::unique_lock const entry{guards_[slot.spec.index], std::try_to_lock};
+    if (!entry.owns_lock() || !slot.am824 || port_ == nullptr || stream_stopped(slot.spec.index)) {
         return false;  // being re-shaped (reformat_stream), or not sending
     }
     // Not zeroed: serialize_am824_raw writes every byte it sends.
@@ -569,8 +570,8 @@ void TalkerStreams::transmit_if_due(
     size_t const samples,
     std::span<float const> src)
 {
-    SlotGuard::Entry const entry{guards_[slot.spec.index]};
-    if (!entry.entered()) {
+    std::unique_lock const entry{guards_[slot.spec.index], std::try_to_lock};
+    if (!entry.owns_lock()) {
         return;  // being re-shaped (reformat_stream): this tick sends nothing
     }
     // A STOP_STREAMING'd stream behaves exactly like a closed SRP gate:
