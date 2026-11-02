@@ -127,8 +127,8 @@ class MilanListener
     static constexpr Duration TMR_NO_RESP = std::chrono::milliseconds{200};
     static constexpr Duration TMR_RETRY = std::chrono::seconds{4};
     static constexpr Duration TMR_NO_TK = std::chrono::seconds{10};
-    /// TMR_DELAY is "between 0 and 1 second"; like GenAVB, never below
-    /// 200 ms (time for a controller's asynchronous notifications).
+    /// TMR_DELAY is "between 0 and 1 second" (Table 5.29); never below 200 ms, so a
+    /// controller's asynchronous notifications come first.
     static constexpr Duration TMR_DELAY_MIN = std::chrono::milliseconds{200};
     static constexpr Duration TMR_DELAY_MAX = std::chrono::seconds{1};
     /// One sink per STREAM_INPUT, as many as the ACMP listener holds.

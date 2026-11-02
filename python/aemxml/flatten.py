@@ -536,7 +536,7 @@ def _serialize_audio_map(am: AudioMap, desc_index: int) -> bytes:
 def _serialize_control(ctrl: Control, desc_index: int) -> bytes:
     """Serialize CONTROL descriptor (104 + L bytes)."""
     # Whatever the model came from (JSON, AEMXML): an IDENTIFY control has
-    # no signal (IEEE 1722.1-2021 7.2.22, as la_avdecc checks it).
+    # no signal (IEEE 1722.1-2021 7.2.22).
     if ctrl.control_type == CONTROL_TYPE_NAMES["IDENTIFY"] and (
         ctrl.signal_type != DESCRIPTOR_INVALID or ctrl.signal_index != 0
     ):
