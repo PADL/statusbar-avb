@@ -93,11 +93,12 @@ struct Bridge
     TimePoint now{std::chrono::seconds{1}};
     Pdus port_out{};
     Pdus bridge_out{};
-    SrpPort port{SrpPortConfig{}};
+    SrpPort port;
     statusbar::srp::msrp::MsrpParticipant bridge{
         statusbar::srp::msrp::MsrpConfig{.max_talker_advertise = 64, .max_talker_failed = 32, .max_listeners = 64}, 0x5eed};
 
-    Bridge()
+    explicit Bridge(DomainInfo const& domain = {})
+        : port{SrpPortConfig{.domain = domain}}
     {
         port.set_senders(collect(port_out), discard());
         bridge.set_send_pdu([this](std::span<uint8_t const> p) {
@@ -122,10 +123,11 @@ struct Bridge
         }
     }
 
-    static auto domain(uint16_t const vid, uint8_t const priority = 3) -> statusbar::srp::msrp::DomainFirstValue
+    static auto domain(uint16_t const vid, uint8_t const priority = 3, uint8_t const sr_class = statusbar::srp::msrp::SR_CLASS_A)
+        -> statusbar::srp::msrp::DomainFirstValue
     {
         statusbar::srp::msrp::DomainFirstValue fv{};
-        fv.sr_class_id = statusbar::srp::msrp::SR_CLASS_A;
+        fv.sr_class_id = sr_class;
         fv.sr_class_priority = priority;
         fv.sr_class_vid = vid;
         return fv;
@@ -262,6 +264,70 @@ TEST(nanoavb_srp_port, a_peer_domain_at_another_priority_is_a_boundary)
     EXPECT_FALSE(b.port.peer_domain_registered());
     EXPECT_EQ(b.port.domain().sr_class_vid, 2);
     EXPECT_TRUE(reports.empty());
+}
+
+// A Class B port (IEEE 802.1Q-2022 Clause 35.2.2.9) declares SRclassID 5 at priority 2, counts only the
+// peer's Class B Domain, adopts its VID, and advertises its talkers at priority 2.
+TEST(nanoavb_srp_port, a_class_b_port_follows_the_class_b_domain)
+{
+    Bridge b{CLASS_B_DOMAIN};
+    EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    EXPECT_TRUE(b.port.declare_talker(talker(4), b.now).has_value());
+    (void)b.bridge.declare_domain(Bridge::domain(7), b.now);  // Class A only: still a boundary
+    b.run(8);
+    EXPECT_FALSE(b.port.peer_domain_registered());
+    EXPECT_EQ(b.port.domain().sr_class_vid, 2);
+    (void)b.bridge.declare_domain(Bridge::domain(7, 2, statusbar::srp::msrp::SR_CLASS_B), b.now);
+    b.run(8);
+    EXPECT_TRUE(b.port.peer_domain_registered());
+    EXPECT_EQ(b.port.domain().sr_class_id, statusbar::srp::msrp::SR_CLASS_B);
+    EXPECT_EQ(b.port.domain().sr_class_vid, 7);
+    auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(4));
+    EXPECT_TRUE(fv != nullptr && fv->get_priority() == 2 && fv->vlan_identifier.get() == 7);
+}
+
+// After a link down and up (IEEE 802.1Q-2022 Clauses 10.7.5.2, 10.7.5.8): rejoin() forgets the peer's Listener
+// registrations and sends a LeaveAll at once, which the peer answers by declaring its own again; our Listener
+// declarations and the peer's Talkers stay, and no Leave goes out
+TEST(nanoavb_srp_port, a_rejoin_forgets_the_peer_s_listeners_and_asks_for_them_again)
+{
+    Bridge b{};
+    std::vector<ListenerDeclaration> heard{};
+    int leaves = 0;
+    b.port.set_observer(SrpPortObserver{
+        .on_talker_leave = [&](StreamId const&) { ++leaves; },
+        .on_listener = [&](StreamId const&, ListenerDeclaration const d) { heard.push_back(d); },
+    });
+    EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    EXPECT_TRUE(b.port.declare_talker(talker(2), b.now).has_value());
+    (void)b.bridge.declare_domain(Bridge::domain(2), b.now);
+    (void)b.bridge.declare_listener(stream_id(2), ListenerDeclaration::Ready, b.now);
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = stream_id(6);
+    fv.destination_address = GROUP;
+    fv.vlan_identifier = 2;
+    fv.max_frame_size = 185;
+    fv.max_interval_frames = 1;
+    (void)b.bridge.declare_talker_advertise(fv, b.now);
+    b.run(8);
+    auto const attached = b.port.attach_listener(stream_id(6), b.now);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Ready);
+    b.run(8);
+    EXPECT_TRUE(b.port.registered_listener(stream_id(2)) == ListenerDeclaration::Ready);
+
+    b.port_out.clear();
+    b.port.rejoin(b.now);
+    EXPECT_FALSE(b.port_out.empty());  // the LeaveAll, now
+    EXPECT_TRUE(b.port.registered_listener(stream_id(2)) == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(!heard.empty() && heard.back() == ListenerDeclaration::Ignore);
+    EXPECT_NE(b.port.find_registered_talker_advertise(GROUP, 2), nullptr);
+    EXPECT_EQ(leaves, 0);
+    EXPECT_TRUE(b.port.peer_domain_registered());
+    b.run(8);
+    EXPECT_TRUE(b.port.registered_listener(stream_id(2)) == ListenerDeclaration::Ready);
+    EXPECT_NE(b.bridge.find_registered_talker_advertise(stream_id(2)), nullptr);
+    auto const* listener = b.bridge.find_listener(stream_id(6));
+    EXPECT_TRUE(listener != nullptr && listener->registrar_is_registered());  // ours, never withdrawn
 }
 
 // A talker whose Advertise turns into a Talker Failed has not left: on_talker_leave comes once,
