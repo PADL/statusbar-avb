@@ -392,6 +392,8 @@ struct ListenerStreams
     /// per-cycle receive budget, end refills its ring. Each under the guard.
     void begin_port_cycle();
     void end_port_cycle();
+    /// Where @p frame's AVTPDU lies (at most rx_buf_'s size), empty for a frame that is not AVTP.
+    [[nodiscard]] auto avtpdu_of(std::span<uint8_t const> frame) const noexcept -> std::span<uint8_t const>;
     /// The AVTPDU of @p frame into rx_buf_: its length, 0 for a frame that is not AVTP.
     [[nodiscard]] auto copy_avtpdu(std::span<uint8_t const> frame) -> size_t;
     /// Frames per drain_rx call at most, so a flood cannot pin the RX thread.
