@@ -1776,7 +1776,11 @@ auto AvbEntityKit::stop() -> Status
 
 void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
 {
-    stream_port_.set_single_threaded(false);  // the reactor receives, the media thread transmits
+    if (stream_port_.single_threaded()) {
+        // RX on the reactor would race the media thread's unlocked TX: it stays the host's to drain.
+        host_.ctl_log().error("stream RX: a single-threaded stream port cannot move to the reactor");
+        return;
+    }
     if (rt_rx_handler_ != nullptr) {
         reactor.add(std::move(rt_rx_handler_));
     }
