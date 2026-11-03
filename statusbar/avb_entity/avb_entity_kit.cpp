@@ -1666,6 +1666,9 @@ void AvbEntityKit::open_stream_port()
     // An xdp backend that does not open falls back to rawnet when the host
     // allows it, the reason kept (stream_xdp_error()).
     stream_tx_error_ = stream_rx_error_ = stream_xdp_error_ = stream_launch_time_error_ = std::error_code{};
+    if (stream_port_.valid()) {
+        return log_stream_port();  // the host opened it before start() (a test port): kept
+    }
     auto opened = open_stream_port_on(config_.net_backend);
     if (!opened && config_.net_backend == "xdp" && config_.net_xdp_fallback) {
         stream_xdp_error_ = opened.error();
