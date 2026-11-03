@@ -38,6 +38,7 @@
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <system_error>
 
 namespace statusbar::avb_entity {
 

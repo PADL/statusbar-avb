@@ -24,18 +24,38 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
         auto const* s = components_.acmp_talker.get_stream(idx);
         if (s != nullptr && s->stream_id.to_uint64() == sid_u64) {
             bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
-            if (ready) {
-                // Stamp the last-ready time so the strict gate's grace window
-                // survives the next LeaveAll re-registration blip.
-                ready_ns_[idx].store(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                        .count(),
-                    std::memory_order_relaxed);
+            if (ready && acmp_conn_[idx].load() > 0) {
+                // Only a reservation made for a live connection counts: a Ready seen with none neither admits
+                // nor opens the grace window. Stamp the last-ready time so the grace window survives the next
+                // LeaveAll blip.
+                latch_ready(idx);
             }
             if (was != ready && logger_) {
                 logger_->status("srp: talker stream {} MSRP listener-ready -> {} (ACMP-AND-MSRP gate)", idx, ready);
             }
         }
+    }
+}
+
+void TalkerGate::latch_ready(uint16_t const idx) noexcept
+{
+    reservation_ready_[idx] = true;
+    ready_ns_[idx].store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_relaxed);
+}
+
+void TalkerGate::note_acmp_connections(uint16_t const idx, uint32_t const count) noexcept
+{
+    if (idx >= acmp_conn_.size()) {
+        return;
+    }
+    acmp_conn_[idx].publish(count);
+    if (count == 0) {
+        reservation_ready_[idx] = false;
+        ready_ns_[idx].store(0, std::memory_order_relaxed);
+    } else if (listener_ready_[idx].load(std::memory_order_relaxed)) {
+        latch_ready(idx);  // connected to a listener whose Ready is already declared
     }
 }
 
