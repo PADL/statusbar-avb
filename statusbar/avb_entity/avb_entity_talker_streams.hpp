@@ -353,18 +353,32 @@ struct TalkerStreams
     /// One AVTP stream frame to @p dest_mac on the port, due at @p launch_time_ns: VLAN tag from
     /// vlan_id_, source the port's address, recorded to the pcap tap. False when the port refuses it.
     [[nodiscard]] auto send_to_port(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload, uint64_t launch_time_ns) -> bool;
-    /// @p serialize's AVTPDU into the port's @p frame and committed, or the frame given back. Under the guard.
+    /// send_serialized() on a port only this thread drives: the AVTPDU rendered into the port's slot.
+    template <typename Context, typename Serialize>
+    [[nodiscard]] auto send_in_place(
+        TalkerStreamSlot& slot, Context& ctx, size_t max_frame, uint64_t launch_time_ns, Serialize const& serialize) -> bool;
+    /// send_serialized() on a serialized port: rendered into tx_buf_, then copied into a slot under the guard.
+    template <typename Context, typename Serialize>
+    [[nodiscard]] auto send_staged(
+        TalkerStreamSlot& slot, Context& ctx, size_t max_frame, uint64_t launch_time_ns, Serialize const& serialize) -> bool;
+    /// @p serialize's AVTPDU into the port's @p frame and committed due at @p launch_time_ns, or the frame given back.
     template <typename Context, typename Serialize>
     [[nodiscard]] auto serialize_into(
-        TalkerStreamSlot& slot, Context& ctx, net::EthernetTxSlot const& frame, size_t max_frame, Serialize const& serialize)
-        -> bool;
+        TalkerStreamSlot& slot,
+        Context& ctx,
+        net::EthernetTxSlot const& frame,
+        size_t max_frame,
+        uint64_t launch_time_ns,
+        Serialize const& serialize) -> bool;
     /// @p slot's 802.1Q-tagged stream header at the start of @p buffer: its length, 0 when it does not fit.
     [[nodiscard]] auto store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> buffer) const noexcept -> size_t;
     /// Up to @p length octets of @p buffer after its @p header octets: where the AVTPDU is serialized.
     [[nodiscard]] static auto payload_window(std::span<uint8_t> buffer, size_t header, size_t length) noexcept
         -> std::span<uint8_t>;
-    /// Commit @p frame, its @p header octets then its @p length-octet AVTPDU, counted on @p slot. Under the guard.
-    [[nodiscard]] auto commit_frame(TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length) -> bool;
+    /// Commit @p frame, its @p header octets then its @p length-octet AVTPDU, due at @p launch_time_ns (its
+    /// launch time fixed now, StreamPort::stamp_launch_time), counted on @p slot.
+    [[nodiscard]] auto commit_frame(
+        TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length, uint64_t launch_time_ns) -> bool;
     /// One sent AVTPDU @p frame counted on @p slot.
     void count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> frame) noexcept;
     /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
@@ -410,6 +424,24 @@ struct TalkerStreams
     uint64_t pts_ns,
     StreamRawRenderFn const& render,
     bool timestamp_uncertain = false) -> size_t;
+
+/// Build one AM824 frame from float samples into @p frame (zeroed first): @p samples per channel of the
+/// interleaved @p src, presented at @p now_ns plus the context's offset. The length, or 0 for none.
+[[nodiscard]] auto serialize_am824_float(
+    avtp::Am824StreamOutputContext& ctx,
+    std::span<uint8_t> frame,
+    uint32_t samples,
+    uint64_t now_ns,
+    std::span<float const> src,
+    bool timestamp_uncertain) -> size_t;
+/// As serialize_am824_float, one AAF frame.
+[[nodiscard]] auto serialize_aaf_float(
+    avtp::AafStreamOutputContext& ctx,
+    std::span<uint8_t> frame,
+    uint16_t samples,
+    uint64_t now_ns,
+    std::span<float const> src,
+    bool timestamp_uncertain) -> size_t;
 
 /// Build one IEC 61883-6 AM824 frame of @p frames blocks from sample index @p first_index (the DBC, mod 256)
 /// at @p pts_ns (no offset added); @p render writes frames x channels big-endian quadlets. Returns the
