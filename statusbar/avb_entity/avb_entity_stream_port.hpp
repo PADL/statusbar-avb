@@ -35,9 +35,13 @@
 #include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/net/net_any_ethernet_port.hpp"
 #include "statusbar/net/net_error.hpp"
+#include "statusbar/net/net_launch_order.hpp"
+#include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_xdp_avtp_rules.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -55,6 +59,14 @@ struct StreamPortConfig
     uint8_t stream_pcp{3};
     /// The NIC queue the xdp backend binds to.
     uint32_t xdp_queue{0};
+    /// The xdp backend's bind and attach modes (net::XdpConfig).
+    net::XdpBindMode xdp_bind_mode{net::XdpBindMode::auto_};
+    net::XdpAttachMode xdp_attach_mode{net::XdpAttachMode::native};
+    /// Where the xdp backend pins its program, to be adopted by the next open; empty for none.
+    std::string_view xdp_pin_path{};
+    /// The xdp backend's frames carry launch times (AF_XDP TX metadata; the
+    /// driver must honour them, net::netdev::launch_time_supported()).
+    bool tx_launch_time{false};
 };
 
 /// The 802.1Q-tagged AVTP header of a stream frame.
@@ -134,6 +146,10 @@ class StreamPort
                 .priority = config.stream_pcp,
                 .xdp_queue_id = config.xdp_queue,
                 .xdp_filter_rules = rules_,
+                .xdp_attach_mode = config.xdp_attach_mode,
+                .xdp_bind_mode = config.xdp_bind_mode,
+                .xdp_tx_launch_time = config.tx_launch_time,
+                .xdp_pin_path = config.xdp_pin_path,
             });
         serialize_ = status.has_value() && !port_.tx_rx_independent();
         return status;
@@ -155,11 +171,69 @@ class StreamPort
     /// only one using it.
     [[nodiscard]] auto port() noexcept -> net::AnyEthernetPort& { return port_; }
 
+    /// The xdp backend's socket, for what only it offers (busy poll, counters,
+    /// pinning); nullptr on another backend.
+    [[nodiscard]] auto xdp() noexcept -> net::XdpContext* { return port_.as<net::XdpContext>(); }
+    [[nodiscard]] auto xdp() const noexcept -> net::XdpContext const* { return port_.as<net::XdpContext>(); }
+
+    /// The sending NIC's PHC, which an AF_XDP launch time is in, read once a frame (a PHC
+    /// read is a syscall: a host caches one per tick). Set on the control thread before the
+    /// media thread runs; without it frames are untimed.
+    void set_phc_clock(net::ClockFn clock) noexcept { phc_ = std::move(clock); }
+
+    /// Whether this port's frames carry launch times (an xdp socket opened
+    /// with TX metadata).
+    [[nodiscard]] auto tx_launch_time() const noexcept -> bool
+    {
+        auto const* const xdp_socket = xdp();
+        return xdp_socket != nullptr && xdp_socket->tx_launch_time();
+    }
+
+    /// The launch time for a frame wanted at @p requested_ns (0: now), in
+    /// commit order (net::LaunchOrder); 0, no launch time, on a port without
+    /// or with no PHC set. Media thread.
+    [[nodiscard]] auto launch_time(uint64_t const requested_ns) noexcept -> int64_t
+    {
+        if (!phc_ || !tx_launch_time()) {
+            return 0;
+        }
+        return static_cast<int64_t>(launch_order_.next(requested_ns, [this] { return net::phc_now_ns(phc_); }));
+    }
+
+    /// The launch-time ordering's counters (clamps, steps, late frames). Any thread.
+    [[nodiscard]] auto launch_order() const noexcept -> net::LaunchOrder const& { return launch_order_; }
+
+    /// Zero the socket's and the ordering's counters at the next end_cycle(),
+    /// on the thread that drives the port. Any thread; not with an external
+    /// kick, whose thread writes the flush counters (TalkerStreams::set_external_kick).
+    void reset_counters() noexcept { reset_pending_.store(true, std::memory_order_relaxed); }
+
+    /// End the port's cycle (net::AnyEthernetPort::end_cycle), and apply a
+    /// counter reset asked for since the last. Under the guard.
+    [[nodiscard]] auto end_cycle() -> Status
+    {
+        if (reset_pending_.exchange(false, std::memory_order_relaxed)) {
+            reset_now();
+        }
+        return port_.end_cycle();
+    }
+
   private:
+    void reset_now() noexcept
+    {
+        if (auto* const xdp_socket = xdp(); xdp_socket != nullptr) {
+            xdp_socket->reset_stats();
+        }
+        launch_order_.reset();
+    }
+
     net::AnyEthernetPort port_{};
     net::AvtpStreamRules rules_{net::avtp_stream_rules()};
     itc::SpinLock lock_{};
     bool serialize_{false};
+    net::ClockFn phc_{};
+    net::LaunchOrder launch_order_{};
+    std::atomic<bool> reset_pending_{false};
 };
 
 }  // namespace statusbar::avb_entity
