@@ -315,6 +315,14 @@ class ShaperQdiscs
     [[nodiscard]] auto drop_etf(EtfSlot const& slot, uint32_t handle) -> Status;
     /// The qdisc on class @p parent (nullopt: none reported, its default). Errors: the netlink errno.
     [[nodiscard]] auto child_of(uint32_t parent) -> StatusValue<std::optional<net::tc::QdiscInfo>>;
+    /// Our cbs on @p queue at @p params, under its class's handle (cbs_major()). Errors: the netlink errno.
+    [[nodiscard]] auto replace_class_cbs(uint16_t queue, CbsParameters const& params) -> Status;
+    /// The handle major of @p queue's cbs, chosen once per install(): the kept root's cbs's, else a new one.
+    [[nodiscard]] auto cbs_major(uint16_t queue) -> uint16_t;
+    /// The handle major of the cbs already on @p queue's class of a kept root; nullopt otherwise.
+    [[nodiscard]] auto kept_cbs_major(uint16_t queue) -> std::optional<uint16_t>;
+    /// A new cbs handle major for @p queue, derived from the root's.
+    [[nodiscard]] auto new_cbs_major(uint16_t queue) const noexcept -> uint16_t;
     /// Our etf on @p slot, kept when it is already there, else put in place of what is.
     [[nodiscard]] auto put_etf(EtfSlot const& slot, logging::StrLit label) -> Status;
     /// No etf on @p slot: an etf found there is deleted.
@@ -350,6 +358,8 @@ class ShaperQdiscs
     bool cbs_refused_b_{false};  ///< class B's alone refused: class A's is still programmed
     CbsParameters class_a_{};
     CbsParameters class_b_{};
+    uint16_t cbs_major_a_{0};  ///< class A's cbs handle major (cbs_major()); 0 until chosen
+    uint16_t cbs_major_b_{0};
     LaunchTimeMode launch_time_mode_{LaunchTimeMode::unsupported};
     int32_t etf_delta_ns_{DEFAULT_ETF_DELTA_NS};
     EtfState etf_a_{};
