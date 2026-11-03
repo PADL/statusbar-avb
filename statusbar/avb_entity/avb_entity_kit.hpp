@@ -196,7 +196,7 @@ class AvbEntityKit
 
     /// The TX kick from the tool's SCHED_FIFO kicker timer (config.stream_tx_kicker)
     /// or from its RX timer's tick (config.stream_tx_kick_in_rx_timer).
-    void kick_stream_tx() { talker_->kick_tx(); }
+    [[nodiscard]] auto kick_stream_tx() -> Status { return talker_->kick_tx(); }
 
     /// The tool could not run the timer that was to kick: the media tick kicks
     /// again, as it does when neither option is set.
@@ -465,6 +465,16 @@ class AvbEntityKit
     /// Why start() could not open the stream RX socket (empty: it opened, or
     /// the blob declares no stream inputs).
     [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }
+    /// Why the xdp backend did not open when the kit fell back to rawnet
+    /// (config.net_xdp_fallback); empty when it did not fall back.
+    [[nodiscard]] auto stream_xdp_error() const noexcept -> std::error_code { return stream_xdp_error_; }
+    /// Why the stream port carries no launch time although config.stream_launch_time
+    /// asked for it (the NIC, kernel or probe refused it); empty otherwise.
+    [[nodiscard]] auto stream_launch_time_error() const noexcept -> std::error_code { return stream_launch_time_error_; }
+    /// The stream port, for what a host reads off it (backend, xdp counters,
+    /// launch-time order). Take its Guard off the media thread.
+    [[nodiscard]] auto stream_port() noexcept -> StreamPort& { return stream_port_; }
+    [[nodiscard]] auto stream_port() const noexcept -> StreamPort const& { return stream_port_; }
     /// Whether "maap" address mode fell back to the static per-kind
     /// destination MACs (the MAAP socket would not open).
     [[nodiscard]] auto maap_fell_back_to_static() const noexcept -> bool { return maap_.fell_back_to_static(); }
@@ -645,28 +655,33 @@ class AvbEntityKit
     //
     // start() and stop() phases
     //
-    /// The stream ports' options, from the configuration.
-    [[nodiscard]] auto stream_ports_options() const -> StreamPortsOptions;
-    /// Failure when the stream RX port of @p ports cannot be drained the way the configuration asks.
-    [[nodiscard]] auto check_stream_rx(StreamPortsOptions const& ports) -> Status;
+    /// The stream port's configuration on @p backend, from the kit's.
+    [[nodiscard]] auto stream_port_config(std::string_view backend) const -> StreamPortConfig;
     /// The control plane up, its stream callbacks wired, the declarations started.
-    [[nodiscard]] auto start_control(net::MessageReactor& reactor) -> Status;
+    [[nodiscard]] auto start_control(net::MessageReactor& reactor, TimePoint now) -> Status;
     /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
     /// config_.default_mcr_priorities onto the MVU handler's clock domains (Milan v1.3 Section 7.6.1.1).
     void apply_default_mcr_priorities();
     /// MAAP's addresses in "maap" mode (none offered until defended) and the declarations' timer.
-    [[nodiscard]] auto start_declarations(net::MessageReactor& reactor) -> Status;
-    /// The TX slots, the stream ports (@p ports), the listener streams and the TX path, in that order.
-    [[nodiscard]] auto start_data_plane(net::MessageReactor& reactor, StreamPortsOptions const& ports) -> Status;
+    [[nodiscard]] auto start_declarations(net::MessageReactor& reactor, TimePoint now) -> Status;
+    /// The TX slots, the stream port, the listener streams and the TX path, in that order.
+    [[nodiscard]] auto start_data_plane(net::MessageReactor& reactor) -> Status;
     /// One TX slot per talker stream, with the identity the ACMP model carries.
     [[nodiscard]] auto open_talker_streams() -> Status;
-    /// The bound port, or the kit's own opened with @p ports; the RX port.
-    [[nodiscard]] auto open_stream_ports(StreamPortsOptions const& ports) -> StatusValue<StreamPort*>;
-    /// The kit's own ports opened with @p ports, their errors recorded and logged; the RX port.
-    [[nodiscard]] auto open_own_stream_ports(StreamPortsOptions const& ports) -> StatusValue<StreamPort*>;
-    /// The RX slots on @p rx_port, the VLAN filter and the saved bindings.
-    [[nodiscard]] auto start_listener_streams(net::MessageReactor& reactor, StreamPort* rx_port) -> Status;
+    /// The stream port on config_.net_backend, rawnet when xdp does not open and
+    /// config_.net_xdp_fallback allows it; errors recorded (stream_tx_error()).
+    void open_stream_port();
+    /// The stream port opened on @p backend; untimed when launch time was asked for and only
+    /// an untimed socket opens, whatever refused the timed one (stream_launch_time_error()
+    /// keeps that error).
+    [[nodiscard]] auto open_stream_port_on(std::string_view backend) -> Status;
+    /// Log what open_stream_port() ended with.
+    void log_stream_port();
+    /// The talker's TX on the stream port, and where its kick comes from.
+    void open_stream_tx();
+    /// The RX slots on the stream port, the VLAN filter and the saved bindings.
+    [[nodiscard]] auto start_listener_streams(net::MessageReactor& reactor) -> Status;
     /// One RX slot per listener stream, the CRF recovery input and the static RX groups.
     [[nodiscard]] auto open_listener_streams() -> Status;
 #if defined(__linux__)
@@ -790,6 +805,8 @@ class AvbEntityKit
     /// What opening the stream TX / RX sockets failed with (see stream_tx_error()).
     std::error_code stream_tx_error_{};
     std::error_code stream_rx_error_{};
+    std::error_code stream_xdp_error_{};
+    std::error_code stream_launch_time_error_{};
 
     /// MAAP dynamic-address acquisition (active only in "maap"
     /// stream_address_mode; ready() defaults true for static MACs).

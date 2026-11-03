@@ -11,6 +11,7 @@
 
 #include "statusbar/stats/stats_atomic_histogram.hpp"
 #include "statusbar/stats/stats_atomic_time_stats.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
