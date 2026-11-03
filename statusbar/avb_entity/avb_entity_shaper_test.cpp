@@ -12,6 +12,7 @@
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <format>
@@ -370,6 +371,17 @@ TEST(shaper_cbs, placeholders)
 #if defined(__linux__)
 namespace {
 
+/// A root qdisc of @p kind under @p handle, with @p mqprio's layout when given.
+[[nodiscard]] auto root_qdisc(uint32_t const handle, std::string_view const kind, std::optional<net::tc::MqprioQdisc> const mqprio = {})
+    -> net::tc::QdiscInfo
+{
+    net::tc::QdiscInfo info{.handle = handle, .parent = net::tc::ROOT};
+    std::ranges::copy(kind, info.kind.begin());
+    info.has_mqprio_params = mqprio.has_value();
+    info.mqprio = mqprio.value_or(net::tc::MqprioQdisc{});
+    return info;
+}
+
 /// A QdiscInfo of @p kind at @p handle under @p parent.
 auto qdisc_info(uint32_t const handle, uint32_t const parent, std::string_view const kind) -> net::tc::QdiscInfo
 {
@@ -414,7 +426,11 @@ class RecordingTc final : public net::tc::TcControl
         }
         return success();
     }
-    auto replace_etf(int /*ifindex*/, net::tc::EtfQdisc const& /*q*/) -> Status override { return success(); }
+    auto replace_etf(int /*ifindex*/, net::tc::EtfQdisc const& q) -> Status override
+    {
+        requests.push_back(std::format("replace {:x}:{:x} etf", q.parent >> 16U, q.parent & 0xFFFFU));
+        return success();
+    }
     auto replace_kind(int /*ifindex*/, uint32_t const parent, std::string_view const kind) -> Status override
     {
         requests.push_back(std::format("replace {:x}:{:x} {}", parent >> 16U, parent & 0xFFFFU, kind));
@@ -476,7 +492,7 @@ TEST(shaper_qdiscs, a_fresh_start_installs_both_cbs)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = qdisc_info(0, net::tc::ROOT, "mq");
+    tc.root = root_qdisc(0, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.installed() && !qdiscs.reused());
@@ -532,7 +548,7 @@ TEST(shaper_qdiscs, a_restart_keeps_an_identical_mqprio)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = mqprio_root(0x9000'0000, igb_mqprio());
+    tc.root = root_qdisc(0x9000'0000, "mqprio", igb_mqprio());
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.reused());
@@ -554,7 +570,7 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
     RecordingTc tc{};
     auto other = igb_mqprio();
     other.prio_tc_map[5] = CLASS_A_TC;
-    tc.root = mqprio_root(0x9000'0000, other);
+    tc.root = root_qdisc(0x9000'0000, "mqprio", other);
     tc.mqprio_error = std::make_error_code(std::errc::invalid_argument);
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
@@ -569,7 +585,7 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
         }));
     // And a foreign root of another handle is simply replaced.
     RecordingTc foreign{};
-    foreign.root = mqprio_root(0x0001'0000, igb_mqprio());
+    foreign.root = root_qdisc(0x0001'0000, "mqprio", igb_mqprio());
     ShaperQdiscs replacing{foreign, channel.logger()};
     EXPECT_TRUE(replacing.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(foreign.read() == Requests({"show root", "replace root mqprio 9000:"}));
