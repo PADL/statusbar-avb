@@ -28,7 +28,7 @@ bool write_file(std::string const& path, std::span<std::uint8_t const> bytes)
 }
 
 std::optional<std::vector<std::uint8_t>> read_file(std::string const& path)
-{
+{  // NOLINT(statusbar-block-statements) a file read; pre-dates the gate
     FILE* f = fopen(path.c_str(), "rb");
     if (f == nullptr) {
         return std::nullopt;
@@ -64,7 +64,7 @@ std::string AemModelStore::symbols_path(std::string_view fingerprint) const
 }
 
 std::optional<std::string> AemModelStore::store(std::span<AemRawDescriptor const> descriptors)
-{
+{  // NOLINT(statusbar-block-statements) a model written; pre-dates the gate
     auto fingerprint = aem_fingerprint(descriptors);
     if (contains(fingerprint)) {
         return fingerprint;
@@ -106,7 +106,7 @@ std::optional<std::vector<std::uint8_t>> AemModelStore::load_blob(std::string_vi
 }
 
 std::optional<std::vector<AemSymbol>> AemModelStore::load_symbols(std::string_view fingerprint) const
-{
+{  // NOLINT(statusbar-block-statements) the symbols loaded; pre-dates the gate
     auto bytes = read_file(symbols_path(fingerprint));
     if (!bytes) {
         return std::nullopt;

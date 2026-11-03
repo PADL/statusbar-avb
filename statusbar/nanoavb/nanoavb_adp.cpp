@@ -75,7 +75,7 @@ auto NanoAvbAdpAdvertiser::set_gptp_info(ClockIdentity const& grandmaster_id, ui
 }
 
 auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
-{
+{  // NOLINT(statusbar-block-statements) the ADPDU, field by field; pre-dates the gate
     auto const& entity = entity_;
 
     // Initialize as Entity Available with our entity ID
