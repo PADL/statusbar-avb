@@ -126,6 +126,8 @@ class AvbEntityToneGenerator
     [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
     /// @param now The control-plane time the declarations are withdrawn at
     [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status { return kit_.stop(now); }
+    /// The stream port (AvbEntityKit::stream_port); one opened before start() is kept.
+    [[nodiscard]] auto stream_port() noexcept -> StreamPort& { return kit_.stream_port(); }
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
