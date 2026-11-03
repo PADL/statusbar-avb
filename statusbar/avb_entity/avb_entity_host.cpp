@@ -456,6 +456,10 @@ void AvbEntityHost::on_link_up(TimePoint const time)
     // (the link monitor's first) keeps it.
     if (!supervisor_ctx_.link_up) {
         (void)components_.msrp_handler.reset_domain(time);
+        if (link_down_count_ != 0) {  // back after a down: what MRP sent meanwhile was lost (IEEE 802.1Q-2022 10.7)
+            components_.msrp_handler.rejoin(time);
+            components_.mvrp_handler.leave_all(time);
+        }
         ++link_up_count_;
         (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
     }

@@ -367,6 +367,10 @@ class MvrpParticipantT
     /// A transmit opportunity now, as MsrpParticipant::transmit().
     void transmit(TimePoint now) { build_and_send_pdu(now); }
 
+    /// A LeaveAll sent now: our VIDs re-declared in it and the peer asked to re-declare its own (IEEE
+    /// 802.1Q-2022 Clause 10.7.5.8), as MsrpParticipant::leave_all(); for a port whose link came back.
+    void leave_all(TimePoint now) { on_leaveall_timer(now); }
+
     void tick(TimePoint now)
     {
         auto const expired = port_.timers().tick(now);
