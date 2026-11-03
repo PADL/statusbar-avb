@@ -77,7 +77,7 @@ void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 }  // namespace
 
 int main(int argc, char* argv[])
-{
+{  // NOLINT(statusbar-block-statements) the tool's main, in order; pre-dates the gate
     using namespace statusbar;
 
     CommonConfig config;

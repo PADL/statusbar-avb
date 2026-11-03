@@ -69,7 +69,7 @@ std::string type_segment(std::uint16_t type)
 /// MEYER_FAN_STATUS / JDKS_IPV4_PARAMETERS), else the EUI-64 as 16 hex
 /// digits — never a non-identifying placeholder.
 std::string control_type_segment(ieee::Eui64 const& type)
-{
+{  // NOLINT(statusbar-block-statements) a CONTROL type's segment; pre-dates the gate
     auto name = control_type_name(type);
     bool identifying = !name.empty();
     for (char const c : name) {
@@ -432,7 +432,7 @@ struct Walker
 }  // namespace
 
 std::vector<AemSymbol> derive_aem_symbols(std::span<AemRawDescriptor const> descriptors)
-{
+{  // NOLINT(statusbar-block-statements) the symbols derived, kind by kind; pre-dates the gate
     Walker w{.descriptors = descriptors, .by_key = {}, .symbols = {}};
     for (auto const& d : descriptors) {
         w.by_key[{d.configuration, d.descriptor_type, d.descriptor_index}] = &d;

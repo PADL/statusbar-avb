@@ -398,7 +398,7 @@ StunServer<MaxSessions>::StunServer(ServerConfig config, uint16_t port)
 
 template <size_t MaxSessions>
 auto StunServer<MaxSessions>::create(ServerConfig config, std::error_code& ec_out) -> std::unique_ptr<StunServer>
-{
+{  // NOLINT(statusbar-block-statements) the server's setup, in order; pre-dates the gate
     uint16_t const requested_port = config.bind_port;
 
     // Open the IPv4 socket first. When bind_port was 0, its

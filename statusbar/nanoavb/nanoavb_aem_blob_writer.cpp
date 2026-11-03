@@ -25,7 +25,7 @@ void AemBlobWriter::add_symbol(
 }
 
 std::vector<std::uint8_t> AemBlobWriter::write() const
-{
+{  // NOLINT(statusbar-block-statements) the blob, section by section; pre-dates the gate
     auto append_struct = [](std::vector<std::uint8_t>& out, auto const& pod) {
         auto view = make_const_span(pod);
         out.insert(out.end(), view.begin(), view.end());

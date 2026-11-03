@@ -134,7 +134,7 @@ void NanoAvbAdpAdvertiser::answer_discover(TimePoint const now)
 }
 
 auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
-{
+{  // NOLINT(statusbar-block-statements) the ADPDU, field by field; pre-dates the gate
     auto const& entity = entity_;
 
     // Initialize as Entity Available with our entity ID
