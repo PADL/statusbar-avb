@@ -468,9 +468,10 @@ class RecordingTc final : public net::tc::TcControl
     std::vector<net::tc::QdiscInfo> children{};  ///< the qdiscs below the root (get's answers)
     std::error_code mqprio_error{};              ///< replace_mqprio's first answer
     std::error_code cbs_error{};                 ///< every replace_cbs's answer
-    std::optional<uint32_t> cbs_refused_on{};    ///< a replace_cbs on this parent answers EOPNOTSUPP
-    std::error_code etf_error{};                 ///< every replace_etf's answer
-    uint16_t next_major{0x8001};                 ///< the handle major the kernel gives the next new qdisc
+    std::optional<uint32_t> cbs_refused_on{};    ///< a replace_cbs on this parent answers cbs_refusal
+    std::errc cbs_refusal{std::errc::operation_not_supported};
+    std::error_code etf_error{};  ///< every replace_etf's answer
+    uint16_t next_major{0x8001};  ///< the handle major the kernel gives the next new qdisc
 
     auto replace_mqprio(int /*ifindex*/, net::tc::MqprioQdisc const& q) -> Status override
     {
@@ -488,7 +489,7 @@ class RecordingTc final : public net::tc::TcControl
             return failure(cbs_error);
         }
         if (cbs_refused_on == q.parent) {
-            return failure(std::make_error_code(std::errc::operation_not_supported));
+            return failure(std::make_error_code(cbs_refusal));
         }
         if (find(q.parent) == nullptr) {
             auto info = qdisc_info(0, q.parent, "cbs");
@@ -759,7 +760,7 @@ TEST(shaper_qdiscs, no_cbs_offload_stops_asking)
     tc.cbs_error = std::make_error_code(std::errc::operation_not_supported);
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
-    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // a refusal is a state, not an error
     EXPECT_TRUE(qdiscs.cbs_unsupported());
     EXPECT_TRUE(tc.drain() == Requests({"show root", "replace root mqprio 9000:", "replace 9000:1 cbs idleslope 375000"}));
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
@@ -982,7 +983,7 @@ TEST(shaper_launch_time, without_cbs_offload_the_etf_goes_on_class_a_s_queue)
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
-    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // a refusal is a state, not an error
     EXPECT_TRUE(
         tc.drain() ==
         Requests({
@@ -1011,7 +1012,7 @@ TEST(shaper_launch_time, without_cbs_offload_a_leftover_etf_gives_way_to_pfifo_f
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(LaunchTimeMode::off);
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
-    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // a refusal is a state, not an error
     EXPECT_TRUE(
         tc.drain() == Requests({"show root", "replace 9000:1 cbs idleslope 375000", "show 9000:1", "replace 9000:1 pfifo_fast"}));
     EXPECT_FALSE(qdiscs.launch_time());
@@ -1026,7 +1027,7 @@ TEST(shaper_launch_time, a_refused_class_b_cbs_leaves_the_etf_under_class_a_s)
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
-    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // a refusal is a state, not an error
     EXPECT_TRUE(
         tc.drain() ==
         Requests({
@@ -1039,6 +1040,45 @@ TEST(shaper_launch_time, a_refused_class_b_cbs_leaves_the_etf_under_class_a_s)
             "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
+    EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported());
+    // Class A's cbs still follows its streams; class B's is not asked again.
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136"}));
+}
+
+// igc refuses a cbs above queue 1 with EINVAL: class B's is refused as with EOPNOTSUPP, once, and the
+// etf still settles under class A's cbs.
+TEST(shaper_launch_time, an_einval_class_b_cbs_is_a_refusal_too)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.cbs_refused_on = 0x9000'0002;
+    tc.cbs_refusal = std::errc::invalid_argument;
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported() && qdiscs.launch_time());
+    (void)tc.drain();
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136"}));
+}
+
+// Class B's cbs waits for class A's: a failed class A request (here EBUSY) sends no class B request
+// (igc enables cbs on queue 0 first), and the next program() sends both.
+TEST(shaper_qdiscs, class_b_s_cbs_waits_for_class_a_s)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    (void)tc.drain();
+    tc.cbs_error = std::make_error_code(std::errc::device_or_resource_busy);
+    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000"}));
+    tc.cbs_error = {};
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
 }
 
 // A refused etf offload (EOPNOTSUPP) is recorded and logged once; the cbs stay, program() succeeds
