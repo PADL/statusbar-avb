@@ -44,6 +44,7 @@ class StreamRxHandler : public net::Pollable
     StreamRxHandler(StreamPort& port, std::span<ieee::Eui48 const> groups, DrainFn drain)
         : port_{port}
         , drain_{std::move(drain)}
+        , closes_{port.closes()}
     {
         StreamPort::Guard const guard{port_};
         for (auto const& group : groups) {
@@ -58,11 +59,13 @@ class StreamRxHandler : public net::Pollable
     [[nodiscard]] auto fd() const noexcept -> int override { return port_.fd(); }
     void on_ready(int64_t /*reactor_now_ns*/) override { drain_(); }
     void tick(int64_t /*now_ns*/) override {}
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+    /// Once its port has closed, opened again or not: the reactor drops it (a restart attaches a new one).
+    [[nodiscard]] auto finished() const noexcept -> bool override { return port_.closes() != closes_; }
 
   private:
     StreamPort& port_;
     DrainFn drain_;
+    uint32_t closes_;  ///< the port's closes() when this was attached
 };
 
 }  // namespace statusbar::avb_entity

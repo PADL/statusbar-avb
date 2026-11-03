@@ -133,6 +133,14 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
     return success();
 }
 
+void TalkerStreams::close() noexcept
+{
+    port_ = nullptr;
+    external_kick_ = false;
+    slots_.clear();
+    std::ranges::for_each(crf_open_, [](std::atomic<bool>& open) { open.store(false, std::memory_order_release); });
+}
+
 auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
 {
     auto* const slot = slot_for(spec.index);

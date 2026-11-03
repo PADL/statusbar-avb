@@ -1049,6 +1049,39 @@ TEST(avb_entity_kit_milan_talker, a_listener_blip_keeps_the_declaration)
     EXPECT_FALSE(m.kit.talker_declared(0));
 }
 
+// stop() closes the data plane: no slots, the port closed and its RX handler dropped; a restart
+// opens each slot and one RX handler again.
+TEST(avb_entity_kit_stream_port, a_restart_opens_each_slot_and_the_rx_handler_once)
+{
+    MilanKit m{std::nullopt, 0x1B, /*gate=*/false};
+    auto const reopen = [&m] {
+        return m.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x1B}}).has_value();
+    };
+    auto const pollables = [&m] {
+        (void)m.reactor.poll_once(0);  // drops the finished
+        return m.reactor.active_count();
+    };
+    auto const before = pollables();
+    EXPECT_TRUE(reopen());
+    EXPECT_TRUE(m.start_ready());
+    auto const started = pollables();
+    EXPECT_EQ(m.kit.talker().stream_count(), m.talkers.size());
+    EXPECT_EQ(m.kit.listener()->stream_count(), m.listeners.size());
+
+    EXPECT_TRUE(m.kit.stop().has_value());
+    EXPECT_EQ(m.kit.talker().stream_count(), size_t{0});
+    EXPECT_EQ(m.kit.listener()->stream_count(), size_t{0});
+    EXPECT_FALSE(m.kit.stream_port().valid());
+    auto const stopped = pollables();
+    EXPECT_TRUE(stopped < started);  // the RX handler among those gone
+
+    EXPECT_TRUE(reopen());
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(pollables() - stopped, started - before);  // one RX handler again, not two
+    EXPECT_EQ(m.kit.talker().stream_count(), m.talkers.size());
+    EXPECT_EQ(m.kit.listener()->stream_count(), m.listeners.size());
+}
+
 // stop() withdraws: undeclared, inactive, every gate shut; a restart declares
 // again (while Ready) as the predicate says.
 TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)

@@ -173,7 +173,11 @@ class StreamPort
         port_.close();
         serialize_ = false;
         test_launch_time_ = false;
+        ++closes_;
     }
+    /// How many times close() ran: what was attached to the port before a close
+    /// (an RX handler) is done with it, even once it opens again.
+    [[nodiscard]] auto closes() const noexcept -> uint32_t { return closes_; }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return port_.valid(); }
     /// The fd a reactor polls for receive readiness.
@@ -247,6 +251,7 @@ class StreamPort
     itc::SpinLock lock_{};
     bool serialize_{false};
     bool test_launch_time_{false};
+    uint32_t closes_{0};
     net::ClockFn phc_{};
     net::LaunchOrder launch_order_{};
     std::atomic<bool> reset_pending_{false};

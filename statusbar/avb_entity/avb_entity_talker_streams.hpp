@@ -118,6 +118,11 @@ struct TalkerStreams
     /// class's state.
     auto open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status;
     auto open_tx(StreamPort& port) -> Status { return open_tx(port, TxPcapConfig{}); }
+    /// Back to before open_stream() and open_tx(): no slots, no port, the kick in flush_tx().
+    /// Control thread, once the media thread no longer transmits.
+    void close() noexcept;
+    /// The slots open_stream() opened.
+    [[nodiscard]] auto stream_count() const noexcept -> size_t { return slots_.size(); }
 
     /// Push this tick's frames to the wire. The ring backends batch what
     /// transmit_* committed until this kick; rawnet sent each frame as it

@@ -310,6 +310,29 @@ void ListenerStreams::adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot c
     slot.spec.format = spec.format;
 }
 
+void ListenerStreams::close()
+{
+    port_ = nullptr;
+    while (!slots_.empty()) {
+        auto& slot = slots_.back();
+        auto const index = slot.spec.index;
+        auto consume = std::move(slot.consume);
+        auto on_crf = std::move(slot.on_crf);
+        slots_.pop_back();
+        keep_pending(index, std::move(consume), std::move(on_crf));
+    }
+}
+
+void ListenerStreams::keep_pending(uint16_t const index, StreamConsumeFn consume, StreamCrfFn on_crf)
+{
+    if (consume) {
+        set_consume(index, std::move(consume));
+    }
+    if (on_crf) {
+        set_crf(index, std::move(on_crf));
+    }
+}
+
 void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn fn)
 {
     if (auto* slot = slot_for(stream_index); slot != nullptr) {

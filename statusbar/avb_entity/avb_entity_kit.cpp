@@ -1786,13 +1786,24 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
     }
 }
 
+void AvbEntityKit::close_streams()
+{
+    // The talker and listener let go of the port before it closes; its RX handler then finishes.
+    rt_rx_handler_.reset();
+    talker_->close();
+    if (listener_ != nullptr) {
+        listener_->close();
+    }
+    stream_port_.close();
+}
+
 void AvbEntityKit::close_data_plane()
 {
 #if defined(__linux__)
     listener_vlan_.release();
 #endif
     rx_static_groups_.clear();
-    stream_port_.close();
+    close_streams();
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {
         persist();  // a listener goal change of this pass

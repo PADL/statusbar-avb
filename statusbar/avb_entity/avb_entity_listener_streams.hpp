@@ -229,6 +229,11 @@ struct ListenerStreams
     [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> ListenerStreamSlot*;
     [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> ListenerStreamSlot const*;
 
+    /// Back to before open_stream() and attach_rx(): no slots, no port; each slot's consumer and
+    /// CRF consumer kept for the next open_stream() of its index. Control thread, RX stopped.
+    void close();
+    /// The slots open_stream() opened.
+    [[nodiscard]] auto stream_count() const noexcept -> size_t { return slots_.size(); }
     /// Receive from @p port (outliving this and the handler) joined to @p static_groups
     /// (only the first join's failure fails); add its drain handler to @p reactor, or
     /// with @p keep_handler return it for an RX timer. Reactor thread.
@@ -357,6 +362,8 @@ struct ListenerStreams
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Take @p trial's deserializers and @p spec's format into @p slot. Under the guard.
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
+    /// A closed slot's consumers, pending again for its @p index (close()).
+    void keep_pending(uint16_t index, StreamConsumeFn consume, StreamCrfFn on_crf);
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when the
     /// frame was not AVTP, nullopt when nothing was queued. Holds the port
     /// guard for exactly that - the decode happens outside it.
