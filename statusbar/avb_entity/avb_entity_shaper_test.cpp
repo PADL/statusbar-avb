@@ -1228,9 +1228,9 @@ TEST(port_shaper, the_tspecs_given_before_install_are_programmed_at_install)
             "show root",
             "replace root mqprio 9000:",
             "replace 9000:1 cbs 9001: idleslope 19136",
-            "replace 9000:2 cbs 9002: idleslope 730864",
         }));
     EXPECT_TRUE(shaper.class_a() == admitted_targets().class_a);
+    EXPECT_TRUE(shaper.class_b().empty());
     EXPECT_TRUE(shaper.layout() == igb_layout());
     EXPECT_EQ(shaper.driver(), std::string{"igb"});
 }
@@ -1247,10 +1247,10 @@ TEST(port_shaper, tspecs_given_after_install_go_out_on_the_next_tick)
     EXPECT_TRUE(shaper.program(streams).has_value());
     EXPECT_TRUE(tc.drain().empty());
     shaper.tick(1'000'000'000);
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
     EXPECT_TRUE(shaper.program({}).has_value());
     shaper.tick(1'010'000'000);
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 100000"}));
     shaper.tick(1'020'000'000);
     EXPECT_TRUE(tc.drain().empty());
 }
@@ -1282,6 +1282,27 @@ TEST(port_shaper, a_bad_class_a_priority_installs_nothing)
     EXPECT_TRUE(tc.drain().empty());
 }
 
+// A port runs class A alone (Milan): class B's PCP rides the legacy TC, so its queue carries nothing
+// and gets no cbs; a root a two-class run left has another map and is replaced, its cbs with it.
+TEST(port_shaper, class_b_maps_to_legacy_and_gets_no_cbs)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    auto const mqprio = mqprio_for(igb_layout(), 0x9000, DEFAULT_CLASS_A_PCP, DEFAULT_CLASS_B_PCP, DEFAULT_PTP_PRIORITY, false);
+    EXPECT_TRUE(mqprio.has_value() && mqprio->prio_tc_map[DEFAULT_CLASS_B_PCP] == LEGACY_TC);
+    EXPECT_TRUE(mqprio.has_value() && mqprio->prio_tc_map[DEFAULT_CLASS_A_PCP] == CLASS_A_TC);
+    RecordingTc tc{};
+    tc.root = mqprio_root(0x9000'0000, igb_mqprio());
+    PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
+    auto const streams = aaf_and_crf();
+    EXPECT_TRUE(shaper.program(streams).has_value());
+    EXPECT_TRUE(shaper.install(igb_port()).has_value());
+    auto const requests = tc.drain();
+    EXPECT_TRUE(std::ranges::find(requests, std::string{"replace root mqprio 9000:"}) != requests.end());
+    EXPECT_TRUE(std::ranges::find(requests, std::string{"replace 9000:1 cbs 9001: idleslope 19136"}) != requests.end());
+    EXPECT_TRUE(std::ranges::none_of(requests, [](std::string const& r) { return r.find("9000:2") != std::string::npos; }));
+    EXPECT_TRUE(shaper.class_b().empty());
+}
+
 // shutdown() parks the cbs at the placeholders and leaves the qdiscs, or with restore_qdisc
 // removes them (docs/SHAPER.md, "Adapter resets").
 TEST(port_shaper, shutdown_parks_or_restores)
@@ -1294,7 +1315,7 @@ TEST(port_shaper, shutdown_parks_or_restores)
     EXPECT_TRUE(parked.install(igb_port()).has_value());
     (void)tc.drain();
     parked.shutdown();
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 100000"}));
     EXPECT_FALSE(parked.installed());
     parked.shutdown();
     EXPECT_TRUE(tc.drain().empty());
@@ -1304,7 +1325,8 @@ TEST(port_shaper, shutdown_parks_or_restores)
     EXPECT_TRUE(restored.install(igb_port()).has_value());
     (void)restored_tc.drain();
     restored.shutdown();
-    EXPECT_TRUE(restored_tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+    // Class A only: nothing maps to class B's queue, so no cbs is there to remove.
+    EXPECT_TRUE(restored_tc.drain() == Requests({"replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
 
 #endif
