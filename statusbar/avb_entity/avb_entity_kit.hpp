@@ -76,9 +76,6 @@ static_assert(
     "AEM stream runtime state (SET_STREAM_FORMAT, START/STOP_STREAMING): inputs and outputs share the table");
 static_assert(MAX_ENTITY_CRF_STREAMS == AvbEntityHost::MAX_CLOCK_DOMAINS, "one CRF input and one CRF output per CLOCK_DOMAIN");
 static_assert(
-    TalkerDeclarations::LISTENER_GRACE_NS == TalkerGate::GRACE_NS,
-    "a departed Listener keeps its stream declared as long as it keeps the gate open");
-static_assert(
     nanoavb::NanoAvbAcmpListener::MAX_FAST_CONNECT_GOALS >= MAX_ENTITY_STREAMS,
     "fast-connect goals and persisted listener bindings: one per STREAM_INPUT");
 static_assert(
@@ -571,10 +568,7 @@ class AvbEntityKit
     /// Every dynamic output port onto its identity for the formats now in force.
     void refresh_output_mappings();
     /// The steady clock in ns: the gate's time base (grace window stamps).
-    [[nodiscard]] static auto steady_now_ns() noexcept -> int64_t
-    {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
+    [[nodiscard]] static auto steady_now_ns() noexcept -> int64_t { return net::monotonic_ns(); }
     /// The group an input pre-joins at start: the first talker output's of its audio kind, else none
     /// (the loopback topology listens on its own output group).
     [[nodiscard]] auto static_rx_group(StreamSpec const& spec) const noexcept -> ieee::Eui48;

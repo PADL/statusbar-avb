@@ -56,9 +56,9 @@ struct std::is_error_code_enum<statusbar::avb_entity::ShaperError> : std::true_t
 
 namespace statusbar::avb_entity {
 
-// ---------------------------------------------------------------------------
+//
 // Queue layout (pure)
-// ---------------------------------------------------------------------------
+//
 
 /// The fewest TX queues an AVB port needs: one legacy, one per SR class.
 inline constexpr uint16_t MIN_AVB_TX_QUEUES = 3;
@@ -129,9 +129,9 @@ inline constexpr uint8_t PTP_TC = 3;
     uint8_t ptp_priority = DEFAULT_PTP_PRIORITY) noexcept -> StatusValue<net::tc::MqprioQdisc>;
 #endif
 
-// ---------------------------------------------------------------------------
-// Credit-based shaper parameters, IEEE 802.1Q Annex L (pure)
-// ---------------------------------------------------------------------------
+//
+// Credit-based shaper parameters (pure) - IEEE 802.1Q-2022 Annex L
+//
 
 /// Per-frame media overhead on an 802.3 port (802.1Q 35.2.2.8.3: 42 octets).
 inline constexpr uint32_t VLAN_OVERHEAD = 4;  ///< the 802.1Q tag
@@ -223,9 +223,9 @@ struct CbsTargets
     uint32_t link_kbps,
     uint32_t max_interfering_frame) noexcept -> CbsTargets;
 
-// ---------------------------------------------------------------------------
+//
 // Launch time: an offloaded etf on class A's queue (tc-etf(8); net_tc_launch_time.hpp)
-// ---------------------------------------------------------------------------
+//
 
 /// What the shaper does with etf on class A's queue, under its cbs or alone (net::tc::LaunchTimeMode), the
 /// mode from the driver's one answer, and etf's default delta.
@@ -233,9 +233,9 @@ using net::tc::DEFAULT_ETF_DELTA_NS;
 using net::tc::launch_time_mode;
 using net::tc::LaunchTimeMode;
 
-// ---------------------------------------------------------------------------
+//
 // ShaperQdiscs (the requests, Linux)
-// ---------------------------------------------------------------------------
+//
 
 #if defined(__linux__)
 
@@ -358,9 +358,9 @@ class ShaperQdiscs
 
 #endif  // __linux__
 
-// ---------------------------------------------------------------------------
+//
 // PortShaper and EntityShaper (reactor thread, Linux)
-// ---------------------------------------------------------------------------
+//
 
 struct ShaperConfig
 {
@@ -555,8 +555,8 @@ class EntityShaper final : public net::Pollable
     /// Give the port the TSpecs of the recorded admitted streams when they differ from the last
     /// given. Every talker stream of the kit is class A (MSRP sr_class_id 6 only).
     void program_admitted() noexcept;
-    /// The port's install returned @p status: on success, hand back the link speed and warn
-    /// about the stream socket's priority; on failure, unhook.
+    /// The port's install returned @p status: on success, hand the kit the link speed; on
+    /// failure, unhook.
     [[nodiscard]] auto installed_on(Status status) -> Status;
     /// Clear the kit's admission hook if this shaper set it.
     void unhook() noexcept;
