@@ -200,7 +200,7 @@ Topic documents live in [`docs/`](docs/):
 | [`PERSISTENT_STATE.md`](docs/PERSISTENT_STATE.md) | The entity's persistent state file |
 | [`PTP_WAKE_TIMING.md`](docs/PTP_WAKE_TIMING.md) | Waking on a PTP deadline |
 | [`SHAPER.md`](docs/SHAPER.md) | Talker traffic shaping and the listener VLAN |
-| [`STREAM_PORTS.md`](docs/STREAM_PORTS.md) | The AVTP frame transport (packet socket, AF_XDP) |
+| [`STREAM_PORTS.md`](docs/STREAM_PORTS.md) | The AVTP frame transport (rawnet, mmap, AF_XDP; launch time) |
 | [`TOOLS.md`](docs/TOOLS.md) | Every installed tool |
 | [`UDPTUN.md`](docs/UDPTUN.md) | The `udptun` framework |
 | [`YUBIKEY_AVB_KEY_SETUP.md`](docs/YUBIKEY_AVB_KEY_SETUP.md) | YubiKey keys for `avtp_crypto` |
