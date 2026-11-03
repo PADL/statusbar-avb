@@ -882,6 +882,28 @@ void MsrpParticipantT<Limits>::rearm_leave_timer() noexcept
 }
 
 template <class Limits>
+void MsrpParticipantT<Limits>::rejoin(TimePoint now)
+{
+    auto flush = [&](auto& records, auto&& notify_leave) {
+        for (auto& rec : records) {
+            if (rec.registrar_is_registered()) {
+                mrp::dispatch_registrar(rec, registrar_sm::Def::Event::Flush, now, port_.timers());
+                notify_leave(rec);
+            }
+        }
+    };
+    flush(listeners_, [&](auto const& rec) { notify_listener_leave(rec.first_value.stream_id); });
+    leave_all(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::leave_all(TimePoint now)
+{
+    port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::LvaTimer, now);
+    send_leave_all(now);
+}
+
+template <class Limits>
 void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
 {
     // LeaveAll timer expired: drive the LeaveAll FSM, which rearms its own timer,
@@ -901,7 +923,12 @@ void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
         build_and_send_pdu(now, /*leave_all=*/false);
         return;
     }
+    send_leave_all(now);
+}
 
+template <class Limits>
+void MsrpParticipantT<Limits>::send_leave_all(TimePoint now)
+{
     auto drive = [&](auto& records) {
         for (auto& rec : records) {
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::TxLeaveAll, now);
@@ -918,10 +945,7 @@ void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
             // same PDU, so it never strands us.
         }
     };
-    drive(talker_adv_);
-    drive(talker_failed_);
-    drive(listeners_);
-    drive(domains_);
+    [&](auto&... all) { (drive(all), ...); }(talker_adv_, talker_failed_, listeners_, domains_);
 
     // The LeaveAll FSM is now in Active; dispatch Tx so it transitions back to
     // Passive with tx_leaveall_pending=true, and emit the PDU WITH the LeaveAll
