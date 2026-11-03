@@ -342,15 +342,15 @@ template <typename Get, typename T>
     return true;
 }
 
-/// The file's version: not_supported unless it is this one.
+/// The file's version: not_supported for a later one, malformed for an earlier one or none.
 [[nodiscard]] auto check_version(Table const& root) -> Status
 {
     auto const version = int_at(root, "version", 0, std::numeric_limits<int64_t>::max());
-    if (!version) {
-        return failure(malformed());
-    }
-    if (*version != PersistentState::VERSION) {
+    if (version && *version > PersistentState::VERSION) {
         return failure(std::make_error_code(std::errc::not_supported));
+    }
+    if (!version || *version != PersistentState::VERSION) {
+        return failure(malformed());
     }
     return success();
 }
@@ -567,7 +567,11 @@ auto open_for_write(std::string const& tmp, std::string const& path) -> int
 auto import_legacy_bindings(std::string const& path, LoadedPersistentState& loaded) -> void
 {
     auto const bindings = load_listener_bindings(path);
-    if (!bindings || bindings->empty()) {
+    if (!bindings) {
+        loaded.error = bindings.error();  // fresh, said: the old file is not imported
+        return;
+    }
+    if (bindings->empty()) {
         return;
     }
     for (auto const& b : *bindings) {
