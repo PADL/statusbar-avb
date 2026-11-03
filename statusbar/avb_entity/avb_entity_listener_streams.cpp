@@ -457,17 +457,22 @@ auto ListenerStreams::take_rx_frame() -> std::optional<size_t>
     return length;
 }
 
-auto ListenerStreams::copy_avtpdu(std::span<uint8_t const> const frame) -> size_t
+auto ListenerStreams::avtpdu_of(std::span<uint8_t const> const frame) const noexcept -> std::span<uint8_t const>
 {
     // Where the AVTPDU starts depends on whether the frame arrived tagged;
     // a frame that is not AVTP at all is dropped here.
     auto const offset = net::avtp_payload_offset(frame);
     if (!offset || *offset >= frame.size()) {
-        return 0;
+        return {};
     }
-    size_t const length = std::min(frame.size() - *offset, rx_buf_.size());
-    span_copy(std::span<uint8_t>{rx_buf_}.first(length), frame.subspan(*offset, length));
-    return length;
+    return frame.subspan(*offset, std::min(frame.size() - *offset, rx_buf_.size()));
+}
+
+auto ListenerStreams::copy_avtpdu(std::span<uint8_t const> const frame) -> size_t
+{
+    auto const avtpdu = avtpdu_of(frame);
+    span_copy(std::span<uint8_t>{rx_buf_}.first(avtpdu.size()), avtpdu);
+    return avtpdu.size();
 }
 
 auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
@@ -510,9 +515,8 @@ auto ListenerStreams::receive_in_place(int64_t const gptp_now_ns) -> bool
     if (!rx || !rx->has_value()) {
         return false;
     }
-    auto const frame = (*rx)->buffer;
-    if (auto const offset = net::avtp_payload_offset(frame); offset && *offset < frame.size()) {
-        on_stream_rx_frame(frame.subspan(*offset, std::min(frame.size() - *offset, rx_buf_.size())), gptp_now_ns);
+    if (auto const avtpdu = avtpdu_of((*rx)->buffer); !avtpdu.empty()) {
+        on_stream_rx_frame(avtpdu, gptp_now_ns);
     }
     (void)port_->port().rx_release((*rx)->handle);
     return true;
