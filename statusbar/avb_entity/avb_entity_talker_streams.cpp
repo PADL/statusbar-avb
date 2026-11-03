@@ -26,12 +26,6 @@ namespace {
 /// carries (a format needing more is refused by its serializer).
 constexpr size_t MAX_AUDIO_PAYLOAD = net::MAX_ETHERNET_PAYLOAD;
 
-/// The steady clock in ns: the time base of the tu window (note_grandmaster_changed).
-[[nodiscard]] auto steady_now_ns() noexcept -> int64_t
-{
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
 /// The stream's sequence number and sample count (the AM824 DBC) from @p from into
 /// @p to's serializer, so that a re-shaped stream goes on.
 void carry_over(TalkerStreamSlot const& from, TalkerStreamSlot& to) noexcept
@@ -248,7 +242,7 @@ void TalkerStreams::transmit_am824(
         return;
     }
 
-    pdu.stream_header.set_tu(timestamp_uncertain(steady_now_ns()));
+    pdu.stream_header.set_tu(timestamp_uncertain(net::monotonic_ns()));
     span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
     (void)send_stream_frame(slot, frame.first(avtp::Am824Pdu::HEADER_LENGTH + audio_bytes));
 }
@@ -279,7 +273,7 @@ void TalkerStreams::transmit_aaf(
         return;
     }
 
-    pdu.set_tu(timestamp_uncertain(steady_now_ns()));
+    pdu.set_tu(timestamp_uncertain(net::monotonic_ns()));
     span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     (void)send_stream_frame(slot, frame.first(avtp::AafPdu::HEADER_LENGTH + audio_bytes));
 }
@@ -380,7 +374,7 @@ auto TalkerStreams::transmit_aaf_raw(
     }
     // Not zeroed: serialize_aaf_raw writes every byte it sends.
     return send_serialized(slot, *slot.aaf, MAX_AUDIO_PAYLOAD, launch_time_ns, [&](std::span<uint8_t> const frame) {
-        return serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
+        return serialize_aaf_raw(*slot.aaf, frame, frames, first_index, pts_ns, render, timestamp_uncertain(net::monotonic_ns()));
     });
 }
 
@@ -421,7 +415,8 @@ auto TalkerStreams::transmit_am824_raw(
     }
     // Not zeroed: serialize_am824_raw writes every byte it sends.
     return send_serialized(slot, *slot.am824, MAX_AUDIO_PAYLOAD, launch_time_ns, [&](std::span<uint8_t> const frame) {
-        return serialize_am824_raw(*slot.am824, frame, frames, first_index, pts_ns, render, timestamp_uncertain(steady_now_ns()));
+        return serialize_am824_raw(
+            *slot.am824, frame, frames, first_index, pts_ns, render, timestamp_uncertain(net::monotonic_ns()));
     });
 }
 
@@ -517,7 +512,7 @@ auto TalkerStreams::transmit_crf_raw(
         if (mr_pending_[slot.spec.index].exchange(false, std::memory_order_relaxed)) {
             slot.crf_mr = !slot.crf_mr;
         }
-        return serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(steady_now_ns()), slot.crf_mr);
+        return serialize_crf_raw(*slot.crf, frame, timestamps_ns, timestamp_uncertain(net::monotonic_ns()), slot.crf_mr);
     });
 }
 
