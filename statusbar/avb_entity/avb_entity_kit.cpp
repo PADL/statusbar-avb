@@ -13,6 +13,7 @@
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -209,6 +210,29 @@ auto AvbEntityKit::current_vlan_id() const noexcept -> uint16_t
     return active_vlan_id_ != 0 ? active_vlan_id_ : config_.vlan_id;
 }
 
+auto AvbEntityKit::admitted_talker_streams() const noexcept -> AdmittedStreams
+{
+    AdmittedStreams admitted{};
+    for (auto const& spec : talker_specs_) {
+        if (gate_.admitted(spec.index)) {
+            (void)admitted.try_push_back(spec.index);
+        }
+    }
+    return admitted;
+}
+
+void AvbEntityKit::note_admission()
+{
+    auto admitted = admitted_talker_streams();
+    if (std::ranges::equal(admitted, admitted_)) {
+        return;
+    }
+    admitted_ = admitted;
+    if (on_admission_changed_) {
+        on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
+}
+
 void AvbEntityKit::wire_stream_callbacks()
 {  // NOLINT(statusbar-block-statements) the stream callback wiring, one install per hook; pre-dates the gate
     // MSRP reservations for the talker streams. The host declares the SR class
@@ -220,8 +244,10 @@ void AvbEntityKit::wire_stream_callbacks()
         }
     });
     // The per-stream transmit gate tracks MSRP Listener Ready.
-    host_.set_on_listener_ready(
-        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool ready) {
+        gate_.note_listener_ready(stream_id, ready);
+        note_admission();
+    });
 
     // ACMP: log talker connections + publish the fresh connection count for
     // the media-timer gate; drive the listener (MSRP attach + mcast join) on
@@ -236,6 +262,7 @@ void AvbEntityKit::wire_stream_callbacks()
                 listener_unique_id);
             gate_.note_acmp_connections(
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+            note_admission();
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -246,6 +273,7 @@ void AvbEntityKit::wire_stream_callbacks()
                 listener_unique_id);
             gate_.note_acmp_connections(
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+            note_admission();
         });
     if (listener_ != nullptr) {
         host_.components().acmp_listener.set_connection_callbacks(
@@ -311,6 +339,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     // Bring up the shared control plane (net handlers + generic SM wiring),
     // then attach the stream-specific callbacks (hooks + ACMP + AEM handlers).
     gate_.set_logger(host_.ctl_log());
+    // A restarted kit reports its first admitted set afresh.
+    admitted_.clear();
     if (listener_ != nullptr) {
         listener_->set_logger(host_.ctl_log());
     }
@@ -465,10 +495,11 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
 {
     nanoavb::TalkerStreamSrpInfo info{};
     fill_talker_srp_identity(spec.index, info);
-    info.max_interval_frames = 1;
-    // TSpec frame size from the format word (kit phase 1) — no per-entity
-    // byte math to keep in step with the model.
-    info.max_frame_size = srp_max_frame_size(spec.format);
+    // TSpec from the format word (kit phase 1) — no per-entity byte math to
+    // keep in step with the model; the hardware shaper sizes by the same one.
+    auto const tspec = talker_tspec(spec);
+    info.max_interval_frames = tspec.max_interval_frames;
+    info.max_frame_size = tspec.max_frame_size;
     info.accumulated_latency = 0;
     return info;
 }
