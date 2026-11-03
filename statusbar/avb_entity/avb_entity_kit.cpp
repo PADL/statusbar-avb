@@ -710,8 +710,8 @@ void AvbEntityKit::rejoin_static_rx_groups()
     if (listener_ == nullptr || !stream_port_.valid()) {
         return;
     }
-    // Under the guard: on a ring backend a join touches what the RX drain uses. A format change
-    // is rare and the drain only waits for these few calls.
+    // Under the guard where it is held. A join is a socket call (ioctl or setsockopt) on every
+    // backend, the test port aside, so a single-threaded port's unlocked drain is not disturbed.
     StreamPort::Guard const guard{stream_port_};
     auto const before = rx_static_groups_;
     for (size_t i = 0; i < rx_static_groups_.size() && i < listener_specs_.size(); ++i) {
@@ -1739,7 +1739,9 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     // time, so RX can't be starved by the control plane. rx_to_reactor()
     // is the way back should that timer not start.
     if (!stream_rx_error_) {
-        if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, config_.stream_rx_rt_timer)) {
+        // A single-threaded port's RX is never the reactor's: its host drains it (drain_stream_rx()).
+        bool const keep = config_.stream_rx_rt_timer || stream_port_.single_threaded();
+        if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, keep)) {
             rt_rx_handler_ = std::move(*rx);
         } else {
             stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
@@ -1846,6 +1848,9 @@ void AvbEntityKit::close_streams() noexcept
 
 void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
 {
+    if (config_.stream_tx_kick_in_rx_timer) {
+        kick_from_media_tick();
+    }
     if (stream_port_.single_threaded()) {
         // RX on the reactor would race the media thread's unlocked TX: it stays the host's to drain.
         host_.ctl_log().error("stream RX: a single-threaded stream port cannot move to the reactor");
@@ -1853,9 +1858,6 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
     }
     if (rt_rx_handler_ != nullptr) {
         reactor.add(std::move(rt_rx_handler_));
-    }
-    if (config_.stream_tx_kick_in_rx_timer) {
-        kick_from_media_tick();
     }
 }
 

@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <system_error>
 
@@ -121,6 +122,17 @@ void note_mr(TalkerTxCounters& c, bool const mr) noexcept
 
 /// Count the sent AVTPDU @p frame (at least 4 octets): mr is bit 3 of octet 1; tu is bit 0 of
 /// octet 3, or of octet 1 in a CRF PDU (IEEE 1722-2016 4.4.4, 10.4).
+/// The first octets of @p pdu, which count_pdu reads, or none for a shorter one.
+auto pdu_head(std::span<uint8_t const> const pdu) noexcept -> std::optional<std::array<uint8_t, 4>>
+{
+    if (pdu.size() < 4) {
+        return std::nullopt;
+    }
+    std::array<uint8_t, 4> head{};
+    span_copy(std::span<uint8_t>{head}, pdu.first(head.size()));
+    return head;
+}
+
 void count_pdu(TalkerTxCounters& c, std::span<uint8_t const> const frame) noexcept
 {
     bool const tu = ((frame[0] == avtp::AvtpSubtype::crf ? frame[1] : frame[3]) & 0x01U) != 0;
@@ -659,12 +671,13 @@ auto TalkerStreams::commit_frame(
     size_t const length,
     uint64_t const launch_time_ns) -> bool
 {
-    port_->stamp_launch_time(frame.handle, launch_time_ns);  // a frame never committed holds no place in the order
+    port_->stamp_launch_time(frame.handle, launch_time_ns);            // after the render: a refused one holds no place
+    auto const head = pdu_head(frame.buffer.subspan(header, length));  // read now: the slot is the port's after the commit
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     if (!commit_stream_frame(frame, header + length)) {
         return false;
     }
-    count_sent(slot, frame.buffer.subspan(header, length));
+    count_sent(slot, head ? std::span<uint8_t const>{*head} : std::span<uint8_t const>{});
     return true;
 }
 
