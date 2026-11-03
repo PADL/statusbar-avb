@@ -329,6 +329,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         // is the way back should that timer not start.
         if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
+        } else {
+            stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
         }
         // Persisted fast-connect bindings (kit phase 5b): a restarted entity
         // re-connects its inputs without a controller (see AvbEntityHost).
@@ -336,10 +338,15 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
     }
 
     // TX on the stream port + optional pcap capture.
-    (void)talker_->open_tx(
-        stream_port_,
-        TalkerStreams::TxPcapConfig{
-            .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+    // Tolerated here (the entity stays a control-plane-only node); recorded
+    // for a host that needs the data plane (stream_tx_error()).
+    if (auto tx = talker_->open_tx(
+            stream_port_,
+            TalkerStreams::TxPcapConfig{
+                .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+        !tx) {
+        stream_tx_error_ = tx.error();
+    }
     // The TX kick off the media thread (the tool's kicker timer, or its RX
     // timer's tick). The tool must then run that timer, or call
     // kick_from_media_tick() / rx_to_reactor() when it cannot.
