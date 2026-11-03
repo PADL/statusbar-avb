@@ -99,7 +99,7 @@ struct ToneStreams
 [[nodiscard]] auto audio_channels_match(StreamSpecs const& specs, size_t channels) -> bool
 {
     return std::ranges::all_of(specs, [channels](StreamSpec const& spec) {
-        bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+        bool const is_audio = is_audio_kind(spec.format.kind);
         return !is_audio || spec.format.channels == channels;
     });
 }

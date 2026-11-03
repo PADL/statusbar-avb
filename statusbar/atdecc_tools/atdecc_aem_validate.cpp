@@ -35,9 +35,12 @@ namespace {
 /// Takes one finding: its severity, where it is and what it is.
 using Add = std::function<void(Severity, std::string, std::string)>;
 
-/// ENTITY: a usable static model id is what controllers cache the model under.
-void check_entity(std::vector<RawDescriptor> const& descs, Add const& add)
-{
+auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<ModelFinding>
+{  // NOLINT(statusbar-block-statements) the model checks, one per descriptor kind; pre-dates the gate
+    std::vector<ModelFinding> out;
+    auto add = [&](Severity s, std::string where, std::string msg) { out.push_back({s, std::move(where), std::move(msg)}); };
+
+    // ENTITY: a usable static model id is what controllers cache the model under.
     if (auto const* e = find_desc(descs, DESCRIPTOR_ENTITY, 0); (e != nullptr) && e->data.size() >= DescriptorEntity::LENGTH) {
         DescriptorEntity d{};
         span_load_padded(d, make_const_span(e->data));
@@ -134,34 +137,8 @@ void check_jacks(std::vector<RawDescriptor> const& descs, Add const& add)
     }
 }
 
-/// One STREAM descriptor: formats that lie inside it, a usable current_format
-/// and a format list. The formats are read from where formats_offset says
-/// (IEEE 1722.1-2021 7.2.6), and a sender that keeps them elsewhere than that
-/// revision does is told so.
-void check_stream(Add const& add, std::string const& where, std::span<uint8_t const> const data)
-{
-    auto const s = load_stream_descriptor(data);
-    if (!s) {
-        add(Severity::Error, where, "truncated, or its formats do not lie inside it.");
-        return;
-    }
-    if (!s->current_format.is_set()) {
-        add(Severity::Error, where, "current_format is 0.");
-    }
-    if (s->number_of_formats.get() == 0) {
-        add(Severity::Warn, where, "number_of_formats is 0 — no advertised format list.");
-    }
-    if (auto const sent = received_stream_formats(data); sent && sent->count != 0 && sent->offset != DescriptorStream::LENGTH) {
-        add(Severity::Info,
-            where,
-            std::format("formats_offset is {} where IEEE 1722.1-2021 has 138; the formats were read from there.", sent->offset));
-    }
-}
-
-/// STREAMs: a usable current_format and a format list.
-void check_streams(std::vector<RawDescriptor> const& descs, Add const& add)
-{
-    for (auto const& r : descs) {
+    // STREAMs: a usable current_format and a format list.
+    for (auto const& r : descs) {  // NOLINT(statusbar-block-statements) one STREAM descriptor's checks; pre-dates the gate
         if (r.type != DESCRIPTOR_STREAM_INPUT && r.type != DESCRIPTOR_STREAM_OUTPUT) {
             continue;
         }

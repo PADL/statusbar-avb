@@ -44,7 +44,7 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
     ieee::Eui48 src_mac{};
     ieee::Eui48 dest_mac{};
 
-    while (true) {
+    while (true) {  // NOLINT(statusbar-block-statements) one Announce read; pre-dates the gate
         auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
         if (!result || *result <= 0) {
             break;
@@ -274,7 +274,7 @@ auto NanoAvbComponents::listener_sink(uint16_t const stream_index) const noexcep
 }
 
 void NanoAvbComponents::print_info() const
-{
+{  // NOLINT(statusbar-block-statements) the info print; pre-dates the gate
     std::print("Components initialized:\n");
     std::print("  - EntityModel with {} configuration(s)\n", entity_model.configuration_count());
     std::print("  - AemCommandHandler\n");
@@ -344,8 +344,19 @@ void AtdeccNetHandler::attach_local_port(AtdeccLocalPort* const port)
 }
 
 void AtdeccNetHandler::tick(int64_t now_ns)
-{
-    tick_protocols(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
+{  // NOLINT(statusbar-block-statements) the ATDECC timers, one per protocol
+    // Convert nanoseconds to sm::TimePoint for protocol handlers
+    auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
+
+    // Tick ATDECC protocol handlers
+    adp_advertiser_.tick(sm_now);
+    // Note: NanoAvbAcmpTalker is event-driven, no tick needed
+    acmp_listener_.tick(sm_now);  // Listener has timeout checking
+    aem_handler_.tick(sm_now);    // AEM has LOCK / pending-acquire timeout checking
+    if (adp_discovery_ != nullptr) {
+        adp_discovery_->tick(sm_now);
+    }
+
     ++tick_count_;
 
     // Periodic telemetry (wall-clock gated; emitted only when a logger is set,
