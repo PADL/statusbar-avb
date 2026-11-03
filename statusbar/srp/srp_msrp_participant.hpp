@@ -794,6 +794,11 @@ class MsrpParticipantT
         return &table.back();
     }
 
+    /// Declare @p fv on @p rec; a changed value is declared New (IEEE 802.1Q-2018 10.7.5.1), so the
+    /// change goes out at the next transmit opportunity.
+    template <typename Record, typename FirstValue>
+    void declare_value(Record& rec, FirstValue const& fv, TimePoint now);
+
     /// The applicant event for a local (re)declaration: New when the attribute is not
     /// yet actively declared (operation Register AND applicant idle in Start/Vo), else
     /// Join. Shared by every declare_* handler so this rule lives in one place.

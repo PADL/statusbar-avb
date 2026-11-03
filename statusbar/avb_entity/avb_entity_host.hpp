@@ -382,6 +382,10 @@ class AvbEntityHost
     /// Close the local ATDECC port, the network handlers and the AVB info mirror.
     void close_ports();
     void apply_interface_runtime();
+    /// AVB_INTERFACE @p index's runtime fields: the NIC's identity from @p mac, the gPTP fields
+    /// from a mirrored device's descriptor when there is one.
+    [[nodiscard]] auto interface_runtime(uint16_t index, std::optional<ieee::Eui48> const& mac) const
+        -> nanoavb::AvbInterfaceRuntime;
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.

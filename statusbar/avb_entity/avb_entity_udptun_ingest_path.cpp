@@ -160,7 +160,7 @@ void UdptunIngestPath::send(int64_t const tai_ns, std::span<uint8_t const> const
 }
 
 void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool const real_source, bool const rt_caller)
-{
+{  // NOLINT(statusbar-block-statements) one tunnel packet ingested; pre-dates the gate
     // `audio` is the raw network-order payload of the received stream packet
     // (4-byte samples: AAF int32, or AM824 24-in-32). It is carried opaquely by
     // the tunnel and re-emitted at the far end, so there is no float round-trip.

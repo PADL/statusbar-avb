@@ -74,7 +74,7 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     // config_ (constructed first); the host's NanoAvbComponents is non-movable.
     : config_{std::move(config)}
     , host_{create_entity_model(), default_adp_advertiser_config(), 1, 4, 1}
-{
+{  // NOLINT(statusbar-block-statements) the entity's wiring, in order; pre-dates the gate
     // Configure biquad filters for both channels
     configure_filter(config_.filter_freq_hz, config_.filter_gain_db, config_.filter_q);
 

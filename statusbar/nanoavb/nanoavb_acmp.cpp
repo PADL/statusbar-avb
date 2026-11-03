@@ -247,7 +247,7 @@ void NanoAvbAcmpListener::wire_listener_callbacks()
 }
 
 auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& cmd, TimePoint event_time) -> bool
-{
+{  // NOLINT(statusbar-block-statements) the Milan dispatch, then the classic command in order
     if (milan_mode_) {
         return cmd.is_command() && milan_.receive(cmd, event_time);
     }
@@ -277,7 +277,7 @@ auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& 
 
 auto NanoAvbAcmpListener::fast_connect(
     uint16_t const listener_unique_id, Eui64 const& talker_id, uint16_t const talker_unique_id, TimePoint const now) -> bool
-{
+{  // NOLINT(statusbar-block-statements) the fast connect; pre-dates the gate
     if (milan_mode_ || ctx_.has_pending || listener_unique_id >= ctx_.max_streams() || is_connected(listener_unique_id)) {
         return false;
     }

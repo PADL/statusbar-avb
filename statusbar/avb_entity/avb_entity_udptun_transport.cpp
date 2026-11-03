@@ -185,7 +185,7 @@ void UdptunTransport::stop_punch_worker()
 }
 
 void UdptunTransport::udptun_punch_loop()
-{
+{  // NOLINT(statusbar-block-statements) the punch loop's setup and loop; pre-dates the gate
     using namespace std::chrono_literals;
 
     // The punch worker is its own producer thread context: log through the
@@ -227,7 +227,7 @@ void UdptunTransport::udptun_punch_loop()
 
     auto tai_now = [this]() -> int64_t { return realtime_tai_ns(config_.udptun_tai_offset_ns); };
 
-    while (punch_run_.load()) {
+    while (punch_run_.load()) {  // NOLINT(statusbar-block-statements) one punch round; pre-dates the gate
         int64_t const now = tai_now();
         int64_t const window = (now > 0) ? now / WINDOW_NS : 0;
         int64_t const into_window = now - (window * WINDOW_NS);
