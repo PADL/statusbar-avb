@@ -35,6 +35,15 @@ constexpr uint16_t TLV_MANAGEMENT = 0x0001;
 constexpr uint16_t TLV_MANAGEMENT_ERROR_STATUS = 0x0002;
 constexpr gptp::SourcePortIdentity ALL_PORTS{gptp::ClockIdentity{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 0xFFFF};
 
+/// What fetch_all() asks for, in order: the clock's data sets, then (with a port
+/// interface) PORT_PROPERTIES_NP, then every port's PORT_DATA_SET.
+constexpr std::array<uint16_t, 5> FETCHED_DATA_SETS{
+    management_id::parent_data_set,
+    management_id::current_data_set,
+    management_id::time_properties_data_set,
+    management_id::port_properties_np,
+    management_id::port_data_set};
+
 /// The smallest data field a RESPONSE for each data set parsed here carries.
 struct DataSetSize
 {
@@ -412,6 +421,17 @@ PtpManagementClient::PtpManagementClient(
     , source_{source}
 {}
 
+auto clock_synchronized(PtpManagementState const& state) noexcept -> bool
+{
+    auto const in = [&state](PortState const wanted) {
+        return std::ranges::any_of(state.port_states, [wanted](std::optional<PortState> const& s) { return s == wanted; });
+    };
+    if (state.status == PtpManagementStatus::locked) {
+        return in(PortState::slave);
+    }
+    return state.status == PtpManagementStatus::no_grandmaster && in(PortState::master) && !in(PortState::uncalibrated);
+}
+
 void PtpManagementClient::note_error(std::error_code const error)
 {
     if (!state_.error) {
@@ -487,12 +507,26 @@ void PtpManagementClient::apply_parent(ParentDataSet const& parent, gptp::ClockI
 
 void PtpManagementClient::apply_port_data_set(PortDataSet const& port_data)
 {
+    if (uint16_t const number = port_data.port_identity.port_number.get(); number >= 1 && number <= MAX_PTP4L_PORTS) {
+        note_port_state(state_.port_states.at(number - 1U), port_data.port_state);
+    }
     if (state_.port != port_data.port_identity) {
         return;
     }
     state_.peer_mean_path_delay_ns = time_interval_ns(port_data.peer_mean_path_delay_scaled);
     state_.port_state = port_data.port_state;
     state_.delay_mechanism = port_data.delay_mechanism;
+}
+
+void PtpManagementClient::note_port_state(std::optional<PortState>& held, PortState const now)
+{
+    // A linuxptp before 4.2 echoes the PARENT_DATA_SET notify bit without honouring it: a port's
+    // state change asks for the parent, which a new grandmaster brings with it.
+    if (state_.subscribed && held && *held != now) {
+        std::array<uint16_t, 1> const parent{management_id::parent_data_set};
+        send_gets(parent);
+    }
+    held = now;
 }
 
 void PtpManagementClient::apply_settings(GrandmasterSettingsNp const& settings)
@@ -522,8 +556,9 @@ void PtpManagementClient::publish_if_changed()
 {  // NOLINT(statusbar-block-statements): one reported field per statement
     if (state_.status == reported_status_ && state_.grandmaster == reported_grandmaster_ && state_.error == reported_error_ &&
         state_.peer_mean_path_delay_ns == reported_peer_delay_ns_ && state_.port_state == reported_port_state_ &&
-        state_.delay_mechanism == reported_delay_mechanism_ && state_.grandmaster_settings == reported_settings_ &&
-        state_.refused == reported_refused_ && state_.subscribed == reported_subscribed_) {
+        state_.port_states == reported_port_states_ && state_.delay_mechanism == reported_delay_mechanism_ &&
+        state_.grandmaster_settings == reported_settings_ && state_.refused == reported_refused_ &&
+        state_.subscribed == reported_subscribed_) {
         return;
     }
     reported_settings_ = state_.grandmaster_settings;
@@ -534,6 +569,7 @@ void PtpManagementClient::publish_if_changed()
     reported_error_ = state_.error;
     reported_peer_delay_ns_ = state_.peer_mean_path_delay_ns;
     reported_port_state_ = state_.port_state;
+    reported_port_states_ = state_.port_states;
     reported_delay_mechanism_ = state_.delay_mechanism;
     if (listener_) {
         listener_(state_);
@@ -593,14 +629,11 @@ void PtpManagementClient::probe_if_due(int64_t const now_ns)
 
 void PtpManagementClient::fetch_all(int64_t const now_ns)
 {
+    state_.port_states = {};  // a restarted ptp4l may have other ports
     // PORT_PROPERTIES_NP before PORT_DATA_SET: ptp4l answers in order, so the port is known first.
-    std::array<uint16_t, 5> const ids{
-        management_id::parent_data_set,
-        management_id::current_data_set,
-        management_id::time_properties_data_set,
-        management_id::port_properties_np,
-        management_id::port_data_set};
-    send_gets(std::span{ids}.first(config_.port_interface.empty() ? 3 : 5));
+    // Every port's PORT_DATA_SET either way: clock_synchronized() reads their states.
+    send_gets(std::span{FETCHED_DATA_SETS}.first(config_.port_interface.empty() ? 3 : 4));
+    send_gets(std::span{FETCHED_DATA_SETS}.last(1));
     send_settings();
     send_subscription(now_ns);
     next_poll_ns_ = now_ns + config_.poll_period_ns;
@@ -613,12 +646,15 @@ void PtpManagementClient::poll_if_due(int64_t const now_ns)
     }
     next_poll_ns_ = now_ns + config_.poll_period_ns;
     // The followed port's PORT_DATA_SET once PORT_PROPERTIES_NP named it; without notifications
-    // (no subscription), PARENT_DATA_SET too.
-    std::array<uint16_t, 3> const ids{
+    // (no subscription), every port's and PARENT_DATA_SET too.
+    bool const follows = !config_.port_interface.empty();
+    std::array<uint16_t, 4> const ids{
         management_id::time_properties_data_set,
-        state_.port ? management_id::port_data_set : management_id::port_properties_np,
+        management_id::port_properties_np,
+        management_id::port_data_set,
         management_id::parent_data_set};
-    std::array<bool, 3> const wanted{true, !config_.port_interface.empty(), !state_.subscribed};
+    std::array<bool, 4> const wanted{
+        true, follows && !state_.port, (follows && state_.port) || !state_.subscribed, !state_.subscribed};
     for (size_t i = 0; i < ids.size(); ++i) {
         if (wanted.at(i)) {
             send_gets(std::span{ids}.subspan(i, 1));
