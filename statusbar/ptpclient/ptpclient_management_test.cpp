@@ -945,6 +945,34 @@ TEST(ptp_management, a_notification_first_does_not_set_the_transport_specific)
     std::filesystem::remove_all(dir);
 }
 
+// TIME_PROPERTIES_DATA_SET answers after PARENT_DATA_SET: its change (timeTraceable, say) is reported too
+TEST(ptp_management, a_change_of_time_properties_is_reported)
+{
+    auto const dir = socket_dir("properties");
+    Ptp4l ptp4l{dir};
+    int calls = 0;
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = ptp4l.path}, [&](PtpManagementState const& state) {
+        ++calls;
+        last = state;
+    });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 0);
+    int const before = calls;
+    std::vector<uint8_t> const traceable{0x00, 0x25, 0x1C, 0x20};  // ptpTimescale | utcOffsetValid | timeTraceable
+    c.handle(response(management_id::time_properties_data_set, traceable), 10);
+    EXPECT_EQ(calls, before + 1);
+    EXPECT_TRUE(last.time_properties && (last.time_properties->flags & time_flag::time_traceable) != 0);
+    c.handle(response(management_id::time_properties_data_set, traceable), 20);
+    EXPECT_EQ(calls, before + 1);  // the same again: no report
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
 // A port's notification carries that port's transportSpecific (port.c port_management_construct),
 // which the client does not take: it keeps the UDS port's, from its first answer
 TEST(ptp_management, a_port_notification_leaves_the_transport_specific)
