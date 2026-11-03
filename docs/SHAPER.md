@@ -142,6 +142,84 @@ at once. On igb/igc an override putting class A on queue 1 and class B on
 queue 0 is refused (`bad_queue_override`): queue 0 outranks queue 1, and igc
 accepts queue 1's cbs only after queue 0's.
 
+## Launch time (etf)
+
+With `ShaperConfig::launch_time` set to `LaunchTimeMode::on` the shaper puts
+an offloaded etf (tc-etf(8): `etf clockid CLOCK_TAI delta <ns> offload
+skip_sock_check`, no deadline mode) on class A's cbs class (`<cbs major>:1`;
+sch_cbs.c has one class). The offload puts the TX queue in the NIC's
+launch-time mode, and the driver then sends each AF_XDP frame at the launch
+time in its TX metadata (STREAM_PORTS.md, "Launch time"). AF_XDP frames bypass
+the qdisc (copy mode through `__dev_direct_xmit`, zero copy in the driver), so
+the offload flag is etf's only job here.
+
+Launch time does not depend on cbs: on a NIC with launch time and no cbs
+offload (the cbs request answered EOPNOTSUPP) the etf goes on class A's mqprio
+class itself (`<major>:<queue + 1>`), once, and the class's pfifo_fast graft at
+`uninstall()` removes it. Off, a leftover etf there gives way to pfifo_fast:
+deleting an mqprio class's child grafts noop_qdisc, which drops everything.
+Each graft on the class deactivates and reactivates the device's queues
+(`mqprio_graft`), which an etf under a cbs avoids, so the etf is placed once.
+igc offloads cbs on queues 0 and 1 only and launch time on any queue.
+
+Only class A's queue gets one: it is the queue the AF_XDP socket transmits on
+(the host makes class A the socket's queue), and every frame on it is timed.
+Class B carries AF_PACKET traffic, which an etf would drop (its own path
+drops a frame whose txtime is missing or past), and frames of no timed
+source.
+
+The host asks the driver once (`net::netdev::launch_time_supported()`) and
+gives the mode with `launch_time_mode(wanted, answer)` (core's
+`net::tc::LaunchTimeMode`, which an unshaped port's queue uses too), `wanted` meaning the
+streams' AF_XDP socket carries launch times:
+
+| Mode | When | etf requests |
+| --- | --- | --- |
+| `unsupported` | launch time is wanted and the driver lacks it (igb), or the query failed | none, and none looked for: the requests are the cbs alone |
+| `off` | launch time is not wanted, whatever the driver said | an etf an earlier run left under class A's cbs is deleted |
+| `on` | the driver has it and the stream socket carries launch times | ours under class A's cbs |
+
+So a leftover etf does not survive into an AF_PACKET or untimed run, even when
+the capability query fails, except when launch time was wanted and the query
+failed (`unsupported`, which asks nothing). In `off` a failed removal is logged
+once, and nothing more is requested. A host that turns launch time on or
+off at run time (`EntityShaper::set_launch_time`) has the etf put or removed
+at the next `tick()`, under the cbs that stays; a host that only pauses launch
+time sends untimed frames and keeps the etf. `skip_sock_check` costs nothing
+and lets frames of sockets without SO_TXTIME through when they carry a txtime.
+
+`etf_delta_ns` (default 150 µs) is how long before its txtime etf hands a
+queued frame to the driver (sch_etf.c's watchdog); it bounds only frames that
+pass through the qdisc, so it does not touch the AF_XDP streams.
+
+Resets: the transmit mode follows only whether any queue is shaped
+(`igc_tsn_offload_apply` resets on a legacy/TSN switch; igb's `enable_fqtss`
+likewise), so an etf added, replaced or removed under a cbs that stays costs
+no reset. The shaper settles the etf once per `install()`, after both cbs
+(`program()`), and leaves it across restarts under the parked cbs. etf has no
+change operation (the kernel answers EINVAL): an identical etf is kept, one
+of another delta deleted and laid down again. `uninstall()`'s pfifo_fast
+graft removes the cbs and its etf together.
+
+A refused etf (EOPNOTSUPP: no etf offload, e.g. igc on a MAC other than
+i225/i226) is logged with the kernel's text and kept in `etf_error()`; no
+further etf is asked for until the next `install()`, the cbs stay, and frames
+on the queue go out at once. Stock igc places the launch time in a 1 s cycle
+it estimates from the system's CLOCK_TAI (`igc_tx_launchtime`); a PHC on
+another timescale needs an igc that estimates it from SYSTIM. None of this has
+run on an igc yet: the requests are checked by `shaper_launch_time.*` against
+a recording `TcControl` and the etf bytes by `tc_qdisc.etf`.
+
+### Launch time and cbs together
+
+The shaper runs both on one port: the etf under class A's cbs, or on class A's
+mqprio class when its cbs is refused. Where the etf goes follows the cbs state
+(`settle_etf`, `etf_slot`), not a configured mode. Should a NIC not honour
+launch times under a cbs, the two become per-port alternatives: an explicit
+`ShaperConfig` mode {cbs, launch_time, both} that `program_classes` and
+`etf_slot` key on, a refusal demoting `both` to the one that works, and a host
+that asks for both on such a port refused with the reason.
+
 ## Threading
 
 The shaper is a tick-only `net::Pollable` on the reactor. `install()` registers
