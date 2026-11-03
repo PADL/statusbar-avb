@@ -438,7 +438,7 @@ auto ListenerStreams::attach_rx(
     }
     port_ = &port;
     auto rx = std::make_unique<StreamRxHandler>(port, static_groups, [this] { drain_rx(current_gptp_ns()); });
-    if (keep_handler) {
+    if (keep_handler || port.single_threaded()) {  // a single-threaded port's RX is its host's to drain
         return success(std::unique_ptr<net::Pollable>{std::move(rx)});
     }
     reactor.add(std::move(rx));
@@ -931,8 +931,7 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
     // Join the talker's stream group so the NIC delivers its frames to us.
     bool joined = false;
-    if (port_ != nullptr) {
-        StreamPort::Guard const guard{*port_};
+    if (port_ != nullptr) {  // no guard: a join is a socket call and touches no ring
         joined = port_->port().join_multicast(dest_mac).has_value();
     }
     if (logger_) {
@@ -957,8 +956,7 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
         (void)components_.msrp_handler.listener_withdraw(sid, sm::Clock::now());
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
-        if (port_ != nullptr) {
-            StreamPort::Guard const guard{*port_};
+        if (port_ != nullptr) {  // no guard: a leave is a socket call and touches no ring
             (void)port_->port().leave_multicast(stream->stream_dest_mac);
         }
     }

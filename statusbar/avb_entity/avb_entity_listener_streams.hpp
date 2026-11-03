@@ -235,7 +235,7 @@ struct ListenerStreams
     [[nodiscard]] auto stream_count() const noexcept -> size_t { return slots_.size(); }
     /// Receive from @p port (outliving this and the handler) joined to @p static_groups
     /// (only the first join's failure fails); add its drain handler to @p reactor, or
-    /// with @p keep_handler return it for an RX timer. Reactor thread.
+    /// with @p keep_handler, or on a single-threaded port, return it for the host to drive. Reactor thread.
     [[nodiscard]] auto attach_rx(
         StreamPort& port, std::span<ieee::Eui48 const> static_groups, net::MessageReactor& reactor, bool keep_handler = false)
         -> StatusValue<std::unique_ptr<net::Pollable>>;
