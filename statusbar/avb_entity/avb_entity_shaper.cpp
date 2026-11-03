@@ -181,7 +181,8 @@ auto mqprio_for(
     uint16_t const major,
     uint8_t const class_a_pcp,
     uint8_t const class_b_pcp,
-    uint8_t const ptp_priority) noexcept -> StatusValue<net::tc::MqprioQdisc>
+    uint8_t const ptp_priority,
+    bool const class_b) noexcept -> StatusValue<net::tc::MqprioQdisc>
 {  // NOLINT(statusbar-block-statements): one line per mqprio field
     auto const status =
         layout.ptp_queue ? validate_priorities(class_a_pcp, class_b_pcp, ptp_priority) : validate_pcps(class_a_pcp, class_b_pcp);
@@ -192,7 +193,7 @@ auto mqprio_for(
     q.major = major;
     q.num_tc = 3;
     q.prio_tc_map.fill(LEGACY_TC);
-    q.prio_tc_map[class_b_pcp] = CLASS_B_TC;
+    q.prio_tc_map[class_b_pcp] = class_b ? CLASS_B_TC : LEGACY_TC;
     q.prio_tc_map[class_a_pcp] = CLASS_A_TC;
     q.count[LEGACY_TC] = layout.legacy_count;
     q.offset[LEGACY_TC] = layout.legacy_offset;
@@ -340,6 +341,15 @@ auto cbs_targets(
     };
 }
 
+auto class_a_targets(
+    std::span<TSpec const> const class_a_streams, uint32_t const link_kbps, uint32_t const max_interfering_frame) noexcept
+    -> CbsTargets
+{
+    auto const a = class_a_cbs(class_a_streams, link_kbps, max_interfering_frame);
+    int64_t const placeholder = int64_t{link_kbps} * CLASS_A_PLACEHOLDER_PERCENT / 100;
+    return CbsTargets{.class_a = a.empty() ? placeholder_cbs(link_kbps, max_interfering_frame, placeholder) : a};
+}
+
 #if defined(__linux__)
 
 //
@@ -369,6 +379,7 @@ auto ShaperQdiscs::install(
     ifindex_ = ifindex;
     major_ = mqprio.major;
     layout_ = layout;
+    class_b_mapped_ = std::ranges::find(mqprio.prio_tc_map, CLASS_B_TC) != mqprio.prio_tc_map.end();
     installed_ = true;
     reused_ = *reused;
     cbs_refused_a_ = cbs_refused_b_ = false;
@@ -665,6 +676,9 @@ void ShaperQdiscs::remove_cbs()
     // whatever was recorded, grafting the default qdisc (deleting an mqprio child leaves
     // noop_qdisc). See docs/SHAPER.md.
     for (uint16_t const queue : {layout_.class_b_queue, layout_.class_a_queue}) {
+        if (queue == layout_.class_b_queue && !class_b_mapped_) {
+            continue;  // nothing maps to it, so no cbs went there
+        }
         if (auto status = tc_.replace_kind(ifindex_, parent_of(queue), "pfifo_fast"); !status) {
             log_.warning("shaper: removing the cbs on queue {} failed: errno {}", queue, status.error().value());
         }
@@ -728,8 +742,8 @@ void PortShaper::shutdown()
 
 void PortShaper::park()
 {
-    // Leave the root and both cbs for the next install(), parked at the
-    // placeholders: no stream is ours any more, and taking the last cbs away
+    // Leave the root and class A's cbs for the next install(), parked at its
+    // placeholder: no stream is ours any more, and taking the last cbs away
     // would reset an igb/igc adapter now and again at the next start.
     (void)qdiscs_.program(targets(false), link_mbps());  // logged
     qdiscs_.release();
@@ -802,7 +816,8 @@ auto PortShaper::install(ShaperPort const& port) -> Status
 
 auto PortShaper::install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status
 {
-    auto const mqprio = mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP, config_.ptp_priority);
+    // Class A only (Milan): class B's PCP rides the legacy TC, so its queue carries nothing.
+    auto const mqprio = mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP, config_.ptp_priority, false);
     if (!mqprio) {
         return failure(mqprio.error());
     }
@@ -913,11 +928,11 @@ auto PortShaper::refresh_link_speed() -> bool
 
 auto PortShaper::targets(bool const streams) -> CbsTargets
 {
-    // Class B stays empty (its placeholder) and is laid out (queue, TC) regardless.
+    // Class A only (Milan): no cbs on class B's queue, which nothing maps to.
     uint32_t const mbps = link_mbps();
     programmed_link_mbps_ = mbps;
     std::span<TSpec const> const class_a = streams ? std::span<TSpec const>{class_a_streams_} : std::span<TSpec const>{};
-    return cbs_targets(class_a, {}, mbps * 1000U, mtu_);
+    return class_a_targets(class_a, mbps * 1000U, mtu_);
 }
 
 auto PortShaper::reprogram() -> Status
