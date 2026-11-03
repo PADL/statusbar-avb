@@ -489,4 +489,26 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
     EXPECT_FALSE(host->fill_counters(DESCRIPTOR_STREAM_INPUT, 0, valid, counters));
 }
 
+// A link back after a down (IEEE 802.1Q-2022 Clause 10.7): MSRP sends a LeaveAll at once, re-declaring the
+// Domain, rather than waiting for its timers; the first link up waits for the join timer
+TEST(avb_entity_host_link, a_link_back_after_a_down_sends_a_leave_all_at_once)
+{
+    using TimePoint = statusbar::sm::TimePoint;
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    std::vector<std::vector<uint8_t>> sent;
+    host->components().msrp_handler.set_callbacks(
+        statusbar::nanoavb::MsrpCallbacks{.send_packet = [&sent](std::span<uint8_t const> p) {
+            sent.emplace_back(p.begin(), p.end());
+            return true;
+        }});
+    host->components().msrp_handler.tick(TimePoint{});  // hands the sender over
+    host->on_link_up(TimePoint{});
+    auto const first = sent.size();
+    host->on_link_down(TimePoint{std::chrono::seconds{1}});
+    host->on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_TRUE(sent.size() > first);  // the return after a down: a LeaveAll PDU at once, before any tick
+    EXPECT_TRUE(!sent.empty() && (sent.back().size() > 4));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_host_test)
