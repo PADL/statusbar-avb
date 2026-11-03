@@ -155,12 +155,30 @@ class StreamPort
         if (status) {
             ++generation_;
         }
+        test_launch_time_ = false;
         return status;
     }
+    /// An in-process test port (net::AnyEthernetPort::open_test), its frames
+    /// timed as an xdp socket with TX metadata would be when @p launch_time
+    /// (test_launch_time_: the one thing a test port cannot report itself).
+    [[nodiscard]] auto open_test(net::TestPortConfig const& config, bool const launch_time = false) -> Status
+    {
+        auto status = port_.open_test(config);
+        serialize_ = status.has_value() && !port_.tx_rx_independent();
+        if (status) {
+            ++generation_;
+        }
+        test_launch_time_ = launch_time;
+        return status;
+    }
+    /// The test port's context, nullptr unless open_test() opened one.
+    [[nodiscard]] auto test_port() noexcept -> net::TestPortContext* { return port_.as<net::TestPortContext>(); }
+
     void close() noexcept
     {
         port_.close();
         serialize_ = false;
+        test_launch_time_ = false;
     }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return port_.valid(); }
@@ -196,7 +214,7 @@ class StreamPort
     [[nodiscard]] auto tx_launch_time() const noexcept -> bool
     {
         auto const* const xdp_socket = xdp();
-        return xdp_socket != nullptr && xdp_socket->tx_launch_time();
+        return xdp_socket != nullptr ? xdp_socket->tx_launch_time() : test_launch_time_;
     }
 
     /// The launch time for a frame wanted at @p requested_ns (0: now), in
@@ -242,6 +260,7 @@ class StreamPort
     itc::SpinLock lock_{};
     bool serialize_{false};
     uint32_t generation_{0};
+    bool test_launch_time_{false};
     net::ClockFn phc_{};
     net::LaunchOrder launch_order_{};
     std::atomic<bool> reset_pending_{false};
