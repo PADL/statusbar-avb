@@ -189,7 +189,8 @@ class StreamPort
     /// Whether TX and RX go through Guard's lock.
     [[nodiscard]] auto serialized() const noexcept -> bool { return serialize_; }
     /// The host drives TX and RX from one thread, never both at once: Guard takes no lock, the talker
-    /// renders into the slot and the listener decodes in place. Before open(); kept across opens.
+    /// renders into the slot, the listener decodes in place and the kit never hands RX to the reactor.
+    /// Multicast joins from another thread stay safe (socket calls), except on the test port. Before open().
     void set_single_threaded(bool const single) noexcept { single_threaded_ = single; }
     [[nodiscard]] auto single_threaded() const noexcept -> bool { return single_threaded_; }
 
@@ -231,7 +232,7 @@ class StreamPort
     [[nodiscard]] auto writes_in_place() const noexcept -> bool { return !serialize_ && (!tx_launch_time() || xdp() != nullptr); }
 
     /// Give frame @p handle, started untimed, the launch time for @p requested_ns (launch_time()), taken
-    /// now: a frame never committed takes no place in the order. Media thread.
+    /// now, after its render: a render refused takes no place in the order. Media thread.
     void stamp_launch_time(uint64_t const handle, uint64_t const requested_ns) noexcept
     {
         auto* const xdp_socket = xdp();
