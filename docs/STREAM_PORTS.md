@@ -25,7 +25,8 @@ float `transmit_aaf`, `transmit_am824`) goes through one path,
 - **A port only one thread drives** (rawnet, or `set_single_threaded()`):
   - the talker claims a TX slot (`tx_start`) untimed, writes the tagged header
     into it, and renders the AVTPDU straight after the header;
-  - the launch time is stamped after the render (`StreamPort::stamp_launch_time`),
+  - the launch time is stamped after the render (`StreamPort::stamp_launch_time`,
+    through `net::AnyEthernetPort::tx_set_launch_time`),
     so a refused render holds no place in the launch order;
   - a render that yields nothing gives the slot back (`tx_cancel`);
   - on a ring backend the payload is so written once, into the frame the NIC
@@ -52,6 +53,10 @@ handler for its host to drain (`drain_stream_rx()`) and never hands it to the
 reactor; `rx_to_reactor()` refuses. Multicast membership may
 still change from the reactor. Each backend's join is a socket call that does
 not touch the rings, and the test port expects one thread.
+
+Multicast joins and leaves (the static groups, an ACMP connect or disconnect)
+need no guard: on every backend they are socket calls (SIOCADDMULTI,
+PACKET_ADD_MEMBERSHIP) that touch no ring.
 
 ## AF_XDP
 
