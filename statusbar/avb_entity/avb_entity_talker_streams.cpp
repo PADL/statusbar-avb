@@ -343,17 +343,28 @@ auto serialize_aaf_raw(
 template <typename Context, typename Serialize>
 auto TalkerStreams::send_serialized(
     TalkerStreamSlot& slot, Context& ctx, size_t const max_frame, uint64_t const launch_time_ns, Serialize const& serialize) -> bool
-{  // NOLINT(statusbar-block-statements): one frame's transmit steps, in order
-    std::span<uint8_t> const frame = tx_begin(max_frame);
-    if (frame.empty()) {
+{
+    if (port_ == nullptr) {
         return false;
     }
+    StreamPort::Guard const guard{*port_};  // the slot's start, header, serialize and commit
+    auto const frame = port_->port().tx_start(port_->launch_time(launch_time_ns));
+    return frame && serialize_into(slot, ctx, *frame, max_frame, serialize);
+}
+
+template <typename Context, typename Serialize>
+auto TalkerStreams::serialize_into(
+    TalkerStreamSlot& slot, Context& ctx, net::EthernetTxSlot const& frame, size_t const max_frame, Serialize const& serialize)
+    -> bool
+{
+    size_t const header = store_stream_header(slot, frame.buffer);
     auto const saved = ctx;  // restored when the port refuses the frame
-    size_t const frame_len = serialize(frame);
-    if (frame_len == 0) {
+    size_t const length = header != 0 ? serialize(payload_window(frame.buffer, header, max_frame)) : 0;
+    if (length == 0) {
+        (void)port_->port().tx_cancel(frame.handle);  // nothing to send: the slot back
         return false;
     }
-    if (!send_stream_frame(slot, frame.first(frame_len), launch_time_ns)) {
+    if (!commit_frame(slot, frame, header, length)) {
         ctx = saved;
         return false;
     }
@@ -429,11 +440,16 @@ auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
     if (port_ != nullptr && !send_to_port(slot.dest_mac, frame, launch_time_ns)) {
         return false;
     }
+    count_sent(slot, frame);
+    return true;
+}
+
+void TalkerStreams::count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> const frame) noexcept
+{
     ++slot.tx_packets;
     if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
         count_pdu(tx_counters_[slot.spec.index], frame);
     }
-    return true;
 }
 
 void fill_crf_timestamps(
@@ -556,6 +572,30 @@ auto TalkerStreams::tx_begin(size_t const length) noexcept -> std::span<uint8_t>
         return {};
     }
     return std::span<uint8_t>{tx_buf_}.first(length);
+}
+
+auto TalkerStreams::store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> const buffer) const noexcept -> size_t
+{
+    auto const header = stream_frame_header(
+        slot.dest_mac, port_->port().hardware_address(), vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp);
+    return buffer.size() > ieee::wire_size(header) ? ieee::store_unchecked(buffer, header) : 0;
+}
+
+auto TalkerStreams::payload_window(std::span<uint8_t> const buffer, size_t const header, size_t const length) noexcept
+    -> std::span<uint8_t>
+{
+    return buffer.subspan(header, std::min(length, buffer.size() - header));
+}
+
+auto TalkerStreams::commit_frame(TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t const header, size_t const length)
+    -> bool
+{
+    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
+    if (!commit_stream_frame(frame, header + length)) {
+        return false;
+    }
+    count_sent(slot, frame.buffer.subspan(header, length));
+    return true;
 }
 
 auto TalkerStreams::send_to_port(ieee::Eui48 const& dest_mac, std::span<uint8_t const> const payload, uint64_t const launch_time_ns)
