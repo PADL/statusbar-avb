@@ -240,6 +240,13 @@ struct ClassLoad
     return static_cast<int32_t>(std::clamp<int64_t>(v, INT32_MIN, INT32_MAX));
 }
 
+/// maxInterferenceSize (IEEE 802.1Q-2022 Annex L): an MTU frame's octets on the wire, counted as
+/// a stream frame's are (wire_frame_size), so hiCredit and loCredit share one convention.
+[[nodiscard]] auto interfering_wire_size(uint32_t const max_interfering_frame) noexcept -> int64_t
+{
+    return wire_frame_size(static_cast<uint16_t>(std::min<uint32_t>(max_interfering_frame, UINT16_MAX)));
+}
+
 }  // namespace
 
 auto class_a_cbs(std::span<TSpec const> const streams, uint32_t const link_kbps, uint32_t const max_interfering_frame) noexcept
@@ -254,8 +261,8 @@ auto class_a_cbs(std::span<TSpec const> const streams, uint32_t const link_kbps,
     return CbsParameters{
         .idleslope_kbps = clamp32(load.idleslope),
         .sendslope_kbps = clamp32(sendslope),
-        .hicredit = clamp32(ceil_div(load.idleslope * max_interfering_frame, link)),  // L-10
-        .locredit = clamp32(ceil_div(sendslope * load.max_frame, link)),              // L-12
+        .hicredit = clamp32(ceil_div(load.idleslope * interfering_wire_size(max_interfering_frame), link)),  // L-10
+        .locredit = clamp32(ceil_div(sendslope * load.max_frame, link)),                                     // L-12
         .max_frame_size = load.max_frame,
     };
 }
@@ -269,9 +276,9 @@ namespace {
 {
     double const link = link_kbps;
     double const idle_a = class_a.idleslope_kbps;
+    auto const interfering = static_cast<double>(interfering_wire_size(max_interfering_frame));
     return static_cast<int64_t>(std::ceil(
-        static_cast<double>(idleslope) *
-        ((static_cast<double>(max_interfering_frame) / (link - idle_a)) + (static_cast<double>(class_a.max_frame_size) / link))));
+        static_cast<double>(idleslope) * ((interfering / (link - idle_a)) + (static_cast<double>(class_a.max_frame_size) / link))));
 }
 
 }  // namespace
@@ -309,8 +316,8 @@ auto placeholder_cbs(uint32_t const link_kbps, uint32_t const max_interfering_fr
     return CbsParameters{
         .idleslope_kbps = clamp32(idleslope),
         .sendslope_kbps = clamp32(sendslope),
-        .hicredit = clamp32(ceil_div(idleslope * max_interfering_frame, link)),  // L-10
-        .locredit = clamp32(ceil_div(sendslope * frame, link)),                  // L-12
+        .hicredit = clamp32(ceil_div(idleslope * interfering_wire_size(max_interfering_frame), link)),  // L-10
+        .locredit = clamp32(ceil_div(sendslope * frame, link)),                                         // L-12
         .max_frame_size = frame,
         .placeholder = true,
     };
