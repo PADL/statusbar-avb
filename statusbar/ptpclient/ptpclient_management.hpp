@@ -107,6 +107,9 @@ enum class PortState : uint8_t
     slave = 9,
 };
 
+/// The ports of one ptp4l whose state PtpManagementState keeps (portNumber 1 to MAX_PTP4L_PORTS).
+inline constexpr size_t MAX_PTP4L_PORTS = 16;
+
 /// delayMechanism (IEEE 1588-2019 Table 21).
 enum class DelayMechanism : uint8_t
 {
@@ -318,6 +321,8 @@ struct PtpManagementState
     std::optional<int64_t> peer_mean_path_delay_ns;
     std::optional<PortState> port_state;
     std::optional<DelayMechanism> delay_mechanism;
+    /// Every port's portState by portNumber - 1, from each PORT_DATA_SET ptp4l answers or notifies.
+    std::array<std::optional<PortState>, MAX_PTP4L_PORTS> port_states{};
     /// The settings ptp4l acknowledged for a SET GRANDMASTER_SETTINGS_NP.
     std::optional<GrandmasterSettingsNp> grandmaster_settings;
     /// The managementErrorId with which ptp4l last refused our GRANDMASTER_SETTINGS_NP; cleared by
@@ -331,6 +336,11 @@ struct PtpManagementState
     /// root-only socket, ENOENT with no ptp4l, ...); clear while ptp4l answers.
     std::error_code error;
 };
+
+/// Whether ptp4l's clock is synchronised to its domain: it follows a grandmaster with a port in SLAVE
+/// (linuxptp's servo locked; a jump, after its step, or an unlock moves it to UNCALIBRATED), or it is the
+/// grandmaster with a port in MASTER and none UNCALIBRATED. False while ptp4l is unreachable.
+[[nodiscard]] auto clock_synchronized(PtpManagementState const& state) noexcept -> bool;
 
 struct PtpManagementConfig
 {
@@ -355,8 +365,8 @@ class PtpManagementClient final : public net::Pollable
 {
   public:
     /// Called on the reactor thread when the status, the grandmaster, the error, the followed
-    /// port's peer delay, state or delay mechanism, the grandmaster settings, a refusal or the
-    /// subscription changes.
+    /// port's peer delay, state or delay mechanism, any port's state, the grandmaster settings, a
+    /// refusal or the subscription changes.
     using Listener = sg14::inplace_function<void(PtpManagementState const&), 64>;
 
     /// Bind the client's socket. Fails with invalid_argument for a bad
@@ -397,6 +407,8 @@ class PtpManagementClient final : public net::Pollable
     /// Take what the RESPONSE @p message carries into state_.
     void apply(ManagementMessage const& message, int64_t now_ns);
     void apply_parent(ParentDataSet const& parent, gptp::ClockIdentity const& sender);
+    /// A port's state @p now into @p held; a change while subscribed asks for the parent.
+    void note_port_state(std::optional<PortState>& held, PortState now);
     void apply_port_data_set(PortDataSet const& port_data);
     void apply_settings(GrandmasterSettingsNp const& settings);
     void apply_subscription(SubscribeEventsNp const& held, int64_t now_ns);
@@ -444,6 +456,7 @@ class PtpManagementClient final : public net::Pollable
     std::error_code reported_error_;
     std::optional<int64_t> reported_peer_delay_ns_;
     std::optional<PortState> reported_port_state_;
+    std::array<std::optional<PortState>, MAX_PTP4L_PORTS> reported_port_states_{};
     std::optional<DelayMechanism> reported_delay_mechanism_;
     std::optional<GrandmasterSettingsNp> reported_settings_;
     std::optional<uint16_t> reported_refused_;
