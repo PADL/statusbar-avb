@@ -116,7 +116,7 @@ TEST(listener_connection, a_disconnect_withdraws_what_the_connect_declared)
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
 
     // A SUCCESS whose destination is still zero: declared, nothing to join.
@@ -139,7 +139,7 @@ TEST(listener_connection, a_second_connect_replaces_the_first_declaration)
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
 
     ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
@@ -160,7 +160,7 @@ TEST(listener_connection, the_same_stream_connected_twice_is_withdrawn_by_one_di
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
 
     ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
@@ -210,7 +210,7 @@ TEST(listener_connection, a_connect_for_an_index_without_a_slot_declares_nothing
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     ls.on_listener_connected(7, STREAM_1, GROUP, sm::TimePoint{});
     EXPECT_FALSE(srp_state_of(donor->components(), STREAM_1).has_value());
     EXPECT_EQ(ls.slot_for(7), nullptr);
@@ -296,7 +296,7 @@ TEST(listener_drain, both_drain_forms_are_a_no_op_without_a_port)
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{4'000'000'000LL};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     static_assert(std::is_same_v<net::RxTimePoint, statusbar::realtime::MonotonicRawClock::time_point>);
 
     // The drain takes the wake on both clocks and touches nothing when no
@@ -309,7 +309,7 @@ TEST(listener_consume, close_rx_keeps_the_consumers_for_the_next_open)
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     // Registered once, before the first start, as an entity does.
     int delivered = 0;
     ls.set_consume(0, [&delivered](uint8_t, std::span<float const>, uint64_t, uint64_t) { ++delivered; });
@@ -330,6 +330,8 @@ TEST(listener_consume, close_rx_keeps_the_consumers_for_the_next_open)
     slot->consume(0, {}, 0, 0);
     EXPECT_EQ(delivered, 1);
     EXPECT_EQ(ls.slot_of(StreamKind::aaf), slot);
+}
+
 // --- The timed raw RX seam (StreamRxTimedAudioSink) ---
 
 namespace {
@@ -577,7 +579,7 @@ TEST(listener_timed, delivery_through_on_stream_rx_frame)
     auto const specs = audio_specs();
     auto const& aaf_spec = specs[1];
     EXPECT_TRUE(aaf_spec.format.kind == StreamKind::aaf);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     RecordingSink raw_sink;
     RecordingSink decoded_sink;
     ListenerStreams raw{1'000'000, donor->components(), gptp, nullptr};
@@ -690,7 +692,7 @@ TEST(listener_format, mismatched_aaf_is_discarded_and_counted)
     auto donor = make_connected_donor(kAm824Id, kAafId);
     auto const specs = audio_specs();
     auto const& aaf_spec = specs[1];
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     RecordingSink sink;
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
@@ -727,7 +729,7 @@ TEST(listener_format, media_lock_is_at_the_streams_rate)
     spec.format_word = 0x0209031800000000ULL | (uint64_t{2} << 22U) | (uint64_t{24} << 12U);  // INT_24, 2 ch, 192 kHz
     spec.format = decode_stream_format(spec.format_word);
     EXPECT_EQ(spec.format.sample_rate_hz, 192000U);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(spec).has_value());
     publish_connections(ls, *donor);
@@ -751,7 +753,7 @@ TEST(listener_timed, am824_timed_path)
     auto const specs = audio_specs();
     auto const& spec = specs[0];
     EXPECT_TRUE(spec.format.kind == StreamKind::am824);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     RecordingSink sink;
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(spec).has_value());
@@ -828,7 +830,7 @@ TEST(listener_port, tagged_and_untagged_frames_reach_their_slot)
     auto donor = make_connected_donor(kAm824Id, kAafId);
     auto const specs = audio_specs();
     auto const& aaf_spec = specs[1];
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     RecordingSink sink;
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
@@ -854,8 +856,12 @@ TEST(listener_port, tagged_and_untagged_frames_reach_their_slot)
     EXPECT_TRUE(wire.inject_rx(l2_frame(untagged, false, 0x88F7)).has_value());
     EXPECT_TRUE(wire.inject_rx(l2_frame(tagged, true)).has_value());
 
-    EXPECT_EQ(ls.drain_rx(static_cast<int64_t>(pts0 - 1'000'000)), size_t{3});  // the gPTP frame drained and dropped
-    EXPECT_EQ(ls.drain_rx(static_cast<int64_t>(pts0 - 1'000'000)), size_t{0});
+    EXPECT_EQ(
+        ls.drain_rx(statusbar::realtime::GptpClock0::from_ns(static_cast<int64_t>(pts0 - 1'000'000)), net::RxTimePoint{}),
+        size_t{3});  // the gPTP frame drained and dropped
+    EXPECT_EQ(
+        ls.drain_rx(statusbar::realtime::GptpClock0::from_ns(static_cast<int64_t>(pts0 - 1'000'000)), net::RxTimePoint{}),
+        size_t{0});
     EXPECT_EQ(sink.seen.size(), size_t{2});
     EXPECT_EQ(ls.slot_for(1)->rx_packets.load(), uint64_t{2});
     if (sink.seen.size() == 2) {
@@ -888,7 +894,7 @@ void drain_one_frame(StreamPort& port, bool const single_threaded, InPlaceSink& 
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
     auto const aaf_spec = audio_specs()[1];
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
     publish_connections(ls, *donor);
@@ -908,7 +914,7 @@ void drain_one_frame(StreamPort& port, bool const single_threaded, InPlaceSink& 
         0};
     uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(aaf_spec.format.sample_rate_hz));
     EXPECT_TRUE(port.test_port()->inject_rx(l2_frame(aaf_frame(tx, spp, 9'000'000'000ULL), true)).has_value());
-    EXPECT_EQ(ls.drain_rx(8'999'000'000), size_t{1});
+    EXPECT_EQ(ls.drain_rx(statusbar::realtime::GptpClock0::from_ns(8'999'000'000), net::RxTimePoint{}), size_t{1});
 }
 
 }  // namespace
@@ -935,7 +941,7 @@ TEST(listener_port, groups_are_joined_and_left_on_the_port)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
     auto const specs = audio_specs();
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(specs[1]).has_value());
     StreamPort port;
@@ -949,10 +955,10 @@ TEST(listener_port, groups_are_joined_and_left_on_the_port)
     EXPECT_TRUE(handler.has_value() && *handler == nullptr);  // added to the reactor
     EXPECT_EQ(wire.joined_multicast_groups().size(), size_t{1});
 
-    ls.on_listener_connected(1, ieee::Eui64{}, kAafGroup);
+    ls.on_listener_connected(1, ieee::Eui64{}, kAafGroup, sm::TimePoint{});
     EXPECT_EQ(wire.joined_multicast_groups().size(), size_t{2});
     EXPECT_TRUE(std::ranges::find(wire.joined_multicast_groups(), kAafGroup) != wire.joined_multicast_groups().end());
-    ls.on_listener_disconnected(1);
+    ls.on_listener_disconnected(1, sm::TimePoint{});
     EXPECT_EQ(wire.joined_multicast_groups().size(), size_t{1});
     EXPECT_TRUE(wire.joined_multicast_groups()[0] == static_group);
 }
@@ -1075,7 +1081,7 @@ TEST(listener_timed, am824_raw_delivery_through_on_stream_rx_frame)
     auto const specs = audio_specs();
     auto const& spec = specs[0];
     EXPECT_TRUE(spec.format.kind == StreamKind::am824);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     RecordingSink raw_sink;
     RecordingSink decoded_sink;
     ListenerStreams raw{1'000'000, donor->components(), gptp, nullptr};
@@ -1137,7 +1143,7 @@ TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
     am824_spec.format_word = avtp::make_am824_stream_format(rate_hz == 96000 ? 4 : 2, 2);
     am824_spec.format = decode_stream_format(am824_spec.format_word);
     EXPECT_TRUE(am824_spec.format.kind == StreamKind::am824 && am824_spec.format.sample_rate_hz == rate_hz);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     RecordingSink sink;
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
@@ -1202,7 +1208,7 @@ TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
 TEST(listener_kind, crf_kind_changes_are_refused)
 {
     auto donor = make_donor();
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
     StreamSpec crf{};
@@ -1226,7 +1232,7 @@ TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)
 TEST(listener_crf, a_crf_pdu_delivers_its_mr_bit)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     StreamSpec crf{};
     crf.index = 1;  // connected to kAafId
@@ -1259,7 +1265,7 @@ TEST(listener_crf, a_crf_pdu_delivers_its_mr_bit)
 TEST(listener_crf, a_rebind_steps_the_crf_source_generation)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     StreamSpec crf{};
     crf.index = 1;  // connected to kAafId
@@ -1294,7 +1300,7 @@ TEST(listener_crf, a_rebind_steps_the_crf_source_generation)
     publish_connections(ls, *donor);
     send(kAafId, false);
     // The same talker stream connected again (on_listener_connected): a new source all the same.
-    ls.on_listener_connected(1, donor->components().acmp_listener.get_stream(1)->stream_id, ieee::Eui48{});
+    ls.on_listener_connected(1, donor->components().acmp_listener.get_stream(1)->stream_id, ieee::Eui48{}, sm::TimePoint{});
     send(kAafId, false);
     EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2, 2, 3, 4}));
 }

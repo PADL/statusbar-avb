@@ -429,7 +429,7 @@ auto ListenerStreams::attach_rx(
     // once per pass and stamps with the last media wake's gPTP time.
     auto rx = std::make_unique<StreamRxHandler>(
         port, static_groups, [this] { (void)drain_rx(realtime::GptpClock0::from_ns(current_gptp_ns()), net::rx_clock_now()); });
-    if (keep_handler) {
+    if (keep_handler || port.single_threaded()) {  // a single-threaded port's RX is its host's to drain
         return success(std::unique_ptr<net::Pollable>{std::move(rx)});
     }
     reactor.add(std::move(rx));
