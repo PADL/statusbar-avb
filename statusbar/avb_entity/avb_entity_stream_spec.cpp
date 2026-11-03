@@ -58,13 +58,12 @@ auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
     // plus the payload plus one byte; MaxIntervalFrames 1.
     switch (format.kind) {
         case StreamKind::aaf: {
-            // The AAF talker emits exactly the class A cadence per PDU (the
-            // reframer and the raw path send constant blocks), so no spare
-            // sample: AAF PCM32 48 kHz N ch is 24*N + 24 + 1.
+            // Constant blocks at a rate the class A cadence divides (PCM32 48 kHz N ch: 24*N + 24 + 1);
+            // at 44.1, 88.2 and 176.4 kHz a PDU carries one sample more now and then.
             if (format.sample_rate_hz == 0) {
                 return 0;
             }
-            auto const samples = class_a_samples_per_packet(format.sample_rate_hz);
+            auto const samples = (format.sample_rate_hz + CLASS_A_PACKETS_PER_SEC - 1) / CLASS_A_PACKETS_PER_SEC;
             return static_cast<uint16_t>(
                 avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(samples)) +
                 MILAN_TSPEC_SPARE_BYTES);
