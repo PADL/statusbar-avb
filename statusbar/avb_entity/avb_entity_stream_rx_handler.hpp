@@ -41,6 +41,7 @@ class StreamRxHandler : public net::Pollable
     /// Join @p port to each of @p groups and drain it via @p drain on readiness.
     StreamRxHandler(StreamPort& port, std::span<ieee::Eui48 const> groups, DrainFn drain)
         : port_{port}
+        , generation_{port.generation()}
         , drain_{std::move(drain)}
     {
         StreamPort::Guard const guard{port_};
@@ -56,10 +57,16 @@ class StreamRxHandler : public net::Pollable
     [[nodiscard]] auto fd() const noexcept -> int override { return port_.fd(); }
     void on_ready(int64_t /*reactor_now_ns*/) override { drain_(); }
     void tick(int64_t /*now_ns*/) override {}
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+
+    /// Done once the port this was attached to has closed, so a reactor that
+    /// owns the handler retires it rather than keeping it against a closed
+    /// port - or against the port's next open, which gets a handler of its
+    /// own and would otherwise be drained twice.
+    [[nodiscard]] auto finished() const noexcept -> bool override { return !port_.valid() || port_.generation() != generation_; }
 
   private:
     StreamPort& port_;
+    uint32_t generation_;
     DrainFn drain_;
 };
 

@@ -150,6 +150,14 @@ struct ListenerStreams
         StreamPort& port, std::span<ieee::Eui48 const> static_groups, net::MessageReactor& reactor, bool keep_handler = false)
         -> StatusValue<std::unique_ptr<net::Pollable>>;
 
+    /// The reverse of open_stream and attach_rx: no slots, no port. Each
+    /// slot's consumers go back to pending under their stream index, so the
+    /// entity's next start() binds them again as it opens the streams - a
+    /// consumer is registered once, at construction, not per run. One call
+    /// from the owning entity's stop(), once whatever drains RX has stopped;
+    /// a handler the reactor holds retires itself when the port closes.
+    void close_rx() noexcept;
+
     /// Non-blocking-drain every queued frame from the RX socket and process each via
     /// on_stream_rx_frame, stamping them all with @p gptp_now_ns (the caller's fresh
     /// gPTP "now"). Called either from the reactor's thin RX adapter (gptp_now_ns =
@@ -211,6 +219,10 @@ struct ListenerStreams
 
     /// Move a pending set_consume registration into its newly-opened slot.
     void bind_pending_consume(ListenerStreamSlot& slot);
+    /// Keep a registration for a slot that does not exist (yet, or any more)
+    /// under its stream index, replacing one already kept for that index.
+    void defer_consume(uint16_t stream_index, StreamConsumeFn fn);
+    void defer_crf(uint16_t stream_index, StreamCrfFn fn);
 
     /// A fresh slot for @p spec, its margin histogram sized for this listener.
     auto new_slot(StreamSpec const& spec) -> ListenerStreamSlot&;

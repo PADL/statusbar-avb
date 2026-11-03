@@ -136,6 +136,9 @@ class StreamPort
                 .xdp_filter_rules = rules_,
             });
         serialize_ = status.has_value() && !port_.tx_rx_independent();
+        if (status) {
+            ++generation_;
+        }
         return status;
     }
     void close() noexcept
@@ -145,6 +148,13 @@ class StreamPort
     }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return port_.valid(); }
+
+    /// Which open this is: 0 before the first, one more on each open that
+    /// succeeded. A holder that attached to the port remembers the value and
+    /// knows, when it differs, that the port it attached to was closed and
+    /// another opened in its place - a close followed by a reopen between
+    /// two of its looks would otherwise pass for the port it knew.
+    [[nodiscard]] auto generation() const noexcept -> uint32_t { return generation_; }
     /// The fd a reactor polls for receive readiness.
     [[nodiscard]] auto fd() const noexcept -> int { return port_.fd(); }
     [[nodiscard]] auto describe() const -> std::string { return port_.describe(); }
@@ -160,6 +170,7 @@ class StreamPort
     net::AvtpStreamRules rules_{net::avtp_stream_rules()};
     itc::SpinLock lock_{};
     bool serialize_{false};
+    uint32_t generation_{0};
 };
 
 }  // namespace statusbar::avb_entity

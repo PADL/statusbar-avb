@@ -324,6 +324,11 @@ class AvbEntityAm824IO
     /// host owns the generic SM wiring + lifecycle.
     auto wire_stream_callbacks() -> void;
 
+    /// Let go of the data plane start() built: the RX handler kept for an RX
+    /// timer, the talker's and the listener's slots, then the port. What the
+    /// next start() opens is then the whole of it, as on a first start.
+    void close_streams() noexcept;
+
     /// Build the MSRP talker reservation (TSpec) for our AM824 stream. The
     /// stream id / destination / VLAN are sourced from the ACMP-configured
     /// talker stream 0 so MSRP, ACMP, and the AVTP stream share one identity;

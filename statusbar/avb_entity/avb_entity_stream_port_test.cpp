@@ -7,6 +7,7 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 
+#include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/net/net_error.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -69,6 +70,18 @@ TEST(stream_port, build_stream_frame_refuses_a_buffer_too_small_for_the_frame)
     for (auto const byte : buffer) {
         EXPECT_EQ(byte, uint8_t{0});
     }
+}
+
+TEST(stream_port, a_handler_on_a_closed_port_is_finished)
+{
+    // A reactor retires a finished handler. One attached to a port that
+    // has since closed is finished, so a restart's handler is the only one
+    // left draining the port's next open.
+    StreamPort port;
+    EXPECT_EQ(port.generation(), 0U);
+    StreamRxHandler const handler{port, {}, [] {}};
+    EXPECT_TRUE(handler.finished());
+    EXPECT_EQ(handler.fd(), -1);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_port_test)

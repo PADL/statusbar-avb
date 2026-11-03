@@ -100,6 +100,13 @@ struct TalkerStreams
     auto open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status;
     auto open_tx(StreamPort& port) -> Status { return open_tx(port, TxPcapConfig{}); }
 
+    /// The reverse of open_stream and open_tx: no slots, no port, the kick
+    /// back in flush_tx, every stream streaming again. One call from the
+    /// owning entity's stop(), once the media timer that transmits has
+    /// stopped; the entity's next start() opens the streams afresh, as a
+    /// first start does, instead of over the ones a previous run left.
+    void close_tx() noexcept;
+
     /// Push this tick's frames to the wire. The ring backends batch what
     /// transmit_* committed until this kick; rawnet sent each frame as it
     /// was committed and this is free. Once per media tick, after the slots.

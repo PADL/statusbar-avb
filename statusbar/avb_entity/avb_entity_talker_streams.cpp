@@ -243,6 +243,16 @@ auto TalkerStreams::open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Statu
     return port.valid() ? success() : failure(std::errc::not_connected);
 }
 
+void TalkerStreams::close_tx() noexcept
+{
+    slots_.clear();
+    port_ = nullptr;
+    external_kick_ = false;
+    for (auto& stopped : stream_stopped_) {
+        stopped.store(false, std::memory_order_release);
+    }
+}
+
 void TalkerStreams::send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> const payload)
 {
     StreamPort::Guard const guard{*port_};

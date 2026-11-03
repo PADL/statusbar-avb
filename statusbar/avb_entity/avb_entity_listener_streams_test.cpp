@@ -145,4 +145,31 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
     EXPECT_EQ(last_ts, 123456789ULL);
 }
 
+TEST(listener_consume, close_rx_keeps_the_consumers_for_the_next_open)
+{
+    auto donor = make_donor();
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    // Registered once, before the first start, as an entity does.
+    int delivered = 0;
+    ls.set_consume(0, [&delivered](uint8_t, std::span<float const>, uint64_t, uint64_t) { ++delivered; });
+
+    // A run, then its end: no slots left.
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume));
+    ls.close_rx();
+    EXPECT_EQ(ls.slot_for(0), nullptr);
+    EXPECT_EQ(ls.slot_of(StreamKind::aaf), nullptr);
+
+    // The next run opens the same stream: one slot, and the consumer it was
+    // given before the first run is bound to it again.
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    auto* slot = ls.slot_for(0);
+    EXPECT_NE(slot, nullptr);
+    EXPECT_TRUE(static_cast<bool>(slot->consume));
+    slot->consume(0, {}, 0, 0);
+    EXPECT_EQ(delivered, 1);
+    EXPECT_EQ(ls.slot_of(StreamKind::aaf), slot);
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

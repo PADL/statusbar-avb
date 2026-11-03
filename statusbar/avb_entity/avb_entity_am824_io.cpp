@@ -317,8 +317,19 @@ auto AvbEntityAm824IO::stop() -> Status
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
+    // The data plane first, once the timers that drive it have stopped,
+    // then the control plane. start() builds both again.
+    close_streams();
     auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     return host_.stop_control_plane(now);
+}
+
+void AvbEntityAm824IO::close_streams() noexcept
+{
+    rt_rx_handler_.reset();
+    talker_.close_tx();
+    listener_.close_rx();
+    stream_port_.close();
 }
 
 //

@@ -144,6 +144,11 @@ void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn f
         slot->consume = std::move(fn);
         return;
     }
+    defer_consume(stream_index, std::move(fn));
+}
+
+void ListenerStreams::defer_consume(uint16_t const stream_index, StreamConsumeFn fn)
+{
     // No slot (yet): keep it pending. open_stream() binds it when the model
     // declares the index; otherwise it stays here, inert (menu/selection).
     for (auto& pending : pending_consume_) {
@@ -163,6 +168,11 @@ void ListenerStreams::set_crf(uint16_t const stream_index, StreamCrfFn fn)
         slot->on_crf = std::move(fn);
         return;
     }
+    defer_crf(stream_index, std::move(fn));
+}
+
+void ListenerStreams::defer_crf(uint16_t const stream_index, StreamCrfFn fn)
+{
     for (auto& pending : pending_crf_) {
         if (pending.stream_index == stream_index) {
             pending.fn = std::move(fn);
@@ -246,6 +256,20 @@ auto ListenerStreams::attach_rx(
     }
     reactor.add(std::move(rx));
     return success(std::unique_ptr<net::Pollable>{});
+}
+
+void ListenerStreams::close_rx() noexcept
+{
+    for (auto& slot : slots_) {
+        if (slot.consume) {
+            defer_consume(slot.spec.index, std::move(slot.consume));
+        }
+        if (slot.on_crf) {
+            defer_crf(slot.spec.index, std::move(slot.on_crf));
+        }
+    }
+    slots_.clear();
+    port_ = nullptr;
 }
 
 auto ListenerStreams::take_rx_frame() -> std::optional<size_t>

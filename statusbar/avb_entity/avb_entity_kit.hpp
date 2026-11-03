@@ -188,6 +188,10 @@ class AvbEntityKit
     /// the ACMP listener connect/disconnect drive, and the AEM
     /// GET_COUNTERS / GET_STREAM_INFO fills.
     void wire_stream_callbacks();
+    /// Let go of the data plane start() built: the RX handler kept for an RX
+    /// timer, the talker's and the listener's slots, then the port. What the
+    /// next start() opens is then the whole of it, as on a first start.
+    void close_streams() noexcept;
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;

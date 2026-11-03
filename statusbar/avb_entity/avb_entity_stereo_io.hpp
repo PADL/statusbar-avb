@@ -282,6 +282,11 @@ class AvbEntityStereoIO
     /// canonical STATIC example; no AEM blob needed).
     [[nodiscard]] auto create_entity_model() const -> nanoavb::EntityModel;
 
+    /// Let go of the data plane start() built: the RX handler kept for an RX
+    /// timer, the talker's and the listener's slots, then the port. What the
+    /// next start() opens is then the whole of it, as on a first start.
+    void close_streams() noexcept;
+
     /// Attach this entity's stream-specific control-plane behavior to the host:
     /// the single-stream MSRP advertise/withdraw + the ACMP talker connection log.
     /// The host owns the generic SM wiring + lifecycle.

@@ -123,4 +123,31 @@ TEST(talker_streams, external_kick_needs_a_port)
     talker.kick_tx();
 }
 
+TEST(talker_streams, close_tx_lets_a_restart_open_the_streams_afresh)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<uint64_t> const gptp_now{0};
+    statusbar::avb_entity::TalkerStreams talker{
+        statusbar::avb_entity::TalkerStreamsConfig{.sample_rate = 96000}, mc, gptp_now, std::pmr::get_default_resource()};
+    statusbar::avb_entity::StreamSpec spec{};
+    spec.index = 3;
+    spec.format_word = 0x020702200200C000ULL;  // AAF 96k int32 8ch
+    spec.format = statusbar::avb_entity::decode_stream_format(spec.format_word);
+
+    // A run: one slot, stopped by a controller.
+    EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
+    talker.set_stream_stopped(3, true);
+    EXPECT_TRUE(talker.stream_stopped(3));
+
+    // Its end, then the next run opening the same stream: still one slot,
+    // and the stream streams again - a restart is a first start.
+    talker.close_tx();
+    EXPECT_EQ(talker.slot_for(3), nullptr);
+    EXPECT_FALSE(talker.stream_stopped(3));
+    EXPECT_FALSE(talker.external_kick());
+    EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
+    EXPECT_NE(talker.slot_for(3), nullptr);
+    EXPECT_EQ(talker.slot_of(statusbar::avb_entity::StreamKind::aaf), talker.slot_for(3));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

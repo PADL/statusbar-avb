@@ -374,8 +374,21 @@ auto AvbEntityKit::stop() -> Status
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
+    // The data plane first, once the tool has stopped the timers that drive
+    // it, then the control plane. start() builds both again.
+    close_streams();
     auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     return host_.stop_control_plane(now);
+}
+
+void AvbEntityKit::close_streams() noexcept
+{
+    rt_rx_handler_.reset();
+    talker_->close_tx();
+    if (listener_ != nullptr) {
+        listener_->close_rx();
+    }
+    stream_port_.close();
 }
 
 auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo
