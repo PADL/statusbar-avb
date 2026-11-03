@@ -120,10 +120,8 @@ void note_mr(TalkerTxCounters& c, bool const mr) noexcept
     c.have_mr = true;
 }
 
-/// Count the sent AVTPDU @p frame (at least 4 octets): mr is bit 3 of octet 1; tu is bit 0 of
-/// octet 3, or of octet 1 in a CRF PDU (IEEE 1722-2016 4.4.4, 10.4).
 /// The first octets of @p pdu, which count_pdu reads, or none for a shorter one.
-auto pdu_head(std::span<uint8_t const> const pdu) noexcept -> std::optional<std::array<uint8_t, 4>>
+[[nodiscard]] auto pdu_head(std::span<uint8_t const> const pdu) noexcept -> std::optional<std::array<uint8_t, 4>>
 {
     if (pdu.size() < 4) {
         return std::nullopt;
@@ -133,6 +131,8 @@ auto pdu_head(std::span<uint8_t const> const pdu) noexcept -> std::optional<std:
     return head;
 }
 
+/// Count the sent AVTPDU @p frame (at least 4 octets): mr is bit 3 of octet 1; tu is bit 0 of
+/// octet 3, or of octet 1 in a CRF PDU (IEEE 1722-2016 4.4.4, 10.4).
 void count_pdu(TalkerTxCounters& c, std::span<uint8_t const> const frame) noexcept
 {
     bool const tu = ((frame[0] == avtp::AvtpSubtype::crf ? frame[1] : frame[3]) & 0x01U) != 0;
