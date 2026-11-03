@@ -357,10 +357,10 @@ struct ListenerStreams
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Take @p trial's deserializers and @p spec's format into @p slot. Under the guard.
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
-    /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when
-    /// nothing was queued or the frame was not AVTP. Holds the port guard for
-    /// exactly that - the decode happens outside it.
-    [[nodiscard]] auto take_rx_frame() -> size_t;
+    /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when the
+    /// frame was not AVTP, nullopt when nothing was queued. Holds the port
+    /// guard for exactly that - the decode happens outside it.
+    [[nodiscard]] auto take_rx_frame() -> std::optional<size_t>;
     /// One drain_rx pass is one port cycle: begin resets the XDP backend's
     /// per-cycle receive budget, end refills its ring. Each under the guard.
     void begin_port_cycle();

@@ -422,12 +422,12 @@ auto ListenerStreams::attach_rx(
     return success(std::unique_ptr<net::Pollable>{});
 }
 
-auto ListenerStreams::take_rx_frame() -> size_t
+auto ListenerStreams::take_rx_frame() -> std::optional<size_t>
 {
     StreamPort::Guard const guard{*port_};
     auto rx = port_->port().rx_start();
     if (!rx || !rx->has_value()) {
-        return 0;
+        return std::nullopt;
     }
     size_t const length = copy_avtpdu((*rx)->buffer);
     (void)port_->port().rx_release((*rx)->handle);
@@ -463,11 +463,13 @@ auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
     begin_port_cycle();
     size_t drained = 0;
     while (drained < MAX_DRAIN_PER_CALL) {
-        size_t const length = take_rx_frame();
-        if (length == 0) {
+        auto const length = take_rx_frame();
+        if (!length) {
             break;
         }
-        on_stream_rx_frame({rx_buf_.data(), length}, gptp_now_ns);
+        if (*length != 0) {  // a frame that is not AVTP goes, and the drain goes on
+            on_stream_rx_frame({rx_buf_.data(), *length}, gptp_now_ns);
+        }
         ++drained;
     }
     end_port_cycle();
