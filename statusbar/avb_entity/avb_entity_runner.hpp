@@ -89,6 +89,45 @@ struct EntityToolOptions
     std::string stream_input_margin_csv_path{};
 };
 
+/// The xdp backend's options beyond its queue: bind and attach modes, pin
+/// path, the rawnet fallback, and launch time.
+inline void add_xdp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    specs.add_choice(
+        "net.xdp_bind",
+        "AF_XDP bind: auto, zero_copy or copy",
+        {"auto", "zero_copy", "copy"},
+        "auto",
+        [&entity](std::string_view v) {
+            entity.net_xdp_bind_mode = v == "zero_copy" ? net::XdpBindMode::zero_copy
+                : v == "copy"                           ? net::XdpBindMode::copy
+                                                        : net::XdpBindMode::auto_;
+        });
+    specs.add_choice(
+        "net.xdp_attach",
+        "XDP program attach: native (driver) or generic",
+        {"native", "generic"},
+        "native",
+        [&entity](std::string_view v) {
+            entity.net_xdp_attach_mode = v == "generic" ? net::XdpAttachMode::generic : net::XdpAttachMode::native;
+        });
+    specs.add<std::string>(
+        "net.xdp_pin_path",
+        "bpffs directory to pin the XDP program and maps in (empty: not pinned)",
+        entity.net_xdp_pin_path,
+        [&entity](auto v) { entity.net_xdp_pin_path = std::string{v}; });
+    specs.add<bool>(
+        "net.xdp_fallback", "Open rawnet when net.backend=xdp does not open", entity.net_xdp_fallback, [&entity](auto v) {
+            entity.net_xdp_fallback = v;
+        });
+    specs.add<bool>(
+        "stream.launch_time",
+        "Open the xdp socket with TX metadata for launch times (net.backend=xdp); frames are timed once the host "
+        "sets the PHC (StreamPort::set_phc_clock)",
+        entity.stream_launch_time,
+        [&entity](auto v) { entity.stream_launch_time = v; });
+}
+
 /// Register the CLI arguments every entity tool shares: entity identity,
 /// interface, ATDECC wire version, VLAN, stream addressing, SRP
 /// workarounds, the talker gate, stream destination MACs, presentation
@@ -135,6 +174,7 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
     specs.add<uint32_t>("net.xdp_queue", "NIC queue for net.backend=xdp (default 0)", entity.net_xdp_queue, [&entity](auto v) {
         entity.net_xdp_queue = v;
     });
+    add_xdp_arg_specs(specs, entity);
     specs.add<std::string>(
         "stream.address_mode",
         "Talker stream dest-address source: 'static' (the configured *_dest_mac) or 'maap' (acquire a block from "
