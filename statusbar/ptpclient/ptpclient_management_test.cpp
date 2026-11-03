@@ -103,6 +103,28 @@ auto port_data(uint16_t const port, int64_t const delay_scaled) -> std::vector<u
     return data;
 }
 
+// Synchronised: a followed grandmaster with a port in SLAVE, or the grandmaster itself with a port in
+// MASTER and none UNCALIBRATED; LISTENING, UNCALIBRATED (a servo jump) and unreachable are not.
+TEST(ptp_management, the_clock_is_synchronized_by_a_slave_port_or_as_grandmaster)
+{
+    PtpManagementState state{.status = PtpManagementStatus::locked};
+    state.port_states[0] = PortState::uncalibrated;
+    state.port_states[1] = PortState::master;
+    EXPECT_FALSE(clock_synchronized(state));
+    state.port_states[0] = PortState::slave;
+    EXPECT_TRUE(clock_synchronized(state));
+    state.status = PtpManagementStatus::unreachable;
+    EXPECT_FALSE(clock_synchronized(state));
+
+    PtpManagementState own{.status = PtpManagementStatus::no_grandmaster};
+    own.port_states[0] = PortState::listening;
+    EXPECT_FALSE(clock_synchronized(own));
+    own.port_states[1] = PortState::master;
+    EXPECT_TRUE(clock_synchronized(own));
+    own.port_states[0] = PortState::uncalibrated;
+    EXPECT_FALSE(clock_synchronized(own));
+}
+
 /// linuxptp's PORT_PROPERTIES_NP data for `port` of BRIDGE on `name` (MASTER, hardware timestamping).
 auto port_properties(uint16_t const port, std::string_view const name) -> std::vector<uint8_t>
 {
@@ -684,21 +706,86 @@ TEST(ptp_management, client_follows_the_named_port_s_peer_delay)
     auto& c = **client;
     c.handle(PARENT_RESPONSE, 10);
     EXPECT_EQ(calls, 1);
-    c.handle(PORT_RESPONSE, 20);  // before PORT_PROPERTIES_NP names the port: not ours yet
+    c.handle(PORT_RESPONSE, 20);  // before PORT_PROPERTIES_NP names the port: its state only
     EXPECT_FALSE(c.state().peer_mean_path_delay_ns.has_value());
+    EXPECT_EQ(calls, 2);
     c.handle(response(management_id::port_properties_np, port_properties(1, "ens4")), 30);
     c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 31);
     EXPECT_TRUE((c.state().port == gptp::SourcePortIdentity{BRIDGE, 2}));
-    c.handle(response(management_id::port_data_set, port_data(1, int64_t{900} * 65536)), 40);  // ens4's: ignored
-    EXPECT_EQ(calls, 1);
+    c.handle(response(management_id::port_data_set, port_data(1, int64_t{900} * 65536)), 40);  // ens4's: its state only
+    EXPECT_EQ(calls, 3);
+    EXPECT_FALSE(c.state().peer_mean_path_delay_ns.has_value());
     c.handle(PORT_RESPONSE, 41);
-    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(calls, 4);
     EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{74});
     EXPECT_TRUE(last.delay_mechanism == DelayMechanism::p2p);
     c.handle(response(management_id::port_data_set, port_data(2, int64_t{74} * 65536 + 100)), 50);
-    EXPECT_EQ(calls, 2);  // the same delay to the ns
+    EXPECT_EQ(calls, 4);  // the same delay to the ns
     c.handle(response(management_id::port_data_set, port_data(2, int64_t{77} * 65536)), 60);
     EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{77});
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// Every port's state is kept, followed port or not, and reported: a port moving SLAVE to UNCALIBRATED
+// (linuxptp's servo jump) is a report, and clock_synchronized() follows it
+TEST(ptp_management, client_keeps_every_port_s_state)
+{
+    auto const dir = socket_dir("states");
+    Ptp4l ptp4l{dir};
+    int calls = 0;
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = ptp4l.path}, [&](PtpManagementState const& state) {
+        ++calls;
+        last = state;
+    });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 10);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::port_data_set, ManagementAction::get), 1);
+    auto slave = port_data(1, 0);
+    slave[10] = static_cast<uint8_t>(PortState::slave);
+    c.handle(response(management_id::port_data_set, slave), 20);
+    c.handle(response(management_id::port_data_set, port_data(2, 0)), 21);
+    EXPECT_TRUE(last.port_states[0] == PortState::slave && last.port_states[1] == PortState::master);
+    EXPECT_FALSE(last.port_state.has_value());  // no port followed
+    EXPECT_TRUE(clock_synchronized(last));
+    int const before = calls;
+    slave[10] = static_cast<uint8_t>(PortState::uncalibrated);
+    c.handle(response(management_id::port_data_set, slave), 30);
+    EXPECT_EQ(calls, before + 1);
+    EXPECT_FALSE(clock_synchronized(last));
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+// Subscribed, a port's state change asks for PARENT_DATA_SET again (a linuxptp before 4.2 holds
+// the bit without sending the notification); the same state again asks nothing
+TEST(ptp_management, a_port_state_change_asks_for_the_parent)
+{
+    auto const dir = socket_dir("parent");
+    Ptp4l ptp4l{dir};
+    auto client = PtpManagementClient::create(PtpManagementConfig{.uds_address = ptp4l.path}, [](PtpManagementState const&) {});
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 0);
+    c.handle(held_subscription(180), 1);
+    EXPECT_TRUE(c.state().subscribed);
+    auto slave = port_data(1, 0);
+    slave[10] = static_cast<uint8_t>(PortState::slave);
+    c.handle(response(management_id::port_data_set, slave), 2);
+    (void)ptp4l.drain();
+    c.handle(response(management_id::port_data_set, slave), 3);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::parent_data_set, ManagementAction::get), 0);
+    slave[10] = static_cast<uint8_t>(PortState::uncalibrated);
+    c.handle(response(management_id::port_data_set, slave), 4);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::parent_data_set, ManagementAction::get), 1);
     client->reset();
     std::filesystem::remove_all(dir);
 }
