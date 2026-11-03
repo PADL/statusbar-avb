@@ -473,13 +473,14 @@ STREAM_INPUT; a stream channel may feed several.
 
 `SrpPort` (`nanoavb_srp_port.hpp`) is MSRP and MVRP on one interface without
 an ATDECC entity: the two handlers, their net handlers (`nanoavb_srp_net.hpp`,
-the same ones `NanoAvbNetHandlers` adds) and the Class A Domain. It serves an
+the same ones `NanoAvbNetHandlers` adds) and one SR class's Domain
+(`SrpPortConfig::domain`: Class A by default, `CLASS_B_DOMAIN` for Class B). It serves an
 end station that only declares Talker Advertise and Listener attributes (IEEE
 802.1Q-2022 Clause 35.2.4) and adopts the bridge's Domain as below:
 
 1. `add_to_reactor()` opens the sockets (or `set_senders()` and the
    `receive_*()` / `tick()` calls stand in for them);
-2. `declare_domain()` declares the configured Class A Domain and joins its VID,
+2. `declare_domain()` declares the configured Domain and joins its VID,
    at start and on each link up;
 3. `declare_talker()` advertises a stream on the Domain's VID and priority;
    `attach_listener()` declares a Listener for a StreamID, found from a
@@ -488,14 +489,20 @@ end station that only declares Talker Advertise and Listener attributes (IEEE
 4. `SrpPortObserver` reports peers' registrations as they happen: the Domain
    (SRP is in force while the peer's is registered), Talker Advertise, Talker
    Failed and their leaving, the Listener declaration for each of our talker
-   streams, and an attached listener following its talker. A Class A Domain
-   adopted from the bridge (`MsrpHandler::set_adopt_domain`, Milan v1.3
-   Section 4.2.7.2.1: priority and VID) moves the MVRP join and re-advertises
-   the talkers. The Domain and a talker's leaving are reported once the
-   received PDU is done, with their final state: a peer's Domain counts only
-   at the SRclassPriority in use (Clause 35.2.1.4), and a talker whose
-   Advertise turns into a Talker Failed has not left.
-5. `withdraw_all()` withdraws every talker, listener, the Domain and its VID
+   streams, and an attached listener following its talker. A Domain of the
+   port's SR class adopted from the bridge (`MsrpHandler::set_adopt_domain`,
+   Milan v1.3 Section 4.2.7.2.1: priority and VID) moves the MVRP join and
+   re-advertises the talkers. The Domain and a talker's leaving are reported
+   once the received PDU is done, with their final state: a peer's Domain
+   counts only at the SRclassPriority in use (Clause 35.2.1.4), and a talker
+   whose Advertise turns into a Talker Failed has not left.
+5. `rejoin()`, after a link down and up: the peer's Listener registrations
+   are flushed and reported gone (its Domain and Talkers kept), and a
+   LeaveAll sent at once re-declares ours and asks the peer to re-declare its
+   own (`MsrpParticipant::rejoin()`, `leave_all()`); no Leave goes out.
+   `leave_all()` sends the LeaveAll again. The AVB entity does the same on a
+   link up after a down.
+6. `withdraw_all()` withdraws every talker, listener, the Domain and its VID
    and sends the Leaves at once (`MsrpHandler::withdraw_all()`,
    `MvrpHandler::withdraw_all()`), before the port closes: its peer drops the
    registrations at its leave timer instead of its next LeaveAll.

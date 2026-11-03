@@ -35,7 +35,7 @@ enum class ShaperError
     not_avb_capable = 1,  ///< fewer than 3 TX queues (legacy + class B + class A)
     bad_queue_override,   ///< an override queue out of range, both classes on one queue, or a legacy range that is not contiguous
     bad_priority,         ///< an SR class PCP of 8 or more, a PTP priority of 16 or more, or two classes on one priority
-    too_many_streams,     ///< more class A streams than MAX_PORT_SHAPER_STREAMS
+    too_many_streams,     ///< more streams of one SR class than MAX_PORT_SHAPER_STREAMS
 };
 
 class ShaperErrorCategory final : public std::error_category
@@ -62,6 +62,25 @@ namespace statusbar::avb_entity {
 
 /// The fewest TX queues an AVB port needs: one legacy, one per SR class.
 inline constexpr uint16_t MIN_AVB_TX_QUEUES = 3;
+
+/// The SR classes one port runs: their PCPs map to their queues and get a cbs; another class's PCP rides
+/// the legacy TC. Milan's AVB port runs class A alone.
+enum class SrClasses : uint8_t
+{
+    a,     ///< class A alone
+    b,     ///< class B alone
+    both,  ///< class A and class B
+};
+
+/// Whether @p classes includes class A, and class B.
+[[nodiscard]] constexpr auto runs_class_a(SrClasses const classes) noexcept -> bool
+{
+    return classes != SrClasses::b;
+}
+[[nodiscard]] constexpr auto runs_class_b(SrClasses const classes) noexcept -> bool
+{
+    return classes != SrClasses::a;
+}
 
 /// Explicit SR-class queues (0-based TX queue numbers), overriding the driver
 /// policy. Either may be given alone; the other then follows the policy.
@@ -94,9 +113,12 @@ struct QueueLayout
 [[nodiscard]] auto is_intel_qav_driver(std::string_view driver) noexcept -> bool;
 
 /// The queue layout for @p driver with @p tx_queues TX queues (docs/SHAPER.md, "Queue order per
-/// driver"); an explicit @p override wins. With two legacy queues or more, PTP uses the one next to
-/// the SR classes. Errors: ShaperError::not_avb_capable below MIN_AVB_TX_QUEUES; bad_queue_override.
-[[nodiscard]] auto make_queue_layout(std::string_view driver, uint16_t tx_queues, QueueOverride const& override = {})
+/// driver"); an explicit @p override wins. On igb/igc a port running class B alone puts it on queue 0, the one
+/// igc shapes first, and refuses it elsewhere. With two legacy queues or more, PTP uses the one next to the SR
+/// classes.
+/// Errors: ShaperError::not_avb_capable below MIN_AVB_TX_QUEUES; bad_queue_override.
+[[nodiscard]] auto make_queue_layout(
+    std::string_view driver, uint16_t tx_queues, QueueOverride const& override = {}, SrClasses classes = SrClasses::a)
     -> StatusValue<QueueLayout>;
 
 /// The default SR class priorities (PCPs): class A 3, class B 2 (802.1Q, Milan).
@@ -118,16 +140,16 @@ inline constexpr uint8_t PTP_TC = 3;
     uint8_t class_a_pcp, uint8_t class_b_pcp, uint8_t ptp_priority = DEFAULT_PTP_PRIORITY) noexcept -> Status;
 
 #if defined(__linux__)
-/// The mqprio root for @p layout, handle @p major:0, hw 0: each SR class's PCP on its TC (@p class_b false:
-/// class B's on TC0, its queue idle), @p ptp_priority on PTP_TC with a PTP queue (num_tc 4, else 3), the
-/// rest on TC0. Errors: ShaperError::bad_priority.
+/// The mqprio root for @p layout, handle @p major:0, hw 0: the PCP of each class in @p classes on its TC (a
+/// class not run: its PCP on TC0, its queue idle), @p ptp_priority on PTP_TC with a PTP queue (num_tc 4,
+/// else 3), the rest on TC0. Errors: ShaperError::bad_priority.
 [[nodiscard]] auto mqprio_for(
     QueueLayout const& layout,
     uint16_t major,
     uint8_t class_a_pcp = DEFAULT_CLASS_A_PCP,
     uint8_t class_b_pcp = DEFAULT_CLASS_B_PCP,
     uint8_t ptp_priority = DEFAULT_PTP_PRIORITY,
-    bool class_b = true) noexcept -> StatusValue<net::tc::MqprioQdisc>;
+    SrClasses classes = SrClasses::both) noexcept -> StatusValue<net::tc::MqprioQdisc>;
 #endif
 
 //
@@ -231,6 +253,22 @@ inline constexpr int64_t CLASS_A_PLACEHOLDER_PERCENT = 10;
 /// placeholder at CLASS_A_PLACEHOLDER_PERCENT; class B empty, so ShaperQdiscs leaves its queue alone.
 [[nodiscard]] auto class_a_targets(
     std::span<TSpec const> class_a_streams, uint32_t link_kbps, uint32_t max_interfering_frame) noexcept -> CbsTargets;
+
+/// A class-B-only port's placeholder idleSlope while nothing is admitted, in percent of the link.
+inline constexpr int64_t CLASS_B_PLACEHOLDER_PERCENT = 10;
+
+/// cbs_targets() for a port that runs class B alone: class B's streams (Annex L, L-11 with no class A), or
+/// with none a placeholder at CLASS_B_PLACEHOLDER_PERCENT; class A empty, so ShaperQdiscs leaves its queue alone.
+[[nodiscard]] auto class_b_targets(
+    std::span<TSpec const> class_b_streams, uint32_t link_kbps, uint32_t max_interfering_frame) noexcept -> CbsTargets;
+
+/// The targets for a port running @p classes: class_a_targets(), class_b_targets() or cbs_targets().
+[[nodiscard]] auto port_targets(
+    SrClasses classes,
+    std::span<TSpec const> class_a_streams,
+    std::span<TSpec const> class_b_streams,
+    uint32_t link_kbps,
+    uint32_t max_interfering_frame) noexcept -> CbsTargets;
 
 //
 // Launch time: an offloaded etf on class A's queue (tc-etf(8); net_tc_launch_time.hpp)
@@ -365,6 +403,7 @@ class ShaperQdiscs
     bool reused_{false};
     bool cbs_refused_a_{false};  ///< class A's cbs refused (EOPNOTSUPP): no class is programmed
     bool cbs_refused_b_{false};  ///< class B's alone refused: class A's is still programmed
+    bool class_a_mapped_{true};  ///< some priority maps to class A's TC (else its queue carries nothing)
     bool class_b_mapped_{true};  ///< some priority maps to class B's TC (else its queue carries nothing)
     CbsParameters class_a_{};
     CbsParameters class_b_{};
@@ -386,6 +425,8 @@ struct ShaperConfig
 {
     std::string interface_name;
     QueueOverride queues{};
+    /// The SR classes the port runs (mqprio map and cbs): class A alone by default, as Milan's port.
+    SrClasses classes{SrClasses::a};
     /// The mqprio root's handle major (`tc qdisc show` prints it as "9000:").
     /// A root already holding this handle with our layout is kept; with
     /// another, it is deleted and replaced.
@@ -393,10 +434,11 @@ struct ShaperConfig
     /// The link speed assumed while the kernel has never reported one.
     uint32_t fallback_link_mbps{1000};
     /// shutdown() removes the mqprio and its cbs (an adapter reset on igb/igc). false (the default)
-    /// parks class A's cbs at its placeholder for the next install() to keep.
+    /// parks each class's cbs at its placeholder for the next install() to keep.
     bool restore_qdisc{false};
     /// etf on class A's queue, under its cbs or alone (launch_time_mode()): on only with the streams on an
     /// AF_XDP socket there carrying launch times, as etf drops AF_PACKET frames; off removes a leftover one.
+    /// A port running class B alone has no launch time (its queue gets none).
     LaunchTimeMode launch_time{LaunchTimeMode::unsupported};
     /// The etf's delta (ns): it bounds frames that pass through etf; AF_XDP frames bypass it.
     int32_t etf_delta_ns{DEFAULT_ETF_DELTA_NS};
@@ -404,7 +446,8 @@ struct ShaperConfig
     uint8_t ptp_priority{DEFAULT_PTP_PRIORITY};
 };
 
-/// The most class A streams a PortShaper sizes its shaper for.
+/// The most frame sizes in each SR class a PortShaper sizes its shaper for: streams of one MaxFrameSize are
+/// folded into one TSpec (their MaxIntervalFrames summed), which Annex L's sums count alike.
 inline constexpr size_t MAX_PORT_SHAPER_STREAMS = 64;
 
 /// What PortShaper::install() reads from the interface: its index, driver, TX queues and MTU.
@@ -418,7 +461,7 @@ struct ShaperPort
 
 #if defined(__linux__)
 
-/// One AVB port's hardware shaper, sized from the class A TSpecs its user programs: a tick-only
+/// One AVB port's hardware shaper, sized from the class A and B TSpecs its user programs: a tick-only
 /// net::Pollable on the reactor (docs/SHAPER.md, "Threading"). After install() every failure is
 /// logged on @p log, never fatal: the streams keep flowing, unshaped.
 class PortShaper final : public net::Pollable
@@ -442,9 +485,10 @@ class PortShaper final : public net::Pollable
     /// ShaperError::not_avb_capable, bad_queue_override or bad_priority, or the netlink errno
     /// (last_kernel_message() has the kernel's reason). Nothing of ours is left installed on failure.
     [[nodiscard]] auto install(ShaperPort const& port) -> Status;
-    /// Size class A for @p class_a, every stream that may send on its queue, from the next tick()
-    /// (before install(): from install()). Errors: ShaperError::too_many_streams; nothing changes.
-    [[nodiscard]] auto program(std::span<TSpec const> class_a) noexcept -> Status;
+    /// Size class A for @p class_a and class B for @p class_b, every stream that may send on each class's
+    /// queue, from the next tick() (before install(): from install()). An empty class keeps its placeholder.
+    /// Errors: ShaperError::too_many_streams past MAX_PORT_SHAPER_STREAMS frame sizes; nothing changes.
+    [[nodiscard]] auto program(std::span<TSpec const> class_a, std::span<TSpec const> class_b = {}) noexcept -> Status;
     /// Another launch-time mode: settled by the next tick(); under a cbs that stays no adapter reset, but
     /// with no cbs offload each change switches igc's TSN mode (a reset). A no-op before install().
     void set_launch_time(LaunchTimeMode mode) noexcept;
@@ -477,6 +521,9 @@ class PortShaper final : public net::Pollable
     /// Whether our etf is on class A's queue.
     [[nodiscard]] auto launch_time() const noexcept -> bool { return qdiscs_.launch_time(); }
 
+    /// One SR class's TSpecs, one per frame size (program()).
+    using StreamTSpecs = sg14::inplace_vector<TSpec, MAX_PORT_SHAPER_STREAMS>;
+
     /// How often tick() re-reads the link speed.
     static constexpr int64_t LINK_CHECK_NS = 1'000'000'000;
     /// tick()'s retry of a failed reprogram(): after 1 s, doubling to 32 s.
@@ -484,11 +531,13 @@ class PortShaper final : public net::Pollable
     static constexpr int64_t RETRY_MAX_NS = 32'000'000'000;
 
   private:
-    /// class_a_targets() for the TSpecs given (@p streams false: none) at the current link speed.
+    /// port_targets() for the classes run and the TSpecs given (@p streams false: none) at the current link speed.
     [[nodiscard]] auto targets(bool streams) -> CbsTargets;
+    /// Size the classes for @p class_a and @p class_b from the next tick().
+    void assign_streams(StreamTSpecs const& class_a, StreamTSpecs const& class_b) noexcept;
     /// Read the link speed; true if the speed the shaper sizes against changed.
     [[nodiscard]] auto refresh_link_speed() -> bool;
-    /// Park class A's cbs at its placeholder and leave the qdiscs for the next start (logged).
+    /// Park each class's cbs at its placeholder and leave the qdiscs for the next start (logged).
     void park();
     /// Open the tc client (our own) and install the mqprio root for @p layout on @p port.
     [[nodiscard]] auto install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status;
@@ -509,7 +558,8 @@ class PortShaper final : public net::Pollable
     uint32_t known_link_mbps_{0};   ///< last speed the kernel reported (0: never)
     std::error_code link_error_{};  ///< last non-"unknown" speed read error (logged on change)
     uint32_t programmed_link_mbps_{0};
-    sg14::inplace_vector<TSpec, MAX_PORT_SHAPER_STREAMS> class_a_streams_{};
+    StreamTSpecs class_a_streams_{};
+    StreamTSpecs class_b_streams_{};
     bool dirty_{false};
     int64_t next_link_check_ns_{0};
     int64_t retry_at_ns_{0};
