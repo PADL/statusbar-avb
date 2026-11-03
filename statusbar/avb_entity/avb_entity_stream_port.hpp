@@ -198,12 +198,9 @@ class StreamPort
     /// Whether TX and RX go through Guard's lock.
     [[nodiscard]] auto serialized() const noexcept -> bool { return serialize_; }
     /// The host drives TX and RX from one thread, never both at once: Guard uses no lock, the talker
-    /// renders into the slot and the listener decodes in place. Kept across opens; while neither side runs.
-    void set_single_threaded(bool const single) noexcept
-    {
-        single_threaded_ = single;
-        serialize_ = port_.valid() && !port_.tx_rx_independent() && !single;
-    }
+    /// renders into the slot and the listener decodes in place. Before open(); kept across opens.
+    void set_single_threaded(bool const single) noexcept { single_threaded_ = single; }
+    [[nodiscard]] auto single_threaded() const noexcept -> bool { return single_threaded_; }
 
     /// The port. Take a Guard around any use from a thread that is not the
     /// only one using it.
