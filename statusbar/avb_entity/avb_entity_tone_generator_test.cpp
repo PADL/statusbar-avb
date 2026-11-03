@@ -329,6 +329,54 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
 }
 
+// TalkerGate::admitted (the hardware shaper's input): an ACMP connection whose
+// listener's reservation is ready, held across a Listener Ready withdrawal (the
+// LeaveAll blip should_transmit's grace covers) until the last ACMP disconnect.
+TEST(tone_gate, admission_follows_connection_and_reservation)
+{
+    auto blob = load_file(entity_tone_bin_path());
+    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    EXPECT_TRUE(result.has_value());
+    if (!result.has_value()) {
+        return;
+    }
+    auto& comps = (*result)->components();
+    constexpr uint16_t k_aaf = 1;  // tone.json: AM824@0, AAF@1, CRF@2
+    auto const* aaf_stream = comps.acmp_talker.get_stream(k_aaf);
+    EXPECT_NE(aaf_stream, nullptr);
+    if (aaf_stream == nullptr) {
+        return;
+    }
+    nanoavb::StreamId sid;
+    sid.from_uint64(aaf_stream->stream_id.to_uint64());
+
+    TalkerGate gate{/*gate_enabled=*/true, comps};
+    EXPECT_FALSE(gate.admitted(k_aaf));
+    gate.note_acmp_connections(k_aaf, 1);
+    EXPECT_FALSE(gate.admitted(k_aaf));  // connected, reservation not ready
+    gate.note_listener_ready(sid, true);
+    EXPECT_TRUE(gate.admitted(k_aaf));
+    gate.note_listener_ready(sid, false);  // LeaveAll blip: still admitted
+    EXPECT_TRUE(gate.admitted(k_aaf));
+    gate.note_acmp_connections(k_aaf, 0);  // last disconnect ends it
+    EXPECT_FALSE(gate.admitted(k_aaf));
+    gate.note_acmp_connections(k_aaf, 1);  // reconnect: needs a ready again
+    EXPECT_FALSE(gate.admitted(k_aaf));
+    gate.note_listener_ready(sid, true);
+    gate.note_acmp_connections(k_aaf, 0);
+    gate.note_acmp_connections(k_aaf, 1);  // Listener Ready still declared across the reconnect
+    EXPECT_TRUE(gate.admitted(k_aaf));
+    EXPECT_TRUE(gate.should_transmit(k_aaf, TalkerGate::RawTimePoint{}));
+    gate.note_acmp_connections(k_aaf, 0);  // the last disconnect closes it
+    EXPECT_FALSE(gate.admitted(k_aaf));
+    EXPECT_FALSE(gate.admitted(0));
+    EXPECT_FALSE(gate.admitted(TalkerGate::STREAM_COUNT));
+
+    TalkerGate open{/*gate_enabled=*/false, comps};
+    EXPECT_TRUE(open.admitted(0));
+    EXPECT_TRUE(open.admitted(k_aaf));
+}
+
 //
 // Lifecycle / data plane (no network).
 //

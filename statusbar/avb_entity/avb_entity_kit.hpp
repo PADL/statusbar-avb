@@ -294,36 +294,17 @@ class AvbEntityKit
     /// no handler still get the generic store/serve built-in.
     void on_control_symbol(uint32_t symbol_code, ControlChangedFn fn);
 
-    // --- Presentation time offset (IEEE 1722.1-2021 Clauses 7.4.76, 7.4.77) ---
-    /// The entity puts talker stream @p idx's new presentation time offset in force in its
-    /// data plane and answers an AEM status (STREAM_IS_RUNNING when it cannot while the
-    /// stream runs). Reactor thread. Without one, SET_MAX_TRANSIT_TIME answers
-    /// NOT_SUPPORTED and the configured offset stays in force. The kit does not defer the
-    /// SET: an IN_PROGRESS is answered ENTITY_MISBEHAVING and nothing is put in force.
-    using PresentationOffsetFn = sg14::inplace_function<uint8_t(uint16_t idx, uint32_t offset_ns), 32>;
-    void set_on_presentation_offset_changed(PresentationOffsetFn fn) noexcept { on_presentation_offset_changed_ = std::move(fn); }
-    /// Talker stream @p idx's presentation time offset in nanoseconds, as GET_MAX_TRANSIT_TIME
-    /// and GET_STREAM_INFO report it: the configured one until a controller changes it, 0 for
-    /// an index that is no talker stream's. Reactor thread.
-    [[nodiscard]] auto presentation_offset_ns(uint16_t idx) const noexcept -> uint32_t;
-
-    // --- Sampling rate (IEEE 1722.1-2021 Clause 7.4.21) -------------------------
-    /// A stream a SET_SAMPLING_RATE re-times: its descriptor, and its format before and after.
-    struct RetimedFormat
-    {
-        uint16_t type{0};
-        uint16_t index{0};
-        uint64_t from{0};
-        uint64_t to{0};
-    };
-    using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
-    /// The entity's data plane moves AUDIO_UNIT 0 to @p rate and each of @p streams to its new
-    /// format, all or none, and answers an AEM status (STREAM_IS_RUNNING when a talker cannot change
-    /// while it streams). Reactor thread. Without one, a rate but the one in force is NOT_SUPPORTED.
-    /// The kit's engines, specs, sample_rate() and TSpecs keep their rate: an entity whose streams
-    /// run on them answers NOT_SUPPORTED; one running its own moves them and declares their TSpecs.
-    using UnitRateFn = sg14::inplace_function<uint8_t(uint32_t rate, std::span<RetimedFormat const> streams), 32>;
-    void set_on_unit_rate_changed(UnitRateFn fn) noexcept { on_unit_rate_changed_ = std::move(fn); }
+    // --- Talker admission (the hardware shaper's input) ------------------------
+    /// The talker stream indices currently admitted (TalkerGate::admitted: a
+    /// listener is ACMP-connected and its reservation is ready; every stream
+    /// when gating is disabled), in stream-table order.
+    using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
+    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
+    /// Called on the reactor thread with the new admitted set whenever it changes, not for the set
+    /// in force when installed (read admitted_talker_streams()). An empty function removes it
+    /// (before whatever it captures goes).
+    using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
+    void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
 
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
@@ -390,6 +371,15 @@ class AvbEntityKit
     /// The rate the kit's engines were built with; a SET_SAMPLING_RATE does not change it
     /// (set_on_unit_rate_changed()), so any thread may read it.
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
+    /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
+    [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
+
+    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at
+    /// the class A cadence, one frame per interval (also the shaper's input).
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
+    {
+        return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+    }
 
     // --- Stream socket health (after start()) ---------------------------------
     /// Why start() could not open the stream TX socket (empty: it opened). The
@@ -674,6 +664,9 @@ class AvbEntityKit
     void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto setup_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
+    /// Recompute the admitted set after a gate input changed; fire
+    /// on_admission_changed_ when it differs from the last one.
+    void note_admission();
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
@@ -696,6 +689,9 @@ class AvbEntityKit
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_;
+    /// The admitted set last reported, and its listener.
+    AdmittedStreams admitted_{};
+    AdmissionChangedFn on_admission_changed_{};
 
     /// The one port every stream frame goes through, backend from
     /// config_.net_backend or opened by the host (stream_port()). Declared before the talker, the listener and the

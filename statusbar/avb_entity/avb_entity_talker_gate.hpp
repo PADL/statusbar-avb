@@ -88,14 +88,10 @@ struct TalkerGate
     static constexpr auto GRACE = std::chrono::seconds{5};
 
     /// Reactor thread: an MSRP Listener Ready declaration for @p stream_id changed
-    /// to @p ready, known at the RAW instant @p now. Matched to a talker stream index
-    /// by ACMP stream_id (same value MSRP advertises). A registration and the
-    /// withdrawal that ends it both stamp @p now, from which the grace runs.
-    void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
-    /// As above, known at the instant last told (tell_time): for an MSRP hook,
-    /// which is not handed the time of its event. Told no time yet, the flag is
-    /// kept and no stamp is made, so a withdrawal then opens no grace; the
-    /// first such call says so in the log.
+    /// to @p ready. Matched to a talker stream index by ACMP stream_id (same value
+    /// MSRP advertises); sets the readiness flag and, while the stream has an
+    /// ACMP connection, the admitted() latch. Needs no time: the grace window
+    /// runs from when the media thread last saw the flag (should_transmit).
     void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready);
 
     /// Reactor thread: the RAW instant of the reactor cycle now being served,
@@ -116,15 +112,23 @@ struct TalkerGate
         }
     }
 
-    /// Reactor thread: talker stream @p idx now has @p count ACMP connections
-    /// (call from the acmp_talker connect/disconnect callback with the fresh
-    /// acmp_talker.connection_count(idx)). Publishes it for the media-timer thread
-    /// so should_transmit never reads the reactor-mutated connection list directly.
-    void note_acmp_connections(uint16_t idx, uint32_t count) noexcept
+    /// Reactor thread: talker stream @p idx now has @p count ACMP connections, published for the
+    /// media thread. The last disconnect forgets the stream's reservation history; a connection
+    /// made while Listener Ready is declared latches it at once.
+    void note_acmp_connections(uint16_t idx, uint32_t count) noexcept;
+
+    /// Reactor thread: is talker stream @p idx admitted (gating off, or an ACMP connection whose
+    /// listener's reservation is ready)? Only the last disconnect ends admission, so the set is
+    /// always a superset of what should_transmit passes; not time-dependent.
+    [[nodiscard]] auto admitted(uint16_t idx) const noexcept -> bool
     {
-        if (idx < acmp_conn_.size()) {
-            acmp_conn_[idx].publish(count);
+        if (!gate_enabled_) {
+            return true;
         }
+        if (idx >= acmp_conn_.size() || acmp_conn_[idx].load() == 0) {
+            return false;
+        }
+        return reservation_ready_[idx] || listener_ready_[idx].load(std::memory_order_relaxed);
     }
 
     /// Any thread: is talker stream @p idx admitted at the RAW instant @p now? True if
@@ -146,6 +150,9 @@ struct TalkerGate
         return admitted(idx, now);
     }
 
+    /// Reactor thread: set the admitted() latch.
+    void latch_ready(uint16_t idx) noexcept;
+
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
     bool needs_acmp_connection_{true};              ///< see set_needs_acmp_connection
@@ -159,10 +166,10 @@ struct TalkerGate
     /// "A listener permits transmit" (MSRP Listener Ready), per stream. Written by
     /// note_listener_ready (reactor) after the stamp, with release; read with acquire.
     std::array<std::atomic<bool>, STREAM_COUNT> listener_ready_{};
-    /// The RAW instant (ns) each stream's Listener Ready was last known registered; 0
-    /// until it first is, and while the gate has been told no time. Written by
-    /// note_listener_ready (reactor) alone.
-    std::array<std::atomic<int64_t>, STREAM_COUNT> ready_raw_ns_{};
+    /// The media wake at which each stream's Listener Ready was last seen set
+    /// while connected (NEVER until then, and again once the last connection
+    /// goes); the strict gate keeps transmitting for GRACE past it. Media-timer thread only.
+    std::array<RawTimePoint, STREAM_COUNT> last_seen_ready_ = never_seen();
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even when connected + Listener Ready.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
@@ -171,18 +178,19 @@ struct TalkerGate
     /// acmp_talker.connection_count(idx) so the media thread never reads the
     /// reactor-mutated connection list directly.
     std::array<itc::Published<uint32_t>, STREAM_COUNT> acmp_conn_{};
+    /// Listener Ready seen while the stream had an ACMP connection (cleared
+    /// when the last one goes). Reactor thread only; feeds admitted().
+    std::array<bool, STREAM_COUNT> reservation_ready_{};
 
   private:
-    /// Reactor thread: stream @p idx's stamp, then its flag, for a Listener @p ready at
-    /// @p now; returns the flag as it was.
-    [[nodiscard]] auto stamp(uint16_t idx, bool ready, RawTimePoint now) noexcept -> bool;
-    /// The stream's ACMP connection + Started preconditions (both published by
-    /// the reactor thread, read here on the media timer's).
-    [[nodiscard]] auto connected_and_started(uint16_t idx) const noexcept -> bool;
-    /// MSRP Listener Ready registered now, or withdrawn less than the grace before @p now.
-    [[nodiscard]] auto listener_ready_within_grace(uint16_t idx, RawTimePoint now) const noexcept -> bool;
-    /// Stream @p idx's stamp plus the grace; nullopt with no stamp.
-    [[nodiscard]] auto stamp_plus_grace(uint16_t idx) const noexcept -> std::optional<RawTimePoint>;
+    [[nodiscard]] static constexpr auto never_seen() noexcept -> std::array<RawTimePoint, STREAM_COUNT>
+    {
+        std::array<RawTimePoint, STREAM_COUNT> seen{};
+        seen.fill(NEVER);
+        return seen;
+    }
+    /// MSRP Listener Ready now, or seen within GRACE of @p now (recorded here).
+    [[nodiscard]] auto listener_ready_within_grace(uint16_t idx, RawTimePoint now) noexcept -> bool;
 };
 
 }  // namespace statusbar::avb_entity
