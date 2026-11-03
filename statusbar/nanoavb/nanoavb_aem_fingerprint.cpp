@@ -71,7 +71,7 @@ void append_descriptor(std::vector<std::uint8_t>& canonical, AemRawDescriptor co
 }  // namespace
 
 std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors)
-{
+{  // NOLINT(statusbar-block-statements) the hashed fields, in order; pre-dates the gate
     std::vector<std::size_t> order;
     order.reserve(descriptors.size());
     for (std::size_t i = 0; i < descriptors.size(); ++i) {

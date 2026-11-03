@@ -306,12 +306,12 @@ auto PtpTimeBridge::start_sampling_impl(PtpTimeReader ptp_reader, BridgeSampling
 
 void PtpTimeBridge::sampler_loop()
 {
+    realtime::set_current_thread_name("ptp-sampler");
     run_guarded("PTP bridge sampler thread", [this]() { sampler_loop_impl(); });
 }
 
 void PtpTimeBridge::sampler_loop_impl()
 {
-    realtime::set_current_thread_name("ptp-sampler");
     // The sampler brackets each /dev/ptp0 read between two CLOCK_MONOTONIC reads;
     // a preemption inside that bracket inflates it past max_bracket_ns (sample
     // rejected) or the residual past the degrade/step thresholds. The sampler

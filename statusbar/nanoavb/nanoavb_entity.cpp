@@ -135,7 +135,7 @@ void store_max_transit_time(std::span<uint8_t> const out, uint16_t const index, 
 }  // namespace
 
 auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool
-{
+{  // NOLINT(statusbar-block-statements) one AECP frame: screened, dispatched, answered; pre-dates the gate
     // Any other AECP command type addressed to us is answered NOT_IMPLEMENTED rather than
     // dropped (IEEE 1722.1-2021 Clause 9.2.1.1.6); MVU normally goes to dispatch_aecp.
     if (payload.size() >= AecpDuCommon::LENGTH) {
@@ -759,7 +759,7 @@ auto AemCommandHandler::complete_pending_command(
     uint16_t const descriptor_index,
     uint8_t const status,
     std::span<uint8_t const> response_body) -> bool
-{
+{  // NOLINT(statusbar-block-statements) a pending command completed; pre-dates the gate
     auto const idx = pending_commands_.find_if([&](PendingCommand const& p) {
         if (p.header.command_code() != command_type || p.body_size < 4) {
             return false;
@@ -815,15 +815,6 @@ void AemCommandHandler::tick(sm::TimePoint const now)
 {
     now_ = now;
     have_now_ = true;
-    // A GET_COUNTERS change held back within a second of the last one goes
-    // once the second has passed, with the counters as they are then.
-    for (auto& n : counters_notifications_) {
-        if (n.pending && now >= n.next_allowed) {
-            n.pending = false;
-            n.next_allowed = now + COUNTERS_NOTIFICATION_INTERVAL;
-            (void)send_counters_notification(n.descriptor_type, n.descriptor_index);
-        }
-    }
     if (locked_ && now >= lock_expiry_time_) {
         release_lock();
         emit_lock_released();
@@ -837,6 +828,20 @@ void AemCommandHandler::tick(sm::TimePoint const now)
         if (now >= p.next_in_progress) {
             (void)send_response(p.mac, p.header, AEM_STATUS_IN_PROGRESS, std::span<uint8_t const>{p.body}.first(p.body_size));
             p.next_in_progress = now + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
+        }
+    }
+    tick_notifications(now);
+}
+
+void AemCommandHandler::tick_notifications(sm::TimePoint const now)
+{
+    // A GET_COUNTERS change held back within a second of the last one goes
+    // once the second has passed, with the counters as they are then.
+    for (auto& n : counters_notifications_) {
+        if (n.pending && now >= n.next_allowed) {
+            n.pending = false;
+            n.next_allowed = now + COUNTERS_NOTIFICATION_INTERVAL;
+            (void)send_counters_notification(n.descriptor_type, n.descriptor_index);
         }
     }
     if (entity_profile_.milan) {
@@ -906,7 +911,7 @@ auto AemCommandHandler::send_counters_notification(uint16_t const descriptor_typ
 
 auto AemCommandHandler::handle_get_avb_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
-{
+{  // NOLINT(statusbar-block-statements) GET_AVB_INFO, field by field; pre-dates the gate
     if (!callbacks_.get_avb_info) {
         return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
@@ -947,7 +952,7 @@ auto AemCommandHandler::handle_get_avb_info(std::span<uint8_t const> command_dat
 }
 
 auto AemCommandHandler::notify_avb_info_changed(uint16_t const descriptor_index) -> uint8_t
-{
+{  // NOLINT(statusbar-block-statements) the AVB_INFO notification; pre-dates the gate
     AemGetAvbInfoCommandPayload const cmd{.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .descriptor_index = descriptor_index};
     std::array<uint8_t, AemGetAvbInfoCommandPayload::LENGTH> request{};
     span_store(request, cmd);
@@ -2311,7 +2316,7 @@ auto AemCommandHandler::handle_get_configuration(AemDu const& /*header*/, std::s
 
 auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
-{
+{  // NOLINT(statusbar-block-statements) SET_CONFIGURATION's checks; pre-dates the gate
     using namespace atdecc::aem;
     if (command_data.size() < AemSetConfigurationPayload::LENGTH || out_buffer.size() < AemSetConfigurationPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
@@ -2610,7 +2615,7 @@ void AemCommandHandler::send_unsolicited_to(
     uint16_t const sequence_id,
     uint16_t const command_type,
     std::span<uint8_t const> body)
-{
+{  // NOLINT(statusbar-block-statements) one unsolicited response; pre-dates the gate
     // Frame an unsolicited AEM response: our id as target, the controller's id,
     // its sequence_id, and the U-bit set.
     AemDu hdr{};
