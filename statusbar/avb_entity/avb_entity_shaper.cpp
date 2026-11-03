@@ -130,6 +130,14 @@ auto mqprio_for(QueueLayout const& layout, uint16_t const major, uint8_t const c
 
 namespace {
 
+/// Whether a root the kernel reported lays the queues out as @p wanted does.
+[[nodiscard]] auto same_layout(net::tc::MqprioQdisc const& reported, net::tc::MqprioQdisc const& wanted) noexcept -> bool
+{
+    return reported.num_tc == wanted.num_tc && reported.prio_tc_map == wanted.prio_tc_map && reported.count == wanted.count &&
+        reported.offset == wanted.offset;
+}
+
+
 /// ceil(n / d) for d > 0 (C++ division truncates toward zero, which is the
 /// ceiling for a negative quotient).
 [[nodiscard]] constexpr auto ceil_div(int64_t const n, int64_t const d) noexcept -> int64_t
@@ -268,7 +276,7 @@ auto ShaperQdiscs::install(
     // children and reset igb/igc. The first program() changes its cbs in place.
     bool reuse = false;
     if (auto const current = tc_.get(ifindex, net::tc::ROOT)) {
-        reuse = current->handle == root && current->has_mqprio_params && current->mqprio == mqprio;
+        reuse = current->handle == root && current->has_mqprio_params && same_layout(current->mqprio, mqprio);
     }
     if (!reuse) {
         auto replaced = tc_.replace_mqprio(ifindex, mqprio);
