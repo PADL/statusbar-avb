@@ -1937,6 +1937,9 @@ auto AvbEntityKit::note_persistent_state_outcome(LoadedPersistentState const& lo
     switch (loaded.outcome) {
         case PersistentStateOutcome::fresh:
             log.status("kit: no persistent state yet; starting from the model's defaults");
+            if (loaded.error) {
+                log.warning("kit: the listener bindings file was not imported: {}", logging::embed<40>(loaded.error.message()));
+            }
             break;
         case PersistentStateOutcome::loaded:
             // Unchanged by what follows, it needs no rewrite.

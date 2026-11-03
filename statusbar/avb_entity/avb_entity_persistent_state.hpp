@@ -152,7 +152,7 @@ struct LoadedPersistentState
     /// when imported). Its entity_model_id is always the running model's.
     PersistentState state;
     PersistentStateOutcome outcome{PersistentStateOutcome::fresh};
-    /// corrupt, unreadable, newer_version: why (corrupt: bad_copy is the .bad path,
+    /// corrupt, unreadable, newer_version, or fresh with an old bindings file not imported: why (corrupt: bad_copy is the .bad path,
     /// empty when the move failed); model_changed: see discarded_model_id. After
     /// unreadable or newer_version the caller must not write the file this run.
     std::error_code error;
