@@ -144,6 +144,8 @@ TEST(avb_persistent_state, malformed_rejected)
     auto const v2 = parse_persistent_state("version = 2\nentity_model_id = \"0x01\"\n");
     EXPECT_FALSE(v2.has_value());
     EXPECT_TRUE(v2.error() == std::errc::not_supported);
+    // version 0 is no version: malformed (moved aside), not a later one left alone forever
+    EXPECT_TRUE(is_malformed("version = 0\nentity_model_id = \"0x01\"\n"));
 }
 
 // An older file's [[sampling_rate]] tables load and are ignored: the kit keeps
@@ -272,10 +274,11 @@ TEST(avb_persistent_state, bindings_imported_once)
     EXPECT_TRUE(reloaded.outcome == PersistentStateOutcome::loaded);
     EXPECT_TRUE(reloaded.state.listener_bindings == imported.state.listener_bindings);
 
-    // An empty or corrupt old file imports nothing
+    // An empty or corrupt old file imports nothing; a corrupt one says why
     std::filesystem::remove(path);
     write_text(legacy, "garbage\n");
-    EXPECT_TRUE(load_persistent_state(path, MODEL, legacy).outcome == PersistentStateOutcome::fresh);
+    auto const corrupt = load_persistent_state(path, MODEL, legacy);
+    EXPECT_TRUE(corrupt.outcome == PersistentStateOutcome::fresh && corrupt.error);
     std::filesystem::remove_all(dir);
 }
 
