@@ -156,7 +156,8 @@ struct ListenerStreams
     /// current_gptp_ns()) or, when stream_rx_rt_timer is set, from a dedicated
     /// SCHED_FIFO RX timer on an isolated core (gptp_now_ns = the timer's wake time),
     /// which keeps ingress frames tallied against a clock at most one tick stale.
-    /// Returns the number of frames drained this call (for the RX-timer batch-size stat).
+    /// Returns the number of frames taken off the port this call, frames that
+    /// were not AVTP included (for the RX-timer batch-size stat).
     auto drain_rx(int64_t gptp_now_ns) -> size_t;
 
     /// The gPTP time the reactor path stamps RX frames with: the media-timer wake
@@ -234,10 +235,12 @@ struct ListenerStreams
     /// Receive scratch for drain_rx: one AVTPDU copied out of the port's slot. 2 KB
     /// covers a full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
     std::array<uint8_t, 2048> rx_buf_{};
-    /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when
-    /// nothing was queued or the frame was not AVTP. Holds the port guard for
-    /// exactly that - the decode happens outside it.
-    [[nodiscard]] auto take_rx_frame() -> size_t;
+    /// One frame out of the port into rx_buf_: the AVTPDU length, 0 for a
+    /// frame that was not AVTP (taken and released all the same), nullopt
+    /// when nothing was queued. The two have to differ: drain_rx ends its
+    /// pass on an empty port, never on a frame it has no use for. Holds the
+    /// port guard for exactly that - the decode happens outside it.
+    [[nodiscard]] auto take_rx_frame() -> std::optional<size_t>;
     /// One drain_rx pass is one port cycle: begin resets the XDP backend's
     /// per-cycle receive budget, end refills its ring. Each under the guard.
     void begin_port_cycle();
