@@ -170,7 +170,7 @@ struct StreamSpec
 };
 
 /// Audio (AM824/AAF) streams per direction the data plane is sized for: 16
-/// talker and 16 listener streams (the media bridge's product limit).
+/// talker and 16 listener streams.
 inline constexpr size_t MAX_ENTITY_AUDIO_STREAMS = 16;
 
 /// Clock-reference (CRF) streams per direction beside the audio: one media
