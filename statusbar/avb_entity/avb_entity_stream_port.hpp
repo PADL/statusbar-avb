@@ -21,7 +21,8 @@
 /// kernel's RT throttling let it run.
 ///
 /// Guard holds that lock for the shortest stretch that is still right: a
-/// tx_start/tx_commit pair, or an rx_start/copy/rx_release triple. The
+/// tx_start/tx_commit pair with the talker's serialize into the frame between
+/// them, or an rx_start/copy/rx_release triple. The
 /// listener copies each frame out under the guard and decodes it outside,
 /// so the media timer never waits on a decode.
 ///
