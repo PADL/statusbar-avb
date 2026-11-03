@@ -34,7 +34,7 @@ namespace {
 }  // namespace
 
 auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<ModelFinding>
-{
+{  // NOLINT(statusbar-block-statements) the model checks, one per descriptor kind; pre-dates the gate
     std::vector<ModelFinding> out;
     auto add = [&](Severity s, std::string where, std::string msg) { out.push_back({s, std::move(where), std::move(msg)}); };
 
@@ -126,7 +126,7 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
     }
 
     // STREAMs: a usable current_format and a format list.
-    for (auto const& r : descs) {
+    for (auto const& r : descs) {  // NOLINT(statusbar-block-statements) one STREAM descriptor's checks; pre-dates the gate
         if (r.type != DESCRIPTOR_STREAM_INPUT && r.type != DESCRIPTOR_STREAM_OUTPUT) {
             continue;
         }
