@@ -611,6 +611,34 @@ TEST(talker_port, aaf_frame_is_the_tagged_frame_send_vlan_builds)
     EXPECT_EQ(slot->tx_packets, uint64_t{2});
 }
 
+// A raw AAF frame is rendered straight into the port's frame, behind the header: the
+// talker stages nothing of its own between the render and the wire.
+TEST(talker_port, a_raw_frame_is_rendered_in_the_ports_frame)
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    std::span<uint8_t const> rendered;
+    avb_entity::StreamRawRenderFn const render = [&rendered](std::span<uint8_t> payload, uint32_t, uint64_t, uint64_t) {
+        rendered = payload;
+        return true;
+    };
+    EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 1200, 0x2'0000'1000ULL, 12, render));
+    EXPECT_EQ(rendered.size(), size_t{12 * 8 * 4});
+    EXPECT_TRUE(wire.holds(rendered));
+    auto const sent = wire.pop_tx();
+    EXPECT_TRUE(sent.has_value() && sent->frame.size() == VLAN_HEADER_LENGTH + avtp::AafPdu::HEADER_LENGTH + rendered.size());
+    EXPECT_EQ(talker.slot_for(0)->tx_packets, uint64_t{1});
+}
+
 // A frame sent by destination alone is the tagged frame around the payload, untimed and
 // counted on no slot.
 TEST(talker_port, a_frame_by_destination_is_the_tagged_frame_untimed)
