@@ -31,7 +31,7 @@ namespace {
 
 /// A TOML basic string. Bytes from 0x80 go through as they are: ATDECC
 /// strings are UTF-8, and the reader does not re-validate them.
-auto toml_string(std::string_view const text) -> std::string
+[[nodiscard]] auto toml_string(std::string_view const text) -> std::string
 {
     std::string out{"\""};
     for (char const c : text) {
@@ -63,7 +63,7 @@ auto toml_string(std::string_view const text) -> std::string
     return out;
 }
 
-auto toml_hex(uint64_t const value) -> std::string
+[[nodiscard]] auto toml_hex(uint64_t const value) -> std::string
 {
     return std::format("\"0x{:016x}\"", value);
 }
@@ -172,7 +172,7 @@ using toml::Table;
     return true;
 }
 
-auto malformed() -> std::error_code
+[[nodiscard]] auto malformed() -> std::error_code
 {
     return std::make_error_code(std::errc::illegal_byte_sequence);
 }
@@ -523,7 +523,7 @@ struct DescriptorKey
 
 /// Create @p tmp for writing, making @p path's directory when it is not there yet
 /// (first start); -1 with errno set on failure.
-auto open_for_write(std::string const& tmp, std::string const& path) -> int
+[[nodiscard]] auto open_for_write(std::string const& tmp, std::string const& path) -> int
 {
     int const fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd >= 0 || errno != ENOENT) {
@@ -584,7 +584,8 @@ auto import_legacy_bindings(std::string const& path, LoadedPersistentState& load
 }
 
 /// No file could be read: unreadable, or absent and perhaps imported.
-auto load_unread(LoadedPersistentState loaded, std::error_code const read_error, std::string const& legacy_bindings_path)
+[[nodiscard]] auto load_unread(
+    LoadedPersistentState loaded, std::error_code const read_error, std::string const& legacy_bindings_path)
     -> LoadedPersistentState
 {
     if (read_error != std::errc::no_such_file_or_directory) {
@@ -600,7 +601,8 @@ auto load_unread(LoadedPersistentState loaded, std::error_code const read_error,
 
 /// The file at @p path did not parse: a newer version is left alone, anything else
 /// is kept as <path>.bad for a post-mortem and the entity starts fresh.
-auto load_rejected(LoadedPersistentState loaded, std::error_code const error, std::string const& path) -> LoadedPersistentState
+[[nodiscard]] auto load_rejected(LoadedPersistentState loaded, std::error_code const error, std::string const& path)
+    -> LoadedPersistentState
 {
     loaded.error = error;
     if (error == std::errc::not_supported) {
@@ -616,7 +618,7 @@ auto load_rejected(LoadedPersistentState loaded, std::error_code const error, st
 }
 
 /// The file parsed: it is used when written for this model (loaded.state's model id).
-auto load_parsed(LoadedPersistentState loaded, StatusValue<PersistentState> parsed, std::string const& path)
+[[nodiscard]] auto load_parsed(LoadedPersistentState loaded, StatusValue<PersistentState> parsed, std::string const& path)
     -> LoadedPersistentState
 {
     if (!parsed) {
