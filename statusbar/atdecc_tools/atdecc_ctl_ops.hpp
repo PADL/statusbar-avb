@@ -412,9 +412,9 @@ template <typename Fn>
 
 /// Bit positions in the counters_valid bitmap for the frame-movement counters
 /// we poll. FRAMES_RX lives in the STREAM_INPUT counter set; FRAMES_TX in the
-/// STREAM_OUTPUT set. (Mirrors atdecc_aem_get_counters_tool.cpp.)
+/// STREAM_OUTPUT set (IEEE 1722.1-2021 Clause 7.4.42.2.5; mirrors atdecc_aem_get_counters_tool.cpp).
 constexpr size_t STREAM_INPUT_FRAMES_RX_BIT = 11;
-constexpr size_t STREAM_OUTPUT_FRAMES_TX_BIT = 6;
+constexpr size_t STREAM_OUTPUT_FRAMES_TX_BIT = 7;
 
 /// Identifies which counter, on OUR local end, measures frame movement for one
 /// leg of a connection.
