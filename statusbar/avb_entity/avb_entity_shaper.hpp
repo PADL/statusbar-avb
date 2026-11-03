@@ -326,9 +326,13 @@ class ShaperQdiscs
     /// which replaced in place would clear our TC map as it goes. Errors: the netlink errno.
     [[nodiscard]] auto clear_foreign_root(
         int ifindex, std::string_view name, StatusValue<net::tc::QdiscInfo> const& current, uint16_t major) -> Status;
-    /// Replace the root with @p mqprio, deleting our own handle @p root and retrying once on EINVAL.
-    [[nodiscard]] auto replace_root(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, uint32_t root)
+    /// Replace the root with @p mqprio; on EINVAL delete our own handle's @p current root, its classes
+    /// cleared first, and retry once.
+    [[nodiscard]] auto replace_root(
+        int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, StatusValue<net::tc::QdiscInfo> const& current)
         -> Status;
+    /// pfifo_fast on every class of the mqprio @p root, the highest queue first, before it is deleted.
+    void clear_root_classes(int ifindex, net::tc::QdiscInfo const& root);
     /// Graft the default qdisc back on both class queues (logged) and forget their cbs.
     void remove_cbs();
     /// Delete the mqprio root (logged).
