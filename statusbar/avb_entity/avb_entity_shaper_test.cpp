@@ -301,22 +301,22 @@ TEST(shaper_cbs, milan_table_4_4)
 TEST(shaper_cbs, class_a_aaf_and_crf_on_a_gigabit_link)
 {
     // One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s, MTU 1500 interfering:
-    // idleSlope 19136, sendSlope -980864, hiCredit 29, loCredit -206 (docs/SHAPER.md).
+    // idleSlope 19136, sendSlope -980864, hiCredit 30, loCredit -206 (docs/SHAPER.md).
     std::array<TSpec, 2> const streams{
         AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
     EXPECT_EQ(a.idleslope_kbps, int32_t{19136});
     EXPECT_EQ(a.sendslope_kbps, int32_t{-980864});
-    EXPECT_EQ(a.hicredit, int32_t{29});
+    EXPECT_EQ(a.hicredit, int32_t{30});
     EXPECT_EQ(a.locredit, int32_t{-206});
     EXPECT_EQ(a.max_frame_size, uint32_t{211});
     EXPECT_FALSE(a.empty());
 
-    // The AAF alone at 100 Mbit/s: idleSlope 13504, sendSlope -86496, hiCredit 203, loCredit -182.
+    // The AAF alone at 100 Mbit/s: idleSlope 13504, sendSlope -86496, hiCredit 209, loCredit -182.
     auto const slow = class_a_cbs(std::span{streams}.first(1), 100'000, 1500);
     EXPECT_EQ(slow.idleslope_kbps, int32_t{13504});
     EXPECT_EQ(slow.sendslope_kbps, int32_t{-86496});
-    EXPECT_EQ(slow.hicredit, int32_t{203});
+    EXPECT_EQ(slow.hicredit, int32_t{209});
     EXPECT_EQ(slow.locredit, int32_t{-182});
 
     // Nothing admitted: nothing to shape
@@ -330,14 +330,14 @@ TEST(shaper_cbs, class_b_sees_class_a_as_interference)
         AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
     auto const a = class_a_cbs(a_streams, 1'000'000, 1500);
     // One AAF stream in class B (6752 kbit/s), class A as above: sendSlopeB -993248,
-    // hiCreditB 12 (L-11), loCreditB -209 (docs/SHAPER.md).
+    // hiCreditB 13 (L-11), loCreditB -209 (docs/SHAPER.md).
     std::array<TSpec, 1> const b_streams{AvbEntityKit::talker_tspec(aaf_8ch_48k_int24())};
     auto const b = class_b_cbs(b_streams, a, 1'000'000, 1500);
     EXPECT_EQ(b.idleslope_kbps, int32_t{6752});
     EXPECT_EQ(b.sendslope_kbps, int32_t{-993248});
-    EXPECT_EQ(b.hicredit, int32_t{12});
+    EXPECT_EQ(b.hicredit, int32_t{13});
     EXPECT_EQ(b.locredit, int32_t{-209});
-    // With no class A: hiCreditB = ceil(6752 x 1500 / 1000000) = ceil(10.128) = 11
+    // With no class A: hiCreditB = ceil(6752 x 1542 / 1000000) = ceil(10.412) = 11
     auto const b_alone = class_b_cbs(b_streams, CbsParameters{}, 1'000'000, 1500);
     EXPECT_EQ(b_alone.hicredit, int32_t{11});
     EXPECT_TRUE(class_b_cbs({}, a, 1'000'000, 1500).empty());
@@ -358,7 +358,7 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
     EXPECT_EQ(a.idleslope_kbps, int32_t{680960});
     EXPECT_EQ(a.sendslope_kbps, int32_t{-319040});
-    EXPECT_EQ(a.hicredit, int32_t{1022});
+    EXPECT_EQ(a.hicredit, int32_t{1051});
     EXPECT_EQ(a.locredit, int32_t{-205});
     EXPECT_EQ(a.max_frame_size, uint32_t{643});
     EXPECT_TRUE(a.idleslope_kbps < 750'000);
@@ -370,13 +370,13 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
 }
 
 // The placeholder at half the 75% SR budget, 1 Gbit/s, MTU 1500 (wire frame 1542): idleSlope
-// 375000, sendSlope -625000, hiCredit 563 (L-10), loCredit -963 (L-12).
+// 375000, sendSlope -625000, hiCredit 579 (L-10), loCredit -963 (L-12).
 TEST(shaper_cbs, placeholders)
 {
     auto const idle = placeholder_cbs(1'000'000, 1500, 375'000);
     EXPECT_EQ(idle.idleslope_kbps, int32_t{375'000});
     EXPECT_EQ(idle.sendslope_kbps, int32_t{-625'000});
-    EXPECT_EQ(idle.hicredit, int32_t{563});
+    EXPECT_EQ(idle.hicredit, int32_t{579});
     EXPECT_EQ(idle.locredit, int32_t{-963});
     EXPECT_EQ(idle.max_frame_size, uint32_t{1542});
     EXPECT_TRUE(idle.placeholder && !idle.empty());
@@ -390,13 +390,13 @@ TEST(shaper_cbs, placeholders)
     auto const none = cbs_targets({}, {}, 1'000'000, 1500);
     EXPECT_TRUE(none.class_a == idle && none.class_b == idle);
     EXPECT_EQ(none.class_a.idleslope_kbps + none.class_b.idleslope_kbps, int32_t{750'000});
-    // The same at 100 Mbit/s: 37500 each, hiCredit 563, loCredit -963.
+    // The same at 100 Mbit/s: 37500 each, hiCredit 579, loCredit -963.
     auto const slow = cbs_targets({}, {}, 100'000, 1500);
     EXPECT_EQ(slow.class_a.idleslope_kbps, int32_t{37'500});
-    EXPECT_EQ(slow.class_a.hicredit, int32_t{563});
+    EXPECT_EQ(slow.class_a.hicredit, int32_t{579});
     EXPECT_EQ(slow.class_a.locredit, int32_t{-963});
     // The AAF and the CRF admitted (19136 kbit/s): class B's placeholder receives the rest of the
-    // budget: idleSlope 730864, sendSlope -269136, hiCredit 1097, loCredit -415.
+    // budget: idleSlope 730864, sendSlope -269136, hiCredit 1127, loCredit -415.
     std::array<TSpec, 2> const streams{
         AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
     auto const some = cbs_targets(streams, {}, 1'000'000, 1500);
@@ -405,7 +405,7 @@ TEST(shaper_cbs, placeholders)
     EXPECT_TRUE(some.class_b.placeholder);
     EXPECT_EQ(some.class_b.idleslope_kbps, int32_t{730'864});
     EXPECT_EQ(some.class_b.sendslope_kbps, int32_t{-269'136});
-    EXPECT_EQ(some.class_b.hicredit, int32_t{1097});
+    EXPECT_EQ(some.class_b.hicredit, int32_t{1127});
     EXPECT_EQ(some.class_b.locredit, int32_t{-415});
     EXPECT_EQ(some.class_a.idleslope_kbps + some.class_b.idleslope_kbps, int32_t{750'000});
     // At the kit's INT_32 bound class A alone exceeds the budget: class B's
@@ -428,13 +428,13 @@ TEST(shaper_cbs, one_int32_talker_as_captured_on_an_i210)
     auto const targets = cbs_targets(streams, {}, 1'000'000, 1500);
     EXPECT_EQ(targets.class_a.idleslope_kbps, int32_t{16576});
     EXPECT_EQ(targets.class_a.sendslope_kbps, int32_t{-983424});
-    EXPECT_EQ(targets.class_a.hicredit, int32_t{25});
+    EXPECT_EQ(targets.class_a.hicredit, int32_t{26});
     EXPECT_EQ(targets.class_a.locredit, int32_t{-254});
     EXPECT_EQ(targets.class_a.max_frame_size, uint32_t{259});
     EXPECT_TRUE(targets.class_b.placeholder);
     EXPECT_EQ(targets.class_b.idleslope_kbps, int32_t{733424});
     EXPECT_EQ(targets.class_b.sendslope_kbps, int32_t{-266576});
-    EXPECT_EQ(targets.class_b.hicredit, int32_t{1101});
+    EXPECT_EQ(targets.class_b.hicredit, int32_t{1131});
     EXPECT_EQ(targets.class_b.locredit, int32_t{-411});
 }
 
