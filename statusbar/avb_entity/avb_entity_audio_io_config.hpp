@@ -8,6 +8,7 @@
 /// EntityUdptunBridge can hold a config_ ref without an include cycle.
 
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <charconv>
@@ -48,6 +49,17 @@ struct AvbEntityAudioIOConfig
 
     /// The NIC queue the xdp backend binds to.
     uint32_t net_xdp_queue{0};
+    /// The xdp backend's bind (zero-copy or copy) and attach (driver or generic) modes.
+    net::XdpBindMode net_xdp_bind_mode{net::XdpBindMode::auto_};
+    net::XdpAttachMode net_xdp_attach_mode{net::XdpAttachMode::native};
+    /// Where the xdp backend pins its program and maps (bpffs); empty: not pinned.
+    std::string net_xdp_pin_path{};
+    /// Open rawnet when the xdp backend does not open, the reason kept
+    /// (AvbEntityKit::stream_xdp_error()); false: no stream port then.
+    bool net_xdp_fallback{false};
+    /// Give each stream frame a launch time (AF_XDP TX metadata, the NIC's
+    /// etf/TBS), in the sending PHC's time; xdp backend only.
+    bool stream_launch_time{false};
 
     // Destination multicast MACs for the talker streams. NOTE: the IEEE-1722
     // AVTP multicast OUI 91:E0:F0 (00:00:00..00:FD:FF) is the MAAP dynamic
