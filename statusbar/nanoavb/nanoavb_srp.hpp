@@ -165,6 +165,11 @@ class MvrpHandler
     /// @param vlan_id The VLAN ID to withdraw
     [[nodiscard]] auto withdraw_vlan(uint16_t vlan_id, TimePoint now) -> Status;
 
+    /// The end of a run: withdraw every VLAN this port registered and send
+    /// the Leaves now rather than at a join timer a stopping reactor never
+    /// reaches. Nothing registered: nothing sent.
+    void withdraw_all(TimePoint now);
+
     /// Get the registration state of a VLAN
     /// @param vlan_id The VLAN ID to query
     [[nodiscard]] auto get_vlan_state(uint16_t vlan_id) const noexcept -> VlanState;
@@ -454,6 +459,24 @@ class MsrpHandler
         return success();
     }
 
+    /// The end of a run: withdraw every talker, every listener and the
+    /// domain this port declared, and send their Leaves now. A withdrawal
+    /// alone only queues its Leave for the next join timer, which a
+    /// stopping reactor never reaches, and the bridge would then keep this
+    /// port's reservations until its own LeaveAll lapsed. Nothing declared:
+    /// nothing sent.
+    void withdraw_all(TimePoint now)
+    {
+        if (!started_) {
+            return;
+        }
+        withdraw_talkers(now);
+        withdraw_listeners(now);
+        (void)participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_A, now);
+        (void)participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_B, now);
+        transmit_now(now);
+    }
+
     [[nodiscard]] auto get_listener_stream(StreamId const& stream_id) const noexcept -> ListenerStreamSrpInfo const*
     {
         for (auto const& stream : listener_streams_) {
@@ -514,16 +537,50 @@ class MsrpHandler
             started_ = true;
         }
         last_event_time_ = now;
-        participant_.tick(now);
+        // Before the timers run, or the first join timer of a run builds
+        // its PDU with nowhere to send it.
         if (callbacks_.send_packet) {
             participant_.set_send_pdu(callbacks_.send_packet);
         }
+        participant_.tick(now);
     }
 
     [[nodiscard]] auto talker_streams() const noexcept -> std::span<TalkerStreamSrpInfo const> { return talker_streams_; }
     [[nodiscard]] auto listener_streams() const noexcept -> std::span<ListenerStreamSrpInfo const> { return listener_streams_; }
 
   private:
+    /// Every talker that is advertising, withdrawn (withdraw_all).
+    void withdraw_talkers(TimePoint now)
+    {
+        for (auto& stream : talker_streams_) {
+            if (stream.state != TalkerReservationState::Idle) {
+                stream.state = TalkerReservationState::Idle;
+                (void)participant_.withdraw_talker(stream.stream_id, now);
+            }
+        }
+    }
+
+    /// Every listener that is attached, withdrawn (withdraw_all).
+    void withdraw_listeners(TimePoint now)
+    {
+        for (auto& stream : listener_streams_) {
+            if (stream.state != ListenerReservationState::Idle) {
+                stream.state = ListenerReservationState::Idle;
+                (void)participant_.withdraw_listener(stream.stream_id, now);
+            }
+        }
+    }
+
+    /// What the applicants have pending, sent now through send_packet - which
+    /// tick() installs, but a run that ends before its first tick has not.
+    void transmit_now(TimePoint now)
+    {
+        if (callbacks_.send_packet) {
+            participant_.set_send_pdu(callbacks_.send_packet);
+        }
+        participant_.transmit_pending(now);
+    }
+
     /// Forward a listener register/leave for one of OUR talker streams to the
     /// on_talker_listener hook, reporting the aggregate "may transmit" state.
     void notify_talker_listener(tsn::StreamId const& sid)

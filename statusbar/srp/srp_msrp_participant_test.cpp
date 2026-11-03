@@ -1677,4 +1677,42 @@ TEST(msrp_participant, peer_declaration_does_not_overwrite_our_talker)
     EXPECT_TRUE(a.foreign_declaration_conflict_count() > 0);
 }
 
+TEST(msrp_participant, transmit_pending_sends_a_withdrawal_without_waiting_for_the_join_timer)
+{
+    MsrpParticipant a{test_msrp_config(), 0xcc33};
+    MsrpParticipant b{test_msrp_config(), 0xdd44};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+    std::optional<tsn::StreamId> leave_id{};
+    Observer obs{};
+    obs.on_talker_leave = [&](tsn::StreamId const& id) { leave_id = id; };
+    b.subscribe(obs);
+
+    (void)a.declare_talker_advertise(make_talker_adv(0x0042), clock.now);
+    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    fab.deliver_a_to_b(b, clock.now);
+    EXPECT_NE(b.find_talker_advertise(make_stream_id(0x0042)), nullptr);
+
+    // A stopping station: the withdrawal and its transmit opportunity at the
+    // same instant, no join timer in between. The Leave is on the fabric at
+    // once...
+    (void)a.withdraw_talker(make_stream_id(0x0042), clock.now);
+    EXPECT_TRUE(fab.a_to_b.empty());
+    a.transmit_pending(clock.now);
+    EXPECT_FALSE(fab.a_to_b.empty());
+
+    // ...and the peer, hearing nothing more from a, drops the registration at
+    // its leave timer.
+    fab.deliver_a_to_b(b, clock.now);
+    b.tick(clock.advance(std::chrono::milliseconds(1100)));
+    EXPECT_TRUE(leave_id.has_value());
+    if (leave_id.has_value()) {
+        EXPECT_EQ(leave_id->get_unique_id(), 0x0042);
+    }
+}
+
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)

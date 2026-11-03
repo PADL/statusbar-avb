@@ -74,6 +74,23 @@ auto MvrpHandler::withdraw_vlan(uint16_t vlan_id, TimePoint now) -> Status
     return success();
 }
 
+void MvrpHandler::withdraw_all(TimePoint now)
+{
+    if (!started_) {
+        return;
+    }
+    for (auto& vlan : vlans_) {
+        if (vlan.state != VlanState::Unregistered) {
+            vlan.state = VlanState::Unregistered;
+            (void)participant_.withdraw_vlan(vlan.vlan_id, now);
+        }
+    }
+    if (callbacks_.send_packet) {
+        participant_.set_send_pdu(callbacks_.send_packet);
+    }
+    participant_.transmit_pending(now);
+}
+
 auto MvrpHandler::get_vlan_state(uint16_t vlan_id) const noexcept -> VlanState
 {
     for (auto const& vlan : vlans_) {
@@ -103,16 +120,14 @@ auto MvrpHandler::tick(TimePoint now) -> void
         participant_.start(now);
         started_ = true;
     }
-    participant_.tick(now);
-
-    // If the protocol engine wants to transmit a PDU, the send_packet
-    // callback wraps it and forwards via the nanoavb callback path.
-    // We install a one-shot adapter the first time tick/receive runs
-    // by configuring the participant's send_pdu callback here.
-    // (Done via set_callbacks below; harmless to re-set each tick.)
+    // The send_packet callback carries what the protocol engine transmits
+    // through the nanoavb callback path. Installed before the timers run,
+    // or the first join timer of a run builds its PDU with nowhere to send
+    // it. Harmless to re-set each tick.
     if (callbacks_.send_packet) {
         participant_.set_send_pdu(callbacks_.send_packet);
     }
+    participant_.tick(now);
 }
 
 }  // namespace statusbar::nanoavb

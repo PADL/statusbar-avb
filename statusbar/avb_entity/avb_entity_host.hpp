@@ -129,8 +129,10 @@ class AvbEntityHost
     /// behavior + the data plane. Idempotent guard: fails if already running.
     [[nodiscard]] auto start_control_plane(net::MessageReactor& reactor, std::string_view interface_name) -> Status;
 
-    /// Stop ADP advertising and release the net handlers. The entity should tear down
-    /// its own data plane (sockets, workers) around this call. Fails if not running.
+    /// Withdraw the MSRP reservations and the MVRP VID with their Leaves sent
+    /// at once, stop ADP advertising and release the net handlers. The entity
+    /// should tear down its own data plane (sockets, workers) around this
+    /// call. Fails if not running.
     [[nodiscard]] auto stop_control_plane(TimePoint now) -> Status;
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return running_; }
@@ -315,6 +317,12 @@ class AvbEntityHost
     void attach_mirror(net::MessageReactor& reactor);
     void apply_interface_runtime();
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
+
+    /// stop_control_plane's first half: the MSRP reservations and the MVRP
+    /// VID withdrawn with their Leaves sent at once, then ENTITY_DEPARTING.
+    void withdraw_from_the_network(TimePoint now);
+    /// Its second: the net handlers released, the mirror detached from them.
+    void release_net_handlers();
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();

@@ -555,6 +555,12 @@ void MsrpParticipantT<Limits>::on_join_timer(TimePoint now)
 }
 
 template <class Limits>
+void MsrpParticipantT<Limits>::transmit_pending(TimePoint now)
+{
+    build_and_send_pdu(now);
+}
+
+template <class Limits>
 void MsrpParticipantT<Limits>::on_leave_timer(TimePoint now)
 {
     // Fire LvTimer event into every attribute's Registrar. Any that

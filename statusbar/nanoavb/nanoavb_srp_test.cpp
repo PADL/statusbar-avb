@@ -488,6 +488,74 @@ TEST(nanoavb_srp_msrp, receive_short_packet)
     handler.receive_packet(short_packet, TimePoint{std::chrono::seconds{1}});  // Should not crash
 }
 
+TEST(nanoavb_srp_msrp, withdraw_all_sends_the_leaves_at_once)
+{
+    size_t sent = 0;
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&sent](std::span<uint8_t const>) {
+                              ++sent;
+                              return true;
+                          }}};
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(7);
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+
+    // A run: the domain and a talker declared, and sent at the join timer.
+    auto now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.declare_domain(now).has_value());
+    EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
+    now += std::chrono::milliseconds{150};
+    handler.tick(now);
+    EXPECT_TRUE(sent > 0);
+
+    // Its end: the withdrawals go out in the same call, no tick needed.
+    // (A second call would send again - the applicants, observers now, take
+    // any transmit opportunity to encode their optional In - which the peer
+    // reads as no change.)
+    auto const sent_before = sent;
+    handler.withdraw_all(now);
+    EXPECT_TRUE(sent > sent_before);
+    EXPECT_EQ(handler.get_talker_stream(sid)->state, TalkerReservationState::Idle);
+
+    // A handler that never declared anything sends nothing.
+    size_t idle_sent = 0;
+    MsrpHandler<> idle{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&idle_sent](std::span<uint8_t const>) {
+                           ++idle_sent;
+                           return true;
+                       }}};
+    idle.withdraw_all(now);
+    EXPECT_EQ(idle_sent, 0U);
+}
+
+TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
+{
+    size_t sent = 0;
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = [&sent](std::span<uint8_t const>) {
+                            ++sent;
+                            return true;
+                        }}};
+    auto now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.register_vlan(2, now).has_value());
+    now += std::chrono::milliseconds{150};
+    handler.tick(now);
+    EXPECT_TRUE(sent > 0);
+
+    auto const sent_before = sent;
+    handler.withdraw_all(now);
+    EXPECT_TRUE(sent > sent_before);
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Unregistered);
+
+    // A handler that never registered anything sends nothing.
+    size_t idle_sent = 0;
+    MvrpHandler idle{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = [&idle_sent](std::span<uint8_t const>) {
+                         ++idle_sent;
+                         return true;
+                     }}};
+    idle.withdraw_all(now);
+    EXPECT_EQ(idle_sent, 0U);
+}
+
 //
 // Test Runner
 //

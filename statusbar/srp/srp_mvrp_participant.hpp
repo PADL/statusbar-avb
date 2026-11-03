@@ -199,6 +199,12 @@ class MvrpParticipantT
     /// Stop all timers. FSMs retain their current state.
     void stop() noexcept { port_.stop(); }
 
+    /// A transmit opportunity now rather than at the join timer: what every
+    /// applicant has pending goes out in one MVRPDU through send_pdu, as the
+    /// timer would have sent it. For the end of a run, so the Leave of a
+    /// withdrawn VID reaches the bridge before the port goes away.
+    void transmit_pending(TimePoint now) { build_and_send_pdu(now); }
+
     // -------------------- Observer subscription --------------------
 
     auto subscribe(Observer obs) -> SubscriptionId

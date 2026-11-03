@@ -392,6 +392,14 @@ class MsrpParticipantT
     /// observer notifications.
     void tick(TimePoint now);
 
+    /// A transmit opportunity now rather than at the join timer: what every
+    /// applicant has pending goes out in one MSRPDU through send_pdu, as the
+    /// timer would have sent it. For the end of a run: the Leaves of what was
+    /// just withdrawn reach the peer before the port goes away, instead of
+    /// waiting on a join timer a stopping reactor never ticks - without them
+    /// the bridge keeps the reservations until its own LeaveAll lapses.
+    void transmit_pending(TimePoint now);
+
     /// Earliest upcoming timer deadline. Returns TimePoint::max() if
     /// no timers are running. Use to schedule a poll/epoll wait.
     [[nodiscard]] auto next_deadline() const noexcept -> TimePoint;

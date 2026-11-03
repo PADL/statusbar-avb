@@ -121,15 +121,30 @@ auto AvbEntityHost::stop_control_plane(TimePoint const now) -> Status
     if (!running_) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
+    withdraw_from_the_network(now);
+    release_net_handlers();
+    reactor_ = nullptr;
+    running_ = false;
+    return success();
+}
+
+void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
+{
+    // The reservations and the VID first, their Leaves sent at once: the net
+    // handlers that carry them are released right after, and a Leave left
+    // for the join timer would never go. Then ENTITY_DEPARTING.
+    components_.msrp_handler.withdraw_all(now);
+    components_.mvrp_handler.withdraw_all(now);
     (void)components_.adp_advertiser.stop(now);
+}
+
+void AvbEntityHost::release_net_handlers()
+{
     net_handlers_.reset();
     if (mirror_ != nullptr) {
         mirror_->mirror().set_on_update({});
         mirror_ = nullptr;
     }
-    reactor_ = nullptr;
-    running_ = false;
-    return success();
 }
 
 //
