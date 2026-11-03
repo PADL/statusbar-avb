@@ -102,6 +102,27 @@ struct ListenerStreamSlot
     StreamInputCounters counters{};
 };
 
+/// The timed packet for @p frames whole frames of an accepted AAF payload presented from @p pts_ns,
+/// after @p ctx processed its header: the payload trimmed to those frames, the sample format, tu and
+/// mr. Both AAF receive paths build their packet with it.
+[[nodiscard]] auto aaf_timed_packet(
+    uint16_t stream_index,
+    avtp::AafStreamInputContext const& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> payload,
+    uint16_t frames,
+    uint64_t pts_ns) noexcept -> StreamRxPacket;
+
+/// The timed packet for one AAF frame without decoding it (the raw-only RX path): accepts what
+/// avtp::aaf_stream_deserialize accepts and updates @p ctx as it does. A refused payload returns
+/// frames == 0 and leaves @p ctx untouched.
+[[nodiscard]] auto aaf_rx_packet(
+    uint16_t stream_index,
+    avtp::AafStreamInputContext& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> payload,
+    uint64_t gptp_now_ns) noexcept -> StreamRxPacket;
+
 struct ListenerStreams
 {
     /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns).
@@ -212,15 +233,6 @@ struct ListenerStreams
     /// its stream_id the stream connected to that input), or nullptr.
     [[nodiscard]] auto find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
 
-    /// One received AM824 frame for @p slot: parse, decode to the consumer, count, hand on.
-    void receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
-    /// The frame's AM824 header when it is one; a bad frame is counted and yields nullopt.
-    [[nodiscard]] auto parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
-        -> std::optional<avtp::Am824Pdu>;
-    /// Decode the audio to the slot's consumer and count the packet; the samples per channel it held.
-    [[nodiscard]] auto deliver_am824_audio(
-        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
-
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,
     /// unit-tested tally_stream_input_packet). See the entity-level doc for ts_sparse.
     void update_stream_input_counters(
@@ -260,6 +272,10 @@ struct ListenerStreams
     /// The group a listener joins for a talker destination: the address when
     /// it is multicast, nothing otherwise (8.2.1.13).
     [[nodiscard]] static auto group_to_join(ieee::Eui48 dest_mac) noexcept -> std::optional<ieee::Eui48>;
+    /// Attach (nullptr detaches) the timed raw sink offered every accepted AM824/AAF packet with its
+    /// presentation time; an AAF stream with no StreamConsumeFn is then not decoded to float.
+    /// Set before streams flow; the RX thread reads it.
+    void set_timed_audio_sink(StreamRxTimedAudioSink* sink) noexcept { timed_sink_ = sink; }
 
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
@@ -310,6 +326,8 @@ struct ListenerStreams
     /// to drain, and to join/leave a remote talker's stream multicast group on
     /// connect/disconnect.
     StreamPort* port_{nullptr};
+    /// Timestamped raw sink (the media bridge's listener seam). Nullable.
+    StreamRxTimedAudioSink* timed_sink_{nullptr};
     /// Reactor-thread connect/disconnect logging (nullable).
     std::optional<logging::Logger> logger_{};
     /// Receive scratch for drain_rx: one AVTPDU copied out of the port's slot. 2 KB

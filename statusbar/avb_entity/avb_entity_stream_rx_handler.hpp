@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <span>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace statusbar::avb_entity {
