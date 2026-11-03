@@ -14,6 +14,7 @@
 #include "statusbar/status/status.hpp"
 
 #if defined(__linux__)
+#    include "statusbar/net/net_carrier_watch.hpp"
 #    include "statusbar/net/net_message_reactor.hpp"
 #    include "statusbar/net/net_tc_qdisc.hpp"
 #endif
@@ -400,8 +401,9 @@ class PortShaper final : public net::Pollable
     auto operator=(PortShaper&&) -> PortShaper& = delete;
     ~PortShaper() override = default;
 
-    /// Read the interface (index, driver, TX queues, MTU) and install(ShaperPort) on it. Errors: the
-    /// interface's, then install(ShaperPort)'s.
+    /// Read the interface (index, driver, TX queues, MTU) and install(ShaperPort) on it; on igb/igc, when a new
+    /// root's first cbs switched the transmit mode, block until the adapter reset is over (docs/SHAPER.md). Call it
+    /// before an AF_XDP socket binds the port. Errors: the interface's, then install(ShaperPort)'s.
     [[nodiscard]] auto install() -> Status;
     /// Lay the mqprio root down on @p port and program the TSpecs given so far. Errors:
     /// ShaperError::not_avb_capable, bad_queue_override or bad_priority, or the netlink errno
@@ -447,6 +449,8 @@ class PortShaper final : public net::Pollable
     /// tick()'s retry of a failed reprogram(): after 1 s, doubling to 32 s.
     static constexpr int64_t RETRY_MIN_NS = 1'000'000'000;
     static constexpr int64_t RETRY_MAX_NS = 32'000'000'000;
+    /// install()'s longest wait for the link after an adapter reset (igb/igc renegotiate in about 4 s).
+    static constexpr int64_t ADAPTER_RESET_TIMEOUT_NS = 10'000'000'000;
 
   private:
     /// cbs_targets() for the TSpecs given (@p streams false: none) at the current link speed.
@@ -455,6 +459,12 @@ class PortShaper final : public net::Pollable
     [[nodiscard]] auto refresh_link_speed() -> bool;
     /// Park both cbs at the placeholders and leave the qdiscs for the next start (logged).
     void park();
+    /// install(@p port), then await_reset() when it reset the adapter.
+    [[nodiscard]] auto install_settled(ShaperPort const& port) -> Status;
+    /// Whether the last install() switched an igb/igc transmit mode: a new root and our first cbs on it.
+    [[nodiscard]] auto reset_adapter() const noexcept -> bool;
+    /// Block until @p ifindex's link, @p before at install(), went down and came back (logged; unread: not awaited).
+    void await_reset(int ifindex, StatusValue<net::LinkCarrier> const& before);
     /// Open the tc client (our own) and install the mqprio root for @p layout on @p port.
     [[nodiscard]] auto install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status;
     /// The root is down: settle launch time, keep @p driver and @p layout, program the TSpecs given.
@@ -497,10 +507,14 @@ class EntityShaper final : public net::Pollable
     auto operator=(EntityShaper&&) -> EntityShaper& = delete;
     ~EntityShaper() override;
 
-    /// PortShaper::install(), then follow the kit's admission changes. Errors: PortShaper::install()'s.
+    /// PortShaper::install(), then follow the kit's admission changes. Before the kit's start(), so that igb/igc
+    /// reset before its AF_XDP socket binds. Errors: PortShaper::install()'s.
     [[nodiscard]] auto install() -> Status;
     /// The same on a given @p port (PortShaper::install(ShaperPort)).
     [[nodiscard]] auto install(ShaperPort const& port) -> Status;
+    /// Warn when the kit's stream socket has no SO_PRIORITY, its frames then missing the shaped queue. After
+    /// the kit's start() (an install() after it checks too).
+    void check_stream_priority() const;
     /// Record @p admitted (the kit's admission hook argument) for the next tick(), which also follows
     /// an admitted stream's format change. Cheap; safe inside the kit's ACMP/MSRP callbacks.
     void on_admission_changed(std::span<uint16_t const> admitted) noexcept;

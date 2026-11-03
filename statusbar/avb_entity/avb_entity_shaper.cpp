@@ -697,6 +697,16 @@ namespace {
     return success();
 }
 
+/// The interface @p name as install() needs it: identify_port(), then size_port().
+[[nodiscard]] auto read_port(std::string_view const name) -> StatusValue<ShaperPort>
+{
+    auto port = identify_port(name);
+    if (!port) {
+        return forward_failure(port);
+    }
+    return size_port(name, *port).transform([&port] { return std::move(*port); });
+}
+
 }  // namespace
 
 auto PortShaper::install() -> Status
@@ -704,14 +714,36 @@ auto PortShaper::install() -> Status
     if (qdiscs_.installed()) {
         return success();
     }
-    auto port = identify_port(config_.interface_name);
-    if (!port) {
-        return forward_failure(port);
+    return read_port(config_.interface_name).and_then([this](ShaperPort const& port) { return install_settled(port); });
+}
+
+auto PortShaper::install_settled(ShaperPort const& port) -> Status
+{
+    // The carrier before the first cbs: the reset it schedules shows as a later carrier loss.
+    auto const before = net::read_link_carrier(port.ifindex);
+    auto status = install(port);
+    if (status && reset_adapter()) {
+        await_reset(port.ifindex, before);
     }
-    if (auto status = size_port(config_.interface_name, *port); !status) {
-        return status;
+    return status;
+}
+
+auto PortShaper::reset_adapter() const noexcept -> bool
+{
+    return !qdiscs_.reused() && is_intel_qav_driver(driver_) && !qdiscs_.class_a().empty();
+}
+
+void PortShaper::await_reset(int const ifindex, StatusValue<net::LinkCarrier> const& before)
+{
+    auto const name = logging::embed<16>(config_.interface_name);
+    auto const cycled =
+        before ? net::await_link_cycled(ifindex, *before, ADAPTER_RESET_TIMEOUT_NS) : StatusValue<bool>{forward_failure(before)};
+    if (cycled && *cycled) {
+        log_.status("shaper: {}: the first cbs reset the adapter; link up again", name);
+        return;
     }
-    return install(*port);
+    auto const error = cycled ? std::make_error_code(std::errc::timed_out) : cycled.error();
+    log_.warning("shaper: {}: the adapter reset not seen through (errno {}): going on", name, error.value());
 }
 
 auto PortShaper::install(ShaperPort const& port) -> Status
@@ -927,11 +959,16 @@ auto EntityShaper::installed_on(Status status) -> Status
         return status;
     }
     kit_.set_link_mbps(port_.link_mbps());  // its class A budget
+    check_stream_priority();
+    return success();
+}
+
+void EntityShaper::check_stream_priority() const
+{
     if (auto const priority = kit_.stream_tx_priority_error(); priority) {
         kit_.host().ctl_log().warning(
             "shaper: the stream socket has no SO_PRIORITY (errno {}): its frames miss the shaped queue", priority.value());
     }
-    return success();
 }
 
 void EntityShaper::follow_admission()

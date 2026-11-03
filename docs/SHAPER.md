@@ -102,13 +102,39 @@ last one away while running:
 
 | Event | Requests | Resets (igb) |
 | --- | --- | --- |
-| first start (default root) | mqprio; cbs A, cbs B (placeholders) | 1 (the first cbs; the second finds FQTSS on) |
+| first start (default root) | mqprio; cbs A, cbs B (placeholders); install() waits for the link | 1 (the first cbs; the second finds FQTSS on) |
 | a stream admitted, withdrawn, link speed change | cbs A and/or B changed in place | 0 |
 | shutdown, `restore_qdisc = false` (default) | both cbs set to their placeholders; root left | 0 |
 | restart onto that root | the root kept; both cbs changed in place | 0 |
 | shutdown, `restore_qdisc = true` | pfifo_fast on B, on A; root deleted | 1 (the last cbs) |
 | start after that, or after a reboot | as a first start | 1 |
 | our handle with another layout (a changed queue override) | root deleted and replaced, cbs added | 1 or 2 (the driver's reset work may coalesce the off and on switches) |
+
+### Before the AF_XDP socket
+
+A reset (`reset_task`; on igc `igc_reinit_locked`, i.e. `igc_down` then
+`igc_up`, igb's alike) frees and refills every RX ring, an AF_XDP zero-copy
+socket's too; with the socket bound, igc's zero-copy RX path then frees into a
+pool being torn down (list corruption in `xp_free()` under `igc_poll`, then
+NULL dereferences). Only the transmit-mode switches reset (igc:
+`igc_tsn_offload_apply` -> `igc_tsn_will_tx_mode_change`, legacy to TSN at the
+first cbs, etf, taprio or offloaded mqprio, TSN to legacy at the last removal;
+igb: `igb_offload_apply` -> `enable_fqtss`); a cbs changed in place or an etf
+added under a cbs does not. And the reset is scheduled work: it runs after the
+tc request has returned.
+
+So the host installs the shaper before anything binds an AF_XDP socket on the
+port (`EntityShaper::install()` before the kit's `start()`), and
+`PortShaper::install()`, when it laid a new root and put the first cbs on it
+on igb/igc, blocks until the link has gone down and come back
+(`net::await_link_cycled`, at most `ADAPTER_RESET_TIMEOUT_NS`, 10 s). The
+carrier loss is notified by linkwatch under RTNL, so after the reset work has
+released it, and the link comes up only after the last reset queued; a kept
+root (a restart) does not wait, and neither does an install whose carrier
+could not be read first (logged). The kit's `start()` then binds with the
+transmit mode settled, and nothing switches it back while the socket is
+bound: parking leaves both cbs, and `restore_qdisc` removes them only after
+the host has stopped the kit (its `stop()` closes the socket).
 
 The placeholder (`placeholder_cbs`) must keep the queue shaped without
 throttling what still reaches it. On class A's queue that is only the gated
