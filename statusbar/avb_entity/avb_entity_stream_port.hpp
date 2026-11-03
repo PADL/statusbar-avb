@@ -21,12 +21,12 @@
 /// kernel's RT throttling let it run.
 ///
 /// Guard holds that lock for the shortest stretch that is still right: a
-/// tx_start/tx_commit pair with the talker's serialize into the frame between
-/// them, or an rx_start/copy/rx_release triple. The
-/// listener copies each frame out under the guard and decodes it outside,
-/// so the media timer never waits on a decode. A host that drives both sides
-/// from one thread says so (set_single_threaded()): no lock is used then, and
-/// the listener decodes in place.
+/// tx_start/copy/tx_commit triple, or an rx_start/copy/rx_release one. The
+/// talker builds each frame outside it and the listener decodes each frame
+/// outside it, so neither side ever waits on the other's render or decode. A
+/// host that drives both sides from one thread says so (set_single_threaded()):
+/// no lock is used then, the talker renders into the slot and the listener
+/// decodes in place.
 ///
 /// The XDP backend is opened with the AVTP stream rules from
 /// net_xdp_avtp_rules.hpp: only the three stream subtypes are steered into
@@ -197,8 +197,8 @@ class StreamPort
     [[nodiscard]] auto describe() const -> std::string { return port_.describe(); }
     /// Whether TX and RX go through Guard's lock.
     [[nodiscard]] auto serialized() const noexcept -> bool { return serialize_; }
-    /// The host drives TX and RX from one thread, never both at once: Guard uses no lock and
-    /// the listener decodes each frame in place. Kept across opens; while neither side runs.
+    /// The host drives TX and RX from one thread, never both at once: Guard uses no lock, the talker
+    /// renders into the slot and the listener decodes in place. Kept across opens; while neither side runs.
     void set_single_threaded(bool const single) noexcept
     {
         single_threaded_ = single;
@@ -236,6 +236,20 @@ class StreamPort
             return 0;
         }
         return static_cast<int64_t>(launch_order_.next(requested_ns, [this] { return net::phc_now_ns(phc_); }));
+    }
+
+    /// Whether a talker writes its frames straight into the port's slots: no other thread drives the port
+    /// (rawnet, or set_single_threaded()), and a timed frame can be timed after its render (xdp).
+    [[nodiscard]] auto writes_in_place() const noexcept -> bool { return !serialize_ && (!tx_launch_time() || xdp() != nullptr); }
+
+    /// Give frame @p handle, started untimed, the launch time for @p requested_ns (launch_time()), fixed
+    /// now: a frame never committed holds no place in the order. Media thread.
+    void stamp_launch_time(uint64_t const handle, uint64_t const requested_ns) noexcept
+    {
+        auto* const xdp_socket = xdp();
+        if (int64_t const at = launch_time(requested_ns); at != 0 && xdp_socket != nullptr) {
+            (void)xdp_socket->tx_set_launch_time(handle, at);
+        }
     }
 
     /// The launch-time ordering's counters (clamps, steps, late frames). Any thread.
