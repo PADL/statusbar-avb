@@ -120,7 +120,7 @@ AvbEntityAm824IO::AvbEntityAm824IO(
     , biquads_(channels, dsp::BiQuad<float>{}, mem_resource_)
     , audio_buffer_(SAMPLES_PER_PACKET * channels, 0.0f, mem_resource_)
     , oscillators_(channels, dsp::Oscillator<float>{}, mem_resource_)
-{
+{  // NOLINT(statusbar-block-statements) the entity's wiring, in order; pre-dates the gate
     // Configure the per-channel sine source: identical frequency, but a distinct
     // initial phase per channel so no two channels carry the same signal.
     double const sr_recip = 1.0 / static_cast<double>(SAMPLE_RATE);

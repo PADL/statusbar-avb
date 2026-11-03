@@ -58,7 +58,7 @@ namespace {
 }  // namespace
 
 auto parse_descriptor(std::span<uint8_t const> desc_data) -> StatusValue<ParsedDescriptor const*>
-{
+{  // NOLINT(statusbar-block-statements) one descriptor parsed by type; pre-dates the gate
     // Need at least 4 bytes for descriptor_type and descriptor_index
     if (desc_data.size() < 4) {
         return failure(BufferError::insufficient_data);
