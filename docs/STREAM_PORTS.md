@@ -4,51 +4,53 @@
 
 ## Overview
 
-`avb_entity::StreamPort` is the link layer under the AVB stream data plane:
-`TalkerStreams` transmits through it and `ListenerStreams` receives through it.
-`StreamPorts` opens the port an entity's streams use, chosen by
-`StreamTransport` (`packet`, `xdp` or `auto`).
+`avb_entity::StreamPort` is the link layer under the AVB stream data plane, a
+thin owner of core's `net::AnyEthernetPort`: `TalkerStreams` transmits through
+it and `ListenerStreams` receives through it. The backend is a configuration
+key, `net.backend = rawnet | mmap | xdp`; the ATDECC control plane keeps its own
+raw socket whichever it is. `StreamPort::Guard` serialises transmit against
+receive only when the backend says the two are not independent.
 
-| Header | Type | Link |
+| Header | Type | What |
 |---|---|---|
-| `avb_entity_stream_port.hpp` | `StreamPort`, `PacketStreamPort` | AF_PACKET (macOS: BPF) |
-| `avb_entity_xdp_stream_port.hpp` | `XdpStreamPort` | one AF_XDP socket |
-| `avb_entity_test_stream_port.hpp` | `TestStreamPort` | `net::TestPortContext`, in process |
-| `avb_entity_stream_ports.hpp` | `StreamPorts` | picks and opens one of the above |
+| `avb_entity_stream_port.hpp` | `StreamPort`, `StreamPortConfig` | the port, its backend and xdp options |
 | `avb_entity_stream_rx_sink.hpp` | `StreamRxAudioSink`, `StreamRxTimedAudioSink` | where received audio goes |
 
 ## Transmit
 
-`tx_begin(capacity)` hands out a window of exactly `capacity` octets at
-`TX_PAYLOAD_OFFSET` of the port's frame buffer; the caller writes the AVTPDU
-there and `tx_commit` sends a prefix of it. A window that is not committed is
-reused by the next `tx_begin`, so a talker that abandons a packet costs nothing.
-`begin_cycle`/`end_cycle` bracket one media tick's packets so a port can batch
-them.
+`TalkerStreams` builds each AVTPDU in its own buffer, then
+`send_stream_frame()` takes a TX slot (`tx_start`), writes the tagged header and
+the payload into it (`build_stream_frame`) and commits it. `flush_tx()` once per
+media tick kicks the ring backends and ends the port's cycle; with an external
+kick (`set_external_kick`) the kicker thread calls `kick_tx()` and `flush_tx()`
+only ends the cycle. It fails with the kick's error, else the cycle's.
 
 ## AF_XDP
 
-`XdpStreamPort` binds one AF_XDP socket to the NIC queue that carries SR class
-A traffic: queue 0 on igb/igc, where non-IP frames land. Its XDP program
-redirects the AVTP stream subtypes to the socket and passes everything else to
-the kernel, so ATDECC, gPTP and MRP keep using ordinary sockets. Frames are
-built in place in UMEM and sent on the same queue. Receive has no descriptor to
-poll; it is drained from the media tick.
+The xdp backend binds one AF_XDP socket to the NIC queue that carries SR class
+A traffic (`net.xdp_queue`). Its XDP program redirects the AVTP stream subtypes
+to the socket and passes everything else to the kernel, so ATDECC, gPTP and MRP
+keep using ordinary sockets. `net.xdp_bind` (`auto`, `zero_copy`, `copy`) and
+`net.xdp_attach` (`native`, `generic`) choose the bind and attach modes, and
+`net.xdp_pin_path` pins the program and its maps in bpffs. With
+`net.xdp_fallback` a socket that does not open gives way to rawnet, and
+`AvbEntityKit::stream_xdp_error()` keeps the reason. `StreamPort::xdp()` gives
+the socket itself (counters, busy poll) and `reset_counters()` zeroes its
+counters and the launch-time order at the next `end_cycle()`. Zero-copy
+behaviour is verified on hardware; the AF_XDP tests need root and skip
+otherwise.
 
-An AF_XDP socket has one consumer, so it carries both directions or neither: when
-receive runs on a thread of its own, `StreamPorts` refuses `xdp`, and `auto`
-falls back to AF_PACKET.
+## Launch time
 
-The transmit pool: `tx_begin` takes one pooled frame and hands the same window
-out until it is committed; the commit consumes it and its completion returns it
-to the pool. An empty pool or a full TX ring refuses the frame before a sequence
-number is taken, and a full ring does not lose the frame from the pool.
-
-Bind modes (`StreamXdpMode`): `auto_` attaches natively, zero-copy when
-the driver offers it; `zerocopy` requires it; `copy` attaches generically in copy
-mode and does not reset the adapter. Without libxdp, or off Linux, `open()`
-fails with `not_supported_on_platform`. Zero-copy behaviour is verified on
-hardware, not in unit tests; the AF_XDP tests need root and skip otherwise.
+With `stream.launch_time` the xdp socket opens with TX metadata and each frame
+carries a launch time (Documentation/networking/xsk-tx-metadata.rst), in the
+sending PHC's own time. The host gives the port that clock with
+`set_phc_clock(net::ClockFn)` on the control thread before the media thread
+runs; without one, frames go untimed. `send_stream_frame()` takes the time the
+caller wants a frame on the wire (0: now) and `launch_time()` orders it after
+the previous one (`net::LaunchOrder`), counting holds, clock steps and frames
+committed late (`launch_order()`). When to use a lead is the host's decision;
+the NIC's etf offload is the shaper's (SHAPER.md, "Launch time (etf)").
 
 ## SlotGuard
 
@@ -73,10 +75,9 @@ payloads are not decoded to float at all. Both must be cheap and non-blocking.
 
 ## Testing
 
-`TestStreamPort` runs the whole transmit path and the receive routing in unit
-tests: committed frames are captured whole (`pop_tx`), injected frames are
-received (`inject_rx`), and flushes, cycles and multicast membership are
-recorded.
+`avb_entity_stream_port_test` covers the backend name, the free guard on a
+closed port, the frame builder and launch time on a port without an xdp
+socket. The talker and listener tests run their slots without a port.
 
 ## See also
 
