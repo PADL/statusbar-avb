@@ -428,13 +428,15 @@ struct ListenerStreams
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Move @p trial's deserializers and @p spec's format into @p slot. Under the guard.
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
+    /// Receive one frame told @p rx_now (false: none queued): through rx_buf_ on a serialized
+    /// port, else in place (rawnet's sides share nothing; a single-threaded port has one user).
+    [[nodiscard]] auto receive_one(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> bool;
+    /// One frame decoded where the port holds it, then released: false when none was queued.
+    [[nodiscard]] auto receive_in_place(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> bool;
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 for a
     /// frame that was not AVTP (taken and released all the same), nullopt
-    /// when nothing was queued. The two have to differ: drain_rx ends its
-    /// pass on an empty port, never on a frame it has no use for. Holds the
-    /// port guard for exactly that - the decode happens outside it.
-    /// @p rx_now is the RX clock as drain_rx was told it for the pass:
-    /// the port is told it (net::EthernetPort::rx_start(now)), not asked.
+    /// when nothing was queued. Holds the port guard for exactly that - the
+    /// decode happens outside it. @p rx_now is the RX clock drain_rx was told.
     [[nodiscard]] auto take_rx_frame(net::RxTimePoint rx_now) -> std::optional<size_t>;
     /// The frames of one pass, up to MAX_DRAIN_PER_CALL, each told @p rx_now
     /// and stamped @p gptp_now_ns: how many the port gave.
