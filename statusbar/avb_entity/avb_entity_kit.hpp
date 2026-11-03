@@ -217,6 +217,7 @@ class AvbEntityKit
     /// The tool could not run the RX timer start() kept the handler for: hand
     /// the handler to @p reactor so the reactor drains RX as it does by default,
     /// and, when the kick was to come from that timer, kick from the media tick.
+    /// Refused (logged) on a single-threaded stream port: its host drains RX on the transmitting thread.
     void rx_to_reactor(net::MessageReactor& reactor);
 
     /// Batch-drain the stream RX socket from the tool's dedicated SCHED_FIFO RX
