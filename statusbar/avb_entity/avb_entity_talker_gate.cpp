@@ -24,7 +24,11 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
         auto const s = components_.talker_stream(idx);
         if (s.has_value() && s->stream_id.to_uint64() == sid_u64) {
-            bool const was = stamp(idx, ready, now);
+            bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
+            if (ready && acmp_conn_[idx].load() > 0) {
+                // Only a reservation made for a live connection admits: a Ready seen with none admits nothing.
+                latch_ready(idx);
+            }
             if (was != ready && logger_) {
                 logger_->status(
                     "srp: talker stream {} MSRP listener-ready -> {} ({} gate)",
@@ -36,29 +40,25 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
     }
 }
 
-void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready)
+void TalkerGate::latch_ready(uint16_t const idx) noexcept
 {
-    if (told_now_ == RawTimePoint{} && !std::exchange(untold_logged_, true) && logger_) {
-        logger_->status("srp: the talker gate was told no time (tell_time): a withdrawn Listener opens no grace");
-    }
-    note_listener_ready(stream_id, ready, told_now_);
+    reservation_ready_[idx] = true;
 }
 
-auto TalkerGate::stamp(uint16_t const idx, bool const ready, RawTimePoint const now) noexcept -> bool
+void TalkerGate::note_acmp_connections(uint16_t const idx, uint32_t const count) noexcept
 {
-    // The reactor is the one writer. The grace runs from the last instant the
-    // declaration was known registered, so a withdrawal seen while already
-    // withdrawn does not extend it. The stamp goes before the flag (release).
-    // An instant never told is RawTimePoint{}, which is stored as no stamp.
-    bool const was = listener_ready_[idx].load(std::memory_order_relaxed);
-    if (ready || was) {
-        ready_raw_ns_[idx].store(RawTimePoint::clock::to_ns(now), std::memory_order_relaxed);
+    if (idx >= acmp_conn_.size()) {
+        return;
     }
-    listener_ready_[idx].store(ready, std::memory_order_release);
-    return was;
+    acmp_conn_[idx].publish(count);
+    if (count == 0) {
+        reservation_ready_[idx] = false;
+    } else if (listener_ready_[idx].load(std::memory_order_relaxed)) {
+        latch_ready(idx);  // connected to a listener whose Ready is already declared
+    }
 }
 
-auto TalkerGate::admitted(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
+auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noexcept -> bool
 {
     // Before anything else, the disabled gate too: a stream whose Talker
     // Advertise is held back has no attribute on the wire to send under.
@@ -77,27 +77,15 @@ auto TalkerGate::admitted(uint16_t const idx, RawTimePoint const now) const noex
     //       registered, so no separate Talker-attribute check is needed), and
     //   (2) the stream is Started (defaults true), and
     //   (3) MSRP Listener Ready for this stream.
-    if (idx >= stream_started_.size() || !connected_and_started(idx)) {
+    // The connection count is published by the reactor (note_acmp_connections).
+    if (idx >= stream_started_.size()) {
         return false;
     }
-    return listener_ready_within_grace(idx, now);
-}
-
-auto TalkerGate::grace_ends(uint16_t const idx) const noexcept -> std::optional<RawTimePoint>
-{
-    if (idx >= listener_ready_.size() || listener_ready_[idx].load(std::memory_order_acquire)) {
-        return std::nullopt;
+    if (acmp_conn_[idx].load() == 0) {
+        last_seen_ready_[idx] = NEVER;  // the last disconnect forgets the grace window
+        return false;
     }
-    return stamp_plus_grace(idx);
-}
-
-auto TalkerGate::connected_and_started(uint16_t const idx) const noexcept -> bool
-{
-    // ACMP connection count is published by the reactor thread (note_acmp_connections)
-    // rather than read live from the reactor-mutated connection list here. A
-    // Milan talker has no connections to count (set_needs_acmp_connection).
-    bool const connected = !needs_acmp_connection_ || acmp_conn_[idx].load() > 0;
-    return connected && stream_started_[idx].load(std::memory_order_relaxed);
+    return stream_started_[idx].load(std::memory_order_relaxed) && listener_ready_within_grace(idx, now);
 }
 
 auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) const noexcept -> bool

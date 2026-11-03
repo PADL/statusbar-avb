@@ -238,6 +238,13 @@ inline constexpr uint16_t MAX_AAF_INPUT_CHANNELS = 64;
 /// the same exact way. Returns 0 for StreamKind::other or an unknown rate.
 [[nodiscard]] auto milan_srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
 
+/// One stream's MSRP TSpec (IEEE 802.1Q 35.2.2.8.4).
+struct TSpec
+{
+    uint16_t max_frame_size{0};       ///< L2 payload octets (MaxFrameSize)
+    uint16_t max_interval_frames{1};  ///< frames per class measurement interval (MaxIntervalFrames)
+};
+
 /// The single audio sample rate shared by every AM824/AAF stream in @p specs
 /// — the rate the entity's one media clock must run at. CRF streams don't
 /// constrain it (a 48 kHz CRF base is routinely advertised under 96 kHz
