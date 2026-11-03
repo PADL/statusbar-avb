@@ -122,11 +122,11 @@ TEST(talker_streams, external_kick_needs_a_port)
     EXPECT_FALSE(talker.set_external_kick(true));
     EXPECT_FALSE(talker.external_kick());
     EXPECT_TRUE(talker.set_external_kick(false));
-    talker.flush_tx();  // no port: nothing happens, nothing crashes
-    talker.kick_tx();
+    EXPECT_TRUE(talker.flush_tx().has_value());  // no port: nothing happens, nothing crashes
+    EXPECT_TRUE(talker.kick_tx().has_value());
 }
 
-// The raw-bytes render seam (the media bridge's fast path): the payload is
+// The raw-bytes render seam (a host's copy-only path): the payload is
 // exactly what the render wrote, the header carries the presentation time and
 // dimensions, and a refused render sends nothing and consumes no sequence number.
 TEST(raw_aaf, render_fills_the_payload_and_the_header_carries_the_pts)
@@ -268,7 +268,6 @@ TEST(raw_crf, transmit_without_a_socket_sends_nothing)
     avb_entity::TalkerStreamSlot not_crf{};
     EXPECT_FALSE(talker.transmit_crf_raw(not_crf, one));
 }
-
 
 // Milan v1.2 Section 4.3.5.2 / AVTP 4.4.4.7: the raw serializers carry the tu
 // bit they are given (TalkerStreams passes timestamp_uncertain()).

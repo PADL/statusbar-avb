@@ -6,8 +6,9 @@
 /// @file avb_entity_talker_streams.hpp
 /// @brief TalkerStreams — the local AVB stream TX path.
 ///
-/// Sends on the entity's StreamPort, owns N per-stream TX slots (each holding the
-/// kind-matching AM824/AAF/CRF serializer shaped by its StreamSpec), the TX
+/// Borrows the StreamPort it transmits on and owns N per-stream TX slots
+/// (each holding the kind-matching AM824/AAF/CRF serializer shaped by its
+/// StreamSpec), the TX
 /// packet counters, and the TX-capture recorder. Runs on the SCHED_FIFO
 /// media-timer thread (called from the entities' process_audio). Reads the
 /// entity's config / media clock / audio buffer / gPTP-now through references
@@ -27,6 +28,7 @@
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_spin_lock.hpp"
+#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -120,7 +122,8 @@ struct TalkerStreams
     /// Push this tick's frames to the wire. The ring backends batch what
     /// transmit_* committed until this kick; rawnet sent each frame as it
     /// was committed and this is free. Once per media tick, after the slots.
-    void flush_tx();
+    /// Fails with the kick's error, else the port cycle's.
+    [[nodiscard]] auto flush_tx() -> Status;
 
     /// Hand the TX kick to another thread (see kick_tx): flush_tx then only
     /// closes the cycle. Returns false, and leaves the kick in flush_tx, when
@@ -133,8 +136,8 @@ struct TalkerStreams
     /// the mmap kick touches no user-space state and the xdp kick only its
     /// atomic pending flag (the kernel's ring protocol is built for a filler
     /// and a kicker), and holding the guard would make the media thread spin
-    /// for the length of the syscall it was spared.
-    void kick_tx();
+    /// for the length of the syscall it was spared. Errors: the kick's.
+    [[nodiscard]] auto kick_tx() -> Status;
 
     /// TX pcap forwarding (see TxPcapRecorder): the capture window closed and
     /// the file awaits the non-RT flush.
@@ -227,19 +230,39 @@ struct TalkerStreams
     /// entities.)
     void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples, std::span<float const> src);
     void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
-    /// Send one AAF packet of @p frames frames at wire presentation time @p pts_ns (no offset added),
-    /// its payload filled by @p render as raw wire bytes. Media-timer thread; true if sent. Nothing is
-    /// sent, nor the sequence advanced, for a non-AAF slot, no socket, or @p render false.
+    /// Send one AAF packet of @p frames frames presented at @p pts_ns (no offset added), its payload raw wire bytes
+    /// from @p render, due at @p launch_time_ns (StreamPort::launch_time). Media-timer thread; true if sent. Nothing
+    /// is sent, nor the sequence advanced, for a non-AAF slot, no port frame, or @p render false.
     [[nodiscard]] auto transmit_aaf_raw(
-        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
+        TalkerStreamSlot& slot,
+        uint64_t first_index,
+        uint64_t pts_ns,
+        uint16_t frames,
+        StreamRawRenderFn const& render,
+        uint64_t launch_time_ns = 0) -> bool;
     /// Send one IEC 61883-6 AM824 packet of @p frames data blocks, the first at sample index @p first_index
-    /// presented at @p pts_ns, its payload filled by @p render (see serialize_am824_raw). Media-timer
-    /// thread; true if sent. As transmit_aaf_raw for a non-AM824 slot, no port frame or a refused render.
+    /// presented at @p pts_ns, its payload filled by @p render (see serialize_am824_raw), due at
+    /// @p launch_time_ns. Media-timer thread; true if sent. As transmit_aaf_raw otherwise.
     [[nodiscard]] auto transmit_am824_raw(
-        TalkerStreamSlot& slot, uint64_t first_index, uint64_t pts_ns, uint16_t frames, StreamRawRenderFn const& render) -> bool;
-    /// Send one built stream frame on @p slot (VLAN-tagged, pcap-stamped) and
-    /// count it. The tail every audio transmit shares. Media-timer thread.
-    void send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame);
+        TalkerStreamSlot& slot,
+        uint64_t first_index,
+        uint64_t pts_ns,
+        uint16_t frames,
+        StreamRawRenderFn const& render,
+        uint64_t launch_time_ns = 0) -> bool;
+    /// Send the AVTPDU @p frame on @p slot (VLAN-tagged, pcap-stamped,
+    /// due at @p launch_time_ns) and count it; false, counting nothing, when the port refuses it (no
+    /// port: only counted). Media-timer thread.
+    [[nodiscard]] auto send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t const> frame, uint64_t launch_time_ns = 0)
+        -> bool;
+    /// One AVTP stream frame to @p dest_mac, untimed and uncounted, tagged with the current VID and
+    /// recorded to the pcap tap when armed; a frame the port refuses is dropped. Media-timer thread.
+    void send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload)
+    {
+        if (port_ != nullptr) {
+            (void)send_to_port(dest_mac, payload, 0);
+        }
+    }
 
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.
@@ -254,9 +277,10 @@ struct TalkerStreams
     /// them with transmit_crf_raw; nothing is sent before the media clock is anchored.
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
     /// Send one CRF PDU on @p slot carrying exactly @p timestamps_ns (64-bit gPTP times, offset
-    /// applied). Media-timer thread; true if sent. Nothing is sent for a non-CRF or stopped slot,
-    /// no socket, or a count other than timestamps_per_packet.
-    [[nodiscard]] auto transmit_crf_raw(TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns) -> bool;
+    /// applied), due at @p launch_time_ns. Media-timer thread; true if sent. Nothing is sent for a
+    /// non-CRF or stopped slot, no port frame, or a count other than timestamps_per_packet.
+    [[nodiscard]] auto transmit_crf_raw(
+        TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns, uint64_t launch_time_ns = 0) -> bool;
 
     /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
     /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
@@ -284,9 +308,18 @@ struct TalkerStreams
     /// Take @p trial's serializers into @p slot, carrying the stream's counts over. Under the guard.
     static void adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept;
     /// Send the frame @p serialize writes into a tx_begin window of @p max_frame octets (its length,
-    /// 0: none), restoring @p ctx when the port refuses it. Media thread.
+    /// 0: none), due at @p launch_time_ns, restoring @p ctx when the port refuses it. Media thread.
     template <typename Context, typename Serialize>
-    [[nodiscard]] auto send_serialized(TalkerStreamSlot& slot, Context& ctx, size_t max_frame, Serialize const& serialize) -> bool;
+    [[nodiscard]] auto send_serialized(
+        TalkerStreamSlot& slot, Context& ctx, size_t max_frame, uint64_t launch_time_ns, Serialize const& serialize) -> bool;
+    /// The window an AVTPDU is built in before it goes to the port: @p length octets of tx_buf_,
+    /// empty with no port or for a length past it. Media thread.
+    [[nodiscard]] auto tx_begin(size_t length) noexcept -> std::span<uint8_t>;
+    /// One AVTP stream frame to @p dest_mac on the port, due at @p launch_time_ns: VLAN tag from
+    /// vlan_id_, source the port's address, recorded to the pcap tap. False when the port refuses it.
+    [[nodiscard]] auto send_to_port(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload, uint64_t launch_time_ns) -> bool;
+    /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
+    [[nodiscard]] auto commit_stream_frame(net::EthernetTxSlot const& slot, size_t length) -> bool;
 
     // Owned TX state.
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
@@ -295,15 +328,6 @@ struct TalkerStreams
     std::array<itc::SpinLock, MAX_ENTITY_STREAMS> guards_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
-    /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
-    /// the port's address, recorded to the pcap tap when that is armed.
-    void send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload);
-    /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
-    void commit_stream_frame(net::EthernetTxSlot const& slot, size_t length);
-
-    StreamPort* port_{nullptr};
-    /// The TX kick lives on another thread (set_external_kick).
-    bool external_kick_{false};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
     /// Per-stream media clock restart pending (toggle_media_clock_restart), by STREAM_OUTPUT index.
@@ -311,6 +335,11 @@ struct TalkerStreams
     /// A CRF slot is open at this STREAM_OUTPUT index (open_stream), for toggle_media_clock_restart.
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> crf_open_{};
     static_assert(std::atomic<bool>::is_always_lock_free);
+    StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
+    /// The TX kick lives on another thread (set_external_kick).
+    bool external_kick_{false};
+    /// An AVTPDU being built (tx_begin): media thread only.
+    std::array<uint8_t, net::MAX_ETHERNET_PAYLOAD> tx_buf_{};
     /// TX stream capture (diagnostic). last_tx_gptp_ns_ is set just before each
     /// send so the captured frame carries the gPTP TX time.
     TxPcapRecorder tx_pcap_recorder_{};

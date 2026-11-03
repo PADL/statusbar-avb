@@ -230,7 +230,7 @@ class AvbEntityAudioIO
     /// Kick the stream port's TX ring. Called from the tool's dedicated SCHED_FIFO
     /// kicker timer when config.stream_tx_kicker is set; the media tick then
     /// leaves the kick to it (see TalkerStreams::kick_tx).
-    void kick_stream_tx() { kit_.kick_stream_tx(); }
+    [[nodiscard]] auto kick_stream_tx() -> Status { return kit_.kick_stream_tx(); }
     /// The tool's kicker timer did not start: the media tick kicks again.
     void kick_from_media_tick() { kit_.kick_from_media_tick(); }
     /// The tool's RX timer did not start: RX back onto @p reactor (see AvbEntityKit).

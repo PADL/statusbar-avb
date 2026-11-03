@@ -345,7 +345,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
                     *slot, tick, kit_.talker_should_transmit(slot->spec.index, now_steady_ns), samples, src);
             }
         }
-        kit_.talker().flush_tx();
+        (void)kit_.talker().flush_tx();
     }
 }
 

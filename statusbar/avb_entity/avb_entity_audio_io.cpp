@@ -404,7 +404,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
             kit_.talker().transmit_if_due(
                 slot, tick, kit_.talker_should_transmit(slot.spec.index, now_steady_ns), samples, audio_buffer_);
         }
-        kit_.talker().flush_tx();
+        (void)kit_.talker().flush_tx();
     }
 }
 

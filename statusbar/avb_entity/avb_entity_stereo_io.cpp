@@ -494,7 +494,7 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
                 talker_.transmit_am824(*slot, pts_base, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
             }
         }
-        talker_.flush_tx();
+        (void)talker_.flush_tx();
     }
 }
 

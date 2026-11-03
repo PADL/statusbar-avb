@@ -8,11 +8,11 @@
 ///
 /// Owns N per-stream RX slots (each holding the kind-matching AM824/AAF
 /// deserialize context shaped by its StreamSpec, its RX telemetry, and its
-/// IEEE 1722.1 STREAM_INPUT health counters) and the borrowed RX socket
-/// handle, plus the methods that decode one received stream frame, gate it to
+/// IEEE 1722.1 STREAM_INPUT health counters) and the borrowed StreamPort,
+/// plus the methods that decode one received stream frame, gate it to
 /// the connected stream, update the counters, and hand the accepted audio to
 /// a StreamRxAudioSink. Runs on the reactor/RX thread (on_stream_rx_frame is
-/// invoked by the entity's StreamRxHandler; the ACMP connect/disconnect
+/// invoked by drain_rx; the ACMP connect/disconnect
 /// methods are wired as the acmp_listener connection callbacks).
 ///
 /// Entity Construction Kit phase 1: the input table is no longer two fixed
@@ -229,24 +229,15 @@ struct ListenerStreams
     [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> ListenerStreamSlot*;
     [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> ListenerStreamSlot const*;
 
-    /// Receive on @p port - the entity's stream port, already open - joined
-    /// to @p static_groups up front (pass zero MACs when every join is
-    /// dynamic, i.e. made on ACMP connect), and hand its drain handler to
-    /// @p reactor. When @p keep_handler is true the handler is returned
-    /// instead of added, so the entity can drain it from a dedicated
-    /// SCHED_FIFO RX timer (drain_rx with the timer's wake time). One call
-    /// from the owning entity's start().
+    /// Receive from @p port (outliving this and the handler) joined to @p static_groups
+    /// (only the first join's failure fails); add its drain handler to @p reactor, or
+    /// with @p keep_handler return it for an RX timer. Reactor thread.
     [[nodiscard]] auto attach_rx(
         StreamPort& port, std::span<ieee::Eui48 const> static_groups, net::MessageReactor& reactor, bool keep_handler = false)
         -> StatusValue<std::unique_ptr<net::Pollable>>;
 
-    /// Non-blocking-drain every queued frame from the RX socket and process each via
-    /// on_stream_rx_frame, stamping them all with @p gptp_now_ns (the caller's fresh
-    /// gPTP "now"). Called either from the reactor's thin RX adapter (gptp_now_ns =
-    /// current_gptp_ns()) or, when stream_rx_rt_timer is set, from a dedicated
-    /// SCHED_FIFO RX timer on an isolated core (gptp_now_ns = the timer's wake time),
-    /// which keeps ingress frames tallied against a clock at most one tick stale.
-    /// Returns the number of frames drained this call (for the RX-timer batch-size stat).
+    /// Drain up to MAX_DRAIN_PER_CALL queued frames from the port without blocking through
+    /// on_stream_rx_frame, stamped with the caller's gPTP now @p gptp_now_ns. Returns the number drained.
     auto drain_rx(int64_t gptp_now_ns) -> size_t;
 
     /// The gPTP time the reactor path stamps RX frames with: the media-timer wake
@@ -306,7 +297,7 @@ struct ListenerStreams
     void note_input_unbound(uint16_t descriptor_index);
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
-    /// and join the talker's stream multicast group on the RX socket. Wired as the
+    /// and join the talker's stream multicast group on the port. Wired as the
     /// acmp_listener connect callback. Reactor thread.
     void on_listener_connected(uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac);
 
@@ -342,31 +333,6 @@ struct ListenerStreams
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Take @p trial's deserializers and @p spec's format into @p slot. Under the guard.
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
-
-    /// A fresh slot for @p spec, its margin histogram sized for this listener.
-    auto new_slot(StreamSpec const& spec) -> ListenerStreamSlot&;
-
-    // --- References / collaborators (bound at construction) --------------------
-    uint32_t lock_tolerance_ns_;  ///< MEDIA_LOCKED step tolerance
-    /// Margin histogram range for new slots (set_presentation_offset_ns).
-    stats::AtomicHistogramConfig margin_histogram_config_{
-        StreamInputCounters::margin_histogram_config_for(StreamInputCounters::DEFAULT_PRESENTATION_OFFSET_NS)};
-    nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
-    std::atomic<uint64_t> const& last_gptp_ns_;
-    /// Where accepted listener audio goes (today the WAN tunnel). The listener does
-    /// not know what the sink does with it. Nullable.
-    StreamRxAudioSink* audio_sink_{nullptr};
-    /// The entity's stream port (outlives this class). Set by attach_rx; used
-    /// to drain, and to join/leave a remote talker's stream multicast group on
-    /// connect/disconnect.
-    StreamPort* port_{nullptr};
-    /// Timestamped raw sink (the media bridge's listener seam). Nullable.
-    StreamRxTimedAudioSink* timed_sink_{nullptr};
-    /// Reactor-thread connect/disconnect logging (nullable).
-    std::optional<logging::Logger> logger_{};
-    /// Receive scratch for drain_rx: one AVTPDU copied out of the port's slot. 2 KB
-    /// covers a full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
-    std::array<uint8_t, 2048> rx_buf_{};
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when
     /// nothing was queued or the frame was not AVTP. Holds the port guard for
     /// exactly that - the decode happens outside it.
@@ -379,6 +345,27 @@ struct ListenerStreams
     [[nodiscard]] auto copy_avtpdu(std::span<uint8_t const> frame) -> size_t;
     /// Frames per drain_rx call at most, so a flood cannot pin the RX thread.
     static constexpr size_t MAX_DRAIN_PER_CALL = 256;
+
+    // --- References / collaborators (bound at construction) --------------------
+    uint32_t lock_tolerance_ns_;  ///< MEDIA_LOCKED step tolerance
+    /// Margin histogram range for new slots (set_presentation_offset_ns).
+    stats::AtomicHistogramConfig margin_histogram_config_{
+        StreamInputCounters::margin_histogram_config_for(StreamInputCounters::DEFAULT_PRESENTATION_OFFSET_NS)};
+    nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
+    std::atomic<uint64_t> const& last_gptp_ns_;
+    /// Where accepted listener audio goes (today the WAN tunnel). The listener does
+    /// not know what the sink does with it. Nullable.
+    StreamRxAudioSink* audio_sink_{nullptr};
+    /// Timestamped raw sink (a host that moves the bytes undecoded). Nullable.
+    StreamRxTimedAudioSink* timed_sink_{nullptr};
+    /// The port frames are received from (attach_rx), also used to join and
+    /// leave a remote talker's stream group on connect/disconnect. Borrowed.
+    StreamPort* port_{nullptr};
+    /// Reactor-thread connect/disconnect logging (nullable).
+    std::optional<logging::Logger> logger_{};
+    /// Receive scratch for drain_rx: one AVTPDU copied out of the port's slot. 2 KB
+    /// covers a full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
+    std::array<uint8_t, 2048> rx_buf_{};
 
     // --- Owned RX state --------------------------------------------------------
     /// The RX slots (atomics inside: constructed in place, never moved/erased).
