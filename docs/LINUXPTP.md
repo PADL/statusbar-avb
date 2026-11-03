@@ -284,3 +284,9 @@ deadline, and set only on success when the call slept (not when the deadline was
 already inside the window). `PtpTimer::wake_headroom()` aggregates it; its
 `min_ns` is the closest call, and a negative minimum shows up as a late wake in
 `stats()`.
+
+## The media timer's busy-spin window
+
+`ptp.spin_ns` is how long before each wake the timer stops sleeping and busy-polls. The
+default 50 µs covers kernel work stalling a shared core; with the timer's core isolated
+(isolcpus/nohz_full, IRQs and kworkers off it, deep C-states disabled) 15000-20000 ns is enough.
