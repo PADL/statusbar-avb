@@ -91,6 +91,8 @@ struct TimePropertiesDataSet
     uint8_t time_source{0};
 
     static constexpr size_t SIZE = TimePropertiesDataSetPayload::LENGTH;
+
+    auto operator==(TimePropertiesDataSet const&) const noexcept -> bool = default;
 };
 
 /// portState (IEEE 1588-2019 Table 20).
@@ -447,6 +449,7 @@ class PtpManagementClient final : public net::Pollable
     std::optional<PortState> reported_port_state_;
     std::optional<DelayMechanism> reported_delay_mechanism_;
     std::optional<GrandmasterSettingsNp> reported_settings_;
+    std::optional<TimePropertiesDataSet> reported_time_properties_;
     std::optional<uint16_t> reported_refused_;
     bool reported_subscribed_{false};
     std::array<uint8_t, 1500> buffer_{};
