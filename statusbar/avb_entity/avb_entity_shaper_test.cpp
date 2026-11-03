@@ -441,6 +441,23 @@ TEST(shaper_cbs, one_int32_talker_as_captured_on_an_i210)
 #if defined(__linux__)
 namespace {
 
+/// A qdisc as parse_qdisc() reports it: @p kind on @p parent, handle @p handle, no parameters.
+auto qdisc_info(uint32_t const handle, uint32_t const parent, std::string_view const kind) -> net::tc::QdiscInfo
+{
+    net::tc::QdiscInfo info{.handle = handle, .parent = parent};
+    std::ranges::copy(kind.substr(0, net::tc::MAX_KIND_LENGTH), info.kind.begin());
+    return info;
+}
+
+/// An mqprio root of handle @p handle with the layout @p mqprio.
+auto mqprio_root(uint32_t const handle, net::tc::MqprioQdisc const& mqprio) -> net::tc::QdiscInfo
+{
+    auto info = qdisc_info(handle, net::tc::ROOT, "mqprio");
+    info.has_mqprio_params = true;
+    info.mqprio = mqprio;
+    return info;
+}
+
 /// A TcControl that records each request as `tc` would spell it and answers
 /// from a canned root and canned errors; the qdiscs below the root are kept as the kernel would.
 class RecordingTc final : public net::tc::TcControl
@@ -451,6 +468,7 @@ class RecordingTc final : public net::tc::TcControl
     std::vector<net::tc::QdiscInfo> children{};  ///< the qdiscs below the root (get's answers)
     std::error_code mqprio_error{};              ///< replace_mqprio's first answer
     std::error_code cbs_error{};                 ///< every replace_cbs's answer
+    std::optional<uint32_t> cbs_refused_on{};    ///< a replace_cbs on this parent answers EOPNOTSUPP
     std::error_code etf_error{};                 ///< every replace_etf's answer
     uint16_t next_major{0x8001};                 ///< the handle major the kernel gives the next new qdisc
 
@@ -469,8 +487,14 @@ class RecordingTc final : public net::tc::TcControl
         if (cbs_error) {
             return failure(cbs_error);
         }
+        if (cbs_refused_on == q.parent) {
+            return failure(std::make_error_code(std::errc::operation_not_supported));
+        }
         if (find(q.parent) == nullptr) {
-            place(net::tc::QdiscInfo{.parent = q.parent, .kind = "cbs", .cbs = q});
+            auto info = qdisc_info(0, q.parent, "cbs");
+            info.has_cbs_params = true;
+            info.cbs = q;
+            place(info);
         }
         return success();
     }
@@ -489,7 +513,7 @@ class RecordingTc final : public net::tc::TcControl
             return failure(etf_error);
         }
         erase(q.parent);
-        place(net::tc::QdiscInfo{.parent = q.parent, .kind = "etf", .etf = q});
+        place(etf_info(0, q));
         return success();
     }
     auto replace_kind(int /*ifindex*/, uint32_t const parent, std::string_view const kind) -> Status override
@@ -518,20 +542,31 @@ class RecordingTc final : public net::tc::TcControl
         if (auto const* const child = find(parent); child != nullptr && parent != net::tc::ROOT) {
             return *child;
         }
-        return failure(std::make_error_code(std::errc::no_such_file_or_directory));
+        return failure(net::NetError::invalid_handle);
     }
     [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
 
     /// A qdisc of @p kind on @p parent with handle @p major:, as an earlier run left it.
-    void left(uint32_t const parent, uint16_t const major, std::string const& kind, std::optional<net::tc::EtfQdisc> etf = {})
+    void left(uint32_t const parent, uint16_t const major, std::string_view const kind)
     {
-        children.push_back(
-            net::tc::QdiscInfo{.handle = net::tc::make_handle(major, 0), .parent = parent, .kind = kind, .etf = etf});
+        children.push_back(qdisc_info(net::tc::make_handle(major, 0), parent, kind));
     }
-    /// The requests since the last read, cleared.
-    auto read() -> std::vector<std::string> { return std::exchange(requests, {}); }
+    /// Our etf @p etf on its parent with handle @p major:, as an earlier run left it.
+    void left(uint16_t const major, net::tc::EtfQdisc const& etf)
+    {
+        children.push_back(etf_info(net::tc::make_handle(major, 0), etf));
+    }
+    /// The requests since the last drain, cleared.
+    auto drain() -> std::vector<std::string> { return std::exchange(requests, {}); }
 
   private:
+    static auto etf_info(uint32_t const handle, net::tc::EtfQdisc const& etf) -> net::tc::QdiscInfo
+    {
+        auto info = qdisc_info(handle, etf.parent, "etf");
+        info.has_etf_params = true;
+        info.etf = etf;
+        return info;
+    }
     auto find(uint32_t const parent) -> net::tc::QdiscInfo*
     {
         auto const it = std::ranges::find(children, parent, &net::tc::QdiscInfo::parent);
@@ -597,13 +632,13 @@ TEST(shaper_qdiscs, a_fresh_start_installs_both_cbs)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    tc.root = qdisc_info(0, net::tc::ROOT, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.installed() && !qdiscs.reused());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace root mqprio 9000:",
@@ -613,7 +648,7 @@ TEST(shaper_qdiscs, a_fresh_start_installs_both_cbs)
     EXPECT_TRUE(qdiscs.class_a().placeholder && qdiscs.class_b().placeholder);
     // Nothing changed: nothing sent.
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
 }
 
 // Admission and withdrawal only ever change cbs parameters in place: no
@@ -625,11 +660,11 @@ TEST(shaper_qdiscs, admission_and_withdrawal_only_replace_cbs)
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    (void)tc.read();
+    (void)tc.drain();
 
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "replace 9000:1 cbs idleslope 19136",
             "replace 9000:2 cbs idleslope 730864",
@@ -638,7 +673,7 @@ TEST(shaper_qdiscs, admission_and_withdrawal_only_replace_cbs)
 
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "replace 9000:1 cbs idleslope 375000",
             "replace 9000:2 cbs idleslope 375000",
@@ -653,13 +688,13 @@ TEST(shaper_qdiscs, a_restart_keeps_an_identical_mqprio)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    tc.root = mqprio_root(0x9000'0000, igb_mqprio());
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.reused());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace 9000:1 cbs idleslope 375000",
@@ -675,13 +710,13 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
     RecordingTc tc{};
     auto other = igb_mqprio();
     other.prio_tc_map[5] = CLASS_A_TC;
-    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = other};
+    tc.root = mqprio_root(0x9000'0000, other);
     tc.mqprio_error = std::make_error_code(std::errc::invalid_argument);
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_FALSE(qdiscs.reused());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace root mqprio 9000:",
@@ -690,10 +725,10 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
         }));
     // A root that sets no traffic classes is simply replaced.
     RecordingTc foreign{};
-    foreign.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "fq"};
+    foreign.root = qdisc_info(0x0001'0000, net::tc::ROOT, "fq");
     ShaperQdiscs replacing{foreign, channel.logger()};
     EXPECT_TRUE(replacing.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
-    EXPECT_TRUE(foreign.read() == Requests({"show root", "replace root mqprio 9000:"}));
+    EXPECT_TRUE(foreign.drain() == Requests({"show root", "replace root mqprio 9000:"}));
 }
 
 // Another handle's mqprio (an AES67 socket's 9100:, a profile switch ago) or taprio is deleted before ours goes
@@ -702,17 +737,17 @@ TEST(shaper_qdiscs, another_handle_s_mqprio_or_taprio_is_deleted_before_ours_is_
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0x9100'0000, .parent = net::tc::ROOT, .kind = "mqprio"};
+    tc.root = qdisc_info(0x9100'0000, net::tc::ROOT, "mqprio");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "eth1", igb_mqprio(), igb_layout()).has_value());
     EXPECT_FALSE(qdiscs.reused());
-    EXPECT_TRUE(tc.read() == Requests({"show root", "del root 9100:", "replace root mqprio 9000:"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show root", "del root 9100:", "replace root mqprio 9000:"}));
     // taprio_destroy resets the TCs too (netdev_reset_tc)
     RecordingTc gated{};
-    gated.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "taprio"};
+    gated.root = qdisc_info(0x0001'0000, net::tc::ROOT, "taprio");
     ShaperQdiscs after_taprio{gated, channel.logger()};
     EXPECT_TRUE(after_taprio.install(3, "eth1", igb_mqprio(), igb_layout()).has_value());
-    EXPECT_TRUE(gated.read() == Requests({"show root", "del root 1:", "replace root mqprio 9000:"}));
+    EXPECT_TRUE(gated.drain() == Requests({"show root", "del root 1:", "replace root mqprio 9000:"}));
 }
 
 // A driver without cbs offload (EOPNOTSUPP): logged once, then no further
@@ -726,11 +761,11 @@ TEST(shaper_qdiscs, no_cbs_offload_stops_asking)
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(qdiscs.cbs_unsupported());
-    EXPECT_TRUE(tc.read() == Requests({"show root", "replace root mqprio 9000:", "replace 9000:1 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show root", "replace root mqprio 9000:", "replace 9000:1 cbs idleslope 375000"}));
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
     EXPECT_TRUE(qdiscs.uninstall().has_value());
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
 
 // A failed cbs request (here EBUSY) is not recorded as programmed: the next
@@ -746,10 +781,10 @@ TEST(shaper_qdiscs, a_failed_cbs_is_sent_again)
     EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_FALSE(qdiscs.cbs_unsupported());
     EXPECT_TRUE(qdiscs.class_a().empty() && qdiscs.class_b().empty());
-    (void)tc.read();
+    (void)tc.drain();
     tc.cbs_error = {};
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
 }
 
 // Uninstall removes class B's cbs first, then class A's (igc's order), then the
@@ -762,10 +797,10 @@ TEST(shaper_qdiscs, uninstall_and_release)
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    (void)tc.read();
+    (void)tc.drain();
     EXPECT_TRUE(qdiscs.uninstall().has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "replace 9000:2 pfifo_fast",
             "replace 9000:1 pfifo_fast",
@@ -773,17 +808,17 @@ TEST(shaper_qdiscs, uninstall_and_release)
         }));
     EXPECT_FALSE(qdiscs.installed());
     EXPECT_TRUE(qdiscs.uninstall().has_value());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
 
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // what shutdown parks
-    (void)tc.read();
+    (void)tc.drain();
     qdiscs.release();
     EXPECT_FALSE(qdiscs.installed());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(qdiscs.uninstall().has_value());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
 }
 // Launch time wanted on a driver that honours it (igc): after both cbs, an offloaded etf on class
 // A's cbs class (8001:1), the AF_XDP socket's queue, settled once; class B's gets none; admission
@@ -792,13 +827,13 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    tc.root = qdisc_info(0, net::tc::ROOT, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace root mqprio 9000:",
@@ -812,7 +847,7 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
     EXPECT_TRUE(qdiscs.launch_time_mode() == LaunchTimeMode::on);
     EXPECT_FALSE(qdiscs.etf_error());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
 }
 
 // A restart onto what an earlier run left: an identical etf stays (etf cannot be changed in place),
@@ -822,9 +857,9 @@ TEST(shaper_launch_time, a_restart_keeps_an_identical_etf_and_replaces_another)
     logging::LogChannel<64> channel{logging::lit("test")};
     for (int32_t const left_delta : {DEFAULT_ETF_DELTA_NS, 500'000}) {
         RecordingTc tc{};
-        tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+        tc.root = mqprio_root(0x9000'0000, igb_mqprio());
         tc.left(0x9000'0001, 0x8001, "cbs");
-        tc.left(0x8001'0001, 0x8003, "etf", our_etf(0x8001'0001, left_delta));
+        tc.left(0x8003, our_etf(0x8001'0001, left_delta));
         tc.left(0x9000'0002, 0x8002, "cbs");
         tc.next_major = 0x8005;
         ShaperQdiscs qdiscs{tc, channel.logger()};
@@ -842,7 +877,7 @@ TEST(shaper_launch_time, a_restart_keeps_an_identical_etf_and_replaces_another)
             want.emplace_back("del 8001:1 handle 8003:");
             want.emplace_back("replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check");
         }
-        EXPECT_TRUE(tc.read() == want);
+        EXPECT_TRUE(tc.drain() == want);
         EXPECT_TRUE(qdiscs.launch_time());
     }
 }
@@ -853,16 +888,16 @@ TEST(shaper_launch_time, an_etf_left_behind_goes_when_not_wanted)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    tc.root = mqprio_root(0x9000'0000, igb_mqprio());
     tc.left(0x9000'0001, 0x8001, "cbs");
-    tc.left(0x8001'0001, 0x8003, "etf", our_etf(0x8001'0001));
+    tc.left(0x8003, our_etf(0x8001'0001));
     tc.left(0x9000'0002, 0x8002, "cbs");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(LaunchTimeMode::off);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace 9000:1 cbs idleslope 375000",
@@ -881,53 +916,53 @@ TEST(shaper_launch_time, enabled_and_disabled_at_run_time_the_etf_follows_under_
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    tc.root = qdisc_info(0, net::tc::ROOT, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(LaunchTimeMode::off);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    (void)tc.read();
+    (void)tc.drain();
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read().empty());  // off: settled, nothing more
+    EXPECT_TRUE(tc.drain().empty());  // off: settled, nothing more
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({"show 9000:1", "show 8001:1", "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
     EXPECT_TRUE(qdiscs.launch_time());
     qdiscs.set_launch_time(LaunchTimeMode::off);
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read() == Requests({"show 9000:1", "show 8001:1", "del 8001:1 handle 8003:"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show 9000:1", "show 8001:1", "del 8001:1 handle 8003:"}));
     EXPECT_FALSE(qdiscs.launch_time());
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({"show 9000:1", "show 8001:1", "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
     EXPECT_TRUE(qdiscs.launch_time());
 }
 
-// A driver that honours no AF_XDP launch time (igb): the requests are the cbs alone, etf neither
-// installed nor looked for, whatever was asked.
+// A driver that honours no AF_XDP launch time (igb), launch time wanted: the requests are the cbs
+// alone, etf neither installed nor looked for. Not wanted, it is off: a leftover etf still goes.
 TEST(shaper_launch_time, a_driver_without_launch_time_gets_no_etf)
 {
     EXPECT_TRUE(launch_time_mode(true, true) == LaunchTimeMode::on);
     EXPECT_TRUE(launch_time_mode(false, true) == LaunchTimeMode::off);
     EXPECT_TRUE(launch_time_mode(true, false) == LaunchTimeMode::unsupported);
-    EXPECT_TRUE(launch_time_mode(false, false) == LaunchTimeMode::unsupported);
+    EXPECT_TRUE(launch_time_mode(false, false) == LaunchTimeMode::off);
     // A failed query: wanted, nothing is done; not wanted, a leftover etf still goes.
     EXPECT_TRUE(launch_time_mode(true, failure(std::errc::no_such_file_or_directory)) == LaunchTimeMode::unsupported);
     EXPECT_TRUE(launch_time_mode(false, failure(std::errc::no_such_file_or_directory)) == LaunchTimeMode::off);
 
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    tc.root = qdisc_info(0, net::tc::ROOT, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     qdiscs.set_launch_time(launch_time_mode(true, false));
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace root mqprio 9000:",
@@ -935,6 +970,75 @@ TEST(shaper_launch_time, a_driver_without_launch_time_gets_no_etf)
             "replace 9000:2 cbs idleslope 375000",
         }));
     EXPECT_FALSE(qdiscs.launch_time());
+}
+
+// A NIC with launch time and no cbs offload: the etf goes on class A's mqprio class itself, once, and the
+// uninstall's pfifo_fast graft removes it with the class.
+TEST(shaper_launch_time, without_cbs_offload_the_etf_goes_on_class_a_s_queue)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.cbs_error = std::make_error_code(std::errc::operation_not_supported);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.drain() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 375000",
+            "show 9000:1",
+            "replace 9000:1 etf clockid 11 delta 150000 offload skip_sock_check",
+        }));
+    EXPECT_TRUE(qdiscs.launch_time());
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.drain().empty());
+    EXPECT_TRUE(qdiscs.uninstall().has_value());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+}
+
+// Without cbs offload and launch time off, an etf an earlier run left on class A's mqprio class gives way
+// to pfifo_fast: deleting an mqprio class's child would graft noop_qdisc and drop the class's traffic.
+TEST(shaper_launch_time, without_cbs_offload_a_leftover_etf_gives_way_to_pfifo_fast)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = mqprio_root(0x9000'0000, igb_mqprio());
+    tc.left(0x8003, our_etf(0x9000'0001));
+    tc.cbs_error = std::make_error_code(std::errc::operation_not_supported);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::off);
+    EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.drain() == Requests({"show root", "replace 9000:1 cbs idleslope 375000", "show 9000:1", "replace 9000:1 pfifo_fast"}));
+    EXPECT_FALSE(qdiscs.launch_time());
+}
+
+// Class A's cbs offloaded and class B's refused: the etf still goes under class A's cbs, never in its place.
+TEST(shaper_launch_time, a_refused_class_b_cbs_leaves_the_etf_under_class_a_s)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.cbs_refused_on = 0x9000'0002;
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.drain() ==
+        Requests({
+            "show root",
+            "replace root mqprio 9000:",
+            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:2 cbs idleslope 375000",
+            "show 9000:1",
+            "show 8001:1",
+            "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check",
+        }));
+    EXPECT_TRUE(qdiscs.launch_time());
 }
 
 // A refused etf offload (EOPNOTSUPP) is recorded and logged once; the cbs stay, program() succeeds
@@ -949,7 +1053,7 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace root mqprio 9000:",
@@ -962,10 +1066,10 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
     EXPECT_TRUE(qdiscs.etf_error() == std::errc::operation_not_supported);
     EXPECT_FALSE(qdiscs.launch_time());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
     // Uninstall is unchanged: grafting pfifo_fast on each class removes cbs and etf together.
     EXPECT_TRUE(qdiscs.uninstall().has_value());
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
 
 namespace {
@@ -993,11 +1097,11 @@ TEST(port_shaper, the_tspecs_given_before_install_are_programmed_at_install)
     PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
     auto const streams = aaf_and_crf();
     EXPECT_TRUE(shaper.program(streams).has_value());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
     EXPECT_TRUE(shaper.install(igb_port()).has_value());
     EXPECT_TRUE(shaper.installed());
     EXPECT_TRUE(
-        tc.read() ==
+        tc.drain() ==
         Requests({
             "show root",
             "replace root mqprio 9000:",
@@ -1016,17 +1120,17 @@ TEST(port_shaper, tspecs_given_after_install_go_out_on_the_next_tick)
     PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
     EXPECT_TRUE(shaper.install(igb_port()).has_value());
     EXPECT_TRUE(shaper.class_a().placeholder);
-    (void)tc.read();
+    (void)tc.drain();
     auto const streams = aaf_and_crf();
     EXPECT_TRUE(shaper.program(streams).has_value());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
     shaper.tick(1'000'000'000);
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
     EXPECT_TRUE(shaper.program({}).has_value());
     shaper.tick(1'010'000'000);
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
     shaper.tick(1'020'000'000);
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
 }
 
 TEST(port_shaper, more_streams_than_it_sizes_for_are_refused)
@@ -1035,13 +1139,13 @@ TEST(port_shaper, more_streams_than_it_sizes_for_are_refused)
     RecordingTc tc{};
     PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
     EXPECT_TRUE(shaper.install(igb_port()).has_value());
-    (void)tc.read();
+    (void)tc.drain();
     std::vector<TSpec> const many(MAX_PORT_SHAPER_STREAMS + 1, TSpec{.max_frame_size = 185, .max_interval_frames = 1});
     auto const refused = shaper.program(many);
     EXPECT_FALSE(refused.has_value());
     EXPECT_TRUE(!refused.has_value() && refused.error() == make_error_code(ShaperError::too_many_streams));
     shaper.tick(1'000'000'000);
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
     EXPECT_TRUE(shaper.class_a().placeholder);
 }
 
@@ -1053,7 +1157,7 @@ TEST(port_shaper, a_bad_class_a_priority_installs_nothing)
     auto const status = shaper.install(igb_port());
     EXPECT_TRUE(!status.has_value() && status.error() == make_error_code(ShaperError::bad_priority));
     EXPECT_FALSE(shaper.installed());
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
 }
 
 // shutdown() parks the cbs at the placeholders and leaves the qdiscs, or with restore_qdisc
@@ -1066,19 +1170,19 @@ TEST(port_shaper, shutdown_parks_or_restores)
     PortShaper parked{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
     EXPECT_TRUE(parked.program(streams).has_value());
     EXPECT_TRUE(parked.install(igb_port()).has_value());
-    (void)tc.read();
+    (void)tc.drain();
     parked.shutdown();
-    EXPECT_TRUE(tc.read() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
     EXPECT_FALSE(parked.installed());
     parked.shutdown();
-    EXPECT_TRUE(tc.read().empty());
+    EXPECT_TRUE(tc.drain().empty());
 
     RecordingTc restored_tc{};
     PortShaper restored{ShaperConfig{.interface_name = "port-shaper0", .restore_qdisc = true}, channel.logger(), restored_tc};
     EXPECT_TRUE(restored.install(igb_port()).has_value());
-    (void)restored_tc.read();
+    (void)restored_tc.drain();
     restored.shutdown();
-    EXPECT_TRUE(restored_tc.read() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+    EXPECT_TRUE(restored_tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
 
 #endif
