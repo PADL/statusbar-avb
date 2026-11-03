@@ -10,6 +10,10 @@ statusbar_add_module(
   ptpclient_bridge.cpp
   ptpclient_linuxptp.cpp
   ptpclient_management.cpp
+  ptpclient_phc.cpp
+  ptpclient_phc_follower.cpp
+  ptpclient_phc_servo.cpp
+  ptpclient_pulse.cpp
   ptpclient_setup.cpp
   ptpclient_timer.cpp
   ptpclient_ntpshm.cpp
@@ -32,6 +36,7 @@ statusbar_add_module(
   ptpclient_phc_follower_test.cpp
   ptpclient_phc_servo_test.cpp
   ptpclient_phc_test.cpp
+  ptpclient_pulse_test.cpp
   ptpclient_tai_translator_test.cpp
   ptpclient_test.cpp
   FUNCTIONAL_TESTS
