@@ -46,7 +46,7 @@ class StreamRxHandler : public net::Pollable
         , generation_{port.generation()}
         , drain_{std::move(drain)}
     {
-        StreamPort::Guard const guard{port_};
+        // No guard: a join is a socket call (SIOCADDMULTI, PACKET_ADD_MEMBERSHIP) and touches no ring.
         for (auto const& group : groups) {
             if (group.is_set()) {
                 (void)port_.port().join_multicast(group);
