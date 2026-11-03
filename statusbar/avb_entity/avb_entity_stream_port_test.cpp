@@ -81,4 +81,20 @@ TEST(stream_port, a_port_without_an_xdp_socket_gives_no_launch_time)
     EXPECT_EQ(port.launch_order().launched_late(), uint64_t{0});
 }
 
+// A counter reset asked for from any thread zeroes the launch order's counters at the next
+// end_cycle(), on the thread that drives the port, and not before.
+TEST(stream_port, a_counter_reset_applies_at_the_end_of_the_cycle)
+{
+    StreamPort port;
+    EXPECT_TRUE(port.open_test({.hardware_address = ieee::Eui48{0x02, 0, 0, 0, 0, 2}}, /*launch_time=*/true).has_value());
+    port.set_phc_clock([] { return int64_t{5'000'000'000}; });
+    (void)port.launch_time(5'000'500'000);
+    (void)port.launch_time(5'000'100'000);  // 400 us behind the last: held, one clamp
+    EXPECT_EQ(port.launch_order().clamped(), uint64_t{1});
+    port.reset_counters();
+    EXPECT_EQ(port.launch_order().clamped(), uint64_t{1});
+    EXPECT_TRUE(port.end_cycle().has_value());
+    EXPECT_EQ(port.launch_order().clamped(), uint64_t{0});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_port_test)

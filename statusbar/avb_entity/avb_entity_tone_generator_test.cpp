@@ -744,4 +744,40 @@ TEST(tone_clocking, audio_inputs_still_rejected)
     EXPECT_TRUE(!result.has_value());
 }
 
+// A media-timer wake with samples due ends with one flush of the stream port, which
+// ends its cycle, after the wake's transmits (on a test port opened before start()).
+TEST(tone_port, each_wake_transmits_then_flushes_the_port_once)
+{
+    auto config = make_config_with_blob(load_file(entity_tone_aaf_bin_path()));
+    config.gate_talker_on_listener = false;
+    config.stream_address_mode = "static";
+    config.interface_name = "tone-port-test0";  // no such interface: no sockets
+    config.stream_tx_kicker = false;            // the wake's flush kicks
+    config.stream_tx_kick_in_rx_timer = false;
+    auto result = AvbEntityToneGenerator::create(std::move(config));
+    EXPECT_TRUE(result.has_value());
+    if (!result.has_value()) {
+        return;
+    }
+    auto& entity = **result;
+    EXPECT_TRUE(entity.stream_port().open_test({.hardware_address = Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}}).has_value());
+    auto& wire = *entity.stream_port().test_port();
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    EXPECT_TRUE(entity.start(reactor).has_value());
+
+    // The wakes' times are the test's own: the media clock anchors at the first, has nothing due at the
+    // second, and one packet's samples at each after; a wake flushes once when it has samples.
+    auto t = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    std::array<size_t, 6> const flushed_after{1, 1, 2, 3, 4, 5};
+    for (size_t const expected : flushed_after) {
+        entity.process_audio(t);
+        t += std::chrono::microseconds{125};
+        EXPECT_EQ(wire.tx_flushes(), expected);
+        EXPECT_EQ(wire.cycles_ended(), expected);
+    }
+    EXPECT_TRUE(wire.tx_flushes() > 0 && wire.tx_pending() > 0);
+    (void)entity.stop();
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)
