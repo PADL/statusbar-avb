@@ -703,7 +703,8 @@ class AvbEntityKit
     [[nodiscard]] auto start_data_plane(net::MessageReactor& reactor) -> Status;
     /// One TX slot per talker stream, with the identity the ACMP model carries.
     [[nodiscard]] auto open_talker_streams() -> Status;
-    /// The stream port on config_.net_backend, rawnet when xdp does not open and
+    /// The stream port on config_.net_backend (one the host opened before start(),
+    /// a test port, is kept), rawnet when xdp does not open and
     /// config_.net_xdp_fallback allows it; errors recorded (stream_tx_error()).
     void open_stream_port();
     /// The stream port opened on @p backend; untimed when launch time was asked for and only
