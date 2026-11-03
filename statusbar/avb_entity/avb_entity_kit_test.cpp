@@ -3339,6 +3339,30 @@ TEST(avb_entity_kit_kind, refused_while_running_and_for_crf)
     EXPECT_TRUE(m.kit.listener()->slot_for(0)->kind.load() == StreamKind::aaf);
 }
 
+// An input pre-joins the group of the first talker output of its kind: a kind
+// change on either side leaves the old group and joins the new one
+TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
+{
+    RateKit m{{}, 0x76, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x76}}).has_value());
+    auto& wire = *m.kit.stream_port().test_port();
+    EXPECT_TRUE(m.start_ready());
+    auto const group = m.kit.talker().slot_for(0)->dest_mac;
+    auto const joined = [&wire, group] { return std::ranges::contains(wire.joined_multicast_groups(), group); };
+    auto const set = [&m](uint16_t const type, uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, word));
+    };
+    EXPECT_TRUE(joined());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(joined());  // no AM824 output
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(joined());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(joined());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(joined());
+}
+
 // ---- Clock sources and clock domain lock (IEEE 1722.1-2021 Clauses 7.2.32, 7.4.23-24, 7.4.42) ----
 
 namespace {
