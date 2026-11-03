@@ -235,6 +235,32 @@ seconds onto a line 1 ms ahead of its start at +100 ppm over PHC0. It restores t
 frequency afterwards, not the time, so never name a PHC that ptp4l or phc2sys
 disciplines.
 
+## ptpclient: pulse lock
+
+`PulseLock` judges a PHC's lock to another clock's 1 PPS from the PHC's own
+external timestamps of it: the pulses ts2phc steers a sink by, with the source
+emitting at its whole seconds. Each event is judged against the whole second nearest
+it. An event further than `edge_window_ns` (250 ms) from one is the pulse's other
+edge, which ts2phc also stamps (`extts_polarity both`), and is ignored. A pulse is
+good when it lies within `max_offset_ns` (25 µs) of its second, and when the
+reference clock, read as the event is handled, lies between half a second before
+and a second after that second. The second test catches a sink stepped by whole seconds, such as one
+an adapter reset set to the system time, which a pulse alone cannot show.
+
+The lock holds after `settle_pulses` (3) good pulses in a row. It goes at one bad
+pulse, or, through `expire()`, after `max_silence_ns` (3 s) without one: an adapter
+reset that disarms the channel, or ts2phc gone. It is event-driven: `pulse()` per
+event and `expire()` when the host's deadline passes.
+
+`ExttsReader` reads one channel's events on a descriptor of its own: a reactor
+`Pollable` over the `/dev/ptpN`. Since Linux 6.7 each open file has its own event
+queue (`ptp_open()`), and `PTP_MASK_CLEAR_ALL` / `PTP_MASK_EN_SINGLE` keep only the
+channel wanted. The channel stays its owner's (ts2phc enables it with
+`PTP_EXTTS_REQUEST`); the reader never enables or disables it. On a kernel without
+the mask ioctls one queue is shared, and reading it would steal the owner's events,
+so `open()` refuses with `not_supported`. One `read()` per readiness:
+`ptp_read()` blocks on an empty queue whatever `O_NONBLOCK` says.
+
 ## ptpclient: waking on a PTP deadline
 
 `PtpTimeBridge::sleep_until_ptp` converts the PTP deadline to CLOCK_MONOTONIC,
