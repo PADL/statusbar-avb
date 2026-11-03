@@ -49,7 +49,7 @@ struct Reading
 // Bracket the PHC read with two CLOCK_REALTIME reads; midpoint REALTIME so PHC
 // and GPS are aligned to within the (~us) bracket window.
 std::optional<Reading> read_sample(int fd, clockid_t phc_clk)
-{
+{  // NOLINT(statusbar-block-statements) one sample read; pre-dates the gate
     timespec g1{}, p{}, g2{};
     clock_gettime(CLOCK_REALTIME, &g1);
     if (clock_gettime(phc_clk, &p) != 0) {
@@ -69,7 +69,7 @@ double dt_seconds(timespec const& now, timespec const& prev)
 }  // namespace
 
 int main(int argc, char** argv)
-{
+{  // NOLINT(statusbar-block-statements) the tool's main, in order; pre-dates the gate
     std::string dev = "/dev/ptp0";
     std::string filter = "kalman";
     double report_s = 5.0, sample_hz = 4.0, fs = 96000.0, window_s = 900.0;

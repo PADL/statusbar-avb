@@ -494,22 +494,24 @@ auto MsrpParticipantT<Limits>::find_or_create_domain(uint8_t sr_class_id) -> Att
 // ============================================================
 
 template <class Limits>
+template <typename Record, typename FirstValue>
+void MsrpParticipantT<Limits>::declare_value(Record& rec, FirstValue const& fv, TimePoint const now)
+{
+    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
+    rec.first_value = fv;
+    rec.operation = Operation::Declare;
+    mrp::dispatch_applicant(rec, changed ? applicant_sm::Def::Event::New : first_declare_event(rec), now);
+    port_.timers().start_join(now);
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status
 {
     auto* rec_ptr = find_or_create_talker_advertise(fv.stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
-    auto& rec = *rec_ptr;
-    // A declaration whose value changed (e.g. a talker moved to an adopted VID) is declared New
-    // (IEEE 802.1Q-2018 10.7.5.1) so the change goes out at the next transmit opportunity.
-    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
-    rec.first_value = fv;
-    rec.operation = Operation::Declare;
-
-    auto const event = changed ? applicant_sm::Def::Event::New : first_declare_event(rec);
-    mrp::dispatch_applicant(rec, event, now);
-    port_.timers().start_join(now);
+    declare_value(*rec_ptr, fv, now);
     return success();
 }
 
@@ -520,16 +522,7 @@ auto MsrpParticipantT<Limits>::declare_talker_failed(TalkerFailedFirstValue cons
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
-    auto& rec = *rec_ptr;
-    // A declaration whose value changed (e.g. a talker moved to an adopted VID) is declared New
-    // (IEEE 802.1Q-2018 10.7.5.1) so the change goes out at the next transmit opportunity.
-    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
-    rec.first_value = fv;
-    rec.operation = Operation::Declare;
-
-    auto const event = changed ? applicant_sm::Def::Event::New : first_declare_event(rec);
-    mrp::dispatch_applicant(rec, event, now);
-    port_.timers().start_join(now);
+    declare_value(*rec_ptr, fv, now);
     return success();
 }
 
@@ -557,7 +550,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
 
 template <class Limits>
 auto MsrpParticipantT<Limits>::declare_listener(tsn::StreamId const& stream_id, ListenerDeclaration decl, TimePoint now) -> Status
-{
+{  // NOLINT(statusbar-block-statements) a declaration, field by field; pre-dates the gate
     auto* rec_ptr = find_or_create_listener(stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
@@ -594,16 +587,7 @@ auto MsrpParticipantT<Limits>::declare_domain(DomainFirstValue const& fv, TimePo
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
-    auto& rec = *rec_ptr;
-    // A declaration whose value changed (e.g. a talker moved to an adopted VID) is declared New
-    // (IEEE 802.1Q-2018 10.7.5.1) so the change goes out at the next transmit opportunity.
-    bool const changed = rec.operation == Operation::Declare && !(rec.first_value == fv);
-    rec.first_value = fv;
-    rec.operation = Operation::Declare;
-
-    auto const event = changed ? applicant_sm::Def::Event::New : first_declare_event(rec);
-    mrp::dispatch_applicant(rec, event, now);
-    port_.timers().start_join(now);
+    declare_value(*rec_ptr, fv, now);
     return success();
 }
 
@@ -908,7 +892,7 @@ void MsrpParticipantT<Limits>::decode_attribute_list(
 template <class Limits>
 void MsrpParticipantT<Limits>::decode_vector_attribute(
     AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
-{
+{  // NOLINT(statusbar-block-statements) a vector attribute decoded; pre-dates the gate
     if (pos + VectorAttributeHeader::LENGTH > payload.size()) {
         return;
     }
@@ -1069,7 +1053,7 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     ListenerDeclaration decl,
     AttributeEvent wire_event,
     TimePoint now)
-{
+{  // NOLINT(statusbar-block-statements) one listener attribute received; pre-dates the gate
     if (attr_length < ListenerFirstValue::LENGTH) {
         return;
     }
