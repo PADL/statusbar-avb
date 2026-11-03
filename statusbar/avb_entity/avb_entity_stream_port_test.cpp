@@ -84,4 +84,14 @@ TEST(stream_port, a_handler_on_a_closed_port_is_finished)
     EXPECT_EQ(handler.fd(), -1);
 }
 
+TEST(stream_port, a_port_without_an_xdp_socket_gives_no_launch_time)
+{
+    StreamPort port;
+    port.set_phc_clock([] { return int64_t{5'000'000'000}; });
+    EXPECT_FALSE(port.tx_launch_time());
+    EXPECT_TRUE(port.xdp() == nullptr);
+    EXPECT_EQ(port.launch_time(6'000'000'000), int64_t{0});
+    EXPECT_EQ(port.launch_order().launched_late(), uint64_t{0});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_port_test)
