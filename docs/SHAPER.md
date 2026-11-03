@@ -124,7 +124,7 @@ placeholders share what the admitted streams leave of the SR budget, 75% of
 the link (802.1Q 34.3.1's default deltaBandwidth): all of it for the one
 empty class, half each when both are empty, with Annex L credits for an MTU
 frame (1 Gbit/s, MTU 1500, nothing admitted: each idleslope 375000, sendslope
--625000, hicredit 563, locredit -963). So the two SR queues together never
+-625000, hicredit 579, locredit -963). So the two SR queues together never
 claim more than 75% and legacy traffic keeps a quarter of the link even with
 both busy (on igb, SP_WAIT_SR holds the strict-priority queues while an SR
 queue has credit). A placeholder never falls under 1% of the link; only when
@@ -301,8 +301,9 @@ hiCredit (B)  = ceil(idleSlopeB * (maxInterferingFrame / (link - idleSlopeA)
                                    + maxFrameSizeA / link))                    (L-11)
 ```
 
-maxFrameSize is the class's largest wire frame; maxInterferingFrame is the
-port MTU. The link speed comes from
+maxFrameSize is the class's largest wire frame; maxInterferingFrame is an
+MTU frame's wire frame (1542 octets at MTU 1500), counted the same way, so both
+credits are in octets on the wire. The link speed comes from
 `/sys/class/net/<if>/speed`, re-read once a second. When the kernel has no
 speed (EINVAL or -1: link down, or a NIC that never reports one) the last
 known speed is kept, so a flap does not churn the shaper; before any is known,
@@ -312,7 +313,7 @@ matter to drivers that take them.
 Example (one admitted 8-channel 48 kHz INT_32 AAF talker, 6 frames a packet,
 1 Gbit/s, MTU 1500, as captured on an i210 below): MaxFrameSize 24 + 6 x 8 x 4
 + 1 = 217, wire 259, 16576 kbit/s; idleSlope 16576, sendSlope -983424,
-hiCredit 25, loCredit -254.
+hiCredit 26, loCredit -254.
 
 The frame size follows the rules under Milan v1.2 Table 4.4: F = MaxFrameSize
 + 22 (Ethernet header with the VLAN tag, and the FCS), at least 68; W = F + 20
@@ -333,36 +334,36 @@ MaxFrameSize = 24 + 6 x 8 x 4 + 1             = 217 octets (srp_max_frame_size)
 wire frame   = 217 + 22 + 20                  = 259 octets
 idleSlope    = 259 x 8 x 8000 / 1000          = 16576 kbit/s
 sendSlope    = 16576 - 1000000                = -983424 kbit/s
-hiCredit     = ceil(16576 x 1500 / 1000000)   = ceil(24.864)    = 25
+hiCredit     = ceil(16576 x 1542 / 1000000)   = ceil(25.560)    = 26
 loCredit     = ceil(-983424 x 259 / 1000000)  = ceil(-254.707)  = -254
 class B (placeholder, the rest of the 75% budget, wire frame 1542):
 idleSlope    = 750000 - 16576                 = 733424 kbit/s
 sendSlope    = 733424 - 1000000               = -266576 kbit/s
-hiCredit     = ceil(733424 x 1500 / 1000000)  = ceil(1100.136)  = 1101
+hiCredit     = ceil(733424 x 1542 / 1000000)  = ceil(1130.940)  = 1131
 loCredit     = ceil(-266576 x 1542 / 1000000) = ceil(-411.060)  = -411
 ```
 
 One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s (1,000,000
-kbit/s), MTU 1500 as the largest interfering frame:
+kbit/s), an MTU 1500 frame (1542 octets on the wire) as the largest interfering one:
 
 ```
 idleSlope = 13504 + 5632                     = 19136 kbit/s
 sendSlope = 19136 - 1000000                  = -980864 kbit/s
-hiCredit  = ceil(19136 x 1500 / 1000000)     = ceil(28.704)    = 29
+hiCredit  = ceil(19136 x 1542 / 1000000)     = ceil(29.508)    = 30
 loCredit  = ceil(-980864 x 211 / 1000000)    = ceil(-206.962)  = -206
             (maxFrameSizeA = the larger wire frame, 211)
 ```
 
 The AAF alone at 100 Mbit/s (100,000 kbit/s): idleSlope 13504, sendSlope
--86496, hiCredit ceil(13504 x 1500 / 100000) = ceil(202.56) = 203, loCredit
+-86496, hiCredit ceil(13504 x 1542 / 100000) = ceil(208.232) = 209, loCredit
 ceil(-86496 x 211 / 100000) = ceil(-182.507) = -182.
 
 One AAF stream in class B (6752 kbit/s), class A as above:
 
 ```
 sendSlopeB = 6752 - 1000000 = -993248
-hiCreditB  = ceil(6752 x (1500 / (1000000 - 19136) + 211 / 1000000))
-           = ceil(6752 x (0.00152926 + 0.000211)) = ceil(11.750) = 12   (L-11)
+hiCreditB  = ceil(6752 x (1542 / (1000000 - 19136) + 211 / 1000000))
+           = ceil(6752 x (0.00157208 + 0.000211)) = ceil(12.039) = 13   (L-11)
 loCreditB  = ceil(-993248 x 211 / 1000000) = ceil(-209.575) = -209
 ```
 
@@ -375,7 +376,7 @@ wire frame = 601 + 22 + 20                    = 643 octets
 bandwidth  = 643 x 8 x 8000                   = 41152 kbit/s a stream
 idleSlope  = 16 x 41152 + 4 x 5632 (the CRFs) = 680960 kbit/s (68.1% of the link)
 sendSlope  = 680960 - 1000000                 = -319040
-hiCredit   = ceil(680960 x 1500 / 1000000)    = ceil(1021.440)  = 1022
+hiCredit   = ceil(680960 x 1542 / 1000000)    = ceil(1050.040)  = 1051
 loCredit   = ceil(-319040 x 643 / 1000000)    = ceil(-205.143)  = -205
 ```
 
@@ -389,14 +390,14 @@ as each class gets with nothing admitted:
 ```
 idleSlope = 750000 / 2                      = 375000 kbit/s
 sendSlope = 375000 - 1000000                = -625000
-hiCredit  = ceil(375000 x 1500 / 1000000)   = ceil(562.5)   = 563    (L-10)
+hiCredit  = ceil(375000 x 1542 / 1000000)   = ceil(578.25)  = 579    (L-10)
 loCredit  = ceil(-625000 x 1542 / 1000000)  = ceil(-963.75) = -963   (L-12)
 ```
 
 With the AAF and the CRF admitted (19136 kbit/s), class A is shaped for them and
 class B's placeholder takes the rest of the budget: idleSlope 750000 - 19136 =
-730864, sendSlope -269136, hiCredit ceil(730864 x 1500 / 1000000) =
-ceil(1096.296) = 1097, loCredit ceil(-269136 x 1542 / 1000000) =
+730864, sendSlope -269136, hiCredit ceil(730864 x 1542 / 1000000) =
+ceil(1126.992) = 1127, loCredit ceil(-269136 x 1542 / 1000000) =
 ceil(-415.008) = -415.
 
 ## Admission
@@ -480,11 +481,11 @@ tc qdisc show dev <if>
 #               mode:dcb
 #               shaper:dcb
 #  qdisc pfifo 0: parent 8002: limit 1000p
-#  qdisc cbs 8001: parent 9000:1 hicredit 25 locredit -254 sendslope -983424 idleslope 16576 offload 1
+#  qdisc cbs 8001: parent 9000:1 hicredit 26 locredit -254 sendslope -983424 idleslope 16576 offload 1
 #  qdisc pfifo 0: parent 8001: limit 1000p
 #  qdisc fq_codel 0: parent 9000:4 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
 #  qdisc fq_codel 0: parent 9000:3 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
-#  qdisc cbs 8002: parent 9000:2 hicredit 1101 locredit -411 sendslope -266576 idleslope 733424 offload 1
+#  qdisc cbs 8002: parent 9000:2 hicredit 1131 locredit -411 sendslope -266576 idleslope 733424 offload 1
 tc -s class show dev <if>        # per-queue counters (non-bypass traffic only)
 tc -s qdisc show dev <if> parent 9000:3   # PTP's queue 2: ptp4l's frames (socket_priority 7) alone
 ethtool -S <if> | grep tx_queue  # per-queue packet counters, bypass frames included
