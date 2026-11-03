@@ -728,7 +728,7 @@ namespace {
 /// Where one raw AAF frame was rendered, sent on @p port (opened single threaded or not).
 auto rendered_span(avb_entity::StreamPort& port, bool const single_threaded) -> std::span<uint8_t const>
 {
-    port.set_single_threaded(single_threaded);
+    EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
     open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
     std::atomic<uint64_t> const last_gptp_ns{0};
@@ -765,6 +765,37 @@ TEST(talker_port, a_single_threaded_port_renders_in_the_slot)
     auto const staged = rendered_span(shared, false);
     EXPECT_EQ(staged.size(), size_t{12 * 8 * 4});
     EXPECT_FALSE(shared.test_port()->holds(staged));
+}
+
+// On a timed port one thread drives, a raw frame is still rendered in the slot, and receives its launch
+// time after the render: the time the port records is the frame's, in commit order.
+TEST(talker_port, a_timed_single_threaded_port_renders_in_the_slot_and_times_it_after)
+{
+    avb_entity::StreamPort port;
+    EXPECT_TRUE(port.set_single_threaded(true).has_value());
+    auto& wire = open_test_port(port, /*launch_time=*/true);
+    port.set_phc_clock([] { return int64_t{4'999'000'000}; });
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<uint64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    std::span<uint8_t const> rendered;
+    avb_entity::StreamRawRenderFn const render = [&rendered](std::span<uint8_t> payload, uint32_t, uint64_t, uint64_t) {
+        rendered = payload;
+        return true;
+    };
+    avb_entity::StreamRawRenderFn const refuse = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return false; };
+    EXPECT_FALSE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 5'002'000'000, 12, refuse, 5'000'500'000));
+    EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 5'002'000'000, 12, render, 5'000'000'000));
+    EXPECT_TRUE(wire.holds(rendered));
+    auto const sent = wire.pop_tx();
+    EXPECT_TRUE(sent.has_value() && sent->launch_time_ns == 5'000'000'000);  // the refused frame held no place
+    EXPECT_EQ(port.launch_order().clamped(), uint64_t{0});
 }
 
 // A frame sent by destination alone is the tagged frame around the payload, untimed and
