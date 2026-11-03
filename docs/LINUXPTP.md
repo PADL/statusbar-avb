@@ -113,9 +113,10 @@ transportSpecific is not its UDS port's (the global `transportSpecific`, 1 in a
 gPTP configuration, unless `ignore_transport_specific`). The first answer gives
 the UDS port's value, used from then on (a port's notifications carry that port's
 own, which is not used), and starts the fetch: GET PARENT_DATA_SET,
-CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET; with `port_interface` set also
-linuxptp's PORT_PROPERTIES_NP (each port's interface name, so the port identity is
-learnt, not configured) and PORT_DATA_SET (15.5.3.6.1); the grandmaster settings,
+CURRENT_DATA_SET, TIME_PROPERTIES_DATA_SET and every port's PORT_DATA_SET
+(15.5.3.6.1); with `port_interface` set also linuxptp's PORT_PROPERTIES_NP (each
+port's interface name, so the port identity is learnt, not configured), before the
+PORT_DATA_SET; the grandmaster settings,
 if any; and SET SUBSCRIBE_EVENTS_NP. The status stays unreachable until
 PARENT_DATA_SET says which grandmaster ptp4l follows. The header's
 minorVersionPTP is not checked (linuxptp sends 0x12 by default). The client
@@ -136,6 +137,16 @@ The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
 sets as its `tlv.h` lays them out). `build_management_message()` and
 `parse_management_message()` are pure and portable, so the wire format is unit
 tested without a ptp4l, and fuzzed.
+
+Every port's portState is kept in `state().port_states` (by portNumber, the
+first `MAX_PTP4L_PORTS`), from each PORT_DATA_SET answered or notified, and a
+change is reported. `clock_synchronized(state)` reads them: ptp4l's clock is
+synchronised to its domain while it follows a grandmaster with a port in SLAVE,
+or is the grandmaster with a port in MASTER and none UNCALIBRATED (linuxptp
+reports its PS_GRAND_MASTER as MASTER). linuxptp moves a port from SLAVE to
+UNCALIBRATED when its servo jumps or unlocks, and back once it locks again.
+ptp4l steps the clock before it dispatches the fault, so a host learns of a step
+just after it happens.
 
 ### Notifications, polling and grandmaster settings
 
