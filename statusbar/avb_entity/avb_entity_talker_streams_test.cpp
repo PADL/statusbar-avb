@@ -638,12 +638,13 @@ TEST(talker_port, aaf_frame_is_the_tagged_frame_send_vlan_builds)
     EXPECT_EQ(slot->tx_packets, uint64_t{2});
 }
 
-// A raw AAF frame is rendered straight into the port's frame, behind the header: the
-// talker stages nothing of its own between the render and the wire.
-TEST(talker_port, a_raw_frame_is_rendered_in_the_ports_frame)
+namespace {
+
+/// Where one raw AAF frame was rendered, sent on @p port (opened single threaded or not).
+auto rendered_span(avb_entity::StreamPort& port, bool const single_threaded) -> std::span<uint8_t const>
 {
-    avb_entity::StreamPort port;
-    auto& wire = open_test_port(port);
+    port.set_single_threaded(single_threaded);
+    open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
     std::atomic<uint64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
@@ -659,11 +660,26 @@ TEST(talker_port, a_raw_frame_is_rendered_in_the_ports_frame)
         return true;
     };
     EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 1200, 0x2'0000'1000ULL, 12, render));
-    EXPECT_EQ(rendered.size(), size_t{12 * 8 * 4});
-    EXPECT_TRUE(wire.holds(rendered));
-    auto const sent = wire.pop_tx();
-    EXPECT_TRUE(sent.has_value() && sent->frame.size() == VLAN_HEADER_LENGTH + avtp::AafPdu::HEADER_LENGTH + rendered.size());
     EXPECT_EQ(talker.slot_for(0)->tx_packets, uint64_t{1});
+    auto const sent = port.test_port()->pop_tx();
+    EXPECT_TRUE(sent.has_value() && sent->frame.size() == VLAN_HEADER_LENGTH + avtp::AafPdu::HEADER_LENGTH + rendered.size());
+    return rendered;
+}
+
+}  // namespace
+
+// On a port one thread drives, a raw AAF frame is rendered straight into the port's slot behind
+// the header; on a serialized one it is rendered outside the guard, then copied into the slot.
+TEST(talker_port, a_single_threaded_port_renders_in_the_slot)
+{
+    avb_entity::StreamPort single;
+    auto const in_place = rendered_span(single, true);
+    EXPECT_EQ(in_place.size(), size_t{12 * 8 * 4});
+    EXPECT_TRUE(single.test_port()->holds(in_place));
+    avb_entity::StreamPort shared;
+    auto const staged = rendered_span(shared, false);
+    EXPECT_EQ(staged.size(), size_t{12 * 8 * 4});
+    EXPECT_FALSE(shared.test_port()->holds(staged));
 }
 
 // A frame sent by destination alone is the tagged frame around the payload, untimed and
