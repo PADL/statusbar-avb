@@ -47,14 +47,12 @@ class MaapAddressAcquirer
     /// fires on the reactor thread each time the block is (re)defended and
     /// every dest MAC has been published — entities re-declare their MSRP
     /// Talker Advertise there so listeners reserve against the MAAP
-    /// address, told the reactor time it fires at. @p on_addresses_lost fires
-    /// on the reactor thread when a conflict takes the block (Milan v1.2 Table
-    /// 5.3: the talkers withdraw their Talker attributes), after each stream's
-    /// ACMP destination address has been zeroed ("When invalid, the Stream
-    /// Destination MAC Address is set to zero"). Call once from start() in
+    /// address, told the reactor time it fires at. Call once from start() in
     /// "maap" address mode; in static mode simply never call it (ready()
     /// defaults true). @p now is the control-plane time the acquisition
     /// starts at: a setup edge, read once here unless the caller holds it.
+    /// @p on_addresses_lost: a conflict took the block, each stream's ACMP destination
+    /// address zeroed first (Milan v1.2 Table 5.3). Reactor thread.
     [[nodiscard]] auto acquire(
         net::MessageReactor& reactor,
         std::string_view const interface_name,
