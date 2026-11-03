@@ -119,7 +119,7 @@ auto mqprio_for(QueueLayout const& layout, uint16_t const major, uint8_t const c
     q.offset[CLASS_B_TC] = layout.class_b_queue;
     q.count[CLASS_A_TC] = 1;
     q.offset[CLASS_A_TC] = layout.class_a_queue;
-    q.hw = false;
+    q.offload = false;
     return q;
 }
 #endif
@@ -129,6 +129,14 @@ auto mqprio_for(QueueLayout const& layout, uint16_t const major, uint8_t const c
 // ---------------------------------------------------------------------------
 
 namespace {
+
+/// Whether a root the kernel reported lays the queues out as @p wanted does.
+[[nodiscard]] auto same_layout(net::tc::MqprioQdisc const& reported, net::tc::MqprioQdisc const& wanted) noexcept -> bool
+{
+    return reported.num_tc == wanted.num_tc && reported.prio_tc_map == wanted.prio_tc_map && reported.count == wanted.count &&
+        reported.offset == wanted.offset;
+}
+
 
 /// ceil(n / d) for d > 0 (C++ division truncates toward zero, which is the
 /// ceiling for a negative quotient).
@@ -268,7 +276,7 @@ auto ShaperQdiscs::install(
     // children and reset igb/igc. The first program() changes its cbs in place.
     bool reuse = false;
     if (auto const current = tc_.get(ifindex, net::tc::ROOT)) {
-        reuse = current->handle == root && current->mqprio.has_value() && *current->mqprio == mqprio;
+        reuse = current->handle == root && current->has_mqprio_params && same_layout(current->mqprio, mqprio);
     }
     if (!reuse) {
         auto replaced = tc_.replace_mqprio(ifindex, mqprio);
