@@ -8,13 +8,13 @@ CAP_NET_ADMIN, Linux and a NIC with at least 3 TX queues. The rtnetlink
 requests are `net::tc::TcClient` (`core/statusbar/net/net_tc_qdisc.hpp`).
 
 The shaper itself is `avb_entity::PortShaper`: one interface, its driver and
-link speed, and the class A TSpecs its user gives with `program()`; it knows
-no entity. `EntityShaper` is the kit's adapter over it: it programs the TSpecs
+link speed, and the class A and class B TSpecs its user gives with
+`program()` (a class given none keeps its placeholder); it knows no entity. `EntityShaper` is the kit's adapter over it: it programs the TSpecs
 of the kit's admitted talker streams (below, "Admission"), uses the kit's
 `stream_pcp` as class A's priority, and hands the link speed back for the kit's
 class A budget. A talker without the kit (a `nanoavb::SrpPort` user) drives a
-`PortShaper` directly with the TSpecs of every stream that may send on class
-A's queue.
+`PortShaper` directly with the TSpecs of every stream that may send on its
+class's queue.
 
 ## Why bypass + mqprio + SO_PRIORITY works
 
@@ -109,6 +109,13 @@ until streams are admitted (`class_a_targets`, `CLASS_A_PLACEHOLDER_PERCENT`):
 room for several streams in the moment before admission resizes it. A root laid by a
 two-class run has another map and is replaced with its cbs, as a changed
 layout is (the last row: one or two resets, once).
+`ShaperConfig::classes` (`SrClasses`) says which classes a port runs: `a` (the
+default, Milan), `b` or `both`. A class not run has its PCP on the legacy TC and
+no cbs. A port running class B alone mirrors the class-A-only port: class B's
+cbs from its streams (Annex L, L-11, no class A interfering), or a placeholder
+at 10% (`class_b_targets`, `CLASS_B_PLACEHOLDER_PERCENT`); on igb/igc class B
+takes queue 0 (`make_queue_layout(..., SrClasses::b)`), as igc takes queue 1's
+cbs only after queue 0's. `both` keeps `cbs_targets()`' shared placeholders.
 The table is for a port that shapes both classes:
 
 | Event | Requests | Resets (igb) |

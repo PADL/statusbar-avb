@@ -59,20 +59,31 @@ auto make_error_code(ShaperError const e) noexcept -> std::error_code
 
 namespace {
 
-/// The SR class A and B queues of @p tx_queues: the override's, else the driver's;
-/// in a layout without its legacy range yet.
-[[nodiscard]] auto class_queues(std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override)
+/// The driver's SR class A and B queues of @p tx_queues: on igb/igc 0 and 1, or 1 and 0 with class B alone
+/// (igc shapes queue 1 only after queue 0); else the top two, class A's highest.
+[[nodiscard]] auto driver_class_queues(std::string_view const driver, uint16_t const tx_queues, SrClasses const classes) noexcept
+    -> std::pair<uint16_t, uint16_t>
+{
+    if (!is_intel_qav_driver(driver)) {
+        return {static_cast<uint16_t>(tx_queues - 1), static_cast<uint16_t>(tx_queues - 2)};
+    }
+    return classes == SrClasses::b ? std::pair<uint16_t, uint16_t>{1, 0} : std::pair<uint16_t, uint16_t>{0, 1};
+}
+
+/// The SR class A and B queues of @p tx_queues: the override's, else the driver's; in a layout without its
+/// legacy range yet.
+[[nodiscard]] auto class_queues(
+    std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override, SrClasses const classes)
     -> StatusValue<QueueLayout>
 {
-    bool const intel = is_intel_qav_driver(driver);
-    uint16_t const a = override.class_a.value_or(intel ? uint16_t{0} : static_cast<uint16_t>(tx_queues - 1));
-    uint16_t const b = override.class_b.value_or(intel ? uint16_t{1} : static_cast<uint16_t>(tx_queues - 2));
+    auto const [driver_a, driver_b] = driver_class_queues(driver, tx_queues, classes);
+    uint16_t const a = override.class_a.value_or(driver_a);
+    uint16_t const b = override.class_b.value_or(driver_b);
     if (a >= tx_queues || b >= tx_queues || a == b) {
         return failure(ShaperError::bad_queue_override);
     }
-    // On igb/igc queue 0 outranks queue 1, and igc takes queue 1's cbs only
-    // after queue 0's: class A on 1 with class B on 0 cannot be shaped.
-    if (intel && a == 1 && b == 0) {
+    // igc shapes queue 1 only after queue 0, and queue 0 outranks it: class B below class A there, or alone.
+    if (is_intel_qav_driver(driver) && (classes == SrClasses::b ? b != 0 : a == 1 && b == 0)) {
         return failure(ShaperError::bad_queue_override);
     }
     return QueueLayout{.queue_count = tx_queues, .class_a_queue = a, .class_b_queue = b};
@@ -122,13 +133,14 @@ namespace {
 
 }  // namespace
 
-auto make_queue_layout(std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override)
+auto make_queue_layout(
+    std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override, SrClasses const classes)
     -> StatusValue<QueueLayout>
 {
     if (tx_queues < MIN_AVB_TX_QUEUES) {
         return failure(ShaperError::not_avb_capable);
     }
-    auto const layout = class_queues(driver, tx_queues, override);
+    auto const layout = class_queues(driver, tx_queues, override, classes);
     if (!layout) {
         return forward_failure(layout);
     }
@@ -182,7 +194,7 @@ auto mqprio_for(
     uint8_t const class_a_pcp,
     uint8_t const class_b_pcp,
     uint8_t const ptp_priority,
-    bool const class_b) noexcept -> StatusValue<net::tc::MqprioQdisc>
+    SrClasses const classes) noexcept -> StatusValue<net::tc::MqprioQdisc>
 {  // NOLINT(statusbar-block-statements): one line per mqprio field
     auto const status =
         layout.ptp_queue ? validate_priorities(class_a_pcp, class_b_pcp, ptp_priority) : validate_pcps(class_a_pcp, class_b_pcp);
@@ -193,8 +205,8 @@ auto mqprio_for(
     q.major = major;
     q.num_tc = 3;
     q.prio_tc_map.fill(LEGACY_TC);
-    q.prio_tc_map[class_b_pcp] = class_b ? CLASS_B_TC : LEGACY_TC;
-    q.prio_tc_map[class_a_pcp] = CLASS_A_TC;
+    q.prio_tc_map[class_b_pcp] = runs_class_b(classes) ? CLASS_B_TC : LEGACY_TC;
+    q.prio_tc_map[class_a_pcp] = runs_class_a(classes) ? CLASS_A_TC : LEGACY_TC;
     q.count[LEGACY_TC] = layout.legacy_count;
     q.offset[LEGACY_TC] = layout.legacy_offset;
     q.count[CLASS_B_TC] = 1;
@@ -350,6 +362,33 @@ auto class_a_targets(
     return CbsTargets{.class_a = a.empty() ? placeholder_cbs(link_kbps, max_interfering_frame, placeholder) : a};
 }
 
+auto class_b_targets(
+    std::span<TSpec const> const class_b_streams, uint32_t const link_kbps, uint32_t const max_interfering_frame) noexcept
+    -> CbsTargets
+{
+    auto const b = class_b_cbs(class_b_streams, CbsParameters{}, link_kbps, max_interfering_frame);
+    int64_t const placeholder = int64_t{link_kbps} * CLASS_B_PLACEHOLDER_PERCENT / 100;
+    return CbsTargets{.class_b = b.empty() ? placeholder_cbs(link_kbps, max_interfering_frame, placeholder) : b};
+}
+
+auto port_targets(
+    SrClasses const classes,
+    std::span<TSpec const> const class_a_streams,
+    std::span<TSpec const> const class_b_streams,
+    uint32_t const link_kbps,
+    uint32_t const max_interfering_frame) noexcept -> CbsTargets
+{
+    switch (classes) {
+        case SrClasses::a:
+            return class_a_targets(class_a_streams, link_kbps, max_interfering_frame);
+        case SrClasses::b:
+            return class_b_targets(class_b_streams, link_kbps, max_interfering_frame);
+        case SrClasses::both:
+            break;
+    }
+    return cbs_targets(class_a_streams, class_b_streams, link_kbps, max_interfering_frame);
+}
+
 #if defined(__linux__)
 
 //
@@ -379,7 +418,8 @@ auto ShaperQdiscs::install(
     ifindex_ = ifindex;
     major_ = mqprio.major;
     layout_ = layout;
-    class_b_mapped_ = std::ranges::find(mqprio.prio_tc_map, CLASS_B_TC) != mqprio.prio_tc_map.end();
+    class_a_mapped_ = std::ranges::contains(mqprio.prio_tc_map, CLASS_A_TC);
+    class_b_mapped_ = std::ranges::contains(mqprio.prio_tc_map, CLASS_B_TC);
     installed_ = true;
     reused_ = *reused;
     cbs_refused_a_ = cbs_refused_b_ = false;
@@ -676,7 +716,7 @@ void ShaperQdiscs::remove_cbs()
     // whatever was recorded, grafting the default qdisc (deleting an mqprio child leaves
     // noop_qdisc). See docs/SHAPER.md.
     for (uint16_t const queue : {layout_.class_b_queue, layout_.class_a_queue}) {
-        if (queue == layout_.class_b_queue && !class_b_mapped_) {
+        if (queue == layout_.class_b_queue ? !class_b_mapped_ : !class_a_mapped_) {
             continue;  // nothing maps to it, so no cbs went there
         }
         if (auto status = tc_.replace_kind(ifindex_, parent_of(queue), "pfifo_fast"); !status) {
@@ -742,8 +782,8 @@ void PortShaper::shutdown()
 
 void PortShaper::park()
 {
-    // Leave the root and class A's cbs for the next install(), parked at its
-    // placeholder: no stream is ours any more, and taking the last cbs away
+    // Leave the root and the cbs for the next install(), parked at the
+    // placeholders: no stream is ours any more, and taking the last cbs away
     // would reset an igb/igc adapter now and again at the next start.
     (void)qdiscs_.program(targets(false), link_mbps());  // logged
     qdiscs_.release();
@@ -803,7 +843,7 @@ auto PortShaper::install(ShaperPort const& port) -> Status
     if (qdiscs_.installed()) {
         return success();
     }
-    auto const layout = make_queue_layout(port.driver, port.tx_queues, config_.queues);
+    auto const layout = make_queue_layout(port.driver, port.tx_queues, config_.queues, config_.classes);
     if (!layout) {
         return failure(layout.error());
     }
@@ -816,8 +856,9 @@ auto PortShaper::install(ShaperPort const& port) -> Status
 
 auto PortShaper::install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status
 {
-    // Class A only (Milan): class B's PCP rides the legacy TC, so its queue carries nothing.
-    auto const mqprio = mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP, config_.ptp_priority, false);
+    // A class the port does not run (Milan: class B) has its PCP on the legacy TC, so its queue carries nothing.
+    auto const mqprio =
+        mqprio_for(layout, config_.qdisc_major, class_a_pcp_, DEFAULT_CLASS_B_PCP, config_.ptp_priority, config_.classes);
     if (!mqprio) {
         return failure(mqprio.error());
     }
@@ -861,15 +902,42 @@ void PortShaper::adopt(std::string driver, QueueLayout const& layout)
     }
 }
 
-auto PortShaper::program(std::span<TSpec const> const class_a) noexcept -> Status
+namespace {
+
+/// @p streams into @p out, those of one MaxFrameSize folded into one (MaxIntervalFrames summed); false when
+/// they have more frame sizes than @p out holds.
+[[nodiscard]] auto fold_tspecs(std::span<TSpec const> const streams, PortShaper::StreamTSpecs& out) noexcept -> bool
 {
-    if (class_a.size() > MAX_PORT_SHAPER_STREAMS) {
+    for (auto const& tspec : streams) {
+        auto* const same = std::ranges::find(out, tspec.max_frame_size, &TSpec::max_frame_size);
+        if (same != out.end()) {
+            same->max_interval_frames = static_cast<uint16_t>(same->max_interval_frames + tspec.max_interval_frames);
+        } else if (out.try_push_back(tspec) == nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+auto PortShaper::program(std::span<TSpec const> const class_a, std::span<TSpec const> const class_b) noexcept -> Status
+{
+    StreamTSpecs folded_a;
+    StreamTSpecs folded_b;
+    if (!fold_tspecs(class_a, folded_a) || !fold_tspecs(class_b, folded_b)) {
         return failure(make_error_code(ShaperError::too_many_streams));
     }
-    class_a_streams_.assign(class_a.begin(), class_a.end());
+    assign_streams(folded_a, folded_b);
+    return success();
+}
+
+void PortShaper::assign_streams(StreamTSpecs const& class_a, StreamTSpecs const& class_b) noexcept
+{
+    class_a_streams_ = class_a;
+    class_b_streams_ = class_b;
     dirty_ = true;
     retry_at_ns_ = 0;  // a new set goes out at once
-    return success();
 }
 
 void PortShaper::set_launch_time(LaunchTimeMode const mode) noexcept
@@ -928,11 +996,12 @@ auto PortShaper::refresh_link_speed() -> bool
 
 auto PortShaper::targets(bool const streams) -> CbsTargets
 {
-    // Class A only (Milan): no cbs on class B's queue, which nothing maps to.
+    // Each class the port runs: its streams' cbs, or with none its placeholder; a class it does not run, none.
     uint32_t const mbps = link_mbps();
     programmed_link_mbps_ = mbps;
     std::span<TSpec const> const class_a = streams ? std::span<TSpec const>{class_a_streams_} : std::span<TSpec const>{};
-    return class_a_targets(class_a, mbps * 1000U, mtu_);
+    std::span<TSpec const> const class_b = streams ? std::span<TSpec const>{class_b_streams_} : std::span<TSpec const>{};
+    return port_targets(config_.classes, class_a, class_b, mbps * 1000U, mtu_);
 }
 
 auto PortShaper::reprogram() -> Status
