@@ -558,10 +558,11 @@ void PtpManagementClient::publish_if_changed()
         state_.peer_mean_path_delay_ns == reported_peer_delay_ns_ && state_.port_state == reported_port_state_ &&
         state_.port_states == reported_port_states_ && state_.delay_mechanism == reported_delay_mechanism_ &&
         state_.grandmaster_settings == reported_settings_ && state_.refused == reported_refused_ &&
-        state_.subscribed == reported_subscribed_) {
+        state_.subscribed == reported_subscribed_ && state_.time_properties == reported_time_properties_) {
         return;
     }
     reported_settings_ = state_.grandmaster_settings;
+    reported_time_properties_ = state_.time_properties;
     reported_refused_ = state_.refused;
     reported_subscribed_ = state_.subscribed;
     reported_status_ = state_.status;
