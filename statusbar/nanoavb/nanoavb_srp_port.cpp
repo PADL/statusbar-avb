@@ -18,7 +18,7 @@ SrpPort::SrpPort(SrpPortConfig config)
     , mvrp_{config_.mvrp}
     , msrp_{config_.msrp}
 {
-    msrp_.set_domain(config_.class_a);
+    msrp_.set_domain(config_.domain);
     msrp_.set_listener_waits_for_talker(true);
     wire();
 }
@@ -171,9 +171,22 @@ void SrpPort::withdraw_all(TimePoint const now)
     mvrp_.transmit(now);
 }
 
+void SrpPort::rejoin(TimePoint const now)
+{
+    msrp_.rejoin(now);
+    mvrp_.leave_all(now);
+    flush();
+}
+
+void SrpPort::leave_all(TimePoint const now)
+{
+    msrp_.leave_all(now);
+    mvrp_.leave_all(now);
+}
+
 auto SrpPort::peer_domain_registered() const noexcept -> bool
 {
-    return peer_class_a_ && peer_priority_ == domain().sr_class_priority;
+    return peer_class_ && peer_priority_ == domain().sr_class_priority;
 }
 
 auto SrpPort::find_registered_talker_advertise(Eui48 const& destination, uint16_t const vid) const noexcept
@@ -204,17 +217,17 @@ void SrpPort::on_vid_changed(uint16_t const old_vid, uint16_t const new_vid, Tim
 
 void SrpPort::on_peer_domain_declared(statusbar::srp::msrp::DomainFirstValue const& fv) noexcept
 {
-    if (fv.sr_class_id.get() == statusbar::srp::msrp::SR_CLASS_A) {
+    if (fv.sr_class_id.get() == domain().sr_class_id) {
         peer_priority_ = fv.sr_class_priority.get();
     }
 }
 
 void SrpPort::on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv, bool const registered) noexcept
 {
-    if (fv.sr_class_id.get() != statusbar::srp::msrp::SR_CLASS_A) {
+    if (fv.sr_class_id.get() != domain().sr_class_id) {
         return;
     }
-    peer_class_a_ = registered;
+    peer_class_ = registered;
     if (!registered) {
         peer_priority_.reset();
     }
