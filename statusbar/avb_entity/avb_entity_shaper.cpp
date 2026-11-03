@@ -372,6 +372,7 @@ auto ShaperQdiscs::install(
     installed_ = true;
     reused_ = *reused;
     cbs_refused_a_ = cbs_refused_b_ = false;
+    cbs_major_a_ = cbs_major_b_ = 0;
     class_a_ = {};
     class_b_ = {};
     etf_a_ = {};
@@ -505,12 +506,8 @@ auto ShaperQdiscs::etf_slot(uint16_t const queue, bool const under_cbs) -> Statu
             return EtfSlot{.parent = parent_of(queue), .child = std::move(child), .on_class = true};
         });
     }
-    auto const cbs = tc_.get(ifindex_, parent_of(queue));
-    if (!cbs) {
-        return failure(cbs.error());
-    }
-    // cbs has one class, major:1 (sch_cbs.c); the kernel numbered the cbs itself.
-    uint32_t const parent = net::tc::make_handle(static_cast<uint16_t>(cbs->handle >> 16U), 1);
+    // cbs has one class, major:1 (sch_cbs.c), under the handle our cbs was sent with.
+    uint32_t const parent = net::tc::make_handle(cbs_major(queue), 1);
     return child_of(parent).transform(
         [&](std::optional<net::tc::QdiscInfo> child) { return EtfSlot{.parent = parent, .child = std::move(child)}; });
 }
@@ -559,18 +556,7 @@ auto ShaperQdiscs::program_one(
     if (params == current || params.empty()) {
         return success();
     }
-    // Always a replace: a change in place on a cbs, a graft on the default qdisc (which resets
-    // igb/igc only when it is the first cbs). See docs/SHAPER.md.
-    auto status = tc_.replace_cbs(
-        ifindex_,
-        net::tc::CbsQdisc{
-            .parent = parent_of(queue),
-            .offload = true,
-            .hicredit = params.hicredit,
-            .locredit = params.locredit,
-            .idleslope_kbps = params.idleslope_kbps,
-            .sendslope_kbps = params.sendslope_kbps,
-        });
+    auto status = replace_class_cbs(queue, params);
     if (!status) {
         if (status.error() == std::errc::operation_not_supported || status.error() == std::errc::invalid_argument) {
             // No cbs offload on this queue (EOPNOTSUPP; igc answers EINVAL above queue 1). A software cbs
@@ -628,9 +614,54 @@ void ShaperQdiscs::clear_root_classes(int const ifindex, net::tc::QdiscInfo cons
     }
 }
 
+auto ShaperQdiscs::replace_class_cbs(uint16_t const queue, CbsParameters const& params) -> Status
+{
+    // Always a replace: a change in place on our cbs, a graft on the default qdisc (which resets
+    // igb/igc only when it is the first cbs). See docs/SHAPER.md.
+    return tc_.replace_cbs(
+        ifindex_,
+        net::tc::CbsQdisc{
+            .parent = parent_of(queue),
+            .offload = true,
+            .hicredit = params.hicredit,
+            .locredit = params.locredit,
+            .idleslope_kbps = params.idleslope_kbps,
+            .sendslope_kbps = params.sendslope_kbps,
+            .handle_major = cbs_major(queue),
+        });
+}
+
+auto ShaperQdiscs::cbs_major(uint16_t const queue) -> uint16_t
+{
+    auto& major = queue == layout_.class_a_queue ? cbs_major_a_ : cbs_major_b_;
+    if (major == 0) {
+        major = kept_cbs_major(queue).value_or(new_cbs_major(queue));
+    }
+    return major;
+}
+
+auto ShaperQdiscs::kept_cbs_major(uint16_t const queue) -> std::optional<uint16_t>
+{
+    // A kept root's cbs is changed in place by its own handle (no graft, no igc reset). A failed
+    // lookup gives a new handle: a graft at worst, never a refusal.
+    auto const child = reused_ ? child_of(parent_of(queue)) : StatusValue<std::optional<net::tc::QdiscInfo>>{};
+    if (!child || !*child || (*child)->kind_name() != "cbs") {
+        return std::nullopt;
+    }
+    return net::tc::handle_major((*child)->handle);
+}
+
+auto ShaperQdiscs::new_cbs_major(uint16_t const queue) const noexcept -> uint16_t
+{
+    // The root's major plus one plus the queue, below it instead where that would reach ffff:
+    // (the ingress handle).
+    unsigned const above = major_ + 1U + queue;
+    return static_cast<uint16_t>(above < 0xFFFFU ? above : major_ - 1U - queue);
+}
+
 void ShaperQdiscs::remove_cbs()
 {
-    // Class B's queue first (igc refuses to drop class A's cbs while B's is on), both queues
+    // Class B's queue first (an igc without the fix refuses to drop class A's cbs while B's is on), both queues
     // whatever was recorded, grafting the default qdisc (deleting an mqprio child leaves
     // noop_qdisc). See docs/SHAPER.md.
     for (uint16_t const queue : {layout_.class_b_queue, layout_.class_a_queue}) {
@@ -640,6 +671,7 @@ void ShaperQdiscs::remove_cbs()
     }
     class_a_ = {};
     class_b_ = {};
+    cbs_major_a_ = cbs_major_b_ = 0;
     etf_a_ = {};
 }
 
