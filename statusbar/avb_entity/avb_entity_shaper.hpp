@@ -118,15 +118,16 @@ inline constexpr uint8_t PTP_TC = 3;
     uint8_t class_a_pcp, uint8_t class_b_pcp, uint8_t ptp_priority = DEFAULT_PTP_PRIORITY) noexcept -> Status;
 
 #if defined(__linux__)
-/// The mqprio root for @p layout with handle @p major:0, hw 0: @p class_a_pcp and @p class_b_pcp on their
-/// SR classes' TCs, @p ptp_priority on PTP_TC when the layout has a PTP queue (num_tc 4, else 3, the PTP
-/// priority unchecked), every other priority on TC0. Errors: ShaperError::bad_priority.
+/// The mqprio root for @p layout, handle @p major:0, hw 0: each SR class's PCP on its TC (@p class_b false:
+/// class B's on TC0, its queue idle), @p ptp_priority on PTP_TC with a PTP queue (num_tc 4, else 3), the
+/// rest on TC0. Errors: ShaperError::bad_priority.
 [[nodiscard]] auto mqprio_for(
     QueueLayout const& layout,
     uint16_t major,
     uint8_t class_a_pcp = DEFAULT_CLASS_A_PCP,
     uint8_t class_b_pcp = DEFAULT_CLASS_B_PCP,
-    uint8_t ptp_priority = DEFAULT_PTP_PRIORITY) noexcept -> StatusValue<net::tc::MqprioQdisc>;
+    uint8_t ptp_priority = DEFAULT_PTP_PRIORITY,
+    bool class_b = true) noexcept -> StatusValue<net::tc::MqprioQdisc>;
 #endif
 
 //
@@ -223,6 +224,14 @@ struct CbsTargets
     uint32_t link_kbps,
     uint32_t max_interfering_frame) noexcept -> CbsTargets;
 
+/// A class-A-only port's placeholder idleSlope while nothing is admitted, in percent of the link.
+inline constexpr int64_t CLASS_A_PLACEHOLDER_PERCENT = 10;
+
+/// cbs_targets() for a port that runs class A only (Milan): class A's admitted streams, or with none a
+/// placeholder at CLASS_A_PLACEHOLDER_PERCENT; class B empty, so ShaperQdiscs leaves its queue alone.
+[[nodiscard]] auto class_a_targets(
+    std::span<TSpec const> class_a_streams, uint32_t link_kbps, uint32_t max_interfering_frame) noexcept -> CbsTargets;
+
 //
 // Launch time: an offloaded etf on class A's queue (tc-etf(8); net_tc_launch_time.hpp)
 //
@@ -253,8 +262,8 @@ class ShaperQdiscs
     [[nodiscard]] auto install(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, QueueLayout const& layout)
         -> Status;
     /// Put @p targets on the SR-class queues, class A's first, each only when changed; always a cbs
-    /// replace. A class's refusal (EOPNOTSUPP, EINVAL) is logged once and ends its requests, not an
-    /// error. Errors: the first other netlink failure (each is logged).
+    /// replace; an empty class's queue is left as it is. A refusal (EOPNOTSUPP, EINVAL) is logged once and
+    /// ends that class's requests, not an error. Errors: the first other netlink failure (each is logged).
     [[nodiscard]] auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
     /// etf on class A's queue as @p mode says, from the next program() on, settled once per install()
     /// and again after each change of mode: under our cbs, or on the mqprio class with no cbs offload;
@@ -356,6 +365,7 @@ class ShaperQdiscs
     bool reused_{false};
     bool cbs_refused_a_{false};  ///< class A's cbs refused (EOPNOTSUPP): no class is programmed
     bool cbs_refused_b_{false};  ///< class B's alone refused: class A's is still programmed
+    bool class_b_mapped_{true};  ///< some priority maps to class B's TC (else its queue carries nothing)
     CbsParameters class_a_{};
     CbsParameters class_b_{};
     uint16_t cbs_major_a_{0};  ///< class A's cbs handle major (cbs_major()); 0 until chosen
@@ -383,7 +393,7 @@ struct ShaperConfig
     /// The link speed assumed while the kernel has never reported one.
     uint32_t fallback_link_mbps{1000};
     /// shutdown() removes the mqprio and its cbs (an adapter reset on igb/igc). false (the default)
-    /// parks both cbs at their placeholders for the next install() to keep.
+    /// parks class A's cbs at its placeholder for the next install() to keep.
     bool restore_qdisc{false};
     /// etf on class A's queue, under its cbs or alone (launch_time_mode()): on only with the streams on an
     /// AF_XDP socket there carrying launch times, as etf drops AF_PACKET frames; off removes a leftover one.
@@ -441,7 +451,7 @@ class PortShaper final : public net::Pollable
     /// Program the cbs for the TSpecs given and the current link speed now. A no-op success before
     /// install(). Errors: the first netlink failure (each is logged).
     [[nodiscard]] auto reprogram() -> Status;
-    /// Take both cbs away and delete the mqprio root. A no-op success when not installed.
+    /// Take the cbs away and delete the mqprio root. A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
     /// uninstall() if config.restore_qdisc, else program the placeholders and leave the qdiscs in
     /// place (failures are logged). Idempotent.
@@ -474,11 +484,11 @@ class PortShaper final : public net::Pollable
     static constexpr int64_t RETRY_MAX_NS = 32'000'000'000;
 
   private:
-    /// cbs_targets() for the TSpecs given (@p streams false: none) at the current link speed.
+    /// class_a_targets() for the TSpecs given (@p streams false: none) at the current link speed.
     [[nodiscard]] auto targets(bool streams) -> CbsTargets;
     /// Read the link speed; true if the speed the shaper sizes against changed.
     [[nodiscard]] auto refresh_link_speed() -> bool;
-    /// Park both cbs at the placeholders and leave the qdiscs for the next start (logged).
+    /// Park class A's cbs at its placeholder and leave the qdiscs for the next start (logged).
     void park();
     /// Open the tc client (our own) and install the mqprio root for @p layout on @p port.
     [[nodiscard]] auto install_layout(ShaperPort const& port, QueueLayout const& layout) -> Status;
@@ -535,7 +545,7 @@ class EntityShaper final : public net::Pollable
     /// current link speed. A no-op success before install(). Errors: the
     /// first netlink failure (each is logged).
     [[nodiscard]] auto reprogram() -> Status;
-    /// Unregister the admission hook, take both cbs away and delete the
+    /// Unregister the admission hook, take the cbs away and delete the
     /// mqprio root. A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
     /// Unregister the admission hook, then PortShaper::shutdown(). Idempotent.

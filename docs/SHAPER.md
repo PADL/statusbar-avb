@@ -32,7 +32,8 @@ it although they never meet mqprio itself. The shaper therefore:
 
 1. replaces the root with mqprio, 3 traffic classes: TC0 legacy, TC1 class B,
    TC2 class A; priority 3 (class A's PCP) maps to TC2, priority 2 (class B's)
-   to TC1, every other priority to TC0; one TX queue per SR class, the rest
+   to TC1 where the port runs class B (`PortShaper`, class A only, maps it to
+   TC0 and leaves TC1's queue idle), every other priority to TC0; one TX queue per SR class, the rest
    to TC0. With two legacy queues or more a fourth class, TC3, takes PTP event
    traffic on a queue of its own (see "PTP event traffic's queue");
 2. relies on the stream TX socket's `SO_PRIORITY` being the class A PCP:
@@ -42,8 +43,8 @@ it although they never meet mqprio itself. The shaper therefore:
    class A on that same PCP (`kit.config().stream_pcp`) and class B on the
    802.1Q default 2, and refuses a PCP of 8 or more or one PCP for both
    (`ShaperError::bad_priority`);
-3. keeps an offloaded cbs on both SR-class queues (`parent <major>:<queue + 1>`)
-   from install on: class A's idleSlope is the sum of the admitted streams'
+3. keeps an offloaded cbs on each SR-class queue in use (`parent <major>:<queue + 1>`;
+   class A's alone on a class-A-only port) from install on: class A's idleSlope is the sum of the admitted streams'
    reservations, and a class with none admitted holds a placeholder (see
    "Adapter resets" below). Admission only changes the parameters in place.
    Each cbs has a handle of its own, chosen once per install: on a kept root
@@ -99,8 +100,16 @@ qdisc it grafts the cbs, which enables the transmit mode only when no other
 cbs is there yet. Class A's goes first, since igc refuses a class B cbs before
 class A's.
 
-So the shaper puts a cbs on both class queues at install and never takes the
-last one away while running:
+So the shaper keeps a cbs on an SR-class queue from install on and never takes
+the last one away while running; one is enough to hold the transmit mode. A
+port that runs class A only (Milan; `PortShaper`) maps class B's PCP to the
+legacy TC (`mqprio_for(..., class_b = false)`), so class B's queue carries
+nothing and gets no cbs; class A's holds a placeholder at 10% of the link
+until streams are admitted (`class_a_targets`, `CLASS_A_PLACEHOLDER_PERCENT`):
+room for several streams in the moment before admission resizes it. A root laid by a
+two-class run has another map and is replaced with its cbs, as a changed
+layout is (the last row: one or two resets, once).
+The table is for a port that shapes both classes:
 
 | Event | Requests | Resets (igb) |
 | --- | --- | --- |
@@ -125,7 +134,8 @@ and an AVB port with no address carries no such IP traffic, so usually
 nothing reaches class B. A small idleSlope would cap that traffic at a trickle; instead the
 placeholders share what the admitted streams leave of the SR budget, 75% of
 the link (802.1Q 34.3.1's default deltaBandwidth): all of it for the one
-empty class, half each when both are empty, with Annex L credits for an MTU
+empty class, half each when both are empty (a class-A-only port instead
+holds class A's at 10%, see above), with Annex L credits for an MTU
 frame (1 Gbit/s, MTU 1500, nothing admitted: each idleslope 375000, sendslope
 -625000, hicredit 579, locredit -963). So the two SR queues together never
 claim more than 75% and legacy traffic keeps a quarter of the link even with
@@ -234,7 +244,7 @@ changes costs one reprogramming and a renegotiated link is corrected within a
 second. `EntityShaper::tick()` also recomputes the admitted streams' TSpecs and
 gives them to the `PortShaper` when they changed: with the gate off a stopped,
 still admitted output may change format. `shutdown()` unregisters the hook and, when `restore_qdisc` is set,
-uninstalls; otherwise (the default) it parks both cbs at their placeholders
+uninstalls; otherwise (the default) it parks the cbs at their placeholders
 and leaves the qdiscs for the next start. The destructor unregisters too. The
 kit must outlive the shaper. The requests themselves are `ShaperQdiscs`, over
 `net::tc::TcControl`; its tests record them, and a `PortShaper` built over a
