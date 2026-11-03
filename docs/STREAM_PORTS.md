@@ -18,17 +18,27 @@ receive only when the backend says the two are not independent.
 
 ## Transmit
 
-A raw transmit (`transmit_aaf_raw`, `transmit_am824_raw`, `transmit_crf_raw`)
-claims a TX slot (`tx_start`) first, writes the tagged header into it, then
-serializes the AVTPDU straight after the header and commits it, all under one
-guard. A serialize that yields nothing gives the slot back (`tx_cancel`); its
-launch time has then still advanced the port's order. On a ring backend the
-payload is so written once, into the frame the NIC sends. The float paths and
-`send_stream_frame()` still build the AVTPDU in the talker's own buffer and
-copy it into the slot (`build_stream_frame`). `flush_tx()` once per
-media tick kicks the ring backends and ends the port's cycle; with an external
-kick (`set_external_kick`) the kicker thread calls `kick_tx()` and `flush_tx()`
-only ends the cycle. It fails with the kick's error, else the cycle's.
+Every transmit (`transmit_aaf_raw`, `transmit_am824_raw`, `transmit_crf_raw` and the
+float `transmit_aaf`, `transmit_am824`) goes through one path,
+`send_serialized()`:
+
+- **A port only one thread drives** (rawnet, or `set_single_threaded()`):
+  - the talker claims a TX slot (`tx_start`) untimed, writes the tagged header
+    into it, and renders the AVTPDU straight after the header;
+  - the launch time is stamped at the commit (`StreamPort::stamp_launch_time`),
+    so a frame never committed holds no place in the launch order;
+  - a render that yields nothing gives the slot back (`tx_cancel`);
+  - on a ring backend the payload is so written once, into the frame the NIC
+    sends.
+- **A serialized port:** the talker renders into its own buffer outside the
+  guard, then claims the slot with its launch time, copies the frame in and
+  commits it under the guard (`build_stream_frame`). The listener's drain
+  never waits on a render.
+
+`send_stream_frame()` follows that second path. `flush_tx()` once per media tick
+kicks the ring backends and ends the port's cycle; with an external kick
+(`set_external_kick`) the kicker thread calls `kick_tx()` and `flush_tx()` only
+ends the cycle. It fails with the kick's error, else the cycle's.
 
 ## Receive
 
@@ -37,7 +47,8 @@ serialized port each frame is copied out under the guard and decoded outside
 it, so a transmitting thread never waits on a decode. An unserialized port
 decodes each frame where the port holds it, then releases it: rawnet, whose two
 sides share nothing, and a port whose host drives both sides from one thread
-(`set_single_threaded()`, while neither side runs). Multicast membership may
+(`set_single_threaded()`, before the port opens; `AvbEntityKit::rx_to_reactor()`
+then refuses to move RX to the reactor). Multicast membership may
 still change from the reactor. Each backend's join is a socket call that does
 not touch the rings, and the test port expects one thread.
 
