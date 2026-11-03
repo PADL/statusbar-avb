@@ -148,7 +148,7 @@ struct ListenerStreamSrpInfo
     std::optional<TalkerMatch> follows{};
 };
 
-/// Domain info for MSRP
+/// Domain info for MSRP: one SR class's SRclassID, SRclassPriority and SRclassVID (IEEE 802.1Q-2022 Clause 35.2.2.9).
 struct DomainInfo
 {
     uint8_t sr_class_id = 6;  // Class A
@@ -157,6 +157,12 @@ struct DomainInfo
 
     [[nodiscard]] constexpr auto operator==(DomainInfo const&) const noexcept -> bool = default;
 };
+
+/// The default Class B Domain (IEEE 802.1Q-2022 Clause 35.2.2.9): SRclassID 5, priority 2, VID 2.
+inline constexpr DomainInfo CLASS_B_DOMAIN{
+    .sr_class_id = statusbar::srp::msrp::SR_CLASS_B,
+    .sr_class_priority = srp::SR_CLASS_B_PRIORITY,
+    .sr_class_vid = srp::DEFAULT_SR_CLASS_B_VID};
 
 /// The MSRP participant's tables for an entity's components, at full capacity, with part of
 /// each reserved for this entity's own streams and their peers so other stations' attributes
@@ -332,6 +338,9 @@ class MvrpHandler
     /// Periodic tick - call this regularly to process timers
     /// @param now Current time for timer processing
     auto tick(TimePoint now) -> void;
+
+    /// A LeaveAll sent now (MvrpParticipant::leave_all()).
+    auto leave_all(TimePoint now) -> void { participant_.leave_all(now); }
 
     /// The MVRP participant's configuration (its tables and MRP timers).
     [[nodiscard]] auto mvrp_config() const noexcept -> statusbar::srp::mvrp::MvrpConfig const& { return participant_.config(); }
@@ -674,16 +683,16 @@ class MsrpHandler
         return failure(make_error_code(NanoAvbError::InvalidStreamIndex));
     }
 
-    /// Declare the Class A MSRP Domain on the VID in use (IEEE 802.1Q Clauses 35.2.1.4, 35.2.2.9;
-    /// Milan v1.2 Section 4.2.7.2.1), so the bridge does not treat the port as an SRP domain
-    /// boundary. Idempotent.
+    /// Declare the configured SR class's MSRP Domain on the VID in use (IEEE 802.1Q Clauses 35.2.1.4,
+    /// 35.2.2.9; Milan v1.2 Section 4.2.7.2.1, Class A), so the bridge does not treat the port as an SRP
+    /// domain boundary. Idempotent.
     [[nodiscard]] auto declare_domain(TimePoint now) -> Status
     {
         if (!started_) {
             participant_.start(now);
             started_ = true;
         }
-        declare_sr_class(statusbar::srp::msrp::SR_CLASS_A, domain_.sr_class_priority, now);
+        declare_sr_class(domain_.sr_class_id, domain_.sr_class_priority, now);  // 6 for Class A, 5 for Class B
         return success();
     }
 
@@ -696,6 +705,11 @@ class MsrpHandler
         fv.sr_class_vid = domain_.sr_class_vid;
         (void)participant_.declare_domain(fv, now);
     }
+
+    /// The link is back after a down (MsrpParticipant::rejoin()).
+    void rejoin(TimePoint now) { participant_.rejoin(now); }
+    /// A LeaveAll sent now (MsrpParticipant::leave_all()).
+    void leave_all(TimePoint now) { participant_.leave_all(now); }
 
     [[nodiscard]] auto get_talker_stream(StreamId const& stream_id) const noexcept -> TalkerStreamSrpInfo const*
     {
@@ -1314,16 +1328,16 @@ class MsrpHandler
         return vid >= 1 && vid <= 4094 && fv.sr_class_priority.get() <= 7;
     }
 
-    /// A Domain registered from the wire. Under adoption, a Class A Domain
-    /// whose priority or VLAN differs from ours becomes ours (see
+    /// A Domain registered from the wire. Under adoption, a Domain of our SR
+    /// class whose priority or VLAN differs from ours becomes ours (see
     /// set_adopt_domain); anything else - another class, the same values, a
     /// VID or priority outside what 802.1Q allows - is noted and left alone,
     /// the Domain in force kept.
     void on_remote_domain(statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation const op)
     {
-        bool const class_a = fv.sr_class_id.get() == statusbar::srp::msrp::SR_CLASS_A;
+        bool const our_class = fv.sr_class_id.get() == domain_.sr_class_id;
         bool const same = fv.sr_class_priority.get() == domain_.sr_class_priority && fv.sr_class_vid.get() == domain_.sr_class_vid;
-        if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !class_a || same || !adoptable(fv)) {
+        if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !our_class || same || !adoptable(fv)) {
             return;
         }
         take_domain(

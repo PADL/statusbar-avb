@@ -17,9 +17,9 @@ SrpPort::SrpPort(SrpPortConfig config)
     : config_{std::move(config)}
     , mvrp_{config_.mvrp}
     , msrp_{config_.msrp}
-    , vid_{config_.class_a.sr_class_vid}
+    , vid_{config_.domain.sr_class_vid}
 {
-    msrp_.set_domain(config_.class_a);
+    msrp_.set_domain(config_.domain);
     msrp_.set_listener_waits_for_talker(true);
     wire();
 }
@@ -118,11 +118,11 @@ void SrpPort::tick(TimePoint const now)
 
 auto SrpPort::declare_domain(TimePoint const now) -> Status
 {
-    bool const moved = domain().sr_class_priority != config_.class_a.sr_class_priority || vid_ != config_.class_a.sr_class_vid;
-    msrp_.set_domain(config_.class_a);
+    bool const moved = domain().sr_class_priority != config_.domain.sr_class_priority || vid_ != config_.domain.sr_class_vid;
+    msrp_.set_domain(config_.domain);
     auto status = msrp_.declare_domain(now);
     if (moved) {
-        on_domain_moved(std::exchange(vid_, config_.class_a.sr_class_vid), now);
+        on_domain_moved(std::exchange(vid_, config_.domain.sr_class_vid), now);
     }
     if (status) {
         status = mvrp_.register_vlan(vid_, now);
@@ -169,9 +169,22 @@ void SrpPort::withdraw_all(TimePoint const now)
     mvrp_.withdraw_all(now);
 }
 
+void SrpPort::rejoin(TimePoint const now)
+{
+    msrp_.rejoin(now);
+    mvrp_.leave_all(now);
+    flush();
+}
+
+void SrpPort::leave_all(TimePoint const now)
+{
+    msrp_.leave_all(now);
+    mvrp_.leave_all(now);
+}
+
 auto SrpPort::peer_domain_registered() const noexcept -> bool
 {
-    return peer_class_a_ && peer_priority_ == domain().sr_class_priority;
+    return peer_class_ && peer_priority_ == domain().sr_class_priority;
 }
 
 auto SrpPort::find_registered_talker_advertise(Eui48 const& destination, uint16_t const vid) const noexcept
@@ -205,10 +218,10 @@ void SrpPort::on_domain_moved(uint16_t const old_vid, TimePoint const now)
 
 void SrpPort::on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv, bool const registered) noexcept
 {
-    if (fv.sr_class_id.get() != statusbar::srp::msrp::SR_CLASS_A) {
+    if (fv.sr_class_id.get() != domain().sr_class_id) {
         return;
     }
-    peer_class_a_ = registered;
+    peer_class_ = registered;
     peer_priority_ = registered ? std::optional<uint8_t>{fv.sr_class_priority.get()} : std::nullopt;
 }
 
