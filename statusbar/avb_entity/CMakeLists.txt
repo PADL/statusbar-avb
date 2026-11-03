@@ -12,6 +12,7 @@ statusbar_add_module(
   avb_entity_host.cpp
   avb_entity_avb_info_mirror.cpp
   avb_entity_kit.cpp
+  avb_entity_upkeep.cpp
   avb_entity_stream_counters.cpp
   avb_entity_stream_spec.cpp
   avb_entity_listener_streams.cpp

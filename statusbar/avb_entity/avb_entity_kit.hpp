@@ -60,8 +60,7 @@
 #include <memory_resource>
 #include <optional>
 #include <span>
-#include <string>
-#include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace statusbar::avb_entity {
@@ -207,14 +206,12 @@ class AvbEntityKit
     /// Whether talker stream @p idx should put its AVTP stream on the wire this
     /// tick (gating disabled, or a downstream listener is ready/connected), told
     /// the wake's CLOCK_MONOTONIC_RAW instant @p now (the gate's grace clock).
-    /// Also gated on MAAP-address readiness in "maap" mode. The talker is told
-    /// that instant too (TalkerStreams::tell_wake_time): it is what the AVTPDUs
-    /// of this wake take their tu at, so call this before transmit_if_due().
+    /// Also gated on MAAP-address readiness in "maap" mode, and closed while a
+    /// controller has the stream STOP_STREAMING'd.
     [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
         -> bool
     {
-        talker_->tell_wake_time(now);
-        if (!maap_.ready()) {
+        if (!maap_.ready() || talker_->stream_stopped(idx)) {
             return false;
         }
         return gate_.should_transmit(idx, now);
@@ -406,6 +403,18 @@ class AvbEntityKit
     /// The rate the kit's engines were built with; a SET_SAMPLING_RATE does not change it
     /// (set_on_unit_rate_changed()), so any thread may read it.
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
+
+    // --- Stream socket health (after start()) ---------------------------------
+    /// Why start() could not open the stream TX socket (empty: it opened). The
+    /// kit carries on without it (a control-plane-only entity); a host that
+    /// needs the data plane checks here.
+    [[nodiscard]] auto stream_tx_error() const noexcept -> std::error_code { return stream_tx_error_; }
+    /// Why start() could not open the stream RX socket (empty: it opened, or
+    /// the blob declares no stream inputs).
+    [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }
+    /// Whether "maap" address mode fell back to the static per-kind
+    /// destination MACs (the MAAP socket would not open).
+    [[nodiscard]] auto maap_fell_back_to_static() const noexcept -> bool { return maap_.fell_back_to_static(); }
 
   private:
     /// Attach the stream-specific control-plane behavior to the host: MSRP
@@ -773,6 +782,10 @@ class AvbEntityKit
     /// The stream RX socket handler when config.stream_rx_rt_timer keeps it
     /// out of the reactor (drained via drain_stream_rx()).
     std::unique_ptr<net::Pollable> rt_rx_handler_{};
+
+    /// What opening the stream TX / RX sockets failed with (see stream_tx_error()).
+    std::error_code stream_tx_error_{};
+    std::error_code stream_rx_error_{};
 
     /// MAAP dynamic-address acquisition (active only in "maap"
     /// stream_address_mode; ready() defaults true for static MACs).

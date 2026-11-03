@@ -1489,10 +1489,41 @@ auto AvbEntityKit::open_talker_streams() -> Status
     return success();
 }
 
-auto AvbEntityKit::open_listener_stream(StreamSpec const& spec) -> StatusValue<ieee::Eui48>
-{
-    if (auto status = listener_->open_stream(spec); !status) {
-        return failure(status.error());
+    // RX slots per blob-declared stream input. CRF inputs feed the media-clock
+    // recovery (kit phase 3c); the ACMP listener callbacks (wired above) drive
+    // the MSRP attach + the multicast join per connection.
+    if (listener_ != nullptr) {
+        // Static RX groups: an audio input pre-joins the same-kind talker
+        // output's group (the loopback topology listens on its own output
+        // group); everything else joins dynamically on ACMP connect (a zero
+        // MAC just opens the socket).
+        sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_groups{};
+        for (auto const& spec : listener_specs_) {
+            if (auto status = listener_->open_stream(spec); !status) {
+                return status;
+            }
+            if (spec.format.kind == StreamKind::crf) {
+                listener_->set_crf(spec.index, crf_recovery_.make_consumer());
+            }
+            ieee::Eui48 group{};
+            bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+            if (auto const* slot = is_audio ? talker_->slot_of(spec.format.kind) : nullptr; slot != nullptr) {
+                group = slot->dest_mac;
+            }
+            (void)rx_groups.try_push_back(group);
+        }
+        // In RT-timer mode the returned handler is kept alive here; the tool's
+        // SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake gPTP
+        // time, so RX can't be starved by the control plane. rx_to_reactor()
+        // is the way back should that timer not start.
+        if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+            rt_rx_handler_ = std::move(*rx);
+        } else {
+            stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
+        }
+        // Persisted fast-connect bindings (kit phase 5b): a restarted entity
+        // re-connects its inputs without a controller (see AvbEntityHost).
+        host_.enable_listener_binding_persistence(config_.listener_bindings_path);
     }
     bind_crf_recovery(spec);
     bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
@@ -1577,10 +1608,15 @@ void AvbEntityKit::attach_listener_rx(std::span<ieee::Eui48 const> const rx_grou
 void AvbEntityKit::finish_start()
 {
     // TX on the stream port + optional pcap capture.
-    (void)talker_->open_tx(
-        stream_port_,
-        TalkerStreams::TxPcapConfig{
-            .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+    // Tolerated here (the entity stays a control-plane-only node); recorded
+    // for a host that needs the data plane (stream_tx_error()).
+    if (auto tx = talker_->open_tx(
+            stream_port_,
+            TalkerStreams::TxPcapConfig{
+                .path = config_.tx_pcap_path, .max_bytes = config_.tx_pcap_max_bytes, .seconds = config_.tx_pcap_seconds});
+        !tx) {
+        stream_tx_error_ = tx.error();
+    }
     // The TX kick off the media thread (the tool's kicker timer, or its RX
     // timer's tick). The tool must then run that timer, or call
     // kick_from_media_tick() / rx_to_reactor() when it cannot.

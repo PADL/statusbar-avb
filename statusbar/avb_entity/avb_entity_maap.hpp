@@ -264,6 +264,11 @@ class MaapAddressAcquirer
         }
     }
 
+    /// Whether setup() could not open the MAAP socket and the talkers kept
+    /// the static per-kind destination MACs (so several talkers of one kind
+    /// share a MAC). Reactor thread, after setup().
+    [[nodiscard]] auto fell_back_to_static() const noexcept -> bool { return fell_back_to_static_; }
+
   private:
     [[nodiscard]] static auto to_ns(sm::TimePoint const tp) noexcept -> int64_t
     {
@@ -299,7 +304,8 @@ class MaapAddressAcquirer
         auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(interface_name, std::move(handler));
         if (!net_handler->valid()) {
             log_->warning("maap: socket open failed; using static stream dest MACs");
-            set_ready(true);  // fall back: do not gate
+            fell_back_to_static_ = true;
+            ready_.store(true, std::memory_order_release);  // fall back: do not gate
             return {};
         }
         // Gate stream TX until the block is defended. ADP/gPTP/SRP/ACMP are
@@ -384,6 +390,7 @@ class MaapAddressAcquirer
     /// Valid until stop() retires it: the reactor drops only finished ports.
     nanoavb::MaapNetHandler* net_{nullptr};
     std::atomic<bool> ready_{true};
+    bool fell_back_to_static_{false};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     ReadyFn on_addresses_ready_{};
     ReadyChangedFn on_ready_changed_{};
