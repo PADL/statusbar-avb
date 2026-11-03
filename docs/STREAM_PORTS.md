@@ -75,9 +75,11 @@ payloads are not decoded to float at all. Both must be cheap and non-blocking.
 
 ## Testing
 
-`avb_entity_stream_port_test` covers the backend name, the free guard on a
-closed port, the frame builder and launch time on a port without an xdp
-socket. The talker and listener tests run their slots without a port.
+`StreamPort::open_test()` opens core's in-process test port
+(`net::AnyEthernetPort::open_test()`): frames are captured with their launch
+times, frames are injected, multicast groups are recorded. The stream port,
+talker, listener, kit and tone generator tests run their whole data plane on
+it, without a socket or privileges; a kit keeps a port opened before start().
 
 ## See also
 
