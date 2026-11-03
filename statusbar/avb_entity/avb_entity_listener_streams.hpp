@@ -363,6 +363,11 @@ struct ListenerStreams
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
     /// A closed slot's consumers, pending again for its @p index (close()).
     void keep_pending(uint16_t index, StreamConsumeFn consume, StreamCrfFn on_crf);
+    /// Receive one frame (false: none queued): through rx_buf_ on a serialized port, else in place
+    /// (rawnet's sides share nothing; a single-threaded port has one user).
+    [[nodiscard]] auto receive_one(int64_t gptp_now_ns) -> bool;
+    /// One frame decoded where the port holds it, then released: false when none was queued.
+    [[nodiscard]] auto receive_in_place(int64_t gptp_now_ns) -> bool;
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 when the
     /// frame was not AVTP, nullopt when nothing was queued. Holds the port
     /// guard for exactly that - the decode happens outside it.

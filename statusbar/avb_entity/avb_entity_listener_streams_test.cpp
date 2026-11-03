@@ -671,6 +671,66 @@ TEST(listener_port, tagged_and_untagged_frames_reach_their_slot)
     }
 }
 
+namespace {
+
+/// Whether each packet's audio was read where the port holds the frame.
+struct InPlaceSink final : StreamRxTimedAudioSink
+{
+    net::TestPortContext const* wire{nullptr};
+    size_t packets{0};
+    size_t in_place{0};
+    void on_listener_packet(StreamRxPacket const& packet) override
+    {
+        ++packets;
+        in_place += wire->holds(packet.payload) ? 1U : 0U;
+    }
+};
+
+/// Frames drained from @p port (single threaded or not) into @p sink: one AAF frame each time.
+void drain_one_frame(StreamPort& port, bool const single_threaded, InPlaceSink& sink)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const aaf_spec = audio_specs()[1];
+    std::atomic<uint64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    ls.set_timed_audio_sink(&sink);
+    port.set_single_threaded(single_threaded);
+    EXPECT_TRUE(port.open_test({.hardware_address = kRxPortMac}).has_value());
+    sink.wire = port.test_port();
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    EXPECT_TRUE(ls.attach_rx(port, {}, reactor, /*keep_handler=*/true).has_value());
+    avtp::AafStreamOutputContext tx{
+        kAafId,
+        aaf_spec.format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(aaf_spec.format.sample_rate_hz),
+        aaf_spec.format.channels,
+        aaf_spec.format.bit_depth,
+        0};
+    uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(aaf_spec.format.sample_rate_hz));
+    EXPECT_TRUE(port.test_port()->inject_rx(l2_frame(aaf_frame(tx, spp, 9'000'000'000ULL), true)).has_value());
+    EXPECT_EQ(ls.drain_rx(8'999'000'000), size_t{1});
+}
+
+}  // namespace
+
+// A port one thread drives takes no lock, and its frames are decoded where the port
+// holds them; a serialized port's are copied out first, so the decode holds no lock.
+TEST(listener_port, a_single_threaded_port_is_decoded_in_place)
+{
+    StreamPort single;
+    InPlaceSink in_place;
+    drain_one_frame(single, true, in_place);
+    EXPECT_FALSE(single.serialized());
+    EXPECT_TRUE(in_place.packets == 1 && in_place.in_place == 1);
+    StreamPort shared;
+    InPlaceSink copied;
+    drain_one_frame(shared, false, copied);
+    EXPECT_TRUE(shared.serialized());
+    EXPECT_TRUE(copied.packets == 1 && copied.in_place == 0);
+}
+
 // attach_rx joins the static groups on the port; an ACMP connect joins the
 // talker's group and the disconnect leaves it.
 TEST(listener_port, groups_are_joined_and_left_on_the_port)

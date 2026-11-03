@@ -24,7 +24,9 @@
 /// tx_start/tx_commit pair with the talker's serialize into the frame between
 /// them, or an rx_start/copy/rx_release triple. The
 /// listener copies each frame out under the guard and decodes it outside,
-/// so the media timer never waits on a decode.
+/// so the media timer never waits on a decode. A host that drives both sides
+/// from one thread says so (set_single_threaded()): no lock is taken then, and
+/// the listener decodes in place.
 ///
 /// The XDP backend is opened with the AVTP stream rules from
 /// net_xdp_avtp_rules.hpp: only the three stream subtypes are steered into
@@ -152,7 +154,7 @@ class StreamPort
                 .xdp_tx_launch_time = config.tx_launch_time,
                 .xdp_pin_path = config.xdp_pin_path,
             });
-        serialize_ = status.has_value() && !port_.tx_rx_independent();
+        serialize_ = status.has_value() && !port_.tx_rx_independent() && !single_threaded_;
         test_launch_time_ = false;
         return status;
     }
@@ -162,7 +164,7 @@ class StreamPort
     [[nodiscard]] auto open_test(net::TestPortConfig const& config, bool const launch_time = false) -> Status
     {
         auto status = port_.open_test(config);
-        serialize_ = status.has_value() && !port_.tx_rx_independent();
+        serialize_ = status.has_value() && !port_.tx_rx_independent() && !single_threaded_;
         test_launch_time_ = launch_time;
         return status;
     }
@@ -186,6 +188,13 @@ class StreamPort
     [[nodiscard]] auto describe() const -> std::string { return port_.describe(); }
     /// Whether TX and RX go through Guard's lock.
     [[nodiscard]] auto serialized() const noexcept -> bool { return serialize_; }
+    /// The host drives TX and RX from one thread, never both at once: Guard takes no lock and
+    /// the listener decodes each frame in place. Kept across opens; while neither side runs.
+    void set_single_threaded(bool const single) noexcept
+    {
+        single_threaded_ = single;
+        serialize_ = port_.valid() && !port_.tx_rx_independent() && !single;
+    }
 
     /// The port. Take a Guard around any use from a thread that is not the
     /// only one using it.
@@ -251,6 +260,7 @@ class StreamPort
     net::AvtpStreamRules rules_{net::avtp_stream_rules()};
     itc::SpinLock lock_{};
     bool serialize_{false};
+    bool single_threaded_{false};
     bool test_launch_time_{false};
     uint32_t closes_{0};
     net::ClockFn phc_{};

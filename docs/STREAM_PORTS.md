@@ -30,6 +30,17 @@ media tick kicks the ring backends and ends the port's cycle; with an external
 kick (`set_external_kick`) the kicker thread calls `kick_tx()` and `flush_tx()`
 only ends the cycle. It fails with the kick's error, else the cycle's.
 
+## Receive
+
+`ListenerStreams::drain_rx()` takes every queued frame in one port cycle. On a
+serialized port each frame is copied out under the guard and decoded outside
+it, so a transmitting thread never waits on a decode. An unserialized port
+decodes each frame where the port holds it, then releases it: rawnet, whose two
+sides share nothing, and a port whose host drives both sides from one thread
+(`set_single_threaded()`, while neither side runs). Multicast membership may
+still change from the reactor. Each backend's join is a socket call that does
+not touch the rings, and the test port expects one thread.
+
 ## AF_XDP
 
 The xdp backend binds one AF_XDP socket to the NIC queue that carries SR class
