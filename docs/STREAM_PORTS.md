@@ -18,9 +18,14 @@ receive only when the backend says the two are not independent.
 
 ## Transmit
 
-`TalkerStreams` builds each AVTPDU in its own buffer, then
-`send_stream_frame()` takes a TX slot (`tx_start`), writes the tagged header and
-the payload into it (`build_stream_frame`) and commits it. `flush_tx()` once per
+A raw transmit (`transmit_aaf_raw`, `transmit_am824_raw`, `transmit_crf_raw`)
+takes a TX slot (`tx_start`) first, writes the tagged header into it, then
+serializes the AVTPDU straight after the header and commits it, all under one
+guard. A serialize that yields nothing gives the slot back (`tx_cancel`); its
+launch time has then still advanced the port's order. On a ring backend the
+payload is so written once, into the frame the NIC sends. The float paths and
+`send_stream_frame()` still build the AVTPDU in the talker's own buffer and
+copy it into the slot (`build_stream_frame`). `flush_tx()` once per
 media tick kicks the ring backends and ends the port's cycle; with an external
 kick (`set_external_kick`) the kicker thread calls `kick_tx()` and `flush_tx()`
 only ends the cycle. It fails with the kick's error, else the cycle's.
