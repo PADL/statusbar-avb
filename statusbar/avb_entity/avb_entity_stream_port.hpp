@@ -154,8 +154,8 @@ class StreamPort
                 .xdp_tx_launch_time = config.tx_launch_time,
                 .xdp_pin_path = config.xdp_pin_path,
             });
-        serialize_ = status.has_value() && !port_.tx_rx_independent() && !single_threaded_;
         test_launch_time_ = false;
+        take_mode(status.has_value());
         return status;
     }
     /// An in-process test port (net::AnyEthernetPort::open_test), its frames
@@ -164,8 +164,8 @@ class StreamPort
     [[nodiscard]] auto open_test(net::TestPortConfig const& config, bool const launch_time = false) -> Status
     {
         auto status = port_.open_test(config);
-        serialize_ = status.has_value() && !port_.tx_rx_independent() && !single_threaded_;
         test_launch_time_ = launch_time;
+        take_mode(status.has_value());
         return status;
     }
     /// The test port's context, nullptr unless open_test() opened one.
@@ -174,8 +174,8 @@ class StreamPort
     void close() noexcept
     {
         port_.close();
-        serialize_ = false;
         test_launch_time_ = false;
+        take_mode(false);
         ++closes_;
     }
     /// How many times close() ran: what was attached to the port before a close
@@ -188,10 +188,18 @@ class StreamPort
     [[nodiscard]] auto describe() const -> std::string { return port_.describe(); }
     /// Whether TX and RX go through Guard's lock.
     [[nodiscard]] auto serialized() const noexcept -> bool { return serialize_; }
-    /// The host drives TX and RX from one thread, never both at once: Guard takes no lock, the talker
-    /// renders into the slot, the listener decodes in place and the kit never hands RX to the reactor.
-    /// Multicast joins from another thread stay safe (socket calls), except on the test port. Before open().
-    void set_single_threaded(bool const single) noexcept { single_threaded_ = single; }
+    /// The host will drive TX and RX from one thread, never both at once: Guard takes no lock, the talker
+    /// renders into the slot, the listener decodes in place and RX is never the reactor's. Taken by the
+    /// next open; refused (device_or_resource_busy) while the port is open.
+    [[nodiscard]] auto set_single_threaded(bool const single) noexcept -> Status
+    {
+        if (valid()) {
+            return failure(std::errc::device_or_resource_busy);
+        }
+        want_single_threaded_ = single;
+        return success();
+    }
+    /// Whether the port in force was opened single threaded.
     [[nodiscard]] auto single_threaded() const noexcept -> bool { return single_threaded_; }
 
     /// The port. Take a Guard around any use from a thread that is not the
@@ -221,23 +229,22 @@ class StreamPort
     /// or with no PHC set. Media thread.
     [[nodiscard]] auto launch_time(uint64_t const requested_ns) noexcept -> int64_t
     {
-        if (!phc_ || !tx_launch_time()) {
+        if (!phc_ || !timed_) {  // timed_: tx_launch_time() as the port opened
             return 0;
         }
         return static_cast<int64_t>(launch_order_.next(requested_ns, [this] { return net::phc_now_ns(phc_); }));
     }
 
-    /// Whether a talker writes its frames straight into the port's slots: no other thread drives the port
-    /// (rawnet, or set_single_threaded()), and a timed frame can be timed after its render (xdp).
-    [[nodiscard]] auto writes_in_place() const noexcept -> bool { return !serialize_ && (!tx_launch_time() || xdp() != nullptr); }
+    /// Whether a talker writes its frames straight into the port's slots: no other thread drives the
+    /// port (rawnet, or opened single threaded). A timed frame is then timed after its render.
+    [[nodiscard]] auto writes_in_place() const noexcept -> bool { return !serialize_; }
 
     /// Give frame @p handle, started untimed, the launch time for @p requested_ns (launch_time()), taken
     /// now, after its render: a render refused takes no place in the order. Media thread.
     void stamp_launch_time(uint64_t const handle, uint64_t const requested_ns) noexcept
     {
-        auto* const xdp_socket = xdp();
-        if (int64_t const at = launch_time(requested_ns); at != 0 && xdp_socket != nullptr) {
-            (void)xdp_socket->tx_set_launch_time(handle, at);
+        if (int64_t const at = launch_time(requested_ns); at != 0) {
+            (void)port_.tx_set_launch_time(handle, at);
         }
     }
 
@@ -260,6 +267,14 @@ class StreamPort
     }
 
   private:
+    /// The mode of the port open() opened (or none, when @p ok is false): its threading and timing.
+    void take_mode(bool const ok) noexcept
+    {
+        single_threaded_ = ok && want_single_threaded_;
+        serialize_ = ok && !port_.tx_rx_independent() && !single_threaded_;
+        timed_ = ok && tx_launch_time();
+    }
+
     void reset_now() noexcept
     {
         if (auto* const xdp_socket = xdp(); xdp_socket != nullptr) {
@@ -272,7 +287,9 @@ class StreamPort
     net::AvtpStreamRules rules_{net::avtp_stream_rules()};
     itc::SpinLock lock_{};
     bool serialize_{false};
-    bool single_threaded_{false};
+    bool want_single_threaded_{false};  ///< set_single_threaded()'s, for the next open
+    bool single_threaded_{false};       ///< the port in force's: open() took it
+    bool timed_{false};                 ///< the port in force's frames carry launch times
     bool test_launch_time_{false};
     uint32_t closes_{0};
     net::ClockFn phc_{};
