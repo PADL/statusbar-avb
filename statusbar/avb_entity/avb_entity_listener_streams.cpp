@@ -498,20 +498,36 @@ auto ListenerStreams::drain_rx(realtime::GptpClock0::time_point const gptp_now, 
 auto ListenerStreams::drain_frames(int64_t const gptp_now_ns, net::RxTimePoint const rx_now) -> size_t
 {
     size_t drained = 0;
-    while (drained < MAX_DRAIN_PER_CALL) {
-        auto const length = take_rx_frame(rx_now);
-        if (!length) {
-            break;  // the port is empty: the one thing that ends a pass
-        }
-        // A frame that is not AVTP was taken and released like any other;
-        // it is simply not a stream frame. It must not end the pass, or every
-        // stream frame queued behind it waits for the next drain.
-        if (*length != 0) {
-            on_stream_rx_frame({rx_buf_.data(), *length}, gptp_now_ns);
-        }
+    while (drained < MAX_DRAIN_PER_CALL && receive_one(gptp_now_ns, rx_now)) {
         ++drained;
     }
     return drained;
+}
+
+auto ListenerStreams::receive_one(int64_t const gptp_now_ns, net::RxTimePoint const rx_now) -> bool
+{
+    if (!port_->serialized()) {
+        return receive_in_place(gptp_now_ns, rx_now);
+    }
+    auto const length = take_rx_frame(rx_now);
+    if (length && *length != 0) {  // a frame that is not AVTP goes, and the drain goes on
+        on_stream_rx_frame({rx_buf_.data(), *length}, gptp_now_ns);
+    }
+    return length.has_value();
+}
+
+auto ListenerStreams::receive_in_place(int64_t const gptp_now_ns, net::RxTimePoint const rx_now) -> bool
+{
+    auto rx = port_->port().rx_start(rx_now);
+    if (!rx || !rx->has_value()) {
+        return false;
+    }
+    auto const frame = (*rx)->buffer;
+    if (auto const offset = net::avtp_payload_offset(frame); offset && *offset < frame.size()) {
+        on_stream_rx_frame(frame.subspan(*offset, std::min(frame.size() - *offset, rx_buf_.size())), gptp_now_ns);
+    }
+    (void)port_->port().rx_release((*rx)->handle);
+    return true;
 }
 
 void ListenerStreams::begin_port_cycle()
