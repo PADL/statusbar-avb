@@ -3,7 +3,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// SrpPort: MSRP and MVRP on one interface with its Class A Domain, for an end station that
+/// SrpPort: MSRP and MVRP on one interface with one SR class's Domain, for an end station that
 /// declares Talker Advertise and Listener attributes without an ATDECC entity (IEEE 802.1Q-2022
 /// Clause 35). Reactor thread. See docs/NANOAVB_ARCHITECTURE.md, "SrpPort".
 
@@ -30,20 +30,21 @@ namespace statusbar::nanoavb {
 /// SrpPort's MSRP handler: 32 streams of its own, the participant sized for discovery.
 using SrpPortMsrpHandler = MsrpHandler<32, statusbar::srp::msrp::DiscoveryMsrpLimits>;
 
-/// What an SrpPort runs on: the interface, the configured Class A Domain and the MRP tables.
+/// What an SrpPort runs on: the interface, the configured Domain and the MRP tables.
 struct SrpPortConfig
 {
     /// The interface whose MSRP and MVRP sockets add_to_reactor() opens.
     std::string interface_name{};
-    /// The configured Class A Domain (IEEE 802.1Q-2022 Clause 35.2.2.9); a peer's is adopted over it.
-    DomainInfo class_a{};
+    /// The configured Domain (IEEE 802.1Q-2022 Clause 35.2.2.9), Class A unless CLASS_B_DOMAIN; a peer's
+    /// Domain for the same SR class is adopted over it.
+    DomainInfo domain{};
     /// The MSRP tables: 256 Talker Advertises and 256 Talker Failed, less the room kept for the
     /// port's own 16 + 16 streams; a foreign attribute beyond that is not registered.
     statusbar::srp::msrp::MsrpConfig msrp{entity_msrp_config<statusbar::srp::msrp::DiscoveryMsrpLimits>(16, 16)};
     statusbar::srp::mvrp::MvrpConfig mvrp{};
 };
 
-/// One talker stream an SrpPort advertises; its VID and priority are the Class A Domain's.
+/// One talker stream an SrpPort advertises; its VID and priority are the Domain's.
 struct SrpTalker
 {
     StreamId stream_id{};
@@ -57,8 +58,8 @@ struct SrpTalker
 /// callback is optional. Registrations are peers' only, never the port's own declarations.
 struct SrpPortObserver
 {
-    /// The Class A Domain in use changed (a peer's adopted, or declare_domain()), or a peer's
-    /// Class A Domain registered or left: SRP is in force while @p peer_registered (Clause 35.2.1.4).
+    /// The Domain in use changed (a peer's adopted, or declare_domain()), or a peer's Domain for
+    /// our SR class registered or left: SRP is in force while @p peer_registered (Clause 35.2.1.4).
     sg14::inplace_function<void(DomainInfo const&, bool peer_registered), 64> on_domain;
     /// A peer's Talker Advertise registered (Clause 35.2.4.3).
     sg14::inplace_function<void(statusbar::srp::msrp::TalkerAdvertiseFirstValue const&), 64> on_talker_advertise;
@@ -107,7 +108,7 @@ class SrpPort
     /// tick_msrp() and tick_mvrp().
     void tick(TimePoint now);
 
-    /// Return to the configured Class A Domain, join its VID with MVRP and declare it (Clause
+    /// Return to the configured Domain, join its VID with MVRP and declare it (Clause
     /// 35.2.2.9; Milan v1.2 Section 4.2.7.2.1). Call before any stream, and again on each link up.
     [[nodiscard]] auto declare_domain(TimePoint now) -> Status;
     /// Declare (or update) @p talker's Talker Advertise on the Domain's VID and priority, rank 1.
@@ -123,10 +124,16 @@ class SrpPort
     /// Withdraw every talker, listener, the Domain and its VID, and send the Leaves now rather than
     /// at the next join timer: before the port closes, so its peer need not wait out LeaveAll.
     void withdraw_all(TimePoint now);
+    /// The link came back after a down: the peer's Listener registrations forgotten (their changes reported) and
+    /// a LeaveAll sent now on MSRP and MVRP (MsrpParticipant::rejoin()); no Leave goes out. Call after
+    /// declare_domain() on that link up; leave_all() repeats the LeaveAll, should the first be lost.
+    void rejoin(TimePoint now);
+    /// A LeaveAll sent now on MSRP and MVRP: our declarations re-declared, the peer's asked for.
+    void leave_all(TimePoint now);
 
-    /// The Class A Domain in use: the configured one, or the one adopted from the peer.
+    /// The Domain in use: the configured one, or the one adopted from the peer.
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return msrp_.domain(); }
-    /// Whether a peer's Class A Domain at our SRclassPriority is registered; otherwise the port is
+    /// Whether a peer's Domain for our SR class at our SRclassPriority is registered; otherwise the port is
     /// an SRP domain boundary (IEEE 802.1Q-2022 Clause 35.2.1.4).
     [[nodiscard]] auto peer_domain_registered() const noexcept -> bool;
     /// A peer's registered Talker Advertise / Failed sent to @p destination on @p vid, or nullptr.
@@ -161,10 +168,10 @@ class SrpPort
     /// Send through the opened @p msrp and @p mvrp sockets and give them to @p reactor.
     void hand_over(
         net::MessageReactor& reactor, std::unique_ptr<MsrpNetHandlerT<MsrpIo>> msrp, std::unique_ptr<MvrpNetHandler> mvrp);
-    /// The Class A Domain moved (vid_ now its VID, @p old_vid the one joined before): rejoin
+    /// The Domain moved (vid_ now its VID, @p old_vid the one joined before): rejoin
     /// with MVRP and re-advertise the talkers on its VID and priority.
     void on_domain_moved(uint16_t old_vid, TimePoint now);
-    /// A peer's Class A Domain registered (@p registered) or left.
+    /// A peer's Domain for our SR class registered (@p registered) or left.
     void on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv, bool registered) noexcept;
     /// A peer's Talker for @p stream_id left: decided when the PDU or tick is done.
     void on_peer_talker_leave(StreamId const& stream_id);
@@ -186,9 +193,9 @@ class SrpPort
     SrpPortObserver observer_{};
     SendFn send_msrp_{};
     SendFn send_mvrp_{};
-    std::optional<uint8_t> peer_priority_{};  ///< the peer's Class A SRclassPriority, as declared
+    std::optional<uint8_t> peer_priority_{};  ///< the peer's SRclassPriority for our SR class, as declared
     uint16_t vid_{0};                         ///< the Domain's VID, joined with MVRP
-    bool peer_class_a_{false};                ///< a peer's Class A Domain is registered
+    bool peer_class_{false};                  ///< a peer's Domain for our SR class is registered
     bool domain_changed_{false};              ///< the Domain moved since the last report
     bool reported_peer_{false};               ///< peer_domain_registered() as last reported
     bool added_{false};                       ///< add_to_reactor() handed the sockets over
