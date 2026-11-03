@@ -1255,20 +1255,64 @@ TEST(port_shaper, tspecs_given_after_install_go_out_on_the_next_tick)
     EXPECT_TRUE(tc.drain().empty());
 }
 
-TEST(port_shaper, more_streams_than_it_sizes_for_are_refused)
+// A port running class B alone (SrClasses::b): on igb class B uses queue 0, which igc shapes
+// first, its PCP alone maps to an SR TC, and only its cbs is put, sized by Annex L L-11 with no class A,
+// or a placeholder at CLASS_B_PLACEHOLDER_PERCENT; class A's queue gets nothing.
+TEST(port_shaper, a_class_b_port_shapes_class_b_alone_on_queue_0)
+{
+    auto const layout = make_queue_layout("igb", 4, {}, SrClasses::b);
+    EXPECT_TRUE(layout.has_value() && layout->class_b_queue == 0 && layout->class_a_queue == 1);
+    EXPECT_FALSE(make_queue_layout("igb", 4, {.class_a = 1, .class_b = 0}, SrClasses::both).has_value());
+    EXPECT_FALSE(make_queue_layout("igc", 4, {.class_a = 0, .class_b = 1}, SrClasses::b).has_value());  // unshapeable
+    auto const mqprio = layout
+        ? mqprio_for(*layout, 0x9000, DEFAULT_CLASS_A_PCP, DEFAULT_CLASS_B_PCP, DEFAULT_PTP_PRIORITY, SrClasses::b)
+        : StatusValue<net::tc::MqprioQdisc>{failure(ShaperError::bad_queue_override)};
+    EXPECT_TRUE(mqprio.has_value() && mqprio->prio_tc_map[DEFAULT_CLASS_B_PCP] == CLASS_B_TC);
+    EXPECT_TRUE(mqprio.has_value() && mqprio->prio_tc_map[DEFAULT_CLASS_A_PCP] == LEGACY_TC);
+    EXPECT_TRUE(mqprio.has_value() && mqprio->offset[CLASS_B_TC] == 0);
+
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0", .classes = SrClasses::b}, channel.logger(), tc};
+    EXPECT_TRUE(shaper.install(igb_port()).has_value());
+    EXPECT_TRUE(shaper.class_b().placeholder && shaper.class_a().empty());
+    auto const installed = tc.drain();
+    EXPECT_TRUE(std::ranges::find(installed, std::string{"replace 9000:1 cbs 9001: idleslope 100000"}) != installed.end());
+    EXPECT_TRUE(std::ranges::none_of(installed, [](std::string const& r) { return r.find("9000:2") != std::string::npos; }));
+    std::array<TSpec, 2> const class_b{TSpec{.max_frame_size = 329, .max_interval_frames = 1}, TSpec{329, 1}};
+    EXPECT_TRUE(shaper.program({}, class_b).has_value());
+    shaper.tick(1'000'000'000);
+    auto const expected = class_b_targets(class_b, 1'000'000, 1500);
+    EXPECT_EQ(expected.class_b.idleslope_kbps, 23744);  // 2 x 371 octets x 8 x 4000 per second
+    EXPECT_TRUE(shaper.class_b() == expected.class_b && shaper.class_a().empty());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 23744"}));
+    EXPECT_TRUE(port_targets(SrClasses::both, {}, class_b, 1'000'000, 1500) == cbs_targets({}, class_b, 1'000'000, 1500));
+}
+
+// Streams of one frame size fold into one TSpec, sized alike (Annex L sums them); past MAX_PORT_SHAPER_STREAMS
+// frame sizes the set is refused
+TEST(port_shaper, more_frame_sizes_than_it_sizes_for_are_refused)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
     PortShaper shaper{ShaperConfig{.interface_name = "port-shaper0"}, channel.logger(), tc};
     EXPECT_TRUE(shaper.install(igb_port()).has_value());
     (void)tc.drain();
-    std::vector<TSpec> const many(MAX_PORT_SHAPER_STREAMS + 1, TSpec{.max_frame_size = 185, .max_interval_frames = 1});
+    std::vector<TSpec> const alike(MAX_PORT_SHAPER_STREAMS + 1, TSpec{.max_frame_size = 185, .max_interval_frames = 1});
+    EXPECT_TRUE(shaper.program(alike).has_value());
+    shaper.tick(1'000'000'000);
+    EXPECT_TRUE(shaper.class_a() == class_a_targets(alike, 1'000'000, 1500).class_a);
+    (void)tc.drain();
+    std::vector<TSpec> many;
+    for (size_t i = 0; i <= MAX_PORT_SHAPER_STREAMS; ++i) {
+        many.push_back(TSpec{.max_frame_size = static_cast<uint16_t>(100 + i), .max_interval_frames = 1});
+    }
     auto const refused = shaper.program(many);
     EXPECT_FALSE(refused.has_value());
     EXPECT_TRUE(!refused.has_value() && refused.error() == make_error_code(ShaperError::too_many_streams));
-    shaper.tick(1'000'000'000);
+    shaper.tick(1'010'000'000);
     EXPECT_TRUE(tc.drain().empty());
-    EXPECT_TRUE(shaper.class_a().placeholder);
+    EXPECT_TRUE(shaper.class_a() == class_a_targets(alike, 1'000'000, 1500).class_a);  // as it was
 }
 
 TEST(port_shaper, a_bad_class_a_priority_installs_nothing)
@@ -1287,7 +1331,8 @@ TEST(port_shaper, a_bad_class_a_priority_installs_nothing)
 TEST(port_shaper, class_b_maps_to_legacy_and_gets_no_cbs)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
-    auto const mqprio = mqprio_for(igb_layout(), 0x9000, DEFAULT_CLASS_A_PCP, DEFAULT_CLASS_B_PCP, DEFAULT_PTP_PRIORITY, false);
+    auto const mqprio =
+        mqprio_for(igb_layout(), 0x9000, DEFAULT_CLASS_A_PCP, DEFAULT_CLASS_B_PCP, DEFAULT_PTP_PRIORITY, SrClasses::a);
     EXPECT_TRUE(mqprio.has_value() && mqprio->prio_tc_map[DEFAULT_CLASS_B_PCP] == LEGACY_TC);
     EXPECT_TRUE(mqprio.has_value() && mqprio->prio_tc_map[DEFAULT_CLASS_A_PCP] == CLASS_A_TC);
     RecordingTc tc{};
