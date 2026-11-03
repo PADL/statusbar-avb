@@ -453,7 +453,7 @@ void AvbEntityAm824IO::process_audio(TimePoint time, realtime::MonotonicRawClock
             talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
         }
     }
-    talker_.flush_tx();
+    (void)talker_.flush_tx();
 }
 
 void AvbEntityAm824IO::configure_filter(double const freq_hz, double const gain_db, double const q)
