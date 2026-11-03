@@ -1185,10 +1185,8 @@ void AvbEntityKit::wire_stream_callbacks()
 
 void AvbEntityKit::wire_aecp_queries()
 {
-    // AECP GET_COUNTERS (STREAM_OUTPUT talker rate + STREAM_INPUT listener
-    // health; ENTITY, AVB_INTERFACE and CLOCK_DOMAIN from the host) and GET_STREAM_INFO (talker stream identity, queried by a Milan
-    // listener to verify the stream before sustaining a connection; listener
-    // sink identity so a controller can read what an input is connected to).
+    // GET_COUNTERS: the streams' (ENTITY, AVB_INTERFACE, CLOCK_DOMAIN from the host); GET_STREAM_INFO:
+    // a talker stream's identity (a Milan listener checks it), a listener sink's binding.
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
             bool const milan = host_.components().profile.milan;

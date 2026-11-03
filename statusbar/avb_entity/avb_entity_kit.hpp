@@ -299,10 +299,9 @@ class AvbEntityKit
     // SET_STREAM_FORMAT goes through the entity's hook and is persisted; SET_SAMPLING_RATE
     // accepts the unit's current rate only. The rules are in docs/AVB_ENTITY_KIT.md.
 
-    /// The entity applies a stream's new (decoded) format to its data plane (reactor
-    /// thread, before the kit adopts it) and answers an AEM status; one at another rate
-    /// than the unit's comes unmapped (an output mapped under set_output_mappings_across_rates),
-    /// refused by a data plane run at the unit's rate.
+    /// The entity's data plane adopts a stream's new (decoded) format before the kit does, answering an
+    /// AEM status (reactor thread); a format at another rate than the unit's comes unmapped
+    /// (set_output_mappings_across_rates), and a data plane at the unit's rate may refuse it.
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
@@ -482,11 +481,9 @@ class AvbEntityKit
   private:
     /// Write @p text as the persistent state and remember it as saved; a failure is logged.
     void save_persisted(std::string text);
-    /// Attach the stream-specific control-plane behavior to the host: MSRP
-    /// advertise/withdraw (+ the transmit gate's MSRP listener feed), the
-    /// ACMP talker connection log,
-    /// the ACMP listener connect/disconnect drive, and the AEM
-    /// GET_COUNTERS / GET_STREAM_INFO fills.
+    /// Attach the stream behaviour to the host: MSRP advertise/withdraw (and the gate's listener feed),
+    /// the ACMP talker log and listener connect/disconnect, the AEM GET_COUNTERS and GET_STREAM_INFO
+    /// fills.
     void wire_stream_callbacks();
     /// Let go of the data plane start() built: the RX handler kept for an RX
     /// timer, the talker's and the listener's slots, then the port. What the

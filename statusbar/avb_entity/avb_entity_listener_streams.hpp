@@ -193,10 +193,9 @@ struct ListenerStreams
     /// "<stem>-in<index><ext>" of @p path. Returns how many were written.
     auto write_margin_histogram_csvs(std::string const& path) const -> size_t;
 
-    /// Re-shape the slot of @p spec.index for @p spec (Milan v1.2 Section 4.4.2.2), keeping its
-    /// consumers and counters; an audio slot may change kind (AAF, AM824). Reactor thread; the slot
-    /// is locked (itc::SpinLock) so RX drops its frames. Errors (slot unchanged): no such slot, a kind
-    /// change to or from CRF, or a format open_stream would refuse.
+    /// Re-shape @p spec.index's slot for @p spec, consumers and counters kept, AAF and AM824 interchangeable
+    /// (Milan v1.2 Section 4.4.2.2). Reactor thread, under the slot's lock. Errors (slot unchanged): no
+    /// such slot, a change to or from CRF, a format open_stream() refuses.
     [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
 
     /// Register a per-stream RX consumer for STREAM_INPUT @p stream_index:
