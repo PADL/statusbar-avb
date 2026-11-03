@@ -253,8 +253,8 @@ class ShaperQdiscs
     [[nodiscard]] auto install(int ifindex, std::string_view name, net::tc::MqprioQdisc const& mqprio, QueueLayout const& layout)
         -> Status;
     /// Put @p targets on the SR-class queues, class A's first, each only when changed; always a cbs
-    /// replace. EOPNOTSUPP is logged once and stops further cbs requests. Errors: the first netlink
-    /// failure (each is logged).
+    /// replace. A class's refusal (EOPNOTSUPP, EINVAL) is logged once and ends its requests, not an
+    /// error. Errors: the first other netlink failure (each is logged).
     [[nodiscard]] auto program(CbsTargets const& targets, uint32_t link_mbps) -> Status;
     /// etf on class A's queue as @p mode says, from the next program() on, settled once per install()
     /// and again after each change of mode: under our cbs, or on the mqprio class with no cbs offload;
@@ -269,8 +269,10 @@ class ShaperQdiscs
     [[nodiscard]] auto installed() const noexcept -> bool { return installed_; }
     /// Whether install() kept a root that was already in place.
     [[nodiscard]] auto reused() const noexcept -> bool { return reused_; }
-    /// Whether the driver refused cbs offload (EOPNOTSUPP).
-    [[nodiscard]] auto cbs_unsupported() const noexcept -> bool { return cbs_unsupported_; }
+    /// Whether the driver refused cbs offload (EOPNOTSUPP, EINVAL) on class A's queue, and so on both.
+    [[nodiscard]] auto cbs_unsupported() const noexcept -> bool { return cbs_refused_a_; }
+    /// Whether it refused it on class B's queue alone (igc offloads cbs on queues 0 and 1).
+    [[nodiscard]] auto class_b_cbs_refused() const noexcept -> bool { return cbs_refused_b_; }
     /// The mode set_launch_time() gave.
     [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return launch_time_mode_; }
     /// Whether our etf is on class A's queue, under its cbs or alone (LaunchTimeMode::on, settled).
@@ -297,9 +299,11 @@ class ShaperQdiscs
         bool on_class{false};  ///< the mqprio class itself (no cbs offload)
     };
 
-    [[nodiscard]] auto program_one(uint16_t queue, CbsParameters const& params, CbsParameters& current, logging::StrLit label)
-        -> Status;
-    /// program_one() for class A, then (unless cbs offload was refused) class B: the first failure.
+    /// One class's cbs to @p params on @p queue; a refusal sets @p refused, and the class is asked no more.
+    [[nodiscard]] auto program_one(
+        uint16_t queue, CbsParameters const& params, CbsParameters& current, logging::StrLit label, bool& refused) -> Status;
+    /// program_one() for class A, then for class B once class A's cbs is in place; neither once class
+    /// A's was refused. Errors: the first failure.
     [[nodiscard]] auto program_classes(CbsTargets const& targets) -> Status;
     /// Bring class @p label's queue @p queue to the launch-time mode once our cbs is on it (@p current), or
     /// at once with no cbs offload.
@@ -338,7 +342,8 @@ class ShaperQdiscs
     uint32_t link_mbps_{0};
     bool installed_{false};
     bool reused_{false};
-    bool cbs_unsupported_{false};
+    bool cbs_refused_a_{false};  ///< class A's cbs refused (EOPNOTSUPP): no class is programmed
+    bool cbs_refused_b_{false};  ///< class B's alone refused: class A's is still programmed
     CbsParameters class_a_{};
     CbsParameters class_b_{};
     LaunchTimeMode launch_time_mode_{LaunchTimeMode::unsupported};

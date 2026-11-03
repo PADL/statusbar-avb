@@ -362,7 +362,7 @@ auto ShaperQdiscs::install(
     layout_ = layout;
     installed_ = true;
     reused_ = *reused;
-    cbs_unsupported_ = false;
+    cbs_refused_a_ = cbs_refused_b_ = false;
     class_a_ = {};
     class_b_ = {};
     etf_a_ = {};
@@ -424,7 +424,7 @@ auto ShaperQdiscs::program(CbsTargets const& targets, uint32_t const link_mbps) 
         return success();
     }
     link_mbps_ = link_mbps;
-    auto status = cbs_unsupported_ ? success() : program_classes(targets);
+    auto status = program_classes(targets);
     // Class A's queue alone carries the AF_XDP socket's timed frames; class B's (AF_PACKET) gets none.
     settle_etf(layout_.class_a_queue, class_a_, etf_a_, logging::lit("A"));
     return status;
@@ -432,12 +432,16 @@ auto ShaperQdiscs::program(CbsTargets const& targets, uint32_t const link_mbps) 
 
 auto ShaperQdiscs::program_classes(CbsTargets const& targets) -> Status
 {
-    auto status_a = program_one(layout_.class_a_queue, targets.class_a, class_a_, logging::lit("A"));
-    if (cbs_unsupported_) {
+    // Class A's refusal ends both (no cbs offload); class B's waits for class A's cbs (igc enables queue 0's
+    // first) and its own refusal leaves class A programmed.
+    auto status_a = cbs_refused_a_
+        ? success()
+        : program_one(layout_.class_a_queue, targets.class_a, class_a_, logging::lit("A"), cbs_refused_a_);
+    if (cbs_refused_a_ || !status_a) {
         return status_a;
     }
-    auto status_b = program_one(layout_.class_b_queue, targets.class_b, class_b_, logging::lit("B"));
-    return !status_a ? status_a : status_b;
+    return cbs_refused_b_ ? success()
+                          : program_one(layout_.class_b_queue, targets.class_b, class_b_, logging::lit("B"), cbs_refused_b_);
 }
 
 void ShaperQdiscs::set_launch_time(LaunchTimeMode const mode, int32_t const delta_ns) noexcept
@@ -453,7 +457,7 @@ void ShaperQdiscs::set_launch_time(LaunchTimeMode const mode, int32_t const delt
 void ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current, EtfState& state, logging::StrLit const label)
 {
     // Under our cbs once it is on the queue; with no cbs offload, on the queue's mqprio class.
-    if (launch_time_mode_ == LaunchTimeMode::unsupported || state.settled || etf_error_ || (current.empty() && !cbs_unsupported_)) {
+    if (launch_time_mode_ == LaunchTimeMode::unsupported || state.settled || etf_error_ || (current.empty() && !cbs_refused_a_)) {
         return;
     }
     bool const on = launch_time_mode_ == LaunchTimeMode::on;
@@ -532,7 +536,7 @@ auto ShaperQdiscs::drop_etf(EtfSlot const& slot, uint32_t const handle) -> Statu
 }
 
 auto ShaperQdiscs::program_one(
-    uint16_t const queue, CbsParameters const& params, CbsParameters& current, logging::StrLit const label) -> Status
+    uint16_t const queue, CbsParameters const& params, CbsParameters& current, logging::StrLit const label, bool& refused) -> Status
 {
     if (params == current || params.empty()) {
         return success();
@@ -550,15 +554,16 @@ auto ShaperQdiscs::program_one(
             .sendslope_kbps = params.sendslope_kbps,
         });
     if (!status) {
-        if (status.error() == std::errc::operation_not_supported) {
-            // No cbs offload (not an i210/i225, a switch port without it):
-            // a software cbs would never see the bypass frames, so stop asking.
-            cbs_unsupported_ = true;
+        if (status.error() == std::errc::operation_not_supported || status.error() == std::errc::invalid_argument) {
+            // No cbs offload on this queue (EOPNOTSUPP; igc answers EINVAL above queue 1). A software cbs
+            // would never see the bypass frames, so this class stops asking: a state, not a failure.
+            refused = true;
             log_.warning(
-                "shaper: no cbs offload on queue {} ({}): talker streams run unshaped on the class queues",
+                "shaper: no cbs offload for class {} on queue {} ({}): its streams run unshaped",
+                label,
                 queue,
                 logging::embed<32>(tc_.last_message()));
-            return status;
+            return success();
         }
         log_.warning(
             "shaper: class {} cbs on queue {} ({:x}:{:x}) failed: errno {} {}",
