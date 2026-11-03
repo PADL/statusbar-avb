@@ -451,11 +451,11 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
 
 void AvbEntityHost::on_link_up(TimePoint const time)
 {
-    // Milan v1.2 Section 4.2.7.2.1: after a Link Up, return to the configured
-    // Class A domain (forget an adopted VID) and declare it at once -- not
-    // gated on gPTP, unlike the stream advertisements.
-    (void)components_.msrp_handler.reset_domain(time);
+    // Milan v1.2 Section 4.2.7.2.1: after a Link Up, return to the configured Class A domain
+    // (forget an adopted VID) and declare it at once; a repeated report of a link already up
+    // (the link monitor's first) keeps it.
     if (!supervisor_ctx_.link_up) {
+        (void)components_.msrp_handler.reset_domain(time);
         ++link_up_count_;
         (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
     }
