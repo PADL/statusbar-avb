@@ -73,11 +73,12 @@ constexpr std::array<CounterDef, 13> STREAM_INPUT_COUNTERS{{
     {.name = "FRAMES_TX", .is_error = false},
 }};
 
-// STREAM_OUTPUT counters (IEEE 1722.1 Clause 7.4.43), indexed by bit position.
-// FRAMES_TX (bit 6) is the talker frame count -- the actual on-wire transmit rate.
-constexpr std::array<CounterDef, 7> STREAM_OUTPUT_COUNTERS{{
+// STREAM_OUTPUT counters (IEEE 1722.1-2021 Clause 7.4.42.2.5), indexed by bit position.
+// FRAMES_TX (bit 7) is the talker frame count; a Milan entity uses Milan v1.2 Table 5.17 instead.
+constexpr std::array<CounterDef, 8> STREAM_OUTPUT_COUNTERS{{
     {.name = "STREAM_START", .is_error = false},
     {.name = "STREAM_STOP", .is_error = false},
+    {.name = "STREAM_INTERRUPTED", .is_error = true},
     {.name = "MEDIA_RESET", .is_error = true},
     {.name = "TIMESTAMP_UNCERTAIN", .is_error = true},
     {.name = "TIMESTAMP_VALID", .is_error = false},
