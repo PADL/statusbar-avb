@@ -127,10 +127,9 @@ struct TalkerStreams
     /// first start does, instead of over the ones a previous run left.
     void close_tx() noexcept;
 
-    /// Push this tick's frames to the wire. The ring backends batch what
-    /// transmit_* committed until this kick; rawnet sent each frame as it
-    /// was committed and this is free. Once per media tick, after the slots.
-    /// Fails with the kick's error, else the port cycle's.
+    /// Push this tick's frames to the wire (the ring backends batch until this kick; rawnet sent
+    /// each as committed). Once per media tick, after the slots. Errors: the kick's, else the
+    /// port cycle's.
     [[nodiscard]] auto flush_tx() -> Status;
 
     /// Hand the TX kick to another thread (see kick_tx): flush_tx then only
@@ -161,10 +160,9 @@ struct TalkerStreams
     /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
     [[nodiscard]] auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
 
-    /// Re-shape the slot of @p spec.index for @p spec (new format, AAF or AM824, same stream id,
-    /// destination, sequence and sample count). Reactor thread; the slot is locked (itc::SpinLock) so the
-    /// media thread skips it. Errors (slot unchanged): no such slot, a kind change to or from CRF, or
-    /// a format open_stream would refuse.
+    /// Re-shape @p spec.index's slot for @p spec, its stream id, destination, sequence and sample count
+    /// kept. Reactor thread, under the slot's lock. Errors (slot unchanged): no such slot, a change to or
+    /// from CRF, a format open_stream() refuses.
     [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
 
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
