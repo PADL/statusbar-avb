@@ -110,4 +110,19 @@ TEST(stream_port, a_counter_reset_applies_at_the_end_of_the_cycle)
     EXPECT_EQ(port.launch_order().clamped(), uint64_t{0});
 }
 
+// The threading is chosen before the port opens, adopted by the open, and refused while open.
+TEST(stream_port, single_threaded_is_adopted_at_the_open_and_refused_while_open)
+{
+    StreamPort port;
+    EXPECT_TRUE(port.set_single_threaded(true).has_value());
+    EXPECT_FALSE(port.single_threaded());  // not open yet
+    EXPECT_TRUE(port.open_test({.hardware_address = ieee::Eui48{0x02, 0, 0, 0, 0, 3}}).has_value());
+    EXPECT_TRUE(port.single_threaded() && !port.serialized() && port.writes_in_place());
+    EXPECT_FALSE(port.set_single_threaded(false).has_value());
+    port.close();
+    EXPECT_TRUE(port.set_single_threaded(false).has_value());
+    EXPECT_TRUE(port.open_test({.hardware_address = ieee::Eui48{0x02, 0, 0, 0, 0, 3}}).has_value());
+    EXPECT_TRUE(!port.single_threaded() && port.serialized() && !port.writes_in_place());
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_port_test)
