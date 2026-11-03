@@ -25,8 +25,8 @@ float `transmit_aaf`, `transmit_am824`) goes through one path,
 - **A port only one thread drives** (rawnet, or `set_single_threaded()`):
   - the talker claims a TX slot (`tx_start`) untimed, writes the tagged header
     into it, and renders the AVTPDU straight after the header;
-  - the launch time is stamped at the commit (`StreamPort::stamp_launch_time`),
-    so a frame never committed holds no place in the launch order;
+  - the launch time is stamped after the render (`StreamPort::stamp_launch_time`),
+    so a refused render holds no place in the launch order;
   - a render that yields nothing gives the slot back (`tx_cancel`);
   - on a ring backend the payload is so written once, into the frame the NIC
     sends.
@@ -47,8 +47,9 @@ serialized port each frame is copied out under the guard and decoded outside
 it, so a transmitting thread never waits on a decode. An unserialized port
 decodes each frame where the port holds it, then releases it: rawnet, whose two
 sides share nothing, and a port whose host drives both sides from one thread
-(`set_single_threaded()`, before the port opens; `AvbEntityKit::rx_to_reactor()`
-then refuses to move RX to the reactor). Multicast membership may
+(`set_single_threaded()`, before the port opens). The kit then keeps the RX
+handler for its host to drain (`drain_stream_rx()`) and never hands it to the
+reactor; `rx_to_reactor()` refuses. Multicast membership may
 still change from the reactor. Each backend's join is a socket call that does
 not touch the rings, and the test port expects one thread.
 
