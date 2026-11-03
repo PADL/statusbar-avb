@@ -595,7 +595,8 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
 }
 
 // Milan v1.2 Section 4.2.7.2.1: an adopted Class A VID reaches the MVRP join,
-// ACMP stream_vlan_id and the frames' tag; a link up restores the configured VID.
+// ACMP stream_vlan_id and the frames' tag; a link up restores the configured VID,
+// a repeated report of a link already up does not.
 TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
 {
     auto const blob = make_blob(1, 1);
@@ -636,6 +637,7 @@ TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
         return true;
     });
     auto now = sm::Clock::now();
+    kit.on_link_up(now);
     bridge.start(now);
     srp::msrp::DomainFirstValue class_a{};
     class_a.sr_class_vid = 7;
@@ -655,6 +657,9 @@ TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(7) != nanoavb::VlanState::Unregistered);
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(2) == nanoavb::VlanState::Unregistered);
 
+    kit.on_link_up(now);  // the link monitor's first report: still up
+    EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{7});
+    kit.on_link_down(now);
     kit.on_link_up(now);
     EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{2});
     EXPECT_EQ(components.acmp_talker.get_stream(0)->stream_vlan_id, uint16_t{2});
