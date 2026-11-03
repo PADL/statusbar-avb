@@ -324,8 +324,8 @@ struct TalkerStreams
     [[nodiscard]] auto reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Move @p trial's serializers into @p slot, carrying the stream's counts over. Under the guard.
     static void adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept;
-    /// Send the frame @p serialize writes into a tx_begin window of @p max_frame octets (its length,
-    /// 0: none), due at @p launch_time_ns, restoring @p ctx when the port refuses it. Media thread.
+    /// Send the AVTPDU @p serialize writes into the port's frame, in a window of at most @p max_frame
+    /// octets (its length, 0: none), due at @p launch_time_ns, restoring @p ctx when the port refuses it.
     template <typename Context, typename Serialize>
     [[nodiscard]] auto send_serialized(
         TalkerStreamSlot& slot, Context& ctx, size_t max_frame, uint64_t launch_time_ns, Serialize const& serialize) -> bool;
@@ -335,6 +335,20 @@ struct TalkerStreams
     /// One AVTP stream frame to @p dest_mac on the port, due at @p launch_time_ns: VLAN tag from
     /// vlan_id_, source the port's address, recorded to the pcap tap. False when the port refuses it.
     [[nodiscard]] auto send_to_port(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload, uint64_t launch_time_ns) -> bool;
+    /// @p serialize's AVTPDU into the port's @p frame and committed, or the frame given back. Under the guard.
+    template <typename Context, typename Serialize>
+    [[nodiscard]] auto serialize_into(
+        TalkerStreamSlot& slot, Context& ctx, net::EthernetTxSlot const& frame, size_t max_frame, Serialize const& serialize)
+        -> bool;
+    /// @p slot's 802.1Q-tagged stream header at the start of @p buffer: its length, 0 when it does not fit.
+    [[nodiscard]] auto store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> buffer) const noexcept -> size_t;
+    /// Up to @p length octets of @p buffer after its @p header octets: where the AVTPDU is serialized.
+    [[nodiscard]] static auto payload_window(std::span<uint8_t> buffer, size_t header, size_t length) noexcept
+        -> std::span<uint8_t>;
+    /// Commit @p frame, its @p header octets then its @p length-octet AVTPDU, counted on @p slot. Under the guard.
+    [[nodiscard]] auto commit_frame(TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length) -> bool;
+    /// One sent AVTPDU @p frame counted on @p slot.
+    void count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> frame) noexcept;
     /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
     [[nodiscard]] auto commit_stream_frame(net::EthernetTxSlot const& slot, size_t length) -> bool;
 
