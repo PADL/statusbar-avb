@@ -289,14 +289,34 @@ struct ListenerStreams
     /// LATE/EARLY classification. Reactor/RX thread.
     void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns);
 
+    /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
+    [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
+    /// The slot @p frame is for: its kind and its connected stream_id; nullptr when none.
+    [[nodiscard]] auto rx_slot_for(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
+    /// One AM824, AAF or CRF frame into @p slot (held under its guard): checked, delivered, counted.
+    void receive_am824(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    void receive_aaf(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    void receive_crf(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// An accepted packet's audio to the timed sink raw, or decoded to the slot's consumer: its samples per channel.
+    [[nodiscard]] auto deliver_am824(
+        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+    [[nodiscard]] auto deliver_aaf(
+        ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+    /// The float decode to the slot's consumer, then the timed sink: the samples per channel.
+    [[nodiscard]] auto decode_am824(
+        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+    [[nodiscard]] auto decode_aaf(
+        ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+    /// An accepted audio packet counted and offered to the RX audio sink.
+    void count_received(ListenerStreamSlot& slot, uint64_t samples, StreamAudioFormat format, std::span<uint8_t const> audio);
+    /// A CRF PDU's counters, and its timestamps to the slot's recovery and consumer.
+    void count_crf(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> ts_data);
+    void deliver_crf(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> ts_data, int64_t gptp_now_ns);
+
     /// True if @p frame belongs to the stream currently connected to STREAM_INPUT
     /// @p stream_index: the slot's published connection is set and the
     /// stream_id at offset 4 matches it. RX thread.
     [[nodiscard]] auto frame_is_for_listener(uint16_t stream_index, std::span<uint8_t const> frame) const -> bool;
-
-    /// The slot a received frame belongs to (its kind matches the AVTP subtype and
-    /// its stream_id the stream connected to that input), or nullptr.
-    [[nodiscard]] auto find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
 
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,
     /// unit-tested tally_stream_input_packet). See the entity-level doc for ts_sparse.

@@ -1161,6 +1161,9 @@ class AemCommandHandler
     /// Send GET_COUNTERS for (@p descriptor_type, @p descriptor_index) now.
     auto send_counters_notification(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
 
+    /// The notifications due at @p now, from tick(): held-back GET_COUNTERS, and
+    /// in Milan mode the controller monitor.
+    void tick_notifications(sm::TimePoint now);
     /// The controller monitor (Milan v1.2 Section 5.4.5.3), from tick().
     void tick_controller_monitor(sm::TimePoint now);
     /// A random monitor period in [CONTROLLER_MONITOR_MIN, CONTROLLER_MONITOR_MAX].

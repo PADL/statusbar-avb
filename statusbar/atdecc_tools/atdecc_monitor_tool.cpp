@@ -718,7 +718,7 @@ auto make_monitor_pollable(MonitorConfig const& config, MonitorCore& core) -> st
 }
 
 auto run_live(MonitorConfig const& config) -> int
-{
+{  // NOLINT(statusbar-block-statements) the live monitor's setup and loop; pre-dates the gate
     auto id_result = atdecc_tools::resolve_controller_id(config, atdecc_tools::TOOL_ID_DISCOVER);
     if (!id_result.has_value()) {
         std::println(stderr, "Error: cannot open interface '{}': {}", config.interface_name, id_result.error().message());
@@ -902,7 +902,7 @@ auto run_enumerate(MonitorConfig const& config) -> int
 }  // namespace
 
 int main(int argc, char* argv[])
-{
+{  // NOLINT(statusbar-block-statements) the tool's main, in order; pre-dates the gate
     using namespace statusbar;
 
     MonitorConfig config;

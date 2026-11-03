@@ -724,7 +724,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
 
 template <class Limits>
 auto MsrpParticipantT<Limits>::declare_listener(tsn::StreamId const& stream_id, ListenerDeclaration decl, TimePoint now) -> Status
-{
+{  // NOLINT(statusbar-block-statements) a declaration, field by field; pre-dates the gate
     auto* rec_ptr = find_or_create_listener(stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
@@ -1100,7 +1100,7 @@ void MsrpParticipantT<Limits>::decode_attribute_list(
 template <class Limits>
 void MsrpParticipantT<Limits>::decode_vector_attribute(
     AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
-{
+{  // NOLINT(statusbar-block-statements) a vector attribute decoded; pre-dates the gate
     if (pos + VectorAttributeHeader::LENGTH > payload.size()) {
         return;
     }
@@ -1261,7 +1261,7 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     ListenerDeclaration decl,
     AttributeEvent wire_event,
     TimePoint now)
-{
+{  // NOLINT(statusbar-block-statements) one listener attribute received; pre-dates the gate
     if (attr_length < ListenerFirstValue::LENGTH) {
         return;
     }

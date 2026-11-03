@@ -448,7 +448,8 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
 
 auto ControllerSimple::make_command_completion() -> atdecc::AemCommandCompletion
 {
-    return [this](atdecc::AemCommandResult const& r) {
+    return [this](atdecc::AemCommandResult const&
+                      r) {  // NOLINT(statusbar-block-statements) a completion: decode, print, record; pre-dates the gate
         CommandCompletedEvent ev{};
         ev.entity_id = r.target_entity_id;
         ev.command_type = r.command_type;
@@ -706,7 +707,12 @@ void ControllerSimple::wire_service()
             },
         .on_aem_timeout = [](Eui64, uint16_t) {},
         .on_unsolicited =
-            [this](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
+            [this](
+                Eui64 target,
+                uint16_t cmd,
+                uint8_t status,
+                std::span<uint8_t const>
+                    data) {  // NOLINT(statusbar-block-statements) a response: decode, print, record; pre-dates the gate
                 UnsolicitedEvent ev{};
                 ev.entity_id = target;
                 ev.command_type = cmd;

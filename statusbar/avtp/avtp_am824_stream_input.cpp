@@ -10,7 +10,7 @@ Am824StreamInputContext::Am824StreamInputContext(Am824SampleRate rate, uint8_t c
 {}
 
 void Am824StreamInputContext::reset() noexcept
-{
+{  // NOLINT(statusbar-block-statements) a many-field reset; pre-dates the gate
     last_dbc = 0;
     last_sequence_num = 0;
     last_avtp_timestamp = 0;
@@ -76,7 +76,7 @@ void Am824StreamInputContext::update_sequence_num(uint8_t seq_num) noexcept
 }
 
 void Am824StreamInputContext::process_packet_header(Am824Pdu const& pdu, size_t sample_count, uint64_t gptp_now_ns) noexcept
-{
+{  // NOLINT(statusbar-block-statements) the header's checks, in order
     uint8_t const dbc = pdu.data_block_count();
     update_sequence_num(pdu.sequence_num());
     if (packets_received > 0 && dbc != static_cast<uint8_t>(last_dbc + last_sample_count)) {
