@@ -703,8 +703,33 @@ TEST(shaper_qdiscs, a_restart_keeps_an_identical_mqprio)
         }));
 }
 
+// Another handle's mqprio is deleted before ours is laid, its classes back to pfifo_fast first (highest
+// queue first), so a cbs it carried is not left on in the hardware.
+TEST(shaper_qdiscs, another_handle_s_mqprio_is_cleared_before_it_goes)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    auto theirs = igb_mqprio();
+    theirs.major = 0x0001;
+    tc.root = mqprio_root(0x0001'0000, theirs);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(
+        tc.drain() ==
+        Requests({
+            "show root",
+            "replace 1:4 pfifo_fast",
+            "replace 1:3 pfifo_fast",
+            "replace 1:2 pfifo_fast",
+            "replace 1:1 pfifo_fast",
+            "del root 1:",
+            "replace root mqprio 9000:",
+        }));
+}
+
 // Our handle with another layout (a changed queue override) cannot be changed
-// in place: mqprio answers EINVAL, the root is deleted and laid down again.
+// in place: mqprio answers EINVAL, the root's classes go back to pfifo_fast
+// (highest queue first, so no cbs stays on), and it is deleted and laid again.
 TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
@@ -721,6 +746,10 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
         Requests({
             "show root",
             "replace root mqprio 9000:",
+            "replace 9000:4 pfifo_fast",
+            "replace 9000:3 pfifo_fast",
+            "replace 9000:2 pfifo_fast",
+            "replace 9000:1 pfifo_fast",
             "del root 9000:",
             "replace root mqprio 9000:",
         }));
