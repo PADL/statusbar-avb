@@ -8,6 +8,7 @@
 /// in); reactor thread only. See docs/MILAN_TALKER.md.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 
@@ -28,7 +29,7 @@ class TalkerDeclarations
     static constexpr int64_t REDECLARE_HOLD_NS = 2 * std::chrono::nanoseconds{nanoavb::MILAN_MRP_TIMERS.leave_all_time_max}.count();
     /// How long a departed Listener still counts as registered: the transmit
     /// gate's grace window (TalkerGate::GRACE_NS), across a LeaveAll blip.
-    static constexpr int64_t LISTENER_GRACE_NS = 5'000'000'000;
+    static constexpr int64_t LISTENER_GRACE_NS = TalkerGate::GRACE_NS;
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
 
     /// A Talker Advertise's identity (its FirstValue's stream ID, destination
