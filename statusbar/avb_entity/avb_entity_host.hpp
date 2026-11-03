@@ -382,6 +382,10 @@ class AvbEntityHost
     void wire_avb_info();
     void attach_mirror(net::MessageReactor& reactor);
     void apply_interface_runtime();
+    /// AVB_INTERFACE @p index's runtime fields: the NIC's identity from @p mac, the gPTP fields
+    /// from a mirrored device's descriptor when there is one.
+    [[nodiscard]] auto interface_runtime(uint16_t index, std::optional<ieee::Eui48> const& mac) const
+        -> nanoavb::AvbInterfaceRuntime;
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
 
     /// stop_control_plane's first half: the MSRP reservations and the MVRP

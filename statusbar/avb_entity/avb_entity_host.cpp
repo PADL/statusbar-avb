@@ -135,7 +135,7 @@ void AvbEntityHost::wire_identify_control()
 //
 
 auto AvbEntityHost::start_control_plane(net::MessageReactor& reactor, std::string_view const interface_name) -> Status
-{
+{  // NOLINT(statusbar-block-statements) the control plane's bring-up, in order; pre-dates the gate
     if (running_) {
         return failure(std::make_error_code(std::errc::already_connected));
     }
@@ -287,7 +287,7 @@ auto AvbEntityHost::mirror_target() const noexcept -> std::optional<ieee::Eui64>
 }
 
 void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
-{
+{  // NOLINT(statusbar-block-statements) the mirror's wiring; pre-dates the gate
     if (!mirror_config_.has_value() || mirror_ != nullptr) {
         return;
     }
@@ -366,36 +366,7 @@ void AvbEntityHost::apply_interface_runtime()
         if (index > 0 && (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index))) {
             break;
         }
-        nanoavb::AvbInterfaceRuntime rt{};
-        if (mac.has_value()) {
-            rt.identity_valid = true;
-            rt.mac_address = *mac;
-            rt.clock_identity = mac->to_modified_eui64();
-            rt.port_number = 1;
-        }
-        auto const m = std::find_if(mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) {
-            return x.index == index && x.descriptor.has_value();
-        });
-        auto const* const mirrored = m != mirrored_.end() ? &*m : nullptr;
-        if (mirrored != nullptr && mirrored->descriptor.has_value()) {  // NOLINT(statusbar-block-statements): field copy
-            auto const& d = *mirrored->descriptor;
-            rt.identity_valid = true;
-            if (!mac.has_value()) {
-                rt.mac_address = d.mac_address;
-            }
-            rt.clock_identity = d.clock_identity;
-            rt.port_number = d.port_number.get();
-            rt.gptp_valid = true;
-            rt.priority1 = static_cast<uint8_t>(d.priority1);
-            rt.clock_class = static_cast<uint8_t>(d.clock_class);
-            rt.offset_scaled_log_variance = d.offset_scaled_log_variance.get();
-            rt.clock_accuracy = static_cast<uint8_t>(d.clock_accuracy);
-            rt.priority2 = static_cast<uint8_t>(d.priority2);
-            rt.domain_number = static_cast<uint8_t>(d.domain_number);
-            rt.log_sync_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_sync_interval));
-            rt.log_announce_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_announce_interval));
-            rt.log_pdelay_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_pdelay_interval));
-        }
+        auto const rt = interface_runtime(index, mac);
         if (!rt.identity_valid && !rt.gptp_valid) {
             continue;
         }
@@ -406,8 +377,44 @@ void AvbEntityHost::apply_interface_runtime()
     }
 }
 
-auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
+auto AvbEntityHost::interface_runtime(uint16_t const index, std::optional<ieee::Eui48> const& mac) const
+    -> nanoavb::AvbInterfaceRuntime
 {
+    nanoavb::AvbInterfaceRuntime rt{};
+    if (mac.has_value()) {
+        rt.identity_valid = true;
+        rt.mac_address = *mac;
+        rt.clock_identity = mac->to_modified_eui64();
+        rt.port_number = 1;
+    }
+    auto const m = std::find_if(mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) {
+        return x.index == index && x.descriptor.has_value();
+    });
+    auto const* const mirrored = m != mirrored_.end() ? &*m : nullptr;
+    if (mirrored != nullptr && mirrored->descriptor.has_value()) {  // NOLINT(statusbar-block-statements): field copy
+        auto const& d = *mirrored->descriptor;
+        rt.identity_valid = true;
+        if (!mac.has_value()) {
+            rt.mac_address = d.mac_address;
+        }
+        rt.clock_identity = d.clock_identity;
+        rt.port_number = d.port_number.get();
+        rt.gptp_valid = true;
+        rt.priority1 = static_cast<uint8_t>(d.priority1);
+        rt.clock_class = static_cast<uint8_t>(d.clock_class);
+        rt.offset_scaled_log_variance = d.offset_scaled_log_variance.get();
+        rt.clock_accuracy = static_cast<uint8_t>(d.clock_accuracy);
+        rt.priority2 = static_cast<uint8_t>(d.priority2);
+        rt.domain_number = static_cast<uint8_t>(d.domain_number);
+        rt.log_sync_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_sync_interval));
+        rt.log_announce_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_announce_interval));
+        rt.log_pdelay_interval = static_cast<int8_t>(static_cast<uint8_t>(d.log_pdelay_interval));
+    }
+    return rt;
+}
+
+auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
+{  // NOLINT(statusbar-block-statements) GET_AVB_INFO, field by field; pre-dates the gate
     using namespace atdecc::aem::avb_info_flags;
     // A mirrored device's answer is reported as-is: it IS the state.
     auto const m = std::find_if(
