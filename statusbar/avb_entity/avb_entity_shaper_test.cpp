@@ -483,20 +483,26 @@ class RecordingTc final : public net::tc::TcControl
     }
     auto replace_cbs(int /*ifindex*/, net::tc::CbsQdisc const& q) -> Status override
     {
-        requests.push_back(
-            std::format("replace {:x}:{:x} cbs idleslope {}", q.parent >> 16U, q.parent & 0xFFFFU, q.idleslope_kbps));
+        requests.push_back(std::format(
+            "replace {:x}:{:x} cbs {:x}: idleslope {}", q.parent >> 16U, q.parent & 0xFFFFU, q.handle_major, q.idleslope_kbps));
+        if (q.handle_major == 0) {
+            return failure(net::NetError::invalid_argument);  // as core's build_replace_cbs refuses it
+        }
         if (cbs_error) {
             return failure(cbs_error);
         }
         if (cbs_refused_on == q.parent) {
             return failure(std::make_error_code(cbs_refusal));
         }
-        if (find(q.parent) == nullptr) {
-            auto info = qdisc_info(0, q.parent, "cbs");
-            info.has_cbs_params = true;
-            info.cbs = q;
-            place(info);
+        if (auto* const there = find(q.parent); there != nullptr && there->handle >> 16U == q.handle_major) {
+            there->cbs = q;  // a change in place
+            return success();
         }
+        erase(q.parent);  // a graft over what was there
+        auto info = qdisc_info(net::tc::make_handle(q.handle_major, 0), q.parent, "cbs");
+        info.has_cbs_params = true;
+        info.cbs = q;
+        children.push_back(std::move(info));
         return success();
     }
     auto replace_etf(int /*ifindex*/, net::tc::EtfQdisc const& q) -> Status override
@@ -643,8 +649,8 @@ TEST(shaper_qdiscs, a_fresh_start_installs_both_cbs)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "replace 9000:2 cbs 9002: idleslope 375000",
         }));
     EXPECT_TRUE(qdiscs.class_a().placeholder && qdiscs.class_b().placeholder);
     // Nothing changed: nothing sent.
@@ -667,8 +673,8 @@ TEST(shaper_qdiscs, admission_and_withdrawal_only_replace_cbs)
     EXPECT_TRUE(
         tc.drain() ==
         Requests({
-            "replace 9000:1 cbs idleslope 19136",
-            "replace 9000:2 cbs idleslope 730864",
+            "replace 9000:1 cbs 9001: idleslope 19136",
+            "replace 9000:2 cbs 9002: idleslope 730864",
         }));
     EXPECT_FALSE(qdiscs.class_a().placeholder);
 
@@ -676,8 +682,8 @@ TEST(shaper_qdiscs, admission_and_withdrawal_only_replace_cbs)
     EXPECT_TRUE(
         tc.drain() ==
         Requests({
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "replace 9000:2 cbs 9002: idleslope 375000",
         }));
     EXPECT_TRUE(qdiscs.class_a().placeholder && qdiscs.class_b().placeholder);
 }
@@ -698,8 +704,58 @@ TEST(shaper_qdiscs, a_restart_keeps_an_identical_mqprio)
         tc.drain() ==
         Requests({
             "show root",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
+            "show 9000:1",  // a kept root's class: no cbs on it, so a new handle
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "show 9000:2",
+            "replace 9000:2 cbs 9002: idleslope 375000",
+        }));
+}
+
+// A cbs is sent with its own handle (core refuses major 0): a restart over an earlier run's cbs
+// 8009: on class A changes it in place under that handle, and every later program() reuses it; the
+// etf goes under it
+TEST(shaper_qdiscs, a_leftover_cbs_keeps_its_handle_through_later_programs)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = mqprio_root(0x9000'0000, igb_mqprio());
+    tc.left(0x9000'0001, 0x8009, "cbs");
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    qdiscs.set_launch_time(LaunchTimeMode::on);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.drain() ==
+        Requests({
+            "show root",
+            "show 9000:1",
+            "replace 9000:1 cbs 8009: idleslope 375000",
+            "show 9000:2",
+            "replace 9000:2 cbs 9002: idleslope 375000",
+            "show 8009:1",
+            "replace 8009:1 etf clockid 11 delta 150000 offload skip_sock_check",
+        }));
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 8009: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
+}
+
+// A root major near the top of the handle space gives cbs handles below it, never ffff: (ingress)
+TEST(shaper_qdiscs, cbs_handles_stay_below_ffff)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.root = qdisc_info(0, net::tc::ROOT, "mq");
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    auto const mqprio = *mqprio_for(igb_layout(), 0xFFFE);
+    EXPECT_TRUE(qdiscs.install(3, "enp8s0", mqprio, igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_TRUE(
+        tc.drain() ==
+        Requests({
+            "show root",
+            "replace root mqprio fffe:",
+            "replace fffe:1 cbs fffd: idleslope 375000",
+            "replace fffe:2 cbs fffc: idleslope 375000",
         }));
 }
 
@@ -791,7 +847,7 @@ TEST(shaper_qdiscs, no_cbs_offload_stops_asking)
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // a refusal is a state, not an error
     EXPECT_TRUE(qdiscs.cbs_unsupported());
-    EXPECT_TRUE(tc.drain() == Requests({"show root", "replace root mqprio 9000:", "replace 9000:1 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show root", "replace root mqprio 9000:", "replace 9000:1 cbs 9001: idleslope 375000"}));
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain().empty());
     EXPECT_TRUE(qdiscs.uninstall().has_value());
@@ -814,7 +870,7 @@ TEST(shaper_qdiscs, a_failed_cbs_is_sent_again)
     (void)tc.drain();
     tc.cbs_error = {};
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
 }
 
 // Uninstall removes class B's cbs first, then class A's (igc's order), then the
@@ -851,7 +907,7 @@ TEST(shaper_qdiscs, uninstall_and_release)
     EXPECT_TRUE(tc.drain().empty());
 }
 // Launch time wanted on a driver that honours it (igc): after both cbs, an offloaded etf on class
-// A's cbs class (8001:1), the AF_XDP socket's queue, settled once; class B's gets none; admission
+// A's cbs class (9001:1), the AF_XDP socket's queue, settled once; class B's gets none; admission
 // changes then touch the cbs only.
 TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
 {
@@ -867,17 +923,16 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
-            "show 9000:1",
-            "show 8001:1",
-            "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check",
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "replace 9000:2 cbs 9002: idleslope 375000",
+            "show 9001:1",
+            "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
     EXPECT_TRUE(qdiscs.launch_time_mode() == LaunchTimeMode::on);
     EXPECT_FALSE(qdiscs.etf_error());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
 }
 
 // A restart onto what an earlier run left: an identical etf stays (etf cannot be changed in place),
@@ -898,9 +953,10 @@ TEST(shaper_launch_time, a_restart_keeps_an_identical_etf_and_replaces_another)
         EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
         Requests want{
             "show root",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
             "show 9000:1",
+            "replace 9000:1 cbs 8001: idleslope 375000",  // the leftover cbs, changed in place
+            "show 9000:2",
+            "replace 9000:2 cbs 8002: idleslope 375000",
             "show 8001:1",
         };
         if (left_delta != DEFAULT_ETF_DELTA_NS) {
@@ -930,9 +986,10 @@ TEST(shaper_launch_time, an_etf_left_behind_goes_when_not_wanted)
         tc.drain() ==
         Requests({
             "show root",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
             "show 9000:1",
+            "replace 9000:1 cbs 8001: idleslope 375000",
+            "show 9000:2",
+            "replace 9000:2 cbs 8002: idleslope 375000",
             "show 8001:1",
             "del 8001:1 handle 8003:",
         }));
@@ -956,19 +1013,15 @@ TEST(shaper_launch_time, enabled_and_disabled_at_run_time_the_etf_follows_under_
     EXPECT_TRUE(tc.drain().empty());  // off: settled, nothing more
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(
-        tc.drain() ==
-        Requests({"show 9000:1", "show 8001:1", "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show 9001:1", "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
     EXPECT_TRUE(qdiscs.launch_time());
     qdiscs.set_launch_time(LaunchTimeMode::off);
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"show 9000:1", "show 8001:1", "del 8001:1 handle 8003:"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show 9001:1", "del 9001:1 handle 8001:"}));
     EXPECT_FALSE(qdiscs.launch_time());
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(
-        tc.drain() ==
-        Requests({"show 9000:1", "show 8001:1", "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
+    EXPECT_TRUE(tc.drain() == Requests({"show 9001:1", "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check"}));
     EXPECT_TRUE(qdiscs.launch_time());
 }
 
@@ -996,8 +1049,8 @@ TEST(shaper_launch_time, a_driver_without_launch_time_gets_no_etf)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "replace 9000:2 cbs 9002: idleslope 375000",
         }));
     EXPECT_FALSE(qdiscs.launch_time());
 }
@@ -1018,7 +1071,7 @@ TEST(shaper_launch_time, without_cbs_offload_the_etf_goes_on_class_a_s_queue)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 375000",
+            "replace 9000:1 cbs 9001: idleslope 375000",
             "show 9000:1",
             "replace 9000:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
@@ -1043,7 +1096,9 @@ TEST(shaper_launch_time, without_cbs_offload_a_leftover_etf_gives_way_to_pfifo_f
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());  // a refusal is a state, not an error
     EXPECT_TRUE(
-        tc.drain() == Requests({"show root", "replace 9000:1 cbs idleslope 375000", "show 9000:1", "replace 9000:1 pfifo_fast"}));
+        tc.drain() ==
+        Requests(
+            {"show root", "show 9000:1", "replace 9000:1 cbs 9001: idleslope 375000", "show 9000:1", "replace 9000:1 pfifo_fast"}));
     EXPECT_FALSE(qdiscs.launch_time());
 }
 
@@ -1062,17 +1117,16 @@ TEST(shaper_launch_time, a_refused_class_b_cbs_leaves_the_etf_under_class_a_s)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
-            "show 9000:1",
-            "show 8001:1",
-            "replace 8001:1 etf clockid 11 delta 150000 offload skip_sock_check",
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "replace 9000:2 cbs 9002: idleslope 375000",
+            "show 9001:1",
+            "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
     EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported());
     // Class A's cbs still follows its streams; class B's is not asked again.
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
 }
 
 // igc refuses a cbs above queue 1 with EINVAL: class B's is refused as with EOPNOTSUPP, once, and the
@@ -1090,7 +1144,7 @@ TEST(shaper_launch_time, an_einval_class_b_cbs_is_a_refusal_too)
     EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported() && qdiscs.launch_time());
     (void)tc.drain();
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
 }
 
 // Class B's cbs waits for class A's: a failed class A request (here EBUSY) sends no class B request
@@ -1104,10 +1158,10 @@ TEST(shaper_qdiscs, class_b_s_cbs_waits_for_class_a_s)
     (void)tc.drain();
     tc.cbs_error = std::make_error_code(std::errc::device_or_resource_busy);
     EXPECT_FALSE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000"}));
     tc.cbs_error = {};
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
 }
 
 // A refused etf offload (EOPNOTSUPP) is recorded and logged once; the cbs stay, program() succeeds
@@ -1126,16 +1180,15 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 375000",
-            "replace 9000:2 cbs idleslope 375000",
-            "show 9000:1",
-            "show 8001:1",
-            "replace 8001:1 etf clockid 11 delta 200000 offload skip_sock_check",
+            "replace 9000:1 cbs 9001: idleslope 375000",
+            "replace 9000:2 cbs 9002: idleslope 375000",
+            "show 9001:1",
+            "replace 9001:1 etf clockid 11 delta 200000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.etf_error() == std::errc::operation_not_supported);
     EXPECT_FALSE(qdiscs.launch_time());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
     // Uninstall is unchanged: grafting pfifo_fast on each class removes cbs and etf together.
     EXPECT_TRUE(qdiscs.uninstall().has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
@@ -1174,8 +1227,8 @@ TEST(port_shaper, the_tspecs_given_before_install_are_programmed_at_install)
         Requests({
             "show root",
             "replace root mqprio 9000:",
-            "replace 9000:1 cbs idleslope 19136",
-            "replace 9000:2 cbs idleslope 730864",
+            "replace 9000:1 cbs 9001: idleslope 19136",
+            "replace 9000:2 cbs 9002: idleslope 730864",
         }));
     EXPECT_TRUE(shaper.class_a() == admitted_targets().class_a);
     EXPECT_TRUE(shaper.layout() == igb_layout());
@@ -1194,10 +1247,10 @@ TEST(port_shaper, tspecs_given_after_install_go_out_on_the_next_tick)
     EXPECT_TRUE(shaper.program(streams).has_value());
     EXPECT_TRUE(tc.drain().empty());
     shaper.tick(1'000'000'000);
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 19136", "replace 9000:2 cbs idleslope 730864"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
     EXPECT_TRUE(shaper.program({}).has_value());
     shaper.tick(1'010'000'000);
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
     shaper.tick(1'020'000'000);
     EXPECT_TRUE(tc.drain().empty());
 }
@@ -1241,7 +1294,7 @@ TEST(port_shaper, shutdown_parks_or_restores)
     EXPECT_TRUE(parked.install(igb_port()).has_value());
     (void)tc.drain();
     parked.shutdown();
-    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs idleslope 375000", "replace 9000:2 cbs idleslope 375000"}));
+    EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
     EXPECT_FALSE(parked.installed());
     parked.shutdown();
     EXPECT_TRUE(tc.drain().empty());

@@ -46,6 +46,9 @@ it although they never meet mqprio itself. The shaper therefore:
    from install on: class A's idleSlope is the sum of the admitted streams'
    reservations, and a class with none admitted holds a placeholder (see
    "Adapter resets" below). Admission only changes the parameters in place.
+   Each cbs has a handle of its own, chosen once per install: on a kept root
+   the cbs already on the class keeps its handle (changed in place, no
+   reset); otherwise `<major> + 1 + <queue>` (9001: and 9002: under 9000:).
 
 A software cbs would do nothing here: bypass frames never enter it. Only the
 offloaded cbs (`offload 1`), which programs the NIC's own shaper on the queue,
@@ -480,12 +483,12 @@ tc qdisc show dev <if>
 #               queues:(3:3) (1:1) (0:0) (2:2)
 #               mode:dcb
 #               shaper:dcb
-#  qdisc pfifo 0: parent 8002: limit 1000p
-#  qdisc cbs 8001: parent 9000:1 hicredit 26 locredit -254 sendslope -983424 idleslope 16576 offload 1
-#  qdisc pfifo 0: parent 8001: limit 1000p
+#  qdisc pfifo 0: parent 9002: limit 1000p
+#  qdisc cbs 9001: parent 9000:1 hicredit 26 locredit -254 sendslope -983424 idleslope 16576 offload 1
+#  qdisc pfifo 0: parent 9001: limit 1000p
 #  qdisc fq_codel 0: parent 9000:4 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
 #  qdisc fq_codel 0: parent 9000:3 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64
-#  qdisc cbs 8002: parent 9000:2 hicredit 1131 locredit -411 sendslope -266576 idleslope 733424 offload 1
+#  qdisc cbs 9002: parent 9000:2 hicredit 1131 locredit -411 sendslope -266576 idleslope 733424 offload 1
 tc -s class show dev <if>        # per-queue counters (non-bypass traffic only)
 tc -s qdisc show dev <if> parent 9000:3   # PTP's queue 2: ptp4l's frames (socket_priority 7) alone
 ethtool -S <if> | grep tx_queue  # per-queue packet counters, bypass frames included
