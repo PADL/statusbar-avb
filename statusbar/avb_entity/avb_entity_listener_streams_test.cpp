@@ -893,7 +893,7 @@ void drain_one_frame(StreamPort& port, bool const single_threaded, InPlaceSink& 
     EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
     publish_connections(ls, *donor);
     ls.set_timed_audio_sink(&sink);
-    port.set_single_threaded(single_threaded);
+    EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
     EXPECT_TRUE(port.open_test({.hardware_address = kRxPortMac}).has_value());
     sink.wire = port.test_port();
     itc::StopToken stop{};
