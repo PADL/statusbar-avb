@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <numeric>
 #include <span>
 #include <string>
 #include <string_view>
@@ -383,7 +384,7 @@ auto ShaperQdiscs::put_root(int const ifindex, std::string_view const name, net:
     if (auto cleared = clear_foreign_root(ifindex, name, current, mqprio.major); !cleared) {
         return forward_failure(cleared);
     }
-    if (auto replaced = replace_root(ifindex, name, mqprio, root); !replaced) {
+    if (auto replaced = replace_root(ifindex, name, mqprio, current); !replaced) {
         return forward_failure(replaced);
     }
     return false;
@@ -392,6 +393,9 @@ auto ShaperQdiscs::put_root(int const ifindex, std::string_view const name, net:
 auto ShaperQdiscs::clear_foreign_root(
     int const ifindex, std::string_view const name, StatusValue<net::tc::QdiscInfo> const& current, uint16_t const major) -> Status
 {
+    if (current && current->kind_name() == "mqprio" && net::tc::handle_major(current->handle) != major) {
+        clear_root_classes(ifindex, *current);
+    }
     auto const removed = current ? net::tc::remove_other_tc_root(tc_, ifindex, *current, major) : StatusValue<bool>{false};
     if (removed && *removed) {
         log_.status(
@@ -404,15 +408,21 @@ auto ShaperQdiscs::clear_foreign_root(
 }
 
 auto ShaperQdiscs::replace_root(
-    int const ifindex, std::string_view const name, net::tc::MqprioQdisc const& mqprio, uint32_t const root) -> Status
+    int const ifindex,
+    std::string_view const name,
+    net::tc::MqprioQdisc const& mqprio,
+    StatusValue<net::tc::QdiscInfo> const& current) -> Status
 {
     auto replaced = tc_.replace_mqprio(ifindex, mqprio);
     if (replaced || replaced.error() != std::errc::invalid_argument) {
         return replaced;
     }
     // EINVAL: the root already holds an mqprio with our handle, which mqprio refuses to
-    // change. Delete it and retry once; a refused layout leaves our handle uninstalled.
-    if (tc_.remove(ifindex, root, net::tc::ROOT)) {
+    // change. Delete it, its cbs first, and retry once; a refused layout leaves our handle uninstalled.
+    if (current) {
+        clear_root_classes(ifindex, *current);
+    }
+    if (tc_.remove(ifindex, net::tc::make_handle(mqprio.major, 0), net::tc::ROOT)) {
         log_.status("shaper: replaced an existing mqprio root {:x}: on {}", mqprio.major, logging::embed<16>(name));
     }
     return tc_.replace_mqprio(ifindex, mqprio);
@@ -597,6 +607,17 @@ auto ShaperQdiscs::uninstall() -> Status
     installed_ = false;
     remove_cbs();
     return remove_root();
+}
+
+void ShaperQdiscs::clear_root_classes(int const ifindex, net::tc::QdiscInfo const& root)
+{
+    // The highest queue first (igc drops queue 1's cbs before queue 0's), best effort: a cbs still on
+    // when the root goes would stay enabled in igc's hardware.
+    uint16_t const major = net::tc::handle_major(root.handle);
+    auto const queues = std::accumulate(root.mqprio.count.begin(), root.mqprio.count.begin() + root.mqprio.num_tc, 0U);
+    for (auto queue = static_cast<uint16_t>(queues); queue > 0; --queue) {
+        (void)tc_.replace_kind(ifindex, net::tc::make_handle(major, queue), "pfifo_fast");
+    }
 }
 
 void ShaperQdiscs::remove_cbs()
