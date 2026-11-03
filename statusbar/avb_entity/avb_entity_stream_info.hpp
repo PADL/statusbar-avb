@@ -220,11 +220,13 @@ template <size_t N>
     statusbar::tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
     if (sink.registration == atdecc::MilanTalkerRegistration::failed) {
-        if (auto const* failed = host.components().msrp_handler.peer_talker_failed(sid); failed != nullptr) {
-            out.msrp_failure_code = failed->failure_code;
-            out.msrp_failure_bridge_id = failed->failure_bridge_id;
-            out.msrp_accumulated_latency = failed->advertise.accumulated_latency;
+        auto const* failed = host.components().msrp_handler.peer_talker_failed(sid);
+        if (failed == nullptr) {  // gone since the sink saw it: no failure fields to vouch for
+            return stream_info_flags::REGISTERING_FAILED;
         }
+        out.msrp_failure_code = failed->failure_code;
+        out.msrp_failure_bridge_id = failed->failure_bridge_id;
+        out.msrp_accumulated_latency = failed->advertise.accumulated_latency;
         return stream_info_flags::MSRP_ACC_LAT_VALID | stream_info_flags::REGISTERING_FAILED |
             stream_info_flags::MSRP_FAILURE_VALID;
     }
