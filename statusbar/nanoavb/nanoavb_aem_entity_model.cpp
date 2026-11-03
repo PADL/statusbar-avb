@@ -135,7 +135,7 @@ constexpr size_t DISPATCH_TABLE_SIZE = 0x80;
 /// point to the SAME handler method but different table slots, so the
 /// handler branches on ref.descriptor_type to distinguish direction.
 [[nodiscard]] constexpr auto build_get_dispatch_table() -> std::array<GetWireFn, DISPATCH_TABLE_SIZE>
-{
+{  // NOLINT(statusbar-block-statements) a dispatch table by descriptor type; pre-dates the gate
     std::array<GetWireFn, DISPATCH_TABLE_SIZE> table{};
 
     table[DESCRIPTOR_ENTITY] = &dispatch_fixed<DescriptorEntity, &AemEntityHandler::on_get_entity>;

@@ -683,7 +683,7 @@ class Enumerator
     // From MonitorCallbacks.on_aem_response.
     void on_response(
         nanoavb::NanoAvbAemController& controller, Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data)
-    {
+    {  // NOLINT(statusbar-block-statements) the stream table, one row per field; pre-dates the gate
         controller_ = &controller;
         if (cmd != AEM_COMMAND_READ_DESCRIPTOR) {
             return;
@@ -1042,7 +1042,7 @@ auto make_monitor_pollable(MonitorConfig const& config, MonitorCore& core) -> st
 }
 
 auto run_live(MonitorConfig const& config) -> int
-{
+{  // NOLINT(statusbar-block-statements) the live monitor's setup and loop; pre-dates the gate
     auto id_result = atdecc_tools::resolve_controller_id(config, atdecc_tools::TOOL_ID_DISCOVER);
     if (!id_result.has_value()) {
         std::println(stderr, "Error: cannot open interface '{}': {}", config.interface_name, id_result.error().message());
@@ -1097,7 +1097,7 @@ auto run_offline(MonitorConfig const& config) -> int
 }
 
 auto run_enumerate(MonitorConfig const& config) -> int
-{
+{  // NOLINT(statusbar-block-statements) the enumeration's setup, crawl and print; pre-dates the gate
     auto id_result = atdecc_tools::resolve_controller_id(config, atdecc_tools::TOOL_ID_DISCOVER);
     if (!id_result.has_value()) {
         std::println(stderr, "Error: cannot open interface '{}': {}", config.interface_name, id_result.error().message());
@@ -1155,7 +1155,7 @@ auto run_enumerate(MonitorConfig const& config) -> int
 }  // namespace
 
 int main(int argc, char* argv[])
-{
+{  // NOLINT(statusbar-block-statements) the tool's main, in order; pre-dates the gate
     using namespace statusbar;
 
     MonitorConfig config;
