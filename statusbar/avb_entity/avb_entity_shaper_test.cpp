@@ -12,6 +12,7 @@
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <format>
@@ -135,7 +136,7 @@ TEST(shaper_mqprio, igb_four_queues)
     EXPECT_EQ(q.count[2], uint16_t{1});
     EXPECT_EQ(q.offset[2], uint16_t{0});
     EXPECT_EQ(q.count[3], uint16_t{0});
-    EXPECT_FALSE(q.hw);
+    EXPECT_FALSE(q.offload);
 }
 
 TEST(shaper_mqprio, marvell_eight_queues)
@@ -370,6 +371,17 @@ TEST(shaper_cbs, placeholders)
 #if defined(__linux__)
 namespace {
 
+/// A root qdisc of @p kind under @p handle, with @p mqprio's layout when given.
+[[nodiscard]] auto root_qdisc(uint32_t const handle, std::string_view const kind, std::optional<net::tc::MqprioQdisc> const mqprio = {})
+    -> net::tc::QdiscInfo
+{
+    net::tc::QdiscInfo info{.handle = handle, .parent = net::tc::ROOT};
+    std::ranges::copy(kind, info.kind.begin());
+    info.has_mqprio_params = mqprio.has_value();
+    info.mqprio = mqprio.value_or(net::tc::MqprioQdisc{});
+    return info;
+}
+
 /// A TcControl that records each request as `tc` would spell it and answers
 /// from a canned root and canned errors.
 class RecordingTc final : public net::tc::TcControl
@@ -395,6 +407,11 @@ class RecordingTc final : public net::tc::TcControl
         if (cbs_error) {
             return failure(cbs_error);
         }
+        return success();
+    }
+    auto replace_etf(int /*ifindex*/, net::tc::EtfQdisc const& q) -> Status override
+    {
+        requests.push_back(std::format("replace {:x}:{:x} etf", q.parent >> 16U, q.parent & 0xFFFFU));
         return success();
     }
     auto replace_kind(int /*ifindex*/, uint32_t const parent, std::string_view const kind) -> Status override
@@ -458,7 +475,7 @@ TEST(shaper_qdiscs, a_fresh_start_installs_both_cbs)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0, .parent = net::tc::ROOT, .kind = "mq"};
+    tc.root = root_qdisc(0, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.installed() && !qdiscs.reused());
@@ -514,7 +531,7 @@ TEST(shaper_qdiscs, a_restart_keeps_an_identical_mqprio)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
-    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    tc.root = root_qdisc(0x9000'0000, "mqprio", igb_mqprio());
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.reused());
@@ -536,7 +553,7 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
     RecordingTc tc{};
     auto other = igb_mqprio();
     other.prio_tc_map[5] = CLASS_A_TC;
-    tc.root = net::tc::QdiscInfo{.handle = 0x9000'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = other};
+    tc.root = root_qdisc(0x9000'0000, "mqprio", other);
     tc.mqprio_error = std::make_error_code(std::errc::invalid_argument);
     ShaperQdiscs qdiscs{tc, channel.logger()};
     EXPECT_TRUE(qdiscs.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
@@ -551,7 +568,7 @@ TEST(shaper_qdiscs, another_layout_under_our_handle_is_replaced)
         }));
     // And a foreign root of another handle is simply replaced.
     RecordingTc foreign{};
-    foreign.root = net::tc::QdiscInfo{.handle = 0x0001'0000, .parent = net::tc::ROOT, .kind = "mqprio", .mqprio = igb_mqprio()};
+    foreign.root = root_qdisc(0x0001'0000, "mqprio", igb_mqprio());
     ShaperQdiscs replacing{foreign, channel.logger()};
     EXPECT_TRUE(replacing.install(3, "enp8s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(foreign.read() == Requests({"show root", "replace root mqprio 9000:"}));
