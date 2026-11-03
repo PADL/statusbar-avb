@@ -199,7 +199,7 @@ auto mqprio_for(
     q.count[CLASS_A_TC] = 1;
     q.offset[CLASS_A_TC] = layout.class_a_queue;
     add_ptp_class(q, layout, ptp_priority);
-    q.hw = false;
+    q.offload = false;
     return q;
 }
 #endif
@@ -376,12 +376,12 @@ auto ShaperQdiscs::put_root(int const ifindex, std::string_view const name, net:
     // A root that already is ours, as we would lay it, stays: replacing it would destroy its cbs
     // children and reset igb/igc. The first program() changes its cbs in place.
     auto const current = tc_.get(ifindex, net::tc::ROOT);
-    if (current && current->handle == root && current->mqprio.has_value() && *current->mqprio == mqprio) {
+    if (current && current->handle == root && current->has_mqprio_params && current->mqprio == mqprio) {
         log_.status("shaper: kept the mqprio root {:x}: already on {}", mqprio.major, logging::embed<16>(name));
         return true;
     }
-    if (auto displaced = displace(ifindex, name, current, mqprio.major); !displaced) {
-        return forward_failure(displaced);
+    if (auto cleared = clear_foreign_root(ifindex, name, current, mqprio.major); !cleared) {
+        return forward_failure(cleared);
     }
     if (auto replaced = replace_root(ifindex, name, mqprio, root); !replaced) {
         return forward_failure(replaced);
@@ -389,14 +389,14 @@ auto ShaperQdiscs::put_root(int const ifindex, std::string_view const name, net:
     return false;
 }
 
-auto ShaperQdiscs::displace(
+auto ShaperQdiscs::clear_foreign_root(
     int const ifindex, std::string_view const name, StatusValue<net::tc::QdiscInfo> const& current, uint16_t const major) -> Status
 {
     auto const removed = current ? net::tc::remove_other_tc_root(tc_, ifindex, *current, major) : StatusValue<bool>{false};
     if (removed && *removed) {
         log_.status(
             "shaper: removed the {} root {:x}: on {} before laying ours",
-            logging::embed<16>(current->kind),
+            logging::embed<16>(current->kind_name()),
             current->handle >> 16U,
             logging::embed<16>(name));
     }
@@ -420,11 +420,11 @@ auto ShaperQdiscs::replace_root(
 
 auto ShaperQdiscs::program(CbsTargets const& targets, uint32_t const link_mbps) -> Status
 {
-    if (!installed_ || cbs_unsupported_) {
+    if (!installed_) {
         return success();
     }
     link_mbps_ = link_mbps;
-    auto status = program_classes(targets);
+    auto status = cbs_unsupported_ ? success() : program_classes(targets);
     // Class A's queue alone carries the AF_XDP socket's timed frames; class B's (AF_PACKET) gets none.
     settle_etf(layout_.class_a_queue, class_a_, etf_a_, logging::lit("A"));
     return status;
@@ -452,32 +452,37 @@ void ShaperQdiscs::set_launch_time(LaunchTimeMode const mode, int32_t const delt
 
 void ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current, EtfState& state, logging::StrLit const label)
 {
-    if (launch_time_mode_ == LaunchTimeMode::unsupported || state.settled || etf_error_ || current.empty()) {
+    // Under our cbs once it is on the queue; with no cbs offload, on the queue's mqprio class.
+    if (launch_time_mode_ == LaunchTimeMode::unsupported || state.settled || etf_error_ || (current.empty() && !cbs_unsupported_)) {
         return;
     }
     bool const on = launch_time_mode_ == LaunchTimeMode::on;
-    auto const status =
-        etf_slot(queue).and_then([&](EtfSlot const& slot) { return on ? put_etf(slot, label) : clear_etf(slot, label); });
+    auto const status = etf_slot(queue, !current.empty()).and_then([&](EtfSlot const& slot) {
+        return on ? put_etf(slot, label) : clear_etf(slot, label);
+    });
     if (!status) {
-        // No etf offload (EOPNOTSUPP) or another refusal: frames on the queue go out at once. Quiet
-        // when off: nothing was asked for, the leftover cleanup is best effort.
+        // No etf offload (EOPNOTSUPP) or another refusal: frames on the queue go out at once; off, a
+        // leftover etf stays (it drops AF_PACKET frames). Said once: no further etf until install().
         etf_error_ = status.error();
-        if (!on) {
-            return;
-        }
         log_.warning(
-            "shaper: class {} etf on queue {} failed: errno {} {}: no launch time",
+            "shaper: class {} etf on queue {} failed: errno {} {}: {}",
             label,
             queue,
             etf_error_.value(),
-            logging::embed<32>(tc_.last_message()));
+            logging::embed<32>(tc_.last_message()),
+            on ? logging::lit("no launch time") : logging::lit("an earlier etf stays"));
         return;
     }
     state = EtfState{.settled = true, .placed = on};
 }
 
-auto ShaperQdiscs::etf_slot(uint16_t const queue) -> StatusValue<EtfSlot>
+auto ShaperQdiscs::etf_slot(uint16_t const queue, bool const under_cbs) -> StatusValue<EtfSlot>
 {
+    if (!under_cbs) {
+        return child_of(parent_of(queue)).transform([&](std::optional<net::tc::QdiscInfo> child) {
+            return EtfSlot{.parent = parent_of(queue), .child = std::move(child), .on_class = true};
+        });
+    }
     auto const cbs = tc_.get(ifindex_, parent_of(queue));
     if (!cbs) {
         return failure(cbs.error());
@@ -490,41 +495,40 @@ auto ShaperQdiscs::etf_slot(uint16_t const queue) -> StatusValue<EtfSlot>
 
 auto ShaperQdiscs::child_of(uint32_t const parent) -> StatusValue<std::optional<net::tc::QdiscInfo>>
 {
-    auto child = tc_.get(ifindex_, parent);
-    if (child) {
-        return std::optional{std::move(*child)};
-    }
-    if (child.error() == std::errc::no_such_file_or_directory) {
-        return std::optional<net::tc::QdiscInfo>{};
-    }
-    return failure(child.error());
+    return net::tc::find_qdisc(tc_, ifindex_, parent);
 }
 
 auto ShaperQdiscs::put_etf(EtfSlot const& slot, logging::StrLit const label) -> Status
 {
     net::tc::EtfQdisc const etf{.parent = slot.parent, .delta_ns = etf_delta_ns_, .offload = true, .skip_sock_check = true};
-    if (slot.child && slot.child->etf == etf) {
+    if (slot.child && slot.child->has_etf_params && slot.child->etf == etf) {
         log_.status("shaper: class {} kept its etf (delta {} ns)", label, etf_delta_ns_);
         return success();
     }
-    // etf has no change operation: another etf goes first. Neither resets igc while the cbs stays.
-    if (auto removed = slot.child && slot.child->kind == "etf" ? tc_.remove(ifindex_, slot.child->handle, slot.parent) : Status{};
-        !removed) {
+    // etf has no change operation: another etf goes first; under a cbs neither resets igc.
+    if (auto removed = slot.child && slot.child->kind_name() == "etf" ? drop_etf(slot, slot.child->handle) : Status{}; !removed) {
         return removed;
     }
     return tc_.replace_etf(ifindex_, etf).transform([&] {
-        log_.status("shaper: class {} etf under its cbs: offloaded launch time, delta {} ns", label, etf_delta_ns_);
+        auto const where = slot.on_class ? logging::lit("on its queue (no cbs)") : logging::lit("under its cbs");
+        log_.status("shaper: class {} etf {}: offloaded launch time, delta {} ns", label, where, etf_delta_ns_);
     });
 }
 
 auto ShaperQdiscs::clear_etf(EtfSlot const& slot, logging::StrLit const label) -> Status
 {
-    if (!slot.child || slot.child->kind != "etf") {
+    if (!slot.child || slot.child->kind_name() != "etf") {
         return success();
     }
-    return tc_.remove(ifindex_, slot.child->handle, slot.parent).transform([&] {
+    return drop_etf(slot, slot.child->handle).transform([&] {
         log_.status("shaper: class {} etf removed: launch time not wanted", label);
     });
+}
+
+auto ShaperQdiscs::drop_etf(EtfSlot const& slot, uint32_t const handle) -> Status
+{
+    // Deleting an mqprio class's child grafts noop_qdisc (mqprio_graft), which drops everything.
+    return slot.on_class ? tc_.replace_kind(ifindex_, slot.parent, "pfifo_fast") : tc_.remove(ifindex_, handle, slot.parent);
 }
 
 auto ShaperQdiscs::program_one(
@@ -927,10 +931,6 @@ auto EntityShaper::installed_on(Status status) -> Status
         return status;
     }
     kit_.set_link_mbps(port_.link_mbps());  // its class A budget
-    if (auto const priority = kit_.stream_tx_priority_error(); priority) {
-        kit_.host().ctl_log().warning(
-            "shaper: the stream socket has no SO_PRIORITY (errno {}): its frames miss the shaped queue", priority.value());
-    }
     return success();
 }
 
