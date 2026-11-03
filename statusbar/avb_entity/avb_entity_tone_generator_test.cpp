@@ -776,7 +776,7 @@ TEST(tone_port, each_wake_transmits_then_flushes_the_port_once)
     auto t = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     std::array<size_t, 6> const flushed_after{1, 1, 2, 3, 4, 5};
     for (size_t const expected : flushed_after) {
-        entity.process_audio(t);
+        entity.process_audio(t, RAW_NOW);
         t += std::chrono::microseconds{125};
         EXPECT_EQ(wire.tx_flushes(), expected);
         EXPECT_EQ(wire.cycles_ended(), expected);

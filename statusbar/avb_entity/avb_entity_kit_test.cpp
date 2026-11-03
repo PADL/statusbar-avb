@@ -376,7 +376,7 @@ struct MilanKit
     AvbEntityAudioIOConfig config;
     EntityIdentityDescriptorHandler handler;
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     AvbEntityKit kit;
     itc::StopToken stop{};
     net::MessageReactor reactor;
@@ -453,7 +453,7 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
     EntityIdentityDescriptorHandler handler{
         *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit bounds", std::nullopt, /*patch_avb_interface=*/false};
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     AvbEntityKit kit{
         config,
         handler,
@@ -613,7 +613,7 @@ TEST(avb_entity_kit_profile, config_milan_overrides_the_model)
         EntityIdentityDescriptorHandler handler{
             *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit profile", std::nullopt, /*patch_avb_interface=*/false};
         ptpclient::MediaClockGenerator media_clock{};
-        std::atomic<uint64_t> last_gptp_ns{0};
+        std::atomic<int64_t> last_gptp_ns{0};
         AvbEntityKit kit{
             config,
             handler,
@@ -2365,7 +2365,7 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
         .grandmaster_id_changed =
             [&m](int64_t, gptp::ClockIdentity const&, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(); },
         .path_trace_changed = [&m](int64_t) { m.kit.note_as_path_changed(); }});
-    handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
+    handlers->gptp_handler().observe_announce(MilanKit::steady_ns(), announce, trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
     r = m.aem_command(atdecc::AEM_COMMAND_GET_AS_PATH, query);
@@ -2374,7 +2374,7 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     EXPECT_EQ(r.body[4 + 8 + 7], 0x02);
 
     // The same Announce again: nothing new.
-    handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
+    handlers->gptp_handler().observe_announce(MilanKit::steady_ns(), announce, trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
 }

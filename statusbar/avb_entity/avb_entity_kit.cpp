@@ -1724,9 +1724,7 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     // time, so RX can't be starved by the control plane. rx_to_reactor()
     // is the way back should that timer not start.
     if (!stream_rx_error_) {
-        // A single-threaded port's RX is never the reactor's: its host drains it (drain_stream_rx()).
-        bool const keep = config_.stream_rx_rt_timer || stream_port_.single_threaded();
-        if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, keep)) {
+        if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
         } else {
             stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
@@ -1837,8 +1835,9 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
         kick_from_media_tick();
     }
     if (stream_port_.single_threaded()) {
-        // RX on the reactor would race the media thread's unlocked TX: it stays the host's to drain.
-        host_.ctl_log().error("stream RX: a single-threaded stream port cannot move to the reactor");
+        // Its host drains RX on the transmitting thread (drain_stream_rx()), which runs whatever timer
+        // failed: RX stays there. On the reactor it would race that thread's unlocked TX.
+        host_.ctl_log().warning("stream RX: a single-threaded stream port is drained by its host, not the reactor");
         return;
     }
     if (rt_rx_handler_ != nullptr) {

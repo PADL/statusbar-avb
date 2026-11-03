@@ -215,7 +215,9 @@ struct DomainBench
             return true;
         });
         statusbar::srp::msrp::Observer obs{};
-        obs.on_domain_declared = [this](statusbar::srp::msrp::DomainFirstValue const& fv) { seen_by_bridge.push_back(fv); };
+        obs.on_domain = [this](statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation) {
+            seen_by_bridge.push_back(fv);
+        };
         (void)bridge.subscribe(obs);
         bridge.start(now);
     }
@@ -425,7 +427,7 @@ TEST(nanoavb_srp_msrp, on_talker_listener_permits_ready_and_ready_failed_only)
     sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
     sid.set_unique_id(7);
     std::optional<bool> permits;
-    talker.set_on_talker_listener([&](StreamId const& s, bool ready) {
+    talker.set_on_talker_listener([&](StreamId const& s, bool ready, TimePoint) {
         if (s == sid) {
             permits = ready;
         }
