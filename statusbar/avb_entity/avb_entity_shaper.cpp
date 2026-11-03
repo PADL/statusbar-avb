@@ -48,9 +48,9 @@ auto make_error_code(ShaperError const e) noexcept -> std::error_code
     return {static_cast<int>(e), shaper_error_category()};
 }
 
-// ---------------------------------------------------------------------------
+//
 // Queue layout
-// ---------------------------------------------------------------------------
+//
 
 [[nodiscard]] auto is_intel_qav_driver(std::string_view const driver) noexcept -> bool
 {
@@ -61,7 +61,7 @@ namespace {
 
 /// The SR class A and B queues of @p tx_queues: the override's, else the driver's;
 /// in a layout without its legacy range yet.
-auto class_queues(std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override)
+[[nodiscard]] auto class_queues(std::string_view const driver, uint16_t const tx_queues, QueueOverride const& override)
     -> StatusValue<QueueLayout>
 {
     bool const intel = is_intel_qav_driver(driver);
@@ -79,7 +79,8 @@ auto class_queues(std::string_view const driver, uint16_t const tx_queues, Queue
 }
 
 /// The first queue from @p queue, moving by @p step, that is neither @p a nor @p b.
-constexpr auto skip_class_queues(uint16_t queue, int const step, uint16_t const a, uint16_t const b) noexcept -> uint16_t
+[[nodiscard]] constexpr auto skip_class_queues(uint16_t queue, int const step, uint16_t const a, uint16_t const b) noexcept
+    -> uint16_t
 {
     while (queue == a || queue == b) {
         queue = static_cast<uint16_t>(queue + step);
@@ -107,7 +108,7 @@ constexpr auto skip_class_queues(uint16_t queue, int const step, uint16_t const 
 }
 
 /// @p layout with PTP on the legacy queue next to the SR classes, when that leaves a legacy queue.
-auto with_ptp_queue(QueueLayout layout) noexcept -> QueueLayout
+[[nodiscard]] auto with_ptp_queue(QueueLayout layout) noexcept -> QueueLayout
 {
     if (layout.legacy_count < 2) {
         return layout;
@@ -205,9 +206,9 @@ auto mqprio_for(
 }
 #endif
 
-// ---------------------------------------------------------------------------
-// Annex L
-// ---------------------------------------------------------------------------
+//
+// Credit-based shaper parameters - IEEE 802.1Q-2022 Annex L
+//
 
 namespace {
 
@@ -341,9 +342,9 @@ auto cbs_targets(
 
 #if defined(__linux__)
 
-// ---------------------------------------------------------------------------
+//
 // ShaperQdiscs
-// ---------------------------------------------------------------------------
+//
 
 ShaperQdiscs::ShaperQdiscs(net::tc::TcControl& tc, logging::Logger const log) noexcept
     : tc_{tc}
@@ -660,9 +661,9 @@ void ShaperQdiscs::release() noexcept
     class_b_ = {};
 }
 
-// ---------------------------------------------------------------------------
+//
 // PortShaper
-// ---------------------------------------------------------------------------
+//
 
 PortShaper::PortShaper(ShaperConfig config, logging::Logger const log, uint8_t const class_a_pcp)
     : config_{std::move(config)}
@@ -906,9 +907,9 @@ auto PortShaper::uninstall() -> Status
     return qdiscs_.uninstall();
 }
 
-// ---------------------------------------------------------------------------
+//
 // EntityShaper
-// ---------------------------------------------------------------------------
+//
 
 EntityShaper::EntityShaper(ShaperConfig config, AvbEntityKit& kit)
     : kit_{kit}
