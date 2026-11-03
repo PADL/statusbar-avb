@@ -464,6 +464,14 @@ class MsrpParticipantT
     /// the bridge keeps the reservations until its own LeaveAll lapses.
     void transmit_pending(TimePoint now);
 
+    /// The port is operational again after its link went down, and the peer may have begun afresh: its
+    /// Listener registrations are forgotten and reported as leaves (Flush!, IEEE 802.1Q-2022 Clause 10.7.5.2),
+    /// then leave_all(). Its Talkers and Domain stay registered until it re-declares or leaves them.
+    void rejoin(TimePoint now);
+    /// A LeaveAll sent now (Clause 10.7.5.8), suppress_leaveall() or not: our declarations re-declared in it,
+    /// the peer asked to re-declare its own.
+    void leave_all(TimePoint now);
+
     /// Earliest upcoming timer deadline. Returns TimePoint::max() if
     /// no timers are running. Use to schedule a poll/epoll wait.
     [[nodiscard]] auto next_deadline() const noexcept -> TimePoint;
@@ -610,6 +618,8 @@ class MsrpParticipantT
     void on_join_timer(TimePoint now);
     void on_leave_timer(TimePoint now);
     void on_leaveall_timer(TimePoint now);
+    /// Our applicants' TxLeaveAll and the PDU carrying the LeaveAll flag, the LeaveAll FSM Active.
+    void send_leave_all(TimePoint now);
     void on_periodic_timer(TimePoint now);
 
     //
