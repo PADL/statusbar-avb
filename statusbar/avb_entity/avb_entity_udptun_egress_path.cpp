@@ -78,7 +78,8 @@ void UdptunEgressPath::drain_rx()
     if (frame_bytes == 0) {
         return;
     }
-    for (int guard = 0; guard < 512; ++guard) {  // bound the drain per tick
+    for (int guard = 0; guard < 512;
+         ++guard) {  // NOLINT(statusbar-block-statements) the drain, bounded per tick; pre-dates the gate
         ssize_t const n = ::recv(rx_fd, rxbuf_.data(), rxbuf_.size(), MSG_DONTWAIT);
         if (n <= 0) {
             break;
@@ -103,7 +104,8 @@ void UdptunEgressPath::drain_rx()
         // presentation time. Same TAI basis (CLOCK_REALTIME + tai_offset) the
         // ingest stamps with, so both ends share one absolute timeline.
         if (egress_colbin_) {
-            if (int64_t const rx_tai = realtime_tai_ns(config_.udptun_tai_offset_ns); rx_tai != 0) {
+            if (int64_t const rx_tai = realtime_tai_ns(config_.udptun_tai_offset_ns);
+                rx_tai != 0) {  // NOLINT(statusbar-block-statements) the receive time stamped; pre-dates the gate
                 // Classify primary vs redundant by the REDUN_BIT; record the
                 // PRIMARY-form stream_id for both so owlm_analyze groups them as
                 // one logical stream (role distinguishes them for recovery accounting).

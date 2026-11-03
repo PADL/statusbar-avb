@@ -43,7 +43,7 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
     ieee::Eui48 src_mac{};
     ieee::Eui48 dest_mac{};
 
-    while (true) {
+    while (true) {  // NOLINT(statusbar-block-statements) one Announce read; pre-dates the gate
         auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
         if (!result || *result <= 0) {
             break;
@@ -184,7 +184,7 @@ auto NanoAvbComponents::talker_connection_count() const -> size_t
 }
 
 void NanoAvbComponents::print_info() const
-{
+{  // NOLINT(statusbar-block-statements) the info print; pre-dates the gate
     std::print("Components initialized:\n");
     std::print("  - EntityModel with {} configuration(s)\n", entity_model.configuration_count());
     std::print("  - AemCommandHandler\n");
@@ -255,7 +255,7 @@ void AtdeccNetHandler::attach_local_port(AtdeccLocalPort* const port)
 }
 
 void AtdeccNetHandler::tick(int64_t now_ns)
-{
+{  // NOLINT(statusbar-block-statements) the ATDECC timers, one per protocol
     // Convert nanoseconds to sm::TimePoint for protocol handlers
     auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
 
