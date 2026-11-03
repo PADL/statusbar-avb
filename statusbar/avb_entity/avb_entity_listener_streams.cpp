@@ -22,8 +22,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
-#include <print>
 #include <mutex>
+#include <print>
 #include <span>
 #include <string>
 #include <system_error>
@@ -53,11 +53,13 @@ auto kind_lit(ListenerStreamSlot const* slot)
     }
 }
 
-/// @p counts with no media lock in them.
-auto without_lock(StreamInputCounts counts) noexcept -> StreamInputCounts
+/// The blocks (samples) of an AM824 payload of @p payload_size octets in @p channels channels,
+/// 0 when the deserializer would refuse them (avtp::am824_deserialize_mbla).
+constexpr auto am824_rx_samples(uint8_t const channels, size_t const payload_size) noexcept -> uint8_t
 {
-    counts.media_locked.reset();
-    return counts;
+    constexpr size_t MAX_BLOCKS = avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET;
+    size_t const blocks = channels == 0 ? 0 : payload_size / (avtp::Am824Pdu::BYTES_PER_SAMPLE * channels);
+    return blocks > MAX_BLOCKS ? 0 : static_cast<uint8_t>(blocks);
 }
 
 }  // namespace
@@ -156,12 +158,10 @@ auto am824_rx_packet(
     std::span<uint8_t const> const payload,
     uint64_t const gptp_now_ns) noexcept -> StreamRxPacket
 {
-    constexpr size_t MAX_BLOCKS = avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET;
     uint8_t const channels = ctx.config.channel_count;
-    size_t const blocks = channels == 0 ? 0 : payload.size() / (avtp::Am824Pdu::BYTES_PER_SAMPLE * channels);
-    // The deserializer's admission (avtp::am824_deserialize_mbla).
-    uint8_t const samples = blocks > MAX_BLOCKS ? 0 : static_cast<uint8_t>(blocks);
-    if (!avtp::is_valid_am824_deserialize_params<avtp::Am824Pdu::MAX_CHANNELS, MAX_BLOCKS>(samples, channels)) {
+    uint8_t const samples = am824_rx_samples(channels, payload.size());
+    if (!avtp::is_valid_am824_deserialize_params<avtp::Am824Pdu::MAX_CHANNELS, avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET>(
+            samples, channels)) {
         return StreamRxPacket{.stream_index = stream_index, .fmt = StreamAudioFormat::am824_mbla, .channels = channels};
     }
     ctx.process_packet_header(pdu, samples, gptp_now_ns);
@@ -220,65 +220,29 @@ auto ListenerStreams::shape(ListenerStreamSlot& slot, StreamSpec const& spec) ->
     }
 }
 
-void ListenerStreams::make_aaf_context(ListenerStreamSlot& slot, StreamFormatFields const& format)
+auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
 {
-    auto const rate = avtp::aaf_sample_rate_from_hz(format.sample_rate_hz);
-    slot.aaf.emplace(format.aaf_format, rate.value_or(avtp::AafSampleRate::user_specified), format.channels, format.bit_depth);
-    slot.aaf->samples_per_pdu = format.aaf_samples_per_frame;
-}
-
-auto ListenerStreams::can_take_stream_format(uint16_t const stream_index, uint64_t const format_word) const noexcept -> bool
-{
-    auto const* const slot = slot_for(stream_index);
-    if (slot == nullptr || stream_index >= stream_format_.size()) {
-        return false;
+    if (slots_.size() == MAX_ENTITY_STREAMS) {
+        return failure(std::errc::result_out_of_range);
     }
-    return format_word == slot->spec.format_word || aaf_input_can_take(slot->spec.format, format_word);
-}
-
-auto ListenerStreams::set_stream_format(uint16_t const stream_index, uint64_t const format_word) noexcept -> bool
-{
-    if (!can_take_stream_format(stream_index, format_word)) {
-        return false;
+    if (spec.format.kind == StreamKind::other) {
+        return failure(std::errc::not_supported);
     }
-    // The opened word is kept as 0: a slot opened from fields alone has no
-    // word of its own to be decoded again.
-    bool const as_opened = format_word == slot_for(stream_index)->spec.format_word;
-    uint64_t const before = stream_format(stream_index);
-    stream_format_[stream_index].store(as_opened ? 0 : format_word, std::memory_order_release);
-    if (format_word != before) {
-        notify_input_changed(*slot_for(stream_index));
-    }
-    return true;
-}
-
-auto ListenerStreams::stream_format(uint16_t const stream_index) const noexcept -> uint64_t
-{
-    auto const* const slot = slot_for(stream_index);
-    if (slot == nullptr || stream_index >= stream_format_.size()) {
-        return 0;
-    }
-    uint64_t const set = stream_format_[stream_index].load(std::memory_order_acquire);
-    return set != 0 ? set : slot->spec.format_word;
-}
-
-void ListenerStreams::follow_stream_format(ListenerStreamSlot& slot)
-{
-    uint64_t const wanted =
-        slot.spec.index < stream_format_.size() ? stream_format_[slot.spec.index].load(std::memory_order_acquire) : 0;
-    if (wanted == slot.rx_format_word) {
-        return;
-    }
-    make_aaf_context(slot, wanted != 0 ? decode_stream_format(wanted) : slot.spec.format);
-    slot.rx_format_word = wanted;
-}
-
-auto ListenerStreams::new_slot(StreamSpec const& spec) -> ListenerStreamSlot&
-{
     auto& slot = slots_.emplace_back();  // in place: the slot holds atomics
+    if (auto status = shape(slot, spec); !status) {
+        slots_.pop_back();
+        return status;
+    }
+    begin_slot(slot, spec);
+    return success();
+}
+
+void ListenerStreams::begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec)
+{
     slot.spec = spec;
     slot.counters.margin_histogram.configure(margin_histogram_config_);
-    return slot;
+    slot.kind.store(spec.format.kind, std::memory_order_relaxed);
+    bind_pending_consume(slot);
 }
 
 void ListenerStreams::set_presentation_offset_ns(uint64_t const presentation_offset_ns)
@@ -312,24 +276,6 @@ auto ListenerStreams::write_margin_histogram_csvs(std::string const& path) const
     return written;
 }
 
-auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
-{
-    if (slots_.size() == MAX_ENTITY_STREAMS) {
-        return failure(std::errc::result_out_of_range);
-    }
-    if (spec.format.kind == StreamKind::other) {
-        return failure(std::errc::not_supported);
-    }
-    auto& slot = new_slot(spec);
-    if (auto status = shape(slot, spec); !status) {
-        slots_.pop_back();
-        return status;
-    }
-    slot.kind.store(spec.format.kind, std::memory_order_relaxed);
-    bind_pending_consume(slot);
-    return success();
-}
-
 auto ListenerStreams::reformat_stream(StreamSpec const& spec) -> Status
 {
     auto* const slot = slot_for(spec.index);
@@ -343,19 +289,29 @@ auto ListenerStreams::reformat_stream(StreamSpec const& spec) -> Status
         // One CRF format a stream: nothing to re-shape.
         return spec.format_word == slot->spec.format_word ? Status{} : Status{failure(std::errc::not_supported)};
     }
+    return reshape(*slot, spec);
+}
+
+auto ListenerStreams::reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status
+{
     // A trial first, so that a refused format leaves the slot as it was.
     ListenerStreamSlot trial{};
     if (auto status = shape(trial, spec); !status) {
         return status;
     }
-    std::scoped_lock const lock{slot->guard};
-    slot->am824 = trial.am824;
-    slot->aaf = trial.aaf;
-    slot->kind.store(spec.format.kind, std::memory_order_relaxed);
-    // The index stays (slot_for reads it unlocked); the format is the new one.
-    slot->spec.format_word = spec.format_word;
-    slot->spec.format = spec.format;
+    std::scoped_lock const lock{slot.guard};
+    adopt_shape(slot, trial, spec);
     return success();
+}
+
+void ListenerStreams::adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept
+{
+    slot.am824 = trial.am824;
+    slot.aaf = trial.aaf;
+    slot.kind.store(spec.format.kind, std::memory_order_relaxed);
+    // The index stays (slot_for reads it unlocked); the format is the new one.
+    slot.spec.format_word = spec.format_word;
+    slot.spec.format = spec.format;
 }
 
 void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn fn)
@@ -603,7 +559,7 @@ void ListenerStreams::end_port_cycle()
 {
     // The ring backends refill their receive ring here; rawnet has nothing to do.
     StreamPort::Guard const guard{*port_};
-    (void)port_->port().end_cycle();
+    (void)port_->end_cycle();  // and a counter reset asked for (StreamPort::reset_counters)
 }
 
 auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*
