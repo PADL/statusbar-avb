@@ -2215,6 +2215,7 @@ auto AvbEntityKit::milan_version_or(std::string const& text, uint32_t const fall
 
 void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
 {
+    stream_port_.set_single_threaded(false);  // the reactor receives, the media thread transmits
     if (rt_rx_handler_ != nullptr) {
         reactor.add(std::move(rt_rx_handler_));
     }
