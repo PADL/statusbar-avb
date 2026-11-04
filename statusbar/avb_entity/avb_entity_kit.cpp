@@ -82,7 +82,7 @@ AvbEntityKit::AvbEntityKit(
         (void)host_.components().acmp_talker.configure_stream(spec.index, stream_id_for(stream_base_mac, spec.index), dest);
     }
 
-    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
+    // The VID itself is registered at start() (stop() withdraws it).
     host_.components().msrp_handler.set_domain(
         DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id});
     host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
@@ -150,7 +150,7 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
 }
 
 void AvbEntityKit::wire_stream_callbacks()
-{
+{  // NOLINT(statusbar-block-statements) the stream callback wiring, one install per hook; pre-dates the gate
     // MSRP reservations for the talker streams. The host declares the SR class
     // domain before calling these, then advertises/withdraws on the MSRP cycle.
     host_.set_advertise_streams([this](TimePoint time) { advertise_talker_streams(time); });
@@ -189,10 +189,10 @@ void AvbEntityKit::wire_stream_callbacks()
         });
     if (listener_ != nullptr) {
         host_.components().acmp_listener.set_connection_callbacks(
-            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
-                listener_->on_listener_connected(stream_index, stream_id, dest_mac);
+            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+                listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
             },
-            [this](uint16_t stream_index) { listener_->on_listener_disconnected(stream_index); });
+            [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
     }
 
     // AECP GET_COUNTERS (STREAM_OUTPUT talker rate + STREAM_INPUT listener
@@ -221,7 +221,7 @@ void AvbEntityKit::wire_stream_callbacks()
         });
 }
 
-auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor) -> Status
+auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices{};
     for (auto const& spec : talker_specs_) {
@@ -237,14 +237,15 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor) -> Statu
         *talker_,
         indices,
         host_.ctl_log(),
-        [this]() {
+        [this](TimePoint const time) {
             if (host_.is_ready()) {
-                advertise_talker_streams(sm::Clock::now());
+                advertise_talker_streams(time);
             }
-        });
+        },
+        now);
 }
 
-auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
+auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     // Bring up the shared control plane (net handlers + generic SM wiring),
     // then attach the stream-specific callbacks (hooks + ACMP + AEM handlers).
@@ -256,6 +257,8 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
         return status;
     }
     wire_stream_callbacks();
+    // The VID, registered on every start: stop() withdraws it with the rest.
+    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, now);
 
     // The stream port, backend by name. Not fatal: an entity whose port
     // would not open keeps its control plane and has no streams, which is
@@ -281,7 +284,7 @@ auto AvbEntityKit::start(net::MessageReactor& reactor) -> Status
     // overwrite the static defaults BEFORE the data plane reads them below.
     // Non-fatal inside: on socket failure the entity keeps the static MACs.
     if (config_.stream_address_mode == "maap") {
-        if (auto status = acquire_maap_addresses(reactor); !status) {
+        if (auto status = acquire_maap_addresses(reactor, now); !status) {
             return status;
         }
     }
@@ -369,7 +372,7 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
     }
 }
 
-auto AvbEntityKit::stop() -> Status
+auto AvbEntityKit::stop(TimePoint const now) -> Status
 {
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
@@ -377,7 +380,6 @@ auto AvbEntityKit::stop() -> Status
     // The data plane first, once the tool has stopped the timers that drive
     // it, then the control plane. start() builds both again.
     close_streams();
-    auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     return host_.stop_control_plane(now);
 }
 

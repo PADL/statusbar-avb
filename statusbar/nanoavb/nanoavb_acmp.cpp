@@ -89,6 +89,14 @@ void NanoAvbAcmpListener::set_callbacks(AcmpListenerCallbacks callbacks)
     wire_listener_callbacks();
 }
 
+void NanoAvbAcmpListener::step(ListenerEvent const ev, TimePoint const now)
+{
+    // The connect/disconnect callbacks fire from inside the machine's actions
+    // and are told this time.
+    last_event_time_ = now;
+    sm_.handle_event(ctx_, ev, now);
+}
+
 void NanoAvbAcmpListener::wire_listener_callbacks()
 {
     ctx_.tx_command = [this](AcmpCommandResponse const& cmd) -> bool {
@@ -109,11 +117,12 @@ void NanoAvbAcmpListener::wire_listener_callbacks()
                     set_fast_connect_goal(resp.listener_unique_id.get(), stream->talker_entity_id, stream->talker_unique_id);
                 }
                 if (callbacks_.on_connect && stream != nullptr) {
-                    callbacks_.on_connect(resp.listener_unique_id.get(), stream->stream_id, stream->stream_dest_mac);
+                    callbacks_.on_connect(
+                        resp.listener_unique_id.get(), stream->stream_id, stream->stream_dest_mac, last_event_time_);
                 }
             } else if (resp.message_type() == ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE) {
                 if (callbacks_.on_disconnect) {
-                    callbacks_.on_disconnect(resp.listener_unique_id.get());
+                    callbacks_.on_disconnect(resp.listener_unique_id.get(), last_event_time_);
                 }
             }
         }
@@ -144,7 +153,7 @@ auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& 
     ctx_.rcvd_cmd_resp = cmd;
 
     // Handle the event with the state machine
-    sm_.handle_event(ctx_, *event, event_time);
+    step(*event, event_time);
 
     return true;
 }
@@ -241,7 +250,7 @@ auto NanoAvbAcmpListener::receive_talker_response(AcmpCommandResponse const& res
     ctx_.rcvd_cmd_resp = resp;
 
     // Handle the event with the state machine
-    sm_.handle_event(ctx_, *event, event_time);
+    step(*event, event_time);
 
     return true;
 }
@@ -249,7 +258,7 @@ auto NanoAvbAcmpListener::receive_talker_response(AcmpCommandResponse const& res
 auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
 {
     if (listener_has_timeout(ctx_, current_time)) {
-        sm_.handle_event(ctx_, ListenerEvent::TxTimeout, current_time);
+        step(ListenerEvent::TxTimeout, current_time);
         return true;
     }
 
@@ -276,11 +285,11 @@ auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
     return false;
 }
 
-auto NanoAvbAcmpListener::on_talker_departed(Eui64 const& talker_id) -> size_t
+auto NanoAvbAcmpListener::on_talker_departed(Eui64 const& talker_id, TimePoint const now) -> size_t
 {
-    return ctx_.clear_talker_connections(talker_id, [this](uint16_t stream_index) {
+    return ctx_.clear_talker_connections(talker_id, [this, now](uint16_t stream_index) {
         if (callbacks_.on_disconnect) {
-            callbacks_.on_disconnect(stream_index);
+            callbacks_.on_disconnect(stream_index, now);
         }
     });
 }

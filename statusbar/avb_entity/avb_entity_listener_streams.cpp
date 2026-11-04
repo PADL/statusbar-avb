@@ -564,11 +564,11 @@ auto ListenerStreams::fill_stream_input_counters(
     return true;
 }
 
-void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac)
+void ListenerStreams::on_listener_connected(
+    uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, sm::TimePoint const now)
 {  // NOLINT(statusbar-block-statements) the connect: declare, join, log; pre-dates the gate
     tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
-    auto const now = sm::Clock::now();
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the
     // talker's boot) — the handler upgrades to Ready when it appears.
@@ -593,12 +593,12 @@ void ListenerStreams::on_listener_connected(uint16_t const stream_index, ieee::E
     }
 }
 
-void ListenerStreams::on_listener_disconnected(uint16_t const stream_index)
+void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
     if (auto const* stream = components_.acmp_listener.get_stream(stream_index); stream != nullptr) {
         tsn::StreamId sid{};
         (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &sid);
-        (void)components_.msrp_handler.listener_withdraw(sid, sm::Clock::now());
+        (void)components_.msrp_handler.listener_withdraw(sid, now);
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
         if (port_ != nullptr) {

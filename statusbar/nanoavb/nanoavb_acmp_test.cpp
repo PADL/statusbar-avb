@@ -472,6 +472,7 @@ TEST(nanoavb_acmp_listener, fast_connect_connects_without_controller)
     AcmpCommandResponse captured_command{};
     bool command_sent = false;
     bool connected_cb = false;
+    auto connected_at = statusbar::sm::TimePoint{};
 
     AcmpListenerCallbacks callbacks;
     callbacks.tx_command = [&](AcmpCommandResponse const& cmd) {
@@ -480,7 +481,10 @@ TEST(nanoavb_acmp_listener, fast_connect_connects_without_controller)
         return true;
     };
     callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
-    callbacks.on_connect = [&](uint16_t, Eui64 const&, Eui48) { connected_cb = true; };
+    callbacks.on_connect = [&](uint16_t, Eui64 const&, Eui48, statusbar::sm::TimePoint const at) {
+        connected_cb = true;
+        connected_at = at;
+    };
 
     NanoAvbAcmpListener listener{listener_id, callbacks};
     listener.start();
@@ -510,9 +514,12 @@ TEST(nanoavb_acmp_listener, fast_connect_connects_without_controller)
     talker_resp.sequence_id = captured_command.sequence_id;
     talker_resp.stream_id = make_stream_id(talker_id, 0);
     talker_resp.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};
-    EXPECT_TRUE(listener.receive_talker_response(talker_resp, now));
+    // The callback is told the time of the response that completed the connect.
+    auto const response_time = now + std::chrono::milliseconds{150};
+    EXPECT_TRUE(listener.receive_talker_response(talker_resp, response_time));
     EXPECT_TRUE(listener.is_connected(0));
     EXPECT_TRUE(connected_cb);
+    EXPECT_EQ(connected_at, response_time);
 
     // Connected: another fast connect for the same sink is a no-op.
     EXPECT_FALSE(listener.fast_connect(0, talker_id, 0, now));
@@ -654,7 +661,7 @@ TEST(nanoavb_acmp_listener, talker_departure_tears_down_connected_sink)
     AcmpListenerCallbacks callbacks;
     callbacks.tx_command = [](AcmpCommandResponse const&) { return true; };
     callbacks.tx_response = [](AcmpCommandResponse const&) { return true; };
-    callbacks.on_disconnect = [&](uint16_t idx) { disconnected.push_back(idx); };
+    callbacks.on_disconnect = [&](uint16_t idx, statusbar::sm::TimePoint) { disconnected.push_back(idx); };
 
     NanoAvbAcmpListener listener{listener_id, callbacks};
     listener.start();
@@ -677,12 +684,12 @@ TEST(nanoavb_acmp_listener, talker_departure_tears_down_connected_sink)
     EXPECT_TRUE(listener.is_connected(0));
 
     // A DIFFERENT talker departing does not touch our sink.
-    EXPECT_EQ(listener.on_talker_departed(other_talker), 0U);
+    EXPECT_EQ(listener.on_talker_departed(other_talker, statusbar::sm::TimePoint{}), 0U);
     EXPECT_TRUE(listener.is_connected(0));
     EXPECT_TRUE(disconnected.empty());
 
     // OUR talker departing tears the sink down and fires on_disconnect once.
-    EXPECT_EQ(listener.on_talker_departed(talker_id), 1U);
+    EXPECT_EQ(listener.on_talker_departed(talker_id, statusbar::sm::TimePoint{}), 1U);
     EXPECT_FALSE(listener.is_connected(0));
     EXPECT_EQ(disconnected.size(), 1U);
     if (!disconnected.empty()) {
@@ -725,7 +732,7 @@ TEST(nanoavb_acmp_listener, talker_ageout_tears_down_connected_sink)
 
     // Discovery wired to the listener exactly as NanoAvbNetHandlers wires it.
     AdpDiscoveryCallbacks disc_cb;
-    disc_cb.on_entity_departing = [&](Eui64 id) { (void)listener.on_talker_departed(id); };
+    disc_cb.on_entity_departing = [&](Eui64 id, statusbar::sm::TimePoint now) { (void)listener.on_talker_departed(id, now); };
     NanoAvbAdpDiscovery discovery{disc_cb};
 
     // The talker is advertising (valid_time field 1 -> valid ~2s).

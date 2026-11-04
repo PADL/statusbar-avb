@@ -72,7 +72,7 @@ void NanoAvbAemController::wire_all_callbacks()
                 }
             },
         .on_entity_departing =
-            [this](Eui64 id) {
+            [this](Eui64 id, sm::TimePoint /*now*/) {
                 if (callbacks_.on_entity_departing) {
                     callbacks_.on_entity_departing(id);
                 }

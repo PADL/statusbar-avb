@@ -268,7 +268,7 @@ MainLoopResult run_main_loop(
             auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
 
             // Process audio (DSP and packet handling)
-            entity.process_audio(now);
+            entity.process_audio(now, wake_info->actual_raw);
 
             last_wake_count.publish(wake_info->wake_count);
             last_wake_error_ns.publish(wake_info->error_ns);

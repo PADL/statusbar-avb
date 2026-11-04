@@ -70,11 +70,14 @@ struct AcmpListenerCallbacks
     /// Called when the handler needs to send an ACMP response to the controller
     statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> tx_response;
 
-    /// Called when a stream is connected
-    statusbar::sg14::inplace_function<void(uint16_t stream_index, Eui64 const& stream_id, Eui48 dest_mac), 64> on_connect;
+    /// Called when a stream is connected, told the time of the receive/tick
+    /// it fires from (the application declares its reservation at it).
+    statusbar::sg14::inplace_function<void(uint16_t stream_index, Eui64 const& stream_id, Eui48 dest_mac, sm::TimePoint now), 64>
+        on_connect;
 
-    /// Called when a stream is disconnected
-    statusbar::sg14::inplace_function<void(uint16_t stream_index), 64> on_disconnect;
+    /// Called when a stream is disconnected, told the time of the receive/tick
+    /// (or the talker departure) it fires from.
+    statusbar::sg14::inplace_function<void(uint16_t stream_index, sm::TimePoint now), 64> on_disconnect;
 
     /// Called to attach a listener to an SRP stream reservation
     statusbar::sg14::inplace_function<void(uint16_t stream_index, Eui64 const& stream_id), 64> srp_attach_listener;
@@ -215,8 +218,8 @@ class NanoAvbAcmpListener
     /// reservation that makes the talker actually start streaming. The wired
     /// tx_response lambda reads callbacks_ live, so updating it post-wiring works.
     void set_connection_callbacks(
-        statusbar::sg14::inplace_function<void(uint16_t, Eui64 const&, Eui48), 64> on_connect,
-        statusbar::sg14::inplace_function<void(uint16_t), 64> on_disconnect)
+        statusbar::sg14::inplace_function<void(uint16_t, Eui64 const&, Eui48, TimePoint), 64> on_connect,
+        statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> on_disconnect)
     {
         callbacks_.on_connect = std::move(on_connect);
         callbacks_.on_disconnect = std::move(on_disconnect);
@@ -297,10 +300,10 @@ class NanoAvbAcmpListener
 
     /// Tear down any sink connected to a departed talker (ADP ENTITY_DEPARTING or a
     /// discovery ageout). Clears each matching sink's connection state and fires the
-    /// on_disconnect callback so SRP/MSRP is released. Returns the number torn down.
+    /// on_disconnect callback (told @p now) so SRP/MSRP is released. Returns the number torn down.
     /// Without this a sink stays connected forever after its talker vanishes, since
     /// ACMP only clears a sink on an explicit controller DISCONNECT_RX.
-    auto on_talker_departed(Eui64 const& talker_id) -> size_t;
+    auto on_talker_departed(Eui64 const& talker_id, TimePoint now) -> size_t;
 
     // ACMP Command/Response Processing
 
@@ -336,6 +339,9 @@ class NanoAvbAcmpListener
   private:
     void wire_listener_callbacks();
     void fast_connect_tick(TimePoint now);
+    /// Drive the state machine with @p ev at @p now, the time its actions'
+    /// callbacks are told.
+    void step(ListenerEvent ev, TimePoint now);
 
     AcmpListenerCallbacks callbacks_;
     ListenerContext<> ctx_;
@@ -343,6 +349,9 @@ class NanoAvbAcmpListener
     statusbar::sg14::inplace_vector<FastConnectGoal, MAX_FAST_CONNECT_GOALS> fast_connect_goals_{};
     statusbar::sg14::inplace_function<void(), 64> on_goals_changed_{};
     TimePoint next_fast_connect_attempt_{};
+    /// The time of the receive/tick being handled: what the connect/disconnect
+    /// callbacks are told (they fire from inside the state machine's actions).
+    TimePoint last_event_time_{};
     uint16_t fast_connect_sequence_{0};
     bool sticky_bindings_{false};
 };

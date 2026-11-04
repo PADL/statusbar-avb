@@ -563,8 +563,10 @@ class NanoAvbComponentsBuilder
     /// Build the components, validating all required fields are set.
     /// Returns a unique_ptr because NanoAvbComponents is non-movable (it holds
     /// internal cross-references) and so cannot be returned by value.
+    /// @param now The control-plane time the default VLAN is registered at
+    ///            (a setup edge: read once here unless the caller holds it).
     /// @return StatusValue containing a unique_ptr<NanoAvbComponents> or error
-    [[nodiscard]] auto build() -> StatusValue<std::unique_ptr<NanoAvbComponents>>;
+    [[nodiscard]] auto build(sm::TimePoint now = sm::Clock::now()) -> StatusValue<std::unique_ptr<NanoAvbComponents>>;
 
   private:
     EntityModel entity_model_{};

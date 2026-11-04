@@ -216,8 +216,9 @@ struct MsrpCallbacks
     /// Called when the set of remote listeners for one of OUR advertised talker
     /// streams changes. `ready` is true when at least one registered listener
     /// permits transmit on `stream_id` (the talker may start sending), false
-    /// otherwise. Fires from receive_packet()/tick() on listener register/leave.
-    statusbar::sg14::inplace_function<void(StreamId const& stream_id, bool ready), 64> on_talker_listener;
+    /// otherwise. Fires from receive_packet()/tick() on listener register/leave,
+    /// told that call's time: the talker drives its own SM from it.
+    statusbar::sg14::inplace_function<void(StreamId const& stream_id, bool ready, TimePoint now), 64> on_talker_listener;
 };
 
 //
@@ -270,7 +271,7 @@ class MsrpHandler
 
     /// Set just the on_talker_listener hook without disturbing the others
     /// (set_callbacks replaces the whole struct; this updates one field).
-    void set_on_talker_listener(statusbar::sg14::inplace_function<void(StreamId const&, bool), 64> cb)
+    void set_on_talker_listener(statusbar::sg14::inplace_function<void(StreamId const&, bool, TimePoint), 64> cb)
     {
         callbacks_.on_talker_listener = std::move(cb);
     }
@@ -582,11 +583,12 @@ class MsrpHandler
     }
 
     /// Forward a listener register/leave for one of OUR talker streams to the
-    /// on_talker_listener hook, reporting the aggregate "may transmit" state.
+    /// on_talker_listener hook, reporting the aggregate "may transmit" state
+    /// and the time of the receive_packet()/tick() this fires from.
     void notify_talker_listener(tsn::StreamId const& sid)
     {
         if (get_talker_stream(sid) != nullptr && callbacks_.on_talker_listener) {
-            callbacks_.on_talker_listener(sid, participant_.listener_permits_transmit(sid));
+            callbacks_.on_talker_listener(sid, participant_.listener_permits_transmit(sid), last_event_time_);
         }
     }
 

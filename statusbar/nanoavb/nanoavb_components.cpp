@@ -187,7 +187,7 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
     auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
 
     switch (subtype) {
-        case AvtpSubtype::adp: {
+        case AvtpSubtype::adp: {  // NOLINT(statusbar-block-statements) one ADP frame's dispatch; pre-dates the gate
             // ADP message
             if (payload.size() < AdpDu::LENGTH) {
                 return;
@@ -203,7 +203,7 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
             // controller DISCONNECT_RX, so otherwise the sink would report connected
             // (and hold its SRP reservation) forever after the talker left.
             if (adp.is_entity_departing()) {
-                (void)acmp_listener_.on_talker_departed(adp.entity_id);
+                (void)acmp_listener_.on_talker_departed(adp.entity_id, sm_now);
                 // A departing controller's unsolicited registration is now stale.
                 (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
             }
@@ -334,7 +334,7 @@ NanoAvbComponents::NanoAvbComponents(
 // NanoAvbComponentsBuilder implementation
 //
 
-auto NanoAvbComponentsBuilder::build() -> StatusValue<std::unique_ptr<NanoAvbComponents>>
+auto NanoAvbComponentsBuilder::build(sm::TimePoint const now) -> StatusValue<std::unique_ptr<NanoAvbComponents>>
 {
     // Validate required components
     if (!has_entity_model_) {
@@ -352,7 +352,7 @@ auto NanoAvbComponentsBuilder::build() -> StatusValue<std::unique_ptr<NanoAvbCom
         std::move(entity_model_), adp_config_, talker_max_streams_, talker_max_listeners_, listener_max_streams_);
 
     // Post-construction setup that needs builder-supplied values.
-    (void)components->mvrp_handler.register_vlan(default_vlan_id_, sm::Clock::now());
+    (void)components->mvrp_handler.register_vlan(default_vlan_id_, now);
     components->msrp_handler.set_domain(sr_domain_);
 
     return success(std::move(components));
@@ -363,7 +363,7 @@ auto NanoAvbComponentsBuilder::build() -> StatusValue<std::unique_ptr<NanoAvbCom
 //
 
 void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
-{
+{  // NOLINT(statusbar-block-statements) the reactor wiring, one handler after another; pre-dates the gate
     auto mvrp = std::make_unique<MvrpNetHandler>(interface_name_, components_->mvrp_handler);
     auto msrp = std::make_unique<MsrpNetHandler>(interface_name_, components_->msrp_handler);
     auto atdecc = std::make_unique<AtdeccNetHandler>(
@@ -379,8 +379,8 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
     // tears down any sink still connected to it. The AtdeccNetHandler feeds this
     // discovery received ADPDUs and ticks it once set below.
     AdpDiscoveryCallbacks discovery_callbacks{};
-    discovery_callbacks.on_entity_departing = [this](Eui64 id) {
-        (void)components_->acmp_listener.on_talker_departed(id);
+    discovery_callbacks.on_entity_departing = [this](Eui64 id, sm::TimePoint now) {
+        (void)components_->acmp_listener.on_talker_departed(id, now);
         // Aged-out controller: drop its now-stale unsolicited registration too.
         (void)components_->aem_handler.remove_unsolicited_registrations_for(id);
     };

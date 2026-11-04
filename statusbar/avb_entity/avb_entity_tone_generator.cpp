@@ -15,6 +15,7 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/net/net_posix_util.hpp"
+#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 
 #include <array>
@@ -244,7 +245,7 @@ void AvbEntityToneGenerator::set_render_symbol(uint32_t const symbol_code, Strea
 // Start
 //
 
-auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
+auto AvbEntityToneGenerator::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
     // Deterministic media clock owns the presentation offset; the stream-output
     // contexts add zero extra offset. Assigned before kit_.start() opens the
@@ -252,7 +253,7 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
         .sample_rate_hz = static_cast<double>(sample_rate_), .presentation_offset_ns = config_.presentation_offset_ns}};
 
-    if (auto status = kit_.start(reactor); !status) {
+    if (auto status = kit_.start(reactor, now); !status) {
         return status;
     }
 
@@ -294,7 +295,12 @@ void AvbEntityToneGenerator::print_state() const
 // Audio processing
 //
 
-void AvbEntityToneGenerator::process_audio(TimePoint time)
+void AvbEntityToneGenerator::process_audio(TimePoint const time)
+{
+    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
+}
+
+void AvbEntityToneGenerator::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
     uint64_t const packet_interval_ns = (static_cast<uint64_t>(samples_per_packet_) * 1'000'000'000ULL) / sample_rate_;
@@ -325,8 +331,6 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         }
 
         uint64_t const pts = media_clock_.timestamp_for(tick.first_index);
-        int64_t const now_steady_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         // Each stream renders its own source (bound render callback, else the
         // shared tone), gates on ITS OWN ACMP connection + reservation, and
         // emits per its kind (AM824 direct, AAF reframed, CRF decimated).
@@ -340,8 +344,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
                 src = dest;
             }
             if (auto* slot = kit_.talker().slot_for(specs[pos].index); slot != nullptr) {
-                kit_.talker().transmit_if_due(
-                    *slot, tick, kit_.talker_should_transmit(slot->spec.index, now_steady_ns), samples, src);
+                kit_.talker().transmit_if_due(*slot, tick, kit_.talker_should_transmit(slot->spec.index, raw_now), samples, src);
             }
         }
         kit_.talker().flush_tx();

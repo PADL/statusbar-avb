@@ -23,10 +23,12 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
+#include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -45,8 +47,10 @@ class MaapAddressAcquirer
     /// fires on the reactor thread each time the block is (re)defended and
     /// every dest MAC has been published — entities re-declare their MSRP
     /// Talker Advertise there so listeners reserve against the MAAP
-    /// address. Call once from start() in "maap" address mode; in static
-    /// mode simply never call it (ready() defaults true).
+    /// address, told the reactor time it fires at. Call once from start() in
+    /// "maap" address mode; in static mode simply never call it (ready()
+    /// defaults true). @p now is the control-plane time the acquisition
+    /// starts at: a setup edge, read once here unless the caller holds it.
     [[nodiscard]] auto acquire(
         net::MessageReactor& reactor,
         std::string_view const interface_name,
@@ -55,8 +59,9 @@ class MaapAddressAcquirer
         TalkerStreams& talker,
         std::span<uint16_t const> const stream_indices,
         logging::Logger const log,
-        statusbar::sg14::inplace_function<void(), 32> on_addresses_ready) -> Status
-    {
+        statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_ready,
+        sm::TimePoint const now = sm::Clock::now()) -> Status
+    {  // NOLINT(statusbar-block-statements) the acquisition setup, one step after another; pre-dates the gate
         log_ = log;
         indices_.clear();
         for (auto const idx : stream_indices) {
@@ -79,26 +84,29 @@ class MaapAddressAcquirer
         // unaffected — they keep running in the reactor; only the talker waits.
         ready_.store(false, std::memory_order_release);
 
-        handler_->set_on_acquired([this, &components, &talker](ieee::Eui48 const& block_start, uint16_t /*count*/) {
-            // Reactor thread, once the block is defended. Publish each
-            // per-stream dest MAC, then release the gate so the media
-            // thread's acquire-load sees the new MACs before transmitting.
-            for (size_t pos = 0; pos < indices_.size(); ++pos) {
-                uint16_t const idx = indices_[pos];
-                ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
-                if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
-                    (void)components.acmp_talker.configure_stream(idx, s->stream_id, dest);
+        handler_->set_on_acquired(
+            [this, &components, &talker](ieee::Eui48 const& block_start, uint16_t /*count*/, int64_t const now_ns) {
+                // Reactor thread, once the block is defended. Publish each
+                // per-stream dest MAC, then release the gate so the media
+                // thread's acquire-load sees the new MACs before transmitting.
+                for (size_t pos = 0; pos < indices_.size(); ++pos) {
+                    uint16_t const idx = indices_[pos];
+                    ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
+                    if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
+                        (void)components.acmp_talker.configure_stream(idx, s->stream_id, dest);
+                    }
+                    if (auto* slot = talker.slot_for(idx); slot != nullptr) {
+                        slot->dest_mac = dest;
+                    }
                 }
-                if (auto* slot = talker.slot_for(idx); slot != nullptr) {
-                    slot->dest_mac = dest;
+                ready_.store(true, std::memory_order_release);
+                log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
+                if (on_addresses_ready_) {
+                    // The MAAP handler's timeline is the reactor's (net::monotonic_ns,
+                    // std::chrono::steady_clock): the same clock as sm::Clock.
+                    on_addresses_ready_(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
                 }
-            }
-            ready_.store(true, std::memory_order_release);
-            log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
-            if (on_addresses_ready_) {
-                on_addresses_ready_();
-            }
-        });
+            });
 
         handler_->set_on_lost([this](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
             // Conflict: close the TX gate until a new block is defended (the
@@ -118,7 +126,9 @@ class MaapAddressAcquirer
         // Hand the handler to the reactor: acquisition runs ASYNCHRONOUSLY —
         // start() never blocks. The handler then keeps the block defended.
         reactor.add(std::move(net_handler));
-        handler_->acquire(static_cast<uint16_t>(indices_.size()), net::monotonic_ns());
+        handler_->acquire(
+            static_cast<uint16_t>(indices_.size()),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
         return {};
     }
 
@@ -131,7 +141,7 @@ class MaapAddressAcquirer
     std::unique_ptr<avtp::MaapHandler> handler_;
     std::atomic<bool> ready_{true};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
-    statusbar::sg14::inplace_function<void(), 32> on_addresses_ready_{};
+    statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_ready_{};
     std::optional<logging::Logger> log_{};  ///< set by acquire (Logger is not default-constructible)
 };
 

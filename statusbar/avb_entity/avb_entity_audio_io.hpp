@@ -45,6 +45,7 @@
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
@@ -159,10 +160,13 @@ class AvbEntityAudioIO
     [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return kit_.crf_recovery(); }
 
     /// Start the entity and add handlers to reactor
-    [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
+    /// @param now The control-plane time the VLAN is registered at (a setup
+    ///            edge: read once here unless the caller holds it)
+    [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
 
     /// Stop the entity and clean up resources
-    [[nodiscard]] auto stop() -> Status;
+    /// @param now The control-plane time the declarations are withdrawn at
+    [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status;
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
@@ -179,15 +183,20 @@ class AvbEntityAudioIO
     /// Process one audio packet period (called from PTP timer at 8000 Hz):
     /// generate audio once, then transmit both an AM824 and an AAF packet.
     auto process_audio(TimePoint time) -> void;
+    /// The told form: @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the
+    /// transmit gate's grace clock), so the tick reads no clock. The one-argument
+    /// form reads it once and calls this.
+    auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
     /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
     /// stream on the wire this tick: true if gating is disabled, or ALL of this
     /// stream's own preconditions hold -- an ACMP connection exists AND the stream
     /// is Started AND MSRP Listener Ready (with grace). Each stream (CRF included)
     /// gates independently. See TalkerGate / gate_talker_on_listener.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
+        -> bool
     {
-        return kit_.talker_should_transmit(idx, now_ns);
+        return kit_.talker_should_transmit(idx, now);
     }
 
     auto set_audio_callback(AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }

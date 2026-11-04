@@ -32,6 +32,7 @@
 #include "statusbar/nanoavb/nanoavb_talker_engine_sm.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_posix_util.hpp"
+#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -206,7 +207,7 @@ AvbEntityAudioIO::~AvbEntityAudioIO()
 // Start / Stop
 //
 
-auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
+auto AvbEntityAudioIO::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
     udptun_->set_ctl_logger(kit_.host().ctl_log());
 
@@ -220,7 +221,7 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
 
     // Control plane + the whole stream data plane (TX/RX slots, sockets, MAAP,
     // CRF recovery feed, persisted listener bindings) -- see AvbEntityKit.
-    if (auto status = kit_.start(reactor); !status) {
+    if (auto status = kit_.start(reactor, now); !status) {
         return status;
     }
 
@@ -233,7 +234,7 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor) -> Status
     return success();
 }
 
-auto AvbEntityAudioIO::stop() -> Status
+auto AvbEntityAudioIO::stop(TimePoint const now) -> Status
 {
     if (!is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
@@ -242,7 +243,7 @@ auto AvbEntityAudioIO::stop() -> Status
     // Tear down our data plane, then the shared control plane (the kit's host
     // stops ADP + releases the net handlers + clears running_).
     udptun_->stop();
-    return kit_.stop();
+    return kit_.stop(now);
 }
 
 void AvbEntityAudioIO::print_state() const
@@ -280,7 +281,12 @@ void AvbEntityAudioIO::print_state() const
 // Audio processing
 //
 
-void AvbEntityAudioIO::process_audio(TimePoint time)
+void AvbEntityAudioIO::process_audio(TimePoint const time)
+{
+    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
+}
+
+void AvbEntityAudioIO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     auto const base_now_ns = static_cast<uint64_t>(time.time_since_epoch().count());
     // One packet's worth of gPTP time: 12 samples @ 96 kHz = 125 us.
@@ -392,16 +398,13 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         // a stream on the wire when nobody is listening. The CRF media clock is
         // emitted whenever any audio talker is transmitting (its listeners lock
         // to it for the audio streams).
-        // Steady-clock now for the MSRP-ready grace window (same clock the
-        // on_talker_listener callback stamps msrp_ready_ns_ with).
-        int64_t const now_steady_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        // The gate is told this wake's RAW instant (its grace window's clock).
         // Each slot gates on ITS OWN ACMP connection + reservation and emits per
         // its kind (AM824 direct, AAF reframed, CRF decimated).
         (void)pts_base;
         for (auto& slot : kit_.talker().slots_) {
             kit_.talker().transmit_if_due(
-                slot, tick, kit_.talker_should_transmit(slot.spec.index, now_steady_ns), samples, audio_buffer_);
+                slot, tick, kit_.talker_should_transmit(slot.spec.index, raw_now), samples, audio_buffer_);
         }
         kit_.talker().flush_tx();
     }

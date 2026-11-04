@@ -34,6 +34,7 @@
 #include "statusbar/nanoavb/nanoavb_supervisor_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_talker_engine_sm.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -145,8 +146,7 @@ AvbEntityAm824IO::AvbEntityAm824IO(
     span_copy(stream_id.span().first(6), config_.entity_id.span().first(6));
     (void)host_.components().acmp_talker.configure_stream(0, stream_id, config_.talker_dest_mac);
 
-    // Register the VLAN with MVRP and set the MSRP SR-class domain.
-    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
+    // The MSRP SR-class domain; the VID itself is registered at start().
     host_.components().msrp_handler.set_domain(DomainInfo{
         .sr_class_id = 6,        // SR Class A
         .sr_class_priority = 3,  // Priority 3
@@ -193,7 +193,7 @@ void AvbEntityAm824IO::wire_stream_callbacks()
 // Start / Stop
 //
 
-auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
+auto AvbEntityAm824IO::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks.
@@ -203,6 +203,8 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
         return status;
     }
     wire_stream_callbacks();
+    // The VID, registered on every start: stop() withdraws it with the rest.
+    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, now);
 
     // --- Stream data plane ---
     // Resolve the talker stream identity (stream id + dest MAC) from ACMP
@@ -294,10 +296,10 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
     // Listener connect/disconnect -> MSRP reserve + join/leave the talker's multicast
     // group on the RX socket. Wired as the acmp_listener connection callbacks.
     host_.components().acmp_listener.set_connection_callbacks(
-        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
-            listener_.on_listener_connected(stream_index, stream_id, dest_mac);
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+            listener_.on_listener_connected(stream_index, stream_id, dest_mac, now);
         },
-        [this](uint16_t stream_index) { listener_.on_listener_disconnected(stream_index); });
+        [this](uint16_t stream_index, TimePoint now) { listener_.on_listener_disconnected(stream_index, now); });
 
     // AECP GET_COUNTERS: expose the IEEE 1722.1 STREAM_INPUT health counters
     // (Clause 7.4.42) for our AM824 listener stream.
@@ -312,7 +314,7 @@ auto AvbEntityAm824IO::start(net::MessageReactor& reactor) -> Status
     return success();
 }
 
-auto AvbEntityAm824IO::stop() -> Status
+auto AvbEntityAm824IO::stop(TimePoint const now) -> Status
 {
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
@@ -320,7 +322,6 @@ auto AvbEntityAm824IO::stop() -> Status
     // The data plane first, once the timers that drive it have stopped,
     // then the control plane. start() builds both again.
     close_streams();
-    auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     return host_.stop_control_plane(now);
 }
 
@@ -412,7 +413,12 @@ void AvbEntityAm824IO::on_timeout(TimePoint time)
 // Audio Processing
 //
 
-void AvbEntityAm824IO::process_audio(TimePoint time)
+void AvbEntityAm824IO::process_audio(TimePoint const time)
+{
+    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
+}
+
+void AvbEntityAm824IO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     // Publish this media-timer wake's gPTP time for the listener RX tally (the reactor /
     // RX-timer path reads it as the "now" for the STREAM_INPUT LATE/EARLY classification).
@@ -451,11 +457,9 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
     auto const tick = media_clock_.advance(gptp_now, 1.0, static_cast<uint32_t>(SAMPLES_PER_PACKET));
     auto const pts = talker_.presentation_for(tick.first_index);
 
-    // Steady-clock now for the MSRP-ready grace window (same clock note_listener_ready
-    // stamps last-ready with); decide the gate once per wake.
-    int64_t const now_steady_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (gate_.should_transmit(0, now_steady_ns)) {
+    // The gate is told this wake's RAW instant (its grace window's clock); decide
+    // it once per wake.
+    if (gate_.should_transmit(0, raw_now)) {
         if (auto* slot = talker_.slot_for(0); slot != nullptr) {
             talker_.transmit_am824(*slot, pts, static_cast<uint32_t>(SAMPLES_PER_PACKET), audio_buffer_);
         }

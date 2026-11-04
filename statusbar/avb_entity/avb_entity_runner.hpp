@@ -325,7 +325,7 @@ auto run_entity_main_loop(
             }
             auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
             auto const cb_t0 = std::chrono::steady_clock::now();
-            entity.process_audio(now);
+            entity.process_audio(now, wake_info->actual_raw);
             note_wake(cb_t0, *wake_info);
         },
         ctx.compensation_ns,

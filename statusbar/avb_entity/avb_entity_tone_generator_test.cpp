@@ -20,6 +20,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
@@ -38,6 +39,10 @@ using namespace statusbar::avb_entity;
 using namespace statusbar::ieee;
 
 namespace {
+
+/// The media wake the gate is told in these tests: any instant, the grace
+/// window is measured from it.
+constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -203,9 +208,9 @@ TEST(tone_gate, default_suppresses_all_talkers_without_listener)
     EXPECT_TRUE(config.gate_talker_on_listener);
     auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
-    EXPECT_FALSE((*result)->talker_should_transmit(0, 0));
-    EXPECT_FALSE((*result)->talker_should_transmit(1, 0));
-    EXPECT_FALSE((*result)->talker_should_transmit(2, 0));
+    EXPECT_FALSE((*result)->talker_should_transmit(0, RAW_NOW));
+    EXPECT_FALSE((*result)->talker_should_transmit(1, RAW_NOW));
+    EXPECT_FALSE((*result)->talker_should_transmit(2, RAW_NOW));
 }
 
 TEST(tone_gate, disabled_allows_all_talkers)
@@ -215,9 +220,9 @@ TEST(tone_gate, disabled_allows_all_talkers)
     config.gate_talker_on_listener = false;
     auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE((*result)->talker_should_transmit(0, 0));
-    EXPECT_TRUE((*result)->talker_should_transmit(1, 0));
-    EXPECT_TRUE((*result)->talker_should_transmit(2, 0));
+    EXPECT_TRUE((*result)->talker_should_transmit(0, RAW_NOW));
+    EXPECT_TRUE((*result)->talker_should_transmit(1, RAW_NOW));
+    EXPECT_TRUE((*result)->talker_should_transmit(2, RAW_NOW));
 }
 
 // Each talker stream gates INDEPENDENTLY on its own ACMP connection + reservation.
@@ -276,8 +281,8 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     };
 
     // Nothing connected -> nothing transmits.
-    EXPECT_FALSE(gate.should_transmit(k_aaf, 0));
-    EXPECT_FALSE(gate.should_transmit(k_crf, 0));
+    EXPECT_FALSE(gate.should_transmit(k_aaf, RAW_NOW));
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW));
 
     // Fully admit the AAF stream (ACMP connection + MSRP Listener Ready). CRF is
     // left untouched -- it must stay suppressed.
@@ -285,18 +290,31 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     gate.note_listener_ready(aaf_sid, true);
     EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{1});
     EXPECT_EQ(comps.acmp_talker.connection_count(k_crf), size_t{0});
-    EXPECT_TRUE(gate.should_transmit(k_aaf, 0));
-    EXPECT_FALSE(gate.should_transmit(k_crf, 0));  // the regression: CRF must not ride AAF
+    EXPECT_TRUE(gate.should_transmit(k_aaf, RAW_NOW));
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW));  // the regression: CRF must not ride AAF
 
     // Admit CRF on its OWN merits -> now it transmits, independently.
     connect(k_crf, 1);
     gate.note_listener_ready(crf_sid, true);
-    EXPECT_TRUE(gate.should_transmit(k_crf, 0));
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
 
     // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.
     gate.note_stream_started(k_aaf, false);
-    EXPECT_FALSE(gate.should_transmit(k_aaf, 0));
-    EXPECT_TRUE(gate.should_transmit(k_crf, 0));
+    EXPECT_FALSE(gate.should_transmit(k_aaf, RAW_NOW));
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
+
+    // The grace window runs from the wake the gate last SAW Listener Ready at,
+    // on the clock it is told (no thread reads one): CRF was seen ready at
+    // RAW_NOW, so a LeaveAll blip keeps it up for GRACE past that and no longer.
+    gate.note_listener_ready(crf_sid, false);
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{4}));
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + TalkerGate::GRACE));
+    // Re-declared: seen again at a later wake, and the window restarts there.
+    gate.note_listener_ready(crf_sid, true);
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{10}));
+    gate.note_listener_ready(crf_sid, false);
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{14}));
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
 }
 
 //
@@ -376,7 +394,7 @@ TEST(tone_aaf_create, aaf_only_builds_and_gates)
     }
     EXPECT_EQ((*result)->channels(), 8U);
     // Gate closed (no listener): the AAF stream (index 0 in AafOnly) stays off.
-    EXPECT_FALSE((*result)->talker_should_transmit(0, 0));
+    EXPECT_FALSE((*result)->talker_should_transmit(0, RAW_NOW));
     (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
     EXPECT_FALSE((*result)->is_running());
 }
@@ -391,7 +409,7 @@ TEST(tone_aaf_create, aaf_only_gate_disabled_transmits_index0)
     if (!result.has_value()) {
         return;
     }
-    EXPECT_TRUE((*result)->talker_should_transmit(0, 0));  // AAF at index 0
+    EXPECT_TRUE((*result)->talker_should_transmit(0, RAW_NOW));  // AAF at index 0
 }
 
 //
@@ -438,8 +456,8 @@ TEST(tone_aafcrf_create, aaf_at_0_crf_at_1_transmit_when_ungated)
         return;
     }
     EXPECT_EQ((*result)->channels(), 8U);
-    EXPECT_TRUE((*result)->talker_should_transmit(0, 0));  // AAF at index 0
-    EXPECT_TRUE((*result)->talker_should_transmit(1, 0));  // CRF at index 1
+    EXPECT_TRUE((*result)->talker_should_transmit(0, RAW_NOW));  // AAF at index 0
+    EXPECT_TRUE((*result)->talker_should_transmit(1, RAW_NOW));  // CRF at index 1
     (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
     EXPECT_FALSE((*result)->is_running());
 }

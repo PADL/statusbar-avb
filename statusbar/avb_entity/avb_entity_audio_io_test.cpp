@@ -19,6 +19,7 @@
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
@@ -38,6 +39,10 @@ using namespace statusbar::avb_entity;
 using namespace statusbar::ieee;
 
 namespace {
+
+/// The media wake the gate is told in these tests: any instant, the grace
+/// window is measured from it.
+constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -307,9 +312,9 @@ TEST(audio_io_gate, default_suppresses_all_talkers_without_listener)
     auto result = AvbEntityAudioIO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityAudioIO::AM824_STREAM_INDEX, 0));
-    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityAudioIO::AAF_STREAM_INDEX, 0));
-    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityAudioIO::CRF_STREAM_INDEX, 0));
+    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityAudioIO::AM824_STREAM_INDEX, RAW_NOW));
+    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityAudioIO::AAF_STREAM_INDEX, RAW_NOW));
+    EXPECT_FALSE((*result)->talker_should_transmit(AvbEntityAudioIO::CRF_STREAM_INDEX, RAW_NOW));
 }
 
 TEST(audio_io_gate, disabled_allows_all_talkers)
@@ -322,9 +327,9 @@ TEST(audio_io_gate, disabled_allows_all_talkers)
     auto result = AvbEntityAudioIO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityAudioIO::AM824_STREAM_INDEX, 0));
-    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityAudioIO::AAF_STREAM_INDEX, 0));
-    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityAudioIO::CRF_STREAM_INDEX, 0));
+    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityAudioIO::AM824_STREAM_INDEX, RAW_NOW));
+    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityAudioIO::AAF_STREAM_INDEX, RAW_NOW));
+    EXPECT_TRUE((*result)->talker_should_transmit(AvbEntityAudioIO::CRF_STREAM_INDEX, RAW_NOW));
 }
 
 //

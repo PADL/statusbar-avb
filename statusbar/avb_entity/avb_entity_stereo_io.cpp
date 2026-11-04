@@ -37,6 +37,7 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -74,7 +75,7 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     // config_ (constructed first); the host's NanoAvbComponents is non-movable.
     : config_{std::move(config)}
     , host_{create_entity_model(), default_adp_advertiser_config(), 1, 4, 1}
-{
+{  // NOLINT(statusbar-block-statements) construction wiring; pre-dates the gate
     // Configure biquad filters for both channels
     configure_filter(config_.filter_freq_hz, config_.filter_gain_db, config_.filter_q);
 
@@ -89,8 +90,7 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     span_copy(stream_id.span().first(6), entity.entity_id.span().first(6));
     (void)host_.components().acmp_talker.configure_stream(0, stream_id, config_.talker_dest_mac);
 
-    // Register the VLAN with MVRP and set the MSRP SR-class domain.
-    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
+    // The MSRP SR-class domain; the VID itself is registered at start().
     host_.components().msrp_handler.set_domain(DomainInfo{
         .sr_class_id = 6,                   // SR Class A
         .sr_class_priority = 3,             // Priority 3
@@ -225,7 +225,7 @@ void AvbEntityStereoIO::wire_stream_callbacks()
 // Start / Stop
 //
 
-auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
+auto AvbEntityStereoIO::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
     // Bring up the shared control plane (net handlers + generic SM wiring), then
     // attach this entity's stream-specific callbacks. The host has no data plane of
@@ -235,6 +235,8 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
         return status;
     }
     wire_stream_callbacks();
+    // The VID, registered on every start: stop() withdraws it with the rest.
+    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, now);
 
     // --- Stream data plane (one stereo 48 kHz AM824 loopback) ------------------
     // Resolve the talker stream identity (id + dest MAC) from ACMP stream 0 so the
@@ -350,10 +352,10 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
     // Listener connect/disconnect: MSRP attach (Ready / AskingFailed per the
     // talker's registration) + multicast join/leave, via ListenerStreams.
     host_.components().acmp_listener.set_connection_callbacks(
-        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac) {
-            listener_->on_listener_connected(stream_index, stream_id, dest_mac);
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+            listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
         },
-        [this](uint16_t stream_index) { listener_->on_listener_disconnected(stream_index); });
+        [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
 
     // AECP GET_COUNTERS: expose the IEEE 1722.1 STREAM_INPUT health counters
     // (Clause 7.4.42) for our single AM824 listener stream (index 0).
@@ -368,7 +370,7 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
     return success();
 }
 
-auto AvbEntityStereoIO::stop() -> Status
+auto AvbEntityStereoIO::stop(TimePoint const now) -> Status
 {
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
@@ -376,7 +378,6 @@ auto AvbEntityStereoIO::stop() -> Status
     // The data plane first, once the timers that drive it have stopped,
     // then the control plane. start() builds both again.
     close_streams();
-    auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     return host_.stop_control_plane(now);
 }
 
@@ -469,7 +470,12 @@ void AvbEntityStereoIO::on_timeout(TimePoint time)
 // Audio Processing
 //
 
-void AvbEntityStereoIO::process_audio(TimePoint time)
+void AvbEntityStereoIO::process_audio(TimePoint const time)
+{
+    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
+}
+
+void AvbEntityStereoIO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     int64_t const gptp_now_ns = time.time_since_epoch().count();
     auto const gptp_now = static_cast<uint64_t>(gptp_now_ns);
@@ -483,11 +489,9 @@ void AvbEntityStereoIO::process_audio(TimePoint time)
     auto const tick = media_clock_.advance(gptp_now, 1.0, static_cast<uint32_t>(SAMPLES_PER_PACKET));
     auto const pts_base = talker_.presentation_for(tick.first_index);
 
-    // Steady-clock now for the MSRP-ready grace window (same clock note_listener_ready
-    // stamps last-ready with); decide the gate once per wake.
-    int64_t const now_steady_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    bool const gate_open = gate_.should_transmit(0, now_steady_ns);
+    // The gate is told this wake's RAW instant (its grace window's clock); decide
+    // it once per wake.
+    bool const gate_open = gate_.should_transmit(0, raw_now);
 
     // Reclock every loopback block whose gPTP presentation time has elapsed onto our
     // local media clock. Both ends run 48 kHz gPTP so the pipe is naturally rate-matched

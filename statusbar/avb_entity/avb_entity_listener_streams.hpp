@@ -38,6 +38,7 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
+#include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <array>
@@ -214,12 +215,13 @@ struct ListenerStreams
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream multicast group on the RX socket. Wired as the
-    /// acmp_listener connect callback. Reactor thread.
-    void on_listener_connected(uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac);
+    /// acmp_listener connect callback, told that handler's time. Reactor thread.
+    void on_listener_connected(uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, sm::TimePoint now);
 
     /// Our listener disconnected: withdraw the MSRP reservation and leave the
-    /// talker's multicast group. Wired as the acmp_listener disconnect callback.
-    void on_listener_disconnected(uint16_t stream_index);
+    /// talker's multicast group. Wired as the acmp_listener disconnect callback,
+    /// told that handler's time.
+    void on_listener_disconnected(uint16_t stream_index, sm::TimePoint now);
 
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }

@@ -56,8 +56,9 @@ class MaapHandler
     using SendFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t const>), 64>;
 
     /// The contiguous range [start, start+count) is now defended and usable as a
-    /// stream destination address.
-    using AcquiredFn = statusbar::sg14::inplace_function<void(Eui48 const& start, uint16_t count), 64>;
+    /// stream destination address. Told the @p now_ns of the tick()/receive()
+    /// that defended it (the handler's own timeline).
+    using AcquiredFn = statusbar::sg14::inplace_function<void(Eui48 const& start, uint16_t count, int64_t now_ns), 64>;
 
     /// A conflict forced us off [start, start+count). The handler is already
     /// re-probing a freshly-picked range and will call the acquired callback

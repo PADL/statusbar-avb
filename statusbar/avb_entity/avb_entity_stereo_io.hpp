@@ -26,6 +26,7 @@
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
@@ -194,11 +195,14 @@ class AvbEntityStereoIO
     /// Start the entity and add handlers to reactor
     /// @param reactor Message reactor (caller must run poll loop)
     /// @return Status indicating success or failure
-    [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
+    /// @param now The control-plane time the VLAN is registered at (a setup
+    ///            edge: read once here unless the caller holds it)
+    [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
 
     /// Stop the entity and clean up resources
     /// @return Status indicating success or failure
-    [[nodiscard]] auto stop() -> Status;
+    /// @param now The control-plane time the declarations are withdrawn at
+    [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status;
 
     /// Check if entity is running
     [[nodiscard]] auto is_running() const noexcept -> bool { return host_.is_running(); }
@@ -234,6 +238,10 @@ class AvbEntityStereoIO
     /// compensation pipe, run each through the DSP biquads, and transmit via TalkerStreams
     /// (gated). @p time is the media-timer wake (gPTP).
     auto process_audio(TimePoint time) -> void;
+    /// The told form: @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the
+    /// transmit gate's grace clock), so the tick reads no clock. The one-argument
+    /// form reads it once and calls this.
+    auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
     /// Batch-drain the AM824 RX socket, decoding + publishing each block to the loopback
     /// pipe, told the RX timer's wake on both clocks (@p wake_gptp stamps the blocks,

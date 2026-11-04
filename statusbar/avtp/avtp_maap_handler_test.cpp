@@ -47,7 +47,7 @@ struct Rig
             }
             return true;
         });
-        handler.set_on_acquired([this](Eui48 const& s, uint16_t c) {
+        handler.set_on_acquired([this](Eui48 const& s, uint16_t c, int64_t /*now_ns*/) {
             acquired_start = s;
             acquired_count = c;
             ++acquired_calls;

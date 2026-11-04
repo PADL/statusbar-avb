@@ -492,7 +492,7 @@ void AvbEntityHost::wire_mvrp_callbacks()
 }
 
 void AvbEntityHost::wire_srp_callbacks()
-{
+{  // NOLINT(statusbar-block-statements) the SRP callback wiring, one install per hook; pre-dates the gate
     msrp_talker_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     msrp_talker_ctx_.callbacks.msrp_talker_advertise = [this](auto& /*ctx*/, TimePoint time) -> void {
         // Declare our SR class domain(s) before advertising streams so the bridge
@@ -517,8 +517,8 @@ void AvbEntityHost::wire_srp_callbacks()
     };
     msrp_talker_ctx_.callbacks.mark_idle = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
 
-    components_.msrp_handler.set_on_talker_listener([this](nanoavb::StreamId const& stream_id, bool ready) {
-        auto const now = sm::Clock::now();
+    components_.msrp_handler.set_on_talker_listener([this](
+                                                        nanoavb::StreamId const& stream_id, bool const ready, TimePoint const now) {
         msrp_talker_.handle_event(
             msrp_talker_ctx_, ready ? nanoavb::msrp_talker_sm::Def::Event::Ready : nanoavb::msrp_talker_sm::Def::Event::Lost, now);
 

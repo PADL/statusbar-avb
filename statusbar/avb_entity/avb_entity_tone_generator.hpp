@@ -37,6 +37,7 @@
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -120,8 +121,11 @@ class AvbEntityToneGenerator
         uint8_t base_midi_note,
         std::pmr::memory_resource* memory_resource);
 
-    [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
-    [[nodiscard]] auto stop() -> Status { return kit_.stop(); }
+    /// @param now The control-plane time the VLAN is registered at (a setup
+    ///            edge: read once here unless the caller holds it)
+    [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
+    /// @param now The control-plane time the declarations are withdrawn at
+    [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status { return kit_.stop(now); }
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
@@ -136,12 +140,17 @@ class AvbEntityToneGenerator
     /// Process one media-timer wake (8000 Hz): generate the per-channel tones and
     /// transmit each blob-declared stream (gated per stream).
     auto process_audio(TimePoint time) -> void;
+    /// The told form: @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the
+    /// transmit gate's grace clock), so the tick reads no clock. The one-argument
+    /// form reads it once and calls this.
+    auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
     /// Whether talker stream `idx` (a STREAM_OUTPUT descriptor index) should put
     /// its AVTP stream on the wire this tick (see AvbEntityKit).
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
+        -> bool
     {
-        return kit_.talker_should_transmit(idx, now_ns);
+        return kit_.talker_should_transmit(idx, now);
     }
 
     /// The blob-derived stream table (kind/format/rate per STREAM_OUTPUT).

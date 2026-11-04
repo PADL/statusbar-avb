@@ -169,7 +169,7 @@ void MaapHandler::receive(Eui48 const& src_mac, std::span<uint8_t const> frame, 
 }
 
 void MaapHandler::dispatch(maap_sm::Def::Event ev, int64_t now_ns)
-{
+{  // NOLINT(statusbar-block-statements) the dispatch: snapshot, step, report the Defend boundary; pre-dates the gate
     using S = maap_sm::Def::State;
 
     auto const before = sm_.current_state();
@@ -183,7 +183,7 @@ void MaapHandler::dispatch(maap_sm::Def::Event ev, int64_t now_ns)
     auto const after = sm_.current_state();
     if (before != S::Defend && after == S::Defend) {
         if (on_acquired_) {
-            on_acquired_(ctx_.requested_start, ctx_.requested_count);
+            on_acquired_(ctx_.requested_start, ctx_.requested_count, now_ns);
         }
     } else if (before == S::Defend && after != S::Defend) {
         if (on_lost_) {

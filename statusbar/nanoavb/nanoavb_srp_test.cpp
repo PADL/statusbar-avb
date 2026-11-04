@@ -277,10 +277,12 @@ TEST(nanoavb_srp_msrp, on_talker_listener_fires_when_listener_ready)
     bool fired_for_sid = false;
     bool ready_for_sid = false;
     bool fired_for_other = false;
-    talker.set_on_talker_listener([&](StreamId const& s, bool ready) {
+    TimePoint fired_at{};
+    talker.set_on_talker_listener([&](StreamId const& s, bool ready, TimePoint const at) {
         if (s == sid) {
             fired_for_sid = true;
             ready_for_sid = ready;
+            fired_at = at;
         } else if (s == other) {
             fired_for_other = true;
         }
@@ -312,6 +314,12 @@ TEST(nanoavb_srp_msrp, on_talker_listener_fires_when_listener_ready)
 
     EXPECT_TRUE(fired_for_sid);
     EXPECT_TRUE(ready_for_sid);
+    // The hook is told the time of the receive_packet()/tick() it fired from:
+    // one of the round times, never a clock read of its own.
+    EXPECT_NE(fired_at, TimePoint{});
+    auto const since_start = std::chrono::duration_cast<std::chrono::milliseconds>(fired_at - TimePoint{std::chrono::seconds{1}});
+    EXPECT_EQ(since_start.count() % 120, 0);
+    EXPECT_TRUE(fired_at <= now);
     // 'other' is not one of the talker's advertised streams -> never forwarded.
     EXPECT_FALSE(fired_for_other);
 }

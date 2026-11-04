@@ -196,13 +196,14 @@ void NanoAvbAdpDiscovery::wire_callbacks()
     };
     ctx_.on_entity_departing = [this](Eui64 id) {
         if (callbacks_.on_entity_departing) {
-            callbacks_.on_entity_departing(id);
+            callbacks_.on_entity_departing(id, last_event_time_);
         }
     };
 }
 
 void NanoAvbAdpDiscovery::receive_adpdu(AdpDu const& adp, Eui48 const& src_mac, TimePoint now)
 {
+    last_event_time_ = now;
     ctx_.rcvd_adpdu = adp;
     ctx_.rcvd_src_mac = src_mac;
 
@@ -213,23 +214,24 @@ void NanoAvbAdpDiscovery::receive_adpdu(AdpDu const& adp, Eui48 const& src_mac, 
     }
 }
 
-void NanoAvbAdpDiscovery::discover_all()
+void NanoAvbAdpDiscovery::discover_all(TimePoint const now)
 {
     ctx_.discover_target = {};
-    sm_.handle_event(ctx_, atdecc::DiscoveryEvent::DoDiscover, TimePoint::clock::now());
+    sm_.handle_event(ctx_, atdecc::DiscoveryEvent::DoDiscover, now);
 }
 
-void NanoAvbAdpDiscovery::discover(Eui64 const& target)
+void NanoAvbAdpDiscovery::discover(Eui64 const& target, TimePoint const now)
 {
     ctx_.discover_target = target;
-    sm_.handle_event(ctx_, atdecc::DiscoveryEvent::DoDiscover, TimePoint::clock::now());
+    sm_.handle_event(ctx_, atdecc::DiscoveryEvent::DoDiscover, now);
 }
 
 void NanoAvbAdpDiscovery::tick(TimePoint now)
 {
-    ctx_.entities.expire_stale(now, [this](atdecc::DiscoveredEntity const& e) {
+    last_event_time_ = now;
+    ctx_.entities.expire_stale(now, [this, now](atdecc::DiscoveredEntity const& e) {
         if (callbacks_.on_entity_departing) {
-            callbacks_.on_entity_departing(e.adpdu.entity_id);
+            callbacks_.on_entity_departing(e.adpdu.entity_id, now);
         }
     });
 }

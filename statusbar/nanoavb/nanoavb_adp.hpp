@@ -254,8 +254,9 @@ struct AdpDiscoveryCallbacks
     /// Called when an entity's state changes (new available_index)
     statusbar::sg14::inplace_function<void(atdecc::DiscoveredEntity const&), 64> on_entity_updated;
 
-    /// Called when an entity departs or times out
-    statusbar::sg14::inplace_function<void(Eui64), 64> on_entity_departing;
+    /// Called when an entity departs or times out, told the time of the
+    /// receive_adpdu()/tick() it fires from.
+    statusbar::sg14::inplace_function<void(Eui64, sm::TimePoint), 64> on_entity_departing;
 };
 
 /// NanoAvbAdpDiscovery - discovers and tracks remote ATDECC entities
@@ -273,10 +274,10 @@ class NanoAvbAdpDiscovery
     void receive_adpdu(AdpDu const& adp, Eui48 const& src_mac, TimePoint now);
 
     /// Send broadcast ENTITY_DISCOVER
-    void discover_all();
+    void discover_all(TimePoint now = TimePoint::clock::now());
 
     /// Send targeted ENTITY_DISCOVER for a specific entity
-    void discover(Eui64 const& target);
+    void discover(Eui64 const& target, TimePoint now = TimePoint::clock::now());
 
     /// Periodic tick for entity expiry checking
     void tick(TimePoint now);
@@ -301,6 +302,9 @@ class NanoAvbAdpDiscovery
     void wire_callbacks();
 
     AdpDiscoveryCallbacks callbacks_;
+    /// The time of the receive_adpdu()/tick() being handled: what the
+    /// departure callback is told (it fires from inside the state machine).
+    TimePoint last_event_time_{};
     atdecc::DiscoveryContext ctx_;
     atdecc::AdpDiscoveryStateMachine<> sm_;
 };

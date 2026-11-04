@@ -530,7 +530,7 @@ TEST(nanoavb_adp_discovery, receive_departing)
     std::vector<Eui64> departed;
     AdpDiscoveryCallbacks callbacks;
     callbacks.on_entity_available = [](DiscoveredEntity const&) {};
-    callbacks.on_entity_departing = [&](Eui64 id) { departed.push_back(id); };
+    callbacks.on_entity_departing = [&](Eui64 id, statusbar::sm::TimePoint) { departed.push_back(id); };
 
     NanoAvbAdpDiscovery discovery{callbacks};
 
@@ -574,7 +574,7 @@ TEST(nanoavb_adp_discovery, tick_expires_entities)
     std::vector<Eui64> departed;
     AdpDiscoveryCallbacks callbacks;
     callbacks.on_entity_available = [](DiscoveredEntity const&) {};
-    callbacks.on_entity_departing = [&](Eui64 id) { departed.push_back(id); };
+    callbacks.on_entity_departing = [&](Eui64 id, statusbar::sm::TimePoint) { departed.push_back(id); };
 
     NanoAvbAdpDiscovery discovery{callbacks};
 

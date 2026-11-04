@@ -39,6 +39,7 @@
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/sm/sm.hpp"
@@ -94,10 +95,13 @@ class AvbEntityKit
     /// MAAP (in "maap" address mode), the talker TX slots + socket (+ optional
     /// pcap capture), the listener RX slots + socket + CRF recovery feed, and
     /// persisted listener bindings. Logs any inert CONTROL registrations
-    /// (menu/selection: never an error).
-    [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
-    /// Stop the control plane (fails with not_connected when not running).
-    [[nodiscard]] auto stop() -> Status;
+    /// (menu/selection: never an error). @p now is the control-plane time the
+    /// VLAN registration and the MAAP acquisition start at: a setup edge, read
+    /// once here unless the caller holds it.
+    [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
+    /// Stop the control plane (fails with not_connected when not running),
+    /// withdrawing its declarations at @p now.
+    [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status;
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
     void on_link_up(TimePoint time) { host_.on_link_up(time); }
@@ -107,14 +111,16 @@ class AvbEntityKit
 
     // --- Media-thread (RT) calls ----------------------------------------------
     /// Whether talker stream @p idx should put its AVTP stream on the wire this
-    /// tick (gating disabled, or a downstream listener is ready/connected).
+    /// tick (gating disabled, or a downstream listener is ready/connected), told
+    /// the wake's CLOCK_MONOTONIC_RAW instant @p now (the gate's grace clock).
     /// Also gated on MAAP-address readiness in "maap" mode.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
+        -> bool
     {
         if (!maap_.ready()) {
             return false;
         }
-        return gate_.should_transmit(idx, now_ns);
+        return gate_.should_transmit(idx, now);
     }
 
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
@@ -200,7 +206,7 @@ class AvbEntityKit
     void close_streams() noexcept;
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
-    [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
+    [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
