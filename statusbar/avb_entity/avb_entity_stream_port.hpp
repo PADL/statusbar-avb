@@ -147,6 +147,7 @@ class StreamPort
                 .interface_name = config.interface_name,
                 .ethertype = avtp::AVTP_ETHERTYPE,
                 .priority = config.stream_pcp,
+                .rx_clock_id = RX_CLOCK,
                 .xdp_queue_id = config.xdp_queue,
                 .xdp_filter_rules = rules_,
                 .xdp_attach_mode = config.xdp_attach_mode,
@@ -235,6 +236,10 @@ class StreamPort
         return static_cast<int64_t>(launch_order_.next(requested_ns, [this] { return net::phc_now_ns(phc_); }));
     }
 
+    /// The port's RX clock now, in ns: the clock the port stamps received frames on (its
+    /// rx_clock_id, CLOCK_MONOTONIC_RAW). A drain reads it once a pass for rx_start(now).
+    [[nodiscard]] static auto rx_clock_now_ns() noexcept -> int64_t { return net::software_rx_timestamp_ns(RX_CLOCK); }
+
     /// Whether a talker writes its frames straight into the port's slots: no other thread drives the
     /// port (rawnet, or opened single threaded). A timed frame is then timed after its render.
     [[nodiscard]] auto writes_in_place() const noexcept -> bool { return !serialize_; }
@@ -267,6 +272,9 @@ class StreamPort
     }
 
   private:
+    /// The clock received frames are stamped on.
+    static constexpr int RX_CLOCK = CLOCK_MONOTONIC_RAW;
+
     /// The mode of the port open() opened (or none, when @p ok is false): its threading and timing.
     void take_mode(bool const ok) noexcept
     {
