@@ -27,6 +27,7 @@
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -75,7 +76,7 @@ struct TalkerStreams
     TalkerStreams(
         TalkerStreamsConfig const& config,
         ptpclient::MediaClockGenerator const& media_clock,
-        std::atomic<uint64_t> const& last_gptp_ns,
+        std::atomic<int64_t> const& last_gptp_ns,
         std::pmr::memory_resource* memory_resource) noexcept
         : config_{config}
         , media_clock_{media_clock}
@@ -175,12 +176,23 @@ struct TalkerStreams
         return stream_index < stream_stopped_.size() && stream_stopped_[stream_index].load(std::memory_order_acquire);
     }
 
+    /// The media clock's presentation time for @p sample_index, typed as the
+    /// gPTP instant it is: what a packet whose first sample is that index
+    /// carries as its avtp_timestamp.
+    [[nodiscard]] auto presentation_for(uint64_t const sample_index) const noexcept -> realtime::GptpClock0::time_point
+    {
+        return realtime::GptpClock0::from_ns(static_cast<int64_t>(media_clock_.timestamp_for(sample_index)));
+    }
+
     /// Serialize + send one packet on a specific slot from @p src (interleaved,
-    /// slot.spec.format.channels stride). Media-timer thread. (Public for
-    /// entities that drive their own cadence, e.g. the pipe-fed AM824 loopback
-    /// entities.)
-    void transmit_am824(TalkerStreamSlot& slot, uint64_t now_ns, uint32_t samples, std::span<float const> src);
-    void transmit_aaf(TalkerStreamSlot& slot, uint64_t now_ns, uint16_t samples, std::span<float const> src);
+    /// slot.spec.format.channels stride), its avtp_timestamp @p presentation
+    /// (presentation_for the packet's first sample). Media-timer thread.
+    /// (Public for entities that drive their own cadence, e.g. the pipe-fed
+    /// AM824 loopback entities.)
+    void transmit_am824(
+        TalkerStreamSlot& slot, realtime::GptpClock0::time_point presentation, uint32_t samples, std::span<float const> src);
+    void transmit_aaf(
+        TalkerStreamSlot& slot, realtime::GptpClock0::time_point presentation, uint16_t samples, std::span<float const> src);
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
@@ -192,7 +204,7 @@ struct TalkerStreams
     // References / values (bound at construction).
     TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
     ptpclient::MediaClockGenerator const& media_clock_;
-    std::atomic<uint64_t> const& last_gptp_ns_;
+    std::atomic<int64_t> const& last_gptp_ns_;
     uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
     std::pmr::memory_resource* mem_resource_;
 

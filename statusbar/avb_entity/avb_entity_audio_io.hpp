@@ -222,9 +222,15 @@ class AvbEntityAudioIO
     [[nodiscard]] auto flush_tx_pcap() -> Status { return kit_.talker().flush_tx_pcap(); }
     [[nodiscard]] auto tx_pcap_frame_count() const noexcept -> size_t { return kit_.talker().tx_pcap_frame_count(); }
 
-    /// Batch-drain the AM824/AAF RX socket, stamping frames with @p wake_gptp_ns. Called
-    /// from the tool's dedicated SCHED_FIFO RX timer when config.stream_rx_rt_timer is
-    /// set (see start()); a no-op when the RX handler is on the reactor instead.
+    /// Batch-drain the AM824/AAF RX socket, told the RX timer's wake on both clocks
+    /// (@p wake_gptp stamps the frames, @p wake_raw is told to the port). Called from
+    /// the tool's dedicated SCHED_FIFO RX timer when config.stream_rx_rt_timer is set
+    /// (see start()); a no-op when the RX handler is on the reactor instead.
+    auto drain_stream_rx(realtime::GptpClock0::time_point const wake_gptp, net::RxTimePoint const wake_raw) -> size_t
+    {
+        return kit_.drain_stream_rx(wake_gptp, wake_raw);
+    }
+    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
     auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t { return kit_.drain_stream_rx(wake_gptp_ns); }
 
     /// Kick the stream port's TX ring. Called from the tool's dedicated SCHED_FIFO
@@ -263,7 +269,7 @@ class AvbEntityAudioIO
     /// Latest gPTP time (ns) seen by the media timer; the RX thread reads it as
     /// "gPTP now" (<=125 us stale) for LATE/EARLY_TIMESTAMP detection, since the
     /// reactor's own clock is CLOCK_MONOTONIC, not gPTP.
-    std::atomic<uint64_t> last_gptp_ns_{0};
+    std::atomic<int64_t> last_gptp_ns_{0};
 
     /// Deterministic, GPS-rate-pinned presentation-timestamp generator (shared by
     /// both talker streams -- they emit the same sample count per tick). The

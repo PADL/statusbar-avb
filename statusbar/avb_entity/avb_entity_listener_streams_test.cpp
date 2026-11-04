@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 using namespace statusbar;
@@ -73,7 +74,7 @@ auto make_aaf_spec(uint16_t index) -> StreamSpec
 TEST(listener_consume, pending_binds_on_open_unknown_stays_inert)
 {
     auto donor = make_donor();
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
 
     // Register BEFORE the slot exists (the normal pre-start pattern) plus one
@@ -96,7 +97,7 @@ TEST(listener_consume, pending_binds_on_open_unknown_stays_inert)
 TEST(listener_consume, slot_shapes_follow_specs)
 {
     auto donor = make_donor();
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
 
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
@@ -113,7 +114,7 @@ TEST(listener_consume, slot_shapes_follow_specs)
 TEST(listener_crf, crf_input_slot_delivers_timestamps)
 {
     auto donor = make_donor();
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
 
     // Register the CRF consumer BEFORE the slot exists (pending), plus one
@@ -145,10 +146,24 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
     EXPECT_EQ(last_ts, 123456789ULL);
 }
 
+TEST(listener_drain, both_drain_forms_are_a_no_op_without_a_port)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{4'000'000'000LL};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    static_assert(std::is_same_v<net::RxTimePoint, statusbar::realtime::MonotonicRawClock::time_point>);
+
+    // The told form takes the wake on both clocks and touches nothing when no
+    // port is attached; the asking form reads the RX clock and does the same.
+    EXPECT_EQ(ls.drain_rx(statusbar::realtime::GptpClock0::from_ns(4'000'000'000LL), net::RxTimePoint{}), 0U);
+    EXPECT_EQ(ls.drain_rx(ls.current_gptp_ns()), 0U);
+    EXPECT_EQ(ls.current_gptp_ns(), 4'000'000'000LL);
+}
+
 TEST(listener_consume, close_rx_keeps_the_consumers_for_the_next_open)
 {
     auto donor = make_donor();
-    std::atomic<uint64_t> gptp{0};
+    std::atomic<int64_t> gptp{0};
     ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
     // Registered once, before the first start, as an entity does.
     int delivered = 0;

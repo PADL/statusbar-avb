@@ -80,7 +80,7 @@ class AvbEntityKit
         uint16_t initial_clock_source,
         std::optional<uint16_t> crf_clock_source_index,
         ptpclient::MediaClockGenerator& media_clock,
-        std::atomic<uint64_t>& last_gptp_ns,
+        std::atomic<int64_t>& last_gptp_ns,
         StreamRxAudioSink* audio_sink,
         std::pmr::memory_resource* memory_resource);
 
@@ -145,7 +145,13 @@ class AvbEntityKit
     void rx_to_reactor(net::MessageReactor& reactor);
 
     /// Batch-drain the stream RX socket from the tool's dedicated SCHED_FIFO RX
-    /// timer (config.stream_rx_rt_timer). No-op when RX is on the reactor.
+    /// timer (config.stream_rx_rt_timer), told its wake on both clocks. No-op
+    /// when RX is on the reactor.
+    auto drain_stream_rx(realtime::GptpClock0::time_point const wake_gptp, net::RxTimePoint const wake_raw) -> size_t
+    {
+        return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp, wake_raw) : 0;
+    }
+    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
     auto drain_stream_rx(int64_t const wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;

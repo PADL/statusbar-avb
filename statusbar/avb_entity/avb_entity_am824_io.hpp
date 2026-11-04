@@ -269,9 +269,15 @@ class AvbEntityAm824IO
     /// @param time Current PTP-synchronized time point for packet timestamping
     auto process_audio(TimePoint time) -> void;
 
-    /// Batch-drain the AM824 RX socket, stamping frames with @p wake_gptp_ns. Called
+    /// Batch-drain the AM824 RX socket, told the RX timer's wake on both clocks
+    /// (@p wake_gptp stamps the frames, @p wake_raw is told to the port). Called
     /// from the tool's dedicated SCHED_FIFO RX timer when stream_rx_rt_timer is set; a
     /// no-op when the RX handler is on the reactor instead. Mirrors AvbEntityAudioIO.
+    auto drain_stream_rx(realtime::GptpClock0::time_point const wake_gptp, net::RxTimePoint const wake_raw) -> size_t
+    {
+        return (rt_rx_handler_ != nullptr) ? listener_.drain_rx(wake_gptp, wake_raw) : 0;
+    }
+    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
     auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr) ? listener_.drain_rx(wake_gptp_ns) : 0;
@@ -382,7 +388,7 @@ class AvbEntityAm824IO
     /// gPTP-domain wake time published by process_audio (media-timer thread), read by
     /// the listener RX tally (reactor / RX-timer thread) as the "now" for the
     /// STREAM_INPUT LATE/EARLY classification. Declared before listener_ + talker_.
-    std::atomic<uint64_t> last_gptp_ns_{0};
+    std::atomic<int64_t> last_gptp_ns_{0};
 
     /// The shared RX path: owns the AM824 deserialize context, the IEEE 1722.1
     /// STREAM_INPUT health counters, and the borrowed RX socket. Counting-only here

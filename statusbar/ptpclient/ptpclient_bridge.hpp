@@ -359,17 +359,29 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// @return current PTP time, or error if epoch changed or mapping unhealthy
     [[nodiscard]] auto finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>;
 
-    /// Sleep until a PTP deadline by converting to monotonic and sleeping
+    /// The wake instant on both clocks: one CLOCK_MONOTONIC_RAW read at the
+    /// end of the spin, and the PTP time it converts to through the primary
+    /// mapping. A tick owner passes both down (TimerWakeInfo), so nothing
+    /// below it reads a clock of its own.
+    struct WakeTimes
+    {
+        int64_t ptp_ns{0};
+        int64_t raw_ns{0};
+    };
+
+    /// Sleep until a PTP deadline: coarse clock_nanosleep on CLOCK_MONOTONIC
+    /// through raw_line(), then a spin on CLOCK_MONOTONIC_RAW to the deadline.
     /// @param ptp_deadline_ns Target PTP time in nanoseconds
     /// @param keep_going Optional: the caller's own running flag. Read before
     ///        the sleep and in the final spin to the deadline: once it is
     ///        false the call returns bridge_not_running, as it already does
     ///        when this bridge stops, so a timer being stopped returns to its
     ///        loop at once instead of sleeping out its period.
-    /// @return Current PTP time on success (allows caller to measure wake accuracy), error otherwise
+    /// @return The wake instant on both clocks (the caller measures its wake
+    ///         accuracy from ptp_ns), or an error
     /// @note On Linux, uses clock_nanosleep for precision. On other platforms, uses std::this_thread::sleep_until.
     [[nodiscard]] auto sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going = nullptr) noexcept
-        -> StatusValue<int64_t>;
+        -> StatusValue<WakeTimes>;
 
     // Manual Epoch Control
 

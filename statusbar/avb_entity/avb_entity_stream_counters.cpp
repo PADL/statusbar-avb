@@ -34,7 +34,7 @@ void tally_continuity(StreamInputCounters& c, uint8_t const seq, bool const mr) 
 /// ms-scale thresholds). diff<0 => presentation time already passed (late);
 /// diff implausibly large => stamped too early. gptp_now_ns==0 means "unknown"
 /// -> skip.
-void tally_presentation_margin(StreamInputCounters& c, uint32_t const avtp_ts, uint64_t const gptp_now_ns) noexcept
+void tally_presentation_margin(StreamInputCounters& c, uint32_t const avtp_ts, int64_t const gptp_now_ns) noexcept
 {
     constexpr uint32_t EARLY_THRESHOLD_NS = 50'000'000;  // 50 ms
     if (gptp_now_ns == 0) {
@@ -178,7 +178,7 @@ void tally_stream_input_packet(
     bool const format_ok,
     uint64_t const samples_per_ch,
     bool const ts_sparse,
-    uint64_t const gptp_now_ns,
+    int64_t const gptp_now_ns,
     uint32_t const lock_tolerance_ns,
     uint32_t const sample_rate_hz)
 {

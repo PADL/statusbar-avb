@@ -297,24 +297,22 @@ auto ListenerStreams::copy_avtpdu(std::span<uint8_t const> const frame) -> size_
     return length;
 }
 
-auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
+auto ListenerStreams::drain_rx(realtime::GptpClock0::time_point const gptp_now, net::RxTimePoint const rx_now) -> size_t
 {
     if (port_ == nullptr) {
         return 0;
     }
     // Drain every queued frame in one pass (the arrival rate is 8000/s = 125 us apart;
     // a 50 us RX-timer tick or a reactor wake sees 0-3 frames). All frames in this pass
-    // share gptp_now_ns -- the caller's fresh gPTP "now" -- and rx_now, the RX clock
-    // read once here and told to the port for each frame: one clock read per pass,
-    // not one per frame.
+    // share gptp_now -- the caller's gPTP "now" -- and rx_now, the RX clock as the
+    // caller holds it, told to the port for each frame: no clock read in the pass.
     //
     // One pass is one port cycle. The XDP backend hands out at most its
     // per-cycle budget of frames between begin_cycle() and end_cycle(), and
     // without the begin the budget is never reset: the first 32 frames
     // arrive and nothing after them.
     begin_port_cycle();
-    net::RxTimePoint const rx_now = net::rx_clock_now();
-    size_t const drained = drain_frames(gptp_now_ns, rx_now);
+    size_t const drained = drain_frames(realtime::GptpClock0::to_ns(gptp_now), rx_now);
     end_port_cycle();
     return drained;
 }
@@ -532,7 +530,7 @@ void ListenerStreams::update_stream_input_counters(
         format_ok,
         samples_per_ch,
         ts_sparse,
-        static_cast<uint64_t>(gptp_now_ns),
+        gptp_now_ns,
         lock_tolerance_ns_,
         sample_rate_);
 }

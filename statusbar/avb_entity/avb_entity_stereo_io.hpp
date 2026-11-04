@@ -236,8 +236,14 @@ class AvbEntityStereoIO
     auto process_audio(TimePoint time) -> void;
 
     /// Batch-drain the AM824 RX socket, decoding + publishing each block to the loopback
-    /// pipe stamped with @p wake_gptp_ns. Called from the tool's dedicated SCHED_FIFO RX
+    /// pipe, told the RX timer's wake on both clocks (@p wake_gptp stamps the blocks,
+    /// @p wake_raw is told to the port). Called from the tool's dedicated SCHED_FIFO RX
     /// timer when stream_rx_rt_timer is set; a no-op when RX is on the reactor instead.
+    auto drain_stream_rx(realtime::GptpClock0::time_point const wake_gptp, net::RxTimePoint const wake_raw) -> size_t
+    {
+        return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp, wake_raw) : 0;
+    }
+    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
     auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
@@ -318,7 +324,7 @@ class AvbEntityStereoIO
     std::pmr::vector<float> audio_buffer_{mem_resource_};
 
     /// gPTP wake time published by process_audio; read by the RX tally for LATE/EARLY.
-    std::atomic<uint64_t> last_gptp_ns_{0};
+    std::atomic<int64_t> last_gptp_ns_{0};
 
     /// Media clock for TX presentation timestamps (r=1.0, gPTP-locked -- stereo has no
     /// separate GPS media clock). Advanced once per media-timer wake.

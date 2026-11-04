@@ -416,7 +416,7 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
     // Publish this media-timer wake's gPTP time for the listener RX tally (the reactor /
     // RX-timer path reads it as the "now" for the STREAM_INPUT LATE/EARLY classification).
-    last_gptp_ns_.store(static_cast<uint64_t>(time.time_since_epoch().count()), std::memory_order_relaxed);
+    last_gptp_ns_.store(time.time_since_epoch().count(), std::memory_order_relaxed);
 
     // Source: generate the per-channel sine into the interleaved buffer.
     for (size_t i = 0; i < SAMPLES_PER_PACKET; ++i) {
@@ -449,7 +449,7 @@ void AvbEntityAm824IO::process_audio(TimePoint time)
     // Advance the deterministic media clock (r=1.0, gPTP-locked). first_index anchors
     // the smooth presentation timestamp used for the transmitted packet.
     auto const tick = media_clock_.advance(gptp_now, 1.0, static_cast<uint32_t>(SAMPLES_PER_PACKET));
-    uint64_t const pts = media_clock_.timestamp_for(tick.first_index);
+    auto const pts = talker_.presentation_for(tick.first_index);
 
     // Steady-clock now for the MSRP-ready grace window (same clock note_listener_ready
     // stamps last-ready with); decide the gate once per wake.

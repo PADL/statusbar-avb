@@ -471,16 +471,17 @@ void AvbEntityStereoIO::on_timeout(TimePoint time)
 
 void AvbEntityStereoIO::process_audio(TimePoint time)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
-    auto const gptp_now = static_cast<uint64_t>(time.time_since_epoch().count());
+    int64_t const gptp_now_ns = time.time_since_epoch().count();
+    auto const gptp_now = static_cast<uint64_t>(gptp_now_ns);
     // Publish this media-timer wake's gPTP time so the reactor-path RX drain stamps
     // ingress against it for the STREAM_INPUT LATE/EARLY classification.
-    last_gptp_ns_.store(gptp_now, std::memory_order_relaxed);
+    last_gptp_ns_.store(gptp_now_ns, std::memory_order_relaxed);
 
     // Advance the deterministic media clock (r=1.0, gPTP-locked -- stereo has no
     // separate GPS media clock). first_index anchors the smooth presentation
     // timestamp used for the re-transmitted packets (jitter-free, offset ahead).
     auto const tick = media_clock_.advance(gptp_now, 1.0, static_cast<uint32_t>(SAMPLES_PER_PACKET));
-    uint64_t const pts_base = media_clock_.timestamp_for(tick.first_index);
+    auto const pts_base = talker_.presentation_for(tick.first_index);
 
     // Steady-clock now for the MSRP-ready grace window (same clock note_listener_ready
     // stamps last-ready with); decide the gate once per wake.

@@ -465,7 +465,11 @@ TEST(ptp_bridge_sleep, sleep_returns_wake_time)
 
     EXPECT_TRUE(result.has_value());
     // Wake time should be close to or after the deadline
-    EXPECT_TRUE(*result >= deadline_ptp.time_ns - 1'000'000LL);  // Within 1ms tolerance
+    EXPECT_TRUE(result->ptp_ns >= deadline_ptp.time_ns - 1'000'000LL);  // Within 1ms tolerance
+    // The wake is one RAW read, and the PTP time is that read through the
+    // mapping (as it stood then; the sampler may have refitted since).
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(result->raw_ns) - result->ptp_ns) < 1'000'000);
+    EXPECT_TRUE(std::abs(statusbar::realtime::read_monotonic_raw_ns() - result->raw_ns) < 1'000'000'000LL);
 
     bridge.stop_sampling();
 }
@@ -545,7 +549,7 @@ TEST(ptp_bridge_raw, after_sampling_each_conversion_names_the_clock_it_returns)
     // Both pairs round-trip, and the two pairs compose the same way.
     EXPECT_TRUE(std::abs(bridge.from_raw_ns(bridge.to_raw_ns(ptp_now)) - ptp_now) < 1'000);
     EXPECT_TRUE(std::abs(bridge.from_monotonic_ns(bridge.to_monotonic_ns(ptp_now)) - ptp_now) < 1'000);
-    EXPECT_EQ(bridge.to_monotonic_ns(ptp_now), bridge.raw_line().to_monotonic_ns(bridge.to_raw_ns(ptp_now)));
+    EXPECT_TRUE(std::abs(bridge.to_monotonic_ns(ptp_now) - bridge.raw_line().to_monotonic_ns(bridge.to_raw_ns(ptp_now))) < 1'000);
 
     bridge.stop_sampling();
 }
@@ -567,11 +571,62 @@ TEST(ptp_bridge_raw, the_sleep_plan_takes_its_monotonic_deadline_from_the_line)
     int64_t const ptp_deadline = bridge.now_ns() + 10'000'000LL;
     auto plan = bridge.prepare_sleep(ptp_deadline);
     EXPECT_TRUE(plan.has_value());
-    EXPECT_EQ(plan->raw_deadline_ns, bridge.to_raw_ns(ptp_deadline));
-    EXPECT_EQ(plan->mono_deadline_ns, bridge.raw_line().to_monotonic_ns(plan->raw_deadline_ns));
-    EXPECT_EQ(plan->mono_per_raw_slope, bridge.raw_line().consume().rate);
+    // The sampler may republish either line between the plan and these reads
+    // (a few ns of fit movement), so the checks are tolerances, not equalities.
+    EXPECT_TRUE(std::abs(plan->raw_deadline_ns - bridge.to_raw_ns(ptp_deadline)) < 1'000);
+    EXPECT_TRUE(std::abs(plan->mono_deadline_ns - bridge.raw_line().to_monotonic_ns(plan->raw_deadline_ns)) < 1'000);
+    EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - bridge.raw_line().consume().rate) < 1e-3);
     EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.0) < 0.2);
 
+    bridge.stop_sampling();
+}
+
+//
+// Tests: PtpTimer - each wake tells its RAW instant
+//
+
+TEST(ptp_timer, each_wake_carries_the_raw_instant_its_ptp_time_was_made_from)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    // The callback is told the wake on both clocks; it compares the RAW one
+    // with the clock as it stands on entry and with the PTP one through the
+    // bridge, and reads nothing else.
+    std::atomic<int64_t> raw_skew_ns{INT64_MAX};
+    std::atomic<int64_t> ptp_skew_ns{INT64_MAX};
+    std::atomic<int> wakes{0};
+    auto timer = make_ptp_timer(
+        bridge,
+        1'000'000,
+        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
+            if (!info || wakes.fetch_add(1) != 0) {
+                return;
+            }
+            int64_t const raw_ns = statusbar::realtime::MonotonicRawClock::to_ns(info->actual_raw);
+            raw_skew_ns.store(statusbar::realtime::read_monotonic_raw_ns() - raw_ns);
+            ptp_skew_ns.store(bridge.from_raw_ns(raw_ns) - info->actual_time_ns);
+        },
+        0,
+        /*enable_realtime=*/false,
+        /*cpu_affinity=*/-1);
+    EXPECT_TRUE(timer.start().has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    timer.stop();
+
+    EXPECT_TRUE(wakes.load() > 0);
+    EXPECT_TRUE(raw_skew_ns.load() >= 0);
+    EXPECT_TRUE(raw_skew_ns.load() < 50'000'000);
+    EXPECT_TRUE(std::abs(ptp_skew_ns.load()) < 1'000'000);
     bridge.stop_sampling();
 }
 

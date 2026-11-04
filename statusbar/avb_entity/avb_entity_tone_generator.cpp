@@ -302,7 +302,7 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
     for (size_t p = 0; p < config_.packets_per_wake;
          ++p) {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate
         uint64_t const wake_ns = base_now_ns + (static_cast<uint64_t>(p) * packet_interval_ns);
-        last_gptp_ns_.store(wake_ns, std::memory_order_relaxed);
+        last_gptp_ns_.store(static_cast<int64_t>(wake_ns), std::memory_order_relaxed);
 
         // Media clock rate: 1.0 (locked to gPTP) unless the CRF-input clock
         // source is active and locked, in which case the recovered remote

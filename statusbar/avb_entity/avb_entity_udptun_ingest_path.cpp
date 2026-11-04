@@ -160,7 +160,7 @@ void UdptunIngestPath::send(int64_t const tai_ns, std::span<uint8_t const> const
 }
 
 void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool const real_source, bool const rt_caller)
-{
+{  // NOLINT(statusbar-block-statements) one packet's ingest, anchor to send, in order; pre-dates the gate
     // `audio` is the raw network-order payload of the received stream packet
     // (4-byte samples: AAF int32, or AM824 24-in-32). It is carried opaquely by
     // the tunnel and re-emitted at the far end, so there is no float round-trip.
@@ -202,7 +202,7 @@ void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool c
     // Resolve the GPS-TAI mapping once for this ingest. On the reactor thread this
     // consumes the media-thread-published snapshot (never the live Kalman); on the
     // media thread (rt_caller) it reads the Kalman directly, which is coherent.
-    auto const gps_tai = ingest_gps_tai(static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed)), rt_caller);
+    auto const gps_tai = ingest_gps_tai(last_gptp_ns_.load(std::memory_order_relaxed), rt_caller);
     if (!anchored_) {
         // Anchor the ingest timeline to GPS-TAI (gPTP master -> GPS-TAI), the same
         // clock that paces the source and that the egress plays on -- so the ingest

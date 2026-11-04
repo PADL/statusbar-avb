@@ -31,7 +31,7 @@ AvbEntityKit::AvbEntityKit(
     uint16_t const initial_clock_source,
     std::optional<uint16_t> const crf_clock_source_index,
     ptpclient::MediaClockGenerator& media_clock,
-    std::atomic<uint64_t>& last_gptp_ns,
+    std::atomic<int64_t>& last_gptp_ns,
     StreamRxAudioSink* audio_sink,
     std::pmr::memory_resource* memory_resource)
     : config_{config}

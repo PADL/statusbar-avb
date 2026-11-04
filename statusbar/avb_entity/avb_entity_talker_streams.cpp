@@ -106,11 +106,13 @@ auto TalkerStreams::slot_of(StreamKind const kind) const noexcept -> TalkerStrea
 }
 
 void TalkerStreams::transmit_am824(
-    TalkerStreamSlot& slot, uint64_t const now_ns, uint32_t const samples, std::span<float const> src)
+    TalkerStreamSlot& slot, realtime::GptpClock0::time_point const presentation, uint32_t const samples, std::span<float const> src)
 {  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
     if (!slot.am824 || port_ == nullptr) {
         return;
     }
+    // The wire takes the presentation time as unsigned nanoseconds (and keeps 32 bits of it).
+    auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     static constexpr size_t MAX_FRAME =
         avtp::Am824Pdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
     std::array<uint8_t, MAX_FRAME> frame{};
@@ -125,7 +127,12 @@ void TalkerStreams::transmit_am824(
 
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::am824_serialize_mbla(
-        *slot.am824, pdu, payload, static_cast<uint8_t>(samples), now_ns, [src, channels](uint8_t ch, std::span<float> dest) {
+        *slot.am824,
+        pdu,
+        payload,
+        static_cast<uint8_t>(samples),
+        presentation_ns,
+        [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
                 dest[s] = src[(s * channels) + ch];
             }
@@ -138,8 +145,8 @@ void TalkerStreams::transmit_am824(
     size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
     // AVB stream frames must be VLAN-tagged with the SR class VID + PCP so bridges
     // admit them to the reserved SR class (untagged AVTP is not part of any SR class).
-    // pcap stamp = the gPTP WALL-CLOCK transmit time (not now_ns, which is the
-    // media-clock PRESENTATION timestamp also written into the AVTP header). Using
+    // pcap stamp = the gPTP WALL-CLOCK transmit time (not the presentation time,
+    // which is the media-clock timestamp written into the AVTP header). Using
     // the wall clock lets a capture reveal the real presentation lead
     // (avtp_ts - wall_clock = presentation_offset).
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
@@ -147,11 +154,13 @@ void TalkerStreams::transmit_am824(
     ++slot.tx_packets;
 }
 
-void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, uint16_t const samples, std::span<float const> src)
+void TalkerStreams::transmit_aaf(
+    TalkerStreamSlot& slot, realtime::GptpClock0::time_point const presentation, uint16_t const samples, std::span<float const> src)
 {  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
     if (!slot.aaf || port_ == nullptr) {
         return;
     }
+    auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     static constexpr size_t MAX_FRAME =
         avtp::AafPdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
     std::array<uint8_t, MAX_FRAME> frame{};
@@ -159,8 +168,8 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
     size_t const channels = slot.spec.format.channels;
     avtp::AafPdu pdu{};
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
-    size_t const audio_bytes =
-        avtp::aaf_stream_serialize(*slot.aaf, pdu, payload, samples, now_ns, [src, channels](uint8_t ch, std::span<float> dest) {
+    size_t const audio_bytes = avtp::aaf_stream_serialize(
+        *slot.aaf, pdu, payload, samples, presentation_ns, [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
                 dest[s] = src[(s * channels) + ch];
             }
@@ -171,8 +180,8 @@ void TalkerStreams::transmit_aaf(TalkerStreamSlot& slot, uint64_t const now_ns, 
 
     span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::AafPdu::HEADER_LENGTH + audio_bytes;
-    // pcap stamp = gPTP WALL-CLOCK transmit time (see transmit_am824); now_ns here
-    // is the media-clock PRESENTATION time, also written into the AVTP header.
+    // pcap stamp = gPTP WALL-CLOCK transmit time (see transmit_am824); the
+    // presentation time is the media-clock timestamp written into the AVTP header.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
     ++slot.tx_packets;
@@ -317,7 +326,7 @@ void TalkerStreams::transmit_if_due(
     switch (slot.spec.format.kind) {
         case StreamKind::am824: {
             if (gate_open && samples > 0) {
-                transmit_am824(slot, media_clock_.timestamp_for(tick.first_index), tick.samples, src);
+                transmit_am824(slot, presentation_for(tick.first_index), tick.samples, src);
             }
             break;
         }
@@ -337,7 +346,7 @@ void TalkerStreams::transmit_if_due(
             // jitter-free media-clock time of its first sample.
             slot.reframer->push(src.first(samples * slot.spec.format.channels), static_cast<uint16_t>(samples), tick.first_index);
             slot.reframer->drain([this, &slot](uint64_t first_index, std::span<float const> block) {
-                transmit_aaf(slot, media_clock_.timestamp_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
+                transmit_aaf(slot, presentation_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
             });
             break;
         }

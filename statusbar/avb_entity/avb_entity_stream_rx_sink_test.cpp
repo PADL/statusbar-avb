@@ -39,7 +39,7 @@ struct BridgeFixture
     statusbar::itc::AtomicTripleBuffer<statusbar::ptpclient::GpsTaiSnapshot> tai_snapshot{};
     std::pmr::vector<float> audio_buffer{};
     size_t channels{8};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
 
     auto make() -> EntityUdptunBridge
     {

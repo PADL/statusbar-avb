@@ -398,7 +398,7 @@ auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcep
     return TimeConvertResult{.time_ns = from_monotonic_ns(monotonic_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
 }
 
-auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<int64_t>
+auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<WakeTimes>
 {  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
     auto prep = prepare_sleep(ptp_deadline_ns);
     if (!prep) {
@@ -470,7 +470,12 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         }
     }
 
-    return finalize_wake(realtime::read_monotonic_raw_ns(), plan.before);
+    int64_t const wake_raw = realtime::read_monotonic_raw_ns();
+    auto const wake_ptp = finalize_wake(wake_raw, plan.before);
+    if (!wake_ptp) {
+        return forward_failure(wake_ptp);
+    }
+    return success(WakeTimes{.ptp_ns = *wake_ptp, .raw_ns = wake_raw});
 }
 
 auto PtpTimeBridge::take_reading() -> Reading

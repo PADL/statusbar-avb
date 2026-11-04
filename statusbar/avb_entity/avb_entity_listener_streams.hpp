@@ -36,6 +36,7 @@
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
@@ -90,7 +91,7 @@ struct ListenerStreams
         uint32_t lock_tolerance_ns,
         uint32_t sample_rate,
         nanoavb::NanoAvbComponents& components,
-        std::atomic<uint64_t> const& last_gptp_ns,
+        std::atomic<int64_t> const& last_gptp_ns,
         StreamRxAudioSink* audio_sink) noexcept
         : lock_tolerance_ns_{lock_tolerance_ns}
         , sample_rate_{sample_rate}
@@ -158,22 +159,28 @@ struct ListenerStreams
     /// a handler the reactor holds retires itself when the port closes.
     void close_rx() noexcept;
 
-    /// Non-blocking-drain every queued frame from the RX socket and process each via
-    /// on_stream_rx_frame, stamping them all with @p gptp_now_ns (the caller's fresh
-    /// gPTP "now"). Called either from the reactor's thin RX adapter (gptp_now_ns =
-    /// current_gptp_ns()) or, when stream_rx_rt_timer is set, from a dedicated
-    /// SCHED_FIFO RX timer on an isolated core (gptp_now_ns = the timer's wake time),
-    /// which keeps ingress frames tallied against a clock at most one tick stale.
+    /// Told form. Non-blocking-drain every queued frame from the RX socket in
+    /// one pass and process each via on_stream_rx_frame, all stamped with
+    /// @p gptp_now (the caller's gPTP "now") and each told @p rx_now, the RX
+    /// clock, at rx_start. The caller owns the tick: the dedicated SCHED_FIFO
+    /// RX timer (stream_rx_rt_timer) passes its wake on both clocks
+    /// (TimerWakeInfo actual_time_ns / actual_raw), so a pass reads no clock at
+    /// all and ingress is tallied against a time at most one tick stale.
     /// Returns the number of frames taken off the port this call, frames that
     /// were not AVTP included (for the RX-timer batch-size stat).
-    auto drain_rx(int64_t gptp_now_ns) -> size_t;
+    auto drain_rx(realtime::GptpClock0::time_point gptp_now, net::RxTimePoint rx_now) -> size_t;
+
+    /// Asking form: reads the RX clock once and drains as above. The reactor's
+    /// thin RX adapter calls it with current_gptp_ns(): the reactor is a tick
+    /// owner on neither clock, and one RAW read per pass is its whole cost.
+    auto drain_rx(int64_t const gptp_now_ns) -> size_t
+    {
+        return drain_rx(realtime::GptpClock0::from_ns(gptp_now_ns), net::rx_clock_now());
+    }
 
     /// The gPTP time the reactor path stamps RX frames with: the media-timer wake
     /// (last_gptp_ns_). The RT-timer path passes its own, fresher wake time instead.
-    [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t
-    {
-        return static_cast<int64_t>(last_gptp_ns_.load(std::memory_order_relaxed));
-    }
+    [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t { return last_gptp_ns_.load(std::memory_order_relaxed); }
 
     /// Decode one received AVTP stream frame: match it to the slot whose
     /// connected stream_id it carries (kind checked against the subtype),
@@ -234,7 +241,7 @@ struct ListenerStreams
         StreamInputCounters::margin_histogram_config_for(StreamInputCounters::DEFAULT_PRESENTATION_OFFSET_NS)};
     uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
     nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
-    std::atomic<uint64_t> const& last_gptp_ns_;
+    std::atomic<int64_t> const& last_gptp_ns_;
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does
     /// not know what the sink does with it. Nullable.
     StreamRxAudioSink* audio_sink_{nullptr};

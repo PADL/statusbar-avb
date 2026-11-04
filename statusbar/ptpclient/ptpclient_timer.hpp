@@ -10,6 +10,7 @@
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/ptpclient/ptpclient_bridge.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -69,13 +70,19 @@ class PtpTimerBase
 // Timer Wake Info
 //
 
-/// Information passed to callback on each timer wake
+/// Information passed to callback on each timer wake: the wake told on each
+/// clock the callback may care about, so nothing it calls reads a clock.
 struct TimerWakeInfo
 {
     int64_t scheduled_time_ns;  ///< Target wake time (PTP nanoseconds)
     int64_t actual_time_ns;     ///< Actual wake time (PTP nanoseconds)
     int64_t error_ns;           ///< actual - scheduled (positive = late, negative = early)
     int64_t wake_count;         ///< Total successful wakes so far
+    /// The wake instant on CLOCK_MONOTONIC_RAW: the one reading actual_time_ns
+    /// was converted from. Typed, so it can only be told to something that
+    /// takes the RAW clock (an RX drain, which tells it to the port). The PTP
+    /// fields stay plain nanoseconds: PtpTimer is not bound to a gPTP domain type.
+    realtime::MonotonicRawClock::time_point actual_raw{};
 };
 
 //
@@ -200,24 +207,34 @@ class PtpTimer : public PtpTimerBase
     [[nodiscard]] auto missed_cycles() const noexcept -> int64_t { return load_missed_cycles(); }
 
   private:
-    /// Process a successful wake: update stats, call callback, advance schedule
-    /// @return wake error in nanoseconds
-    auto process_wake(int64_t actual_wake_ptp, int64_t& next_wake) -> int64_t
+    /// The schedule after a wake at @p actual_wake_ptp: the next period, or,
+    /// when that is already behind the wake, the first period boundary still
+    /// ahead, the skipped ones counted as missed cycles.
+    auto advance_schedule(int64_t const actual_wake_ptp, int64_t& next_wake) noexcept -> void
     {
-        int64_t const error_ns = actual_wake_ptp - next_wake;
-        stats_.update(error_ns);
-
-        TimerWakeInfo info{
-            .scheduled_time_ns = next_wake, .actual_time_ns = actual_wake_ptp, .error_ns = error_ns, .wake_count = stats_.count()};
-        callback_(success(info));
-
         next_wake += period_ns_;
         if (actual_wake_ptp > next_wake) {
             int64_t const periods_behind = ((actual_wake_ptp - next_wake) / period_ns_) + 1;
             next_wake += periods_behind * period_ns_;
             add_missed_cycles(periods_behind);
         }
+    }
 
+    /// Process a successful wake: update stats, call the callback with the
+    /// wake told on both clocks, advance the schedule.
+    /// @return wake error in nanoseconds
+    auto process_wake(PtpTimeBridge::WakeTimes const& wake, int64_t& next_wake) -> int64_t
+    {
+        int64_t const error_ns = wake.ptp_ns - next_wake;
+        stats_.update(error_ns);
+        TimerWakeInfo const info{
+            .scheduled_time_ns = next_wake,
+            .actual_time_ns = wake.ptp_ns,
+            .error_ns = error_ns,
+            .wake_count = stats_.count(),
+            .actual_raw = realtime::MonotonicRawClock::from_ns(wake.raw_ns)};
+        callback_(success(info));
+        advance_schedule(wake.ptp_ns, next_wake);
         return error_ns;
     }
 

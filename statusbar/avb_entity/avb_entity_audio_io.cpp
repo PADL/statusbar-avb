@@ -337,7 +337,7 @@ void AvbEntityAudioIO::process_audio(TimePoint time)
         uint64_t const wake_ns = base_now_ns + (static_cast<uint64_t>(p) * PACKET_INTERVAL_NS);
         // Publish the gPTP media time so the RX thread can judge LATE/EARLY_TIMESTAMP
         // against gPTP (the reactor's own clock is monotonic, not gPTP).
-        last_gptp_ns_.store(wake_ns, std::memory_order_relaxed);
+        last_gptp_ns_.store(static_cast<int64_t>(wake_ns), std::memory_order_relaxed);
 
         // Deterministic, GPS-rate-pinned media clock: how many samples to emit
         // this tick (nominal +/- 1, paced to GPS) and the jitter-free presentation

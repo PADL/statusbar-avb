@@ -403,7 +403,8 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
                 return;
             }
             auto const cb_t0 = std::chrono::steady_clock::now();
-            size_t const n = entity.drain_stream_rx(wake_info->actual_time_ns);
+            size_t const n =
+                entity.drain_stream_rx(realtime::GptpClock0::from_ns(wake_info->actual_time_ns), wake_info->actual_raw);
             note_rx(cb_t0, n, wake_info->error_ns);
             if (kick_in_rx) {  // the drain released the port guard; the kick needs none
                 auto const k0 = std::chrono::steady_clock::now();

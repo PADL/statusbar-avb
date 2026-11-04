@@ -111,7 +111,7 @@ TEST(crf_math, live_base_tracks_now_not_anchor)
 TEST(talker_streams, external_kick_needs_a_port)
 {
     ptpclient::MediaClockGenerator const mc{};
-    std::atomic<uint64_t> const gptp_now{0};
+    std::atomic<int64_t> const gptp_now{0};
     statusbar::avb_entity::TalkerStreams talker{
         statusbar::avb_entity::TalkerStreamsConfig{.sample_rate = 96000}, mc, gptp_now, std::pmr::get_default_resource()};
     // No open_tx: nothing to kick, so the request is refused and the state
@@ -126,7 +126,7 @@ TEST(talker_streams, external_kick_needs_a_port)
 TEST(talker_streams, close_tx_lets_a_restart_open_the_streams_afresh)
 {
     ptpclient::MediaClockGenerator const mc{};
-    std::atomic<uint64_t> const gptp_now{0};
+    std::atomic<int64_t> const gptp_now{0};
     statusbar::avb_entity::TalkerStreams talker{
         statusbar::avb_entity::TalkerStreamsConfig{.sample_rate = 96000}, mc, gptp_now, std::pmr::get_default_resource()};
     statusbar::avb_entity::StreamSpec spec{};

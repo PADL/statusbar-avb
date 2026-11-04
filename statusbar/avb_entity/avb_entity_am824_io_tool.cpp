@@ -335,7 +335,8 @@ MainLoopResult run_main_loop(
                 rx_timer_error_count.add(1);
                 return;
             }
-            size_t const n = entity.drain_stream_rx(wake_info->actual_time_ns);
+            size_t const n =
+                entity.drain_stream_rx(realtime::GptpClock0::from_ns(wake_info->actual_time_ns), wake_info->actual_raw);
             rx_frames_drained.add(n);
             rx_last_batch.publish(static_cast<int64_t>(n));
             rx_last_wake_error_ns.publish(wake_info->error_ns);

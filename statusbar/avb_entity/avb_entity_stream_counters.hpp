@@ -101,7 +101,7 @@ void tally_stream_input_packet(
     bool format_ok,
     uint64_t samples_per_ch,
     bool ts_sparse,
-    uint64_t gptp_now_ns,
+    int64_t gptp_now_ns,
     uint32_t lock_tolerance_ns,
     uint32_t sample_rate_hz);
 

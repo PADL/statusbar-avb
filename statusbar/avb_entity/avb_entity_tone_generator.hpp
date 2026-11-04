@@ -209,7 +209,7 @@ class AvbEntityToneGenerator
 
     /// Latest gPTP time (ns) seen by the media timer (the kit's TalkerStreams
     /// reads it). Declared before kit_ (the kit binds it).
-    std::atomic<uint64_t> last_gptp_ns_{0};
+    std::atomic<int64_t> last_gptp_ns_{0};
 
     /// Deterministic presentation-timestamp generator. r is 1.0 (locked to
     /// gPTP) unless the CRF-input clock source is active and locked (see

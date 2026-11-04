@@ -46,7 +46,7 @@ class UdptunIngestPath
         size_t const& channels,
         MediaClockRateTracker const& rate_tracker,
         itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot,
-        std::atomic<uint64_t> const& last_gptp_ns,
+        std::atomic<int64_t> const& last_gptp_ns,
         UdptunTransport& transport,
         UdptunTelemetry telemetry) noexcept
         : config_{config}
@@ -124,7 +124,7 @@ class UdptunIngestPath
     size_t const& channels_;
     MediaClockRateTracker const& rate_tracker_;
     itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot_;
-    std::atomic<uint64_t> const& last_gptp_ns_;
+    std::atomic<int64_t> const& last_gptp_ns_;
     UdptunTransport& transport_;
     UdptunTelemetry telemetry_;
     std::optional<logging::Logger> ctl_log_{};

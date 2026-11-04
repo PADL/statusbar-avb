@@ -48,7 +48,7 @@ class EntityUdptunBridge : public StreamRxAudioSink
         itc::AtomicTripleBuffer<ptpclient::GpsTaiSnapshot>& tai_snapshot,
         std::pmr::vector<float>& audio_buffer,
         size_t const& channels,
-        std::atomic<uint64_t> const& last_gptp_ns) noexcept
+        std::atomic<int64_t> const& last_gptp_ns) noexcept
         : config_{config}
         , transport_{config, telemetry_}
         , ingest_{config, channels, rate_tracker, tai_snapshot, last_gptp_ns, transport_, telemetry_}
