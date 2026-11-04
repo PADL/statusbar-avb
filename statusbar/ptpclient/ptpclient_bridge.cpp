@@ -7,6 +7,7 @@
 #include "statusbar/ptpclient/ptpclient_bridge.hpp"
 
 #include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <system_error>
 #include <thread>
@@ -59,16 +61,6 @@ auto PtpTimeBridgeBase::regression_buffer_overruns() const noexcept -> uint64_t
     // A seqlock has no unconsumed-overwrite concept: every reader always observes
     // the latest published value, so there are no overruns to report.
     return 0;
-}
-
-auto PtpTimeBridgeBase::mono_raw_publish(double const rate, int64_t const offset_ns) noexcept -> void
-{
-    mono_raw_buffer_.store(RateOffset{.rate = rate, .offset_ns = offset_ns});
-}
-
-auto PtpTimeBridgeBase::mono_raw_consume() const noexcept -> RateOffset
-{
-    return mono_raw_buffer_.load();
 }
 
 // Running state
@@ -219,13 +211,10 @@ auto PtpTimeBridge::now_ns() const noexcept -> int64_t
 {
     // Authoritative timebase is CLOCK_MONOTONIC_RAW (immune to phc2sys slewing);
     // the primary regression maps PHC = rate * RAW + offset.
-    int64_t const raw_ns = read_raw_ns();
-    auto const ro = regression_buffer_consume();
-    auto const slope = FixedPointSlope::from_double(ro.rate);
-    return monotonic_to_ptp_precise(raw_ns, slope, ro.offset_ns);
+    return from_raw_ns(realtime::read_monotonic_raw_ns());
 }
 
-auto PtpTimeBridge::to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t
+auto PtpTimeBridge::to_raw_ns(int64_t ptp_ns) const noexcept -> int64_t
 {
     auto const ro = regression_buffer_consume();
     // Use precise conversion with __int128 arithmetic
@@ -233,12 +222,22 @@ auto PtpTimeBridge::to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t
     return ptp_to_monotonic_precise(ptp_ns, slope, ro.offset_ns);
 }
 
-auto PtpTimeBridge::from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t
+auto PtpTimeBridge::from_raw_ns(int64_t raw_ns) const noexcept -> int64_t
 {
     auto const ro = regression_buffer_consume();
     // Use precise conversion with __int128 arithmetic
     auto const slope = FixedPointSlope::from_double(ro.rate);
-    return monotonic_to_ptp_precise(mono_ns, slope, ro.offset_ns);
+    return monotonic_to_ptp_precise(raw_ns, slope, ro.offset_ns);
+}
+
+auto PtpTimeBridge::to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t
+{
+    return raw_line_.to_monotonic_ns(to_raw_ns(ptp_ns));
+}
+
+auto PtpTimeBridge::from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t
+{
+    return from_raw_ns(raw_line_.from_monotonic_ns(mono_ns));
 }
 
 auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusValue<SleepPlan>
@@ -252,22 +251,18 @@ auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusVal
         return failure(PtpError::bridge_not_healthy);
     }
 
-    // 1. PTP deadline -> RAW deadline via the primary (PHC <-> RAW) mapping.
-    //    ptp = rate * raw + offset  =>  raw = (ptp - offset) / rate. The
-    //    *_precise/ptp_to_monotonic_precise helpers compute exactly this inverse;
-    //    here the "monotonic" value they return is the RAW timestamp.
-    auto const phc_slope = FixedPointSlope::from_double(before.rate);
-    int64_t const phc_offset_ns = static_cast<int64_t>(before.offset_ns);
-    int64_t const raw_deadline = ptp_to_monotonic_precise(ptp_deadline_ns, phc_slope, phc_offset_ns);
+    // 1. PTP deadline -> RAW deadline via the primary (PHC <-> RAW) mapping
+    //    captured in `before`: ptp = rate * raw + offset => raw = (ptp - offset) / rate.
+    int64_t const raw_deadline = ptp_to_monotonic_precise(
+        ptp_deadline_ns, FixedPointSlope::from_double(before.rate), static_cast<int64_t>(before.offset_ns));
 
-    // 2. RAW deadline -> coarse CLOCK_MONOTONIC deadline via the secondary
-    //    (MONOTONIC = mono_rate * RAW + mono_offset) mapping, for clock_nanosleep.
-    auto const mr = mono_raw_consume();
-    auto const mono_slope = FixedPointSlope::from_double(mr.rate);
-    int64_t const mono_deadline = monotonic_to_ptp_precise(raw_deadline, mono_slope, mr.offset_ns);
-
+    // 2. RAW deadline -> coarse CLOCK_MONOTONIC deadline through the
+    //    RAW<->MONOTONIC line, for clock_nanosleep; its rate sizes the guard.
     return success(SleepPlan{
-        .raw_deadline_ns = raw_deadline, .mono_deadline_ns = mono_deadline, .mono_per_raw_slope = mr.rate, .before = before});
+        .raw_deadline_ns = raw_deadline,
+        .mono_deadline_ns = raw_line_.to_monotonic_ns(raw_deadline),
+        .mono_per_raw_slope = raw_line_.consume().rate,
+        .before = before});
 }
 
 auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>
@@ -292,20 +287,6 @@ void PtpTimeBridge::reset_epoch() noexcept
     set_healthy(false);
     set_ever_healthy(false);
     set_reset_requested(true);
-}
-
-auto PtpTimeBridge::read_monotonic_ns() noexcept -> int64_t
-{
-    timespec ts{};
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
-    return timespec_to_ns(ts.tv_sec, ts.tv_nsec);
-}
-
-auto PtpTimeBridge::read_raw_ns() noexcept -> int64_t
-{
-    timespec ts{};
-    ::clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-    return timespec_to_ns(ts.tv_sec, ts.tv_nsec);
 }
 
 auto PtpTimeBridge::start_sampling_impl(PtpTimeReader ptp_reader, BridgeSamplingParams const& params) -> StatusValue<SamplingGuard>
@@ -338,10 +319,10 @@ void PtpTimeBridge::sampler_loop_impl()
     // does not need a fast, jitter-free cadence, and an outlier bracket is just
     // rejected. (RT pinning was tried and backed out — it was unnecessary once
     // the media timer no longer hard-exits on a transient unhealthy bridge.)
-    // Two lockstep windows: primary PHC<->RAW (authoritative) and secondary
-    // MONOTONIC<->RAW (coarse early-wake scheduling).
+    // The primary PHC<->RAW window (authoritative) and, over the same span,
+    // the tracker that keeps raw_line_ (RAW<->MONOTONIC, for the sleeps).
     TimingSampleWindow phc_window(static_cast<size_t>(params_.window_size));
-    TimingSampleWindow mono_window(static_cast<size_t>(params_.window_size));
+    realtime::MonotonicRawTracker raw_tracker{raw_line_, static_cast<size_t>(params_.window_size)};
 
     auto const period = std::chrono::nanoseconds(1'000'000'000LL / std::max(1, params_.sample_hz));
     auto next = std::chrono::steady_clock::now();
@@ -350,7 +331,7 @@ void PtpTimeBridge::sampler_loop_impl()
 
     while (is_running_atomic()) {
         next += period;
-        collect_sample(phc_window, mono_window, worst_bracket);
+        collect_sample(phc_window, raw_tracker, worst_bracket);
         std::this_thread::sleep_until(next);
     }
 }
@@ -397,30 +378,24 @@ auto PtpTimeBridge::telemetry() const noexcept -> BridgeTelemetry
     return t;
 }
 
+auto PtpTimeBridge::convert_ptp_to_raw(int64_t ptp_ns) const noexcept -> TimeConvertResult
+{
+    return TimeConvertResult{.time_ns = to_raw_ns(ptp_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
+}
+
+auto PtpTimeBridge::convert_raw_to_ptp(int64_t raw_ns) const noexcept -> TimeConvertResult
+{
+    return TimeConvertResult{.time_ns = from_raw_ns(raw_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
+}
+
 auto PtpTimeBridge::convert_ptp_to_monotonic(int64_t ptp_ns) const noexcept -> TimeConvertResult
 {
-    TimeConvertResult result;
-    result.epoch = load_epoch();
-    result.healthy = is_healthy_atomic();
-
-    auto const ro = regression_buffer_consume();
-    auto const slope = FixedPointSlope::from_double(ro.rate);
-    result.time_ns = ptp_to_monotonic_precise(ptp_ns, slope, ro.offset_ns);
-
-    return result;
+    return TimeConvertResult{.time_ns = to_monotonic_ns(ptp_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
 }
 
 auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcept -> TimeConvertResult
 {
-    TimeConvertResult result;
-    result.epoch = load_epoch();
-    result.healthy = is_healthy_atomic();
-
-    auto const ro = regression_buffer_consume();
-    auto const slope = FixedPointSlope::from_double(ro.rate);
-    result.time_ns = monotonic_to_ptp_precise(monotonic_ns, slope, ro.offset_ns);
-
-    return result;
+    return TimeConvertResult{.time_ns = from_monotonic_ns(monotonic_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
 }
 
 auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<int64_t>
@@ -446,7 +421,7 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
     // divergence accrued over the sleep [slew term] so we never oversleep past
     // the RAW deadline. When phc2sys is calm the slew term is ~0 (minimal spin);
     // when it is railed at ±10% the term is ~10% of the sleep (a small spin).
-    int64_t const raw_now = read_raw_ns();
+    int64_t const raw_now = realtime::read_monotonic_raw_ns();
     int64_t const sleep_dur = raw_deadline - raw_now;
     int64_t const base_guard = std::max<int64_t>(params_.wake_refine_spin_ns, 0);
     int64_t const slew_guard =
@@ -483,7 +458,7 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
     // Precise finish: spin on CLOCK_MONOTONIC_RAW to the exact RAW deadline.
     // sched_yield while still far out to avoid a hard busy-loop; bail on shutdown.
     while (true) {
-        int64_t const now_raw = read_raw_ns();
+        int64_t const now_raw = realtime::read_monotonic_raw_ns();
         if (now_raw >= raw_deadline) {
             break;
         }
@@ -495,73 +470,70 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         }
     }
 
-    int64_t const wake_raw = read_raw_ns();
-    return finalize_wake(wake_raw, plan.before);
+    return finalize_wake(realtime::read_monotonic_raw_ns(), plan.before);
 }
 
-auto PtpTimeBridge::collect_sample(TimingSampleWindow& phc_window, TimingSampleWindow& mono_window, int64_t& worst_bracket) -> bool
+auto PtpTimeBridge::take_reading() -> Reading
 {
-    if (exchange_reset_requested(false)) {
-        phc_window.clear();
-        mono_window.clear();
-        worst_bracket = 0;
-    }
+    // Bracket the (expensive) PHC read with CLOCK_MONOTONIC_RAW, the slew-immune
+    // timing reference. Immediately after, take a RAW-bracketed CLOCK_MONOTONIC
+    // read for the (slewed) RAW<->MONOTONIC line the sleeps go through.
+    int64_t const raw_before_phc = realtime::read_monotonic_raw_ns();
+    auto phc = ptp_reader_();
+    int64_t const raw_after_phc = realtime::read_monotonic_raw_ns();
+    int64_t const mono = realtime::read_monotonic_ns();
+    return Reading{
+        .raw_before_phc = raw_before_phc,
+        .phc = std::move(phc),
+        .raw_after_phc = raw_after_phc,
+        .mono = mono,
+        .raw_after_mono = realtime::read_monotonic_raw_ns()};
+}
 
-    // Bracket the (expensive) PHC read with CLOCK_MONOTONIC_RAW — the slew-immune
-    // authoritative timebase. Immediately after, take a RAW-bracketed
-    // CLOCK_MONOTONIC read so we can also track the (slewed) MONOTONIC<->RAW line
-    // used for coarse early-wake scheduling.
-    int64_t const raw1 = read_raw_ns();
-    auto ptp_result = ptp_reader_();
-    int64_t const raw2 = read_raw_ns();
-    int64_t const mono = read_monotonic_ns();
-    int64_t const raw3 = read_raw_ns();
+auto PtpTimeBridge::min_samples_for_fit() const noexcept -> size_t
+{
+    return static_cast<size_t>(std::max(2, std::min(params_.min_samples_for_healthy, params_.window_size / 4)));
+}
 
-    if (!ptp_result) {
-        return false;
-    }
-
-    int64_t const ptp = *ptp_result;
-    int64_t bracket = raw2 - raw1;
-    if (bracket < 0) {
-        bracket = -bracket;
-    }
-    if (bracket > worst_bracket) {
-        worst_bracket = bracket;
-    }
-
-    // Telemetry: record the full PHC-read bracket distribution (contention signal).
+auto PtpTimeBridge::accept_phc_sample(TimingSampleWindow& phc_window, Reading const& reading, int64_t& worst_bracket) -> bool
+{
+    int64_t const bracket = std::abs(reading.raw_after_phc - reading.raw_before_phc);
+    worst_bracket = std::max(worst_bracket, bracket);
+    // Telemetry: the full PHC-read bracket distribution (contention signal).
     bracket_stats_.update(bracket);
-
     if (bracket > params_.max_bracket_ns) {
         reject_count_.fetch_add(1, std::memory_order_relaxed);
-        return true;
+        return false;
     }
-
     // Primary PHC <-> RAW sample (x = RAW midpoint of the PHC bracket, y = PHC).
-    int64_t const raw_mid_phc = (raw1 + raw2) / 2;
-    phc_window.push({.monotonic_ns = raw_mid_phc, .ptp_ns = ptp, .bracket_ns = bracket});
-
-    // Secondary MONOTONIC <-> RAW sample (x = RAW midpoint of the MONOTONIC read,
-    // y = MONOTONIC). Kept in lockstep with the primary window (same size).
-    int64_t mono_bracket = raw3 - raw2;
-    if (mono_bracket < 0) {
-        mono_bracket = -mono_bracket;
-    }
-    int64_t const raw_mid_mono = (raw2 + raw3) / 2;
-    mono_window.push({.monotonic_ns = raw_mid_mono, .ptp_ns = mono, .bracket_ns = mono_bracket});
-
-    size_t const min_samples = static_cast<size_t>(std::max(2, std::min(params_.min_samples_for_healthy, params_.window_size / 4)));
-
-    if (phc_window.size() >= min_samples) {
-        update_mapping(phc_window, mono_window, worst_bracket);
-    }
-
+    phc_window.push(
+        {.monotonic_ns = (reading.raw_before_phc + reading.raw_after_phc) / 2, .ptp_ns = *reading.phc, .bracket_ns = bracket});
     return true;
 }
 
-void PtpTimeBridge::update_mapping(
-    TimingSampleWindow const& phc_window, TimingSampleWindow const& mono_window, int64_t worst_bracket)
+auto PtpTimeBridge::collect_sample(
+    TimingSampleWindow& phc_window, realtime::MonotonicRawTracker& raw_tracker, int64_t& worst_bracket) -> bool
+{
+    if (exchange_reset_requested(false)) {
+        phc_window.clear();
+        raw_tracker.clear();
+        worst_bracket = 0;
+    }
+    Reading const reading = take_reading();
+    // The RAW<->MONOTONIC line does not depend on the PHC read: the tracker
+    // is told the pair at the RAW midpoint of the MONOTONIC bracket whatever
+    // the PHC did, so the sleeps have a fresh line even while unhealthy.
+    (void)raw_tracker.push((reading.raw_after_phc + reading.raw_after_mono) / 2, reading.mono);
+    if (!reading.phc) {
+        return false;
+    }
+    if (accept_phc_sample(phc_window, reading, worst_bracket) && phc_window.size() >= min_samples_for_fit()) {
+        update_mapping(phc_window, worst_bracket);
+    }
+    return true;
+}
+
+void PtpTimeBridge::update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket)
 {
     auto fit = fit_time_mapping(phc_window, params_.max_rate_ppm);
 
@@ -606,17 +578,6 @@ void PtpTimeBridge::update_mapping(
     set_healthy(healthy);
     if (healthy) {
         set_ever_healthy(true);
-    }
-
-    // Secondary MONOTONIC <-> RAW fit, used only to convert a RAW wake deadline
-    // into a coarse CLOCK_MONOTONIC deadline for clock_nanosleep. A WIDE rate
-    // clamp (±20%) because phc2sys legitimately slews CLOCK_MONOTONIC by up to
-    // ~±10%; pinning it to the primary's narrow window would corrupt the coarse
-    // deadline. Does not gate health.
-    constexpr double MONO_RAW_MAX_RATE_PPM = 200'000.0;  // ±20%
-    auto const mono_fit = fit_time_mapping(mono_window, MONO_RAW_MAX_RATE_PPM);
-    if (mono_fit.valid) {
-        mono_raw_publish(mono_fit.slope, mono_fit.intercept_ns);
     }
 }
 

@@ -95,16 +95,10 @@ inline constexpr int64_t DEFAULT_TAI_OFFSET_NS = 37'000'000'000LL;
 /// gPTP servo's pull-in).
 [[nodiscard]] auto make_gptp_slave_translator(gptp::GptpTimeBridge const& bridge) -> WireClock::Translator;
 
-/// Build a translator over a `ptpclient::PtpTimeBridge`. The bridge
-/// samples against CLOCK_MONOTONIC (not CLOCK_MONOTONIC_RAW), so the
-/// closure samples both clocks fresh on every call and converts via
-/// `bridge.from_monotonic_ns(mraw_ns + (mono_now - mraw_now))`.
-/// CLOCK_MONOTONIC is slewed by phc2sys (a 1–20 ppm correction is
-/// typical depending on the local crystal's offset from nominal),
-/// while CLOCK_MONOTONIC_RAW is exempt — so the offset between them
-/// drifts during a session at the slewing rate. A captured-once
-/// offset would silently inject that drift into every translation,
-/// producing a walking measured one-way latency.
+/// Build a translator over a `ptpclient::PtpTimeBridge`. The bridge's
+/// reference clock is CLOCK_MONOTONIC_RAW, the clock the wire timeline
+/// runs on, so the closure is `bridge.from_raw_ns(mraw_ns)`: the primary
+/// PHC<->RAW line, exact, with no clock read of its own.
 [[nodiscard]] auto make_ptp4l_translator(ptpclient::PtpTimeBridge const& bridge) -> WireClock::Translator;
 
 }  // namespace statusbar::udptun

@@ -10,6 +10,7 @@
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/realtime/realtime_monotonic_raw_line.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/stats/stats.hpp"
 #include "statusbar/status/status.hpp"
@@ -71,12 +72,12 @@ class PtpTimeBridgeBase
 
     /// Result of a seqlock-protected paired load of (rate, offset_ns).
     /// The two values were observed from the same writer publication,
-    /// so the regression line `gptp = rate * mono + offset_ns` is
-    /// internally consistent. A non-seqlocked load of one without the
-    /// other is racy with the sampler thread's update_mapping: a
-    /// 1 ppm slope wobble between samples combined with a stale
-    /// intercept (or vice versa) yields a translation error of
-    /// rate_delta * mono_now, which on a system that's been up for
+    /// so the regression line `gptp = rate * raw + offset_ns` (raw being
+    /// CLOCK_MONOTONIC_RAW) is internally consistent. A non-seqlocked
+    /// load of one without the other is racy with the sampler thread's
+    /// update_mapping: a 1 ppm slope wobble between samples combined
+    /// with a stale intercept (or vice versa) yields a translation error
+    /// of rate_delta * raw_now, which on a system that's been up for
     /// tens of hours is on the order of 100 ms per ppm.
     struct RateOffset
     {
@@ -113,15 +114,6 @@ class PtpTimeBridgeBase
     /// position transfers between main (setup/shutdown) and the
     /// wan_timer / RT thread (steady-state operation).
     [[nodiscard]] auto regression_buffer_consume() const noexcept -> RateOffset;
-
-    /// Secondary mapping CLOCK_MONOTONIC = rate * CLOCK_MONOTONIC_RAW + offset_ns.
-    /// The primary `regression_buffer_` holds the authoritative PHC<->RAW line
-    /// (RAW is immune to phc2sys slewing); this secondary line is used only to
-    /// convert a RAW wake deadline into a coarse CLOCK_MONOTONIC deadline for
-    /// clock_nanosleep (which cannot sleep on RAW). It legitimately has a large
-    /// slope when phc2sys is slewing CLOCK_MONOTONIC. Same SPSC discipline.
-    auto mono_raw_publish(double rate, int64_t offset_ns) noexcept -> void;
-    [[nodiscard]] auto mono_raw_consume() const noexcept -> RateOffset;
 
     // Epoch
     [[nodiscard]] auto load_epoch() const noexcept -> uint64_t;
@@ -164,8 +156,6 @@ class PtpTimeBridgeBase
     // strictly-SPSC AtomicTripleBuffer, whose consume() is single-consumer) is the
     // right primitive: every reader observes a consistent (rate, offset) snapshot.
     statusbar::itc::SeqlockValue<RateOffset> regression_buffer_{RateOffset{.rate = 1.0, .offset_ns = 0}};
-    // Secondary CLOCK_MONOTONIC <- CLOCK_MONOTONIC_RAW line (see mono_raw_publish).
-    statusbar::itc::SeqlockValue<RateOffset> mono_raw_buffer_{RateOffset{.rate = 1.0, .offset_ns = 0}};
     std::atomic<uint64_t> epoch_;
     std::atomic<bool> healthy_;
     std::atomic<bool> ever_healthy_;
@@ -234,8 +224,11 @@ class SamplingGuard
 // PTP Time Bridge
 //
 
-/// Bridge between PTP hardware clock and local monotonic clock
-/// Maintains a continuously-updated linear mapping using background sampling
+/// Bridge between the PTP hardware clock and the local timing reference,
+/// CLOCK_MONOTONIC_RAW. Maintains a continuously-updated linear mapping
+/// PHC = rate * RAW + offset using background sampling, plus the
+/// RAW<->CLOCK_MONOTONIC line (realtime::MonotonicRawLine) a sleeper needs
+/// to reach a RAW deadline through the kernel's CLOCK_MONOTONIC sleep.
 ///
 /// Usage:
 ///   PtpTimeBridge bridge;
@@ -292,38 +285,62 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     [[nodiscard]] auto epoch() const noexcept -> uint64_t { return load_epoch(); }
 
     // ClockSource-compatible interface (for use with ClockAdapter)
+    //
+    // The reference clock is CLOCK_MONOTONIC_RAW: the sampler fits the PHC
+    // against RAW, so to_raw_ns()/from_raw_ns() are the primary line and a
+    // realtime::Timer on this source sleeps early on CLOCK_MONOTONIC and
+    // spins on RAW to each deadline. to_monotonic_ns()/from_monotonic_ns()
+    // go through raw_line(), the RAW<->MONOTONIC line the sampler keeps
+    // alongside, so each conversion names the clock it returns. All of
+    // them are exact (__int128), so a large offset costs no precision.
 
-    /// Get current PTP time in nanoseconds
-    /// This reads monotonic time and converts to PTP domain
-    /// Uses __int128 precision to avoid floating-point errors with large offsets
+    /// A realtime::Timer on this source takes the RAW-authoritative wait.
+    static constexpr bool reference_is_raw = true;
+
+    /// Current PTP time in nanoseconds: reads CLOCK_MONOTONIC_RAW once and
+    /// converts it through the primary mapping.
     [[nodiscard]] auto now_ns() const noexcept -> int64_t;
 
-    /// Convert PTP time to monotonic time (nanoseconds)
-    /// Uses __int128 precision to avoid floating-point errors with large offsets
-    /// @param ptp_ns PTP time in nanoseconds to convert
+    /// PTP nanoseconds -> CLOCK_MONOTONIC_RAW nanoseconds (primary mapping).
+    [[nodiscard]] auto to_raw_ns(int64_t ptp_ns) const noexcept -> int64_t;
+
+    /// CLOCK_MONOTONIC_RAW nanoseconds -> PTP nanoseconds (primary mapping).
+    [[nodiscard]] auto from_raw_ns(int64_t raw_ns) const noexcept -> int64_t;
+
+    /// PTP nanoseconds -> CLOCK_MONOTONIC nanoseconds: to_raw_ns(), then raw_line().
     [[nodiscard]] auto to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t;
 
-    /// Convert monotonic time to PTP time (nanoseconds)
-    /// Uses __int128 precision to avoid floating-point errors with large offsets
-    /// @param mono_ns Monotonic time in nanoseconds to convert
+    /// CLOCK_MONOTONIC nanoseconds -> PTP nanoseconds: raw_line(), then from_raw_ns().
     [[nodiscard]] auto from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t;
+
+    /// The RAW<->CLOCK_MONOTONIC line the sampler keeps (seqlocked, read from
+    /// any thread; identity until the first sample). A sleeper derives the
+    /// CLOCK_MONOTONIC early-wake instant for a RAW deadline from it.
+    [[nodiscard]] auto raw_line() const noexcept -> realtime::MonotonicRawLine const& { return raw_line_; }
 
     // Time Conversion (returning TimeConvertResult with epoch/health info)
 
-    /// Convert PTP time to monotonic time
-    /// Uses __int128 precision to avoid floating-point errors with large offsets
+    /// PTP time -> CLOCK_MONOTONIC_RAW time, with the epoch and health it was made under
+    /// @param ptp_ns PTP time in nanoseconds to convert
+    [[nodiscard]] auto convert_ptp_to_raw(int64_t ptp_ns) const noexcept -> TimeConvertResult;
+
+    /// CLOCK_MONOTONIC_RAW time -> PTP time, with the epoch and health it was made under
+    /// @param raw_ns CLOCK_MONOTONIC_RAW time in nanoseconds to convert
+    [[nodiscard]] auto convert_raw_to_ptp(int64_t raw_ns) const noexcept -> TimeConvertResult;
+
+    /// PTP time -> CLOCK_MONOTONIC time (through raw_line()), with epoch and health
     /// @param ptp_ns PTP time in nanoseconds to convert
     [[nodiscard]] auto convert_ptp_to_monotonic(int64_t ptp_ns) const noexcept -> TimeConvertResult;
 
-    /// Convert monotonic time to PTP time
-    /// Uses __int128 precision to avoid floating-point errors with large offsets
-    /// @param monotonic_ns Monotonic time in nanoseconds to convert
+    /// CLOCK_MONOTONIC time -> PTP time (through raw_line()), with epoch and health
+    /// @param monotonic_ns CLOCK_MONOTONIC time in nanoseconds to convert
     [[nodiscard]] auto convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcept -> TimeConvertResult;
 
     /// Plan for one bracketed sleep: the PTP deadline expressed in both clock
     /// domains. raw_deadline (CLOCK_MONOTONIC_RAW) is authoritative — we spin to
-    /// it. mono_deadline (CLOCK_MONOTONIC) is the coarse early-wake target for
-    /// clock_nanosleep. mono_per_raw_slope sizes the early-wake guard.
+    /// it. mono_deadline (CLOCK_MONOTONIC, through raw_line()) is the coarse
+    /// early-wake target for clock_nanosleep. mono_per_raw_slope is the line's
+    /// rate and sizes the early-wake guard.
     struct SleepPlan
     {
         int64_t raw_deadline_ns{0};
@@ -364,29 +381,41 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     [[nodiscard]] auto telemetry() const noexcept -> BridgeTelemetry;
 
   private:
-    /// Read CLOCK_MONOTONIC (slewed by phc2sys/NTP frequency adjustment). Used
-    /// only as the coarse early-wake clock for clock_nanosleep.
-    [[nodiscard]] static auto read_monotonic_ns() noexcept -> int64_t;
-
-    /// Read CLOCK_MONOTONIC_RAW — the raw hardware counter, immune to phc2sys/NTP
-    /// slewing. This is the bridge's authoritative local timebase: the PHC is
-    /// fitted against RAW, and wake deadlines are hit by spinning on RAW.
-    [[nodiscard]] static auto read_raw_ns() noexcept -> int64_t;
-
     [[nodiscard]] auto start_sampling_impl(PtpTimeReader ptp_reader, BridgeSamplingParams const& params)
         -> StatusValue<SamplingGuard>;
 
-    /// Take a single sample: bracket the PHC read with CLOCK_MONOTONIC_RAW
-    /// (primary PHC<->RAW window) and a RAW-bracketed CLOCK_MONOTONIC read
-    /// (secondary MONOTONIC<->RAW window).
+    /// One sampler reading: the PHC read bracketed by CLOCK_MONOTONIC_RAW,
+    /// then a RAW-bracketed CLOCK_MONOTONIC read for the RAW<->MONOTONIC line.
+    struct Reading
+    {
+        int64_t raw_before_phc;
+        StatusValue<int64_t> phc;
+        int64_t raw_after_phc;
+        int64_t mono;
+        int64_t raw_after_mono;
+    };
+
+    [[nodiscard]] auto take_reading() -> Reading;
+
+    /// Take a single sample: feed the RAW<->MONOTONIC pair to @p raw_tracker
+    /// (told form, the sampler owns the bracket), then accept the PHC half
+    /// into the primary window and refit when enough samples are in.
     /// @return true if a valid sample was collected, false if skipped
-    auto collect_sample(TimingSampleWindow& phc_window, TimingSampleWindow& mono_window, int64_t& worst_bracket) -> bool;
+    auto collect_sample(TimingSampleWindow& phc_window, realtime::MonotonicRawTracker& raw_tracker, int64_t& worst_bracket) -> bool;
+
+    /// The PHC half of a reading: record its bracket, reject an over-long
+    /// one, else push (RAW midpoint, PHC) into the primary window.
+    /// @return true when a sample was pushed
+    auto accept_phc_sample(TimingSampleWindow& phc_window, Reading const& reading, int64_t& worst_bracket) -> bool;
+
+    /// Samples the primary window needs before its fit is published.
+    [[nodiscard]] auto min_samples_for_fit() const noexcept -> size_t;
 
     void sampler_loop();       ///< Thread entry: exception barrier around sampler_loop_impl()
     void sampler_loop_impl();  ///< Actual sampler work loop
 
-    /// Refit and publish both mappings from the two windows (kept in lockstep).
-    void update_mapping(TimingSampleWindow const& phc_window, TimingSampleWindow const& mono_window, int64_t worst_bracket);
+    /// Refit and publish the primary PHC<->RAW mapping from the window.
+    void update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket);
 
     // Configuration
     BridgeSamplingParams params_{};
@@ -394,6 +423,10 @@ class PtpTimeBridge : public PtpTimeBridgeBase
 
     // Thread (atomics are in base class)
     std::thread sampler_thread_;
+
+    // RAW<->CLOCK_MONOTONIC line: written by the sampler thread's tracker,
+    // read by any sleeper (prepare_sleep, to_monotonic_ns, raw_line()).
+    realtime::MonotonicRawLine raw_line_;
 
     // Telemetry (written by the sampler thread, read by any consumer)
     stats::AtomicTimeStats bracket_stats_;           ///< PHC-read bracket distribution (all samples)

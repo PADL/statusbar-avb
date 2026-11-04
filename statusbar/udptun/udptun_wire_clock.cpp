@@ -15,25 +15,10 @@ auto make_gptp_slave_translator(gptp::GptpTimeBridge const& bridge) -> WireClock
 
 auto make_ptp4l_translator(ptpclient::PtpTimeBridge const& bridge) -> WireClock::Translator
 {
-    // CLOCK_MONOTONIC is slewed by adjtimex (phc2sys keeps it aligned
-    // to the PHC), but CLOCK_MONOTONIC_RAW is not — so the offset
-    // between them drifts over a session at the slewing rate (often
-    // 1–20 ppm depending on the local oscillator's deviation from
-    // nominal). A captured-once raw_offset would silently inject that
-    // drift into every wire_ns translation, producing a slowly-walking
-    // measured one-way latency. Sample both clocks fresh on every
-    // call instead — two clock_gettime() syscalls is tens of ns, and
-    // the sub-µs gap between them bounds any sampling skew.
-    return [&bridge](int64_t mraw_ns) noexcept -> int64_t {
-        timespec mraw_ts{};
-        clock_gettime(CLOCK_MONOTONIC_RAW, &mraw_ts);
-        timespec mono_ts{};
-        clock_gettime(CLOCK_MONOTONIC, &mono_ts);
-        int64_t const mraw_now = (mraw_ts.tv_sec * 1'000'000'000LL) + mraw_ts.tv_nsec;
-        int64_t const mono_now = (mono_ts.tv_sec * 1'000'000'000LL) + mono_ts.tv_nsec;
-        int64_t const mraw_to_mono_offset = mono_now - mraw_now;
-        return bridge.from_monotonic_ns(mraw_ns + mraw_to_mono_offset);
-    };
+    // The bridge's reference clock is CLOCK_MONOTONIC_RAW, the clock the
+    // wire timeline runs on, so a RAW instant goes straight through the
+    // primary PHC<->RAW line: the translator reads no clock of its own.
+    return [&bridge](int64_t mraw_ns) noexcept -> int64_t { return bridge.from_raw_ns(mraw_ns); };
 }
 
 }  // namespace statusbar::udptun

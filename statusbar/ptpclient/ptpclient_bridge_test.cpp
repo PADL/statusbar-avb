@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/realtime/realtime_base.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -9,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <functional>
 #include <system_error>
@@ -492,5 +495,84 @@ TEST(ptp_bridge_mapping, get_mapping_returns_consistent_snapshot)
 //
 // Main test runner
 //
+
+//
+// Tests: PtpTimeBridge - the reference clock is CLOCK_MONOTONIC_RAW
+//
+
+static_assert(PtpTimeBridge::reference_is_raw);
+static_assert(statusbar::realtime::RawReferenceClockSource<PtpTimeBridge>);
+static_assert(statusbar::realtime::ClockAdapter<statusbar::realtime::GptpClock0, PtpTimeBridge>::reference_is_raw);
+
+TEST(ptp_bridge_raw, the_raw_conversions_are_the_primary_line_and_the_mono_line_starts_as_identity)
+{
+    PtpTimeBridge bridge;
+
+    EXPECT_EQ(bridge.to_raw_ns(1'000'000'000LL), 1'000'000'000LL);
+    EXPECT_EQ(bridge.from_raw_ns(1'000'000'000LL), 1'000'000'000LL);
+    EXPECT_EQ(bridge.to_monotonic_ns(1'000'000'000LL), 1'000'000'000LL);
+    EXPECT_EQ(bridge.from_monotonic_ns(1'000'000'000LL), 1'000'000'000LL);
+    EXPECT_EQ(bridge.raw_line().consume().rate, 1.0);
+    EXPECT_EQ(bridge.raw_line().consume().offset_ns, 0);
+    EXPECT_FALSE(bridge.convert_ptp_to_raw(5).healthy);
+    EXPECT_EQ(bridge.convert_raw_to_ptp(5).time_ns, 5);
+}
+
+TEST(ptp_bridge_raw, after_sampling_each_conversion_names_the_clock_it_returns)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+    mock.set_offset(500'000'000LL);
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    // to_raw_ns of "now" in PTP is RAW now; to_monotonic_ns of it is
+    // CLOCK_MONOTONIC now, through the line the sampler keeps.
+    int64_t const ptp_now = bridge.now_ns();
+    int64_t const raw_now = statusbar::realtime::read_monotonic_raw_ns();
+    int64_t const mono_now = statusbar::realtime::read_monotonic_ns();
+    constexpr int64_t slack_ns = 1'000'000;
+    EXPECT_TRUE(std::abs(bridge.to_raw_ns(ptp_now) - raw_now) < slack_ns);
+    EXPECT_TRUE(std::abs(bridge.to_monotonic_ns(ptp_now) - mono_now) < slack_ns);
+
+    // Both pairs round-trip, and the two pairs compose the same way.
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(bridge.to_raw_ns(ptp_now)) - ptp_now) < 1'000);
+    EXPECT_TRUE(std::abs(bridge.from_monotonic_ns(bridge.to_monotonic_ns(ptp_now)) - ptp_now) < 1'000);
+    EXPECT_EQ(bridge.to_monotonic_ns(ptp_now), bridge.raw_line().to_monotonic_ns(bridge.to_raw_ns(ptp_now)));
+
+    bridge.stop_sampling();
+}
+
+TEST(ptp_bridge_raw, the_sleep_plan_takes_its_monotonic_deadline_from_the_line)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    int64_t const ptp_deadline = bridge.now_ns() + 10'000'000LL;
+    auto plan = bridge.prepare_sleep(ptp_deadline);
+    EXPECT_TRUE(plan.has_value());
+    EXPECT_EQ(plan->raw_deadline_ns, bridge.to_raw_ns(ptp_deadline));
+    EXPECT_EQ(plan->mono_deadline_ns, bridge.raw_line().to_monotonic_ns(plan->raw_deadline_ns));
+    EXPECT_EQ(plan->mono_per_raw_slope, bridge.raw_line().consume().rate);
+    EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.0) < 0.2);
+
+    bridge.stop_sampling();
+}
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_bridge_test)

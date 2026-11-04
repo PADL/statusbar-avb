@@ -229,7 +229,7 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     s.add_flag("software", "Use software timestamping (no PHC required)", [&](auto v) { c.software_timestamping = v; });
     s.add_choice(
         "bridge-clock",
-        "POSIX clock to bridge gPTP against",
+        "POSIX clock to bridge gPTP against (the wire timeline runs on CLOCK_MONOTONIC_RAW; only monotonic_raw is accepted)",
         {"none", "monotonic", "monotonic_raw", "realtime"},
         "monotonic_raw",
         [&](auto v) { c.bridge_clock = parse_bridge_clock(v); });

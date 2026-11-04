@@ -24,6 +24,7 @@ statusbar_add_module(
   statusbar::ieee
   statusbar::net
   statusbar::ptpclient
+  statusbar::realtime
   statusbar::stats
   statusbar::status
   statusbar::itc
