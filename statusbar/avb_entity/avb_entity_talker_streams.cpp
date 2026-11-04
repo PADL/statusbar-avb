@@ -226,7 +226,7 @@ auto serialize_am824_float(
     uint64_t const now_ns,
     std::span<float const> const src,
     bool const timestamp_uncertain) -> size_t
-{  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
+{  // NOLINT(statusbar-block-statements): one frame, built field by field
     span_zero(frame);
     size_t const channels = ctx.config.channel_count;
     avtp::Am824Pdu pdu{};
@@ -258,7 +258,7 @@ auto serialize_aaf_float(
     uint64_t const now_ns,
     std::span<float const> const src,
     bool const timestamp_uncertain) -> size_t
-{  // NOLINT(statusbar-block-statements) one frame, built field by field; pre-dates the gate
+{  // NOLINT(statusbar-block-statements): one frame, built field by field
     span_zero(frame);
     size_t const channels = ctx.channel_count;
     avtp::AafPdu pdu{};
@@ -645,7 +645,7 @@ auto TalkerStreams::commit_frame(
     size_t const length,
     uint64_t const launch_time_ns) -> bool
 {
-    port_->stamp_launch_time(frame.handle, launch_time_ns);            // after the render: a refused one holds no place
+    port_->stamp_launch_time(frame.handle, launch_time_ns);            // after the render: a refused render holds no place
     auto const head = pdu_head(frame.buffer.subspan(header, length));  // read now: the slot is the port's after the commit
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     if (!commit_stream_frame(frame, header + length)) {
