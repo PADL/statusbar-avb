@@ -526,7 +526,7 @@ auto ListenerStreams::begin_port_cycle() -> int64_t
 {
     StreamPort::Guard const guard{*port_};
     port_->port().begin_cycle();
-    return net::software_rx_timestamp_ns(CLOCK_MONOTONIC_RAW);  // the pass's one RX clock read
+    return StreamPort::rx_clock_now_ns();  // the pass's one read of the port's RX clock
 }
 
 void ListenerStreams::end_port_cycle()
