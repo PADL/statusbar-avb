@@ -252,7 +252,12 @@ struct ListenerStreams
     /// when nothing was queued. The two have to differ: drain_rx ends its
     /// pass on an empty port, never on a frame it has no use for. Holds the
     /// port guard for exactly that - the decode happens outside it.
-    [[nodiscard]] auto take_rx_frame() -> std::optional<size_t>;
+    /// @p rx_now is the RX clock as drain_rx read it once for the pass:
+    /// the port is told it (net::EthernetPort::rx_start(now)), not asked.
+    [[nodiscard]] auto take_rx_frame(net::RxTimePoint rx_now) -> std::optional<size_t>;
+    /// The frames of one pass, up to MAX_DRAIN_PER_CALL, each told @p rx_now
+    /// and stamped @p gptp_now_ns: how many the port gave.
+    [[nodiscard]] auto drain_frames(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> size_t;
     /// One drain_rx pass is one port cycle: begin resets the XDP backend's
     /// per-cycle receive budget, end refills its ring. Each under the guard.
     void begin_port_cycle();
