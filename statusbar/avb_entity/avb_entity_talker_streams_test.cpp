@@ -640,8 +640,9 @@ TEST(talker_port, aaf_frame_is_the_tagged_frame_send_vlan_builds)
 
 namespace {
 
-/// Where one raw AAF frame was rendered, sent on @p port (opened single threaded or not).
-auto rendered_span(avb_entity::StreamPort& port, bool const single_threaded) -> std::span<uint8_t const>
+/// One raw AAF frame sent on @p port (opened single threaded or not): its payload's size, and
+/// whether it was rendered in the port's frame, both read while the talker lives.
+auto rendered_in_port(avb_entity::StreamPort& port, bool const single_threaded) -> std::pair<size_t, bool>
 {
     EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
     open_test_port(port);
@@ -663,7 +664,7 @@ auto rendered_span(avb_entity::StreamPort& port, bool const single_threaded) -> 
     EXPECT_EQ(talker.slot_for(0)->tx_packets, uint64_t{1});
     auto const sent = port.test_port()->pop_tx();
     EXPECT_TRUE(sent.has_value() && sent->frame.size() == VLAN_HEADER_LENGTH + avtp::AafPdu::HEADER_LENGTH + rendered.size());
-    return rendered;
+    return {rendered.size(), port.test_port()->holds(rendered)};
 }
 
 }  // namespace
@@ -673,13 +674,13 @@ auto rendered_span(avb_entity::StreamPort& port, bool const single_threaded) -> 
 TEST(talker_port, a_single_threaded_port_renders_in_the_slot)
 {
     avb_entity::StreamPort single;
-    auto const in_place = rendered_span(single, true);
-    EXPECT_EQ(in_place.size(), size_t{12 * 8 * 4});
-    EXPECT_TRUE(single.test_port()->holds(in_place));
+    auto const [in_place, held] = rendered_in_port(single, true);
+    EXPECT_EQ(in_place, size_t{12 * 8 * 4});
+    EXPECT_TRUE(held);
     avb_entity::StreamPort shared;
-    auto const staged = rendered_span(shared, false);
-    EXPECT_EQ(staged.size(), size_t{12 * 8 * 4});
-    EXPECT_FALSE(shared.test_port()->holds(staged));
+    auto const [staged, staged_held] = rendered_in_port(shared, false);
+    EXPECT_EQ(staged, size_t{12 * 8 * 4});
+    EXPECT_FALSE(staged_held);
 }
 
 // On a timed port one thread drives, a raw frame is still rendered in the slot, and receives its launch
