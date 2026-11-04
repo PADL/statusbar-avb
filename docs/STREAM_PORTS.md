@@ -48,15 +48,16 @@ serialized port each frame is copied out under the guard and decoded outside
 it, so a transmitting thread never waits on a decode. An unserialized port
 decodes each frame where the port holds it, then releases it: rawnet, whose two
 sides share nothing, and a port whose host drives both sides from one thread
-(`set_single_threaded()`, before the port opens). The kit then keeps the RX
-handler for its host to drain (`drain_stream_rx()`) and never hands it to the
-reactor; `rx_to_reactor()` refuses. Multicast membership may
-still change from the reactor. Each backend's join is a socket call that does
-not touch the rings, and the test port expects one thread.
+(`set_single_threaded()`, before the port opens). A single-threaded port's RX
+handler is always kept for its host to drain (`drain_stream_rx()`), never
+handed to the reactor.
+
+A drain reads the RX clock once per pass and stamps each frame of it with that
+reading (`net::AnyEthernetPort::rx_start(now)`), not once per frame.
 
 Multicast joins and leaves (the static groups, an ACMP connect or disconnect)
 take no guard: on every backend they are socket calls (SIOCADDMULTI,
-PACKET_ADD_MEMBERSHIP) that touch no ring.
+PACKET_ADD_MEMBERSHIP) that touch no ring. The test port expects one thread.
 
 ## AF_XDP
 
