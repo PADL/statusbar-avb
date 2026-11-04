@@ -445,10 +445,10 @@ auto ListenerStreams::attach_rx(
     return success(std::unique_ptr<net::Pollable>{});
 }
 
-auto ListenerStreams::take_rx_frame() -> std::optional<size_t>
+auto ListenerStreams::take_rx_frame(int64_t const rx_now_ns) -> std::optional<size_t>
 {
     StreamPort::Guard const guard{*port_};
-    auto rx = port_->port().rx_start();
+    auto rx = port_->port().rx_start(rx_now_ns);
     if (!rx || !rx->has_value()) {
         return std::nullopt;
     }
@@ -488,30 +488,30 @@ auto ListenerStreams::drain_rx(int64_t const gptp_now_ns) -> size_t
     // per-cycle budget of frames between begin_cycle() and end_cycle(), and
     // without the begin the budget is never reset: the first 32 frames
     // arrive and nothing after them.
-    begin_port_cycle();
+    int64_t const rx_now_ns = begin_port_cycle();
     size_t drained = 0;
-    while (drained < MAX_DRAIN_PER_CALL && receive_one(gptp_now_ns)) {
+    while (drained < MAX_DRAIN_PER_CALL && receive_one(gptp_now_ns, rx_now_ns)) {
         ++drained;
     }
     end_port_cycle();
     return drained;
 }
 
-auto ListenerStreams::receive_one(int64_t const gptp_now_ns) -> bool
+auto ListenerStreams::receive_one(int64_t const gptp_now_ns, int64_t const rx_now_ns) -> bool
 {
     if (!port_->serialized()) {
-        return receive_in_place(gptp_now_ns);
+        return receive_in_place(gptp_now_ns, rx_now_ns);
     }
-    auto const length = take_rx_frame();
+    auto const length = take_rx_frame(rx_now_ns);
     if (length && *length != 0) {  // a frame that is not AVTP goes, and the drain goes on
         on_stream_rx_frame({rx_buf_.data(), *length}, gptp_now_ns);
     }
     return length.has_value();
 }
 
-auto ListenerStreams::receive_in_place(int64_t const gptp_now_ns) -> bool
+auto ListenerStreams::receive_in_place(int64_t const gptp_now_ns, int64_t const rx_now_ns) -> bool
 {
-    auto rx = port_->port().rx_start();
+    auto rx = port_->port().rx_start(rx_now_ns);
     if (!rx || !rx->has_value()) {
         return false;
     }
@@ -522,10 +522,11 @@ auto ListenerStreams::receive_in_place(int64_t const gptp_now_ns) -> bool
     return true;
 }
 
-void ListenerStreams::begin_port_cycle()
+auto ListenerStreams::begin_port_cycle() -> int64_t
 {
     StreamPort::Guard const guard{*port_};
     port_->port().begin_cycle();
+    return net::software_rx_timestamp_ns(CLOCK_MONOTONIC_RAW);  // the pass's one RX clock read
 }
 
 void ListenerStreams::end_port_cycle()
