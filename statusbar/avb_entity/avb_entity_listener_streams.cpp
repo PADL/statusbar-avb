@@ -250,7 +250,10 @@ auto ListenerStreams::attach_rx(
         return failure(std::errc::io_error);
     }
     port_ = &port;
-    auto rx = std::make_unique<StreamRxHandler>(port, static_groups, [this] { drain_rx(current_gptp_ns()); });
+    // The reactor owns a tick on neither clock: its adapter reads the RX clock
+    // once per pass and stamps with the last media wake's gPTP time.
+    auto rx = std::make_unique<StreamRxHandler>(
+        port, static_groups, [this] { (void)drain_rx(realtime::GptpClock0::from_ns(current_gptp_ns()), net::rx_clock_now()); });
     if (keep_handler) {
         return success(std::unique_ptr<net::Pollable>{std::move(rx)});
     }

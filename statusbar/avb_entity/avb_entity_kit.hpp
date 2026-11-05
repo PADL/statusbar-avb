@@ -157,11 +157,6 @@ class AvbEntityKit
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp, wake_raw) : 0;
     }
-    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
-    auto drain_stream_rx(int64_t const wake_gptp_ns) -> size_t
-    {
-        return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
-    }
 
     // --- Per-control value handlers (kit phase 4) -----------------------------
     /// Register a handler for the CONTROL whose blob symbol code is

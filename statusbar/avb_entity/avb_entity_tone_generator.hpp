@@ -139,10 +139,8 @@ class AvbEntityToneGenerator
 
     /// Process one media-timer wake (8000 Hz): generate the per-channel tones and
     /// transmit each blob-declared stream (gated per stream).
-    auto process_audio(TimePoint time) -> void;
-    /// The told form: @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the
-    /// transmit gate's grace clock), so the tick reads no clock. The one-argument
-    /// form reads it once and calls this.
+    /// @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the transmit gate's
+    /// grace clock), so the tick reads no clock: the media timer tells both.
     auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
     /// Whether talker stream `idx` (a STREAM_OUTPUT descriptor index) should put

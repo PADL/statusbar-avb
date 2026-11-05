@@ -398,31 +398,39 @@ class NanoAvbAcmpController
     // High-level command API
 
     /// Connect a talker to a listener
-    auto connect(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
+    auto connect(
+        Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Disconnect a talker from a listener
-    auto disconnect(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
+    auto disconnect(
+        Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Send a CONNECT_TX_COMMAND directly to the talker's ACMP state machine.
     /// Unlike connect() (which sends CONNECT_RX to the listener and lets the
     /// listener relay a TX command), this drives the talker side directly --
     /// needed by the supervise/self-heal path to re-establish a talker.
-    auto connect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
+    auto connect_tx(
+        Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Send a DISCONNECT_TX_COMMAND directly to the talker's ACMP state machine.
     /// Clears the talker's per-listener connection (and its SRP registration)
     /// without going through the listener -- the clean half of a stale-stream
     /// reset.
-    auto disconnect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
+    auto disconnect_tx(
+        Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Query listener connection state
-    auto get_rx_state(Eui64 listener_id, uint16_t listener_uid) -> bool;
+    auto get_rx_state(Eui64 listener_id, uint16_t listener_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Query talker connection state
-    auto get_tx_state(Eui64 talker_id, uint16_t talker_uid) -> bool;
+    auto get_tx_state(Eui64 talker_id, uint16_t talker_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Query a specific talker connection by index
-    auto get_tx_connection(Eui64 talker_id, uint16_t talker_uid, uint16_t index) -> bool;
+    auto get_tx_connection(Eui64 talker_id, uint16_t talker_uid, uint16_t index, TimePoint now = TimePoint::clock::now()) -> bool;
 
     // Response/timeout processing
 
@@ -451,6 +459,7 @@ class NanoAvbAcmpController
         uint16_t talker_uid,
         Eui64 listener_id,
         uint16_t listener_uid,
+        TimePoint now,
         uint16_t connection_count = 0) -> bool;
 
     AcmpControllerCallbacks callbacks_;

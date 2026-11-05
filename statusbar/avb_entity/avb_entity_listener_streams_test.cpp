@@ -153,10 +153,9 @@ TEST(listener_drain, both_drain_forms_are_a_no_op_without_a_port)
     ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
     static_assert(std::is_same_v<net::RxTimePoint, statusbar::realtime::MonotonicRawClock::time_point>);
 
-    // The told form takes the wake on both clocks and touches nothing when no
-    // port is attached; the asking form reads the RX clock and does the same.
+    // The drain takes the wake on both clocks and touches nothing when no
+    // port is attached.
     EXPECT_EQ(ls.drain_rx(statusbar::realtime::GptpClock0::from_ns(4'000'000'000LL), net::RxTimePoint{}), 0U);
-    EXPECT_EQ(ls.drain_rx(ls.current_gptp_ns()), 0U);
     EXPECT_EQ(ls.current_gptp_ns(), 4'000'000'000LL);
 }
 

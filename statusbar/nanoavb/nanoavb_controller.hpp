@@ -78,11 +78,11 @@ class NanoAvbAemController
 
     // --- ADP Discovery ---
 
-    /// Send broadcast ENTITY_DISCOVER
-    void discover_all();
+    /// Send broadcast ENTITY_DISCOVER, told the time it is issued at.
+    void discover_all(TimePoint now = TimePoint::clock::now());
 
-    /// Send targeted ENTITY_DISCOVER for a specific entity
-    void discover(Eui64 const& target);
+    /// Send targeted ENTITY_DISCOVER for a specific entity, told the time it is issued at.
+    void discover(Eui64 const& target, TimePoint now = TimePoint::clock::now());
 
     /// Find a discovered entity
     [[nodiscard]] auto find_entity(Eui64 const& id) const -> atdecc::DiscoveredEntity const*;
@@ -95,63 +95,79 @@ class NanoAvbAemController
 
     // --- AEM Commands ---
 
-    /// Send an AEM command to a target entity (looked up via ADP discovery for MAC)
-    /// Send an arbitrary AEM command. The optional @p completion fires
+    /// Send an arbitrary AEM command to a target entity (looked up via ADP
+    /// discovery for its MAC), told the time it is issued at; every command
+    /// below forwards to it. The optional @p completion fires
     /// exactly once with the outcome (final response, timeout, or send
     /// failure) — the caller never matches sequence IDs itself.
     auto send_aem_command(
-        Eui64 target, uint16_t command_code, std::span<uint8_t const> payload = {}, atdecc::AemCommandCompletion completion = {})
-        -> bool;
+        Eui64 target,
+        uint16_t command_code,
+        std::span<uint8_t const> payload = {},
+        atdecc::AemCommandCompletion completion = {},
+        TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Acquire entity
-    auto acquire_entity(Eui64 target, bool persistent = false) -> bool;
+    auto acquire_entity(Eui64 target, bool persistent = false, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Release entity
-    auto release_entity(Eui64 target) -> bool;
+    auto release_entity(Eui64 target, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Lock entity
-    auto lock_entity(Eui64 target) -> bool;
+    auto lock_entity(Eui64 target, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Unlock entity
-    auto unlock_entity(Eui64 target) -> bool;
+    auto unlock_entity(Eui64 target, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Read descriptor
-    auto read_descriptor(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
+    auto read_descriptor(Eui64 target, uint16_t desc_type, uint16_t desc_index, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Register for unsolicited notifications. The optional @p completion
     /// reports whether the entity accepted the registration.
-    auto register_unsolicited(Eui64 target, atdecc::AemCommandCompletion completion = {}) -> bool;
+    auto register_unsolicited(Eui64 target, atdecc::AemCommandCompletion completion = {}, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Set the identify state on a target entity (flashes/stops the LED).
     /// Sends SET_CONTROL on the CONTROL descriptor whose index is advertised
     /// by the ADPDU's `identify_control_index` field. `on=true` writes 0xFF,
     /// `on=false` writes 0x00.
-    auto set_identify(Eui64 target, bool on, atdecc::AemCommandCompletion completion = {}) -> bool;
+    auto set_identify(Eui64 target, bool on, atdecc::AemCommandCompletion completion = {}, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Send GET_STREAM_INFO command
-    auto get_stream_info(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
+    auto get_stream_info(Eui64 target, uint16_t desc_type, uint16_t desc_index, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send GET_AVB_INFO command (AVB_INTERFACE descriptor)
-    auto get_avb_info(Eui64 target, uint16_t desc_index = 0) -> bool;
+    auto get_avb_info(Eui64 target, uint16_t desc_index = 0, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send GET_CLOCK_SOURCE command (CLOCK_DOMAIN descriptor)
-    auto get_clock_source(Eui64 target, uint16_t desc_index = 0, atdecc::AemCommandCompletion completion = {}) -> bool;
+    auto get_clock_source(
+        Eui64 target,
+        uint16_t desc_index = 0,
+        atdecc::AemCommandCompletion completion = {},
+        TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send GET_COUNTERS command
-    auto get_counters(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
+    auto get_counters(Eui64 target, uint16_t desc_type, uint16_t desc_index, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send SET_STREAM_FORMAT command
-    auto set_stream_format(Eui64 target, uint16_t desc_type, uint16_t desc_index, uint64_t stream_format) -> bool;
+    auto set_stream_format(
+        Eui64 target, uint16_t desc_type, uint16_t desc_index, uint64_t stream_format, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     /// Send START_STREAMING command
-    auto start_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
+    auto start_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send STOP_STREAMING command
-    auto stop_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index) -> bool;
+    auto stop_streaming(Eui64 target, uint16_t desc_type, uint16_t desc_index, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send SET_CLOCK_SOURCE command
     auto set_clock_source(
-        Eui64 target, uint16_t desc_index, uint16_t clock_source_index, atdecc::AemCommandCompletion completion = {}) -> bool;
+        Eui64 target,
+        uint16_t desc_index,
+        uint16_t clock_source_index,
+        atdecc::AemCommandCompletion completion = {},
+        TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send SET_SIGNAL_SELECTOR command (SIGNAL_SELECTOR descriptor):
     /// select the {signal_type, signal_index, signal_output} source.
@@ -161,33 +177,44 @@ class NanoAvbAemController
         uint16_t signal_type,
         uint16_t signal_index,
         uint16_t signal_output,
-        atdecc::AemCommandCompletion completion = {}) -> bool;
+        atdecc::AemCommandCompletion completion = {},
+        TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send GET_SIGNAL_SELECTOR command (SIGNAL_SELECTOR descriptor)
-    auto get_signal_selector(Eui64 target, uint16_t desc_index = 0, atdecc::AemCommandCompletion completion = {}) -> bool;
+    auto get_signal_selector(
+        Eui64 target,
+        uint16_t desc_index = 0,
+        atdecc::AemCommandCompletion completion = {},
+        TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send SET_SAMPLING_RATE command
-    auto set_sampling_rate(Eui64 target, uint16_t desc_type, uint16_t desc_index, uint32_t sampling_rate) -> bool;
+    auto set_sampling_rate(
+        Eui64 target, uint16_t desc_type, uint16_t desc_index, uint32_t sampling_rate, TimePoint now = TimePoint::clock::now())
+        -> bool;
 
     // --- ACMP Commands ---
 
     /// Connect a stream (talker to listener)
-    auto connect_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
+    auto connect_stream(
+        Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Disconnect a stream
-    auto disconnect_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
+    auto disconnect_stream(
+        Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send CONNECT_TX_COMMAND directly to the talker (self-heal path)
-    auto connect_tx_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
+    auto connect_tx_stream(
+        Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Send DISCONNECT_TX_COMMAND directly to the talker (self-heal path)
-    auto disconnect_tx_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
+    auto disconnect_tx_stream(
+        Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Query listener stream connection state (GET_RX_STATE)
-    auto get_rx_state(Eui64 listener, uint16_t listener_uid) -> bool;
+    auto get_rx_state(Eui64 listener, uint16_t listener_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     /// Query talker stream connection state (GET_TX_STATE)
-    auto get_tx_state(Eui64 talker, uint16_t talker_uid) -> bool;
+    auto get_tx_state(Eui64 talker, uint16_t talker_uid, TimePoint now = TimePoint::clock::now()) -> bool;
 
     // --- Packet Dispatch ---
 

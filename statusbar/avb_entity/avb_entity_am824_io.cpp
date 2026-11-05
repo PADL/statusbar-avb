@@ -34,7 +34,6 @@
 #include "statusbar/nanoavb/nanoavb_supervisor_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_talker_engine_sm.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
-#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -412,11 +411,6 @@ void AvbEntityAm824IO::on_timeout(TimePoint time)
 //
 // Audio Processing
 //
-
-void AvbEntityAm824IO::process_audio(TimePoint const time)
-{
-    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
-}
 
 void AvbEntityAm824IO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate

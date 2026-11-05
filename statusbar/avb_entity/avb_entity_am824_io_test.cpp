@@ -13,6 +13,7 @@
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
@@ -31,6 +32,8 @@ using namespace statusbar::avb_entity;
 using namespace statusbar::ieee;
 
 namespace {
+
+constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -186,7 +189,7 @@ TEST(am824_io_audio, process_audio_callback_receives_correct_size)
     });
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    (*result)->process_audio(now);
+    (*result)->process_audio(now, RAW_NOW);
 
     // Buffer should be SAMPLES_PER_PACKET * channels (6 * 8 = 48)
     EXPECT_EQ(callback_buffer_size, AvbEntityAm824IO::SAMPLES_PER_PACKET * 8U);
@@ -291,7 +294,7 @@ TEST(am824_io_audio, process_audio_does_not_crash)
     EXPECT_TRUE(result.has_value());
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    (*result)->process_audio(now);
+    (*result)->process_audio(now, RAW_NOW);
     EXPECT_FALSE((*result)->is_running());
 }
 
@@ -304,7 +307,7 @@ TEST(am824_io_audio, process_audio_multiple_times)
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     for (int i = 0; i < 10; ++i) {
-        (*result)->process_audio(now);
+        (*result)->process_audio(now, RAW_NOW);
     }
     EXPECT_FALSE((*result)->is_running());
 }
@@ -458,7 +461,7 @@ TEST(am824_io_audio, callback_receives_filtered_data)
     });
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    (*result)->process_audio(now);
+    (*result)->process_audio(now, RAW_NOW);
 
     // process_audio now drives a per-channel sine source through the (flat)
     // filter, so the callback receives a non-silent, bounded signal.

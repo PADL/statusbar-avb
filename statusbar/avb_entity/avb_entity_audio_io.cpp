@@ -32,7 +32,6 @@
 #include "statusbar/nanoavb/nanoavb_talker_engine_sm.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_posix_util.hpp"
-#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -280,11 +279,6 @@ void AvbEntityAudioIO::print_state() const
 //
 // Audio processing
 //
-
-void AvbEntityAudioIO::process_audio(TimePoint const time)
-{
-    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
-}
 
 void AvbEntityAudioIO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate

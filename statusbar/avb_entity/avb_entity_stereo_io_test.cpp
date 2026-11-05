@@ -8,6 +8,7 @@
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
@@ -25,6 +26,8 @@ using namespace statusbar::avb_entity;
 using namespace statusbar::ieee;
 
 namespace {
+
+constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
 
 /// Helper to check approximate equality for floats
 constexpr bool approx_equal(float a, float b, float tolerance = 1e-5f)
@@ -370,7 +373,7 @@ TEST(stereo_io_audio, process_audio_does_not_crash)
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
 
     // Process audio without starting entity - should not crash
-    entity.process_audio(now);
+    entity.process_audio(now, RAW_NOW);
     EXPECT_FALSE(entity.is_running());
 }
 
@@ -389,7 +392,7 @@ TEST(stereo_io_audio, process_audio_no_input_no_callback)
     entity.set_audio_callback([&](std::span<float> /*samples*/, size_t /*count*/) { callback_invoked = true; });
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.process_audio(now);
+    entity.process_audio(now, RAW_NOW);
 
     EXPECT_FALSE(callback_invoked);
 }

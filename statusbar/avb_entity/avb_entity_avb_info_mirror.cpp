@@ -9,6 +9,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <algorithm>
+#include <chrono>
 
 namespace statusbar::avb_entity {
 
@@ -88,10 +89,11 @@ void AvbInfoMirror::on_target_available()
 
 void AvbInfoMirror::tick(int64_t const now_ns)
 {
+    auto const now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
     controller_.tick(now_ns);
     if (!target_seen_) {
         if (last_discover_ns_ == 0 || now_ns - last_discover_ns_ >= config_.discover_interval_ns) {
-            controller_.discover(config_.target_entity_id);
+            controller_.discover(config_.target_entity_id, now);
             last_discover_ns_ = now_ns;
         }
         return;
@@ -101,22 +103,27 @@ void AvbInfoMirror::tick(int64_t const now_ns)
     if (!descriptors_done_ && !reading_) {
         if (next_read_index_ >= MAX_INTERFACES) {
             descriptors_done_ = true;
-        } else if (controller_.read_descriptor(config_.target_entity_id, DESCRIPTOR_AVB_INTERFACE, next_read_index_)) {
+        } else if (controller_.read_descriptor(config_.target_entity_id, DESCRIPTOR_AVB_INTERFACE, next_read_index_, now)) {
             reading_ = true;
         }
     }
     if (descriptors_done_ && !registered_) {
-        if (controller_.register_unsolicited(config_.target_entity_id)) {
+        if (controller_.register_unsolicited(config_.target_entity_id, {}, now)) {
             registered_ = true;
         }
     }
+    poll_interfaces(now_ns, now);
+}
+
+void AvbInfoMirror::poll_interfaces(int64_t const now_ns, sm::TimePoint const now)
+{
     if (!descriptors_done_) {
         return;
     }
     for (size_t i = 0; i < interface_count_; ++i) {
         auto& iface = interfaces_[i];
         if (iface.last_poll_ns == 0 || now_ns - iface.last_poll_ns >= config_.poll_interval_ns) {
-            if (controller_.get_avb_info(config_.target_entity_id, iface.index)) {
+            if (controller_.get_avb_info(config_.target_entity_id, iface.index, now)) {
                 iface.last_poll_ns = now_ns;
             }
         }

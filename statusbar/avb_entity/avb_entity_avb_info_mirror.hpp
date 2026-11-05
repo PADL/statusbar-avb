@@ -86,6 +86,9 @@ class AvbInfoMirror
 
   private:
     void wire_controller();
+    /// Re-poll each interface whose poll interval has elapsed (once the
+    /// descriptors are read).
+    void poll_interfaces(int64_t now_ns, sm::TimePoint now);
     void on_target_available();
     void handle_response(uint16_t cmd, uint8_t status, std::span<uint8_t const> sent, std::span<uint8_t const> data);
     void handle_read_descriptor(std::span<uint8_t const> sent, uint8_t status, std::span<uint8_t const> data);

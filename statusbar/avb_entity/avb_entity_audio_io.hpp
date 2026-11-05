@@ -182,10 +182,8 @@ class AvbEntityAudioIO
 
     /// Process one audio packet period (called from PTP timer at 8000 Hz):
     /// generate audio once, then transmit both an AM824 and an AAF packet.
-    auto process_audio(TimePoint time) -> void;
-    /// The told form: @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the
-    /// transmit gate's grace clock), so the tick reads no clock. The one-argument
-    /// form reads it once and calls this.
+    /// @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the transmit gate's
+    /// grace clock), so the tick reads no clock: the media timer tells both.
     auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
     /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
@@ -239,8 +237,6 @@ class AvbEntityAudioIO
     {
         return kit_.drain_stream_rx(wake_gptp, wake_raw);
     }
-    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
-    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t { return kit_.drain_stream_rx(wake_gptp_ns); }
 
     /// Kick the stream port's TX ring. Called from the tool's dedicated SCHED_FIFO
     /// kicker timer when config.stream_tx_kicker is set; the media tick then

@@ -237,10 +237,8 @@ class AvbEntityStereoIO
     /// loopback blocks now due (their gPTP presentation time has elapsed) from the
     /// compensation pipe, run each through the DSP biquads, and transmit via TalkerStreams
     /// (gated). @p time is the media-timer wake (gPTP).
-    auto process_audio(TimePoint time) -> void;
-    /// The told form: @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the
-    /// transmit gate's grace clock), so the tick reads no clock. The one-argument
-    /// form reads it once and calls this.
+    /// @p raw_now is the same wake on CLOCK_MONOTONIC_RAW (the transmit gate's
+    /// grace clock), so the tick reads no clock: the media timer tells both.
     auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
     /// Batch-drain the AM824 RX socket, decoding + publishing each block to the loopback
@@ -250,11 +248,6 @@ class AvbEntityStereoIO
     auto drain_stream_rx(realtime::GptpClock0::time_point const wake_gptp, net::RxTimePoint const wake_raw) -> size_t
     {
         return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp, wake_raw) : 0;
-    }
-    /// Asking form: the RX clock is read once per pass (see ListenerStreams::drain_rx).
-    auto drain_stream_rx(int64_t wake_gptp_ns) -> size_t
-    {
-        return (rt_rx_handler_ != nullptr && listener_ != nullptr) ? listener_->drain_rx(wake_gptp_ns) : 0;
     }
 
     /// The tool's RX timer did not start: the kept handler goes onto @p reactor,

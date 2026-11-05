@@ -272,7 +272,7 @@ TEST(audio_io_audio, process_audio_drives_both_formats)
     (*result)->set_audio_callback([&](std::span<float> samples, size_t /*count*/) { callback_buffer_size = samples.size(); });
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    (*result)->process_audio(now);  // not started: serialize is skipped, audio engine still runs
+    (*result)->process_audio(now, RAW_NOW);  // not started: serialize is skipped, audio engine still runs
     EXPECT_EQ(callback_buffer_size, AvbEntityAudioIO::SAMPLES_PER_PACKET * 8U);
     EXPECT_FALSE((*result)->is_running());
 }

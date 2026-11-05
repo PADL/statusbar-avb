@@ -339,8 +339,8 @@ TEST(tone_audio, process_audio_runs_without_talker)
     auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
     EXPECT_TRUE(result.has_value());
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    (*result)->process_audio(now);
-    (*result)->process_audio(now);
+    (*result)->process_audio(now, RAW_NOW);
+    (*result)->process_audio(now, RAW_NOW);
     EXPECT_FALSE((*result)->is_running());
 }
 
@@ -395,7 +395,7 @@ TEST(tone_aaf_create, aaf_only_builds_and_gates)
     EXPECT_EQ((*result)->channels(), 8U);
     // Gate closed (no listener): the AAF stream (index 0 in AafOnly) stays off.
     EXPECT_FALSE((*result)->talker_should_transmit(0, RAW_NOW));
-    (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()}, RAW_NOW);
     EXPECT_FALSE((*result)->is_running());
 }
 
@@ -458,7 +458,7 @@ TEST(tone_aafcrf_create, aaf_at_0_crf_at_1_transmit_when_ungated)
     EXPECT_EQ((*result)->channels(), 8U);
     EXPECT_TRUE((*result)->talker_should_transmit(0, RAW_NOW));  // AAF at index 0
     EXPECT_TRUE((*result)->talker_should_transmit(1, RAW_NOW));  // CRF at index 1
-    (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()}, RAW_NOW);
     EXPECT_FALSE((*result)->is_running());
 }
 
@@ -504,7 +504,7 @@ TEST(tone_render, symbol_and_index_bindings_fire_with_timing)
     });
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.process_audio(now);
+    entity.process_audio(now, RAW_NOW);
 
     EXPECT_TRUE(by_symbol.calls > 0);                                            // AAF@1 bound via its blob symbol
     EXPECT_TRUE(by_index.calls > 0);                                             // AM824@0 bound via its index
@@ -533,8 +533,8 @@ TEST(tone_render, unbound_registrations_are_inert)
     entity.set_render(uint16_t{7}, count_call);  // index not in the model
 
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.process_audio(now);
-    entity.process_audio(now);
+    entity.process_audio(now, RAW_NOW);
+    entity.process_audio(now, RAW_NOW);
 
     EXPECT_EQ(calls, 0U);  // inert, and creation/processing never errored
 }

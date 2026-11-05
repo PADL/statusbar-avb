@@ -329,8 +329,13 @@ void NanoAvbAcmpController::wire_callbacks()
 }
 
 auto NanoAvbAcmpController::send_command(
-    uint8_t message_type, Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, uint16_t connection_count)
-    -> bool
+    uint8_t message_type,
+    Eui64 talker_id,
+    uint16_t talker_uid,
+    Eui64 listener_id,
+    uint16_t listener_uid,
+    TimePoint const now,
+    uint16_t connection_count) -> bool
 {
     ctx_.command_params = AcmpCommandParams{
         .message_type = message_type,
@@ -342,43 +347,47 @@ auto NanoAvbAcmpController::send_command(
     };
 
     auto const before = ctx_.inflight_count();
-    sm_.handle_event(ctx_, ControllerEvent::DoCommand, TimePoint::clock::now());
+    sm_.handle_event(ctx_, ControllerEvent::DoCommand, now);
     return ctx_.inflight_count() > before;
 }
 
-auto NanoAvbAcmpController::connect(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
+auto NanoAvbAcmpController::connect(
+    Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
+    return send_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, talker_id, talker_uid, listener_id, listener_uid, now);
 }
 
-auto NanoAvbAcmpController::disconnect(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
+auto NanoAvbAcmpController::disconnect(
+    Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
+    return send_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, talker_id, talker_uid, listener_id, listener_uid, now);
 }
 
-auto NanoAvbAcmpController::connect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
+auto NanoAvbAcmpController::connect_tx(
+    Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
+    return send_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, talker_id, talker_uid, listener_id, listener_uid, now);
 }
 
-auto NanoAvbAcmpController::disconnect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
+auto NanoAvbAcmpController::disconnect_tx(
+    Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
+    return send_command(ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND, talker_id, talker_uid, listener_id, listener_uid, now);
 }
 
-auto NanoAvbAcmpController::get_rx_state(Eui64 listener_id, uint16_t listener_uid) -> bool
+auto NanoAvbAcmpController::get_rx_state(Eui64 listener_id, uint16_t listener_uid, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, {}, 0, listener_id, listener_uid);
+    return send_command(ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, {}, 0, listener_id, listener_uid, now);
 }
 
-auto NanoAvbAcmpController::get_tx_state(Eui64 talker_id, uint16_t talker_uid) -> bool
+auto NanoAvbAcmpController::get_tx_state(Eui64 talker_id, uint16_t talker_uid, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, talker_id, talker_uid, {}, 0);
+    return send_command(ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, talker_id, talker_uid, {}, 0, now);
 }
 
-auto NanoAvbAcmpController::get_tx_connection(Eui64 talker_id, uint16_t talker_uid, uint16_t index) -> bool
+auto NanoAvbAcmpController::get_tx_connection(Eui64 talker_id, uint16_t talker_uid, uint16_t index, TimePoint const now) -> bool
 {
-    return send_command(ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_COMMAND, talker_id, talker_uid, {}, 0, index);
+    return send_command(ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_COMMAND, talker_id, talker_uid, {}, 0, now, index);
 }
 
 auto NanoAvbAcmpController::receive_response(AcmpCommandResponse const& resp, TimePoint event_time) -> bool

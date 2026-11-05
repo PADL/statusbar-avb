@@ -171,14 +171,6 @@ struct ListenerStreams
     /// were not AVTP included (for the RX-timer batch-size stat).
     auto drain_rx(realtime::GptpClock0::time_point gptp_now, net::RxTimePoint rx_now) -> size_t;
 
-    /// Asking form: reads the RX clock once and drains as above. The reactor's
-    /// thin RX adapter calls it with current_gptp_ns(): the reactor is a tick
-    /// owner on neither clock, and one RAW read per pass is its whole cost.
-    auto drain_rx(int64_t const gptp_now_ns) -> size_t
-    {
-        return drain_rx(realtime::GptpClock0::from_ns(gptp_now_ns), net::rx_clock_now());
-    }
-
     /// The gPTP time the reactor path stamps RX frames with: the media-timer wake
     /// (last_gptp_ns_). The RT-timer path passes its own, fresher wake time instead.
     [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t { return last_gptp_ns_.load(std::memory_order_relaxed); }

@@ -37,7 +37,6 @@
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
-#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
@@ -469,11 +468,6 @@ void AvbEntityStereoIO::on_timeout(TimePoint time)
 //
 // Audio Processing
 //
-
-void AvbEntityStereoIO::process_audio(TimePoint const time)
-{
-    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
-}
 
 void AvbEntityStereoIO::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {  // NOLINT(statusbar-block-statements) the media tick, pre-dates the gate

@@ -15,7 +15,6 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/net/net_posix_util.hpp"
-#include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 
 #include <array>
@@ -294,11 +293,6 @@ void AvbEntityToneGenerator::print_state() const
 //
 // Audio processing
 //
-
-void AvbEntityToneGenerator::process_audio(TimePoint const time)
-{
-    process_audio(time, realtime::MonotonicRawClock::from_ns(realtime::read_monotonic_raw_ns()));
-}
 
 void AvbEntityToneGenerator::process_audio(TimePoint time, realtime::MonotonicRawClock::time_point const raw_now)
 {
