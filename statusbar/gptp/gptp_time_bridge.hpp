@@ -9,29 +9,33 @@
 //
 // Usage:
 //
-//   // In the event loop setup:
+//   // Setup: bind the two clocks and take one cross-timestamp.
 //   GptpTimeBridge bridge{
 //       .get_gptp_time_ns = [&soft_clock]() { return soft_clock.get_ptp_time_ns(realtime_ns()); },
-//       .get_app_time_ns  = []() { return monotonic_ns(); },
+//       .get_app_time_ns  = []() { return read_monotonic_raw_ns(); },
 //   };
-//   bridge.update();  // take initial cross-timestamp
-//
-//   // Periodically (every sync or every second):
 //   bridge.update();
 //
-//   // Plain offset-based conversion (no rate compensation):
-//   int64_t play_at_app = bridge.from_gptp(avtp_header.get_timestamp());
+//   // On every Sync+FollowUp pairing, TOLD the pair: the app-clock instant
+//   // of the Sync's arrival and the master time it carried. The bridge
+//   // reads no clock here (gptp_slave_session wires this).
+//   bridge.update_from_anchor(sync_rx_app_ns, tx_master_ns, rate_ratio);
 //
-//   // Rate-aware conversion (uses both offset and the latest rate
-//   // measurement to extrapolate from the anchor point — accurate
-//   // to a few ns at any time within an update interval):
+//   // Conversions are told an instant and read nothing:
+//   int64_t play_at_app = bridge.from_gptp(avtp_header.get_timestamp());
 //   int64_t play_at_app = bridge.from_gptp_rated(avtp_header.get_timestamp());
 //
-// The bridge maintains a cached offset between the two clocks plus a
-// rate-offset measurement, refreshed by calling update(). Between
-// updates, the unrated offset drifts by at most (rate × interval); the
-// rated conversions extrapolate from the anchor and hold sub-ns
-// accuracy for typical drift rates and intervals up to a few seconds.
+// The bridge keeps a cached offset between the two clocks plus a rate
+// measurement. The rated conversions extrapolate from the last anchor
+// and hold sub-ns accuracy for typical drift rates and intervals up to
+// a few seconds; the unrated offset drifts by (rate x interval) between
+// anchors. update() reads both clocks itself and is the setup path;
+// refresh_offset() likewise, for exit-time diagnostics.
+//
+// Time domains: the app clock is whichever clock the owner binds, by
+// policy CLOCK_MONOTONIC_RAW (the timing reference, see
+// realtime::MonotonicRawClock) so that a RAW instant goes straight
+// through to_gptp(). The master side is gPTP TAI nanoseconds.
 //
 // Rate representation — int64 picoseconds-per-second:
 //
@@ -44,8 +48,6 @@
 //       aarch64 / x86_64)
 //     - self-documenting: 1 ppt = 1 picosecond per second = 10⁻¹²
 //     - range ±9.2 million ppm (way more than oscillator stability)
-//   The double-returning rate_ratio() accessor is kept as a backward-
-//   compat shim for callers that want the familiar 1.0±ε form.
 //
 // Thread safety: the four cached fields (offset, rate_offset, prev_app,
 // prev_gptp) are published together under a single-writer seqlock
@@ -91,8 +93,8 @@ struct GptpTimeBridge
     /// Refresh the cached offset and rate. Call this from the event loop
     /// after each servo pass (every sync interval), or at least once
     /// per second. The first update() seeds the previous-sample
-    /// storage; rate_offset_ppt() returns 0 (rate_ratio() returns 1.0)
-    /// until the second update() arrives.
+    /// storage; rate_offset_ppt() returns 0 until the second update()
+    /// arrives.
     void update() noexcept
     {
         if (!get_gptp_time_ns || !get_app_time_ns) {
@@ -134,64 +136,29 @@ struct GptpTimeBridge
                 new_ppt = static_cast<int64_t>(ppt_d);
             }
         }
-        // Publish the four-field rated snapshot atomically via the
-        // triple buffer. Phase jumps would otherwise make a torn read
-        // catastrophic: NEW offset arriving bumped by step size while
-        // OLD prev_a remains would have a reader computing a
-        // translation off by exactly the step size.
-        rated_buffer_.publish(RatedSnapshot{
-            .offset_ns = gptp - app,
-            .ppt = new_ppt,
-            .prev_gptp_ns = gptp,
-            .prev_app_ns = app,
-        });
-        // Solo-atomic mirror of offset for the unrated to_gptp /
-        // from_gptp readers (single load is race-free).
-        offset_ns_.store(gptp - app, std::memory_order_relaxed);
-        rate_offset_ppt_.store(new_ppt, std::memory_order_relaxed);
-        prev_gptp_ns_.store(gptp, std::memory_order_relaxed);
-        prev_app_ns_.store(app, std::memory_order_relaxed);
-        have_previous_ = true;
+        publish_anchor(app, gptp, new_ppt);
     }
 
-    /// Refresh the cached anchor + rate using a HW-stamped
-    /// (local, master) pair from a Sync+FollowUp exchange. The
-    /// app-clock anchor is sampled at this call from
-    /// `get_app_time_ns`; the master-side anchor is the precise
-    /// grandmaster TAI timestamp from the FollowUp body (with
-    /// correctionField + rate-corrected link delay applied) — i.e.
-    /// master TAI at Sync arrival.
+    /// Refresh the cached anchor + rate from one Sync+FollowUp pairing,
+    /// TOLD both sides of the pair: @p sync_rx_app_ns is the app-clock
+    /// instant of the Sync's arrival (read once by the receive path, as
+    /// early as user space can, and carried with the Sync until its
+    /// FollowUp pairs it); @p tx_master_ns is the grandmaster TAI time
+    /// the FollowUp carried for that Sync (correctionField and
+    /// rate-corrected link delay applied, i.e. master TAI at arrival).
+    /// The bridge reads no clock here. Reading the app clock at this
+    /// call instead would pair the master time of the Sync with the app
+    /// time of the FollowUp's processing, a bias of the whole
+    /// Sync-to-FollowUp gap.
     ///
-    /// Preferred over `update()` for consumers that need HW-accurate
-    /// gPTP→app conversion: the master anchor is taken directly from
-    /// the wire pair instead of `get_gptp_time_ns()` sampled in user
-    /// space some microseconds after the sync exchange completed.
-    /// The app side remains user-space sampled (a few µs residual).
+    /// Preferred over `update()` once sync runs: the master anchor is
+    /// the wire pair, not `get_gptp_time_ns()` sampled afterwards.
     ///
-    /// `rate_ratio` is the servo's master/local rate estimate;
-    /// stored as `(rate_ratio − 1) × 10¹²` in `rate_offset_ppt_`.
-    /// `rx_local_ns` is currently unused (the app anchor comes from
-    /// `get_app_time_ns`); kept in the signature so consumers that
-    /// need to pair PHC and app timestamps can do so externally.
-    void update_from_anchor(int64_t /*rx_local_ns*/, int64_t tx_master_ns, double rate_ratio) noexcept
+    /// `rate_ratio` is the servo's master/local rate estimate; stored
+    /// as `(rate_ratio - 1) x 10^12` in `rate_offset_ppt_`.
+    void update_from_anchor(int64_t sync_rx_app_ns, int64_t tx_master_ns, double rate_ratio) noexcept
     {
-        if (!get_app_time_ns) {
-            return;
-        }
-        int64_t const app = get_app_time_ns();
-        int64_t const new_ppt = static_cast<int64_t>((rate_ratio - 1.0) * 1e12);
-        rated_buffer_.publish(RatedSnapshot{
-            .offset_ns = tx_master_ns - app,
-            .ppt = new_ppt,
-            .prev_gptp_ns = tx_master_ns,
-            .prev_app_ns = app,
-        });
-        // Solo-atomic mirrors for diagnostics + unrated to_gptp readers.
-        offset_ns_.store(tx_master_ns - app, std::memory_order_relaxed);
-        rate_offset_ppt_.store(new_ppt, std::memory_order_relaxed);
-        prev_gptp_ns_.store(tx_master_ns, std::memory_order_relaxed);
-        prev_app_ns_.store(app, std::memory_order_relaxed);
-        have_previous_ = true;
+        publish_anchor(sync_rx_app_ns, tx_master_ns, static_cast<int64_t>((rate_ratio - 1.0) * 1e12));
     }
 
     /// Refresh only the cached offset, NOT the rate or anchor
@@ -296,15 +263,6 @@ struct GptpTimeBridge
     /// been taken.
     [[nodiscard]] auto rate_offset_ppt() const noexcept -> int64_t { return rate_offset_ppt_.load(std::memory_order_relaxed); }
 
-    /// Rate ratio as a double (1.0 + rate_offset_ppt × 10⁻¹²).
-    /// Backward-compat shim for callers that prefer the ratio form.
-    /// New code should use rate_offset_ppt() — int64 has better
-    /// precision and atomicity properties for values near 1.0.
-    [[nodiscard]] auto rate_ratio() const noexcept -> double
-    {
-        return 1.0 + (static_cast<double>(rate_offset_ppt_.load(std::memory_order_relaxed)) * 1e-12);
-    }
-
     /// Last anchor point's app-clock timestamp (the value of
     /// get_app_time_ns() at the most recent update() call). Used by
     /// to_gptp_rated / from_gptp_rated and exposed for diagnostics.
@@ -332,6 +290,26 @@ struct GptpTimeBridge
     };
 
   private:
+    /// Publish one (app, gptp) anchor and rate as the four-field rated
+    /// snapshot, atomically via the triple buffer: a phase jump would
+    /// otherwise make a torn read catastrophic (NEW offset bumped by the
+    /// step while OLD prev_app remains puts a reader off by exactly the
+    /// step). Then mirror the fields for the solo-atomic readers.
+    void publish_anchor(int64_t const app, int64_t const gptp, int64_t const ppt) noexcept
+    {
+        rated_buffer_.publish(RatedSnapshot{
+            .offset_ns = gptp - app,
+            .ppt = ppt,
+            .prev_gptp_ns = gptp,
+            .prev_app_ns = app,
+        });
+        offset_ns_.store(gptp - app, std::memory_order_relaxed);
+        rate_offset_ppt_.store(ppt, std::memory_order_relaxed);
+        prev_gptp_ns_.store(gptp, std::memory_order_relaxed);
+        prev_app_ns_.store(app, std::memory_order_relaxed);
+        have_previous_ = true;
+    }
+
     // Solo atomic mirrors of the rated snapshot's fields. Kept so
     // unrated readers (to_gptp / from_gptp on offset_ns_) and the
     // diagnostic accessors (offset, rate_offset_ppt, last_anchor_*)

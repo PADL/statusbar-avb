@@ -118,7 +118,10 @@ struct Observer
     /// pair (e.g. for a bridge anchor used in HW-precise time-domain
     /// conversion) read it here instead of sampling get_local_time_ns
     /// at callback time.
-    statusbar::sg14::inplace_function<void(int64_t rx_local_ns, int64_t tx_master_ns, double rate_ratio), 64> on_anchor_update;
+    /// `rx_app_ns` is the app-clock instant the owner told receive_frame()
+    /// for that Sync (0 when it told none): the bridge anchor's app side.
+    statusbar::sg14::inplace_function<void(int64_t rx_local_ns, int64_t rx_app_ns, int64_t tx_master_ns, double rate_ratio), 64>
+        on_anchor_update;
 
     /// Fires when the grandmaster identity in the most recent Announce
     /// differs from the previously latched identity (or when the
@@ -182,7 +185,11 @@ class GptpSlavePort
     /// @param rx_hw_timestamp_ns Hardware RX timestamp of the frame in
     ///                          the same clock as GptpClockOps::get_local_time_ns.
     /// @param now               Monotonic TimePoint for timer scheduling.
-    void receive_frame(std::span<uint8_t const> gptp_payload, int64_t rx_hw_timestamp_ns, TimePoint now);
+    /// @param rx_app_ns         The frame's arrival on the owner's app clock
+    ///                          (the time-bridge clock), read once by the
+    ///                          owner's receive path; 0 when it keeps none.
+    ///                          Carried with a Sync to on_anchor_update.
+    void receive_frame(std::span<uint8_t const> gptp_payload, int64_t rx_hw_timestamp_ns, TimePoint now, int64_t rx_app_ns = 0);
 
     /// Deferred-path for hardware that cannot return the TX
     /// timestamp synchronously from GptpClockOps::send_frame.
@@ -278,7 +285,7 @@ class GptpSlavePort
     // Internal message handlers
     // =========================================================
 
-    void handle_sync_message(SyncMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
+    void handle_sync_message(SyncMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now, int64_t rx_app_ns);
     void handle_follow_up_message(FollowUpMessage const& msg, std::span<uint8_t const> trailing_bytes, TimePoint now);
     void handle_pdelay_req_message(PdelayReqMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
     void handle_pdelay_resp_message(PdelayRespMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now);
@@ -326,7 +333,9 @@ class GptpSlavePort
 
     void notify_sync_state_change(bool synchronized);
     void notify_sync_update(int64_t master_offset_ns, double rate_ratio);
-    void notify_anchor_update(int64_t rx_local_ns, int64_t tx_master_ns, double rate_ratio);
+    void notify_anchor_update(int64_t rx_local_ns, int64_t rx_app_ns, int64_t tx_master_ns, double rate_ratio);
+    /// The app-clock arrival of the Sync awaiting its FollowUp (see receive_frame).
+    int64_t pending_sync_rx_app_ns_{0};
     void notify_grandmaster_change(tsn::ClockIdentity const& gm_identity);
     void notify_peer_delay_update(int64_t link_delay_ns, double rate_ratio);
     void notify_as_capable_change(bool as_capable);

@@ -323,7 +323,7 @@ void NanoAvbAcmpController::wire_callbacks()
 
     ctx_.process_response = [this](AcmpCommandResponse const& resp) {
         if (callbacks_.on_response) {
-            callbacks_.on_response(resp);
+            callbacks_.on_response(resp, last_event_time_);
         }
     };
 }
@@ -398,7 +398,7 @@ auto NanoAvbAcmpController::receive_response(AcmpCommandResponse const& resp, Ti
     }
     ctx_.rcvd_cmd_resp = resp;
     ctx_.current_inflight_index = idx;
-    sm_.handle_event(ctx_, ControllerEvent::RcvdResponse, event_time);
+    step(ControllerEvent::RcvdResponse, event_time);
     return true;
 }
 
@@ -406,6 +406,12 @@ auto NanoAvbAcmpController::receive_response(AcmpCommandResponse const& resp, Ti
     bool was_retried, InflightCommand const* entry, AcmpControllerCallbacks const& callbacks) -> bool
 {
     return was_retried && static_cast<bool>(callbacks.on_timeout) && entry != nullptr;
+}
+
+void NanoAvbAcmpController::step(ControllerEvent const ev, TimePoint const now)
+{
+    last_event_time_ = now;
+    sm_.handle_event(ctx_, ev, now);
 }
 
 void NanoAvbAcmpController::tick(TimePoint now)
@@ -416,11 +422,11 @@ void NanoAvbAcmpController::tick(TimePoint now)
         auto const* entry = ctx_.get_inflight(idx);
         bool const was_retried = entry != nullptr && entry->retried;
 
-        sm_.handle_event(ctx_, ControllerEvent::Timeout, now);
+        step(ControllerEvent::Timeout, now);
 
         // If the entry was already retried, it was removed -> notify timeout
         if (should_notify_timeout(was_retried, entry, callbacks_)) {
-            callbacks_.on_timeout(entry->command);
+            callbacks_.on_timeout(entry->command, now);
         }
 
         idx = ctx_.find_timed_out(now);

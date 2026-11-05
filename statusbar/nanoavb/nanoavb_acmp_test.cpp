@@ -1019,7 +1019,7 @@ TEST(nanoavb_acmp_controller, receive_response)
     std::vector<AcmpCommandResponse> responses;
     AcmpControllerCallbacks callbacks;
     callbacks.tx_command = [](AcmpCommandResponse const&) { return true; };
-    callbacks.on_response = [&](AcmpCommandResponse const& resp) { responses.push_back(resp); };
+    callbacks.on_response = [&](AcmpCommandResponse const& resp, statusbar::sm::TimePoint) { responses.push_back(resp); };
 
     NanoAvbAcmpController controller{controller_id, callbacks};
     controller.start();

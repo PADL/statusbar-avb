@@ -215,9 +215,10 @@ auto SlaveSession::start() -> bool
     // Fires on every successful Sync+FollowUp pairing — earlier in the
     // path than on_sync_update because it carries the wire timestamps
     // directly rather than the user-space-sampled "now" pair.
-    obs.on_anchor_update = [this, show_bridge](int64_t rx_local_ns, int64_t tx_master_ns, double rate_ratio) {
+    obs.on_anchor_update = [this,
+                            show_bridge](int64_t /*rx_local_ns*/, int64_t rx_app_ns, int64_t tx_master_ns, double rate_ratio) {
         if (show_bridge) {
-            bridge_.update_from_anchor(rx_local_ns, tx_master_ns, rate_ratio);
+            bridge_.update_from_anchor(rx_app_ns, tx_master_ns, rate_ratio);
         }
     };
 
@@ -265,11 +266,15 @@ void SlaveSession::dispatch(int fd, sm::TimePoint now)
     if (payload_len <= 0) {
         return;
     }
+    // The bridge's app-clock side of a Sync anchor: read once, here, the
+    // earliest user-space instant after arrival, and told through the port
+    // so the anchor pairs it with the FollowUp's master time.
+    int64_t const rx_app_ns = (cfg_.bridge_clock >= 0) ? bridge_.app_now() : 0;
     bool const use_soft_clock_corrections = cfg_.software_timestamping || cfg_.phc_passthrough;
     if (use_soft_clock_corrections && rx_ns != 0) {
         rx_ns = soft_clock_.correct_timestamp(rx_ns);
     }
-    port_->receive_frame(std::span<uint8_t const>(payload_buf_.data(), static_cast<size_t>(payload_len)), rx_ns, now);
+    port_->receive_frame(std::span<uint8_t const>(payload_buf_.data(), static_cast<size_t>(payload_len)), rx_ns, now, rx_app_ns);
 }
 
 void SlaveSession::tick(sm::TimePoint now)

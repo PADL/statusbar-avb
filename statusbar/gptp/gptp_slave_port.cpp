@@ -175,8 +175,9 @@ void GptpSlavePort::on_link_down(TimePoint now)
 // Ingress
 // =============================================================
 
-void GptpSlavePort::receive_frame(std::span<uint8_t const> gptp_payload, int64_t rx_hw_timestamp_ns, TimePoint now)
-{
+void GptpSlavePort::receive_frame(
+    std::span<uint8_t const> gptp_payload, int64_t rx_hw_timestamp_ns, TimePoint now, int64_t const rx_app_ns)
+{  // NOLINT(statusbar-block-statements) one frame's ingress validation and dispatch
     // Ingress validation: only accept well-formed gPTP frames for our domain, so a
     // plain IEEE-1588 frame (majorSdoId 0) or another PTP domain sharing EtherType
     // 0x88F7 can never reach the servo. is_valid() checks majorSdoId / versionPTP /
@@ -204,7 +205,7 @@ void GptpSlavePort::receive_frame(std::span<uint8_t const> gptp_payload, int64_t
         [&](auto const& msg) {
             using T = std::decay_t<decltype(msg)>;
             if constexpr (std::is_same_v<T, SyncMessage>) {
-                handle_sync_message(msg, rx_adjusted, now);
+                handle_sync_message(msg, rx_adjusted, now, rx_app_ns);
             } else if constexpr (std::is_same_v<T, FollowUpMessage>) {
                 auto const trailing = (gptp_payload.size() > FollowUpMessage::LENGTH)
                     ? gptp_payload.subspan(FollowUpMessage::LENGTH)
@@ -340,7 +341,7 @@ auto GptpSlavePort::source_is_grandmaster(SourcePortIdentity const& src) const n
     return src == gm->source_port_identity;
 }
 
-void GptpSlavePort::handle_sync_message(SyncMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now)
+void GptpSlavePort::handle_sync_message(SyncMessage const& msg, int64_t rx_hw_timestamp_ns, TimePoint now, int64_t const rx_app_ns)
 {
     // Drop Sync from a source other than the latched grandmaster: interleaved Syncs
     // from a rogue/second master would feed the servo alternating offsets.
@@ -348,12 +349,13 @@ void GptpSlavePort::handle_sync_message(SyncMessage const& msg, int64_t rx_hw_ti
         return;
     }
     md_sync_receive_.on_sync(msg, rx_hw_timestamp_ns);
+    pending_sync_rx_app_ns_ = rx_app_ns;
     // Rearm the sync receipt timeout from the advertised interval.
     arm_sync_receipt_timeout(now, static_cast<int8_t>(msg.header.log_message_interval));
 }
 
 void GptpSlavePort::handle_follow_up_message(FollowUpMessage const& msg, std::span<uint8_t const> trailing_bytes, TimePoint now)
-{
+{  // NOLINT(statusbar-block-statements) one Sync+FollowUp pairing: servo, corrections, telemetry, observers
     if (!source_is_grandmaster(msg.header.source_port_identity)) {
         return;  // Follow_Up from a source other than the latched grandmaster
     }
@@ -390,7 +392,7 @@ void GptpSlavePort::handle_follow_up_message(FollowUpMessage const& msg, std::sp
 
     // Observer callbacks.
     notify_sync_update(out.master_offset_ns, out.rate_ratio);
-    notify_anchor_update(indication->sync_rx_local_ns, out.corrected_master_ns, out.rate_ratio);
+    notify_anchor_update(indication->sync_rx_local_ns, pending_sync_rx_app_ns_, out.corrected_master_ns, out.rate_ratio);
     notify_sync_quality(sync_quality_);
     publish_state_changes();
 }
@@ -674,11 +676,11 @@ void GptpSlavePort::notify_sync_update(int64_t master_offset_ns, double rate_rat
     }
 }
 
-void GptpSlavePort::notify_anchor_update(int64_t rx_local_ns, int64_t tx_master_ns, double rate_ratio)
+void GptpSlavePort::notify_anchor_update(int64_t rx_local_ns, int64_t rx_app_ns, int64_t tx_master_ns, double rate_ratio)
 {
     for (auto const& slot : observers_) {
         if (slot.id != 0 && slot.obs.on_anchor_update) {
-            slot.obs.on_anchor_update(rx_local_ns, tx_master_ns, rate_ratio);
+            slot.obs.on_anchor_update(rx_local_ns, rx_app_ns, tx_master_ns, rate_ratio);
         }
     }
 }

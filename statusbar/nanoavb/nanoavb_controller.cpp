@@ -8,11 +8,6 @@
 
 namespace statusbar::nanoavb {
 
-inline auto ns_to_timepoint(int64_t ns) -> sm::TimePoint
-{
-    return sm::TimePoint{std::chrono::nanoseconds{ns}};
-}
-
 namespace {
 
 /// Serialize a fixed AEM payload wire struct into a byte array for
@@ -44,9 +39,9 @@ void NanoAvbAemController::set_callbacks(AemControllerEntityCallbacks callbacks)
     wire_all_callbacks();
 }
 
-void NanoAvbAemController::start()
+void NanoAvbAemController::start(TimePoint const now)
 {
-    acmp_controller_.start();
+    acmp_controller_.start(now);
 }
 
 void NanoAvbAemController::wire_all_callbacks()
@@ -95,15 +90,15 @@ void NanoAvbAemController::wire_all_callbacks()
             return false;
         },
         .on_response =
-            [this](AcmpCommandResponse const& resp) {
+            [this](AcmpCommandResponse const& resp, TimePoint const now) {
                 if (callbacks_.on_acmp_response) {
-                    callbacks_.on_acmp_response(resp);
+                    callbacks_.on_acmp_response(resp, now);
                 }
             },
         .on_timeout =
-            [this](AcmpCommandResponse const& cmd) {
+            [this](AcmpCommandResponse const& cmd, TimePoint const now) {
                 if (callbacks_.on_acmp_timeout) {
-                    callbacks_.on_acmp_timeout(cmd);
+                    callbacks_.on_acmp_timeout(cmd, now);
                 }
             },
     });
@@ -379,18 +374,18 @@ auto NanoAvbAemController::get_tx_state(Eui64 talker, uint16_t talker_uid, TimeP
 
 // Packet Dispatch
 
-void NanoAvbAemController::receive_adp(AdpDu const& adp, Eui48 const& src_mac, int64_t now_ns)
+void NanoAvbAemController::receive_adp(AdpDu const& adp, Eui48 const& src_mac, TimePoint const now)
 {
-    discovery_.receive_adpdu(adp, src_mac, ns_to_timepoint(now_ns));
+    discovery_.receive_adpdu(adp, src_mac, now);
 }
 
-void NanoAvbAemController::receive_acmp(AcmpCommandResponse const& resp, int64_t now_ns)
+void NanoAvbAemController::receive_acmp(AcmpCommandResponse const& resp, TimePoint const now)
 {
-    acmp_controller_.receive_response(resp, ns_to_timepoint(now_ns));
+    acmp_controller_.receive_response(resp, now);
 }
 
-void NanoAvbAemController::receive_aecp(std::span<uint8_t const> payload, int64_t now_ns)
-{
+void NanoAvbAemController::receive_aecp(std::span<uint8_t const> payload, TimePoint const now)
+{  // NOLINT(statusbar-block-statements) one AECP frame's dispatch: header checks, unsolicited routing, inflight lookup
     if (payload.size() < AemDu::LENGTH) {
         return;
     }
@@ -409,7 +404,7 @@ void NanoAvbAemController::receive_aecp(std::span<uint8_t const> payload, int64_
     if (header.is_unsolicited()) {
         if (callbacks_.on_unsolicited) {
             callbacks_.on_unsolicited(
-                header.target_entity_id, header.command_code(), header.status(), payload.subspan(AemDu::LENGTH));
+                header.target_entity_id, header.command_code(), header.status(), payload.subspan(AemDu::LENGTH), now);
         }
         return;
     }
@@ -422,12 +417,11 @@ void NanoAvbAemController::receive_aecp(std::span<uint8_t const> payload, int64_
     aem_ctx_.rcvd_header = header;
     aem_ctx_.rcvd_response_data = payload.subspan(AemDu::LENGTH);
     aem_ctx_.current_inflight_index = idx;
-    aem_sm_.handle_event(aem_ctx_, AemControllerEvent::RcvdResponse, ns_to_timepoint(now_ns));
+    aem_sm_.handle_event(aem_ctx_, AemControllerEvent::RcvdResponse, now);
 }
 
-void NanoAvbAemController::tick(int64_t now_ns)
+void NanoAvbAemController::tick(TimePoint const now)
 {
-    auto const now = ns_to_timepoint(now_ns);
     discovery_.tick(now);
     acmp_controller_.tick(now);
 

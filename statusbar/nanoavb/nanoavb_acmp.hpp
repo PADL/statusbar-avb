@@ -366,11 +366,13 @@ struct AcmpControllerCallbacks
     /// Called to send an ACMP command on the wire (multicast)
     statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> tx_command;
 
-    /// Called when a response is received for an inflight command
-    statusbar::sg14::inplace_function<void(AcmpCommandResponse const& response), 64> on_response;
+    /// Called when a response is received for an inflight command, told the
+    /// response's receive time.
+    statusbar::sg14::inplace_function<void(AcmpCommandResponse const& response, sm::TimePoint now), 64> on_response;
 
-    /// Called when an inflight command times out after retry
-    statusbar::sg14::inplace_function<void(AcmpCommandResponse const& original_command), 64> on_timeout;
+    /// Called when an inflight command times out after retry, told the tick
+    /// that timed it out.
+    statusbar::sg14::inplace_function<void(AcmpCommandResponse const& original_command, sm::TimePoint now), 64> on_timeout;
 };
 
 /// NanoAvbAcmpController - simplified wrapper around ACMP controller state machine
@@ -383,8 +385,8 @@ class NanoAvbAcmpController
     /// Construct with entity ID and optional max inflight commands
     explicit NanoAvbAcmpController(Eui64 entity_id, AcmpControllerCallbacks callbacks = {}, size_t max_inflight = 16);
 
-    /// Activate the state machine
-    void start(TimePoint event_time = {}) { sm_.handle_event(ctx_, ControllerEvent::UCT, event_time); }
+    /// Activate the state machine, told the time it starts at.
+    void start(TimePoint now = TimePoint::clock::now()) { sm_.handle_event(ctx_, ControllerEvent::UCT, now); }
 
     /// Get the entity ID
     [[nodiscard]] auto entity_id() const noexcept -> Eui64 { return ctx_.my_id; }
@@ -453,6 +455,9 @@ class NanoAvbAcmpController
 
   private:
     void wire_callbacks();
+    /// Stash the told time for the hooks the state machine fires from inside
+    /// its actions, then run the event.
+    void step(ControllerEvent ev, TimePoint now);
     auto send_command(
         uint8_t message_type,
         Eui64 talker_id,
@@ -465,6 +470,9 @@ class NanoAvbAcmpController
     AcmpControllerCallbacks callbacks_;
     ControllerContext ctx_;
     AcmpControllerStateMachine<> sm_;
+    /// The told time of the receive or tick being handled, for the hooks the
+    /// state machine fires from inside its actions.
+    TimePoint last_event_time_{};
 };
 
 }  // namespace statusbar::nanoavb

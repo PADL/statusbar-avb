@@ -196,8 +196,8 @@ struct IntegrationFixture
                     aem_responses.emplace_back(target, cmd, status);
                 },
             .on_aem_timeout = [](Eui64, uint16_t) {},
-            .on_acmp_response = [](AcmpCommandResponse const&) {},
-            .on_acmp_timeout = [](AcmpCommandResponse const&) {},
+            .on_acmp_response = [](AcmpCommandResponse const&, sm::TimePoint) {},
+            .on_acmp_timeout = [](AcmpCommandResponse const&, sm::TimePoint) {},
         });
         controller.start();
     }

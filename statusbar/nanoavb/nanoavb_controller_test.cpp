@@ -186,7 +186,7 @@ TEST(nanoavb_controller, unsolicited_response_reaches_callback)
     uint16_t cmd_seen = 0;
     uint8_t status_seen = 0xFF;
     AemControllerEntityCallbacks callbacks;
-    callbacks.on_unsolicited = [&](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
+    callbacks.on_unsolicited = [&](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data, sm::TimePoint) {
         from = target;
         cmd_seen = cmd;
         status_seen = status;

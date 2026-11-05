@@ -236,19 +236,19 @@ class RawnetControllerService final
                     }
                 },
             .on_unsolicited =
-                [this](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
+                [this](Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data, sm::TimePoint /*now*/) {
                     if (sink_.on_unsolicited) {
                         sink_.on_unsolicited(target, cmd, status, data);
                     }
                 },
             .on_acmp_response =
-                [this](AcmpCommandResponse const& resp) {
+                [this](AcmpCommandResponse const& resp, sm::TimePoint /*now*/) {
                     if (sink_.on_acmp_response) {
                         sink_.on_acmp_response(resp);
                     }
                 },
             .on_acmp_timeout =
-                [this](AcmpCommandResponse const& cmd) {
+                [this](AcmpCommandResponse const& cmd, sm::TimePoint /*now*/) {
                     if (sink_.on_acmp_timeout) {
                         sink_.on_acmp_timeout(cmd);
                     }

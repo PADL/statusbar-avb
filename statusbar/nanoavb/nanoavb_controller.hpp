@@ -54,12 +54,15 @@ struct AemControllerEntityCallbacks
     /// the AemDu header (e.g. a SET_CONTROL response body). Without this
     /// callback unsolicited responses are dropped — they never match an
     /// in-flight sequence ID.
-    statusbar::sg14::inplace_function<void(Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data), 64>
-        on_unsolicited;
+    /// `now` is the receive time the controller was told.
+    statusbar::sg14::
+        inplace_function<void(Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data, sm::TimePoint now), 64>
+            on_unsolicited;
 
-    // ACMP response notifications
-    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64> on_acmp_response;
-    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64> on_acmp_timeout;
+    // ACMP response notifications. `now` is the told time of the event that
+    // fired them: the response's receive time, or the tick that timed out.
+    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&, sm::TimePoint now), 64> on_acmp_response;
+    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&, sm::TimePoint now), 64> on_acmp_timeout;
 };
 
 /// NanoAvbAemController - full ATDECC controller entity
@@ -73,8 +76,9 @@ class NanoAvbAemController
 
     void set_callbacks(AemControllerEntityCallbacks callbacks);
 
-    /// Start the controller (initializes all sub-state-machines)
-    void start();
+    /// Start the controller (initializes all sub-state-machines), told the
+    /// time it starts at.
+    void start(TimePoint now = TimePoint::clock::now());
 
     // --- ADP Discovery ---
 
@@ -218,38 +222,39 @@ class NanoAvbAemController
 
     // --- Packet Dispatch ---
 
-    /// Process a received ADP packet (nanosecond timestamp)
-    void receive_adp(atdecc::AdpDu const& adp, Eui48 const& src_mac, int64_t now_ns);
+    // Each entry point is told the time of the frame or tick it handles, as
+    // the control-plane TimePoint (sm::Clock). The int64 forms are the
+    // reactor adapters: net::MessageReactor hands its clock to a Pollable as
+    // a nanosecond count on the same steady_clock, and these wrap it once.
 
-    /// Process a received ADP packet (TimePoint overload for backward compatibility)
-    void receive_adp(atdecc::AdpDu const& adp, Eui48 const& src_mac, TimePoint now)
+    /// Process a received ADP packet, told its receive time.
+    void receive_adp(atdecc::AdpDu const& adp, Eui48 const& src_mac, TimePoint now);
+    /// receive_adp(adp, src_mac, now) from the reactor's nanosecond count.
+    void receive_adp(atdecc::AdpDu const& adp, Eui48 const& src_mac, int64_t now_ns)
     {
-        receive_adp(adp, src_mac, std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        receive_adp(adp, src_mac, TimePoint{std::chrono::nanoseconds{now_ns}});
     }
 
-    /// Process a received ACMP response (nanosecond timestamp)
-    void receive_acmp(atdecc::AcmpCommandResponse const& resp, int64_t now_ns);
-
-    /// Process a received ACMP response (TimePoint overload for backward compatibility)
-    void receive_acmp(atdecc::AcmpCommandResponse const& resp, TimePoint now)
+    /// Process a received ACMP response, told its receive time.
+    void receive_acmp(atdecc::AcmpCommandResponse const& resp, TimePoint now);
+    /// receive_acmp(resp, now) from the reactor's nanosecond count.
+    void receive_acmp(atdecc::AcmpCommandResponse const& resp, int64_t now_ns)
     {
-        receive_acmp(resp, std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        receive_acmp(resp, TimePoint{std::chrono::nanoseconds{now_ns}});
     }
 
-    /// Process a received AECP/AEM response (nanosecond timestamp)
-    void receive_aecp(std::span<uint8_t const> payload, int64_t now_ns);
-
-    /// Process a received AECP/AEM response (TimePoint overload for backward compatibility)
-    void receive_aecp(std::span<uint8_t const> payload, TimePoint now)
+    /// Process a received AECP/AEM response, told its receive time.
+    void receive_aecp(std::span<uint8_t const> payload, TimePoint now);
+    /// receive_aecp(payload, now) from the reactor's nanosecond count.
+    void receive_aecp(std::span<uint8_t const> payload, int64_t now_ns)
     {
-        receive_aecp(payload, std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        receive_aecp(payload, TimePoint{std::chrono::nanoseconds{now_ns}});
     }
 
-    /// Periodic tick for timeouts and expiry (nanosecond timestamp)
-    void tick(int64_t now_ns);
-
-    /// Periodic tick for timeouts and expiry (TimePoint overload for backward compatibility)
-    void tick(TimePoint now) { tick(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()); }
+    /// Periodic tick for timeouts and expiry, told the tick's time.
+    void tick(TimePoint now);
+    /// tick(now) from the reactor's nanosecond count.
+    void tick(int64_t now_ns) { tick(TimePoint{std::chrono::nanoseconds{now_ns}}); }
 
     /// Get the controller entity ID
     [[nodiscard]] auto entity_id() const noexcept -> Eui64 { return controller_entity_id_; }

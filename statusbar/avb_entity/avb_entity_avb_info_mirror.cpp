@@ -19,7 +19,7 @@ using namespace statusbar::atdecc::aem;
 AvbInfoMirror::AvbInfoMirror(Config config, SendMulticastFn send_multicast, SendUnicastFn send_unicast)
     : config_{config}
     , controller_{config.controller_entity_id}
-{
+{  // NOLINT(statusbar-block-statements) one controller wiring: every hook the mirror installs
     nanoavb::AemControllerEntityCallbacks callbacks;
     callbacks.send_atdecc_multicast = std::move(send_multicast);
     callbacks.send_atdecc_unicast = std::move(send_unicast);
@@ -50,11 +50,12 @@ AvbInfoMirror::AvbInfoMirror(Config config, SendMulticastFn send_multicast, Send
             reading_ = false;  // retried on the next tick
         }
     };
-    callbacks.on_unsolicited = [this](ieee::Eui64 const target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data) {
-        if (target == config_.target_entity_id && cmd == AEM_COMMAND_GET_AVB_INFO && status == AEM_STATUS_SUCCESS) {
-            handle_avb_info(data);
-        }
-    };
+    callbacks.on_unsolicited =
+        [this](ieee::Eui64 const target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data, sm::TimePoint /*now*/) {
+            if (target == config_.target_entity_id && cmd == AEM_COMMAND_GET_AVB_INFO && status == AEM_STATUS_SUCCESS) {
+                handle_avb_info(data);
+            }
+        };
     controller_.set_callbacks(std::move(callbacks));
     controller_.start();
 }

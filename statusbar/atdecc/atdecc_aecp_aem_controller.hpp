@@ -48,6 +48,10 @@ struct AemCommandResult
     ieee::Eui64 target_entity_id{};
     std::span<uint8_t const> sent_payload{};  ///< the original request payload
     std::span<uint8_t const> response{};      ///< response payload (empty unless Responded)
+    /// The told time of the event that completed the command: the response's
+    /// receive time, the tick that timed it out, or the send attempt. A
+    /// completion that issues a follow-up command tells it this.
+    sm::TimePoint at{};
 };
 
 /// Per-command completion: fires exactly once per tracked command — on the

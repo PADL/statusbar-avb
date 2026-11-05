@@ -1390,7 +1390,6 @@ TEST(gptp_time_bridge, initial_state_offset_zero_rate_zero)
     GptpTimeBridge b{};
     EXPECT_EQ(b.offset(), int64_t{0});
     EXPECT_EQ(b.rate_offset_ppt(), int64_t{0});
-    EXPECT_EQ(b.rate_ratio(), 1.0);
 }
 
 TEST(gptp_time_bridge, first_update_sets_offset_but_not_rate)
@@ -1429,11 +1428,6 @@ TEST(gptp_time_bridge, second_update_computes_ppt_exactly)
     int64_t const ppt = b.rate_offset_ppt();
     EXPECT_TRUE(ppt >= 100'010'000);
     EXPECT_TRUE(ppt <= 100'010'010);
-
-    // rate_ratio() shim should be ≈ 1.00010001
-    double const r = b.rate_ratio();
-    EXPECT_TRUE(r > 1.000099);
-    EXPECT_TRUE(r < 1.000101);
 }
 
 TEST(gptp_time_bridge, to_gptp_unrated_uses_offset_only)
