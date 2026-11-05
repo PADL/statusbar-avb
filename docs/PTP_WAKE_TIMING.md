@@ -233,8 +233,8 @@ PTP Wake Example
   Realtime priority: enabled
   PTP client opened successfully
   Current PTP time:       1735689600123456789 ns (1735689600.123 seconds)
-  Current MONOTONIC:      12345678901234 ns (12345.679 seconds)
-  Difference (PTP-mono):  1735677254444555555 ns
+  Current MONOTONIC_RAW:  12345678901234 ns (12345.679 seconds)
+  Difference (PTP-raw):   1735677254444555555 ns
   Bridge sampling started
   Waiting for bridge to become healthy...
 ```

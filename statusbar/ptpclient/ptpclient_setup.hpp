@@ -18,7 +18,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <ctime>
 #include <format>
 #include <functional>
 #include <iterator>
@@ -100,14 +99,13 @@ auto format_clock_times_to(OutputIt out, PtpClientBase& client) -> OutputIt
         out = std::format_to(out, "  Error reading PTP time: {}\n", ptp_now.error().message());
     }
 
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t const mono_now = (ts.tv_sec * 1'000'000'000LL) + ts.tv_nsec;
-    out = std::format_to(out, "  Current MONOTONIC:      {} ns ({:.3f} seconds)\n", mono_now, static_cast<double>(mono_now) / 1e9);
+    // The timing reference, the clock the bridge fits the PHC against.
+    int64_t const raw_now = realtime::read_monotonic_raw_ns();
+    out = std::format_to(out, "  Current MONOTONIC_RAW:  {} ns ({:.3f} seconds)\n", raw_now, static_cast<double>(raw_now) / 1e9);
 
     if (ptp_now) {
-        int64_t const diff = *ptp_now - mono_now;
-        out = std::format_to(out, "  Difference (PTP-mono):  {} ns ({:.3f} seconds)\n", diff, static_cast<double>(diff) / 1e9);
+        int64_t const diff = *ptp_now - raw_now;
+        out = std::format_to(out, "  Difference (PTP-raw):   {} ns ({:.3f} seconds)\n", diff, static_cast<double>(diff) / 1e9);
     }
 
     return out;
