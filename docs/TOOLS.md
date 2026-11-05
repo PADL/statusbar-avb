@@ -117,7 +117,10 @@ statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 ```
 
 `gptp-slave` options: `--profile=standard|automotive`, `--manual-peer-delay=<ns>`,
-`--servo-kp`/`--servo-ki`, `--software`, `--bridge-clock=monotonic_raw|...`.
+`--servo-kp`/`--servo-ki`, `--software`, `--bridge-clock=monotonic_raw|...`
+(`monotonic_raw` is the policy value: the app side of the gPTP time bridge is
+the timing reference, and `udptun` refuses any other; the other values are
+for comparing clocks, not for running on).
 (`gps-ratio-tracker` uses a hand-rolled parser — space-separated `--flag value`.)
 
 ## SRP / MSRP

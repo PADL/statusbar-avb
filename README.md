@@ -129,7 +129,11 @@ CSV output into plots and stats.
   state machines, link delay, servo, Linux clock/socket integration, and an
   NTP-SHM publisher.
 - **`ptpclient`** — application-facing PTP client abstraction with a bridge
-  to `linuxptp` and a wake/timer interface.
+  to `linuxptp` and a wake/timer interface: PTP deadlines on the
+  `CLOCK_MONOTONIC_RAW` timing reference, slept early on `CLOCK_MONOTONIC`,
+  spun to on RAW, and the wake told to the callback on both clocks (see
+  [`docs/PTP_WAKE_TIMING.md`](docs/PTP_WAKE_TIMING.md) and core's
+  `docs/TIME_POLICY.md` for the time-handling policy).
 - **`srp`** — IEEE 802.1Q SRP: MRP (applicant / registrar / leave-all /
   periodic state machines), plus MSRP (stream reservation) and MVRP (VLAN
   registration) participants.

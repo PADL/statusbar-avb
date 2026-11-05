@@ -246,9 +246,9 @@ NanoAVB uses consistent callback patterns:
 
 | Pattern | Signature | Use Case |
 |---------|-----------|----------|
-| State machine action | `void(Context&, TimePoint)` | State transition actions (init, start, stop) |
+| State machine action | `void(Context&, TimePoint)` | State transition actions (init, start, stop); the `TimePoint` is the time the machine was told |
 | Network send | `bool(data)` | Packet transmission (returns success/failure) |
-| State notification | `void(id, state)` | Observer callbacks (on_connect, on_state_change) |
+| State notification | `void(id, state, TimePoint now)` | Observer callbacks (on_connect, on_talker_listener, on_entity_departing); `now` is the receive or tick that caused them, stashed by the handler at its told entry |
 
 Examples:
 ```cpp
@@ -341,16 +341,30 @@ t.at(S::WaitVlanBase, E::Timeout) = T::action<timeout_vlan>(S::Degraded);
 The application is responsible for implementing a watchdog timer that injects `Timeout` events:
 
 ```cpp
-auto last_state_change = std::chrono::steady_clock::now();
-while (!shutdown_requested) {
-    auto now = std::chrono::steady_clock::now();
+// The reactor tells its ports the cycle's time; the watchdog is told it in
+// turn and tells the machine. Nothing here reads the clock twice.
+auto last_state_change = sm::TimePoint{};
+void tick(int64_t now_ns) {
+    auto const now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
     if (now - last_state_change > WATCHDOG_TIMEOUT) {
-        supervisor.handle_event(ctx, Event::Timeout, sm_now);
+        supervisor.handle_event(ctx, Event::Timeout, now);
         last_state_change = now;
     }
-    reactor.poll(100);
 }
 ```
+
+### Time
+
+NanoAVB runs on the control-plane clock, `sm::Clock` (`std::chrono::steady_clock`),
+and is told its time: the reactor reads the clock once per cycle and hands
+it to every handler (`on_ready(now_ns)` / `tick(now_ns)`), the handler wraps
+it into a `TimePoint` at its entry and tells the state machine, and hooks the
+machine fires from its actions carry that same time. Setup and edge calls
+(`start(reactor, now)`, `register_vlan(vid, now)`, controller commands) take
+a default-argument `now` for callers that own no tick. Media-side stamps and
+deadlines live on `CLOCK_MONOTONIC_RAW` and are told separately, typed; the
+two never mix. The policy, with its forms and contracts, is core's
+[`TIME_POLICY.md`](../../core/docs/TIME_POLICY.md).
 
 ## Protocol Interaction Sequence
 

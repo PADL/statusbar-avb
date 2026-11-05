@@ -9,8 +9,9 @@ This document covers the `ptpclient_wake_example` tool and performance tuning re
 
 The PTP Wake Example demonstrates precision wake timing by:
 1. Reading the PTP hardware clock via `/dev/ptp*` devices
-2. Mapping PTP time to the local monotonic clock using linear regression
-3. Waking at precise PTP-synchronized times using `clock_nanosleep()`
+2. Fitting PTP time against the local timing reference, `CLOCK_MONOTONIC_RAW`, with a continuously sampled linear mapping (`PtpTimeBridge`)
+3. Waking at precise PTP-synchronized times: each PTP deadline becomes a `CLOCK_MONOTONIC_RAW` deadline, the thread sleeps early on `CLOCK_MONOTONIC` through the RAW↔MONOTONIC line (`realtime::MonotonicRawLine`, the only clock `clock_nanosleep()` can target), then spins on RAW to the exact instant
+4. Telling the wake to the callback on both clocks (`TimerWakeInfo`: PTP nanoseconds and the typed RAW instant), so nothing the callback runs reads a clock
 
 ## Command Line Usage
 
@@ -301,9 +302,31 @@ Check for:
 
 ### Clock Types
 
-The bridge uses `CLOCK_MONOTONIC` (not `CLOCK_MONOTONIC_RAW`) because:
-- `clock_nanosleep()` does not support `CLOCK_MONOTONIC_RAW`
-- `CLOCK_MONOTONIC` provides sufficient precision for this use case
+The bridge's reference clock is `CLOCK_MONOTONIC_RAW`, the timing reference
+for all of statusbar (core's [`TIME_POLICY.md`](../../core/docs/TIME_POLICY.md)):
+the raw hardware counter, immune to the frequency slew NTP or phc2sys apply
+to `CLOCK_MONOTONIC`. The PHC is fitted against RAW, deadlines are RAW, and
+wake error is measured on RAW.
+
+`clock_nanosleep()` cannot target `CLOCK_MONOTONIC_RAW`, so a sleep goes
+through the RAW↔MONOTONIC line (`realtime::MonotonicRawLine`,
+`monotonic = rate * raw + offset`, published by the bridge's sampler): the
+RAW deadline becomes a coarse `CLOCK_MONOTONIC` target, the thread wakes
+early by a guard sized from the line's rate, then spins on RAW to the
+deadline. `CLOCK_MONOTONIC` is for sleeping, never for timing.
+
+The startup lines above print `CLOCK_MONOTONIC` and the PTP-minus-MONOTONIC
+difference for orientation only; the mapping the timer runs on is the RAW
+fit.
+
+### The wake is told on both clocks
+
+`TimerWakeInfo` carries `scheduled_time_ns` / `actual_time_ns` / `error_ns`
+in PTP nanoseconds and `actual_raw`, the same wake as a typed
+`realtime::MonotonicRawClock::time_point`. A callback tells PTP time to what
+stamps on PTP (AVTP presentation) and the RAW instant to what stamps on RAW
+(an RX drain, a transmit gate); it reads no clock of its own. See
+[`TIME_POLICY.md`](../../core/docs/TIME_POLICY.md) for the rule.
 
 ### FD_TO_CLOCKID
 
@@ -317,9 +340,13 @@ This allows `clock_gettime()` to read the PTP hardware clock directly.
 
 ### Linear Regression Mapping
 
-The PtpTimeBridge maintains a linear mapping between PTP and monotonic clocks:
+The PtpTimeBridge maintains a linear mapping between the PHC and
+`CLOCK_MONOTONIC_RAW`:
 ```
-ptp_ns = monotonic_ns * rate + offset
+ptp_ns = raw_ns * rate + offset
 ```
 
 The mapping is continuously updated using samples to track clock drift.
+`to_raw_ns()` / `from_raw_ns()` are the primary conversions; the
+`to_monotonic_ns()` / `from_monotonic_ns()` pair goes through the
+RAW↔MONOTONIC line as well and exists for sleeping.

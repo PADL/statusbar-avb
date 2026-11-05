@@ -523,17 +523,26 @@ struct LoggingObserver
 AcmpControllerStateMachine<LoggingObserver> sm{LoggingObserver{}};
 ```
 
-## Time Injection for Testing
+## Telling the Machine Its Time
 
-`handle_event` takes an optional `event_time` (defaults to `Clock::now()`):
+A state machine is told its time and never reads a clock: `handle_event`
+takes the `event_time` of the frame or tick being handled, and every action
+receives it. `sm::Clock` is `std::chrono::steady_clock`, the control-plane
+clock, on purpose (core's [`TIME_POLICY.md`](../../core/docs/TIME_POLICY.md)).
 
 ```cpp
 using Clock = std::chrono::steady_clock;
 
-// For production - uses current time
-sm.handle_event(ctx, ControllerEvent::DoCommand);
+// Production: the reactor read the clock once for this cycle and told the
+// handler; the handler tells the machine.
+void on_ready(int64_t now_ns) { ... sm.handle_event(ctx, ControllerEvent::RcvdResponse, TimePoint{std::chrono::nanoseconds{now_ns}}); }
 
-// For testing - inject specific time
+// A command issued from outside any tick (a tool's keypress) takes the
+// default-argument form; a caller with a time in hand passes it.
+controller.connect(talker, 0, listener, 0);        // now = Clock::now()
+controller.connect(talker, 0, listener, 0, now);   // told
+
+// Tests tell whatever time they like: no clock to mock.
 auto const test_time = Clock::time_point{} + std::chrono::milliseconds{1000};
 sm.handle_event(ctx, ControllerEvent::DoCommand, test_time);
 
