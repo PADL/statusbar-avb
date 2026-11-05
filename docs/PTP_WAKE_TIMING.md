@@ -315,9 +315,9 @@ RAW deadline becomes a coarse `CLOCK_MONOTONIC` target, the thread wakes
 early by a guard sized from the line's rate, then spins on RAW to the
 deadline. `CLOCK_MONOTONIC` is for sleeping, never for timing.
 
-The startup lines above print `CLOCK_MONOTONIC` and the PTP-minus-MONOTONIC
-difference for orientation only; the mapping the timer runs on is the RAW
-fit.
+The startup lines above print one `CLOCK_MONOTONIC_RAW` reading and the
+PTP-minus-RAW difference for orientation; the mapping the timer runs on is
+the continuously sampled RAW fit.
 
 ### The wake is told on both clocks
 
