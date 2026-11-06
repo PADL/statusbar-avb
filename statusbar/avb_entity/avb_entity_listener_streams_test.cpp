@@ -891,17 +891,24 @@ TEST(listener_port, holds_past_the_ports_share_are_refused)
     EXPECT_EQ(sink.held.size(), size_t{3});
 }
 
-// The port closing takes its frames with it: a later release gives nothing back to the next port.
-TEST(listener_port, a_frame_kept_past_close_is_forgotten)
+// A frame kept past close_rx() still goes back to the port, which stays open; the port closing takes its
+// frames with it, and a later release gives nothing back to the next port.
+TEST(listener_port, a_frame_kept_past_close_rx_goes_back_to_the_open_port)
 {
     HoldingSink sink;
-    HoldRig rig{true, 2, sink};
-    EXPECT_TRUE(rig.inject());
-    EXPECT_EQ(rig.drain(), size_t{1});
+    sink.keep = 2;
+    HoldRig rig{true, 4, sink};
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_TRUE(rig.inject());
+        EXPECT_EQ(rig.drain(), size_t{1});
+    }
     rig.ls.close_rx();
-    EXPECT_EQ(rig.ls.held_frames(), size_t{0});
+    EXPECT_EQ(rig.ls.held_frames(), size_t{2});  // the sink still holds them
     rig.ls.release(sink.held[0]);
-    EXPECT_EQ(rig.ls.held_frames(), size_t{0});
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});
+    rig.port.close();
+    rig.ls.release(sink.held[1]);  // a port since closed: forgotten
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});
 }
 
 // A frame kept from a port before it was opened again is forgotten, not released into the new one; the new

@@ -372,8 +372,13 @@ struct TalkerStreams
         TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length, uint64_t launch_time_ns) -> bool;
     /// One sent AVTPDU @p frame counted on @p slot.
     void count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> frame) noexcept;
-    /// A gathered frame, @p head then @p payload's buffers, into the TX capture when one records.
-    void record_gathered(std::span<uint8_t const> head, std::span<std::span<uint8_t const> const> payload);
+    /// The gathered frame (@p head, then @p payload) staged whole in tx_buf_ for the pcap tap when armed, its gPTP
+    /// time noted: how many bytes, 0 when it is not. Recorded (record_staged()) after the port takes the frame.
+    [[nodiscard]] auto stage_gathered(std::span<uint8_t const> head, std::span<std::span<uint8_t const> const> payload) -> size_t;
+    /// The @p staged bytes of tx_buf_ to the pcap tap, if any.
+    void record_staged(size_t staged);
+    /// @p piece into tx_buf_ from @p at, as far as it goes: where the next goes.
+    [[nodiscard]] auto stage_piece(std::span<uint8_t const> piece, size_t at) noexcept -> size_t;
     /// A port frame with @p slot's stream header written and room for a @p pdu_header-octet AVTPDU header after it,
     /// and the stream header's length; nullopt when the port has none (or too small: then given back).
     [[nodiscard]] auto start_header_frame(TalkerStreamSlot const& slot, size_t pdu_header) noexcept

@@ -462,7 +462,8 @@ auto TalkerStreams::gather_fits(
     size_t const length =
         std::ranges::fold_left(payload, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
     size_t const expected = size_t{frames} * aaf.channel_count * avtp::aaf_bytes_per_sample(aaf.format);
-    return length == expected && length != 0 && payload.size() + 1 <= port_->port().tx_segments();
+    bool const fits = length + avtp::AafPdu::HEADER_LENGTH + net::ETHERNET_HEADER_SIZE + net::VLAN_TAG_SIZE <= tx_buf_.size();
+    return length == expected && length != 0 && fits && payload.size() + 1 <= port_->port().tx_segments();
 }
 
 auto TalkerStreams::gather_aaf(
@@ -512,30 +513,42 @@ auto TalkerStreams::commit_gathered(
     uint64_t const launch_time_ns) -> bool
 {
     auto const head = pdu_head(frame.buffer.subspan(header, length - header));  // the slot is the port's after the commit
-    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
-    record_gathered(frame.buffer.first(length), payload);
+    size_t const staged = stage_gathered(frame.buffer.first(length), payload);  // before the commit takes the frame
     if (!port_->port().tx_commit_gather(frame.handle, length, payload, port_->launch_time(launch_time_ns))) {
         return false;
     }
+    record_staged(staged);
     count_sent(slot, head ? std::span<uint8_t const>{*head} : std::span<uint8_t const>{});
     return true;
 }
 
-void TalkerStreams::record_gathered(std::span<uint8_t const> const head, std::span<std::span<uint8_t const> const> const payload)
+void TalkerStreams::record_staged(size_t const staged)
 {
-    if (!tx_pcap_recorder_.recording()) {
-        return;
+    if (staged != 0) {
+        tx_pcap_recorder_.record(std::span<uint8_t const>{tx_buf_}.first(staged), last_tx_gptp_ns_);
     }
-    // Staged whole for the capture alone: tx_buf_ is unused on a port one thread drives.
-    std::span<uint8_t> out{tx_buf_};
-    auto const copy = [&out](std::span<uint8_t const> const piece) {
-        size_t const n = std::min(piece.size(), out.size());
-        span_copy(out.first(n), piece.first(n));
-        out = out.subspan(n);
-    };
-    copy(head);
-    std::ranges::for_each(payload, copy);
-    tx_pcap_recorder_.record(std::span<uint8_t const>{tx_buf_}.first(tx_buf_.size() - out.size()), last_tx_gptp_ns_);
+}
+
+auto TalkerStreams::stage_gathered(std::span<uint8_t const> const head, std::span<std::span<uint8_t const> const> const payload)
+    -> size_t
+{
+    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
+    if (!tx_pcap_recorder_.recording()) {
+        return 0;
+    }
+    // Staged whole for the capture alone (gather_fits() bounds it): tx_buf_ is unused on a port one thread drives.
+    size_t staged = stage_piece(head, 0);
+    for (auto const piece : payload) {
+        staged = stage_piece(piece, staged);
+    }
+    return staged;
+}
+
+auto TalkerStreams::stage_piece(std::span<uint8_t const> const piece, size_t const at) noexcept -> size_t
+{
+    size_t const n = std::min(piece.size(), tx_buf_.size() - at);
+    span_copy(std::span{tx_buf_}.subspan(at, n), piece.first(n));
+    return at + n;
 }
 
 auto serialize_am824_raw(

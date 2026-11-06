@@ -446,8 +446,7 @@ void ListenerStreams::close_rx() noexcept
         }
     }
     slots_.clear();
-    port_ = nullptr;
-    held_frames_ = 0;  // the port's frames go with it
+    port_ = nullptr;  // holder_port_ stays: a sink may still release what it kept, to the port while it is open
 }
 
 auto ListenerStreams::take_rx_frame(net::RxTimePoint const rx_now) -> std::optional<size_t>
@@ -560,6 +559,7 @@ auto ListenerStreams::hold() noexcept -> std::optional<uint64_t>
 
 auto ListenerStreams::follow_generation() noexcept -> uint32_t
 {
+    holder_port_ = port_;  // the port the frames go back to, past close_rx()
     uint32_t const generation = port_->generation();
     if (generation != held_generation_) {
         held_frames_ = 0;  // a reopened port's frames are all its own
@@ -572,12 +572,12 @@ void ListenerStreams::release(uint64_t const token) noexcept
 {
     // A frame of a port since closed, or opened again, went with that port.
     auto const generation = static_cast<uint16_t>(token >> HOLD_GENERATION_SHIFT);
-    bool const current = port_ != nullptr && port_->valid() && port_->generation() == held_generation_;
+    bool const current = holder_port_ != nullptr && holder_port_->valid() && holder_port_->generation() == held_generation_;
     if (!current || generation != static_cast<uint16_t>(held_generation_) || held_frames_ == 0) {
         return;
     }
     --held_frames_;
-    (void)port_->port().rx_release(token & ((uint64_t{1} << HOLD_GENERATION_SHIFT) - 1));
+    (void)holder_port_->port().rx_release(token & ((uint64_t{1} << HOLD_GENERATION_SHIFT) - 1));
 }
 
 void ListenerStreams::offer_timed(StreamRxPacket& packet)

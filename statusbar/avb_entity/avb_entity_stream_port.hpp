@@ -166,20 +166,15 @@ class StreamPort
                 .xdp_umem_share = config.xdp_umem_share,
                 .xdp_scatter_gather = config.xdp_scatter_gather,
             });
-        if (status) {
-            ++generation_;
-        }
-        test_launch_time_ = false;
-        rx_hold_frames_ = *backend == net::EthernetBackend::xdp ? config.xdp_rx_hold_frames : 0;
-        shared_umem_ = status && *backend == net::EthernetBackend::xdp ? config.xdp_shared_umem : nullptr;
-        take_mode(status.has_value());
+        bool const xdp = status && *backend == net::EthernetBackend::xdp;
+        adopt(
+            status.has_value(),
+            {.rx_hold_frames = xdp ? config.xdp_rx_hold_frames : 0, .shared_umem = xdp ? config.xdp_shared_umem : nullptr});
         return status;
     }
-    /// An in-process test port (net::AnyEthernetPort::open_test), its frames
-    /// timed as an xdp socket with TX metadata would be when @p launch_time
-    /// (test_launch_time_: the one thing a test port cannot report itself), @p rx_hold_frames of its frames
-    /// holdable (rx_hold_frames(); nullopt: its pool), and its frames sendable by others as a shared UMEM's
-    /// with @p frames_shared (frames_shared()).
+    /// An in-process test port (net::AnyEthernetPort::open_test): timed as an xdp socket with TX metadata when
+    /// @p launch_time, @p rx_hold_frames of its frames holdable (nullopt: its pool), and its frames sendable by
+    /// others as a shared UMEM's when @p frames_shared.
     [[nodiscard]] auto open_test(
         net::TestPortConfig const& config,
         bool const launch_time = false,
@@ -187,13 +182,11 @@ class StreamPort
         bool const frames_shared = false) -> Status
     {
         auto status = port_.open_test(config);
-        if (status) {
-            ++generation_;
-        }
-        test_launch_time_ = launch_time;
-        rx_hold_frames_ = rx_hold_frames.value_or(config.frame_pool_size);
-        test_frames_shared_ = status && frames_shared;
-        take_mode(status.has_value());
+        adopt(
+            status.has_value(),
+            {.rx_hold_frames = rx_hold_frames.value_or(config.frame_pool_size),
+             .test_launch_time = launch_time,
+             .test_frames_shared = frames_shared});
         return status;
     }
     /// The test port's context, nullptr unless open_test() opened one.
@@ -202,10 +195,7 @@ class StreamPort
     void close() noexcept
     {
         port_.close();
-        test_launch_time_ = false;
-        test_frames_shared_ = false;
-        shared_umem_ = nullptr;
-        take_mode(false);
+        adopt(false, {});
     }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return port_.valid(); }
@@ -310,6 +300,25 @@ class StreamPort
 
   private:
     /// The mode of the port open() opened (or none, when @p ok is false): its threading and timing.
+    /// What an open settled: nothing when it failed.
+    struct Opened
+    {
+        size_t rx_hold_frames{0};
+        net::XdpSharedUmem* shared_umem{nullptr};
+        bool test_launch_time{false};
+        bool test_frames_shared{false};
+    };
+    /// The port's mode after an open (@p opened: it succeeded, a new generation) or a close: @p what, or nothing.
+    void adopt(bool const opened, Opened const& what) noexcept
+    {
+        generation_ += opened ? 1 : 0;
+        rx_hold_frames_ = opened ? what.rx_hold_frames : 0;
+        shared_umem_ = opened ? what.shared_umem : nullptr;
+        test_launch_time_ = opened && what.test_launch_time;
+        test_frames_shared_ = opened && what.test_frames_shared;
+        take_mode(opened);
+    }
+
     void take_mode(bool const ok) noexcept
     {
         single_threaded_ = ok && want_single_threaded_;

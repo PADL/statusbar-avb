@@ -438,8 +438,9 @@ struct ListenerStreams final : StreamRxFrameHolder
     /// The frame receive_in_place() is decoding (hold() keeps it), and whether it was kept. RX thread.
     std::optional<uint64_t> in_place_frame_{};
     bool in_place_kept_{false};
-    size_t held_frames_{0};        ///< of the port open held_generation_
-    uint32_t held_generation_{0};  ///< the port open whose frames held_frames_ counts
+    size_t held_frames_{0};             ///< of the port open held_generation_
+    uint32_t held_generation_{0};       ///< the port open whose frames held_frames_ counts
+    StreamPort* holder_port_{nullptr};  ///< the port they are released to, kept past close_rx()
 
     // --- Owned RX state --------------------------------------------------------
     /// The RX slots (atomics inside: constructed in place, never moved/erased).
