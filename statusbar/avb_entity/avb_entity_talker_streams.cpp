@@ -440,6 +440,86 @@ auto TalkerStreams::transmit_aaf_raw(
     });
 }
 
+auto TalkerStreams::transmit_aaf_gathered(
+    TalkerStreamSlot& slot,
+    uint64_t const pts_ns,
+    uint16_t const frames,
+    std::span<std::span<uint8_t const> const> const payload,
+    uint64_t const launch_time_ns) -> bool
+{
+    std::unique_lock const entry{guards_[slot.spec.index], std::try_to_lock};
+    if (!entry.owns_lock() || !slot.aaf || port_ == nullptr || stream_stopped(slot.spec.index) || !port_->writes_in_place()) {
+        return false;  // being re-shaped, not sending, or a port another thread drives
+    }
+    return gather_fits(*slot.aaf, frames, payload) && gather_aaf(slot, *slot.aaf, pts_ns, frames, payload, launch_time_ns);
+}
+
+auto TalkerStreams::gather_fits(
+    avtp::AafStreamOutputContext const& aaf,
+    uint16_t const frames,
+    std::span<std::span<uint8_t const> const> const payload) const noexcept -> bool
+{
+    size_t const length =
+        std::ranges::fold_left(payload, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
+    size_t const expected = size_t{frames} * aaf.channel_count * avtp::aaf_bytes_per_sample(aaf.format);
+    return length == expected && length != 0 && payload.size() + 1 <= port_->port().tx_segments();
+}
+
+auto TalkerStreams::gather_aaf(
+    TalkerStreamSlot& slot,
+    avtp::AafStreamOutputContext& aaf,
+    uint64_t const pts_ns,
+    uint16_t const frames,
+    std::span<std::span<uint8_t const> const> const payload,
+    uint64_t const launch_time_ns) -> bool
+{
+    auto const started = start_header_frame(slot, avtp::AafPdu::HEADER_LENGTH);
+    if (!started) {
+        return false;
+    }
+    auto const saved = aaf;  // restored when the port refuses the frame
+    store_aaf_raw_header(
+        aaf, started->first.buffer.subspan(started->second), frames, pts_ns, timestamp_uncertain(net::monotonic_ns()));
+    if (!commit_gathered(
+            slot, started->first, started->second, started->second + avtp::AafPdu::HEADER_LENGTH, payload, launch_time_ns)) {
+        aaf = saved;
+        return false;
+    }
+    return true;
+}
+
+auto TalkerStreams::start_header_frame(TalkerStreamSlot const& slot, size_t const pdu_header) noexcept
+    -> std::optional<std::pair<net::EthernetTxSlot, size_t>>
+{
+    auto const frame = port_->port().tx_start();  // timed at the commit
+    if (!frame) {
+        return std::nullopt;
+    }
+    size_t const header = store_stream_header(slot, frame->buffer);
+    if (header == 0 || frame->buffer.size() < header + pdu_header) {
+        (void)port_->port().tx_cancel(frame->handle);
+        return std::nullopt;
+    }
+    return std::pair{*frame, header};
+}
+
+auto TalkerStreams::commit_gathered(
+    TalkerStreamSlot& slot,
+    net::EthernetTxSlot const& frame,
+    size_t const header,
+    size_t const length,
+    std::span<std::span<uint8_t const> const> const payload,
+    uint64_t const launch_time_ns) -> bool
+{
+    auto const head = pdu_head(frame.buffer.subspan(header, length - header));  // the slot is the port's after the commit
+    last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
+    if (!port_->port().tx_commit_gather(frame.handle, length, payload, port_->launch_time(launch_time_ns))) {
+        return false;
+    }
+    count_sent(slot, head ? std::span<uint8_t const>{*head} : std::span<uint8_t const>{});
+    return true;
+}
+
 auto serialize_am824_raw(
     avtp::Am824StreamOutputContext& ctx,
     std::span<uint8_t> const frame,
