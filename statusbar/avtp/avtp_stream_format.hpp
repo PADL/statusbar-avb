@@ -75,6 +75,37 @@ struct AafStreamFormat
 
 static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
 
+/// An AAF format word's ut ("up to") bit, octet 1 bit 4 (IEEE 1722-2016 Annex I.2.4): its
+/// channels_per_frame is a maximum, every count from 1 to it supported.
+inline constexpr uint64_t AAF_FORMAT_UP_TO = uint64_t{1} << 52U;
+inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNELS_MASK};
+
+/// Whether a stream listing format @p listed supports format @p wanted: the same word, or, for an
+/// AAF @p listed with ut set, @p wanted with 1 to its channels_per_frame and all else equal. An AAF
+/// @p wanted with ut set is no stream's format.
+[[nodiscard]] constexpr auto stream_format_covers(uint64_t const listed, uint64_t const wanted) noexcept -> bool
+{
+    bool const aaf = stream_format_bytes(wanted)[0] == AvtpSubtype::aaf;
+    if (listed == wanted) {
+        return !(aaf && (wanted & AAF_FORMAT_UP_TO) != 0);
+    }
+    if (!aaf || (listed & AAF_FORMAT_UP_TO) == 0 || (wanted & AAF_FORMAT_UP_TO) != 0) {
+        return false;
+    }
+    uint64_t const fixed = ~(AAF_FORMAT_UP_TO | AAF_FORMAT_CHANNELS);
+    uint64_t const channels = (wanted & AAF_FORMAT_CHANNELS) >> AafStreamFormat::CHANNELS_SHIFT;
+    return (listed & fixed) == (wanted & fixed) && channels >= 1 &&
+        channels <= (listed & AAF_FORMAT_CHANNELS) >> AafStreamFormat::CHANNELS_SHIFT;
+}
+
+/// The concrete format @p listed stands for at its widest: an AAF word with ut set as its own
+/// channels_per_frame (IEEE 1722-2016 Annex I.2.4), any other word itself.
+[[nodiscard]] constexpr auto stream_format_widest(uint64_t const listed) noexcept -> uint64_t
+{
+    bool const aaf = stream_format_bytes(listed)[0] == AvtpSubtype::aaf;
+    return aaf ? listed & ~AAF_FORMAT_UP_TO : listed;
+}
+
 /// AAF nsr (nominal sample rate) codes → Hz (IEEE 1722-2016 Table 11)
 [[nodiscard]] constexpr auto aaf_nsr_to_hz(uint8_t nsr) noexcept -> uint32_t
 {
