@@ -4,6 +4,7 @@
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
@@ -31,9 +32,10 @@ auto lookup(tsn::StreamId const& s) -> std::optional<uint16_t>
     return static_cast<uint16_t>(uid - 0x100);
 }
 
-constexpr int64_t T0 = 1'000'000'000;
-/// A media wake on CLOCK_MONOTONIC_RAW, the clock should_transmit is told.
-constexpr auto RAW0 = TalkerGate::RawTimePoint{std::chrono::seconds{100}};
+using namespace std::chrono_literals;
+/// An instant on the gate's clock (CLOCK_MONOTONIC_RAW): the reactor stamps it, a media wake is told it.
+constexpr auto T0 = TalkerGate::RawTimePoint{100s};
+constexpr auto GRACE = TalkerGate::GRACE;
 
 }  // namespace
 
@@ -63,6 +65,7 @@ TEST(talker_gate, an_index_beyond_the_gate_is_ignored)
     gate.note_listener_ready(sid(0x100), true, T0);
     EXPECT_FALSE(gate.admitted(0, T0));
     EXPECT_FALSE(gate.admitted(TalkerGate::STREAM_COUNT, T0));
+    EXPECT_FALSE(gate.grace_ends(TalkerGate::STREAM_COUNT).has_value());
 }
 
 TEST(talker_gate, without_a_lookup_nothing_is_admitted)
@@ -77,13 +80,14 @@ TEST(talker_gate, a_withdrawn_listener_keeps_the_gate_open_for_the_grace)
 {
     TalkerGate gate{true, lookup};
     gate.note_listener_ready(sid(0x101), true, T0);
-    gate.note_listener_ready(sid(0x101), false, T0 + 1);
-    EXPECT_TRUE(gate.admitted(1, T0 + TalkerGate::GRACE_NS));
-    EXPECT_FALSE(gate.admitted(1, T0 + 1 + TalkerGate::GRACE_NS));
+    gate.note_listener_ready(sid(0x101), false, T0 + 1ns);
+    EXPECT_TRUE(gate.grace_ends(1) == T0 + 1ns + GRACE);
+    EXPECT_TRUE(gate.admitted(1, T0 + GRACE));
+    EXPECT_FALSE(gate.admitted(1, T0 + 1ns + GRACE));
     gate.note_stream_started(1, false);
-    gate.note_listener_ready(sid(0x101), true, T0 + 2);
-    EXPECT_FALSE(gate.admitted(1, T0 + 2));
-    EXPECT_TRUE(gate.listener_admitted(1, T0 + 2));
+    gate.note_listener_ready(sid(0x101), true, T0 + 2ns);
+    EXPECT_FALSE(gate.admitted(1, T0 + 2ns));
+    EXPECT_TRUE(gate.listener_admitted(1, T0 + 2ns));
 }
 
 TEST(talker_gate, a_disabled_gate_admits_every_stream)
@@ -93,68 +97,80 @@ TEST(talker_gate, a_disabled_gate_admits_every_stream)
     EXPECT_TRUE(gate.admitted(3, T0));
 }
 
-// Without a time, a Listener Ready and its withdrawal are stamped at the steady clock's now:
-// the stream stays admitted for GRACE_NS after the withdrawal, then closes
+// Without a time, a Listener Ready and its withdrawal are stamped at the gate's clock's now: the
+// stream stays admitted for GRACE after the withdrawal, then closes.
 TEST(talker_gate, a_listener_ready_without_a_time_is_stamped_now)
 {
     TalkerGate gate{true, lookup};
     gate.note_listener_ready(sid(0x102), true);
     gate.note_listener_ready(sid(0x102), false);
-    auto const now =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto const now = net::rx_clock_now();
     EXPECT_TRUE(gate.admitted(2, now));
-    EXPECT_FALSE(gate.admitted(2, now + (2 * TalkerGate::GRACE_NS)));
+    EXPECT_FALSE(gate.admitted(2, now + 2 * GRACE));
 }
 
-// The media thread runs the grace from the wake it last saw the declaration at, on the RAW
-// clock it is told; it reads no clock and needs no reactor time.
-TEST(talker_gate, the_media_grace_runs_from_the_wake_the_declaration_was_last_seen)
+// The media side reads the predicate the reactor stamps: one clock, one answer. A Ready
+// registered and withdrawn between two media wakes opens the grace from its stamp on both.
+TEST(talker_gate, the_media_side_and_the_reactor_agree_on_a_ready_set_and_cleared_between_wakes)
 {
     TalkerGate gate{true, lookup};
-    EXPECT_FALSE(gate.should_transmit(1, RAW0));
-    gate.note_listener_ready(sid(0x101), true, T0);
-    EXPECT_TRUE(gate.should_transmit(1, RAW0));
-    gate.note_listener_ready(sid(0x101), false, T0 + 1);
-    EXPECT_TRUE(gate.should_transmit(1, RAW0 + std::chrono::seconds{4}));
-    EXPECT_FALSE(gate.should_transmit(1, RAW0 + TalkerGate::GRACE));
+    EXPECT_FALSE(gate.should_transmit(0, T0));
+    gate.note_listener_ready(sid(0x100), true, T0 + 10us);
+    gate.note_listener_ready(sid(0x100), false, T0 + 20us);
+    for (auto const at : {T0 + 125us, T0 + 20us + GRACE - 1ns}) {
+        EXPECT_TRUE(gate.should_transmit(0, at));
+        EXPECT_TRUE(gate.admitted(0, at));
+    }
+    EXPECT_FALSE(gate.should_transmit(0, T0 + 20us + GRACE));
+    EXPECT_FALSE(gate.admitted(0, T0 + 20us + GRACE));
 }
 
-// A Talker withdrawal closes the stream at once on the media side too: the grace seen before it
-// is forgotten until the declaration is seen again.
-TEST(talker_gate, a_talker_withdrawal_closes_the_media_side_at_once)
+// A Ready that came and went while the media side was not asked (no wakes while PTP is
+// unlocked) is judged by its stamp, not by when the media side looks: closed after the grace.
+TEST(talker_gate, a_ready_missed_over_a_long_gap_is_judged_by_its_stamp)
+{
+    TalkerGate gate{true, lookup};
+    gate.note_listener_ready(sid(0x100), true, T0);
+    gate.note_listener_ready(sid(0x100), false, T0 + 1ns);
+    EXPECT_TRUE(gate.should_transmit(0, T0 + 4s));
+    EXPECT_FALSE(gate.should_transmit(0, T0 + 10s));
+    EXPECT_FALSE(gate.admitted(0, T0 + 10s));
+}
+
+// A Stopped stream's grace is the stamp's: STOP, a LeaveAll blip, START within the grace, and
+// both sides transmit until it runs out.
+TEST(talker_gate, a_stream_stopped_through_a_blip_is_admitted_again_within_the_grace)
+{
+    TalkerGate gate{true, lookup};
+    gate.note_listener_ready(sid(0x101), true, T0);
+    gate.note_stream_started(1, false);
+    EXPECT_FALSE(gate.should_transmit(1, T0 + 125us));
+    gate.note_listener_ready(sid(0x101), false, T0 + 1s);  // the blip
+    gate.note_stream_started(1, true);
+    EXPECT_TRUE(gate.should_transmit(1, T0 + 2s));
+    EXPECT_TRUE(gate.admitted(1, T0 + 2s));
+    EXPECT_FALSE(gate.should_transmit(1, T0 + 1s + GRACE));
+    EXPECT_FALSE(gate.admitted(1, T0 + 1s + GRACE));
+}
+
+// A Talker withdrawal closes the stream at once on both sides; a Ready set and cleared after it
+// opens the grace again from its own stamp.
+TEST(talker_gate, a_talker_withdrawal_closes_at_once_and_a_later_ready_reopens)
 {
     TalkerGate gate{true, lookup};
     gate.note_listener_ready(sid(0x102), true, T0);
-    EXPECT_TRUE(gate.should_transmit(2, RAW0));
+    EXPECT_TRUE(gate.should_transmit(2, T0 + 125us));
     gate.note_talker_withdrawn(2);
-    EXPECT_FALSE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{1}));
-    gate.note_listener_ready(sid(0x102), true, T0 + 2);
-    EXPECT_TRUE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{2}));
-    gate.note_stream_started(2, false);
-    EXPECT_FALSE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{3}));
-}
-
-// A Ready registered and withdrawn between two wakes still opens the media side's grace, as it
-// does the reactor's, timed from the earlier wake: the latest instant known to precede it.
-TEST(talker_gate, a_ready_set_and_cleared_between_wakes_opens_the_media_grace)
-{
-    TalkerGate gate{true, lookup};
-    EXPECT_FALSE(gate.should_transmit(0, RAW0));
-    gate.note_listener_ready(sid(0x100), true, T0);
-    gate.note_listener_ready(sid(0x100), false, T0 + 1);
-    EXPECT_TRUE(gate.should_transmit(0, RAW0 + std::chrono::milliseconds{1}));
-    EXPECT_FALSE(gate.should_transmit(0, RAW0 + TalkerGate::GRACE));
-}
-
-// The gate unasked for longer than the grace (no media ticks: PTP unlocked) does not reopen on a
-// Ready that came and went meanwhile.
-TEST(talker_gate, a_ready_missed_over_a_long_gap_opens_nothing)
-{
-    TalkerGate gate{true, lookup};
-    EXPECT_FALSE(gate.should_transmit(0, RAW0));
-    gate.note_listener_ready(sid(0x100), true, T0);
-    gate.note_listener_ready(sid(0x100), false, T0 + 1);
-    EXPECT_FALSE(gate.should_transmit(0, RAW0 + std::chrono::seconds{10}));
+    EXPECT_FALSE(gate.should_transmit(2, T0 + 250us));
+    EXPECT_FALSE(gate.admitted(2, T0 + 250us));
+    EXPECT_FALSE(gate.grace_ends(2).has_value());
+    gate.note_listener_ready(sid(0x102), true, T0 + 300us);
+    gate.note_listener_ready(sid(0x102), false, T0 + 310us);
+    EXPECT_TRUE(gate.should_transmit(2, T0 + 375us));
+    EXPECT_TRUE(gate.admitted(2, T0 + 375us));
+    EXPECT_FALSE(gate.should_transmit(2, T0 + 310us + GRACE));
+    gate.note_talker_withdrawn();
+    EXPECT_FALSE(gate.should_transmit(2, T0 + 400us));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_gate_test)
