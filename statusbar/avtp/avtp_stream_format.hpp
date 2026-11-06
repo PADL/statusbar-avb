@@ -35,7 +35,7 @@ namespace statusbar::avtp {
 /// AAF stream-format wire layout (IEEE 1722-2016 Clause 7.3.4), viewed over
 /// the 8-byte format code:
 ///   octet 0:    subtype (0x02 AAF)
-///   octet 1:    reserved[7:4] | nsr[3:0]
+///   octet 1:    ut[7] | reserved[6:4] | nsr[3:0]
 ///   octet 2:    format (AAF sample format code: INT_32=0x02, ...)
 ///   octet 3:    bit_depth
 ///   octets 4-7: channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
@@ -70,6 +70,37 @@ struct AafStreamFormat
 };
 
 static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
+
+/// An AAF format word's ut ("up to") bit (IEEE 1722-2016 Annex I.2.4): its channels_per_frame
+/// is a maximum, every count from 1 to it supported.
+inline constexpr uint64_t AAF_FORMAT_UP_TO = uint64_t{1} << 55U;
+inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNELS_MASK};
+
+/// Whether a stream listing format @p listed supports format @p wanted: the same word, or, for an
+/// AAF @p listed with ut set, @p wanted with 1 to its channels_per_frame and all else equal. An AAF
+/// @p wanted with ut set is no stream's format.
+[[nodiscard]] constexpr auto stream_format_covers(uint64_t const listed, uint64_t const wanted) noexcept -> bool
+{
+    bool const aaf = stream_format_bytes(wanted)[0] == AvtpSubtype::aaf;
+    if (listed == wanted) {
+        return !(aaf && (wanted & AAF_FORMAT_UP_TO) != 0);
+    }
+    if (!aaf || (listed & AAF_FORMAT_UP_TO) == 0 || (wanted & AAF_FORMAT_UP_TO) != 0) {
+        return false;
+    }
+    uint64_t const fixed = ~(AAF_FORMAT_UP_TO | AAF_FORMAT_CHANNELS);
+    uint64_t const channels = (wanted & AAF_FORMAT_CHANNELS) >> AafStreamFormat::CHANNELS_SHIFT;
+    return (listed & fixed) == (wanted & fixed) && channels >= 1 &&
+        channels <= (listed & AAF_FORMAT_CHANNELS) >> AafStreamFormat::CHANNELS_SHIFT;
+}
+
+/// The concrete format @p listed stands for at its widest: an AAF word with ut set as its own
+/// channels_per_frame (IEEE 1722-2016 Annex I.2.4), any other word itself.
+[[nodiscard]] constexpr auto stream_format_widest(uint64_t const listed) noexcept -> uint64_t
+{
+    bool const aaf = stream_format_bytes(listed)[0] == AvtpSubtype::aaf;
+    return aaf ? listed & ~AAF_FORMAT_UP_TO : listed;
+}
 
 /// AAF nsr (nominal sample rate) codes → Hz (IEEE 1722-2016 Table 11)
 [[nodiscard]] constexpr auto aaf_nsr_to_hz(uint8_t nsr) noexcept -> uint32_t
