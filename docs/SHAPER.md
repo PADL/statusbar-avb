@@ -363,6 +363,10 @@ hiCredit     = ceil(733424 x 1542 / 1000000)  = ceil(1130.940)  = 1131
 loCredit     = ceil(-266576 x 1542 / 1000000) = ceil(-411.060)  = -411
 ```
 
+The examples below use Milan v1.2's TSpecs (the clock-drift byte in MaxFrameSize). A Milan
+v1.3 entity declares one octet less and adds it after the 68-octet rule (Table 4.4 step 3):
+the AAF bandwidths are unchanged, a CRF reserves 5696 kbit/s instead of 5632.
+
 One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s (1,000,000
 kbit/s), an MTU 1500 frame (1542 octets on the wire) as the largest interfering one:
 

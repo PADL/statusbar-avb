@@ -123,6 +123,7 @@ AvbEntityKit::AvbEntityKit(
         listener_->set_presentation_offset_ns(config_.presentation_offset_ns);
     }
 
+    configure_milan();
     // ATDECC descriptor wire version. Default "2016": emit descriptors at their
     // 1722.1-2013/2016 lengths so controllers that reject 2021-length descriptors
     // can enumerate the model. "2021" emits the full 2021 forms.
@@ -131,6 +132,19 @@ AvbEntityKit::AvbEntityKit(
     configure_talker_streams();
     configure_class_a_domain();
     wire_controller_hooks();
+}
+
+void AvbEntityKit::configure_milan()
+{
+    // The Milan version and GET_MILAN_INFO's features, fixed before the entity is advertised
+    // (Milan v1.3 Section 5.4.4.1).
+    host_.components().set_milan_version(config_.milan_version);
+    host_.components().mvu_handler.set_extra_features(
+        config_.signal_presence ? atdecc::mvu::MVU_FEATURES_TALKER_SIGNAL_PRESENCE : 0U);
+    // Advertised, so reported from the start: no signal until the application says otherwise.
+    for (auto const& spec : talker_specs_) {
+        output_counters_[spec.index].presence = reports_signal_presence() ? std::optional<uint64_t>{0} : std::nullopt;
+    }
 }
 
 void AvbEntityKit::configure_talker_streams()
@@ -670,6 +684,9 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
     if (output && declarations_.declared(updated.index)) {
         refresh_pending_.set(updated.index);  // its TSpec, re-declared at the next pass (this hook is told no time)
     }
+    if (output && reports_signal_presence()) {
+        output_counters_[updated.index].narrow_presence(updated.format.channels);  // its presence, at the next fold
+    }
 }
 
 auto AvbEntityKit::static_rx_group(StreamSpec const& spec) const noexcept -> ieee::Eui48
@@ -734,8 +751,8 @@ auto AvbEntityKit::group_connected(ieee::Eui48 const& group) const -> bool
 
 auto AvbEntityKit::talkers_fit(uint16_t const index, uint64_t const word) const noexcept -> bool
 {
-    auto const kbps = [](StreamSpec const& s) {
-        return uint64_t{stream_bandwidth_kbps(talker_tspec(s), CLASS_A_INTERVALS_PER_SEC)};
+    auto const kbps = [this](StreamSpec const& s) {
+        return uint64_t{stream_bandwidth_kbps(talker_tspec(s, host_.components().profile), CLASS_A_INTERVALS_PER_SEC)};
     };
     uint64_t before = 0;
     uint64_t after = 0;
@@ -866,6 +883,19 @@ void AvbEntityKit::poll_counters(int64_t const now_ns)
     if (!first) {  // else the first interval starts now
         fold_stream_counters();
     }
+}
+
+void AvbEntityKit::set_output_signal_presence(uint16_t const idx, uint64_t const channels) noexcept
+{
+    if (reports_signal_presence() && is_talker_index(idx)) {
+        output_counters_[idx].set_presence(presence_of(channels, talker_channels(idx)));
+    }
+}
+
+auto AvbEntityKit::talker_channels(uint16_t const idx) const noexcept -> uint16_t
+{
+    auto const spec = std::ranges::find(talker_specs_, idx, &StreamSpec::index);
+    return spec == talker_specs_.end() ? uint16_t{0} : spec->format.channels;
 }
 
 void AvbEntityKit::fold_stream_counters()
@@ -1192,7 +1222,12 @@ void AvbEntityKit::wire_aecp_queries()
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 return is_talker_index(descriptor_index) &&
                     fill_talker_stream_counters(
-                           *talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
+                           *talker_,
+                           descriptor_index,
+                           output_counters_[descriptor_index],
+                           host_.components().profile,
+                           valid,
+                           counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 // Classic keeps IEEE 1722.1's running totals.
@@ -1222,7 +1257,8 @@ void AvbEntityKit::wire_aecp_queries()
                     .accumulated_latency_ns = TALKER_ACCUMULATED_LATENCY_NS};
                 filled = fill_talker_stream_info(host_, descriptor_index, status, out, ext);
             } else if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                filled = milan ? fill_milan_listener_stream_info(host_, descriptor_index, out, ext)
+                auto const layout = host_.components().aem_handler.stream_info_layout();
+                filled = milan ? fill_milan_listener_stream_info(host_, descriptor_index, layout, out, ext)
                                : fill_listener_stream_info(host_, descriptor_index, out);
             }
             // The fills read the blob's authored format: the stream's current
@@ -1901,6 +1937,9 @@ auto AvbEntityKit::note_persistent_state_outcome(LoadedPersistentState const& lo
             }
             break;
         case PersistentStateOutcome::loaded:
+            if (loaded.state.system_unique_id_ignored) {
+                log.warning("kit: the persistent state's system_unique_id is not a hex string: left out, the rest loaded");
+            }
             // Unchanged by what follows, it needs no rewrite.
             persisted_text_ = serialize_persistent_state(loaded.state);
             break;
@@ -2022,7 +2061,7 @@ void AvbEntityKit::apply_saved_names(PersistentState const& saved)
 void AvbEntityKit::apply_saved_mvu_settings(PersistentState const& saved)
 {
     auto& mvu = host_.components().mvu_handler;
-    mvu.set_system_unique_id(saved.system_unique_id);
+    mvu.set_system_unique_id(saved.system_unique_id, nanoavb::mcr_domain_name(saved.system_unique_name));
     for (auto const& mcr : saved.media_clock_references) {
         nanoavb::MvuCommandHandler::McrInfo const info{
             .user_mcr_prio = mcr.user_priority, .domain_name = nanoavb::mcr_domain_name(mcr.domain_name)};
@@ -2236,6 +2275,8 @@ void AvbEntityKit::collect_mvu_settings(PersistentState& state) const
 {
     auto const& mvu = host_.components().mvu_handler;
     state.system_unique_id = mvu.system_unique_id();
+    auto const& name = mvu.system_unique_name();
+    state.system_unique_name.assign(name.data(), static_cast<size_t>(std::ranges::find(name, '\0') - name.begin()));
     for (size_t index = 0; index < mvu.clock_domain_count(); ++index) {
         nanoavb::MvuCommandHandler::McrInfo const defaults{.user_mcr_prio = mvu.default_mcr_priority(index)};
         if (auto const* info = mvu.mcr_info(index); info != nullptr && !(*info == defaults)) {
@@ -2282,7 +2323,7 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     }
     // TSpec from the format word (kit phase 1) — no per-entity byte math to
     // keep in step with the model; the hardware shaper sizes by the same one.
-    auto const tspec = talker_tspec(spec);
+    auto const tspec = talker_tspec(spec, host_.components().profile);
     info.max_interval_frames = tspec.max_interval_frames;
     info.max_frame_size = tspec.max_frame_size;
     return info;
