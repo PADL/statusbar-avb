@@ -257,7 +257,7 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     };
     auto const aaf_sid = as_stream_id(aaf_stream->stream_id);
     auto const crf_sid = as_stream_id(crf_stream->stream_id);
-    constexpr int64_t t0 = 1'000'000'000;
+    constexpr auto t0 = RAW_NOW;
 
     // No listener -> nothing transmits.
     EXPECT_FALSE(gate.admitted(k_aaf, t0));
@@ -332,8 +332,9 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
         return;
     }
     constexpr uint16_t k_aaf = 1;
-    constexpr int64_t t0 = 1'000'000'000;
-    constexpr int64_t grace = TalkerGate::GRACE_NS;
+    constexpr auto t0 = RAW_NOW;
+    constexpr auto grace = TalkerGate::GRACE;
+    using std::chrono::nanoseconds;
     TalkerGate gate{/*gate_enabled=*/true, comps};
     EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{0});
     EXPECT_FALSE(gate.admitted(k_aaf, t0));
@@ -346,28 +347,28 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 
     // Withdrawn at t1 (a LeaveAll blip or a real departure): open for GRACE_NS
     // from the withdrawal, closed after.
-    int64_t const t1 = t0 + 60 * grace;
+    auto const t1 = t0 + 60 * grace;
     gate.note_listener_ready(*sid, false, t1);
     EXPECT_TRUE(gate.admitted(k_aaf, t1));
-    EXPECT_TRUE(gate.admitted(k_aaf, t1 + grace - 1));
+    EXPECT_TRUE(gate.admitted(k_aaf, t1 + grace - nanoseconds{1}));
     EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
     EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
 
     // A repeated withdrawal does not extend the window.
-    gate.note_listener_ready(*sid, false, t1 + grace - 1);
+    gate.note_listener_ready(*sid, false, t1 + grace - nanoseconds{1});
     EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
 
     // The blip: re-registered within the grace window keeps it open throughout.
-    int64_t const t2 = t1 + 10 * grace;
+    auto const t2 = t1 + 10 * grace;
     gate.note_listener_ready(*sid, true, t2);
-    gate.note_listener_ready(*sid, false, t2 + 1);
+    gate.note_listener_ready(*sid, false, t2 + nanoseconds{1});
     gate.note_listener_ready(*sid, true, t2 + grace / 2);
     EXPECT_TRUE(gate.admitted(k_aaf, t2 + 2 * grace));
 
     // Our Talker withdrawn: closed at once, no grace, listener state forgotten.
     gate.note_talker_withdrawn();
     EXPECT_FALSE(gate.admitted(k_aaf, t2 + 2 * grace));
-    EXPECT_EQ(gate.ready_ns_[k_aaf].load(), int64_t{0});
+    EXPECT_FALSE(gate.grace_ends(k_aaf).has_value());
 
     // Out of range is never admitted.
     EXPECT_FALSE(gate.admitted(TalkerGate::STREAM_COUNT, t0));
@@ -393,7 +394,8 @@ TEST(tone_gate, classic_listener_admitted_by_listener_ready_not_connection)
         return;
     }
     constexpr uint16_t k_aaf = 1;
-    constexpr int64_t t0 = 1'000'000'000;
+    constexpr auto t0 = RAW_NOW;
+    constexpr auto tick = std::chrono::nanoseconds{1};
     TalkerGate gate{/*gate_enabled=*/true, comps};
 
     acmp_connect(comps, k_aaf);
@@ -401,9 +403,9 @@ TEST(tone_gate, classic_listener_admitted_by_listener_ready_not_connection)
     EXPECT_FALSE(gate.admitted(k_aaf, t0));  // connected, no reservation yet
     gate.note_listener_ready(*sid, true, t0);
     EXPECT_TRUE(gate.admitted(k_aaf, t0));
-    gate.note_listener_ready(*sid, false, t0 + 1);  // the listener's Ready goes with the disconnect
-    EXPECT_TRUE(gate.admitted(k_aaf, t0 + TalkerGate::GRACE_NS));
-    EXPECT_FALSE(gate.admitted(k_aaf, t0 + 1 + TalkerGate::GRACE_NS));
+    gate.note_listener_ready(*sid, false, t0 + tick);  // the listener's Ready goes with the disconnect
+    EXPECT_TRUE(gate.admitted(k_aaf, t0 + TalkerGate::GRACE));
+    EXPECT_FALSE(gate.admitted(k_aaf, t0 + tick + TalkerGate::GRACE));
 }
 
 // gate_talker_on_listener=false: always admitted, always transmitting, even
@@ -419,8 +421,8 @@ TEST(tone_gate, disabled_gate_always_admits)
     TalkerGate open{/*gate_enabled=*/false, (*result)->components()};
     open.note_stream_started(1, false);
     for (uint16_t idx = 0; idx < 3; ++idx) {
-        EXPECT_TRUE(open.admitted(idx, 0));
-        EXPECT_TRUE(open.admitted(idx, 0));
+        EXPECT_TRUE(open.admitted(idx, RAW_NOW));
+        EXPECT_TRUE(open.should_transmit(idx, RAW_NOW));
     }
 }
 
