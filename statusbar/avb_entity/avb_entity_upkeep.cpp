@@ -3,6 +3,7 @@
 
 #include "statusbar/avb_entity/avb_entity_upkeep.hpp"
 
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_link_monitor.hpp"
 
 #include <memory>
@@ -113,7 +114,7 @@ void EntityUpkeep::reevaluate(std::chrono::steady_clock::time_point const now)
     // re-evaluate it so an expiry with no MSRP event still reaches the
     // admission-changed callback (the hardware shaper).
     auto const now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-    kit_.poll_admission(now_ns);
+    kit_.poll_admission(net::rx_clock_now());  // the gate's clock, read once a pass
     kit_.poll_counters(now_ns);
 }
 

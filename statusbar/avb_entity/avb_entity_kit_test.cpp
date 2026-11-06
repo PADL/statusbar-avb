@@ -15,6 +15,7 @@
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -224,7 +225,8 @@ struct MilanKit
         uint64_t const entity_low,
         bool const gate = true,
         std::vector<uint8_t> model = make_blob(1, 1),
-        std::optional<uint16_t> const crf_clock_source = std::nullopt)
+        std::optional<uint16_t> const crf_clock_source = std::nullopt,
+        net::ClockFn clock = net::monotonic_ns)
         : blob{std::move(model)}
         , storage{*atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob})}
         , talkers{*talker_stream_specs(storage, 0)}
@@ -242,7 +244,7 @@ struct MilanKit
               last_gptp_ns,
               nullptr,
               std::pmr::get_default_resource()}
-        , reactor{stop, net::monotonic_ns, 0}
+        , reactor{stop, std::move(clock), 0}
     {}
     MilanKit(MilanKit const&) = delete;
     auto operator=(MilanKit const&) -> MilanKit& = delete;
@@ -368,6 +370,8 @@ struct MilanKit
     {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
+    /// The gate's clock (CLOCK_MONOTONIC_RAW), as the reactor reads it once per event.
+    static auto raw_now() -> AvbEntityKit::GateTimePoint { return net::rx_clock_now(); }
 
     std::vector<uint8_t> blob;
     atdecc::aem::DescriptorStorage storage;
@@ -561,34 +565,37 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     kit.set_on_admission_changed(
         [r = &reports](std::span<uint16_t const> admitted) { r->emplace_back(admitted.begin(), admitted.end()); });
     using V = std::vector<uint16_t>;
-    constexpr int64_t t0 = 1'000'000'000;
-    constexpr int64_t grace = TalkerGate::GRACE_NS;
+    using std::chrono::nanoseconds;
+    // The gate's clock and the reactor's: the gate is told the first, the declarations the second.
+    constexpr auto t0 = AvbEntityKit::GateTimePoint{std::chrono::seconds{1}};
+    constexpr auto grace = TalkerGate::GRACE;
+    int64_t const now_ns = MilanKit::steady_ns();
 
     EXPECT_TRUE(kit.admitted_talker_streams(t0).empty());
     kit.poll_admission(t0);
     EXPECT_TRUE(reports.empty());  // no change, no report
 
-    kit.note_listener_ready(aaf_sid, true, t0);
+    kit.note_listener_ready(aaf_sid, true, now_ns, t0);
     EXPECT_EQ(reports.size(), size_t{1});
     EXPECT_TRUE(reports.back() == V{0});
-    kit.note_listener_ready(crf_sid, true, t0);
+    kit.note_listener_ready(crf_sid, true, now_ns, t0);
     EXPECT_TRUE(reports.back() == (V{0, 1}));
     EXPECT_EQ(reports.size(), size_t{2});
 
     // AAF's Ready withdrawn: still admitted through the grace window (no report),
     // then the poll past it reports the drop -- no MSRP event needed.
-    kit.note_listener_ready(aaf_sid, false, t0 + 10);
+    kit.note_listener_ready(aaf_sid, false, now_ns, t0 + nanoseconds{10});
     EXPECT_EQ(reports.size(), size_t{2});
-    kit.poll_admission(t0 + 10 + grace - 1);
+    kit.poll_admission(t0 + nanoseconds{10} + grace - nanoseconds{1});
     EXPECT_EQ(reports.size(), size_t{2});
-    kit.poll_admission(t0 + 10 + grace);
+    kit.poll_admission(t0 + nanoseconds{10} + grace);
     EXPECT_EQ(reports.size(), size_t{3});
     EXPECT_TRUE(reports.back() == V{1});
     kit.poll_admission(t0 + 10 * grace);
     EXPECT_EQ(reports.size(), size_t{3});
 
     // Re-registered: back in.
-    kit.note_listener_ready(aaf_sid, true, t0 + 11 * grace);
+    kit.note_listener_ready(aaf_sid, true, now_ns, t0 + 11 * grace);
     EXPECT_TRUE(reports.back() == (V{0, 1}));
     EXPECT_EQ(reports.size(), size_t{4});
     kit.set_on_admission_changed({});
@@ -933,14 +940,53 @@ TEST(avb_entity_kit_milan_talker, no_gate_for_an_undeclared_stream)
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     int64_t const now = MilanKit::steady_ns();
-    m.kit.note_listener_ready(m.sid(0), true, now);
-    EXPECT_TRUE(m.kit.admitted_talker_streams(now).size() == 1);
+    auto const raw = MilanKit::raw_now();
+    m.kit.note_listener_ready(m.sid(0), true, now, raw);
+    EXPECT_TRUE(m.kit.admitted_talker_streams(raw).size() == 1);
     // A MAAP conflict withdraws it; the Listener's next registration event
     // must not reopen the gate.
     m.kit.note_talker_addresses(false, now + 1);
     EXPECT_FALSE(m.kit.talker_declared(0));
-    m.kit.note_listener_ready(m.sid(0), true, now + 2);
-    EXPECT_TRUE(m.kit.admitted_talker_streams(now + 2).empty());
+    m.kit.note_listener_ready(m.sid(0), true, now + 2, raw + std::chrono::nanoseconds{2});
+    EXPECT_TRUE(m.kit.admitted_talker_streams(raw + std::chrono::nanoseconds{2}).empty());
+}
+
+// The declarations' deadlines are built from the time the reactor tells (its ClockFn, whatever
+// clock that is), so a kit on a reactor timing by its own clock still closes a Milan probe window
+// at its tick and re-declares a withdrawn talker on the next probe.
+TEST(avb_entity_kit_milan_talker, the_probe_window_closes_on_the_reactors_own_clock)
+{
+    int64_t fake_ns = 7'000'000'000;  // a clock nothing else in the process reads
+    MilanKit m{std::nullopt, 0x1B, true, make_blob(1, 1), std::nullopt, [&fake_ns] { return fake_ns; }};
+    auto const at = [&fake_ns] { return sm::TimePoint{std::chrono::nanoseconds{fake_ns}}; };
+    auto const probe = [&m, &at] {
+        atdecc::AcmpCommandResponse cmd{};
+        cmd.init_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
+        cmd.talker_entity_id = m.config.entity_id;
+        cmd.talker_unique_id = uint16_t{0};
+        cmd.listener_entity_id = ieee::Eui64{}.from_uint64(0x0200001111110001ULL);
+        (void)m.kit.host().components().acmp_talker.receive_command(cmd, at());
+    };
+    EXPECT_TRUE(m.kit.start(m.reactor, at()).has_value());
+    m.kit.on_link_up(at());
+    m.kit.on_gptp_announce(at(), true);
+    EXPECT_TRUE(m.kit.host().is_ready());
+    probe();
+    EXPECT_TRUE(m.kit.talker_declared(0));
+
+    // The window closes 15 s later on the reactor's clock: its pass withdraws.
+    fake_ns += TalkerDeclarations::PROBE_WINDOW_NS - 1;
+    (void)m.reactor.poll_once(0);
+    EXPECT_TRUE(m.kit.talker_declared(0));
+    fake_ns += 2;
+    (void)m.reactor.poll_once(0);
+    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
+
+    // A new probe re-declares at once (the same parameters are not held).
+    probe();
+    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.kit.stop(at()).has_value());
 }
 
 // With the transmit gate disabled (bench debugging: every stream transmits)
@@ -988,7 +1034,7 @@ TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)
     MilanKit m{std::nullopt, 0x1A};
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
-    m.kit.note_listener_ready(m.sid(0), true, MilanKit::steady_ns());
+    m.kit.note_listener_ready(m.sid(0), true, MilanKit::steady_ns(), MilanKit::raw_now());
     EXPECT_TRUE(m.kit.talker_declared(0));
     EXPECT_FALSE(m.kit.admitted_talker_streams().empty());
 
@@ -1662,7 +1708,7 @@ TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
     // Milan v1.2 Section 5.4.2.7: a streaming output keeps its format.
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
-    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::steady_ns()));
+    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::raw_now()));
     size_t const asked = m.formats.size();
     EXPECT_EQ(
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_48K)),
@@ -2244,7 +2290,7 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
 
     // The Listener goes; the grace window runs out: stopped.
     m.bridge_withdraw(0);
-    m.kit.poll_admission(MilanKit::steady_ns() + TalkerGate::GRACE_NS + 1'000'000'000);
+    m.kit.poll_admission(MilanKit::raw_now() + TalkerGate::GRACE + std::chrono::seconds{1});
     c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_EQ(c.counters[0].get(), 1U);
     EXPECT_EQ(c.counters[1].get(), 1U);
@@ -3155,7 +3201,7 @@ TEST(avb_entity_kit_kind, refused_while_running_and_for_crf)
     };
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
-    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::steady_ns()));
+    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::raw_now()));
     EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, 0, AM824_8CH_48K), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
     EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf.has_value());
     EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
