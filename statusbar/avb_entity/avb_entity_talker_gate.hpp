@@ -5,10 +5,11 @@
 
 /// TalkerGate: the per-stream "should this talker transmit?" gate (Milan v1.2 Sections 5.3.7.3,
 /// 5.5.2.5). Written by the reactor thread, read by the media-timer thread (should_transmit), so
-/// its state is atomic. See docs/MILAN_TALKER.md.
+/// its shared state is atomic. Each side times the grace window on the clock it is told.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
@@ -44,7 +45,12 @@ struct TalkerGate
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
     /// How long the gate stays open after the listener declaration was last seen registered, so
     /// an MRP LeaveAll re-registration blip does not chop the stream.
-    static constexpr int64_t GRACE_NS = 5'000'000'000;
+    static constexpr auto GRACE = std::chrono::seconds{5};
+    static constexpr int64_t GRACE_NS = std::chrono::nanoseconds{GRACE}.count();
+    /// The media wake's instant on CLOCK_MONOTONIC_RAW, the clock should_transmit is told.
+    using RawTimePoint = realtime::MonotonicRawClock::time_point;
+    /// "Never seen Listener Ready" on the media side: the grace window has nothing to run from.
+    static constexpr RawTimePoint NEVER = RawTimePoint::min();
 
     /// Reactor thread: whether a Listener declaration permitting transmission (Ready or Ready
     /// Failed) is registered for @p stream_id at steady-clock @p now_ns. Registration and
@@ -86,9 +92,10 @@ struct TalkerGate
     /// regardless of gate_enabled_ and Started (Milan v1.2 Section 5.3.7.3).
     [[nodiscard]] auto listener_admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
-    /// Media-timer thread: may talker stream @p idx transmit at steady-clock @p now_ns? Exactly
-    /// admitted(), independent of every other stream.
-    [[nodiscard]] auto should_transmit(uint16_t idx, int64_t now_ns) const noexcept -> bool { return admitted(idx, now_ns); }
+    /// Media-timer thread: may talker stream @p idx transmit at the wake told as @p now
+    /// (CLOCK_MONOTONIC_RAW)? admitted()'s predicate with the grace window run from the wake at
+    /// which this thread last saw the declaration; one thread calls it.
+    [[nodiscard]] auto should_transmit(uint16_t idx, RawTimePoint now) noexcept -> bool;
 
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                        ///< config.gate_talker_on_listener, destructured at the call site
@@ -106,6 +113,23 @@ struct TalkerGate
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even with Listener Ready registered.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
+    /// Talker withdrawals per stream (reactor): the media side forgets its grace on a change.
+    std::array<std::atomic<uint32_t>, STREAM_COUNT> withdrawals_{};
+
+  private:
+    [[nodiscard]] static constexpr auto never_seen() noexcept -> std::array<RawTimePoint, STREAM_COUNT>
+    {
+        std::array<RawTimePoint, STREAM_COUNT> seen{};
+        seen.fill(NEVER);
+        return seen;
+    }
+    /// Listener Ready now, or seen within GRACE of @p now (recorded here). Media-timer thread.
+    [[nodiscard]] auto listener_ready_within_grace(uint16_t idx, RawTimePoint now) noexcept -> bool;
+
+    /// Media-timer thread only: the wake each stream's declaration was last seen at, and the
+    /// withdrawals_ count it was seen under.
+    std::array<RawTimePoint, STREAM_COUNT> last_seen_ready_ = never_seen();
+    std::array<uint32_t, STREAM_COUNT> seen_withdrawals_{};
 };
 
 }  // namespace statusbar::avb_entity
