@@ -6,6 +6,7 @@
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/avtp/avtp_stream_format.hpp"
 
 #include <system_error>
 
@@ -15,8 +16,18 @@ namespace {
 
 using atdecc::aem::DescriptorStream;
 
-/// The nsr bits of an AAF format word's second octet (IEEE 1722-2016 Clause 7.3.4).
-constexpr uint8_t AAF_NSR_MASK = 0x0F;
+/// The StreamSpec of STREAM descriptor @p desc at @p index: its current_format (an authored up-to
+/// word at its widest), clock domain and interface.
+auto stream_spec_of(uint16_t const index, atdecc::aem::DescriptorStream const& desc) noexcept -> StreamSpec
+{
+    uint64_t const word = avtp::stream_format_widest(desc.current_format.to_uint64());
+    return StreamSpec{
+        .index = index,
+        .format_word = word,
+        .format = decode_stream_format(word),
+        .clock_domain_index = desc.clock_domain_index,
+        .avb_interface_index = desc.avb_interface_index};
+}
 
 auto stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16_t const config_idx, uint16_t const descriptor_type)
     -> StatusValue<StreamSpecs>
@@ -32,13 +43,7 @@ auto stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16_t const 
             // than silently shaping the entity smaller than its model claims.
             return failure(std::errc::result_out_of_range);
         }
-        StreamSpec spec{};
-        spec.index = index;
-        spec.format_word = desc->current_format.to_uint64();
-        spec.format = decode_stream_format(spec.format_word);
-        spec.clock_domain_index = desc->clock_domain_index;
-        spec.avb_interface_index = desc->avb_interface_index;
-        specs.push_back(spec);
+        specs.push_back(stream_spec_of(index, *desc));
     }
     return success(specs);
 }

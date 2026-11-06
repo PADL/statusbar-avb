@@ -388,6 +388,17 @@ class AvbEntityKit
     {
         return is_talker_index(idx) ? &output_counters_[idx] : nullptr;
     }
+    /// Reactor thread: the signal presence of STREAM_OUTPUT @p idx's channels, bit k channel k, cut
+    /// to the channels its format has (again at a SET_STREAM_FORMAT), reported from the next observation
+    /// interval (Milan v1.3 Section 5.3.7.7.1). Ignored unless config().signal_presence and Milan v1.3.
+    void set_output_signal_presence(uint16_t idx, uint64_t channels) noexcept;
+    /// The channels of talker stream @p idx's format now (0 for no such stream).
+    [[nodiscard]] auto talker_channels(uint16_t idx) const noexcept -> uint16_t;
+    /// The kit reports signal presence: configured and Milan v1.3.
+    [[nodiscard]] auto reports_signal_presence() const noexcept -> bool
+    {
+        return config_.signal_presence && host_.components().profile.milan_v1_3();
+    }
 
     // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
 
@@ -599,12 +610,20 @@ class AvbEntityKit
     /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
 
-    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at
-    /// the class A cadence, one frame per interval (also the shaper's input).
-    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
+    /// The MSRP TSpec advertised for talker stream @p spec, one frame per class A interval: Milan v1.3
+    /// Table 4.4's frame and drift byte for a @p milan entity, else srp_max_frame_size. The shaper's too.
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec, bool const milan) noexcept -> TSpec
     {
-        return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+        if (!milan) {
+            return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+        }
+        return TSpec{
+            .max_frame_size = milan_srp_max_frame_size(spec.format),
+            .max_interval_frames = 1,
+            .clock_drift_bytes = spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
     }
+    /// talker_tspec under this entity's profile (milan_profile()).
+    [[nodiscard]] auto talker_tspec(StreamSpec const& spec) const noexcept -> TSpec { return talker_tspec(spec, milan_profile()); }
 
     // --- Stream socket health (after start()) ---------------------------------
     /// Why start() could not open the stream TX socket (empty: it opened). The
@@ -1005,6 +1024,8 @@ class AvbEntityKit
     // Construction phases
     //
     /// The talker streams' ACMP identities, address validity and presentation offsets.
+    /// The configured Milan version and GET_MILAN_INFO features (construction).
+    void configure_milan();
     void configure_talker_streams();
     /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
     void note_talker_interface(uint16_t index);

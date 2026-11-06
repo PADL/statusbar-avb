@@ -305,6 +305,21 @@ constexpr uint8_t ACTIVE = 2;     ///< querying the talker (PROBE_TX)
 constexpr uint8_t COMPLETED = 3;  ///< settled
 }  // namespace probing_status
 
+/// pbsta (3 bits, the most significant) and acmpsta (5) in one octet: Milan v1.2 Figure 5.1's
+/// GET_STREAM_INFO tail and v1.3 Figure 5.12's GET_STREAM_INPUT_INFO_EX.
+[[nodiscard]] constexpr auto pack_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept -> uint8_t
+{
+    return static_cast<uint8_t>(((pbsta & 0x07U) << 5U) | (acmpsta & 0x1FU));
+}
+[[nodiscard]] constexpr auto probing_status_of(uint8_t const packed) noexcept -> uint8_t
+{
+    return static_cast<uint8_t>(packed >> 5U);
+}
+[[nodiscard]] constexpr auto acmp_status_of(uint8_t const packed) noexcept -> uint8_t
+{
+    return static_cast<uint8_t>(packed & 0x1FU);
+}
+
 /// GET_STREAM_INFO command payload
 struct AemGetStreamInfoCommandPayload
 {
@@ -396,19 +411,13 @@ struct AemStreamInfoMilanExtension
     /// Bytes 53-55: Reserved
     std::array<octet_t, 3> reserved{};
 
-    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t
-    {
-        return static_cast<uint8_t>(pbsta_acmpsta.get() >> 5U);
-    }
-    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t
-    {
-        return static_cast<uint8_t>(pbsta_acmpsta.get() & 0x1FU);
-    }
+    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return probing_status_of(pbsta_acmpsta.get()); }
+    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return acmp_status_of(pbsta_acmpsta.get()); }
     /// pbsta per Table 5.5; acmpsta an ACMP status (defined only while
     /// probing actively, else 0).
     constexpr void set_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept
     {
-        pbsta_acmpsta = static_cast<uint8_t>(((pbsta & 0x07U) << 5U) | (acmpsta & 0x1FU));
+        pbsta_acmpsta = pack_probing(pbsta, acmpsta);
     }
 
     auto operator<=>(AemStreamInfoMilanExtension const&) const noexcept = default;

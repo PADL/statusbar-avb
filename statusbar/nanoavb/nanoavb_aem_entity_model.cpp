@@ -12,7 +12,6 @@
 #include <array>
 #include <cstring>
 #include <optional>
-#include <string_view>
 
 namespace statusbar::nanoavb {
 
@@ -270,6 +269,25 @@ auto AemEntityModel::get_name_for_wire(NameRef ref, std::span<uint8_t> out) cons
     span_store(out, payload);
     return NAME_RESPONSE_SIZE;
 }
+
+namespace {
+
+/// The whole SET_NAME command body @p command_body via the wire struct; nullopt when short or when the
+/// name is not the well-formed UTF-8 an ATDECC string is.
+[[nodiscard]] auto set_name_payload(std::span<uint8_t const> const command_body) -> std::optional<atdecc::aem::AemNamePayload>
+{
+    if (command_body.size() < NAME_RESPONSE_SIZE) {
+        return std::nullopt;
+    }
+    atdecc::aem::AemNamePayload payload{};
+    span_load(payload, command_body);
+    if (!atdecc::utf8_well_formed(atdecc::atdecc_string_text(payload.name))) {
+        return std::nullopt;
+    }
+    return payload;
+}
+
+}  // namespace
 
 auto AemEntityModel::apply_set_name(std::span<uint8_t const> command_body) -> uint8_t
 {

@@ -121,7 +121,6 @@ TEST(avb_persistent_state, malformed_rejected)
     EXPECT_TRUE(is_malformed("entity_model_id = \"0x01\"\n"));
     EXPECT_TRUE(is_malformed("version = 1\n"));
     EXPECT_TRUE(is_malformed("version = 1\nentity_model_id = 5\n"));
-    EXPECT_TRUE(is_malformed(head + "system_unique_id = -1\n"));
     EXPECT_TRUE(is_malformed(head + "[[clock_source]]\nclock_domain = 0\n"));
     EXPECT_TRUE(is_malformed(
         head + "[[name]]\ndescriptor_type = 0\ndescriptor_index = 0\nname_index = 0\nvalue = \"" + std::string(65, 'n') + "\"\n"));
@@ -280,6 +279,52 @@ TEST(avb_persistent_state, bindings_imported_once)
     auto const corrupt = load_persistent_state(path, MODEL, legacy);
     EXPECT_TRUE(corrupt.outcome == PersistentStateOutcome::fresh && corrupt.error);
     std::filesystem::remove_all(dir);
+}
+
+// Milan v1.3 Section 5.4.4.2: a 64-bit SYSTEM_UNIQUE_ID number (hex, as every u64 here) and its
+// name round-trip
+// A system_unique_id of another type (an integer, before it was a u64 in hex) is left out and said,
+// the rest of the file loaded: an old box keeps its bindings and names
+TEST(avb_persistent_state, a_mistyped_system_unique_id_is_left_out)
+{
+    std::string const head = "version = 1\nentity_model_id = \"0x001b92fffe000001\"\n";
+    auto const parsed = parse_persistent_state(head + "system_unique_id = 1234\nsystem_unique_name = \"FOH\"\n");
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->system_unique_id_ignored);
+    EXPECT_EQ(parsed->system_unique_id, uint64_t{0});
+    EXPECT_EQ(parsed->system_unique_name, std::string{"FOH"});
+    auto const hex = parse_persistent_state(head + "system_unique_id = \"0x4d2\"\n");
+    EXPECT_TRUE(hex.has_value() && !hex->system_unique_id_ignored && hex->system_unique_id == 0x4d2);
+    auto const text = parse_persistent_state(head + "system_unique_id = \"FOH\"\n");
+    EXPECT_TRUE(text.has_value() && text->system_unique_id_ignored);
+}
+
+TEST(avb_persistent_state, a_64_bit_system_unique_id_and_its_name)
+{
+    PersistentState state{};
+    state.entity_model_id = 0x0011223344556677ULL;
+    state.system_unique_id = 0xFEDCBA9876543210ULL;
+    state.system_unique_name = "FOH system";
+    auto const parsed = parse_persistent_state(serialize_persistent_state(state));
+    EXPECT_TRUE(parsed.has_value() && *parsed == state);
+}
+
+// Every controller-sent name goes to the file as text: a malformed UTF-8 sequence ends it there
+// (a lone continuation octet, a cut sequence, a surrogate), a well-formed one is kept whole
+TEST(avb_persistent_state, names_are_written_up_to_a_malformed_utf8_sequence)
+{
+    PersistentState state{};
+    state.entity_model_id = 0x1;
+    state.system_unique_name = "Caf\xC3\xA9 \x80 sale";
+    state.media_clock_references.push_back({.clock_domain = 0, .user_priority = 100, .domain_name = "A\xE2\x82"});
+    state.names.push_back({.descriptor_type = 0, .descriptor_index = 0, .name_index = 0, .value = "\xED\xA0\x80x"});
+    state.media_clock_references.push_back({.clock_domain = 1, .user_priority = 100, .domain_name = "\xF0\x9F\x8E\xB5 ok"});
+    auto const parsed = parse_persistent_state(serialize_persistent_state(state));
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->system_unique_name, std::string{"Caf\xC3\xA9 "});
+    EXPECT_EQ(parsed->media_clock_references[0].domain_name, std::string{"A"});
+    EXPECT_EQ(parsed->names[0].value, std::string{});
+    EXPECT_EQ(parsed->media_clock_references[1].domain_name, std::string{"\xF0\x9F\x8E\xB5 ok"});
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_persistent_state_test)
