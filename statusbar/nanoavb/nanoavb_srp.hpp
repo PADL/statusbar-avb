@@ -430,7 +430,7 @@ class MsrpHandler
 
     /// Called when a peer's Talker Advertise or Talker Failed for @p stream_id is registered or
     /// leaves, after an attached listener's declaration has followed it.
-    void set_on_remote_talker(statusbar::sg14::inplace_function<void(StreamId const&), 64> cb)
+    void set_on_remote_talker(statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> cb)
     {
         on_remote_talker_ = std::move(cb);
     }
@@ -918,7 +918,7 @@ class MsrpHandler
     {
         follow_remote_talker(sid);
         if (on_remote_talker_) {
-            on_remote_talker_(sid);
+            on_remote_talker_(sid, last_event_time_);  // the receive or tick this fires from
         }
     }
 
@@ -981,7 +981,7 @@ class MsrpHandler
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipantT<Limits> participant_;
     TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)
-    statusbar::sg14::inplace_function<void(StreamId const&), 64> on_remote_talker_{};
+    statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> on_remote_talker_{};
     bool listener_waits_for_talker_{false};
     bool started_{false};
 };
