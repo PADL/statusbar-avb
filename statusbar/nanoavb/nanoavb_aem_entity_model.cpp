@@ -5,11 +5,13 @@
 
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
+#include "statusbar/atdecc/atdecc_utf8.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <optional>
 
 namespace statusbar::nanoavb {
 
@@ -255,26 +257,41 @@ auto AemEntityModel::get_name_for_wire(NameRef ref, std::span<uint8_t> out) cons
     return NAME_RESPONSE_SIZE;
 }
 
-auto AemEntityModel::apply_set_name(std::span<uint8_t const> command_body) -> uint8_t
+namespace {
+
+/// The whole SET_NAME command body @p command_body via the wire struct; nullopt when short or when the
+/// name is not the well-formed UTF-8 an ATDECC string is.
+[[nodiscard]] auto set_name_payload(std::span<uint8_t const> const command_body) -> std::optional<atdecc::aem::AemNamePayload>
 {
     if (command_body.size() < NAME_RESPONSE_SIZE) {
-        return AEM_STATUS_BAD_ARGUMENTS;
+        return std::nullopt;
     }
-
-    // Parse the whole SET_NAME command body via the wire struct.
     atdecc::aem::AemNamePayload payload{};
     span_load(payload, command_body);
+    if (!atdecc::utf8_well_formed(atdecc::atdecc_string_text(payload.name))) {
+        return std::nullopt;
+    }
+    return payload;
+}
 
+}  // namespace
+
+auto AemEntityModel::apply_set_name(std::span<uint8_t const> command_body) -> uint8_t
+{
+    auto const payload = set_name_payload(command_body);
+    if (!payload) {
+        return AEM_STATUS_BAD_ARGUMENTS;
+    }
     NameRef const ref{
         .descriptor =
             DescriptorRef{
-                .configuration_index = payload.configuration_index.get(),
-                .descriptor_type = payload.descriptor_type.get(),
-                .descriptor_index = payload.descriptor_index.get()},
-        .name_index = payload.name_index.get()};
+                .configuration_index = payload->configuration_index.get(),
+                .descriptor_type = payload->descriptor_type.get(),
+                .descriptor_index = payload->descriptor_index.get()},
+        .name_index = payload->name_index.get()};
 
     AtdeccString name{};
-    span_copy(make_span(name.value), make_const_span(payload.name));
+    span_copy(make_span(name.value), make_const_span(payload->name));
 
     return handler_->on_set_name(DescriptorId{.ref = ref.descriptor, .symbol = symbol_for(ref.descriptor)}, ref.name_index, name);
 }
