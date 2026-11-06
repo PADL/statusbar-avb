@@ -665,11 +665,13 @@ class MsrpHandler
         }
     }
 
-    /// Every listener that is declared, withdrawn (withdraw_all).
+    /// Every listener withdrawn (withdraw_all); one still Waiting was never declared.
     void withdraw_listeners(TimePoint now)
     {
         for (auto& stream : listener_streams_) {
-            if (stream.state != ListenerReservationState::Idle && stream.state != ListenerReservationState::Waiting) {
+            if (stream.state == ListenerReservationState::Waiting) {
+                stream.state = ListenerReservationState::Idle;  // recorded, never declared
+            } else if (stream.state != ListenerReservationState::Idle) {
                 stream.state = ListenerReservationState::Idle;
                 (void)participant_.withdraw_listener(stream.stream_id, now);
             }
