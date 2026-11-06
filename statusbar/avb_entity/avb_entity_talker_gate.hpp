@@ -133,9 +133,10 @@ struct TalkerGate
     /// Listener Ready now, or seen within GRACE of @p now (recorded here). Media-timer thread.
     [[nodiscard]] auto listener_ready_within_grace(uint16_t idx, RawTimePoint now) noexcept -> bool;
 
-    /// Media-timer thread only: the wake each stream's declaration was last seen at, and the
-    /// readies_ and withdrawals_ counts it was seen under.
+    /// Media-timer thread only: the wake each stream's declaration was last seen at, the wake the
+    /// gate was last asked at, and the readies_ and withdrawals_ counts seen then.
     std::array<RawTimePoint, STREAM_COUNT> last_seen_ready_ = never_seen();
+    std::array<RawTimePoint, STREAM_COUNT> last_wake_ = never_seen();
     std::array<uint32_t, STREAM_COUNT> seen_readies_{};
     std::array<uint32_t, STREAM_COUNT> seen_withdrawals_{};
 };
