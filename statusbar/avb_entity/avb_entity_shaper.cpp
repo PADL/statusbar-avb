@@ -244,7 +244,7 @@ struct ClassLoad
     ClassLoad load{};
     for (auto const& tspec : streams) {
         load.idleslope += stream_bandwidth_kbps(tspec, intervals_per_sec);
-        load.max_frame = std::max(load.max_frame, wire_frame_size(tspec.max_frame_size));
+        load.max_frame = std::max(load.max_frame, wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes));
     }
     return load;
 }
@@ -1109,7 +1109,7 @@ void EntityShaper::program_admitted() noexcept
     for (uint16_t const index : admitted_) {
         for (auto const& spec : kit_.talker_specs()) {
             if (spec.index == index) {
-                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
+                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec, kit_.host().components().profile));
             }
         }
     }
