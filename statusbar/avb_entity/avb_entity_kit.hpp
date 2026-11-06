@@ -175,21 +175,16 @@ class AvbEntityKit
 
     // --- Media-thread (RT) calls ----------------------------------------------
 
-    /// Whether talker stream @p idx transmits this tick: admitted (or gating off),
-    /// its MAAP address ready in "maap" mode, and not STOP_STREAMING'd.
-    /// The gate runs on the steady clock until it moves to the wake's RAW time.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const /*now*/) const noexcept
+    /// Whether talker stream @p idx transmits at the media wake told as @p now
+    /// (CLOCK_MONOTONIC_RAW): admitted (or gating off), its MAAP address ready in
+    /// "maap" mode, and not STOP_STREAMING'd.
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
         -> bool
-    {
-        return talker_should_transmit(idx, steady_now_ns());
-    }
-    /// The same at steady-clock @p now_ns.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
     {
         if (!maap_.ready() || talker_->stream_stopped(idx)) {
             return false;
         }
-        return gate_.should_transmit(idx, now_ns);
+        return gate_.should_transmit(idx, now);
     }
 
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
@@ -390,6 +385,9 @@ class AvbEntityKit
     /// Whether STREAM_OUTPUT @p idx streams at @p now_ns: it may transmit, or it
     /// declares with a Listener Ready (Failed) registered (Milan v1.2 Section 5.3.7.3).
     [[nodiscard]] auto output_streaming(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+    /// Reactor thread: talker_should_transmit()'s predicate at steady-clock @p now_ns, the
+    /// gate's grace window timed on the reactor's own stamps (TalkerGate::admitted).
+    [[nodiscard]] auto talker_admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
     // --- Persistent state (docs/PERSISTENT_STATE.md) -----------------------------
 
