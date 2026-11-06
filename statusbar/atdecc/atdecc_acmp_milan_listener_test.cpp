@@ -1,9 +1,9 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// Unit tests for the Milan listener's sink state machine (Milan v1.2 Section 5.5.3, Table 5.30:
+// Unit tests for the Milan listener's sink state machine (Milan v1.3 Section 5.5.3, Table 5.31:
 // one test per implemented cell, grouped by state), its per-sink ADP discovery (Section 5.6.4)
-// and the response tables 5.27 and 5.31-5.39 field by field.
+// and the response tables 5.27 and 5.32-5.44 field by field; the Milan v1.3 additions last.
 
 #include "statusbar/atdecc/atdecc_acmp_milan_listener.hpp"
 
@@ -1229,6 +1229,101 @@ TEST(acmp_milan_listener, status_notifications_follow_what_get_stream_info_shows
     f.status_changes.clear();
     f.bind(0, OTHER_TALKER, 4);
     EXPECT_EQ(f.status_changes.size(), size_t{1});
+}
+
+//
+// Milan v1.3
+//
+
+// Section 5.6.4.5.2: another current_configuration_index from the discovered talker is a
+// configuration change: DEPARTED then DISCOVERED, as a restart (a probing sink probes again; a
+// settled one only notes it, Sections 5.5.3.6.40-41). The index is compared only while both
+// advertisements mark it valid (IEEE 1722.1-2021 Clause 6.2.1.10: the capability may come and go)
+TEST(acmp_milan_listener, a_talker_configuration_change_is_a_departure)
+{
+    Fixture f;
+    f.bind();  // PRB_W_RESP
+    auto with_config = [&f](uint32_t const index, uint16_t const configuration) {
+        auto du = f.adp(index);
+        du.entity_capabilities = entity_capabilities::AEM_CONFIGURATION_INDEX_VALID;
+        du.current_configuration_index = configuration;
+        f.l.receive_adp(du, GM, 0, f.now);
+    };
+    with_config(10, 0);
+    with_config(11, 0);  // the same configuration, moving forward: nothing
+    EXPECT_TRUE(f.state() == State::prb_w_resp);
+    f.discover(12);  // the capability cleared, and back: not a change
+    EXPECT_FALSE(f.sink().configuration_index.has_value());
+    EXPECT_TRUE(f.state() == State::prb_w_resp);
+    with_config(13, 0);
+    EXPECT_TRUE(f.state() == State::prb_w_resp);
+    with_config(14, 1);
+    EXPECT_TRUE(f.state() == State::prb_w_delay);  // departed, then discovered
+    EXPECT_TRUE(f.sink().configuration_index == uint16_t{1});
+    // A settled sink notes the change and stays settled
+    Fixture g;
+    g.settle();
+    auto settled_with_config = [&g](uint32_t const index, uint16_t const configuration) {
+        auto du = g.adp(index);
+        du.entity_capabilities = entity_capabilities::AEM_CONFIGURATION_INDEX_VALID;
+        du.current_configuration_index = configuration;
+        g.l.receive_adp(du, GM, 0, g.now);
+    };
+    settled_with_config(10, 0);
+    settled_with_config(11, 1);
+    EXPECT_TRUE(g.state() == State::settled_no_rsv && g.sink().discovered);
+}
+
+// Section 5.5.3.2: BIND_STREAM and UNBIND_STREAM drive the sink as BIND_RX and UNBIND_RX, the
+// response through the reply (before the probe), never as ACMP
+TEST(acmp_milan_listener, mvu_binding_replies_through_its_own_path)
+{
+    Fixture f;
+    std::vector<uint8_t> replies;
+    size_t sent_at_reply = 99;
+    MilanListener::ReplyFn const reply = [&](uint8_t const status) {
+        replies.push_back(status);
+        sent_at_reply = f.sent.size();
+    };
+    MilanBindRequest const request{
+        .controller_entity_id = CONTROLLER, .talker_entity_id = TALKER, .talker_unique_id = 3, .streaming_wait = true};
+    EXPECT_TRUE(f.l.bind_stream(SINK, request, f.now, reply));
+    EXPECT_EQ(replies, std::vector<uint8_t>{ACMP_STATUS_SUCCESS});
+    EXPECT_EQ(sent_at_reply, size_t{0});
+    EXPECT_EQ(f.sent.size(), size_t{1});
+    EXPECT_EQ(f.sent[0].message_type(), ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
+    EXPECT_TRUE(f.state() == State::prb_w_resp);
+    EXPECT_FALSE(f.sink().binding.started);
+    EXPECT_FALSE(f.l.bind_stream(2, request, f.now, reply));  // no such sink: no reply
+    EXPECT_EQ(replies.size(), size_t{1});
+
+    f.locked_by = OTHER_CONTROLLER;
+    EXPECT_TRUE(f.l.unbind_stream(SINK, CONTROLLER, f.now, reply));
+    EXPECT_EQ(replies.back(), ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
+    EXPECT_TRUE(f.sink().bound());
+    f.locked_by = Eui64{};
+    f.sent.clear();
+    EXPECT_TRUE(f.l.unbind_stream(SINK, CONTROLLER, f.now, reply));
+    EXPECT_EQ(replies.back(), ACMP_STATUS_SUCCESS);
+    EXPECT_FALSE(f.sink().bound());
+    EXPECT_TRUE(f.sent.empty());
+}
+
+// Table 5.21: the info-ex hook follows the talker, the probing and ACMP statuses and the
+// registration, not the started state
+TEST(acmp_milan_listener, info_ex_notifications_follow_what_it_reports)
+{
+    Fixture f;
+    std::vector<uint16_t> changes;
+    f.l.set_on_info_ex_changed([&changes](uint16_t const sink) { changes.push_back(sink); });
+    f.bind();
+    EXPECT_EQ(changes.size(), size_t{1});
+    EXPECT_TRUE(f.l.set_started(SINK, false));
+    EXPECT_EQ(changes.size(), size_t{1});
+    f.respond();  // settled: probing COMPLETED
+    EXPECT_EQ(changes.size(), size_t{2});
+    f.l.set_registration(SINK, MilanTalkerRegistration::advertise, f.now);
+    EXPECT_EQ(changes.size(), size_t{3});
 }
 
 TEST_MAIN(statusbar_atdecc, atdecc_acmp_milan_listener_test)
