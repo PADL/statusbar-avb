@@ -135,7 +135,7 @@ TEST(talker_gate, a_talker_withdrawal_closes_the_media_side_at_once)
 }
 
 // A Ready registered and withdrawn between two wakes still opens the media side's grace, as it
-// does the reactor's.
+// does the reactor's, timed from the earlier wake: the latest instant known to precede it.
 TEST(talker_gate, a_ready_set_and_cleared_between_wakes_opens_the_media_grace)
 {
     TalkerGate gate{true, lookup};
@@ -143,7 +143,18 @@ TEST(talker_gate, a_ready_set_and_cleared_between_wakes_opens_the_media_grace)
     gate.note_listener_ready(sid(0x100), true, T0);
     gate.note_listener_ready(sid(0x100), false, T0 + 1);
     EXPECT_TRUE(gate.should_transmit(0, RAW0 + std::chrono::milliseconds{1}));
-    EXPECT_FALSE(gate.should_transmit(0, RAW0 + std::chrono::milliseconds{1} + TalkerGate::GRACE));
+    EXPECT_FALSE(gate.should_transmit(0, RAW0 + TalkerGate::GRACE));
+}
+
+// The gate unasked for longer than the grace (no media ticks: PTP unlocked) does not reopen on a
+// Ready that came and went meanwhile.
+TEST(talker_gate, a_ready_missed_over_a_long_gap_opens_nothing)
+{
+    TalkerGate gate{true, lookup};
+    EXPECT_FALSE(gate.should_transmit(0, RAW0));
+    gate.note_listener_ready(sid(0x100), true, T0);
+    gate.note_listener_ready(sid(0x100), false, T0 + 1);
+    EXPECT_FALSE(gate.should_transmit(0, RAW0 + std::chrono::seconds{10}));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_gate_test)
