@@ -229,7 +229,7 @@ void with_kit(uint16_t const inputs, Body const& body)
     EntityIdentityDescriptorHandler handler{
         *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit vlan", std::nullopt, /*patch_avb_interface=*/false};
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     AvbEntityKit kit{
         config,
         handler,
