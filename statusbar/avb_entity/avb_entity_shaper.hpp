@@ -166,24 +166,25 @@ inline constexpr uint32_t MIN_L2_FRAME = 68;
 inline constexpr uint32_t CLASS_A_INTERVALS_PER_SEC = 8000;
 inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
 
-/// The octets a stream frame occupies on the wire (Milan v1.2 Table 4.4): F = MaxFrameSize + 22,
-/// at least 68, plus 20. The clock-drift byte is already in MaxFrameSize (srp_max_frame_size).
-[[nodiscard]] constexpr auto wire_frame_size(uint16_t const max_frame_size) noexcept -> uint32_t
+/// The octets a stream frame occupies on the wire (Milan v1.3 Table 4.4): F = MaxFrameSize + 22,
+/// at least 68, plus @p clock_drift_bytes (v1.3's step 3; v1.2 has it in MaxFrameSize), plus 20.
+[[nodiscard]] constexpr auto wire_frame_size(uint16_t const max_frame_size, uint16_t const clock_drift_bytes = 0) noexcept
+    -> uint32_t
 {
     uint32_t frame = uint32_t{max_frame_size} + VLAN_OVERHEAD + L2_OVERHEAD;
     if (frame < MIN_L2_FRAME) {
         frame = MIN_L2_FRAME;
     }
-    return frame + L1_OVERHEAD;
+    return frame + clock_drift_bytes + L1_OVERHEAD;
 }
 
 /// A stream's reserved bandwidth in kbit/s, rounded up:
 /// wire_frame_size * 8 * max_interval_frames * @p intervals_per_sec / 1000
-/// (Milan v1.2 Table 4.4's "Bandwidth (kbps)" column at class A).
+/// (Milan v1.3 Table 4.4's "Bandwidth (kbps)" column at class A).
 [[nodiscard]] constexpr auto stream_bandwidth_kbps(TSpec const& tspec, uint32_t const intervals_per_sec) noexcept -> uint32_t
 {
-    uint64_t const bits_per_sec =
-        uint64_t{wire_frame_size(tspec.max_frame_size)} * 8U * tspec.max_interval_frames * intervals_per_sec;
+    uint64_t const bits_per_sec = uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * 8U *
+        tspec.max_interval_frames * intervals_per_sec;
     return static_cast<uint32_t>((bits_per_sec + 999U) / 1000U);
 }
 

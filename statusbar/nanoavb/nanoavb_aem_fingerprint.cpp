@@ -99,18 +99,14 @@ std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors)
     return out;
 }
 
-std::string aem_fingerprint(std::span<std::uint8_t const> const blob)
+std::string aem_fingerprint(atdecc::aem::DescriptorStorage const& storage)
 {
-    auto const storage = atdecc::aem::DescriptorStorage::create(blob);
-    if (!storage) {
-        return {};
-    }
     std::vector<AemRawDescriptor> descriptors;
-    storage->for_each_descriptor([&descriptors](
-                                     std::uint16_t const configuration,
-                                     std::uint16_t const type,
-                                     std::uint16_t const index,
-                                     std::span<std::uint8_t const> const bytes) {
+    storage.for_each_descriptor([&descriptors](
+                                    std::uint16_t const configuration,
+                                    std::uint16_t const type,
+                                    std::uint16_t const index,
+                                    std::span<std::uint8_t const> const bytes) {
         descriptors.push_back(
             {.configuration = configuration,
              .descriptor_type = type,
@@ -118,6 +114,12 @@ std::string aem_fingerprint(std::span<std::uint8_t const> const blob)
              .bytes = {bytes.begin(), bytes.end()}});
     });
     return aem_fingerprint(descriptors);
+}
+
+std::string aem_fingerprint(std::span<std::uint8_t const> const blob)
+{
+    auto const storage = atdecc::aem::DescriptorStorage::create(blob);
+    return storage ? aem_fingerprint(*storage) : std::string{};
 }
 
 }  // namespace statusbar::nanoavb
