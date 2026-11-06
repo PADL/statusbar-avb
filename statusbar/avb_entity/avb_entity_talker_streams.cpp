@@ -612,8 +612,10 @@ void TalkerStreams::close_tx() noexcept
     slots_.clear();
     port_ = nullptr;
     external_kick_ = false;
-    for (auto& stopped : stream_stopped_) {
-        stopped.store(false, std::memory_order_release);
+    for (size_t idx = 0; idx < MAX_ENTITY_STREAMS; ++idx) {
+        stream_stopped_[idx].store(false, std::memory_order_release);
+        crf_open_[idx].store(false, std::memory_order_release);  // a toggle is refused until a CRF opens here again
+        mr_pending_[idx].store(false, std::memory_order_release);
     }
 }
 
