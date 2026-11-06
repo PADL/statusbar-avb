@@ -94,6 +94,27 @@ TEST(stream_port, a_port_without_an_xdp_socket_gives_no_launch_time)
     EXPECT_EQ(port.launch_order().launched_late(), uint64_t{0});
 }
 
+// A PHC that gives no reading (0) tells the order nothing: a timed frame keeps its place after the
+// frame before it (held at the last launch time; the NIC sends it at once, in order), an untimed
+// one stays untimed, nothing is counted; a reading back, the order continues.
+TEST(stream_port, a_stalled_phc_holds_frames_in_order)
+{
+    StreamPort port;
+    EXPECT_TRUE(port.open_test({.hardware_address = ieee::Eui48{0x02, 0, 0, 0, 0, 2}}, /*launch_time=*/true).has_value());
+    int64_t phc = 5'000'000'000;
+    port.set_phc_clock([&phc] { return phc; });
+    EXPECT_EQ(port.launch_time(5'000'500'000), int64_t{5'000'500'000});
+    phc = 0;
+    EXPECT_EQ(port.launch_time(5'000'400'000), int64_t{5'000'500'000});  // behind the last: held, in order
+    EXPECT_EQ(port.launch_time(5'000'600'000), int64_t{5'000'600'000});
+    EXPECT_EQ(port.launch_time(0), int64_t{0});
+    EXPECT_EQ(port.launch_order().steps(), uint64_t{0});
+    EXPECT_EQ(port.launch_order().clamped(), uint64_t{0});
+    phc = 5'000'700'000;
+    EXPECT_EQ(port.launch_time(5'000'100'000), int64_t{5'000'600'000});  // held and, with a reading, counted
+    EXPECT_EQ(port.launch_order().clamped(), uint64_t{1});
+}
+
 // A counter reset asked for from any thread zeroes the launch order's counters at the next
 // end_cycle(), on the thread that drives the port, and not before.
 TEST(stream_port, a_counter_reset_applies_at_the_end_of_the_cycle)
