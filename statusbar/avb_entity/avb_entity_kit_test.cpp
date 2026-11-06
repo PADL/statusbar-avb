@@ -1750,14 +1750,30 @@ TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
     };
     drain();
     sent = 0;
+    auto const frame_size = [&](uint16_t const idx) { return msrp.get_talker_stream(m.sid(idx))->max_frame_size; };
+    uint16_t const before0 = frame_size(0);
+    uint16_t const before1 = frame_size(1);
     EXPECT_EQ(
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
         atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.pending_refresh().test(0) && !m.kit.pending_refresh().test(1));
     EXPECT_EQ(sent, size_t{0});  // asked for, run at the next pass
+    EXPECT_EQ(frame_size(0), before0);
     drain();
     EXPECT_TRUE(sent > 0);
+    EXPECT_TRUE(m.kit.pending_refresh().none());
     EXPECT_TRUE(m.advertising(0) && m.advertising(1));
     EXPECT_EQ(m.kit.talker_specs()[0].format_word, base_format(48000, 8));
+    EXPECT_TRUE(frame_size(0) != before0);  // output 0's TSpec re-declared (INT24 -> INT32 samples)
+    EXPECT_EQ(frame_size(1), before1);      // output 1's as it was
+
+    // A re-declaration asked for just before a stop is not replayed after the next start.
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_48K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.pending_refresh().test(0));
+    EXPECT_TRUE(m.kit.stop().has_value());
+    EXPECT_TRUE(m.kit.pending_refresh().none());
 }
 
 // SET_STREAM_FORMAT takes a listed format of the stream's kind at the kit's

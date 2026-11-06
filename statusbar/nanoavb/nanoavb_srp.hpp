@@ -417,6 +417,7 @@ class MsrpHandler
     /// index. Errors: NanoAvbError::SrpRegistrationFailed (table full), the participant's.
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
     {
+        withdrawn_ = false;
         auto const idx = stream_slot(talker_streams_, info.stream_id, TalkerReservationState::Idle);
         if (!idx) {
             return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
@@ -446,6 +447,7 @@ class MsrpHandler
     /// domain boundary. Idempotent.
     [[nodiscard]] auto declare_domain(TimePoint now) -> Status
     {
+        bool const resumed = std::exchange(withdrawn_, false);
         if (!started_) {
             participant_.start(now);
             started_ = true;
@@ -454,7 +456,11 @@ class MsrpHandler
         domain.sr_class_id = domain_.sr_class_id;  // 6 for Class A, 5 for Class B
         domain.sr_class_priority = domain_.sr_class_priority;
         domain.sr_class_vid = domain_.sr_class_vid;
-        return participant_.declare_domain(domain, now);
+        auto status = participant_.declare_domain(domain, now);
+        if (resumed) {
+            follow_waiting_listeners();
+        }
+        return status;
     }
 
     /// The link is back after a down (MsrpParticipant::rejoin()).
@@ -509,6 +515,7 @@ class MsrpHandler
     /// nothing sent.
     void withdraw_all(TimePoint now)
     {
+        withdrawn_ = true;
         if (!started_) {
             return;
         }
@@ -604,6 +611,7 @@ class MsrpHandler
     /// registered: the stream is attached in Waiting.
     [[nodiscard]] auto listener_attach(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>
     {
+        withdrawn_ = false;
         if (talker_advertise_registered(stream_id)) {
             if (auto const r = listener_ready(stream_id, now); !r) {
                 return failure(r.error());
@@ -665,15 +673,24 @@ class MsrpHandler
         }
     }
 
-    /// Every listener withdrawn (withdraw_all); one still Waiting was never declared.
+    /// Every listener that is declared, withdrawn (withdraw_all); one still Waiting stays attached:
+    /// the next run declares it when its talker is registered (follow_waiting_listeners).
     void withdraw_listeners(TimePoint now)
     {
         for (auto& stream : listener_streams_) {
-            if (stream.state == ListenerReservationState::Waiting) {
-                stream.state = ListenerReservationState::Idle;  // recorded, never declared
-            } else if (stream.state != ListenerReservationState::Idle) {
+            if (stream.state != ListenerReservationState::Idle && stream.state != ListenerReservationState::Waiting) {
                 stream.state = ListenerReservationState::Idle;
                 (void)participant_.withdraw_listener(stream.stream_id, now);
+            }
+        }
+    }
+
+    /// A run's start: every Waiting listener re-checked against what the peer registered meanwhile.
+    void follow_waiting_listeners()
+    {
+        for (size_t i = 0; i < listener_streams_.size(); ++i) {
+            if (listener_streams_[i].state == ListenerReservationState::Waiting) {
+                follow_remote_talker(listener_streams_[i].stream_id);
             }
         }
     }
@@ -853,6 +870,9 @@ class MsrpHandler
 
     void follow_remote_talker(tsn::StreamId const& sid)
     {
+        if (withdrawn_) {
+            return;  // between withdraw_all() and the next run: nothing declares
+        }
         for (auto& stream : listener_streams_) {
             if (stream.stream_id != sid) {
                 continue;
@@ -897,6 +917,7 @@ class MsrpHandler
     statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> on_remote_talker_{};
     bool listener_waits_for_talker_{false};
     bool started_{false};
+    bool withdrawn_{false};  ///< withdraw_all() ran and no declaration has begun a run since
 };
 
 }  // namespace statusbar::nanoavb
