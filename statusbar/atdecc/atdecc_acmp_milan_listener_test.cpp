@@ -983,10 +983,9 @@ TEST(acmp_milan_listener, the_talker_registered_while_settled_stops_the_no_talke
 TEST(acmp_milan_listener, a_registration_reported_from_the_settle_hook_is_kept)
 {
     Fixture f;
-    f.l.set_on_settled(
-        [&f](uint16_t const sink, MilanSinkStream const&, sm::TimePoint const now) {
-            f.l.set_registration(sink, MilanTalkerRegistration::failed, now);
-        });
+    f.l.set_on_settled([&f](uint16_t const sink, MilanSinkStream const&, sm::TimePoint const now) {
+        f.l.set_registration(sink, MilanTalkerRegistration::failed, now);
+    });
     f.bind();
     f.respond();
     EXPECT_TRUE(f.state() == State::settled_rsv_ok);
