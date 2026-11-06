@@ -993,7 +993,7 @@ TEST(nanoavb_srp_msrp, withdraw_all_sends_the_leaves_at_once)
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.declare_domain(now).has_value());
     EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};  // past JoinTime (IEEE 802.1Q-2018 Table 10-7)
     handler.tick(now);
     EXPECT_TRUE(sent > 0);
 
@@ -1025,7 +1025,7 @@ TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
                         }}};
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.register_vlan(2, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};  // past JoinTime (IEEE 802.1Q-2018 Table 10-7)
     handler.tick(now);
     EXPECT_TRUE(sent > 0);
 
