@@ -1468,6 +1468,12 @@ TEST(entity_name, get_set_round_trip_and_callback_and_read_descriptor)
     EXPECT_EQ(get1.status, AEM_STATUS_SUCCESS);
     EXPECT_EQ(name_from_response(get1.bytes), std::string{"LiveName"});
 
+    // A name that is not well-formed UTF-8 (an ATDECC string is) is refused, the name in force kept.
+    auto const malformed =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "Caf\xC3\xA9 \x80"));
+    EXPECT_EQ(malformed.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"LiveName"});
+
     // READ_DESCRIPTOR of the ENTITY now reflects the updated name too.
     AemEntityModel const model{handler, *storage_result};
     std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> dbuf{};

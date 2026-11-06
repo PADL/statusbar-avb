@@ -8,6 +8,7 @@
 /// EntityUdptunBridge can hold a config_ ref without an include cycle.
 
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
@@ -192,10 +193,18 @@ struct AvbEntityAudioIOConfig
     /// is deferred until there is an IP-stream use case. Default "2016".
     std::string atdecc_version{"2016"};
 
-    /// The ATDECC profile: true Milan v1.2, false classic IEEE 1722.1. Unset takes
+    /// The ATDECC profile: true Milan, false classic IEEE 1722.1. Unset takes
     /// the model's (Milan when it says nothing). Under Milan, ACQUIRE_ENTITY answers
-    /// NOT_SUPPORTED (Milan v1.2 Section 5.4.2.1).
+    /// NOT_SUPPORTED (Milan v1.3 Section 5.4.2.1).
     std::optional<bool> milan{};
+
+    /// The Milan version a Milan entity implements (GET_MILAN_INFO's specification_version and
+    /// every layout that differs; nanoavb::MilanVersion). Default Milan v1.3.
+    nanoavb::MilanVersion milan_version{nanoavb::MilanVersion::v1_3};
+
+    /// The application reports each output's signal presence (AvbEntityKit::set_output_signal_presence):
+    /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan v1.3 only.
+    bool signal_presence{false};
 
     /// Each CLOCK_DOMAIN's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1), by
     /// index; the last also serves the domains after it, extras are ignored. Empty keeps the MVU
