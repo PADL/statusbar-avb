@@ -898,14 +898,15 @@ void AvbEntityKit::note_listener_ready(
     }
     // Any Listener registration keeps the stream declared (Section 4.3.3.1),
     // and GET_STREAM_INFO reports REGISTERING / REGISTERING_FAILED.
-    if (idx && refresh_talker_listener(*idx, now_ns)) {
-        bool const was_declared = declarations_.declared(*idx);
-        update_talker_declarations(now_ns, gate_now, RefreshSet{});
-        if (declarations_.declared(*idx) == was_declared) {
-            notify_talker_stream_info(*idx);  // else the (un)declaration notified
-        }
+    if (!idx || !refresh_talker_listener(*idx, now_ns)) {
+        note_admission(gate_now);
+        return;
     }
-    note_admission(gate_now);
+    bool const was_declared = declarations_.declared(*idx);
+    update_talker_declarations(now_ns, gate_now, RefreshSet{});  // ends with the admission
+    if (declarations_.declared(*idx) == was_declared) {
+        notify_talker_stream_info(*idx);  // else the (un)declaration notified
+    }
 }
 
 auto AvbEntityKit::is_talker_index(uint16_t const idx) const noexcept -> bool
@@ -1811,6 +1812,7 @@ void AvbEntityKit::close_data_plane()
 #endif
     rx_static_groups_.clear();
     close_streams();
+    refresh_pending_.reset();          // a re-declaration asked for in this run: the next run declares afresh
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {
         persist();  // a listener goal change of this pass
