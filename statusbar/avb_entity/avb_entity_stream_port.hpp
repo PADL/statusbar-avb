@@ -246,6 +246,7 @@ class StreamPort
     /// The port. Take a Guard around any use from a thread that is not the
     /// only one using it.
     [[nodiscard]] auto port() noexcept -> net::AnyEthernetPort& { return port_; }
+    [[nodiscard]] auto port() const noexcept -> net::AnyEthernetPort const& { return port_; }
 
     /// The xdp backend's socket, for what only it offers (busy poll, counters,
     /// pinning); nullptr on another backend.

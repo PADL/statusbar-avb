@@ -392,6 +392,8 @@ struct ListenerStreams final : StreamRxFrameHolder
     [[nodiscard]] auto receive_in_place(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> bool;
     /// @p rx decoded where the port holds it, then released unless the timed sink kept it.
     void decode_in_place(net::EthernetRxSlot const& rx, int64_t gptp_now_ns);
+    /// The port's open generation, held_frames_ restarted when it moved on. The RX thread.
+    [[nodiscard]] auto follow_generation() noexcept -> uint32_t;
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 for a
     /// frame that was not AVTP (taken and released all the same), nullopt
     /// when nothing was queued. Holds the port guard for exactly that - the

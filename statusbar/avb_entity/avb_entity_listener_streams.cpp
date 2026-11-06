@@ -549,17 +549,23 @@ auto ListenerStreams::hold() noexcept -> std::optional<uint64_t>
     if (!in_place_frame_ || in_place_kept_) {
         return std::nullopt;  // not decoded in place, or one packet's frame kept twice
     }
-    uint32_t const generation = port_->generation();
-    if (generation != held_generation_) {
-        held_frames_ = 0;  // a reopened port's frames are all its own
-        held_generation_ = generation;
-    }
+    uint32_t const generation = follow_generation();
     if (held_frames_ >= port_->rx_hold_frames()) {
         return std::nullopt;  // the port's share kept
     }
     in_place_kept_ = true;
     ++held_frames_;
     return *in_place_frame_ | (uint64_t{static_cast<uint16_t>(generation)} << HOLD_GENERATION_SHIFT);
+}
+
+auto ListenerStreams::follow_generation() noexcept -> uint32_t
+{
+    uint32_t const generation = port_->generation();
+    if (generation != held_generation_) {
+        held_frames_ = 0;  // a reopened port's frames are all its own
+        held_generation_ = generation;
+    }
+    return generation;
 }
 
 void ListenerStreams::release(uint64_t const token) noexcept

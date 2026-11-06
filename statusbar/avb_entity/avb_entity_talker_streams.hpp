@@ -257,10 +257,9 @@ struct TalkerStreams
         uint16_t frames,
         StreamRawRenderFn const& render,
         uint64_t launch_time_ns = 0) -> bool;
-    /// As transmit_aaf_raw(), the payload @p payload's buffers sent where they lie (one frame of the header and
-    /// them: net::AnyEthernetPort::tx_commit_gather()), exactly @p frames frames of the slot's format. Nothing is
-    /// sent, nor the sequence advanced, where transmit_aaf_raw() would send nothing, on a serialized port, or where
-    /// the port cannot send that many buffers a frame. Media-timer thread.
+    /// As transmit_aaf_raw(), the payload (@p frames frames) @p payload's buffers sent where they lie
+    /// (net::AnyEthernetPort::tx_commit_gather()). Nothing is sent, nor the sequence advanced, where transmit_aaf_raw()
+    /// sends nothing, on a serialized port, or past the port's buffers a frame. Media-timer thread.
     [[nodiscard]] auto transmit_aaf_gathered(
         TalkerStreamSlot& slot,
         uint64_t pts_ns,
@@ -373,6 +372,8 @@ struct TalkerStreams
         TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length, uint64_t launch_time_ns) -> bool;
     /// One sent AVTPDU @p frame counted on @p slot.
     void count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> frame) noexcept;
+    /// A gathered frame, @p head then @p payload's buffers, into the TX capture when one records.
+    void record_gathered(std::span<uint8_t const> head, std::span<std::span<uint8_t const> const> payload);
     /// A port frame with @p slot's stream header written and room for a @p pdu_header-octet AVTPDU header after it,
     /// and the stream header's length; nullopt when the port has none (or too small: then given back).
     [[nodiscard]] auto start_header_frame(TalkerStreamSlot const& slot, size_t pdu_header) noexcept
