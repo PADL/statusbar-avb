@@ -576,12 +576,20 @@ class AvbEntityKit
     /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
 
-    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at
-    /// the class A cadence, one frame per interval (also the shaper's input).
-    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
+    /// The MSRP TSpec advertised for talker stream @p spec, one frame per class A interval: Milan v1.3
+    /// Table 4.4's frame and drift byte for a @p milan entity, else srp_max_frame_size. The shaper's too.
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec, bool const milan) noexcept -> TSpec
     {
-        return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+        if (!milan) {
+            return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+        }
+        return TSpec{
+            .max_frame_size = milan_srp_max_frame_size(spec.format),
+            .max_interval_frames = 1,
+            .clock_drift_bytes = spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
     }
+    /// talker_tspec under this entity's profile (milan_profile()).
+    [[nodiscard]] auto talker_tspec(StreamSpec const& spec) const noexcept -> TSpec { return talker_tspec(spec, milan_profile()); }
 
     // --- Stream socket health (after start()) ---------------------------------
     /// Why start() could not open the stream TX socket (empty: it opened). The
@@ -1036,6 +1044,8 @@ class AvbEntityKit
     // Construction phases
     //
     /// The talker streams' ACMP identities, address validity and presentation offsets.
+    /// The configured Milan version and GET_MILAN_INFO features (construction).
+    void configure_milan();
     void configure_talker_streams();
     /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
     void note_talker_interface(uint16_t index);

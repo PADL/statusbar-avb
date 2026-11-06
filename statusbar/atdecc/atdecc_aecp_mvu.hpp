@@ -17,7 +17,8 @@
 /// (5.4.4.8). What they mean to a sink is in atdecc_milan_mvu_stream_input.hpp.
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
-#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/atdecc/atdecc_aem_command.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 
 #include <compare>
@@ -441,12 +442,15 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::M
 {};
 
 //
-// SYSTEM_UNIQUE_ID and MEDIA_CLOCK_REFERENCE_INFO - 5.4.4.2 to 5.4.4.5
+// SYSTEM_UNIQUE_ID, MEDIA_CLOCK_REFERENCE_INFO and the binding commands - 5.4.4.2 to 5.4.4.8
 //
 
 namespace statusbar::atdecc {
 
-/// SET_MEDIA_CLOCK_REFERENCE_INFO flags (Table 5.21), MSB-numbered as above
+/// BIND_STREAM flags (Milan v1.3 Table 5.19): set, the STREAM_INPUT is bound stopped.
+constexpr uint16_t MVU_BIND_FLAGS_STREAMING_WAIT = 0x0001;
+
+/// SET_MEDIA_CLOCK_REFERENCE_INFO flags (Milan v1.3 Table 5.18), MSB-numbered as above
 constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID = 0x01;
 constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID = 0x02;
 /// Every SET_MEDIA_CLOCK_REFERENCE_INFO flag: a response carries the bits the
@@ -503,8 +507,8 @@ struct MvuSystemUniqueIdPayload
 
 static_assert(sizeof(MvuSystemUniqueIdPayload) == 6, "MvuSystemUniqueIdPayload must be 6 bytes");
 
-/// The v1.3 SET_SYSTEM_UNIQUE_ID command (v1.3 Figure 5.7): a u64 number and a 64-octet name.
-/// A v1.2 entity accepts the number when it fits a u32 and answers in the v1.2 layout.
+/// SET_SYSTEM_UNIQUE_ID command and response, GET_SYSTEM_UNIQUE_ID response (Milan v1.3
+/// Figure 5.7): a u64 number and a 64-octet name. A v1.2 entity accepts a number that fits its u32.
 struct MvuSystemUniqueIdPayloadV13
 {
     static constexpr size_t LENGTH = 74;
@@ -569,6 +573,83 @@ struct MvuMediaClockReferenceInfoPayload
 
 static_assert(sizeof(MvuMediaClockReferenceInfoPayload) == 74, "MvuMediaClockReferenceInfoPayload must be 74 bytes");
 
+/// BIND_STREAM command and response (Milan v1.3 Figure 5.10)
+struct MvuBindStreamPayload
+{
+    static constexpr size_t LENGTH = 18;
+
+    /// Bytes 30-31: flags (MVU_BIND_FLAGS_*)
+    doublet_t flags{0};
+
+    /// Bytes 32-35: the STREAM_INPUT to bind (descriptor_index = ACMP listener_unique_id)
+    doublet_t descriptor_type{0};
+    doublet_t descriptor_index{0};
+
+    /// Bytes 36-43: the talker
+    ieee::Eui64 talker_entity_id{};
+
+    /// Bytes 44-45: the talker's STREAM_OUTPUT (ACMP talker_unique_id)
+    doublet_t talker_stream_index{0};
+
+    /// Bytes 46-47: reserved
+    doublet_t reserved{0};
+
+    auto operator<=>(MvuBindStreamPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuBindStreamPayload) == 18, "MvuBindStreamPayload must be 18 bytes");
+static_assert(offsetof(MvuBindStreamPayload, talker_entity_id) == 6);
+
+/// UNBIND_STREAM command and response, GET_STREAM_INPUT_INFO_EX command (Milan v1.3 Figure 5.11)
+struct MvuStreamInputPayload
+{
+    static constexpr size_t LENGTH = 6;
+
+    /// Bytes 30-31: reserved
+    doublet_t reserved{0};
+
+    /// Bytes 32-35: the STREAM_INPUT
+    doublet_t descriptor_type{0};
+    doublet_t descriptor_index{0};
+
+    auto operator<=>(MvuStreamInputPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuStreamInputPayload) == 6, "MvuStreamInputPayload must be 6 bytes");
+
+/// GET_STREAM_INPUT_INFO_EX response (Milan v1.3 Figure 5.12)
+struct MvuStreamInputInfoExPayload
+{
+    static constexpr size_t LENGTH = 18;
+
+    /// Bytes 30-35: as MvuStreamInputPayload
+    MvuStreamInputPayload input{};
+
+    /// Bytes 36-43: the talker the input is bound to (0 unbound)
+    ieee::Eui64 talker_entity_id{};
+
+    /// Bytes 44-45: its STREAM_OUTPUT
+    doublet_t talker_unique_id{0};
+
+    /// Byte 46: pbsta[7:5] (Milan v1.3 Table 5.5), acmpsta[4:0] (Section 5.3.8.6)
+    octet_t pbsta_acmpsta{0};
+
+    /// Byte 47: reserved
+    octet_t reserved{0};
+
+    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return aem::probing_status_of(pbsta_acmpsta.get()); }
+    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return aem::acmp_status_of(pbsta_acmpsta.get()); }
+    constexpr void set_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept
+    {
+        pbsta_acmpsta = aem::pack_probing(pbsta, acmpsta);
+    }
+
+    auto operator<=>(MvuStreamInputInfoExPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(MvuStreamInputInfoExPayload) == 18, "MvuStreamInputInfoExPayload must be 18 bytes");
+static_assert(offsetof(MvuStreamInputInfoExPayload, pbsta_acmpsta) == 16);
+
 }  // namespace statusbar::atdecc
 
 // Serialization traits
@@ -590,17 +671,13 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::M
 {};
 
 template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuSystemUniqueIdPayload> : std::true_type
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuBindStreamPayload> : std::true_type
 {};
 
 template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuBindStream> : std::true_type
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuStreamInputPayload> : std::true_type
 {};
 
 template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuStreamInput> : std::true_type
-{};
-
-template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetStreamInputInfoExResponse> : std::true_type
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuStreamInputInfoExPayload> : std::true_type
 {};

@@ -3,19 +3,20 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// Well-formed UTF-8 (RFC 3629 Section 4), which the text of an ATDECC string is (IEEE
-/// 1722.1-2021's 64-octet string fields): what a string a controller sends is checked by.
+/// Well-formed UTF-8 (RFC 3629 Section 4), as every ATDECC string is (IEEE 1722.1-2021 Clause 7.2, the
+/// string fields): what a controller-sent name is refused by, and what persisted text is cut to.
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace statusbar::atdecc {
 
-/// The length of the well-formed UTF-8 sequence at the head of @p text (RFC 3629 Section 4: no
-/// overlong form, no surrogate, nothing past U+10FFFF); 0 for a malformed or cut one, or no text.
+/// The length of the well-formed UTF-8 sequence at the head of @p text (RFC 3629 Section 4: no overlong
+/// form, no surrogate, nothing past U+10FFFF), 0 for a malformed or cut one, or an empty @p text.
 [[nodiscard]] constexpr auto utf8_sequence_length(std::string_view const text) noexcept -> size_t
-{  // NOLINT(statusbar-block-statements) a codec: one case per lead-octet range of RFC 3629 Section 4
+{  // NOLINT(statusbar-block-statements): one case per lead-octet range of RFC 3629 Section 4
     if (text.empty()) {
         return 0;
     }
@@ -41,17 +42,31 @@ namespace statusbar::atdecc {
     return 0;
 }
 
-/// Whether all of @p text is well-formed UTF-8; an empty text is.
-[[nodiscard]] constexpr auto utf8_well_formed(std::string_view text) noexcept -> bool
+/// The well-formed UTF-8 prefix of @p text: up to its first malformed sequence.
+[[nodiscard]] constexpr auto utf8_prefix(std::string_view const text) noexcept -> std::string_view
 {
-    while (!text.empty()) {
-        size_t const n = utf8_sequence_length(text);
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t const n = utf8_sequence_length(text.substr(i));
         if (n == 0) {
-            return false;
+            break;
         }
-        text.remove_prefix(n);
+        i += n;
     }
-    return true;
+    return text.substr(0, i);
+}
+
+/// Whether all of @p text is well-formed UTF-8.
+[[nodiscard]] constexpr auto utf8_well_formed(std::string_view const text) noexcept -> bool
+{
+    return utf8_prefix(text).size() == text.size();
+}
+
+/// The text of an ATDECC string field @p octets (64 octets, NUL padded): up to its first NUL.
+[[nodiscard]] constexpr auto atdecc_string_text(std::span<char const> const octets) noexcept -> std::string_view
+{
+    std::string_view const text{octets.data(), octets.size()};
+    return text.substr(0, text.find('\0'));
 }
 
 }  // namespace statusbar::atdecc
