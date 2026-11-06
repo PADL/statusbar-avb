@@ -2338,6 +2338,43 @@ auto response_sampling_rate(std::span<uint8_t const> bytes) -> uint32_t
 
 }  // namespace
 
+// Milan v1.3 Section 6.6: a listed AAF word with ut set accepts SET_STREAM_FORMAT of every
+// channel count up to its own, nothing else; an authored current_format with ut set is read at
+// its widest (no stream's format is a range) by GET_STREAM_FORMAT and READ_DESCRIPTOR
+TEST(stream_lifecycle, set_stream_format_accepts_any_count_an_up_to_word_lists)
+{
+    auto blob = make_blob_with_stream_output();
+    constexpr uint64_t XF24_48K = 0x0285022006006000ULL;
+    constexpr uint64_t XF24_WIDEST = 0x0205022006006000ULL;
+    constexpr size_t desc_b = 20 + 12;                                   // header, TOC entry
+    constexpr size_t trailer_b = desc_b + DescriptorStream::LENGTH + 8;  // the descriptor, its first format
+    span_store(
+        make_span(blob, {.start = desc_b + offsetof(DescriptorStream, current_format), .length = 8}), ieee::octlet_t{XF24_48K});
+    span_store(make_span(blob, {.start = trailer_b, .length = 8}), ieee::octlet_t{XF24_48K});
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    auto const set = [&cmd_handler](uint64_t const format) {
+        return run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, format)).status;
+    };
+    auto const authored = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(authored.bytes), XF24_WIDEST);
+    AemEntityModel model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0},
+        make_span(buf));
+    DescriptorStream parsed{};
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
+    EXPECT_EQ(parsed.current_format.to_uint64(), XF24_WIDEST);
+    EXPECT_EQ(set(0x0205022003406000ULL), AEM_STATUS_SUCCESS);  // 13 channels
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(get.bytes), uint64_t{0x0205022003406000ULL});
+    EXPECT_EQ(set(0x0205022006406000ULL), atdecc::AEM_STATUS_NOT_SUPPORTED);  // 25
+    EXPECT_EQ(set(XF24_48K), atdecc::AEM_STATUS_NOT_SUPPORTED);
+}
+
 TEST(stream_lifecycle, set_stream_format_validates_and_round_trips)
 {
     auto blob = make_blob_with_stream_output();
