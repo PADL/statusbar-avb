@@ -113,22 +113,30 @@ struct TalkerGate
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even with Listener Ready registered.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
-    /// Talker withdrawals per stream (reactor): the media side forgets its grace on a change.
-    std::array<std::atomic<uint32_t>, STREAM_COUNT> withdrawals_{};
 
   private:
+    /// Per stream, counted by the reactor: Listener Ready registrations, so the media side opens
+    /// its grace on one it did not see set, and Talker withdrawals, on which it forgets it.
+    std::array<std::atomic<uint32_t>, STREAM_COUNT> readies_{};
+    std::array<std::atomic<uint32_t>, STREAM_COUNT> withdrawals_{};
+
     [[nodiscard]] static constexpr auto never_seen() noexcept -> std::array<RawTimePoint, STREAM_COUNT>
     {
         std::array<RawTimePoint, STREAM_COUNT> seen{};
         seen.fill(NEVER);
         return seen;
     }
+    /// Reactor thread: count a Ready for the media side and stamp the reactor's grace.
+    void stamp_ready(uint16_t idx, bool ready, bool was, int64_t now_ns) noexcept;
+    /// Take in the Readies and withdrawals the reactor counted since the last wake. Media-timer thread.
+    void catch_up(uint16_t idx, RawTimePoint now) noexcept;
     /// Listener Ready now, or seen within GRACE of @p now (recorded here). Media-timer thread.
     [[nodiscard]] auto listener_ready_within_grace(uint16_t idx, RawTimePoint now) noexcept -> bool;
 
     /// Media-timer thread only: the wake each stream's declaration was last seen at, and the
-    /// withdrawals_ count it was seen under.
+    /// readies_ and withdrawals_ counts it was seen under.
     std::array<RawTimePoint, STREAM_COUNT> last_seen_ready_ = never_seen();
+    std::array<uint32_t, STREAM_COUNT> seen_readies_{};
     std::array<uint32_t, STREAM_COUNT> seen_withdrawals_{};
 };
 
