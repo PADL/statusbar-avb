@@ -48,11 +48,11 @@ struct Fixture
             sent.push_back(pdu);
             return true;
         });
-        l.set_on_settled([this](uint16_t const sink, MilanSinkStream const& stream) {
+        l.set_on_settled([this](uint16_t const sink, MilanSinkStream const& stream, sm::TimePoint) {
             settled.push_back(sink);
             last_settled = stream;
         });
-        l.set_on_unsettled([this](uint16_t const sink, MilanSinkStream const& was) {
+        l.set_on_unsettled([this](uint16_t const sink, MilanSinkStream const& was, sm::TimePoint) {
             unsettled.push_back(sink);
             last_unsettled = was;
         });
@@ -984,7 +984,9 @@ TEST(acmp_milan_listener, a_registration_reported_from_the_settle_hook_is_kept)
 {
     Fixture f;
     f.l.set_on_settled(
-        [&f](uint16_t const sink, MilanSinkStream const&) { f.l.set_registration(sink, MilanTalkerRegistration::failed, f.now); });
+        [&f](uint16_t const sink, MilanSinkStream const&, sm::TimePoint const now) {
+            f.l.set_registration(sink, MilanTalkerRegistration::failed, now);
+        });
     f.bind();
     f.respond();
     EXPECT_TRUE(f.state() == State::settled_rsv_ok);
