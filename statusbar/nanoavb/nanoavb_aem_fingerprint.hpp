@@ -3,6 +3,8 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
+#include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+
 #include <cstdint>
 #include <span>
 #include <string>
@@ -34,6 +36,9 @@ struct AemRawDescriptor
 
 /// The model fingerprint as 64 lowercase hex characters (SHA-256).
 std::string aem_fingerprint(std::span<AemRawDescriptor const> descriptors);
+
+/// The fingerprint of every descriptor of parsed blob @p storage (its entity_model_id included, as authored).
+std::string aem_fingerprint(atdecc::aem::DescriptorStorage const& storage);
 
 /// The fingerprint of every descriptor in a compiled .aem blob @p blob (its
 /// entity_model_id included, as authored); empty when the blob does not parse.

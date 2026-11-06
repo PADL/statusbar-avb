@@ -106,7 +106,10 @@ constexpr uint64_t AM824_8CH_48K = avtp::make_am824_stream_format(2, 8);
 /// AUDIO_MAP, plus every Milan v1.2 Section 5.3.13 name's descriptor. With
 /// @p one_rate the unit lists 48 kHz only and STREAM_PORT_OUTPUT 0 is dynamic.
 /// With @p am824 both audio streams also list AM824_8CH_48K.
-auto make_multirate_blob(bool const ports = false, bool const one_rate = false, bool const am824 = false) -> std::vector<uint8_t>
+/// With @p narrow_output the output lists the 2-channel Base format too (and has no map to forbid it).
+auto make_multirate_blob(
+    bool const ports = false, bool const one_rate = false, bool const am824 = false, bool const narrow_output = false)
+    -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -124,7 +127,7 @@ auto make_multirate_blob(bool const ports = false, bool const one_rate = false, 
         for (uint32_t const rate : {48000U, 96000U}) {
             (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(rate == 48000 ? INT24_8CH_48K : INT24_8CH_96K));
             for (uint16_t const channels : {1, 2, 4, 6, 8}) {
-                if (type == DESCRIPTOR_STREAM_INPUT || channels == 8 || ports) {
+                if (type == DESCRIPTOR_STREAM_INPUT || channels == 8 || ports || (narrow_output && channels == 2)) {
                     (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(base_format(rate, channels)));
                 }
             }
@@ -226,12 +229,14 @@ struct MilanKit
         bool const gate = true,
         std::vector<uint8_t> model = make_blob(1, 1),
         std::optional<uint16_t> const crf_clock_source = std::nullopt,
-        net::ClockFn clock = net::monotonic_ns)
+        net::ClockFn clock = net::monotonic_ns,
+        nanoavb::MilanVersion const version = nanoavb::MilanVersion::v1_2,
+        bool const signal_presence = false)
         : blob{std::move(model)}
         , storage{*atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob})}
         , talkers{*talker_stream_specs(storage, 0)}
         , listeners{*listener_stream_specs(storage, 0)}
-        , config{make_config(milan, entity_low, gate)}
+        , config{make_config(milan, entity_low, gate, version, signal_presence)}
         , handler{storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit milan", std::nullopt, /*patch_avb_interface=*/false}
         , kit{config,
               handler,
@@ -252,9 +257,18 @@ struct MilanKit
     auto operator=(MilanKit&&) -> MilanKit& = delete;
     ~MilanKit() { (void)kit.stop(); }
 
-    static auto make_config(std::optional<bool> const milan, uint64_t const entity_low, bool const gate) -> AvbEntityAudioIOConfig
+    /// The kit's configuration: Milan v1.2 unless @p version says otherwise (the tests written for
+    /// v1.2 keep checking its layouts; the v1.3 ones ask for it).
+    static auto make_config(
+        std::optional<bool> const milan,
+        uint64_t const entity_low,
+        bool const gate,
+        nanoavb::MilanVersion const version = nanoavb::MilanVersion::v1_2,
+        bool const signal_presence = false) -> AvbEntityAudioIOConfig
     {
         AvbEntityAudioIOConfig c{};
+        c.milan_version = version;
+        c.signal_presence = signal_presence;
         c.gate_talker_on_listener = gate;
         c.interface_name = "kit-milan-test0";  // no such interface: no MAC, no sockets
         c.entity_id = ieee::Eui64{}.from_uint64(0x020000fffe000000ULL | entity_low);
@@ -509,7 +523,7 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
         nanoavb::TalkerStreamSrpInfo info{};
         info.stream_id = stream_id(0x0200000000000100ULL + spec.index);
         info.vlan_id = 2;
-        info.max_frame_size = AvbEntityKit::talker_tspec(spec).max_frame_size;
+        info.max_frame_size = AvbEntityKit::talker_tspec(spec, components.profile).max_frame_size;
         info.max_interval_frames = 1;
         EXPECT_TRUE(components.msrp_handler.talker_advertise(info, now).has_value());
     }
@@ -1189,7 +1203,7 @@ struct PersistentKit : MilanKit
             response.assign(bytes.begin(), bytes.end());
             return true;
         });
-        (void)kit.host().components().mvu_handler.process_packet(CONTROLLER_MAC, frame, config.entity_id);
+        (void)kit.host().components().mvu_handler.process_packet(CONTROLLER_MAC, frame, config.entity_id, {});
         atdecc::mvu::MvuDu reply{};
         span_load(reply, std::span<uint8_t const>{response}.first(atdecc::mvu::MvuDu::LENGTH));
         return reply.common.status();
@@ -1811,7 +1825,9 @@ TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
         atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf->format == avtp::AafFormat::int_32bit);
-    EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{6 * 8 * 4 + 24 + 1});
+    EXPECT_EQ(
+        AvbEntityKit::talker_tspec(m.kit.talker_specs().front(), m.kit.host().components().profile).max_frame_size,
+        uint16_t{6 * 8 * 4 + 24 + 1});
 
     // Refused: an unlisted format (the handler), the CRF's, and the entity's
     // own refusal (nothing changes).
@@ -2425,6 +2441,85 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
     MilanKit classic{false, 0x61};
     EXPECT_TRUE(classic.start_ready());
     EXPECT_EQ(counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
+}
+
+// Milan v1.3 Table 5.14: the output's counters at IEEE 1722.1-2021's positions; with signal presence
+// reported (Section 5.3.7.7.1) ENTITY_SPECIFIC_9 and _10 too, channel 0 at the MSB, from the next fold
+TEST(avb_entity_kit_counters, milan_v1_3_output_counters_and_signal_presence)
+{
+    MilanKit m{std::nullopt, 0x62, true, make_blob(1, 1), std::nullopt, net::monotonic_ns, nanoavb::MilanVersion::v1_3};
+    EXPECT_TRUE(m.start_ready());
+    auto c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_EQ(c.counters_valid.get(), 0x9BU);
+    m.kit.set_output_signal_presence(0, 0b101);  // not configured: ignored
+    int64_t t = MilanKit::steady_ns();
+    m.kit.poll_counters(t);
+    m.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
+    EXPECT_FALSE(m.kit.output_counters(0)->presence.has_value());
+
+    // Configured: both quadlets valid from the start (no signal) and through a fold nothing reported in;
+    // a report shows at the next fold, masked to the stream's channels as its format is now (8 here, then
+    // 2 after a SET_STREAM_FORMAT: Milan v1.3 Section 5.3.7.7.1).
+    MilanKit p{
+        std::nullopt,
+        0x63,
+        true,
+        make_multirate_blob(false, false, false, true),
+        std::nullopt,
+        net::monotonic_ns,
+        nanoavb::MilanVersion::v1_3,
+        true};
+    p.kit.set_on_stream_format_changed([](uint16_t, uint16_t, StreamFormatFields const&) { return atdecc::AEM_STATUS_SUCCESS; });
+    EXPECT_TRUE(p.start_ready());
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU | 0x00C0'0000U);
+    t = MilanKit::steady_ns();
+    p.kit.poll_counters(t);
+    p.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU | 0x00C0'0000U);
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0U);
+    p.kit.set_output_signal_presence(0, (uint64_t{1} << 1U) | (uint64_t{1} << 7U) | (uint64_t{1} << 8U) | (uint64_t{1} << 40U));
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0U);
+    p.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0x4100'0000U);
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_32_59].get(), 0U);
+    // Narrowed to 2 channels: channel 7 is no longer the stream's, from the next fold, which notifies.
+    EXPECT_EQ(
+        p.aem_command(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 2)))
+            .status,
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(p.kit.talker_channels(0), uint16_t{2});
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0x4100'0000U);
+    EXPECT_EQ(p.kit.output_counters(0)->pending_presence, std::optional<uint64_t>{0b10});
+    p.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0x4000'0000U);
+    EXPECT_FALSE(p.kit.output_counters(0)->pending_presence.has_value());  // reported
+    // A report past the stream's channels is cut to them when it is accepted.
+    p.kit.set_output_signal_presence(0, (uint64_t{1} << 0U) | (uint64_t{1} << 5U));
+    EXPECT_EQ(p.kit.output_counters(0)->pending_presence, std::optional<uint64_t>{0b1});
+
+    // Reported: the two quadlets beside the five counters.
+    StreamOutputIntervals intervals{};
+    intervals.set_presence((uint64_t{1} << 0U) | (uint64_t{1} << 31U) | (uint64_t{1} << 32U) | (uint64_t{1} << 59U));
+    EXPECT_TRUE(intervals.fold({}));
+    uint32_t valid = 0;
+    std::array<uint32_t, 32> out{};
+    fill_milan_v13_talker_counters(intervals, valid, out);
+    EXPECT_EQ(valid, 0x9BU | 0x00C0'0000U);
+    EXPECT_EQ(out[StreamOutputIntervals::PRESENCE_0_31], 0x8000'0001U);
+    EXPECT_EQ(out[StreamOutputIntervals::PRESENCE_32_59], 0x8000'0010U);  // channel 59 is bit 27
+    EXPECT_FALSE(intervals.fold({}));                                     // unchanged
+}
+
+// Milan v1.3 Table 4.4: a v1.3 entity declares the AVTPDU as MaxFrameSize, the shaper the drift byte
+TEST(avb_entity_kit_formats, milan_v1_3_tspec)
+{
+    MilanKit m{std::nullopt, 0x65, true, make_blob(1, 1), std::nullopt, net::monotonic_ns, nanoavb::MilanVersion::v1_3};
+    auto const tspec = AvbEntityKit::talker_tspec(m.kit.talker_specs().front(), m.kit.host().components().profile);
+    EXPECT_EQ(tspec.max_frame_size, srp_max_frame_size(m.kit.talker_specs().front().format, nanoavb::MilanVersion::v1_3));
+    EXPECT_EQ(tspec.clock_drift_bytes, MILAN_TSPEC_SPARE_BYTES);
+    EXPECT_TRUE(m.kit.host().components().profile.milan_v1_3());
+    EXPECT_TRUE(m.kit.host().components().aem_handler.stream_info_layout() == atdecc::aem::StreamInfoLayout::ieee_2021);
 }
 
 // Milan v1.2 Table 5.16: the input's ten counters; zeroed when it becomes
@@ -3158,7 +3253,9 @@ TEST(avb_entity_kit_mixed_rates, a_dynamic_output_identity_follows_the_rate)
     EXPECT_TRUE(m.kit.output_mappings(0).empty());
     EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{0}}));
     EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format.sample_rate_hz, 96000U);
-    EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{12 * 8 * 3 + 24 + 1});
+    EXPECT_EQ(
+        AvbEntityKit::talker_tspec(m.kit.talker_specs().front(), m.kit.host().components().profile).max_frame_size,
+        uint16_t{12 * 8 * 3 + 24 + 1});
     EXPECT_EQ(m.kit.talker().samples_per_packet_, 6U);  // the media clock stays at the unit's rate
     // Back at the unit's rate the identity returns.
     EXPECT_EQ(
@@ -3296,8 +3393,8 @@ TEST(avb_entity_kit_kind, an_audio_stream_switches_between_aaf_and_am824)
     EXPECT_EQ(out->am824->sequence_num, uint8_t{41});
     EXPECT_EQ(out->am824->running_dbc, uint32_t{600});
     EXPECT_EQ(
-        AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size,
-        srp_max_frame_size(decode_stream_format(AM824_8CH_48K)));
+        AvbEntityKit::talker_tspec(m.kit.talker_specs().front(), m.kit.host().components().profile).max_frame_size,
+        srp_max_frame_size(decode_stream_format(AM824_8CH_48K), nanoavb::MilanVersion::v1_2));
 
     EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
     auto const* in = m.kit.listener()->slot_for(0);

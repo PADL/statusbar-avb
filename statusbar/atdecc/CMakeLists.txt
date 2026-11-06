@@ -53,7 +53,8 @@ statusbar_add_module(
   atdecc_jdks_test.cpp
   atdecc_adp_discovery_test.cpp
   atdecc_aecp_aem_controller_test.cpp
-  atdecc_test.cpp)
+  atdecc_test.cpp
+  atdecc_utf8_test.cpp)
 
 add_executable(acmp_controller_tool atdecc_acmp_controller_tool.cpp)
 target_link_libraries(acmp_controller_tool PRIVATE statusbar)
