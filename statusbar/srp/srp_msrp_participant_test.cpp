@@ -2265,7 +2265,7 @@ TEST(msrp_participant, transmit_pending_sends_a_withdrawal_without_waiting_for_t
     b.subscribe(obs);
 
     (void)a.declare_talker_advertise(make_talker_adv(0x0042), clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));  // past JoinTime (IEEE 802.1Q-2018 Table 10-7)
     fab.deliver_a_to_b(b, clock.now);
     EXPECT_NE(b.find_talker_advertise(make_stream_id(0x0042)), nullptr);
 
