@@ -6,6 +6,7 @@
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 
 #include "statusbar/nanoavb/nanoavb_components.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -45,7 +46,7 @@ TalkerGate::TalkerGate(bool const gate_enabled, nanoavb::NanoAvbComponents const
     : TalkerGate{gate_enabled, [&components](tsn::StreamId const& sid) { return acmp_talker_index(components, sid); }}
 {}
 
-void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const ready, int64_t const now_ns)
+void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const ready, RawTimePoint const now)
 {
     // Record whether this talker stream has a listener that permits transmit (Listener Ready /
     // Ready Failed), matched to the stream index by stream_id.
@@ -54,23 +55,27 @@ void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const 
         return;
     }
     uint16_t const idx = *found;
-    bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
-    stamp_ready(idx, ready, was, now_ns);
+    bool const was = stamp(idx, ready, now);
     if (was != ready && logger_) {
         logger_->status("srp: talker stream {} MSRP listener-ready -> {} (SRP gate)", idx, ready);
     }
 }
 
-void TalkerGate::stamp_ready(uint16_t const idx, bool const ready, bool const was, int64_t const now_ns) noexcept
+auto TalkerGate::stamp(uint16_t const idx, bool const ready, RawTimePoint const now) noexcept -> bool
 {
-    if (ready) {
-        readies_[idx].fetch_add(1, std::memory_order_release);
-    }
+    bool const was = listener_ready_[idx].load(std::memory_order_relaxed);  // the reactor is the one writer
     if (ready || was) {
-        // The grace window runs from the last moment the declaration was known registered;
-        // a withdrawal seen while already withdrawn does not extend it.
-        ready_ns_[idx].store(now_ns, std::memory_order_relaxed);
+        // The grace runs from the last instant the declaration was known registered; a
+        // withdrawal seen while already withdrawn does not extend it. Stamped before the flag.
+        ready_raw_ns_[idx].store(RawTimePoint::clock::to_ns(now), std::memory_order_relaxed);
     }
+    listener_ready_[idx].store(ready, std::memory_order_release);
+    return was;
+}
+
+void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const ready)
+{
+    note_listener_ready(stream_id, ready, net::rx_clock_now());
 }
 
 void TalkerGate::note_talker_withdrawn() noexcept
@@ -83,13 +88,12 @@ void TalkerGate::note_talker_withdrawn() noexcept
 void TalkerGate::note_talker_withdrawn(uint16_t const idx) noexcept
 {
     if (idx < listener_ready_.size()) {
-        listener_ready_[idx].store(false, std::memory_order_relaxed);
-        ready_ns_[idx].store(0, std::memory_order_relaxed);
-        withdrawals_[idx].fetch_add(1, std::memory_order_release);
+        ready_raw_ns_[idx].store(0, std::memory_order_relaxed);  // forgotten before the flag drops
+        listener_ready_[idx].store(false, std::memory_order_release);
     }
 }
 
-auto TalkerGate::admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+auto TalkerGate::admitted(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
 {
     if (!gate_enabled_) {
         // Gate disabled: transmit unconditionally. NOTE: this puts the stream on the
@@ -100,57 +104,33 @@ auto TalkerGate::admitted(uint16_t const idx, int64_t const now_ns) const noexce
     if (idx >= stream_started_.size() || !stream_started_[idx].load(std::memory_order_relaxed)) {
         return false;
     }
-    return listener_admitted(idx, now_ns);
+    return listener_admitted(idx, now);
 }
 
-auto TalkerGate::listener_admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+auto TalkerGate::listener_admitted(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
 {
     if (idx >= listener_ready_.size()) {
         return false;
     }
     // Listener Ready / Ready Failed registered, held across the MRP LeaveAll re-registration
-    // blip by GRACE_NS; a listener that does not re-declare within it closes the gate.
-    if (listener_ready_[idx].load(std::memory_order_relaxed)) {
+    // blip by GRACE; a listener that does not re-declare within it closes the gate.
+    if (listener_ready_[idx].load(std::memory_order_acquire)) {
         return true;
     }
-    int64_t const last_ready = ready_ns_[idx].load(std::memory_order_relaxed);
-    return last_ready != 0 && (now_ns - last_ready) < GRACE_NS;
+    auto const ends = grace_ends(idx);
+    return ends.has_value() && now < *ends;
 }
 
-auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+auto TalkerGate::grace_ends(uint16_t const idx) const noexcept -> std::optional<RawTimePoint>
 {
-    if (!gate_enabled_) {
-        return true;
+    if (idx >= ready_raw_ns_.size()) {
+        return std::nullopt;
     }
-    if (idx >= stream_started_.size()) {
-        return false;
+    int64_t const last_ready = ready_raw_ns_[idx].load(std::memory_order_relaxed);
+    if (last_ready == 0) {
+        return std::nullopt;
     }
-    catch_up(idx, now);  // a stopped stream keeps its grace current too
-    return stream_started_[idx].load(std::memory_order_relaxed) && listener_ready_within_grace(idx, now);
-}
-
-void TalkerGate::catch_up(uint16_t const idx, RawTimePoint const now) noexcept
-{
-    // A Ready registered since the last wake counts as seen at that wake, the latest instant known
-    // to be before it, however briefly it was set; a withdrawal since closes the stream at once.
-    if (uint32_t const readies = readies_[idx].load(std::memory_order_acquire); readies != seen_readies_[idx]) {
-        seen_readies_[idx] = readies;
-        last_seen_ready_[idx] = last_wake_[idx];
-    }
-    if (uint32_t const withdrawals = withdrawals_[idx].load(std::memory_order_acquire); withdrawals != seen_withdrawals_[idx]) {
-        seen_withdrawals_[idx] = withdrawals;
-        last_seen_ready_[idx] = NEVER;
-    }
-    last_wake_[idx] = now;
-}
-
-auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool
-{
-    if (listener_ready_[idx].load(std::memory_order_relaxed)) {
-        last_seen_ready_[idx] = now;
-        return true;
-    }
-    return last_seen_ready_[idx] != NEVER && (now - last_seen_ready_[idx]) < GRACE;
+    return RawTimePoint::clock::from_ns(last_ready) + GRACE;
 }
 
 }  // namespace statusbar::avb_entity
