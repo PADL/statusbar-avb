@@ -368,8 +368,10 @@ auto AvbEntityStereoIO::stop(TimePoint const now) -> Status
         return failure(std::make_error_code(std::errc::not_connected));
     }
     // The data plane first, once the timers that drive it have stopped,
-    // then the control plane. start() builds both again.
+    // then the control plane. start() builds both again; its first wake
+    // transmits on a reservation made in it, not this run's.
     close_streams();
+    gate_.note_talker_withdrawn();
     return host_.stop_control_plane(now);
 }
 
