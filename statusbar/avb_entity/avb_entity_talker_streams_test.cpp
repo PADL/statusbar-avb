@@ -267,7 +267,7 @@ TEST(raw_crf, serialize_writes_the_header_and_the_timestamps_verbatim)
 TEST(raw_crf, transmit_without_a_socket_sends_nothing)
 {
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
     avb_entity::StreamSpec too_many{};
@@ -326,7 +326,7 @@ TEST(raw_tu, aaf_and_crf_carry_the_timestamp_uncertain_bit)
 TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lost)
 {
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
     constexpr int64_t t0 = 5'000'000'000;
@@ -348,7 +348,7 @@ TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lo
 TEST(talker_tx_counters, pdus_tu_and_mr_toggles)
 {
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
     avb_entity::TalkerStreamSlot slot{};
@@ -601,7 +601,7 @@ TEST(talker_port, aaf_frame_is_the_tagged_frame_send_vlan_builds)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -647,7 +647,7 @@ auto rendered_in_port(avb_entity::StreamPort& port, bool const single_threaded) 
     EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
     open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -692,7 +692,7 @@ TEST(talker_port, a_timed_single_threaded_port_renders_in_the_slot_and_times_it_
     auto& wire = open_test_port(port, /*launch_time=*/true);
     port.set_phc_clock([] { return int64_t{4'999'000'000}; });
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -721,7 +721,7 @@ TEST(talker_port, a_frame_by_destination_is_the_tagged_frame_untimed)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
     talker.send_stream_frame(kDest, std::array<uint8_t, 4>{0x02, 0x00, 0x00, 0x00});  // no port yet: nothing
@@ -740,7 +740,7 @@ TEST(talker_port, crf_frame_is_the_tagged_frame_send_vlan_builds)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
     EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());  // Milan CRF
@@ -766,7 +766,7 @@ TEST(talker_port, float_paths_serialize_into_the_port_window)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -776,7 +776,7 @@ TEST(talker_port, float_paths_serialize_into_the_port_window)
     EXPECT_TRUE(talker.open_tx(port).has_value());
     std::vector<float> const src(12U * 8U, 0.5F);
 
-    talker.transmit_aaf(*talker.slot_for(0), 1'000'000, 12, src);
+    talker.transmit_aaf(*talker.slot_for(0), realtime::GptpClock0::from_ns(1'000'000), 12, src);
     auto const aaf = wire.pop_tx();
     EXPECT_TRUE(aaf.has_value());
     EXPECT_EQ(aaf->frame.size(), VLAN_HEADER_LENGTH + avtp::AafPdu::HEADER_LENGTH + (12U * 8U * 4U));
@@ -793,7 +793,7 @@ TEST(talker_port, a_refused_render_commits_nothing_and_flush_reaches_the_port)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -821,7 +821,7 @@ TEST(talker_port, each_frame_carries_its_launch_time_to_the_port)
     auto& wire = open_test_port(port, /*launch_time=*/true);
     port.set_phc_clock([] { return int64_t{4'999'000'000}; });  // 1 ms before the first is due
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -863,7 +863,7 @@ TEST(talker_port, a_refused_commit_consumes_no_sequence_number)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -911,7 +911,7 @@ TEST(talker_port, am824_frames_carry_the_streams_own_rate)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -936,7 +936,7 @@ TEST(talker_port, am824_frames_carry_the_streams_own_rate)
     EXPECT_TRUE(raw_pdu.has_value() && raw_pdu->sample_rate() == avtp::Am824SampleRate::rate_96_khz);
 
     std::vector<float> const src(12U * 2U, 0.25F);
-    talker.transmit_am824(*slot, 1'000'000, 12, src);
+    talker.transmit_am824(*slot, realtime::GptpClock0::from_ns(1'000'000), 12, src);
     auto const decoded = wire.pop_tx();
     EXPECT_TRUE(decoded.has_value());
     auto const float_pdu = avtp::am824_parse_header(std::span<uint8_t const>{decoded->frame}.subspan(18));
@@ -961,7 +961,7 @@ TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numb
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
@@ -1011,7 +1011,7 @@ TEST(talker_crf, a_toggled_restart_sets_mr_on_the_next_pdu)
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
     ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<uint64_t> const last_gptp_ns{0};
+    std::atomic<int64_t> const last_gptp_ns{0};
     avb_entity::TalkerStreams talker{
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
         media_clock,
