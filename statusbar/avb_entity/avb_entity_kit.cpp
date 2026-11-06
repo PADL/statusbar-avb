@@ -552,9 +552,14 @@ auto AvbEntityKit::input_running(uint16_t const idx) const noexcept -> bool
     return stream != nullptr && stream->connected;
 }
 
+auto AvbEntityKit::talker_admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+{
+    return maap_.ready() && !talker_->stream_stopped(idx) && gate_.admitted(idx, now_ns);
+}
+
 auto AvbEntityKit::output_streaming(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
 {
-    return talker_should_transmit(idx, now_ns) || (declarations_.declared(idx) && gate_.listener_admitted(idx, now_ns));
+    return talker_admitted(idx, now_ns) || (declarations_.declared(idx) && gate_.listener_admitted(idx, now_ns));
 }
 
 auto AvbEntityKit::reshape_stream(bool const output, StreamSpec const& spec) -> Status
@@ -907,7 +912,7 @@ void AvbEntityKit::update_output_streaming(int64_t const now_ns)
         return;
     }
     for (auto const& spec : talker_specs_) {
-        bool const on = talker_should_transmit(spec.index, now_ns);
+        bool const on = talker_admitted(spec.index, now_ns);
         if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
             (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
         }
