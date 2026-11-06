@@ -137,4 +137,28 @@ TEST(am824_stream_format, a_non_am824_event_type_has_no_rate)
     EXPECT_TRUE(s == "AM824 8ch SFC=0x0a");
 }
 
+// IEEE 1722-2016 Annex I.2.4: an AAF word with ut set lists every channel count from 1 to its
+// own (Milan v1.3 Section 6.6: XF24 is one such word a rate)
+TEST(stream_format, an_up_to_word_covers_every_count_to_its_own)
+{
+    constexpr uint64_t XF24_48K = 0x0215022006006000ULL;    // INT_32, 48 kHz, 24 channels, 6 samples, ut
+    constexpr uint64_t INT32_13CH = 0x0205022003406000ULL;  // 13 channels
+    EXPECT_TRUE(stream_format_covers(XF24_48K, INT32_13CH));
+    EXPECT_TRUE(stream_format_covers(XF24_48K, 0x0205022000406000ULL));   // 1 channel
+    EXPECT_TRUE(stream_format_covers(XF24_48K, 0x0205022006006000ULL));   // 24 channels
+    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x0205022006406000ULL));  // 25
+    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x0205022000006000ULL));  // none
+    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x0205021803406000ULL));  // INT_24
+    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x020702200340C000ULL));  // 96 kHz
+    EXPECT_FALSE(stream_format_covers(XF24_48K, XF24_48K));               // no stream's format
+    // Without ut, only the word itself
+    EXPECT_TRUE(stream_format_covers(INT32_13CH, INT32_13CH));
+    EXPECT_FALSE(stream_format_covers(0x0205022006006000ULL, INT32_13CH));
+    // Not AAF: the word itself
+    EXPECT_TRUE(stream_format_covers(0x041060010000BB80ULL, 0x041060010000BB80ULL));
+    // At its widest, the up-to word is the 24-channel format
+    EXPECT_EQ(stream_format_widest(XF24_48K), uint64_t{0x0205022006006000ULL});
+    EXPECT_EQ(stream_format_widest(0x041060010000BB80ULL), uint64_t{0x041060010000BB80ULL});
+}
+
 TEST_MAIN(statusbar_avtp, avtp_stream_format_test)
