@@ -182,24 +182,24 @@ void NanoAvbAcmpListener::wire_milan()
     // (both are multicast).
     milan_.set_send(
         [this](AcmpCommandResponse const& pdu) -> bool { return callbacks_.tx_command ? callbacks_.tx_command(pdu) : false; });
-    milan_.set_on_settled([this](uint16_t const index, MilanSinkStream const& stream) {
+    milan_.set_on_settled([this](uint16_t const index, MilanSinkStream const& stream, TimePoint const now) {
         auto* const s = ctx_.get_stream(index);
         if (s == nullptr) {
             return;
         }
         connect_settled(*s, milan_.sink(index)->binding, stream);
         if (callbacks_.on_connect) {
-            callbacks_.on_connect(index, stream.stream_id, stream.dest_mac, last_event_time_);
+            callbacks_.on_connect(index, stream.stream_id, stream.dest_mac, now);
         }
     });
-    milan_.set_on_unsettled([this](uint16_t const index, MilanSinkStream const&) {
+    milan_.set_on_unsettled([this](uint16_t const index, MilanSinkStream const&, TimePoint const now) {
         auto* const s = ctx_.get_stream(index);
         if (s == nullptr || !s->connected) {
             return;
         }
         // The data plane reads the stream identity to release it.
         if (callbacks_.on_disconnect) {
-            callbacks_.on_disconnect(index, last_event_time_);
+            callbacks_.on_disconnect(index, now);
         }
         s->reset();
     });
