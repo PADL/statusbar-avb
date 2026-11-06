@@ -67,9 +67,8 @@ void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const 
 
 void TalkerGate::note_talker_withdrawn() noexcept
 {
-    for (size_t idx = 0; idx < listener_ready_.size(); ++idx) {
-        listener_ready_[idx].store(false, std::memory_order_relaxed);
-        ready_ns_[idx].store(0, std::memory_order_relaxed);
+    for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
+        note_talker_withdrawn(idx);
     }
 }
 
@@ -78,6 +77,7 @@ void TalkerGate::note_talker_withdrawn(uint16_t const idx) noexcept
     if (idx < listener_ready_.size()) {
         listener_ready_[idx].store(false, std::memory_order_relaxed);
         ready_ns_[idx].store(0, std::memory_order_relaxed);
+        withdrawals_[idx].fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -107,6 +107,31 @@ auto TalkerGate::listener_admitted(uint16_t const idx, int64_t const now_ns) con
     }
     int64_t const last_ready = ready_ns_[idx].load(std::memory_order_relaxed);
     return last_ready != 0 && (now_ns - last_ready) < GRACE_NS;
+}
+
+auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+{
+    if (!gate_enabled_) {
+        return true;
+    }
+    if (idx >= stream_started_.size() || !stream_started_[idx].load(std::memory_order_relaxed)) {
+        return false;
+    }
+    return listener_ready_within_grace(idx, now);
+}
+
+auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+{
+    // A withdrawal closes the stream at once: the grace seen before it is forgotten.
+    if (uint32_t const withdrawals = withdrawals_[idx].load(std::memory_order_acquire); withdrawals != seen_withdrawals_[idx]) {
+        seen_withdrawals_[idx] = withdrawals;
+        last_seen_ready_[idx] = NEVER;
+    }
+    if (listener_ready_[idx].load(std::memory_order_relaxed)) {
+        last_seen_ready_[idx] = now;
+        return true;
+    }
+    return last_seen_ready_[idx] != NEVER && (now - last_seen_ready_[idx]) < GRACE;
 }
 
 }  // namespace statusbar::avb_entity
