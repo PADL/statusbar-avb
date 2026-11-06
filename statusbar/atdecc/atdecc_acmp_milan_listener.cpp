@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <utility>
 
 namespace statusbar::atdecc {
 
@@ -75,7 +76,7 @@ void set_talker(AcmpCommandResponse& resp, MilanSinkBinding const& binding, uint
     resp.flags = flags;
 }
 
-/// Table 5.32: the response to a BIND_RX_COMMAND.
+/// Table 5.34: the response to a BIND_RX_COMMAND.
 auto bind_response(AcmpCommandResponse const& cmd) noexcept -> AcmpCommandResponse
 {
     auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
@@ -85,7 +86,7 @@ auto bind_response(AcmpCommandResponse const& cmd) noexcept -> AcmpCommandRespon
     return resp;
 }
 
-/// Tables 5.34 and 5.36: the response to GET_RX_STATE or UNBIND_RX for an unbound sink.
+/// Tables 5.37 and 5.40: the response to GET_RX_STATE or UNBIND_RX for an unbound sink.
 auto unbound_response(AcmpCommandResponse const& cmd) noexcept -> AcmpCommandResponse
 {
     auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
@@ -107,7 +108,7 @@ auto rx_state_flags(MilanSink const& s) noexcept -> uint16_t
     return flags;
 }
 
-/// Tables 5.37 (probing), 5.38 (SETTLED_NO_RSV), 5.39 (SETTLED_RSV_OK): GET_RX_STATE for bound sink @p s.
+/// Tables 5.42 (probing), 5.43 (SETTLED_NO_RSV), 5.44 (SETTLED_RSV_OK): GET_RX_STATE for bound sink @p s.
 auto bound_response(AcmpCommandResponse const& cmd, MilanSink const& s) noexcept -> AcmpCommandResponse
 {
     auto resp = echo(cmd, ACMP_STATUS_SUCCESS);
@@ -121,8 +122,8 @@ auto bound_response(AcmpCommandResponse const& cmd, MilanSink const& s) noexcept
     return resp;
 }
 
-/// Sections 5.5.3.5.18 and 5.5.3.5.25 step 1: @p resp answers the probe @p s
-/// sent and is waiting for (Table 5.30: ignored in every other state).
+/// Sections 5.5.3.6.18 and 5.5.3.6.25 step 1: @p resp answers the probe @p s
+/// sent and is waiting for (Table 5.31: ignored in every other state).
 [[nodiscard]] auto answers_probe(MilanSink const& s, AcmpCommandResponse const& resp) noexcept -> bool
 {
     return (s.state == MilanSinkState::prb_w_resp || s.state == MilanSinkState::prb_w_resp2) &&
@@ -135,6 +136,25 @@ auto bound_response(AcmpCommandResponse const& cmd, MilanSink const& s) noexcept
 {
     return s.bound() && s.binding.talker_entity_id == cmd.talker_entity_id &&
         s.binding.talker_unique_id == cmd.talker_unique_id.get();
+}
+
+/// @p adp's current_configuration_index, when its capabilities mark it valid (IEEE 1722.1-2021
+/// Clause 6.2.1.10).
+[[nodiscard]] auto configuration_index_of(AdpDu const& adp) noexcept -> std::optional<uint16_t>
+{
+    if (!adp.has_entity_capability(entity_capabilities::AEM_CONFIGURATION_INDEX_VALID)) {
+        return std::nullopt;
+    }
+    return adp.current_configuration_index.get();
+}
+
+/// What sink @p s keeps of each ENTITY_AVAILABLE @p adp of its talker (Section 5.6.4.5), valid until
+/// @p valid_until; the interface_index is the one it was discovered on (adp_not_discovered).
+void note_adp(MilanSink& s, AdpDu const& adp, sm::TimePoint const valid_until) noexcept
+{
+    s.available_index = adp.available_index.get();
+    s.configuration_index = configuration_index_of(adp);
+    s.adp_deadline = valid_until;
 }
 
 /// Enter @p state with probing status @p probing and no ACMP status.
@@ -192,7 +212,50 @@ auto MilanListener::receive_command(uint8_t const type, uint16_t const index, Ac
 
 void MilanListener::respond(AcmpCommandResponse const& cmd, uint8_t const status)
 {
-    send(echo(cmd, status));
+    reply(echo(cmd, status));
+}
+
+auto MilanListener::bind_stream(uint16_t const index, MilanBindRequest const& request, TimePoint const now, ReplyFn const& reply)
+    -> bool
+{
+    if (index >= sinks_.size()) {
+        return false;
+    }
+    auto const cmd = bind_command(index, request);
+    replying(reply, [&] { bind(index, cmd, now); });
+    return true;
+}
+
+auto MilanListener::bind_command(uint16_t const index, MilanBindRequest const& request) const noexcept -> AcmpCommandResponse
+{
+    auto cmd = binding_command(ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, index, request.controller_entity_id);
+    cmd.talker_entity_id = request.talker_entity_id;
+    cmd.talker_unique_id = request.talker_unique_id;
+    cmd.flags = static_cast<uint16_t>(request.streaming_wait ? acmp_flags::STREAMING_WAIT : 0U);
+    return cmd;
+}
+
+auto MilanListener::unbind_stream(uint16_t const index, ieee::Eui64 const& controller, TimePoint const now, ReplyFn const& reply)
+    -> bool
+{
+    if (index >= sinks_.size()) {
+        return false;
+    }
+    auto const cmd = binding_command(ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND, index, controller);
+    replying(reply, [&] { unbind(index, cmd, now); });
+    return true;
+}
+
+auto MilanListener::binding_command(uint8_t const type, uint16_t const index, ieee::Eui64 const& controller) const noexcept
+    -> AcmpCommandResponse
+{
+    // Milan v1.3 Table 5.22: the ACMP command an MVU binding stands for.
+    AcmpCommandResponse cmd{};
+    cmd.init_command(type);
+    cmd.controller_entity_id = controller;
+    cmd.listener_entity_id = entity_id_;
+    cmd.listener_unique_id = index;
+    return cmd;
 }
 
 auto MilanListener::restore(uint16_t const index, MilanSinkBinding const& binding) -> bool
@@ -208,19 +271,19 @@ auto MilanListener::restore(uint16_t const index, MilanSinkBinding const& bindin
 
 void MilanListener::bind(uint16_t const index, AcmpCommandResponse const& cmd, TimePoint const now)
 {
-    // Step 1 of each RCV_BIND_RX_CMD row (Table 5.31).
+    // Step 1 of each RCV_BIND_RX_CMD row (Table 5.32).
     if (!authorized(cmd.controller_entity_id)) {
         respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
         return;
     }
     if (bound_to(sinks_[index], cmd)) {
         update_binding(index, cmd);
-        send(bind_response(cmd));
+        reply(bind_response(cmd));
         notify(index);
         return;
     }
     rebind(index, cmd, now);
-    send(bind_response(cmd));
+    reply(bind_response(cmd));
     send_probe(index, now);
     notify(index);
 }
@@ -265,7 +328,7 @@ void MilanListener::stop(uint16_t const index, TimePoint const now)
 void MilanListener::unbind(uint16_t const index, AcmpCommandResponse const& cmd, TimePoint const now)
 {
     if (!authorized(cmd.controller_entity_id)) {
-        respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);  // Table 5.35
+        respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);  // Table 5.38
         return;
     }
     if (sinks_[index].bound()) {
@@ -273,8 +336,8 @@ void MilanListener::unbind(uint16_t const index, AcmpCommandResponse const& cmd,
         sinks_[index] = MilanSink{.probing_status = probing_status::DISABLED};  // binding cleared, discovery stopped
         binding_changed(index);
     }
-    // Table 5.36. No DISCONNECT_TX: the talker learns from MSRP.
-    send(unbound_response(cmd));
+    // Table 5.40. No DISCONNECT_TX: the talker learns from MSRP.
+    reply(unbound_response(cmd));
     notify(index);
 }
 
@@ -285,7 +348,7 @@ void MilanListener::get_rx_state(uint16_t const index, AcmpCommandResponse const
 }
 
 auto MilanListener::probe_command(uint16_t const index) -> AcmpCommandResponse
-{  // NOLINT(statusbar-block-statements): one assignment per field of Table 5.33
+{  // NOLINT(statusbar-block-statements): one assignment per field of Table 5.36
     auto const& binding = sinks_[index].binding;
     AcmpCommandResponse cmd{};
     cmd.init_command(ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
@@ -399,11 +462,11 @@ void MilanListener::set_registration(uint16_t const index, MilanTalkerRegistrati
     bool const was = s.registering();
     s.registration = registration;
     if (s.state == MilanSinkState::settled_no_rsv && !was && s.registering()) {
-        // Section 5.5.3.5.42: EVT_TK_REGISTERED.
+        // Section 5.5.3.6.42: EVT_TK_REGISTERED.
         s.timer_running = false;
         s.state = MilanSinkState::settled_rsv_ok;
     } else if (s.state == MilanSinkState::settled_rsv_ok && was && !s.registering()) {
-        // Section 5.5.3.5.48: EVT_TK_UNREGISTERED.
+        // Section 5.5.3.6.48: EVT_TK_UNREGISTERED.
         s.timer_running = false;
         unsettle(index, now);
         s.acmp_status = 0;
@@ -427,7 +490,7 @@ void MilanListener::discovered(uint16_t const index, TimePoint const now)
 {
     auto& s = sinks_[index];
     s.discovered = true;
-    // Section 5.5.3.5.9; in every other bound state the talker is only noted
+    // Section 5.5.3.6.9; in every other bound state the talker is only noted
     // as discovered.
     if (s.state == MilanSinkState::prb_w_avail) {
         s.probing_status = probing_status::ACTIVE;
@@ -441,7 +504,7 @@ void MilanListener::departed(uint16_t const index)
 {
     auto& s = sinks_[index];
     s.discovered = false;
-    // Sections 5.5.3.5.15, .22, .29, .35; the settled states only note it.
+    // Sections 5.5.3.6.15, .22, .29, .35; the settled states only note it.
     switch (s.state) {
         case MilanSinkState::prb_w_delay:
         case MilanSinkState::prb_w_resp:
@@ -484,10 +547,8 @@ void MilanListener::adp_not_discovered(
     if (!adp.is_entity_available() || !same_gptp) {
         return;
     }
-    auto& s = sinks_[index];
-    s.interface_index = adp.interface_index.get();
-    s.available_index = adp.available_index.get();
-    s.adp_deadline = valid_until;
+    sinks_[index].interface_index = adp.interface_index.get();
+    note_adp(sinks_[index], adp, valid_until);
     discovered(index, now);
 }
 
@@ -502,17 +563,26 @@ void MilanListener::adp_discovered(
         departed(index);  // Section 5.6.4.5.3
         return;
     }
-    // Section 5.6.4.5.2: an available_index that did not move forward
-    // (wrap-safe) is a talker that restarted.
-    if (static_cast<int32_t>(adp.available_index.get() - s.available_index) <= 0) {
+    if (talker_changed(s, adp)) {
         departed(index);
         if (!same_gptp) {
             return;  // TK_NOT_DISCOVERED, the timer stopped
         }
         discovered(index, now);
     }
-    s.available_index = adp.available_index.get();
-    s.adp_deadline = valid_until;
+    note_adp(s, adp, valid_until);
+}
+
+auto MilanListener::talker_changed(MilanSink const& s, AdpDu const& adp) const noexcept -> bool
+{
+    // Milan v1.3 Section 5.6.4.5.2: an available_index that did not move forward (wrap-safe) is a
+    // talker that restarted; one with another current_configuration_index, both marked valid (the
+    // capability may come and go, IEEE 1722.1-2021 Clause 6.2.1.10), reconfigured.
+    bool const restarted = static_cast<int32_t>(adp.available_index.get() - s.available_index) <= 0;
+    auto const configuration = configuration_index_of(adp);
+    bool const reconfigured =
+        configuration_departs_ && configuration && s.configuration_index && *configuration != *s.configuration_index;
+    return restarted || reconfigured;
 }
 
 void MilanListener::tick(TimePoint const now)
@@ -539,29 +609,29 @@ void MilanListener::expire(uint16_t const index, TimePoint const now)
     s.timer_running = false;
     switch (s.state) {
         case MilanSinkState::prb_w_delay:
-            // Section 5.5.3.5.10.
+            // Section 5.5.3.6.10.
             s.state = MilanSinkState::prb_w_resp;
             send_probe(index, now);
             break;
         case MilanSinkState::prb_w_resp:
-            // Section 5.5.3.5.16: the duplicate, same sequence_id.
+            // Section 5.5.3.6.16: the duplicate, same sequence_id.
             start_timer(s, now, TMR_NO_RESP);
             s.state = MilanSinkState::prb_w_resp2;
             send(s.probe);
             break;
         case MilanSinkState::prb_w_resp2:
-            // Section 5.5.3.5.23.
+            // Section 5.5.3.6.23.
             start_timer(s, now, TMR_RETRY);
             s.acmp_status = ACMP_STATUS_LISTENER_TALKER_TIMEOUT;
             s.state = MilanSinkState::prb_w_retry;
             break;
         case MilanSinkState::prb_w_retry:
-            // Section 5.5.3.5.30 (the ACMP status of the last probe
+            // Section 5.5.3.6.30 (the ACMP status of the last probe
             // sequence is kept while probing again).
             reprobe(index, now);
             break;
         case MilanSinkState::settled_no_rsv:
-            // Section 5.5.3.5.36: TMR_NO_TK.
+            // Section 5.5.3.6.36: TMR_NO_TK.
             unsettle(index, now);
             s.acmp_status = 0;
             reprobe(index, now);
@@ -584,12 +654,15 @@ void MilanListener::notify(uint16_t const index)
         .acmp_status = s.acmp_status,
         .stream = s.stream,
         .registration = s.registration};
-    if (now == notified_[index]) {
+    auto const before = std::exchange(notified_[index], now);
+    if (before == now) {
         return;
     }
-    notified_[index] = now;
     if (on_status_changed_) {
         on_status_changed_(index);
+    }
+    if (on_info_ex_changed_ && !now.same_info_ex(before)) {
+        on_info_ex_changed_(index);
     }
 }
 
