@@ -138,12 +138,12 @@ class MilanListener
     /// multicast address).
     using SendFn = sg14::inplace_function<bool(AcmpCommandResponse const&), 64>;
     /// The sink settled: start the SRP reservation and listening for the
-    /// stream (Section 5.5.3.5.18 step 4).
-    using SettledFn = sg14::inplace_function<void(uint16_t sink, MilanSinkStream const& stream), 64>;
+    /// stream (Section 5.5.3.5.18 step 4), told the time of the event that settled it.
+    using SettledFn = sg14::inplace_function<void(uint16_t sink, MilanSinkStream const& stream, TimePoint now), 64>;
     /// The sink left the settled states: "clear the SRP parameters and stop
     /// SRP" (and stop listening). The sink's stream is already zero; the one
-    /// it settled on is passed.
-    using UnsettledFn = sg14::inplace_function<void(uint16_t sink, MilanSinkStream const& was), 64>;
+    /// it settled on is passed, with the time of the event that unsettled it.
+    using UnsettledFn = sg14::inplace_function<void(uint16_t sink, MilanSinkStream const& was, TimePoint now), 64>;
     /// The sink's binding parameters changed (bound, rebound, unbound, a new
     /// controller or started state): save them.
     using SinkFn = sg14::inplace_function<void(uint16_t sink), 64>;
@@ -236,10 +236,10 @@ class MilanListener
     /// probing or settled state); only the controller and the started state are updated.
     void update_binding(uint16_t index, AcmpCommandResponse const& cmd);
     /// A new binding, or a rebinding to another talker: stop what runs and probe the talker.
-    void rebind(uint16_t index, AcmpCommandResponse const& cmd);
+    void rebind(uint16_t index, AcmpCommandResponse const& cmd, TimePoint now);
     /// Stop what runs: the timer, the SRP reservation and the ADP discovery state machine.
-    void stop(uint16_t index);
-    void unbind(uint16_t index, AcmpCommandResponse const& cmd);
+    void stop(uint16_t index, TimePoint now);
+    void unbind(uint16_t index, AcmpCommandResponse const& cmd, TimePoint now);
     void get_rx_state(uint16_t index, AcmpCommandResponse const& cmd);
     void probe_response(uint16_t index, AcmpCommandResponse const& resp, TimePoint now);
     /// Section 5.5.3.5.18 step 4: settle on the stream already in sink @p index.
@@ -263,7 +263,7 @@ class MilanListener
         }
     }
     /// Leave the settled states: clear the SRP parameters, stop SRP.
-    void unsettle(uint16_t index);
+    void unsettle(uint16_t index, TimePoint now);
     /// TMR_RETRY, TMR_NO_TK, EVT_TK_UNREGISTERED: wait for the talker, or
     /// probe again after TMR_DELAY when it is discovered.
     void reprobe(uint16_t index, TimePoint now);
