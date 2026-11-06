@@ -237,10 +237,9 @@ class AvbEntityKit
 
     // --- Talker admission (the hardware shaper's input) ------------------------
 
-    /// The talker stream indices whose reservation the gate admits at @p now (TalkerGate::admitted),
-    /// in table order: the shaper's set. STOP_STREAMING and a pending MAAP address keep a stream in
-    /// it: its Talker Advertise stays declared (IEEE 1722.1-2021 Clause 7.4.37 withdraws nothing).
-    /// The no-argument form reads the gate's clock once.
+    /// The talker stream indices whose reservation the gate admits at @p now (TalkerGate::admitted), in
+    /// table order: the shaper's set, which a STOP_STREAMING'd or MAAP-pending stream stays in
+    /// (docs/MILAN_TALKER.md). The no-argument form reads the gate's clock once.
     using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
     [[nodiscard]] auto admitted_talker_streams(GateTimePoint now) const noexcept -> AdmittedStreams;
     [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams
@@ -288,11 +287,12 @@ class AvbEntityKit
     /// The talker streams a declaration pass re-declares as they stand (a changed TSpec, a new
     /// Class A VID), by index; the rest only as TalkerDeclarations decides.
     using RefreshSet = std::bitset<MAX_ENTITY_STREAMS>;
-    /// Reactor thread: declare and withdraw Talker Advertises as TalkerDeclarations
-    /// decides at the reactor's @p now_ns, the streams in @p refresh re-declared, the
-    /// gate told @p gate_now. The kit's own timer calls it at each deadline; events
-    /// call it directly.
+    /// Reactor thread: declare and withdraw Talker Advertises as TalkerDeclarations decides
+    /// at the reactor's @p now_ns, the streams in @p refresh re-declared, the gate told
+    /// @p gate_now; the kit's timer at each deadline, the reactor's events directly.
     void update_talker_declarations(int64_t now_ns, GateTimePoint gate_now, RefreshSet refresh);
+    /// The re-declarations an AEM hook asked for, run at the next reactor pass; empty after stop().
+    [[nodiscard]] auto pending_refresh() const noexcept -> RefreshSet { return refresh_pending_; }
     /// As above for a caller with no gate reading in hand (reads the gate's clock once);
     /// @p refresh re-declares every stream.
     void update_talker_declarations(int64_t const now_ns, bool const refresh = false)
