@@ -85,7 +85,7 @@ transmitting the stream". A talker puts stream `idx` on the wire only when:
 
 1. an MSRP Listener declaration that permits transmission (Ready or Ready
    Failed, not Asking Failed) is registered for the stream's stream_id, or was
-   within `GRACE_NS`;
+   within `GRACE`;
 2. our Talker Advertise is declared. This is implied by (1): a listener
    declaration for our stream only arises against our Talker Advertise, and the
    gate closes at once when we withdraw it (`note_talker_withdrawn`);
@@ -100,24 +100,50 @@ stream index lookup given to the gate (`TalkerGate::StreamIndexFn`); the kit's
 is its ACMP talker table, and a talker without an ATDECC entity (one driving an
 `nanoavb::SrpPort`) gives its own.
 
+### One clock, one stamp, one predicate
+
+The gate's clock is `CLOCK_MONOTONIC_RAW` (`TalkerGate::RawTimePoint`,
+`realtime::MonotonicRawClock`): the clock a media wake is told on
+(`TimerWakeInfo::actual_raw`), and the one `net::rx_clock_now()` reads. The
+reactor is told its own time (`sm::TimePoint`, the reactor's `ClockFn`) and has
+no line to RAW, so for each event that changes or evaluates the gate it reads
+RAW once (`AvbEntityKit::note_listener_ready` takes that reading beside the
+reactor's time; `poll_admission` is told one). The reactor is not real-time;
+the media thread never reads a clock for the gate.
+
+Per stream the gate holds one stamp, `ready_raw_ns_`: the last RAW instant the
+Listener declaration was known registered. `note_listener_ready` writes it on a
+registration and on a withdrawal (the moment the registration was last known),
+then the `listener_ready_` flag with release; `note_talker_withdrawn` zeroes the
+stamp (no grace) before clearing the flag. A reader loads the flag with acquire
+and then the stamp, so a withdrawal never pairs an old stamp with a cleared flag.
+
+`admitted(idx, now)` is the whole predicate: gating off, or Started and
+(`listener_ready_` or `now < stamp + GRACE`). `should_transmit(idx, now)` is
+`admitted()` by another name for the media wake, so the reactor's admitted set
+(the shaper's input, the STREAM_OUTPUT `streaming` counter) and what goes on the
+wire are one function of one stamp: a Ready set and cleared between two media
+wakes, a STOP through a LeaveAll blip and a START within the grace, a Talker
+withdrawal followed by a Ready, all read the same on both sides
+(`avb_entity_talker_gate_test.cpp`). `grace_ends(idx)` gives a host the
+instant the stamp's grace runs out, for a deadline of its own.
+
 The grace window covers the MRP LeaveAll cycle: the peer's Listener declaration
 ages out and re-declares on a roughly 10 s cycle, momentarily withdrawn for 1-3
-s, which must not chop the stream. Both a registration and its withdrawal stamp
-the last-ready time (the last moment it was known registered), and only those
-events move the stamp, so a withdrawn declaration closes the gate `GRACE_NS`
-later and the window cannot be extended without a fresh registration. A genuine
-departure closes the gate.
-
-The gate is cross-thread: the listener and stream-started state is written by
-the reactor thread (`note_listener_ready`, `note_talker_withdrawn`,
-`note_stream_started`) and read by the media-timer thread (`should_transmit`),
-so the flags and last-ready timestamps are atomic. `admitted()` depends on
-time, so the reactor re-evaluates it periodically (`AvbEntityKit::poll_admission`)
-to notice a grace expiry without an MSRP event; the hardware shaper sizes its
-resources from it. Because the reactor evaluates at a later `now_ns` than the
-media thread, the admitted set it reports closes no earlier than transmission
-stops. `listener_admitted()` reports the listener half alone (whatever
+s, which must not chop the stream. Only a registration or a withdrawal moves
+the stamp, so a withdrawn declaration closes the gate `GRACE` later and the
+window cannot be extended without a fresh registration. A genuine departure
+closes the gate; `admitted()` depends on time, so the reactor re-evaluates it
+periodically (`AvbEntityKit::poll_admission`) to notice a grace expiry without
+an MSRP event. `listener_admitted()` reports the listener half alone (whatever
 `gate_enabled_` says, Started/Stopped playing no part).
+
+The declarations' deadlines (`TalkerDeclarations`, the probe window and the
+re-declare hold) are a different matter: they run on the reactor's clock, built
+from the time each hook is told, and the kit's `DeclarationTimer` compares them
+with the time the reactor tells its tick, so a reactor on any `ClockFn` closes
+a window on time. An AEM hook told no time uses the reactor's time as of its
+last pass (`AvbEntityKit::reactor_now_ns`).
 
 ## See also
 
