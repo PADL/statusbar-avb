@@ -16,6 +16,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/srp/srp_msrp.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -265,12 +266,13 @@ template <size_t N>
     return flags;
 }
 
-/// Fill the Milan GET_STREAM_INFO response for a STREAM_INPUT from its sink state
-/// machine (Milan v1.2 Section 5.4.2.10.1, Tables 5.9-5.10; docs/AVB_ENTITY_KIT.md).
-/// False when the input or its sink does not exist.
+/// Fill the Milan GET_STREAM_INFO response for a STREAM_INPUT from its sink state machine in
+/// @p layout (Milan v1.3 Section 5.4.2.10.1 Table 5.8 in IEEE 1722.1-2021's, Milan v1.2 Tables
+/// 5.9-5.10 in its own; docs/AVB_ENTITY_KIT.md). False when the input or its sink does not exist.
 [[nodiscard]] inline auto fill_milan_listener_stream_info(
     AvbEntityHost const& host,
     uint16_t const descriptor_index,
+    atdecc::aem::StreamInfoLayout const layout,
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
 {
@@ -278,7 +280,11 @@ template <size_t N>
     if (sink == nullptr) {
         return false;
     }
-    out.flags = ieee::quadlet_t{fill_milan_listener_fields(host, descriptor_index, *sink, out)};
+    uint32_t flags = fill_milan_listener_fields(host, descriptor_index, *sink, out);
+    if (layout == atdecc::aem::StreamInfoLayout::ieee_2021 && sink->bound() && !sink->registering()) {
+        flags |= atdecc::aem::stream_info_flags::NOT_REGISTERING_SRP;
+    }
+    out.flags = ieee::quadlet_t{flags};
     ext.flags_ex = ieee::quadlet_t{sink->registering() ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
     ext.set_probing(sink->probing_status, sink->acmp_status);
     return true;
@@ -314,26 +320,44 @@ inline void fill_classic_talker_counters(
     out[stream_output_frames_tx_bit] = totals.pdus;
 }
 
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index: Milan v1.2 Section
-/// 5.4.2.25 Table 5.17, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
+/// A Milan v1.3 STREAM_OUTPUT's GET_COUNTERS (Milan v1.3 Table 5.14): @p intervals at IEEE
+/// 1722.1-2021's positions, and its signal presence once monitored (Section 5.3.7.7.1).
+inline void fill_milan_v13_talker_counters(StreamOutputIntervals const& intervals, uint32_t& valid, std::array<uint32_t, 32>& out)
+{
+    for (size_t i = 0; i < intervals.values.size(); ++i) {
+        auto const position = StreamOutputIntervals::V1_3_POSITIONS[i];
+        valid |= 1U << position;
+        out[position] = intervals.values[i];
+    }
+    if (intervals.presence) {
+        valid |= (1U << StreamOutputIntervals::PRESENCE_0_31) | (1U << StreamOutputIntervals::PRESENCE_32_59);
+        out[StreamOutputIntervals::PRESENCE_0_31] = presence_quadlet(*intervals.presence, 0);
+        out[StreamOutputIntervals::PRESENCE_32_59] = presence_quadlet(*intervals.presence, 32);
+    }
+}
+
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index in @p profile's layout: Milan v1.3
+/// Table 5.14, Milan v1.2 Table 5.17, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
 /// False when the talker has no such stream.
 [[nodiscard]] inline auto fill_talker_stream_counters(
     TalkerStreams const& talker,
     uint16_t const descriptor_index,
     StreamOutputIntervals const& intervals,
-    bool const milan,
+    nanoavb::EntityProfile const profile,
     uint32_t& valid,
     std::array<uint32_t, 32>& out) -> bool
 {
     if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    if (milan) {
+    if (profile.milan_v1_3()) {
+        fill_milan_v13_talker_counters(intervals, valid, out);
+    } else if (profile.milan) {
         valid |= StreamOutputIntervals::VALID;
         std::copy(intervals.values.begin(), intervals.values.end(), out.begin());
-        return true;
+    } else {
+        fill_classic_talker_counters(talker, descriptor_index, intervals, valid, out);
     }
-    fill_classic_talker_counters(talker, descriptor_index, intervals, valid, out);
     return true;
 }
 

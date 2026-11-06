@@ -1140,6 +1140,7 @@ TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
 {
     auto model = create_test_model();
     AemCommandHandler handler{model};
+    handler.set_entity_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
     handler.set_get_stream_info(
         [](uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext)
             -> bool {
@@ -1217,7 +1218,10 @@ TEST(nanoavb_entity_get_stream_info, the_layout_sets_the_response_length)
     std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> cmd{0x00, 0x06, 0x00, 0x00};
     auto header = create_aem_header(AEM_COMMAND_GET_STREAM_INFO);
 
-    // The profile's form until a layout is set (Milan v1.3 Section 5.4.2.10.2).
+    // The profile's form until a layout is set (Milan v1.3 Section 5.4.2.10.2): Milan v1.3's is
+    // IEEE 1722.1-2021's, v1.2's its own.
+    EXPECT_EQ(handler.stream_info_layout(), StreamInfoLayout::ieee_2021);
+    handler.set_entity_profile(EntityProfile{.milan_version = MilanVersion::v1_2});
     EXPECT_EQ(handler.stream_info_layout(), StreamInfoLayout::milan_v1_2);
     handler.set_stream_info_layout(StreamInfoLayout::ieee_2021);
     auto const v2021 = make_test_result(handler, header, cmd);
@@ -2965,6 +2969,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
+    handler.set_entity_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
     handler.set_entity_id(kEntity);
     handler.set_profile(AemCommandHandler::Profile::milan13);  // the requester is left out
     OffsetStore store;
@@ -3017,6 +3022,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_refusals)
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
+    handler.set_entity_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
     handler.set_entity_id(kEntity);
     std::vector<CapturedSend> sends;
     capture_sends(handler, sends);
@@ -3060,6 +3066,7 @@ TEST(nanoavb_entity_presentation_offset, refused_while_another_controller_holds_
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
+    handler.set_entity_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
     handler.set_entity_id(kEntity);
     OffsetStore store;
     store.install(handler);
