@@ -376,7 +376,7 @@ struct MilanKit
     AvbEntityAudioIOConfig config;
     EntityIdentityDescriptorHandler handler;
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     AvbEntityKit kit;
     itc::StopToken stop{};
     net::MessageReactor reactor;
@@ -453,7 +453,7 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
     EntityIdentityDescriptorHandler handler{
         *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit bounds", std::nullopt, /*patch_avb_interface=*/false};
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     AvbEntityKit kit{
         config,
         handler,
@@ -612,7 +612,7 @@ TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
     EntityIdentityDescriptorHandler handler{
         *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit domain", std::nullopt, /*patch_avb_interface=*/false};
     ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<uint64_t> last_gptp_ns{0};
+    std::atomic<int64_t> last_gptp_ns{0};
     AvbEntityKit kit{
         config,
         handler,
@@ -686,7 +686,7 @@ TEST(avb_entity_kit_profile, config_milan_overrides_the_model)
         EntityIdentityDescriptorHandler handler{
             *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit profile", std::nullopt, /*patch_avb_interface=*/false};
         ptpclient::MediaClockGenerator media_clock{};
-        std::atomic<uint64_t> last_gptp_ns{0};
+        std::atomic<int64_t> last_gptp_ns{0};
         AvbEntityKit kit{
             config,
             handler,
