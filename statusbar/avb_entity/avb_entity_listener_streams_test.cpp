@@ -698,8 +698,9 @@ TEST(listener_port, tagged_and_untagged_frames_reach_their_slot)
     EXPECT_TRUE(wire.inject_rx(l2_frame(untagged, false, 0x88F7)).has_value());
     EXPECT_TRUE(wire.inject_rx(l2_frame(tagged, true)).has_value());
 
-    EXPECT_EQ(ls.drain_rx(realtime::GptpClock0::from_ns(static_cast<int64_t>(pts0 - 1'000'000)), net::rx_clock_now()), size_t{3});  // the gPTP frame drained and dropped
-    EXPECT_EQ(ls.drain_rx(realtime::GptpClock0::from_ns(static_cast<int64_t>(pts0 - 1'000'000)), net::rx_clock_now()), size_t{0});
+    auto const gptp_now = realtime::GptpClock0::from_ns(static_cast<int64_t>(pts0 - 1'000'000));
+    EXPECT_EQ(ls.drain_rx(gptp_now, net::rx_clock_now()), size_t{3});  // the gPTP frame drained and dropped
+    EXPECT_EQ(ls.drain_rx(gptp_now, net::rx_clock_now()), size_t{0});
     EXPECT_EQ(sink.seen.size(), size_t{2});
     EXPECT_EQ(ls.slot_for(1)->rx_packets.load(), uint64_t{2});
     if (sink.seen.size() == 2) {
