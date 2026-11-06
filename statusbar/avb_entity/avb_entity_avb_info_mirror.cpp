@@ -9,8 +9,8 @@
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <array>
+#include <chrono>
 
 namespace statusbar::avb_entity {
 
