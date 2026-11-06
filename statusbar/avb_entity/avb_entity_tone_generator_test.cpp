@@ -260,26 +260,26 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     constexpr int64_t t0 = 1'000'000'000;
 
     // No listener -> nothing transmits.
-    EXPECT_FALSE(gate.should_transmit(k_aaf, t0));
-    EXPECT_FALSE(gate.should_transmit(k_crf, t0));
+    EXPECT_FALSE(gate.admitted(k_aaf, t0));
+    EXPECT_FALSE(gate.admitted(k_crf, t0));
 
     // Admit the AAF stream (MSRP Listener Ready). CRF is left untouched -- it
     // must stay suppressed.
     gate.note_listener_ready(aaf_sid, true, t0);
-    EXPECT_TRUE(gate.should_transmit(k_aaf, t0));
-    EXPECT_FALSE(gate.should_transmit(k_crf, t0));  // the regression: CRF must not ride AAF
+    EXPECT_TRUE(gate.admitted(k_aaf, t0));
+    EXPECT_FALSE(gate.admitted(k_crf, t0));  // the regression: CRF must not ride AAF
 
     // Admit CRF on its OWN merits -> now it transmits, independently.
     gate.note_listener_ready(crf_sid, true, t0);
-    EXPECT_TRUE(gate.should_transmit(k_crf, t0));
+    EXPECT_TRUE(gate.admitted(k_crf, t0));
 
     // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.
     gate.note_stream_started(k_aaf, false);
-    EXPECT_FALSE(gate.should_transmit(k_aaf, t0));
     EXPECT_FALSE(gate.admitted(k_aaf, t0));
-    EXPECT_TRUE(gate.should_transmit(k_crf, t0));
+    EXPECT_FALSE(gate.admitted(k_aaf, t0));
+    EXPECT_TRUE(gate.admitted(k_crf, t0));
     gate.note_stream_started(k_aaf, true);
-    EXPECT_TRUE(gate.should_transmit(k_aaf, t0));
+    EXPECT_TRUE(gate.admitted(k_aaf, t0));
 }
 
 namespace {
@@ -338,7 +338,7 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 
     gate.note_listener_ready(*sid, true, t0);
     EXPECT_TRUE(gate.admitted(k_aaf, t0));
-    EXPECT_TRUE(gate.should_transmit(k_aaf, t0));
+    EXPECT_TRUE(gate.admitted(k_aaf, t0));
     // Registered: no expiry however long it stays.
     EXPECT_TRUE(gate.admitted(k_aaf, t0 + 100 * grace));
 
@@ -347,8 +347,8 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
     int64_t const t1 = t0 + 60 * grace;
     gate.note_listener_ready(*sid, false, t1);
     EXPECT_TRUE(gate.admitted(k_aaf, t1));
-    EXPECT_TRUE(gate.should_transmit(k_aaf, t1 + grace - 1));
-    EXPECT_FALSE(gate.should_transmit(k_aaf, t1 + grace));
+    EXPECT_TRUE(gate.admitted(k_aaf, t1 + grace - 1));
+    EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
     EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
 
     // A repeated withdrawal does not extend the window.
@@ -418,7 +418,7 @@ TEST(tone_gate, disabled_gate_always_admits)
     open.note_stream_started(1, false);
     for (uint16_t idx = 0; idx < 3; ++idx) {
         EXPECT_TRUE(open.admitted(idx, 0));
-        EXPECT_TRUE(open.should_transmit(idx, 0));
+        EXPECT_TRUE(open.admitted(idx, 0));
     }
 }
 
@@ -776,7 +776,7 @@ TEST(tone_port, each_wake_transmits_then_flushes_the_port_once)
     auto t = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     std::array<size_t, 6> const flushed_after{1, 1, 2, 3, 4, 5};
     for (size_t const expected : flushed_after) {
-        entity.process_audio(t);
+        entity.process_audio(t, RAW_NOW);
         t += std::chrono::microseconds{125};
         EXPECT_EQ(wire.tx_flushes(), expected);
         EXPECT_EQ(wire.cycles_ended(), expected);
