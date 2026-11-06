@@ -30,6 +30,7 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
+#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -237,20 +238,23 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
     return format.aaf_samples_per_frame != 0 ? format.aaf_samples_per_frame : aaf_table_samples_per_pdu(format.sample_rate_hz);
 }
 
-/// The byte Milan v1.2 Table 4.4 adds to every MaxFrameSize for a sampling
-/// clock a little faster than nominal.
+/// The byte Milan Table 4.4 adds for a sampling clock a little faster than nominal: to
+/// MaxFrameSize in v1.2, to the frame after the minimum-size rule in v1.3 (step 3).
 inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
 
-/// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence
-/// (Milan v1.2 Section 4.3.3.2, Table 4.4). Returns 0 for StreamKind::other
-/// or an unknown rate.
-[[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
+/// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence: the AVTPDU (Milan
+/// v1.3 Section 4.3.3.2, Table 4.4), MILAN_TSPEC_SPARE_BYTES more in @p version v1.2. Returns 0
+/// for StreamKind::other or an unknown rate.
+[[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion version) noexcept -> uint16_t;
 
 /// One stream's MSRP TSpec (IEEE 802.1Q 35.2.2.8.4).
 struct TSpec
 {
     uint16_t max_frame_size{0};       ///< L2 payload octets (MaxFrameSize)
     uint16_t max_interval_frames{1};  ///< frames per class measurement interval (MaxIntervalFrames)
+    /// Octets the shaper adds to each frame after the minimum-size rule, not declared (Milan
+    /// v1.3 Table 4.4 step 3: MILAN_TSPEC_SPARE_BYTES).
+    uint16_t clock_drift_bytes{0};
 
     auto operator==(TSpec const&) const noexcept -> bool = default;
 };

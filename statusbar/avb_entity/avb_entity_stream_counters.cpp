@@ -5,6 +5,7 @@
 
 #include <format>
 #include <iterator>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -307,7 +308,25 @@ auto StreamOutputIntervals::fold(StreamOutputTotals const& totals) noexcept -> b
         ++values[FRAMES_TX];
     }
     last = totals;
-    return values != before;
+    return fold_presence() || values != before;
+}
+
+void StreamOutputIntervals::narrow_presence(uint16_t const count) noexcept
+{
+    auto const latest = pending_presence ? pending_presence : presence;
+    if (latest) {
+        pending_presence = presence_of(*latest, count);
+    }
+}
+
+auto StreamOutputIntervals::fold_presence() noexcept -> bool
+{
+    if (!pending_presence) {
+        return false;  // nothing reported since the last fold: what is reported stands
+    }
+    bool const changed = pending_presence != presence;
+    presence = std::exchange(pending_presence, std::nullopt);
+    return changed;
 }
 
 void StreamInputIntervals::reset(StreamInputCounters& c) noexcept

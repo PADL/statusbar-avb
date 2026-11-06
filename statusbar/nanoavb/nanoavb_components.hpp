@@ -444,12 +444,18 @@ struct NanoAvbComponents
 
     void print_info() const;
 
+    /// The Milan version a Milan entity implements (EntityProfile::milan_version): set before the
+    /// entity is advertised, as GET_MILAN_INFO may not change (Milan v1.3 Section 5.4.4.1).
+    void set_milan_version(MilanVersion version) noexcept;
+
     /// Get total talker connection count
     [[nodiscard]] auto talker_connection_count() const -> size_t;
 
   private:
-    /// The handlers' Milan behaviour, from profile (both constructors).
+    /// Every reader of profile told it (both constructors, set_milan_version); each install is idempotent.
     void wire_profile();
+    /// The AEM and MVU handlers' profile, and the MVU handler on the Milan sinks (Milan v1.3 Sections 5.4.4.6-8).
+    void wire_mvu_binding();
 };
 
 //
