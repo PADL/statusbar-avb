@@ -181,7 +181,7 @@ auto MilanListener::receive_command(uint8_t const type, uint16_t const index, Ac
             bind(index, pdu, now);
             break;
         case ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND:
-            unbind(index, pdu);
+            unbind(index, pdu, now);
             break;
         default:
             get_rx_state(index, pdu);
@@ -219,7 +219,7 @@ void MilanListener::bind(uint16_t const index, AcmpCommandResponse const& cmd, T
         notify(index);
         return;
     }
-    rebind(index, cmd);
+    rebind(index, cmd, now);
     send(bind_response(cmd));
     send_probe(index, now);
     notify(index);
@@ -237,9 +237,9 @@ void MilanListener::update_binding(uint16_t const index, AcmpCommandResponse con
     }
 }
 
-void MilanListener::rebind(uint16_t const index, AcmpCommandResponse const& cmd)
+void MilanListener::rebind(uint16_t const index, AcmpCommandResponse const& cmd, TimePoint const now)
 {
-    stop(index);
+    stop(index, now);
     auto& s = sinks_[index];
     s.binding = MilanSinkBinding{
         .talker_entity_id = cmd.talker_entity_id,
@@ -252,24 +252,24 @@ void MilanListener::rebind(uint16_t const index, AcmpCommandResponse const& cmd)
     binding_changed(index);
 }
 
-void MilanListener::stop(uint16_t const index)
+void MilanListener::stop(uint16_t const index, TimePoint const now)
 {
     auto& s = sinks_[index];
     s.timer_running = false;
     if (s.settled()) {
-        unsettle(index);
+        unsettle(index, now);
     }
     s.discovered = false;
 }
 
-void MilanListener::unbind(uint16_t const index, AcmpCommandResponse const& cmd)
+void MilanListener::unbind(uint16_t const index, AcmpCommandResponse const& cmd, TimePoint const now)
 {
     if (!authorized(cmd.controller_entity_id)) {
         respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);  // Table 5.35
         return;
     }
     if (sinks_[index].bound()) {
-        stop(index);
+        stop(index, now);
         sinks_[index] = MilanSink{.probing_status = probing_status::DISABLED};  // binding cleared, discovery stopped
         binding_changed(index);
     }
@@ -341,11 +341,11 @@ void MilanListener::settle(uint16_t const index, TimePoint const now)
     start_timer(s, now, TMR_NO_TK);
     notify(index);
     if (on_settled_) {
-        on_settled_(index, s.stream);
+        on_settled_(index, s.stream, now);
     }
 }
 
-void MilanListener::unsettle(uint16_t const index)
+void MilanListener::unsettle(uint16_t const index, TimePoint const now)
 {
     auto& s = sinks_[index];
     MilanSinkStream const was = s.stream;
@@ -355,7 +355,7 @@ void MilanListener::unsettle(uint16_t const index)
     // follows): a registration the hook reports back is ignored.
     s.state = MilanSinkState::prb_w_avail;
     if (on_unsettled_) {
-        on_unsettled_(index, was);
+        on_unsettled_(index, was, now);
     }
 }
 
@@ -405,7 +405,7 @@ void MilanListener::set_registration(uint16_t const index, MilanTalkerRegistrati
     } else if (s.state == MilanSinkState::settled_rsv_ok && was && !s.registering()) {
         // Section 5.5.3.5.48: EVT_TK_UNREGISTERED.
         s.timer_running = false;
-        unsettle(index);
+        unsettle(index, now);
         s.acmp_status = 0;
         reprobe(index, now);
     }
@@ -562,7 +562,7 @@ void MilanListener::expire(uint16_t const index, TimePoint const now)
             break;
         case MilanSinkState::settled_no_rsv:
             // Section 5.5.3.5.36: TMR_NO_TK.
-            unsettle(index);
+            unsettle(index, now);
             s.acmp_status = 0;
             reprobe(index, now);
             break;
