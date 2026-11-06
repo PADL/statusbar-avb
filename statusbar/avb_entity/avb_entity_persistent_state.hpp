@@ -115,7 +115,12 @@ struct PersistentState
     std::vector<PersistedClockSource> clock_sources;
     std::vector<PersistedPresentationOffset> presentation_offsets;
     std::vector<PersistedListenerBinding> listener_bindings;
-    uint32_t system_unique_id{0};
+    /// SYSTEM_UNIQUE_ID's number and name (Milan v1.3 Section 5.4.4.2; v1.2's is a u32 and no name).
+    uint64_t system_unique_id{0};
+    std::string system_unique_name;
+    /// The file's system_unique_id was of another type (an integer, before it was a u64 in hex) and
+    /// left out, the rest loaded; not written back.
+    bool system_unique_id_ignored{false};
     std::vector<PersistedMediaClockReference> media_clock_references;
     std::vector<PersistedAudioMap> audio_maps;
 
