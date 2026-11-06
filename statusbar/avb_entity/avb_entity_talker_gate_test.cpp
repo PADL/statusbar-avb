@@ -134,4 +134,16 @@ TEST(talker_gate, a_talker_withdrawal_closes_the_media_side_at_once)
     EXPECT_FALSE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{3}));
 }
 
+// A Ready registered and withdrawn between two wakes still opens the media side's grace, as it
+// does the reactor's.
+TEST(talker_gate, a_ready_set_and_cleared_between_wakes_opens_the_media_grace)
+{
+    TalkerGate gate{true, lookup};
+    EXPECT_FALSE(gate.should_transmit(0, RAW0));
+    gate.note_listener_ready(sid(0x100), true, T0);
+    gate.note_listener_ready(sid(0x100), false, T0 + 1);
+    EXPECT_TRUE(gate.should_transmit(0, RAW0 + std::chrono::milliseconds{1}));
+    EXPECT_FALSE(gate.should_transmit(0, RAW0 + std::chrono::milliseconds{1} + TalkerGate::GRACE));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_gate_test)

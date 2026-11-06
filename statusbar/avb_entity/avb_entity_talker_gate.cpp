@@ -55,13 +55,21 @@ void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const 
     }
     uint16_t const idx = *found;
     bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
+    stamp_ready(idx, ready, was, now_ns);
+    if (was != ready && logger_) {
+        logger_->status("srp: talker stream {} MSRP listener-ready -> {} (SRP gate)", idx, ready);
+    }
+}
+
+void TalkerGate::stamp_ready(uint16_t const idx, bool const ready, bool const was, int64_t const now_ns) noexcept
+{
+    if (ready) {
+        readies_[idx].fetch_add(1, std::memory_order_release);
+    }
     if (ready || was) {
         // The grace window runs from the last moment the declaration was known registered;
         // a withdrawal seen while already withdrawn does not extend it.
         ready_ns_[idx].store(now_ns, std::memory_order_relaxed);
-    }
-    if (was != ready && logger_) {
-        logger_->status("srp: talker stream {} MSRP listener-ready -> {} (SRP gate)", idx, ready);
     }
 }
 
@@ -114,19 +122,29 @@ auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noe
     if (!gate_enabled_) {
         return true;
     }
-    if (idx >= stream_started_.size() || !stream_started_[idx].load(std::memory_order_relaxed)) {
+    if (idx >= stream_started_.size()) {
         return false;
     }
-    return listener_ready_within_grace(idx, now);
+    catch_up(idx, now);  // a stopped stream keeps its grace current too
+    return stream_started_[idx].load(std::memory_order_relaxed) && listener_ready_within_grace(idx, now);
 }
 
-auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+void TalkerGate::catch_up(uint16_t const idx, RawTimePoint const now) noexcept
 {
-    // A withdrawal closes the stream at once: the grace seen before it is forgotten.
+    // A Ready registered since the last wake counts as seen at this one, however briefly it was
+    // set; a withdrawal since then closes the stream at once, forgetting the grace.
+    if (uint32_t const readies = readies_[idx].load(std::memory_order_acquire); readies != seen_readies_[idx]) {
+        seen_readies_[idx] = readies;
+        last_seen_ready_[idx] = now;
+    }
     if (uint32_t const withdrawals = withdrawals_[idx].load(std::memory_order_acquire); withdrawals != seen_withdrawals_[idx]) {
         seen_withdrawals_[idx] = withdrawals;
         last_seen_ready_[idx] = NEVER;
     }
+}
+
+auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+{
     if (listener_ready_[idx].load(std::memory_order_relaxed)) {
         last_seen_ready_[idx] = now;
         return true;
