@@ -3,9 +3,9 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// The Milan listener's connection management (Milan v1.2 Section 5.5.3) and per-sink talker
-/// discovery (Section 5.6.4). No I/O and no clock: each event carries its time; effects go out
-/// through the set_* hooks, called after the sink's state is updated. See docs/MILAN_LISTENER.md.
+/// The Milan listener's connection management, bound by ACMP or MVU (Milan v1.3 Section 5.5.3), and
+/// per-sink talker discovery (Section 5.6.4). No I/O, no clock: events carry their time, effects go out
+/// through the set_* hooks after the sink's state is updated (docs/MILAN_LISTENER.md).
 
 #include "statusbar/atdecc/atdecc_acmp.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
@@ -18,18 +18,20 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <string_view>
+#include <utility>
 
 namespace statusbar::atdecc {
 
-/// Milan v1.2 Section 5.5.2.2 renames CONNECT_RX and DISCONNECT_RX (same values).
+/// Milan v1.3 Section 5.5.2.2 renames CONNECT_RX and DISCONNECT_RX (same values).
 constexpr uint8_t ACMP_MESSAGE_TYPE_BIND_RX_COMMAND = ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND;
 constexpr uint8_t ACMP_MESSAGE_TYPE_BIND_RX_RESPONSE = ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE;
 constexpr uint8_t ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND = ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND;
 constexpr uint8_t ACMP_MESSAGE_TYPE_UNBIND_RX_RESPONSE = ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE;
 
-/// The states of a sink (Table 5.28).
+/// The states of a sink (Table 5.29).
 enum class MilanSinkState : uint8_t
 {
     unbound,
@@ -92,7 +94,7 @@ struct MilanSink
     uint8_t acmp_status{0};
 
     /// The last PROBE_TX_COMMAND sent, resent unchanged on TMR_NO_RESP
-    /// (Section 5.5.3.5.16: the same sequence_id).
+    /// (Section 5.5.3.6.16: the same sequence_id).
     AcmpCommandResponse probe{};
     /// The running TMR_DELAY / TMR_NO_RESP / TMR_RETRY / TMR_NO_TK: at most
     /// one per state.
@@ -104,6 +106,8 @@ struct MilanSink
     bool discovered{false};
     uint16_t interface_index{0};
     uint32_t available_index{0};
+    /// The talker's current_configuration_index, when its ENTITY_AVAILABLE marks it valid.
+    std::optional<uint16_t> configuration_index{};
     sm::TimePoint adp_deadline{};  ///< TMR_NO_ADP: valid_time x 2 s
 
     [[nodiscard]] auto bound() const noexcept -> bool { return state != MilanSinkState::unbound; }
@@ -115,6 +119,15 @@ struct MilanSink
     [[nodiscard]] auto registering() const noexcept -> bool { return registration != MilanTalkerRegistration::none; }
 };
 
+/// A BIND_STREAM command's binding parameters (Milan v1.3 Section 5.4.4.6, Table 5.22).
+struct MilanBindRequest
+{
+    ieee::Eui64 controller_entity_id{};
+    ieee::Eui64 talker_entity_id{};
+    uint16_t talker_unique_id{0};  ///< talker_stream_index
+    bool streaming_wait{false};
+};
+
 /// The sinks of one Milan listener entity, each with its §5.5.3 and §5.6.4
 /// state machines. Reactor thread only.
 class MilanListener
@@ -123,11 +136,11 @@ class MilanListener
     using TimePoint = sm::TimePoint;
     using Duration = std::chrono::nanoseconds;
 
-    /// Table 5.29.
+    /// Table 5.30.
     static constexpr Duration TMR_NO_RESP = std::chrono::milliseconds{200};
     static constexpr Duration TMR_RETRY = std::chrono::seconds{4};
     static constexpr Duration TMR_NO_TK = std::chrono::seconds{10};
-    /// TMR_DELAY is "between 0 and 1 second" (Table 5.29); never below 200 ms, so a
+    /// TMR_DELAY is "between 0 and 1 second" (Table 5.30); never below 200 ms, so a
     /// controller's asynchronous notifications come first.
     static constexpr Duration TMR_DELAY_MIN = std::chrono::milliseconds{200};
     static constexpr Duration TMR_DELAY_MAX = std::chrono::seconds{1};
@@ -138,7 +151,7 @@ class MilanListener
     /// multicast address).
     using SendFn = sg14::inplace_function<bool(AcmpCommandResponse const&), 64>;
     /// The sink settled: start the SRP reservation and listening for the
-    /// stream (Section 5.5.3.5.18 step 4), told the time of the event that settled it.
+    /// stream (Section 5.5.3.6.18 step 4), told the time of the event that settled it.
     using SettledFn = sg14::inplace_function<void(uint16_t sink, MilanSinkStream const& stream, TimePoint now), 64>;
     /// The sink left the settled states: "clear the SRP parameters and stop
     /// SRP" (and stop listening). The sink's stream is already zero; the one
@@ -152,6 +165,8 @@ class MilanListener
     using AuthorizedFn = sg14::inplace_function<bool(ieee::Eui64 const& controller), 32>;
     /// The next TMR_DELAY (default: uniform in [TMR_DELAY_MIN, TMR_DELAY_MAX]).
     using DelayFn = sg14::inplace_function<Duration(), 32>;
+    /// Answers a BIND_STREAM / UNBIND_STREAM with the ACMP status its ACMP form would carry.
+    using ReplyFn = sg14::inplace_function<void(uint8_t acmp_status), 64>;
 
     explicit MilanListener(ieee::Eui64 entity_id = {}, size_t sinks = 0);
 
@@ -169,8 +184,14 @@ class MilanListener
     /// Something GET_STREAM_INFO reports of the sink changed (bound, started,
     /// probing or ACMP status, the stream, the registration): notify.
     void set_on_status_changed(SinkFn fn) { on_status_changed_ = std::move(fn); }
+    /// Something GET_STREAM_INPUT_INFO_EX reports of the sink changed (Milan v1.3 Table 5.21: the
+    /// talker, probing or ACMP status, or the talker's registration): notify.
+    void set_on_info_ex_changed(SinkFn fn) { on_info_ex_changed_ = std::move(fn); }
     void set_authorized(AuthorizedFn fn) { authorized_ = std::move(fn); }
     void set_delay(DelayFn fn) { delay_ = std::move(fn); }
+    /// Whether a discovered talker's new current_configuration_index departs it (Milan v1.3
+    /// Section 5.6.4.5.2; not in v1.2). Default true.
+    void set_configuration_departs(bool const departs) noexcept { configuration_departs_ = departs; }
 
     [[nodiscard]] auto sink_count() const noexcept -> size_t { return sinks_.size(); }
     /// The sink with listener_unique_id @p sink, or nullptr.
@@ -179,15 +200,21 @@ class MilanListener
         return sink < sinks_.size() ? &sinks_[sink] : nullptr;
     }
 
-    /// Section 5.5.3.5.2, startup with a saved binding: start discovering the
+    /// Section 5.5.3.6.2, startup with a saved binding: start discovering the
     /// talker and wait for it in PRB_W_AVAIL. False for an unknown or already
     /// bound sink.
     [[nodiscard]] auto restore(uint16_t index, MilanSinkBinding const& binding) -> bool;
 
     /// A BIND_RX / UNBIND_RX / GET_RX_STATE command or PROBE_TX_RESPONSE addressed to this listener
-    /// (Milan v1.2 Section 5.5.3.1; an unknown sink is answered LISTENER_UNKNOWN_ID, Table 5.27).
+    /// (Milan v1.3 Section 5.5.3.1; an unknown sink is answered LISTENER_UNKNOWN_ID, Table 5.27).
     /// False for any other ACMPDU.
     [[nodiscard]] auto receive(AcmpCommandResponse const& pdu, TimePoint now) -> bool;
+
+    /// BIND_STREAM for sink @p index (Milan v1.3 Section 5.5.3.2): RCV_BIND_RX_CMD, answered
+    /// through @p reply before any probe goes. False, and no reply, for an unknown sink.
+    [[nodiscard]] auto bind_stream(uint16_t index, MilanBindRequest const& request, TimePoint now, ReplyFn const& reply) -> bool;
+    /// UNBIND_STREAM for sink @p index from @p controller: RCV_UNBIND_RX_CMD, as bind_stream().
+    [[nodiscard]] auto unbind_stream(uint16_t index, ieee::Eui64 const& controller, TimePoint now, ReplyFn const& reply) -> bool;
 
     /// Section 5.6.4.1: an ENTITY_AVAILABLE / ENTITY_DEPARTING, for every
     /// bound sink whose talker sent it. @p grandmaster and @p domain are this
@@ -195,7 +222,7 @@ class MilanListener
     void receive_adp(AdpDu const& adp, tsn::ClockIdentity const& grandmaster, uint8_t domain, TimePoint now);
 
     /// The registration of settled sink @p index's stream changed (the caller matches stream ID,
-    /// destination address and VLAN ID; Milan v1.2 Section 5.5.3.3). Raises EVT_TK_REGISTERED /
+    /// destination address and VLAN ID; Milan v1.3 Section 5.5.3.4). Raises EVT_TK_REGISTERED /
     /// EVT_TK_UNREGISTERED on a change of registered state; ignored unless the sink is settled.
     void set_registration(uint16_t index, MilanTalkerRegistration registration, TimePoint now);
 
@@ -227,6 +254,13 @@ class MilanListener
         MilanSinkStream stream{};
         MilanTalkerRegistration registration{MilanTalkerRegistration::none};
         auto operator==(Status const&) const -> bool = default;
+
+        /// What GET_STREAM_INPUT_INFO_EX reports, or its notification follows (Table 5.21), is the same.
+        [[nodiscard]] auto same_info_ex(Status const& other) const noexcept -> bool
+        {
+            return talker_entity_id == other.talker_entity_id && talker_unique_id == other.talker_unique_id &&
+                probing_status == other.probing_status && acmp_status == other.acmp_status && registration == other.registration;
+        }
     };
 
     /// A BIND_RX / UNBIND_RX / GET_RX_STATE command for sink @p index; false for another message type.
@@ -242,12 +276,35 @@ class MilanListener
     void unbind(uint16_t index, AcmpCommandResponse const& cmd, TimePoint now);
     void get_rx_state(uint16_t index, AcmpCommandResponse const& cmd);
     void probe_response(uint16_t index, AcmpCommandResponse const& resp, TimePoint now);
-    /// Section 5.5.3.5.18 step 4: settle on the stream already in sink @p index.
+    /// Section 5.5.3.6.18 step 4: settle on the stream already in sink @p index.
     void settle(uint16_t index, TimePoint now);
-    /// Table 5.33: the PROBE_TX_COMMAND for sink @p index, with the next sequence_id.
+    /// Table 5.36: the PROBE_TX_COMMAND for sink @p index, with the next sequence_id.
     auto probe_command(uint16_t index) -> AcmpCommandResponse;
     void send_probe(uint16_t index, TimePoint now);
     void respond(AcmpCommandResponse const& cmd, uint8_t status);
+    /// The @p type command for sink @p index from @p controller an MVU binding stands for (Table 5.22).
+    [[nodiscard]] auto binding_command(uint8_t type, uint16_t index, ieee::Eui64 const& controller) const noexcept
+        -> AcmpCommandResponse;
+    /// The BIND_RX_COMMAND BIND_STREAM @p request for sink @p index stands for.
+    [[nodiscard]] auto bind_command(uint16_t index, MilanBindRequest const& request) const noexcept -> AcmpCommandResponse;
+    /// Run @p process (a bind or unbind) with its response going to @p reply.
+    template <typename F>
+    void replying(ReplyFn const& reply, F&& process)
+    {
+        reply_ = &reply;
+        std::forward<F>(process)();
+        reply_ = nullptr;
+    }
+    /// The response @p resp to a binding command: through reply_ for an MVU one (Section 5.5.3.6:
+    /// a reply of the command's kind), else sent.
+    void reply(AcmpCommandResponse const& resp)
+    {
+        if (reply_ != nullptr) {
+            (*reply_)(resp.status());
+            return;
+        }
+        send(resp);
+    }
     /// @p pdu through the send callback, when there is one.
     void send(AcmpCommandResponse const& pdu)
     {
@@ -275,7 +332,9 @@ class MilanListener
     void adp_not_discovered(uint16_t index, AdpDu const& adp, bool same_gptp, TimePoint valid_until, TimePoint now);
     /// Sections 5.6.4.5.2-3: an ADP message from the discovered talker of sink @p index.
     void adp_discovered(uint16_t index, AdpDu const& adp, bool same_gptp, TimePoint valid_until, TimePoint now);
-    /// The timer of sink @p index expired (Section 5.5.3.5).
+    /// Whether the discovered talker of sink @p s restarted or changed configuration, by its @p adp.
+    [[nodiscard]] auto talker_changed(MilanSink const& s, AdpDu const& adp) const noexcept -> bool;
+    /// The timer of sink @p index expired (Section 5.5.3.6).
     void expire(uint16_t index, TimePoint now);
     void notify(uint16_t index);
     [[nodiscard]] auto authorized(ieee::Eui64 const& controller) const -> bool { return !authorized_ || authorized_(controller); }
@@ -290,7 +349,11 @@ class MilanListener
     UnsettledFn on_unsettled_{};
     SinkFn on_binding_changed_{};
     SinkFn on_status_changed_{};
+    SinkFn on_info_ex_changed_{};
     AuthorizedFn authorized_{};
+    bool configuration_departs_{true};
+    /// The MVU reply of the binding command being processed; null for an ACMP one.
+    ReplyFn const* reply_{nullptr};
     DelayFn delay_{};
 };
 
