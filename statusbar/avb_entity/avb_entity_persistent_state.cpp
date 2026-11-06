@@ -3,6 +3,7 @@
 
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
 
+#include "statusbar/atdecc/atdecc_utf8.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/toml/toml.hpp"
 
@@ -29,12 +30,12 @@ namespace {
 // TOML text
 //
 
-/// A TOML basic string. Bytes from 0x80 go through as they are: ATDECC
+/// A TOML basic string of the well-formed UTF-8 prefix of @p text (atdecc::utf8_prefix): ATDECC
 /// strings are UTF-8, and the reader does not re-validate them.
 [[nodiscard]] auto toml_string(std::string_view const text) -> std::string
 {
     std::string out{"\""};
-    for (char const c : text) {
+    for (char const c : atdecc::utf8_prefix(text)) {
         switch (c) {
             case '"':
                 out += "\\\"";
@@ -243,7 +244,10 @@ auto append_scalars(std::string& out, PersistentState const& state) -> void
     out += std::format("configured_entity_name = {}\n", toml_string(state.configured_entity_name));
     out += std::format("configured_presentation_offset_ns = {}\n", state.configured_presentation_offset_ns);
     if (state.system_unique_id != 0) {
-        out += std::format("system_unique_id = {}\n", state.system_unique_id);
+        out += std::format("system_unique_id = {}\n", toml_hex(state.system_unique_id));
+    }
+    if (!state.system_unique_name.empty()) {
+        out += std::format("system_unique_name = {}\n", toml_string(state.system_unique_name));
     }
 }
 
@@ -355,6 +359,18 @@ template <typename Get, typename T>
     return success();
 }
 
+/// The system_unique_id key, a hex string since it became a u64 (Milan v1.3 Section 5.4.4.2): one of
+/// another type is left out and noted, the rest of the file still loaded.
+void parse_system_unique_id(Table const& root, PersistentState& state)
+{
+    if (!root.contains("system_unique_id")) {
+        return;
+    }
+    auto const id = hex_at(root, "system_unique_id");
+    state.system_unique_id = id.value_or(0);
+    state.system_unique_id_ignored = !id.has_value();
+}
+
 /// The entity model id and the optional scalar keys; false when one is malformed.
 [[nodiscard]] auto parse_scalars(Table const& root, PersistentState& state) -> bool
 {
@@ -363,9 +379,10 @@ template <typename Get, typename T>
         return false;
     }
     state.entity_model_id = *model_id;
+    parse_system_unique_id(root, state);
     return optional_into(root, "configured_entity_name", name_at, state.configured_entity_name) &&
         optional_into(root, "configured_presentation_offset_ns", u32_at, state.configured_presentation_offset_ns) &&
-        optional_into(root, "system_unique_id", u32_at, state.system_unique_id);
+        optional_into(root, "system_unique_name", name_at, state.system_unique_name);
 }
 
 struct DescriptorKey
