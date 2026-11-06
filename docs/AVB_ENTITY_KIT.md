@@ -43,13 +43,16 @@ stream list (one address per talker stream, CRF included: one block of up to
 20), the shaper's admitted set and the tone generator's renders. Collaborators
 sized elsewhere are checked against it in `avb_entity_kit.hpp`.
 
-`srp_max_frame_size` follows Milan v1.2 Section 4.3.3.2, Table 4.4: the AVTPDU
-header plus the payload plus `MILAN_TSPEC_SPARE_BYTES` (one byte, since the
-PAAD's sampling clock may run a little faster than nominal), MaxIntervalFrames
-1. AAF reserves exactly the class A samples per PDU the talker sends (AAF
-PCM32 48 kHz N channels: 24*N + 24 + 1); CRF its timestamps (28 + 1 for one).
-AM824, not a Milan format, reserves a spare sample instead: its talker may send
-nominal+1 samples on a wake.
+`srp_max_frame_size` follows Milan v1.3 Section 4.3.3.2, Table 4.4: the AVTPDU
+header plus the payload, MaxIntervalFrames 1. AAF reserves exactly the class A
+samples per PDU the talker sends (AAF PCM32 48 kHz N channels: 24*N + 24); CRF
+its timestamps (28 for one). The byte for a sampling clock a little faster than
+nominal (`MILAN_TSPEC_SPARE_BYTES`) is the shaper's, added to the frame after
+the 68-octet minimum (`TSpec::clock_drift_bytes`, Table 4.4 step 3): the CRF's
+5696 kbit/s. Milan v1.2's Table 4.4 puts it in MaxFrameSize instead (24*N + 24
++ 1, CRF 28 + 1 and 5632 kbit/s); `talker_tspec` follows the entity's Milan
+version, a classic entity v1.2's. AM824, not a Milan format, reserves a spare
+sample instead: its talker may send nominal+1 samples on a wake.
 
 The raw TX render (`StreamRawRenderFn`) is the fast path alongside the float
 `StreamRenderFn`: the payload is interleaved big-endian samples of the
@@ -102,8 +105,20 @@ packet's is counted in the context's `dbc_discontinuities`, a statistic beside
 `AudioIoConfig::milan` selects the ATDECC profile. Unset follows the model's
 (the blob's ENTITY profile symbol, aemxml's entity `"milan"`); a model that
 says nothing is Milan. Only behaviour that could break a classic controller
-follows it: under Milan, ACQUIRE_ENTITY answers NOT_SUPPORTED (Milan v1.2
+follows it: under Milan, ACQUIRE_ENTITY answers NOT_SUPPORTED (Milan v1.3
 Section 5.4.2.1).
+
+`AudioIoConfig::milan_version` (default v1.3) is the Milan version a Milan
+entity implements: GET_MILAN_INFO's specification_version, the MVU layouts and
+commands (docs/MVU.md), GET_STREAM_INFO's form, the STREAM_OUTPUT counters'
+positions and the TSpec's MaxFrameSize below. Milan v1.3 Section 5.3.1 makes
+GET_MILAN_INFO's fields part of the entity model: an entity that changes its
+version or features reports another entity_model_id.
+`AudioIoConfig::signal_presence` says the application reports each output's
+signal presence (`set_output_signal_presence`, a channel bit mask, reactor
+thread), kept to the channels the stream's format has, and cut again when a
+SET_STREAM_FORMAT narrows it (the next fold reports and notifies it);
+GET_MILAN_INFO then says TALKER_SIGNAL_PRESENCE (v1.3 only).
 
 ## Talker admission
 
@@ -307,7 +322,7 @@ selection is also `active_clock_source()`, which `media_rate()` reads.
 
 ## GET_STREAM_INFO
 
-Talker (Milan v1.2 Section 5.4.2.10.2, Tables 5.11-5.12): STREAM_FORMAT_VALID
+Talker in Milan v1.2's form (its Section 5.4.2.10.2, Tables 5.11-5.12): STREAM_FORMAT_VALID
 and MSRP_ACC_LAT_VALID always; the stream ID and VID always (valid while
 declaring, undefined otherwise); the destination address while MAAP has one;
 REGISTERING (flags_ex) while declaring and registering any Listener,
@@ -318,8 +333,8 @@ the ACMP connection count. A Milan listener queries this to verify the stream
 before sustaining a connection.
 
 The response form is the AEM handler's `stream_info_layout()`: the profile's
-(Milan v1.2's 56 octets, classic IEEE 1722.1-2013's 48) unless
-`set_stream_info_layout` picks IEEE 1722.1-2021's 84. A controller tells them
+(Milan v1.3's IEEE 1722.1-2021 84 octets, Milan v1.2's 56, classic IEEE
+1722.1-2013's 48) unless `set_stream_info_layout` picks another. A controller tells them
 by length, and the form gives an output's msrp_accumulated_latency its meaning
 (Milan v1.3 Section 5.4.2.10.2): the presentation time offset in the older
 forms, the AccumulatedLatency the Talker Advertise declares (0, the bridges
@@ -329,13 +344,13 @@ a Listener, REGISTERING_FAILED with Listener Asking Failed, CONNECTED with
 Listener Ready or Ready Failed. A classic output in 2021's form has
 MSRP_ACC_LAT_VALID only while it declares (IEEE 1722.1-2021 Clause 7.4.16.2).
 
-Inputs keep Milan v1.2's flags in every form, which blocks selecting the 2021
-form for a Milan entity until the v1.3 input work lands: an input in 2021's
-form needs Milan v1.3 Table 5.8 (NOT_REGISTERING_SRP while bound and not
-registering), and its pbsta and acmpsta move to the MVU
-GET_STREAM_INPUT_INFO_EX command (Milan v1.3 Section 5.4.4.8).
+A Milan input in 2021's form uses Milan v1.3 Table 5.8: NOT_REGISTERING_SRP
+while bound and not registering, CONNECTED for v1.2's BOUND (the same bit); its
+pbsta and acmpsta are the MVU GET_STREAM_INPUT_INFO_EX's (Milan v1.3 Section
+5.4.4.8).
 
-Milan listener (Milan v1.2 Section 5.4.2.10.1, Tables 5.9-5.10):
+Milan listener (Milan v1.2 Section 5.4.2.10.1, Tables 5.9-5.10; in 2021's form
+as above):
 STREAM_FORMAT_VALID always; BOUND, FAST_CONNECT and SAVED_STATE while bound,
 STREAMING_WAIT while bound and stopped; the stream ID, destination address and
 VLAN ID (and their VALID flags) while settled, as the PROBE_TX_RESPONSE had
@@ -346,9 +361,13 @@ MSRP_FAILURE_VALID and its bridge and code; pbsta and acmpsta.
 
 ## GET_COUNTERS
 
-Stream outputs: Milan (v1.2 Section 5.4.2.25, Table 5.17) STREAM_START,
-STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX at bit values
-0x01-0x10 from the interval counts. Classic (IEEE 1722.1-2021 Clause
+Stream outputs: Milan v1.3 (Section 5.4.2.25, Table 5.14) STREAM_START,
+STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX from the interval
+counts at IEEE 1722.1-2021's bit values 0x01, 0x02, 0x08, 0x10 and 0x80, and,
+once the application reports it, signal presence (Section 5.3.7.7.1) in
+ENTITY_SPECIFIC_9 (channels 0-31) and ENTITY_SPECIFIC_10 (32-59), channel 0 at
+the MSB, notified with the other counters at most once a second. Milan v1.2
+(Table 5.17) has the five at bit values 0x01-0x10. Classic (IEEE 1722.1-2021 Clause
 7.4.42.2.5): STREAM_START and STREAM_STOP as Milan's, then the running totals
 of mr toggles (bit 3), tu PDUs (bit 4) and PDUs (FRAMES_TX, bit 7).
 
