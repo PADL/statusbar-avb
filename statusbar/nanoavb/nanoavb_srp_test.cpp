@@ -502,7 +502,7 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
     listener.set_listener_waits_for_talker(true);
     listener.set_instant_leave(true);  // Milan v1.3 Section 4.2.7.2.2, as atdecc.profile = "milan13"
     int hooks = 0;
-    listener.set_on_remote_talker([&](StreamId const& s) {
+    listener.set_on_remote_talker([&](StreamId const& s, TimePoint) {
         if (s == sid) {
             ++hooks;
         }

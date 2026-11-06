@@ -552,14 +552,9 @@ auto AvbEntityKit::input_running(uint16_t const idx) const noexcept -> bool
     return stream != nullptr && stream->connected;
 }
 
-auto AvbEntityKit::talker_admitted(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
-{
-    return talker_should_transmit(idx, now);
-}
-
 auto AvbEntityKit::output_streaming(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
 {
-    return talker_admitted(idx, now) || (declarations_.declared(idx) && gate_.listener_admitted(idx, now));
+    return talker_should_transmit(idx, now) || (declarations_.declared(idx) && gate_.listener_admitted(idx, now));
 }
 
 auto AvbEntityKit::reshape_stream(bool const output, StreamSpec const& spec) -> Status
@@ -680,7 +675,7 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
         before,
         updated.format_word);
     if (output && declarations_.declared(updated.index)) {
-        update_talker_declarations(reactor_ns_, true);  // its TSpec; an AEM hook is told no time
+        refresh_pending_.set(updated.index);  // its TSpec, re-declared at the next pass (this hook is told no time)
     }
 }
 
@@ -912,7 +907,7 @@ void AvbEntityKit::update_output_streaming(GateTimePoint const now)
         return;
     }
     for (auto const& spec : talker_specs_) {
-        bool const on = talker_admitted(spec.index, now);
+        bool const on = talker_should_transmit(spec.index, now);
         if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
             (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
         }
@@ -963,7 +958,7 @@ void AvbEntityKit::note_listener_ready(
     // and GET_STREAM_INFO reports REGISTERING / REGISTERING_FAILED.
     if (idx && refresh_talker_listener(*idx, now_ns)) {
         bool const was_declared = declarations_.declared(*idx);
-        update_talker_declarations(now_ns, gate_now, false);
+        update_talker_declarations(now_ns, gate_now, RefreshSet{});
         if (declarations_.declared(*idx) == was_declared) {
             notify_talker_stream_info(*idx);  // else the (un)declaration notified
         }
@@ -1048,14 +1043,14 @@ void AvbEntityKit::note_talker_addresses(bool const valid, int64_t const now_ns)
     }
 }
 
-void AvbEntityKit::update_talker_declarations(int64_t const now_ns, GateTimePoint const gate_now, bool const refresh)
+void AvbEntityKit::update_talker_declarations(int64_t const now_ns, GateTimePoint const gate_now, RefreshSet const refresh)
 {
     // MSRP calls back on the reactor; a nested evaluation would act on the
     // table the outer one is walking: it is noted, and the outer one runs
     // again once its pass is done, at the outer one's times.
     if (updating_declarations_) {
         declarations_pending_ = true;
-        declarations_pending_refresh_ = declarations_pending_refresh_ || refresh;
+        declarations_pending_refresh_ |= refresh;
         return;
     }
     declarations_gate_now_ = gate_now;  // stashed for the gate stamps the passes make
@@ -1064,25 +1059,25 @@ void AvbEntityKit::update_talker_declarations(int64_t const now_ns, GateTimePoin
     note_admission(gate_now);
 }
 
-void AvbEntityKit::run_declaration_passes(int64_t const now_ns, bool const refresh)
+void AvbEntityKit::run_declaration_passes(int64_t const now_ns, RefreshSet const refresh)
 {
     updating_declarations_ = true;
     run_talker_declarations(now_ns, refresh);
     for (int pass = 0; declarations_pending_ && pass < 4; ++pass) {
-        bool const again_refresh = declarations_pending_refresh_;
+        RefreshSet const again_refresh = declarations_pending_refresh_;
         declarations_pending_ = false;
-        declarations_pending_refresh_ = false;
+        declarations_pending_refresh_.reset();
         run_talker_declarations(now_ns, again_refresh);
     }
     declarations_pending_ = false;
-    declarations_pending_refresh_ = false;
+    declarations_pending_refresh_.reset();
     updating_declarations_ = false;
 }
 
-void AvbEntityKit::run_talker_declarations(int64_t const now_ns, bool const refresh)
+void AvbEntityKit::run_talker_declarations(int64_t const now_ns, RefreshSet const refresh)
 {
     for (auto const& spec : talker_specs_) {
-        run_talker_declaration(spec, now_ns, refresh);
+        run_talker_declaration(spec, now_ns, refresh.test(spec.index));
     }
 }
 
@@ -1398,13 +1393,13 @@ void AvbEntityKit::wire_milan_listener()
     });
     // EVT_TK_REGISTERED / EVT_TK_UNREGISTERED: every change of a talker's
     // registration is matched against the settled sinks.
-    components.msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& sid) {
+    components.msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& sid, TimePoint const now) {
         auto const& sinks = host_.components().acmp_listener.milan_sinks();
         for (size_t i = 0; i < sinks.sink_count(); ++i) {
             auto const index = static_cast<uint16_t>(i);
             auto const* sink = sinks.sink(index);
             if (sink->settled() && sink->stream.stream_id.to_uint64() == sid.to_uint64()) {
-                refresh_sink_registration(index, TimePoint{std::chrono::nanoseconds{reactor_ns_}});  // a hook told no time
+                refresh_sink_registration(index, now);
             }
         }
     });
@@ -1501,7 +1496,6 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoin
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
-    reactor_ns_ = steady_ns_of(now);  // until the reactor's first pass
     if (auto status = start_control(reactor, now); !status) {
         return status;
     }
@@ -1884,13 +1878,19 @@ void AvbEntityKit::close_data_plane()
 
 void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
 {
-    reactor_ns_ = now_ns;  // the reactor's clock, for a hook told no time
     // A listener goal change during this pass is saved now, after its ACMP
     // response.
     if (persist_pending_) {
         persist();
     }
-    if (declaration_deadline_ns_ && host_.is_running() && now_ns >= *declaration_deadline_ns_) {
+    if (!host_.is_running()) {
+        return;
+    }
+    // A refresh an AEM hook asked for (told no time): at this pass, told its time.
+    if (refresh_pending_.any()) {
+        update_talker_declarations(now_ns, net::rx_clock_now(), std::exchange(refresh_pending_, RefreshSet{}));
+    }
+    if (declaration_deadline_ns_ && now_ns >= *declaration_deadline_ns_) {
         update_talker_declarations(now_ns);
     }
 }
