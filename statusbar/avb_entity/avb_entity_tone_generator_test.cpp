@@ -268,6 +268,7 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     gate.note_listener_ready(aaf_sid, true, t0);
     EXPECT_TRUE(gate.admitted(k_aaf, t0));
     EXPECT_FALSE(gate.admitted(k_crf, t0));  // the regression: CRF must not ride AAF
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW));
 
     // Admit CRF on its OWN merits -> now it transmits, independently.
     gate.note_listener_ready(crf_sid, true, t0);
@@ -276,8 +277,9 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.
     gate.note_stream_started(k_aaf, false);
     EXPECT_FALSE(gate.admitted(k_aaf, t0));
-    EXPECT_FALSE(gate.admitted(k_aaf, t0));
+    EXPECT_FALSE(gate.should_transmit(k_aaf, RAW_NOW));
     EXPECT_TRUE(gate.admitted(k_crf, t0));
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
     gate.note_stream_started(k_aaf, true);
     EXPECT_TRUE(gate.admitted(k_aaf, t0));
 }
@@ -338,7 +340,7 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 
     gate.note_listener_ready(*sid, true, t0);
     EXPECT_TRUE(gate.admitted(k_aaf, t0));
-    EXPECT_TRUE(gate.admitted(k_aaf, t0));
+    EXPECT_TRUE(gate.should_transmit(k_aaf, RAW_NOW));
     // Registered: no expiry however long it stays.
     EXPECT_TRUE(gate.admitted(k_aaf, t0 + 100 * grace));
 
