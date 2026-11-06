@@ -1725,6 +1725,41 @@ auto unsolicited(std::vector<std::vector<uint8_t>> const& frames, uint16_t const
 
 }  // namespace
 
+// A re-declaration is per stream: SET_STREAM_FORMAT on one of two declared outputs re-advertises
+// that one with its new TSpec at the next reactor pass (the hook is told no time), not the table.
+TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
+{
+    RateKit m{"", 0x1C};
+    EXPECT_TRUE(m.start_ready());
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 1);
+    EXPECT_TRUE(m.kit.talker_declared(0) && m.kit.talker_declared(1));
+    auto& msrp = m.kit.host().components().msrp_handler;
+    size_t sent = 0;
+    msrp.set_send_packet([&sent](std::span<uint8_t const> const p) {
+        sent += p.size();
+        return true;
+    });
+    auto now = sm::Clock::now();
+    auto const drain = [&] {  // a reactor pass, then the join timers of what it declared
+        m.kit.on_declaration_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        for (int i = 0; i < 4; ++i) {
+            now += std::chrono::milliseconds{250};
+            msrp.tick(now);
+        }
+    };
+    drain();
+    sent = 0;
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sent, size_t{0});  // asked for, run at the next pass
+    drain();
+    EXPECT_TRUE(sent > 0);
+    EXPECT_TRUE(m.advertising(0) && m.advertising(1));
+    EXPECT_EQ(m.kit.talker_specs()[0].format_word, base_format(48000, 8));
+}
+
 // SET_STREAM_FORMAT accepts a listed format of the stream's kind at the kit's
 // rate, through the entity's hook, and re-shapes the stream (spec, TX or RX
 // slot); refused while the input is bound or the output streams

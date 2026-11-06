@@ -53,6 +53,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -172,9 +173,9 @@ class AvbEntityKit
     /// per event it stamps or evaluates (net::rx_clock_now()).
     using GateTimePoint = TalkerGate::RawTimePoint;
 
-    /// Whether talker stream @p idx transmits at the media wake told as @p now:
-    /// admitted (or gating off), its MAAP address ready in "maap" mode, and not
-    /// STOP_STREAMING'd. The same predicate as talker_admitted().
+    /// Whether talker stream @p idx transmits at the wake told as @p now: the gate's admitted()
+    /// (the reservation, with its grace) plus the MAAP address ready in "maap" mode and not
+    /// STOP_STREAMING'd. The wire's and the STREAM_OUTPUT streaming counter's predicate.
     [[nodiscard]] auto talker_should_transmit(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
     {
         if (!maap_.ready() || talker_->stream_stopped(idx)) {
@@ -228,8 +229,10 @@ class AvbEntityKit
 
     // --- Talker admission (the hardware shaper's input) ------------------------
 
-    /// The talker stream indices admitted at @p now, in table order
-    /// (TalkerGate::admitted). The no-argument form reads the gate's clock once.
+    /// The talker stream indices whose reservation the gate admits at @p now (TalkerGate::admitted),
+    /// in table order: the shaper's set. STOP_STREAMING and a pending MAAP address keep a stream in
+    /// it: its Talker Advertise stays declared (IEEE 1722.1-2021 Clause 7.4.37 withdraws nothing).
+    /// The no-argument form reads the gate's clock once.
     using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
     [[nodiscard]] auto admitted_talker_streams(GateTimePoint now) const noexcept -> AdmittedStreams;
     [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams
@@ -274,15 +277,19 @@ class AvbEntityKit
     /// steady-clock @p now_ns (the ACMP talker's on_probe lands here): its
     /// window opens and the declarations are re-evaluated.
     void note_talker_probe(uint16_t idx, int64_t now_ns);
+    /// The talker streams a declaration pass re-declares as they stand (a changed TSpec, a new
+    /// Class A VID), by index; the rest only as TalkerDeclarations decides.
+    using RefreshSet = std::bitset<MAX_ENTITY_STREAMS>;
     /// Reactor thread: declare and withdraw Talker Advertises as TalkerDeclarations
-    /// decides at the reactor's @p now_ns (@p refresh re-declares, e.g. with a new
-    /// Class A VID), the gate told @p gate_now. The kit's own timer calls it at
-    /// each deadline; events call it directly.
-    void update_talker_declarations(int64_t now_ns, GateTimePoint gate_now, bool refresh);
-    /// As above, for a caller with no gate reading in hand: reads the gate's clock once.
+    /// decides at the reactor's @p now_ns, the streams in @p refresh re-declared, the
+    /// gate told @p gate_now. The kit's own timer calls it at each deadline; events
+    /// call it directly.
+    void update_talker_declarations(int64_t now_ns, GateTimePoint gate_now, RefreshSet refresh);
+    /// As above for a caller with no gate reading in hand (reads the gate's clock once);
+    /// @p refresh re-declares every stream.
     void update_talker_declarations(int64_t const now_ns, bool const refresh = false)
     {
-        update_talker_declarations(now_ns, net::rx_clock_now(), refresh);
+        update_talker_declarations(now_ns, net::rx_clock_now(), refresh ? RefreshSet{}.set() : RefreshSet{});
     }
     /// Reactor thread: the talker streams' MAAP addresses became valid (@p valid)
     /// or were lost to a conflict. Until valid, PROBE_TX / CONNECT_TX are answered
@@ -388,8 +395,6 @@ class AvbEntityKit
     /// Whether STREAM_OUTPUT @p idx streams at @p now: it may transmit, or it
     /// declares with a Listener Ready (Failed) registered (Milan v1.2 Section 5.3.7.3).
     [[nodiscard]] auto output_streaming(uint16_t idx, GateTimePoint now) const noexcept -> bool;
-    /// Reactor thread: talker_should_transmit() at @p now (one predicate, one clock).
-    [[nodiscard]] auto talker_admitted(uint16_t idx, GateTimePoint now) const noexcept -> bool;
 
     // --- Persistent state (docs/PERSISTENT_STATE.md) -----------------------------
 
@@ -509,7 +514,7 @@ class AvbEntityKit
     void advertise_talker_streams(TimePoint time);
     void withdraw_talker_streams(TimePoint time);
     /// One pass of update_talker_declarations over the talker streams.
-    void run_talker_declarations(int64_t now_ns, bool refresh);
+    void run_talker_declarations(int64_t now_ns, RefreshSet refresh);
     /// One talker stream's turn of run_talker_declarations: declare, withdraw or leave it.
     void run_talker_declaration(StreamSpec const& spec, int64_t now_ns, bool refresh);
     /// Advertise @p spec's Talker; on success note it, re-learn the gate and announce it.
@@ -590,9 +595,6 @@ class AvbEntityKit
     [[nodiscard]] auto identity_spec(uint16_t port_type, uint16_t port_index) const -> StreamSpec const*;
     /// Every dynamic output port onto its identity for the formats now in force.
     void refresh_output_mappings();
-    /// The reactor's clock as of its last pass (on_declaration_timer): the declarations' time
-    /// base for a hook told no time (an AEM command's). The kit's deadlines are all on it.
-    [[nodiscard]] auto reactor_now_ns() const noexcept -> int64_t { return reactor_ns_; }
     /// Control-plane time @p time as the reactor's ns (the hooks are told the reactor's clock).
     [[nodiscard]] static auto steady_ns_of(TimePoint const time) noexcept -> int64_t
     {
@@ -653,7 +655,7 @@ class AvbEntityKit
     /// Talker stream @p idx's registered Listener; nullopt for no such stream.
     [[nodiscard]] auto registered_listener_of(uint16_t idx) const -> std::optional<srp::msrp::ListenerDeclaration>;
     /// update_talker_declarations()'s passes: one, then those asked for meanwhile (at most 4).
-    void run_declaration_passes(int64_t now_ns, bool refresh);
+    void run_declaration_passes(int64_t now_ns, RefreshSet refresh);
     /// Every talker stream undeclared, inactive and gated at steady-clock @p now_ns.
     void note_all_talkers_withdrawn(int64_t now_ns);
     /// The registration of the Talker that settled Milan sink @p sink probed.
@@ -745,11 +747,11 @@ class AvbEntityKit
     /// its timer next wakes for (nullopt: none).
     TalkerDeclarations declarations_;
     std::optional<int64_t> declaration_deadline_ns_{};
-    int64_t reactor_ns_{0};                  ///< the reactor's clock at its last pass (on_declaration_timer)
     GateTimePoint declarations_gate_now_{};  ///< the gate reading the running declaration pass stamps with
     bool updating_declarations_{false};
-    bool declarations_pending_{false};          ///< asked for while updating
-    bool declarations_pending_refresh_{false};  ///< ... with refresh
+    bool declarations_pending_{false};           ///< asked for while updating
+    RefreshSet declarations_pending_refresh_{};  ///< ... the streams to re-declare
+    RefreshSet refresh_pending_{};               ///< re-declarations an AEM hook asked for, run at the next pass
     /// What the declarations' timer reaches the kit through (start(); stop()
     /// drops it and the timer finishes).
     std::shared_ptr<AvbEntityKit* const> declaration_timer_token_{};
