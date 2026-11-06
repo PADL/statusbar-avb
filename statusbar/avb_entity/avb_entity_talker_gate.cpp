@@ -131,16 +131,17 @@ auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noe
 
 void TalkerGate::catch_up(uint16_t const idx, RawTimePoint const now) noexcept
 {
-    // A Ready registered since the last wake counts as seen at this one, however briefly it was
-    // set; a withdrawal since then closes the stream at once, forgetting the grace.
+    // A Ready registered since the last wake counts as seen at that wake, the latest instant known
+    // to be before it, however briefly it was set; a withdrawal since closes the stream at once.
     if (uint32_t const readies = readies_[idx].load(std::memory_order_acquire); readies != seen_readies_[idx]) {
         seen_readies_[idx] = readies;
-        last_seen_ready_[idx] = now;
+        last_seen_ready_[idx] = last_wake_[idx];
     }
     if (uint32_t const withdrawals = withdrawals_[idx].load(std::memory_order_acquire); withdrawals != seen_withdrawals_[idx]) {
         seen_withdrawals_[idx] = withdrawals;
         last_seen_ready_[idx] = NEVER;
     }
+    last_wake_[idx] = now;
 }
 
 auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool
