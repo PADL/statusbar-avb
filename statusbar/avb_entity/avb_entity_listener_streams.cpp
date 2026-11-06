@@ -447,6 +447,7 @@ void ListenerStreams::close_rx() noexcept
     }
     slots_.clear();
     port_ = nullptr;
+    held_frames_ = 0;  // the port's frames go with it
 }
 
 auto ListenerStreams::take_rx_frame(net::RxTimePoint const rx_now) -> std::optional<size_t>
@@ -526,11 +527,57 @@ auto ListenerStreams::receive_in_place(int64_t const gptp_now_ns, net::RxTimePoi
     if (!rx || !rx->has_value()) {
         return false;
     }
-    if (auto const avtpdu = avtpdu_of((*rx)->buffer); !avtpdu.empty()) {
+    decode_in_place(**rx, gptp_now_ns);
+    return true;
+}
+
+void ListenerStreams::decode_in_place(net::EthernetRxSlot const& rx, int64_t const gptp_now_ns)
+{
+    in_place_frame_ = rx.handle;
+    in_place_kept_ = false;
+    if (auto const avtpdu = avtpdu_of(rx.buffer); !avtpdu.empty()) {
         on_stream_rx_frame(avtpdu, gptp_now_ns);
     }
-    (void)port_->port().rx_release((*rx)->handle);
-    return true;
+    in_place_frame_.reset();
+    if (!in_place_kept_) {
+        (void)port_->port().rx_release(rx.handle);  // else the timed sink kept it (hold())
+    }
+}
+
+auto ListenerStreams::hold() noexcept -> std::optional<uint64_t>
+{
+    if (!in_place_frame_ || in_place_kept_) {
+        return std::nullopt;  // not decoded in place, or one packet's frame kept twice
+    }
+    uint32_t const generation = port_->generation();
+    if (generation != held_generation_) {
+        held_frames_ = 0;  // a reopened port's frames are all its own
+        held_generation_ = generation;
+    }
+    if (held_frames_ >= port_->rx_hold_frames()) {
+        return std::nullopt;  // the port's share kept
+    }
+    in_place_kept_ = true;
+    ++held_frames_;
+    return *in_place_frame_ | (uint64_t{static_cast<uint16_t>(generation)} << HOLD_GENERATION_SHIFT);
+}
+
+void ListenerStreams::release(uint64_t const token) noexcept
+{
+    // A frame of a port since closed, or opened again, went with that port.
+    auto const generation = static_cast<uint16_t>(token >> HOLD_GENERATION_SHIFT);
+    bool const current = port_ != nullptr && port_->valid() && port_->generation() == held_generation_;
+    if (!current || generation != static_cast<uint16_t>(held_generation_) || held_frames_ == 0) {
+        return;
+    }
+    --held_frames_;
+    (void)port_->port().rx_release(token & ((uint64_t{1} << HOLD_GENERATION_SHIFT) - 1));
+}
+
+void ListenerStreams::offer_timed(StreamRxPacket& packet)
+{
+    packet.holder = in_place_frame_ ? this : nullptr;
+    timed_sink_->on_listener_packet(packet);
 }
 
 void ListenerStreams::begin_port_cycle()
@@ -630,10 +677,10 @@ auto ListenerStreams::deliver_am824(
     uint64_t samples = 0;
     if (timed_sink_ != nullptr && !slot.consume) {
         // Raw-only: the timed sink takes the quadlets as they are; no float decode.
-        auto const packet = am824_rx_packet(slot.spec.index, *slot.am824, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
+        auto packet = am824_rx_packet(slot.spec.index, *slot.am824, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
         samples = packet.frames;
         if (packet.frames != 0) {
-            timed_sink_->on_listener_packet(packet);
+            offer_timed(packet);
         }
     } else {
         samples = decode_am824(slot, pdu, audio, gptp_now_ns);
@@ -661,8 +708,8 @@ auto ListenerStreams::decode_am824(
             }
         });
     if (timed_sink_ != nullptr && samples != 0) {
-        timed_sink_->on_listener_packet(
-            am824_timed_packet(slot.spec.index, *slot.am824, pdu, audio, static_cast<uint32_t>(samples), pts_first));
+        auto packet = am824_timed_packet(slot.spec.index, *slot.am824, pdu, audio, static_cast<uint32_t>(samples), pts_first);
+        offer_timed(packet);
     }
     return samples;
 }
@@ -699,10 +746,10 @@ auto ListenerStreams::deliver_aaf(
     if (timed_sink_ != nullptr && !slot.consume) {
         // Raw-only: the timed sink takes the payload as is, so skip the
         // float decode and take the timing from the header alone.
-        auto const packet = aaf_rx_packet(slot.spec.index, *slot.aaf, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
+        auto packet = aaf_rx_packet(slot.spec.index, *slot.aaf, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
         samples = packet.frames;
         if (packet.frames != 0) {
-            timed_sink_->on_listener_packet(packet);
+            offer_timed(packet);
         }
     } else {
         samples = decode_aaf(slot, pdu, audio, gptp_now_ns);
@@ -729,8 +776,8 @@ auto ListenerStreams::decode_aaf(
             }
         });
     if (timed_sink_ != nullptr && samples != 0) {
-        timed_sink_->on_listener_packet(
-            aaf_timed_packet(slot.spec.index, *slot.aaf, pdu, audio, static_cast<uint16_t>(samples), pts_first));
+        auto packet = aaf_timed_packet(slot.spec.index, *slot.aaf, pdu, audio, static_cast<uint16_t>(samples), pts_first);
+        offer_timed(packet);
     }
     return samples;
 }

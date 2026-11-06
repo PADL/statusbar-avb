@@ -47,6 +47,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -70,6 +71,8 @@ struct StreamPortConfig
     /// The xdp backend's frames carry launch times (AF_XDP TX metadata; the
     /// driver must honour them, net::netdev::launch_time_supported()).
     bool tx_launch_time{false};
+    /// UMEM frames the xdp backend adds for received frames a timed sink holds (StreamRxFrameHolder).
+    size_t xdp_rx_hold_frames{0};
 };
 
 /// The 802.1Q-tagged AVTP header of a stream frame.
@@ -153,24 +156,31 @@ class StreamPort
                 .xdp_bind_mode = config.xdp_bind_mode,
                 .xdp_tx_launch_time = config.tx_launch_time,
                 .xdp_pin_path = config.xdp_pin_path,
+                .xdp_rx_hold_frames = config.xdp_rx_hold_frames,
             });
         if (status) {
             ++generation_;
         }
         test_launch_time_ = false;
+        rx_hold_frames_ = *backend == net::EthernetBackend::xdp ? config.xdp_rx_hold_frames : 0;
         take_mode(status.has_value());
         return status;
     }
     /// An in-process test port (net::AnyEthernetPort::open_test), its frames
     /// timed as an xdp socket with TX metadata would be when @p launch_time
-    /// (test_launch_time_: the one thing a test port cannot report itself).
-    [[nodiscard]] auto open_test(net::TestPortConfig const& config, bool const launch_time = false) -> Status
+    /// (test_launch_time_: the one thing a test port cannot report itself), and
+    /// @p rx_hold_frames of its frames holdable (rx_hold_frames(); nullopt: its pool).
+    [[nodiscard]] auto open_test(
+        net::TestPortConfig const& config,
+        bool const launch_time = false,
+        std::optional<size_t> const rx_hold_frames = std::nullopt) -> Status
     {
         auto status = port_.open_test(config);
         if (status) {
             ++generation_;
         }
         test_launch_time_ = launch_time;
+        rx_hold_frames_ = rx_hold_frames.value_or(config.frame_pool_size);
         take_mode(status.has_value());
         return status;
     }
@@ -210,6 +220,9 @@ class StreamPort
     }
     /// Whether the port in force was opened single threaded.
     [[nodiscard]] auto single_threaded() const noexcept -> bool { return single_threaded_; }
+    /// Received frames a holder may keep past their decode at once (StreamRxFrameHolder): the xdp backend's
+    /// StreamPortConfig::xdp_rx_hold_frames, a test port's pool; 0 on a backend whose frames go back in order.
+    [[nodiscard]] auto rx_hold_frames() const noexcept -> size_t { return rx_hold_frames_; }
 
     /// The port. Take a Guard around any use from a thread that is not the
     /// only one using it.
@@ -301,6 +314,7 @@ class StreamPort
     bool single_threaded_{false};       ///< the port in force's: open() took it
     bool timed_{false};                 ///< the port in force's frames carry launch times
     bool test_launch_time_{false};
+    size_t rx_hold_frames_{0};
     net::ClockFn phc_{};
     net::LaunchOrder launch_order_{};
     std::atomic<bool> reset_pending_{false};
