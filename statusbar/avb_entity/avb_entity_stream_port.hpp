@@ -241,7 +241,7 @@ class StreamPort
         if (!phc_ || !timed_) {  // timed_: tx_launch_time() as the port opened
             return 0;
         }
-        return static_cast<int64_t>(launch_order_.next(requested_ns, [this] { return net::phc_now_ns(phc_); }));
+        return static_cast<int64_t>(launch_order_.next(requested_ns, net::phc_now_ns(phc_)));
     }
 
     /// Whether a talker writes its frames straight into the port's slots: no other thread drives the
