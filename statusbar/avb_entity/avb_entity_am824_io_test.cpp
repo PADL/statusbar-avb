@@ -12,11 +12,14 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
+#include "statusbar/tsn/tsn_stream_id.hpp"
 
 #include <array>
 #include <chrono>
@@ -381,6 +384,36 @@ TEST(am824_io_print, print_state_does_not_crash)
 
     (*result)->print_state();
     EXPECT_FALSE((*result)->is_running());
+}
+
+// stop() closes the transmit gate: a restart's first wake does not transmit on the previous run's
+// reservation (the Listener declares again against the new Talker Advertise).
+TEST(am824_io_lifecycle, stop_closes_the_transmit_gate)
+{
+    auto blob = load_file(simple2_bin_path());
+    auto config = make_config_with_blob(std::move(blob));
+    config.gate_talker_on_listener = true;
+    auto result = AvbEntityAm824IO::create(std::move(config));
+    EXPECT_TRUE(result.has_value());
+    if (!result) {
+        return;
+    }
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    EXPECT_TRUE((*result)->start(reactor).has_value());
+    auto const* stream = (*result)->components().acmp_talker.get_stream(0);
+    EXPECT_TRUE(stream != nullptr);
+    if (stream == nullptr) {
+        return;
+    }
+    tsn::StreamId sid{};
+    (void)tsn::load_unchecked(stream->stream_id.span(), &sid);
+    constexpr auto RAW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
+    auto& gate = (*result)->talker_gate();
+    gate.note_listener_ready(sid, true, RAW);
+    EXPECT_TRUE(gate.should_transmit(0, RAW));
+    EXPECT_TRUE((*result)->stop().has_value());
+    EXPECT_FALSE(gate.should_transmit(0, RAW + std::chrono::milliseconds{1}));
 }
 
 //

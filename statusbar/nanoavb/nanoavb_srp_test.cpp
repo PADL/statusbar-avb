@@ -960,6 +960,78 @@ TEST(nanoavb_srp_msrp, withdraw_all_sends_the_leaves_at_once)
     EXPECT_EQ(idle_sent, 0U);
 }
 
+// A listener attached Waiting (listener_waits_for_talker) stays attached across withdraw_all(): a
+// stopped handler declares nothing for a talker heard meanwhile, and the next run (declare_domain)
+// re-checks it and declares the Listener once its talker is registered.
+TEST(nanoavb_srp_msrp, a_waiting_listener_survives_withdraw_all_and_declares_in_the_next_run)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    using statusbar::srp::msrp::MsrpConfig;
+    using statusbar::srp::msrp::MsrpParticipant;
+
+    TimePoint now{std::chrono::seconds{1}};
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(11);
+    std::vector<std::vector<uint8_t>> talker_out;
+    std::vector<std::vector<uint8_t>> listener_out;
+    MsrpParticipant talker{milan_msrp_config(MsrpConfig{}), 0x7a3};
+    talker.set_send_pdu([&talker_out](std::span<uint8_t const> p) {
+        talker_out.emplace_back(p.begin(), p.end());
+        return true;
+    });
+    talker.start(now);
+    MsrpHandler<> listener{
+        milan_msrp_config(MsrpConfig{}), MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
+            listener_out.emplace_back(p.begin(), p.end());
+            return true;
+        }}};
+    listener.set_listener_waits_for_talker(true);
+    auto run = [&](int const rounds) {
+        for (int round = 0; round < rounds; ++round) {
+            now += std::chrono::milliseconds{120};
+            talker.tick(now);
+            listener.tick(now);
+            for (auto const& p : talker_out) {
+                listener.receive_packet(p, now);
+            }
+            talker_out.clear();
+            for (auto const& p : listener_out) {
+                talker.receive_pdu(p, now);
+            }
+            listener_out.clear();
+        }
+    };
+    auto const heard = [&] {
+        auto const* rec = talker.find_listener(sid);
+        return rec != nullptr && rec->registrar_is_registered() ? rec->substate : ListenerDeclaration::Ignore;
+    };
+
+    EXPECT_TRUE(listener.declare_domain(now).has_value());
+    EXPECT_EQ(*listener.listener_attach(sid, now), ListenerReservationState::Waiting);
+    run(4);
+    listener.withdraw_all(now);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
+
+    // Stopped: the talker's Advertise heard now declares nothing.
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = sid;
+    fv.vlan_identifier = 2;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    (void)talker.declare_talker_advertise(fv, now);
+    run(12);
+    EXPECT_TRUE(listener.peer_talker_advertise(sid) != nullptr);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
+    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);
+
+    // The next run: the Waiting listener is re-checked and declared for the registered talker.
+    EXPECT_TRUE(listener.declare_domain(now).has_value());
+    run(12);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
+    EXPECT_TRUE(heard() == ListenerDeclaration::Ready);
+}
+
 TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
 {
     size_t sent = 0;
