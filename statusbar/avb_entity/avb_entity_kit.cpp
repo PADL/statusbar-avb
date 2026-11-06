@@ -1258,7 +1258,7 @@ void AvbEntityKit::wire_milan_talker()
                     talker_listener_[idx] == srp::msrp::ListenerDeclaration::AskingFailed,
                 .avb_interface_index = idx < talker_interface_.size() ? talker_interface_[idx] : uint16_t{0}};
         },
-        [this](uint16_t const idx, TimePoint) { note_talker_probe(idx, steady_now_ns()); });
+        [this](uint16_t const idx, TimePoint const time) { note_talker_probe(idx, steady_ns_of(time)); });
 
     // The presentation time offset (Milan v1.2 Sections 5.4.2.9-10): refused
     // while the output is streaming and when the entity cannot apply it.
