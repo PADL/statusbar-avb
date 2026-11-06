@@ -3,6 +3,7 @@
 
 #include "statusbar/nanoavb/nanoavb_mvu_handler.hpp"
 
+#include "statusbar/atdecc/atdecc_utf8.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <algorithm>
@@ -10,6 +11,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <utility>
 
 namespace statusbar::nanoavb {
 
@@ -40,22 +43,70 @@ constexpr size_t MAX_AECP_PDU_LENGTH = AecpDuCommon::HEADER_LENGTH + AECP_MAX_CO
     return payload.first(declared);
 }
 
-/// The requested id of a SET_SYSTEM_UNIQUE_ID's @p data; nullopt when too short. The full v1.3
-/// payload (a u64 number where v1.2 has its u32, and a name, not kept); anything shorter that
-/// holds the v1.2 id is v1.2.
-[[nodiscard]] auto requested_system_unique_id(std::span<uint8_t const> const data) -> std::optional<uint64_t>
+/// The requested id of a SET_SYSTEM_UNIQUE_ID's @p data; nullopt when too short. The v1.3 payload
+/// (Milan v1.3 Figure 5.7); below v1.3 anything shorter that holds the v1.2 id is v1.2's (and a
+/// v1.3 payload's name is not kept).
+[[nodiscard]] auto requested_system_unique_id(std::span<uint8_t const> const data, bool const v1_3)
+    -> std::optional<MvuSystemUniqueIdPayloadV13>
 {
-    if (data.size() >= MvuSystemUniqueIdPayloadV13::LENGTH) {
-        ieee::octlet_t number{0};
-        span_load(number, data.subspan(offsetof(MvuSystemUniqueIdPayloadV13, number), sizeof(number)));
-        return number.get();
+    if (auto const v13 = load_payload<MvuSystemUniqueIdPayloadV13>(data)) {
+        return *v13;
     }
-    if (data.size() >= MvuSystemUniqueIdPayload::LENGTH) {
-        MvuSystemUniqueIdPayload v12{};
-        span_load(v12, data.first(MvuSystemUniqueIdPayload::LENGTH));
-        return v12.system_unique_id.get();
+    if (v1_3 || data.size() < MvuSystemUniqueIdPayload::LENGTH) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    MvuSystemUniqueIdPayload v12{};
+    span_load(v12, data.first(MvuSystemUniqueIdPayload::LENGTH));
+    return MvuSystemUniqueIdPayloadV13{.number = uint64_t{v12.system_unique_id.get()}};
+}
+
+/// The MVU status of a binding answered @p acmp_status by the Milan listener (Milan v1.3 Tables
+/// 5.33-5.41: a locked entity is ENTITY_LOCKED).
+[[nodiscard]] constexpr auto binding_status(uint8_t const acmp_status) noexcept -> uint8_t
+{
+    switch (acmp_status) {
+        case atdecc::ACMP_STATUS_SUCCESS:
+            return MVU_STATUS_SUCCESS;
+        case atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED:
+            return MVU_STATUS_ENTITY_LOCKED;
+        default:
+            return MVU_STATUS_ENTITY_MISBEHAVING;
+    }
+}
+
+/// What sink @p s reports of its binding, to tell whether a command changed it.
+struct BindingState
+{
+    bool bound{false};
+    atdecc::MilanSinkBinding binding{};
+
+    auto operator==(BindingState const&) const -> bool = default;
+};
+
+[[nodiscard]] auto binding_state(atdecc::MilanSink const* const s) noexcept -> BindingState
+{
+    return s == nullptr ? BindingState{} : BindingState{.bound = s->bound(), .binding = s->binding};
+}
+
+/// A binding command's payload T from @p command, its reserved field cleared for the echo; nullopt when short.
+template <typename T>
+[[nodiscard]] auto binding_payload(std::span<uint8_t const> const command) -> std::optional<T>
+{
+    auto payload = load_payload<T>(command.subspan(MvuDu::LENGTH));
+    if (payload) {
+        payload->reserved = uint16_t{0};
+    }
+    return payload;
+}
+
+/// BIND_STREAM @p p from @p controller as the Milan listener receives it (Milan v1.3 Table 5.22).
+[[nodiscard]] auto bind_request(Eui64 const& controller, MvuBindStreamPayload const& p) noexcept -> atdecc::MilanBindRequest
+{
+    return atdecc::MilanBindRequest{
+        .controller_entity_id = controller,
+        .talker_entity_id = p.talker_entity_id,
+        .talker_unique_id = p.talker_stream_index.get(),
+        .streaming_wait = (p.flags.get() & MVU_BIND_FLAGS_STREAMING_WAIT) != 0};
 }
 
 /// @p info with the fields @p request's flags mark valid; default_mcr_prio is read-only
@@ -72,6 +123,13 @@ constexpr size_t MAX_AECP_PDU_LENGTH = AecpDuCommon::HEADER_LENGTH + AECP_MAX_CO
     return info;
 }
 
+/// Whether the media_clock_domain_name @p request sets (its flag) is well-formed UTF-8 (an ATDECC string).
+[[nodiscard]] auto mcr_name_well_formed(MvuMediaClockReferenceInfoPayload const& request) noexcept -> bool
+{
+    return (request.flags.get() & MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID) == 0 ||
+        atdecc::utf8_well_formed(atdecc::atdecc_string_text(request.media_clock_domain_name));
+}
+
 /// Clear r, reserved and 0 in every MVU response (Section 5.4.3.2.2), in @p pdu's header.
 void clear_reserved_r(std::span<uint8_t> const pdu)
 {
@@ -83,8 +141,8 @@ void clear_reserved_r(std::span<uint8_t> const pdu)
 
 }  // namespace
 
-auto MvuCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> const payload, Eui64 const& our_entity_id)
-    -> bool
+auto MvuCommandHandler::process_packet(
+    Eui48 const& src_mac, std::span<uint8_t const> const payload, Eui64 const& our_entity_id, sm::TimePoint const now) -> bool
 {
     MvuDu header{};
     auto const command = addressed_command(payload, our_entity_id, header);
@@ -100,32 +158,26 @@ auto MvuCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
         }
         return send_not_implemented(src_mac, command);
     }
-    return dispatch_command(src_mac, header, command);
+    return dispatch_command(src_mac, header, command, now);
 }
 
-auto MvuCommandHandler::dispatch_command(Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command) -> bool
-{
+auto MvuCommandHandler::dispatch_command(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command, sm::TimePoint const now) -> bool
+{  // NOLINT(statusbar-block-statements): one case per command type of Milan v1.3 Table 5.15
+    std::array<uint8_t, MvuSystemUniqueIdPayloadV13::LENGTH> body{};
+    bool const v1_3 = profile_.milan_v1_3();
     switch (header.command_type()) {
-        case MVU_COMMAND_GET_MILAN_INFO: {
-            // The reserved field is ignored by the receiver (Figure 5.3), so a
+        case MVU_COMMAND_GET_MILAN_INFO:
+            // The reserved field is ignored by the receiver (Figure 5.5), so a
             // command without it is answered all the same.
-            MvuGetMilanInfoResponse response{};
-            response.protocol_version = MVU_PROTOCOL_VERSION;
-            // No redundancy (Section 8, one AVB interface), and no mapping
-            // changes while a Stream Output is streaming.
-            response.features_flags = uint32_t{0};
-            response.certification_version = certification_version_;
-            return send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
-        }
+            return send_response(src_mac, header, MVU_STATUS_SUCCESS, milan_info_payload(body));
 
         case MVU_COMMAND_SET_SYSTEM_UNIQUE_ID:
             return set_system_unique_id_command(src_mac, header, command);
 
-        case MVU_COMMAND_GET_SYSTEM_UNIQUE_ID: {
+        case MVU_COMMAND_GET_SYSTEM_UNIQUE_ID:
             // The reserved field is ignored, as for GET_MILAN_INFO.
-            auto const response = system_unique_id_payload();
-            return send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
-        }
+            return send_response(src_mac, header, MVU_STATUS_SUCCESS, system_unique_id_payload(body));
 
         case MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO:
             return set_mcr_info_command(src_mac, header, command);
@@ -133,9 +185,44 @@ auto MvuCommandHandler::dispatch_command(Eui48 const& src_mac, MvuDu const& head
         case MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO:
             return get_mcr_info_command(src_mac, header, command);
 
+        // Milan v1.3 Sections 5.4.4.6-8; reserved command types below v1.3.
+        case MVU_COMMAND_BIND_STREAM:
+            return v1_3 ? bind_stream_command(src_mac, header, command, now) : send_not_implemented(src_mac, command);
+
+        case MVU_COMMAND_UNBIND_STREAM:
+            return v1_3 ? unbind_stream_command(src_mac, header, command, now) : send_not_implemented(src_mac, command);
+
+        case MVU_COMMAND_GET_STREAM_INPUT_INFO_EX:
+            return v1_3 ? stream_input_info_ex_command(src_mac, header, command) : send_not_implemented(src_mac, command);
+
         default:
             return send_not_implemented(src_mac, command);
     }
+}
+
+auto MvuCommandHandler::features_flags() const noexcept -> uint32_t
+{
+    // What the application adds, less v1.3's bits below v1.3 (Milan v1.2 Table 5.14 has only
+    // REDUNDANCY and TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING); MVU binding wherever there are sinks to bind.
+    constexpr uint32_t V1_3_FEATURES = MVU_FEATURES_MVU_BINDING | MVU_FEATURES_TALKER_SIGNAL_PRESENCE;
+    if (!profile_.milan_v1_3()) {
+        return extra_features_ & ~V1_3_FEATURES;
+    }
+    return extra_features_ | (bindable(0) ? MVU_FEATURES_MVU_BINDING : 0U);
+}
+
+auto MvuCommandHandler::milan_info_payload(std::span<uint8_t> const out) const noexcept -> std::span<uint8_t const>
+{
+    MvuGetMilanInfoResponseV13 const response{
+        .info =
+            {.protocol_version = quadlet_t{MVU_PROTOCOL_VERSION},
+             .features_flags = quadlet_t{features_flags()},
+             .certification_version = quadlet_t{certification_version_}},
+        .specification_version = quadlet_t{milan_specification_version(profile_.milan_version)}};
+    // Milan v1.2 Figure 5.4 has no specification_version.
+    size_t const length = profile_.milan_v1_3() ? MvuGetMilanInfoResponseV13::LENGTH : MvuGetMilanInfoResponse::LENGTH;
+    span_store(out.first(MvuGetMilanInfoResponseV13::LENGTH), response);
+    return out.first(length);
 }
 
 void MvuCommandHandler::set_clock_domain_count(size_t const count) noexcept
@@ -191,36 +278,191 @@ auto MvuCommandHandler::locked_against(MvuDu const& header) const noexcept -> bo
     return aem_ != nullptr && aem_->exclusive_access_status(header.common.controller_entity_id).has_value();
 }
 
-auto MvuCommandHandler::system_unique_id_payload() const noexcept -> MvuSystemUniqueIdPayload
+auto MvuCommandHandler::system_unique_id_payload(std::span<uint8_t> const out) const noexcept -> std::span<uint8_t const>
 {
+    if (profile_.milan_v1_3()) {
+        MvuSystemUniqueIdPayloadV13 const payload{.number = system_unique_id_, .name = system_unique_name_};
+        span_store(out.first(MvuSystemUniqueIdPayloadV13::LENGTH), payload);
+        return out.first(MvuSystemUniqueIdPayloadV13::LENGTH);
+    }
     MvuSystemUniqueIdPayload payload{};
-    payload.system_unique_id = system_unique_id_;
-    return payload;
+    payload.system_unique_id = static_cast<uint32_t>(system_unique_id_);
+    span_store(out.first(MvuSystemUniqueIdPayload::LENGTH), payload);
+    return out.first(MvuSystemUniqueIdPayload::LENGTH);
 }
 
 auto MvuCommandHandler::set_system_unique_id_command(
     Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command) -> bool
 {
-    auto const requested = requested_system_unique_id(command.subspan(MvuDu::LENGTH));
+    auto const requested = requested_system_unique_id(command.subspan(MvuDu::LENGTH), profile_.milan_v1_3());
     if (!requested) {
         return send_response(src_mac, header, MVU_STATUS_PAYLOAD_TOO_SHORT, {});
     }
-    return apply_system_unique_id(src_mac, header, *requested);
+    return apply_system_unique_id(src_mac, header, requested->number.get(), requested->name);
 }
 
-auto MvuCommandHandler::apply_system_unique_id(Eui48 const& src_mac, MvuDu const& header, uint64_t const requested) -> bool
+auto MvuCommandHandler::apply_system_unique_id(
+    Eui48 const& src_mac, MvuDu const& header, uint64_t const number, std::array<char, 64> const& name) -> bool
 {
-    auto const current = system_unique_id_payload();
+    std::array<uint8_t, MvuSystemUniqueIdPayloadV13::LENGTH> body{};
     if (locked_against(header)) {
-        return send_response(src_mac, header, MVU_STATUS_ENTITY_LOCKED, make_const_span(current));
+        return send_response(src_mac, header, MVU_STATUS_ENTITY_LOCKED, system_unique_id_payload(body));
     }
-    // Section 5.4.4.2: the new id differs from the default, 0; and it is a v1.2 u32.
-    if (requested == 0 || requested > UINT32_MAX) {
-        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, make_const_span(current));
+    if (!system_unique_id_settable(number) || !atdecc::utf8_well_formed(atdecc::atdecc_string_text(name))) {
+        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, system_unique_id_payload(body));
     }
-    bool const changed = system_unique_id_ != static_cast<uint32_t>(requested);
-    system_unique_id_ = static_cast<uint32_t>(requested);
-    return respond_and_notify(src_mac, header, make_const_span(system_unique_id_payload()), changed);
+    bool const changed = replace_system_unique_id(number, name);
+    return respond_and_notify(src_mac, header, system_unique_id_payload(body), changed);
+}
+
+auto MvuCommandHandler::system_unique_id_settable(uint64_t const number) const noexcept -> bool
+{
+    // Milan v1.2 Section 5.4.4.2: the new id differs from the default, 0, and is a u32. Milan
+    // v1.3 makes 0 (with an empty name) the factory default, a value like any other.
+    return profile_.milan_v1_3() || (number != 0 && number <= UINT32_MAX);
+}
+
+auto MvuCommandHandler::replace_system_unique_id(uint64_t const number, std::array<char, 64> const& name) noexcept -> bool
+{
+    auto const before = std::pair{system_unique_id_, system_unique_name_};
+    set_system_unique_id(number, name);
+    return std::pair{system_unique_id_, system_unique_name_} != before;
+}
+
+//
+// Binding - Milan v1.3 Sections 5.4.4.6-8, 5.5.3.2
+//
+
+auto MvuCommandHandler::stream_input_refusal(uint16_t const type, uint16_t const index) const noexcept -> std::optional<uint8_t>
+{
+    if (type != atdecc::aem::DESCRIPTOR_STREAM_INPUT) {
+        return MVU_STATUS_BAD_ARGUMENTS;
+    }
+    if (!bindable(index)) {
+        return MVU_STATUS_NO_SUCH_DESCRIPTOR;
+    }
+    return std::nullopt;
+}
+
+auto MvuCommandHandler::bindable(uint16_t const index) const noexcept -> bool
+{
+    bool const described = !stream_input_count_ || index < *stream_input_count_;
+    return listener_ != nullptr && listener_->sink(index) != nullptr && described;
+}
+
+void MvuCommandHandler::set_system_unique_id(uint64_t const id, std::array<char, 64> const& name) noexcept
+{
+    bool const v1_3 = profile_.milan_v1_3();
+    system_unique_id_ = v1_3 || id <= UINT32_MAX ? id : 0;  // never truncated into another id
+    system_unique_name_ = v1_3 ? name : std::array<char, 64>{};
+}
+
+auto MvuCommandHandler::answer_binding(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const body, uint8_t const acmp_status, bool const changed)
+    -> bool
+{
+    uint8_t const status = binding_status(acmp_status);
+    bool const sent = send_response(src_mac, header, status, body);
+    // Milan v1.3 Section 5.4.5.3: a response that changed the binding notifies the others.
+    if (status == MVU_STATUS_SUCCESS && changed) {
+        send_unsolicited(header.command_type(), header.common.controller_entity_id, body);
+    }
+    return sent;
+}
+
+auto MvuCommandHandler::run_binding(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const body, uint16_t const index, BindingFn const& binding)
+    -> bool
+{
+    auto const before = binding_state(listener_->sink(index));
+    std::optional<bool> sent{};
+    (void)binding([&](uint8_t const acmp_status) {
+        bool const changed = !(binding_state(listener_->sink(index)) == before);
+        sent = answer_binding(src_mac, header, body, acmp_status, changed);
+    });
+    return sent.has_value() ? *sent : send_response(src_mac, header, MVU_STATUS_ENTITY_MISBEHAVING, body);
+}
+
+template <typename Payload, typename Bind>
+auto MvuCommandHandler::binding_command(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command, sm::TimePoint const now, Bind const& bind)
+    -> bool
+{
+    auto const request = binding_payload<Payload>(command);
+    if (!request) {
+        return send_response(src_mac, header, MVU_STATUS_PAYLOAD_TOO_SHORT, {});
+    }
+    uint16_t const index = request->descriptor_index.get();
+    if (auto const refusal = stream_input_refusal(request->descriptor_type.get(), index)) {
+        return send_response(src_mac, header, *refusal, make_const_span(*request));
+    }
+    // The listener answers before it probes (Section 5.5.3.6.3 steps 3 and 5).
+    return run_binding(src_mac, header, make_const_span(*request), index, [&](atdecc::MilanListener::ReplyFn const& reply) {
+        return bind(index, *request, now, reply);
+    });
+}
+
+auto MvuCommandHandler::bind_stream_command(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command, sm::TimePoint const now) -> bool
+{
+    return binding_command<MvuBindStreamPayload>(
+        src_mac,
+        header,
+        command,
+        now,
+        [&](uint16_t const index, MvuBindStreamPayload const& request, sm::TimePoint const at, auto const& reply) {
+            return listener_->bind_stream(index, bind_request(header.common.controller_entity_id, request), at, reply);
+        });
+}
+
+auto MvuCommandHandler::unbind_stream_command(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command, sm::TimePoint const now) -> bool
+{
+    return binding_command<MvuStreamInputPayload>(
+        src_mac,
+        header,
+        command,
+        now,
+        [&](uint16_t const index, MvuStreamInputPayload const&, sm::TimePoint const at, auto const& reply) {
+            return listener_->unbind_stream(index, header.common.controller_entity_id, at, reply);
+        });
+}
+
+auto MvuCommandHandler::stream_input_info_ex(uint16_t const index) const noexcept -> MvuStreamInputInfoExPayload
+{
+    auto const& s = *listener_->sink(index);
+    MvuStreamInputInfoExPayload payload{
+        .input = {.descriptor_type = doublet_t{atdecc::aem::DESCRIPTOR_STREAM_INPUT}, .descriptor_index = doublet_t{index}}};
+    if (s.bound()) {
+        payload.talker_entity_id = s.binding.talker_entity_id;
+        payload.talker_unique_id = s.binding.talker_unique_id;
+    }
+    payload.set_probing(s.probing_status, s.acmp_status);
+    return payload;
+}
+
+auto MvuCommandHandler::stream_input_info_ex_command(
+    Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command) -> bool
+{
+    auto const request = binding_payload<MvuStreamInputPayload>(command);
+    if (!request) {
+        return send_response(src_mac, header, MVU_STATUS_PAYLOAD_TOO_SHORT, {});
+    }
+    if (auto const refusal = stream_input_refusal(request->descriptor_type.get(), request->descriptor_index.get())) {
+        MvuStreamInputInfoExPayload const refused{.input = *request};
+        return send_response(src_mac, header, *refusal, make_const_span(refused));
+    }
+    auto const response = stream_input_info_ex(request->descriptor_index.get());
+    return send_response(src_mac, header, MVU_STATUS_SUCCESS, make_const_span(response));
+}
+
+void MvuCommandHandler::notify_stream_input_info_ex(uint16_t const index)
+{
+    if (!profile_.milan_v1_3() || listener_ == nullptr || listener_->sink(index) == nullptr) {
+        return;
+    }
+    auto const payload = stream_input_info_ex(index);
+    send_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, Eui64{}, make_const_span(payload));
 }
 
 auto MvuCommandHandler::mcr_payload(uint16_t const index) const noexcept -> MvuMediaClockReferenceInfoPayload
@@ -259,9 +501,11 @@ auto MvuCommandHandler::set_mcr_info_command(Eui48 const& src_mac, MvuDu const& 
     if (!request) {
         return send_response(src_mac, header, MVU_STATUS_PAYLOAD_TOO_SHORT, data);
     }
-    uint16_t const index = request->clock_domain_index.get();
-    if (index >= clock_domain_count_) {
+    if (request->clock_domain_index.get() >= clock_domain_count_) {
         return send_response(src_mac, header, MVU_STATUS_NO_SUCH_DESCRIPTOR, make_const_span(*request));
+    }
+    if (!mcr_name_well_formed(*request)) {
+        return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, make_const_span(*request));
     }
     return apply_mcr_info(src_mac, header, *request);
 }
@@ -292,12 +536,20 @@ auto MvuCommandHandler::respond_and_notify(
 
 void MvuCommandHandler::notify_changed(uint16_t const command_type, Eui64 const& requester, std::span<uint8_t const> const body)
 {
+    send_unsolicited(command_type, requester, body);
+    if (on_settings_changed_) {
+        on_settings_changed_();
+    }
+}
+
+void MvuCommandHandler::send_unsolicited(uint16_t const command_type, Eui64 const& requester, std::span<uint8_t const> const body)
+{
     if (aem_ != nullptr && send_response_ && MvuDu::LENGTH + body.size() <= MAX_AECP_PDU_LENGTH) {
         MvuDu unsolicited{};
         unsolicited.init_response(command_type, MVU_STATUS_SUCCESS, static_cast<uint16_t>(body.size()));
         unsolicited.common.target_entity_id = our_entity_id_;
         unsolicited.set_unsolicited(true);
-        // Milan v1.2 Section 5.4.5.1: one to each registered controller but the one that asked,
+        // Milan v1.3 Sections 5.4.5.1-2: one to each registered controller but the one that asked,
         // each with its own controller id and its own next MVU sequence_id.
         aem_->for_each_unsolicited_registration([&](Eui48 const& mac, Eui64 const& controller, uint16_t& sequence_id) {
             if (controller == requester) {
@@ -308,9 +560,6 @@ void MvuCommandHandler::notify_changed(uint16_t const command_type, Eui64 const&
             header.common.sequence_id = sequence_id++;
             (void)send_pdu(mac, header, body);
         });
-    }
-    if (on_settings_changed_) {
-        on_settings_changed_();
     }
 }
 
@@ -356,8 +605,10 @@ auto dispatch_aecp(
     MvuCommandHandler& mvu,
     Eui48 const& src_mac,
     std::span<uint8_t const> const payload,
-    Eui64 const& our_entity_id) -> bool
+    Eui64 const& our_entity_id,
+    sm::TimePoint const now) -> bool
 {
+    aem.set_event_time(now);  // a LOCK or ACQUIRE deadline set by this command runs from now
     if (is_mvu_command(payload)) {
         // A valid AECP command from a registered controller restarts its
         // monitor timer (Milan v1.2 Section 5.4.5.3).
@@ -368,7 +619,7 @@ auto dispatch_aecp(
                 aem.note_controller_command(common.controller_entity_id, src_mac);
             }
         }
-        return mvu.process_packet(src_mac, payload, our_entity_id);
+        return mvu.process_packet(src_mac, payload, our_entity_id, now);
     }
     return aem.process_packet(src_mac, payload, our_entity_id);
 }

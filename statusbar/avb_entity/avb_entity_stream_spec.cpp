@@ -6,6 +6,7 @@
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/avtp/avtp_stream_format.hpp"
 
 #include <system_error>
 
@@ -14,6 +15,19 @@ namespace statusbar::avb_entity {
 namespace {
 
 using atdecc::aem::DescriptorStream;
+
+/// The StreamSpec of STREAM descriptor @p desc at @p index: its current_format (an authored up-to
+/// word at its widest), clock domain and interface.
+auto stream_spec_of(uint16_t const index, atdecc::aem::DescriptorStream const& desc) noexcept -> StreamSpec
+{
+    uint64_t const word = avtp::stream_format_widest(desc.current_format.to_uint64());
+    return StreamSpec{
+        .index = index,
+        .format_word = word,
+        .format = decode_stream_format(word),
+        .clock_domain_index = desc.clock_domain_index,
+        .avb_interface_index = desc.avb_interface_index};
+}
 
 auto stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16_t const config_idx, uint16_t const descriptor_type)
     -> StatusValue<StreamSpecs>
@@ -29,13 +43,7 @@ auto stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16_t const 
             // than silently shaping the entity smaller than its model claims.
             return failure(std::errc::result_out_of_range);
         }
-        StreamSpec spec{};
-        spec.index = index;
-        spec.format_word = desc->current_format.to_uint64();
-        spec.format = decode_stream_format(spec.format_word);
-        spec.clock_domain_index = desc->clock_domain_index;
-        spec.avb_interface_index = desc->avb_interface_index;
-        specs.push_back(spec);
+        specs.push_back(stream_spec_of(index, *desc));
     }
     return success(specs);
 }
@@ -52,21 +60,21 @@ auto listener_stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16
     return stream_specs(storage, config_idx, atdecc::aem::DESCRIPTOR_STREAM_INPUT);
 }
 
-auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
+auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion const version) noexcept -> uint16_t
 {
-    // Milan v1.2 Section 4.3.3.2, Table 4.4: MaxFrameSize is the AVTPDU header
-    // plus the payload plus one byte; MaxIntervalFrames 1.
+    // Milan v1.3 Section 4.3.3.2, Table 4.4: MaxFrameSize is the AVTPDU header plus the payload
+    // (v1.2's adds one byte); MaxIntervalFrames 1.
+    uint16_t const spare = version == nanoavb::MilanVersion::v1_2 ? MILAN_TSPEC_SPARE_BYTES : 0;
     switch (format.kind) {
         case StreamKind::aaf: {
-            // Constant blocks at a rate the class A cadence divides (PCM32 48 kHz N ch: 24*N + 24 + 1);
+            // Constant blocks at a rate the class A cadence divides (PCM32 48 kHz N ch: 24*N + 24);
             // at 44.1, 88.2 and 176.4 kHz a PDU carries one sample more now and then.
             if (format.sample_rate_hz == 0) {
                 return 0;
             }
             auto const samples = (format.sample_rate_hz + CLASS_A_PACKETS_PER_SEC - 1) / CLASS_A_PACKETS_PER_SEC;
             return static_cast<uint16_t>(
-                avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(samples)) +
-                MILAN_TSPEC_SPARE_BYTES);
+                avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(samples)) + spare);
         }
         case StreamKind::am824: {
             // Not a Milan format. The AM824 path sends each media-clock tick's
@@ -80,10 +88,10 @@ auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
                 avtp::am824_packet_size(static_cast<uint8_t>(format.channels), static_cast<uint8_t>(samples)));
         }
         case StreamKind::crf:
-            // Milan Table 4.4: "CRF, 1 ts/pdu: 28 + 1".
+            // Milan v1.3 Table 4.4: "CRF, 1 ts/pdu: 28" (v1.2's "28 + 1").
             return static_cast<uint16_t>(
                 avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(format.crf_timestamps_per_pdu) * avtp::CrfPdu::TIMESTAMP_SIZE) +
-                MILAN_TSPEC_SPARE_BYTES);
+                spare);
         case StreamKind::other:
         default:
             return 0;

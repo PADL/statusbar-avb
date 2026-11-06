@@ -39,7 +39,8 @@ version = 1
 entity_model_id = "0x001b92fffe000001"
 configured_entity_name = "Bridge"              # the name the entity was given
 configured_presentation_offset_ns = 2000000    # the offsets it started at
-system_unique_id = 1234                        # absent: 0, the default
+system_unique_id = "0x00000000000004d2"      # absent: 0, the default; of another type: left out, said
+system_unique_name = "FOH system"              # Milan v1.3's name; absent: empty
 
 [[name]]                  # descriptor_type, descriptor_index, name_index
 descriptor_type = 0
