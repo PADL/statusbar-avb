@@ -29,7 +29,7 @@
 ///         // attach your stream behavior via the hybrid API:
 ///         host_.set_advertise_streams([this](TimePoint t) { advertise_my_streams(t); });
 ///         host_.set_withdraw_streams([this](TimePoint t) { withdraw_my_streams(t); });
-///         host_.set_on_listener_ready([this](nanoavb::StreamId const& id, bool r) { gate_.note_listener_ready(id, r); });
+///         host_.set_on_listener_ready([this](nanoavb::StreamId const& id, bool r, TimePoint) { gate_.note_listener_ready(id, r); });
 ///         host_.components().acmp_talker.set_connection_callbacks(/* yours */);
 ///         host_.components().acmp_listener.set_connection_callbacks(/* yours */);
 ///         setup_my_data_plane(r);
@@ -346,9 +346,9 @@ class AvbEntityHost
     void set_withdraw_streams(statusbar::sg14::inplace_function<void(TimePoint), 64> fn) { withdraw_streams_ = std::move(fn); }
 
     /// Called for every MSRP Listener Ready register/leave on one of our talker
-    /// streams (after the host drives the talker SM + logs the gate debug). Wire this
-    /// to your TalkerGate::note_listener_ready so the transmit gate tracks readiness.
-    void set_on_listener_ready(statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> fn)
+    /// streams, told the time of the receive or tick that fired it (after the host drives
+    /// the talker SM + logs the gate debug). Wire it to TalkerGate::note_listener_ready.
+    void set_on_listener_ready(statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool, TimePoint), 64> fn)
     {
         on_listener_ready_ = std::move(fn);
     }
@@ -439,7 +439,7 @@ class AvbEntityHost
 
     statusbar::sg14::inplace_function<void(TimePoint), 64> advertise_streams_{};
     statusbar::sg14::inplace_function<void(TimePoint), 64> withdraw_streams_{};
-    statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool), 64> on_listener_ready_{};
+    statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool, TimePoint), 64> on_listener_ready_{};
     statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> on_domain_vid_changed_{};
 
     std::string interface_name_{};

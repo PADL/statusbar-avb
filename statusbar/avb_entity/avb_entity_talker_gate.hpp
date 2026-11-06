@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// TalkerGate: the per-stream "should this talker transmit?" gate (Milan v1.2 Sections 5.3.7.3,
-/// 5.5.2.5). Written by the reactor thread, read by the media-timer thread (should_transmit), so
-/// its shared state is atomic. Each side times the grace window on the clock it is told.
+/// 5.5.2.5). The reactor stamps each stream's Listener Ready on CLOCK_MONOTONIC_RAW; any thread
+/// told a RAW instant reads the same predicate from it. See docs/MILAN_TALKER.md.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
@@ -30,6 +30,9 @@ struct TalkerGate
 {
     /// The talker stream index (below STREAM_COUNT) a StreamID is declared on, or nullopt.
     using StreamIndexFn = sg14::inplace_function<std::optional<uint16_t>(tsn::StreamId const&), 32>;
+    /// The gate's clock: CLOCK_MONOTONIC_RAW, the clock a media wake is told on (net::rx_clock_now()
+    /// reads it elsewhere). The reactor reads it once per event it stamps.
+    using RawTimePoint = realtime::MonotonicRawClock::time_point;
 
     /// A gate whose note_listener_ready() finds streams by @p stream_index (reactor thread); with
     /// @p gate_enabled false every stream is admitted.
@@ -46,24 +49,13 @@ struct TalkerGate
     /// How long the gate stays open after the listener declaration was last seen registered, so
     /// an MRP LeaveAll re-registration blip does not chop the stream.
     static constexpr auto GRACE = std::chrono::seconds{5};
-    static constexpr int64_t GRACE_NS = std::chrono::nanoseconds{GRACE}.count();
-    /// The media wake's instant on CLOCK_MONOTONIC_RAW, the clock should_transmit is told.
-    using RawTimePoint = realtime::MonotonicRawClock::time_point;
-    /// "Never seen Listener Ready" on the media side: the grace window has nothing to run from.
-    static constexpr RawTimePoint NEVER = RawTimePoint::min();
 
     /// Reactor thread: whether a Listener declaration permitting transmission (Ready or Ready
-    /// Failed) is registered for @p stream_id at steady-clock @p now_ns. Registration and
-    /// withdrawal both stamp the last-ready time, from which GRACE_NS runs.
-    void note_listener_ready(tsn::StreamId const& stream_id, bool ready, int64_t now_ns);
-    /// As above, at the steady clock's now.
-    void note_listener_ready(tsn::StreamId const& stream_id, bool ready)
-    {
-        note_listener_ready(
-            stream_id,
-            ready,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-    }
+    /// Failed) is registered for @p stream_id at @p now. Registration and withdrawal both stamp
+    /// the last-ready instant, from which GRACE runs.
+    void note_listener_ready(tsn::StreamId const& stream_id, bool ready, RawTimePoint now);
+    /// As above, for a caller with no RAW reading in hand: reads the clock once.
+    void note_listener_ready(tsn::StreamId const& stream_id, bool ready);
 
     /// Reactor thread: our Talker declarations were withdrawn. Every stream closes at once (no
     /// grace) and forgets its listener state until note_listener_ready re-learns it.
@@ -83,62 +75,44 @@ struct TalkerGate
         }
     }
 
-    /// Any thread: is talker stream @p idx admitted at steady-clock @p now_ns? True if gating is
-    /// disabled, or the stream is Started and a permitting listener declaration is registered now
-    /// or was within GRACE_NS. Time-dependent: the reactor re-evaluates it (poll_admission).
-    [[nodiscard]] auto admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+    /// Any thread: is talker stream @p idx admitted at @p now? True if gating is disabled, or
+    /// the stream is Started and a permitting listener declaration is registered now or was
+    /// within GRACE. Time-dependent: the reactor re-evaluates it (AvbEntityKit::poll_admission).
+    [[nodiscard]] auto admitted(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
-    /// Whether stream @p idx has a permitting listener declaration now or within GRACE_NS,
+    /// Whether stream @p idx has a permitting listener declaration now or within GRACE,
     /// regardless of gate_enabled_ and Started (Milan v1.2 Section 5.3.7.3).
-    [[nodiscard]] auto listener_admitted(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+    [[nodiscard]] auto listener_admitted(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
-    /// Media-timer thread: may talker stream @p idx transmit at the wake told as @p now
-    /// (CLOCK_MONOTONIC_RAW)? admitted()'s predicate with the grace window run from the wake at
-    /// which this thread last saw the declaration; one thread calls it.
-    [[nodiscard]] auto should_transmit(uint16_t idx, RawTimePoint now) noexcept -> bool;
+    /// When stream @p idx's grace runs out: its last-ready stamp plus GRACE, nullopt with no stamp
+    /// (never registered, or forgotten by a withdrawal). The declaration may still be registered.
+    [[nodiscard]] auto grace_ends(uint16_t idx) const noexcept -> std::optional<RawTimePoint>;
+
+    /// Media-timer thread: may talker stream @p idx transmit at the wake told as @p now? Exactly
+    /// admitted(), independent of every other stream.
+    [[nodiscard]] auto should_transmit(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
+    {
+        return admitted(idx, now);
+    }
 
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                        ///< config.gate_talker_on_listener, destructured at the call site
     StreamIndexFn stream_index_;               ///< maps stream_id -> talker stream index
     std::optional<logging::Logger> logger_{};  ///< reactor-thread gate-transition logging
 
-    // --- Owned gate state (cross-thread) ---------------------------------------
-    /// A listener declaration permitting transmission is registered, per stream.
-    /// Written by note_listener_ready (reactor), read by admitted (any thread).
+  private:
+    /// Reactor thread: stream @p idx's stamp and flag for a Listener @p ready at @p now; the flag before.
+    auto stamp(uint16_t idx, bool ready, RawTimePoint now) noexcept -> bool;
+
+    /// A listener declaration permitting transmission is registered, per stream. Written by
+    /// note_listener_ready (reactor, after the stamp, release), read by admitted (acquire).
     std::array<std::atomic<bool>, STREAM_COUNT> listener_ready_{};
-    /// Last steady-clock time (ns) each stream's listener declaration was known
-    /// registered (0 = never, or forgotten by note_talker_withdrawn); the gate
-    /// stays open for GRACE_NS past this.
-    std::array<std::atomic<int64_t>, STREAM_COUNT> ready_ns_{};
+    /// The RAW instant (ns) each stream's listener declaration was last known registered
+    /// (0 = never, or forgotten by note_talker_withdrawn); the gate stays open for GRACE past it.
+    std::array<std::atomic<int64_t>, STREAM_COUNT> ready_raw_ns_{};
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even with Listener Ready registered.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
-
-  private:
-    /// Per stream, counted by the reactor: Listener Ready registrations, so the media side opens
-    /// its grace on one it did not see set, and Talker withdrawals, on which it forgets it.
-    std::array<std::atomic<uint32_t>, STREAM_COUNT> readies_{};
-    std::array<std::atomic<uint32_t>, STREAM_COUNT> withdrawals_{};
-
-    [[nodiscard]] static constexpr auto never_seen() noexcept -> std::array<RawTimePoint, STREAM_COUNT>
-    {
-        std::array<RawTimePoint, STREAM_COUNT> seen{};
-        seen.fill(NEVER);
-        return seen;
-    }
-    /// Reactor thread: count a Ready for the media side and stamp the reactor's grace.
-    void stamp_ready(uint16_t idx, bool ready, bool was, int64_t now_ns) noexcept;
-    /// Take in the Readies and withdrawals the reactor counted since the last wake. Media-timer thread.
-    void catch_up(uint16_t idx, RawTimePoint now) noexcept;
-    /// Listener Ready now, or seen within GRACE of @p now (recorded here). Media-timer thread.
-    [[nodiscard]] auto listener_ready_within_grace(uint16_t idx, RawTimePoint now) noexcept -> bool;
-
-    /// Media-timer thread only: the wake each stream's declaration was last seen at, the wake the
-    /// gate was last asked at, and the readies_ and withdrawals_ counts seen then.
-    std::array<RawTimePoint, STREAM_COUNT> last_seen_ready_ = never_seen();
-    std::array<RawTimePoint, STREAM_COUNT> last_wake_ = never_seen();
-    std::array<uint32_t, STREAM_COUNT> seen_readies_{};
-    std::array<uint32_t, STREAM_COUNT> seen_withdrawals_{};
 };
 
 }  // namespace statusbar::avb_entity
