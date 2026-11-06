@@ -5,13 +5,14 @@
 The Milan listener (`statusbar/atdecc/atdecc_acmp_milan_listener.hpp`) binds a
 STREAM_INPUT to a talker stream on a controller's command, probes the talker
 until it answers, and settles on the stream once the talker's Talker attribute
-is registered (Milan v1.2 Section 5.5.3, Tables 5.27-5.39). The entity's
+is registered (Milan v1.3 Section 5.5.3, Tables 5.27-5.44; section and table
+numbers below are v1.3's, which renumbered v1.2's from Section 5.5.3.2). The entity's
 `avb_entity::ListenerStreams` receives and checks the stream's AVTPDUs.
 
 ## The sink state machine
 
 `atdecc_acmp_milan_listener.hpp` keeps one sink state machine per STREAM_INPUT
-(Milan v1.2 Table 5.30): UNBOUND, PRB_W_AVAIL, PRB_W_DELAY, PRB_W_RESP,
+(Milan v1.3 Table 5.31): UNBOUND, PRB_W_AVAIL, PRB_W_DELAY, PRB_W_RESP,
 PRB_W_RESP2, PRB_W_RETRY, SETTLED_NO_RSV and SETTLED_RSV_OK. Its events are the
 controller's BIND_RX / UNBIND_RX / GET_RX_STATE, the talker's PROBE_TX_RESPONSE,
 the four timers (TMR_NO_RESP 200 ms, TMR_RETRY 4 s, TMR_DELAY random, TMR_NO_TK
@@ -31,8 +32,24 @@ the effects go out through hooks. Each hook is called after the sink's state is
 updated, so a hook may feed the machine again (for example, report a
 registration from `on_settled`).
 
+A Milan v1.3 controller binds with MVU instead (BIND_STREAM, UNBIND_STREAM,
+Sections 5.4.4.6-7 and 5.5.3.2): `bind_stream` and `unbind_stream` run the same
+RCV_BIND_RX_CMD and RCV_UNBIND_RX_CMD steps, the response going to the caller's
+reply hook instead of out as ACMP (Section 5.5.3.6: a reply of the command's
+kind), before any probe. `nanoavb::MvuCommandHandler` turns it into the MVU
+response. Either way the binding is saved alike. A second hook,
+`set_on_info_ex_changed`, fires when what GET_STREAM_INPUT_INFO_EX reports (the
+talker, pbsta, acmpsta) or the talker's registration changes (Table 5.21).
+
+Discovery (Section 5.6.4.5.2): a discovered talker whose available_index did
+not move forward restarted, and one whose current_configuration_index (when
+its ADP capabilities mark it valid) changed went to another configuration;
+either is a departure then a discovery. The configuration rule is v1.3's
+(`set_configuration_departs`); a v1.2 entity departs a talker on its
+available_index alone.
+
 The registration the caller reports is matched on stream ID, destination
-address and VLAN ID (Section 5.5.3.3). EVT_TK_REGISTERED fires on Not registered
+address and VLAN ID (Section 5.5.3.4). EVT_TK_REGISTERED fires on Not registered
 -> Registered and EVT_TK_UNREGISTERED on the reverse; a switch between Advertise
 and Failed only changes what GET_RX_STATE reports.
 
