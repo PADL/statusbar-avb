@@ -723,80 +723,10 @@ void TalkerStreams::close_tx() noexcept
     slots_.clear();
     port_ = nullptr;
     external_kick_ = false;
-    for (uint16_t idx = 0; idx < MAX_ENTITY_STREAMS; ++idx) {
+    for (size_t idx = 0; idx < MAX_ENTITY_STREAMS; ++idx) {
         stream_stopped_[idx].store(false, std::memory_order_release);
-        follow_streaming(idx, false);       // the media thread has stopped: so has the stream
-        tx_counters_[idx].have_mr = false;  // a reopened stream's first mr is no toggle
-    }
-}
-
-auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status
-{
-    if (stream_index >= mr_requests_.size() || slot_for(stream_index) == nullptr) {
-        return failure(std::errc::invalid_argument);
-    }
-    bump(mr_requests_[stream_index]);
-    return success();
-}
-
-auto TalkerStreams::set_signal_presence(uint16_t const stream_index, uint64_t const channels) noexcept -> Status
-{
-    if (stream_index >= signal_presence_.size()) {
-        return failure(std::errc::invalid_argument);
-    }
-    uint64_t const reported = channels & ((uint64_t{1} << SIGNAL_PRESENCE_CHANNELS) - 1U);
-    signal_presence_[stream_index].store(SIGNAL_PRESENCE_REPORTED | reported, std::memory_order_relaxed);
-    return success();
-}
-
-auto TalkerStreams::signal_presence(uint16_t const stream_index) const noexcept -> std::optional<uint64_t>
-{
-    uint64_t const word =
-        stream_index < signal_presence_.size() ? signal_presence_[stream_index].load(std::memory_order_relaxed) : 0U;
-    return (word & SIGNAL_PRESENCE_REPORTED) != 0 ? std::optional<uint64_t>{word & ~SIGNAL_PRESENCE_REPORTED} : std::nullopt;
-}
-
-auto TalkerStreams::mr_requests(uint16_t const stream_index) const noexcept -> uint32_t
-{
-    return stream_index < mr_requests_.size() ? mr_requests_[stream_index].load(std::memory_order_relaxed) : 0U;
-}
-
-auto TalkerStreams::restart_owed(TalkerStreamSlot const& slot) const noexcept -> bool
-{
-    uint64_t const steps = media_clock_.step_count();
-    return mr_requests(slot.spec.index) != slot.mr_requests_seen || steps != slot.media_clock_steps.value_or(steps);
-}
-
-auto TalkerStreams::next_mr(TalkerStreamSlot& slot) noexcept -> bool
-{
-    slot.media_clock_steps = slot.media_clock_steps.value_or(media_clock_.step_count());  // the first AVTPDU's
-    if (slot.mr_hold == 0 && restart_owed(slot)) {
-        slot.mr = !slot.mr;
-        slot.mr_hold = MR_HOLD_PDUS;
-        slot.mr_requests_seen = mr_requests(slot.spec.index);  // every restart so far: one toggle
-        slot.media_clock_steps = media_clock_.step_count();
-    }
-    return slot.mr;
-}
-
-void TalkerStreams::count_sent(TalkerStreamSlot& slot, bool const tu, bool const mr) noexcept
-{
-    ++slot.tx_packets;
-    slot.mr_hold -= slot.mr_hold != 0 ? 1 : 0;  // the hold is of AVTPDUs sent
-    if (slot.spec.index < tx_counters_.size()) {
-        count_pdu(tx_counters_[slot.spec.index], tu, mr);
-    }
-}
-
-void TalkerStreams::follow_streaming(uint16_t const stream_index, bool const on) noexcept
-{
-    if (stream_index >= tx_counters_.size()) {
-        return;
-    }
-    auto& changes = tx_counters_[stream_index].streaming_changes;
-    bool const streaming = (changes.load(std::memory_order_relaxed) % 2U) != 0;
-    if (on != streaming) {
-        bump(changes);
+        crf_open_[idx].store(false, std::memory_order_release);  // a toggle is refused until a CRF opens here again
+        mr_pending_[idx].store(false, std::memory_order_release);
     }
 }
 

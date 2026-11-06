@@ -120,13 +120,22 @@ and then the stamp, so a withdrawal never pairs an old stamp with a cleared flag
 
 `admitted(idx, now)` is the whole predicate: gating off, or Started and
 (`listener_ready_` or `now < stamp + GRACE`). `should_transmit(idx, now)` is
-`admitted()` by another name for the media wake, so the reactor's admitted set
-(the shaper's input, the STREAM_OUTPUT `streaming` counter) and what goes on the
-wire are one function of one stamp: a Ready set and cleared between two media
-wakes, a STOP through a LeaveAll blip and a START within the grace, a Talker
-withdrawal followed by a Ready, all read the same on both sides
-(`avb_entity_talker_gate_test.cpp`). `grace_ends(idx)` gives a host the
-instant the stamp's grace runs out, for a deadline of its own.
+`admitted()` by another name for the media wake, so a Ready set and cleared
+between two media wakes, a STOP through a LeaveAll blip and a START within the
+grace, a Talker withdrawal followed by a Ready, all read the same from the
+reactor and from the media thread (`avb_entity_talker_gate_test.cpp`).
+`grace_ends(idx)` gives a host the instant the stamp's grace runs out, for a
+deadline of its own.
+
+The kit adds two things to the gate for what goes on the wire:
+`AvbEntityKit::talker_should_transmit()` is `admitted()` and the MAAP address
+ready (in "maap" mode) and the stream not STOP_STREAMING'd; the STREAM_OUTPUT
+`streaming` counter follows it. The shaper's admitted set
+(`admitted_talker_streams()`) is the gate's `admitted()` alone: a stream
+stopped by a controller, or waiting for its MAAP block, keeps its reservation
+and its share of the shaper, because its Talker Advertise stays declared (IEEE
+1722.1-2021 Clause 7.4.37, STOP_STREAMING, withdraws nothing) and the listener
+keeps its Ready; the credit is there the moment it streams again.
 
 The grace window covers the MRP LeaveAll cycle: the peer's Listener declaration
 ages out and re-declares on a roughly 10 s cycle, momentarily withdrawn for 1-3
@@ -142,8 +151,9 @@ The declarations' deadlines (`TalkerDeclarations`, the probe window and the
 re-declare hold) are a different matter: they run on the reactor's clock, built
 from the time each hook is told, and the kit's `DeclarationTimer` compares them
 with the time the reactor tells its tick, so a reactor on any `ClockFn` closes
-a window on time. An AEM hook told no time uses the reactor's time as of its
-last pass (`AvbEntityKit::reactor_now_ns`).
+a window on time. An AEM hook told no time (SET_STREAM_FORMAT, whose TSpec
+re-declares the stream) asks for the re-declaration (`RefreshSet`) and the next
+reactor pass runs it, told its time; a refresh is per stream, never the table.
 
 ## See also
 

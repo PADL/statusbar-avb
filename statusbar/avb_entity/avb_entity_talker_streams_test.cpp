@@ -1138,4 +1138,43 @@ TEST(talker_crf, a_toggled_restart_sets_mr_on_the_next_pdu)
     EXPECT_EQ(talker.tx_counters(1)->mr_toggles.load(), uint32_t{3});
 }
 
+// A stop forgets each stream's CRF: a toggle is refused until a CRF opens at the index again, and
+// one pending at the stop fires on nothing that reopens there.
+TEST(talker_crf, close_tx_forgets_the_crf_streams)
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    constexpr uint64_t AAF = 0x0205022000806000ULL;
+    constexpr uint64_t CRF = 0x041060010000BB80ULL;
+    EXPECT_TRUE(talker.open_stream(spec_of(1, CRF), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());  // pending at the stop
+    talker.close_tx();
+    EXPECT_FALSE(talker.toggle_media_clock_restart(1).has_value());
+
+    // The index reopens as AAF: still no CRF to toggle.
+    EXPECT_TRUE(talker.open_stream(spec_of(1, AAF), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    EXPECT_FALSE(talker.toggle_media_clock_restart(1).has_value());
+    talker.close_tx();
+
+    // Reopened as CRF: the toggle pending at the stop is gone, so the first PDU carries mr clear.
+    EXPECT_TRUE(talker.open_stream(spec_of(1, CRF), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    std::array<uint64_t, 1> const ts{1'000'000};
+    EXPECT_TRUE(talker.transmit_crf_raw(*talker.slot_for(1), ts));
+    auto const sent = wire.pop_tx();
+    EXPECT_TRUE(sent.has_value());
+    auto const pdu = avtp::crf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(VLAN_HEADER_LENGTH));
+    EXPECT_TRUE(pdu.has_value() && !pdu->mr());
+    EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

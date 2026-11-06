@@ -557,10 +557,12 @@ class MsrpHandler
     /// (see MsrpParticipant::set_instant_leave).
     void set_instant_leave(bool const on) noexcept { participant_.set_instant_leave(on); }
 
-    /// The MRP timer durations of this port from here on: IEEE 802.1Q Table
-    /// 10-7's (statusbar::srp::mrp::TimerConfig{}) or a profile's, such as
-    /// MILAN_MRP_TIMERS. An invalid @p timers is ignored.
-    void set_mrp_timers(statusbar::srp::mrp::TimerConfig const& timers) noexcept { (void)participant_.set_mrp_timers(timers); }
+    /// Called when a peer's Talker Advertise or Talker Failed for @p stream_id is registered or
+    /// leaves, after an attached listener's declaration has followed it.
+    void set_on_remote_talker(statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> cb)
+    {
+        on_remote_talker_ = std::move(cb);
+    }
 
     /// The MRP timer durations in force.
     [[nodiscard]] auto mrp_timers() const noexcept -> statusbar::srp::mrp::TimerConfig const& { return participant_.mrp_timers(); }
@@ -1295,6 +1297,14 @@ class MsrpHandler
 
     void on_remote_talker_changed(tsn::StreamId const& sid)
     {
+        follow_remote_talker(sid);
+        if (on_remote_talker_) {
+            on_remote_talker_(sid, last_event_time_);  // the receive or tick this fires from
+        }
+    }
+
+    void follow_remote_talker(tsn::StreamId const& sid)
+    {
         for (auto& stream : listener_streams_) {
             if (stream.stream_id == sid) {
                 redeclare_attached_listener(stream);
@@ -1398,6 +1408,8 @@ class MsrpHandler
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipantT<Limits> participant_;
     TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)
+    statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> on_remote_talker_{};
+    bool listener_waits_for_talker_{false};
     bool started_{false};
 };
 
