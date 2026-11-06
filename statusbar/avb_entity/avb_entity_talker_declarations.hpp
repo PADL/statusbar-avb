@@ -29,7 +29,7 @@ class TalkerDeclarations
     static constexpr int64_t REDECLARE_HOLD_NS = 2 * std::chrono::nanoseconds{nanoavb::MILAN_MRP_TIMERS.leave_all_time_max}.count();
     /// How long a departed Listener still counts as registered: the transmit
     /// gate's grace window (TalkerGate::GRACE_NS), across a LeaveAll blip.
-    static constexpr int64_t LISTENER_GRACE_NS = TalkerGate::GRACE_NS;
+    static constexpr int64_t LISTENER_GRACE_NS = std::chrono::nanoseconds{TalkerGate::GRACE}.count();
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
 
     /// A Talker Advertise's identity (its FirstValue's stream ID, destination

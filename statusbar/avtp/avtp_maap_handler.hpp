@@ -60,10 +60,10 @@ class MaapHandler
     /// that defended it (the handler's own timeline).
     using AcquiredFn = statusbar::sg14::inplace_function<void(Eui48 const& start, uint16_t count, int64_t now_ns), 64>;
 
-    /// A conflict forced us off [start, start+count). The handler is already
-    /// re-probing a freshly-picked range and will call the acquired callback
+    /// A conflict forced us off [start, start+count) at now_ns (the handler's own timeline). The
+    /// handler is already re-probing a freshly-picked range and will call the acquired callback
     /// again once it settles.
-    using LostFn = statusbar::sg14::inplace_function<void(Eui48 const& start, uint16_t count), 64>;
+    using LostFn = statusbar::sg14::inplace_function<void(Eui48 const& start, uint16_t count, int64_t now_ns), 64>;
 
     /// @param our_mac    this station's MAC (conflict tie-break + self-frame filtering)
     /// @param stream_id  stream id placed in emitted MAAP PDUs

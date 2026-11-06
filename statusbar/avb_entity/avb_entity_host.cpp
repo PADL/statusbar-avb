@@ -800,7 +800,7 @@ void AvbEntityHost::wire_srp_callbacks()
 
         // The entity's transmit gate tracks readiness (TalkerGate::note_listener_ready).
         if (on_listener_ready_) {
-            on_listener_ready_(stream_id, ready);
+            on_listener_ready_(stream_id, ready, now);
         }
     });
 
