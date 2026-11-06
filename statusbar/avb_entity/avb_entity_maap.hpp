@@ -52,7 +52,7 @@ class MaapAddressAcquirer
     /// defaults true). @p now is the control-plane time the acquisition
     /// starts at: a setup edge, read once here unless the caller holds it.
     /// @p on_addresses_lost: a conflict claimed the block, each stream's ACMP destination
-    /// address zeroed first (Milan v1.2 Table 5.3). Reactor thread.
+    /// address zeroed first (Milan v1.2 Table 5.3); told the reactor time. Reactor thread.
     [[nodiscard]] auto acquire(
         net::MessageReactor& reactor,
         std::string_view const interface_name,
@@ -62,7 +62,7 @@ class MaapAddressAcquirer
         std::span<uint16_t const> const stream_indices,
         logging::Logger const log,
         statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_ready,
-        statusbar::sg14::inplace_function<void(), 32> on_addresses_lost = {},
+        statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_lost = {},
         sm::TimePoint const now = sm::Clock::now()) -> Status
     {  // NOLINT(statusbar-block-statements) the acquisition setup, one step after another; pre-dates the gate
         log_ = log;
@@ -112,7 +112,7 @@ class MaapAddressAcquirer
                 }
             });
 
-        handler_->set_on_lost([this, &components](ieee::Eui48 const& /*start*/, uint16_t /*count*/) {
+        handler_->set_on_lost([this, &components](ieee::Eui48 const& /*start*/, uint16_t /*count*/, int64_t const now_ns) {
             // Conflict: close the TX gate until a new block is defended (on_acquired
             // re-opens it). The media slot keeps its MAC; the control plane's is zeroed.
             ready_.store(false, std::memory_order_release);
@@ -123,7 +123,7 @@ class MaapAddressAcquirer
             }
             log_->warning("maap: address lost to a conflict; re-acquiring");
             if (on_addresses_lost_) {
-                on_addresses_lost_();
+                on_addresses_lost_(sm::TimePoint{std::chrono::nanoseconds{now_ns}});  // the reactor's clock, as on_acquired
             }
         });
 
@@ -169,7 +169,7 @@ class MaapAddressAcquirer
     bool fell_back_to_static_{false};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_ready_{};
-    statusbar::sg14::inplace_function<void(), 32> on_addresses_lost_{};
+    statusbar::sg14::inplace_function<void(sm::TimePoint), 32> on_addresses_lost_{};
     std::optional<logging::Logger> log_{};  ///< set by acquire (Logger is not default-constructible)
 };
 

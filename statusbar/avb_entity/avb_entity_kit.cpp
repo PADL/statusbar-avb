@@ -229,7 +229,7 @@ void AvbEntityKit::wire_storage_hooks()
     storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
         if (type == DESCRIPTOR_STREAM_OUTPUT) {
             talker_->set_stream_stopped(index, !streaming);
-            note_admission(steady_now_ns());  // STREAM_START / STREAM_STOP now
+            note_admission(net::rx_clock_now());  // STREAM_START / STREAM_STOP now
             (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
         }
         // Milan v1.2 Sections 5.4.2.19-20: a bound input becomes started or
@@ -552,14 +552,14 @@ auto AvbEntityKit::input_running(uint16_t const idx) const noexcept -> bool
     return stream != nullptr && stream->connected;
 }
 
-auto AvbEntityKit::talker_admitted(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+auto AvbEntityKit::talker_admitted(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
 {
-    return maap_.ready() && !talker_->stream_stopped(idx) && gate_.admitted(idx, now_ns);
+    return talker_should_transmit(idx, now);
 }
 
-auto AvbEntityKit::output_streaming(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
+auto AvbEntityKit::output_streaming(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
 {
-    return talker_admitted(idx, now_ns) || (declarations_.declared(idx) && gate_.listener_admitted(idx, now_ns));
+    return talker_admitted(idx, now) || (declarations_.declared(idx) && gate_.listener_admitted(idx, now));
 }
 
 auto AvbEntityKit::reshape_stream(bool const output, StreamSpec const& spec) -> Status
@@ -607,7 +607,7 @@ auto AvbEntityKit::stream_format_refusal(bool const output, StreamSpec const& sp
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Milan v1.2 Section 5.4.2.7.
-    if (output ? output_streaming(spec.index, steady_now_ns()) : input_running(spec.index)) {
+    if (output ? output_streaming(spec.index, net::rx_clock_now()) : input_running(spec.index)) {
         return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
     }
     if (!mappings_allow_format(output, updated)) {
@@ -680,7 +680,7 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
         before,
         updated.format_word);
     if (output && declarations_.declared(updated.index)) {
-        update_talker_declarations(steady_now_ns(), true);  // its TSpec
+        update_talker_declarations(reactor_ns_, true);  // its TSpec; an AEM hook is told no time
     }
 }
 
@@ -882,21 +882,21 @@ auto AvbEntityKit::current_vlan_id() const noexcept -> uint16_t
     return active_vlan_id_ != 0 ? active_vlan_id_ : config_.vlan_id;
 }
 
-auto AvbEntityKit::admitted_talker_streams(int64_t const now_ns) const noexcept -> AdmittedStreams
+auto AvbEntityKit::admitted_talker_streams(GateTimePoint const now) const noexcept -> AdmittedStreams
 {
     AdmittedStreams admitted{};
     for (auto const& spec : talker_specs_) {
-        if (gate_.admitted(spec.index, now_ns)) {
+        if (gate_.admitted(spec.index, now)) {
             (void)admitted.try_push_back(spec.index);
         }
     }
     return admitted;
 }
 
-void AvbEntityKit::note_admission(int64_t const now_ns)
+void AvbEntityKit::note_admission(GateTimePoint const now)
 {
-    update_output_streaming(now_ns);
-    auto admitted = admitted_talker_streams(now_ns);
+    update_output_streaming(now);
+    auto admitted = admitted_talker_streams(now);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
     }
@@ -906,13 +906,13 @@ void AvbEntityKit::note_admission(int64_t const now_ns)
     }
 }
 
-void AvbEntityKit::update_output_streaming(int64_t const now_ns)
+void AvbEntityKit::update_output_streaming(GateTimePoint const now)
 {
     if (talker_ == nullptr) {
         return;
     }
     for (auto const& spec : talker_specs_) {
-        bool const on = talker_admitted(spec.index, now_ns);
+        bool const on = talker_admitted(spec.index, now);
         if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
             (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
         }
@@ -950,24 +950,25 @@ void AvbEntityKit::fold_stream_counters()
     }
 }
 
-void AvbEntityKit::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, int64_t const now_ns)
+void AvbEntityKit::note_listener_ready(
+    nanoavb::StreamId const& stream_id, bool const ready, int64_t const now_ns, GateTimePoint const gate_now)
 {
     auto const idx = talker_index_of(stream_id);
     // Only a declared stream streams (Milan v1.2 Section 5.3.7.3): a Listener
     // registered for a withdrawn stream opens nothing; re-declaring re-learns it.
     if (!idx || declarations_.declared(*idx)) {
-        gate_.note_listener_ready(stream_id, ready, now_ns);
+        gate_.note_listener_ready(stream_id, ready, gate_now);
     }
     // Any Listener registration keeps the stream declared (Section 4.3.3.1),
     // and GET_STREAM_INFO reports REGISTERING / REGISTERING_FAILED.
     if (idx && refresh_talker_listener(*idx, now_ns)) {
         bool const was_declared = declarations_.declared(*idx);
-        update_talker_declarations(now_ns);
+        update_talker_declarations(now_ns, gate_now, false);
         if (declarations_.declared(*idx) == was_declared) {
             notify_talker_stream_info(*idx);  // else the (un)declaration notified
         }
     }
-    note_admission(now_ns);
+    note_admission(gate_now);
 }
 
 auto AvbEntityKit::is_talker_index(uint16_t const idx) const noexcept -> bool
@@ -1047,19 +1048,20 @@ void AvbEntityKit::note_talker_addresses(bool const valid, int64_t const now_ns)
     }
 }
 
-void AvbEntityKit::update_talker_declarations(int64_t const now_ns, bool const refresh)
+void AvbEntityKit::update_talker_declarations(int64_t const now_ns, GateTimePoint const gate_now, bool const refresh)
 {
     // MSRP calls back on the reactor; a nested evaluation would act on the
     // table the outer one is walking: it is noted, and the outer one runs
-    // again once its pass is done.
+    // again once its pass is done, at the outer one's times.
     if (updating_declarations_) {
         declarations_pending_ = true;
         declarations_pending_refresh_ = declarations_pending_refresh_ || refresh;
         return;
     }
+    declarations_gate_now_ = gate_now;  // stashed for the gate stamps the passes make
     run_declaration_passes(now_ns, refresh);
     declaration_deadline_ns_ = declarations_.next_deadline(now_ns);
-    note_admission(now_ns);
+    note_admission(gate_now);
 }
 
 void AvbEntityKit::run_declaration_passes(int64_t const now_ns, bool const refresh)
@@ -1114,14 +1116,14 @@ void AvbEntityKit::declare_talker(
     int64_t const now_ns)
 {
     auto& msrp = host_.components().msrp_handler;
-    if (auto result = msrp.talker_advertise(info, sm::Clock::now()); !result) {
+    if (auto result = msrp.talker_advertise(info, TimePoint{std::chrono::nanoseconds{now_ns}}); !result) {
         host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", spec.index, result.error().value());
         return;
     }
     declarations_.note_declared(spec.index, params);
     // Re-learn the gate from the live registration: a withdraw forgot it,
     // and a registration that stayed raises no fresh MSRP event.
-    gate_.note_listener_ready(info.stream_id, msrp.listener_permit_debug(info.stream_id).permits, now_ns);
+    gate_.note_listener_ready(info.stream_id, msrp.listener_permit_debug(info.stream_id).permits, declarations_gate_now_);
     // A Listener registered or gone changes REGISTERING (Milan v1.2 Table 5.12).
     announce_talker_declared(spec, was_declared, refresh_talker_listener(spec.index, now_ns));
 }
@@ -1141,7 +1143,7 @@ void AvbEntityKit::announce_talker_declared(StreamSpec const& spec, bool const w
 
 void AvbEntityKit::withdraw_talker(StreamSpec const& spec, nanoavb::TalkerStreamSrpInfo const& info, int64_t const now_ns)
 {
-    (void)host_.components().msrp_handler.talker_withdraw(info.stream_id, sm::Clock::now());
+    (void)host_.components().msrp_handler.talker_withdraw(info.stream_id, TimePoint{std::chrono::nanoseconds{now_ns}});
     declarations_.note_withdrawn(spec.index, now_ns);
     // No Talker Advertise, no streaming (Milan v1.2 5.3.7.3).
     gate_.note_talker_withdrawn(spec.index);
@@ -1157,7 +1159,7 @@ void AvbEntityKit::withdraw_talker_streams(TimePoint const time)
     for (auto const& spec : talker_specs_) {
         (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info(spec).stream_id, time);
     }
-    int64_t const now_ns = steady_now_ns();
+    int64_t const now_ns = steady_ns_of(time);
     bool const any =
         std::ranges::any_of(talker_specs_, [this](StreamSpec const& spec) { return declarations_.declared(spec.index); });
     note_all_talkers_withdrawn(now_ns);
@@ -1176,7 +1178,7 @@ void AvbEntityKit::note_all_talkers_withdrawn(int64_t const now_ns)
     // No Talker Advertise, no streaming (Milan 1.2 5.3.7.3): close every
     // stream now, without the grace window.
     gate_.note_talker_withdrawn();
-    note_admission(now_ns);
+    note_admission(net::rx_clock_now());
 }
 
 void AvbEntityKit::wire_stream_callbacks()
@@ -1187,8 +1189,9 @@ void AvbEntityKit::wire_stream_callbacks()
     host_.set_withdraw_streams([this](TimePoint time) { withdraw_talker_streams(time); });
     // The transmit gate tracks the MSRP listener declarations against our talker
     // streams; that alone admits a stream (docs/AVB_ENTITY_KIT.md).
-    host_.set_on_listener_ready(
-        [this](nanoavb::StreamId const& stream_id, bool ready) { note_listener_ready(stream_id, ready, steady_now_ns()); });
+    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool const ready, TimePoint const time) {
+        note_listener_ready(stream_id, ready, steady_ns_of(time), net::rx_clock_now());
+    });
 
     // ACMP: log talker connections (classic only: they no longer gate
     // anything); drive the listener (MSRP attach + mcast join) on listener
@@ -1221,7 +1224,7 @@ void AvbEntityKit::wire_stream_callbacks()
                     if (auto const* s = host_.components().acmp_listener.get_stream(stream_index); s != nullptr) {
                         join_sink_vlan(s->stream_vlan_id, now);
                     }
-                    refresh_sink_registration(stream_index);
+                    refresh_sink_registration(stream_index, now);
                 }
             },
             [this](uint16_t stream_index, TimePoint now) {
@@ -1330,7 +1333,7 @@ auto AvbEntityKit::change_presentation_offset(uint16_t const idx, uint32_t const
     }
     // Streaming as Milan v1.2 Section 5.3.7.3 has it: declaring and a Listener Ready / Ready
     // Failed registered (the grace window included), even with the transmit gate disabled.
-    if (declarations_.declared(idx) && gate_.listener_admitted(idx, steady_now_ns())) {
+    if (declarations_.declared(idx) && gate_.listener_admitted(idx, net::rx_clock_now())) {
         return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
     }
     uint32_t const before = presentation_offset_ns(idx);
@@ -1401,20 +1404,20 @@ void AvbEntityKit::wire_milan_listener()
             auto const index = static_cast<uint16_t>(i);
             auto const* sink = sinks.sink(index);
             if (sink->settled() && sink->stream.stream_id.to_uint64() == sid.to_uint64()) {
-                refresh_sink_registration(index);
+                refresh_sink_registration(index, TimePoint{std::chrono::nanoseconds{reactor_ns_}});  // a hook told no time
             }
         }
     });
 }
 
-void AvbEntityKit::refresh_sink_registration(uint16_t const index)
+void AvbEntityKit::refresh_sink_registration(uint16_t const index, TimePoint const now)
 {
     auto& sinks = host_.components().acmp_listener.milan_sinks();
     auto const* sink = sinks.sink(index);
     if (sink == nullptr || !sink->settled()) {
         return;
     }
-    sinks.set_registration(index, talker_registration(*sink), sm::Clock::now());
+    sinks.set_registration(index, talker_registration(*sink), now);
 }
 
 auto AvbEntityKit::talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration
@@ -1492,12 +1495,13 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoin
         indices,
         host_.ctl_log(),
         [this](TimePoint const time) { note_talker_addresses(true, steady_ns_of(time)); },
-        [this]() { note_talker_addresses(false, steady_now_ns()); },
+        [this](TimePoint const time) { note_talker_addresses(false, steady_ns_of(time)); },
         now);
 }
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
+    reactor_ns_ = steady_ns_of(now);  // until the reactor's first pass
     if (auto status = start_control(reactor, now); !status) {
         return status;
     }
@@ -1880,6 +1884,7 @@ void AvbEntityKit::close_data_plane()
 
 void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
 {
+    reactor_ns_ = now_ns;  // the reactor's clock, for a hook told no time
     // A listener goal change during this pass is saved now, after its ACMP
     // response.
     if (persist_pending_) {
@@ -2348,12 +2353,12 @@ void AvbEntityKit::fill_talker_srp_identity(uint16_t const index, nanoavb::Talke
     }
 }
 
-void AvbEntityKit::advertise_talker_streams(TimePoint const /*time*/)
+void AvbEntityKit::advertise_talker_streams(TimePoint const time)
 {
     // The control plane advertises: each stream declares when TalkerDeclarations
     // says so, after its MAAP address and, under Milan, interest.
     declarations_.set_active(true);
-    update_talker_declarations(steady_now_ns(), true);
+    update_talker_declarations(steady_ns_of(time), true);
 }
 
 }  // namespace statusbar::avb_entity

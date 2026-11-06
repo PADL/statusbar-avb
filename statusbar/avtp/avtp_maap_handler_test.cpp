@@ -52,7 +52,7 @@ struct Rig
             acquired_count = c;
             ++acquired_calls;
         });
-        handler.set_on_lost([this](Eui48 const& s, uint16_t /*c*/) {
+        handler.set_on_lost([this](Eui48 const& s, uint16_t /*c*/, int64_t /*now_ns*/) {
             lost_start = s;
             ++lost_calls;
         });

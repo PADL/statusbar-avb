@@ -223,7 +223,7 @@ void MaapHandler::dispatch(maap_sm::Def::Event ev, int64_t now_ns)
         }
     } else if (before == S::Defend && after != S::Defend) {
         if (on_lost_) {
-            on_lost_(prev_start, prev_count);
+            on_lost_(prev_start, prev_count, now_ns);
         }
     }
 }
