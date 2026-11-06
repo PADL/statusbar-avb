@@ -49,6 +49,7 @@
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/sg14/inplace_function.h"
@@ -291,6 +292,8 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (auto const* state = find_stream_state(id.ref.descriptor_type, id.ref.descriptor_index);
             state != nullptr && state->has_format) {
             desc.current_format = state->format;
+        } else {
+            desc.current_format.from_uint64(avtp::stream_format_widest(desc.current_format.to_uint64()));  // an up-to word
         }
         apply_object_name(id.ref, desc.object_name);  // and SET_NAME
         return true;
@@ -820,8 +823,8 @@ class DescriptorStorageHandler : public AemEntityHandler
         return authored_stream_format(ref);
     }
 
-    /// The stream's authored current_format: the blob's (a SET_STREAM_FORMAT
-    /// changes the runtime format only); nullopt if the blob has no such stream.
+    /// The stream's authored current_format: the blob's (a SET_STREAM_FORMAT changes the runtime
+    /// format only), an up-to word at its widest; nullopt if the blob has no such stream.
     [[nodiscard]] auto authored_stream_format(DescriptorRef ref) const noexcept -> std::optional<ieee::Eui64>
     {
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
@@ -830,7 +833,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         }
         ieee::Eui64 authored{};
         span_load(authored, blob->subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
-        return authored;
+        return authored.from_uint64(avtp::stream_format_widest(authored.to_uint64()));
     }
 
     /// Whether @p format is one the stream's descriptor lists (its authored
@@ -975,6 +978,14 @@ class DescriptorStorageHandler : public AemEntityHandler
     [[nodiscard]] static auto blob_list_contains(
         std::span<uint8_t const> const blob, size_t const offset_field, size_t const count_field, T const& wanted) noexcept -> bool
     {
+        return blob_list_any<T>(blob, offset_field, count_field, [&wanted](T const& candidate) { return candidate == wanted; });
+    }
+
+    /// Whether an entry of the blob's list of T at the offset and count fields satisfies @p pred.
+    template <typename T, typename Pred>
+    [[nodiscard]] static auto blob_list_any(
+        std::span<uint8_t const> const blob, size_t const offset_field, size_t const count_field, Pred const& pred) noexcept -> bool
+    {
         size_t const offset = read_u16(blob, offset_field);
         size_t const count = read_u16(blob, count_field);
         for (size_t i = 0; i < count; ++i) {
@@ -984,7 +995,7 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
             T candidate{};
             span_load(candidate, blob.subspan(off, sizeof(T)));
-            if (candidate == wanted) {
+            if (pred(candidate)) {
                 return true;
             }
         }
@@ -1689,9 +1700,14 @@ class DescriptorStorageHandler : public AemEntityHandler
     [[nodiscard]] static auto stream_format_supported(std::span<uint8_t const> const blob, ieee::Eui64 const& format) noexcept
         -> bool
     {
+        // A listed AAF word with ut set covers every channel count up to its own (Milan v1.3 Section 6.6).
+        auto const covers = [&format](ieee::Eui64 const& listed) {
+            return avtp::stream_format_covers(listed.to_uint64(), format.to_uint64());
+        };
         ieee::Eui64 authored{};
         span_load(authored, blob.subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
-        return authored == format || blob_list_contains(blob, STREAM_FORMATS_OFFSET_FIELD, STREAM_NUMBER_OF_FORMATS_FIELD, format);
+        return covers(authored) ||
+            blob_list_any<ieee::Eui64>(blob, STREAM_FORMATS_OFFSET_FIELD, STREAM_NUMBER_OF_FORMATS_FIELD, covers);
     }
 
     /// Apply a SET_STREAM_FORMAT (Clause 7.4.9). @p value is the payload
