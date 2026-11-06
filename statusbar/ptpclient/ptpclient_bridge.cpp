@@ -17,7 +17,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <ctime>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -428,17 +427,13 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
     int64_t const mono_wake = plan.mono_deadline_ns - (base_guard + slew_guard);
 
-#if defined(__linux__)
-    timespec now_ts{};
-    ::clock_gettime(CLOCK_MONOTONIC, &now_ts);
-    int64_t const mono_now = timespec_to_ns(now_ts.tv_sec, now_ts.tv_nsec);
-    if (mono_wake > mono_now) {
-        int64_t sec = 0, nsec = 0;
-        ns_to_timespec(mono_wake, sec, nsec);
-        timespec ts{};
-        ts.tv_sec = static_cast<time_t>(sec);
-        ts.tv_nsec = static_cast<long>(nsec);
-        int const rc = ::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+    // One kernel sleep primitive on every platform, on the clock the line
+    // maps to. (The macOS branch used to sleep on std::chrono::steady_clock,
+    // which is CLOCK_MONOTONIC_RAW there, against a deadline on a different
+    // counter: harmless on a desktop, a full-period spin on a laptop that had
+    // ever slept.)
+    if (mono_wake > realtime::read_monotonic_ns()) {
+        int const rc = realtime::sleep_until_monotonic_ns(mono_wake);
         if (rc == EINTR) {
             // Signal received -- return error so caller can check shutdown flag
             return failure(std::error_code(EINTR, std::system_category()));
@@ -447,13 +442,6 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
             return failure(std::error_code(rc, std::system_category()));
         }
     }
-#else
-    int64_t const mono_now =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (mono_wake > mono_now) {
-        std::this_thread::sleep_until(std::chrono::steady_clock::time_point{std::chrono::nanoseconds{mono_wake}});
-    }
-#endif
 
     // Precise finish: spin on CLOCK_MONOTONIC_RAW to the exact RAW deadline.
     // sched_yield while still far out to avoid a hard busy-loop; bail on shutdown.

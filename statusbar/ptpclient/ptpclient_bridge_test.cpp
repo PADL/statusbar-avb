@@ -252,8 +252,7 @@ TEST(ptp_bridge_convert, conversion_after_convergence)
     // After convergence, time conversions should be accurate
     // The mapping is: ptp = rate * monotonic + offset
     // So converting monotonic->ptp and back should give close to the original
-    auto now = std::chrono::steady_clock::now();
-    auto mono_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    auto const mono_ns = statusbar::realtime::read_monotonic_ns();
 
     auto ptp_result = bridge.convert_monotonic_to_ptp(mono_ns);
     auto mono_result = bridge.convert_ptp_to_monotonic(ptp_result.time_ns);
@@ -400,8 +399,7 @@ TEST(ptp_bridge_sleep, sleep_fails_when_unhealthy)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // Try to sleep - should fail because unhealthy
-    auto now = std::chrono::steady_clock::now();
-    auto deadline_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() + 1'000'000LL;
+    auto const deadline_ns = statusbar::realtime::read_monotonic_ns() + 1'000'000LL;
 
     auto result = bridge.sleep_until_ptp(deadline_ns);
 
@@ -428,8 +426,7 @@ TEST(ptp_bridge_sleep, sleep_bails_when_the_caller_stops)
     // A caller that has already been told to stop: the sleep's final spin
     // reads the flag and returns bridge_not_running instead of the wake time.
     std::atomic<bool> const keep_going{false};
-    auto now = std::chrono::steady_clock::now();
-    auto mono_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    auto const mono_ns = statusbar::realtime::read_monotonic_ns();
     auto deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 10'000'000LL);
 
     auto result = bridge.sleep_until_ptp(deadline_ptp.time_ns, &keep_going);
@@ -457,8 +454,7 @@ TEST(ptp_bridge_sleep, sleep_returns_wake_time)
     EXPECT_TRUE(bridge.is_healthy());
 
     // Sleep for a short time
-    auto now = std::chrono::steady_clock::now();
-    auto mono_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    auto const mono_ns = statusbar::realtime::read_monotonic_ns();
     auto deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 10'000'000LL);  // 10ms from now
 
     auto result = bridge.sleep_until_ptp(deadline_ptp.time_ns);
