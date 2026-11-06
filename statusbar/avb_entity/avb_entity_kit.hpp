@@ -355,10 +355,9 @@ class AvbEntityKit
 
     // --- Talker admission (the hardware shaper's input) ------------------------
 
-    /// The talker stream indices whose reservation the gate admits at @p now (TalkerGate::admitted),
-    /// in table order: the shaper's set. STOP_STREAMING and a pending MAAP address keep a stream in
-    /// it: its Talker Advertise stays declared (IEEE 1722.1-2021 Clause 7.4.37 withdraws nothing).
-    /// The no-argument form reads the gate's clock once.
+    /// The talker stream indices whose reservation the gate admits at @p now (TalkerGate::admitted), in
+    /// table order: the shaper's set, which a STOP_STREAMING'd or MAAP-pending stream stays in
+    /// (docs/MILAN_TALKER.md). The no-argument form reads the gate's clock once.
     using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
     [[nodiscard]] auto admitted_talker_streams(GateTimePoint now) const noexcept -> AdmittedStreams;
     [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams
