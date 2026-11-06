@@ -425,11 +425,7 @@ void AtdeccNetHandler::dispatch_frame(
             // AECP message - an MVU command to the MVU handler, anything else
             // to the AEM handler; each sends its unicast response
             auto const our_entity_id = adp_advertiser_.adpdu().entity_id;
-            // Advance the handler's clock so a LOCK/ACQUIRE deadline set while
-            // processing this command is relative to now, not epoch 0 (tick()
-            // above then checks those deadlines each reactor tick).
-            aem_handler_.set_event_time(sm_now);
-            (void)dispatch_aecp(aem_handler_, mvu_handler_, src_mac, payload, our_entity_id);
+            (void)dispatch_aecp(aem_handler_, mvu_handler_, src_mac, payload, our_entity_id, sm_now);
             break;
         }
 
@@ -444,6 +440,21 @@ void AtdeccNetHandler::dispatch_frame(
 //
 
 namespace {
+
+/// The STREAM_INPUT descriptors in configuration 0 of @p storage, at most the Milan listener's sinks;
+/// nullopt without a blob (the sinks are the inputs).
+auto stream_input_count(atdecc::aem::DescriptorStorage const* const storage) noexcept -> std::optional<size_t>
+{
+    if (storage == nullptr) {
+        return std::nullopt;
+    }
+    size_t count = 0;
+    while (count < atdecc::MilanListener::MAX_SINKS &&
+           storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, static_cast<uint16_t>(count)).has_value()) {
+        ++count;
+    }
+    return count;
+}
 
 /// The CLOCK_DOMAIN descriptors in configuration 0 of @p storage (one, the
 /// MVU handler's default, without a blob).
@@ -496,10 +507,9 @@ NanoAvbComponents::NanoAvbComponents(
     , mvrp_handler{profile_mvrp_config(profile), MvrpCallbacks{}}
     , msrp_handler{profile_msrp_config(profile, entity_msrp_config(talker_max_streams, listener_max_streams)), MsrpCallbacks{}}
 {
-    aem_handler.set_entity_profile(profile);
-    mvu_handler.set_profile(profile);
     mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
     mvu_handler.set_clock_domain_count(clock_domain_count(entity_model.descriptor_storage()));
+    mvu_handler.set_stream_input_count(stream_input_count(entity_model.descriptor_storage()));
     wire_profile();
 }
 
@@ -555,19 +565,37 @@ NanoAvbComponents::NanoAvbComponents(
     , mvrp_handler{profile_mvrp_config(profile), MvrpCallbacks{}}
     , msrp_handler{profile_msrp_config(profile, entity_msrp_config(talker_max_streams, listener_max_streams)), MsrpCallbacks{}}
 {
-    aem_handler.set_entity_profile(profile);
-    mvu_handler.set_profile(profile);
     mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
     mvu_handler.set_clock_domain_count(clock_domain_count(handler.descriptor_storage()));
+    mvu_handler.set_stream_input_count(stream_input_count(handler.descriptor_storage()));
     wire_profile();
+}
+
+void NanoAvbComponents::set_milan_version(MilanVersion const version) noexcept
+{
+    profile.milan_version = version;
+    wire_profile();
+}
+
+void NanoAvbComponents::wire_mvu_binding()
+{
+    aem_handler.set_entity_profile(profile);
+    mvu_handler.set_profile(profile);
+    // Milan v1.3 Sections 5.4.4.6-8: MVU binding addresses the Milan sinks, and their
+    // GET_STREAM_INPUT_INFO_EX goes to the registered controllers as it changes (Table 5.21).
+    mvu_handler.set_milan_listener(&acmp_listener.milan_sinks());
+    acmp_listener.milan_sinks().set_on_info_ex_changed(
+        [this](uint16_t const index) { mvu_handler.notify_stream_input_info_ex(index); });
+    acmp_listener.milan_sinks().set_configuration_departs(profile.milan_v1_3());
 }
 
 void NanoAvbComponents::wire_profile()
 {
+    wire_mvu_binding();
     acmp_talker.set_milan(profile.milan);
     acmp_listener.set_milan(profile.milan);
     msrp_handler.set_listener_waits_for_talker(profile.milan);
-    // Milan v1.2 Section 5.5.3.5.3 step 1: a locked entity accepts bindings
+    // Milan v1.3 Section 5.5.3.6.3 step 1: a locked entity accepts bindings
     // only from the locking controller.
     acmp_listener.milan_sinks().set_authorized(
         [this](Eui64 const& controller) { return !aem_handler.exclusive_access_status(controller).has_value(); });
