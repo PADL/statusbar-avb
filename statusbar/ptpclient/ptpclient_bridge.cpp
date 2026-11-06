@@ -399,7 +399,8 @@ auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcep
 }
 
 auto PtpTimeBridge::sleep_until_ptp(
-    int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going, int64_t* const spin_headroom_ns) noexcept -> StatusValue<WakeTimes>
+    int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going, int64_t* const spin_headroom_ns) noexcept
+    -> StatusValue<WakeTimes>
 {  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
     auto prep = prepare_sleep(ptp_deadline_ns);
     if (!prep) {
