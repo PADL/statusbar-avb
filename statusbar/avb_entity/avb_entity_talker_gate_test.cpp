@@ -32,6 +32,8 @@ auto lookup(tsn::StreamId const& s) -> std::optional<uint16_t>
 }
 
 constexpr int64_t T0 = 1'000'000'000;
+/// A media wake on CLOCK_MONOTONIC_RAW, the clock should_transmit is told.
+constexpr auto RAW0 = TalkerGate::RawTimePoint{std::chrono::seconds{100}};
 
 }  // namespace
 
@@ -88,7 +90,7 @@ TEST(talker_gate, a_disabled_gate_admits_every_stream)
 {
     TalkerGate gate{false, lookup};
     EXPECT_TRUE(gate.admitted(0, T0));
-    EXPECT_TRUE(gate.should_transmit(3, T0));
+    EXPECT_TRUE(gate.admitted(3, T0));
 }
 
 // Without a time, a Listener Ready and its withdrawal are stamped at the steady clock's now:
@@ -102,6 +104,34 @@ TEST(talker_gate, a_listener_ready_without_a_time_is_stamped_now)
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     EXPECT_TRUE(gate.admitted(2, now));
     EXPECT_FALSE(gate.admitted(2, now + (2 * TalkerGate::GRACE_NS)));
+}
+
+// The media thread runs the grace from the wake it last saw the declaration at, on the RAW
+// clock it is told; it reads no clock and needs no reactor time.
+TEST(talker_gate, the_media_grace_runs_from_the_wake_the_declaration_was_last_seen)
+{
+    TalkerGate gate{true, lookup};
+    EXPECT_FALSE(gate.should_transmit(1, RAW0));
+    gate.note_listener_ready(sid(0x101), true, T0);
+    EXPECT_TRUE(gate.should_transmit(1, RAW0));
+    gate.note_listener_ready(sid(0x101), false, T0 + 1);
+    EXPECT_TRUE(gate.should_transmit(1, RAW0 + std::chrono::seconds{4}));
+    EXPECT_FALSE(gate.should_transmit(1, RAW0 + TalkerGate::GRACE));
+}
+
+// A Talker withdrawal closes the stream at once on the media side too: the grace seen before it
+// is forgotten until the declaration is seen again.
+TEST(talker_gate, a_talker_withdrawal_closes_the_media_side_at_once)
+{
+    TalkerGate gate{true, lookup};
+    gate.note_listener_ready(sid(0x102), true, T0);
+    EXPECT_TRUE(gate.should_transmit(2, RAW0));
+    gate.note_talker_withdrawn(2);
+    EXPECT_FALSE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{1}));
+    gate.note_listener_ready(sid(0x102), true, T0 + 2);
+    EXPECT_TRUE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{2}));
+    gate.note_stream_started(2, false);
+    EXPECT_FALSE(gate.should_transmit(2, RAW0 + std::chrono::milliseconds{3}));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_gate_test)
