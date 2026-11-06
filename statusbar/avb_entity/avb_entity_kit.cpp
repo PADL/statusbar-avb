@@ -1469,6 +1469,9 @@ auto AvbEntityKit::stream_port_config(std::string_view const backend) const -> S
         .xdp_pin_path = config_.net_xdp_pin_path,
         .tx_launch_time = config_.stream_launch_time,
         .xdp_rx_hold_frames = config_.net_xdp_rx_hold_frames,
+        .xdp_shared_umem = config_.net_xdp_shared_umem,
+        .xdp_umem_share = config_.net_xdp_umem_share,
+        .xdp_scatter_gather = config_.net_xdp_scatter_gather,
     };
 }
 

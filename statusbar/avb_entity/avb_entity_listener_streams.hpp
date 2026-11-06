@@ -352,7 +352,7 @@ struct ListenerStreams final : StreamRxFrameHolder
     /// it is told of (its payload stays where the port holds it), up to StreamPort::rx_hold_frames(); else nullopt.
     [[nodiscard]] auto hold() noexcept -> std::optional<uint64_t> override;
     /// The frame back to the port. The RX thread; a frame of a port since closed is forgotten.
-    void release(uint64_t handle) noexcept override;
+    void release(uint64_t token) noexcept override;
     /// Frames of the port open now that hold() kept and release() has not given back. The RX thread.
     [[nodiscard]] auto held_frames() const noexcept -> size_t { return held_frames_; }
     /// Where hold()'s token keeps the port's open generation, above the frame's handle.

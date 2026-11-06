@@ -73,6 +73,11 @@ struct StreamPortConfig
     bool tx_launch_time{false};
     /// UMEM frames the xdp backend adds for received frames a timed sink holds (StreamRxFrameHolder).
     size_t xdp_rx_hold_frames{0};
+    /// A UMEM the xdp backend shares with sockets on other devices, its share of it, and multi-buffer transmit
+    /// (net::XdpConfig::shared_umem, umem_share, tx_scatter_gather): TalkerStreams::transmit_aaf_gathered().
+    net::XdpSharedUmem* xdp_shared_umem{nullptr};
+    size_t xdp_umem_share{0};
+    bool xdp_scatter_gather{false};
 };
 
 /// The 802.1Q-tagged AVTP header of a stream frame.
@@ -157,23 +162,29 @@ class StreamPort
                 .xdp_tx_launch_time = config.tx_launch_time,
                 .xdp_pin_path = config.xdp_pin_path,
                 .xdp_rx_hold_frames = config.xdp_rx_hold_frames,
+                .xdp_shared_umem = config.xdp_shared_umem,
+                .xdp_umem_share = config.xdp_umem_share,
+                .xdp_scatter_gather = config.xdp_scatter_gather,
             });
         if (status) {
             ++generation_;
         }
         test_launch_time_ = false;
         rx_hold_frames_ = *backend == net::EthernetBackend::xdp ? config.xdp_rx_hold_frames : 0;
+        shared_umem_ = status && *backend == net::EthernetBackend::xdp ? config.xdp_shared_umem : nullptr;
         take_mode(status.has_value());
         return status;
     }
     /// An in-process test port (net::AnyEthernetPort::open_test), its frames
     /// timed as an xdp socket with TX metadata would be when @p launch_time
-    /// (test_launch_time_: the one thing a test port cannot report itself), and
-    /// @p rx_hold_frames of its frames holdable (rx_hold_frames(); nullopt: its pool).
+    /// (test_launch_time_: the one thing a test port cannot report itself), @p rx_hold_frames of its frames
+    /// holdable (rx_hold_frames(); nullopt: its pool), and its frames sendable by others as a shared UMEM's
+    /// with @p frames_shared (frames_shared()).
     [[nodiscard]] auto open_test(
         net::TestPortConfig const& config,
         bool const launch_time = false,
-        std::optional<size_t> const rx_hold_frames = std::nullopt) -> Status
+        std::optional<size_t> const rx_hold_frames = std::nullopt,
+        bool const frames_shared = false) -> Status
     {
         auto status = port_.open_test(config);
         if (status) {
@@ -181,6 +192,7 @@ class StreamPort
         }
         test_launch_time_ = launch_time;
         rx_hold_frames_ = rx_hold_frames.value_or(config.frame_pool_size);
+        test_frames_shared_ = status && frames_shared;
         take_mode(status.has_value());
         return status;
     }
@@ -191,6 +203,8 @@ class StreamPort
     {
         port_.close();
         test_launch_time_ = false;
+        test_frames_shared_ = false;
+        shared_umem_ = nullptr;
         take_mode(false);
     }
 
@@ -220,6 +234,11 @@ class StreamPort
     }
     /// Whether the port in force was opened single threaded.
     [[nodiscard]] auto single_threaded() const noexcept -> bool { return single_threaded_; }
+    /// The UMEM the xdp backend shares with other devices' sockets (StreamPortConfig::xdp_shared_umem), or nullptr.
+    [[nodiscard]] auto shared_umem() const noexcept -> net::XdpSharedUmem* { return shared_umem_; }
+    /// Whether its frames lie where another device's socket can send them from: a shared UMEM, or a test port
+    /// opened so.
+    [[nodiscard]] auto frames_shared() const noexcept -> bool { return shared_umem_ != nullptr || test_frames_shared_; }
     /// Received frames a holder may keep past their decode at once (StreamRxFrameHolder): the xdp backend's
     /// StreamPortConfig::xdp_rx_hold_frames, a test port's pool; 0 on a backend whose frames go back in order.
     [[nodiscard]] auto rx_hold_frames() const noexcept -> size_t { return rx_hold_frames_; }
@@ -314,8 +333,10 @@ class StreamPort
     bool single_threaded_{false};       ///< the port in force's: open() took it
     bool timed_{false};                 ///< the port in force's frames carry launch times
     bool test_launch_time_{false};
-    size_t rx_hold_frames_{0};
+    bool test_frames_shared_{false};
     net::ClockFn phc_{};
+    size_t rx_hold_frames_{0};
+    net::XdpSharedUmem* shared_umem_{nullptr};
     net::LaunchOrder launch_order_{};
     std::atomic<bool> reset_pending_{false};
 };
