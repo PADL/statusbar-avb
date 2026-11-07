@@ -1888,12 +1888,10 @@ void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
     if (!host_.is_running()) {
         return;
     }
-    // A refresh an AEM hook asked for (told no time): at this pass, told its time.
-    if (refresh_pending_.any()) {
+    // One pass, told its time, for a refresh an AEM hook asked for (told no time) or a deadline reached.
+    bool const due = declaration_deadline_ns_ && now_ns >= *declaration_deadline_ns_;
+    if (due || refresh_pending_.any()) {
         update_talker_declarations(now_ns, net::rx_clock_now(), std::exchange(refresh_pending_, RefreshSet{}));
-    }
-    if (declaration_deadline_ns_ && now_ns >= *declaration_deadline_ns_) {
-        update_talker_declarations(now_ns);
     }
 }
 
