@@ -468,6 +468,10 @@ class MsrpParticipantT
     /// Listener registrations are forgotten and reported as leaves (Flush!, IEEE 802.1Q-2022 Clause 10.7.5.2),
     /// then leave_all(). Its Talkers and Domain stay registered until it re-declares or leaves them.
     void rejoin(TimePoint now);
+    /// A run resumed after a stop (withdraw_all() with no tick since): every peer registration, Talkers,
+    /// Listeners and Domains, is forgotten and reported as a leave (Flush!, Clause 10.7.5.2), then leave_all()
+    /// asks the peer for what it still declares; a talker gone meanwhile is not treated as registered.
+    void resume(TimePoint now);
     /// A LeaveAll sent now (Clause 10.7.5.8), suppress_leaveall() or not: our declarations re-declared in it,
     /// the peer asked to re-declare its own.
     void leave_all(TimePoint now);
@@ -615,6 +619,9 @@ class MsrpParticipantT
     //
     // Timer expiry handlers
     //
+    /// Flush! into the registrar of each registered record of `records`, `notify_leave`(record) for each.
+    template <typename Records, typename NotifyLeave>
+    void flush_registered(Records& records, TimePoint now, NotifyLeave const& notify_leave);
     void on_join_timer(TimePoint now);
     void on_leave_timer(TimePoint now);
     void on_leaveall_timer(TimePoint now);

@@ -157,6 +157,9 @@ auto SrpPort::withdraw_listener(StreamId const& stream_id, TimePoint const now) 
 
 void SrpPort::withdraw_all(TimePoint const now)
 {
+    for (auto const& listener : msrp_.listener_streams()) {
+        (void)msrp_.listener_withdraw(listener.stream_id, now);  // a Waiting one too: not followed next run
+    }
     msrp_.withdraw_all(now);
     mvrp_.withdraw_all(now);
 }
