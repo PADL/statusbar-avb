@@ -18,6 +18,7 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace statusbar::avb_entity {
@@ -49,6 +50,24 @@ struct StreamRxAudioSink
     virtual ~StreamRxAudioSink() = default;
 };
 
+/// The port frame a timed packet's payload lies in, which a sink may keep past its call instead of
+/// copying the payload out. Offered only where the listener decodes in place (a single-threaded port).
+struct StreamRxFrameHolder
+{
+    /// Keep the frame of the packet being delivered: its payload stays valid until release() of the
+    /// handle returned; nullopt when it cannot be kept. Only during on_listener_packet().
+    [[nodiscard]] virtual auto hold() noexcept -> std::optional<uint64_t> = 0;
+    /// Give back a frame hold() kept. The RX thread, before the port closes.
+    virtual void release(uint64_t handle) noexcept = 0;
+
+    StreamRxFrameHolder() = default;
+    StreamRxFrameHolder(StreamRxFrameHolder const&) = default;
+    StreamRxFrameHolder(StreamRxFrameHolder&&) = default;
+    auto operator=(StreamRxFrameHolder const&) -> StreamRxFrameHolder& = default;
+    auto operator=(StreamRxFrameHolder&&) -> StreamRxFrameHolder& = default;
+    virtual ~StreamRxFrameHolder() = default;
+};
+
 /// One accepted listener stream packet with its timing: what a sink needs to
 /// place the frames on the media clock without decoding them.
 struct StreamRxPacket
@@ -68,6 +87,8 @@ struct StreamRxPacket
     /// AVTP sequence_num, as received: a sink placing frames without a usable
     /// timestamp (tu set) counts the packets lost since the last one by it.
     uint8_t sequence_num{0};
+    /// Where the payload's port frame can be kept (StreamRxFrameHolder), or nullptr: copy it before returning.
+    StreamRxFrameHolder* holder{nullptr};
 };
 
 /// The timestamped StreamRxAudioSink: each accepted packet's raw payload, 64-bit AVTP presentation
