@@ -954,76 +954,191 @@ TEST(nanoavb_srp_msrp, withdraw_all_sends_the_leaves_at_once)
     EXPECT_EQ(idle_sent, 0U);
 }
 
-// A listener attached Waiting (listener_waits_for_talker) stays attached across withdraw_all(): a
-// stopped handler declares nothing for a talker heard meanwhile, and the next run (declare_domain)
-// re-checks it and declares the Listener once its talker is registered.
-TEST(nanoavb_srp_msrp, a_waiting_listener_survives_withdraw_all_and_declares_in_the_next_run)
-{
-    using statusbar::srp::msrp::ListenerDeclaration;
-    using statusbar::srp::msrp::MsrpConfig;
-    using statusbar::srp::msrp::MsrpParticipant;
+namespace {
 
+/// A Milan listener handler (listener_waits_for_talker) on a direct link with a talker participant.
+struct WaitingBench
+{
+    using ListenerDeclaration = statusbar::srp::msrp::ListenerDeclaration;
     TimePoint now{std::chrono::seconds{1}};
-    statusbar::tsn::StreamId sid;
-    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
-    sid.set_unique_id(11);
     std::vector<std::vector<uint8_t>> talker_out;
     std::vector<std::vector<uint8_t>> listener_out;
-    MsrpParticipant talker{milan_msrp_config(MsrpConfig{}), 0x7a3};
-    talker.set_send_pdu([&talker_out](std::span<uint8_t const> p) {
-        talker_out.emplace_back(p.begin(), p.end());
-        return true;
-    });
-    talker.start(now);
+    statusbar::srp::msrp::MsrpParticipant talker{milan_msrp_config(statusbar::srp::msrp::MsrpConfig{}), 0x7a3};
     MsrpHandler<> listener{
-        milan_msrp_config(MsrpConfig{}), MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
+        milan_msrp_config(statusbar::srp::msrp::MsrpConfig{}), MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
             listener_out.emplace_back(p.begin(), p.end());
             return true;
         }}};
-    listener.set_listener_waits_for_talker(true);
-    auto run = [&](int const rounds) {
+    bool talker_alive{true};
+
+    WaitingBench()
+    {
+        talker.set_send_pdu([this](std::span<uint8_t const> p) {
+            talker_out.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        talker.start(now);
+        listener.set_listener_waits_for_talker(true);
+    }
+
+    static auto stream(uint16_t const unique) -> statusbar::tsn::StreamId
+    {
+        statusbar::tsn::StreamId sid;
+        sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+        sid.set_unique_id(unique);
+        return sid;
+    }
+
+    /// The talker advertises `sid` (heard by the listener on the next run()).
+    void advertise(statusbar::tsn::StreamId const& sid)
+    {
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fv.stream_id = sid;
+        fv.vlan_identifier = 2;
+        fv.max_frame_size = 416;
+        fv.max_interval_frames = 1;
+        (void)talker.declare_talker_advertise(fv, now);
+    }
+
+    /// `rounds` ticks of 120 ms each, PDUs exchanged; a talker not alive (powered off) sends nothing.
+    void run(int const rounds)
+    {
         for (int round = 0; round < rounds; ++round) {
             now += std::chrono::milliseconds{120};
-            talker.tick(now);
+            if (talker_alive) {
+                talker.tick(now);
+            }
             listener.tick(now);
             for (auto const& p : talker_out) {
                 listener.receive_packet(p, now);
             }
             talker_out.clear();
             for (auto const& p : listener_out) {
-                talker.receive_pdu(p, now);
+                if (talker_alive) {
+                    talker.receive_pdu(p, now);
+                }
             }
             listener_out.clear();
         }
-    };
-    auto const heard = [&] {
+    }
+
+    /// What the talker has registered of the listener's declaration for `sid`.
+    auto heard(statusbar::tsn::StreamId const& sid) const -> ListenerDeclaration
+    {
         auto const* rec = talker.find_listener(sid);
         return rec != nullptr && rec->registrar_is_registered() ? rec->substate : ListenerDeclaration::Ignore;
-    };
+    }
 
-    EXPECT_TRUE(listener.declare_domain(now).has_value());
-    EXPECT_EQ(*listener.listener_attach(sid, now), ListenerReservationState::Waiting);
-    run(4);
-    listener.withdraw_all(now);
-    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
+    auto state(statusbar::tsn::StreamId const& sid) const -> ListenerReservationState
+    {
+        return listener.get_listener_stream(sid)->state;
+    }
+
+    /// A run: domain declared, `sid` attached (Waiting: no talker yet), then stopped with withdraw_all().
+    void attach_and_stop(statusbar::tsn::StreamId const& sid)
+    {
+        EXPECT_TRUE(listener.declare_domain(now).has_value());
+        EXPECT_EQ(*listener.listener_attach(sid, now), ListenerReservationState::Waiting);
+        run(4);
+        listener.withdraw_all(now);
+        EXPECT_EQ(state(sid), ListenerReservationState::Waiting);
+    }
+};
+
+}  // namespace
+
+// A listener attached Waiting (listener_waits_for_talker) stays attached across withdraw_all(): a
+// stopped handler declares nothing for a talker heard meanwhile, and the next run (declare_domain)
+// forgets the last run's registrations, hears the talker again and declares the Listener.
+TEST(nanoavb_srp_msrp, a_waiting_listener_survives_withdraw_all_and_declares_in_the_next_run)
+{
+    using ListenerDeclaration = WaitingBench::ListenerDeclaration;
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(11);
+    b.attach_and_stop(sid);
 
     // Stopped: the talker's Advertise heard now declares nothing.
-    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
-    fv.stream_id = sid;
-    fv.vlan_identifier = 2;
-    fv.max_frame_size = 416;
-    fv.max_interval_frames = 1;
-    (void)talker.declare_talker_advertise(fv, now);
-    run(12);
-    EXPECT_TRUE(listener.peer_talker_advertise(sid) != nullptr);
-    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
-    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_TRUE(b.listener.peer_talker_advertise(sid) != nullptr);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
+    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ignore);
 
-    // The next run: the Waiting listener is re-checked and declared for the registered talker.
-    EXPECT_TRUE(listener.declare_domain(now).has_value());
-    run(12);
-    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
-    EXPECT_TRUE(heard() == ListenerDeclaration::Ready);
+    // The next run: the last run's registrations are forgotten, the talker heard again, the Listener declared.
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    EXPECT_TRUE(b.listener.peer_talker_advertise(sid) == nullptr);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+}
+
+// A talker heard while stopped, then powered off before the next run, is not declared for: the run's
+// start forgets what the last run registered, and the talker never advertises again.
+TEST(nanoavb_srp_msrp, a_talker_gone_while_stopped_is_not_declared_for_at_resume)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(12);
+    b.attach_and_stop(sid);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_TRUE(b.listener.peer_talker_advertise(sid) != nullptr);
+    b.talker_alive = false;
+
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    b.run(24);  // past the talker's leave timer and a LeaveAll
+    EXPECT_TRUE(b.listener.peer_talker_advertise(sid) == nullptr);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
+}
+
+// Only declare_domain() begins a run: a listener attached before it is declared, but the last run's
+// Waiting listener is followed at declare_domain(), not before.
+TEST(nanoavb_srp_msrp, a_run_begun_with_listener_attach_follows_the_waiting_listener_at_declare_domain)
+{
+    using ListenerDeclaration = WaitingBench::ListenerDeclaration;
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(13);
+    auto const other = WaitingBench::stream(14);
+    b.attach_and_stop(sid);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_TRUE(b.listener.peer_talker_advertise(sid) != nullptr);
+
+    EXPECT_EQ(*b.listener.listener_attach(other, b.now), ListenerReservationState::Waiting);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);  // not resumed by the attach
+    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+    EXPECT_EQ(b.state(other), ListenerReservationState::Waiting);
+}
+
+// A peer's Domain heard while withdrawn resumes nothing: no VID is adopted and no Listener declared
+// until the next declare_domain(), which hears the Domain again and adopts it then.
+TEST(nanoavb_srp_msrp, a_peer_domain_while_withdrawn_declares_nothing)
+{
+    using ListenerDeclaration = WaitingBench::ListenerDeclaration;
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(15);
+    b.attach_and_stop(sid);
+    b.advertise(sid);
+    statusbar::srp::msrp::DomainFirstValue domain{};
+    domain.sr_class_id = 6;
+    domain.sr_class_priority = 3;
+    domain.sr_class_vid = 7;
+    (void)b.talker.declare_domain(domain, b.now);
+    b.run(12);
+    EXPECT_EQ(b.listener.domain().sr_class_vid, 2);  // not adopted while withdrawn
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
+    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ignore);
+
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    b.run(12);
+    EXPECT_EQ(b.listener.domain().sr_class_vid, 7);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
 }
 
 TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
