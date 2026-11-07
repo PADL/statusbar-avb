@@ -882,17 +882,31 @@ void MsrpParticipantT<Limits>::rearm_leave_timer() noexcept
 }
 
 template <class Limits>
+template <typename Records, typename NotifyLeave>
+void MsrpParticipantT<Limits>::flush_registered(Records& records, TimePoint now, NotifyLeave const& notify_leave)
+{
+    for (auto& rec : records) {
+        if (rec.registrar_is_registered()) {
+            mrp::dispatch_registrar(rec, registrar_sm::Def::Event::Flush, now, port_.timers());
+            notify_leave(rec);
+        }
+    }
+}
+
+template <class Limits>
 void MsrpParticipantT<Limits>::rejoin(TimePoint now)
 {
-    auto flush = [&](auto& records, auto&& notify_leave) {
-        for (auto& rec : records) {
-            if (rec.registrar_is_registered()) {
-                mrp::dispatch_registrar(rec, registrar_sm::Def::Event::Flush, now, port_.timers());
-                notify_leave(rec);
-            }
-        }
-    };
-    flush(listeners_, [&](auto const& rec) { notify_listener_leave(rec.first_value.stream_id); });
+    flush_registered(listeners_, now, [&](auto const& rec) { notify_listener_leave(rec.first_value.stream_id); });
+    leave_all(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::resume(TimePoint now)
+{
+    flush_registered(talker_adv_, now, [&](auto const& rec) { notify_talker_leave(rec.first_value.stream_id); });
+    flush_registered(talker_failed_, now, [&](auto const& rec) { notify_talker_leave(rec.first_value.advertise.stream_id); });
+    flush_registered(listeners_, now, [&](auto const& rec) { notify_listener_leave(rec.first_value.stream_id); });
+    flush_registered(domains_, now, [&](auto const& rec) { notify_domain_leave(rec.first_value); });
     leave_all(now);
 }
 
