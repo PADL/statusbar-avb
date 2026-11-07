@@ -158,6 +158,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
     specs.add<uint32_t>("net.xdp_queue", "NIC queue for net.backend=xdp (default 0)", entity.net_xdp_queue, [&entity](auto v) {
         entity.net_xdp_queue = v;
     });
+    specs.add<size_t>(
+        "net.xdp_rx_hold_frames",
+        "UMEM frames net.backend=xdp adds for received frames a listener's sink keeps past the tick (default 0)",
+        entity.net_xdp_rx_hold_frames,
+        [&entity](auto v) { entity.net_xdp_rx_hold_frames = v; });
     add_xdp_arg_specs(specs, entity);
     specs.add<std::string>(
         "stream.address_mode",
