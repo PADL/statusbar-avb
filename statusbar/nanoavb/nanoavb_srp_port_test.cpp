@@ -461,6 +461,34 @@ TEST(nanoavb_srp_port, withdraw_all_sends_the_leaves_at_once)
 }
 
 // Without the interface (or the privilege to open raw sockets) nothing joins the reactor.
+// withdraw_all() detaches a Waiting listener too (unlike MsrpHandler::withdraw_all()): the next run,
+// another profile's, declares nothing for a stream it no longer carries.
+TEST(nanoavb_srp_port, withdraw_all_detaches_a_waiting_listener)
+{
+    Bridge b{};
+    b.port.msrp().set_listener_waits_for_talker(true);
+    EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    auto const attached = b.port.attach_listener(stream_id(5), b.now);
+    EXPECT_TRUE(attached && *attached == ListenerReservationState::Waiting);
+    b.run(4);
+    b.port.withdraw_all(b.now);
+    auto const* const entry = b.port.msrp().get_listener_stream(stream_id(5));
+    EXPECT_TRUE(entry == nullptr || entry->state == ListenerReservationState::Idle);
+
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = stream_id(5);
+    fv.destination_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x20, 0x05};
+    fv.vlan_identifier = 2;
+    fv.max_frame_size = 185;
+    fv.max_interval_frames = 1;
+    (void)b.bridge.declare_talker_advertise(fv, b.now);
+    EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    b.run(12);
+    EXPECT_NE(b.port.find_registered_talker_advertise(fv.destination_address, 2), nullptr);
+    EXPECT_FALSE(b.bridge.listener_permits_transmit(stream_id(5)));
+    EXPECT_EQ(b.bridge.find_listener(stream_id(5)), nullptr);
+}
+
 TEST(nanoavb_srp_port, a_missing_interface_is_refused)
 {
     SrpPort port{SrpPortConfig{.interface_name = "srp-port-test-none"}};
