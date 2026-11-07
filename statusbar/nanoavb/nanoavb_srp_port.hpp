@@ -121,8 +121,9 @@ class SrpPort
     [[nodiscard]] auto attach_listener(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>;
     /// Withdraw the Listener declaration for @p stream_id (idempotent).
     [[nodiscard]] auto withdraw_listener(StreamId const& stream_id, TimePoint now) -> Status;
-    /// Withdraw every talker, listener, the Domain and its VID, and send the Leaves now rather than
-    /// at the next join timer: before the port closes, so its peer need not wait out LeaveAll.
+    /// Withdraw every talker, every listener (a Waiting one detached too), the Domain and its VID, and send
+    /// the Leaves now rather than at the next join timer: before the port closes, so its peer need not wait
+    /// out LeaveAll. The next declare_domain() starts afresh: nothing of this run is declared again.
     void withdraw_all(TimePoint now);
     /// The link came back after a down: the peer's Listener registrations forgotten (their changes reported) and
     /// a LeaveAll sent now on MSRP and MVRP (MsrpParticipant::rejoin()); no Leave goes out. Call after
