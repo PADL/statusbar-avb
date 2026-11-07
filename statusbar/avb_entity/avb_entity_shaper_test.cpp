@@ -53,6 +53,16 @@ auto crf_one_timestamp() -> StreamSpec
     return spec;
 }
 
+/// A Milan v1.3 entity's profile, the default.
+constexpr nanoavb::EntityProfile V1_3{};
+
+/// @p spec's TSpec as a Milan v1.2 entity declares it (the clock-drift byte in MaxFrameSize):
+/// the CBS arithmetic below was worked out from these.
+auto v1_2_tspec(StreamSpec const& spec) -> TSpec
+{
+    return AvbEntityKit::talker_tspec(spec, nanoavb::EntityProfile{.milan_version = nanoavb::MilanVersion::v1_2});
+}
+
 }  // namespace
 
 // i210 7.2.7.4: queue 0 has the highest priority, queue 3 the lowest; PTP goes on queue 2, just below
@@ -229,23 +239,24 @@ TEST(shaper_mqprio, refuses_bad_priorities)
 
 TEST(shaper_cbs, frame_sizes_and_bandwidth)
 {
-    // The TSpecs the kit advertises (srp_max_frame_size, Milan v1.2 Table 4.4):
-    //   AAF 8 ch INT_24 48 kHz: 24-byte AAF header + 6 samples x 8 ch x 3 B + 1 = 18*8 + 24 + 1 = 169
-    //   CRF, one timestamp a PDU: 20-byte CRF header + 1 x 8 + 1 = 29
-    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24());
-    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp());
-    EXPECT_EQ(aaf.max_frame_size, uint16_t{169});
+    // The TSpecs the kit advertises (srp_max_frame_size, Milan v1.3 Table 4.4):
+    //   AAF 8 ch INT_24 48 kHz: 24-byte AAF header + 6 samples x 8 ch x 3 B = 18*8 + 24 = 168
+    //   CRF, one timestamp a PDU: 20-byte CRF header + 1 x 8 = 28
+    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24(), V1_3);
+    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp(), V1_3);
+    EXPECT_EQ(aaf.max_frame_size, uint16_t{168});
     EXPECT_EQ(aaf.max_interval_frames, uint16_t{1});
-    EXPECT_EQ(crf.max_frame_size, uint16_t{29});
-    // On the wire (Table 4.4 notes): max(MFS + 22, 68) + 20
-    //   AAF: 169 + 22 = 191 (>= 68), + 20 = 211
-    //   CRF: 29 + 22 = 51 -> 68, + 20 = 88
-    EXPECT_EQ(wire_frame_size(169), uint32_t{211});
-    EXPECT_EQ(wire_frame_size(29), uint32_t{88});
+    EXPECT_EQ(crf.max_frame_size, uint16_t{28});
+    EXPECT_EQ(aaf.clock_drift_bytes, MILAN_TSPEC_SPARE_BYTES);
+    // On the wire (Table 4.4 notes): max(MFS + 22, 68) + 1 + 20
+    //   AAF: 168 + 22 = 190 (>= 68), + 1 + 20 = 211
+    //   CRF: 28 + 22 = 50 -> 68, + 1 + 20 = 89
+    EXPECT_EQ(wire_frame_size(168, 1), uint32_t{211});
+    EXPECT_EQ(wire_frame_size(28, 1), uint32_t{89});
     // Class A: 8000 frames/s. AAF 211 x 8 x 8000 / 1000 = 13504 kbit/s
-    // (Table 4.4: 1152*8 + 4288); CRF 88 x 8 x 8000 / 1000 = 5632 (Table 4.4).
+    // (Table 4.4: 1152*8 + 4288); CRF 89 x 8 x 8000 / 1000 = 5696 (Table 4.4).
     EXPECT_EQ(stream_bandwidth_kbps(aaf, CLASS_A_INTERVALS_PER_SEC), uint32_t{13504});
-    EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5632});
+    EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5696});
     // Class B: 4000 frames/s: 211 x 8 x 4000 / 1000 = 6752 kbit/s
     EXPECT_EQ(stream_bandwidth_kbps(aaf, CLASS_B_INTERVALS_PER_SEC), uint32_t{6752});
     // MFS 100 -> 142 octets; 3 frames per 250 us: 142 x 8 x 3 x 4000 / 1000 = 13632.
@@ -255,7 +266,22 @@ TEST(shaper_cbs, frame_sizes_and_bandwidth)
     EXPECT_EQ(stream_bandwidth_kbps(TSpec{.max_frame_size = 100, .max_interval_frames = 1}, 1), uint32_t{2});
 }
 
-// Milan v1.2 Section 4.3.3.2, Table 4.4, every row: MaxFrameSize and the
+// Milan v1.2 Table 4.4 has the byte in MaxFrameSize, before the minimum-frame rule: the CRF's
+// 29 + 22 = 51 -> 68 + 20 = 88 octets, 5632 kbit/s; the AAF's bandwidth is v1.3's.
+TEST(shaper_cbs, milan_v1_2_table_4_4)
+{
+    auto const aaf = v1_2_tspec(aaf_8ch_48k_int24());
+    auto const crf = v1_2_tspec(crf_one_timestamp());
+    EXPECT_EQ(aaf.max_frame_size, uint16_t{169});
+    EXPECT_EQ(crf.max_frame_size, uint16_t{29});
+    EXPECT_EQ(crf.clock_drift_bytes, uint16_t{0});
+    EXPECT_EQ(wire_frame_size(169), uint32_t{211});
+    EXPECT_EQ(wire_frame_size(29), uint32_t{88});
+    EXPECT_EQ(stream_bandwidth_kbps(aaf, CLASS_A_INTERVALS_PER_SEC), uint32_t{13504});
+    EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5632});
+}
+
+// Milan v1.3 Section 4.3.3.2, Table 4.4, every row: MaxFrameSize and the
 // class A bandwidth the CBS is configured with, for 1 to 32 channels.
 TEST(shaper_cbs, milan_table_4_4)
 {
@@ -280,30 +306,29 @@ TEST(shaper_cbs, milan_table_4_4)
             spec.format.aaf_format = row.format;
             spec.format.sample_rate_hz = row.rate;
             spec.format.channels = n;
-            uint32_t const mfs = (row.bytes_per_channel * n) + 24 + 1;
+            uint32_t const mfs = (row.bytes_per_channel * n) + 24;
             if (mfs > 1500) {
                 continue;  // past the MTU: not a stream the model allows
             }
-            auto const tspec = AvbEntityKit::talker_tspec(spec);
+            auto const tspec = AvbEntityKit::talker_tspec(spec, V1_3);
             EXPECT_EQ(uint32_t{tspec.max_frame_size}, mfs);
             EXPECT_EQ(tspec.max_interval_frames, uint16_t{1});
             // The column's linear formula holds while the frame is past the
             // 68-octet minimum; below it the notes' rule 2 pads the frame.
-            uint32_t const expected = (mfs + 22 < 68) ? 5632 : (row.kbps_per_channel * n) + 4288;
+            uint32_t const expected = (mfs + 22 < 68) ? 5696 : (row.kbps_per_channel * n) + 4288;
             EXPECT_EQ(stream_bandwidth_kbps(tspec, CLASS_A_INTERVALS_PER_SEC), expected);
         }
     }
-    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp());
-    EXPECT_EQ(crf.max_frame_size, uint16_t{28 + 1});
-    EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5632});
+    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp(), V1_3);
+    EXPECT_EQ(crf.max_frame_size, uint16_t{28});
+    EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5696});
 }
 
 TEST(shaper_cbs, class_a_aaf_and_crf_on_a_gigabit_link)
 {
     // One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s, MTU 1500 interfering:
     // idleSlope 19136, sendSlope -980864, hiCredit 30, loCredit -206 (docs/SHAPER.md).
-    std::array<TSpec, 2> const streams{
-        AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
     EXPECT_EQ(a.idleslope_kbps, int32_t{19136});
     EXPECT_EQ(a.sendslope_kbps, int32_t{-980864});
@@ -326,12 +351,11 @@ TEST(shaper_cbs, class_a_aaf_and_crf_on_a_gigabit_link)
 
 TEST(shaper_cbs, class_b_sees_class_a_as_interference)
 {
-    std::array<TSpec, 2> const a_streams{
-        AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const a_streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
     auto const a = class_a_cbs(a_streams, 1'000'000, 1500);
     // One AAF stream in class B (6752 kbit/s), class A as above: sendSlopeB -993248,
     // hiCreditB 13 (L-11), loCreditB -209 (docs/SHAPER.md).
-    std::array<TSpec, 1> const b_streams{AvbEntityKit::talker_tspec(aaf_8ch_48k_int24())};
+    std::array<TSpec, 1> const b_streams{v1_2_tspec(aaf_8ch_48k_int24())};
     auto const b = class_b_cbs(b_streams, a, 1'000'000, 1500);
     EXPECT_EQ(b.idleslope_kbps, int32_t{6752});
     EXPECT_EQ(b.sendslope_kbps, int32_t{-993248});
@@ -350,10 +374,10 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
 {
     auto aaf = aaf_8ch_48k_int24();
     aaf.format.channels = 32;
-    EXPECT_EQ(AvbEntityKit::talker_tspec(aaf).max_frame_size, uint16_t{601});
-    EXPECT_EQ(stream_bandwidth_kbps(AvbEntityKit::talker_tspec(aaf), CLASS_A_INTERVALS_PER_SEC), uint32_t{41152});
-    std::vector<TSpec> streams(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
-    streams.insert(streams.end(), MAX_ENTITY_CRF_STREAMS, AvbEntityKit::talker_tspec(crf_one_timestamp()));
+    EXPECT_EQ(v1_2_tspec(aaf).max_frame_size, uint16_t{601});
+    EXPECT_EQ(stream_bandwidth_kbps(v1_2_tspec(aaf), CLASS_A_INTERVALS_PER_SEC), uint32_t{41152});
+    std::vector<TSpec> streams(MAX_ENTITY_AUDIO_STREAMS, v1_2_tspec(aaf));
+    streams.insert(streams.end(), MAX_ENTITY_CRF_STREAMS, v1_2_tspec(crf_one_timestamp()));
     EXPECT_EQ(streams.size(), MAX_ENTITY_STREAMS);
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
     EXPECT_EQ(a.idleslope_kbps, int32_t{680960});
@@ -364,8 +388,8 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
     EXPECT_TRUE(a.idleslope_kbps < 750'000);
 
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
-    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
-    wide.insert(wide.end(), MAX_ENTITY_CRF_STREAMS, AvbEntityKit::talker_tspec(crf_one_timestamp()));
+    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, v1_2_tspec(aaf));
+    wide.insert(wide.end(), MAX_ENTITY_CRF_STREAMS, v1_2_tspec(crf_one_timestamp()));
     EXPECT_EQ(class_a_cbs(wide, 1'000'000, 1500).idleslope_kbps, int32_t{877568});
 }
 
@@ -397,8 +421,7 @@ TEST(shaper_cbs, placeholders)
     EXPECT_EQ(slow.class_a.locredit, int32_t{-963});
     // The AAF and the CRF admitted (19136 kbit/s): class B's placeholder takes the rest of the
     // budget: idleSlope 730864, sendSlope -269136, hiCredit 1127, loCredit -415.
-    std::array<TSpec, 2> const streams{
-        AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
     auto const some = cbs_targets(streams, {}, 1'000'000, 1500);
     EXPECT_TRUE(some.class_a == class_a_cbs(streams, 1'000'000, 1500));
     EXPECT_FALSE(some.class_a.placeholder);
@@ -413,7 +436,7 @@ TEST(shaper_cbs, placeholders)
     auto aaf = aaf_8ch_48k_int24();
     aaf.format.channels = 32;
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
-    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, AvbEntityKit::talker_tspec(aaf));
+    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, v1_2_tspec(aaf));
     EXPECT_EQ(cbs_targets(wide, {}, 1'000'000, 1500).class_b.idleslope_kbps, int32_t{10'000});
 }
 
@@ -423,7 +446,7 @@ TEST(shaper_cbs, one_int32_talker_as_captured_on_an_i210)
 {
     auto aaf = aaf_8ch_48k_int24();
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
-    std::array<TSpec, 1> const streams{AvbEntityKit::talker_tspec(aaf)};
+    std::array<TSpec, 1> const streams{v1_2_tspec(aaf)};
     EXPECT_EQ(streams[0].max_frame_size, uint16_t{217});
     auto const targets = cbs_targets(streams, {}, 1'000'000, 1500);
     EXPECT_EQ(targets.class_a.idleslope_kbps, int32_t{16576});
@@ -618,8 +641,7 @@ auto igb_mqprio() -> net::tc::MqprioQdisc
 /// The admitted AAF + CRF (class A 19136 kbit/s) and nothing, at 1 Gbit/s.
 auto admitted_targets() -> CbsTargets
 {
-    std::array<TSpec, 2> const streams{
-        AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
     return cbs_targets(streams, {}, 1'000'000, 1500);
 }
 
@@ -1205,7 +1227,7 @@ auto igb_port() -> ShaperPort
 /// The AAF + CRF TSpecs of admitted_targets().
 auto aaf_and_crf() -> std::array<TSpec, 2>
 {
-    return {AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()), AvbEntityKit::talker_tspec(crf_one_timestamp())};
+    return {v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
 }
 
 }  // namespace
