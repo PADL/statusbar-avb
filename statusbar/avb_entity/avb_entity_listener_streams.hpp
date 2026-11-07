@@ -159,7 +159,7 @@ struct ListenerStreamSlot
 /// Section 4.4.2.2): type, timestamp interval, timestamps per PDU, pull and base frequency match.
 [[nodiscard]] auto crf_header_matches_format(StreamFormatFields const& format, avtp::CrfPdu const& pdu) noexcept -> bool;
 
-struct ListenerStreams
+struct ListenerStreams final : StreamRxFrameHolder
 {
     /// @param lock_tolerance_ns  MEDIA_LOCKED step tolerance (config.lock_tolerance_ns); each
     ///                           stream's nominal step is at its own format's rate.
@@ -348,6 +348,16 @@ struct ListenerStreams
     /// Set before streams flow; the RX thread reads it.
     void set_timed_audio_sink(StreamRxTimedAudioSink* sink) noexcept { timed_sink_ = sink; }
 
+    /// StreamRxFrameHolder: on a port decoded in place, the timed sink may keep the frame of the packet
+    /// it is told of (its payload stays where the port holds it), up to StreamPort::rx_hold_frames(); else nullopt.
+    [[nodiscard]] auto hold() noexcept -> std::optional<uint64_t> override;
+    /// The frame back to the port. The RX thread; a frame of a port since closed is forgotten.
+    void release(uint64_t token) noexcept override;
+    /// Frames of the port open now that hold() kept and release() has not given back. The RX thread.
+    [[nodiscard]] auto held_frames() const noexcept -> size_t { return held_frames_; }
+    /// Where hold()'s token keeps the port's open generation, above the frame's handle.
+    static constexpr unsigned HOLD_GENERATION_SHIFT = 48;
+
     /// Discard (@p stopped) or process STREAM_INPUT @p stream_index's
     /// AVTPDUs (ListenerStreamSlot::stopped). Reactor thread.
     void set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
@@ -380,6 +390,10 @@ struct ListenerStreams
     [[nodiscard]] auto receive_one(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> bool;
     /// One frame decoded where the port holds it, then released: false when none was queued.
     [[nodiscard]] auto receive_in_place(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> bool;
+    /// @p rx decoded where the port holds it, then released unless the timed sink kept it.
+    void decode_in_place(net::EthernetRxSlot const& rx, int64_t gptp_now_ns);
+    /// The port's open generation, held_frames_ restarted when it moved on. The RX thread.
+    [[nodiscard]] auto follow_generation() noexcept -> uint32_t;
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 for a
     /// frame that was not AVTP (taken and released all the same), nullopt
     /// when nothing was queued. Holds the port guard for exactly that - the
@@ -398,6 +412,8 @@ struct ListenerStreams
     [[nodiscard]] auto copy_avtpdu(std::span<uint8_t const> frame) -> size_t;
     /// Frames per drain_rx call at most, so a flood cannot pin the RX thread.
     static constexpr size_t MAX_DRAIN_PER_CALL = 256;
+    /// Offer @p packet to the timed sink, holdable (its holder set) while a frame is decoded in place.
+    void offer_timed(StreamRxPacket& packet);
 
     // --- References / collaborators (bound at construction) --------------------
     uint32_t lock_tolerance_ns_;  ///< MEDIA_LOCKED step tolerance
@@ -419,6 +435,12 @@ struct ListenerStreams
     /// Receive scratch for drain_rx: one AVTPDU copied out of the port's slot. 2 KB
     /// covers a full AVB stream frame; drain_rx is single-threaded so one buffer is enough.
     std::array<uint8_t, 2048> rx_buf_{};
+    /// The frame receive_in_place() is decoding (hold() keeps it), and whether it was kept. RX thread.
+    std::optional<uint64_t> in_place_frame_{};
+    bool in_place_kept_{false};
+    size_t held_frames_{0};             ///< of the port open held_generation_
+    uint32_t held_generation_{0};       ///< the port open whose frames held_frames_ counts
+    StreamPort* holder_port_{nullptr};  ///< the port they are released to, kept past close_rx()
 
     // --- Owned RX state --------------------------------------------------------
     /// The RX slots (atomics inside: constructed in place, never moved/erased).

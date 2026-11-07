@@ -54,6 +54,15 @@ struct AvbEntityAudioIOConfig
     net::XdpAttachMode net_xdp_attach_mode{net::XdpAttachMode::native};
     /// Where the xdp backend pins its program and maps (bpffs); empty: not pinned.
     std::string net_xdp_pin_path{};
+    /// UMEM frames the xdp backend adds for received frames a timed sink holds (StreamRxFrameHolder);
+    /// net.xdp_rx_hold_frames.
+    size_t net_xdp_rx_hold_frames{0};
+    /// A UMEM the xdp backend shares with another device's socket (outliving the kit), its share, and
+    /// multi-buffer transmit (StreamPortConfig::xdp_shared_umem). The host's alone: no net.* key, the UMEM
+    /// being an object of its making.
+    net::XdpSharedUmem* net_xdp_shared_umem{nullptr};
+    size_t net_xdp_umem_share{0};
+    bool net_xdp_scatter_gather{false};
     /// Open rawnet when the xdp backend does not open, the reason kept
     /// (AvbEntityKit::stream_xdp_error()); false: no stream port then.
     bool net_xdp_fallback{false};

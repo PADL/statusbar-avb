@@ -24,11 +24,14 @@
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -755,6 +758,68 @@ void drain_one_frame(StreamPort& port, bool const single_threaded, InPlaceSink& 
     EXPECT_EQ(ls.drain_rx(realtime::GptpClock0::from_ns(8'999'000'000), net::rx_clock_now()), size_t{1});
 }
 
+/// Keeps the frame of the first `keep` packets it is told of, where it may, and what their payloads were.
+struct HoldingSink final : StreamRxTimedAudioSink
+{
+    size_t keep{1};
+    size_t packets{0};
+    size_t offered{0};  ///< packets that came holdable
+    std::vector<uint64_t> held;
+    std::vector<std::span<uint8_t const>> payloads;
+    std::vector<std::vector<uint8_t>> copies;
+    void on_listener_packet(StreamRxPacket const& packet) override
+    {
+        ++packets;
+        offered += packet.holder != nullptr ? 1U : 0U;
+        if (packet.holder == nullptr || held.size() == keep) {
+            return;
+        }
+        if (auto const handle = packet.holder->hold()) {
+            held.push_back(*handle);
+            payloads.push_back(packet.payload);
+            copies.emplace_back(packet.payload.begin(), packet.payload.end());
+            EXPECT_FALSE(packet.holder->hold().has_value());  // one frame, kept once
+        }
+    }
+};
+
+/// A listener on `port` (opened single threaded or not, a pool of `pool` frames) into `sink`.
+struct HoldRig
+{
+    std::unique_ptr<AvbEntityAudioIO> donor{make_connected_donor(kAm824Id, kAafId)};
+    StreamSpec spec{audio_specs()[1]};
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    StreamPort port;
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    avtp::AafStreamOutputContext tx{
+        kAafId,
+        spec.format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz),
+        spec.format.channels,
+        spec.format.bit_depth,
+        0};
+    uint64_t pts{9'000'000'000ULL};
+
+    HoldRig(bool const single_threaded, size_t const pool, StreamRxTimedAudioSink& sink, std::optional<size_t> const holdable = {})
+    {
+        EXPECT_TRUE(ls.open_stream(spec).has_value());
+        ls.set_timed_audio_sink(&sink);
+        EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
+        EXPECT_TRUE(port.open_test({.hardware_address = kRxPortMac, .frame_pool_size = pool}, false, holdable).has_value());
+        EXPECT_TRUE(ls.attach_rx(port, {}, reactor, /*keep_handler=*/true).has_value());
+    }
+    /// One AAF frame onto the wire; false when the port has no frame free for it.
+    auto inject() -> bool
+    {
+        uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(spec.format.sample_rate_hz));
+        pts += 125'000;
+        return port.test_port()->inject_rx(l2_frame(aaf_frame(tx, spp, pts), true)).has_value();
+    }
+    auto drain() -> size_t { return ls.drain_rx(realtime::GptpClock0::from_ns(8'999'000'000), net::rx_clock_now()); }
+};
+
 }  // namespace
 
 // A port one thread drives uses no lock, and its frames are decoded where the port
@@ -771,6 +836,102 @@ TEST(listener_port, a_single_threaded_port_is_decoded_in_place)
     drain_one_frame(shared, false, copied);
     EXPECT_TRUE(shared.serialized());
     EXPECT_TRUE(copied.packets == 1 && copied.in_place == 0);
+}
+
+// A timed sink keeps a frame decoded in place: the port does not get it back, its payload stays as it
+// arrived while later frames come and go, and release() returns it.
+TEST(listener_port, a_frame_decoded_in_place_is_kept_until_the_sink_releases_it)
+{
+    HoldingSink sink;
+    HoldRig rig{true, 2, sink};
+    EXPECT_TRUE(rig.inject());
+    EXPECT_EQ(rig.drain(), size_t{1});
+    EXPECT_EQ(sink.held.size(), size_t{1});
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});
+    EXPECT_TRUE(rig.inject());  // the pool's other frame, given back after its decode
+    EXPECT_EQ(rig.drain(), size_t{1});
+    EXPECT_TRUE(rig.inject());
+    EXPECT_FALSE(rig.inject());  // the kept frame is still out of the pool
+    EXPECT_TRUE(std::ranges::equal(sink.payloads[0], sink.copies[0]));
+    EXPECT_TRUE(rig.port.test_port()->holds(sink.payloads[0]));
+    rig.ls.release(sink.held[0]);
+    EXPECT_EQ(rig.ls.held_frames(), size_t{0});
+    EXPECT_TRUE(rig.inject());
+    EXPECT_EQ(sink.packets, size_t{2});
+    EXPECT_EQ(sink.offered, size_t{2});
+}
+
+// A serialized port's frames are copied out before their decode: nothing to keep.
+TEST(listener_port, a_frame_copied_out_of_a_serialized_port_cannot_be_kept)
+{
+    HoldingSink sink;
+    HoldRig rig{false, 4, sink};
+    EXPECT_TRUE(rig.inject());
+    EXPECT_EQ(rig.drain(), size_t{1});
+    EXPECT_EQ(sink.packets, size_t{1});
+    EXPECT_EQ(sink.offered, size_t{0});
+    EXPECT_EQ(rig.ls.held_frames(), size_t{0});
+}
+
+// Past the port's share of holdable frames the sink is refused, and copies instead.
+TEST(listener_port, holds_past_the_ports_share_are_refused)
+{
+    HoldingSink sink;
+    sink.keep = 3;
+    HoldRig rig{true, 8, sink, 2};
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(rig.inject());
+        EXPECT_EQ(rig.drain(), size_t{1});
+    }
+    EXPECT_EQ(sink.held.size(), size_t{2});
+    EXPECT_EQ(rig.ls.held_frames(), size_t{2});
+    rig.ls.release(sink.held[0]);
+    EXPECT_TRUE(rig.inject());
+    EXPECT_EQ(rig.drain(), size_t{1});
+    EXPECT_EQ(sink.held.size(), size_t{3});
+}
+
+// A frame kept past close_rx() still goes back to the port, which stays open; the port closing carries its
+// frames with it, and a later release gives nothing back to the next port.
+TEST(listener_port, a_frame_kept_past_close_rx_goes_back_to_the_open_port)
+{
+    HoldingSink sink;
+    sink.keep = 2;
+    HoldRig rig{true, 4, sink};
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_TRUE(rig.inject());
+        EXPECT_EQ(rig.drain(), size_t{1});
+    }
+    rig.ls.close_rx();
+    EXPECT_EQ(rig.ls.held_frames(), size_t{2});  // the sink still holds them
+    rig.ls.release(sink.held[0]);
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});
+    rig.port.close();
+    rig.ls.release(sink.held[1]);  // a port since closed: forgotten
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});
+}
+
+// A frame kept from a port before it was opened again is forgotten, not released into the new one; the new
+// port's own kept frames are counted and released as before.
+TEST(listener_port, a_frame_of_a_port_opened_again_is_not_released_into_the_new_one)
+{
+    HoldingSink sink;
+    sink.keep = 2;
+    HoldRig rig{true, 2, sink};
+    EXPECT_TRUE(rig.inject());
+    EXPECT_EQ(rig.drain(), size_t{1});
+    rig.port.close();
+    EXPECT_TRUE(rig.port.open_test({.hardware_address = kRxPortMac, .frame_pool_size = 2}).has_value());
+    EXPECT_TRUE(rig.inject());
+    EXPECT_EQ(rig.drain(), size_t{1});
+    EXPECT_EQ(sink.held.size(), size_t{2});
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});  // the new port's
+    rig.ls.release(sink.held[0]);                // the old port's: forgotten
+    EXPECT_EQ(rig.ls.held_frames(), size_t{1});
+    EXPECT_TRUE(rig.inject());
+    EXPECT_FALSE(rig.inject());  // the new port's kept frame is still out of its pool
+    rig.ls.release(sink.held[1]);
+    EXPECT_EQ(rig.ls.held_frames(), size_t{0});
 }
 
 // attach_rx joins the static groups on the port; an ACMP connect joins the

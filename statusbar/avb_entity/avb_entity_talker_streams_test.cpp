@@ -669,6 +669,46 @@ auto rendered_in_port(avb_entity::StreamPort& port, bool const single_threaded) 
 
 }  // namespace
 
+// A gathered AAF frame goes out as the header the talker writes and the payload where it lies, the sequence
+// advanced as for a rendered one; on a port that cannot send so many buffers nothing goes, nor does the sequence.
+TEST(talker_port, a_gathered_frame_is_sent_from_where_its_payload_lies)
+{
+    avb_entity::StreamPort port;
+    EXPECT_TRUE(port.set_single_threaded(true).has_value());
+    EXPECT_TRUE(port.open_test({.hardware_address = kPortMac, .tx_segments = 3}).has_value());
+    auto& wire = *port.test_port();
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    auto& slot = *talker.slot_for(0);
+    std::vector<uint8_t> first(6 * 8 * 4, 0x11);
+    std::vector<uint8_t> second(6 * 8 * 4, 0x22);
+    std::array<std::span<uint8_t const>, 2> const halves{first, second};
+    EXPECT_TRUE(talker.transmit_aaf_gathered(slot, 0x2'0000'1000ULL, 12, halves));
+    auto const sent = wire.pop_tx();
+    size_t const header = VLAN_HEADER_LENGTH + avtp::AafPdu::HEADER_LENGTH;
+    EXPECT_TRUE(sent && sent->frame.size() == header + first.size() + second.size());
+    EXPECT_TRUE(wire.last_gather().size() == 2 && wire.last_gather()[0].data() == first.data());
+    EXPECT_TRUE(sent && sent->frame.data()[header] == 0x11 && sent->frame.data()[header + first.size()] == 0x22);
+    EXPECT_EQ(slot.tx_packets, uint64_t{1});
+    std::array<std::span<uint8_t const>, 3> const thirds{first, second, first};  // four buffers with the header's
+    EXPECT_FALSE(talker.transmit_aaf_gathered(slot, 0x2'0000'1000ULL, 18, thirds));
+    std::array<std::span<uint8_t const>, 1> const short_of{first};
+    EXPECT_FALSE(talker.transmit_aaf_gathered(slot, 0x2'0000'1000ULL, 12, short_of));  // not 12 frames
+    EXPECT_EQ(slot.tx_packets, uint64_t{1});
+    EXPECT_TRUE(talker.transmit_aaf_gathered(slot, 0x2'0000'1000ULL, 12, halves));
+    auto const next = wire.pop_tx();
+    EXPECT_TRUE(
+        sent && next &&
+        next->frame.data()[VLAN_HEADER_LENGTH + 2] == static_cast<uint8_t>(sent->frame.data()[VLAN_HEADER_LENGTH + 2] + 1));
+}
+
 // On a port one thread drives, a raw AAF frame is rendered straight into the port's slot behind
 // the header; on a serialized one it is rendered outside the guard, then copied into the slot.
 TEST(talker_port, a_single_threaded_port_renders_in_the_slot)
