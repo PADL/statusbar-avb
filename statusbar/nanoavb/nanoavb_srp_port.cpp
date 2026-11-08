@@ -240,7 +240,7 @@ void SrpPort::on_peer_talker_leave(StreamId const& stream_id)
 
 void SrpPort::on_peer_talker_join(StreamId const& stream_id) noexcept
 {
-    if (auto const it = std::ranges::find(reported_leaves_, stream_id); it != reported_leaves_.end()) {
+    if (auto* const it = std::ranges::find(reported_leaves_, stream_id); it != reported_leaves_.end()) {
         reported_leaves_.erase(it);
     }
 }
