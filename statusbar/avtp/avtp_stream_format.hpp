@@ -88,8 +88,9 @@ inline constexpr uint64_t AAF_STREAM_FORMAT_CHANNELS_MASK = uint64_t{AafStreamFo
 /// specified"). An entry with the bit clear describes itself.
 [[nodiscard]] constexpr auto aaf_stream_format_covers(uint64_t const listed, uint64_t const wanted) noexcept -> bool
 {
-    if ((listed & AAF_STREAM_FORMAT_UT_BIT) == 0) {
-        return listed == wanted;
+    bool const aaf = stream_format_bytes(wanted)[0] == AvtpSubtype::aaf;
+    if (listed == wanted) {
+        return !aaf || (wanted & AAF_FORMAT_UP_TO) == 0;
     }
     uint64_t const apart = AAF_STREAM_FORMAT_UT_BIT | AAF_STREAM_FORMAT_CHANNELS_MASK;
     uint16_t const channels = AafStreamFormat::from_u64(wanted).channels_per_frame();

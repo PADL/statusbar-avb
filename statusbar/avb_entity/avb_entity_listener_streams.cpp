@@ -601,11 +601,11 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
     }
     if (slot->am824) {
-        receive_am824(*slot, frame, gptp_now_ns);
+        receive_am824(*slot, *slot->am824, frame, gptp_now_ns);
     } else if (slot->aaf) {
-        receive_aaf(*slot, frame, gptp_now_ns);
+        receive_aaf(*slot, *slot->aaf, frame, gptp_now_ns);
     } else if (slot->crf) {
-        receive_crf(*slot, frame, gptp_now_ns);
+        receive_crf(*slot, *slot->crf, frame, gptp_now_ns);
     }
 }
 
@@ -628,13 +628,14 @@ auto ListenerStreams::rx_slot_for(std::span<uint8_t const> const frame) -> Liste
     if (kind == StreamKind::other) {
         return nullptr;
     }
-    auto const found = std::ranges::find_if(slots_, [&](ListenerStreamSlot const& s) {
+    auto* const found = std::ranges::find_if(slots_, [&](ListenerStreamSlot const& s) {
         return s.kind.load(std::memory_order_relaxed) == kind && slot_receives(s, frame);
     });
     return found != slots_.end() ? &*found : nullptr;
 }
 
-void ListenerStreams::receive_am824(ListenerStreamSlot& slot, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
+void ListenerStreams::receive_am824(
+    ListenerStreamSlot& slot, avtp::Am824StreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) one PDU checked, delivered and counted
     if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
         return;
@@ -650,7 +651,7 @@ void ListenerStreams::receive_am824(ListenerStreamSlot& slot, std::span<uint8_t 
     bool const format_ok = am824_header_matches_format(slot.spec.format, pdu);
     // The declared audio length, not the Ethernet padding past it.
     std::span<uint8_t const> const audio = avtp::am824_get_audio_payload(pdu, frame);
-    uint64_t const samples = format_ok ? deliver_am824(slot, pdu, audio, gptp_now_ns) : 0;
+    uint64_t const samples = format_ok ? deliver_am824(slot, ctx, pdu, audio, gptp_now_ns) : 0;
     // 61883-6 SYT cadence: tv=0 between SYT packets is normal (ts_sparse). A mismatched
     // format is discarded and counted in UNSUPPORTED_FORMAT, as for AAF.
     update_stream_input_counters(
@@ -667,32 +668,38 @@ void ListenerStreams::receive_am824(ListenerStreamSlot& slot, std::span<uint8_t 
 }
 
 auto ListenerStreams::deliver_am824(
-    ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> const audio, int64_t const gptp_now_ns)
-    -> uint64_t
+    ListenerStreamSlot& slot,
+    avtp::Am824StreamInputContext& ctx,
+    avtp::Am824Pdu const& pdu,
+    std::span<uint8_t const> const audio,
+    int64_t const gptp_now_ns) -> uint64_t
 {
     uint64_t samples = 0;
     if (timed_sink_ != nullptr && !slot.consume) {
         // Raw-only: the timed sink receives the quadlets as they are; no float decode.
-        auto const packet = am824_rx_packet(slot.spec.index, *slot.am824, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
+        auto const packet = am824_rx_packet(slot.spec.index, ctx, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
         samples = packet.frames;
         if (packet.frames != 0) {
             timed_sink_->on_listener_packet(packet);
         }
     } else {
-        samples = decode_am824(slot, pdu, audio, gptp_now_ns);
+        samples = decode_am824(slot, ctx, pdu, audio, gptp_now_ns);
     }
     count_received(slot, samples, StreamAudioFormat::am824_mbla, audio);
     return samples;
 }
 
 auto ListenerStreams::decode_am824(
-    ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> const audio, int64_t const gptp_now_ns)
-    -> uint64_t
+    ListenerStreamSlot& slot,
+    avtp::Am824StreamInputContext& ctx,
+    avtp::Am824Pdu const& pdu,
+    std::span<uint8_t const> const audio,
+    int64_t const gptp_now_ns) -> uint64_t
 {
     uint64_t samples = 0;
     uint64_t pts_first = 0;
     avtp::am824_deserialize_mbla(
-        *slot.am824,
+        ctx,
         pdu,
         audio,
         static_cast<uint64_t>(gptp_now_ns),
@@ -705,12 +712,13 @@ auto ListenerStreams::decode_am824(
         });
     if (timed_sink_ != nullptr && samples != 0) {
         timed_sink_->on_listener_packet(
-            am824_timed_packet(slot.spec.index, *slot.am824, pdu, audio, static_cast<uint32_t>(samples), pts_first));
+            am824_timed_packet(slot.spec.index, ctx, pdu, audio, static_cast<uint32_t>(samples), pts_first));
     }
     return samples;
 }
 
-void ListenerStreams::receive_aaf(ListenerStreamSlot& slot, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
+void ListenerStreams::receive_aaf(
+    ListenerStreamSlot& slot, avtp::AafStreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {
     auto const pdu = accepted_aaf_pdu(slot, frame, now);
     if (!pdu) {
@@ -720,7 +728,7 @@ void ListenerStreams::receive_aaf(ListenerStreamSlot& slot, std::span<uint8_t co
     }
     // Milan v1.2 Section 4.4.2.2: a mismatched format is discarded, counted in UNSUPPORTED_FORMAT.
     bool const format_ok = aaf_header_matches_format(slot.spec.format, *pdu);
-    uint64_t const samples = format_ok ? deliver_aaf(slot, *pdu, avtp::aaf_get_audio_payload(*pdu, frame), gptp_now_ns) : 0;
+    uint64_t const samples = format_ok ? deliver_aaf(slot, ctx, *pdu, avtp::aaf_get_audio_payload(*pdu, frame), gptp_now_ns) : 0;
     // AAF timestamps every packet: tv=0 is a real fault (not ts_sparse).
     update_stream_input_counters(
         slot,
@@ -735,31 +743,40 @@ void ListenerStreams::receive_aaf(ListenerStreamSlot& slot, std::span<uint8_t co
         gptp_now_ns);
 }
 
-auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& /*slot*/, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>
+auto ListenerStreams::deliver_aaf(
+    ListenerStreamSlot& slot,
+    avtp::AafStreamInputContext& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> const audio,
+    int64_t const gptp_now_ns) -> uint64_t
 {
     uint64_t samples = 0;
     if (timed_sink_ != nullptr && !slot.consume) {
         // Raw-only: the timed sink receives the payload as is, so skip the
         // float decode and read the timing from the header alone.
-        auto const packet = aaf_rx_packet(slot.spec.index, *slot.aaf, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
+        auto const packet = aaf_rx_packet(slot.spec.index, ctx, pdu, audio, static_cast<uint64_t>(gptp_now_ns));
         samples = packet.frames;
         if (packet.frames != 0) {
             timed_sink_->on_listener_packet(packet);
         }
     } else {
-        samples = decode_aaf(slot, pdu, audio, gptp_now_ns);
+        samples = decode_aaf(slot, ctx, pdu, audio, gptp_now_ns);
     }
     count_received(slot, samples, StreamAudioFormat::aaf_int32, audio);
     return samples;
 }
 
 auto ListenerStreams::decode_aaf(
-    ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> const audio, int64_t const gptp_now_ns) -> uint64_t
+    ListenerStreamSlot& slot,
+    avtp::AafStreamInputContext& ctx,
+    avtp::AafPdu const& pdu,
+    std::span<uint8_t const> const audio,
+    int64_t const gptp_now_ns) -> uint64_t
 {
     uint64_t samples = 0;
     uint64_t pts_first = 0;
     avtp::aaf_stream_deserialize(
-        *slot.aaf,
+        ctx,
         pdu,
         audio,
         static_cast<uint64_t>(gptp_now_ns),
@@ -772,7 +789,7 @@ auto ListenerStreams::decode_aaf(
         });
     if (timed_sink_ != nullptr && samples != 0) {
         timed_sink_->on_listener_packet(
-            aaf_timed_packet(slot.spec.index, *slot.aaf, pdu, audio, static_cast<uint16_t>(samples), pts_first));
+            aaf_timed_packet(slot.spec.index, ctx, pdu, audio, static_cast<uint16_t>(samples), pts_first));
     }
     return samples;
 }
@@ -788,7 +805,8 @@ void ListenerStreams::count_received(
     }
 }
 
-void ListenerStreams::receive_crf(ListenerStreamSlot& slot, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
+void ListenerStreams::receive_crf(
+    ListenerStreamSlot& slot, avtp::CrfStreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) a CRF frame's checks, then counted and delivered
     if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
         return;
@@ -799,17 +817,11 @@ void ListenerStreams::receive_crf(ListenerStreamSlot& slot, std::span<uint8_t co
         slot.rx_bad.add(1);
         return;
     }
-    std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
-    if (!crf_header_matches_format(slot.spec.format, pdu)) {
-        update_stream_input_counters(
-            slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/false, 0, /*ts_sparse=*/true, 0);
-        return;
-    }
-    count_crf(slot, pdu, ts_data);
-    deliver_crf(slot, pdu, ts_data, gptp_now_ns);
+    deliver_crf_timestamps(slot, *pdu, frame.subspan(avtp::CrfPdu::HEADER_LENGTH), gptp_now_ns);
+    tally_crf_pdu(slot, *pdu, gptp_now_ns);
 }
 
-void ListenerStreams::count_crf(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> const ts_data)
+auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& /*slot*/, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>
 {
     // Media lock on the first timestamps' step, timestamp_interval x timestamps_per_pdu
     // events apart (IEEE 1722-2016 Clause 10.4); no AVTP timestamp to call late or early.
@@ -829,23 +841,26 @@ void ListenerStreams::count_crf(ListenerStreamSlot& slot, avtp::CrfPdu const& pd
 }
 
 void ListenerStreams::deliver_crf(
-    ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> const ts_data, int64_t const gptp_now_ns)
+    ListenerStreamSlot& slot,
+    avtp::CrfStreamInputContext& ctx,
+    avtp::CrfPdu const& pdu,
+    std::span<uint8_t const> const ts_data,
+    int64_t const gptp_now_ns)
 {
     auto const stream_id = pdu.stream_id().to_uint64();
     auto const connection = slot.connections.load(std::memory_order_acquire);
-    slot.crf->process_packet(
-        pdu, ts_data, [&slot, gptp_now_ns, mr = pdu.mr(), stream_id, connection](uint64_t ts_ns, uint16_t index) {
-            if (slot.crf_source == 0 || stream_id != slot.crf_stream_id || connection != slot.crf_connection) {
-                slot.crf_stream_id = stream_id;
-                slot.crf_connection = connection;
-                ++slot.crf_source;
-            }
-            if (slot.on_crf) {
-                slot.on_crf(ts_ns, index, gptp_now_ns, mr, slot.crf_source);
-            }
-        });
+    ctx.process_packet(pdu, ts_data, [&slot, gptp_now_ns, mr = pdu.mr(), stream_id, connection](uint64_t ts_ns, uint16_t index) {
+        if (slot.crf_source == 0 || stream_id != slot.crf_stream_id || connection != slot.crf_connection) {
+            slot.crf_stream_id = stream_id;
+            slot.crf_connection = connection;
+            ++slot.crf_source;
+        }
+        if (slot.on_crf) {
+            slot.on_crf(ts_ns, index, gptp_now_ns, mr, slot.crf_source);
+        }
+    });
     slot.rx_packets.add(1);
-    slot.rx_samples.add(slot.crf->last_timestamp_count);
+    slot.rx_samples.add(ctx.last_timestamp_count);
 }
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool

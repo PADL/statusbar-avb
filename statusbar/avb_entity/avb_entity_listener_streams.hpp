@@ -326,27 +326,73 @@ struct ListenerStreams
 
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
-    /// The slot @p frame is for: its kind and its connected stream_id; nullptr when none.
-    [[nodiscard]] auto rx_slot_for(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
-    /// One AM824, AAF or CRF frame into @p slot (held under its guard): checked, delivered, counted.
-    void receive_am824(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
-    void receive_aaf(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// Whether @p frame is for @p slot: it carries the slot's connected stream_id, whatever its subtype.
+    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) const -> bool;
+    /// @p frame, of subtype_kind() @p kind, into @p slot unless it is stopped or being re-shaped; another kind
+    /// is counted rejected (count_rejected). Reactor/RX thread.
+    void receive_into(ListenerStreamSlot& slot, StreamKind kind, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// One AM824 or AAF frame into @p slot (held under its guard) and its engaged @p ctx: checked,
+    /// delivered, counted.
+    void receive_am824(
+        ListenerStreamSlot& slot, avtp::Am824StreamInputContext& ctx, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    void receive_aaf(
+        ListenerStreamSlot& slot, avtp::AafStreamInputContext& ctx, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// One received CRF frame for @p slot (held under its guard): each timestamp to the CRF consumer
+    /// with the receive time, and the AVTPDU into the input's counters as an AAF one is (Milan v1.3
+    /// 5.3.8.10 asks Table 5.6 of each Stream Input). A CRF stream is a media-clock reference and carries no audio.
     void receive_crf(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// The frame's CRF header when it is one of the input's format: its type,
+    /// base frequency, pull and timestamp interval, and the timestamps a PDU
+    /// of it carries. Any other frame is counted (rx_bad, FRAMES_RX and
+    /// UNSUPPORTED_FORMAT, its sequence_num kept: count_rejected), yields nullopt
+    /// and reaches no consumer: a clock of another format is not this input's clock.
+    [[nodiscard]] auto accepted_crf_pdu(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+        -> std::optional<avtp::CrfPdu>;
+    /// The frame's CRF header when it is a CRF AVTPDU at all; nullopt for any other frame.
+    [[nodiscard]] static auto parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame)
+        -> std::optional<avtp::CrfPdu>;
+    /// The timestamps of an accepted CRF AVTPDU to the consumer with its mr bit and source generation,
+    /// and the slot's packet and sample counts.
+    void deliver_crf_timestamps(
+        ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> timestamp_data, int64_t gptp_now_ns);
+    /// An accepted CRF AVTPDU into the input's counters: sequence_num, mr and
+    /// tu from its header, its first timestamp as an AAF AVTPDU's
+    /// avtp_timestamp is taken (late, early, and the steady step of the media
+    /// lock), the step judged at the stream's own rate: timestamps a PDU
+    /// times the timestamp interval over the base frequency. Every CRF
+    /// AVTPDU carries its timestamps, so each counts TIMESTAMP_VALID. After
+    /// deliver_crf_timestamps().
+    void tally_crf_pdu(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, int64_t gptp_now_ns);
+    /// A lock gained by an AVTPDU that crossed the input's loss of its stream is given up.
+    void drop_lock_of_a_lost_stream(ListenerStreamSlot& slot);
     /// An accepted packet's audio to the timed sink raw, or decoded to the slot's consumer: its samples per channel.
     [[nodiscard]] auto deliver_am824(
-        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+        ListenerStreamSlot& slot,
+        avtp::Am824StreamInputContext& ctx,
+        avtp::Am824Pdu const& pdu,
+        std::span<uint8_t const> audio,
+        int64_t gptp_now_ns) -> uint64_t;
     [[nodiscard]] auto deliver_aaf(
-        ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+        ListenerStreamSlot& slot,
+        avtp::AafStreamInputContext& ctx,
+        avtp::AafPdu const& pdu,
+        std::span<uint8_t const> audio,
+        int64_t gptp_now_ns) -> uint64_t;
     /// The float decode to the slot's consumer, then the timed sink: the samples per channel.
     [[nodiscard]] auto decode_am824(
-        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+        ListenerStreamSlot& slot,
+        avtp::Am824StreamInputContext& ctx,
+        avtp::Am824Pdu const& pdu,
+        std::span<uint8_t const> audio,
+        int64_t gptp_now_ns) -> uint64_t;
     [[nodiscard]] auto decode_aaf(
-        ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+        ListenerStreamSlot& slot,
+        avtp::AafStreamInputContext& ctx,
+        avtp::AafPdu const& pdu,
+        std::span<uint8_t const> audio,
+        int64_t gptp_now_ns) -> uint64_t;
     /// An accepted audio packet counted and offered to the RX audio sink.
     void count_received(ListenerStreamSlot& slot, uint64_t samples, StreamAudioFormat format, std::span<uint8_t const> audio);
-    /// A CRF PDU's counters, and its timestamps to the slot's recovery and consumer.
-    void count_crf(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> ts_data);
-    void deliver_crf(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> ts_data, int64_t gptp_now_ns);
 
     /// True if @p frame belongs to the stream currently connected to STREAM_INPUT
     /// @p stream_index: the slot's published connection is set and the
