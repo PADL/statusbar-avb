@@ -102,9 +102,11 @@ int main(int argc, char* argv[])
     // Create the controller backend (platform default: AVB framework on
     // macOS, raw socket elsewhere) and the controller pollable on it.
     std::string backend_error;
+    // NOLINTBEGIN(readability-suspicious-call-argument): g_backend is the backend, backend_error the error out-parameter
     auto service = config.socket_path.empty()
         ? atdecc_tools::make_controller_service(g_backend, config.interface_name, controller_id, backend_error)
         : atdecc_tools::make_local_controller_service(config.socket_path, controller_id, backend_error);
+    // NOLINTEND(readability-suspicious-call-argument)
     if (service == nullptr) {
         std::println(stderr, "Error: {}", backend_error);
         return 1;
