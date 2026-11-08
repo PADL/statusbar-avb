@@ -83,7 +83,8 @@ runs; without one, frames go untimed. `send_stream_frame()` accepts the time the
 caller wants a frame on the wire (0: now) and `launch_time()` orders it after
 the previous one (`net::LaunchOrder`), counting holds, clock steps and frames
 committed late (`launch_order()`). When to use a lead is the host's decision;
-the NIC's etf offload is the shaper's (SHAPER.md, "Launch time (etf)").
+the NIC's etf offload is the host's, on a port without the shaper
+(SHAPER.md, "Launch time").
 
 ## SlotGuard
 
