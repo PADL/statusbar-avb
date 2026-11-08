@@ -937,7 +937,7 @@ void AvbEntityKit::set_output_signal_presence(uint16_t const idx, uint64_t const
 
 auto AvbEntityKit::talker_channels(uint16_t const idx) const noexcept -> uint16_t
 {
-    auto const spec = std::ranges::find(talker_specs_, idx, &StreamSpec::index);
+    auto const* const spec = std::ranges::find(talker_specs_, idx, &StreamSpec::index);
     return spec == talker_specs_.end() ? uint16_t{0} : spec->format.channels;
 }
 
@@ -1705,7 +1705,8 @@ void AvbEntityKit::open_stream_port()
     // allows it, the reason kept (stream_xdp_error()).
     stream_tx_error_ = stream_rx_error_ = stream_xdp_error_ = stream_launch_time_error_ = std::error_code{};
     if (stream_port_.valid()) {
-        return log_stream_port();  // the host opened it before start() (a test port): kept
+        log_stream_port();  // the host opened it before start() (a test port): kept
+        return;
     }
     auto opened = open_stream_port_on(config_.net_backend);
     if (!opened && config_.net_backend == "xdp" && config_.net_xdp_fallback) {
