@@ -554,13 +554,13 @@ auto ShaperQdiscs::etf_slot(uint16_t const queue, bool const under_cbs) -> Statu
 {
     if (!under_cbs) {
         return child_of(parent_of(queue)).transform([&](std::optional<net::tc::QdiscInfo> child) {
-            return EtfSlot{.parent = parent_of(queue), .child = std::move(child), .on_class = true};
+            return EtfSlot{.parent = parent_of(queue), .child = child, .on_class = true};
         });
     }
     // cbs has one class, major:1 (sch_cbs.c), under the handle our cbs was sent with.
     uint32_t const parent = net::tc::make_handle(cbs_major(queue), 1);
     return child_of(parent).transform(
-        [&](std::optional<net::tc::QdiscInfo> child) { return EtfSlot{.parent = parent, .child = std::move(child)}; });
+        [&](std::optional<net::tc::QdiscInfo> child) { return EtfSlot{.parent = parent, .child = child}; });
 }
 
 auto ShaperQdiscs::child_of(uint32_t const parent) -> StatusValue<std::optional<net::tc::QdiscInfo>>

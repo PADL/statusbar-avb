@@ -83,7 +83,7 @@ inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNE
 {
     bool const aaf = stream_format_bytes(wanted)[0] == AvtpSubtype::aaf;
     if (listed == wanted) {
-        return !(aaf && (wanted & AAF_FORMAT_UP_TO) != 0);
+        return !aaf || (wanted & AAF_FORMAT_UP_TO) == 0;
     }
     if (!aaf || (listed & AAF_FORMAT_UP_TO) == 0 || (wanted & AAF_FORMAT_UP_TO) != 0) {
         return false;
