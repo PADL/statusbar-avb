@@ -53,7 +53,7 @@ constexpr size_t V1_2_MILAN_INFO_LENGTH = MvuGetMilanInfoResponse::LENGTH - 4;
     -> std::optional<MvuSystemUniqueIdPayloadV13>
 {
     if (auto const v13 = load_payload<MvuSystemUniqueIdPayloadV13>(data)) {
-        return *v13;
+        return v13;
     }
     if (v1_3 || data.size() < MvuSystemUniqueIdPayload::LENGTH) {
         return std::nullopt;
