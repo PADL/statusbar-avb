@@ -465,9 +465,12 @@ void AvbEntityHost::on_link_up(TimePoint const time)
     // (forget an adopted VID) and declare it at once; a repeated report of a link already up
     // (the link monitor's first) keeps it.
     if (!supervisor_ctx_.link_up) {
+        bool const resumes = components_.msrp_handler.withdrawn();  // a flush and a LeaveAll already, no rejoin
         (void)components_.msrp_handler.reset_domain(time);
         if (link_down_count_ != 0) {  // back after a down: what MRP sent meanwhile was lost (IEEE 802.1Q-2022 10.7)
-            components_.msrp_handler.rejoin(time);
+            if (!resumes) {
+                components_.msrp_handler.rejoin(time);
+            }
             components_.mvrp_handler.leave_all(time);
         }
         ++link_up_count_;
