@@ -15,7 +15,9 @@ auto escf_sig_mode_name(uint8_t const sig) noexcept -> std::string_view
 {
     switch (sig) {
         case 0x00:
-            return "ECC1";
+            return "ECSSA_DSA_EMSA1_SHA256";
+        case 0x01:
+            return "ED25519";
         default:
             return "Reserved";
     }
@@ -37,7 +39,7 @@ auto escf_parse_header(std::span<uint8_t const> const packet) noexcept -> std::o
     return pdu;
 }
 
-auto escf_get_signed_payload(std::span<uint8_t const> const packet) noexcept -> std::span<uint8_t const>
+auto escf_get_encapsulated_avtpdu(std::span<uint8_t const> const packet) noexcept -> std::span<uint8_t const>
 {
     if (packet.size() <= EscfPdu::HEADER_LENGTH) {
         return {};

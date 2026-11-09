@@ -3,15 +3,19 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// EECF - ECC Encrypted Control Format - IEEE 1722-2016 Clause 17
+/// EECF - ECC Encrypted Control Format - IEEE 1722-2025 Clause 17
 /// Discrete encrypted control PDU header
 ///
-/// Wire format (12-byte header + variable encrypted_payload):
+/// Wire format (12-byte header + variable encrypted_payload, Figure 110):
 ///   Byte 0:     subtype (0xED)
 ///   Byte 1:     r(1)|version(3)|enc(4)
-///   Bytes 2-3:  reserved(5)|encrypted_payload_length(11)
+///   Bytes 2-3:  encrypted_payload_length (16 bits)
 ///   Bytes 4-11: key_id (8 bytes, EUI-64)
 ///   Bytes 12+:  encrypted_payload
+///
+/// The enc values beyond ECC1 are the IEEE 1722 security amendment proposal
+/// (November 2026; see avb/docs/IEEE_1722_CRYPTO_AMENDMENT.md), which this
+/// stack implements as its proof of concept.
 
 #include "statusbar/avtp/avtp_types.hpp"
 #include "statusbar/ieee/ieee_base.hpp"
@@ -31,16 +35,17 @@ using ieee::Eui64;
 using ieee::octet_t;
 
 //
-// EECF Encryption Algorithm Values - IEEE 1722-2016 Table 48
+// EECF Encryption Algorithm Values - IEEE 1722-2025 Table 53, plus the amendment's rows
 //
 /// EECF enc field values
 enum class EecfEncMode : uint8_t
 {
-    ecc1 = 0x00U,  ///< ECC1 encryption algorithm (ECIES, IEEE 1722-2025 17.3.1)
+    ecc1 = 0x00U,  ///< ECC1: IEEE 1363a-2004 DL/ECIES (IEEE 1722-2025 17.3)
     ecc2 = 0x01U,  ///< ECC2: RFC 9180 HPKE base mode, DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 /
-                   ///< AES-256-GCM (statusbar proposal to the IEEE 1722 group; Table 53 reserves
-                   ///< 0x01-0x0F). See avb/docs/EECF_ECC2_PROPOSAL.md.
-    // 0x02 - 0x0F: Reserved
+                   ///< AES-256-GCM (amendment 17.4, Table 53a)
+    ecc3 = 0x02U,  ///< ECC3: RFC 9180 HPKE base mode, DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 /
+                   ///< AES-256-GCM (amendment 17.4, Table 53a)
+    // 0x03 - 0x0F: Reserved
 };
 
 /// Get human-readable name for EECF encryption mode
@@ -48,10 +53,10 @@ enum class EecfEncMode : uint8_t
 [[nodiscard]] auto eecf_enc_mode_name(uint8_t enc) noexcept -> std::string_view;
 
 //
-// EecfPdu - IEEE 1722-2016 Clause 17
+// EecfPdu - IEEE 1722-2025 Clause 17
 // Wire format: 12-byte header + variable encrypted_payload
 //
-/// EECF Protocol Data Unit Header - IEEE 1722-2016 Clause 17 (subtype 0xED)
+/// EECF Protocol Data Unit Header - IEEE 1722-2025 Clause 17 (subtype 0xED)
 struct EecfPdu
 {
     /// Total length of EECF header on wire
@@ -63,8 +68,8 @@ struct EecfPdu
     // Byte 1: r[7] | version[6:4] | enc[3:0]
     octet_t r_version_enc;
 
-    // Bytes 2-3: reserved[15:11] | encrypted_payload_length[10:0]
-    doublet_t rsv_encrypted_payload_length;
+    // Bytes 2-3: encrypted_payload_length[15:0] (17.2.3, Figure 110)
+    doublet_t encrypted_payload_length_;
 
     // Bytes 4-11: key_id (EUI-64)
     Eui64 key_id_;
@@ -81,19 +86,12 @@ struct EecfPdu
     /// @param value Encryption algorithm (4 bits)
     constexpr void set_enc(uint8_t const value) noexcept { r_version_enc.set_bits(0x0FU, 0, value); }
 
-    /// Get the encrypted_payload_length (11-bit field)
-    [[nodiscard]] constexpr auto encrypted_payload_length() const noexcept -> uint16_t
-    {
-        return static_cast<uint16_t>(rsv_encrypted_payload_length.get() & 0x07FFU);
-    }
+    /// Get the encrypted_payload_length (16-bit field)
+    [[nodiscard]] constexpr auto encrypted_payload_length() const noexcept -> uint16_t { return encrypted_payload_length_.get(); }
 
-    /// Set the encrypted_payload_length (11-bit field)
-    /// @param length Encrypted payload length in octets (max 2047)
-    constexpr void set_encrypted_payload_length(uint16_t const length) noexcept
-    {
-        uint16_t const current = rsv_encrypted_payload_length.get();
-        rsv_encrypted_payload_length = static_cast<uint16_t>((current & 0xF800U) | (length & 0x07FFU));
-    }
+    /// Set the encrypted_payload_length (16-bit field)
+    /// @param length Encrypted payload length in octets
+    constexpr void set_encrypted_payload_length(uint16_t const length) noexcept { encrypted_payload_length_ = length; }
 
     /// Get the key_id
     [[nodiscard]] constexpr auto key_id() const noexcept -> Eui64 { return key_id_; }
@@ -105,14 +103,14 @@ struct EecfPdu
     // Initialization
 
     /// Initialize for EECF encrypted control
-    /// @param enc_mode Encryption algorithm (0=ECC1)
+    /// @param enc_mode Encryption algorithm (0=ECC1, 1=ECC2, 2=ECC3)
     /// @param kid Key identifier (EUI-64)
     constexpr void init(uint8_t const enc_mode, Eui64 const& kid) noexcept
     {
         subtype = AvtpSubtype::eecf;
         r_version_enc = 0U;
         set_enc(enc_mode);
-        rsv_encrypted_payload_length = 0U;
+        encrypted_payload_length_ = 0U;
         key_id_ = kid;
     }
 
@@ -138,7 +136,7 @@ static_assert(sizeof(EecfPdu) == 12, "EecfPdu must be exactly 12 bytes");
 static_assert(alignof(EecfPdu) <= 4, "EecfPdu alignment must not exceed 4 bytes");
 static_assert(offsetof(EecfPdu, subtype) == 0, "subtype must be at offset 0");
 static_assert(offsetof(EecfPdu, r_version_enc) == 1, "r_version_enc must be at offset 1");
-static_assert(offsetof(EecfPdu, rsv_encrypted_payload_length) == 2, "rsv_encrypted_payload_length must be at offset 2");
+static_assert(offsetof(EecfPdu, encrypted_payload_length_) == 2, "encrypted_payload_length must be at offset 2");
 static_assert(offsetof(EecfPdu, key_id_) == 4, "key_id must be at offset 4");
 
 //

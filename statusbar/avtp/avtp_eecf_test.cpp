@@ -42,8 +42,13 @@ TEST(eecf, encrypted_payload_length)
     pdu.set_encrypted_payload_length(2047);
     EXPECT_EQ(pdu.encrypted_payload_length(), 2047);
 
+    // Figure 110: a full 16-bit field (the MTU, not the field, bounds a real frame).
     pdu.set_encrypted_payload_length(0xFFFF);
-    EXPECT_EQ(pdu.encrypted_payload_length(), 2047);
+    EXPECT_EQ(pdu.encrypted_payload_length(), 0xFFFF);
+    std::array<uint8_t, 12> buf{};
+    span_store(buf, pdu);
+    EXPECT_EQ(buf[2], 0xFF);
+    EXPECT_EQ(buf[3], 0xFF);
 }
 
 TEST(eecf, parse_valid)
@@ -100,7 +105,8 @@ TEST(eecf, enc_mode_names)
 {
     EXPECT_EQ(std::string(eecf_enc_mode_name(0)), "ECC1");
     EXPECT_EQ(std::string(eecf_enc_mode_name(1)), "ECC2");
-    EXPECT_EQ(std::string(eecf_enc_mode_name(2)), "Reserved");
+    EXPECT_EQ(std::string(eecf_enc_mode_name(2)), "ECC3");
+    EXPECT_EQ(std::string(eecf_enc_mode_name(3)), "Reserved");
 }
 
 TEST(eecf, format_to_output)

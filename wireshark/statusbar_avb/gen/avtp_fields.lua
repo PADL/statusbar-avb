@@ -238,12 +238,14 @@ M.values_aef_enc = {
 }
 
 M.values_escf_sig = {
-    [0x00] = "ECC1",
+    [0x00] = "ECSSA_DSA_EMSA1_SHA256",
+    [0x01] = "ED25519",
 }
 
 M.values_eecf_enc = {
     [0x00] = "ECC1",
     [0x01] = "ECC2",
+    [0x02] = "ECC3",
 }
 
 M.values_acf_msg_type = {
@@ -448,10 +450,12 @@ M.f.avtp_aef_stream_data_length = ProtoField.uint16("avb.avtp.aef.stream_data_le
 M.f.avtp_aef_key_id = ProtoField.eui64("avb.avtp.aef.key_id", "aef.key_id", "key_id (EUI-64)")
 M.f.avtp_aef_control_data_length = ProtoField.uint16("avb.avtp.aef.control_data_length", "aef.control_data_length", base.DEC, nil, 0x7FF, "control_data_length (11 bits)")
 M.f.avtp_escf_sig = ProtoField.uint8("avb.avtp.escf.sig", "escf.sig", base.DEC, M.values_escf_sig, 0xF, "signature algorithm")
-M.f.avtp_escf_control_data_length = ProtoField.uint16("avb.avtp.escf.control_data_length", "escf.control_data_length", base.DEC, nil, 0x7FF, "control_data_length (11 bits)")
+M.f.avtp_escf_encapsulated_avtpdu_length = ProtoField.uint16("avb.avtp.escf.encapsulated_avtpdu_length", "escf.encapsulated_avtpdu_length", base.DEC, nil, nil, "encapsulated_avtpdu_length (octets)")
 M.f.avtp_escf_key_id = ProtoField.eui64("avb.avtp.escf.key_id", "escf.key_id", "key_id (EUI-64)")
+M.f.avtp_escf_signing_timestamp = ProtoField.uint64("avb.avtp.escf.signing_timestamp", "escf.signing_timestamp", base.DEC, nil, nil, "signing_timestamp (PTP nanoseconds)")
+M.f.avtp_escf_signature_value = ProtoField.bytes("avb.avtp.escf.signature_value", "escf.signature_value", base.NONE, "signature_value: ECSSA c || d, or Ed25519 R || S")
 M.f.avtp_eecf_enc = ProtoField.uint8("avb.avtp.eecf.enc", "eecf.enc", base.DEC, M.values_eecf_enc, 0xF, "encryption algorithm")
-M.f.avtp_eecf_encrypted_payload_length = ProtoField.uint16("avb.avtp.eecf.encrypted_payload_length", "eecf.encrypted_payload_length", base.DEC, nil, 0x7FF, "encrypted_payload_length (11 bits)")
+M.f.avtp_eecf_encrypted_payload_length = ProtoField.uint16("avb.avtp.eecf.encrypted_payload_length", "eecf.encrypted_payload_length", base.DEC, nil, nil, "encrypted_payload_length (octets)")
 M.f.avtp_eecf_key_id = ProtoField.eui64("avb.avtp.eecf.key_id", "eecf.key_id", "key_id (EUI-64)")
 M.f.ipavtp_encapsulation_sequence_num = ProtoField.uint32("avb.ipavtp.encapsulation_sequence_num", "encapsulation_sequence_num", base.DEC, nil, nil, "encapsulation_sequence_num")
 M.f.avtp_payload = ProtoField.bytes("avb.avtp.payload", "payload", base.NONE, "undissected AVTPDU payload")
@@ -490,6 +494,10 @@ M.f.avtp_eecf_ecc1_c = ProtoField.bytes("avb.avtp.eecf.ecc1.c", "c", base.NONE, 
 M.f.avtp_eecf_ecc2_enc = ProtoField.bytes("avb.avtp.eecf.ecc2.enc", "enc", base.NONE, "enc: HPKE encapsulated key, SEC1 uncompressed P-256 point (0x04 || x || y)")
 M.f.avtp_eecf_ecc2_c = ProtoField.bytes("avb.avtp.eecf.ecc2.c", "c", base.NONE, "C: AES-256-GCM ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)")
 M.f.avtp_eecf_ecc2_t = ProtoField.bytes("avb.avtp.eecf.ecc2.t", "t", base.NONE, "T: AES-256-GCM tag over C with the EECF header as aad; the last 16 octets")
+M.f.avtp_eecf_ecc3_enc = ProtoField.bytes("avb.avtp.eecf.ecc3.enc", "enc", base.NONE, "enc: HPKE encapsulated key, the X25519 public key (RFC 7748 u-coordinate)")
+M.f.avtp_eecf_ecc3_c = ProtoField.bytes("avb.avtp.eecf.ecc3.c", "c", base.NONE, "C: AES-256-GCM ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)")
+M.f.avtp_eecf_ecc3_t = ProtoField.bytes("avb.avtp.eecf.ecc3.t", "t", base.NONE, "T: AES-256-GCM tag over C with the EECF header as aad; the last 16 octets")
+M.f.avtp_escf_encapsulated_avtpdu = ProtoField.bytes("avb.avtp.escf.encapsulated_avtpdu", "encapsulated_avtpdu", base.NONE, "encapsulated_avtpdu: the signed AVTPDU, from its subtype field")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -635,8 +643,10 @@ M.avtp_fields = {
     M.f.avtp_aef_key_id,
     M.f.avtp_aef_control_data_length,
     M.f.avtp_escf_sig,
-    M.f.avtp_escf_control_data_length,
+    M.f.avtp_escf_encapsulated_avtpdu_length,
     M.f.avtp_escf_key_id,
+    M.f.avtp_escf_signing_timestamp,
+    M.f.avtp_escf_signature_value,
     M.f.avtp_eecf_enc,
     M.f.avtp_eecf_encrypted_payload_length,
     M.f.avtp_eecf_key_id,
@@ -676,6 +686,10 @@ M.avtp_fields = {
     M.f.avtp_eecf_ecc2_enc,
     M.f.avtp_eecf_ecc2_c,
     M.f.avtp_eecf_ecc2_t,
+    M.f.avtp_eecf_ecc3_enc,
+    M.f.avtp_eecf_ecc3_c,
+    M.f.avtp_eecf_ecc3_t,
+    M.f.avtp_escf_encapsulated_avtpdu,
 }
 
 M.ipavtp_fields = {
@@ -1138,16 +1152,18 @@ function M.add_aef_discrete(tree, tvb, off)
     tree:add(M.f.avtp_aef_key_id, tvb(off + 4, 8))
 end
 
---- ESCF header (IEEE 1722-2025 16.3)
+--- ESCF header (IEEE 1722-2025 16.2, Figure 109; signature_value and ED25519 per the amendment)
 function M.add_escf(tree, tvb, off)
     tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
     tree:add(M.f.avtp_version, tvb(off + 1, 1))
     tree:add(M.f.avtp_escf_sig, tvb(off + 1, 1))
-    tree:add(M.f.avtp_escf_control_data_length, tvb(off + 2, 2))
+    tree:add(M.f.avtp_escf_encapsulated_avtpdu_length, tvb(off + 2, 2))
     tree:add(M.f.avtp_escf_key_id, tvb(off + 4, 8))
+    tree:add(M.f.avtp_escf_signing_timestamp, tvb(off + 12, 8))
+    tree:add(M.f.avtp_escf_signature_value, tvb(off + 20, 64))
 end
 
---- EECF header (IEEE 1722-2025 17.3)
+--- EECF header (IEEE 1722-2025 17.2, Figure 110)
 function M.add_eecf(tree, tvb, off)
     tree:add(M.f.avtp_subtype, tvb(off + 0, 1))
     tree:add(M.f.avtp_version, tvb(off + 1, 1))
@@ -1214,7 +1230,7 @@ M.subtype_specs[0x6E][0] = { name = "aef_continuous", header_length = 12, layout
 M.subtype_specs[0xEE] = M.subtype_specs[0xEE] or {}
 M.subtype_specs[0xEE][0] = { name = "aef_discrete", header_length = 12, layouts = { M.add_aef_discrete }, post = nil }
 M.subtype_specs[0xEC] = M.subtype_specs[0xEC] or {}
-M.subtype_specs[0xEC][0] = { name = "escf", header_length = 12, layouts = { M.add_escf }, post = nil }
+M.subtype_specs[0xEC][0] = { name = "escf", header_length = 84, layouts = { M.add_escf }, post = "escf_encapsulated" }
 M.subtype_specs[0xED] = M.subtype_specs[0xED] or {}
 M.subtype_specs[0xED][0] = { name = "eecf", header_length = 12, layouts = { M.add_eecf }, post = "eecf_payload" }
 

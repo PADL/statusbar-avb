@@ -16,6 +16,7 @@
 #include "statusbar/crypto/util/crypto_util_internal.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <string_view>
@@ -598,11 +599,12 @@ TEST(avtp_aem_frame, eecf_ecc1_encrypt_rejects_small_buffer_and_oversize)
     std::array<uint8_t, 96> too_small{};
     EXPECT_FALSE(eecf_ecc1_encrypt_payload(sk.public_key, as_bytes("Hello, DL/ECIES!"), too_small, kat_entropy).has_value());
 
-    // 2047 is the most an EECF header can declare; 65 + 1984 = 2049 would not fit.
-    std::array<uint8_t, 1983> big_plaintext{};
+    // 1488 octets (a 1500-octet MTU less the EECF header) is the most one frame carries;
+    // 65 + 1424 = 1489 would not fit, 65 + 1408 = 1473 does.
+    std::array<uint8_t, 1423> big_plaintext{};
     std::array<uint8_t, 4096> big_out{};
     EXPECT_FALSE(eecf_ecc1_encrypt_payload(sk.public_key, big_plaintext, big_out, kat_entropy).has_value());
-    std::array<uint8_t, 1967> fits{};  // 65 + 1968 = 2033
+    std::array<uint8_t, 1407> fits{};
     EXPECT_TRUE(eecf_ecc1_encrypt_payload(sk.public_key, fits, big_out, kat_entropy).has_value());
 }
 
@@ -633,8 +635,21 @@ TEST(avtp_aem_frame, eecf_ecc1_full_frame_roundtrip)
 }
 
 // ===========================================================================
-// ECC2 encrypted_payload (RFC 9180 HPKE base mode; avb/docs/EECF_ECC2_PROPOSAL.md)
+// ECC2 encrypted_payload (RFC 9180 HPKE base mode over P-256; IEEE 1722 security
+// amendment proposal 17.4, avb/docs/IEEE_1722_CRYPTO_AMENDMENT.md)
 // ===========================================================================
+
+TEST(avtp_aem_frame, eecf_frame_size_rules)
+{
+    // 17.4.4: EncapMTU = MTU - 36 - Npk, 1399 for ECC2 and 1432 for ECC3 at a 1500-octet MTU.
+    EXPECT_TRUE(eecf_mtu == 1500);
+    EXPECT_TRUE(eecf_max_encrypted_payload_size == 1488);
+    EXPECT_TRUE(eecf_ecc2_max_encapsulated_avtpdu_size == 1399);
+    EXPECT_TRUE(eecf_ecc3_max_encapsulated_avtpdu_size == 1432);
+    // 17.4.3 step 2: at least Npk + 24.
+    EXPECT_TRUE(eecf_ecc2_min_framed_size == 89);
+    EXPECT_TRUE(eecf_ecc3_min_framed_size == 56);
+}
 
 TEST(avtp_aem_frame, eecf_ecc2_sizes)
 {
@@ -645,9 +660,9 @@ TEST(avtp_aem_frame, eecf_ecc2_sizes)
     EXPECT_TRUE(eecf_ecc2_encrypted_size(0) == 81);
     EXPECT_TRUE(eecf_ecc2_encrypted_size(24) == 105);
     EXPECT_TRUE(eecf_ecc2_payload_size_is_valid(81));
-    EXPECT_TRUE(eecf_ecc2_payload_size_is_valid(2047));
+    EXPECT_TRUE(eecf_ecc2_payload_size_is_valid(1488));
     EXPECT_FALSE(eecf_ecc2_payload_size_is_valid(80));
-    EXPECT_FALSE(eecf_ecc2_payload_size_is_valid(2048));
+    EXPECT_FALSE(eecf_ecc2_payload_size_is_valid(1489));
 }
 
 TEST(avtp_aem_frame, eecf_ecc2_header_is_the_frame_header)
@@ -733,12 +748,22 @@ TEST(avtp_aem_frame, eecf_ecc2_encrypt_rejects_small_buffer_and_oversize)
     std::array<uint8_t, 96> too_small{};
     EXPECT_FALSE(eecf_ecc2_encrypt_payload(sk.public_key, {}, plaintext, too_small, kat_entropy).has_value());
 
-    // 1966 octets of plaintext fill the 2047-octet payload exactly; one more does not fit.
-    std::array<uint8_t, 1966> big{};
+    // 1407 octets of plaintext fill the 1488-octet payload exactly; one more does not fit.
+    std::array<uint8_t, 1407> big{};
     std::array<uint8_t, 2048> out{};
     EXPECT_TRUE(eecf_ecc2_encrypt_payload(sk.public_key, {}, big, out, kat_entropy).has_value());
     EXPECT_FALSE(
-        eecf_ecc2_encrypt_payload(sk.public_key, {}, std::span<uint8_t const>(out).first(1967), out, kat_entropy).has_value());
+        eecf_ecc2_encrypt_payload(sk.public_key, {}, std::span<uint8_t const>(out).first(1408), out, kat_entropy).has_value());
+
+    // The framed form bounds the AVTPDU at EncapMTU (1399) and the framed decrypt
+    // discards anything shorter than Npk + 24 before touching HPKE.
+    std::array<uint8_t, 1399> avtpdu{};
+    EXPECT_TRUE(eecf_ecc2_encrypt(sk.public_key, kat_key_id, kat_timestamp, avtpdu, out, kat_entropy).has_value());
+    EXPECT_FALSE(
+        eecf_ecc2_encrypt(sk.public_key, kat_key_id, kat_timestamp, std::span<uint8_t const>(out).first(1400), out, kat_entropy)
+            .has_value());
+    std::array<uint8_t, 88> too_short{};
+    EXPECT_FALSE(eecf_ecc2_decrypt(sk, eecf_ecc2_header(kat_key_id, 88), too_short, out).has_value());
 }
 
 TEST(avtp_aem_frame, eecf_ecc2_full_frame_roundtrip)
@@ -762,6 +787,189 @@ TEST(avtp_aem_frame, eecf_ecc2_full_frame_roundtrip)
 
     std::array<uint8_t, 256> plaintext{};
     auto const opened = eecf_ecc2_decrypt(sk, parsed->header.first<eecf_header_size>(), parsed->encrypted_payload, plaintext);
+    EXPECT_TRUE(opened.has_value());
+    EXPECT_TRUE(opened->encryption_timestamp == kat_timestamp);
+    EXPECT_TRUE(span_compare(opened->encapsulated_avtpdu, std::span<uint8_t const>(kat_avtpdu)));
+}
+
+// ===========================================================================
+// ECC3 encrypted_payload (RFC 9180 HPKE base mode over X25519; amendment 17.4)
+//
+// Known answers from the independent Python HPKE reference and the amendment's
+// test-vector slide: recipient key = DeriveKeyPair(kat_seed) for DHKEM(X25519),
+// ikm_e = kat_entropy, key_id 70-B3-D5-ED-C4-00-00-42, aad = the EECF header for
+// that key_id, enc = 2 and the payload's length.
+// ===========================================================================
+
+namespace {
+
+auto kat_ecc3_recipient() -> X25519PrivateKey
+{
+    return hpke_x25519_derive_key_pair(kat_seed).value();
+}
+
+constexpr std::array<uint8_t, 32> kat_ecc3_recipient_pk{
+    0x49, 0xE4, 0x87, 0x4E, 0x25, 0xFE, 0x38, 0x9E, 0xD3, 0xC9, 0xFA, 0x2F, 0xD0, 0x9D, 0x07, 0x79,
+    0x07, 0xEC, 0xC5, 0x80, 0x9C, 0x86, 0x19, 0xE2, 0x12, 0x71, 0x28, 0xB6, 0xA7, 0x2C, 0x7C, 0x7A,
+};
+
+// encrypted_payload for the plaintext "Hello, HPKE ECC3" (16 octets -> 16-octet C).
+constexpr std::array<uint8_t, 64> kat_ecc3_hello{
+    0x8A, 0x7D, 0x27, 0x73, 0xC3, 0xDC, 0xC1, 0xCB, 0xFA, 0x27, 0x5F, 0x67, 0x91, 0x5A, 0x8B, 0x3F,
+    0x7B, 0x28, 0xB6, 0xE2, 0xC9, 0xB4, 0x73, 0x46, 0xFB, 0xFD, 0x23, 0x2C, 0xDF, 0x38, 0xFC, 0x22,
+    0xC1, 0x01, 0x0C, 0xD6, 0x1E, 0xEF, 0x7D, 0x3D, 0x7E, 0xD7, 0x71, 0xC7, 0x0B, 0x4C, 0xB9, 0x0B,
+    0xB5, 0x1F, 0x77, 0xE0, 0xD2, 0x3E, 0xE6, 0x46, 0xEC, 0x9E, 0x33, 0xE1, 0xB2, 0x3D, 0x2C, 0x56,
+};
+
+// encrypted_payload for the 17.3.3 plaintext kat_timestamp || kat_avtpdu (24 octets -> 24-octet C):
+// the amendment's ECC3 test vector.
+constexpr std::array<uint8_t, 72> kat_ecc3_framed{
+    0x8A, 0x7D, 0x27, 0x73, 0xC3, 0xDC, 0xC1, 0xCB, 0xFA, 0x27, 0x5F, 0x67, 0x91, 0x5A, 0x8B, 0x3F, 0x7B, 0x28,
+    0xB6, 0xE2, 0xC9, 0xB4, 0x73, 0x46, 0xFB, 0xFD, 0x23, 0x2C, 0xDF, 0x38, 0xFC, 0x22, 0x88, 0x47, 0x25, 0xDD,
+    0xF8, 0x68, 0x90, 0x9A, 0x3E, 0x8D, 0x26, 0xF4, 0x5A, 0x1A, 0xEC, 0x2F, 0xB0, 0x54, 0x0E, 0xBC, 0xD1, 0xEB,
+    0x7D, 0xF3, 0x0E, 0xB9, 0x5B, 0x3B, 0x51, 0x0A, 0x5A, 0xBE, 0x6C, 0x6B, 0xE6, 0x77, 0xDA, 0x63, 0x28, 0x43,
+};
+
+}  // namespace
+
+TEST(avtp_aem_frame, eecf_ecc3_sizes)
+{
+    EXPECT_TRUE(eecf_enc_ecc3 == 2);
+    EXPECT_TRUE(eecf_ecc3_enc_size == 32);
+    EXPECT_TRUE(eecf_ecc3_tag_size == 16);
+    EXPECT_TRUE(eecf_ecc3_overhead == 48);
+    EXPECT_TRUE(eecf_ecc3_encrypted_size(0) == 48);
+    EXPECT_TRUE(eecf_ecc3_encrypted_size(24) == 72);
+    EXPECT_TRUE(eecf_ecc3_payload_size_is_valid(48));
+    EXPECT_TRUE(eecf_ecc3_payload_size_is_valid(1488));
+    EXPECT_FALSE(eecf_ecc3_payload_size_is_valid(47));
+    EXPECT_FALSE(eecf_ecc3_payload_size_is_valid(1489));
+    EXPECT_TRUE(span_compare(
+        std::span<uint8_t const>(kat_ecc3_recipient().public_key.data), std::span<uint8_t const>(kat_ecc3_recipient_pk)));
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_header_is_the_frame_header)
+{
+    auto const header = eecf_ecc3_header(kat_key_id, 72);
+    constexpr std::array<uint8_t, 12> expected{0xED, 0x02, 0x00, 0x48, 0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x00, 0x42};
+    EXPECT_TRUE(span_compare(std::span<uint8_t const>(header), std::span<uint8_t const>(expected)));
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_payload_known_answer)
+{
+    auto const sk = kat_ecc3_recipient();
+    auto const plaintext = as_bytes("Hello, HPKE ECC3");
+    auto const aad = eecf_ecc3_header(kat_key_id, kat_ecc3_hello.size());
+
+    std::array<uint8_t, 64> payload{};
+    auto const built = eecf_ecc3_encrypt_payload(sk.public_key, aad, plaintext, payload, kat_entropy);
+    EXPECT_TRUE(built.has_value());
+    EXPECT_TRUE(span_compare(*built, std::span<uint8_t const>(kat_ecc3_hello)));
+
+    std::array<uint8_t, 16> recovered{};
+    auto const opened = eecf_ecc3_decrypt_payload(sk, aad, kat_ecc3_hello, recovered);
+    EXPECT_TRUE(opened.has_value());
+    EXPECT_TRUE(span_compare(*opened, plaintext));
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_framed_known_answer)
+{
+    auto const sk = kat_ecc3_recipient();
+
+    std::array<uint8_t, 72> payload{};
+    auto const built = eecf_ecc3_encrypt(sk.public_key, kat_key_id, kat_timestamp, kat_avtpdu, payload, kat_entropy);
+    EXPECT_TRUE(built.has_value());
+    EXPECT_TRUE(span_compare(*built, std::span<uint8_t const>(kat_ecc3_framed)));
+
+    std::array<uint8_t, 72> plaintext{};
+    auto const opened = eecf_ecc3_decrypt(sk, eecf_ecc3_header(kat_key_id, 72), kat_ecc3_framed, plaintext);
+    EXPECT_TRUE(opened.has_value());
+    EXPECT_TRUE(opened->encryption_timestamp == kat_timestamp);
+    EXPECT_TRUE(span_compare(opened->encapsulated_avtpdu, std::span<uint8_t const>(kat_avtpdu)));
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_header_is_authenticated)
+{
+    auto const sk = kat_ecc3_recipient();
+    std::array<uint8_t, 72> plaintext{};
+
+    statusbar::ieee::Eui64 const other_key_id{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x00, 0x43};
+    EXPECT_FALSE(eecf_ecc3_decrypt(sk, eecf_ecc3_header(other_key_id, 72), kat_ecc3_framed, plaintext).has_value());
+    auto relabelled = eecf_ecc3_header(kat_key_id, 72);
+    relabelled[1] = eecf_enc_ecc2;
+    EXPECT_FALSE(eecf_ecc3_decrypt(sk, relabelled, kat_ecc3_framed, plaintext).has_value());
+    EXPECT_FALSE(eecf_ecc3_decrypt(sk, eecf_ecc3_header(kat_key_id, 73), kat_ecc3_framed, plaintext).has_value());
+    EXPECT_TRUE(eecf_ecc3_decrypt(sk, eecf_ecc3_header(kat_key_id, 72), kat_ecc3_framed, plaintext).has_value());
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_decrypt_rejects_tampering_and_bad_shapes)
+{
+    auto const sk = kat_ecc3_recipient();
+    auto const aad = eecf_ecc3_header(kat_key_id, 64);
+    std::array<uint8_t, 16> recovered{};
+
+    auto tampered_enc = kat_ecc3_hello;
+    tampered_enc[10] ^= 0x01;
+    EXPECT_FALSE(eecf_ecc3_decrypt_payload(sk, aad, tampered_enc, recovered).has_value());
+    auto tampered_cipher = kat_ecc3_hello;
+    tampered_cipher[40] ^= 0x01;
+    EXPECT_FALSE(eecf_ecc3_decrypt_payload(sk, aad, tampered_cipher, recovered).has_value());
+    auto tampered_tag = kat_ecc3_hello;
+    tampered_tag[63] ^= 0x01;
+    EXPECT_FALSE(eecf_ecc3_decrypt_payload(sk, aad, tampered_tag, recovered).has_value());
+
+    // A small-order enc (all zero u) fails HPKE setup (RFC 9180 7.1.4), as 17.4.3 step 4 says.
+    auto small_order = kat_ecc3_hello;
+    std::fill(small_order.begin(), small_order.begin() + 32, 0);
+    EXPECT_FALSE(eecf_ecc3_decrypt_payload(sk, aad, small_order, recovered).has_value());
+
+    EXPECT_FALSE(eecf_ecc3_decrypt_payload(sk, aad, std::span<uint8_t const>(kat_ecc3_hello).first(47), recovered).has_value());
+    EXPECT_FALSE(eecf_ecc3_decrypt_payload(sk, aad, kat_ecc3_hello, std::span<uint8_t>(recovered).first(15)).has_value());
+    std::array<uint8_t, 55> too_short{};
+    std::array<uint8_t, 64> out{};
+    EXPECT_FALSE(eecf_ecc3_decrypt(sk, eecf_ecc3_header(kat_key_id, 55), too_short, out).has_value());
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_encrypt_rejects_small_buffer_and_oversize)
+{
+    auto const sk = kat_ecc3_recipient();
+    std::array<uint8_t, 63> too_small{};
+    EXPECT_FALSE(eecf_ecc3_encrypt_payload(sk.public_key, {}, as_bytes("Hello, HPKE ECC3"), too_small, kat_entropy).has_value());
+
+    // 1440 octets of plaintext fill the 1488-octet payload exactly; EncapMTU is 1432 for the AVTPDU.
+    std::array<uint8_t, 1440> big{};
+    std::array<uint8_t, 2048> out{};
+    EXPECT_TRUE(eecf_ecc3_encrypt_payload(sk.public_key, {}, big, out, kat_entropy).has_value());
+    EXPECT_FALSE(
+        eecf_ecc3_encrypt_payload(sk.public_key, {}, std::span<uint8_t const>(out).first(1441), out, kat_entropy).has_value());
+    std::array<uint8_t, 1432> avtpdu{};
+    EXPECT_TRUE(eecf_ecc3_encrypt(sk.public_key, kat_key_id, kat_timestamp, avtpdu, out, kat_entropy).has_value());
+    EXPECT_FALSE(
+        eecf_ecc3_encrypt(sk.public_key, kat_key_id, kat_timestamp, std::span<uint8_t const>(out).first(1433), out, kat_entropy)
+            .has_value());
+}
+
+TEST(avtp_aem_frame, eecf_ecc3_full_frame_roundtrip)
+{
+    auto const sk = kat_ecc3_recipient();
+
+    std::array<uint8_t, 256> payload{};
+    auto const encrypted = eecf_ecc3_encrypt(sk.public_key, kat_key_id, kat_timestamp, kat_avtpdu, payload, kat_entropy);
+    EXPECT_TRUE(encrypted.has_value());
+
+    std::array<uint8_t, 512> frame{};
+    auto const built = build_eecf_frame(frame, test_controller_mac, test_talker_mac, eecf_enc_ecc3, kat_key_id, *encrypted);
+    EXPECT_TRUE(built.has_value());
+    EXPECT_TRUE(built->size() == eecf_payload_offset + 72);
+
+    auto const parsed = parse_eecf_frame(*built);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->enc == eecf_enc_ecc3);
+    EXPECT_TRUE(span_compare(parsed->header, std::span<uint8_t const>(eecf_ecc3_header(kat_key_id, 72))));
+    EXPECT_TRUE(span_compare(parsed->encrypted_payload, std::span<uint8_t const>(kat_ecc3_framed)));
+
+    std::array<uint8_t, 256> plaintext{};
+    auto const opened = eecf_ecc3_decrypt(sk, parsed->header.first<eecf_header_size>(), parsed->encrypted_payload, plaintext);
     EXPECT_TRUE(opened.has_value());
     EXPECT_TRUE(opened->encryption_timestamp == kat_timestamp);
     EXPECT_TRUE(span_compare(opened->encapsulated_avtpdu, std::span<uint8_t const>(kat_avtpdu)));

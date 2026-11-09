@@ -30,7 +30,10 @@
 #include "statusbar/avtp/avtp_tscf.hpp"
 #include "statusbar/avtp/avtp_tscf_v1.hpp"
 #include "statusbar/avtp_crypto/avtp_aem_frame.hpp"
+#include "statusbar/avtp_crypto/avtp_escf_frame.hpp"
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/crypto/25519/ed25519.hpp"
+#include "statusbar/crypto/hpke/hpke.hpp"
 #include "statusbar/crypto/p256/p256_ecdsa.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/ip/ip_ipv4.hpp"
@@ -583,19 +586,6 @@ auto aef_discrete() -> std::vector<uint8_t>
     return out;
 }
 
-auto escf() -> std::vector<uint8_t>
-{
-    EscfPdu pdu{};
-    pdu.init(0, KEY_ID);
-    pdu.set_control_data_length(12);
-    std::vector<uint8_t> out;
-    append(out, pdu);
-    std::array<uint8_t, 12> signed_payload{};
-    signed_payload[0] = 0x51;
-    append(out, std::span<uint8_t const>(signed_payload));
-    return out;
-}
-
 // The ECC1 known answer of avtp_aem_frame_test (IEEE 1722-2025 17.3.2):
 // recipient d = SHA-256(ECC1_SEED) mod n, ephemeral key from ECC1_ENTROPY, the
 // 17.3.3 plaintext encryption_timestamp || a 16-octet encapsulated AVTPDU.
@@ -657,7 +647,7 @@ auto eecf() -> std::vector<uint8_t>
     return out;
 }
 
-/// The ECC2 known answer (RFC 9180 HPKE base mode; docs/EECF_ECC2_PROPOSAL.md) for the
+/// The ECC2 known answer (RFC 9180 HPKE over P-256; docs/IEEE_1722_CRYPTO_AMENDMENT.md) for the
 /// same recipient, ikm_e, timestamp and AVTPDU as the ECC1 frame: enc || C || T, 105
 /// octets, bound to the EECF header for KEY_ID as HPKE aad.
 auto ecc2_payload() -> std::vector<uint8_t>
@@ -676,6 +666,52 @@ auto eecf_ecc2() -> std::vector<uint8_t>
     append(out, eecf_header(EecfEncMode::ecc2, payload.size()));
     append(out, std::span<uint8_t const>(payload));
     return out;
+}
+
+/// The ECC3 known answer (RFC 9180 HPKE over X25519; amendment 17.4): recipient key =
+/// DeriveKeyPair(ECC1_SEED) for DHKEM(X25519), ikm_e, timestamp and AVTPDU as the ECC2
+/// frame: enc || C || T, 72 octets, bound to the EECF header for KEY_ID as HPKE aad.
+auto ecc3_payload() -> std::vector<uint8_t>
+{
+    namespace ca = statusbar::crypto::avtp;
+    std::array<uint8_t, ca::eecf_ecc3_encrypted_size(sizeof(ECC1_TIMESTAMP) + ECC1_AVTPDU.size())> out{};
+    auto const recipient = statusbar::crypto::hpke_x25519_derive_key_pair(ECC1_SEED).value();
+    auto const built = ca::eecf_ecc3_encrypt(recipient.public_key, KEY_ID, ECC1_TIMESTAMP, ECC1_AVTPDU, out, ECC1_ENTROPY).value();
+    return {built.begin(), built.end()};
+}
+
+auto eecf_ecc3() -> std::vector<uint8_t>
+{
+    auto const payload = ecc3_payload();
+    std::vector<uint8_t> out;
+    append(out, eecf_header(EecfEncMode::ecc3, payload.size()));
+    append(out, std::span<uint8_t const>(payload));
+    return out;
+}
+
+/// The ESCF known answers of avtp_escf_frame_test (IEEE 1722-2025 Clause 16 as the
+/// November 2026 amendment reads it): signing_timestamp ECC1_TIMESTAMP, the 16-octet
+/// AVTPDU ECC1_AVTPDU, key_id KEY_ID; one frame signed with ECSSA_DSA_EMSA1_SHA256 by the
+/// P-256 key d = SHA-256(ECC1_SEED) mod n, one with ED25519 by the Ed25519 key of seed
+/// ECC1_SEED. The AVTPDU after the Ethernet header is what goes in the capture.
+template <class Key>
+auto escf_signed(Key const& key) -> std::vector<uint8_t>
+{
+    namespace ca = statusbar::crypto::avtp;
+    std::array<uint8_t, ca::escf_payload_offset + ECC1_AVTPDU.size()> frame{};
+    auto const built = ca::build_signed_escf_frame(frame, DA, SA, key, KEY_ID, ECC1_TIMESTAMP, ECC1_AVTPDU).value();
+    auto const avtpdu = built.subspan(ca::ethernet_header_size);
+    return {avtpdu.begin(), avtpdu.end()};
+}
+
+auto escf_ecssa() -> std::vector<uint8_t>
+{
+    return escf_signed(statusbar::crypto::p256_ecdsa_keypair_from_seed(ECC1_SEED));
+}
+
+auto escf_ed25519() -> std::vector<uint8_t>
+{
+    return escf_signed(statusbar::crypto::ed25519_keypair_from_seed(ECC1_SEED));
 }
 
 /// A TSCF version-0 AVTPDU carrying @p acf
@@ -796,9 +832,11 @@ int main(int argc, char** argv)
     ethernet(ntscf_v1());
     ethernet(aef_continuous());
     ethernet(aef_discrete());
-    ethernet(escf());
+    ethernet(escf_ecssa());
+    ethernet(escf_ed25519());
     ethernet(eecf());
     ethernet(eecf_ecc2());
+    ethernet(eecf_ecc3());
     ethernet(aaf_v0_int24());
     ethernet(aaf_v0_float32());
     ethernet(aaf_v0_partial_frame());

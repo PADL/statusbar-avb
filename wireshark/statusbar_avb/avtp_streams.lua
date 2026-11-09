@@ -401,6 +401,8 @@ local ECC1_T_OCTETS = 32 -- HMAC-SHA-256 tag
 local ECC1_BLOCK_OCTETS = 16 -- AES-256-CBC block
 local ECC2_ENC_OCTETS = 65 -- SEC1 uncompressed P-256 point (HPKE enc)
 local ECC2_T_OCTETS = 16 -- AES-256-GCM tag
+local ECC3_ENC_OCTETS = 32 -- X25519 public key (HPKE enc)
+local ECC3_T_OCTETS = 16 -- AES-256-GCM tag
 
 --- EECF ECC1 (IEEE 1722-2025 17.3.2): V (the ephemeral public key, EC2OSP-X),
 --- T (the HMAC-SHA-256 tag) and C (the AES-256-CBC ciphertext of
@@ -418,19 +420,20 @@ local function eecf_ecc1(tree, tvb, start, declared)
     return start + declared
 end
 
---- EECF ECC2 (RFC 9180 HPKE base mode, statusbar proposal for enc = 1): enc
---- (the HPKE encapsulated key, a SEC1 uncompressed P-256 point), C (the
---- AES-256-GCM ciphertext of the 17.3.3 plaintext) and T (the tag, over C with
---- the EECF header as aad), in that order.
-local function eecf_ecc2(tree, tvb, start, declared)
-    local c_len = declared - ECC2_ENC_OCTETS - ECC2_T_OCTETS
+--- EECF ECC2 and ECC3 (RFC 9180 HPKE base mode, the IEEE 1722 security amendment's
+--- enc = 1 and enc = 2): enc (the HPKE encapsulated key: a SEC1 uncompressed P-256
+--- point for ECC2, an X25519 public key for ECC3), C (the AES-256-GCM ciphertext
+--- of the 17.3.3 plaintext) and T (the tag, over C with the EECF header as aad),
+--- in that order.
+local function eecf_hpke(tree, tvb, start, declared, enc_octets, t_octets, f_enc, f_c, f_t)
+    local c_len = declared - enc_octets - t_octets
     if c_len < 0 then
         return start
     end
-    local c_at = start + ECC2_ENC_OCTETS
-    tree:add(gen.f.avtp_eecf_ecc2_enc, tvb(start, ECC2_ENC_OCTETS))
-    tree:add(gen.f.avtp_eecf_ecc2_c, tvb(c_at, c_len))
-    tree:add(gen.f.avtp_eecf_ecc2_t, tvb(c_at + c_len, ECC2_T_OCTETS))
+    local c_at = start + enc_octets
+    tree:add(f_enc, tvb(start, enc_octets))
+    tree:add(f_c, tvb(c_at, c_len))
+    tree:add(f_t, tvb(c_at + c_len, t_octets))
     return start + declared
 end
 
@@ -439,15 +442,31 @@ end
 --- enc value stays undissected payload.
 function M.post.eecf_payload(tree, tvb, start)
     local enc = tvb(1, 1):bitfield(4, 4)
-    local declared = tvb(2, 2):bitfield(5, 11)
+    local declared = tvb(2, 2):uint()
     if declared > tvb:len() - start then
         return start
     elseif enc == 0 then
         return eecf_ecc1(tree, tvb, start, declared)
     elseif enc == 1 then
-        return eecf_ecc2(tree, tvb, start, declared)
+        return eecf_hpke(tree, tvb, start, declared, ECC2_ENC_OCTETS, ECC2_T_OCTETS,
+            gen.f.avtp_eecf_ecc2_enc, gen.f.avtp_eecf_ecc2_c, gen.f.avtp_eecf_ecc2_t)
+    elseif enc == 2 then
+        return eecf_hpke(tree, tvb, start, declared, ECC3_ENC_OCTETS, ECC3_T_OCTETS,
+            gen.f.avtp_eecf_ecc3_enc, gen.f.avtp_eecf_ecc3_c, gen.f.avtp_eecf_ecc3_t)
     end
     return start
+end
+
+--- ESCF (IEEE 1722-2025 16.2.6): the encapsulated AVTPDU after the 84-octet
+--- header, bounded by encapsulated_avtpdu_length. A declared length that
+--- overruns the frame stays undissected payload.
+function M.post.escf_encapsulated(tree, tvb, start)
+    local declared = tvb(2, 2):uint()
+    if declared > tvb:len() - start then
+        return start
+    end
+    tree:add(gen.f.avtp_escf_encapsulated_avtpdu, tvb(start, declared))
+    return start + declared
 end
 
 -- Info-column summaries: spec name -> function(tvb) returning text.

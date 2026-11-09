@@ -90,10 +90,19 @@ EECF_SUBTYPE = 0xED
 EECF_HEADER_SIZE = 12  # subtype_data(4) + key_id(8)
 EECF_PAYLOAD_OFFSET = ETHERNET_HEADER_SIZE + EECF_HEADER_SIZE  # 26
 EECF_ENC_ECC1 = 0
-EECF_ENC_ECC2 = (
-    1  # RFC 9180 HPKE base mode (statusbar proposal, avb/docs/EECF_ECC2_PROPOSAL.md)
-)
+EECF_ENC_ECC2 = 1  # RFC 9180 HPKE over P-256 (IEEE 1722 security amendment, 17.4)
+EECF_ENC_ECC3 = 2  # RFC 9180 HPKE over X25519 (IEEE 1722 security amendment, 17.4)
 EECF_TIMESTAMP_SIZE = 8
+
+# ESCF subtype (IEEE 1722-2025 Clause 16, as the amendment reads it)
+ESCF_SUBTYPE = 0xEC
+ESCF_HEADER_SIZE = 84  # through signature_value (Figure 109)
+ESCF_PAYLOAD_OFFSET = ETHERNET_HEADER_SIZE + ESCF_HEADER_SIZE  # 98
+ESCF_SIG_ECSSA = 0  # ECSSA_DSA_EMSA1_SHA256
+ESCF_SIG_ED25519 = 1  # ED25519 (amendment 16.4)
+ESCF_SIGNATURE_SIZE = 64
+ESCF_MAX_ENCAPSULATED_AVTPDU = 1416  # 16.2.6
+ESCF_TIMESTAMP_WINDOW_NS = 100_000_000  # 16.2.5 as amended (A3)
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +461,7 @@ class ParsedEecfFrame:
     enc: int
     encrypted_payload_length: int
     key_id: bytes
-    header: bytes  # the 12-octet EECF header as received (the ECC2 HPKE aad)
+    header: bytes  # the 12-octet EECF header as received (the ECC2 / ECC3 HPKE aad)
     encrypted_payload: bytes
 
 
@@ -465,10 +474,10 @@ def build_eecf_frame(
 ) -> bytes:
     """Build a complete Ethernet + EECF frame.
 
-    Wire layout (after 14-byte Ethernet header):
+    Wire layout (after 14-byte Ethernet header, Figure 110):
       Byte 0:     subtype (0xED)
       Byte 1:     r(1)|version(3)|enc(4)
-      Bytes 2-3:  reserved(5)|encrypted_payload_length(11)
+      Bytes 2-3:  encrypted_payload_length (16 bits)
       Bytes 4-11: key_id (8 bytes, EUI-64)
       Bytes 12+:  encrypted_payload
     """
@@ -477,10 +486,8 @@ def build_eecf_frame(
 
     byte0 = EECF_SUBTYPE
     byte1 = enc & 0x0F  # r=0, version=0, enc
-    byte2 = (epl >> 8) & 0x07  # reserved=0, epl[10:8]
-    byte3 = epl & 0xFF
 
-    hdr = struct.pack("BBBB", byte0, byte1, byte2, byte3) + key_id
+    hdr = struct.pack("!BBH", byte0, byte1, epl) + key_id
 
     return eth + hdr + encrypted_payload
 
@@ -506,7 +513,7 @@ def parse_eecf_frame(frame: bytes) -> ParsedEecfFrame:
         )
 
     enc = frame[15] & 0x0F
-    epl = ((frame[16] & 0x07) << 8) | frame[17]
+    (epl,) = struct.unpack_from("!H", frame, 16)
     key_id = frame[18:26]
     encrypted_payload = frame[EECF_PAYLOAD_OFFSET:]
 
@@ -598,10 +605,10 @@ def eecf_decrypt(
     return timestamp, avtpdu
 
 
-# ECC2 encrypted_payload (statusbar proposal, avb/docs/EECF_ECC2_PROPOSAL.md): RFC 9180
-# HPKE base mode with DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, laid out
-# as enc (65) || C || T (16). The HPKE info is a fixed string; the HPKE aad is the
-# frame's 12-octet EECF header, so enc, encrypted_payload_length and key_id are
+# ECC2 encrypted_payload (IEEE 1722 security amendment 17.4, avb/docs/IEEE_1722_CRYPTO_AMENDMENT.md):
+# RFC 9180 HPKE base mode with DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM,
+# laid out as enc (65) || C || T (16). The HPKE info is a fixed string; the HPKE aad is
+# the frame's 12-octet EECF header, so enc, encrypted_payload_length and key_id are
 # authenticated with the payload.
 ECC2_ENC_SIZE = 65
 ECC2_TAG_SIZE = 16
@@ -681,6 +688,234 @@ def eecf_ecc2_decrypt(
         raise ValueError("EECF decrypted payload too short for timestamp")
     (timestamp,) = struct.unpack("!Q", plaintext[:EECF_TIMESTAMP_SIZE])
     return timestamp, plaintext[EECF_TIMESTAMP_SIZE:]
+
+
+# ECC3 encrypted_payload (amendment 17.4): ECC2 with DHKEM(X25519, HKDF-SHA256);
+# enc is the 32-octet X25519 public key. A framed payload must be at least Npk + 24
+# (17.4.3 step 2).
+ECC3_ENC_SIZE = 32
+ECC3_TAG_SIZE = 16
+ECC3_OVERHEAD = ECC3_ENC_SIZE + ECC3_TAG_SIZE  # 48
+ECC3_INFO = b"IEEE 1722 EECF ECC3"
+ECC3_MIN_FRAMED_SIZE = ECC3_OVERHEAD + EECF_TIMESTAMP_SIZE  # 56
+ECC2_MIN_FRAMED_SIZE = ECC2_OVERHEAD + EECF_TIMESTAMP_SIZE  # 89
+
+
+def eecf_ecc3_header(key_id: bytes, encrypted_payload_size: int) -> bytes:
+    """The EECF header an ECC3 payload is bound to: what build_eecf_frame writes for enc = ECC3."""
+    return build_eecf_frame(
+        bytes(6), bytes(6), EECF_ENC_ECC3, key_id, bytes(encrypted_payload_size)
+    )[ETHERNET_HEADER_SIZE:EECF_PAYLOAD_OFFSET]
+
+
+def eecf_ecc3_encrypt_payload(
+    recipient_pk: sc.X25519PublicKey, aad: bytes, plaintext: bytes, ikm_e: bytes
+) -> bytes:
+    """ECC3 encrypted_payload (enc || C || T) for an arbitrary plaintext and aad."""
+    enc, ctx = sc.hpke_setup_base_s(
+        sc.hpke_aead_aes256_gcm, recipient_pk, ECC3_INFO, ikm_e
+    )
+    tag, ct = sc.hpke_seal(ctx, aad, plaintext)
+    return enc + ct + tag
+
+
+def eecf_ecc3_decrypt_payload(
+    recipient_sk: sc.X25519PrivateKey, aad: bytes, encrypted_payload: bytes
+) -> bytes:
+    """Plaintext of an ECC3 encrypted_payload; ValueError on a bad shape, enc or tag."""
+    if len(encrypted_payload) < ECC3_OVERHEAD:
+        raise ValueError(
+            f"not an ECC3 encrypted_payload: {len(encrypted_payload)} octets"
+        )
+    ctx = sc.hpke_setup_base_r(
+        sc.hpke_aead_aes256_gcm,
+        encrypted_payload[:ECC3_ENC_SIZE],
+        recipient_sk,
+        ECC3_INFO,
+    )
+    ok, plaintext = sc.hpke_open(
+        ctx,
+        aad,
+        encrypted_payload[ECC3_ENC_SIZE:-ECC3_TAG_SIZE],
+        encrypted_payload[-ECC3_TAG_SIZE:],
+    )
+    if not ok:
+        raise ValueError("ECC3 tag verification failed")
+    return plaintext
+
+
+def eecf_ecc3_encrypt(
+    inner_avtpdu: bytes,
+    recipient_pk: sc.X25519PublicKey,
+    key_id: bytes,
+    timestamp: int,
+    ikm_e: bytes,
+) -> bytes:
+    """Encrypt an inner AVTPDU for EECF ECC3 encapsulation under key_id. Returns enc || C || T."""
+    plaintext = struct.pack("!Q", timestamp) + inner_avtpdu
+    aad = eecf_ecc3_header(key_id, len(plaintext) + ECC3_OVERHEAD)
+    return eecf_ecc3_encrypt_payload(recipient_pk, aad, plaintext, ikm_e)
+
+
+def eecf_ecc3_decrypt(
+    encrypted_payload: bytes, header: bytes, recipient_sk: sc.X25519PrivateKey
+) -> tuple[int, bytes]:
+    """Decrypt an ECC3 encrypted_payload received under the 12-octet EECF header.
+
+    Returns (encryption_timestamp, encapsulated_avtpdu); ValueError below Npk + 24.
+    """
+    if len(encrypted_payload) < ECC3_MIN_FRAMED_SIZE:
+        raise ValueError("ECC3 encrypted_payload shorter than Npk + 24 (17.4.3 step 2)")
+    plaintext = eecf_ecc3_decrypt_payload(recipient_sk, header, encrypted_payload)
+    (timestamp,) = struct.unpack("!Q", plaintext[:EECF_TIMESTAMP_SIZE])
+    return timestamp, plaintext[EECF_TIMESTAMP_SIZE:]
+
+
+# ---------------------------------------------------------------------------
+# ESCF frame builder/parser and signatures (IEEE 1722-2025 Clause 16, amended)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ParsedEscfFrame:
+    """Parsed fields from a complete Ethernet + ESCF frame."""
+
+    dest_mac: bytes
+    src_mac: bytes
+    ethertype: int
+    subtype: int
+    sig: int
+    encapsulated_avtpdu_length: int
+    key_id: bytes
+    signing_timestamp: int
+    signature_value: bytes
+    encapsulated_avtpdu: bytes  # bounded by encapsulated_avtpdu_length
+
+
+def escf_signed_message(key_id: bytes, signing_timestamp: int, avtpdu: bytes) -> bytes:
+    """key_id || signing_timestamp || encapsulated_avtpdu (16.3.1, 16.4.1)."""
+    if len(avtpdu) > ESCF_MAX_ENCAPSULATED_AVTPDU:
+        raise ValueError(f"encapsulated_avtpdu over 16.2.6's limit: {len(avtpdu)}")
+    return key_id + struct.pack("!Q", signing_timestamp) + avtpdu
+
+
+def escf_ecssa_sign(
+    sk: sc.P256PrivateKey, key_id: bytes, signing_timestamp: int, avtpdu: bytes
+) -> bytes:
+    """ECSSA_DSA_EMSA1_SHA256 (16.3.2): P-256 ECDSA over SHA-256; signature_value = c || d."""
+    return sc.p256_ecdsa_sign(
+        sk, escf_signed_message(key_id, signing_timestamp, avtpdu)
+    ).data
+
+
+def escf_ecssa_verify(
+    pk: sc.P256PublicKey,
+    key_id: bytes,
+    signing_timestamp: int,
+    avtpdu: bytes,
+    signature_value: bytes,
+) -> bool:
+    """ECSSA_DSA_EMSA1_SHA256 (16.3.3)."""
+    return sc.p256_ecdsa_verify(
+        pk,
+        escf_signed_message(key_id, signing_timestamp, avtpdu),
+        sc.P256EcdsaSignature(data=signature_value),
+    )
+
+
+def escf_ed25519_sign(
+    sk: sc.Ed25519PrivateKey, key_id: bytes, signing_timestamp: int, avtpdu: bytes
+) -> bytes:
+    """ED25519 (amendment 16.4.2): RFC 8032 5.1.6; signature_value = R || S."""
+    return sc.ed25519_sign(
+        sk, escf_signed_message(key_id, signing_timestamp, avtpdu)
+    ).data
+
+
+def escf_ed25519_verify(
+    pk: sc.Ed25519PublicKey,
+    key_id: bytes,
+    signing_timestamp: int,
+    avtpdu: bytes,
+    signature_value: bytes,
+) -> bool:
+    """ED25519 (amendment 16.4.3): RFC 8032 5.1.7."""
+    return sc.ed25519_verify(
+        pk,
+        escf_signed_message(key_id, signing_timestamp, avtpdu),
+        sc.Ed25519Signature(data=signature_value),
+    )
+
+
+def escf_signing_timestamp_is_acceptable(
+    signing_timestamp: int, now_ptp_ns: int
+) -> bool:
+    """16.2.5 as amended (A3): not later than now, and not more than 100 ms earlier."""
+    return (
+        signing_timestamp <= now_ptp_ns
+        and now_ptp_ns - signing_timestamp <= ESCF_TIMESTAMP_WINDOW_NS
+    )
+
+
+def build_escf_frame(
+    dest_mac: bytes,
+    src_mac: bytes,
+    sig: int,
+    key_id: bytes,
+    signing_timestamp: int,
+    signature_value: bytes,
+    encapsulated_avtpdu: bytes,
+) -> bytes:
+    """Build a complete Ethernet + ESCF frame (Figure 109).
+
+    Wire layout (after 14-byte Ethernet header):
+      Byte 0:      subtype (0xEC)
+      Byte 1:      r(1)|version(3)|sig(4)
+      Bytes 2-3:   encapsulated_avtpdu_length (16 bits)
+      Bytes 4-11:  key_id (EUI-64)
+      Bytes 12-19: signing_timestamp
+      Bytes 20-83: signature_value
+      Bytes 84+:   encapsulated_avtpdu
+    """
+    if len(signature_value) != ESCF_SIGNATURE_SIZE:
+        raise ValueError("signature_value must be 64 octets")
+    if len(encapsulated_avtpdu) > ESCF_MAX_ENCAPSULATED_AVTPDU:
+        raise ValueError("encapsulated_avtpdu over 16.2.6's limit")
+    eth = dest_mac + src_mac + struct.pack("!H", AVTP_ETHERTYPE)
+    hdr = (
+        struct.pack("!BBH", ESCF_SUBTYPE, sig & 0x0F, len(encapsulated_avtpdu))
+        + key_id
+        + struct.pack("!Q", signing_timestamp)
+        + signature_value
+    )
+    return eth + hdr + encapsulated_avtpdu
+
+
+def parse_escf_frame(frame: bytes) -> ParsedEscfFrame:
+    """Parse a raw Ethernet frame as an ESCF frame; ValueError when malformed."""
+    if len(frame) < ESCF_PAYLOAD_OFFSET:
+        raise ValueError(f"ESCF frame too short: {len(frame)} < {ESCF_PAYLOAD_OFFSET}")
+    (ethertype,) = struct.unpack_from("!H", frame, 12)
+    if ethertype != AVTP_ETHERTYPE:
+        raise ValueError(f"Wrong ethertype: 0x{ethertype:04x}")
+    if frame[14] != ESCF_SUBTYPE or (frame[15] & 0x70) != 0:
+        raise ValueError("Not a version-0 ESCF AVTPDU")
+    (length,) = struct.unpack_from("!H", frame, 16)
+    if ESCF_PAYLOAD_OFFSET + length > len(frame):
+        raise ValueError("encapsulated_avtpdu_length past the end of the frame")
+    (signing_timestamp,) = struct.unpack_from("!Q", frame, 26)
+    return ParsedEscfFrame(
+        dest_mac=frame[0:6],
+        src_mac=frame[6:12],
+        ethertype=ethertype,
+        subtype=frame[14],
+        sig=frame[15] & 0x0F,
+        encapsulated_avtpdu_length=length,
+        key_id=frame[18:26],
+        signing_timestamp=signing_timestamp,
+        signature_value=frame[34:98],
+        encapsulated_avtpdu=frame[ESCF_PAYLOAD_OFFSET : ESCF_PAYLOAD_OFFSET + length],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1434,6 +1669,223 @@ class TestFrameBuildParse(unittest.TestCase):
         with self.assertRaises(ValueError):
             eecf_ecc2_decrypt_payload(kp, good, self.ECC2_KAT_FRAMED[:80])
 
+    # ECC3 known answers (amendment test-vector slide and the Python HPKE reference):
+    # recipient key = DeriveKeyPair(ECC1_KAT_SEED) for DHKEM(X25519), same ikm_e,
+    # key_id, timestamp and AVTPDU as ECC2.
+    ECC3_KAT_RECIPIENT_PK = bytes.fromhex(
+        "49e4874e25fe389ed3c9fa2fd09d077907ecc5809c8619e2127128b6a72c7c7a"
+    )
+    ECC3_KAT_HELLO = bytes.fromhex(
+        "8a7d2773c3dcc1cbfa275f67915a8b3f7b28b6e2c9b47346fbfd232cdf38fc22"
+        "c1010cd61eef7d3d7ed771c70b4cb90bb51f77e0d23ee646ec9e33e1b23d2c56"
+    )
+    ECC3_KAT_FRAMED = bytes.fromhex(
+        "8a7d2773c3dcc1cbfa275f67915a8b3f7b28b6e2c9b47346fbfd232cdf38fc22"
+        "884725ddf868909a3e8d26f45a1aec2fb0540ebcd1eb7df3"
+        "0eb95b3b510a5abe6c6be677da632843"
+    )
+
+    def test_eecf_ecc3_payload_known_answer(self):
+        """ECC3 payload for 'Hello, HPKE ECC3' under its header as aad."""
+        kp = sc.hpke_x25519_derive_key_pair(self.ECC1_KAT_SEED)
+        self.assertEqual(kp.public_key.data, self.ECC3_KAT_RECIPIENT_PK)
+        aad = eecf_ecc3_header(self.ECC2_KAT_KEY_ID, len(self.ECC3_KAT_HELLO))
+        self.assertEqual(aad, bytes.fromhex("ed02004070b3d5edc4000042"))
+        payload = eecf_ecc3_encrypt_payload(
+            kp.public_key, aad, b"Hello, HPKE ECC3", self.ECC1_KAT_ENTROPY
+        )
+        self.assertEqual(payload, self.ECC3_KAT_HELLO)
+        self.assertEqual(
+            eecf_ecc3_decrypt_payload(kp, aad, self.ECC3_KAT_HELLO), b"Hello, HPKE ECC3"
+        )
+
+    def test_eecf_ecc3_framed_known_answer(self):
+        """The amendment's ECC3 test vector, through a built and parsed frame."""
+        kp = sc.hpke_x25519_derive_key_pair(self.ECC1_KAT_SEED)
+        payload = eecf_ecc3_encrypt(
+            bytes(range(0x10, 0x20)),
+            kp.public_key,
+            self.ECC2_KAT_KEY_ID,
+            0x0123456789ABCDEF,
+            self.ECC1_KAT_ENTROPY,
+        )
+        self.assertEqual(payload, self.ECC3_KAT_FRAMED)
+        frame = build_eecf_frame(
+            bytes(6), bytes(6), EECF_ENC_ECC3, self.ECC2_KAT_KEY_ID, payload
+        )
+        self.assertEqual(frame[14:26], bytes.fromhex("ed02004870b3d5edc4000042"))
+        parsed = parse_eecf_frame(frame)
+        self.assertEqual(parsed.enc, EECF_ENC_ECC3)
+        ts, dec = eecf_ecc3_decrypt(parsed.encrypted_payload, parsed.header, kp)
+        self.assertEqual((ts, dec), (0x0123456789ABCDEF, bytes(range(0x10, 0x20))))
+
+    def test_eecf_ecc3_header_is_authenticated_and_short_payloads_rejected(self):
+        """A header with another key_id, enc or length does not open the payload."""
+        kp = sc.hpke_x25519_derive_key_pair(self.ECC1_KAT_SEED)
+        good = eecf_ecc3_header(self.ECC2_KAT_KEY_ID, len(self.ECC3_KAT_FRAMED))
+        other_key = eecf_ecc3_header(
+            bytes.fromhex("70b3d5edc4000043"), len(self.ECC3_KAT_FRAMED)
+        )
+        relabelled = bytes([good[0], EECF_ENC_ECC2]) + good[2:]
+        for bad in (other_key, relabelled, good[:-1] + bytes([good[-1] ^ 1])):
+            with self.assertRaises(ValueError):
+                eecf_ecc3_decrypt(self.ECC3_KAT_FRAMED, bad, kp)
+        with self.assertRaises(ValueError):
+            eecf_ecc3_decrypt(bytes(55), eecf_ecc3_header(self.ECC2_KAT_KEY_ID, 55), kp)
+        with self.assertRaises(ValueError):
+            eecf_ecc2_decrypt(
+                bytes(88),
+                eecf_ecc2_header(self.ECC2_KAT_KEY_ID, 88),
+                sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED),
+            )
+        with self.assertRaises(ValueError):  # small-order enc (all-zero u)
+            eecf_ecc3_decrypt_payload(kp, good, bytes(32) + self.ECC3_KAT_FRAMED[32:])
+
+    def test_eecf_length_field_is_sixteen_bits(self):
+        """Figure 110: encrypted_payload_length is the whole of octets 2 and 3."""
+        frame = build_eecf_frame(
+            bytes(6), bytes(6), EECF_ENC_ECC1, bytes(8), bytes(0x1234)
+        )
+        self.assertEqual(frame[16:18], bytes.fromhex("1234"))
+        self.assertEqual(parse_eecf_frame(frame).encrypted_payload_length, 0x1234)
+
+    # ESCF: the ED25519 known answer from an independent RFC 8032 implementation (the
+    # cryptography package) for seed ECC1_KAT_SEED over
+    # key_id 70-B3-D5-ED-C4-00-00-42 || 0x0123456789ABCDEF || 0x10 .. 0x1F.
+    ESCF_KAT_MESSAGE = bytes.fromhex(
+        "70b3d5edc40000420123456789abcdef101112131415161718191a1b1c1d1e1f"
+    )
+    ESCF_KAT_ED25519_PK = bytes.fromhex(
+        "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+    )
+    ESCF_KAT_ED25519_SIG = bytes.fromhex(
+        "60a4f03c792333de185d84b8f98b8b84e020e2348c7cceaaa61f1ea4ac3b4d34"
+        "375624c2a4b7c674e0a2cc4a52c6966bed1e34b772ac5a845f91cf883529450f"
+    )
+    # ECSSA_DSA_EMSA1_SHA256 by the C++ stack (RFC 6979 nonce) for d = SHA-256(seed) mod n;
+    # test_escf_ecssa_known_answer verifies it with the cryptography package's ECDSA.
+    ESCF_KAT_ECSSA_SIG = bytes.fromhex(
+        "993ebbb74f57d10e01c554e0f70662d0a546d0aa667e83fb6962fee43b96a613"
+        "580e68bba17a988c1968394becbf2a7205ff9446a263ceccfc363b8d385b1c59"
+    )
+
+    def test_escf_ecssa_known_answer(self):
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        self.assertTrue(
+            escf_ecssa_verify(
+                kp.public_key,
+                self.ECC2_KAT_KEY_ID,
+                0x0123456789ABCDEF,
+                bytes(range(0x10, 0x20)),
+                self.ESCF_KAT_ECSSA_SIG,
+            )
+        )
+
+    def test_escf_signed_message_and_ed25519_known_answer(self):
+        avtpdu = bytes(range(0x10, 0x20))
+        self.assertEqual(
+            escf_signed_message(self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF, avtpdu),
+            self.ESCF_KAT_MESSAGE,
+        )
+        kp = sc.ed25519_keypair_from_seed(self.ECC1_KAT_SEED)
+        self.assertEqual(kp.public_key.data, self.ESCF_KAT_ED25519_PK)
+        sig = escf_ed25519_sign(kp, self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF, avtpdu)
+        self.assertEqual(sig, self.ESCF_KAT_ED25519_SIG)
+        self.assertTrue(
+            escf_ed25519_verify(
+                kp.public_key, self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF, avtpdu, sig
+            )
+        )
+        self.assertFalse(
+            escf_ed25519_verify(
+                kp.public_key, self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF + 1, avtpdu, sig
+            )
+        )
+        with self.assertRaises(ValueError):
+            escf_signed_message(self.ECC2_KAT_KEY_ID, 0, bytes(1417))
+
+    def test_escf_ecssa_sign_verify(self):
+        avtpdu = bytes(range(0x10, 0x20))
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        sig = escf_ecssa_sign(kp, self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF, avtpdu)
+        self.assertEqual(len(sig), 64)
+        self.assertTrue(
+            escf_ecssa_verify(
+                kp.public_key, self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF, avtpdu, sig
+            )
+        )
+        self.assertFalse(
+            escf_ecssa_verify(kp.public_key, bytes(8), 0x0123456789ABCDEF, avtpdu, sig)
+        )
+
+    def test_escf_frame_roundtrip_both_variants(self):
+        avtpdu = bytes(range(0x10, 0x20))
+        p256 = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        ed = sc.ed25519_keypair_from_seed(self.ECC1_KAT_SEED)
+        for sig_mode, sign, verify, kp in (
+            (ESCF_SIG_ECSSA, escf_ecssa_sign, escf_ecssa_verify, p256),
+            (ESCF_SIG_ED25519, escf_ed25519_sign, escf_ed25519_verify, ed),
+        ):
+            sig = sign(kp, self.ECC2_KAT_KEY_ID, 0x0123456789ABCDEF, avtpdu)
+            frame = build_escf_frame(
+                DEFAULT_CONFIG.talker_mac,
+                DEFAULT_CONFIG.controller_mac,
+                sig_mode,
+                self.ECC2_KAT_KEY_ID,
+                0x0123456789ABCDEF,
+                sig,
+                avtpdu,
+            )
+            self.assertEqual(len(frame), ESCF_PAYLOAD_OFFSET + 16)
+            self.assertEqual(frame[14:18], bytes([ESCF_SUBTYPE, sig_mode, 0, 16]))
+            parsed = parse_escf_frame(frame + bytes(20))  # padding is not the AVTPDU
+            self.assertEqual(
+                (parsed.sig, parsed.encapsulated_avtpdu_length, parsed.key_id),
+                (sig_mode, 16, self.ECC2_KAT_KEY_ID),
+            )
+            self.assertEqual(parsed.signing_timestamp, 0x0123456789ABCDEF)
+            self.assertEqual(
+                (parsed.signature_value, parsed.encapsulated_avtpdu), (sig, avtpdu)
+            )
+            self.assertTrue(
+                verify(
+                    kp.public_key,
+                    parsed.key_id,
+                    parsed.signing_timestamp,
+                    parsed.encapsulated_avtpdu,
+                    parsed.signature_value,
+                )
+            )
+            tampered = bytearray(frame)
+            tampered[ESCF_PAYLOAD_OFFSET] ^= 1
+            t = parse_escf_frame(bytes(tampered))
+            self.assertFalse(
+                verify(
+                    kp.public_key,
+                    t.key_id,
+                    t.signing_timestamp,
+                    t.encapsulated_avtpdu,
+                    t.signature_value,
+                )
+            )
+        with self.assertRaises(ValueError):
+            parse_escf_frame(frame[: ESCF_PAYLOAD_OFFSET - 1])
+        with self.assertRaises(ValueError):
+            parse_escf_frame(frame[:16] + bytes([0, 200]) + frame[18:])
+
+    def test_escf_timestamp_window(self):
+        now = 1_000_000_000_000
+        self.assertTrue(escf_signing_timestamp_is_acceptable(now, now))
+        self.assertTrue(
+            escf_signing_timestamp_is_acceptable(now - ESCF_TIMESTAMP_WINDOW_NS, now)
+        )
+        self.assertFalse(
+            escf_signing_timestamp_is_acceptable(
+                now - ESCF_TIMESTAMP_WINDOW_NS - 1, now
+            )
+        )
+        self.assertFalse(escf_signing_timestamp_is_acceptable(now + 1, now))
+
     def test_eecf_ecc1_rejects_bad_shapes(self):
         """A payload without a whole cipher block after V and T is not ECC1."""
         kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
@@ -1656,6 +2108,104 @@ class TestAvbKeyExchangeFrame(unittest.TestCase):
             python_payload.hex(),
         )
         self.assertEqual(out, "fail")
+
+    def test_eecf_ecc3_payload_matches_cpp_tool(self):
+        """The C++ eecf_ecc3_encrypt/decrypt agree with the Python enc || C || T."""
+        if self.cli_path is None:
+            self.skipTest("no avtp_crypto_tool")
+        from avb_key_exchange_test import run_cli  # noqa: PLC0415
+
+        seed = TestFrameBuildParse.ECC1_KAT_SEED
+        ikm_e = TestFrameBuildParse.ECC1_KAT_ENTROPY
+        kp = sc.hpke_x25519_derive_key_pair(seed)
+        sk_hex, pk_hex = run_cli(
+            self.cli_path, "hpke_x25519_keypair", seed.hex()
+        ).split()
+        self.assertEqual((sk_hex, pk_hex), (kp.data.hex(), kp.public_key.data.hex()))
+        plaintext = struct.pack("!Q", 0x0123456789ABCDEF) + bytes(range(0x10, 0x20))
+        aad = eecf_ecc3_header(
+            TestFrameBuildParse.ECC2_KAT_KEY_ID, len(plaintext) + ECC3_OVERHEAD
+        )
+        cpp_payload = bytes.fromhex(
+            run_cli(
+                self.cli_path,
+                "eecf_ecc3_encrypt",
+                kp.public_key.data.hex(),
+                ikm_e.hex(),
+                aad.hex(),
+                plaintext.hex(),
+            )
+        )
+        self.assertEqual(cpp_payload, TestFrameBuildParse.ECC3_KAT_FRAMED)
+        self.assertEqual(
+            cpp_payload, eecf_ecc3_encrypt_payload(kp.public_key, aad, plaintext, ikm_e)
+        )
+        out = run_cli(
+            self.cli_path, "eecf_ecc3_decrypt", seed.hex(), aad.hex(), cpp_payload.hex()
+        )
+        self.assertEqual(out, "ok " + plaintext.hex())
+
+    def test_escf_signatures_match_cpp_tool(self):
+        """The C++ escf_sign/escf_verify agree with the Python ESCF signatures."""
+        if self.cli_path is None:
+            self.skipTest("no avtp_crypto_tool")
+        from avb_key_exchange_test import run_cli  # noqa: PLC0415
+
+        seed = TestFrameBuildParse.ECC1_KAT_SEED
+        key_id = TestFrameBuildParse.ECC2_KAT_KEY_ID
+        ts = 0x0123456789ABCDEF
+        avtpdu = bytes(range(0x10, 0x20))
+        args = (key_id.hex(), struct.pack("!Q", ts).hex(), avtpdu.hex())
+
+        ed = sc.ed25519_keypair_from_seed(seed)
+        cpp_ed = bytes.fromhex(
+            run_cli(self.cli_path, "escf_sign", "01", seed.hex(), *args)
+        )
+        self.assertEqual(cpp_ed, TestFrameBuildParse.ESCF_KAT_ED25519_SIG)
+        self.assertEqual(
+            run_cli(
+                self.cli_path,
+                "escf_verify",
+                "01",
+                ed.public_key.data.hex(),
+                *args,
+                cpp_ed.hex(),
+            ),
+            "ok",
+        )
+
+        p256 = sc.p256_ecdsa_keypair_from_seed(seed)
+        cpp_ecssa = bytes.fromhex(
+            run_cli(self.cli_path, "escf_sign", "00", seed.hex(), *args)
+        )
+        self.assertEqual(cpp_ecssa, TestFrameBuildParse.ESCF_KAT_ECSSA_SIG)  # RFC 6979
+        self.assertTrue(
+            escf_ecssa_verify(p256.public_key, key_id, ts, avtpdu, cpp_ecssa)
+        )
+        py_ecssa = escf_ecssa_sign(p256, key_id, ts, avtpdu)
+        self.assertEqual(
+            run_cli(
+                self.cli_path,
+                "escf_verify",
+                "00",
+                p256.public_key.data.hex(),
+                *args,
+                py_ecssa.hex(),
+            ),
+            "ok",
+        )
+        bad = (py_ecssa[:-1] + bytes([py_ecssa[-1] ^ 1])).hex()
+        self.assertEqual(
+            run_cli(
+                self.cli_path,
+                "escf_verify",
+                "00",
+                p256.public_key.data.hex(),
+                *args,
+                bad,
+            ),
+            "fail",
+        )
 
     def test_full_key_distribution_via_frames(self):
         """Run complete AUTH flow using frames for all 3 targets.

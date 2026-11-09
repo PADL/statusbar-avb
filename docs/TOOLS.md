@@ -165,9 +165,12 @@ Invoked as `<command> [hex_args...]` (not flags). Commands include
 `x25519`, `p256_ecdsa_sign`/`p256_ecdh`, `ecies_encrypt` (the IEEE 1363a-2004
 triple as V||C||T), `eecf_ecc1_encrypt`/`eecf_ecc1_decrypt` (the IEEE
 1722-2025 17.3.2 EECF encrypted_payload, V||T||C) and
-`eecf_ecc2_encrypt`/`eecf_ecc2_decrypt` (the proposed HPKE-based ECC2
-encrypted_payload, enc||C||T, with the 12-octet EECF header as aad; see
-`EECF_ECC2_PROPOSAL.md`).
+`eecf_ecc2_encrypt`/`eecf_ecc2_decrypt` and `eecf_ecc3_encrypt`/
+`eecf_ecc3_decrypt` (the HPKE-based ECC2 and ECC3 encrypted_payloads of the
+IEEE 1722 security amendment, enc||C||T, with the 12-octet EECF header as
+aad), `hpke_x25519_keypair` (RFC 9180 DeriveKeyPair) and `escf_sign`/
+`escf_verify` (the ESCF signature_value for sig 00, ECSSA_DSA_EMSA1_SHA256,
+or 01, ED25519; see `IEEE_1722_CRYPTO_AMENDMENT.md`).
 
 ## Diagnostics
 

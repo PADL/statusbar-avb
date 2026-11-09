@@ -318,8 +318,10 @@ VALUE_TABLES: dict[str, ValueTable] = {
     ),
     # IEEE 1722-2025 Clause 13 (AEF), 16 (ESCF), 17 (EECF)
     "aef_enc": ValueTable("aef_enc", {0x00: "AES-SIV", 0x01: "AES-GCM-SIV"}),
-    "escf_sig": ValueTable("escf_sig", {0x00: "ECC1"}),
-    "eecf_enc": ValueTable("eecf_enc", {0x00: "ECC1", 0x01: "ECC2"}),
+    "escf_sig": ValueTable(
+        "escf_sig", {0x00: "ECSSA_DSA_EMSA1_SHA256", 0x01: "ED25519"}
+    ),
+    "eecf_enc": ValueTable("eecf_enc", {0x00: "ECC1", 0x01: "ECC2", 0x02: "ECC3"}),
 }
 
 HEADER_KIND: dict[int, str] = {code: kind for code, _, _, kind in AVTP_SUBTYPES}
@@ -1195,27 +1197,40 @@ AEF_DISCRETE = Layout(
 ESCF = Layout(
     "escf",
     "avb.avtp",
-    "ESCF header (IEEE 1722-2025 16.3)",
+    "ESCF header (IEEE 1722-2025 16.2, Figure 109; signature_value and ED25519 per the amendment)",
     _VERSION_ONLY
     + (
         Field(
             "escf.sig", 1, 1, "u8", "signature algorithm", mask=0x0F, values="escf_sig"
         ),
         Field(
-            "escf.control_data_length",
+            "escf.encapsulated_avtpdu_length",
             2,
             2,
             "u16",
-            "control_data_length (11 bits)",
-            mask=0x07FF,
+            "encapsulated_avtpdu_length (octets)",
         ),
         Field("escf.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
+        Field(
+            "escf.signing_timestamp",
+            12,
+            8,
+            "u64",
+            "signing_timestamp (PTP nanoseconds)",
+        ),
+        Field(
+            "escf.signature_value",
+            20,
+            64,
+            "bytes",
+            "signature_value: ECSSA c || d, or Ed25519 R || S",
+        ),
     ),
 )
 EECF = Layout(
     "eecf",
     "avb.avtp",
-    "EECF header (IEEE 1722-2025 17.3)",
+    "EECF header (IEEE 1722-2025 17.2, Figure 110)",
     _VERSION_ONLY
     + (
         Field(
@@ -1226,8 +1241,7 @@ EECF = Layout(
             2,
             2,
             "u16",
-            "encrypted_payload_length (11 bits)",
-            mask=0x07FF,
+            "encrypted_payload_length (octets)",
         ),
         Field("eecf.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
     ),
@@ -1267,17 +1281,18 @@ EECF_ECC1 = Layout(
         ),
     ),
 )
-# An ECC2 encrypted_payload (statusbar proposal for enc = 0x01, RFC 9180 HPKE base
-# mode with DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM) is enc || C || T:
-# the ephemeral public key (SEC1 uncompressed, 65 octets), the AES-256-GCM
-# ciphertext (the plaintext's length) and the 16-octet tag. The same post hook
-# adds the three items when enc is ECC2 and the declared length covers enc and T.
+# An ECC2 encrypted_payload (RFC 9180 HPKE over P-256, the IEEE 1722 security
+# amendment's enc = 1) is enc || C || T: the HPKE encapsulated key (SEC1
+# uncompressed P-256 point, 65 octets), the AES-256-GCM ciphertext of the 17.3.3
+# plaintext and the 16-octet tag; ECC3 (enc = 2) is the same over X25519 with a
+# 32-octet enc. The "eecf_payload" post hook adds the three items when the
+# declared length has the enc value's shape.
 ECC2_ENC_OCTETS = 65
 ECC2_T_OCTETS = 16
 EECF_ECC2 = Layout(
     "eecf_ecc2",
     "avb.avtp.eecf.ecc2",
-    "EECF ECC2 encrypted_payload (RFC 9180 HPKE, statusbar proposal)",
+    "EECF ECC2 encrypted_payload (RFC 9180 HPKE over P-256; IEEE 1722 security amendment 17.4)",
     (
         Field(
             "enc",
@@ -1299,6 +1314,52 @@ EECF_ECC2 = Layout(
             ECC2_T_OCTETS,
             "bytes",
             "T: AES-256-GCM tag over C with the EECF header as aad; the last 16 octets",
+        ),
+    ),
+)
+# ECC3 is ECC2 with DHKEM(X25519): enc is the 32-octet X25519 public key.
+ECC3_ENC_OCTETS = 32
+ECC3_T_OCTETS = 16
+EECF_ECC3 = Layout(
+    "eecf_ecc3",
+    "avb.avtp.eecf.ecc3",
+    "EECF ECC3 encrypted_payload (RFC 9180 HPKE over X25519; IEEE 1722 security amendment 17.4)",
+    (
+        Field(
+            "enc",
+            0,
+            ECC3_ENC_OCTETS,
+            "bytes",
+            "enc: HPKE encapsulated key, the X25519 public key (RFC 7748 u-coordinate)",
+        ),
+        Field(
+            "c",
+            ECC3_ENC_OCTETS,
+            0,
+            "bytes",
+            "C: AES-256-GCM ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)",
+        ),
+        Field(
+            "t",
+            ECC3_ENC_OCTETS,
+            ECC3_T_OCTETS,
+            "bytes",
+            "T: AES-256-GCM tag over C with the EECF header as aad; the last 16 octets",
+        ),
+    ),
+)
+# The ESCF encapsulated AVTPDU, bounded by encapsulated_avtpdu_length (post hook "escf_encapsulated").
+ESCF_PAYLOAD = Layout(
+    "escf_payload",
+    "avb.avtp.escf",
+    "ESCF encapsulated_avtpdu (IEEE 1722-2025 16.2.6)",
+    (
+        Field(
+            "encapsulated_avtpdu",
+            0,
+            0,
+            "bytes",
+            "encapsulated_avtpdu: the signed AVTPDU, from its subtype field",
         ),
     ),
 )
@@ -1333,7 +1394,7 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("maap", 0xFE, 0, (MAAP,), 28),
     SubtypeSpec("aef_continuous", 0x6E, 0, (AEF_CONTINUOUS,), 12),
     SubtypeSpec("aef_discrete", 0xEE, 0, (AEF_DISCRETE,), 12),
-    SubtypeSpec("escf", 0xEC, 0, (ESCF,), 12),
+    SubtypeSpec("escf", 0xEC, 0, (ESCF,), 84, post="escf_encapsulated"),
     SubtypeSpec("eecf", 0xED, 0, (EECF,), 12, post="eecf_payload"),
 )
 
@@ -1533,4 +1594,6 @@ EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (
     VSF_EXTRA,
     EECF_ECC1,
     EECF_ECC2,
+    EECF_ECC3,
+    ESCF_PAYLOAD,
 )

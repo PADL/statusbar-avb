@@ -120,7 +120,10 @@ CSV output into plots and stats.
   ESCF/EECF, MAAP, IP encapsulation, and stream input/output state
   machines.
 - **`avtp_crypto`** — AVTP control-plane crypto: key exchange, keychain,
-  AEM-frame authentication, P-256 wire helpers.
+  AEM-frame authentication, P-256 wire helpers, and the IEEE 1722-2025
+  EECF (ECC1, ECC2, ECC3) and ESCF (ECSSA, ED25519) codecs that are the proof
+  of concept for the November 2026 security amendment proposal
+  ([`docs/IEEE_1722_CRYPTO_AMENDMENT.md`](docs/IEEE_1722_CRYPTO_AMENDMENT.md)).
 - **`avtp_tools`** — higher-level helpers atop `avtp` (audio stream decoder,
   channel interleaver, AVTP-to-WAV).
 - **`atdecc`** — IEEE 1722.1: ADP discovery, ACMP connection management,

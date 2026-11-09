@@ -9,6 +9,7 @@ statusbar_add_module(
   avtp_keychain.cpp
   avtp_crypto_pdu.cpp
   avtp_aem_frame.cpp
+  avtp_escf_frame.cpp
   p256_wire.cpp
   DEPS
   statusbar::avtp
@@ -16,6 +17,7 @@ statusbar_add_module(
   statusbar::crypto
   TESTS
   avtp_aem_frame_test.cpp
+  avtp_escf_frame_test.cpp
   avtp_crypto_pdu_test.cpp
   avtp_crypto_test.cpp
   avtp_keychain_test.cpp

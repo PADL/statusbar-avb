@@ -10,6 +10,8 @@
 // Output is space-separated hex strings on a single line.
 
 #include "statusbar/avtp_crypto/avtp_aem_frame.hpp"
+#include "statusbar/avtp_crypto/avtp_escf_frame.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/crypto/25519/ed25519.hpp"
 #include "statusbar/crypto/25519/x25519.hpp"
 #include "statusbar/crypto/aes/aes128_hw.hpp"
@@ -158,7 +160,13 @@ static void usage()
         "  eecf_ecc1_encrypt    <pubkey> <entropy> <pt>     -> V||T||C (hex, IEEE 1722-2025 17.3.2 encrypted_payload)\n"
         "  eecf_ecc1_decrypt    <seed> <encrypted_payload>  -> ok|fail plaintext\n"
         "  eecf_ecc2_encrypt    <pubkey> <ikm_e> <aad> <pt> -> enc||C||T (hex, ECC2 encrypted_payload; aad = EECF header)\n"
-        "  eecf_ecc2_decrypt    <seed> <aad> <encrypted_payload> -> ok|fail plaintext\n"
+        "  eecf_ecc2_decrypt    <seed> <aad> <encrypted_payload> -> ok|fail plaintext (recipient d = SHA-256(seed) mod n)\n"
+        "  eecf_ecc3_encrypt    <x25519_pubkey> <ikm_e> <aad> <pt> -> enc||C||T (hex, ECC3 encrypted_payload; aad = EECF header)\n"
+        "  eecf_ecc3_decrypt    <ikm_r> <aad> <encrypted_payload> -> ok|fail plaintext (recipient = HPKE DeriveKeyPair(ikm_r))\n"
+        "  hpke_x25519_keypair  <ikm>                       -> private_key public_key (RFC 9180 DeriveKeyPair, X25519)\n"
+        "  escf_sign            <sig> <seed> <key_id> <timestamp> <avtpdu> -> signature_value (sig 00: P-256 seed, 01: Ed25519 "
+        "seed)\n"
+        "  escf_verify          <sig> <pubkey> <key_id> <timestamp> <avtpdu> <signature_value> -> ok|fail\n"
         "  x25519_ecies_encrypt <pubkey> <entropy> <pt>     -> V||C||T (hex)\n"
         "  x25519_ecies_decrypt <seed> <ciphertext>         -> ok|fail plaintext\n"
         "  backend                                          -> resolved hw/sw backend per primitive\n"
@@ -1034,6 +1042,154 @@ static void cmd_eecf_ecc2_decrypt(int argc, char** argv)
 }
 
 //
+// EECF ECC3 (RFC 9180 HPKE over X25519) and ESCF (IEEE 1722-2025 Clause 16) command handlers
+//
+
+static void cmd_eecf_ecc3_encrypt(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 4, "eecf_ecc3_encrypt");
+    auto pk_bytes = hex_decode(argv[2]);
+    auto ikm_bytes = hex_decode(argv[3]);
+    SecureVectorGuard const guard_ikm{ikm_bytes};
+    auto aad = hex_decode(argv[4]);
+    auto pt = hex_decode(argv[5]);
+
+    X25519PublicKey pk;
+    require_copy(pk.data, pk_bytes, "x25519_pubkey");
+    std::array<uint8_t, hpke_min_ikm_size> ikm_e;
+    require_copy(ikm_e, ikm_bytes, "ikm_e");
+
+    std::vector<uint8_t> output(statusbar::crypto::avtp::eecf_ecc3_encrypted_size(pt.size()));
+    auto result = statusbar::crypto::avtp::eecf_ecc3_encrypt_payload(pk, aad, pt, output, ikm_e);
+    if (!result) {
+        std::println(stderr, "error: eecf_ecc3_encrypt failed");
+        std::exit(1);
+    }
+    hex_print(*result);
+    std::println("");
+}
+
+static void cmd_eecf_ecc3_decrypt(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 3, "eecf_ecc3_decrypt");
+    auto ikm = hex_decode(argv[2]);
+    SecureVectorGuard const guard_ikm{ikm};
+    auto aad = hex_decode(argv[3]);
+    auto payload = hex_decode(argv[4]);
+
+    auto sk = hpke_x25519_derive_key_pair(ikm);
+    if (!sk) {
+        std::println(stderr, "error: ikm_r must be at least {} bytes", hpke_min_ikm_size);
+        std::exit(1);
+    }
+    std::vector<uint8_t> plaintext(payload.size());
+    auto result = statusbar::crypto::avtp::eecf_ecc3_decrypt_payload(*sk, aad, payload, plaintext);
+    if (!result) {
+        std::println("fail");
+    } else {
+        std::print("ok ");
+        hex_print(*result);
+        std::println("");
+    }
+}
+
+static void cmd_hpke_x25519_keypair(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 1, "hpke_x25519_keypair");
+    auto ikm = hex_decode(argv[2]);
+    SecureVectorGuard const guard_ikm{ikm};
+    auto sk = hpke_x25519_derive_key_pair(ikm);
+    if (!sk) {
+        std::println(stderr, "error: ikm must be at least {} bytes", hpke_min_ikm_size);
+        std::exit(1);
+    }
+    hex_print(sk->data);
+    std::print(" ");
+    hex_print(sk->public_key.data);
+    std::println("");
+}
+
+// The ESCF signed-message inputs shared by escf_sign and escf_verify: sig, key_id, timestamp, avtpdu.
+struct EscfArgs
+{
+    uint8_t sig{};
+    statusbar::ieee::Eui64 key_id{};
+    uint64_t timestamp{};
+    std::vector<uint8_t> avtpdu;
+};
+
+static auto parse_escf_args(char const* sig_hex, char const* key_id_hex, char const* timestamp_hex, char const* avtpdu_hex)
+    -> EscfArgs
+{  // NOLINT(statusbar-block-statements) CLI argument decoding: one fixed-size field per step
+    EscfArgs args{};
+    std::array<uint8_t, 1> sig{};
+    require_copy(sig, hex_decode(sig_hex), "sig");
+    args.sig = sig[0];
+    std::array<uint8_t, 8> key_id{};
+    require_copy(key_id, hex_decode(key_id_hex), "key_id");
+    statusbar::span_load(args.key_id, std::span<uint8_t const>(key_id));
+    std::array<uint8_t, 8> timestamp{};
+    require_copy(timestamp, hex_decode(timestamp_hex), "timestamp");
+    statusbar::ieee::octlet_t ts{};
+    statusbar::span_load(ts, std::span<uint8_t const>(timestamp));
+    args.timestamp = ts.get();
+    args.avtpdu = hex_decode(avtpdu_hex);
+    return args;
+}
+
+static void cmd_escf_sign(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 5, "escf_sign");
+    auto const args = parse_escf_args(argv[2], argv[4], argv[5], argv[6]);
+    auto seed = hex_decode(argv[3]);
+    SecureVectorGuard const guard_seed{seed};
+    std::array<uint8_t, 32> seed_arr{};
+    require_copy(seed_arr, seed, "seed");
+
+    std::optional<statusbar::crypto::avtp::EscfSignature> signature;
+    if (args.sig == statusbar::crypto::avtp::escf_sig_ecssa) {
+        signature = statusbar::crypto::avtp::escf_ecssa_sign(
+            p256_ecdsa_keypair_from_seed(seed_arr), args.key_id, args.timestamp, args.avtpdu);
+    } else if (args.sig == statusbar::crypto::avtp::escf_sig_ed25519) {
+        signature = statusbar::crypto::avtp::escf_ed25519_sign(
+            ed25519_keypair_from_seed(seed_arr), args.key_id, args.timestamp, args.avtpdu);
+    } else {
+        std::println(stderr, "error: sig must be 00 (ECSSA_DSA_EMSA1_SHA256) or 01 (ED25519)");
+        std::exit(1);
+    }
+    if (!signature) {
+        std::println(stderr, "error: escf_sign failed (AVTPDU over 1416 octets?)");
+        std::exit(1);
+    }
+    hex_print(*signature);
+    std::println("");
+}
+
+static void cmd_escf_verify(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 6, "escf_verify");
+    auto const args = parse_escf_args(argv[2], argv[4], argv[5], argv[6]);
+    auto pk_bytes = hex_decode(argv[3]);
+    std::array<uint8_t, 64> signature{};
+    require_copy(signature, hex_decode(argv[7]), "signature_value");
+
+    bool ok = false;
+    if (args.sig == statusbar::crypto::avtp::escf_sig_ecssa) {
+        P256PublicKey pk;
+        require_copy(pk.data, pk_bytes, "pubkey");
+        ok = statusbar::crypto::avtp::escf_ecssa_verify(pk, args.key_id, args.timestamp, args.avtpdu, signature);
+    } else if (args.sig == statusbar::crypto::avtp::escf_sig_ed25519) {
+        Ed25519PublicKey pk;
+        require_copy(pk.data, pk_bytes, "pubkey");
+        ok = statusbar::crypto::avtp::escf_ed25519_verify(pk, args.key_id, args.timestamp, args.avtpdu, signature);
+    } else {
+        std::println(stderr, "error: sig must be 00 (ECSSA_DSA_EMSA1_SHA256) or 01 (ED25519)");
+        std::exit(1);
+    }
+    std::println("{}", ok ? "ok" : "fail");
+}
+
+//
 // X25519 ECIES command handlers
 //
 
@@ -1316,6 +1472,16 @@ int main(int argc, char** argv)
         cmd_eecf_ecc2_encrypt(argc, argv);
     } else if (cmd == "eecf_ecc2_decrypt") {
         cmd_eecf_ecc2_decrypt(argc, argv);
+    } else if (cmd == "eecf_ecc3_encrypt") {
+        cmd_eecf_ecc3_encrypt(argc, argv);
+    } else if (cmd == "eecf_ecc3_decrypt") {
+        cmd_eecf_ecc3_decrypt(argc, argv);
+    } else if (cmd == "hpke_x25519_keypair") {
+        cmd_hpke_x25519_keypair(argc, argv);
+    } else if (cmd == "escf_sign") {
+        cmd_escf_sign(argc, argv);
+    } else if (cmd == "escf_verify") {
+        cmd_escf_verify(argc, argv);
     } else if (cmd == "x25519_ecies_encrypt") {
         cmd_x25519_ecies_encrypt(argc, argv);
     } else if (cmd == "x25519_ecies_decrypt") {

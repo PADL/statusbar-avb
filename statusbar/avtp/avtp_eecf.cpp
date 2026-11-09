@@ -18,6 +18,8 @@ auto eecf_enc_mode_name(uint8_t const enc) noexcept -> std::string_view
             return "ECC1";
         case 0x01:
             return "ECC2";
+        case 0x02:
+            return "ECC3";
         default:
             return "Reserved";
     }

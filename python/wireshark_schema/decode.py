@@ -371,13 +371,17 @@ def _post_eecf_payload(data: bytes, start: int, out: dict[str, int | str]) -> No
     """EECF: the encrypted_payload split by enc value, as the Lua does.
 
     ECC1 (IEEE 1722-2025 17.3.2): V, T and C when the declared length is V + T +
-    whole AES blocks. ECC2 (RFC 9180 HPKE, statusbar proposal): enc, C and T when
-    the declared length covers enc and T. The declared length must fit the frame;
-    anything else stays payload.
+    whole AES blocks. ECC2 and ECC3 (RFC 9180 HPKE, the IEEE 1722 security
+    amendment): enc, C and T when the declared length covers enc and T. The
+    declared length must fit the frame; anything else stays payload.
     """
     enc = int(out["avb.avtp.eecf.enc"])
     declared = int(out["avb.avtp.eecf.encrypted_payload_length"])
     rest = start
+    hpke = {
+        1: ("ecc2", L.ECC2_ENC_OCTETS, L.ECC2_T_OCTETS),
+        2: ("ecc3", L.ECC3_ENC_OCTETS, L.ECC3_T_OCTETS),
+    }
     if declared <= len(data) - start:
         c_len = declared - L.ECC1_V_OCTETS - L.ECC1_T_OCTETS
         if (
@@ -391,13 +395,25 @@ def _post_eecf_payload(data: bytes, start: int, out: dict[str, int | str]) -> No
             out["avb.avtp.eecf.ecc1.t"] = data[t_at:c_at].hex()
             out["avb.avtp.eecf.ecc1.c"] = data[c_at : start + declared].hex()
             rest = start + declared
-        elif enc == 1 and declared >= L.ECC2_ENC_OCTETS + L.ECC2_T_OCTETS:
-            c_at = start + L.ECC2_ENC_OCTETS
-            t_at = start + declared - L.ECC2_T_OCTETS
-            out["avb.avtp.eecf.ecc2.enc"] = data[start:c_at].hex()
-            out["avb.avtp.eecf.ecc2.c"] = data[c_at:t_at].hex()
-            out["avb.avtp.eecf.ecc2.t"] = data[t_at : start + declared].hex()
+        elif enc in hpke and declared >= hpke[enc][1] + hpke[enc][2]:
+            name, enc_octets, t_octets = hpke[enc]
+            c_at = start + enc_octets
+            t_at = start + declared - t_octets
+            out[f"avb.avtp.eecf.{name}.enc"] = data[start:c_at].hex()
+            out[f"avb.avtp.eecf.{name}.c"] = data[c_at:t_at].hex()
+            out[f"avb.avtp.eecf.{name}.t"] = data[t_at : start + declared].hex()
             rest = start + declared
+    if rest < len(data):
+        out["avb.avtp.payload"] = data[rest:].hex()
+
+
+def _post_escf_encapsulated(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """ESCF: the encapsulated_avtpdu, bounded by encapsulated_avtpdu_length, as the Lua does."""
+    declared = int(out["avb.avtp.escf.encapsulated_avtpdu_length"])
+    rest = start
+    if declared <= len(data) - start:
+        out["avb.avtp.escf.encapsulated_avtpdu"] = data[start : start + declared].hex()
+        rest = start + declared
     if rest < len(data):
         out["avb.avtp.payload"] = data[rest:].hex()
 
@@ -410,6 +426,7 @@ POST_HOOKS = {
     "cvf": _post_cvf,
     "vsf": _post_vsf,
     "eecf_payload": _post_eecf_payload,
+    "escf_encapsulated": _post_escf_encapsulated,
 }
 
 #: ADP, AECP, ACMP: dissected by atdecc.lua / decode_atdecc
