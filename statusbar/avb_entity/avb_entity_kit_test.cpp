@@ -2216,6 +2216,25 @@ struct MilanPair
         return l.aem_command(start ? atdecc::AEM_COMMAND_START_STREAMING : atdecc::AEM_COMMAND_STOP_STREAMING, body).status;
     }
 
+    /// The talker's PROBE_TX_RESPONSE to the sink's probe: stream @p stream_id to @p group.
+    void probe_answered(ieee::Eui48 const& group, uint64_t const stream_id = 0x0200000000000777ULL)
+    {
+        auto resp = sink().probe;
+        resp.set_message_type(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
+        resp.stream_id = ieee::Eui64{}.from_uint64(stream_id);
+        resp.stream_dest_mac = group;
+        resp.stream_vlan_id = uint16_t{2};
+        (void)lc().acmp_listener.receive_talker_response(resp, now);
+    }
+
+    /// Open the listener's stream port as a test port (before start()); its context.
+    auto listener_wire() -> net::TestPortContext&
+    {
+        EXPECT_TRUE(
+            l.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x40}}).has_value());
+        return *l.kit.stream_port().test_port();
+    }
+
     /// The talker's ENTITY_AVAILABLE reaching the listener.
     void talker_advertises()
     {
@@ -2396,6 +2415,47 @@ TEST(avb_entity_kit_milan_listener, another_vid_joins_mvrp)
     (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
     EXPECT_TRUE(p.lc().mvrp_handler.get_vlan_state(5) == nanoavb::VlanState::Unregistered);
     EXPECT_TRUE(p.lc().mvrp_handler.get_vlan_state(2) != nanoavb::VlanState::Unregistered);  // the host's
+}
+
+// Rebound to another talker's stream, a settled input leaves its group before
+// it joins the new one: each group is joined once while it is listened to
+TEST(avb_entity_kit_milan_listener, a_rebind_leaves_the_old_group_and_joins_the_new)
+{
+    MilanPair p;
+    auto const& wire = p.listener_wire();
+    EXPECT_TRUE(p.start());
+    ieee::Eui48 const first{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x01};
+    ieee::Eui48 const second{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x02};
+    auto const joins = [&wire](ieee::Eui48 const& group) { return std::ranges::count(wire.joined_multicast_groups(), group); };
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    p.probe_answered(first);
+    EXPECT_EQ(joins(first), 1);
+
+    auto rebind = p.command(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    rebind.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200000000000042ULL);
+    EXPECT_TRUE(p.lc().acmp_listener.receive_controller_command(rebind, p.now));
+    EXPECT_EQ(joins(first), 0);
+    p.probe_answered(second, 0x0200000000000042ULL);
+    EXPECT_EQ(joins(first), 0);
+    EXPECT_EQ(joins(second), 1);
+}
+
+// stop() leaves the groups of the connections that outlive it (an AF_XDP port's
+// memberships are the interface's); the next start() joins them again, once
+TEST(avb_entity_kit_milan_listener, a_restart_joins_a_surviving_connection_once)
+{
+    MilanPair p;
+    (void)p.listener_wire();
+    EXPECT_TRUE(p.start());
+    ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x03};
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    p.probe_answered(group);
+    EXPECT_TRUE(p.l.kit.stop().has_value());
+    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
+
+    auto const& rewired = p.listener_wire();
+    EXPECT_TRUE(p.l.start_ready());
+    EXPECT_EQ(std::ranges::count(rewired.joined_multicast_groups(), group), 1);
 }
 
 // [avb] milan = false keeps the classic listener: CONNECT_RX relayed as
