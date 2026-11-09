@@ -394,6 +394,32 @@ function M.post.cvf(tree, tvb, start, pinfo)
     return start
 end
 
+-- Encrypted control -------------------------------------------------------------
+
+local ECC1_V_OCTETS = 33 -- EC2OSP-X compressed P-256 point
+local ECC1_T_OCTETS = 32 -- HMAC-SHA-256 tag
+local ECC1_BLOCK_OCTETS = 16 -- AES-256-CBC block
+
+--- EECF (IEEE 1722-2025 17.3.2): an ECC1 encrypted_payload is V (the
+--- ephemeral public key, EC2OSP-X), T (the HMAC-SHA-256 tag) and C (the
+--- AES-256-CBC ciphertext of encryption_timestamp || encapsulated AVTPDU,
+--- whole blocks), in that order. Another enc value, a declared length that is
+--- not V + T + whole blocks, or a truncated frame stays undissected payload.
+function M.post.eecf_ecc1(tree, tvb, start)
+    local enc = tvb(1, 1):bitfield(4, 4)
+    local declared = tvb(2, 2):bitfield(5, 11)
+    local c_len = declared - ECC1_V_OCTETS - ECC1_T_OCTETS
+    if enc ~= 0 or declared > tvb:len() - start or c_len < ECC1_BLOCK_OCTETS or c_len % ECC1_BLOCK_OCTETS ~= 0 then
+        return start
+    end
+    local t_at = start + ECC1_V_OCTETS
+    local c_at = t_at + ECC1_T_OCTETS
+    tree:add(gen.f.avtp_eecf_ecc1_v, tvb(start, ECC1_V_OCTETS))
+    tree:add(gen.f.avtp_eecf_ecc1_t, tvb(t_at, ECC1_T_OCTETS))
+    tree:add(gen.f.avtp_eecf_ecc1_c, tvb(c_at, c_len))
+    return start + declared
+end
+
 -- Info-column summaries: spec name -> function(tvb) returning text.
 M.info = {}
 

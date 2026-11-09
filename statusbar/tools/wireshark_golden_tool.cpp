@@ -29,7 +29,9 @@
 #include "statusbar/avtp/avtp_ntscf_v1.hpp"
 #include "statusbar/avtp/avtp_tscf.hpp"
 #include "statusbar/avtp/avtp_tscf_v1.hpp"
+#include "statusbar/avtp_crypto/avtp_aem_frame.hpp"
 #include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/crypto/p256/p256_ecdsa.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/ip/ip_ipv4.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -594,16 +596,64 @@ auto escf() -> std::vector<uint8_t>
     return out;
 }
 
-auto eecf() -> std::vector<uint8_t>
+// The ECC1 known answer of avtp_aem_frame_test (IEEE 1722-2025 17.3.2):
+// recipient d = SHA-256(ECC1_SEED) mod n, ephemeral key from ECC1_ENTROPY, the
+// 17.3.3 plaintext encryption_timestamp || a 16-octet encapsulated AVTPDU.
+constexpr std::array<uint8_t, 32> ECC1_SEED{
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+};
+constexpr std::array<uint8_t, 32> ECC1_ENTROPY{
+    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+};
+constexpr uint64_t ECC1_TIMESTAMP = 0x0123456789ABCDEFULL;
+constexpr std::array<uint8_t, 16> ECC1_AVTPDU{
+    0x10,
+    0x11,
+    0x12,
+    0x13,
+    0x14,
+    0x15,
+    0x16,
+    0x17,
+    0x18,
+    0x19,
+    0x1A,
+    0x1B,
+    0x1C,
+    0x1D,
+    0x1E,
+    0x1F,
+};
+
+/// The known-answer ECC1 encrypted_payload V || T || C (97 octets). The
+/// construction is deterministic, so the committed capture carries a real
+/// payload that the published seed decrypts.
+auto ecc1_payload() -> std::vector<uint8_t>
+{
+    namespace ca = statusbar::crypto::avtp;
+    std::array<uint8_t, ca::eecf_ecc1_encrypted_size(sizeof(ECC1_TIMESTAMP) + ECC1_AVTPDU.size())> out{};
+    auto const recipient = statusbar::crypto::p256_ecdsa_keypair_from_seed(ECC1_SEED);
+    auto const built = ca::eecf_ecc1_encrypt(recipient.public_key, ECC1_TIMESTAMP, ECC1_AVTPDU, out, ECC1_ENTROPY).value();
+    return {built.begin(), built.end()};
+}
+
+/// An ECC1 EECF header announcing @p encrypted_payload_length octets
+auto eecf_header(size_t const encrypted_payload_length) -> EecfPdu
 {
     EecfPdu pdu{};
-    pdu.init(0, KEY_ID);
-    pdu.set_encrypted_payload_length(12);
+    pdu.init(static_cast<uint8_t>(EecfEncMode::ecc1), KEY_ID);
+    pdu.set_encrypted_payload_length(static_cast<uint16_t>(encrypted_payload_length));
+    return pdu;
+}
+
+auto eecf() -> std::vector<uint8_t>
+{
+    auto const payload = ecc1_payload();
     std::vector<uint8_t> out;
-    append(out, pdu);
-    std::array<uint8_t, 12> cipher{};
-    cipher[0] = 0xE1;
-    append(out, std::span<uint8_t const>(cipher));
+    append(out, eecf_header(payload.size()));
+    append(out, std::span<uint8_t const>(payload));
     return out;
 }
 

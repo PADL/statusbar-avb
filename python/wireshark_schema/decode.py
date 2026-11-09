@@ -367,6 +367,31 @@ def _post_vsf(data: bytes, start: int, out: dict[str, int | str]) -> None:
         out["avb.avtp.payload"] = data[start:].hex()
 
 
+def _post_eecf_ecc1(data: bytes, start: int, out: dict[str, int | str]) -> None:
+    """EECF: an ECC1 encrypted_payload as V, T and C (IEEE 1722-2025 17.3.2).
+
+    Only when enc is ECC1, the declared encrypted_payload_length fits the
+    frame and it is V + T + whole AES blocks; anything else stays payload.
+    """
+    declared = int(out["avb.avtp.eecf.encrypted_payload_length"])
+    c_len = declared - L.ECC1_V_OCTETS - L.ECC1_T_OCTETS
+    rest = start
+    if (
+        int(out["avb.avtp.eecf.enc"]) == 0
+        and declared <= len(data) - start
+        and c_len >= L.ECC1_BLOCK_OCTETS
+        and c_len % L.ECC1_BLOCK_OCTETS == 0
+    ):
+        t_at = start + L.ECC1_V_OCTETS
+        c_at = t_at + L.ECC1_T_OCTETS
+        out["avb.avtp.eecf.ecc1.v"] = data[start:t_at].hex()
+        out["avb.avtp.eecf.ecc1.t"] = data[t_at:c_at].hex()
+        out["avb.avtp.eecf.ecc1.c"] = data[c_at : start + declared].hex()
+        rest = start + declared
+    if rest < len(data):
+        out["avb.avtp.payload"] = data[rest:].hex()
+
+
 POST_HOOKS = {
     "crf_timestamps": _post_crf_timestamps,
     "acf": _post_acf,
@@ -374,6 +399,7 @@ POST_HOOKS = {
     "iec61883": _post_iec61883,
     "cvf": _post_cvf,
     "vsf": _post_vsf,
+    "eecf_ecc1": _post_eecf_ecc1,
 }
 
 #: ADP, AECP, ACMP: dissected by atdecc.lua / decode_atdecc

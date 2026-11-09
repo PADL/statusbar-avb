@@ -483,6 +483,9 @@ M.f.avtp_mpegts_tsc = ProtoField.uint8("avb.avtp.mpegts.tsc", "tsc", base.DEC, n
 M.f.avtp_mpegts_afc = ProtoField.uint8("avb.avtp.mpegts.afc", "afc", base.DEC, nil, 0x30, "adaptation field control")
 M.f.avtp_mpegts_cc = ProtoField.uint8("avb.avtp.mpegts.cc", "cc", base.DEC, nil, 0xF, "continuity counter")
 M.f.avtp_vsf_vendor_id = ProtoField.ether("avb.avtp.vsf.vendor_id", "vendor_id", base.NONE, "vendor id (vendor_id_1 || vendor_id_2, an OUI-based EUI-48)")
+M.f.avtp_eecf_ecc1_v = ProtoField.bytes("avb.avtp.eecf.ecc1.v", "v", base.NONE, "V: ephemeral public key, EC2OSP-X compressed P-256 point")
+M.f.avtp_eecf_ecc1_t = ProtoField.bytes("avb.avtp.eecf.ecc1.t", "t", base.NONE, "T: HMAC-SHA-256 tag over C (IEEE 1363a-2004 DL/ECIES)")
+M.f.avtp_eecf_ecc1_c = ProtoField.bytes("avb.avtp.eecf.ecc1.c", "c", base.NONE, "C: AES-256-CBC ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -663,6 +666,9 @@ M.avtp_fields = {
     M.f.avtp_mpegts_afc,
     M.f.avtp_mpegts_cc,
     M.f.avtp_vsf_vendor_id,
+    M.f.avtp_eecf_ecc1_v,
+    M.f.avtp_eecf_ecc1_t,
+    M.f.avtp_eecf_ecc1_c,
 }
 
 M.ipavtp_fields = {
@@ -1203,6 +1209,6 @@ M.subtype_specs[0xEE][0] = { name = "aef_discrete", header_length = 12, layouts 
 M.subtype_specs[0xEC] = M.subtype_specs[0xEC] or {}
 M.subtype_specs[0xEC][0] = { name = "escf", header_length = 12, layouts = { M.add_escf }, post = nil }
 M.subtype_specs[0xED] = M.subtype_specs[0xED] or {}
-M.subtype_specs[0xED][0] = { name = "eecf", header_length = 12, layouts = { M.add_eecf }, post = nil }
+M.subtype_specs[0xED][0] = { name = "eecf", header_length = 12, layouts = { M.add_eecf }, post = "eecf_ecc1" }
 
 return M

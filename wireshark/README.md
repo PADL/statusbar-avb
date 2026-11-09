@@ -66,7 +66,7 @@ repository's C++ wire-format definitions.
 |---|---|
 | `statusbar_avb.lua` | the loader: the one file Wireshark must see; registers the dissectors |
 | `statusbar_avb/avtp.lua` | hand-written AVTP dissector logic (header kinds, dispatch, preferences) |
-| `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps; AAF PCM samples and AES3 subframes; IEC 61883: IIDC, CIP, AM824 data blocks, IEC 61883-4 MPEG2-TS source packets; CVF: MJPEG, H.264 and H.265 NAL/FU headers, JPEG 2000; audio grouped by channel or by frame per the preference *Audio sample grouping*) and info-column summaries for every stream subtype (IEC 61883, MMA, AAF, CVF, CRF, TSCF, SVF, RVF, VSF, EF, NTSCF) and MAAP, AEF, ESCF, EECF |
+| `statusbar_avb/avtp_streams.lua` | per-subtype post hooks (CRF timestamps; AAF PCM samples and AES3 subframes; IEC 61883: IIDC, CIP, AM824 data blocks, IEC 61883-4 MPEG2-TS source packets; CVF: MJPEG, H.264 and H.265 NAL/FU headers, JPEG 2000; audio grouped by channel or by frame per the preference *Audio sample grouping*) EECF: the ECC1 encrypted_payload split into V, T and C per IEEE 1722-2025 17.3.2) and info-column summaries for every stream subtype (IEC 61883, MMA, AAF, CVF, CRF, TSCF, SVF, RVF, VSF, EF, NTSCF) and MAAP, AEF, ESCF, EECF |
 | `statusbar_avb/acf.lua` | the ACF message walker inside TSCF/NTSCF: every clause 9.4 type, pad rules, Checksum/CRC trailer verification (preference *Verify ACF Checksum/CRC trailers*) |
 | `statusbar_avb/atdecc.lua` | IEEE 1722.1: ADP, ACMP, AECP (AEM payloads and every descriptor's counted tables by table; control value_details typed by control_value_type, and SET/GET_CONTROL / MIXER / MATRIX values typed from the descriptor seen earlier in the capture; stream formats broken into AAF / IEC 61883-6 / CRF fields; Address Access TLVs; AVC; Milan vendor unique (MVU) commands; other Vendor Unique raw), command/response pairing |
 | `statusbar_avb/acf_integrity.lua` | ones-complement checksum and CRC-32 (Ethernet, AUTOSAR P4) for the trailers; needs Lua 5.3+ (Wireshark 4.4+), otherwise verification is skipped |
@@ -152,6 +152,12 @@ dissector's own test runs over. Open it in Wireshark once the plugin loads
 to see every `avb.*` field decoded, or use it to compare against a
 builtin-dissector view. The GitHub release ships it inside the archives
 and as `statusbar-avb-golden-<version>.pcap` beside them.
+
+The EECF frame is the ECC1 known answer of `avtp_aem_frame_test`: a real
+V || T || C `encrypted_payload` (IEEE 1722-2025 17.3.2) for the recipient key
+d = SHA-256(0x01 .. 0x20) mod n, so `statusbar-avtp-crypto-tool eecf_ecc1_decrypt`
+with that seed recovers its `encryption_timestamp` 0x0123456789ABCDEF and the
+16-octet encapsulated AVTPDU 0x10 .. 0x1F.
 
 ## Testing
 

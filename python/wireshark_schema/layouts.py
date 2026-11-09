@@ -1232,6 +1232,41 @@ EECF = Layout(
         Field("eecf.key_id", 4, 8, "eui64", "key_id (EUI-64)", base="hex"),
     ),
 )
+# An ECC1 encrypted_payload (17.3.2) is V || T || C: the ephemeral public key
+# (EC2OSP-X, 33 octets), the HMAC-SHA-256 tag (32 octets) and the AES-256-CBC
+# ciphertext (whole 16-octet blocks). The "eecf_ecc1" post hook adds the three
+# items when enc is ECC1 and the declared length has that shape.
+ECC1_V_OCTETS = 33
+ECC1_T_OCTETS = 32
+ECC1_BLOCK_OCTETS = 16
+EECF_ECC1 = Layout(
+    "eecf_ecc1",
+    "avb.avtp.eecf.ecc1",
+    "EECF ECC1 encrypted_payload (IEEE 1722-2025 17.3.2)",
+    (
+        Field(
+            "v",
+            0,
+            ECC1_V_OCTETS,
+            "bytes",
+            "V: ephemeral public key, EC2OSP-X compressed P-256 point",
+        ),
+        Field(
+            "t",
+            ECC1_V_OCTETS,
+            ECC1_T_OCTETS,
+            "bytes",
+            "T: HMAC-SHA-256 tag over C (IEEE 1363a-2004 DL/ECIES)",
+        ),
+        Field(
+            "c",
+            ECC1_V_OCTETS + ECC1_T_OCTETS,
+            0,
+            "bytes",
+            "C: AES-256-CBC ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)",
+        ),
+    ),
+)
 
 SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("aaf_v0", 0x02, 0, (AVTP_STREAM_V0, AAF_V0), 24, post="aaf_audio"),
@@ -1264,7 +1299,7 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("aef_continuous", 0x6E, 0, (AEF_CONTINUOUS,), 12),
     SubtypeSpec("aef_discrete", 0xEE, 0, (AEF_DISCRETE,), 12),
     SubtypeSpec("escf", 0xEC, 0, (ESCF,), 12),
-    SubtypeSpec("eecf", 0xED, 0, (EECF,), 12),
+    SubtypeSpec("eecf", 0xED, 0, (EECF,), 12, post="eecf_ecc1"),
 )
 
 SUBTYPE_LAYOUTS: tuple[Layout, ...] = (
@@ -1461,4 +1496,5 @@ EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (
     AM824_AUDIO,
     MPEGTS,
     VSF_EXTRA,
+    EECF_ECC1,
 )
