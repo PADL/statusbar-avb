@@ -525,21 +525,17 @@ talker's attribute is registered).
   reserve a path to the entity. Only Class A (SRclassID 6, priority 3) is
   declared, on the VID in use: Milan v1.2 Section 4.2.7.2.1 declares "an MSRP
   Domain for Class A", and the entity has no Class B streams (every STREAM_*
-  descriptor sets CLASS_A, Section 5.3.3.4). After startup or link up
-  `reset_domain()` restores the configured domain (priority 3, VID 2 by
-  default) and declares it, whether or not gPTP is up.
-- **Domain adoption.** A peer's Class A Domain with different parameters is
-  adopted (Milan v1.2 Section 4.2.7.2.1), but only its SRclassVID and only at
-  our SRclassPriority (3): stream frames always carry that PCP (the shaper's
-  queue map is keyed by it), so adopting another priority would declare a
-  TSpec the frames do not use. A Class A Domain at another priority leaves the
-  port an SRP domain boundary (IEEE 802.1Q-2018 Clause 35.2.1.4 h). The VID
-  is the same at every position of a Domain vector (a bridge's default
-  `{5,2,VID},{6,3,VID}`); the participant hands over the per-position value. Adoption happens at most once per link up: two
-  adopting end stations on a direct link with different configured VIDs would
-  otherwise swap each other's previous value on every periodic PDU, churning
-  MVRP, ACMP, the TX tag and the advertisements. A VID change is reported so
-  the talker moves its MVRP join, Talker Advertise and stream frames.
+  descriptor sets CLASS_A, Section 5.3.3.4). `declare_domain()` declares it,
+  from the talker advertise hook and at a restart, whether or not gPTP is up.
+- **Domain adoption.** With `set_adopt_domain(true)` (`atdecc.profile =
+  "milan13"`) a peer's Domain for our SR class with other parameters is
+  adopted, its SRclassPriority and SRclassVID both (Milan v1.3 Section
+  4.2.7.2.1), and `on_domain_adopted` moves the MVRP join, the ACMP
+  stream_vlan_id and the stream frames. A talker's priority is its SR
+  class's (IEEE 802.1Q-2022 Clause 35.2.2.8.5): `talker_advertise()`
+  declares at the Domain's priority. The VID is the same at every position
+  of a Domain vector (a bridge's default `{5,2,VID},{6,3,VID}`); the
+  participant hands over the per-position value.
 - **Milan listener.** With `set_listener_waits_for_talker` (Milan v1.2
   Section 5.3.8.5) an attached listener declares Listener Ready while the
   talker's Advertise is registered, Asking Failed while its Talker Failed is,
