@@ -182,6 +182,8 @@ class SrpPort
     void report_leave(StreamId const& stream_id);
     /// The talker leaves, then the Domain, as the received PDU or the tick left them.
     void flush();
+    /// Forget the reported leaves whose registration has gone (LeaveTime expired, record freed).
+    void forget_left_talkers() noexcept;
     /// A peer's Listener declaration for @p stream_id registered, changed or left.
     void on_peer_listener(StreamId const& stream_id);
     /// Report the Domain once, with its final state, if it changed since the last report.
@@ -206,7 +208,7 @@ class SrpPort
         statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_advertise +
             statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_failed>
         pending_leaves_{};
-    /// Talkers reported gone, so the leave's LeaveTime expiry is not reported again; a join clears one.
+    /// Talkers reported gone and still registered Leaving, so their LeaveTime expiry is not reported again.
     sg14::inplace_vector<
         StreamId,
         statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_advertise +
