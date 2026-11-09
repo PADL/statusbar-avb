@@ -472,11 +472,14 @@ class MsrpHandler
         if (!idx) {
             return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
         }
+        // A talker's priority is its SR class's (IEEE 802.1Q-2022 Clause 35.2.2.8.5).
+        TalkerStreamSrpInfo declared = info;
+        declared.priority = domain_.sr_class_priority;
         // Declared first: a full attribute table leaves the reservation entries as they were.
-        if (auto status = declare_talker_attribute(info, now); !status) {
+        if (auto status = declare_talker_attribute(declared, now); !status) {
             return failure(status.error());
         }
-        store_stream(talker_streams_, *idx, advertising(info));
+        store_stream(talker_streams_, *idx, advertising(declared));
         return *idx;
     }
 
