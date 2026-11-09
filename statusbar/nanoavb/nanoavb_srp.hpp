@@ -375,7 +375,7 @@ class MsrpHandler
     }
     /// Set the configured (default) domain, Class A unless it says otherwise. This is also what
     /// reset_domain() returns to on link up; a Domain adopted from the
-    /// bridge (Milan v1.2 Section 4.2.7.2.1) overrides it until then.
+    /// bridge (Milan v1.3 Section 4.2.7.2.1) overrides it until then.
     void set_domain(DomainInfo const& domain) noexcept
     {
         default_domain_ = domain;
@@ -396,12 +396,9 @@ class MsrpHandler
     /// (Milan v1.2 Section 4.2.7.2.1). Call on link up; not gated on gPTP.
     [[nodiscard]] auto reset_domain(TimePoint now) -> Status
     {
-        uint16_t const old_vid = domain_.sr_class_vid;
-        domain_ = default_domain_;
+        DomainInfo const old = std::exchange(domain_, default_domain_);
         auto const status = declare_domain(now);
-        if (old_vid != domain_.sr_class_vid && on_domain_vid_changed_) {
-            on_domain_vid_changed_(old_vid, domain_.sr_class_vid, now);
-        }
+        follow_domain(old, now);
         return status;
     }
 
@@ -428,11 +425,14 @@ class MsrpHandler
         if (!idx) {
             return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
         }
+        // A talker's priority is its SR class's (IEEE 802.1Q-2022 Clause 35.2.2.8.5).
+        TalkerStreamSrpInfo declared = info;
+        declared.priority = domain_.sr_class_priority;
         // Declared first: a full attribute table leaves the reservation entries as they were.
-        if (auto status = declare_talker_attribute(info, now); !status) {
+        if (auto status = declare_talker_attribute(declared, now); !status) {
             return failure(status.error());
         }
-        store_stream(talker_streams_, *idx, advertising(info));
+        store_stream(talker_streams_, *idx, advertising(declared));
         return *idx;
     }
 
@@ -840,33 +840,57 @@ class MsrpHandler
         return participant_.declare_listener(stream_id, decl, now);
     }
 
-    /// A peer declared a Domain: adopt our SR class's SRclassVID at our SRclassPriority, at most once
-    /// per link up (Milan v1.2 Section 4.2.7.2.1); docs/NANOAVB_ARCHITECTURE.md.
+    /// A peer declared a Domain: adopt its SRclassPriority and SRclassVID for our SR class (Milan v1.3
+    /// Section 4.2.7.2.1), once until reset_domain() (a deviation: docs/NANOAVB_ARCHITECTURE.md).
     void on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv)
     {
-        uint16_t const vid = adoptable_domain_vid(fv);
-        if (vid == 0 || withdrawn_) {
-            return;  // withdrawn: nothing declares until the next run's declare_domain(), which hears it again
+        auto const adopted = adoptable_domain(fv);
+        if (!adopted || withdrawn_) {
+            return;  // withdrawn: nothing declares until the next run's declare_domain(), which receives it again
         }
-        uint16_t const old_vid = std::exchange(domain_.sr_class_vid, vid);
+        DomainInfo const old = std::exchange(domain_, *adopted);
         (void)declare_domain(last_event_time_);
-        if (on_domain_vid_changed_) {
-            on_domain_vid_changed_(old_vid, vid, last_event_time_);
+        follow_domain(old, last_event_time_);
+    }
+
+    /// The talkers after the Domain moved from @p old: a new VID told on_domain_vid_changed_ (which
+    /// re-advertises them), a new priority alone declared again here.
+    void follow_domain(DomainInfo const& old, TimePoint const now)
+    {
+        if (old.sr_class_vid != domain_.sr_class_vid && on_domain_vid_changed_) {
+            on_domain_vid_changed_(old.sr_class_vid, domain_.sr_class_vid, now);
+            return;
+        }
+        if (old.sr_class_priority != domain_.sr_class_priority) {
+            redeclare_talkers(now);
         }
     }
 
-    /// Our SR class's SRclassVID a peer's Domain @p fv offers for adoption, or 0 when there is none to adopt.
-    [[nodiscard]] auto adoptable_domain_vid(statusbar::srp::msrp::DomainFirstValue const& fv) const noexcept -> uint16_t
+    /// The Domain a peer's Domain @p fv for our SR class has us adopt, or nullopt: another class, an
+    /// invalid VID, the Domain in use, or one adopted since reset_domain() already.
+    [[nodiscard]] auto adoptable_domain(statusbar::srp::msrp::DomainFirstValue const& fv) const noexcept
+        -> std::optional<DomainInfo>
     {
-        if (fv.sr_class_id.get() != domain_.sr_class_id || fv.sr_class_priority.get() != domain_.sr_class_priority) {
-            return 0;
-        }
         uint16_t const vid = fv.sr_class_vid.get();
-        // Adopt at most once per link up (reset_domain restores the default).
-        if (vid > 4094 || vid == domain_.sr_class_vid || domain_.sr_class_vid != default_domain_.sr_class_vid) {
-            return 0;
+        if (fv.sr_class_id.get() != domain_.sr_class_id || vid == 0 || vid > 4094) {
+            return std::nullopt;
         }
-        return vid;
+        bool const adopted =
+            domain_.sr_class_vid != default_domain_.sr_class_vid || domain_.sr_class_priority != default_domain_.sr_class_priority;
+        if (adopted || (fv.sr_class_priority.get() == domain_.sr_class_priority && vid == domain_.sr_class_vid)) {
+            return std::nullopt;
+        }
+        return DomainInfo{.sr_class_id = domain_.sr_class_id, .sr_class_priority = fv.sr_class_priority.get(), .sr_class_vid = vid};
+    }
+
+    /// Declare every Advertising talker again, at the Domain's priority.
+    void redeclare_talkers(TimePoint const now)
+    {
+        for (auto const& stream : talker_streams_) {
+            if (stream.state == TalkerReservationState::Advertising) {
+                (void)talker_advertise(stream, now);
+            }
+        }
     }
 
     /// Forward a listener register/leave for one of OUR talker streams to the

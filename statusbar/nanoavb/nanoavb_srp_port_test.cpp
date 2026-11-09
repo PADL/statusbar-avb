@@ -221,7 +221,7 @@ TEST(nanoavb_srp_port, a_talker_failed_is_reported_and_asked_for)
     EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::AskingFailed);
 }
 
-// Milan v1.2 Section 4.2.7.2.1: the bridge's Class A VID is adopted; the port moves its MVRP join
+// Milan v1.3 Section 4.2.7.2.1: the bridge's Class A VID is adopted; the port moves its MVRP join
 // and re-advertises its talker on it, and declare_domain() (link up) returns to the configured VID.
 TEST(nanoavb_srp_port, an_adopted_vid_moves_the_vlan_and_the_talkers)
 {
@@ -250,20 +250,25 @@ TEST(nanoavb_srp_port, an_adopted_vid_moves_the_vlan_and_the_talkers)
     EXPECT_TRUE(b.port.msrp().get_talker_stream(stream_id(3))->vlan_id == 2);
 }
 
-// IEEE 802.1Q-2022 Clause 35.2.1.4: a peer's Class A Domain at another SRclassPriority leaves the
-// port an SRP domain boundary; it is neither adopted nor reported as registered.
-TEST(nanoavb_srp_port, a_peer_domain_at_another_priority_is_a_boundary)
+// Milan v1.3 Section 4.2.7.2.1: a peer's Class A Domain at another SRclassPriority is adopted, so
+// the port is no SRP domain boundary (IEEE 802.1Q-2022 Clause 35.2.1.4), and its talkers follow.
+TEST(nanoavb_srp_port, a_peer_domain_at_another_priority_is_adopted)
 {
     Bridge b{};
     std::vector<std::pair<uint16_t, bool>> reports{};
     b.port.set_observer(
         SrpPortObserver{.on_domain = [&](DomainInfo const& d, bool const r) { reports.emplace_back(d.sr_class_vid, r); }});
     EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    EXPECT_TRUE(b.port.declare_talker(talker(3), b.now).has_value());
     (void)b.bridge.declare_domain(Bridge::domain(7, 2), b.now);
     b.run(8);
-    EXPECT_FALSE(b.port.peer_domain_registered());
-    EXPECT_EQ(b.port.domain().sr_class_vid, 2);
-    EXPECT_TRUE(reports.empty());
+    EXPECT_TRUE(b.port.peer_domain_registered());
+    EXPECT_EQ(b.port.domain().sr_class_priority, 2);
+    EXPECT_EQ(b.port.domain().sr_class_vid, 7);
+    using Reports = std::vector<std::pair<uint16_t, bool>>;
+    EXPECT_TRUE(reports == Reports({{7, true}}));
+    auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(3));
+    EXPECT_FALSE(fv == nullptr || fv->get_priority() != 2 || fv->vlan_identifier.get() != 7);
 }
 
 // A Class B port (IEEE 802.1Q-2022 Clause 35.2.2.9) declares SRclassID 5 at priority 2, counts only the
