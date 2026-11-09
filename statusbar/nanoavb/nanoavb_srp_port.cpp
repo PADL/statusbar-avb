@@ -172,6 +172,7 @@ void SrpPort::withdraw_all(TimePoint const now)
     }
     msrp_.withdraw_all(now);
     mvrp_.withdraw_all(now);
+    reported_leaves_.clear();  // the next run reports afresh
 }
 
 void SrpPort::rejoin(TimePoint const now)
@@ -251,6 +252,9 @@ void SrpPort::report_leave(StreamId const& stream_id)
     if (msrp_.peer_talker_in(stream_id) || std::ranges::contains(reported_leaves_, stream_id)) {
         return;
     }
+    if (reported_leaves_.size() == decltype(reported_leaves_)::capacity()) {
+        reported_leaves_.erase(reported_leaves_.begin());  // the oldest: at worst reported again
+    }
     (void)reported_leaves_.try_push_back(stream_id);
     if (observer_.on_talker_leave) {
         observer_.on_talker_leave(stream_id);
@@ -269,8 +273,19 @@ void SrpPort::flush()
     for (auto const& sid : pending_leaves_) {
         report_leave(sid);
     }
+    if (!pending_leaves_.empty()) {
+        forget_left_talkers();  // a LeaveTime expiry is a leave too: its registration has gone
+    }
     pending_leaves_.clear();
     flush_domain();
+}
+
+void SrpPort::forget_left_talkers() noexcept
+{
+    auto const gone = std::ranges::remove_if(reported_leaves_, [this](StreamId const& sid) {
+        return msrp_.peer_talker_advertise(sid) == nullptr && msrp_.peer_talker_failed(sid) == nullptr;
+    });
+    reported_leaves_.erase(gone.begin(), gone.end());
 }
 
 void SrpPort::flush_domain()
