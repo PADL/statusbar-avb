@@ -29,6 +29,7 @@ from .model import (
     LISTENER_CAPABILITIES_NAMES,
     STREAM_FLAGS_NAMES,
     JACK_FLAGS_NAMES,
+    PORT_FLAGS_NAMES,
     JACK_TYPE_VALUES,
     CLOCK_SOURCE_TYPE_VALUES,
     INTERFACE_FLAGS_NAMES,
@@ -101,6 +102,8 @@ def _write_port(port: AudioStreamPort, unit_clock_domain_index: int = 0) -> dict
     result: dict = {}
     if port.clock_domain_index != unit_clock_domain_index:
         result["clock_domain_index"] = port.clock_domain_index
+    if port.port_flags:
+        result["flags"] = _flags_to_names(port.port_flags, PORT_FLAGS_NAMES)
     if port.clusters:
         result["clusters"] = [_write_cluster(c) for c in port.clusters]
     if port.maps:
