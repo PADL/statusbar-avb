@@ -337,8 +337,8 @@ class AvbEntityKit
     // accepts the unit's current rate only. The rules are in docs/AVB_ENTITY_KIT.md.
 
     /// The entity's data plane adopts a stream's new (decoded) format before the kit does, answering an
-    /// AEM status (reactor thread); a format at another rate than the unit's comes unmapped
-    /// (set_output_mappings_across_rates), and a data plane at the unit's rate may refuse it.
+    /// AEM status (reactor thread); a format at another rate than the unit's comes unmapped unless its port
+    /// converts rates (or set_output_mappings_across_rates), and a data plane may refuse a rate it cannot run.
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
@@ -376,8 +376,8 @@ class AvbEntityKit
     /// STREAM_PORT_INPUT @p port_index's dynamic mappings, in cluster order.
     [[nodiscard]] auto input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
     /// The channels of STREAM_OUTPUT @p stream_index the model's static AUDIO_MAPs name (1 + the
-    /// highest; 0: none): a SET_STREAM_FORMAT narrower than that, or while any at another rate
-    /// than the unit's (unless set_output_mappings_across_rates), is BAD_ARGUMENTS.
+    /// highest; 0: none): a SET_STREAM_FORMAT narrower than that, or at another rate than the unit's
+    /// on a port that does not convert (unless set_output_mappings_across_rates), is BAD_ARGUMENTS.
     [[nodiscard]] auto output_static_map_channels(uint16_t stream_index) const -> uint16_t;
     /// The data plane cannot route STREAM_PORT_INPUT @p port_index's mappings in
     /// force: fall back to the default (unmapped if that is refused too), warned,
@@ -616,19 +616,22 @@ class AvbEntityKit
     /// Whether the talkers fit the class A budget (see set_link_mbps) with STREAM_OUTPUT
     /// @p index at format @p word; a change that lowers the total always does.
     [[nodiscard]] auto talkers_fit(uint16_t index, uint64_t word) const noexcept -> bool;
-    /// Whether a port map names stream @p index of the direction (@p output): a static AUDIO_MAP,
-    /// or an input's dynamic mapping; the kit's own output identity does not count.
+    /// Whether a map on a port that converts no rates names stream @p index of the direction (@p output): a static
+    /// AUDIO_MAP, or an input's dynamic mapping; the kit's own output identity does not count.
     [[nodiscard]] auto stream_mapped(bool output, uint16_t index) const -> bool;
+    /// Whether stream port (@p port_type, @p port_index) sets ASYNC_ or SYNC_SAMPLE_RATE_CONV (Milan v1.3 Section 5.3.3.7).
+    [[nodiscard]] auto port_converts(uint16_t port_type, uint16_t port_index) const -> bool;
     /// Whether stream @p index of that direction must stay at the unit's rate: mapped, and not an output
     /// under set_output_mappings_across_rates().
     [[nodiscard]] auto held_at_unit_rate(bool output, uint16_t index) const -> bool;
-    /// The channels of stream @p stream_index the static AUDIO_MAPs of @p port_type's ports name.
-    [[nodiscard]] auto static_map_channels(uint16_t port_type, uint16_t stream_index) const -> uint16_t;
+    /// The channels of stream @p stream_index the static AUDIO_MAPs of @p port_type's ports name (with
+    /// @p unconverted_only, of the ports that convert no rates).
+    [[nodiscard]] auto static_map_channels(uint16_t port_type, uint16_t stream_index, bool unconverted_only) const -> uint16_t;
     /// Stream @p port_index's channels in order onto port (@p port_type, @p port_index)'s cluster
-    /// channels in order, as far as both go; none for a stream at another rate than the unit's.
+    /// channels in order, as far as both go; none for a stream identity_spec() leaves out.
     [[nodiscard]] auto identity_mappings(uint16_t port_type, uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
     /// The spec of the stream port (@p port_type, @p port_index)'s identity names; nullptr when it has none or it is
-    /// at another rate than the unit's, unless an output under set_output_mappings_across_rates.
+    /// at another rate than the unit's, unless the port converts or an output under set_output_mappings_across_rates.
     [[nodiscard]] auto identity_spec(uint16_t port_type, uint16_t port_index) const -> StreamSpec const*;
     /// Every dynamic output port onto its identity for the formats now in force.
     void refresh_output_mappings();
