@@ -126,8 +126,8 @@ TEST(talker_gate, the_media_side_and_the_reactor_agree_on_a_ready_set_and_cleare
 }
 
 // A Ready that came and went while the media side was not asked (no wakes while PTP is
-// unlocked) is judged by its stamp, not by when the media side looks: closed after the grace.
-TEST(talker_gate, a_ready_missed_over_a_long_gap_is_judged_by_its_stamp)
+// unlocked) is checked against its stamp, not against when the media side looks: closed after the grace.
+TEST(talker_gate, a_ready_missed_over_a_long_gap_is_checked_against_its_stamp)
 {
     TalkerGate gate{true, lookup};
     gate.note_listener_ready(sid(0x100), true, T0);

@@ -121,7 +121,130 @@ The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
 `gptp::MessageHeader`), the management header (15.4.1), the MANAGEMENT TLV
 (15.5.2) and the data sets (15.5.3). `build_management_get()` and
 `parse_management_message()` are pure and portable, so the wire format is unit
-tested without a ptp4l.
+tested without a ptp4l, and fuzzed.
+
+Every port's portState is kept in `state().port_states` (by portNumber, the
+first `MAX_PTP4L_PORTS`), from each PORT_DATA_SET answered or notified, and a
+change is reported. `clock_synchronized(state)` reads them: ptp4l's clock is
+synchronised to its domain while it follows a grandmaster with a port in SLAVE,
+or is the grandmaster with a port in MASTER and none UNCALIBRATED (linuxptp
+reports its PS_GRAND_MASTER as MASTER). linuxptp moves a port from SLAVE to
+UNCALIBRATED when its servo jumps or unlocks, and back once it locks again.
+ptp4l steps the clock before it dispatches the fault, so a host learns of a step
+just after it happens.
+
+### Notifications, polling and grandmaster settings
+
+The client always subscribes to `port_state` and `parent_data_set`, and to the
+further events in `PtpManagementConfig::events` (`time_sync`). ptp4l pushes, to
+the socket that last subscribed with the client's source port identity, an
+unsolicited RESPONSE carrying the whole data set an event concerns: a port's
+PORT_DATA_SET on each state change, PARENT_DATA_SET when it changes (linuxptp
+4.2) and TIME_STATUS_NP on each clock update. They are parsed as the answers to
+GETs are. A new parent also fetches CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET
+again; TIME_STATUS_NP is kept in `state().time_status` and reports nothing by
+itself. ptp4l notifies nothing for TIME_PROPERTIES_DATA_SET or for a port's
+peerMeanPathDelay, so those are polled every `poll_period_ns`, with
+PARENT_DATA_SET too while ptp4l holds no subscription (it refuses one on the
+read-only socket; that refusal is not reported in `state().refused`).
+
+The subscription lasts `subscription_duration_s` (6 s by default; 65535 would
+never expire and is refused) and is renewed three times per duration, as phc2sys
+does (pmc_agent.c), so one renewal can be lost before ptp4l prunes it
+(clock.c `clock_prune_subscriptions`). A renewal is a GET then a SET of
+SUBSCRIBE_EVENTS_NP, with a GET of GRANDMASTER_SETTINGS_NP when the client set
+some: an answer to the GET without our events is a restarted ptp4l, so the client
+fetches everything again and sends its settings, and settings other than ours are
+sent again. It is also the keepalive: two renewals without any answer from ptp4l
+make the client unreachable, and so does a send ptp4l's socket refuses (ENOENT,
+ECONNREFUSED: it exited or is restarting); everything learnt is then forgotten and
+the probes resume. A client being destroyed unsubscribes (an empty bitmask).
+
+`set_grandmaster_settings()` sends SET GRANDMASTER_SETTINGS_NP: the clockQuality
+(clockClass, clockAccuracy, offsetScaledLogVariance), currentUtcOffset, the time
+flags and the time source that ptp4l announces while it is grandmaster. This is
+linuxptp's external-grandmaster path: a `serverOnly 1`, `free_running 1` ptp4l
+timestamps and announces while something else steers its PHC (`PhcServo`
+below), and the steering process states its quality, such as clockClass 13 when
+locked to an application-specific source and 248 when not (IEEE 1588-2019
+Table 4). ptp4l's answer lands in `state().grandmaster_settings`, a
+MANAGEMENT_ERROR_STATUS in `state().refused`; an answer with other settings than
+ours sends ours again. The settings and the subscription need ptp4l's read-write
+socket (`uds_address`, not `uds_ro_address`).
+
+## ptpclient: PHC cross-timestamps and the PHC servo
+
+`PhcDevice` opens a `/dev/ptpN` and reads it against CLOCK_MONOTONIC_RAW by the
+best method the device and kernel offer: `PTP_SYS_OFFSET_PRECISE` (a hardware
+cross-timestamp over PCIe PTM, as on an I226) when the capabilities say so;
+`PTP_SYS_OFFSET_EXTENDED` with `clockid` CLOCK_MONOTONIC_RAW (Linux 6.11 and
+later; an older kernel refuses the field with EINVAL); else a software bracket of
+`clock_gettime` RAW, PHC, RAW. Each read uses `samples` brackets (9 by default)
+and keeps the narrowest, its midpoint as the instant. A failed hardware
+cross-timestamp (a PTM timeout) falls back to the next method for that read.
+`frequency_ppb()` needs a writable device, as the kernel refuses
+`clock_adjtime` on a read-only PHC descriptor.
+
+`PhcCrossTimestamp` pairs two PHCs, as phc2sys's `sysoff_measure` does but with
+RAW in place of the system clock: read PHC0, PHC_d, PHC0, and interpolate PHC0 at
+PHC_d's instant (over tens of microseconds, where the clocks' rate difference
+is negligible). A sample's `uncertainty_ns` is half PHC_d's bracket plus half
+PHC0's mean bracket. The two may be the same device, which checks the
+arithmetic: the pair then agrees to within its brackets.
+
+`PhcServo` steers a PHC to a target given per sample, as `error_ns = t_phc -
+t_target`: linuxptp's `pi.c` with its hardware-timestamping constants (kp =
+0.7 × interval^-0.3, at most 0.7 / interval; ki = 0.3 × interval^0.4, at most
+0.3 / interval; at 16 updates a second kp = 1.61, ki = 0.099), the first
+frequency estimate after 0.016 / ki seconds, and an anti-windup clamp at
+`max_frequency_ppb` (give the device's `max_frequency_ppb()`). It steps only on
+that first estimate and only before its first lock, past
+`first_step_threshold_ns` (20 µs, linuxptp's `first_step_threshold`); afterwards
+it slews. It is locked after 16 samples under 100 ns and unlocked after 16 over
+1 µs. `freeze()` holds the frequency (the PHC free-runs on its last correction)
+until `thaw()`; `reset()` starts over from the frequency in force and allows a
+step again. A known target rate goes in as `feed_forward_ppb`, so the integrator
+learns only the PHC's own oscillator error. The servo is arithmetic only;
+`apply()` sets the frequency (ADJ_FREQUENCY) and steps (ADJ_SETOFFSET).
+
+The tests that touch real clocks skip unless the devices open. On a box with
+PHCs, as root:
+
+```
+STATUSBAR_PHC0=/dev/ptp0 STATUSBAR_PHCD=/dev/ptp1 STATUSBAR_PHC_SERVO_DEVICE=/dev/ptp1 \
+    ctest --test-dir build -R 'ptpclient_phc' -V
+```
+
+`STATUSBAR_PHC_SERVO_DEVICE` names a spare PHC the servo test may steer for ten
+seconds onto a line 1 ms ahead of its start at +100 ppm over PHC0. It restores the
+frequency afterwards, not the time, so never name a PHC that ptp4l or phc2sys
+disciplines.
+
+## ptpclient: pulse lock
+
+`PulseLock` decides whether a PHC is locked to another clock's 1 PPS from the PHC's own
+external timestamps of it: the pulses ts2phc steers a sink by, with the source
+emitting at its whole seconds. Each event is checked against the whole second nearest
+it. An event further than `edge_window_ns` (250 ms) from one is the pulse's other
+edge, which ts2phc also stamps (`extts_polarity both`), and is ignored. A pulse is
+good when it lies within `max_offset_ns` (25 µs) of its second, and when the
+reference clock, read as the event is handled, lies between half a second before
+and a second after that second. The second test catches a sink stepped by whole seconds, such as one
+an adapter reset set to the system time, which a pulse alone cannot show.
+
+The lock holds after `settle_pulses` (3) good pulses in a row. It goes at one bad
+pulse, or, through `expire()`, after `max_silence_ns` (3 s) without one: an adapter
+reset that disarms the channel, or ts2phc gone. It is event-driven: `pulse()` per
+event and `expire()` when the host's deadline passes.
+
+`ExttsReader` reads one channel's events on a descriptor of its own: a reactor
+`Pollable` over the `/dev/ptpN`. Since Linux 6.7 each open file has its own event
+queue (`ptp_open()`), and `PTP_MASK_CLEAR_ALL` / `PTP_MASK_EN_SINGLE` keep only the
+channel wanted. The channel stays its owner's (ts2phc enables it with
+`PTP_EXTTS_REQUEST`); the reader never enables or disables it. On a kernel without
+the mask ioctls one queue is shared, and reading it would steal the owner's events,
+so `open()` refuses with `not_supported`. One `read()` per readiness:
+`ptp_read()` blocks on an empty queue whatever `O_NONBLOCK` says.
 
 ## ptpclient: waking on a PTP deadline
 
