@@ -792,6 +792,7 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // command (e.g. an IDENTIFY button pressed at startup). process_packet keeps it
     // current thereafter.
     components.aem_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
+    components.mvu_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
 
     // MVRP: send packets to multicast
     components.mvrp_handler.set_callbacks(MvrpCallbacks{.send_packet = [&handlers](std::span<uint8_t const> packet) -> bool {

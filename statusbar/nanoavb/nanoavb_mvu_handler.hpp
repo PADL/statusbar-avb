@@ -47,6 +47,10 @@ class MvuCommandHandler
     /// Set the callback that sends a response, unicast to the controller
     void set_send_response(SendAemResponseFn fn) { send_response_ = std::move(fn); }
 
+    /// The entity's id, the target_entity_id of its unsolicited responses; process_packet keeps it
+    /// current. NanoAvbComponents seeds it, so a notification before any MVU command carries it.
+    void set_entity_id(Eui64 const& entity_id) noexcept { our_entity_id_ = entity_id; }
+
     /// GET_MILAN_INFO certification_version (atdecc::mvu::milan_certification_version);
     /// 0, the default, until the entity has passed Milan certification.
     void set_certification_version(uint32_t const version) noexcept { certification_version_ = version; }
