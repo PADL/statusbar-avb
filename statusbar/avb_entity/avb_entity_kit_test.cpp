@@ -2072,6 +2072,24 @@ struct MilanPair
         return *l.kit.stream_port().test_port();
     }
 
+    /// Stop the listener and start it again on a fresh test port, its sends captured as start()'s; that port.
+    auto restart_listener() -> net::TestPortContext&
+    {
+        EXPECT_TRUE(l.kit.stop(now).has_value());
+        auto& wire = listener_wire();
+        EXPECT_TRUE(l.start_ready());
+        auto const queue = [this](atdecc::AcmpCommandResponse const& pdu) {
+            acmp.push_back(pdu);
+            return true;
+        };
+        lc().acmp_listener.set_transmit(queue, queue);
+        lc().msrp_handler.set_send_packet([this](std::span<uint8_t const> p) {
+            to_t.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        return wire;
+    }
+
     /// The talker's ENTITY_AVAILABLE reaching the listener.
     void talker_advertises()
     {
@@ -2277,22 +2295,89 @@ TEST(avb_entity_kit_milan_listener, a_rebind_leaves_the_old_group_and_joins_the_
     EXPECT_EQ(joins(second), 1);
 }
 
-// stop() leaves the groups of the connections that outlive it (an AF_XDP port's
-// memberships are the interface's); the next start() joins them again, once
-TEST(avb_entity_kit_milan_listener, a_restart_joins_a_surviving_connection_once)
+// stop() leaves every group an input holds, the connected one included; the
+// log outlives the port stop() closes
+TEST(avb_entity_kit_milan_listener, a_stop_leaves_the_connected_group)
 {
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
     MilanPair p;
-    (void)p.listener_wire();
+    p.listener_wire().record_memberships(&log);
     EXPECT_TRUE(p.start());
     ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x03};
+    auto const held = [&log](ieee::Eui48 const& g) {
+        return std::ranges::count(log, net::TestPortContext::MembershipChange{.group = g, .joined = true}) -
+            std::ranges::count(log, net::TestPortContext::MembershipChange{.group = g, .joined = false});
+    };
     (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
     p.probe_answered(group);
-    EXPECT_TRUE(p.l.kit.stop().has_value());
+    EXPECT_EQ(held(group), 1);
+
+    EXPECT_TRUE(p.l.kit.stop(p.now).has_value());
+    EXPECT_EQ(held(group), 0);
+    EXPECT_TRUE(std::ranges::all_of(log, [&held](auto const& change) { return held(change.group) == 0; }));
+}
+
+// A locked entity's stop() still unbinds its inputs, as the locking controller
+TEST(avb_entity_kit_milan_listener, a_stop_unbinds_a_locked_entitys_input)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};  // locked by controller 0
+    EXPECT_EQ(p.l.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(p.l.kit.stop(p.now).has_value());
+    EXPECT_FALSE(p.sink().bound());
+}
+
+// stop() drops the input's connection, not its saved binding: after a restart
+// it is unconnected until the binding settles again, declared and joined anew
+TEST(avb_entity_kit_milan_listener, a_restart_reconnects_from_the_saved_binding)
+{
+    auto const dir = state_dir("restart");
+    auto const path = (dir / "avb-state.toml").string();
+    MilanPair p{path};
+    (void)p.listener_wire();
+    EXPECT_TRUE(p.start());
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    p.pump(10);
+    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
+    auto const group = p.lc().acmp_listener.get_stream(0)->stream_dest_mac;
+
+    auto const& rewired = p.restart_listener();
+    auto const joins = [&rewired, &group] { return std::ranges::count(rewired.joined_multicast_groups(), group); };
+    auto const static_joins = joins();  // the loopback topology's pre-joined group may be the same
+    EXPECT_EQ(load_persistent_state(path, 0, {}).state.listener_bindings.size(), size_t{1});
+    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_avail);
+    EXPECT_FALSE(p.lc().acmp_listener.is_connected(0));
+    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Idle);
+
+    p.talker_advertises();
+    p.pump(20);  // TMR_DELAY, the probe, the reservation
+    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
+    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
+    EXPECT_EQ(joins(), static_joins + 1);
+    std::filesystem::remove_all(dir);
+}
+
+// A classic input is disconnected by stop() with its fast-connect goal kept;
+// after a restart the goal connects it again
+TEST(avb_entity_kit_milan_listener, a_classic_restart_reconnects_from_the_goal)
+{
+    auto const dir = state_dir("classic-restart");
+    MilanPair p{(dir / "avb-state.toml").string(), false};
+    (void)p.listener_wire();
+    EXPECT_TRUE(p.start());
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    p.pump(10);
     EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
 
-    auto const& rewired = p.listener_wire();
-    EXPECT_TRUE(p.l.start_ready());
-    EXPECT_EQ(std::ranges::count(rewired.joined_multicast_groups(), group), 1);
+    (void)p.restart_listener();
+    EXPECT_FALSE(p.lc().acmp_listener.is_connected(0));
+    EXPECT_EQ(p.lc().acmp_listener.fast_connect_goals().size(), size_t{1});
+    p.pump(30);  // FAST_CONNECT_RETRY, the CONNECT_TX, the reservation
+    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
+    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
+    std::filesystem::remove_all(dir);
 }
 
 // [avb] milan = false keeps the classic listener: CONNECT_RX relayed as
