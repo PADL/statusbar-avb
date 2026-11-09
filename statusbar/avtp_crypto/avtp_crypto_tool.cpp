@@ -157,6 +157,8 @@ static void usage()
         "  ecies_decrypt        <seed> <ciphertext>         -> ok|fail plaintext\n"
         "  eecf_ecc1_encrypt    <pubkey> <entropy> <pt>     -> V||T||C (hex, IEEE 1722-2025 17.3.2 encrypted_payload)\n"
         "  eecf_ecc1_decrypt    <seed> <encrypted_payload>  -> ok|fail plaintext\n"
+        "  eecf_ecc2_encrypt    <pubkey> <ikm_e> <aad> <pt> -> enc||C||T (hex, ECC2 encrypted_payload; aad = EECF header)\n"
+        "  eecf_ecc2_decrypt    <seed> <aad> <encrypted_payload> -> ok|fail plaintext\n"
         "  x25519_ecies_encrypt <pubkey> <entropy> <pt>     -> V||C||T (hex)\n"
         "  x25519_ecies_decrypt <seed> <ciphertext>         -> ok|fail plaintext\n"
         "  backend                                          -> resolved hw/sw backend per primitive\n"
@@ -981,6 +983,57 @@ static void cmd_eecf_ecc1_decrypt(int argc, char** argv)
 }
 
 //
+// EECF ECC2 encrypted_payload command handlers (RFC 9180 HPKE base mode: enc || C || T)
+//
+
+static void cmd_eecf_ecc2_encrypt(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 4, "eecf_ecc2_encrypt");
+    auto pk_bytes = hex_decode(argv[2]);
+    auto ikm_bytes = hex_decode(argv[3]);
+    SecureVectorGuard const guard_ikm{ikm_bytes};
+    auto aad = hex_decode(argv[4]);
+    auto pt = hex_decode(argv[5]);
+
+    P256PublicKey pk;
+    require_copy(pk.data, pk_bytes, "public_key");
+    std::array<uint8_t, hpke_min_ikm_size> ikm_e;
+    require_copy(ikm_e, ikm_bytes, "ikm_e");
+
+    std::vector<uint8_t> output(statusbar::crypto::avtp::eecf_ecc2_encrypted_size(pt.size()));
+    auto result = statusbar::crypto::avtp::eecf_ecc2_encrypt_payload(pk, aad, pt, output, ikm_e);
+    if (!result) {
+        std::println(stderr, "error: eecf_ecc2_encrypt failed");
+        std::exit(1);
+    }
+    hex_print(*result);
+    std::println("");
+}
+
+static void cmd_eecf_ecc2_decrypt(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 3, "eecf_ecc2_decrypt");
+    auto seed = hex_decode(argv[2]);
+    SecureVectorGuard const guard_seed{seed};
+    auto aad = hex_decode(argv[3]);
+    auto payload = hex_decode(argv[4]);
+
+    std::array<uint8_t, p256_scalar_size> seed_arr;
+    require_copy(seed_arr, seed, "seed");
+
+    auto sk = p256_ecdsa_keypair_from_seed(seed_arr);
+    std::vector<uint8_t> plaintext(payload.size());
+    auto result = statusbar::crypto::avtp::eecf_ecc2_decrypt_payload(sk, aad, payload, plaintext);
+    if (!result) {
+        std::println("fail");
+    } else {
+        std::print("ok ");
+        hex_print(*result);
+        std::println("");
+    }
+}
+
+//
 // X25519 ECIES command handlers
 //
 
@@ -1259,6 +1312,10 @@ int main(int argc, char** argv)
         cmd_eecf_ecc1_encrypt(argc, argv);
     } else if (cmd == "eecf_ecc1_decrypt") {
         cmd_eecf_ecc1_decrypt(argc, argv);
+    } else if (cmd == "eecf_ecc2_encrypt") {
+        cmd_eecf_ecc2_encrypt(argc, argv);
+    } else if (cmd == "eecf_ecc2_decrypt") {
+        cmd_eecf_ecc2_decrypt(argc, argv);
     } else if (cmd == "x25519_ecies_encrypt") {
         cmd_x25519_ecies_encrypt(argc, argv);
     } else if (cmd == "x25519_ecies_decrypt") {

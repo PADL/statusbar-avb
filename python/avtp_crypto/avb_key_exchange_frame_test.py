@@ -90,6 +90,9 @@ EECF_SUBTYPE = 0xED
 EECF_HEADER_SIZE = 12  # subtype_data(4) + key_id(8)
 EECF_PAYLOAD_OFFSET = ETHERNET_HEADER_SIZE + EECF_HEADER_SIZE  # 26
 EECF_ENC_ECC1 = 0
+EECF_ENC_ECC2 = (
+    1  # RFC 9180 HPKE base mode (statusbar proposal, avb/docs/EECF_ECC2_PROPOSAL.md)
+)
 EECF_TIMESTAMP_SIZE = 8
 
 
@@ -449,6 +452,7 @@ class ParsedEecfFrame:
     enc: int
     encrypted_payload_length: int
     key_id: bytes
+    header: bytes  # the 12-octet EECF header as received (the ECC2 HPKE aad)
     encrypted_payload: bytes
 
 
@@ -514,6 +518,7 @@ def parse_eecf_frame(frame: bytes) -> ParsedEecfFrame:
         enc=enc,
         encrypted_payload_length=epl,
         key_id=key_id,
+        header=frame[ETHERNET_HEADER_SIZE:EECF_PAYLOAD_OFFSET],
         encrypted_payload=encrypted_payload,
     )
 
@@ -591,6 +596,91 @@ def eecf_decrypt(
     (timestamp,) = struct.unpack("!Q", plaintext[:EECF_TIMESTAMP_SIZE])
     avtpdu = plaintext[EECF_TIMESTAMP_SIZE:]
     return timestamp, avtpdu
+
+
+# ECC2 encrypted_payload (statusbar proposal, avb/docs/EECF_ECC2_PROPOSAL.md): RFC 9180
+# HPKE base mode with DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, laid out
+# as enc (65) || C || T (16). The HPKE info is a fixed string; the HPKE aad is the
+# frame's 12-octet EECF header, so enc, encrypted_payload_length and key_id are
+# authenticated with the payload.
+ECC2_ENC_SIZE = 65
+ECC2_TAG_SIZE = 16
+ECC2_OVERHEAD = ECC2_ENC_SIZE + ECC2_TAG_SIZE  # 81
+ECC2_INFO = b"IEEE 1722 EECF ECC2"
+
+
+def eecf_ecc2_header(key_id: bytes, encrypted_payload_size: int) -> bytes:
+    """The EECF header an ECC2 payload is bound to: what build_eecf_frame writes for enc = ECC2."""
+    return build_eecf_frame(
+        bytes(6), bytes(6), EECF_ENC_ECC2, key_id, bytes(encrypted_payload_size)
+    )[ETHERNET_HEADER_SIZE:EECF_PAYLOAD_OFFSET]
+
+
+def eecf_ecc2_encrypt_payload(
+    recipient_pk: sc.P256PublicKey, aad: bytes, plaintext: bytes, ikm_e: bytes
+) -> bytes:
+    """ECC2 encrypted_payload (enc || C || T) for an arbitrary plaintext and aad."""
+    enc, ctx = sc.hpke_setup_base_s(
+        sc.hpke_aead_aes256_gcm, recipient_pk, ECC2_INFO, ikm_e
+    )
+    tag, ct = sc.hpke_seal(ctx, aad, plaintext)
+    return enc + ct + tag
+
+
+def eecf_ecc2_decrypt_payload(
+    recipient_sk: sc.P256PrivateKey, aad: bytes, encrypted_payload: bytes
+) -> bytes:
+    """Plaintext of an ECC2 encrypted_payload; ValueError on a bad shape or tag."""
+    if len(encrypted_payload) < ECC2_OVERHEAD:
+        raise ValueError(
+            f"not an ECC2 encrypted_payload: {len(encrypted_payload)} octets"
+        )
+    ctx = sc.hpke_setup_base_r(
+        sc.hpke_aead_aes256_gcm,
+        encrypted_payload[:ECC2_ENC_SIZE],
+        recipient_sk,
+        ECC2_INFO,
+    )
+    ok, plaintext = sc.hpke_open(
+        ctx,
+        aad,
+        encrypted_payload[ECC2_ENC_SIZE:-ECC2_TAG_SIZE],
+        encrypted_payload[-ECC2_TAG_SIZE:],
+    )
+    if not ok:
+        raise ValueError("ECC2 tag verification failed")
+    return plaintext
+
+
+def eecf_ecc2_encrypt(
+    inner_avtpdu: bytes,
+    recipient_pk: sc.P256PublicKey,
+    key_id: bytes,
+    timestamp: int,
+    ikm_e: bytes,
+) -> bytes:
+    """Encrypt an inner AVTPDU for EECF ECC2 encapsulation under key_id.
+
+    The plaintext is encryption_timestamp(8) || encapsulated_avtpdu (17.3.3); the
+    aad is the EECF header the frame will carry. Returns enc || C || T.
+    """
+    plaintext = struct.pack("!Q", timestamp) + inner_avtpdu
+    aad = eecf_ecc2_header(key_id, len(plaintext) + ECC2_OVERHEAD)
+    return eecf_ecc2_encrypt_payload(recipient_pk, aad, plaintext, ikm_e)
+
+
+def eecf_ecc2_decrypt(
+    encrypted_payload: bytes, header: bytes, recipient_sk: sc.P256PrivateKey
+) -> tuple[int, bytes]:
+    """Decrypt an ECC2 encrypted_payload received under the 12-octet EECF header.
+
+    Returns (encryption_timestamp, encapsulated_avtpdu).
+    """
+    plaintext = eecf_ecc2_decrypt_payload(recipient_sk, header, encrypted_payload)
+    if len(plaintext) < EECF_TIMESTAMP_SIZE:
+        raise ValueError("EECF decrypted payload too short for timestamp")
+    (timestamp,) = struct.unpack("!Q", plaintext[:EECF_TIMESTAMP_SIZE])
+    return timestamp, plaintext[EECF_TIMESTAMP_SIZE:]
 
 
 # ---------------------------------------------------------------------------
@@ -1282,6 +1372,68 @@ class TestFrameBuildParse(unittest.TestCase):
         self.assertEqual(ts, 0x0123456789ABCDEF)
         self.assertEqual(dec, avtpdu)
 
+    # ECC2 known answers from the Python HPKE reference (statusbar_crypto.py over the
+    # cryptography package; also carried by avtp_aem_frame_test.cpp and the golden
+    # capture): same recipient, ikm_e = ECC1_KAT_ENTROPY, key_id 70-B3-D5-ED-C4-00-00-42.
+    ECC2_KAT_KEY_ID = bytes.fromhex("70b3d5edc4000042")
+    ECC2_KAT_HELLO = bytes.fromhex(
+        "04289dce76026f47dcb7d77006982f29b06f0e58c166b738d5dfcd276280de6d23"
+        "7c66c8670a4191c3ffb0de2cb2bb793c885fc8631d0dca63795c4dad394aa7cd"
+        "e927f21be61587d511f47e61b2a848ecdf4524fd10762fe8efa7ab8b526ef733"
+    )
+    ECC2_KAT_FRAMED = bytes.fromhex(
+        "04289dce76026f47dcb7d77006982f29b06f0e58c166b738d5dfcd276280de6d23"
+        "7c66c8670a4191c3ffb0de2cb2bb793c885fc8631d0dca63795c4dad394aa7cd"
+        "a061db1000926a7251ae2952e3fe1dc92245c6bf41452b5b84bbe99ed14496be"
+        "08c5186eb4fdbd3f"
+    )
+
+    def test_eecf_ecc2_payload_known_answer(self):
+        """ECC2 payload for 'Hello, HPKE ECC2' under its header as aad."""
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        aad = eecf_ecc2_header(self.ECC2_KAT_KEY_ID, len(self.ECC2_KAT_HELLO))
+        self.assertEqual(aad, bytes.fromhex("ed01006170b3d5edc4000042"))
+        payload = eecf_ecc2_encrypt_payload(
+            kp.public_key, aad, b"Hello, HPKE ECC2", self.ECC1_KAT_ENTROPY
+        )
+        self.assertEqual(payload, self.ECC2_KAT_HELLO)
+        self.assertEqual(
+            eecf_ecc2_decrypt_payload(kp, aad, self.ECC2_KAT_HELLO), b"Hello, HPKE ECC2"
+        )
+
+    def test_eecf_ecc2_framed_known_answer(self):
+        """ECC2 payload of the 17.3.3 plaintext, through a built and parsed frame."""
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        payload = eecf_ecc2_encrypt(
+            bytes(range(0x10, 0x20)),
+            kp.public_key,
+            self.ECC2_KAT_KEY_ID,
+            0x0123456789ABCDEF,
+            self.ECC1_KAT_ENTROPY,
+        )
+        self.assertEqual(payload, self.ECC2_KAT_FRAMED)
+        frame = build_eecf_frame(
+            bytes(6), bytes(6), EECF_ENC_ECC2, self.ECC2_KAT_KEY_ID, payload
+        )
+        parsed = parse_eecf_frame(frame)
+        self.assertEqual(parsed.enc, EECF_ENC_ECC2)
+        ts, dec = eecf_ecc2_decrypt(parsed.encrypted_payload, parsed.header, kp)
+        self.assertEqual((ts, dec), (0x0123456789ABCDEF, bytes(range(0x10, 0x20))))
+
+    def test_eecf_ecc2_header_is_authenticated(self):
+        """A header with another key_id, enc or length does not open the payload."""
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        good = eecf_ecc2_header(self.ECC2_KAT_KEY_ID, len(self.ECC2_KAT_FRAMED))
+        other_key = eecf_ecc2_header(
+            bytes.fromhex("70b3d5edc4000043"), len(self.ECC2_KAT_FRAMED)
+        )
+        downgraded = bytes([good[0], EECF_ENC_ECC1]) + good[2:]
+        for bad in (other_key, downgraded, good[:-1] + bytes([good[-1] ^ 1])):
+            with self.assertRaises(ValueError):
+                eecf_ecc2_decrypt(self.ECC2_KAT_FRAMED, bad, kp)
+        with self.assertRaises(ValueError):
+            eecf_ecc2_decrypt_payload(kp, good, self.ECC2_KAT_FRAMED[:80])
+
     def test_eecf_ecc1_rejects_bad_shapes(self):
         """A payload without a whole cipher block after V and T is not ECC1."""
         kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
@@ -1461,6 +1613,49 @@ class TestAvbKeyExchangeFrame(unittest.TestCase):
             self.cli_path, "eecf_ecc1_decrypt", seed.hex(), python_payload.hex()
         )
         self.assertEqual(out, "ok " + plaintext.hex())
+
+    def test_eecf_ecc2_payload_matches_cpp_tool(self):
+        """The C++ eecf_ecc2_encrypt/decrypt agree with the Python enc || C || T."""
+        if self.cli_path is None:
+            self.skipTest("no avtp_crypto_tool")
+        from avb_key_exchange_test import run_cli  # noqa: PLC0415
+
+        seed = TestFrameBuildParse.ECC1_KAT_SEED
+        ikm_e = TestFrameBuildParse.ECC1_KAT_ENTROPY
+        kp = sc.p256_ecdsa_keypair_from_seed(seed)
+        plaintext = struct.pack("!Q", 0x0123456789ABCDEF) + bytes(range(0x10, 0x20))
+        aad = eecf_ecc2_header(
+            TestFrameBuildParse.ECC2_KAT_KEY_ID, len(plaintext) + ECC2_OVERHEAD
+        )
+        cpp_payload = bytes.fromhex(
+            run_cli(
+                self.cli_path,
+                "eecf_ecc2_encrypt",
+                kp.public_key.data.hex(),
+                ikm_e.hex(),
+                aad.hex(),
+                plaintext.hex(),
+            )
+        )
+        self.assertEqual(cpp_payload, TestFrameBuildParse.ECC2_KAT_FRAMED)
+        python_payload = eecf_ecc2_encrypt_payload(kp.public_key, aad, plaintext, ikm_e)
+        self.assertEqual(cpp_payload, python_payload)
+        out = run_cli(
+            self.cli_path,
+            "eecf_ecc2_decrypt",
+            seed.hex(),
+            aad.hex(),
+            python_payload.hex(),
+        )
+        self.assertEqual(out, "ok " + plaintext.hex())
+        out = run_cli(
+            self.cli_path,
+            "eecf_ecc2_decrypt",
+            seed.hex(),
+            aad[:-1].hex() + "43",
+            python_payload.hex(),
+        )
+        self.assertEqual(out, "fail")
 
     def test_full_key_distribution_via_frames(self):
         """Run complete AUTH flow using frames for all 3 targets.

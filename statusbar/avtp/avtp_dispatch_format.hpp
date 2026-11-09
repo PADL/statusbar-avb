@@ -53,15 +53,20 @@ auto format_hex_dump(OutputIt out, std::span<uint8_t const> data) -> OutputIt
     return out;
 }
 
-/// ECC1 (IEEE 1722-2025 17.3.2): V (33 octets), T (32 octets), then C in whole
-/// cipher blocks. Prints nothing for other enc values or sizes that are not ECC1.
+/// The parts of an EECF encrypted_payload by enc value. ECC1 (IEEE 1722-2025
+/// 17.3.2): V (33 octets), T (32 octets), then C in whole cipher blocks. ECC2
+/// (RFC 9180 HPKE, statusbar proposal): enc (65 octets), C, then T (16 octets).
+/// Prints nothing for other enc values or sizes that do not fit the enc value.
 template <typename OutputIt>
-auto format_eecf_ecc1_split(OutputIt out, uint8_t enc, size_t encrypted_payload_size) -> OutputIt
+auto format_eecf_payload_split(OutputIt out, uint8_t enc, size_t encrypted_payload_size) -> OutputIt
 {
     constexpr size_t v_and_t = 33 + 32;
+    constexpr size_t enc_and_t = 65 + 16;
     bool const ecc1_shape = encrypted_payload_size >= v_and_t + 16 && ((encrypted_payload_size - v_and_t) % 16) == 0;
     if (enc == static_cast<uint8_t>(EecfEncMode::ecc1) && ecc1_shape) {
         out = std::format_to(out, "       ECC1: V 33 octets, T 32 octets, C {} octets\n", encrypted_payload_size - v_and_t);
+    } else if (enc == static_cast<uint8_t>(EecfEncMode::ecc2) && encrypted_payload_size >= enc_and_t) {
+        out = std::format_to(out, "       ECC2: enc 65 octets, C {} octets, T 16 octets\n", encrypted_payload_size - enc_and_t);
     }
     return out;
 }
@@ -231,7 +236,7 @@ auto format_avtp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
             break;
         }
 
-        case AvtpSubtype::eecf: {  // NOLINT(statusbar-block-statements) one subtype per case: header, payload, ECC1 split
+        case AvtpSubtype::eecf: {  // NOLINT(statusbar-block-statements) one subtype per case: header, payload, enc split
             if (payload.size() < EecfPdu::HEADER_LENGTH) {
                 out = std::format_to(out, "  AVTP EECF truncated ({} bytes, need {})\n", payload.size(), EecfPdu::HEADER_LENGTH);
                 return detail::format_hex_dump(out, payload);
@@ -248,7 +253,7 @@ auto format_avtp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
             if (!enc_payload.empty()) {
                 out = std::format_to(out, "       encrypted payload: {} bytes\n", enc_payload.size());
             }
-            out = detail::format_eecf_ecc1_split(out, pdu->enc(), enc_payload.size());
+            out = detail::format_eecf_payload_split(out, pdu->enc(), enc_payload.size());
             break;
         }
 

@@ -307,7 +307,7 @@ auto build_eecf_frame(
 // EECF frame parser
 
 auto parse_eecf_frame(span<uint8_t const> frame) -> std::optional<ParsedEecfFrame>
-{
+{  // NOLINT(statusbar-block-statements) frame parse: Ethernet check, EECF header, one copy per field, bounds
     if (frame.size() < eecf_payload_offset) {
         return std::nullopt;
     }
@@ -333,6 +333,7 @@ auto parse_eecf_frame(span<uint8_t const> frame) -> std::optional<ParsedEecfFram
     result.enc = eecf_opt->enc();
     result.encrypted_payload_length = eecf_opt->encrypted_payload_length();
     result.key_id = eecf_opt->key_id();
+    result.header = frame.subspan(ethernet_header_size, eecf_header_size);
 
     // Bound the ciphertext by the declared encrypted_payload_length, not the frame
     // extent, and reject a length that over-runs the frame -- otherwise padding is
@@ -368,13 +369,24 @@ auto ecc1_payload_to_triple(span<uint8_t const> encrypted_payload, span<uint8_t>
 }
 
 /// The 17.3.3 plaintext: encryption_timestamp (8 octets) then the encapsulated AVTPDU.
-auto ecc1_plaintext(span<uint8_t> storage, uint64_t encryption_timestamp, span<uint8_t const> encapsulated_avtpdu)
+auto framed_plaintext(span<uint8_t> storage, uint64_t encryption_timestamp, span<uint8_t const> encapsulated_avtpdu)
     -> span<uint8_t const>
 {
     auto const plaintext = storage.first(eecf_timestamp_size + encapsulated_avtpdu.size());
     span_store(plaintext.first(eecf_timestamp_size), statusbar::ieee::octlet_t{encryption_timestamp});
     span_copy(plaintext.subspan(eecf_timestamp_size), encapsulated_avtpdu);
     return plaintext;
+}
+
+/// A decrypted 17.3.3 plaintext split into encryption_timestamp and encapsulated AVTPDU.
+auto split_plaintext(std::optional<span<uint8_t const>> const& plaintext) -> std::optional<EecfPlaintext>
+{
+    if (!plaintext || plaintext->size() < eecf_timestamp_size) {
+        return std::nullopt;
+    }
+    statusbar::ieee::octlet_t timestamp{};
+    span_load(timestamp, plaintext->first(eecf_timestamp_size));
+    return EecfPlaintext{timestamp.get(), plaintext->subspan(eecf_timestamp_size)};
 }
 
 }  // namespace
@@ -428,21 +440,111 @@ auto eecf_ecc1_encrypt(
     }
 
     SecureArray<eecf_max_encrypted_payload_size> plaintext_storage{};
-    auto const plaintext = ecc1_plaintext(plaintext_storage, encryption_timestamp, encapsulated_avtpdu);
+    auto const plaintext = framed_plaintext(plaintext_storage, encryption_timestamp, encapsulated_avtpdu);
     return eecf_ecc1_encrypt_payload(recipient_pk, plaintext, out, entropy);
 }
 
 auto eecf_ecc1_decrypt(P256PrivateKey const& sk, span<uint8_t const> encrypted_payload, span<uint8_t> plaintext_out)
-    -> std::optional<EecfEcc1Plaintext>
+    -> std::optional<EecfPlaintext>
 {
-    auto const plaintext = eecf_ecc1_decrypt_payload(sk, encrypted_payload, plaintext_out);
-    if (!plaintext || plaintext->size() < eecf_timestamp_size) {
+    return split_plaintext(eecf_ecc1_decrypt_payload(sk, encrypted_payload, plaintext_out));
+}
+
+// ECC2 encrypted_payload codec (RFC 9180 HPKE base mode; avb/docs/EECF_ECC2_PROPOSAL.md)
+
+namespace {
+
+auto ecc2_info() -> span<uint8_t const>
+{
+    return {reinterpret_cast<uint8_t const*>(eecf_ecc2_info.data()), eecf_ecc2_info.size()};
+}
+
+/// Seal the plaintext behind enc in @p out (enc || C || T): C is sealed in place, T appended.
+auto ecc2_seal(HpkeContext& context, span<uint8_t const> aad, span<uint8_t const> plaintext, span<uint8_t> out) -> bool
+{
+    auto const ciphertext = out.subspan(eecf_ecc2_enc_size, plaintext.size());
+    span_copy(ciphertext, plaintext);
+    auto const tag = hpke_seal(context, aad, ciphertext);
+    if (!tag) {
+        return false;
+    }
+    span_copy(out.last(eecf_ecc2_tag_size), span<uint8_t const>(*tag));
+    return true;
+}
+
+}  // namespace
+
+auto eecf_ecc2_header(statusbar::ieee::Eui64 const& key_id, size_t const encrypted_payload_size)
+    -> std::array<uint8_t, eecf_header_size>
+{
+    statusbar::avtp::EecfPdu header{};
+    header.init(eecf_enc_ecc2, key_id);
+    header.set_encrypted_payload_length(static_cast<uint16_t>(encrypted_payload_size));
+    std::array<uint8_t, eecf_header_size> out{};
+    span_store(out, header);
+    return out;
+}
+
+auto eecf_ecc2_encrypt_payload(
+    P256PublicKey const& recipient_pk,
+    span<uint8_t const> aad,
+    span<uint8_t const> plaintext,
+    span<uint8_t> out,
+    span<uint8_t const, hpke_min_ikm_size> ikm_e) -> std::optional<span<uint8_t const>>
+{
+    size_t const size = eecf_ecc2_encrypted_size(plaintext.size());
+    if (size > eecf_max_encrypted_payload_size || out.size() < size) {
         return std::nullopt;
     }
+    auto setup = hpke_setup_base_s(eecf_ecc2_aead, recipient_pk, ecc2_info(), ikm_e);
+    if (!setup) {
+        return std::nullopt;
+    }
+    span_copy(out.first(eecf_ecc2_enc_size), span<uint8_t const>(setup->enc));
+    return ecc2_seal(setup->context, aad, plaintext, out.first(size)) ? std::optional{out.first(size)} : std::nullopt;
+}
 
-    statusbar::ieee::octlet_t timestamp{};
-    span_load(timestamp, plaintext->first(eecf_timestamp_size));
-    return EecfEcc1Plaintext{timestamp.get(), plaintext->subspan(eecf_timestamp_size)};
+auto eecf_ecc2_decrypt_payload(
+    P256PrivateKey const& sk, span<uint8_t const> aad, span<uint8_t const> encrypted_payload, span<uint8_t> plaintext_out)
+    -> std::optional<span<uint8_t const>>
+{
+    if (!eecf_ecc2_payload_size_is_valid(encrypted_payload.size()) ||
+        plaintext_out.size() < encrypted_payload.size() - eecf_ecc2_overhead) {
+        return std::nullopt;
+    }
+    auto context = hpke_setup_base_r(eecf_ecc2_aead, encrypted_payload.first<eecf_ecc2_enc_size>(), sk, ecc2_info());
+    auto const plaintext = plaintext_out.first(encrypted_payload.size() - eecf_ecc2_overhead);
+    span_copy(plaintext, encrypted_payload.subspan(eecf_ecc2_enc_size, plaintext.size()));
+    if (!context || !hpke_open(*context, aad, plaintext, encrypted_payload.last<eecf_ecc2_tag_size>())) {
+        return std::nullopt;
+    }
+    return plaintext;
+}
+
+auto eecf_ecc2_encrypt(
+    P256PublicKey const& recipient_pk,
+    statusbar::ieee::Eui64 const& key_id,
+    uint64_t encryption_timestamp,
+    span<uint8_t const> encapsulated_avtpdu,
+    span<uint8_t> out,
+    span<uint8_t const, hpke_min_ikm_size> ikm_e) -> std::optional<span<uint8_t const>>
+{
+    size_t const size = eecf_ecc2_encrypted_size(eecf_timestamp_size + encapsulated_avtpdu.size());
+    if (size > eecf_max_encrypted_payload_size) {
+        return std::nullopt;
+    }
+    SecureArray<eecf_max_encrypted_payload_size> plaintext_storage{};
+    auto const plaintext = framed_plaintext(plaintext_storage, encryption_timestamp, encapsulated_avtpdu);
+    return eecf_ecc2_encrypt_payload(recipient_pk, eecf_ecc2_header(key_id, size), plaintext, out, ikm_e);
+}
+
+auto eecf_ecc2_decrypt(
+    P256PrivateKey const& sk,
+    span<uint8_t const, eecf_header_size> eecf_header,
+    span<uint8_t const> encrypted_payload,
+    span<uint8_t> plaintext_out) -> std::optional<EecfPlaintext>
+{
+    return split_plaintext(eecf_ecc2_decrypt_payload(sk, eecf_header, encrypted_payload, plaintext_out));
 }
 
 }  // namespace statusbar::crypto::avtp

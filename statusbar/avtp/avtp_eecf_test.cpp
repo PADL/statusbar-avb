@@ -99,7 +99,8 @@ TEST(eecf, get_encrypted_payload)
 TEST(eecf, enc_mode_names)
 {
     EXPECT_EQ(std::string(eecf_enc_mode_name(0)), "ECC1");
-    EXPECT_EQ(std::string(eecf_enc_mode_name(1)), "Reserved");
+    EXPECT_EQ(std::string(eecf_enc_mode_name(1)), "ECC2");
+    EXPECT_EQ(std::string(eecf_enc_mode_name(2)), "Reserved");
 }
 
 TEST(eecf, format_to_output)

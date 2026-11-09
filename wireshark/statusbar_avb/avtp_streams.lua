@@ -399,17 +399,15 @@ end
 local ECC1_V_OCTETS = 33 -- EC2OSP-X compressed P-256 point
 local ECC1_T_OCTETS = 32 -- HMAC-SHA-256 tag
 local ECC1_BLOCK_OCTETS = 16 -- AES-256-CBC block
+local ECC2_ENC_OCTETS = 65 -- SEC1 uncompressed P-256 point (HPKE enc)
+local ECC2_T_OCTETS = 16 -- AES-256-GCM tag
 
---- EECF (IEEE 1722-2025 17.3.2): an ECC1 encrypted_payload is V (the
---- ephemeral public key, EC2OSP-X), T (the HMAC-SHA-256 tag) and C (the
---- AES-256-CBC ciphertext of encryption_timestamp || encapsulated AVTPDU,
---- whole blocks), in that order. Another enc value, a declared length that is
---- not V + T + whole blocks, or a truncated frame stays undissected payload.
-function M.post.eecf_ecc1(tree, tvb, start)
-    local enc = tvb(1, 1):bitfield(4, 4)
-    local declared = tvb(2, 2):bitfield(5, 11)
+--- EECF ECC1 (IEEE 1722-2025 17.3.2): V (the ephemeral public key, EC2OSP-X),
+--- T (the HMAC-SHA-256 tag) and C (the AES-256-CBC ciphertext of
+--- encryption_timestamp || encapsulated AVTPDU, whole blocks), in that order.
+local function eecf_ecc1(tree, tvb, start, declared)
     local c_len = declared - ECC1_V_OCTETS - ECC1_T_OCTETS
-    if enc ~= 0 or declared > tvb:len() - start or c_len < ECC1_BLOCK_OCTETS or c_len % ECC1_BLOCK_OCTETS ~= 0 then
+    if c_len < ECC1_BLOCK_OCTETS or c_len % ECC1_BLOCK_OCTETS ~= 0 then
         return start
     end
     local t_at = start + ECC1_V_OCTETS
@@ -418,6 +416,38 @@ function M.post.eecf_ecc1(tree, tvb, start)
     tree:add(gen.f.avtp_eecf_ecc1_t, tvb(t_at, ECC1_T_OCTETS))
     tree:add(gen.f.avtp_eecf_ecc1_c, tvb(c_at, c_len))
     return start + declared
+end
+
+--- EECF ECC2 (RFC 9180 HPKE base mode, statusbar proposal for enc = 1): enc
+--- (the HPKE encapsulated key, a SEC1 uncompressed P-256 point), C (the
+--- AES-256-GCM ciphertext of the 17.3.3 plaintext) and T (the tag, over C with
+--- the EECF header as aad), in that order.
+local function eecf_ecc2(tree, tvb, start, declared)
+    local c_len = declared - ECC2_ENC_OCTETS - ECC2_T_OCTETS
+    if c_len < 0 then
+        return start
+    end
+    local c_at = start + ECC2_ENC_OCTETS
+    tree:add(gen.f.avtp_eecf_ecc2_enc, tvb(start, ECC2_ENC_OCTETS))
+    tree:add(gen.f.avtp_eecf_ecc2_c, tvb(c_at, c_len))
+    tree:add(gen.f.avtp_eecf_ecc2_t, tvb(c_at + c_len, ECC2_T_OCTETS))
+    return start + declared
+end
+
+--- EECF: the encrypted_payload split by enc value. A declared length that
+--- overruns the frame, another enc value, or a length that does not fit the
+--- enc value stays undissected payload.
+function M.post.eecf_payload(tree, tvb, start)
+    local enc = tvb(1, 1):bitfield(4, 4)
+    local declared = tvb(2, 2):bitfield(5, 11)
+    if declared > tvb:len() - start then
+        return start
+    elseif enc == 0 then
+        return eecf_ecc1(tree, tvb, start, declared)
+    elseif enc == 1 then
+        return eecf_ecc2(tree, tvb, start, declared)
+    end
+    return start
 end
 
 -- Info-column summaries: spec name -> function(tvb) returning text.

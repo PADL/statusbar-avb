@@ -319,7 +319,7 @@ VALUE_TABLES: dict[str, ValueTable] = {
     # IEEE 1722-2025 Clause 13 (AEF), 16 (ESCF), 17 (EECF)
     "aef_enc": ValueTable("aef_enc", {0x00: "AES-SIV", 0x01: "AES-GCM-SIV"}),
     "escf_sig": ValueTable("escf_sig", {0x00: "ECC1"}),
-    "eecf_enc": ValueTable("eecf_enc", {0x00: "ECC1"}),
+    "eecf_enc": ValueTable("eecf_enc", {0x00: "ECC1", 0x01: "ECC2"}),
 }
 
 HEADER_KIND: dict[int, str] = {code: kind for code, _, _, kind in AVTP_SUBTYPES}
@@ -1234,7 +1234,7 @@ EECF = Layout(
 )
 # An ECC1 encrypted_payload (17.3.2) is V || T || C: the ephemeral public key
 # (EC2OSP-X, 33 octets), the HMAC-SHA-256 tag (32 octets) and the AES-256-CBC
-# ciphertext (whole 16-octet blocks). The "eecf_ecc1" post hook adds the three
+# ciphertext (whole 16-octet blocks). The "eecf_payload" post hook adds the three
 # items when enc is ECC1 and the declared length has that shape.
 ECC1_V_OCTETS = 33
 ECC1_T_OCTETS = 32
@@ -1264,6 +1264,41 @@ EECF_ECC1 = Layout(
             0,
             "bytes",
             "C: AES-256-CBC ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)",
+        ),
+    ),
+)
+# An ECC2 encrypted_payload (statusbar proposal for enc = 0x01, RFC 9180 HPKE base
+# mode with DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM) is enc || C || T:
+# the ephemeral public key (SEC1 uncompressed, 65 octets), the AES-256-GCM
+# ciphertext (the plaintext's length) and the 16-octet tag. The same post hook
+# adds the three items when enc is ECC2 and the declared length covers enc and T.
+ECC2_ENC_OCTETS = 65
+ECC2_T_OCTETS = 16
+EECF_ECC2 = Layout(
+    "eecf_ecc2",
+    "avb.avtp.eecf.ecc2",
+    "EECF ECC2 encrypted_payload (RFC 9180 HPKE, statusbar proposal)",
+    (
+        Field(
+            "enc",
+            0,
+            ECC2_ENC_OCTETS,
+            "bytes",
+            "enc: HPKE encapsulated key, SEC1 uncompressed P-256 point (0x04 || x || y)",
+        ),
+        Field(
+            "c",
+            ECC2_ENC_OCTETS,
+            0,
+            "bytes",
+            "C: AES-256-GCM ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)",
+        ),
+        Field(
+            "t",
+            ECC2_ENC_OCTETS,
+            ECC2_T_OCTETS,
+            "bytes",
+            "T: AES-256-GCM tag over C with the EECF header as aad; the last 16 octets",
         ),
     ),
 )
@@ -1299,7 +1334,7 @@ SUBTYPE_SPECS: tuple[SubtypeSpec, ...] = (
     SubtypeSpec("aef_continuous", 0x6E, 0, (AEF_CONTINUOUS,), 12),
     SubtypeSpec("aef_discrete", 0xEE, 0, (AEF_DISCRETE,), 12),
     SubtypeSpec("escf", 0xEC, 0, (ESCF,), 12),
-    SubtypeSpec("eecf", 0xED, 0, (EECF,), 12, post="eecf_ecc1"),
+    SubtypeSpec("eecf", 0xED, 0, (EECF,), 12, post="eecf_payload"),
 )
 
 SUBTYPE_LAYOUTS: tuple[Layout, ...] = (
@@ -1497,4 +1532,5 @@ EXTRA_FIELD_LAYOUTS: tuple[Layout, ...] = (
     MPEGTS,
     VSF_EXTRA,
     EECF_ECC1,
+    EECF_ECC2,
 )

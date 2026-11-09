@@ -639,11 +639,11 @@ auto ecc1_payload() -> std::vector<uint8_t>
     return {built.begin(), built.end()};
 }
 
-/// An ECC1 EECF header announcing @p encrypted_payload_length octets
-auto eecf_header(size_t const encrypted_payload_length) -> EecfPdu
+/// An EECF header for @p enc announcing @p encrypted_payload_length octets
+auto eecf_header(EecfEncMode const enc, size_t const encrypted_payload_length) -> EecfPdu
 {
     EecfPdu pdu{};
-    pdu.init(static_cast<uint8_t>(EecfEncMode::ecc1), KEY_ID);
+    pdu.init(static_cast<uint8_t>(enc), KEY_ID);
     pdu.set_encrypted_payload_length(static_cast<uint16_t>(encrypted_payload_length));
     return pdu;
 }
@@ -652,7 +652,28 @@ auto eecf() -> std::vector<uint8_t>
 {
     auto const payload = ecc1_payload();
     std::vector<uint8_t> out;
-    append(out, eecf_header(payload.size()));
+    append(out, eecf_header(EecfEncMode::ecc1, payload.size()));
+    append(out, std::span<uint8_t const>(payload));
+    return out;
+}
+
+/// The ECC2 known answer (RFC 9180 HPKE base mode; docs/EECF_ECC2_PROPOSAL.md) for the
+/// same recipient, ikm_e, timestamp and AVTPDU as the ECC1 frame: enc || C || T, 105
+/// octets, bound to the EECF header for KEY_ID as HPKE aad.
+auto ecc2_payload() -> std::vector<uint8_t>
+{
+    namespace ca = statusbar::crypto::avtp;
+    std::array<uint8_t, ca::eecf_ecc2_encrypted_size(sizeof(ECC1_TIMESTAMP) + ECC1_AVTPDU.size())> out{};
+    auto const recipient = statusbar::crypto::p256_ecdsa_keypair_from_seed(ECC1_SEED);
+    auto const built = ca::eecf_ecc2_encrypt(recipient.public_key, KEY_ID, ECC1_TIMESTAMP, ECC1_AVTPDU, out, ECC1_ENTROPY).value();
+    return {built.begin(), built.end()};
+}
+
+auto eecf_ecc2() -> std::vector<uint8_t>
+{
+    auto const payload = ecc2_payload();
+    std::vector<uint8_t> out;
+    append(out, eecf_header(EecfEncMode::ecc2, payload.size()));
     append(out, std::span<uint8_t const>(payload));
     return out;
 }
@@ -734,7 +755,7 @@ auto udp_encapsulated(std::span<uint8_t const> const avtpdu, uint16_t const dst_
 }  // namespace
 
 int main(int argc, char** argv)
-{
+{  // NOLINT(statusbar-block-statements) the golden frame list: one call per captured frame
     if (argc != 2) {
         std::fprintf(stderr, "usage: %s <output.pcap>\n", argv[0]);
         return 2;
@@ -777,6 +798,7 @@ int main(int argc, char** argv)
     ethernet(aef_discrete());
     ethernet(escf());
     ethernet(eecf());
+    ethernet(eecf_ecc2());
     ethernet(aaf_v0_int24());
     ethernet(aaf_v0_float32());
     ethernet(aaf_v0_partial_frame());

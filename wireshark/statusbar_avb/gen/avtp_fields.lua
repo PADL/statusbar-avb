@@ -243,6 +243,7 @@ M.values_escf_sig = {
 
 M.values_eecf_enc = {
     [0x00] = "ECC1",
+    [0x01] = "ECC2",
 }
 
 M.values_acf_msg_type = {
@@ -486,6 +487,9 @@ M.f.avtp_vsf_vendor_id = ProtoField.ether("avb.avtp.vsf.vendor_id", "vendor_id",
 M.f.avtp_eecf_ecc1_v = ProtoField.bytes("avb.avtp.eecf.ecc1.v", "v", base.NONE, "V: ephemeral public key, EC2OSP-X compressed P-256 point")
 M.f.avtp_eecf_ecc1_t = ProtoField.bytes("avb.avtp.eecf.ecc1.t", "t", base.NONE, "T: HMAC-SHA-256 tag over C (IEEE 1363a-2004 DL/ECIES)")
 M.f.avtp_eecf_ecc1_c = ProtoField.bytes("avb.avtp.eecf.ecc1.c", "c", base.NONE, "C: AES-256-CBC ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)")
+M.f.avtp_eecf_ecc2_enc = ProtoField.bytes("avb.avtp.eecf.ecc2.enc", "enc", base.NONE, "enc: HPKE encapsulated key, SEC1 uncompressed P-256 point (0x04 || x || y)")
+M.f.avtp_eecf_ecc2_c = ProtoField.bytes("avb.avtp.eecf.ecc2.c", "c", base.NONE, "C: AES-256-GCM ciphertext of encryption_timestamp || encapsulated AVTPDU (17.3.3)")
+M.f.avtp_eecf_ecc2_t = ProtoField.bytes("avb.avtp.eecf.ecc2.t", "t", base.NONE, "T: AES-256-GCM tag over C with the EECF header as aad; the last 16 octets")
 
 M.avtp_fields = {
     M.f.avtp_subtype,
@@ -669,6 +673,9 @@ M.avtp_fields = {
     M.f.avtp_eecf_ecc1_v,
     M.f.avtp_eecf_ecc1_t,
     M.f.avtp_eecf_ecc1_c,
+    M.f.avtp_eecf_ecc2_enc,
+    M.f.avtp_eecf_ecc2_c,
+    M.f.avtp_eecf_ecc2_t,
 }
 
 M.ipavtp_fields = {
@@ -1209,6 +1216,6 @@ M.subtype_specs[0xEE][0] = { name = "aef_discrete", header_length = 12, layouts 
 M.subtype_specs[0xEC] = M.subtype_specs[0xEC] or {}
 M.subtype_specs[0xEC][0] = { name = "escf", header_length = 12, layouts = { M.add_escf }, post = nil }
 M.subtype_specs[0xED] = M.subtype_specs[0xED] or {}
-M.subtype_specs[0xED][0] = { name = "eecf", header_length = 12, layouts = { M.add_eecf }, post = "eecf_ecc1" }
+M.subtype_specs[0xED][0] = { name = "eecf", header_length = 12, layouts = { M.add_eecf }, post = "eecf_payload" }
 
 return M

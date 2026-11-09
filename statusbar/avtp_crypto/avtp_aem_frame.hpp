@@ -23,6 +23,7 @@
 #include "statusbar/avtp_crypto/avtp_crypto_pdu.hpp"
 #include "statusbar/avtp_crypto/avtp_keychain.hpp"
 #include "statusbar/crypto/ecies/ecies.hpp"
+#include "statusbar/crypto/hpke/hpke.hpp"
 #include "statusbar/ieee/ieee_base.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 
@@ -31,6 +32,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace statusbar::crypto::avtp {
 
@@ -123,13 +125,14 @@ constexpr auto eecf_ecc1_payload_size_is_valid(size_t encrypted_payload_size) ->
         ((encrypted_payload_size - eecf_ecc1_overhead) % 16) == 0;
 }
 
-/// ECC1 plaintext (IEEE 1722-2025 17.3.3): encryption_timestamp, then the
-/// encapsulated AVTPDU. The AVTPDU span views the caller's plaintext buffer.
-struct EecfEcc1Plaintext
+/// EECF plaintext (IEEE 1722-2025 17.3.3, shared by ECC1 and ECC2): encryption_timestamp,
+/// then the encapsulated AVTPDU. The AVTPDU span views the caller's plaintext buffer.
+struct EecfPlaintext
 {
     uint64_t encryption_timestamp{};
     std::span<uint8_t const> encapsulated_avtpdu;
 };
+using EecfEcc1Plaintext = EecfPlaintext;
 
 /// Encrypt an ECC1 plaintext into an EECF encrypted_payload laid out as V || T || C.
 ///
@@ -171,7 +174,108 @@ auto eecf_ecc1_encrypt(
 /// encryption_timestamp and encapsulated AVTPDU. @p plaintext_out must hold
 /// encrypted_payload.size() octets; the returned AVTPDU span views it.
 auto eecf_ecc1_decrypt(P256PrivateKey const& sk, std::span<uint8_t const> encrypted_payload, std::span<uint8_t> plaintext_out)
-    -> std::optional<EecfEcc1Plaintext>;
+    -> std::optional<EecfPlaintext>;
+
+// ECC2 encrypted_payload (statusbar proposal for IEEE 1722 Table 53 enc = 0x01)
+//
+// ECC2 is RFC 9180 HPKE in base mode with the cipher suite DHKEM(P-256,
+// HKDF-SHA256) 0x0010 / HKDF-SHA256 0x0001 / AES-256-GCM 0x0002, one HPKE
+// context per PDU (sequence number 0). The encrypted_payload is
+//   enc  the sender's ephemeral public key, SEC1 uncompressed (0x04 || x || y), 65 octets
+//   C    the AES-256-GCM ciphertext of the 17.3.3 plaintext, as long as the plaintext
+//   T    the AES-256-GCM tag, 16 octets
+// The HPKE info is the fixed string eecf_ecc2_info; the HPKE aad is the frame's
+// 12-octet EECF header (enc, encrypted_payload_length, key_id), so the header is
+// authenticated together with the payload. See avb/docs/EECF_ECC2_PROPOSAL.md.
+
+/// EECF enc field value: ECC2 (from statusbar::avtp).
+inline constexpr uint8_t eecf_enc_ecc2 = static_cast<uint8_t>(statusbar::avtp::EecfEncMode::ecc2);
+
+/// ECC2 HPKE AEAD: AES-256-GCM (RFC 9180 AEAD id 0x0002).
+inline constexpr HpkeAead eecf_ecc2_aead = HpkeAead::aes256_gcm;
+
+/// ECC2 HPKE info string.
+inline constexpr std::string_view eecf_ecc2_info = "IEEE 1722 EECF ECC2";
+
+/// ECC2 encrypted_payload: enc (SEC1 uncompressed P-256 point) size.
+inline constexpr size_t eecf_ecc2_enc_size = hpke_p256_public_key_size;  // 65
+
+/// ECC2 encrypted_payload: T (AES-256-GCM tag) size.
+inline constexpr size_t eecf_ecc2_tag_size = hpke_tag_size;  // 16
+
+/// ECC2 encrypted_payload: octets besides C (enc ahead of it, T behind it).
+inline constexpr size_t eecf_ecc2_overhead = eecf_ecc2_enc_size + eecf_ecc2_tag_size;  // 81
+
+/// Size of the ECC2 encrypted_payload for a plaintext of @p plaintext_size octets.
+constexpr auto eecf_ecc2_encrypted_size(size_t plaintext_size) -> size_t
+{
+    return plaintext_size + eecf_ecc2_overhead;
+}
+
+/// True when @p encrypted_payload_size can be an ECC2 encrypted_payload: enc and T
+/// (C may be empty), and at most what the EECF header can declare.
+constexpr auto eecf_ecc2_payload_size_is_valid(size_t encrypted_payload_size) -> bool
+{
+    return encrypted_payload_size >= eecf_ecc2_overhead && encrypted_payload_size <= eecf_max_encrypted_payload_size;
+}
+
+/// The EECF header an ECC2 encrypted_payload of @p encrypted_payload_size octets under
+/// @p key_id is bound to as HPKE aad: exactly what build_eecf_frame writes for enc = ECC2.
+auto eecf_ecc2_header(statusbar::ieee::Eui64 const& key_id, size_t encrypted_payload_size) -> std::array<uint8_t, eecf_header_size>;
+
+/// Encrypt a plaintext into an ECC2 encrypted_payload enc || C || T.
+///
+/// @param recipient_pk Recipient's P-256 public key (the key_id's key).
+/// @param aad The 12-octet EECF header the payload travels under (eecf_ecc2_header),
+///        or any octet string for the payload-level tests and tools.
+/// @param plaintext The 17.3.3 plaintext (encryption_timestamp || encapsulated_avtpdu),
+///        or any octet string.
+/// @param out Output buffer, at least eecf_ecc2_encrypted_size(plaintext.size()).
+/// @param ikm_e 32 octets of fresh randomness for the ephemeral key (HPKE DeriveKeyPair).
+/// @return The encrypted_payload within @p out, or nullopt when the buffer is too
+///         small, the result would not fit an EECF frame, or HPKE fails.
+auto eecf_ecc2_encrypt_payload(
+    P256PublicKey const& recipient_pk,
+    std::span<uint8_t const> aad,
+    std::span<uint8_t const> plaintext,
+    std::span<uint8_t> out,
+    std::span<uint8_t const, hpke_min_ikm_size> ikm_e) -> std::optional<std::span<uint8_t const>>;
+
+/// Decrypt an ECC2 encrypted_payload (enc || C || T) to its plaintext.
+///
+/// @param sk Recipient's P-256 private key.
+/// @param aad The 12-octet EECF header as received (ParsedEecfFrame::header).
+/// @param encrypted_payload The EECF encrypted_payload as parsed from the frame.
+/// @param plaintext_out Output buffer, at least encrypted_payload.size() - eecf_ecc2_overhead.
+/// @return The plaintext within @p plaintext_out, or nullopt when the payload size is
+///         not an ECC2 shape, the buffer is too small, enc is not a valid point, or
+///         the tag does not verify (the header or payload was altered).
+auto eecf_ecc2_decrypt_payload(
+    P256PrivateKey const& sk,
+    std::span<uint8_t const> aad,
+    std::span<uint8_t const> encrypted_payload,
+    std::span<uint8_t> plaintext_out) -> std::optional<std::span<uint8_t const>>;
+
+/// Encrypt an encapsulated AVTPDU with its encryption_timestamp (17.3.3) into an
+/// ECC2 encrypted_payload bound to the EECF header for @p key_id. @p out must hold
+/// eecf_ecc2_encrypted_size(eecf_timestamp_size + encapsulated_avtpdu.size()).
+auto eecf_ecc2_encrypt(
+    P256PublicKey const& recipient_pk,
+    statusbar::ieee::Eui64 const& key_id,
+    uint64_t encryption_timestamp,
+    std::span<uint8_t const> encapsulated_avtpdu,
+    std::span<uint8_t> out,
+    std::span<uint8_t const, hpke_min_ikm_size> ikm_e) -> std::optional<std::span<uint8_t const>>;
+
+/// Decrypt an ECC2 encrypted_payload received under @p eecf_header and split the
+/// 17.3.3 plaintext into its encryption_timestamp and encapsulated AVTPDU.
+/// @p plaintext_out must hold encrypted_payload.size() octets; the returned AVTPDU
+/// span views it.
+auto eecf_ecc2_decrypt(
+    P256PrivateKey const& sk,
+    std::span<uint8_t const, eecf_header_size> eecf_header,
+    std::span<uint8_t const> encrypted_payload,
+    std::span<uint8_t> plaintext_out) -> std::optional<EecfPlaintext>;
 
 // Parsed frame structure
 
@@ -310,8 +414,10 @@ auto extract_auth_add_key_nonce_response(ParsedAemFrame const& frame) -> std::op
 // EECF frame (IEEE 1722-2025 Clause 17)
 
 /// Parsed fields from a complete Ethernet + EECF frame.
-/// The encrypted_payload member is a zero-copy view into the original frame buffer;
-/// for enc = ECC1 it is V || T || C (17.3.2), decrypted by eecf_ecc1_decrypt.
+/// The header and encrypted_payload members are zero-copy views into the original
+/// frame buffer; for enc = ECC1 the payload is V || T || C (17.3.2), decrypted by
+/// eecf_ecc1_decrypt; for enc = ECC2 it is enc || C || T, decrypted by
+/// eecf_ecc2_decrypt with the header as its aad.
 ///
 /// Wire layout (after Ethernet header):
 ///   Byte 0:     subtype (0xED)
@@ -328,13 +434,16 @@ struct ParsedEecfFrame
     uint8_t enc{};
     uint16_t encrypted_payload_length{};
     statusbar::ieee::Eui64 key_id{};
+    std::span<uint8_t const> header;  ///< the 12-octet EECF header as received (the ECC2 HPKE aad)
     std::span<uint8_t const> encrypted_payload;
 };
 
 /// Build a complete Ethernet + EECF frame.
 ///
 /// The encrypted_payload is already encrypted: for ECC1 it is the V || T || C
-/// output of eecf_ecc1_encrypt(encryption_timestamp, encapsulated_avtpdu).
+/// output of eecf_ecc1_encrypt(encryption_timestamp, encapsulated_avtpdu); for
+/// ECC2 the enc || C || T output of eecf_ecc2_encrypt, whose aad is the header
+/// this function writes (same enc, key_id and encrypted_payload_length).
 ///
 /// @param out Output buffer. Must be at least eecf_payload_offset + encrypted_payload.size().
 /// @param dest_mac Destination MAC address for the Ethernet header.

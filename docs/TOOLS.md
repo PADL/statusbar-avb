@@ -163,8 +163,11 @@ Invoked as `<command> [hex_args...]` (not flags). Commands include
 `aes256_gcm_siv_encrypt`, `sha256`/`sha512`/`sha256_hmac`,
 `hkdf`/`hkdf_extract`/`hkdf_expand`, `ed25519_sign`/`ed25519_verify`,
 `x25519`, `p256_ecdsa_sign`/`p256_ecdh`, `ecies_encrypt` (the IEEE 1363a-2004
-triple as V||C||T) and `eecf_ecc1_encrypt`/`eecf_ecc1_decrypt` (the IEEE
-1722-2025 17.3.2 EECF encrypted_payload, V||T||C).
+triple as V||C||T), `eecf_ecc1_encrypt`/`eecf_ecc1_decrypt` (the IEEE
+1722-2025 17.3.2 EECF encrypted_payload, V||T||C) and
+`eecf_ecc2_encrypt`/`eecf_ecc2_decrypt` (the proposed HPKE-based ECC2
+encrypted_payload, enc||C||T, with the 12-octet EECF header as aad; see
+`EECF_ECC2_PROPOSAL.md`).
 
 ## Diagnostics
 

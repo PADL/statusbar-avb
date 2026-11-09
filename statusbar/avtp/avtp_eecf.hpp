@@ -36,8 +36,11 @@ using ieee::octet_t;
 /// EECF enc field values
 enum class EecfEncMode : uint8_t
 {
-    ecc1 = 0x00U,  ///< ECC1 encryption algorithm (ECIES)
-    // 0x01 - 0x0F: Reserved
+    ecc1 = 0x00U,  ///< ECC1 encryption algorithm (ECIES, IEEE 1722-2025 17.3.1)
+    ecc2 = 0x01U,  ///< ECC2: RFC 9180 HPKE base mode, DHKEM(P-256, HKDF-SHA256) / HKDF-SHA256 /
+                   ///< AES-256-GCM (statusbar proposal to the IEEE 1722 group; Table 53 reserves
+                   ///< 0x01-0x0F). See avb/docs/EECF_ECC2_PROPOSAL.md.
+    // 0x02 - 0x0F: Reserved
 };
 
 /// Get human-readable name for EECF encryption mode
