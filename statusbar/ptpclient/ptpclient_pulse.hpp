@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 /// A PHC's lock to another clock's 1 PPS, from the PHC's own external timestamps of it (the pulses ts2phc
-/// steers a sink by): PulseLock judges each pulse against the whole second nearest it, and ExttsReader
+/// steers a sink by): PulseLock checks each pulse against the whole second nearest it, and ExttsReader
 /// reads one channel's events on a descriptor of its own. See docs/LINUXPTP.md ("Pulse lock").
 
 #include "statusbar/net/net_message_reactor.hpp"
@@ -50,12 +50,12 @@ class PulseLock
     [[nodiscard]] auto locked() const noexcept -> bool { return locked_; }
     /// The last pulse's PHC time less its whole second (ns); 0 before one.
     [[nodiscard]] auto offset_ns() const noexcept -> int64_t { return offset_ns_; }
-    /// Local time of the last pulse, the deadline expire() judges silence by (0: none yet).
+    /// Local time of the last pulse, which expire() checks silence against (0: none yet).
     [[nodiscard]] auto last_pulse_ns() const noexcept -> int64_t { return last_pulse_ns_; }
 
   private:
-    /// @p good as the latest pulse's verdict; whether locked() changed.
-    [[nodiscard]] auto judge(bool good) noexcept -> bool;
+    /// Notes the latest pulse checked @p good (false: off, or silence); whether locked() changed.
+    [[nodiscard]] auto note_pulse(bool good) noexcept -> bool;
 
     PulseLockParams params_;
     int64_t offset_ns_{0};
