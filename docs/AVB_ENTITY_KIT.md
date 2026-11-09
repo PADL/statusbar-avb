@@ -181,6 +181,10 @@ joins the new VLAN (Milan v1.2 Section 4.3.2), moves every ACMP talker stream's
 stream_vlan_id, lets the entity re-tag its stream frames
 (`TalkerStreams::set_vlan_id`) and re-advertises the talker streams.
 
+start() after a stop() declares the Domain again, which resumes MSRP (every
+peer registration flushed, then a LeaveAll): a restart with the link up reports
+no link up and runs no advertise hook, so nothing else would.
+
 GET_AVB_INFO of interface 0 is notified asynchronously (Milan v1.2 Table 5.22)
 when a field the table lists changes; the events that can change one call
 `refresh_avb_info()`, and a mirrored device's updates notify themselves.

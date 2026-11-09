@@ -519,6 +519,8 @@ class MsrpHandler
         (void)participant_.declare_domain(fv, now);
     }
 
+    /// Whether withdraw_all() ended a run and no declare_domain() has begun one since: the next resumes.
+    [[nodiscard]] auto withdrawn() const noexcept -> bool { return withdrawn_; }
     /// The link is back after a down (MsrpParticipant::rejoin()).
     void rejoin(TimePoint now) { participant_.rejoin(now); }
     /// A LeaveAll sent now (MsrpParticipant::leave_all()).
