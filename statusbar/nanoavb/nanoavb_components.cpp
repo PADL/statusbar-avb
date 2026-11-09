@@ -802,6 +802,7 @@ void wire_aecp(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
     // command (e.g. an IDENTIFY button pressed at startup). process_packet keeps it
     // current thereafter.
     components.aem_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
+    components.mvu_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
 }
 
 /// MVRP and MSRP transmit to their multicast addresses.

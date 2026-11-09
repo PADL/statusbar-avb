@@ -898,6 +898,18 @@ TEST(nanoavb_mvu, binding_notifies_registered_controllers)
     EXPECT_TRUE(reply_header(it->bytes).common.controller_entity_id == OTHER);
 }
 
+// A notification before any MVU command (an ACMP binding's GET_STREAM_INPUT_INFO_EX) carries the
+// seeded entity id as its target_entity_id, not 0 (Milan v1.3 Section 5.4.5.2).
+TEST(nanoavb_mvu, a_notification_before_any_command_carries_the_seeded_entity_id)
+{
+    V13Side v;
+    v.mvu.set_entity_id(US);
+    EXPECT_TRUE(v.side.aem.process_packet(OTHER_MAC, aem_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, OTHER), US));
+    v.mvu.notify_stream_input_info_ex(0);
+    EXPECT_EQ(v.sent.size(), size_t{1});
+    EXPECT_FALSE(v.sent.empty() || reply_header(v.sent.back().bytes).common.target_entity_id != US);
+}
+
 // Below v1.3 the binding commands are reserved: NOT_IMPLEMENTED, nothing bound
 TEST(nanoavb_mvu, binding_commands_are_v1_3_only)
 {
