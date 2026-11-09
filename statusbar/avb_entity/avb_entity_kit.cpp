@@ -778,15 +778,6 @@ auto AvbEntityKit::connected_rx_group(StreamSpec const& spec) const -> ieee::Eui
     return stream != nullptr && stream->connected ? stream->stream_dest_mac : ieee::Eui48{};
 }
 
-void AvbEntityKit::join_connected_rx_groups()
-{
-    for (auto const& spec : listener_specs_) {
-        if (auto const group = connected_rx_group(spec); group.is_multicast()) {
-            (void)stream_port_.port().join_multicast(group);
-        }
-    }
-}
-
 void AvbEntityKit::leave_rx_groups()
 {
     sg14::inplace_vector<ieee::Eui48, 2 * MAX_ENTITY_STREAMS> held{};
@@ -1783,9 +1774,6 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
             stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
         }
     }
-    if (stream_port_.valid()) {
-        join_connected_rx_groups();
-    }
 #if defined(__linux__)
     // The VID's tagged stream frames must get past the NIC's VLAN filter.
     // Never fatal: without CAP_NET_ADMIN this only warns.
@@ -1870,9 +1858,32 @@ auto AvbEntityKit::stop(TimePoint const now) -> Status
         return failure(std::make_error_code(std::errc::not_connected));
     }
     // Stopping the control plane runs no withdraw hook: withdraw here, so a
-    // restart starts undeclared, inactive and with every gate closed.
+    // restart starts undeclared, inactive, unconnected and with every gate closed.
     withdraw_talker_streams(now);
+    drop_listener_connections(now);
     return host_.stop_control_plane(now);
+}
+
+void AvbEntityKit::drop_listener_connections(TimePoint const now)
+{
+    for (auto const& spec : listener_specs_) {
+        drop_listener_connection(spec.index, now);
+    }
+}
+
+void AvbEntityKit::drop_listener_connection(uint16_t const index, TimePoint const now)
+{
+    auto& acmp = host_.components().acmp_listener;
+    if (auto const* sink = acmp.milan_sinks().sink(index); sink != nullptr && sink->bound()) {
+        // As the controller the entity's acquisition or lock admits (Milan v1.3 Section 5.5.3.6.3).
+        auto const& aem = host_.components().aem_handler;
+        auto const owner = aem.is_acquired() ? aem.acquiring_controller() : aem.locking_controller();
+        (void)acmp.milan_sinks().unbind_stream(index, owner, now, [](uint8_t) {});
+        return;
+    }
+    if (auto const* stream = acmp.get_stream(index); stream != nullptr && stream->connected) {
+        (void)acmp.on_talker_departed(stream->talker_entity_id, now);  // its fast-connect goal stays
+    }
 }
 
 void AvbEntityKit::close_streams() noexcept
