@@ -7,6 +7,10 @@
 
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/crypto/util/crypto_util_internal.hpp"
+#include "statusbar/crypto/util/secure_array.hpp"
+
+#include <algorithm>
+#include <array>
 
 namespace statusbar::crypto::avtp {
 
@@ -340,6 +344,105 @@ auto parse_eecf_frame(span<uint8_t const> frame) -> std::optional<ParsedEecfFram
     result.encrypted_payload = frame.subspan(eecf_payload_offset, result.encrypted_payload_length);
 
     return result;
+}
+
+// ECC1 encrypted_payload codec (IEEE 1722-2025 17.3.2 over IEEE 1363a-2004 11.3)
+
+namespace {
+
+/// In place: the 1363a triple V || C || T becomes the 17.3.2 payload V || T || C
+/// (the trailing tag moves ahead of the ciphertext).
+auto ecc1_triple_to_payload(span<uint8_t> buffer) -> void
+{
+    auto const tag_then_cipher = buffer.subspan(eecf_ecc1_v_size);
+    std::rotate(tag_then_cipher.begin(), tag_then_cipher.end() - eecf_ecc1_tag_size, tag_then_cipher.end());
+}
+
+/// The 1363a triple V || C || T reassembled from a 17.3.2 payload V || T || C.
+auto ecc1_payload_to_triple(span<uint8_t const> encrypted_payload, span<uint8_t> triple) -> void
+{
+    size_t const cipher_size = encrypted_payload.size() - eecf_ecc1_overhead;
+    span_copy(triple.first(eecf_ecc1_v_size), encrypted_payload.first(eecf_ecc1_v_size));
+    span_copy(triple.subspan(eecf_ecc1_v_size, cipher_size), encrypted_payload.subspan(eecf_ecc1_overhead, cipher_size));
+    span_copy(triple.last(eecf_ecc1_tag_size), encrypted_payload.subspan(eecf_ecc1_v_size, eecf_ecc1_tag_size));
+}
+
+/// The 17.3.3 plaintext: encryption_timestamp (8 octets) then the encapsulated AVTPDU.
+auto ecc1_plaintext(span<uint8_t> storage, uint64_t encryption_timestamp, span<uint8_t const> encapsulated_avtpdu)
+    -> span<uint8_t const>
+{
+    auto const plaintext = storage.first(eecf_timestamp_size + encapsulated_avtpdu.size());
+    span_store(plaintext.first(eecf_timestamp_size), statusbar::ieee::octlet_t{encryption_timestamp});
+    span_copy(plaintext.subspan(eecf_timestamp_size), encapsulated_avtpdu);
+    return plaintext;
+}
+
+}  // namespace
+
+auto eecf_ecc1_encrypt_payload(
+    P256PublicKey const& recipient_pk,
+    span<uint8_t const> plaintext,
+    span<uint8_t> out,
+    span<uint8_t const, p256_scalar_size> entropy) -> std::optional<span<uint8_t const>>
+{
+    size_t const size = eecf_ecc1_encrypted_size(plaintext.size());
+    if (size > eecf_max_encrypted_payload_size || out.size() < size) {
+        return std::nullopt;
+    }
+
+    // The library writes the 1363a triple V || C || T; 17.3.2 wants V, T, C.
+    auto const triple = ecies_encrypt(recipient_pk, plaintext, out.first(size), entropy);
+    if (triple.size() != size) {
+        return std::nullopt;
+    }
+    ecc1_triple_to_payload(out.first(size));
+    return out.first(size);
+}
+
+auto eecf_ecc1_decrypt_payload(P256PrivateKey const& sk, span<uint8_t const> encrypted_payload, span<uint8_t> plaintext_out)
+    -> std::optional<span<uint8_t const>>
+{
+    if (!eecf_ecc1_payload_size_is_valid(encrypted_payload.size()) || plaintext_out.size() < encrypted_payload.size()) {
+        return std::nullopt;
+    }
+
+    // Everything in the payload is public (it was on the wire), so a plain
+    // stack buffer holds the reordered copy the library expects.
+    std::array<uint8_t, eecf_max_encrypted_payload_size> triple_storage{};
+    span<uint8_t> const triple(triple_storage.data(), encrypted_payload.size());
+    ecc1_payload_to_triple(encrypted_payload, triple);
+
+    auto const plaintext = ecies_decrypt(sk, triple, plaintext_out);
+    return plaintext.data() == nullptr ? std::nullopt : std::optional{plaintext};
+}
+
+auto eecf_ecc1_encrypt(
+    P256PublicKey const& recipient_pk,
+    uint64_t encryption_timestamp,
+    span<uint8_t const> encapsulated_avtpdu,
+    span<uint8_t> out,
+    span<uint8_t const, p256_scalar_size> entropy) -> std::optional<span<uint8_t const>>
+{
+    if (eecf_ecc1_encrypted_size(eecf_timestamp_size + encapsulated_avtpdu.size()) > eecf_max_encrypted_payload_size) {
+        return std::nullopt;
+    }
+
+    SecureArray<eecf_max_encrypted_payload_size> plaintext_storage{};
+    auto const plaintext = ecc1_plaintext(plaintext_storage, encryption_timestamp, encapsulated_avtpdu);
+    return eecf_ecc1_encrypt_payload(recipient_pk, plaintext, out, entropy);
+}
+
+auto eecf_ecc1_decrypt(P256PrivateKey const& sk, span<uint8_t const> encrypted_payload, span<uint8_t> plaintext_out)
+    -> std::optional<EecfEcc1Plaintext>
+{
+    auto const plaintext = eecf_ecc1_decrypt_payload(sk, encrypted_payload, plaintext_out);
+    if (!plaintext || plaintext->size() < eecf_timestamp_size) {
+        return std::nullopt;
+    }
+
+    statusbar::ieee::octlet_t timestamp{};
+    span_load(timestamp, plaintext->first(eecf_timestamp_size));
+    return EecfEcc1Plaintext{timestamp.get(), plaintext->subspan(eecf_timestamp_size)};
 }
 
 }  // namespace statusbar::crypto::avtp

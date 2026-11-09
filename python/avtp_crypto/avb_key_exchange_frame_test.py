@@ -85,7 +85,7 @@ AEM_STATUS_SUCCESS = 0
 # AEM data length: controller_entity_id(8) + sequence_id(2) + command_type(2)
 AEM_DATA_LENGTH = 12
 
-# EECF subtype (IEEE 1722-2016 Clause 17)
+# EECF subtype (IEEE 1722-2025 Clause 17)
 EECF_SUBTYPE = 0xED
 EECF_HEADER_SIZE = 12  # subtype_data(4) + key_id(8)
 EECF_PAYLOAD_OFFSET = ETHERNET_HEADER_SIZE + EECF_HEADER_SIZE  # 26
@@ -434,7 +434,7 @@ def extract_auth_add_key_nonce_response(
 
 
 # ---------------------------------------------------------------------------
-# EECF frame builder/parser (IEEE 1722-2016 Clause 17)
+# EECF frame builder/parser (IEEE 1722-2025 Clause 17)
 # ---------------------------------------------------------------------------
 
 
@@ -518,6 +518,48 @@ def parse_eecf_frame(frame: bytes) -> ParsedEecfFrame:
     )
 
 
+# ECC1 encrypted_payload (IEEE 1722-2025 17.3.2): V (33), T (32), then C.
+# statusbar_crypto's ecies_encrypt/ecies_decrypt speak the IEEE 1363a-2004
+# triple as V || C || T; these two helpers are where the orders meet.
+ECC1_V_SIZE = 33
+ECC1_TAG_SIZE = 32
+ECC1_OVERHEAD = ECC1_V_SIZE + ECC1_TAG_SIZE  # 65
+
+
+def ecc1_payload_from_triple(vct: bytes) -> bytes:
+    """IEEE 1363a triple V || C || T -> EECF ECC1 encrypted_payload V || T || C."""
+    v, c, t = vct[:ECC1_V_SIZE], vct[ECC1_V_SIZE:-ECC1_TAG_SIZE], vct[-ECC1_TAG_SIZE:]
+    return v + t + c
+
+
+def ecc1_payload_to_triple(encrypted_payload: bytes) -> bytes:
+    """EECF ECC1 encrypted_payload V || T || C -> IEEE 1363a triple V || C || T."""
+    if len(encrypted_payload) < ECC1_OVERHEAD + 16 or (
+        (len(encrypted_payload) - ECC1_OVERHEAD) % 16
+    ):
+        raise ValueError(
+            f"not an ECC1 encrypted_payload: {len(encrypted_payload)} octets"
+        )
+    v = encrypted_payload[:ECC1_V_SIZE]
+    t = encrypted_payload[ECC1_V_SIZE:ECC1_OVERHEAD]
+    c = encrypted_payload[ECC1_OVERHEAD:]
+    return v + c + t
+
+
+def eecf_ecc1_encrypt_payload(
+    recipient_pk: sc.P256PublicKey, plaintext: bytes, entropy: bytes
+) -> bytes:
+    """ECC1 encrypted_payload (V || T || C) for an arbitrary plaintext."""
+    return ecc1_payload_from_triple(sc.ecies_encrypt(recipient_pk, plaintext, entropy))
+
+
+def eecf_ecc1_decrypt_payload(
+    recipient_sk: sc.P256PrivateKey, encrypted_payload: bytes
+) -> bytes:
+    """Plaintext of an ECC1 encrypted_payload (V || T || C)."""
+    return sc.ecies_decrypt(recipient_sk, ecc1_payload_to_triple(encrypted_payload))
+
+
 def eecf_encrypt(
     inner_avtpdu: bytes,
     recipient_pk: sc.P256PublicKey,
@@ -527,23 +569,23 @@ def eecf_encrypt(
 ) -> bytes:
     """Encrypt an inner AVTPDU for EECF ECC1 encapsulation.
 
-    The ECC1 plaintext is: encryption_timestamp(8) || encapsulated_avtpdu.
-    Returns the encrypted_payload (ECIES output: V || C || T).
+    The ECC1 plaintext is: encryption_timestamp(8) || encapsulated_avtpdu (17.3.3).
+    Returns the encrypted_payload laid out as V || T || C (17.3.2).
     """
     ts_bytes = struct.pack("!Q", timestamp)
     plaintext = ts_bytes + inner_avtpdu
-    return sc.ecies_encrypt(recipient_pk, plaintext, entropy)
+    return eecf_ecc1_encrypt_payload(recipient_pk, plaintext, entropy)
 
 
 def eecf_decrypt(
     encrypted_payload: bytes,
     recipient_sk: sc.P256PrivateKey,
 ) -> tuple[int, bytes]:
-    """Decrypt an EECF ECC1 encrypted_payload.
+    """Decrypt an EECF ECC1 encrypted_payload (V || T || C).
 
     Returns (encryption_timestamp, encapsulated_avtpdu).
     """
-    plaintext = sc.ecies_decrypt(recipient_sk, encrypted_payload)
+    plaintext = eecf_ecc1_decrypt_payload(recipient_sk, encrypted_payload)
     if len(plaintext) < EECF_TIMESTAMP_SIZE:
         raise ValueError("EECF decrypted payload too short for timestamp")
     (timestamp,) = struct.unpack("!Q", plaintext[:EECF_TIMESTAMP_SIZE])
@@ -1065,7 +1107,8 @@ class TestFrameBuildParse(unittest.TestCase):
 
     def test_auth_add_key_nonce_roundtrip(self):
         """Build AUTH_ADD_KEY_NONCE command with dummy ciphertext, parse, verify."""
-        ciphertext = bytes(range(64))
+        # Shaped like a real X25519 ECIES output: V (32) || C (one block) || T (32).
+        ciphertext = bytes(range(96))
         frame = build_auth_add_key_nonce_frame(
             ciphertext,
             dest_mac=DEFAULT_CONFIG.talker_mac,
@@ -1074,10 +1117,10 @@ class TestFrameBuildParse(unittest.TestCase):
             controller_entity_id=DEFAULT_CONFIG.controller_entity_id,
             sequence_id=43,
         )
-        self.assertEqual(len(frame), 38 + 64)
+        self.assertEqual(len(frame), 38 + 96)
         parsed = parse_aem_frame(frame)
         self.assertEqual(parsed.message_type, AECP_MESSAGE_TYPE_AEM_COMMAND)
-        self.assertEqual(parsed.control_data_length, 12 + 64)
+        self.assertEqual(parsed.control_data_length, 12 + 96)
         self.assertEqual(parsed.command_code, 0x0068)
         self.assertEqual(extract_auth_add_key_nonce_ciphertext(parsed), ciphertext)
 
@@ -1185,6 +1228,67 @@ class TestFrameBuildParse(unittest.TestCase):
         self.assertEqual(parsed.encrypted_payload_length, 96)
         self.assertEqual(parsed.key_id, key_id)
         self.assertEqual(parsed.encrypted_payload, enc_payload)
+
+    # Known answers from an independent IEEE 1363a-2004 11.3.2 reference
+    # (also carried by avtp_aem_frame_test.cpp): recipient d = SHA-256(seed) mod n.
+    ECC1_KAT_SEED = bytes(range(1, 33))
+    ECC1_KAT_ENTROPY = bytes.fromhex(
+        "deadbeefcafebabe0102030405060708090a0b0c0d0e0f101112131415161718"
+    )
+    ECC1_KAT_HELLO = bytes.fromhex(
+        "01c23f7a6a51aa50aecd3aaac1c65933cfaa9256eafd363ca2d345f9e53d95a59a"
+        "a0447cd56edb42a5cec04ca4d4506ee7c1a28f62077c3ca956e35fc894ba2187"
+        "2921cb336cc09952820b97fdca2ac7c6ba7425af011e3dc5a267e5d2686e9a13"
+    )
+    ECC1_KAT_FRAMED = bytes.fromhex(
+        "01c23f7a6a51aa50aecd3aaac1c65933cfaa9256eafd363ca2d345f9e53d95a59a"
+        "e905f27629d33d7fb957de4ea4707a22aef622d95db6ad7d4761909365c67c4e"
+        "166bed535fd26ff87446a6e23d2f8adf4d88a26447d016039a3d68619289604a"
+    )
+
+    def test_eecf_ecc1_payload_known_answer(self):
+        """V || T || C for "Hello, DL/ECIES!" matches the independent reference."""
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        payload = eecf_ecc1_encrypt_payload(
+            kp.public_key, b"Hello, DL/ECIES!", self.ECC1_KAT_ENTROPY
+        )
+        self.assertEqual(payload, self.ECC1_KAT_HELLO)
+        self.assertEqual(
+            eecf_ecc1_decrypt_payload(kp, self.ECC1_KAT_HELLO), b"Hello, DL/ECIES!"
+        )
+        # The library's own V || C || T order is not an ECC1 payload.
+        vct = sc.ecies_encrypt(
+            kp.public_key, b"Hello, DL/ECIES!", self.ECC1_KAT_ENTROPY
+        )
+        self.assertEqual(payload[:33], vct[:33])  # V
+        self.assertEqual(payload[33:65], vct[-32:])  # T
+        self.assertEqual(payload[65:], vct[33:-32])  # C
+        with self.assertRaises(ValueError):
+            eecf_ecc1_decrypt_payload(kp, vct)
+
+    def test_eecf_ecc1_framed_known_answer(self):
+        """17.3.3 plaintext timestamp || AVTPDU, encrypted, matches the reference."""
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        avtpdu = bytes(range(0x10, 0x20))
+        payload = eecf_encrypt(
+            avtpdu,
+            kp.public_key,
+            DEFAULT_CONFIG.talker_entity_id,
+            0x0123456789ABCDEF,
+            self.ECC1_KAT_ENTROPY,
+        )
+        self.assertEqual(payload, self.ECC1_KAT_FRAMED)
+        ts, dec = eecf_decrypt(self.ECC1_KAT_FRAMED, kp)
+        self.assertEqual(ts, 0x0123456789ABCDEF)
+        self.assertEqual(dec, avtpdu)
+
+    def test_eecf_ecc1_rejects_bad_shapes(self):
+        """A payload without a whole cipher block after V and T is not ECC1."""
+        kp = sc.p256_ecdsa_keypair_from_seed(self.ECC1_KAT_SEED)
+        with self.assertRaises(ValueError):
+            eecf_ecc1_decrypt_payload(kp, self.ECC1_KAT_HELLO[:65])
+        with self.assertRaises(ValueError):
+            eecf_ecc1_decrypt_payload(kp, self.ECC1_KAT_HELLO[:96])
 
     def test_eecf_encrypt_decrypt_roundtrip(self):
         """EECF encrypt/decrypt with P-256 ECIES roundtrip."""
@@ -1323,11 +1427,40 @@ class TestAvbKeyExchangeFrame(unittest.TestCase):
             install_controller_keys(self.controller, target)
 
         # Generate EECF P-256 keypairs for each target (used for EECF-wrapped
-        # AUTH_ADD_KEY_NONCE transport encryption per IEEE 1722-2016 Clause 17).
+        # AUTH_ADD_KEY_NONCE transport encryption per IEEE 1722-2025 Clause 17).
         self.eecf_keypairs: dict = {}
         for target in self.targets:
             seed = sc.sha256(f"eecf_p256:{target.name}".encode())
             self.eecf_keypairs[target.name] = sc.p256_ecdsa_keypair_from_seed(seed)
+
+    def test_eecf_ecc1_payload_matches_cpp_tool(self):
+        """The C++ eecf_ecc1_encrypt/decrypt agree with the Python V || T || C."""
+        if self.cli_path is None:
+            self.skipTest("no avtp_crypto_tool")
+        from avb_key_exchange_test import run_cli  # noqa: PLC0415
+
+        seed = TestFrameBuildParse.ECC1_KAT_SEED
+        entropy = TestFrameBuildParse.ECC1_KAT_ENTROPY
+        kp = sc.p256_ecdsa_keypair_from_seed(seed)
+        plaintext = struct.pack("!Q", 0x0123456789ABCDEF) + bytes(range(0x10, 0x20))
+        cpp_payload = bytes.fromhex(
+            run_cli(
+                self.cli_path,
+                "eecf_ecc1_encrypt",
+                kp.public_key.data.hex(),
+                entropy.hex(),
+                plaintext.hex(),
+            )
+        )
+        self.assertEqual(cpp_payload, TestFrameBuildParse.ECC1_KAT_FRAMED)
+        self.assertEqual(
+            cpp_payload, eecf_ecc1_encrypt_payload(kp.public_key, plaintext, entropy)
+        )
+        python_payload = eecf_ecc1_encrypt_payload(kp.public_key, plaintext, entropy)
+        out = run_cli(
+            self.cli_path, "eecf_ecc1_decrypt", seed.hex(), python_payload.hex()
+        )
+        self.assertEqual(out, "ok " + plaintext.hex())
 
     def test_full_key_distribution_via_frames(self):
         """Run complete AUTH flow using frames for all 3 targets.

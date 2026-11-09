@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 // IEEE 1722.1 AECP AEM frame builder/parser for AVB key exchange,
-// plus IEEE 1722-2016 Clause 17 EECF (ECC Encrypted Control Format).
+// plus IEEE 1722-2025 Clause 17 EECF (ECC Encrypted Control Format).
 //
 // Builds and parses complete Ethernet frames for:
 //   1. AUTH_GET_NONCE command/response (IEEE 1722.1-2021 §7.4.103)
 //   2. AUTH_ADD_KEY_NONCE command/response (IEEE 1722.1-2021 §7.4.104)
-//   3. EECF encrypted control wrapping (IEEE 1722-2016 Clause 17)
+//   3. EECF encrypted control wrapping (IEEE 1722-2025 Clause 17), including
+//      the ECC1 encrypted_payload codec (17.3.2: V, T, C) over the crypto
+//      library's DL/ECIES (which speaks IEEE 1363a-2004's V, C, T triple).
 //
 // Wire layout: 14-byte Ethernet header + 24-byte AemDu + variable payload.
 // EECF layout: 14-byte Ethernet header + 12-byte EECF header + encrypted payload.
@@ -20,6 +22,7 @@
 #include "statusbar/avtp_crypto/avtp_crypto.hpp"
 #include "statusbar/avtp_crypto/avtp_crypto_pdu.hpp"
 #include "statusbar/avtp_crypto/avtp_keychain.hpp"
+#include "statusbar/crypto/ecies/ecies.hpp"
 #include "statusbar/ieee/ieee_base.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 
@@ -78,8 +81,97 @@ inline constexpr size_t eecf_payload_offset = ethernet_header_size + eecf_header
 /// EECF enc field value: ECC1 (from statusbar::avtp).
 inline constexpr uint8_t eecf_enc_ecc1 = static_cast<uint8_t>(statusbar::avtp::EecfEncMode::ecc1);
 
-/// ECC1 plaintext timestamp size (8-byte gPTP nanoseconds).
+/// ECC1 plaintext timestamp size (8-byte gPTP nanoseconds, IEEE 1722-2025 17.3.3).
 inline constexpr size_t eecf_timestamp_size = 8;
+
+/// Largest encrypted_payload an EECF header can declare (11-bit encrypted_payload_length).
+inline constexpr size_t eecf_max_encrypted_payload_size = 0x07FF;  // 2047
+
+// ECC1 encrypted_payload (IEEE 1722-2025 17.3.2)
+//
+// For enc = ECC1 the encrypted_payload carries the three outputs of the IEEE
+// 1363a-2004 11.3 encryption operation in the order IEEE 1722-2025 fixes:
+//   V  the sender's ephemeral public key, EC2OSP-X (0x01 || x), 33 octets
+//   T  the HMAC-SHA-256 tag, 32 octets
+//   C  the AES-256-CBC-IV0 ciphertext, a multiple of 16 octets
+// The crypto library's ecies_encrypt/ecies_decrypt hand over the 1363a triple
+// as V || C || T. The eecf_ecc1_* functions below are the only place the two
+// orders meet; nothing else in the stack may assume one or the other.
+
+/// ECC1 encrypted_payload: V (EC2OSP-X) size.
+inline constexpr size_t eecf_ecc1_v_size = ecies_ephemeral_key_size;  // 33
+
+/// ECC1 encrypted_payload: T (HMAC-SHA-256) size.
+inline constexpr size_t eecf_ecc1_tag_size = ecies_mac_tag_size;  // 32
+
+/// ECC1 encrypted_payload: octets ahead of C (V then T).
+inline constexpr size_t eecf_ecc1_overhead = eecf_ecc1_v_size + eecf_ecc1_tag_size;  // 65
+
+/// Size of the ECC1 encrypted_payload for a plaintext of @p plaintext_size octets
+/// (V + T + the PKCS#7-padded ciphertext).
+constexpr auto eecf_ecc1_encrypted_size(size_t plaintext_size) -> size_t
+{
+    return ecies_output_size(plaintext_size);
+}
+
+/// True when @p encrypted_payload_size can be an ECC1 encrypted_payload:
+/// V and T, then at least one 16-octet cipher block, and at most what the
+/// EECF header can declare.
+constexpr auto eecf_ecc1_payload_size_is_valid(size_t encrypted_payload_size) -> bool
+{
+    return encrypted_payload_size >= eecf_ecc1_overhead + 16 && encrypted_payload_size <= eecf_max_encrypted_payload_size &&
+        ((encrypted_payload_size - eecf_ecc1_overhead) % 16) == 0;
+}
+
+/// ECC1 plaintext (IEEE 1722-2025 17.3.3): encryption_timestamp, then the
+/// encapsulated AVTPDU. The AVTPDU span views the caller's plaintext buffer.
+struct EecfEcc1Plaintext
+{
+    uint64_t encryption_timestamp{};
+    std::span<uint8_t const> encapsulated_avtpdu;
+};
+
+/// Encrypt an ECC1 plaintext into an EECF encrypted_payload laid out as V || T || C.
+///
+/// @param recipient_pk Recipient's P-256 public key (the key_id's key).
+/// @param plaintext The 17.3.3 plaintext (encryption_timestamp || encapsulated_avtpdu),
+///        or any octet string for the payload-level tests and tools.
+/// @param out Output buffer, at least eecf_ecc1_encrypted_size(plaintext.size()).
+/// @param entropy 32 octets of fresh randomness for the ephemeral key.
+/// @return The encrypted_payload within @p out, or nullopt when the buffer is too
+///         small, the result would not fit an EECF frame, or ECIES fails.
+auto eecf_ecc1_encrypt_payload(
+    P256PublicKey const& recipient_pk,
+    std::span<uint8_t const> plaintext,
+    std::span<uint8_t> out,
+    std::span<uint8_t const, p256_scalar_size> entropy) -> std::optional<std::span<uint8_t const>>;
+
+/// Decrypt an EECF ECC1 encrypted_payload (V || T || C) to its plaintext.
+///
+/// @param sk Recipient's P-256 private key.
+/// @param encrypted_payload The EECF encrypted_payload as parsed from the frame.
+/// @param plaintext_out Output buffer, at least encrypted_payload.size().
+/// @return The plaintext within @p plaintext_out, or nullopt when the payload size
+///         is not an ECC1 shape, the buffer is too small, or the tag does not verify.
+auto eecf_ecc1_decrypt_payload(
+    P256PrivateKey const& sk, std::span<uint8_t const> encrypted_payload, std::span<uint8_t> plaintext_out)
+    -> std::optional<std::span<uint8_t const>>;
+
+/// Encrypt an encapsulated AVTPDU with its encryption_timestamp (17.3.3) into an
+/// ECC1 encrypted_payload (V || T || C). @p out must hold
+/// eecf_ecc1_encrypted_size(eecf_timestamp_size + encapsulated_avtpdu.size()).
+auto eecf_ecc1_encrypt(
+    P256PublicKey const& recipient_pk,
+    uint64_t encryption_timestamp,
+    std::span<uint8_t const> encapsulated_avtpdu,
+    std::span<uint8_t> out,
+    std::span<uint8_t const, p256_scalar_size> entropy) -> std::optional<std::span<uint8_t const>>;
+
+/// Decrypt an ECC1 encrypted_payload and split the 17.3.3 plaintext into its
+/// encryption_timestamp and encapsulated AVTPDU. @p plaintext_out must hold
+/// encrypted_payload.size() octets; the returned AVTPDU span views it.
+auto eecf_ecc1_decrypt(P256PrivateKey const& sk, std::span<uint8_t const> encrypted_payload, std::span<uint8_t> plaintext_out)
+    -> std::optional<EecfEcc1Plaintext>;
 
 // Parsed frame structure
 
@@ -215,10 +307,11 @@ auto extract_auth_add_key_nonce_ciphertext(ParsedAemFrame const& frame) -> std::
 /// Returns nullopt if payload is too short (< 24 bytes).
 auto extract_auth_add_key_nonce_response(ParsedAemFrame const& frame) -> std::optional<AuthAddKeyNonceResponsePayload>;
 
-// EECF frame (IEEE 1722-2016 Clause 17)
+// EECF frame (IEEE 1722-2025 Clause 17)
 
 /// Parsed fields from a complete Ethernet + EECF frame.
-/// The encrypted_payload member is a zero-copy view into the original frame buffer.
+/// The encrypted_payload member is a zero-copy view into the original frame buffer;
+/// for enc = ECC1 it is V || T || C (17.3.2), decrypted by eecf_ecc1_decrypt.
 ///
 /// Wire layout (after Ethernet header):
 ///   Byte 0:     subtype (0xED)
@@ -240,15 +333,15 @@ struct ParsedEecfFrame
 
 /// Build a complete Ethernet + EECF frame.
 ///
-/// The encrypted_payload should already be the output of ECIES encryption
-/// (e.g., for ECC1: ecies_encrypt(timestamp || inner_avtpdu)).
+/// The encrypted_payload is already encrypted: for ECC1 it is the V || T || C
+/// output of eecf_ecc1_encrypt(encryption_timestamp, encapsulated_avtpdu).
 ///
 /// @param out Output buffer. Must be at least eecf_payload_offset + encrypted_payload.size().
 /// @param dest_mac Destination MAC address for the Ethernet header.
 /// @param src_mac Source MAC address for the Ethernet header.
 /// @param enc Encryption algorithm identifier (bits [1:0] of the enc field).
 /// @param key_id Entity ID of the key used to encrypt the payload.
-/// @param encrypted_payload Ciphertext bytes (ECIES output) appended after the header.
+/// @param encrypted_payload The encrypted_payload (ECC1: V || T || C) appended after the header.
 /// @return Span of the written frame, or nullopt if output buffer is too small.
 auto build_eecf_frame(
     std::span<uint8_t> out,

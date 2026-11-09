@@ -9,6 +9,7 @@
 // Empty strings represent zero-length data.
 // Output is space-separated hex strings on a single line.
 
+#include "statusbar/avtp_crypto/avtp_aem_frame.hpp"
 #include "statusbar/crypto/25519/ed25519.hpp"
 #include "statusbar/crypto/25519/x25519.hpp"
 #include "statusbar/crypto/aes/aes128_hw.hpp"
@@ -152,8 +153,10 @@ static void usage()
         "  p256_ecdsa_sign      <seed> <message>            -> signature (64 bytes r||s)\n"
         "  p256_ecdsa_verify    <pubkey> <message> <sig>    -> ok|fail\n"
         "  p256_ecdh            <seed> <peer_pubkey>        -> shared_secret (32 bytes)\n"
-        "  ecies_encrypt        <pubkey> <entropy> <pt>     -> V||C||T (hex)\n"
+        "  ecies_encrypt        <pubkey> <entropy> <pt>     -> V||C||T (hex, IEEE 1363a triple order)\n"
         "  ecies_decrypt        <seed> <ciphertext>         -> ok|fail plaintext\n"
+        "  eecf_ecc1_encrypt    <pubkey> <entropy> <pt>     -> V||T||C (hex, IEEE 1722-2025 17.3.2 encrypted_payload)\n"
+        "  eecf_ecc1_decrypt    <seed> <encrypted_payload>  -> ok|fail plaintext\n"
         "  x25519_ecies_encrypt <pubkey> <entropy> <pt>     -> V||C||T (hex)\n"
         "  x25519_ecies_decrypt <seed> <ciphertext>         -> ok|fail plaintext\n"
         "  backend                                          -> resolved hw/sw backend per primitive\n"
@@ -927,6 +930,57 @@ static void cmd_ecies_decrypt(int argc, char** argv)
 }
 
 //
+// EECF ECC1 encrypted_payload command handlers (IEEE 1722-2025 17.3.2: V || T || C)
+//
+
+static void cmd_eecf_ecc1_encrypt(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 3, "eecf_ecc1_encrypt");
+    auto pk_bytes = hex_decode(argv[2]);
+    auto entropy_bytes = hex_decode(argv[3]);
+    SecureVectorGuard const guard_entropy{entropy_bytes};
+    auto pt = hex_decode(argv[4]);
+
+    P256PublicKey pk;
+    require_copy(pk.data, pk_bytes, "public_key");
+    std::array<uint8_t, p256_scalar_size> entropy;
+    require_copy(entropy, entropy_bytes, "entropy");
+
+    std::vector<uint8_t> output(statusbar::crypto::avtp::eecf_ecc1_encrypted_size(pt.size()));
+
+    auto result = statusbar::crypto::avtp::eecf_ecc1_encrypt_payload(pk, pt, output, entropy);
+    if (!result) {
+        std::println(stderr, "error: eecf_ecc1_encrypt failed");
+        std::exit(1);
+    }
+    hex_print(*result);
+    std::println("");
+}
+
+static void cmd_eecf_ecc1_decrypt(int argc, char** argv)
+{  // NOLINT(statusbar-block-statements) CLI handler: decode arguments, run, print, like its siblings
+    require_args(argc, 2, "eecf_ecc1_decrypt");
+    auto seed = hex_decode(argv[2]);
+    SecureVectorGuard const guard_seed{seed};
+    auto payload = hex_decode(argv[3]);
+
+    std::array<uint8_t, p256_scalar_size> seed_arr;
+    require_copy(seed_arr, seed, "seed");
+
+    auto sk = p256_ecdsa_keypair_from_seed(seed_arr);
+    std::vector<uint8_t> plaintext(payload.size());
+
+    auto result = statusbar::crypto::avtp::eecf_ecc1_decrypt_payload(sk, payload, plaintext);
+    if (!result) {
+        std::println("fail");
+    } else {
+        std::print("ok ");
+        hex_print(*result);
+        std::println("");
+    }
+}
+
+//
 // X25519 ECIES command handlers
 //
 
@@ -1201,6 +1255,10 @@ int main(int argc, char** argv)
         cmd_ecies_encrypt(argc, argv);
     } else if (cmd == "ecies_decrypt") {
         cmd_ecies_decrypt(argc, argv);
+    } else if (cmd == "eecf_ecc1_encrypt") {
+        cmd_eecf_ecc1_encrypt(argc, argv);
+    } else if (cmd == "eecf_ecc1_decrypt") {
+        cmd_eecf_ecc1_decrypt(argc, argv);
     } else if (cmd == "x25519_ecies_encrypt") {
         cmd_x25519_ecies_encrypt(argc, argv);
     } else if (cmd == "x25519_ecies_decrypt") {
