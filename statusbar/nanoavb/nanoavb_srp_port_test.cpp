@@ -408,6 +408,32 @@ TEST(nanoavb_srp_port, a_talker_leave_is_reported_when_it_arrives)
     EXPECT_EQ(leaves, 1);
 }
 
+// A reported leave is forgotten once its LeaveTime has run out (IEEE 802.1Q-2022 Clause 10.7.7), so
+// more StreamIDs than the port holds attributes for each leave, and each leave is reported once.
+TEST(nanoavb_srp_port, every_one_of_more_talkers_than_the_table_holds_leaves_once)
+{
+    Bridge b{};
+    int leaves = 0;
+    b.port.set_observer(SrpPortObserver{.on_talker_leave = [&](StreamId const&) { ++leaves; }});
+    constexpr int TALKERS = 520;  // more than the 512 talker attributes the port holds
+    int registered = 0;           // a declaration the bridge's full PDU deferred may not arrive in time
+    for (int uid = 0; uid < TALKERS; ++uid) {
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fv.stream_id = stream_id(static_cast<uint16_t>(0x200 + uid));
+        fv.destination_address = GROUP;
+        fv.vlan_identifier = 2;
+        fv.max_frame_size = 185;
+        fv.max_interval_frames = 1;
+        (void)b.bridge.declare_talker_advertise(fv, b.now);
+        b.run(4);
+        registered += b.port.msrp().peer_talker_advertise(fv.stream_id) != nullptr ? 1 : 0;
+        (void)b.bridge.withdraw_talker(fv.stream_id, b.now);
+        b.run(8);
+    }
+    EXPECT_TRUE(registered > 512);
+    EXPECT_EQ(leaves, registered);
+}
+
 // The port's participant holds every advertise a bridge propagates (Clause 35.2.2.8.3 discovery):
 // the stream wanted is found after 39 others.
 TEST(nanoavb_srp_port, a_stream_is_found_among_forty_foreign_advertises)
