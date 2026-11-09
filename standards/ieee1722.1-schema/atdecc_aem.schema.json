@@ -811,6 +811,17 @@
           "minimum": 0,
           "description": "Index of the CLOCK_DOMAIN this port belongs to. Defaults to its audio unit's."
         },
+        "flags": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "CLOCK_SYNC_SOURCE",
+              "ASYNC_SAMPLE_RATE_CONV",
+              "SYNC_SAMPLE_RATE_CONV"
+            ]
+          },
+          "description": "Port flags (IEEE 1722.1-2021 Clause 7.2.13.1)."
+        },
         "symbol": {
           "$ref": "#/$defs/symbol"
         }
