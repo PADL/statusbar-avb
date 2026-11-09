@@ -270,6 +270,13 @@ STREAM_FLAGS_NAMES: dict[str, int] = {
     "SUPPORTS_NO_SRP": 0x8000,
 }
 
+# STREAM_PORT_INPUT/OUTPUT port_flags (IEEE 1722.1-2021 Clause 7.2.13.1).
+PORT_FLAGS_NAMES: dict[str, int] = {
+    "CLOCK_SYNC_SOURCE": 0x0001,
+    "ASYNC_SAMPLE_RATE_CONV": 0x0002,
+    "SYNC_SAMPLE_RATE_CONV": 0x0004,
+}
+
 JACK_FLAGS_NAMES: dict[str, int] = {
     "CLOCK_SYNC_SOURCE": 0x0001,
     "CAPTIVE": 0x0002,
