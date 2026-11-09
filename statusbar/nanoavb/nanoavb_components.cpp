@@ -802,14 +802,14 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
         return mvrp.send(MVRP_MULTICAST_MAC, packet).has_value();
     }});
 
-    // MSRP: send packets to multicast
-    components.msrp_handler.set_callbacks(MsrpCallbacks{.send_packet = [&handlers](std::span<uint8_t const> packet) -> bool {
+    // MSRP: send packets to multicast; the hooks an owner set before start (on_domain_adopted) stay.
+    components.msrp_handler.set_send_packet([&handlers](std::span<uint8_t const> packet) -> bool {
         auto& msrp = handlers.msrp_handler();
         if (!msrp.valid()) {
             return false;
         }
         return msrp.send(MSRP_MULTICAST_MAC, packet).has_value();
-    }});
+    });
 
     // gPTP Announce: the grandmaster in force, gained, changed or lost, is
     // reported the same way to ADP and to the registered controllers.
