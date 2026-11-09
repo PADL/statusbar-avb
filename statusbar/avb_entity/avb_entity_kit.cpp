@@ -65,6 +65,15 @@ template <typename T>
         host, atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER, static_cast<uint16_t>(port.base_cluster.get() + offset));
 }
 
+/// STREAM_PORT port_flags ASYNC_ and SYNC_SAMPLE_RATE_CONV (IEEE 1722.1-2021 Clause 7.2.13.1).
+constexpr uint16_t PORT_FLAGS_SAMPLE_RATE_CONV = 0x0002 | 0x0004;
+
+/// Whether @p port converts sample rates between its audio unit and its streams (Milan v1.3 Section 5.3.3.7).
+[[nodiscard]] auto converts_rates(atdecc::aem::DescriptorStreamPort const& port) noexcept -> bool
+{
+    return (port.port_flags.get() & PORT_FLAGS_SAMPLE_RATE_CONV) != 0;
+}
+
 /// SET_CLOCK_SOURCE's body (IEEE 1722.1-2021 Clause 7.4.23.1): CLOCK_DOMAIN, its index, the source, reserved.
 auto clock_source_command(uint16_t const clock_domain_index, uint16_t const clock_source_index) -> std::array<uint8_t, 8>
 {
@@ -348,9 +357,11 @@ auto AvbEntityKit::identity_spec(uint16_t const port_type, uint16_t const port_i
     bool const output = port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
     auto const& specs = output ? talker_specs_ : listener_specs_;
     auto const* const spec = std::ranges::find(specs, port_index, &StreamSpec::index);
-    // Milan v1.2 Section 5.4.2.27: none at another rate than the unit's, unless outputs opted out.
-    bool const at_rate =
-        spec != specs.end() && (spec->format.sample_rate_hz == sample_rate_ || (output && output_mappings_across_rates_));
+    // Milan v1.2 Section 5.4.2.27: none at another rate than the unit's, unless the port converts rates (Milan v1.3
+    // Section 5.3.3.7) or outputs opted out.
+    bool const at_rate = spec != specs.end() &&
+        (spec->format.sample_rate_hz == sample_rate_ || port_converts(port_type, port_index) ||
+         (output && output_mappings_across_rates_));
     return at_rate ? &*spec : nullptr;
 }
 
@@ -502,20 +513,22 @@ void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
 
 auto AvbEntityKit::output_static_map_channels(uint16_t const stream_index) const -> uint16_t
 {
-    return static_map_channels(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, stream_index);
+    return static_map_channels(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, stream_index, /*unconverted_only=*/false);
 }
 
-auto AvbEntityKit::static_map_channels(uint16_t const port_type, uint16_t const stream_index) const -> uint16_t
+auto AvbEntityKit::static_map_channels(uint16_t const port_type, uint16_t const stream_index, bool const unconverted_only) const
+    -> uint16_t
 {
-    // Every such port's static AUDIO_MAPs (the model's): the channels of
-    // stream @p stream_index of the port's direction they name.
+    // Every such port's static AUDIO_MAPs (the model's), or only those of ports that convert no
+    // rates: the channels of stream @p stream_index of the port's direction they name.
     uint16_t needed = 0;
     for (uint16_t p = 0; p < UINT16_MAX; ++p) {
         auto const port = load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, port_type, p);
         if (!port) {
             break;
         }
-        for (uint16_t i = 0; i < port->number_of_maps.get(); ++i) {
+        uint16_t const maps = unconverted_only && converts_rates(*port) ? uint16_t{0} : port->number_of_maps.get();
+        for (uint16_t i = 0; i < maps; ++i) {
             auto map = load_descriptor<atdecc::aem::DescriptorAudioMap>(
                 host_, atdecc::aem::DESCRIPTOR_AUDIO_MAP, static_cast<uint16_t>(port->base_map.get() + i));
             if (!map) {
@@ -534,24 +547,32 @@ auto AvbEntityKit::static_map_channels(uint16_t const port_type, uint16_t const 
 
 auto AvbEntityKit::stream_mapped(bool const output, uint16_t const index) const -> bool
 {
-    if (static_map_channels(
-            output ? atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT : atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, index) != 0) {
+    uint16_t const port_type = output ? atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT : atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
+    if (static_map_channels(port_type, index, /*unconverted_only=*/true) != 0) {
         return true;
     }
     bool named = false;
     if (!output) {
         host_.components().aem_handler.dynamic_audio_maps().for_each(
-            [&named, index](uint16_t const port_type, uint16_t /*port_index*/, nanoavb::DynamicAudioMapping const& m) {
-                named = named || (port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == index);
+            [this, &named, index](uint16_t const type, uint16_t const port_index, nanoavb::DynamicAudioMapping const& m) {
+                named = named ||
+                    (type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == index &&
+                     !port_converts(type, port_index));
             });
     }
     return named;
 }
 
+auto AvbEntityKit::port_converts(uint16_t const port_type, uint16_t const port_index) const -> bool
+{
+    auto const port = load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, port_type, port_index);
+    return port.has_value() && converts_rates(*port);
+}
+
 auto AvbEntityKit::held_at_unit_rate(bool const output, uint16_t const index) const -> bool
 {
-    // Milan v1.2 Sections 5.4.2.7, 5.4.2.27: a mapped stream keeps the unit's rate. That rate rule is a
-    // should, not part of Section 5.3.3.4's validity, so an entity may opt its outputs out of it.
+    // Milan v1.2 Sections 5.4.2.7, 5.4.2.27: a stream mapped through a port that converts no rates keeps the unit's
+    // rate. That rule is a should, not part of Section 5.3.3.4's validity, so an entity may opt its outputs out of it.
     return !(output && output_mappings_across_rates_) && stream_mapped(output, index);
 }
 

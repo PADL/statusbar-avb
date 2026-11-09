@@ -115,9 +115,13 @@ constexpr uint64_t AM824_8CH_48K = avtp::make_am824_stream_format(2, 8);
 /// @p one_rate the unit lists 48 kHz only and STREAM_PORT_OUTPUT 0 is dynamic.
 /// With @p am824 both audio streams also list AM824_8CH_48K.
 /// With @p narrow_output the output lists the 2-channel Base format too (and has no map to forbid it).
+/// @p port_flags are both stream ports' (IEEE 1722.1-2021 Clause 7.2.13.1).
 auto make_multirate_blob(
-    bool const ports = false, bool const one_rate = false, bool const am824 = false, bool const narrow_output = false)
-    -> std::vector<uint8_t>
+    bool const ports = false,
+    bool const one_rate = false,
+    bool const am824 = false,
+    bool const narrow_output = false,
+    uint16_t const port_flags = 0) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -164,6 +168,7 @@ auto make_multirate_blob(
         unit.number_of_stream_input_ports = uint16_t{1};
         atdecc::aem::DescriptorStreamPort port{};
         port.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
+        port.port_flags = port_flags;
         port.number_of_clusters = uint16_t{8};
         w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, 0, make_const_span(port));
         for (uint16_t c = 0; c < 8; ++c) {
@@ -178,6 +183,7 @@ auto make_multirate_blob(
         unit.number_of_stream_output_ports = uint16_t{1};
         atdecc::aem::DescriptorStreamPort out_port{};
         out_port.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
+        out_port.port_flags = port_flags;
         out_port.number_of_clusters = uint16_t{1};
         out_port.base_cluster = uint16_t{8};
         out_port.number_of_maps = static_cast<uint16_t>(one_rate ? 0 : 1);
@@ -3522,6 +3528,59 @@ TEST(avb_entity_kit_mixed_rates, a_mapped_input_keeps_the_unit_rate_when_outputs
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, INT24_8CH_96K)),
         atdecc::AEM_STATUS_BAD_ARGUMENTS);
     EXPECT_TRUE(m.formats.empty());
+}
+
+// Milan v1.3 Section 5.3.3.7: ports that set SYNC_SAMPLE_RATE_CONV map a stream at another rate than the unit's
+// like any other: a 96 kHz input keeps the identity, mappings hold across 48 <-> 96 kHz, an output's static map
+// too without set_output_mappings_across_rates; Section 5.4.2.7's channel rule still holds
+TEST(avb_entity_kit_mixed_rates, a_converting_port_keeps_its_mappings_across_rates)
+{
+    constexpr uint16_t SYNC_SAMPLE_RATE_CONV = 0x0004;
+    PersistentKit m{{}, 0x7E, std::nullopt, make_multirate_blob(true, false, false, false, SYNC_SAMPLE_RATE_CONV)};
+    m.kit.set_on_stream_format_changed([](uint16_t, uint16_t, StreamFormatFields const&) { return atdecc::AEM_STATUS_SUCCESS; });
+    m.kit.set_on_input_mappings_changed(
+        [](uint16_t, std::span<nanoavb::DynamicAudioMapping const>) { return atdecc::AEM_STATUS_SUCCESS; });
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    auto const set = [&m](uint16_t const type, uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, word));
+    };
+    std::vector<nanoavb::DynamicAudioMapping> identity;
+    identity.reserve(8);
+    for (uint16_t ch = 0; ch < 8; ++ch) {
+        identity.push_back(mapping(ch, ch));
+    }
+    EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), identity));
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_96K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 96000U);
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).empty());
+    EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), identity));
+    EXPECT_TRUE(std::ranges::equal(m.kit.default_input_mappings(0), identity));  // mapped with the identity at 96 kHz
+    EXPECT_EQ(map_command(m, false, {mapping(0, 0), mapping(1, 1)}), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(map_command(m, true, {mapping(1, 0), mapping(0, 1)}), atdecc::AEM_STATUS_SUCCESS);
+    auto const swapped = m.kit.input_mappings(0);
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, base_format(96000, 2)), atdecc::AEM_STATUS_BAD_ARGUMENTS);  // channels 2-7 mapped
+    EXPECT_FALSE(m.kit.output_mappings_across_rates());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT, INT24_8CH_96K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.output_static_map_channels(0), uint16_t{8});
+}
+
+// ASYNC_SAMPLE_RATE_CONV converts as well: a dynamic output port keeps the kit's identity at 96 kHz, nothing removed
+TEST(avb_entity_kit_mixed_rates, a_converting_dynamic_output_keeps_its_identity_across_rates)
+{
+    constexpr uint16_t ASYNC_SAMPLE_RATE_CONV = 0x0002;
+    PersistentKit m{{}, 0x7F, std::nullopt, make_multirate_blob(true, true, false, false, ASYNC_SAMPLE_RATE_CONV)};
+    m.kit.set_on_stream_format_changed([](uint16_t, uint16_t, StreamFormatFields const&) { return atdecc::AEM_STATUS_SUCCESS; });
+    EXPECT_TRUE(m.start_ready());
+    register_other_controller(m);
+    EXPECT_TRUE(m.kit.has_dynamic_output_map(0));
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_96K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS).empty());
+    EXPECT_EQ(m.kit.output_mappings(0).size(), size_t{8});
 }
 
 // --- An audio stream's kind (AAF, AM824) ---------------------------------------
