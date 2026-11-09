@@ -621,6 +621,47 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     kit.set_on_admission_changed({});
 }
 
+// A restart with the link up resumes MSRP on the configured Domain: the VID
+// adopted before the stop is dropped, and the bridge's Class A VID 7 is
+// adopted again once it re-declares (Milan v1.2 Section 4.2.7.2.1)
+TEST(avb_entity_kit_domain, a_restart_with_the_link_up_adopts_a_bridges_vid)
+{
+    MilanKit m{std::nullopt, 0x31};
+    EXPECT_TRUE(m.start_ready());
+    auto& components = m.kit.host().components();
+    std::vector<std::vector<uint8_t>> bridge_out;
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9e};
+    bridge.set_send_pdu([&bridge_out](std::span<uint8_t const> p) {
+        bridge_out.emplace_back(p.begin(), p.end());
+        return true;
+    });
+    auto now = sm::Clock::now();
+    auto const exchange = [&] {
+        for (int i = 0; i < 4; ++i) {
+            now += std::chrono::milliseconds(250);
+            bridge.tick(now);
+            for (auto const& p : std::exchange(bridge_out, {})) {
+                components.msrp_handler.receive_packet(p, now);
+            }
+        }
+    };
+    bridge.start(now);
+    (void)bridge.declare_domain(srp::msrp::DomainFirstValue{.sr_class_vid = 7}, now);
+    exchange();
+    EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{7});
+
+    EXPECT_TRUE(m.kit.stop().has_value());
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_FALSE(components.msrp_handler.withdrawn());
+    EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{2});
+    EXPECT_TRUE(components.mvrp_handler.get_vlan_state(2) != nanoavb::VlanState::Unregistered);
+    bridge.leave_all(now);  // the resumed run's LeaveAll reaching the bridge
+    exchange();
+    EXPECT_EQ(components.msrp_handler.domain().sr_class_vid, uint16_t{7});
+    EXPECT_EQ(components.acmp_talker.get_stream(0)->stream_vlan_id, uint16_t{7});
+    EXPECT_TRUE(components.mvrp_handler.get_vlan_state(7) != nanoavb::VlanState::Unregistered);
+}
+
 // Milan v1.2 Section 4.2.7.2.1: an adopted Class A VID reaches the MVRP join,
 // ACMP stream_vlan_id and the frames' tag; a link up restores the configured VID,
 // a repeated report of a link already up does not.

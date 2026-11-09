@@ -1561,14 +1561,24 @@ auto AvbEntityKit::start_control(net::MessageReactor& reactor, TimePoint const n
         return status;
     }
     wire_stream_callbacks();
-    // The VID, registered on every start: stop() withdraws it with the rest.
-    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, now);
+    declare_vid_and_domain(now);
     // A restarted kit whose control plane stayed Ready gets no advertise hook
     // again (stop() withdrew everything): advertise now.
     if (host_.is_ready()) {
         advertise_talker_streams(now);
     }
     return start_declarations(reactor, now);
+}
+
+void AvbEntityKit::declare_vid_and_domain(TimePoint const now)
+{
+    // The VID, registered on every start: stop() withdraws it with the rest.
+    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, now);
+    // After a stop, the run resumes on the configured Domain, which a link already
+    // up reports no link up to restore (Milan v1.2 Section 4.2.7.2.1).
+    if (host_.components().msrp_handler.withdrawn()) {
+        (void)host_.components().msrp_handler.reset_domain(now);
+    }
 }
 
 void AvbEntityKit::prepare_control_plane()
