@@ -747,10 +747,40 @@ void AvbEntityKit::rejoin_static_rx_groups()
 
 auto AvbEntityKit::group_connected(ieee::Eui48 const& group) const -> bool
 {
-    return std::ranges::any_of(listener_specs_, [this, &group](StreamSpec const& spec) {
-        auto const* const stream = host_.components().acmp_listener.get_stream(spec.index);
-        return stream != nullptr && stream->connected && stream->stream_dest_mac == group;
-    });
+    return std::ranges::any_of(
+        listener_specs_, [this, &group](StreamSpec const& spec) { return connected_rx_group(spec) == group; });
+}
+
+auto AvbEntityKit::connected_rx_group(StreamSpec const& spec) const -> ieee::Eui48
+{
+    auto const* const stream = host_.components().acmp_listener.get_stream(spec.index);
+    return stream != nullptr && stream->connected ? stream->stream_dest_mac : ieee::Eui48{};
+}
+
+void AvbEntityKit::join_connected_rx_groups()
+{
+    for (auto const& spec : listener_specs_) {
+        if (auto const group = connected_rx_group(spec); group.is_multicast()) {
+            (void)stream_port_.port().join_multicast(group);
+        }
+    }
+}
+
+void AvbEntityKit::leave_rx_groups()
+{
+    sg14::inplace_vector<ieee::Eui48, 2 * MAX_ENTITY_STREAMS> held{};
+    for (size_t i = 0; i < listener_specs_.size(); ++i) {
+        (void)held.try_push_back(connected_rx_group(listener_specs_[i]));
+        (void)held.try_push_back(i < rx_static_groups_.size() ? rx_static_groups_[i] : ieee::Eui48{});
+    }
+    rx_static_groups_.clear();
+    std::ranges::sort(held);
+    auto const repeated = std::ranges::unique(held);
+    for (auto const& group : std::ranges::subrange{held.begin(), repeated.begin()}) {
+        if (group.is_multicast() && stream_port_.valid()) {
+            (void)stream_port_.port().leave_multicast(group);
+        }
+    }
 }
 
 auto AvbEntityKit::talkers_fit(uint16_t const index, uint64_t const word) const noexcept -> bool
@@ -1732,6 +1762,9 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
             stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
         }
     }
+    if (stream_port_.valid()) {
+        join_connected_rx_groups();
+    }
 #if defined(__linux__)
     // The VID's tagged stream frames must get past the NIC's VLAN filter.
     // Never fatal: without CAP_NET_ADMIN this only warns.
@@ -1852,7 +1885,7 @@ void AvbEntityKit::close_data_plane()
 #if defined(__linux__)
     listener_vlan_.release();
 #endif
-    rx_static_groups_.clear();
+    leave_rx_groups();
     close_streams();
     refresh_pending_.reset();          // a re-declaration asked for in this run: the next run declares afresh
     declaration_timer_token_.reset();  // the timer finishes
