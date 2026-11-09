@@ -42,6 +42,7 @@ from .model import (
     LISTENER_CAPABILITIES_NAMES,
     STREAM_FLAGS_NAMES,
     JACK_FLAGS_NAMES,
+    PORT_FLAGS_NAMES,
     JACK_TYPE_NAMES,
     CLOCK_SOURCE_TYPE_NAMES,
     INTERFACE_FLAGS_NAMES,
@@ -291,6 +292,9 @@ def _parse_port(
     ]
     return AudioStreamPort(
         clock_domain_index=port_obj.get("clock_domain_index", clock_domain_index),
+        port_flags=_parse_flags(
+            port_obj.get("flags", []), PORT_FLAGS_NAMES, f"{context}.flags"
+        ),
         clusters=clusters,
         maps=audio_maps,
         controls=controls,
