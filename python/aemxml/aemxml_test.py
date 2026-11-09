@@ -3064,6 +3064,67 @@ def test_json_unit_and_port_clock_domains():
     print("  [+] JSON unit and port clock domains: OK")
 
 
+def test_json_port_flags():
+    """A stream port's "flags" reach its port_flags (IEEE 1722.1-2021 Clause 7.2.13.1)
+    and survive the JSON and blob round trips; a port without them has none."""
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+    from aemxml.unflatten import unflatten
+
+    model = {
+        "entity": {
+            "vendor": "V",
+            "model": "M",
+            "name": "Ports",
+            "configurations": [
+                {
+                    "name": "C",
+                    "avb_interfaces": [{"name": "eth0"}],
+                    "clock_sources": [{"name": "Internal", "type": "INTERNAL"}],
+                    "clock_domains": [{"name": "CD0", "source": 0, "sources": [0]}],
+                    "audio_units": [
+                        {
+                            "name": "U",
+                            "rates": [48000],
+                            "input_ports": [
+                                {
+                                    "flags": ["SYNC_SAMPLE_RATE_CONV"],
+                                    "clusters": [{"name": "In", "channels": 2}],
+                                }
+                            ],
+                            "output_ports": [
+                                {"clusters": [{"name": "Out", "channels": 2}]}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    def flags(entity) -> list:
+        unit = entity.configurations[0].audio_units[0]
+        ports = unit.input_stream_ports + unit.output_stream_ports
+        return [p.port_flags for p in ports]
+
+    entity = read_json(json.dumps(model))
+    assert flags(entity) == [0x0004, 0], flags(entity)
+    # One configuration and one unit: the writer uses the singular keys.
+    written = json.loads(write_json(entity))["entity"]["configuration"]["audio_unit"]
+    assert written["input_ports"][0]["flags"] == ["SYNC_SAMPLE_RATE_CONV"]
+    assert "flags" not in written["output_ports"][0]
+    assert flags(read_json(write_json(entity))) == [0x0004, 0]
+    assert flags(unflatten(*read_blob(write_blob(*flatten(entity))))) == [0x0004, 0]
+    port = model["entity"]["configurations"][0]["audio_units"][0]["input_ports"][0]
+    port["flags"] = ["NO_SUCH_FLAG"]
+    try:
+        read_json(json.dumps(model))
+        raise AssertionError("an unknown port flag was accepted")
+    except ValueError as e:
+        assert "flags" in str(e)
+    print("  [+] JSON port flags: OK")
+
+
 def test_entity_milan_profile():
     """The entity's "milan" profile reaches the blob only as the ENTITY
     descriptor's well-known symbol (descriptor bytes unchanged), and survives
@@ -3151,6 +3212,7 @@ def main():
         test_json_round_trip_keeps_timing_ptp_and_clock_source_location,
         test_json_stream_buffer_length,
         test_json_unit_and_port_clock_domains,
+        test_json_port_flags,
         test_entity_milan_profile,
         test_json_to_blob,
         test_json_to_xml_round_trip,
