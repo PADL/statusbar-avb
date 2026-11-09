@@ -210,7 +210,10 @@ while no port map names the stream (an input's dynamic mappings, a static
 AUDIO_MAP of either direction), else BAD_ARGUMENTS: Section 5.4.2.27 maps no
 stream at another rate than its unit's onto a port without rate conversion, so
 such a stream exists unmapped (Section 5.4.2.7 names BAD_ARGUMENTS for a format
-the mappings forbid). A controller removes the mappings first.
+the mappings forbid). A controller removes the mappings first. A port whose
+port_flags set ASYNC_ or SYNC_SAMPLE_RATE_CONV (IEEE 1722.1-2021 Clause
+7.2.13.1; Milan v1.3 Section 5.3.3.7) converts, so its maps hold at any listed
+rate; the entity's format hook refuses a rate its data plane cannot convert.
 
 That rate rule is a "should" in Section 5.4.2.27, so it is no part of a
 mapping's validity under Section 5.3.3.4's "shall" ("only stream formats where
@@ -219,7 +222,7 @@ stream's own rate opts its outputs out with
 `set_output_mappings_across_rates(true)` before `start()`: an output stream then
 accepts any listed rate with its static AUDIO_MAPs, or the kit's identity, still in
 force; the channel rule of Section 5.4.2.7 still holds. The default follows the
-"should"; inputs always do. No SSRC/ASRC port flag is claimed. The entity's hook
+"should"; inputs always do, unless their port converts. The entity's hook
 (`set_on_stream_format_changed`) applies it to its data plane, and the kit
 re-shapes the stream (its spec, its TX or RX slot at the format's rate, a
 declared talker's TSpec at that rate's samples per frame). Without a hook only
@@ -258,15 +261,16 @@ v1.2 Sections 5.3.10, 5.4.2.26-28). The kit starts each such port k with its
 default: STREAM_INPUT k's channels, in order, onto the port's cluster channels
 in order, as far as both go (the identity a port-per-stream data plane already
 routes); none for a port with no stream input of its index, and none while
-stream k is at another rate than the unit's (Section 5.4.2.27). A stream leaves
-the unit's rate only with no mappings (above); when it comes back, the port
-stays empty until its owner restores them (a controller's ADD, or the entity's
-`request_audio_mappings`).
+stream k is at another rate than the unit's on a port that does not convert
+(Section 5.4.2.27). Such a stream leaves the unit's rate only with no mappings
+(above); when it comes back, the port stays empty until its owner restores them
+(a controller's ADD, or the entity's `request_audio_mappings`). On a converting
+port the mappings, and the default, hold at any rate.
 
 Every STREAM_PORT_OUTPUT without a static AUDIO_MAP carries the kit's own
 identity, built as the input default from STREAM_OUTPUT k, while stream k is at
-the unit's rate (at any rate under `set_output_mappings_across_rates`), and
-none otherwise; the kit re-derives it after every format
+the unit's rate (at any rate on a converting port or under
+`set_output_mappings_across_rates`), and none otherwise; the kit re-derives it after every format
 change, told to the registered controllers as unsolicited
 REMOVE/ADD_AUDIO_MAPPINGS. GET_AUDIO_MAP answers it; a controller's ADD or
 REMOVE is NOT_SUPPORTED. That falls short of Milan v1.2: Sections 5.3.9.1 and
@@ -274,7 +278,7 @@ REMOVE is NOT_SUPPORTED. That falls short of Milan v1.2: Sections 5.3.9.1 and
 gives its output ports static AUDIO_MAPs, on which GET/ADD/REMOVE answer
 NOT_SUPPORTED as Sections 5.4.2.26-28 require. It is not persisted: it follows the
 formats. A model's static output maps stay as they are and keep their streams
-at the unit's rate, unless the entity opts out (above). A controller's
+at the unit's rate, unless their port converts or the entity opts out (above). A controller's
 change goes to the entity's hook, which routes it or refuses it, and is
 persisted while it differs from the default (restored after the stream formats,
 before the bindings). A SET_STREAM_FORMAT that would drop a mapped channel of a
