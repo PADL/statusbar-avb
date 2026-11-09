@@ -329,7 +329,9 @@ REGISTERING (flags_ex) while declaring and registering any Listener,
 REGISTERING_FAILED while that Listener is Asking Failed; FAST_CONNECT,
 SAVED_STATE, STREAMING_WAIT and BOUND 0; pbsta and acmpsta 0. The entity never
 declares Talker Failed, so MSRP_FAILURE_VALID stays 0. Classic: CONNECTED from
-the ACMP connection count. A Milan listener queries this to verify the stream
+the ACMP connection count; STREAMING_WAIT after STOP_STREAMING until START_STREAMING
+(IEEE 1722.1-2021 Table 7-145), each change notified as an unsolicited GET_STREAM_INFO.
+(Milan refuses STOP_STREAMING on an output, Milan v1.2 Section 5.4.2.20.) A Milan listener queries this to verify the stream
 before sustaining a connection.
 
 The response form is the AEM handler's `stream_info_layout()`: the profile's

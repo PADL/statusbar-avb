@@ -236,8 +236,12 @@ void AvbEntityKit::wire_storage_hooks()
     // (the media thread treats it as a closed SRP gate); START reopens.
     storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
         if (type == DESCRIPTOR_STREAM_OUTPUT) {
+            bool const changed = talker_->stream_stopped(index) == streaming;
             talker_->set_stream_stopped(index, !streaming);
             note_admission(net::rx_clock_now());  // STREAM_START / STREAM_STOP now
+            if (changed) {
+                notify_talker_stream_info(index);  // STREAMING_WAIT (IEEE 1722.1-2021 Table 7-145)
+            }
         }
         // Milan v1.2 Sections 5.4.2.19-20: a bound input becomes started or
         // stopped (no effect on an unbound one); the AEM lock was checked.
@@ -1254,7 +1258,8 @@ void AvbEntityKit::wire_aecp_queries()
                     .declaring = declarations_.declared(descriptor_index),
                     .listener = talker_listener_[descriptor_index],
                     .presentation_offset_ns = presentation_offset_ns(descriptor_index),
-                    .accumulated_latency_ns = TALKER_ACCUMULATED_LATENCY_NS};
+                    .accumulated_latency_ns = TALKER_ACCUMULATED_LATENCY_NS,
+                    .stopped = talker_->stream_stopped(descriptor_index)};
                 filled = fill_talker_stream_info(host_, descriptor_index, status, out, ext);
             } else if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 auto const layout = host_.components().aem_handler.stream_info_layout();

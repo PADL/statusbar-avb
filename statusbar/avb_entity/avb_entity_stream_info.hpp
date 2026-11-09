@@ -45,6 +45,8 @@ struct TalkerStreamStatus
     /// The AccumulatedLatency its Talker Advertise declares, ns: the IEEE 1722.1-2021
     /// layout's msrp_accumulated_latency (Milan v1.3 Section 5.4.2.10.2).
     uint32_t accumulated_latency_ns{0};
+    /// Stopped by STOP_STREAMING: STREAMING_WAIT (IEEE 1722.1-2021 Clause 7.4.16.2, Table 7-145).
+    bool stopped{false};
 };
 
 /// MSRP_ACC_LAT_VALID for an output with @p status: Milan always (v1.3 Table 5.9); classic in
@@ -99,12 +101,14 @@ struct TalkerStreamStatus
     return failed ? atdecc::aem::stream_info_flags::REGISTERING_FAILED : 0U;
 }
 
-/// The flags of classic output @p descriptor_index: CONNECTED from the ACMP connection count.
-/// SR class A is the entities' only class, so CLASS_B stays clear.
-[[nodiscard]] inline auto classic_talker_flags(AvbEntityHost const& host, uint16_t const descriptor_index) -> uint32_t
+/// The flags of classic output @p descriptor_index: CONNECTED from the ACMP connection count,
+/// STREAMING_WAIT while @p status is stopped. SR class A is the entities' only class, so CLASS_B stays clear.
+[[nodiscard]] inline auto classic_talker_flags(
+    AvbEntityHost const& host, uint16_t const descriptor_index, TalkerStreamStatus const& status) -> uint32_t
 {
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
     bool const connected = host.components().acmp_talker.connection_count(descriptor_index) > 0;
-    return connected ? atdecc::aem::stream_info_flags::CONNECTED : 0U;
+    return (connected ? stream_info_flags::CONNECTED : 0U) | (status.stopped ? stream_info_flags::STREAMING_WAIT : 0U);
 }
 
 /// The STREAM_OUTPUT descriptor's current_format into @p out: STREAM_FORMAT_VALID when the
@@ -154,8 +158,8 @@ template <size_t N>
     }
     uint32_t const flags = fill_talker_identity(*stream, status, out) | fill_talker_format(host, descriptor_index, out) |
         talker_accumulated_latency_flag(status);
-    out.flags =
-        ieee::quadlet_t{flags | (status.milan ? milan_talker_flags(status, ext) : classic_talker_flags(host, descriptor_index))};
+    out.flags = ieee::quadlet_t{
+        flags | (status.milan ? milan_talker_flags(status, ext) : classic_talker_flags(host, descriptor_index, status))};
     return true;
 }
 
