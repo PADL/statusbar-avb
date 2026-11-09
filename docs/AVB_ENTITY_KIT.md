@@ -418,7 +418,11 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
 - stop() leaves every group the inputs hold, pre-joined or connected, before
   it closes the port: an AF_XDP port joins with SIOCADDMULTI, whose
   memberships belong to the interface and outlive the port and the process.
-  A connection that outlives the stop is joined again by the next start().
+  stop() then drops the inputs' connections, after the bindings are saved: a
+  Milan input is unbound, a classic input disconnected with its fast-connect
+  goal kept. The next start() reloads the saved bindings and reconnects them
+  through the connect path, which joins the group, declares the Listener and
+  joins the VID.
 - A binding change (bound, rebound, unbound, its controller or started state)
   is saved once the reactor pass that made it is done, after the ACMP response.
 - Until a talker's address is valid the stream has no destination address:
