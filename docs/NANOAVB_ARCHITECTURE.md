@@ -489,12 +489,12 @@ end station that only declares Talker Advertise and Listener attributes (IEEE
 4. `SrpPortObserver` reports peers' registrations as they happen: the Domain
    (SRP is in force while the peer's is registered), Talker Advertise, Talker
    Failed and their leaving, the Listener declaration for each of our talker
-   streams, and an attached listener following its talker. A Domain VID
-   adopted from the bridge moves the MVRP join and re-advertises the talkers.
+   streams, and an attached listener following its talker. A Domain adopted
+   from the bridge moves the MVRP join and re-advertises the talkers.
    The Domain and a talker's leaving are reported once the received PDU is
    done, with their final state: a peer's Domain counts only at our
-   SRclassPriority (Clause 35.2.1.4), and a talker whose Advertise turns into
-   a Talker Failed has not left.
+   SRclassPriority (Clause 35.2.1.4), which adoption makes it, and a talker
+   whose Advertise turns into a Talker Failed has not left.
 5. `rejoin()`, after a link down and up: the peer's Listener registrations
    are flushed and reported gone (its Domain and Talkers kept), and a
    LeaveAll sent at once re-declares ours and asks the peer to re-declare its
@@ -527,18 +527,20 @@ talker's attribute is registered).
   descriptor sets CLASS_A, Section 5.3.3.4). After startup or link up
   `reset_domain()` restores the configured domain (priority 3, VID 2 by
   default) and declares it, whether or not gPTP is up.
-- **Domain adoption.** A peer's Class A Domain with different parameters is
-  adopted (Milan v1.2 Section 4.2.7.2.1), but only its SRclassVID and only at
-  our SRclassPriority (3): stream frames always carry that PCP (the shaper's
-  queue map is keyed by it), so adopting another priority would declare a
-  TSpec the frames do not use. A Class A Domain at another priority leaves the
-  port an SRP domain boundary (IEEE 802.1Q-2018 Clause 35.2.1.4 h). The VID
-  is the same at every position of a Domain vector (a bridge's default
-  `{5,2,VID},{6,3,VID}`); the participant hands over the per-position value. Adoption happens at most once per link up: two
-  adopting end stations on a direct link with different configured VIDs would
-  otherwise swap each other's previous value on every periodic PDU, churning
-  MVRP, ACMP, the TX tag and the advertisements. A VID change is reported so
-  the talker moves its MVRP join, Talker Advertise and stream frames.
+- **Domain adoption.** A peer's Domain for our SR class with other parameters
+  is adopted, its SRclassPriority and SRclassVID both (Milan v1.3 Section
+  4.2.7.2.1), until `reset_domain()` at the next link up. The talkers follow:
+  a VID change is reported so the talker moves its MVRP join, Talker Advertise
+  and stream frames, and a priority change alone declares them again (a
+  talker's priority is its SR class's, IEEE 802.1Q-2022 Clause 35.2.2.8.5);
+  `reset_domain()` brings both back. The stream frames' PCP and the shaper's
+  queue map stay at the configured priority (`stream_pcp`). The VID is the
+  same at every position of a Domain vector (a bridge's default
+  `{5,2,VID},{6,3,VID}`); the participant hands over the per-position value.
+  A deviation: the section adopts every Domain declared, the entity one per
+  link up. Two end stations on a direct link with different configured
+  Domains would otherwise swap each other's previous one on every PDU,
+  churning MVRP, ACMP, the TX tag and the advertisements.
 - **Milan listener.** With `set_listener_waits_for_talker` (Milan v1.2
   Section 5.3.8.5) an attached listener declares Listener Ready while the
   talker's Advertise is registered, Asking Failed while its Talker Failed is,
