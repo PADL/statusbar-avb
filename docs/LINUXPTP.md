@@ -237,9 +237,9 @@ disciplines.
 
 ## ptpclient: pulse lock
 
-`PulseLock` judges a PHC's lock to another clock's 1 PPS from the PHC's own
+`PulseLock` decides whether a PHC is locked to another clock's 1 PPS from the PHC's own
 external timestamps of it: the pulses ts2phc steers a sink by, with the source
-emitting at its whole seconds. Each event is judged against the whole second nearest
+emitting at its whole seconds. Each event is checked against the whole second nearest
 it. An event further than `edge_window_ns` (250 ms) from one is the pulse's other
 edge, which ts2phc also stamps (`extts_polarity both`), and is ignored. A pulse is
 good when it lies within `max_offset_ns` (25 µs) of its second, and when the

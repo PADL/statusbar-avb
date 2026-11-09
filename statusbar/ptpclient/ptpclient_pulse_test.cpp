@@ -115,7 +115,7 @@ TEST(ptpclient_pulse, a_silence_restarts_the_settle)
     EXPECT_FALSE(lock.locked());
 }
 
-// A reactor late by most of a second still judges a good pulse good.
+// A reactor late by most of a second still finds a good pulse good.
 TEST(ptpclient_pulse, a_late_read_still_finds_the_second)
 {
     PulseLock lock;
