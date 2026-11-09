@@ -687,6 +687,13 @@ class AvbEntityKit
     void announce_stream_format(uint16_t type, uint64_t before, StreamSpec const& updated);
     /// Whether an ACMP-connected input listens on @p group.
     [[nodiscard]] auto group_connected(ieee::Eui48 const& group) const -> bool;
+    /// The group input @p spec's ACMP connection listens on; zero when not connected.
+    [[nodiscard]] auto connected_rx_group(StreamSpec const& spec) const -> ieee::Eui48;
+    /// start(): join the groups of connections that outlived a stop() (its leave_rx_groups()).
+    void join_connected_rx_groups();
+    /// stop(): leave every group an input holds, pre-joined or connected, once each, and forget the
+    /// pre-joined ones. An AF_XDP port's memberships are the interface's and outlive the process.
+    void leave_rx_groups();
 
     //
     // Declarations and registrations
