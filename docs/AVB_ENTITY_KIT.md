@@ -413,6 +413,10 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
   4.4.1). The Milan sink settles once per probe and is still intact when it
   unsettles, so the join count stays balanced. The Milan MSRP Listener
   declaration is made only once the talker's attribute is registered.
+- stop() leaves every group the inputs hold, pre-joined or connected, before
+  it closes the port: an AF_XDP port joins with SIOCADDMULTI, whose
+  memberships belong to the interface and outlive the port and the process.
+  A connection that outlives the stop is joined again by the next start().
 - A binding change (bound, rebound, unbound, its controller or started state)
   is saved once the reactor pass that made it is done, after the ACMP response.
 - Until a talker's address is valid the stream has no destination address:
