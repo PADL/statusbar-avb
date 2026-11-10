@@ -278,30 +278,58 @@ inline constexpr uint32_t FALLBACK_MTU = 1500;
     return uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * tspec.max_interval_frames;
 }
 
-/// A talker port's worst-case latency in ns, rounded up: one frame of the port's @p mtu, then @p class_octets
-/// (interval_wire_octets of every stream in the SR class's queue), at @p link_mbps. 0 is unknown: 1000 Mbit/s,
-/// FALLBACK_MTU. The Talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
-[[nodiscard]] constexpr auto talker_port_latency_ns(
-    uint64_t const class_octets, uint32_t const link_mbps, uint32_t const mtu) noexcept -> uint32_t
+/// The egress port a Talker's AccumulatedLatency is for. 0 is unknown: 1000 Mbit/s, FALLBACK_MTU.
+struct TalkerPort
 {
-    auto const interfering = static_cast<uint16_t>(std::min<uint32_t>(mtu == 0 ? FALLBACK_MTU : mtu, UINT16_MAX));
-    uint64_t const octets = wire_frame_size(interfering) + class_octets;
+    uint32_t link_mbps{0};
+    uint32_t mtu{0};
+    /// The SR class's measurement intervals a second (CLASS_A_INTERVALS_PER_SEC, CLASS_B_INTERVALS_PER_SEC).
+    uint32_t intervals_per_sec{CLASS_A_INTERVALS_PER_SEC};
+    /// A cbs shapes the class's queue at an idleSlope of its streams' bandwidth (IEEE 802.1Q-2022 Annex L).
+    bool cbs{false};
+};
+
+/// @p octets' transmission time at @p link_mbps (0: 1000), ns, rounded up.
+[[nodiscard]] constexpr auto wire_time_ns(uint64_t const octets, uint32_t const link_mbps) noexcept -> uint64_t
+{
     uint64_t const mbps = link_mbps == 0 ? 1000 : link_mbps;
-    return static_cast<uint32_t>(std::min<uint64_t>(((octets * 8000U) + mbps - 1) / mbps, UINT32_MAX));
+    return ((octets * 8000U) + mbps - 1) / mbps;
 }
 
-/// talker_port_latency_ns on @p interface_name for an entity without a PortShaper: @p link_mbps and @p mtu
-/// where nonzero, else the interface's as read now (Linux; elsewhere, and unknown, the fallbacks).
-[[nodiscard]] inline auto interface_talker_latency_ns(
-    uint64_t const class_octets, std::string_view const interface_name, uint32_t link_mbps, uint32_t mtu) -> uint32_t
+/// The time a cbs whose idleSlope is @p class_octets an interval takes to send @p queued of them, ns,
+/// rounded up: their share of the interval.
+[[nodiscard]] constexpr auto cbs_drain_ns(
+    uint64_t const queued, uint64_t const class_octets, uint32_t const intervals_per_sec) noexcept -> uint64_t
+{
+    uint64_t const per_sec = class_octets * intervals_per_sec;
+    return per_sec == 0 ? 0 : ((queued * 1'000'000'000U) + per_sec - 1) / per_sec;
+}
+
+/// A talker port's portTcMaxLatency for a stream of @p own_octets among its class's @p class_octets (interval_wire_octets
+/// each), ns, rounded up (IEEE 802.1Q-2022 Clause 35.2.2.8.6): a) the class's other frames, at the link speed or, under a
+/// cbs, at idleSlope; b) one MTU frame and then its own at the link speed.
+[[nodiscard]] constexpr auto talker_port_latency_ns(
+    TalkerPort const& port, uint64_t const class_octets, uint64_t const own_octets) noexcept -> uint32_t
+{
+    auto const interfering = static_cast<uint16_t>(std::min<uint32_t>(port.mtu == 0 ? FALLBACK_MTU : port.mtu, UINT16_MAX));
+    uint64_t const others = class_octets - std::min(own_octets, class_octets);
+    uint64_t const at_link = wire_frame_size(interfering) + own_octets + (port.cbs ? 0 : others);
+    uint64_t const queue_ns = port.cbs ? cbs_drain_ns(others, class_octets, port.intervals_per_sec) : 0;
+    return static_cast<uint32_t>(std::min<uint64_t>(wire_time_ns(at_link, port.link_mbps) + queue_ns, UINT32_MAX));
+}
+
+/// talker_port_latency_ns for a lone, unshaped stream of @p octets on @p interface_name: @p port's link speed
+/// and MTU where nonzero, else the interface's as read now (Linux; elsewhere, and unknown, the fallbacks).
+[[nodiscard]] inline auto interface_talker_latency_ns(std::string_view const interface_name, TalkerPort port, uint64_t const octets)
+    -> uint32_t
 {
 #if defined(__linux__)
-    link_mbps = link_mbps != 0 ? link_mbps : net::link_speed_mbps(interface_name).value_or(0);
-    mtu = mtu != 0 ? mtu : net::interface_mtu(interface_name).value_or(0);
+    port.link_mbps = port.link_mbps != 0 ? port.link_mbps : net::link_speed_mbps(interface_name).value_or(0);
+    port.mtu = port.mtu != 0 ? port.mtu : net::interface_mtu(interface_name).value_or(0);
 #else
     (void)interface_name;
 #endif
-    return talker_port_latency_ns(class_octets, link_mbps, mtu);
+    return talker_port_latency_ns(port, octets, octets);
 }
 
 /// The single audio sample rate shared by every AM824/AAF stream in @p specs
