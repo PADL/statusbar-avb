@@ -402,7 +402,11 @@ valid. Only configuration 0 is served.
 The grandmaster in force is the gPTP stack's PARENT_DATA_SET
 grandmasterIdentity, its own clock while it is grandmaster, once the
 integrator reports it with `AvbEntityHost::note_parent_grandmaster`; a proxy
-entity's AVB info mirror reports the mirrored device's. Until then the
+entity's AVB info mirror reports the mirrored device's. An integrator whose
+gPTP stack reports it can call `follow_parent_grandmaster()` (at any time,
+typically at the stack's first report): the Announce handler, which also
+sees the local stack's own Announces, counts nothing from then on, and the
+next report is no change. Without either call the
 Announce handler's grandmaster stands, and an Announce receipt timeout makes
 a grandmaster-capable entity (AVB_INTERFACE 0 priority1 below 255, IEEE
 802.1AS-2020 Clause 8.6.2.1) its own grandmaster: A lost and found again is

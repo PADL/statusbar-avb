@@ -64,6 +64,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace statusbar::avb_entity {
@@ -160,14 +161,23 @@ class AvbEntityHost
     void on_timeout(TimePoint time);
 
     /// gPTP grandmaster @p grandmaster found by the Announce handler: the grandmaster in force for
-    /// GPTP_GM_CHANGED (IEEE 1722.1-2021 Clause 7.4.42.2.2) until note_parent_grandmaster is told. Reactor thread.
+    /// GPTP_GM_CHANGED (IEEE 1722.1-2021 Clause 7.4.42.2.2) until the parent data set is followed. Reactor thread.
     void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster);
-    /// The grandmaster was lost (no Announce within the receipt timeout): a grandmaster-capable
-    /// entity is its own grandmaster in force from now. Reactor thread.
+    /// The grandmaster was lost (no Announce within the receipt timeout): a grandmaster-capable entity
+    /// is its own grandmaster in force from now, unless the parent data set is followed. Reactor thread.
     void note_grandmaster_lost();
     /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
     /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
     void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
+    /// From now on GPTP_GM_CHANGED counts note_parent_grandmaster's reports alone, the Announce handler's
+    /// none, and the next report is no change (what the handler had in force is dropped): for an integrator
+    /// whose gPTP stack reports PARENT_DATA_SET. Idempotent. Reactor thread, or before start().
+    void follow_parent_grandmaster() noexcept
+    {
+        if (!std::exchange(grandmaster_from_parent_, true)) {
+            grandmaster_in_force_.reset();
+        }
+    }
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
     void note_as_path_changed();
@@ -488,7 +498,7 @@ class AvbEntityHost
     };
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
     std::optional<ieee::Eui64> grandmaster_in_force_{};  ///< for GPTP_GM_CHANGED; none before the first
-    bool grandmaster_from_parent_{false};                ///< note_parent_grandmaster has been told
+    bool grandmaster_from_parent_{false};                ///< note_parent_grandmaster or follow_parent_grandmaster has been called
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence

@@ -509,6 +509,25 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
+// An integrator that follows the parent data set: from then on the Announce handler's grandmasters, found or
+// lost, count nothing, and the next parent report is no change, whatever the handler had in force.
+TEST(avb_entity_host_counters, following_the_parent_data_set_counts_its_changes_alone)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'7788ULL});  // before: in force
+    host->follow_parent_grandmaster();
+    host->follow_parent_grandmaster();                                                         // again: nothing more
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x70B3'D5FF'FEED'0001ULL});  // ptp4l's own Announces
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    EXPECT_EQ(gm_changed(host), 0U);  // the first
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL));
+    EXPECT_EQ(gm_changed(host), 1U);
+}
+
 // A link back after a down (IEEE 802.1Q-2022 Clause 10.7): MSRP sends a LeaveAll at once, re-declaring the
 // Domain, rather than waiting for its timers; the first link up waits for the join timer
 TEST(avb_entity_host_link, a_link_back_after_a_down_sends_a_leave_all_at_once)
