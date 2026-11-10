@@ -564,7 +564,7 @@ class AemCommandHandler
     /// SET code (SET_CONTROL, SET_NAME, ...); @p command_body is the SET
     /// command body (descriptor_type + descriptor_index + value). Returns the
     /// AEM status from the handler's symbol-keyed set hook; notifications are
-    /// emitted only on AEM_STATUS_SUCCESS.
+    /// emitted only on an AEM_STATUS_SUCCESS that changes the value.
     [[nodiscard]] auto apply_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
     /// A SET_NAME by the entity itself (@p command_body as the command's), applied, notified and
     /// reported to the settings hook as a controller's. The AEM status.
@@ -1167,9 +1167,9 @@ class AemCommandHandler
     // The stream ports' dynamic audio mappings: the inputs', the outputs'.
     DynamicAudioMaps dynamic_maps_{};
     DynamicAudioMaps output_maps_{};
-    // The command being dispatched succeeded without changing a persistent
-    // setting (an ADD/REMOVE_AUDIO_MAPPINGS that left the port as it was):
-    // process_packet does not report it to on_settings_changed.
+    // The command being dispatched changes nothing (a SET to the value in force, a mapping
+    // command that leaves the port as it was): no notification, and process_packet does not
+    // report it to on_settings_changed.
     bool setting_unchanged_{false};
 };
 
