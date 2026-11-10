@@ -757,25 +757,20 @@ void TalkerStreams::transmit_if_due(
                 break;
             }
             if (!gate_open) {
-                slot.crf_decim = 0;  // gate closed: next emission starts a fresh PDU phase
+                slot.crf_next = 0;  // gate closed: next emission starts a fresh PDU phase
                 break;
             }
-            // One PDU carries timestamps_per_packet timestamps, each spaced
-            // sample_stride audio samples, so a PDU spans pkts_per_crf audio packets
-            // (the Milan 48 kHz/interval-96/1-ts format under 96 kHz audio -> 192
-            // samples = every 16 packets -> 500 PDU/s).
+            // One PDU per timestamps_per_packet timestamps, each sample_stride audio samples apart, sent
+            // by the first wake at or past its first sample: the media clock's PDU rate at any audio rate
+            // (the Milan CRF: 500 PDU/s under 48 kHz audio, 459.375 PDU/s under 44.1 kHz).
             uint32_t const sample_stride =
                 crf_sample_stride(slot.crf->timestamp_interval, slot.crf->base_frequency, config_.sample_rate);
-            uint32_t pkts_per_crf = (static_cast<uint32_t>(slot.crf->timestamps_per_packet) * sample_stride) / samples_per_packet_;
-            if (pkts_per_crf == 0) {
-                pkts_per_crf = 1;
+            if (tick.first_index >= slot.crf_next) {
+                // Re-based to the live media-clock position, so the timestamps track gPTP-now.
+                uint64_t const base = crf_aligned_base(tick.first_index, sample_stride);
+                transmit_crf(slot, base);
+                slot.crf_next = base + (uint64_t{slot.crf->timestamps_per_packet} * sample_stride);
             }
-            if (slot.crf_decim == 0) {
-                // Re-base to the live media-clock position each PDU so CRF timestamps
-                // track gPTP-now, not the (possibly long-past) media-clock anchor.
-                transmit_crf(slot, crf_aligned_base(tick.first_index, sample_stride));
-            }
-            slot.crf_decim = static_cast<uint16_t>((slot.crf_decim + 1U) % pkts_per_crf);
             break;
         }
         case StreamKind::other:
