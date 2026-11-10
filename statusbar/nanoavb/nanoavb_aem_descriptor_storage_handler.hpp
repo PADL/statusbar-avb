@@ -929,6 +929,15 @@ class DescriptorStorageHandler : public AemEntityHandler
             fn(state.descriptor_index, state.clock_source_index);
         }
     }
+    /// @p fn(audio_unit_index, rate) per AUDIO_UNIT with a SET_SAMPLING_RATE in force.
+    template <typename Fn>
+    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
+    void for_each_runtime_sampling_rate(Fn&& fn) const
+    {
+        for (auto const& state : sampling_rate_states_) {
+            fn(state.descriptor_index, state.rate);
+        }
+    }
     /// @p fn(descriptor_type, descriptor_index, name) per managed object_name
     /// override (manage_object_names).
     template <typename Fn>
