@@ -975,8 +975,8 @@ class MsrpParticipantT
     void read_pdu(std::span<uint8_t const> pdu, TimePoint now);
     /// Each message of @p pdu, decoded.
     void decode_messages(std::span<uint8_t const> pdu, TimePoint now);
-    /// The Talker leaves of the MRPDU just read, each but a StreamID still registered In under its other
-    /// Talker attribute (a Talker Advertise turned Talker Failed, or back).
+    /// The Talker leaves of the MRPDU just read, one per StreamID; an observer reads what is registered then
+    /// (the other Talker attribute, for a Talker Advertise turned Talker Failed, or back).
     void deliver_rx_talker_leaves();
     /// An Lv (@p event) of a peer Talker attribute @p fv on another destination or VLAN than @p rec's registered
     /// one: it leaves an attribute not registered, so @p rec stays. A join adopts its value (a talker that moved).

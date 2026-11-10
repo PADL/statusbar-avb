@@ -2481,8 +2481,9 @@ struct TalkerRig
 }  // namespace
 
 // A Talker Advertise's Lv and the Talker Failed replacing it in one MRPDU (Milan v1.2 Section 4.2.7.2.2:
-// the Lv deregisters at once) are one change: the Failed is reported, the StreamID's leave is not.
-TEST(msrp_participant, a_talker_advertise_replaced_by_a_failed_in_one_mrpdu_reports_no_leave)
+// the Lv deregisters at once) are reported as the MRPDU leaves them: the Failed as it is read, the Advertise's
+// leave once the MRPDU is read, when the Failed is registered; never the StreamID without a Talker attribute.
+TEST(msrp_participant, a_talker_advertise_replaced_by_a_failed_in_one_mrpdu_reports_the_leave_after_it)
 {
     TalkerRig rig{};
     auto const ta = make_talker_adv(0x0010);
@@ -2490,11 +2491,17 @@ TEST(msrp_participant, a_talker_advertise_replaced_by_a_failed_in_one_mrpdu_repo
     TalkerFailedFirstValue tf{};
     tf.advertise = ta;
     tf.failure_code = 1;
+    bool failed_at_leave = false;
+    rig.p.subscribe(Observer{.on_talker_leave = [&rig, &failed_at_leave](tsn::StreamId const& id) {
+        failed_at_leave = rig.p.find_registered_talker_failed(id) != nullptr;
+    }});
     rig.receive(one_mrpdu(talker_message(ta, AttributeEvent::Lv), talker_message(tf, AttributeEvent::New)));
     EXPECT_EQ(rig.failed, 1);
-    EXPECT_EQ(rig.leaves, 0);
-    rig.receive(talker_message(tf, AttributeEvent::Lv));  // the stream gone: its leave, once the MRPDU is read
     EXPECT_EQ(rig.leaves, 1);
+    EXPECT_TRUE(failed_at_leave);
+    rig.receive(talker_message(tf, AttributeEvent::Lv));
+    EXPECT_EQ(rig.leaves, 2);
+    EXPECT_FALSE(failed_at_leave);
 }
 
 // A Talker attribute's Lv on another VLAN than the one registered for its StreamID leaves an attribute not
