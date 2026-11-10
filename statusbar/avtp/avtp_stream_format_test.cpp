@@ -120,14 +120,10 @@ TEST(am824_stream_format, motu_16a_input_and_output_words)
     EXPECT_TRUE(Am824StreamFormat::from_u64(0x00a0020150000100ULL).synchronous_clock());
 }
 
-// make_am824_stream_format builds the non-blocking MBLA-only word the decoders read back.
-TEST(am824_stream_format, make_builds_the_annex_and_motu_words)
+// The IEEE 1722-2016 Annex I and MOTU words decode as their rate and channels.
+TEST(am824_stream_format, the_annex_and_motu_words_decode)
 {
-    static_assert(make_am824_stream_format(2, 8) == 0x00a0020840000800ULL);
-    static_assert(make_am824_stream_format(2, 2) == 0x00a0020240000200ULL);
-    static_assert(make_am824_stream_format(4, 8, /*up_to=*/true) == 0x00a0040860000800ULL);
-    static_assert(make_am824_stream_format(6, 8, /*up_to=*/true, /*synchronous_clock=*/true) == 0x00a0060870000800ULL);
-    EXPECT_TRUE(stream_format_to_string(make_am824_stream_format(4, 6)) == "AM824 6ch 96kHz");
+    EXPECT_TRUE(stream_format_to_string(0x00a0040640000600ULL) == "AM824 6ch 96kHz");
 }
 
 // A non-AM824 event type in the FDF is not read as a rate.

@@ -184,17 +184,26 @@ auto MvuCommandHandler::dispatch_command(
 
 auto MvuCommandHandler::features_flags() const noexcept -> uint32_t
 {
-    // What the application adds, and MVU binding wherever there are sinks to bind (Milan v1.3 Table 5.17).
-    return extra_features_ | (bindable(0) ? MVU_FEATURE_MVU_BINDING : 0U);
+    // The configured flags and what the application adds, and MVU binding wherever there are sinks
+    // to bind (Milan v1.3 Table 5.17).
+    uint32_t const configured = milan_info() != nullptr ? milan_info()->features_flags : 0U;
+    return configured | extra_features_ | (bindable(0) ? MVU_FEATURE_MVU_BINDING : 0U);
+}
+
+auto MvuCommandHandler::milan_info() const noexcept -> AemCommandHandler::MilanInfo const*
+{
+    return aem_ != nullptr && aem_->milan_info() ? &*aem_->milan_info() : nullptr;
 }
 
 auto MvuCommandHandler::milan_info_payload(std::span<uint8_t> const out) const noexcept -> std::span<uint8_t const>
 {
+    // The versions the AEM handler's MilanInfo gives, else none certified and Milan v1.3.
+    auto const* info = milan_info();
     MvuGetMilanInfoResponse const response{
         .protocol_version = quadlet_t{MVU_PROTOCOL_VERSION},
         .features_flags = quadlet_t{features_flags()},
-        .certification_version = quadlet_t{certification_version_},
-        .specification_version = quadlet_t{MILAN_SPECIFICATION_VERSION}};
+        .certification_version = quadlet_t{info != nullptr ? info->certification_version : 0U},
+        .specification_version = quadlet_t{info != nullptr ? info->specification_version : MILAN_SPECIFICATION_VERSION}};
     span_store(out.first(MvuGetMilanInfoResponse::LENGTH), response);
     return out.first(MvuGetMilanInfoResponse::LENGTH);
 }

@@ -99,9 +99,8 @@ class SrpPort
     [[nodiscard]] auto add_to_reactor(net::MessageReactor& reactor) -> Status;
     /// Send MSRPDUs through @p msrp and MVRPDUs through @p mvrp instead (tests, or other I/O).
     void set_senders(SendFn msrp, SendFn mvrp) noexcept;
-    /// Feed a received MSRPDU / MVRPDU (payload only) at @p now; add_to_reactor's sockets do this.
+    /// Feed a received MSRPDU (payload only) at @p now; add_to_reactor's sockets do this.
     void receive_msrp(std::span<uint8_t const> pdu, TimePoint now);
-    void receive_mvrp(std::span<uint8_t const> pdu, TimePoint now) { mvrp_.receive_packet(pdu, now); }
     /// Run the MSRP / MVRP timers at @p now; add_to_reactor's sockets do this every 10 ms.
     void tick_msrp(TimePoint now);
     void tick_mvrp(TimePoint now) { mvrp_.tick(now); }
