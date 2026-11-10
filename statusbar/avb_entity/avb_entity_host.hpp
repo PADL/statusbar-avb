@@ -159,9 +159,9 @@ class AvbEntityHost
     void on_gptp_announce(TimePoint time, bool has_grandmaster);
     void on_timeout(TimePoint time);
 
-    /// A gPTP grandmaster change seen (the Announce handler's): counted for
-    /// GET_COUNTERS (AVB_INTERFACE GPTP_GM_CHANGED). Reactor thread.
-    void note_grandmaster_changed();
+    /// gPTP grandmaster @p grandmaster found (the Announce handler's): AVB_INTERFACE GPTP_GM_CHANGED
+    /// counts it when it differs from the last one found (IEEE 1722.1-2021 Clause 7.4.42.2.2). Reactor thread.
+    void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster);
     /// The grandmaster was lost (no Announce within the receipt timeout).
     /// Reactor thread.
     void note_grandmaster_lost();
@@ -474,7 +474,7 @@ class AvbEntityHost
         bool entity_driven{false};  ///< note_clock_domain_locked was called: gPTP no longer drives it
     };
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
-    bool grandmaster_seen_{false};
+    std::optional<gptp::ClockIdentity> last_grandmaster_{};  ///< the last grandmaster found, kept across its loss
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
