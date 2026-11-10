@@ -143,7 +143,6 @@ class AvbEntityKit
     /// @p control until stop(); a no-op without stream inputs. start() calls it
     /// unless called first; @p control must outlive the kit.
     void bind_listener_vlan(net::vlan::VlanControl& control, int ifindex);
-    [[nodiscard]] auto listener_vlan() const noexcept -> ListenerVlan const& { return listener_vlan_; }
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
@@ -267,12 +266,6 @@ class AvbEntityKit
     /// COUNTERS_INTERVAL_NS has passed and notify each stream descriptor whose
     /// counters changed (the AEM handler holds them to one a second).
     void poll_counters(int64_t now_ns);
-    /// STREAM_OUTPUT @p idx's Milan counters (StreamOutputIntervals), or
-    /// nullptr for a stream the kit does not have.
-    [[nodiscard]] auto output_counters(uint16_t const idx) const noexcept -> StreamOutputIntervals const*
-    {
-        return is_talker_index(idx) ? &output_counters_[idx] : nullptr;
-    }
     /// Reactor thread: the signal presence of STREAM_OUTPUT @p idx's channels, bit k channel k, cut
     /// to the channels its format has (again at a SET_STREAM_FORMAT), reported from the next observation
     /// interval (Milan v1.3 Section 5.3.7.7.1). Ignored unless config().signal_presence and Milan v1.3.
@@ -287,9 +280,6 @@ class AvbEntityKit
 
     // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
 
-    /// Whether talker stream @p idx declares its Talker Advertise now
-    /// (TalkerDeclarations; the rules are in docs/AVB_ENTITY_KIT.md).
-    [[nodiscard]] auto talker_declared(uint16_t const idx) const noexcept -> bool { return declarations_.declared(idx); }
     [[nodiscard]] auto talker_declarations() const noexcept -> TalkerDeclarations const& { return declarations_; }
     /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx counted at
     /// steady-clock @p now_ns (the ACMP talker's on_probe lands here): its
@@ -302,8 +292,6 @@ class AvbEntityKit
     /// at the reactor's @p now_ns, the streams in @p refresh re-declared, the gate told
     /// @p gate_now; the kit's timer at each deadline, the reactor's events directly.
     void update_talker_declarations(int64_t now_ns, GateTimePoint gate_now, RefreshSet refresh);
-    /// The re-declarations an AEM hook asked for, run at the next reactor pass; empty after stop().
-    [[nodiscard]] auto pending_refresh() const noexcept -> RefreshSet { return refresh_pending_; }
     /// As above for a caller with no gate reading in hand (reads the gate's clock once);
     /// @p refresh re-declares every stream.
     void update_talker_declarations(int64_t const now_ns, bool const refresh = false)

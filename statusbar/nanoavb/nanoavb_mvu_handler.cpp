@@ -194,7 +194,7 @@ auto MvuCommandHandler::milan_info_payload(std::span<uint8_t> const out) const n
         .info =
             {.protocol_version = quadlet_t{MVU_PROTOCOL_VERSION},
              .features_flags = quadlet_t{features_flags()},
-             .certification_version = quadlet_t{certification_version_}},
+             .certification_version = quadlet_t{0}},  // not certified
         .specification_version = quadlet_t{MILAN_SPECIFICATION_VERSION}};
     span_store(out.first(MvuGetMilanInfoResponseV13::LENGTH), response);
     return out.first(MvuGetMilanInfoResponseV13::LENGTH);
