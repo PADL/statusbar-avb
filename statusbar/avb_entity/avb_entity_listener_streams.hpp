@@ -334,6 +334,9 @@ struct ListenerStreams
         uint64_t samples_per_ch,
         bool ts_sparse,
         int64_t gptp_now_ns);
+    /// A frame for @p slot too short or malformed to read: counted in UNSUPPORTED_FORMAT, its
+    /// sequence_num and mr read from the AVTP common header (Milan v1.3 Section 5.3.8.10).
+    void count_rejected(ListenerStreamSlot& slot, std::span<uint8_t const> frame, bool ts_sparse, int64_t gptp_now_ns);
 
     /// Fill the GET_COUNTERS bitmap + values for a STREAM_INPUT index (true if it is
     /// one of our stream inputs). Control plane (AEM handler).

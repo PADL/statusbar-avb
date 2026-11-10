@@ -596,24 +596,13 @@ auto ListenerStreams::rx_slot_for(std::span<uint8_t const> const frame) -> Liste
 void ListenerStreams::receive_am824(
     ListenerStreamSlot& slot, avtp::Am824StreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) one PDU checked, delivered and counted
-    if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
-        return;
-    }
     avtp::Am824Pdu pdu{};
-    span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
-        slot.rx_bad.add(1);
-        update_stream_input_counters(
-            slot,
-            pdu.sequence_num(),
-            0,
-            false,
-            false,
-            pdu.stream_header.mr(),
-            /*format_ok=*/false,
-            0,
-            /*ts_sparse=*/true,
-            gptp_now_ns);
+    bool const whole = frame.size() >= avtp::Am824Pdu::HEADER_LENGTH;
+    if (whole) {
+        span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
+    }
+    if (!whole || !pdu.is_valid()) {
+        count_rejected(slot, frame, /*ts_sparse=*/true, gptp_now_ns);
         return;
     }
     auto const& header = pdu.stream_header;
@@ -692,10 +681,7 @@ void ListenerStreams::receive_aaf(
 {
     auto const pdu = avtp::aaf_parse_header(frame);
     if (!pdu) {
-        slot.rx_bad.add(1);
-        auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
-        auto const mr = avtp::avtp_get_mr(frame).value_or(false);
-        update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
+        count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);
         return;
     }
     // Milan v1.2 Section 4.4.2.2: a mismatched format is discarded, counted in UNSUPPORTED_FORMAT.
@@ -780,15 +766,13 @@ void ListenerStreams::count_received(
 void ListenerStreams::receive_crf(
     ListenerStreamSlot& slot, avtp::CrfStreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) a CRF frame's checks, then counted and delivered
-    if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
-        return;
-    }
     avtp::CrfPdu pdu{};
-    span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
-        slot.rx_bad.add(1);
-        update_stream_input_counters(
-            slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/false, 0, /*ts_sparse=*/true, 0);
+    bool const whole = frame.size() >= avtp::CrfPdu::HEADER_LENGTH;
+    if (whole) {
+        span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+    }
+    if (!whole || !pdu.is_valid()) {
+        count_rejected(slot, frame, /*ts_sparse=*/true, 0);
         return;
     }
     std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
@@ -841,6 +825,15 @@ void ListenerStreams::deliver_crf(
     });
     slot.rx_packets.add(1);
     slot.rx_samples.add(ctx.last_timestamp_count);
+}
+
+void ListenerStreams::count_rejected(
+    ListenerStreamSlot& slot, std::span<uint8_t const> const frame, bool const ts_sparse, int64_t const gptp_now_ns)
+{
+    slot.rx_bad.add(1);
+    auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
+    auto const mr = avtp::avtp_get_mr(frame).value_or(false);
+    update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, ts_sparse, gptp_now_ns);
 }
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
