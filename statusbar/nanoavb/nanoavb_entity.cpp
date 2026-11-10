@@ -661,8 +661,9 @@ auto AemCommandHandler::apply_local_name(std::span<uint8_t const> const command_
         return *refusal;
     }
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
+    setting_unchanged_ = name_in_force(command_body);  // nothing to notify or save
     auto const r = set_name(command_body, echo, std::nullopt);
-    if (r.status == AEM_STATUS_SUCCESS && callbacks_.on_settings_changed) {
+    if (r.status == AEM_STATUS_SUCCESS && !setting_unchanged_ && callbacks_.on_settings_changed) {
         callbacks_.on_settings_changed(AEM_COMMAND_SET_NAME);
     }
     return r.status;
@@ -687,9 +688,11 @@ auto AemCommandHandler::set_name(
         // The name in force, which an empty one (cleared to the configured or
         // authored name) is not: what GET_NAME now answers.
         (void)aem_model.get_name_for_wire(name_ref_of(command_data), out_buffer);
-        // A controller renamed a descriptor: notify every registered
-        // controller, like handle_set_descriptor_value does for values.
-        emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size}, requester);
+        // A rename notifies every registered controller, like handle_set_descriptor_value; a
+        // rename to the name in force (setting_unchanged_, set by the caller) changes nothing.
+        if (!setting_unchanged_) {
+            emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size}, requester);
+        }
     }
     return {.status = status, .size = size};
 }
@@ -697,14 +700,13 @@ auto AemCommandHandler::set_name(
 auto AemCommandHandler::handle_set_descriptor_value(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // A value already in force changes nothing to save (process_packet).
-    setting_unchanged_ = is_persistent_setting_command(command_type) && value_in_force(command_type, command_data);
+    // A value already in force changes nothing to save (process_packet) or to notify.
+    setting_unchanged_ = value_in_force(command_type, command_data);
     auto const r = apply_descriptor_value(command_type, command_data, out_buffer);
 
-    // A controller changed a control: notify every registered controller (IEEE
-    // 1722.1 9.6 unsolicited notifications); the originator too in the
-    // classic profile, not in Milan's (emit_unsolicited).
-    if (r.status == AEM_STATUS_SUCCESS) {
+    // A controller changed a value: notify every registered controller (Milan v1.3 Section
+    // 5.4.5.3); the originator too in the classic profile, not in Milan's (emit_unsolicited).
+    if (r.status == AEM_STATUS_SUCCESS && !setting_unchanged_) {
         emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size}, current_header_.controller_entity_id);
     }
     if (r.status == AEM_STATUS_IN_PROGRESS) {
@@ -2740,8 +2742,9 @@ auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type
     }
     AemEntityModel aem_model{*handler_};
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
+    bool const in_force = value_in_force(command_type, command_body);  // nothing to notify or save
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
-    if (r.status == AEM_STATUS_SUCCESS) {
+    if (r.status == AEM_STATUS_SUCCESS && !in_force) {
         emit_unsolicited(command_type, std::span<uint8_t const>{echo.data(), r.size});
         if (is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
             callbacks_.on_settings_changed(command_type);
