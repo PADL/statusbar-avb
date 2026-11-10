@@ -435,13 +435,23 @@ struct ListenerStreams
     void take_connection(
         ListenerConnection& held, ieee::Eui64 const& stream_id, std::optional<ieee::Eui48> group, sm::TimePoint now);
     void release_connection(ListenerConnection& held, sm::TimePoint now);
-    /// Declare @p stream_id to MSRP; true when the reservation is Ready.
-    auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
+    /// Declare @p stream_id to MSRP, following only a Talker attribute that is @p match when set;
+    /// true when the reservation is Ready.
+    auto attach_ready(ieee::Eui64 const& stream_id, std::optional<nanoavb::TalkerMatch> const& match, sm::TimePoint now)
+        -> bool;
+    /// The Talker attribute Milan input @p stream_index's connection follows: @p dest_mac on the VLAN its
+    /// ACMP stream names (Milan v1.3 Section 5.5.3.6: the probe's answer); nullopt for a classic one.
+    [[nodiscard]] auto talker_match(uint16_t stream_index, ieee::Eui48 const& dest_mac) const
+        -> std::optional<nanoavb::TalkerMatch>;
     /// Whether the declaration already standing for @p stream_id is Ready.
     [[nodiscard]] auto held_ready(ieee::Eui64 const& stream_id) const -> bool;
     /// Declare @p stream_id when @p held is not on it yet, else ask after the
     /// standing declaration: true when the reservation is Ready.
-    auto attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
+    auto attach_or_held_ready(
+        ListenerConnection const& held,
+        ieee::Eui64 const& stream_id,
+        std::optional<nanoavb::TalkerMatch> const& match,
+        sm::TimePoint now) -> bool;
     /// Whether @p frame (an AVTPDU of 12 octets or more) carries the stream
     /// @p slot has published as its connection. RX thread.
     [[nodiscard]] static auto slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool;

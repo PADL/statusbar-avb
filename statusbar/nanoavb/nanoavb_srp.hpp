@@ -97,6 +97,14 @@ struct TalkerStreamSrpInfo
     Eui64 failure_bridge_id{};
 };
 
+/// The Talker attribute a listener stream follows: the destination address and VLAN its connection
+/// names (IEEE 802.1Q-2022 Clause 35.2.2.8.3).
+struct TalkerMatch
+{
+    Eui48 destination{};
+    uint16_t vid{0};  ///< 0: any (a probe answer naming none)
+};
+
 /// Listener stream info for MSRP: one record per talker stream this port
 /// listens to, however many of its inputs are bound to that stream.
 struct ListenerStreamSrpInfo
@@ -106,6 +114,7 @@ struct ListenerStreamSrpInfo
     /// Inputs attached to the stream. The Listener declaration stands on the
     /// wire while this is above zero and is withdrawn when the last goes.
     uint16_t attached{0};
+    std::optional<TalkerMatch> talker{};  ///< none: any Talker attribute of the StreamID
 };
 
 /// Domain info for MSRP: one SR class's SRclassID, SRclassPriority and SRclassVID (IEEE 802.1Q-2022 Clause 35.2.2.9).
@@ -664,10 +673,23 @@ class MsrpHandler
     /// replaced it; with set_listener_waits_for_talker, only a peer's live registration counts.
     [[nodiscard]] auto talker_advertise_registered(StreamId const& stream_id) const noexcept -> bool
     {
+        return talker_advertise_registered(stream_id, std::nullopt);
+    }
+    /// As above, counting only a Talker Advertise or Failed on @p talker's destination and VLAN (any without one).
+    [[nodiscard]] auto talker_advertise_registered(
+        StreamId const& stream_id, std::optional<TalkerMatch> const& talker) const noexcept -> bool
+    {
         if (listener_waits_for_talker_) {
-            return peer_talker_advertise(stream_id) != nullptr && peer_talker_failed(stream_id) == nullptr;
+            return matching(talker, peer_talker_advertise(stream_id)) && !talker_failed_registered(stream_id, talker);
         }
-        return participant_.find_talker_advertise(stream_id) != nullptr && participant_.find_talker_failed(stream_id) == nullptr;
+        return matching(talker, participant_.find_talker_advertise(stream_id)) &&
+            !matching(talker, advertise_of(participant_.find_talker_failed(stream_id)));
+    }
+    /// A peer's Talker Failed for @p stream_id is registered on @p talker's destination and VLAN (any without one).
+    [[nodiscard]] auto talker_failed_registered(StreamId const& stream_id, std::optional<TalkerMatch> const& talker) const noexcept
+        -> bool
+    {
+        return matching(talker, advertise_of(peer_talker_failed(stream_id)));
     }
 
     /// Attach this listener to @p stream_id (kit phase 5d, IEEE 802.1Q
@@ -681,24 +703,22 @@ class MsrpHandler
     ///
     /// With set_listener_waits_for_talker (Milan), nothing is declared until the talker's
     /// Advertise (Ready) or Talker Failed (Asking Failed) is registered: attached in Waiting.
-    [[nodiscard]] auto listener_attach(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>
+    /// With @p talker, only a Talker attribute on its destination and VLAN counts, now and later.
+    [[nodiscard]] auto listener_attach(
+        StreamId const& stream_id, TimePoint now, std::optional<TalkerMatch> const& talker = std::nullopt)
+        -> StatusValue<ListenerReservationState>
     {
-        if (talker_advertise_registered(stream_id)) {
-            if (auto const r = listener_ready(stream_id, now); !r) {
-                return failure(r.error());
-            }
-            return success(ListenerReservationState::Ready);
+        auto const state = attach_state(stream_id, talker);
+        auto const attached = attach_as(stream_id, state, now);
+        // Recorded even when the attach failed: an earlier connection's match is not this one's.
+        if (auto* const entry = std::ranges::find(listener_streams_, stream_id, &ListenerStreamSrpInfo::stream_id);
+            entry != listener_streams_.end()) {
+            entry->talker = talker;
         }
-        if (listener_waits_for_talker_ && peer_talker_failed(stream_id) == nullptr) {
-            if (auto const r = attach_waiting(stream_id, now); !r) {
-                return failure(r.error());
-            }
-            return success(ListenerReservationState::Waiting);
+        if (!attached) {
+            return failure(attached.error());
         }
-        if (auto const r = listener_asking_failed(stream_id, now); !r) {
-            return failure(r.error());
-        }
-        return success(ListenerReservationState::AskingFailed);
+        return success(state);
     }
 
     auto receive_packet(std::span<uint8_t const> packet, TimePoint now) -> void
@@ -775,6 +795,47 @@ class MsrpHandler
                 (void)follow_remote_talker(listener_streams_[i].stream_id, now);
             }
         }
+    }
+
+    /// Whether @p fv is a Talker attribute on @p talker's destination and VLAN (any without one).
+    [[nodiscard]] static auto matching(
+        std::optional<TalkerMatch> const& talker, statusbar::srp::msrp::TalkerAdvertiseFirstValue const* fv) noexcept -> bool
+    {
+        return fv != nullptr &&
+            (!talker ||
+             (fv->destination_address == talker->destination && (talker->vid == 0 || fv->vlan_identifier.get() == talker->vid)));
+    }
+    [[nodiscard]] static auto advertise_of(statusbar::srp::msrp::TalkerFailedFirstValue const* fv) noexcept
+        -> statusbar::srp::msrp::TalkerAdvertiseFirstValue const*
+    {
+        return fv != nullptr ? &fv->advertise : nullptr;
+    }
+
+    /// The state a listener of @p stream_id following @p talker wants: what listener_attach declares
+    /// and what a re-declaration moves an attached stream to.
+    [[nodiscard]] auto attach_state(StreamId const& stream_id, std::optional<TalkerMatch> const& talker) const noexcept
+        -> ListenerReservationState
+    {
+        if (talker_advertise_registered(stream_id, talker)) {
+            return ListenerReservationState::Ready;
+        }
+        if (listener_waits_for_talker_ && !talker_failed_registered(stream_id, talker)) {
+            return ListenerReservationState::Waiting;
+        }
+        return ListenerReservationState::AskingFailed;
+    }
+
+    /// Attach @p stream_id in @p state (Ready, Waiting or Asking Failed) at @p now.
+    [[nodiscard]] auto attach_as(StreamId const& stream_id, ListenerReservationState const state, TimePoint now) -> Status
+    {
+        if (state != ListenerReservationState::Ready) {
+            return state == ListenerReservationState::Waiting ? attach_waiting(stream_id, now)
+                                                              : listener_asking_failed(stream_id, now);
+        }
+        if (auto const r = listener_ready(stream_id, now); !r) {
+            return failure(r.error());
+        }
+        return success();
     }
 
     /// The index of @p stream_id's record, or listener_streams_.size().
@@ -1020,20 +1081,9 @@ class MsrpHandler
             state == ListenerReservationState::Waiting;
     }
 
-    /// The state an attached listener stream wants: Ready with the talker's Advertise; without it,
-    /// Waiting where the handler waits for an absent talker, else AskingFailed.
-    [[nodiscard]] auto wanted_listener_state(tsn::StreamId const& sid) -> ListenerReservationState
-    {
-        if (talker_advertise_registered(sid)) {
-            return ListenerReservationState::Ready;
-        }
-        bool const waits = listener_waits_for_talker_ && peer_talker_failed(sid) == nullptr;
-        return waits ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
-    }
-
     auto redeclare_attached_listener(ListenerStreamSrpInfo& stream, TimePoint now) -> bool
     {
-        ListenerReservationState const want = wanted_listener_state(stream.stream_id);
+        ListenerReservationState const want = attach_state(stream.stream_id, stream.talker);
         if (!listener_is_attached(stream.state) || stream.state == want) {
             return false;
         }
