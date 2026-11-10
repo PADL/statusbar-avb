@@ -1051,7 +1051,7 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     for (auto const& spec : m.kit.talker_specs()) {
         octets += interval_wire_octets(AvbEntityKit::talker_tspec(spec));
     }
-    auto const at_100 = static_cast<uint32_t>(octets * 80);
+    auto const at_100 = static_cast<uint32_t>((octets * 80) + PROPAGATION_DELAY_NS);
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100);  // not declared yet
     m.kit.set_mtu(9000);  // the port's MTU frame interferes: 7500 octets more
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100 + (7500 * 80));
@@ -1060,7 +1060,7 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     uint64_t const own = interval_wire_octets(AvbEntityKit::talker_tspec(m.kit.talker_specs()[0]));
     auto const shaped = (1542 + own) * 80 + cbs_drain_ns(octets - 1542 - own, octets - 1542, CLASS_A_INTERVALS_PER_SEC);
     m.kit.set_class_a_cbs(true);
-    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), shaped);
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), shaped + PROPAGATION_DELAY_NS);
     m.kit.set_class_a_cbs(false);
 
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
@@ -1099,7 +1099,7 @@ TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_the_declared_accumulat
     for (auto const& spec : m.kit.talker_specs()) {
         octets += interval_wire_octets(AvbEntityKit::talker_tspec(spec));
     }
-    EXPECT_EQ(payload.msrp_accumulated_latency.get(), static_cast<uint32_t>(octets * 8));
+    EXPECT_EQ(payload.msrp_accumulated_latency.get(), static_cast<uint32_t>((octets * 8) + PROPAGATION_DELAY_NS));
 
     // Milan v1.2's layout: the presentation time offset, as GET_MAX_TRANSIT_TIME reads it.
     m.kit.host().components().aem_handler.set_stream_info_layout(atdecc::aem::StreamInfoLayout::milan_v1_2);
