@@ -557,21 +557,26 @@ void ListenerStreams::end_port_cycle()
 
 void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
 {
+    auto const kind = subtype_kind(frame);
+    if (kind == StreamKind::other) {
+        return;
+    }
     // Every input connected to the frame's stream receives it: several may share one talker stream.
     for (auto& slot : slots_) {
-        if (rx_slot_matches(slot, frame)) {
-            receive_into(slot, frame, gptp_now_ns);
+        if (rx_slot_matches(slot, kind, frame)) {
+            receive_into(slot, kind, frame, gptp_now_ns);
         }
     }
 }
 
-void ListenerStreams::receive_into(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t const gptp_now_ns)
+void ListenerStreams::receive_into(
+    ListenerStreamSlot& slot, StreamKind const kind, std::span<uint8_t const> frame, int64_t const gptp_now_ns)
 {
     if (slot.stopped.load(std::memory_order_relaxed)) {
         return;
     }
     std::unique_lock const entry{slot.guard, std::try_to_lock};
-    if (!entry.owns_lock() || slot.kind.load(std::memory_order_relaxed) != subtype_kind(frame)) {
+    if (!entry.owns_lock() || slot.kind.load(std::memory_order_relaxed) != kind) {
         return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
     }
     if (slot.am824) {
@@ -594,13 +599,12 @@ auto ListenerStreams::subtype_kind(std::span<uint8_t const> const frame) noexcep
                                                          : StreamKind::other;
 }
 
-auto ListenerStreams::rx_slot_matches(ListenerStreamSlot const& slot, std::span<uint8_t const> const frame) const -> bool
+auto ListenerStreams::rx_slot_matches(
+    ListenerStreamSlot const& slot, StreamKind const kind, std::span<uint8_t const> const frame) const -> bool
 {
-    // The slot's kind matches the AVTP subtype and the frame carries its connected stream_id (the
-    // socket also sees our own TX and other streams); several inputs may be connected to one stream.
-    auto const kind = subtype_kind(frame);
-    return kind != StreamKind::other && slot.kind.load(std::memory_order_relaxed) == kind &&
-        frame_is_for_listener(slot.spec.index, frame);
+    // The slot's kind is the frame's and the frame carries its connected stream_id (the socket also
+    // sees our own TX and other streams); several inputs may be connected to one stream.
+    return slot.kind.load(std::memory_order_relaxed) == kind && frame_is_for_listener(slot.spec.index, frame);
 }
 
 void ListenerStreams::receive_am824(
