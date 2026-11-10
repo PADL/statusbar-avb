@@ -270,10 +270,10 @@ struct ListenerStreams
 
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
-    /// Whether @p frame, of subtype_kind() @p kind, is for @p slot: its kind and its connected stream_id.
-    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, StreamKind kind, std::span<uint8_t const> frame) const
-        -> bool;
-    /// @p frame, of subtype_kind() @p kind, into @p slot unless it is stopped or being re-shaped. Reactor/RX thread.
+    /// Whether @p frame is for @p slot: it carries the slot's connected stream_id, whatever its subtype.
+    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) const -> bool;
+    /// @p frame, of subtype_kind() @p kind, into @p slot unless it is stopped or being re-shaped; another kind
+    /// is counted rejected (count_rejected). Reactor/RX thread.
     void receive_into(ListenerStreamSlot& slot, StreamKind kind, std::span<uint8_t const> frame, int64_t gptp_now_ns);
     /// One AM824, AAF or CRF frame into @p slot (held under its guard) and its engaged @p ctx: checked,
     /// delivered, counted.
@@ -337,6 +337,9 @@ struct ListenerStreams
         uint64_t samples_per_ch,
         bool ts_sparse,
         int64_t gptp_now_ns);
+    /// A frame for @p slot too short or malformed to read: counted in UNSUPPORTED_FORMAT, its sequence_num
+    /// and mr read from the AVTP common header (Milan v1.3 Section 5.3.8.10); none with sv=0 or version != 0.
+    void count_rejected(ListenerStreamSlot& slot, std::span<uint8_t const> frame, bool ts_sparse, int64_t gptp_now_ns);
 
     /// Fill the GET_COUNTERS bitmap + values for a STREAM_INPUT index (true if it is
     /// one of our stream inputs). Control plane (AEM handler).

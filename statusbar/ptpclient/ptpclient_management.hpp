@@ -44,6 +44,8 @@ inline constexpr uint16_t grandmaster_settings_np = 0xC001;
 inline constexpr uint16_t subscribe_events_np = 0xC003;
 /// linuxptp's PORT_PROPERTIES_NP: a port's interface name.
 inline constexpr uint16_t port_properties_np = 0xC004;
+/// linuxptp's CMLDS_INFO_NP (4.3): a port's link delay and asCapable, notified on each change.
+inline constexpr uint16_t cmlds_info_np = 0xC00B;
 }  // namespace management_id
 
 /// actionField (Table 57).
@@ -154,6 +156,25 @@ struct PortPropertiesNp
     static constexpr size_t SIZE = PortPropertiesNpPayload::LENGTH;  ///< up to the PTPText's lengthField
 };
 
+/// A port's asCapable as linuxptp reports it: always_capable is its `asCapable true`, never changing.
+enum class AsCapable : uint8_t
+{
+    not_capable = 0,
+    capable = 1,
+    always_capable = 2,
+};
+
+/// linuxptp's CMLDS_INFO_NP, from the port it describes (the message's sourcePortIdentity): sent
+/// on each asCapable change and each peer delay measurement.
+struct CmldsInfoNp
+{
+    int64_t mean_link_delay_scaled{0};             ///< ns scaled by 2^16 (802.1AS-2020 meanLinkDelay)
+    int32_t scaled_neighbor_rate_ratio{0};         ///< (neighborRateRatio - 1) * 2^41
+    AsCapable as_capable{AsCapable::not_capable};  ///< IEEE 802.1AS-2020 Clause 10.2.5.1
+
+    static constexpr size_t SIZE = CmldsInfoNpPayload::LENGTH;
+};
+
 /// linuxptp's TIME_STATUS_NP, as ptp4l sends it on each clock update (lastGmPhaseChange skipped).
 struct TimeStatusNp
 {
@@ -201,7 +222,7 @@ enum class ManagementEvent : uint8_t
     port_state = 0,       ///< a port's PORT_DATA_SET on each state change
     time_sync = 1,        ///< TIME_STATUS_NP on each clock update
     parent_data_set = 2,  ///< PARENT_DATA_SET when it changes (linuxptp 4.2)
-    cmlds = 3,            ///< CMLDS_INFO_NP (linuxptp 4.3); not parsed here
+    cmlds = 3,            ///< CMLDS_INFO_NP on each asCapable change and peer delay (linuxptp 4.3)
 };
 
 /// linuxptp's SUBSCRIBE_EVENTS_NP: a duration in seconds (65535: never expires; an empty
@@ -251,6 +272,7 @@ struct ManagementMessage
         TimePropertiesDataSet,
         PortDataSet,
         PortPropertiesNp,
+        CmldsInfoNp,
         TimeStatusNp,
         GrandmasterSettingsNp,
         SubscribeEventsNp>
@@ -318,11 +340,14 @@ struct PtpManagementState
     std::optional<TimePropertiesDataSet> time_properties;
     /// The port named PtpManagementConfig::port_interface, once PORT_PROPERTIES_NP names it.
     std::optional<gptp::SourcePortIdentity> port;
-    /// That port's PORT_DATA_SET: peerMeanPathDelay in ns (802.1AS-2020 neighborPropDelay,
-    /// measured whatever the port's role), portState and delayMechanism.
+    /// That port's PORT_DATA_SET: peerMeanPathDelay in ns (802.1AS-2020 neighborPropDelay, measured
+    /// whatever the port's role; then each CMLDS_INFO_NP meanLinkDelay), portState and delayMechanism.
     std::optional<int64_t> peer_mean_path_delay_ns;
     std::optional<PortState> port_state;
     std::optional<DelayMechanism> delay_mechanism;
+    /// That port's asCapable, from CMLDS_INFO_NP: fetched once, then notified (NOTIFY_CMLDS); not_capable,
+    /// once known, while the port is DISABLED or FAULTY. Unknown with a ptp4l before 4.3.
+    std::optional<AsCapable> as_capable;
     /// Every port's portState by portNumber - 1, from each PORT_DATA_SET ptp4l answers or notifies.
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> port_states{};
     /// The settings ptp4l acknowledged for a SET GRANDMASTER_SETTINGS_NP.
@@ -348,8 +373,8 @@ struct PtpManagementConfig
 {
     std::string uds_address{"/var/run/ptp4l"};  ///< ptp4l's uds_address; absolute
     uint8_t domain{0};                          ///< ptp4l's domainNumber (pmc -d)
-    /// Between polls of what ptp4l pushes no notification for: TIME_PROPERTIES_DATA_SET and the
-    /// followed port's PORT_DATA_SET (its peer delay), and everything while it refuses a subscription.
+    /// Between polls of what ptp4l pushes no notification for: TIME_PROPERTIES_DATA_SET, the followed
+    /// port's PORT_DATA_SET until its first CMLDS_INFO_NP, and everything while it refuses a subscription.
     int64_t poll_period_ns{2'000'000'000};
     int64_t retry_period_ns{1'000'000'000};  ///< between probes while ptp4l is unreachable
     std::string port_interface;              ///< the port whose PORT_DATA_SET to follow (empty: none)
@@ -366,9 +391,9 @@ struct PtpManagementConfig
 class PtpManagementClient final : public net::Pollable
 {
   public:
-    /// Called on the reactor thread when the status, the grandmaster, the error, the followed
-    /// port's peer delay, state or delay mechanism, any port's state, the grandmaster settings, a
-    /// refusal or the subscription changes.
+    /// Called on the reactor thread when the status, the grandmaster, the error, the followed port's
+    /// peer delay, asCapable, state or delay mechanism, any port's state, the time properties, the
+    /// grandmaster settings, a refusal or the subscription changes.
     using Listener = sg14::inplace_function<void(PtpManagementState const&), 64>;
 
     /// Bind the client's socket. Fails with invalid_argument for a bad
@@ -412,6 +437,10 @@ class PtpManagementClient final : public net::Pollable
     /// A port's state @p now into @p held; a change while subscribed asks for the parent.
     void note_port_state(std::optional<PortState>& held, PortState now);
     void apply_port_data_set(PortDataSet const& port_data);
+    /// The followed port moved to @p now: its asCapable again, which a state change may reset unnotified.
+    void note_followed_port_state(PortState now);
+    /// The followed port's asCapable and peer delay from @p sender's CMLDS_INFO_NP.
+    void apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePortIdentity const& sender);
     void apply_settings(GrandmasterSettingsNp const& settings);
     void apply_subscription(SubscribeEventsNp const& held, int64_t now_ns);
     void publish_if_changed();
@@ -460,6 +489,9 @@ class PtpManagementClient final : public net::Pollable
     std::optional<PortState> reported_port_state_;
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> reported_port_states_{};
     std::optional<DelayMechanism> reported_delay_mechanism_;
+    std::optional<AsCapable> reported_as_capable_;
+    /// The followed port's CMLDS_INFO_NP has come since ptp4l was found or last subscribed afresh.
+    bool cmlds_seen_{false};
     std::optional<GrandmasterSettingsNp> reported_settings_;
     std::optional<TimePropertiesDataSet> reported_time_properties_;
     std::optional<uint16_t> reported_refused_;

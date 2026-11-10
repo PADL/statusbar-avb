@@ -310,8 +310,8 @@ TEST(avb_entity_host_symbol, legacy_parsed_model_path_has_no_storage)
 
 namespace {
 
-/// ENTITY + CONFIGURATION + one AVB_INTERFACE, through the blob writer.
-auto make_interface_blob() -> std::vector<uint8_t>
+/// ENTITY + CONFIGURATION + one AVB_INTERFACE of @p priority1, through the blob writer.
+auto make_interface_blob(uint8_t const priority1 = 248) -> std::vector<uint8_t>
 {
     using statusbar::atdecc::aem::DESCRIPTOR_AVB_INTERFACE;
     using statusbar::atdecc::aem::DESCRIPTOR_CONFIGURATION;
@@ -324,11 +324,20 @@ auto make_interface_blob() -> std::vector<uint8_t>
     DescriptorConfiguration config{};
     w.add(0, DESCRIPTOR_CONFIGURATION, 0, statusbar::make_const_span(config));
     DescriptorAvbInterface iface{};
-    iface.priority1 = 248;
+    iface.priority1 = priority1;
     iface.priority2 = 248;
     iface.clock_identity = statusbar::ieee::Eui64{0x70, 0xB3, 0xD5, 0xFF, 0xFE, 0xED, 0x00, 0x01};
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, statusbar::make_const_span(iface));
     return w.write();
+}
+
+/// AVB_INTERFACE 0's GPTP_GM_CHANGED.
+auto gm_changed(SymbolAwareHost& host) -> uint32_t
+{
+    std::array<uint32_t, 32> counters{};
+    uint32_t valid = 0;
+    EXPECT_TRUE(host->fill_counters(statusbar::atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0, valid, counters));
+    return counters[5];
 }
 
 }  // namespace
@@ -475,8 +484,9 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
     host->on_link_up(TimePoint{});
     host->on_link_down(TimePoint{});
     host->on_link_up(TimePoint{});
-    host->note_grandmaster_changed();  // the first: found, not changed
-    host->note_grandmaster_changed();
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);  // the first: found, not changed
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
     EXPECT_TRUE(host->fill_counters(DESCRIPTOR_AVB_INTERFACE, 0, valid, counters));
     EXPECT_EQ(valid, 0x23U);
     EXPECT_EQ(counters[0], 2U);  // LINK_UP
@@ -487,6 +497,110 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
     // The model has no CLOCK_DOMAIN: not ours to answer.
     EXPECT_FALSE(host->fill_counters(DESCRIPTOR_CLOCK_DOMAIN, 0, valid, counters));
     EXPECT_FALSE(host->fill_counters(DESCRIPTOR_STREAM_INPUT, 0, valid, counters));
+}
+
+// GET_AVB_INFO's AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows the gPTP stack's port asCapable once
+// reported, whatever the entity's own gPTP lock.
+TEST(avb_entity_host_avb_info, as_capable_follows_the_gptp_stack_s_port)
+{
+    using statusbar::atdecc::aem::avb_info_flags::AS_CAPABLE;
+    using TimePoint = statusbar::sm::TimePoint;
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    host->on_link_up(TimePoint{});
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);  // the entity has no gPTP lock
+    host->note_port_as_capable(true);
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) != 0);
+    host->note_port_as_capable(false);
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
+    host->note_port_as_capable(true);
+    host->on_link_down(TimePoint{});  // a link that is down is never asCapable
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
+    host->on_link_up(TimePoint{});
+    host->note_port_as_capable(std::nullopt);  // ptp4l gone: the entity's own state again
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
+}
+
+// GPTP_GM_CHANGED (Milan v1.3 Section 5.3.6.3, IEEE 1722.1-2021 Clause 7.4.42.2.2) follows the grandmaster
+// in force: with the Announces gone a grandmaster-capable entity is its own, so A lost and found again is two.
+TEST(avb_entity_host_counters, a_grandmaster_lost_and_found_again_is_two_changes)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);
+    EXPECT_EQ(gm_changed(host), 0U);  // the first
+    host->note_grandmaster_lost();
+    EXPECT_EQ(gm_changed(host), 1U);  // to itself
+    host->note_grandmaster_changed(gm_a);
+    EXPECT_EQ(gm_changed(host), 2U);
+}
+
+// priority1 255 is no grandmaster-capable entity (IEEE 802.1AS-2020 Clause 8.6.2.1): a loss leaves the
+// last grandmaster in force, so only another one counts.
+TEST(avb_entity_host_counters, a_grandmaster_lost_on_an_entity_not_capable_is_no_change)
+{
+    auto const blob = make_interface_blob(255);
+    auto host = make_host_from_blob(blob);
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(gm_a);
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    EXPECT_EQ(gm_changed(host), 1U);
+}
+
+// The gPTP stack's PARENT_DATA_SET outranks the Announce handler once reported: its own clock as
+// grandmaster is a change like any other, and the Announce handler's reports no longer count.
+TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    auto const gm_a = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    auto const self = statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL);
+    host->note_parent_grandmaster(gm_a);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    host->note_grandmaster_lost();
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_parent_grandmaster(self);
+    host->note_parent_grandmaster(self);
+    host->note_parent_grandmaster(gm_a);
+    EXPECT_EQ(gm_changed(host), 2U);
+}
+
+// use_parent_grandmaster after an Announce: the Announce handler's grandmaster in force is dropped, its
+// grandmasters found or lost (the local ptp4l's own among them) count nothing, and the stack's first
+// report is no change.
+TEST(avb_entity_host_counters, use_parent_grandmaster_drops_the_announce_handler_s_grandmaster)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'7788ULL});  // before: in force
+    host->use_parent_grandmaster();
+    host->use_parent_grandmaster();                                                            // again: nothing more
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x70B3'D5FF'FEED'0001ULL});  // ptp4l's own Announces
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    EXPECT_EQ(gm_changed(host), 0U);  // the first
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL));
+    EXPECT_EQ(gm_changed(host), 1U);
+}
+
+// use_parent_grandmaster hands GPTP_GM_CHANGED to the gPTP stack before it names a grandmaster: a
+// clientOnly ptp4l following none names none, and the Announce handler's reports count nothing.
+TEST(avb_entity_host_counters, the_parent_data_set_can_be_the_source_before_its_first_report)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->use_parent_grandmaster();
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(gm_a);
+    EXPECT_EQ(gm_changed(host), 0U);
 }
 
 // A link back after a down (IEEE 802.1Q-2022 Clause 10.7): MSRP sends a LeaveAll at once, re-declaring the

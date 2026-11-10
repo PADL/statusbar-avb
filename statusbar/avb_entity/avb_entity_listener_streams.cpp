@@ -552,12 +552,9 @@ void ListenerStreams::end_port_cycle()
 void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
 {
     auto const kind = subtype_kind(frame);
-    if (kind == StreamKind::other) {
-        return;
-    }
     // Every input connected to the frame's stream receives it: several may share one talker stream.
     for (auto& slot : slots_) {
-        if (rx_slot_matches(slot, kind, frame)) {
+        if (rx_slot_matches(slot, frame)) {
             receive_into(slot, kind, frame, gptp_now_ns);
         }
     }
@@ -570,8 +567,12 @@ void ListenerStreams::receive_into(
         return;
     }
     std::unique_lock const entry{slot.guard, std::try_to_lock};
-    if (!entry.owns_lock() || slot.kind.load(std::memory_order_relaxed) != kind) {
-        return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
+    if (!entry.owns_lock()) {
+        return;  // being re-shaped (reformat_stream)
+    }
+    if (slot.kind.load(std::memory_order_relaxed) != kind) {
+        count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);  // another subtype on its stream_id
+        return;
     }
     if (slot.am824) {
         receive_am824(slot, *slot.am824, frame, gptp_now_ns);
@@ -593,25 +594,24 @@ auto ListenerStreams::subtype_kind(std::span<uint8_t const> const frame) noexcep
                                                          : StreamKind::other;
 }
 
-auto ListenerStreams::rx_slot_matches(
-    ListenerStreamSlot const& slot, StreamKind const kind, std::span<uint8_t const> const frame) const -> bool
+auto ListenerStreams::rx_slot_matches(ListenerStreamSlot const& slot, std::span<uint8_t const> const frame) const -> bool
 {
-    // The slot's kind is the frame's and the frame carries its connected stream_id (the socket also
-    // sees our own TX and other streams); several inputs may be connected to one stream.
-    return slot.kind.load(std::memory_order_relaxed) == kind && frame_is_for_listener(slot.spec.index, frame);
+    // The frame carries the slot's connected stream_id, whatever its subtype (the socket also sees our
+    // own TX and other streams); several inputs may be connected to one stream.
+    return frame_is_for_listener(slot.spec.index, frame);
 }
 
 void ListenerStreams::receive_am824(
     ListenerStreamSlot& slot, avtp::Am824StreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) one PDU checked, delivered and counted
-    if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
-        return;
-    }
     avtp::Am824Pdu pdu{};
-    span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
+    bool const whole = frame.size() >= avtp::Am824Pdu::HEADER_LENGTH;
+    if (whole) {
+        span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
+    }
+    if (!whole || !pdu.is_valid()) {
         slot.rx_bad.add(1);
-        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
+        count_rejected(slot, frame, /*ts_sparse=*/true, gptp_now_ns);
         return;
     }
     auto const& header = pdu.stream_header;
@@ -691,7 +691,7 @@ void ListenerStreams::receive_aaf(
     auto const pdu = avtp::aaf_parse_header(frame);
     if (!pdu) {
         slot.rx_bad.add(1);
-        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
+        count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);
         return;
     }
     // Milan v1.2 Section 4.4.2.2: a mismatched format is discarded, counted in UNSUPPORTED_FORMAT.
@@ -776,13 +776,14 @@ void ListenerStreams::count_received(
 void ListenerStreams::receive_crf(
     ListenerStreamSlot& slot, avtp::CrfStreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) a CRF frame's checks, then counted and delivered
-    if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
-        return;
-    }
     avtp::CrfPdu pdu{};
-    span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
+    bool const whole = frame.size() >= avtp::CrfPdu::HEADER_LENGTH;
+    if (whole) {
+        span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+    }
+    if (!whole || !pdu.is_valid()) {
         slot.rx_bad.add(1);
+        count_rejected(slot, frame, /*ts_sparse=*/true, 0);
         return;
     }
     std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
@@ -835,6 +836,18 @@ void ListenerStreams::deliver_crf(
     });
     slot.rx_packets.add(1);
     slot.rx_samples.add(ctx.last_timestamp_count);
+}
+
+void ListenerStreams::count_rejected(
+    ListenerStreamSlot& slot, std::span<uint8_t const> const frame, bool const ts_sparse, int64_t const gptp_now_ns)
+{
+    // sv=0 or a version other than 0 is no stream data of this stream (IEEE 1722-2016 Clauses 4.4.3.4, 4.4.4.2).
+    if (!avtp::avtp_get_sv(frame).value_or(false) || avtp::avtp_get_version(frame).value_or(1) != 0) {
+        return;
+    }
+    auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
+    auto const mr = avtp::avtp_get_mr(frame).value_or(false);
+    update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, ts_sparse, gptp_now_ns);
 }
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
@@ -964,6 +977,11 @@ void ListenerStreams::on_listener_connected(
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
     if (auto* const slot = slot_for(stream_index); slot != nullptr) {
         slot->connections.fetch_add(1, std::memory_order_release);  // a new CRF source (StreamCrfFn)
+        // A rebind to another stream: its first frame continues no sequence (Milan v1.3 Section 5.3.8.10).
+        auto const* const held = std::ranges::find(connections_, stream_index, &Connection::stream_index);
+        if (held != connections_.end() && held->stream_id != stream_id) {
+            slot->counters.restart_run.store(true, std::memory_order_relaxed);
+        }
     }
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the

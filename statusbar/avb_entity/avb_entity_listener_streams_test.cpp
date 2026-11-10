@@ -1088,8 +1088,8 @@ TEST(listener_timed, am824_raw_delivery_through_on_stream_rx_frame)
 }
 
 // An AAF input re-shaped to AM824 and back (reformat_stream): each kind's frames land while it is the
-// slot's, the other kind's are not matched (none parsed as the wrong kind), and a frame arriving while
-// the reactor holds the slot is dropped.
+// slot's, the other kind's count in UNSUPPORTED_FORMAT (none parsed as the wrong kind), and a frame
+// arriving while the reactor holds the slot is dropped.
 TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
@@ -1156,7 +1156,7 @@ TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
     }
     EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
     EXPECT_EQ(slot->rx_bad.load(), uint64_t{0});
-    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{0});
+    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{3});
 }
 
 // A CRF slot never changes kind, nor an audio slot to CRF.
@@ -1252,4 +1252,29 @@ TEST(listener_crf, a_rebind_steps_the_crf_source_generation)
     ls.on_listener_connected(1, donor->components().acmp_listener.get_stream(1)->stream_id, ieee::Eui48{}, sm::Clock::now());
     send(kAafId, false);
     EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2, 2, 3, 4}));
+}
+
+// A BIND_RX that moves a bound input to another stream, without an unbind, starts its sequence
+// again (Milan v1.3 Section 5.3.8.10); the same stream bound again continues it.
+TEST(listener_counters, a_rebind_to_another_stream_counts_no_sequence_mismatch)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(audio_specs()[1]).has_value());
+    auto* const slot = ls.slot_for(1);
+    auto const frame = [slot](uint8_t const seq) {
+        tally_stream_input_packet(slot->counters, seq, 0, false, false, false, true, 0, false, 0, 5'000, 48'000);
+    };
+    auto const first = ieee::Eui64{}.from_uint64(0x0200000000000101ULL);
+    auto const second = ieee::Eui64{}.from_uint64(0x0200000000000102ULL);
+    ls.on_listener_connected(1, first, kAafGroup, sm::Clock::now());
+    frame(36);
+    frame(37);
+    ls.on_listener_connected(1, second, kAafGroup, sm::Clock::now());
+    frame(200);
+    EXPECT_EQ(slot->counters.seq_num_mismatch.load(), 0U);
+    ls.on_listener_connected(1, second, kAafGroup, sm::Clock::now());
+    frame(202);
+    EXPECT_EQ(slot->counters.seq_num_mismatch.load(), 1U);
 }
