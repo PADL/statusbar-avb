@@ -509,12 +509,13 @@ void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandm
     }
 }
 
-void AvbEntityHost::note_grandmaster_changed()
+void AvbEntityHost::note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
 {
     refresh_avb_info();
-    // The first grandmaster found is not a change.
-    if (!grandmaster_seen_) {
-        grandmaster_seen_ = true;
+    // Neither the first grandmaster found nor the same one found again after its loss is a change.
+    bool const changed = last_grandmaster_.has_value() && !(grandmaster == *last_grandmaster_);
+    last_grandmaster_ = grandmaster;
+    if (!changed) {
         return;
     }
     ++gm_changed_count_;
