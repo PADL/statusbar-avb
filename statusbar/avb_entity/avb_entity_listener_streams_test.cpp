@@ -1140,7 +1140,7 @@ TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
     auto const aaf_spec = audio_specs()[1];
     uint32_t const rate_hz = aaf_spec.format.sample_rate_hz;
     StreamSpec am824_spec = aaf_spec;
-    am824_spec.format_word = avtp::make_am824_stream_format(rate_hz == 96000 ? 4 : 2, 2);
+    am824_spec.format_word = rate_hz == 96000 ? 0x00a0040240000200ULL : 0x00a0020240000200ULL;  // 2 channels
     am824_spec.format = decode_stream_format(am824_spec.format_word);
     EXPECT_TRUE(am824_spec.format.kind == StreamKind::am824 && am824_spec.format.sample_rate_hz == rate_hz);
     std::atomic<int64_t> gptp{0};

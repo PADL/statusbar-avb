@@ -51,16 +51,11 @@ class MvuCommandHandler
     /// current. NanoAvbComponents seeds it, so a notification before any MVU command carries it.
     void set_entity_id(Eui64 const& entity_id) noexcept { our_entity_id_ = entity_id; }
 
-    /// GET_MILAN_INFO certification_version (atdecc::mvu_version);
-    /// 0, the default, until the entity has passed Milan certification.
-    void set_certification_version(uint32_t const version) noexcept { certification_version_ = version; }
-    [[nodiscard]] auto certification_version() const noexcept -> uint32_t { return certification_version_; }
-
     /// GET_MILAN_INFO features_flags beyond MVU_BINDING (which a Milan listener gives), such as
     /// MVU_FEATURE_TALKER_SIGNAL_PRESENCE: set before the entity is advertised, as they may not
     /// change (Milan v1.3 Section 5.4.4.1).
     void set_extra_features(uint32_t const flags) noexcept { extra_features_ = flags; }
-    /// The features_flags GET_MILAN_INFO answers with.
+    /// The features_flags GET_MILAN_INFO answers with: the AEM handler's MilanInfo's, these and MVU_BINDING.
     [[nodiscard]] auto features_flags() const noexcept -> uint32_t;
 
     /// The Milan listener whose sinks BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX
@@ -132,6 +127,8 @@ class MvuCommandHandler
         Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id, sm::TimePoint now) -> bool;
 
   private:
+    /// The AEM handler's MilanInfo (upstream's GET_MILAN_INFO fields), or nullptr.
+    [[nodiscard]] auto milan_info() const noexcept -> AemCommandHandler::MilanInfo const*;
     /// Answer the Milan command @p command (control data as declared), received at @p now, by its command_type
     [[nodiscard]] auto dispatch_command(
         Eui48 const& src_mac, atdecc::AecpMvuDu const& header, std::span<uint8_t const> command, sm::TimePoint now) -> bool;
@@ -224,7 +221,6 @@ class MvuCommandHandler
     void send_unsolicited(uint16_t command_type, Eui64 const& requester, std::span<uint8_t const> body);
 
     EntityProfile profile_{};
-    uint32_t certification_version_{0};
     uint32_t extra_features_{0};
     SendAemResponseFn send_response_{};
     AemCommandHandler* aem_{nullptr};
