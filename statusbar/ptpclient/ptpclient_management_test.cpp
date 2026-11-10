@@ -1116,6 +1116,42 @@ TEST(ptp_management, client_follows_the_named_port_s_as_capable_from_notificatio
     std::filesystem::remove_all(dir);
 }
 
+// Subscribed, the followed port's peer delay arrives with each CMLDS_INFO_NP (its meanLinkDelay) and its
+// PORT_DATA_SET is no longer polled
+TEST(ptp_management, client_follows_the_named_port_s_peer_delay_from_notifications)
+{
+    auto const dir = socket_dir("cmldsdelay");
+    Ptp4l ptp4l{dir};
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .port_interface = "enp8s0"},
+        [&](PtpManagementState const& state) { last = state; });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 10);
+    c.handle(held_subscription(6, true), 11);
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 12);
+    c.handle(PORT_RESPONSE, 13);
+    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{74});
+    std::vector<uint8_t> data(CmldsInfoNp::SIZE);
+    data[5] = 0x4D;  // meanLinkDelay 77 ns
+    data.back() = 1;
+    auto cmlds = response(management_id::cmlds_info_np, data);
+    std::array<uint8_t, 8> const bridge{0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00};  // BRIDGE
+    std::copy(bridge.begin(), bridge.end(), cmlds.begin() + 20);
+    cmlds[29] = 2;
+    c.handle(cmlds, 14);
+    EXPECT_EQ(last.peer_mean_path_delay_ns.value_or(0), int64_t{77});
+    (void)ptp4l.drain();
+    c.tick(3 * SECOND);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::port_data_set, ManagementAction::get), 0);
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
 #endif  // __linux__
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_management_test)

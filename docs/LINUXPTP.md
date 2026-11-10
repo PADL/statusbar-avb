@@ -150,18 +150,26 @@ just after it happens.
 
 ### Notifications, polling and grandmaster settings
 
-The client always subscribes to `port_state` and `parent_data_set`, and to the
-further events in `PtpManagementConfig::events` (`time_sync`). ptp4l pushes, to
-the socket that last subscribed with the client's source port identity, an
-unsolicited RESPONSE carrying the whole data set an event concerns: a port's
-PORT_DATA_SET on each state change, PARENT_DATA_SET when it changes (linuxptp
-4.2) and TIME_STATUS_NP on each clock update. They are parsed as the answers to
-GETs are. A new parent also fetches CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET
-again; TIME_STATUS_NP is kept in `state().time_status` and reports nothing by
-itself. ptp4l notifies nothing for TIME_PROPERTIES_DATA_SET or for a port's
-peerMeanPathDelay, so those are polled every `poll_period_ns`, with
-PARENT_DATA_SET too while ptp4l holds no subscription (it refuses one on the
-read-only socket; that refusal is not reported in `state().refused`).
+The client always subscribes to `port_state` and `parent_data_set`, to `cmlds`
+when it follows a port (`port_interface`), and to the further events in
+`PtpManagementConfig::events` (`time_sync`). ptp4l pushes, to the socket that
+last subscribed with the client's source port identity, an unsolicited RESPONSE
+carrying the whole data set an event concerns: a port's PORT_DATA_SET on each
+state change, PARENT_DATA_SET when it changes (linuxptp 4.2), a port's
+CMLDS_INFO_NP on each asCapable change and peer delay measurement (linuxptp 4.3,
+named by the header's sourcePortIdentity) and TIME_STATUS_NP on each clock
+update. They are parsed as the answers to GETs are. A new parent also fetches
+CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET again; TIME_STATUS_NP is kept in
+`state().time_status` and reports nothing by itself. The followed port's
+CMLDS_INFO_NP gives `state().as_capable` (as linuxptp reports it: `asCapable
+true` is always_capable) and its peer delay; it is fetched once with the rest,
+again when the port's state changes, and DISABLED or FAULTY makes it
+not_capable, since linuxptp keeps asCapable as it was there. A ptp4l before 4.3
+echoes the `cmlds` bit without honouring it: asCapable then stays unknown.
+ptp4l notifies nothing for TIME_PROPERTIES_DATA_SET, so it is polled every
+`poll_period_ns`, with every port's PORT_DATA_SET and PARENT_DATA_SET too while
+ptp4l holds no subscription (it refuses one on the read-only socket; that
+refusal is not reported in `state().refused`).
 
 The subscription lasts `subscription_duration_s` (6 s by default; 65535 would
 never expire and is refused) and is renewed three times per duration, as phc2sys
