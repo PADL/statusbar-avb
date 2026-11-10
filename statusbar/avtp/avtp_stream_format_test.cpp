@@ -137,7 +137,7 @@ TEST(am824_stream_format, a_non_am824_event_type_has_no_rate)
 // own (Milan v1.3 Section 6.6: XF24 is one such word a rate)
 TEST(stream_format, an_up_to_word_covers_every_count_to_its_own)
 {
-    constexpr uint64_t XF24_48K = 0x0285022006006000ULL;    // INT_32, 48 kHz, 24 channels, 6 samples, ut
+    constexpr uint64_t XF24_48K = 0x0215022006006000ULL;    // INT_32, 48 kHz, 24 channels, 6 samples, ut
     constexpr uint64_t INT32_13CH = 0x0205022003406000ULL;  // 13 channels
     EXPECT_TRUE(stream_format_covers(XF24_48K, INT32_13CH));
     EXPECT_TRUE(stream_format_covers(XF24_48K, 0x0205022000406000ULL));   // 1 channel
@@ -155,6 +155,19 @@ TEST(stream_format, an_up_to_word_covers_every_count_to_its_own)
     // At its widest, the up-to word is the 24-channel format
     EXPECT_EQ(stream_format_widest(XF24_48K), uint64_t{0x0205022006006000ULL});
     EXPECT_EQ(stream_format_widest(0x041060010000BB80ULL), uint64_t{0x041060010000BB80ULL});
+}
+
+// IEEE 1722-2016 Figure I.12: ut is octet 1 bit 4, between the reserved bits and nsr
+TEST(stream_format, the_up_to_bit_sits_just_above_nsr)
+{
+    constexpr uint64_t XF24_48K = 0x0215022006006000ULL;
+    EXPECT_EQ(stream_format_bytes(XF24_48K)[1], uint8_t{0x15});
+    EXPECT_EQ(AafStreamFormat::from_u64(XF24_48K).nsr(), uint8_t{0x05});
+    EXPECT_TRUE(decode_aaf_stream_format(XF24_48K) == "AAF 24ch 48kHz 32-bit");
+    EXPECT_EQ(stream_format_widest(XF24_48K), uint64_t{0x0205022006006000ULL});
+    // A reserved bit is no ut: the word covers itself only
+    EXPECT_FALSE(stream_format_covers(0x0285022006006000ULL, 0x0205022003406000ULL));
+    EXPECT_EQ(stream_format_widest(0x0285022006006000ULL), uint64_t{0x0285022006006000ULL});
 }
 
 TEST_MAIN(statusbar_avtp, avtp_stream_format_test)

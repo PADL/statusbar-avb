@@ -1479,10 +1479,23 @@ TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
     EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{1});
     EXPECT_EQ(m.kit.request_entity_name(std::string(65, 'x')), atdecc::AEM_STATUS_BAD_ARGUMENTS);
     std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
-    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    auto const lock_entity = [&m, &lock] {
+        nanoavb::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+        header.controller_entity_id = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+        std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+        return m.kit.host().components().aem_handler.handle_command(header, lock, out).status;
+    };
+    EXPECT_EQ(lock_entity(), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(m.kit.local_change_refusal().has_value());  // opt-in (Milan v1.3 Section 5.3.4.1)
+    EXPECT_EQ(m.kit.request_entity_name("Locked"), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.entity_name() == "Locked");
+    m.kit.set_lock_refuses_local_changes(true);
     EXPECT_EQ(m.kit.request_entity_name("Other"), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_TRUE(m.entity_name() == "Locked");
     lock[3] = 0x01;  // UNLOCK
-    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(m.kit.local_change_refusal().has_value());
     EXPECT_EQ(m.kit.request_entity_name(""), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(m.entity_name() == "kit milan");
     EXPECT_TRUE(load_persistent_state(path, 0, {}).state.names.empty());
@@ -1856,13 +1869,13 @@ auto unsolicited(std::vector<std::vector<uint8_t>> const& frames, uint16_t const
 // that one with its new TSpec at the next reactor pass (the hook is told no time), not the table.
 TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
 {
+    size_t sent = 0;  // before the kit, whose stop at destruction still sends
     RateKit m{"", 0x1C};
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 1);
     EXPECT_TRUE(m.advertising(0) && m.advertising(1));
     auto& msrp = m.kit.host().components().msrp_handler;
-    size_t sent = 0;
     msrp.set_send_packet([&sent](std::span<uint8_t const> const p) {
         sent += p.size();
         return true;
@@ -2278,14 +2291,15 @@ struct MilanPair
         return s != nullptr ? s->state : nanoavb::ListenerReservationState::Idle;
     }
 
-    PersistentKit l;
-    MilanKit t;
     sm::TimePoint now{};
     uint16_t sequence{0x100};
     std::vector<atdecc::AcmpCommandResponse> acmp;
     std::vector<atdecc::AcmpCommandResponse> heard;
     std::vector<std::vector<uint8_t>> to_l;
     std::vector<std::vector<uint8_t>> to_t;
+    // Last: their stops at destruction send into the queues above.
+    PersistentKit l;
+    MilanKit t;
 };
 
 namespace sif = atdecc::aem::stream_info_flags;
@@ -3311,15 +3325,17 @@ TEST(avb_entity_kit_mappings, request_audio_mappings_is_a_local_remove_and_add)
         EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
         EXPECT_TRUE(m.aem.empty());
 
-        // Milan v1.2 Sections 5.4.2.27-28: no local change while a controller holds the lock.
+        // Milan v1.3 Section 5.3.4.1, opted in: no local change while a controller holds the lock.
         std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
         nanoavb::AemDu header{};
         header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
         header.controller_entity_id = OTHER_CONTROLLER;
         std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
         EXPECT_EQ(m.kit.host().components().aem_handler.handle_command(header, lock, out).status, atdecc::AEM_STATUS_SUCCESS);
+        m.kit.set_lock_refuses_local_changes(true);
         EXPECT_EQ(m.kit.request_audio_mappings(0, std::vector{mapping(0, 2)}, {}), atdecc::AEM_STATUS_ENTITY_LOCKED);
         EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
+        m.kit.set_lock_refuses_local_changes(false);
     }
     {
         RateKit m{path, 0x75, true};

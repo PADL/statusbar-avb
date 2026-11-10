@@ -2355,7 +2355,7 @@ auto response_sampling_rate(std::span<uint8_t const> bytes) -> uint32_t
 TEST(stream_lifecycle, set_stream_format_accepts_any_count_an_up_to_word_lists)
 {
     auto blob = make_blob_with_stream_output();
-    constexpr uint64_t XF24_48K = 0x0285022006006000ULL;
+    constexpr uint64_t XF24_48K = 0x0215022006006000ULL;
     constexpr uint64_t XF24_WIDEST = 0x0205022006006000ULL;
     constexpr size_t desc_b = 20 + 12;                                   // header, TOC entry
     constexpr size_t trailer_b = desc_b + DescriptorStream::LENGTH + 8;  // the descriptor, its first format

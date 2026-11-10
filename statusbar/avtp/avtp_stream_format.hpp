@@ -35,7 +35,7 @@ namespace statusbar::avtp {
 /// AAF stream-format wire layout (IEEE 1722-2016 Clause 7.3.4), viewed over
 /// the 8-byte format code:
 ///   octet 0:    subtype (0x02 AAF)
-///   octet 1:    ut[7] | reserved[6:4] | nsr[3:0]
+///   octet 1:    reserved[7:5] | ut[4] | nsr[3:0]
 ///   octet 2:    format (AAF sample format code: INT_32=0x02, ...)
 ///   octet 3:    bit_depth
 ///   octets 4-7: channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
@@ -71,9 +71,9 @@ struct AafStreamFormat
 
 static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
 
-/// An AAF format word's ut ("up to") bit (IEEE 1722-2016 Annex I.2.4): its channels_per_frame
-/// is a maximum, every count from 1 to it supported.
-inline constexpr uint64_t AAF_FORMAT_UP_TO = uint64_t{1} << 55U;
+/// An AAF format word's ut ("up to") bit, octet 1 bit 4 (IEEE 1722-2016 Figure I.12): its
+/// channels_per_frame is a maximum, every count from 1 to it supported.
+inline constexpr uint64_t AAF_FORMAT_UP_TO = uint64_t{1} << 52U;
 inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNELS_MASK};
 
 /// Whether a stream listing format @p listed supports format @p wanted: the same word, or, for an

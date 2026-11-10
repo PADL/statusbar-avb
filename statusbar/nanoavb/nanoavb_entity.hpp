@@ -381,8 +381,8 @@ class AemCommandHandler
     [[nodiscard]] auto set_audio_mappings(
         uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings, bool apply) -> uint8_t;
     /// REMOVE_AUDIO_MAPPINGS of @p remove, then ADD_AUDIO_MAPPINGS of @p add, on STREAM_PORT_INPUT @p port_index by
-    /// the entity itself: ENTITY_LOCKED while locked or acquired (Milan v1.2 Sections 5.4.2.27-28), else as a
-    /// controller's, all or nothing; a change is notified and reported to the settings hook. The AEM status.
+    /// the entity itself, as a controller's but whatever the lock, all or nothing; a change is notified and
+    /// reported to the settings hook. The AEM status.
     [[nodiscard]] auto apply_local_audio_mappings(
         uint16_t port_index, std::span<DynamicAudioMapping const> add, std::span<DynamicAudioMapping const> remove) -> uint8_t;
     /// Make @p mappings dynamic STREAM_PORT_OUTPUT @p port_index's, the entity's own at the unit's rate (controllers'

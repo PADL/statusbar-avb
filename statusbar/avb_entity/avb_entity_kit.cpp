@@ -824,11 +824,19 @@ auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t cons
     return in_force == rate ? atdecc::AEM_STATUS_SUCCESS : atdecc::AEM_STATUS_NOT_SUPPORTED;
 }
 
+auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_t>
+{
+    if (!lock_refuses_local_changes_) {
+        return std::nullopt;
+    }
+    return host_.components().aem_handler.exclusive_access_status(ieee::Eui64{});  // as no controller's command
+}
+
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
 {
     auto& aem = host_.components().aem_handler;
-    if (aem.is_locked() || aem.is_acquired()) {
-        return atdecc::AEM_STATUS_ENTITY_LOCKED;
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
     }
     if (name.size() > atdecc::aem::AtdeccString::LENGTH) {
         return atdecc::AEM_STATUS_BAD_ARGUMENTS;
@@ -854,6 +862,9 @@ auto AvbEntityKit::request_audio_mappings(
     std::span<nanoavb::DynamicAudioMapping const> const add,
     std::span<nanoavb::DynamicAudioMapping const> const remove) -> uint8_t
 {
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
     return host_.components().aem_handler.apply_local_audio_mappings(port_index, add, remove);
 }
 
