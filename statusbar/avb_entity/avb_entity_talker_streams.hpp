@@ -81,9 +81,9 @@ struct TalkerStreamSlot
     StreamSpec spec{};
     ieee::Eui48 dest_mac{};
     uint64_t tx_packets{0};
-    /// CRF decimation phase: transmit one PDU every pkts_per_crf audio packets.
+    /// The sample index the next CRF PDU starts at (0: the next wake sends one).
     /// Reset to 0 whenever the CRF gate is closed so a reconnect starts fresh.
-    uint16_t crf_decim{0};
+    uint64_t crf_next{0};
     /// The CRF mr bit sent (IEEE 1722-2016 Clause 10.4). Media thread.
     bool crf_mr{false};
     std::optional<avtp::Am824StreamOutputContext> am824{};
