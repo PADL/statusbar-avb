@@ -69,8 +69,9 @@ auto wire(Descriptor const& desc) -> std::span<uint8_t const>
 }
 
 /// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then @p crf CRF
-/// streams in each direction.
-auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1) -> std::vector<uint8_t>
+/// streams in each direction; with @p identify, CONTROL 0 is an IDENTIFY control.
+auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1, bool const identify = false)
+    -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -92,6 +93,13 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16
     }
     atdecc::aem::DescriptorAvbInterface iface{};
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    if (identify) {
+        atdecc::aem::DescriptorControl control{};
+        control.control_type = atdecc::aem::CONTROL_TYPE_IDENTIFY;
+        control.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8
+        control.number_of_values = 1;
+        w.add(0, atdecc::aem::DESCRIPTOR_CONTROL, 0, wire(control));
+    }
     return w.write();
 }
 
