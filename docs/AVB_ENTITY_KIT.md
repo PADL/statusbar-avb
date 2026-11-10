@@ -148,17 +148,22 @@ address is valid. After a withdrawal, a different declaration waits two
 LeaveAll periods. The kit's own timer runs the declarations at each deadline (a
 probe window closing, a hold ending).
 
-A Talker Advertise's AccumulatedLatency is the talker port's own latency
-(IEEE 802.1Q-2022 Clause 35.2.2.8.6), `talker_port_latency_ns()`: one
-full-size (1500-octet MSDU) interfering frame, then one interval's frames of
-every talker stream in class A's queue (`interval_wire_octets()`, as the shaper
-sizes them), at the link speed the shaper reports (`set_link_mbps`, 1000 until
-set). Twelve 8-channel 24-bit 48 kHz AAF talkers declare 32.6 us at 1 Gbit/s.
-GET_STREAM_INFO reports the value the MSRP handler holds while declared, else
-the one it would declare; a changed link speed or format applies when a stream
-is next declared. The latency inside the entity before a frame is queued is the
-presentation time offset's, not the network's, and is not counted; the
-interfering frame assumes a 1500-octet MTU.
+A Talker Advertise's AccumulatedLatency is the talker port's portTcMaxLatency
+(IEEE 802.1Q-2022 Clause 35.2.2.8.6), `talker_port_latency_ns()`: item a), the
+other talker streams' frames of one interval in class A's queue
+(`interval_wire_octets()`, as the shaper sizes them); item b), one frame of the
+port's MTU (`set_mtu`, 1500 until set); and the stream's own frame. Without a
+cbs every frame leaves at the link speed (`set_link_mbps`, 1000 until set). Under the shaper's cbs (`set_class_a_cbs`),
+whose idleSlope is the streams' bandwidth (Annex L), the other streams' frames
+are spread over the interval: they take their share of 125 us. Twelve 8-channel
+24-bit 48 kHz AAF talkers at 1 Gbit/s declare 128.6 us each under the cbs
+(14.0 us at the link speed, 114.6 us at idleSlope), 32.6 us unshaped.
+Configured streams count, not only admitted ones: an upper bound that does not
+move with each connection. GET_STREAM_INFO reports the value the MSRP handler
+holds while declared, else the one it would declare; a changed link speed,
+MTU or format applies when a stream is next declared. Item c), the entity's
+time before a frame is queued, is the presentation time offset's, not the
+network's, and is not counted.
 
 The admitted set changes after an MSRP listener declaration for a talker stream
 is registered or withdrawn, after the Talker declarations are withdrawn, or
@@ -370,14 +375,15 @@ queries this to verify the stream before sustaining a connection.
 
 The response form is the AEM handler's `stream_info_layout()`: the profile's
 (Milan's IEEE 1722.1-2021 84 octets, classic IEEE 1722.1-2013's 48) unless
-`set_stream_info_layout` picks another, Milan v1.2's 56 among them. A controller tells them
-by length, and the form gives an output's msrp_accumulated_latency its meaning
-(Milan v1.3 Section 5.4.2.10.2): the presentation time offset in the older
-forms, the AccumulatedLatency the Talker Advertise declares in 2021's. A Milan
-output in 2021's form uses Milan v1.3 Table 5.9's flags instead of flags_ex: NOT_REGISTERING_SRP while declaring without
-a Listener, REGISTERING_FAILED with Listener Asking Failed, CONNECTED with
-Listener Ready or Ready Failed. A classic output in 2021's form has
-MSRP_ACC_LAT_VALID only while it declares (IEEE 1722.1-2021 Clause 7.4.16.2).
+`set_stream_info_layout` picks another, Milan v1.2's 56 among them. A
+controller tells them by length, and the form gives an output's
+msrp_accumulated_latency its meaning (Milan v1.3 Section 5.4.2.10.2): the
+presentation time offset in the older forms, the AccumulatedLatency the Talker
+Advertise declares in 2021's. A Milan output in 2021's form uses Milan v1.3 Table 5.9's flags instead of flags_ex:
+NOT_REGISTERING_SRP while declaring without a Listener, REGISTERING_FAILED with
+Listener Asking Failed, CONNECTED with Listener Ready or Ready Failed. A
+classic output in 2021's form has MSRP_ACC_LAT_VALID only while it declares
+(IEEE 1722.1-2021 Clause 7.4.16.2).
 
 A Milan input in 2021's form uses Milan v1.3 Table 5.8: NOT_REGISTERING_SRP
 while bound and not registering, CONNECTED for v1.2's BOUND (the same bit); its

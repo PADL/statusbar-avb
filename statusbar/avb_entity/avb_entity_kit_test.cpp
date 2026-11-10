@@ -1030,6 +1030,12 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     m.kit.set_mtu(9000);  // the port's MTU frame interferes: 7500 octets more
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100 + (7500 * 80));
     m.kit.set_mtu(1500);
+    // Under the shaper's cbs the other talkers' frames leave at idleSlope; this one's at the link speed.
+    uint64_t const own = interval_wire_octets(AvbEntityKit::talker_tspec(m.kit.talker_specs()[0]));
+    auto const shaped = (1542 + own) * 80 + cbs_drain_ns(octets - 1542 - own, octets - 1542, CLASS_A_INTERVALS_PER_SEC);
+    m.kit.set_class_a_cbs(true);
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), shaped);
+    m.kit.set_class_a_cbs(false);
 
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     auto const* declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
