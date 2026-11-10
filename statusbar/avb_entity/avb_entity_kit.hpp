@@ -629,6 +629,9 @@ class AvbEntityKit
     // Construction phases
     //
 
+    /// The tag of stream frames on @p vlan_id: the Domain's priority once adopted (IEEE 802.1Q-2022
+    /// Clause 35.2.2.8.5), else config().stream_pcp.
+    [[nodiscard]] auto stream_tag(uint16_t vlan_id) const noexcept -> StreamTag;
     /// GET_MILAN_INFO's features and the outputs' signal presence (construction).
     void configure_milan();
     /// The talker streams' ACMP identities, address validity and presentation offsets.
