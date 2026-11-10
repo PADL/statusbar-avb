@@ -461,6 +461,20 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
     EXPECT_FALSE(host->fill_counters(DESCRIPTOR_STREAM_INPUT, 0, valid, counters));
 }
 
+// GET_AVB_INFO's AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows the gPTP stack's port asCapable once
+// reported, whatever the entity's own gPTP lock.
+TEST(avb_entity_host_avb_info, as_capable_follows_the_gptp_stack_s_port)
+{
+    using statusbar::atdecc::aem::avb_info_flags::AS_CAPABLE;
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);  // the entity has no gPTP lock
+    host->note_port_as_capable(true);
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) != 0);
+    host->note_port_as_capable(false);
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
+}
+
 // GPTP_GM_CHANGED (Milan v1.3 Section 5.3.6.3, IEEE 1722.1-2021 Clause 7.4.42.2.2) follows the grandmaster
 // in force: with the Announces gone a grandmaster-capable entity is its own, so A lost and found again is two.
 TEST(avb_entity_host_counters, a_grandmaster_lost_and_found_again_is_two_changes)
