@@ -1077,9 +1077,6 @@ constexpr std::array<uint16_t, 24> DYNAMIC_INFO_COMMANDS{
     AEM_COMMAND_GET_PATH_LATENCY,
 };
 
-/// The most AEM command-specific data one AECPDU can carry.
-constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
-
 auto read_u16(std::span<uint8_t const> bytes, size_t const at) -> uint16_t
 {
     doublet_t v{};
@@ -2629,7 +2626,7 @@ void AemCommandHandler::emit_unsolicited(
         return;  // sent after the command's response
     }
 
-    // Milan v1.2 Section 5.4.5.1: every registered controller but the requester, each with its
+    // Milan v1.3 Section 5.4.5.1: every registered controller but the requester, each with its
     // own sequence id, incremented whether or not the send succeeds. Classic tells the requester too.
     for (auto& reg : unsolicited_registrations_) {
         if (profile_.milan && requester == reg.controller_entity_id) {
@@ -2665,7 +2662,7 @@ auto AemCommandHandler::queue_notification(
     uint16_t const command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester) -> bool
 {
     bool const own = requester == std::optional<Eui64>{current_header_.controller_entity_id};  // the command's own
-    if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_QUEUED_BODY) {
+    if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_AEM_BODY) {
         release_side_effects();  // the held ones go first, so the order on the wire is the order raised
         return false;
     }
