@@ -702,7 +702,7 @@ class AemCommandHandler
 
     /// Handle SET_NAME command (IEEE 1722.1 Clause 7.4.17). Routes through
     /// AemEntityModel::apply_set_name -> the handler's symbol-keyed
-    /// on_set_name, echoing the command as the response.
+    /// on_set_name, answering the name in force (the old one on a failure).
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// SET_NAME for a controller (handle_set_name) or by non-ATDECC means (apply_local_name).
     [[nodiscard]] auto set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
@@ -924,8 +924,8 @@ class AemCommandHandler
     }
 
     /// Handle a SET descriptor-value command (SET_CONTROL, and the wider family).
-    /// Routes through AemEntityModel::apply_set_descriptor_value -> the handler's
-    /// symbol-keyed on_set_descriptor_value, echoing the command as the response.
+    /// Routes through AemEntityModel::apply_set_descriptor_value -> the handler's symbol-keyed
+    /// on_set_descriptor_value; a success echoes the command, a failure answers reject_set()'s.
     [[nodiscard]] auto handle_set_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// Whether @p command_type's value in @p command_data is the one its GET twin answers now.
