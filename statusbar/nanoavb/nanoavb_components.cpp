@@ -110,12 +110,13 @@ auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept
 
 void GptpAnnounceHandler::on_announce(gptp::AnnounceMessage const& announce, int64_t const now_ns, AsPath const& path_trace)
 {
-    note_grandmaster(announce, now_ns);
-    note_path_trace(path_trace, announce.grandmaster_identity, now_ns);
+    // Recorded first: a callback reads this Announce as last_announce().
     announce_timeout_ns_ = announce_timeout_ns(announce);
     last_announce_time_ns_ = now_ns;
     last_announce_ = announce;
     has_announce_ = true;
+    note_grandmaster(announce, now_ns);
+    note_path_trace(path_trace, announce.grandmaster_identity, now_ns);
 }
 
 void GptpAnnounceHandler::note_grandmaster(gptp::AnnounceMessage const& announce, int64_t const now_ns)

@@ -476,6 +476,28 @@ TEST(nanoavb_gptp_announce, grandmaster_expires_after_the_receipt_timeout)
     EXPECT_EQ(losses, 2);
 }
 
+// The Announce naming a new grandmaster is last_announce() when grandmaster_id_changed is told,
+// so a callback reads its domain (ADP's gptp_domain_number, IEEE 1722.1-2021 Clause 6.2.2.17) there.
+TEST(nanoavb_gptp_announce, the_announce_naming_a_grandmaster_is_the_last_one_when_told)
+{
+    statusbar::nanoavb::GptpAnnounceHandler const* seen_by = nullptr;
+    int seen_domain = -1;
+    statusbar::nanoavb::GptpAnnounceHandler handler{
+        "nanoavb-announce-test0",  // no such interface: no socket, on_announce driven directly
+        statusbar::nanoavb::GptpAnnounceCallbacks{
+            .grandmaster_id_changed =
+                [&](int64_t, ::statusbar::gptp::ClockIdentity const&, ::statusbar::gptp::AnnounceMessage const&) {
+                    auto const* last = seen_by != nullptr ? seen_by->last_announce() : nullptr;
+                    seen_domain = last != nullptr ? last->header.domain_number.get() : -2;
+                }}};
+    seen_by = &handler;
+    ::statusbar::gptp::AnnounceMessage announce{};
+    announce.grandmaster_identity = ::statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+    announce.header.domain_number = 3;
+    handler.on_announce(announce, 100'000'000'000);
+    EXPECT_EQ(seen_domain, 3);
+}
+
 // The Announce's PATH_TRACE TLV (IEEE 802.1AS-2020 10.6.3.3) is the AS path
 // GET_AS_PATH reports (Milan v1.2 Section 5.4.2.24); its changes, and its
 // clearing when the grandmaster is lost, are reported once each.
