@@ -792,10 +792,7 @@ auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t cons
 
 auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_t>
 {
-    if (!lock_refuses_local_changes_) {
-        return std::nullopt;
-    }
-    return host_.components().aem_handler.exclusive_access_status(ieee::Eui64{});  // as no controller's command
+    return host_.components().aem_handler.local_change_refusal();
 }
 
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
@@ -818,7 +815,7 @@ auto AvbEntityKit::request_clock_source(uint16_t const clock_domain_index, uint1
     auto& aem = host_.components().aem_handler;
     auto const body = clock_source_command(clock_domain_index, clock_source_index);
     applying_local_clock_source_ = true;
-    auto const status = aem.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, body);
+    auto const status = aem.follow_local_descriptor_value(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, body);  // never refused
     applying_local_clock_source_ = false;
     return status;
 }

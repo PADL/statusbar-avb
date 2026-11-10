@@ -582,7 +582,8 @@ class AemCommandHandler
     /// notifications — every registered controller plus the IDENTIFY multicast —
     /// and fires the identify_changed callback. Call from the entity's event
     /// loop (this class is single-threaded). Returns the AEM status;
-    /// AEM_STATUS_NOT_IMPLEMENTED when no identify control has been wired.
+    /// AEM_STATUS_NOT_IMPLEMENTED when no identify control has been wired,
+    /// local_change_refusal() while it refuses.
     [[nodiscard]] auto set_local_identify(bool on) -> uint8_t;
 
     /// Apply a descriptor-value change originated by the entity ITSELF (the
@@ -598,6 +599,15 @@ class AemCommandHandler
     /// A SET_NAME by the entity itself (@p command_body as the command's), applied, notified and
     /// reported to the settings hook as a controller's. The AEM status.
     [[nodiscard]] auto apply_local_name(std::span<uint8_t const> command_body) -> uint8_t;
+    /// apply_local_descriptor_value() without the lock refusal: a value the host has already put in
+    /// force (a clock source it follows), which the model only reports. The AEM status.
+    [[nodiscard]] auto follow_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
+    /// ENTITY_LOCKED while a controller holds the lock under milan13 (Milan v1.3 Sections 5.3.4.1,
+    /// 5.4.2.17), else nullopt: the answer of every apply_local_* path and set_local_identify().
+    [[nodiscard]] auto local_change_refusal() const noexcept -> std::optional<uint8_t>
+    {
+        return profile_ == Profile::milan13 && locked_ ? std::optional<uint8_t>{AEM_STATUS_ENTITY_LOCKED} : std::nullopt;
+    }
 
     /// Emit an unsolicited AEM response (U-bit set) carrying @p command_type and
     /// @p body to every registered controller (plus the IDENTIFY multicast when the
