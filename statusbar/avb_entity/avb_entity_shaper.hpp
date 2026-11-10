@@ -188,8 +188,8 @@ inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
     return static_cast<uint32_t>((bits_per_sec + 999U) / 1000U);
 }
 
-/// The MSDU of the largest frame that may delay a stream frame on the port: a full-size 802.3 frame.
-inline constexpr uint16_t MAX_INTERFERING_MSDU = 1500;
+/// The MTU assumed for the interfering frame when the port's is unknown: a full-size 802.3 frame's MSDU.
+inline constexpr uint32_t FALLBACK_MTU = 1500;
 
 /// The octets @p tspec's frames of one class measurement interval occupy on the wire (wire_frame_size).
 [[nodiscard]] constexpr auto interval_wire_octets(TSpec const& tspec) noexcept -> uint64_t
@@ -197,12 +197,14 @@ inline constexpr uint16_t MAX_INTERFERING_MSDU = 1500;
     return uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * tspec.max_interval_frames;
 }
 
-/// A talker port's worst-case latency in ns, rounded up: one MAX_INTERFERING_MSDU frame, then @p class_octets
-/// (interval_wire_octets of every stream in the SR class's queue), at @p link_mbps (0, unknown: 1000).
-/// The Talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
-[[nodiscard]] constexpr auto talker_port_latency_ns(uint64_t const class_octets, uint32_t const link_mbps) noexcept -> uint32_t
+/// A talker port's worst-case latency in ns, rounded up: one frame of the port's @p mtu, then @p class_octets
+/// (interval_wire_octets of every stream in the SR class's queue), at @p link_mbps. 0 is unknown: 1000 Mbit/s,
+/// FALLBACK_MTU. The Talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+[[nodiscard]] constexpr auto talker_port_latency_ns(
+    uint64_t const class_octets, uint32_t const link_mbps, uint32_t const mtu) noexcept -> uint32_t
 {
-    uint64_t const octets = wire_frame_size(MAX_INTERFERING_MSDU) + class_octets;
+    auto const interfering = static_cast<uint16_t>(std::min<uint32_t>(mtu == 0 ? FALLBACK_MTU : mtu, UINT16_MAX));
+    uint64_t const octets = wire_frame_size(interfering) + class_octets;
     uint64_t const mbps = link_mbps == 0 ? 1000 : link_mbps;
     return static_cast<uint32_t>(std::min<uint64_t>(((octets * 8000U) + mbps - 1) / mbps, UINT32_MAX));
 }
@@ -479,7 +481,7 @@ struct ShaperPort
     int ifindex{0};
     std::string driver{};
     uint16_t tx_queues{0};
-    uint32_t mtu{1500};
+    uint32_t mtu{FALLBACK_MTU};
 };
 
 #if defined(__linux__)
@@ -540,6 +542,8 @@ class PortShaper final : public net::Pollable
     [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return qdiscs_.class_b(); }
     /// The link speed the shaper sizes against (Mbit/s).
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t;
+    /// The MTU the shaper sizes its interfering frame by (install(); FALLBACK_MTU unknown).
+    [[nodiscard]] auto mtu() const noexcept -> uint32_t { return mtu_; }
     [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return tc_->last_message(); }
     /// config.launch_time, as install() gave it to the qdiscs.
     [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return qdiscs_.launch_time_mode(); }
@@ -579,7 +583,7 @@ class PortShaper final : public net::Pollable
     ShaperQdiscs qdiscs_;
     std::string driver_{};
     QueueLayout layout_{};
-    uint32_t mtu_{1500};
+    uint32_t mtu_{FALLBACK_MTU};
     uint32_t known_link_mbps_{0};   ///< last speed the kernel reported (0: never)
     std::error_code link_error_{};  ///< last non-"unknown" speed read error (logged on change)
     uint32_t programmed_link_mbps_{0};
