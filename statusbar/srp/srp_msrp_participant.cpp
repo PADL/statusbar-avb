@@ -923,7 +923,12 @@ void MsrpParticipantT<Limits>::notify_talker_failed(TalkerFailedFirstValue const
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_talker_leave(tsn::StreamId const& id)
 {
-    notify_all(&Observer::on_talker_leave, id);
+    // Held while an MRPDU is read: a Talker Failed replacing an Advertise follows its Lv (immediate leave).
+    bool const held =
+        reading_pdu_ && (std::ranges::contains(rx_talker_leaves_, id) || rx_talker_leaves_.try_push_back(id) != nullptr);
+    if (!held) {
+        notify_all(&Observer::on_talker_leave, id);
+    }
 }
 
 template <class Limits>
@@ -977,10 +982,52 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
     if (pdu[0] != PROTOCOL_VERSION) {
         return;  // unknown protocol version
     }
+    read_pdu(pdu, now);
 
+    // A received LeaveAll asked everyone to re-declare. Do it SYNCHRONOUSLY here
+    // rather than only arming the join timer (~100 ms): the bridge that sent the
+    // LeaveAll declares our (now-leaving) attributes as Mt toward downstream
+    // listeners on its own ~100 ms join timer, and a re-declare that lands just
+    // after that window makes the listener see our talker momentarily disappear
+    // and tear down its reservation (observed feeding a downstream listener through an
+    // AVB switch: the downstream stream stopped being forwarded). Emitting our re-declarations
+    // immediately keeps our registration continuously visible to the bridge.
+    if (rx_leaveall_seen_) {
+        build_and_send_pdu(now);
+    }
+
+    // After processing received events, a join timer opportunity may
+    // be needed so that state transitions triggered by rx events can
+    // be transmitted.
+    port_.timers().start_join(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::read_pdu(std::span<uint8_t const> pdu, TimePoint now)
+{
     rx_leaveall_seen_ = false;
+    reading_pdu_ = true;
+    decode_messages(pdu, now);
+    reading_pdu_ = false;
+    deliver_rx_talker_leaves();  // before the LeaveAll answer, which then carries what observers re-declared
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::deliver_rx_talker_leaves()
+{
+    for (auto const& id : rx_talker_leaves_) {
+        if (!talker_registered_in(id)) {
+            notify_all(&Observer::on_talker_leave, id);
+        }
+    }
+    rx_talker_leaves_.clear();
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::decode_messages(std::span<uint8_t const> pdu, TimePoint now)
+{  // NOLINT(statusbar-block-statements) the message walk of receive_pdu, moved whole; pre-dates the gate
     size_t pos = 1;
-    while (pos + 2 <= pdu.size()) {
+    while (pos + 2 <= pdu.size()) {  // NOLINT(statusbar-block-statements) one message, read as receive_pdu read it
         uint16_t const end_check = mrp::read_doublet_at(pdu, pos);
         if (end_check == mrp::END_MARK) {
             break;
@@ -1015,23 +1062,6 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
         // keeping the outer message-walk cursor aligned with the sender.
         pos = attr_list_end;
     }
-
-    // A received LeaveAll asked everyone to re-declare. Do it SYNCHRONOUSLY here
-    // rather than only arming the join timer (~100 ms): the bridge that sent the
-    // LeaveAll declares our (now-leaving) attributes as Mt toward downstream
-    // listeners on its own ~100 ms join timer, and a re-declare that lands just
-    // after that window makes the listener see our talker momentarily disappear
-    // and tear down its reservation (observed feeding a downstream listener through an
-    // AVB switch: the downstream stream stopped being forwarded). Emitting our re-declarations
-    // immediately keeps our registration continuously visible to the bridge.
-    if (rx_leaveall_seen_) {
-        build_and_send_pdu(now);
-    }
-
-    // After processing received events, a join timer opportunity may
-    // be needed so that state transitions triggered by rx events can
-    // be transmitted.
-    port_.timers().start_join(now);
 }
 
 template <class Limits>
