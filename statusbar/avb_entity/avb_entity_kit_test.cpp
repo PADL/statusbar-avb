@@ -1493,8 +1493,8 @@ TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
     std::filesystem::remove_all(dir);
 }
 
-// Identify set by other than ATDECC is refused while a controller holds the lock, once the kit
-// is opted in (Milan v1.3 Section 5.4.2.17), as a name change is
+// Identify set by other than ATDECC, through the kit or the host, is refused while a controller
+// holds the lock once the kit is opted in (Milan v1.3 Section 5.4.2.17), as a name change is
 TEST(avb_entity_kit_lock, request_identify_is_refused_while_locked)
 {
     MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
@@ -1511,7 +1511,8 @@ TEST(avb_entity_kit_lock, request_identify_is_refused_while_locked)
     EXPECT_EQ(m.kit.request_identify(false), atdecc::AEM_STATUS_SUCCESS);  // not opted in
     m.kit.set_lock_refuses_local_changes(true);
     EXPECT_EQ(m.kit.request_identify(true), atdecc::AEM_STATUS_ENTITY_LOCKED);
-    EXPECT_TRUE(told == std::vector<bool>({true, false}));  // the refused change applied nothing
+    EXPECT_FALSE(m.kit.host().set_local_identify(true));    // the host's own setter, refused the same
+    EXPECT_TRUE(told == std::vector<bool>({true, false}));  // the refused changes applied nothing
 }
 
 // The entity renamed by other than ATDECC (the bridge's control socket): as
