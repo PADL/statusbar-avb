@@ -345,8 +345,8 @@ struct PtpManagementState
     std::optional<int64_t> peer_mean_path_delay_ns;
     std::optional<PortState> port_state;
     std::optional<DelayMechanism> delay_mechanism;
-    /// That port's asCapable, from CMLDS_INFO_NP: fetched once, then notified (NOTIFY_CMLDS); not_capable
-    /// while the port is DISABLED or FAULTY. Unknown with a ptp4l before 4.3.
+    /// That port's asCapable, from CMLDS_INFO_NP: fetched once, then notified (NOTIFY_CMLDS); not_capable,
+    /// once known, while the port is DISABLED or FAULTY. Unknown with a ptp4l before 4.3.
     std::optional<AsCapable> as_capable;
     /// Every port's portState by portNumber - 1, from each PORT_DATA_SET ptp4l answers or notifies.
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> port_states{};
