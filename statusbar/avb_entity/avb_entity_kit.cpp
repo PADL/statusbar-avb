@@ -1781,7 +1781,6 @@ auto AvbEntityKit::open_talker_streams() -> Status
 
 void AvbEntityKit::open_stream_port()
 {
-    // The auto backend is xdp, else rawnet, the reason kept (stream_xdp_error()).
     stream_tx_error_ = stream_rx_error_ = stream_xdp_error_ = stream_launch_time_error_ = std::error_code{};
     if (stream_port_.valid()) {
         log_stream_port();  // the host opened it before start() (a test port): kept
@@ -1797,26 +1796,10 @@ void AvbEntityKit::open_stream_port()
 
 auto AvbEntityKit::open_configured_stream_port() -> Status
 {
-    if (config_.net_backend != "auto") {
-        return open_stream_port_on(config_.net_backend);
-    }
-    auto opened = open_stream_port_on("xdp");
-    if (!opened) {
-        stream_xdp_error_ = opened.error();
-        opened = open_stream_port_on("rawnet");
-    }
+    auto opened = stream_port_.open_resolved(stream_port_config(config_.net_backend));
+    stream_xdp_error_ = stream_port_.xdp_error();
+    stream_launch_time_error_ = stream_port_.launch_time_error();
     return opened;
-}
-
-auto AvbEntityKit::open_stream_port_on(std::string_view const backend) -> Status
-{
-    auto config = stream_port_config(backend);
-    auto opened = stream_port_.open(config);
-    if (opened || !config.tx_launch_time) {
-        return opened;
-    }
-    config.tx_launch_time = false;  // the NIC, kernel or probe refused it: untimed, the reason kept
-    return stream_port_.open(config).transform([&] { stream_launch_time_error_ = opened.error(); });
 }
 
 void AvbEntityKit::log_stream_port()
