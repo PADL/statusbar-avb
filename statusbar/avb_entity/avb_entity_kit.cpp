@@ -150,9 +150,7 @@ AvbEntityKit::AvbEntityKit(
 
 void AvbEntityKit::configure_milan()
 {
-    // The Milan version and GET_MILAN_INFO's features, fixed before the entity is advertised
-    // (Milan v1.3 Section 5.4.4.1).
-    host_.components().set_milan_version(config_.milan_version);
+    // GET_MILAN_INFO's features, fixed before the entity is advertised (Milan v1.3 Section 5.4.4.1).
     host_.components().mvu_handler.set_extra_features(config_.signal_presence ? atdecc::MVU_FEATURE_TALKER_SIGNAL_PRESENCE : 0U);
     // Advertised, so reported from the start: no signal until the application says otherwise.
     for (auto const& spec : talker_specs_) {

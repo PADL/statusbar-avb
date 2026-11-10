@@ -397,7 +397,7 @@ class AvbEntityKit
     /// The kit reports signal presence: configured and Milan v1.3.
     [[nodiscard]] auto reports_signal_presence() const noexcept -> bool
     {
-        return config_.signal_presence && host_.components().profile.milan_v1_3();
+        return config_.signal_presence && host_.components().profile.milan;
     }
 
     // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
