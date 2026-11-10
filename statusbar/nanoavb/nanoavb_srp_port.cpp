@@ -236,10 +236,8 @@ void SrpPort::on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv, b
 
 void SrpPort::on_peer_talker_leave(StreamId const& stream_id)
 {
-    // Decided once the PDU is done: its Talker Failed may follow the Advertise's leave.
-    if (std::ranges::find(pending_leaves_, stream_id) == pending_leaves_.end()) {
-        (void)pending_leaves_.try_push_back(stream_id);  // sized for every talker attribute
-    }
+    report_leave(stream_id);
+    forget_left_talkers();  // a LeaveTime expiry is a leave too: its registration has gone
 }
 
 void SrpPort::on_peer_talker_join(StreamId const& stream_id) noexcept
@@ -270,13 +268,6 @@ void SrpPort::on_peer_listener(StreamId const& stream_id)
 
 void SrpPort::flush()
 {
-    for (auto const& sid : pending_leaves_) {
-        report_leave(sid);
-    }
-    if (!pending_leaves_.empty()) {
-        forget_left_talkers();  // a LeaveTime expiry is a leave too: its registration has gone
-    }
-    pending_leaves_.clear();
     flush_domain();
 }
 

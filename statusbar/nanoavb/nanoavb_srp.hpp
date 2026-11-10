@@ -599,9 +599,8 @@ class MsrpHandler
         return participant_.find_registered_talker_failed(destination, vid);
     }
 
-    /// Subscribe @p observer to the participant's registrations beside this handler's own; it is called
-    /// after the handler has followed each one, except a listener stream's talker within an MRPDU, which
-    /// the handler follows once the MRPDU is read (on_remote_talker). See MsrpParticipant::subscribe.
+    /// Subscribe @p observer to the participant's registrations beside this handler's own; it is
+    /// called after the handler has followed each one. See MsrpParticipant::subscribe.
     [[nodiscard]] auto subscribe(statusbar::srp::msrp::Observer observer) ->
         typename statusbar::srp::msrp::MsrpParticipantT<Limits>::SubscriptionId
     {
@@ -682,10 +681,7 @@ class MsrpHandler
             started_ = true;
         }
         last_event_time_ = now;
-        receiving_ = true;
         participant_.receive_pdu(packet, now);
-        receiving_ = false;
-        follow_changed_talkers();
     }
 
     auto tick(TimePoint now) -> void
@@ -739,7 +735,7 @@ class MsrpHandler
     {
         for (size_t i = 0; i < listener_streams_.size(); ++i) {
             if (listener_streams_[i].state == ListenerReservationState::Waiting) {
-                (void)follow_remote_talker(listener_streams_[i].stream_id, now);
+                follow_remote_talker(listener_streams_[i].stream_id, now);
             }
         }
     }
@@ -979,81 +975,71 @@ class MsrpHandler
     /// an attached listener stream — AskingFailed -> Ready when the
     /// Advertise appears, Ready -> AskingFailed when it goes away — and
     /// surface the change through on_listener_state_change. Fires from
-    /// receive_packet()/tick() via the participant observer; for a listener stream's talker within an MRPDU,
-    /// once it is read whole, so a Talker Advertise's Lv and the Talker Failed replacing it are one change.
+    /// receive_packet()/tick() via the participant observer (a leave once the MRPDU is read).
     void on_remote_talker_changed(tsn::StreamId const& sid)
     {
-        // At most MaxStreams listener streams, so the list never fills; a full one follows at once.
-        bool const held = receiving_ && get_listener_stream(sid) != nullptr &&
-            (std::ranges::contains(changed_talkers_, sid) || changed_talkers_.try_push_back(sid) != nullptr);
-        if (!held) {
-            (void)follow_changed_talker(sid);
-        }
-    }
-
-    /// Follow each talker whose registration the MRPDU just read changed; a Listener declaration that
-    /// changed goes now, after any re-declaration the MRPDU's LeaveAll made with the one before.
-    void follow_changed_talkers()
-    {
-        bool declared = false;
-        for (auto const& sid : changed_talkers_) {
-            declared = follow_changed_talker(sid) || declared;
-        }
-        changed_talkers_.clear();
-        if (declared) {
-            participant_.transmit_pending(last_event_time_);
-        }
-    }
-
-    /// Re-derive @p sid's attached listener, then tell on_remote_talker; true when its declaration changed.
-    auto follow_changed_talker(tsn::StreamId const& sid) -> bool
-    {
-        bool const declared = follow_remote_talker(sid, last_event_time_);
+        follow_remote_talker(sid, last_event_time_);
         if (on_remote_talker_) {
             on_remote_talker_(sid, last_event_time_);  // the receive or tick this fires from
         }
-        return declared;
     }
 
-    /// The attached listener of @p sid re-derived from the talker's registration, declared or withdrawn at @p now;
-    /// true when that changed its declaration.
-    auto follow_remote_talker(tsn::StreamId const& sid, TimePoint now) -> bool
+    /// The attached listener of @p sid re-derived from the talker's registration, declared or withdrawn at @p now.
+    void follow_remote_talker(tsn::StreamId const& sid, TimePoint now)
     {
         if (withdrawn_) {
-            return false;  // between withdraw_all() and the next declare_domain(): nothing declares
+            return;  // between withdraw_all() and the next declare_domain(): nothing declares
         }
-        for (auto& stream : listener_streams_) {
-            if (stream.stream_id != sid) {
-                continue;
-            }
-            if (stream.state != ListenerReservationState::Ready && stream.state != ListenerReservationState::AskingFailed &&
-                stream.state != ListenerReservationState::Waiting) {
-                return false;  // not attached (Idle/withdrawn): nothing to re-declare
-            }
-            bool const ready = talker_advertise_registered(sid, stream.talker);
-            ListenerReservationState want = ready ? ListenerReservationState::Ready : ListenerReservationState::AskingFailed;
-            if (!ready && listener_waits_for_talker_ && !talker_failed_registered(sid, stream.talker)) {
-                want = ListenerReservationState::Waiting;
-            }
-            if (stream.state == want) {
-                return false;
-            }
-            stream.state = want;
-            if (want == ListenerReservationState::Waiting) {
-                (void)participant_.withdraw_listener(sid, now);
-            } else {
-                (void)participant_.declare_listener(
-                    sid,
-                    ready ? statusbar::srp::msrp::ListenerDeclaration::Ready
-                          : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
-                    now);
-            }
-            if (callbacks_.on_listener_state_change) {
-                callbacks_.on_listener_state_change(sid, stream.state);
-            }
-            return true;
+        auto* const stream = std::ranges::find(listener_streams_, sid, &ListenerStreamSrpInfo::stream_id);
+        if (stream != listener_streams_.end() && attached(stream->state)) {
+            follow_attached(*stream, now);
         }
-        return false;
+    }
+
+    /// Whether a listener stream in @p state is attached (Idle: withdrawn, nothing to re-declare).
+    [[nodiscard]] static auto attached(ListenerReservationState const state) noexcept -> bool
+    {
+        return state == ListenerReservationState::Ready || state == ListenerReservationState::AskingFailed ||
+            state == ListenerReservationState::Waiting;
+    }
+
+    /// Attached @p stream's declaration as its talker's registration asks, changed at @p now if it differs.
+    void follow_attached(ListenerStreamSrpInfo& stream, TimePoint now)
+    {
+        auto const want = wanted_state(stream);
+        if (stream.state == want) {
+            return;
+        }
+        stream.state = want;
+        redeclare(stream, now);
+    }
+
+    /// What attached @p stream declares for its talker's registration: Ready for an Advertise, Asking Failed
+    /// for a Failed (or, not waiting for the talker, none), Waiting otherwise.
+    [[nodiscard]] auto wanted_state(ListenerStreamSrpInfo const& stream) const noexcept -> ListenerReservationState
+    {
+        if (talker_advertise_registered(stream.stream_id, stream.talker)) {
+            return ListenerReservationState::Ready;
+        }
+        bool const waiting = listener_waits_for_talker_ && !talker_failed_registered(stream.stream_id, stream.talker);
+        return waiting ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
+    }
+
+    /// Declare (or, Waiting, withdraw) @p stream's Listener attribute as its state says, and tell
+    /// on_listener_state_change.
+    void redeclare(ListenerStreamSrpInfo const& stream, TimePoint now)
+    {
+        using statusbar::srp::msrp::ListenerDeclaration;
+        if (stream.state == ListenerReservationState::Waiting) {
+            (void)participant_.withdraw_listener(stream.stream_id, now);
+        } else {
+            bool const ready = stream.state == ListenerReservationState::Ready;
+            (void)participant_.declare_listener(
+                stream.stream_id, ready ? ListenerDeclaration::Ready : ListenerDeclaration::AskingFailed, now);
+        }
+        if (callbacks_.on_listener_state_change) {
+            callbacks_.on_listener_state_change(stream.stream_id, stream.state);
+        }
     }
 
     MsrpCallbacks callbacks_;
@@ -1066,9 +1052,6 @@ class MsrpHandler
     TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)
     statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> on_remote_talker_{};
     bool listener_waits_for_talker_{false};
-    /// Talkers whose registration changed in the MRPDU receive_packet() is reading (follow_changed_talkers).
-    statusbar::sg14::inplace_vector<tsn::StreamId, MaxStreams> changed_talkers_;
-    bool receiving_{false};
     bool started_{false};
     bool withdrawn_{false};  ///< withdraw_all() ran and no declare_domain() has begun a run since
 };

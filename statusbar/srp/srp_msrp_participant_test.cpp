@@ -1994,3 +1994,71 @@ TEST(msrp_participant, a_registered_talker_is_found_by_destination_and_vid)
 }
 
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)
+
+namespace {
+
+/// One TalkerAdvertise (or TalkerFailed) MSRPDU message: one value, one event.
+auto talker_message(TalkerAdvertiseFirstValue const& fv, AttributeEvent const event) -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 25> bytes{};
+    (void)store_unchecked(std::span<uint8_t>(bytes), fv);
+    return build_vector_pdu(AttributeType::TalkerAdvertise, 25, bytes, {event});
+}
+auto talker_message(TalkerFailedFirstValue const& fv, AttributeEvent const event) -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 34> bytes{};
+    (void)store_unchecked(std::span<uint8_t>(bytes), fv);
+    return build_vector_pdu(AttributeType::TalkerFailed, 34, bytes, {event});
+}
+
+/// The messages of @p first then @p second in one MSRPDU (first's message EndMark dropped, second's version).
+auto one_mrpdu(std::vector<uint8_t> first, std::vector<uint8_t> const& second) -> std::vector<uint8_t>
+{
+    first.resize(first.size() - 2);
+    first.insert(first.end(), second.begin() + 1, second.end());
+    return first;
+}
+
+/// A participant with Milan's immediate leave, counting the Talker leaves and Failed registrations it reports.
+struct TalkerRig
+{
+    MsrpParticipant p;
+    TestClock clock{};
+    int leaves{0};
+    int failed{0};
+
+    TalkerRig()
+        : p{[] {
+                auto config = test_msrp_config();
+                config.leave_immediate = true;
+                return config;
+            }(),
+            0xa00e}
+    {
+        p.start(clock.now);
+        p.subscribe(Observer{
+            .on_talker_failed = [this](TalkerFailedFirstValue const&, Operation) { ++failed; },
+            .on_talker_leave = [this](tsn::StreamId const&) { ++leaves; },
+        });
+    }
+    void receive(std::vector<uint8_t> const& pdu) { p.receive_pdu(std::span<uint8_t const>(pdu.data(), pdu.size()), clock.now); }
+};
+
+}  // namespace
+
+// A Talker Advertise's Lv and the Talker Failed replacing it in one MRPDU (Milan v1.2 Section 4.2.7.2.2:
+// the Lv deregisters at once) are one change: the Failed is reported, the StreamID's leave is not.
+TEST(msrp_participant, a_talker_advertise_replaced_by_a_failed_in_one_mrpdu_reports_no_leave)
+{
+    TalkerRig rig{};
+    auto const ta = make_talker_adv(0x0010);
+    rig.receive(talker_message(ta, AttributeEvent::New));
+    TalkerFailedFirstValue tf{};
+    tf.advertise = ta;
+    tf.failure_code = 1;
+    rig.receive(one_mrpdu(talker_message(ta, AttributeEvent::Lv), talker_message(tf, AttributeEvent::New)));
+    EXPECT_EQ(rig.failed, 1);
+    EXPECT_EQ(rig.leaves, 0);
+    rig.receive(talker_message(tf, AttributeEvent::Lv));  // the stream gone: its leave, once the MRPDU is read
+    EXPECT_EQ(rig.leaves, 1);
+}
