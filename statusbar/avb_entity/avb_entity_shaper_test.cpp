@@ -1206,6 +1206,32 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
 }
 
+// The listener of a refused etf turns launch time off from inside the call (as the bridge's launch-time
+// follower does): told once, after the etf settled; the next program() settles off and asks for no etf.
+TEST(shaper_launch_time, a_refusal_may_turn_launch_time_off_from_its_listener)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.etf_error = std::make_error_code(std::errc::operation_not_supported);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    std::vector<std::error_code> settled{};
+    qdiscs.set_on_etf_settled([&](std::error_code const e) {
+        settled.push_back(e);
+        qdiscs.set_launch_time(LaunchTimeMode::off, 200'000);
+    });
+    qdiscs.set_launch_time(LaunchTimeMode::on, 200'000);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_EQ(settled.size(), size_t{1});
+    EXPECT_FALSE(qdiscs.launch_time());
+    (void)tc.drain();
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_EQ(settled.size(), size_t{1});
+    for (auto const& request : tc.drain()) {
+        EXPECT_FALSE(request.find(" etf ") != std::string::npos);
+    }
+}
+
 namespace {
 
 /// An igb port of 4 TX queues the PortShaper is told about rather than reads.
