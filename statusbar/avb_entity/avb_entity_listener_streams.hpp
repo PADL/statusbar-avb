@@ -284,7 +284,7 @@ struct ListenerStreams
     /// (last_gptp_ns_). The RT-timer path passes its own, fresher wake time instead.
     [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t { return last_gptp_ns_.load(std::memory_order_relaxed); }
 
-    /// Decode one received AVTP stream frame: match it to the slot whose
+    /// Decode one received AVTP stream frame: match it to every slot whose
     /// connected stream_id it carries (kind checked against the subtype),
     /// deserialize, update counters, and offer the accepted audio to the sink.
     /// @p gptp_now_ns is the gPTP receive time used for the deserialize anchor and the
@@ -293,8 +293,10 @@ struct ListenerStreams
 
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
-    /// The slot @p frame is for: its kind and its connected stream_id; nullptr when none.
-    [[nodiscard]] auto rx_slot_for(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
+    /// Whether @p frame is for @p slot: its kind and its connected stream_id.
+    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) const -> bool;
+    /// @p frame into @p slot unless it is stopped or being re-shaped. Reactor/RX thread.
+    void receive_into(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
     /// One AM824, AAF or CRF frame into @p slot (held under its guard) and its engaged @p ctx: checked,
     /// delivered, counted.
     void receive_am824(
