@@ -1790,13 +1790,13 @@ auto unsolicited(std::vector<std::vector<uint8_t>> const& frames, uint16_t const
 // that one with its new TSpec at the next reactor pass (the hook is told no time), not the table.
 TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
 {
+    size_t sent = 0;  // before the kit, whose stop at destruction still sends
     RateKit m{"", 0x1C};
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 1);
     EXPECT_TRUE(m.kit.talker_declared(0) && m.kit.talker_declared(1));
     auto& msrp = m.kit.host().components().msrp_handler;
-    size_t sent = 0;
     msrp.set_send_packet([&sent](std::span<uint8_t const> const p) {
         sent += p.size();
         return true;
@@ -2217,14 +2217,15 @@ struct MilanPair
         return s != nullptr ? s->state : nanoavb::ListenerReservationState::Idle;
     }
 
-    PersistentKit l;
-    MilanKit t;
     sm::TimePoint now{};
     uint16_t sequence{0x100};
     std::vector<atdecc::AcmpCommandResponse> acmp;
     std::vector<atdecc::AcmpCommandResponse> heard;
     std::vector<std::vector<uint8_t>> to_l;
     std::vector<std::vector<uint8_t>> to_t;
+    // Last: their stops at destruction send into the queues above.
+    PersistentKit l;
+    MilanKit t;
 };
 
 namespace sif = atdecc::aem::stream_info_flags;
