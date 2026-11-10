@@ -66,8 +66,9 @@ to the socket and passes everything else to the kernel, so ATDECC, gPTP and MRP
 keep using ordinary sockets. `net.xdp_bind` (`auto`, `zero_copy`, `copy`) and
 `net.xdp_attach` (`native`, `generic`) choose the bind and attach modes, and
 `net.xdp_pin_path` pins the program and its maps in bpffs. The `auto` backend
-is xdp, giving way to rawnet when the socket does not open, and
-`AvbEntityKit::stream_xdp_error()` keeps the reason. `StreamPort::xdp()` gives
+is xdp, giving way to rawnet when the socket does not open; `StreamPort::open()`
+resolves it for every entity and `StreamPort::xdp_error()` keeps the reason
+(`AvbEntityKit::stream_xdp_error()` in the kit). `StreamPort::xdp()` gives
 the socket itself (counters, busy poll) and `reset_counters()` zeroes its
 counters and the launch-time order at the next `end_cycle()`. Zero-copy
 behaviour is verified on hardware; the AF_XDP tests need root and skip
