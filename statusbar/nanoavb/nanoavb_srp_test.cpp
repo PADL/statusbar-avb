@@ -7,6 +7,7 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -1180,6 +1181,96 @@ TEST(nanoavb_srp_msrp, a_peer_domain_while_withdrawn_declares_nothing)
     EXPECT_EQ(b.listener.domain().sr_class_vid, 7);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
     EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+}
+
+// A talker that turns its Talker Advertise into a Talker Failed sends the Advertise's Lv and the Failed in
+// one MRPDU: the listener follows that MRPDU once it is read whole, so its talker is never seen unregistered
+// and its Listener goes from Ready to Asking Failed without a withdrawal between.
+TEST(nanoavb_srp_msrp, a_talker_advertise_replaced_by_a_talker_failed_in_one_mrpdu_is_one_change)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(16);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    EXPECT_EQ(*b.listener.listener_attach(sid, b.now), ListenerReservationState::Waiting);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+
+    int unregistered = 0;
+    b.listener.set_on_remote_talker([&b, &unregistered](statusbar::tsn::StreamId const& changed, TimePoint) {
+        unregistered += b.listener.peer_talker_advertise(changed) == nullptr && b.listener.peer_talker_failed(changed) == nullptr;
+    });
+    statusbar::srp::msrp::TalkerFailedFirstValue failed{};
+    failed.advertise = *b.listener.peer_talker_advertise(sid);
+    failed.failure_code = 1;
+    (void)b.talker.withdraw_talker(sid, b.now);
+    (void)b.talker.declare_talker_failed(failed, b.now);
+    std::vector<ListenerReservationState> states{};
+    for (int round = 0; round < 12; ++round) {
+        b.run(1);
+        states.push_back(b.state(sid));
+    }
+    EXPECT_EQ(unregistered, 0);
+    EXPECT_TRUE(std::ranges::find(states, ListenerReservationState::Waiting) == states.end());
+    EXPECT_EQ(b.state(sid), ListenerReservationState::AskingFailed);
+}
+
+// The reverse: a Talker Failed replaced by the Advertise in one MRPDU (the Advertise's New first, then the
+// Failed's Lv) leaves the listener Ready, once the MRPDU is read, not Asking Failed.
+TEST(nanoavb_srp_msrp, a_talker_failed_replaced_by_an_advertise_in_one_mrpdu_is_one_change)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(26);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    EXPECT_EQ(*b.listener.listener_attach(sid, b.now), ListenerReservationState::Waiting);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+    auto const adv = *b.listener.peer_talker_advertise(sid);
+    statusbar::srp::msrp::TalkerFailedFirstValue failed{};
+    failed.advertise = adv;
+    failed.failure_code = 1;
+    (void)b.talker.withdraw_talker(sid, b.now);
+    (void)b.talker.declare_talker_failed(failed, b.now);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::AskingFailed);
+    (void)b.talker.withdraw_talker(sid, b.now);
+    (void)b.talker.declare_talker_advertise(adv, b.now);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+}
+
+// A listener attached to the destination and VLAN its connection names declares nothing for a Talker
+// Advertise of its StreamID on another VLAN, and Ready once the talker declares it on the named one.
+TEST(nanoavb_srp_msrp, a_talker_advertise_on_another_vlan_declares_no_listener)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(17);
+    Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0x01, 0x00};
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = sid;
+    fv.destination_address = group;
+    fv.vlan_identifier = 3;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    (void)b.talker.declare_talker_advertise(fv, b.now);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    b.run(12);
+    EXPECT_EQ(
+        *b.listener.listener_attach(sid, b.now, TalkerMatch{.destination = group, .vid = 2}), ListenerReservationState::Waiting);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
+    auto const* const declared = b.talker.find_listener(sid);
+    EXPECT_FALSE(declared != nullptr && declared->registrar_is_registered());
+
+    EXPECT_TRUE(b.listener.listener_asking_failed(sid, b.now).has_value());  // declared again: the match stays
+    EXPECT_TRUE(b.listener.get_listener_stream(sid)->talker.has_value());
+
+    (void)b.talker.withdraw_talker(sid, b.now);
+    fv.vlan_identifier = 2;
+    (void)b.talker.declare_talker_advertise(fv, b.now);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
 }
 
 TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)

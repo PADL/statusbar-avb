@@ -461,8 +461,9 @@ creates `<if>.<vid>` (`ip link add link <if> name <if>.<vid> type vlan id
 <vid>`, left down; the interface part is cut short past 15 characters) for
 the Class A VID in use, through `avb_entity::ListenerVlan`
 (`statusbar/avb_entity/avb_entity_listener_vlan.hpp`) over
-`net::vlan::VlanLinkClient` (`core/statusbar/net/net_vlan_link.hpp`). An
-adopted MSRP Domain VID moves it (the new link first, then ours goes), and
+`net::vlan::VlanLinkClient` (`core/statusbar/net/net_vlan_link.hpp`), one
+per VID in the kit's `VlanFilterTable`. An adopted MSRP Domain VID moves it
+(the new VID held first, then the old one dropped), and
 the return to the configured VID on link up moves it back; `stop()` (and the
 kit's destructor) deletes it, only if the kit created it. A link already
 there (EEXIST: an operator's `ip link add ...`, or one a crashed run left)
@@ -475,8 +476,17 @@ frames. Without CAP_NET_ADMIN (or 8021q) the kit logs a warning and goes on;
 on a filtering NIC the listener's streams then stay dropped. A talker-only
 entity creates nothing: transmitting tagged frames needs no filter entry.
 
-The VID followed is our own SR-class VID; a talker whose stream frames carry
-another VID (its Talker Advertise's DataFrameParameters) is not covered.
+A Milan input settles on the VID its talker's probe answer names (Milan v1.3
+Section 5.5.3.6), which need not be the Class A VID; an answer naming none
+(0) uses the VID of the matched Talker Advertise once it is registered, and
+keeps it until the input unsettles, even if the talker later moves its VLAN. The
+table refcounts each VID: the Class A VID is one holder and each settled
+input another, so a link is created at the first hold and deleted with the
+last, and a Domain move that lands on a VID an input uses, or leaves one,
+neither deletes nor re-creates that link. A link whose create was refused
+stays held and is tried again at the next hold of its VID. `stop()` deletes
+them all. A talker whose stream frames carry another VID than the probe
+answer's is not covered, and its Talker Advertise is not followed.
 
 A listener of IP streams on the SR class VLAN (AES67-2018 Annex C.1.1.2)
 constructs its `ListenerVlan` with `ListenerLinkUse::ip_multicast`: the link

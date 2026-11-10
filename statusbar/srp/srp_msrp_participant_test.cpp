@@ -2185,3 +2185,97 @@ TEST(msrp_participant, a_registered_talker_is_found_by_destination_and_vid)
 }
 
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)
+
+namespace {
+
+/// One TalkerAdvertise (or TalkerFailed) MSRPDU message: one value, one event.
+auto talker_message(TalkerAdvertiseFirstValue const& fv, AttributeEvent const event) -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 25> bytes{};
+    (void)store_unchecked(std::span<uint8_t>(bytes), fv);
+    return build_vector_pdu(AttributeType::TalkerAdvertise, 25, bytes, {event});
+}
+auto talker_message(TalkerFailedFirstValue const& fv, AttributeEvent const event) -> std::vector<uint8_t>
+{
+    std::array<uint8_t, 34> bytes{};
+    (void)store_unchecked(std::span<uint8_t>(bytes), fv);
+    return build_vector_pdu(AttributeType::TalkerFailed, 34, bytes, {event});
+}
+
+/// The messages of @p first then @p second in one MSRPDU (first's message EndMark dropped, second's version).
+auto one_mrpdu(std::vector<uint8_t> first, std::vector<uint8_t> const& second) -> std::vector<uint8_t>
+{
+    first.resize(first.size() - 2);
+    first.insert(first.end(), second.begin() + 1, second.end());
+    return first;
+}
+
+/// A participant with Milan's immediate leave, counting the Talker leaves and Failed registrations it reports.
+struct TalkerRig
+{
+    MsrpParticipant p;
+    TestClock clock{};
+    int leaves{0};
+    int failed{0};
+
+    TalkerRig()
+        : p{[] {
+                auto config = test_msrp_config();
+                config.leave_immediate = true;
+                return config;
+            }(),
+            0xa00e}
+    {
+        p.start(clock.now);
+        p.subscribe(Observer{
+            .on_talker_failed = [this](TalkerFailedFirstValue const&, Operation) { ++failed; },
+            .on_talker_leave = [this](tsn::StreamId const&) { ++leaves; },
+        });
+    }
+    void receive(std::vector<uint8_t> const& pdu) { p.receive_pdu(std::span<uint8_t const>(pdu.data(), pdu.size()), clock.now); }
+};
+
+}  // namespace
+
+// A Talker Advertise's Lv and the Talker Failed replacing it in one MRPDU (Milan v1.2 Section 4.2.7.2.2:
+// the Lv deregisters at once) are reported as the MRPDU leaves them: the Failed as it is read, the Advertise's
+// leave once the MRPDU is read, when the Failed is registered; never the StreamID without a Talker attribute.
+TEST(msrp_participant, a_talker_advertise_replaced_by_a_failed_in_one_mrpdu_reports_the_leave_after_it)
+{
+    TalkerRig rig{};
+    auto const ta = make_talker_adv(0x0010);
+    rig.receive(talker_message(ta, AttributeEvent::New));
+    TalkerFailedFirstValue tf{};
+    tf.advertise = ta;
+    tf.failure_code = 1;
+    bool failed_at_leave = false;
+    rig.p.subscribe(Observer{.on_talker_leave = [&rig, &failed_at_leave](tsn::StreamId const& id) {
+        failed_at_leave = rig.p.find_registered_talker_failed(id) != nullptr;
+    }});
+    rig.receive(one_mrpdu(talker_message(ta, AttributeEvent::Lv), talker_message(tf, AttributeEvent::New)));
+    EXPECT_EQ(rig.failed, 1);
+    EXPECT_EQ(rig.leaves, 1);
+    EXPECT_TRUE(failed_at_leave);
+    rig.receive(talker_message(tf, AttributeEvent::Lv));
+    EXPECT_EQ(rig.leaves, 2);
+    EXPECT_FALSE(failed_at_leave);
+}
+
+// A Talker attribute's Lv on another VLAN than the one registered for its StreamID leaves an attribute not
+// registered: the registered one stays, and no leave is reported.
+TEST(msrp_participant, an_lv_on_another_vlan_leaves_the_registered_talker_advertise)
+{
+    TalkerRig rig{};
+    auto const ta = make_talker_adv(0x0011);
+    rig.receive(talker_message(ta, AttributeEvent::New));
+    auto other = ta;
+    other.vlan_identifier = 3;
+    rig.receive(talker_message(other, AttributeEvent::Lv));
+    auto const* registered = rig.p.find_registered_talker_advertise(ta.stream_id);
+    EXPECT_NE(registered, nullptr);
+    EXPECT_EQ(registered != nullptr ? registered->vlan_identifier.get() : uint16_t{0}, ta.vlan_identifier.get());
+    EXPECT_EQ(rig.leaves, 0);
+    rig.receive(talker_message(ta, AttributeEvent::Lv));
+    EXPECT_EQ(rig.p.find_registered_talker_advertise(ta.stream_id), nullptr);
+    EXPECT_EQ(rig.leaves, 1);
+}

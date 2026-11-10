@@ -222,7 +222,9 @@ void AvbEntityKit::configure_class_a_domain()
     host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint const time) {
         talker_->set_tag(stream_tag(vlan_id));
 #if defined(__linux__)
-        listener_vlan_.follow(vlan_id);
+        // The new VID held before the old is dropped: a link an input also holds stays as it is.
+        vlan_filters_.hold(vlan_id);
+        vlan_filters_.drop(std::exchange(class_a_filtered_, vlan_id));
 #endif
         // The host withdrew the old Class A VID: keep the ones settled
         // listener streams still use.
@@ -1421,16 +1423,12 @@ void AvbEntityKit::wire_stream_callbacks()
             [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
                 listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
                 if (host_.components().profile.milan) {
-                    if (auto const* s = host_.components().acmp_listener.get_stream(stream_index); s != nullptr) {
-                        join_sink_vlan(s->stream_vlan_id, now);
-                    }
-                    refresh_sink_registration(stream_index, now);
+                    refresh_sink_registration(stream_index, now);  // the input's VID joined there
                 }
             },
             [this](uint16_t stream_index, TimePoint now) {
-                if (auto const* s = host_.components().acmp_listener.get_stream(stream_index);
-                    host_.components().profile.milan && s != nullptr && s->connected) {
-                    leave_sink_vlan(s->stream_vlan_id, now);
+                if (stream_index < input_vid_.size()) {
+                    leave_sink_vlan(std::exchange(input_vid_[stream_index], uint16_t{0}), now);
                 }
                 // A classic disconnect is the controller's: no interruption.
                 // (A Milan input unsettles for other reasons too; its unbind is
@@ -1623,25 +1621,43 @@ void AvbEntityKit::refresh_sink_registration(uint16_t const index, TimePoint con
     if (sink == nullptr || !sink->settled()) {
         return;
     }
+    join_input_vlan(index, *sink, now);
     sinks.set_registration(index, talker_registration(*sink), now);
+}
+
+void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSink const& sink, TimePoint const now)
+{
+    // Once per settle; a probe answer naming no VID (0) uses the matched Talker attribute's, when registered.
+    uint16_t const vid = sink.stream.vlan_id != 0 ? sink.stream.vlan_id : matched_talker_vid(sink);
+    if (index < input_vid_.size() && input_vid_[index] == 0 && vid != 0) {
+        input_vid_[index] = vid;
+        join_sink_vlan(vid, now);
+    }
+}
+
+auto AvbEntityKit::matched_talker_vid(atdecc::MilanSink const& sink) const -> uint16_t
+{
+    statusbar::tsn::StreamId sid{};
+    (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
+    auto const& msrp = host_.components().msrp_handler;
+    auto const* const failed = msrp.peer_talker_failed(sid);
+    auto const* const fv = failed != nullptr ? &failed->advertise : msrp.peer_talker_advertise(sid);
+    return fv != nullptr && fv->destination_address == sink.stream.dest_mac ? fv->vlan_identifier.get() : uint16_t{0};
 }
 
 auto AvbEntityKit::talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration
 {
     // Milan v1.2 Section 5.5.3.3: a Talker attribute matching the stream ID,
-    // destination address and VLAN ID the probe returned.
+    // destination address and VLAN ID the probe returned, as the Listener declaration follows.
     statusbar::tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
-    auto const matches = [&sink](srp::msrp::TalkerAdvertiseFirstValue const& fv) {
-        return fv.destination_address == sink.stream.dest_mac && fv.vlan_identifier.get() == sink.stream.vlan_id;
-    };
-    if (auto const* failed = host_.components().msrp_handler.peer_talker_failed(sid);
-        failed != nullptr && matches(failed->advertise)) {
+    auto const& msrp = host_.components().msrp_handler;
+    nanoavb::TalkerMatch const match{.destination = sink.stream.dest_mac, .vid = sink.stream.vlan_id};
+    if (msrp.talker_failed_registered(sid, match)) {
         return atdecc::MilanTalkerRegistration::failed;
     }
-    auto const* advertise = host_.components().msrp_handler.peer_talker_advertise(sid);
-    return advertise != nullptr && matches(*advertise) ? atdecc::MilanTalkerRegistration::advertise
-                                                       : atdecc::MilanTalkerRegistration::none;
+    return msrp.talker_advertise_registered(sid, match) ? atdecc::MilanTalkerRegistration::advertise
+                                                        : atdecc::MilanTalkerRegistration::none;
 }
 
 void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
@@ -1649,6 +1665,9 @@ void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
     if (vid == 0 || vid > 4094) {
         return;
     }
+#if defined(__linux__)
+    vlan_filters_.hold(vid);  // one hold per input, beside the Class A VID's own
+#endif
     for (auto& [joined, count] : sink_vlans_) {
         if (joined == vid) {
             ++count;
@@ -1659,12 +1678,6 @@ void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
     // The Class A VID in use is the host's (always joined).
     if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
         (void)host_.components().mvrp_handler.register_vlan(vid, now);
-#if defined(__linux__)
-        host_.ctl_log().warning(
-            "listener: a stream on VLAN {}, not the Class A VLAN {}: joined with MVRP, but not on the NIC's VLAN filter",
-            vid,
-            host_.components().msrp_handler.domain().sr_class_vid);
-#endif
     }
 }
 
@@ -1674,6 +1687,9 @@ void AvbEntityKit::leave_sink_vlan(uint16_t const vid, TimePoint const now)
         if (it->first != vid) {
             continue;
         }
+#if defined(__linux__)
+        vlan_filters_.drop(vid);
+#endif
         if (--it->second == 0) {
             sink_vlans_.erase(it);
             if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
@@ -1990,7 +2006,7 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     // The VID's tagged stream frames must get past the NIC's VLAN filter.
     // Never fatal: without CAP_NET_ADMIN this only warns.
     // (A control bound before start() -- a test's -- is used as it is.)
-    if (!listener_vlan_.bound()) {
+    if (!vlan_filters_.bound()) {
         open_listener_vlan_filter();
     }
 #endif
@@ -2056,8 +2072,12 @@ void AvbEntityKit::bind_listener_vlan(net::vlan::VlanControl& control, int const
     if (listener_ == nullptr) {
         return;
     }
-    listener_vlan_.bind(control, config_.interface_name, ifindex);
-    listener_vlan_.follow(host_.components().msrp_handler.domain().sr_class_vid);
+    vlan_filters_.bind(control, config_.interface_name, ifindex);
+    class_a_filtered_ = host_.components().msrp_handler.domain().sr_class_vid;
+    vlan_filters_.hold(class_a_filtered_);
+    for (auto const vid : input_vid_) {
+        vlan_filters_.hold(vid);  // the inputs settled before (0: none)
+    }
 }
 #endif
 
@@ -2127,7 +2147,7 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
 void AvbEntityKit::close_data_plane()
 {
 #if defined(__linux__)
-    listener_vlan_.release();
+    vlan_filters_.release();
 #endif
     close_streams();                   // the port's memberships close with it
     rx_static_groups_.clear();         // held on that port only: the next start joins them afresh

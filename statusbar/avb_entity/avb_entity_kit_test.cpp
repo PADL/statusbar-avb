@@ -2772,14 +2772,14 @@ struct MilanPair
         return l.aem_command(start ? atdecc::AEM_COMMAND_START_STREAMING : atdecc::AEM_COMMAND_STOP_STREAMING, body).status;
     }
 
-    /// The talker's PROBE_TX_RESPONSE to the sink's probe: stream @p stream_id to @p group.
-    void probe_answered(ieee::Eui48 const& group, uint64_t const stream_id = 0x0200000000000777ULL)
+    /// The talker's PROBE_TX_RESPONSE to the sink's probe: stream @p stream_id to @p group on VLAN @p vid.
+    void probe_answered(ieee::Eui48 const& group, uint64_t const stream_id = 0x0200000000000777ULL, uint16_t const vid = 2)
     {
         auto resp = sink().probe;
         resp.set_message_type(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
         resp.stream_id = ieee::Eui64{}.from_uint64(stream_id);
         resp.stream_dest_mac = group;
-        resp.stream_vlan_id = uint16_t{2};
+        resp.stream_vlan_id = vid;
         (void)lc().acmp_listener.receive_talker_response(resp, now);
     }
 
@@ -4965,3 +4965,114 @@ TEST(avb_entity_kit_formats, the_shaper_follows_an_admitted_streams_format)
     shaper.shutdown();
 }
 #endif
+
+#if defined(__linux__)
+
+namespace {
+
+/// Records each VLAN link request as "add <name>" or "del <name>"; every one succeeds.
+class VlanRecorder final : public net::vlan::VlanControl
+{
+  public:
+    std::vector<std::string> requests;
+
+    auto add_vlan(int /*parent_ifindex*/, std::string_view const name, uint16_t /*vid*/)
+        -> StatusValue<net::vlan::LinkOwnership> override
+    {
+        requests.push_back("add " + std::string{name});
+        return net::vlan::LinkOwnership::created;
+    }
+    auto remove_link(std::string_view const name) -> Status override
+    {
+        requests.push_back("del " + std::string{name});
+        return success();
+    }
+    auto bring_up(std::string_view /*name*/) -> Status override { return success(); }
+    [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
+
+  private:
+    std::string message_{};
+};
+
+}  // namespace
+
+// A Milan input settled on VLAN 3 (its talker's probe answer) holds VID 3 on the NIC's filter beside the Class A
+// VID 2. When an adopted Domain moves Class A onto 3, the link both use stays and 2's goes; the input's unbind
+// leaves 3 to the Class A VID.
+TEST(avb_entity_kit_milan_listener, an_input_settled_on_another_vlan_holds_its_vid_on_the_filter)
+{
+    VlanRecorder fake;  // first: it outlives the kit, which deletes its links through it
+    MilanPair p;
+    p.l.kit.bind_listener_vlan(fake, 9);  // before start(), which then uses it
+    EXPECT_TRUE(p.start());
+    auto const link = [&p](uint16_t const vid) { return net::vlan::vlan_link_name(p.l.config.interface_name, vid); };
+    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND).status(), atdecc::ACMP_STATUS_SUCCESS);
+    p.probe_answered(ieee::Eui48{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x10}, 0x0200000000000777ULL, 3);
+    EXPECT_TRUE(p.sink().settled());
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
+
+    std::vector<std::vector<uint8_t>> out;
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9e};
+    bridge.set_send_pdu([&out](std::span<uint8_t const> pdu) {
+        out.emplace_back(pdu.begin(), pdu.end());
+        return true;
+    });
+    bridge.start(p.now);
+    srp::msrp::DomainFirstValue class_a{};
+    class_a.sr_class_vid = 3;
+    (void)bridge.declare_domain(class_a, p.now);
+    for (int i = 0; i < 4; ++i) {
+        p.now += std::chrono::milliseconds(250);
+        bridge.tick(p.now);
+        for (auto const& pdu : std::exchange(out, {})) {
+            p.lc().msrp_handler.receive_packet(pdu, p.now);
+        }
+    }
+    EXPECT_EQ(p.lc().msrp_handler.domain().sr_class_vid, uint16_t{3});
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(2)}));
+}
+
+// A probe answer naming no VLAN (0) matches the Talker Advertise on any; the input joins the VLAN that
+// Advertise is on (3) once it is registered, and leaves it at its unbind.
+TEST(avb_entity_kit_milan_listener, an_input_probed_without_a_vlan_joins_its_talker_advertises)
+{
+    VlanRecorder fake;  // first: it outlives the kit, which deletes its links through it
+    MilanPair p;
+    p.l.kit.bind_listener_vlan(fake, 9);
+    EXPECT_TRUE(p.start());
+    auto const link = [&p](uint16_t const vid) { return net::vlan::vlan_link_name(p.l.config.interface_name, vid); };
+    ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x11};
+    uint64_t const stream = 0x0200000000000888ULL;
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    p.probe_answered(group, stream, 0);
+    EXPECT_TRUE(p.sink().settled());
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2)}));  // no VID yet
+
+    std::vector<std::vector<uint8_t>> out;
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9f};
+    bridge.set_send_pdu([&out](std::span<uint8_t const> pdu) {
+        out.emplace_back(pdu.begin(), pdu.end());
+        return true;
+    });
+    bridge.start(p.now);
+    srp::msrp::TalkerAdvertiseFirstValue fv{};
+    (void)tsn::load_unchecked(ieee::Eui64{}.from_uint64(stream).span(), &fv.stream_id);
+    fv.destination_address = group;
+    fv.vlan_identifier = 3;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    (void)bridge.declare_talker_advertise(fv, p.now);
+    for (int i = 0; i < 4; ++i) {
+        p.now += std::chrono::milliseconds(250);
+        bridge.tick(p.now);
+        for (auto const& pdu : std::exchange(out, {})) {
+            p.lc().msrp_handler.receive_packet(pdu, p.now);
+        }
+    }
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(3)}));
+}
+
+#endif  // __linux__
