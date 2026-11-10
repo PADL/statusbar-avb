@@ -55,8 +55,8 @@ still change from the reactor. Each backend's join is a socket call that does
 not touch the rings, and the test port expects one thread.
 
 Multicast joins and leaves (the static groups, an ACMP connect or disconnect)
-need no guard: on every backend they are socket calls (SIOCADDMULTI,
-PACKET_ADD_MEMBERSHIP) that touch no ring.
+need no guard: on every backend they are socket calls (PACKET_ADD_MEMBERSHIP,
+counted per socket and dropped when the port closes) that touch no ring.
 
 ## AF_XDP
 
