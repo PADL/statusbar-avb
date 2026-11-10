@@ -2791,6 +2791,23 @@ TEST(configuration, a_failed_set_answers_the_configuration_in_force)
     EXPECT_EQ(response_configuration(vetoed.bytes), uint16_t{0});
 }
 
+// SET_CONFIGURATION has no deferral: a hook's IN_PROGRESS answers the configuration in force (IEEE 1722.1-2021
+// Clause 7.4.7.1), and the configuration stays as it was.
+TEST(configuration, a_hook_answering_in_progress_answers_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_IN_PROGRESS; });
+
+    auto const answered = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(answered.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(answered.bytes), uint16_t{0});
+    EXPECT_EQ(cmd_handler.current_configuration(), uint16_t{0});
+}
+
 //
 // Test Runner
 //
