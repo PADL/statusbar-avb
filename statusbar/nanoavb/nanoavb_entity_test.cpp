@@ -2518,6 +2518,50 @@ TEST(nanoavb_entity_in_progress, a_set_refused_for_a_full_table_does_not_call_it
 
 namespace {
 
+/// Accepts every SET, raising @p side_effects notifications of its own from the hook.
+class NotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, 0x00};
+        for (size_t n = 0; n < side_effects; ++n) {
+            aem->emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, body);
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    size_t side_effects{0};
+};
+
+}  // namespace
+
+// Milan v1.3 Section 5.4.5.1: however many notifications a hook raises, the command's own follows its response.
+TEST(nanoavb_entity_unsolicited_notify, the_commands_own_notification_follows_its_response)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 6;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    EXPECT_EQ(sends.size(), size_t{8});
+    auto const response = std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); });
+    EXPECT_TRUE(response != sends.end() && response->dest == kMacA);
+    EXPECT_TRUE(header_of(sends.back()).is_unsolicited());
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_EQ(std::ranges::count_if(response, sends.end(), [](CapturedSend const& s) { return header_of(s).is_unsolicited(); }), 4);
+}
+
+namespace {
+
 /// A DeferringHandler whose STREAM_OUTPUT 0 is in force at kFormatInForce.
 class DeferringStreamHandler : public DeferringHandler
 {
@@ -3025,6 +3069,33 @@ void serve_offsets_as_stream_info(AemCommandHandler& handler, OffsetStore& store
 }
 
 }  // namespace
+
+// Milan v1.3 Section 5.4.5.1: a command's response reaches the wire before the notifications it raises.
+TEST(nanoavb_entity_unsolicited_notify, the_response_is_sent_before_its_notification)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    OffsetStore store;
+    store.install(handler);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(
+        handler,
+        kEntity,
+        kControllerA,
+        kMacA,
+        AEM_COMMAND_SET_MAX_TRANSIT_TIME,
+        max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, 3'000'000));
+    EXPECT_EQ(sends.size(), size_t{2});
+    EXPECT_FALSE(header_of(sends[0]).is_unsolicited());
+    EXPECT_EQ(sends[0].dest, kMacA);
+    EXPECT_TRUE(header_of(sends[1]).is_unsolicited());
+    EXPECT_EQ(sends[1].dest, kMacB);
+}
 
 // IEEE 1722.1-2021 Clause 7.4.15.1: a refused SET_STREAM_INFO answers the stream's values in force.
 TEST(nanoavb_entity_presentation_offset, a_refused_set_stream_info_answers_the_values_in_force)
