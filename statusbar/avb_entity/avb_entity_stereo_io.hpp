@@ -266,8 +266,6 @@ class AvbEntityStereoIO
     /// Get access to NanoAVB components (for advanced use)
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
     [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
-    /// The per-stream transmit gate (stop() closes it).
-    [[nodiscard]] auto talker_gate() noexcept -> TalkerGate& { return gate_; }
 
     /// Get access to network handlers (for advanced use)
     [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
