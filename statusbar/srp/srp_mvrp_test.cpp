@@ -468,6 +468,8 @@ TEST(mvrp_participant, received_leave_runs_the_leave_timer)
     a.set_send_pdu(fab.make_a_sender());
     b.set_send_pdu(fab.make_b_sender());
     MvrpTestClock c{};
+    int leaves = 0;
+    (void)b.subscribe(Observer{.on_vlan_leave = [&leaves](uint16_t) { ++leaves; }});
     a.start(c.now);
     b.start(c.now);
     (void)a.declare_vlan(300, c.now);
@@ -480,11 +482,11 @@ TEST(mvrp_participant, received_leave_runs_the_leave_timer)
     a.tick(t);
     fab.deliver_a_to_b(b, t);
     EXPECT_FALSE(b.is_vlan_registered(300));
-    EXPECT_TRUE(b.is_vlan_leaving(300));  // LV, not MT
+    EXPECT_EQ(leaves, 1);  // the leave received: LV, not MT
     b.tick(c.advance(std::chrono::milliseconds(500)));
-    EXPECT_TRUE(b.is_vlan_leaving(300));  // still inside the 1 s LeaveTime
+    EXPECT_EQ(leaves, 1);  // still inside the 1 s LeaveTime
     b.tick(c.advance(std::chrono::milliseconds(600)));
-    EXPECT_FALSE(b.is_vlan_leaving(300));
+    EXPECT_EQ(leaves, 2);  // the LeaveTimer: MT
     EXPECT_FALSE(b.is_vlan_registered(300));
 }
 
@@ -500,6 +502,8 @@ TEST(mvrp_participant, milan_timers_lengthen_the_leave_timer)
     a.set_send_pdu(fab.make_a_sender());
     b.set_send_pdu(fab.make_b_sender());
     MvrpTestClock c{};
+    int leaves = 0;
+    (void)b.subscribe(Observer{.on_vlan_leave = [&leaves](uint16_t) { ++leaves; }});
     a.start(c.now);
     b.start(c.now);
     (void)a.declare_vlan(300, c.now);
@@ -511,9 +515,9 @@ TEST(mvrp_participant, milan_timers_lengthen_the_leave_timer)
     a.tick(t);
     fab.deliver_a_to_b(b, t);
     b.tick(c.advance(std::chrono::milliseconds(4000)));
-    EXPECT_TRUE(b.is_vlan_leaving(300));  // still inside the 5 s LeaveTime
+    EXPECT_EQ(leaves, 1);  // the leave received, still inside the 5 s LeaveTime
     b.tick(c.advance(std::chrono::milliseconds(1100)));
-    EXPECT_FALSE(b.is_vlan_leaving(300));
+    EXPECT_EQ(leaves, 2);  // the LeaveTimer
 }
 
 namespace {

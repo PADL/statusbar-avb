@@ -99,10 +99,9 @@ auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
         adpdu_.identify_control_index = identify_control_index_;
         adpdu_.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID);
     }
-    // The interface the ADPDU goes out on is always known: Milan v1.2 Section
-    // 5.6.2 requires AEM_INTERFACE_INDEX_VALID with interface_index populated
-    // (IEEE 1722.1-2021 6.2.2.20).
-    adpdu_.interface_index = interface_index_;
+    // The interface the ADPDU goes out on is always known, AVB_INTERFACE 0: Milan v1.2
+    // Section 5.6.2 requires AEM_INTERFACE_INDEX_VALID with interface_index populated.
+    adpdu_.interface_index = uint16_t{0};
     adpdu_.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_INTERFACE_INDEX_VALID);
 }
 
