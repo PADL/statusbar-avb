@@ -99,7 +99,7 @@ auto make_frame(uint8_t message_type, Eui48 const& start, uint16_t count) -> std
     return v >= MAAP_DYNAMIC_POOL_START.to_uint64() && (v + count - 1) <= MAAP_DYNAMIC_POOL_END.to_uint64();
 }
 
-/// Tick every MAX_TICK_PERIOD_NS from @p armed_ns, as MaapNetHandler does, until the timer armed then sends one
+/// Tick every MAX_TICK_PERIOD_NS from @p armed_ns, the longest gap the draws allow, until the timer armed then sends one
 /// frame; the send time, or 0 when nothing (or more than one frame) is sent within @p limit_us.
 [[nodiscard]] auto send_time(Rig& rig, int64_t armed_ns, uint64_t limit_us) -> int64_t
 {
