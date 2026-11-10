@@ -2769,6 +2769,28 @@ TEST(configuration, set_validates_switches_and_round_trips)
     EXPECT_EQ(response_configuration(still1.bytes), uint16_t{1});
 }
 
+// IEEE 1722.1-2021 Clause 7.4.7.1: a failed SET_CONFIGURATION answers the configuration in force.
+TEST(configuration, a_failed_set_answers_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    auto const unhooked = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(unhooked.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(unhooked.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(unhooked.bytes), uint16_t{0});
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(5));
+    EXPECT_EQ(bad.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(response_configuration(bad.bytes), uint16_t{0});
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_STREAM_IS_RUNNING; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(response_configuration(vetoed.bytes), uint16_t{0});
+}
+
 //
 // Test Runner
 //

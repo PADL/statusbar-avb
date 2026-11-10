@@ -286,7 +286,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_CONFIGURATION:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return refused_set(*blocked, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
             }
             return handle_set_configuration(command_data, out_buffer);
 
@@ -643,8 +643,9 @@ auto AemCommandHandler::failed_set_body(
 
 auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept -> std::optional<uint16_t>
 {
-    constexpr std::array<std::pair<uint16_t, uint16_t>, 8> twins{
-        {{AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
+    constexpr std::array<std::pair<uint16_t, uint16_t>, 9> twins{
+        {{AEM_COMMAND_SET_CONFIGURATION, AEM_COMMAND_GET_CONFIGURATION},  // 7.4.7.1: the configuration in force
+         {AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
          {AEM_COMMAND_SET_CONTROL, AEM_COMMAND_GET_CONTROL},
          {AEM_COMMAND_SET_STREAM_FORMAT, AEM_COMMAND_GET_STREAM_FORMAT},
          {AEM_COMMAND_SET_SAMPLING_RATE, AEM_COMMAND_GET_SAMPLING_RATE},
@@ -2328,7 +2329,7 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
 {  // NOLINT(statusbar-block-statements) SET_CONFIGURATION's checks; pre-dates the gate
     using namespace atdecc::aem;
     if (command_data.size() < AemSetConfigurationPayload::LENGTH || out_buffer.size() < AemSetConfigurationPayload::LENGTH) {
-        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+        return refused_set(AEM_STATUS_BAD_ARGUMENTS, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
     }
     AemSetConfigurationPayload cmd{};
     span_load(cmd, command_data);
@@ -2347,7 +2348,7 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
         configurations_count = count.get();
     }
     if (requested >= configurations_count) {
-        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+        return refused_set(AEM_STATUS_BAD_ARGUMENTS, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
     }
 
     bool const switching = requested != current_configuration_;
@@ -2356,10 +2357,10 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
         // re-shape itself; refuse the switch rather than claim a
         // configuration the streams are not built for.
         if (!on_configuration_changed_) {
-            return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+            return refused_set(AEM_STATUS_NOT_SUPPORTED, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
         }
         if (auto const status = on_configuration_changed_(requested); status != AEM_STATUS_SUCCESS) {
-            return {.status = status, .size = 0};
+            return refused_set(status, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
         }
         current_configuration_ = requested;
         dynamic_maps_ = {};  // the mappings belong to the configuration's ports
