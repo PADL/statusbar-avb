@@ -607,6 +607,9 @@ auto AemCommandHandler::name_in_force(std::span<uint8_t const> const command_dat
 
 auto AemCommandHandler::apply_local_name(std::span<uint8_t const> const command_body) -> uint8_t
 {
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = set_name(command_body, echo, std::nullopt);
     if (r.status == AEM_STATUS_SUCCESS && callbacks_.on_settings_changed) {
@@ -1583,6 +1586,9 @@ auto AemCommandHandler::apply_local_audio_mappings(
     uint16_t const port_index, std::span<DynamicAudioMapping const> const add, std::span<DynamicAudioMapping const> const remove)
     -> uint8_t
 {
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
     auto const current = dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index);
     DynamicAudioMaps::Mappings next{};
     if (auto const status = local_mappings(port_index, current, add, remove, next); status != AEM_STATUS_SUCCESS) {
@@ -2540,12 +2546,9 @@ auto AemCommandHandler::set_local_identify(bool const on) -> uint8_t
     if (!identify_control_index_valid_) {
         return AEM_STATUS_NOT_IMPLEMENTED;
     }
-    if (auto const refusal = local_change_refusal_ ? local_change_refusal_() : std::nullopt) {
-        return *refusal;
-    }
+    aem::AemControlPayloadHeader const header{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = identify_control_index_};
     std::array<uint8_t, aem::AemControlPayloadHeader::LENGTH + 1> body{};
-    span_store(
-        body, aem::AemControlPayloadHeader{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = identify_control_index_});
+    span_store(body, header);
     body[aem::AemControlPayloadHeader::LENGTH] = on ? uint8_t{0xFF} : uint8_t{0x00};
     return apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body);
 }
@@ -2605,6 +2608,9 @@ auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type
     // Apply the change exactly as a controller's SET would (same symbol-keyed
     // hook), then fan out unsolicited notifications. This is the entry point for
     // an entity changing its own controls (e.g. a software IDENTIFY button).
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
     AemEntityModel aem_model{*handler_};
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
