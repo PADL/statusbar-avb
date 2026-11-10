@@ -679,13 +679,13 @@ class AemCommandHandler
     /// the controller can match the response. Applies no mutation.
     [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// Fail a SET with @p status, answering the value in force where current_value() reads it, else the
-    /// echo (IEEE 1722.1-2021 Clauses 7.4.9.1, 7.4.17.1, 7.4.21.1, 7.4.23.1, 7.4.25.1, 7.4.29.1).
+    /// Fail a SET with @p status, answering the value in force where current_value() reads it, else the echo
+    /// (IEEE 1722.1-2021 Clauses 7.4.9.1, 7.4.17.1, 7.4.21.1, 7.4.23.1, 7.4.25.1, 7.4.29.1, 7.4.31.1, 7.4.33.2).
     [[nodiscard]] auto reject_set(
         uint8_t status, uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// The GET answer, in the SET's layout, for SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE,
-    /// SET_CLOCK_SOURCE, SET_CONTROL or SET_SIGNAL_SELECTOR; NOT_IMPLEMENTED for any other.
+    /// The GET answer, in the SET's layout, for SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE, SET_CLOCK_SOURCE,
+    /// SET_CONTROL, SET_SIGNAL_SELECTOR, SET_MIXER or SET_MATRIX (the region it names); NOT_IMPLEMENTED for any other.
     [[nodiscard]] auto current_value(uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
