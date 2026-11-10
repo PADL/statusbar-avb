@@ -814,6 +814,59 @@ TEST(nanoavb_entity_lock, timeout_expiration)
     EXPECT_FALSE(handler.is_locked());
 }
 
+// Milan v1.3 Section 5.4.2.2: a LOCK_ENTITY naming any descriptor but the ENTITY is NOT_SUPPORTED.
+TEST(nanoavb_entity_lock, a_milan_lock_of_another_descriptor_is_not_supported)
+{
+    auto model = create_test_model();  // has STREAM_INPUT[0]
+    AemCommandHandler handler{model};  // Milan by default
+    auto header = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    header.controller_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+
+    AemLockEntityPayload lock{};
+    lock.descriptor_type = DESCRIPTOR_STREAM_INPUT;
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> bytes{};
+    span_store(bytes, lock);
+    EXPECT_EQ(make_test_result(handler, header, bytes).status, AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_FALSE(handler.is_locked());
+
+    lock.descriptor_type = DESCRIPTOR_ENTITY;
+    span_store(bytes, lock);
+    EXPECT_EQ(make_test_result(handler, header, bytes).status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(handler.is_locked());
+}
+
+// IEEE 1722.1-2021 Clause 7.4.2.2: an acquired entity answers another controller's LOCK_ENTITY ENTITY_ACQUIRED.
+TEST(nanoavb_entity_lock, a_lock_from_other_than_the_acquirer_is_entity_acquired)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_profile(EntityProfile{.milan = false});  // classic: ACQUIRE_ENTITY implemented
+    Eui64 const controller_a{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    Eui64 const controller_b{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+
+    auto acquire = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    acquire.controller_entity_id = controller_a;
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> const acquire_data{};
+    EXPECT_EQ(make_test_result(handler, acquire, acquire_data).status, AEM_STATUS_SUCCESS);
+
+    AemLockEntityPayload unlock{};
+    unlock.set_unlock(true);
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> unlock_data{};
+    span_store(unlock_data, unlock);
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> const lock_data{};
+    auto lock_b = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock_b.controller_entity_id = controller_b;
+    EXPECT_EQ(make_test_result(handler, lock_b, lock_data).status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_EQ(make_test_result(handler, lock_b, unlock_data).status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_FALSE(handler.is_locked());
+
+    // The acquiring controller may lock.
+    auto lock_a = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock_a.controller_entity_id = controller_a;
+    EXPECT_EQ(make_test_result(handler, lock_a, lock_data).status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(handler.is_locked());
+}
+
 TEST(nanoavb_entity_lock, refresh_extends_timeout)
 {
     auto model = create_test_model();
