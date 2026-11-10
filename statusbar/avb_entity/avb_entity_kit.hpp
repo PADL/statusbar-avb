@@ -804,8 +804,11 @@ class AvbEntityKit
     /// Bind the listener's VLAN filter control (rtnetlink), warning when it cannot.
     void open_listener_vlan_filter();
 #endif
-    /// Join settled Milan input @p index's VID, the probe answer's, once.
+    /// Join settled Milan input @p index's VID once: the probe answer's, or with none (0) the matched
+    /// Talker attribute's once it is registered (matched_talker_vid).
     void join_input_vlan(uint16_t index, atdecc::MilanSink const& sink, TimePoint now);
+    /// The VLAN of the registered Talker Advertise or Failed on @p sink's StreamID and destination; 0: none.
+    [[nodiscard]] auto matched_talker_vid(atdecc::MilanSink const& sink) const -> uint16_t;
     /// stop(): the data plane down and a pending save written.
     void close_data_plane();
     /// stop(), after close_data_plane() saved the bindings: no input stays connected. The next
