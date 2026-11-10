@@ -169,8 +169,9 @@ class AvbEntityHost
     /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
     void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
     /// GPTP_GM_CHANGED follows note_parent_grandmaster alone from now, before its first report too, and
-    /// even if none ever comes: a gPTP stack that never answers leaves it unchanged.
-    void use_parent_grandmaster() noexcept { grandmaster_from_parent_ = true; }
+    /// even if none ever comes: a gPTP stack that never answers leaves it unchanged. The first call drops
+    /// the Announce handler's grandmaster, so the stack's first report is no change.
+    void use_parent_grandmaster() noexcept;
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
     void note_as_path_changed();
