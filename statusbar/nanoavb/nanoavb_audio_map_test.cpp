@@ -457,13 +457,13 @@ TEST(audio_map, a_local_change_is_routed_once_told_in_pdus_and_saved)
     EXPECT_EQ(b.aem.apply_local_audio_mappings(1, {}, std::vector{m(0, 1, 0, 1)}), AEM_STATUS_SUCCESS);
     EXPECT_EQ(saved_as, AEM_COMMAND_REMOVE_AUDIO_MAPPINGS);
 
-    // A controller's lock is the caller's to honour (AvbEntityKit::local_change_refusal()).
+    // Under milan13 a controller's lock refuses the entity's own change (Milan v1.3 Section 5.3.4.1).
     AemLockEntityPayload lock{};
     std::array<uint8_t, AemLockEntityPayload::LENGTH> lock_body{};
     span_store(lock_body, lock);
     EXPECT_EQ(b.command(CONTROLLER_B, MAC_B, AEM_COMMAND_LOCK_ENTITY, lock_body).header.status(), AEM_STATUS_SUCCESS);
-    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, {}, new_one), AEM_STATUS_SUCCESS);
-    EXPECT_EQ(b.get_map(1, 0).mappings.size(), size_t{98});
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(1, {}, new_one), AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(b.get_map(1, 0).mappings.size(), size_t{99});
 }
 
 // A dynamic output port's mappings are the entity's own (Milan v1.2 Section 5.3.9.1):
