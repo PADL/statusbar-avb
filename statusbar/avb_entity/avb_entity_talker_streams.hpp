@@ -84,8 +84,8 @@ struct TalkerStreamSlot
     /// The sample index the next CRF PDU starts at (0: the next wake sends one).
     /// Reset to 0 whenever the CRF gate is closed so a reconnect starts fresh.
     uint64_t crf_next{0};
-    /// The CRF mr bit sent (IEEE 1722-2016 Clause 10.4). Media thread.
-    bool crf_mr{false};
+    /// The mr bit the stream sends (IEEE 1722-2016 Clauses 4.4.4.3, 10.4.3). Media thread.
+    bool mr{false};
     std::optional<avtp::Am824StreamOutputContext> am824{};
     std::optional<avtp::AafStreamOutputContext> aaf{};
     std::optional<avtp::CrfStreamOutputContext> crf{};
@@ -219,9 +219,9 @@ struct TalkerStreams
         return gptp_lost_.load(std::memory_order_relaxed) || now_ns < tu_until_ns_.load(std::memory_order_relaxed);
     }
 
-    /// A media clock restart on CRF STREAM_OUTPUT @p stream_index: mr toggles on its next PDU and stays
-    /// (IEEE 1722-2016 Clause 10.4); requests before that PDU toggle it once. Any thread: two lock-free
-    /// atomic accesses, no allocation. invalid_argument for no CRF slot of that index.
+    /// A media clock restart on STREAM_OUTPUT @p stream_index: mr toggles on its next raw AAF, AM824 or CRF PDU and
+    /// stays (IEEE 1722-2016 Clause 4.4.4.3); requests before that PDU toggle it once. Any thread, lock-free, no
+    /// allocation. invalid_argument for no open stream of that index.
     [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
 
     /// VLAN ID the stream frames are tagged with: config.vlan_id until the
@@ -336,6 +336,8 @@ struct TalkerStreams
     uint32_t samples_per_packet_;  ///< per AAF packet: class_a_samples_per_packet() of the media clock's rate
     std::pmr::memory_resource* mem_resource_;
 
+    /// The mr bit @p slot's next PDU carries: toggled once for the restarts requested since its last. Media thread.
+    [[nodiscard]] auto next_mr(TalkerStreamSlot& slot) noexcept -> bool;
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
     /// @p stream_id: what open_stream and reformat_stream share.
     [[nodiscard]] auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
@@ -400,8 +402,8 @@ struct TalkerStreams
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
     /// Per-stream media clock restart pending (toggle_media_clock_restart), by STREAM_OUTPUT index.
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> mr_pending_{};
-    /// A CRF slot is open at this STREAM_OUTPUT index (open_stream), for toggle_media_clock_restart.
-    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> crf_open_{};
+    /// A slot is open at this STREAM_OUTPUT index (open_stream), for toggle_media_clock_restart.
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> open_{};
     static_assert(std::atomic<bool>::is_always_lock_free);
     StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
     /// The TX kick lives on another thread (set_external_kick).
@@ -419,8 +421,8 @@ struct TalkerStreams
 // ---------------------------------------------------------------------------
 
 /// Build one AAF frame into @p frame for @p frames frames, AVTP timestamp the low 32 bits of
-/// @p pts_ns (no offset added), payload filled by @p render. Returns the length (sequence advanced),
-/// or 0 with @p ctx untouched for a format with no byte layout, a short @p frame or @p render false.
+/// @p pts_ns (no offset added), payload filled by @p render, with the tu and mr bits given. Returns the length
+/// (sequence advanced), or 0 with @p ctx untouched for a format with no byte layout, a short @p frame or @p render false.
 [[nodiscard]] auto serialize_aaf_raw(
     avtp::AafStreamOutputContext& ctx,
     std::span<uint8_t> frame,
@@ -428,7 +430,8 @@ struct TalkerStreams
     uint64_t first_index,
     uint64_t pts_ns,
     StreamRawRenderFn const& render,
-    bool timestamp_uncertain = false) -> size_t;
+    bool timestamp_uncertain = false,
+    bool media_clock_restart = false) -> size_t;
 
 /// Build one AM824 frame from float samples into @p frame (zeroed first): @p samples per channel of the
 /// interleaved @p src, presented at @p now_ns plus the context's offset. The length, or 0 for none.
@@ -448,9 +451,9 @@ struct TalkerStreams
     std::span<float const> src,
     bool timestamp_uncertain) -> size_t;
 
-/// Build one IEC 61883-6 AM824 frame of @p frames blocks from sample index @p first_index (the DBC, mod 256)
-/// at @p pts_ns (no offset added); @p render writes frames x channels big-endian quadlets. Returns the
-/// length (sequence advanced), or 0 with @p ctx untouched for > 32 blocks, a short @p frame or @p render false.
+/// One IEC 61883-6 AM824 frame of @p frames blocks from sample @p first_index (the DBC, mod 256) at @p pts_ns (no
+/// offset added), tu and mr as given; @p render writes frames x channels big-endian quadlets. The length (sequence
+/// advanced), or 0 with @p ctx untouched for > 32 blocks, a short @p frame or @p render false.
 [[nodiscard]] auto serialize_am824_raw(
     avtp::Am824StreamOutputContext& ctx,
     std::span<uint8_t> frame,
@@ -458,7 +461,8 @@ struct TalkerStreams
     uint64_t first_index,
     uint64_t pts_ns,
     StreamRawRenderFn const& render,
-    bool timestamp_uncertain = false) -> size_t;
+    bool timestamp_uncertain = false,
+    bool media_clock_restart = false) -> size_t;
 
 // ---------------------------------------------------------------------------
 // CRF timestamp math (pure, socket-free -- unit-testable in isolation).
