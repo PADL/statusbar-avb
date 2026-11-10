@@ -8,7 +8,6 @@
 /// in); reactor thread only. See docs/MILAN_TALKER.md.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
-#include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 
@@ -27,9 +26,6 @@ class TalkerDeclarations
     static constexpr int64_t PROBE_WINDOW_NS = 15'000'000'000;
     /// Table 5.3: 2 LeaveAll periods, at the longest leavealltimer Milan's MRP timers draw.
     static constexpr int64_t REDECLARE_HOLD_NS = 2 * std::chrono::nanoseconds{nanoavb::MILAN_MRP_TIMERS.leave_all_time_max}.count();
-    /// How long a departed Listener still counts as registered: the transmit
-    /// gate's grace window (TalkerGate::GRACE), across a LeaveAll blip.
-    static constexpr int64_t LISTENER_GRACE_NS = std::chrono::nanoseconds{TalkerGate::GRACE}.count();
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
 
     /// A Talker Advertise's identity (its FirstValue's stream ID, destination
@@ -62,12 +58,8 @@ class TalkerDeclarations
     /// runs to now + PROBE_WINDOW_NS.
     void note_probe(uint16_t idx, int64_t now_ns) noexcept;
     /// Whether a Listener attribute (any declaration type) for stream @p idx's stream ID is
-    /// registered, seen at @p now_ns. A departed Listener keeps condition 2 true for
-    /// LISTENER_GRACE_NS (the MRP LeaveAll re-registration blip).
-    void note_listener_registered(uint16_t idx, bool registered, int64_t now_ns) noexcept;
-    /// Whether condition 2's Listener arm holds for stream @p idx at @p now_ns:
-    /// registered, or gone less than LISTENER_GRACE_NS ago.
-    [[nodiscard]] auto listener_interest(uint16_t idx, int64_t now_ns) const noexcept -> bool;
+    /// registered: the MSRP registrar's In or Lv, which holds it through a LeaveAll for LeaveTime.
+    void note_listener_registered(uint16_t idx, bool registered) noexcept;
     /// Whether MAAP has a conflict-free destination address for stream @p idx
     /// (always true with static addresses).
     void note_address_valid(uint16_t idx, bool valid) noexcept;
@@ -112,8 +104,7 @@ class TalkerDeclarations
         bool declared{false};
         bool listener_registered{false};
         bool address_valid{false};
-        int64_t probe_until_ns{0};    ///< 0: never probed
-        int64_t listener_seen_ns{0};  ///< the last moment a Listener was known registered (0: never)
+        int64_t probe_until_ns{0};  ///< 0: never probed
         Params declared_params{};
         /// What was last withdrawn, and until when a different declaration waits.
         Params withdrawn_params{};

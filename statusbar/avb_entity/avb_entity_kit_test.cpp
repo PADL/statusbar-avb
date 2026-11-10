@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -36,6 +37,7 @@
 #include <span>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 using namespace statusbar;
@@ -1151,22 +1153,141 @@ TEST(avb_entity_kit_milan_talker, offset_settable_with_the_gate_disabled)
     EXPECT_EQ(m.kit.presentation_offset_ns(0), 3'000'000U);
 }
 
-// Past the probe window a Listener that blips out (an MRP LeaveAll
-// re-registration) keeps the stream declared through the gate's grace; one
-// gone longer withdraws it.
-TEST(avb_entity_kit_milan_talker, a_listener_blip_keeps_the_declaration)
+namespace {
+
+/// A Listener LeaveAll MRPDU (IEEE 802.1Q-2022 Clause 10.8.1) from a bridge port whose Listener left
+/// without an Lv: ProtocolVersion; a Listener message (length 8, list length 4) of one VectorHeader with
+/// LeaveAllEvent and no values, and its EndMark; the PDU's EndMark.
+constexpr std::array<uint8_t, 11> LISTENER_LEAVE_ALL{0x00, 0x03, 0x08, 0x00, 0x04, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+/// A Milan kit's talker stream 0, probed and registered by a bridge's Listener Ready, run past
+/// the 15 s probe window on the MRP clock so only the Listener keeps it declared.
+struct ListenerDepartureRig
 {
-    MilanKit m{std::nullopt, 0x19};
-    EXPECT_TRUE(m.start_ready());
-    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
-    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
-    m.bridge_withdraw(0);
-    int64_t const gone = MilanKit::steady_ns();
-    // The probe window is over (15 s on), the Listener gone less than the grace.
-    m.kit.update_talker_declarations(gone + TalkerDeclarations::PROBE_WINDOW_NS - 1'000'000'000);
-    EXPECT_TRUE(m.advertising(0));
-    m.kit.update_talker_declarations(gone + TalkerDeclarations::PROBE_WINDOW_NS + 1);
-    EXPECT_FALSE(m.advertising(0));
+    static constexpr auto STEP = std::chrono::milliseconds{100};
+
+    explicit ListenerDepartureRig(uint64_t const entity_low)
+        : m{std::nullopt, entity_low}
+    {
+        ok = m.start_ready();
+        // The entity's registrars share one leavetimer: only the tests' LeaveAll starts it.
+        m.bridge.set_suppress_leaveall(true);
+        (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+        m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+        run(std::chrono::seconds{16}, /*bridge=*/true);
+    }
+
+    /// One STEP of the MRP clock: the bridge's MSRPDUs delivered (when @p bridge), the entity ticked.
+    void step(bool const bridge)
+    {
+        m.bridge_now += STEP;
+        if (bridge) {
+            m.bridge.tick(m.bridge_now);
+            deliver();
+        }
+        m.kit.host().components().msrp_handler.tick(m.bridge_now);
+    }
+    void run(std::chrono::milliseconds const span, bool const bridge)
+    {
+        for (auto left = span; left > std::chrono::milliseconds{0}; left -= STEP) {
+            step(bridge);
+        }
+    }
+    void deliver()
+    {
+        for (auto const& p : std::exchange(m.bridge_out, {})) {
+            m.kit.host().components().msrp_handler.receive_packet(p, m.bridge_now);
+        }
+    }
+    void leave_all() { m.kit.host().components().msrp_handler.receive_packet(LISTENER_LEAVE_ALL, m.bridge_now); }
+
+    /// Stream 0 is declared and its gate open, on the gate's clock now.
+    [[nodiscard]] auto streaming() -> bool
+    {
+        return m.advertising(0) && !m.kit.admitted_talker_streams(MilanKit::raw_now()).empty();
+    }
+    /// Steps (the bridge silent) until stream 0 is neither declared nor admitted; how long that took.
+    auto time_to_withdrawal(std::chrono::milliseconds const limit) -> std::chrono::milliseconds
+    {
+        auto elapsed = std::chrono::milliseconds{0};
+        for (; elapsed < limit && (m.advertising(0) || !m.kit.admitted_talker_streams(MilanKit::raw_now()).empty());
+             elapsed += STEP) {
+            step(false);
+        }
+        return elapsed;
+    }
+    /// SET_MAX_TRANSIT_TIME on stream 0: STREAM_IS_RUNNING while it streams (Milan v1.3 Section 5.4.2.30).
+    auto set_offset(uint64_t const offset_ns) -> uint8_t
+    {
+        atdecc::aem::AemSetMaxTransitTimePayload set{};
+        set.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        set.descriptor_index = uint16_t{0};
+        set.max_transit_time = offset_ns;
+        std::array<uint8_t, atdecc::aem::AemSetMaxTransitTimePayload::LENGTH> body{};
+        span_store(body, set);
+        return m.aem_command(atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME, body).status;
+    }
+
+    MilanKit m;
+    bool ok{false};
+};
+
+}  // namespace
+
+// Milan v1.3 Sections 4.2.7.2.2 and 5.5.2.5: the last Listener's Lv withdraws the Talker
+// Advertise and stops the stream at once, and its settings are no longer STREAM_IS_RUNNING.
+TEST(avb_entity_kit_milan_talker, the_last_listeners_leave_withdraws_at_once)
+{
+    ListenerDepartureRig rig{0x19};
+    EXPECT_TRUE(rig.ok);
+    rig.m.kit.set_on_presentation_offset_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
+    EXPECT_TRUE(rig.streaming());
+    EXPECT_EQ(rig.set_offset(3'000'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+
+    (void)rig.m.bridge.withdraw_listener(rig.m.sid(0), rig.m.bridge_now);
+    for (int i = 0; i < 5; ++i) {
+        rig.step(true);  // the bridge's Lv goes on its JoinTime
+    }
+    EXPECT_FALSE(rig.m.advertising(0));
+    EXPECT_TRUE(rig.m.kit.admitted_talker_streams(MilanKit::raw_now()).empty());
+    EXPECT_FALSE(rig.m.kit.admission_deadline().has_value());
+    EXPECT_EQ(rig.set_offset(3'000'000), atdecc::AEM_STATUS_SUCCESS);
+}
+
+// A Listener gone without an Lv is retired by the next LeaveAll after LeaveTime (5 s, Milan v1.3
+// Table 4.3): the stream is withdrawn then, within 6 s of the LeaveAll, and not before.
+TEST(avb_entity_kit_milan_talker, a_listener_lost_through_a_leave_all_withdraws_after_leave_time)
+{
+    ListenerDepartureRig rig{0x1C};
+    EXPECT_TRUE(rig.ok);
+    EXPECT_TRUE(rig.streaming());
+    rig.leave_all();
+    auto const elapsed = rig.time_to_withdrawal(std::chrono::seconds{10});
+    EXPECT_TRUE(elapsed >= nanoavb::MILAN_MRP_TIMERS.leave_time);
+    EXPECT_TRUE(elapsed <= nanoavb::MILAN_MRP_TIMERS.leave_time + ListenerDepartureRig::STEP);
+    EXPECT_FALSE(rig.m.advertising(0));
+    EXPECT_FALSE(rig.m.kit.admission_deadline().has_value());
+}
+
+// A Listener re-declaring within LeaveTime of a LeaveAll (3 s late here) keeps the stream
+// declared and streaming throughout.
+TEST(avb_entity_kit_milan_talker, a_listener_redeclaring_after_a_leave_all_keeps_streaming)
+{
+    ListenerDepartureRig rig{0x1D};
+    EXPECT_TRUE(rig.ok);
+    rig.leave_all();
+    rig.m.bridge.receive_pdu(LISTENER_LEAVE_ALL, rig.m.bridge_now);  // its re-declaration held back
+    bool held = true;
+    for (int i = 0; i < 30; ++i) {
+        rig.step(false);
+        held = held && rig.streaming();
+    }
+    rig.deliver();
+    for (int i = 0; i < 100; ++i) {
+        rig.step(true);
+        held = held && rig.streaming();
+    }
+    EXPECT_TRUE(held);
 }
 
 // stop() withdraws: undeclared, inactive, every gate shut; a restart declares
