@@ -97,8 +97,8 @@ auto TalkerStreams::shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::S
         }
         case StreamKind::aaf: {
             auto const rate = avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz);
-            if (!rate || spec.format.channels == 0) {
-                return failure(std::errc::invalid_argument);
+            if (!rate || spec.format.channels == 0 || !class_a_framed(spec.format)) {
+                return failure(std::errc::invalid_argument);  // sent in class A packets (class_a_samples_per_packet)
             }
             slot.aaf.emplace(
                 stream_id, spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth, /*pres_offset=*/0);

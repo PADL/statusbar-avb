@@ -3915,19 +3915,20 @@ TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
     EXPECT_TRUE(joined());
 }
 
-// A listed AAF format framed other than class A is refused NOT_SUPPORTED on either stream: the
-// talker sends class A packets (IEEE 1722-2016 Clause 7.3, Milan v1.3 Section 6)
-TEST(avb_entity_kit_formats, an_aaf_format_not_framed_for_class_a_is_refused)
+// A listed AAF format framed other than class A is refused NOT_SUPPORTED on an output, whose talker
+// sends class A packets (IEEE 1722-2016 Clause 7.7, Table 17); an input receives it as it says
+TEST(avb_entity_kit_formats, an_output_format_not_framed_for_class_a_is_refused)
 {
     RateKit m{{}, 0x79, false, false, /*am824=*/true};
     EXPECT_TRUE(m.start_ready());
-    for (auto const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
-        EXPECT_EQ(
-            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, INT24_8CH_48K_12_FRAMES)),
-            atdecc::AEM_STATUS_NOT_SUPPORTED);
-        EXPECT_EQ(m.current_format(type, 0), INT24_8CH_48K);
-    }
+    auto const set = [&m](uint16_t const type) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, INT24_8CH_48K_12_FRAMES));
+    };
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
     EXPECT_TRUE(m.formats.empty());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K_12_FRAMES);
 }
 
 // A stop forgets the static groups with the port that held them: a port opened again before the
