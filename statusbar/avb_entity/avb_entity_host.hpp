@@ -349,9 +349,9 @@ class AvbEntityHost
         on_listener_ready_ = std::move(fn);
     }
 
-    /// Called when the Class A VID in use changes (Milan v1.2 Section 4.2.7.2.1),
-    /// after the host has moved the MVRP join and ACMP stream_vlan_id to @p vlan_id;
-    /// the entity re-tags its frames. The advertise hook is called again when Ready.
+    /// Called when the Class A Domain in use changes, its VID or priority (Milan v1.3 Section 4.2.7.2.1),
+    /// after the host has moved the MVRP join and ACMP stream_vlan_id to @p vlan_id; the entity re-tags
+    /// its frames (msrp_handler.domain()). The advertise hook is called again when Ready and the VID moved.
     void set_on_domain_vid_changed(statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> fn)
     {
         on_domain_vid_changed_ = std::move(fn);
@@ -403,6 +403,8 @@ class AvbEntityHost
     /// talker streams, the entity hook and re-advertising. Wired at
     /// construction: it needs no network.
     void wire_domain_callbacks();
+    /// Advertise the talker streams again at @p time when the Domain's VID @p moved and the host is Ready.
+    void readvertise_after_move(bool moved, TimePoint time);
     void wire_srp_callbacks();  ///< MSRP talker/listener SM drive + the talker-listener bridge (uses the hooks)
     void wire_engine_callbacks();
 
