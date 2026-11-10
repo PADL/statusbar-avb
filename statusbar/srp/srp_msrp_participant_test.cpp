@@ -163,9 +163,9 @@ auto talker_advertise_unique_ids(std::span<uint8_t const> pdu) -> std::vector<ui
     return ids;
 }
 
-// The offset of the FirstValue of the first non-empty TalkerAdvertise vector
-// in the PDU that has its first three-packed event after it, if any.
-auto first_talker_advertise_at(std::span<uint8_t const> pdu) -> std::optional<size_t>
+// The offset of the FirstValue of the first non-empty vector of `type` in the
+// PDU that has its first three-packed event after it, if any.
+auto first_vector_at(std::span<uint8_t const> pdu, AttributeType const type) -> std::optional<size_t>
 {
     size_t p = 1;
     while (p + 4 <= pdu.size()) {
@@ -177,7 +177,7 @@ auto first_talker_advertise_at(std::span<uint8_t const> pdu) -> std::optional<si
         size_t const list_len = (static_cast<size_t>(pdu[p + 2]) << 8) | pdu[p + 3];
         p += 4;
         size_t const list_end = std::min(p + list_len, pdu.size());
-        if (attr_type == static_cast<uint8_t>(AttributeType::TalkerAdvertise)) {
+        if (attr_type == static_cast<uint8_t>(type)) {
             size_t vp = p;
             while (vp + 2 <= list_end) {
                 uint16_t const vh = (static_cast<uint16_t>(pdu[vp]) << 8) | pdu[vp + 1];
@@ -195,6 +195,11 @@ auto first_talker_advertise_at(std::span<uint8_t const> pdu) -> std::optional<si
         p = list_end;
     }
     return std::nullopt;
+}
+
+auto first_talker_advertise_at(std::span<uint8_t const> pdu) -> std::optional<size_t>
+{
+    return first_vector_at(pdu, AttributeType::TalkerAdvertise);
 }
 
 // The three-packed event (802.1Q 10.8.2.10: New 0, JoinIn 1, In 2, JoinMt 3,
@@ -216,6 +221,22 @@ auto first_talker_advertise(std::span<uint8_t const> pdu) -> std::string
         return {};
     }
     return std::format("{} {}", NAMES.at(*event), (static_cast<unsigned>(pdu[*at + 16]) << 8) | pdu[*at + 17]);
+}
+
+// The first Domain value's event, SRclassPriority and SRclassVID, as "Lv 3/2".
+auto first_domain(std::span<uint8_t const> pdu) -> std::string
+{
+    static constexpr std::array<std::string_view, 6> NAMES{"New", "JoinIn", "In", "JoinMt", "Mt", "Lv"};
+    auto const at = first_vector_at(pdu, AttributeType::Domain);
+    if (!at) {
+        return {};
+    }
+    size_t const p = *at;
+    size_t const event = pdu[p + DomainFirstValue::LENGTH] / 36;
+    if (event >= NAMES.size()) {
+        return {};
+    }
+    return std::format("{} {}/{}", NAMES.at(event), pdu[p + 1], (static_cast<unsigned>(pdu[p + 2]) << 8) | pdu[p + 3]);
 }
 
 // True if any message in the PDU has its first vector header carrying the
@@ -801,15 +822,15 @@ struct TalkerChangeRig
         run(4);
     }
 
-    /// `rounds` join periods, both ways; what a sent, first Talker Advertise value of each PDU.
-    auto run(int const rounds) -> std::vector<std::string>
+    /// `rounds` join periods, both ways; what a sent, `describe`d (the first Talker Advertise value) per PDU.
+    auto run(int const rounds, std::string (*describe)(std::span<uint8_t const>) = first_talker_advertise)
+        -> std::vector<std::string>
     {
         std::vector<std::string> sent;
         for (int i = 0; i < rounds; ++i) {
             auto const t = clock.advance(std::chrono::milliseconds(250));
             a.tick(t);
-            std::ranges::transform(
-                fab.a_to_b, std::back_inserter(sent), [](auto const& pdu) { return first_talker_advertise(pdu); });
+            std::ranges::transform(fab.a_to_b, std::back_inserter(sent), [describe](auto const& pdu) { return describe(pdu); });
             fab.deliver_a_to_b(b, t);
             b.tick(t);
             fab.deliver_b_to_a(a, t);
@@ -828,16 +849,23 @@ auto position(std::vector<std::string> const& sent, std::string_view const prefi
     return static_cast<size_t>(found - sent.begin());
 }
 
-// Whether `sent` holds a Join of the old value (`old_size`), then its Lv, then the new value New (`new_size`).
+// Whether `sent` holds a Join of the old value, then its Lv, then the new value New.
+auto joined_left_then_new(std::vector<std::string> const& sent, std::string_view const old_value, std::string_view const new_value)
+    -> bool
+{
+    auto const join = position(sent, std::format("JoinMt {}", old_value)) < sent.size()
+        ? position(sent, std::format("JoinMt {}", old_value))
+        : position(sent, std::format("JoinIn {}", old_value));
+    auto const leave = position(sent, std::format("Lv {}", old_value), join);
+    auto const fresh = position(sent, std::format("New {}", new_value), leave);
+    bool const nothing_new_before = position(sent, std::format("New {}", new_value)) == fresh;
+    return join < leave && leave < fresh && fresh < sent.size() && nothing_new_before;
+}
+
+// The same for Talker Advertise values told apart by MaxFrameSize.
 auto joined_left_then_new(std::vector<std::string> const& sent, int const old_size, int const new_size) -> bool
 {
-    auto const join = position(sent, std::format("JoinMt {}", old_size)) < sent.size()
-        ? position(sent, std::format("JoinMt {}", old_size))
-        : position(sent, std::format("JoinIn {}", old_size));
-    auto const leave = position(sent, std::format("Lv {}", old_size), join);
-    auto const fresh = position(sent, std::format("New {}", new_size), leave);
-    bool const nothing_new_before = position(sent, std::format("New {}", new_size)) == fresh;
-    return join < leave && leave < fresh && fresh < sent.size() && nothing_new_before;
+    return joined_left_then_new(sent, std::to_string(old_size), std::to_string(new_size));
 }
 
 // IEEE 802.1Q-2022 Clause 10.7 and Table 35-6 code 16: a Talker whose TSpec changes joins the old value,
@@ -907,6 +935,25 @@ TEST(msrp_participant, a_leaveall_received_before_the_lv_joins_the_old_value_aga
     EXPECT_TRUE(joined_left_then_new(sent, 150, 224));
     auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
     EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
+}
+
+// Milan v1.3 Section 4.2.7.2.1, IEEE 802.1Q-2022 Clause 10.7: a Domain declared with other parameters
+// joins the old value, leaves it, then declares the new one New, so a peer never registers both.
+TEST(msrp_participant, a_changed_domain_leaves_the_old_value_before_the_new_one)
+{
+    TalkerChangeRig rig{make_talker_adv(0x0101)};
+    DomainFirstValue dfv{};
+    dfv.sr_class_id = SR_CLASS_A;
+    dfv.sr_class_priority = 3;
+    dfv.sr_class_vid = 2;
+    (void)rig.a.declare_domain(dfv, rig.clock.now);
+    (void)rig.run(4, first_domain);
+    dfv.sr_class_priority = 5;
+    dfv.sr_class_vid = 5;
+    (void)rig.a.declare_domain(dfv, rig.clock.now);
+    EXPECT_TRUE(joined_left_then_new(rig.run(6, first_domain), "3/2", "5/5"));
+    auto const* declared = rig.a.find_domain(SR_CLASS_A);
+    EXPECT_TRUE(declared != nullptr && declared->sr_class_priority.get() == 5 && declared->sr_class_vid.get() == 5);
 }
 
 // A change of AccumulatedLatency alone is declared New in place, with no Leave.

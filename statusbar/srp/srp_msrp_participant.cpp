@@ -144,17 +144,24 @@ void note_sent(Record& rec) noexcept
     }
 }
 
-/// Whether declaring @p fv on @p rec, declared and not yet withdrawn to VO, changes more than its
-/// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8; Table 35-6 code 16).
-template <class Record>
-[[nodiscard]] constexpr auto changes_reservation(Record const& rec, TalkerAdvertiseFirstValue const& fv) noexcept -> bool
+/// Whether @p rec, declared and not yet withdrawn to VO, declares another value than @p fv.
+template <class Record, class FirstValue>
+[[nodiscard]] constexpr auto changes_value(Record const& rec, FirstValue const& fv) noexcept -> bool
 {
     auto const state = rec.applicant_sm.current_state();
     bool const declared = rec.operation == mrp::Operation::Declare && state != applicant_sm::Def::State::Start &&
         state != applicant_sm::Def::State::Vo;
-    auto same = rec.first_value;
-    same.accumulated_latency = fv.accumulated_latency;
-    return declared && !(same == fv);
+    return declared && !(rec.first_value == fv);
+}
+
+/// Whether declaring @p fv on @p rec changes more than its AccumulatedLatency (IEEE 802.1Q-2022
+/// Clause 35.2.2.8; Table 35-6 code 16).
+template <class Record>
+[[nodiscard]] constexpr auto changes_reservation(Record const& rec, TalkerAdvertiseFirstValue const& fv) noexcept -> bool
+{
+    auto same = fv;
+    same.accumulated_latency = rec.first_value.accumulated_latency;
+    return changes_value(rec, same);
 }
 
 }  // namespace detail_msrp
@@ -555,7 +562,7 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     if (detail_msrp::changes_reservation(*rec_ptr, fv)) {
-        change_talker(*rec_ptr, fv, now);
+        change_value(*rec_ptr, fv, now);
         return success();
     }
     rec_ptr->pending.reset();
@@ -564,42 +571,60 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
 }
 
 template <class Limits>
-void MsrpParticipantT<Limits>::change_talker(
-    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint const now)
+template <typename Record, typename FirstValue>
+void MsrpParticipantT<Limits>::change_value(Record& rec, FirstValue const& fv, TimePoint const now)
 {
     if (rec.pending) {
         rec.pending->value = fv;  // the old value's Join and Leave go on as they were
         return;
     }
-    rec.pending = mrp::PendingValue<TalkerAdvertiseFirstValue>{.value = fv};
+    rec.pending = mrp::PendingValue<FirstValue>{.value = fv};
     detail_msrp::join_again(rec, now);
     port_.timers().start_join(now);
 }
 
 template <class Limits>
-void MsrpParticipantT<Limits>::rejoin_pending_talkers(TimePoint const now)
+void MsrpParticipantT<Limits>::rejoin_pending(TimePoint const now)
 {
-    for (auto& rec : talker_adv_) {
-        if (rec.pending) {
-            rec.pending->rejoined = false;
-            rec.pending->left = false;
-            detail_msrp::join_again(rec, now);
+    auto const rejoin = [now](auto& records) {
+        for (auto& rec : records) {
+            if (rec.pending) {
+                rec.pending->rejoined = false;
+                rec.pending->left = false;
+                detail_msrp::join_again(rec, now);
+            }
         }
-    }
+    };
+    rejoin(talker_adv_);
+    rejoin(domains_);
 }
 
 template <class Limits>
-void MsrpParticipantT<Limits>::declare_pending_talkers(TimePoint const now)
+void MsrpParticipantT<Limits>::declare_pending(TimePoint const now)
 {
-    for (auto& rec : talker_adv_) {
-        auto const pending = rec.pending.value_or(mrp::PendingValue<TalkerAdvertiseFirstValue>{});
-        if (pending.left) {
-            rec.pending.reset();
-            declare_value(rec, pending.value, now);
-        } else if (pending.rejoined && !detail_msrp::leaving(rec)) {
-            mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
-            port_.timers().start_join(now);
+    auto const settle = [this, now](auto& records) {
+        for (auto& rec : records) {
+            settle_pending(rec, now);
         }
+    };
+    settle(talker_adv_);
+    settle(domains_);
+}
+
+template <class Limits>
+template <typename Record>
+void MsrpParticipantT<Limits>::settle_pending(Record& rec, TimePoint const now)
+{
+    if (!rec.pending) {
+        return;
+    }
+    auto const pending = *rec.pending;
+    if (pending.left) {
+        rec.pending.reset();
+        declare_value(rec, pending.value, now);
+    } else if (pending.rejoined && !detail_msrp::leaving(rec)) {
+        mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
+        port_.timers().start_join(now);
     }
 }
 
@@ -676,6 +701,11 @@ auto MsrpParticipantT<Limits>::declare_domain(DomainFirstValue const& fv, TimePo
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
+    if (detail_msrp::changes_value(*rec_ptr, fv)) {
+        change_value(*rec_ptr, fv, now);
+        return success();
+    }
+    rec_ptr->pending.reset();
     declare_value(*rec_ptr, fv, now);
     return success();
 }
@@ -685,6 +715,7 @@ auto MsrpParticipantT<Limits>::withdraw_domain(uint8_t sr_class_id, TimePoint no
 {
     for (auto& rec : domains_) {
         if (rec.first_value.sr_class_id.get() == sr_class_id) {
+            rec.pending.reset();
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             port_.timers().start_join(now);
             return success();
@@ -841,7 +872,7 @@ void MsrpParticipantT<Limits>::send_leave_all(TimePoint now)
         }
     };
     [&](auto&... all) { (drive(all), ...); }(talker_adv_, talker_failed_, listeners_, domains_);
-    rejoin_pending_talkers(now);  // the old value joined again, in this PDU, before its Lv
+    rejoin_pending(now);  // the old value joined again, in this PDU, before its Lv
 
     // The LeaveAll FSM is now in Active; dispatch Tx so it transitions back to
     // Passive with tx_leaveall_pending=true, and emit the PDU WITH the LeaveAll
@@ -1051,7 +1082,7 @@ void MsrpParticipantT<Limits>::decode_vector_attribute(
         switch (attr_type) {
             case AttributeType::TalkerAdvertise:
                 drive_leaveall(talker_adv_);
-                rejoin_pending_talkers(now);  // the old value joined again before its Lv
+                rejoin_pending(now);  // the old value joined again before its Lv
                 break;
             case AttributeType::TalkerFailed:
                 drive_leaveall(talker_failed_);
@@ -1570,7 +1601,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     // Reuse the participant's pre-allocated PDU buffer; no per-tx heap.
     pdu_buffer_.rewind();
     if (!append_u8(pdu_buffer_, PROTOCOL_VERSION)) {
-        declare_pending_talkers(now);
+        declare_pending(now);
         return;
     }
 
@@ -1597,7 +1628,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     }
 
     if (!any_message) {
-        declare_pending_talkers(now);
+        declare_pending(now);
         return;
     }
     // Final message EndMark
@@ -1606,7 +1637,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     if (send_pdu_) {
         (void)send_pdu_(pdu_buffer_.get_span());
     }
-    declare_pending_talkers(now);
+    declare_pending(now);
 }
 
 // ============================================================
