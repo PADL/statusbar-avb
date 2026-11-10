@@ -197,6 +197,14 @@ auto SrpPort::find_registered_talker_failed(Eui48 const& destination, uint16_t c
 
 void SrpPort::on_vid_changed(uint16_t const old_vid, uint16_t const new_vid, TimePoint const now)
 {
+    domain_changed_ = true;  // reported by flush_domain() once the PDU is done
+    if (old_vid != new_vid) {
+        move_talkers(old_vid, new_vid, now);
+    }
+}
+
+void SrpPort::move_talkers(uint16_t const old_vid, uint16_t const new_vid, TimePoint const now)
+{
     (void)mvrp_.withdraw_vlan(old_vid, now);
     (void)mvrp_.register_vlan(new_vid, now);
     for (size_t i = 0; i < msrp_.talker_streams().size(); ++i) {
@@ -206,7 +214,6 @@ void SrpPort::on_vid_changed(uint16_t const old_vid, uint16_t const new_vid, Tim
             (void)msrp_.talker_advertise(info, now);  // updates the entry in place
         }
     }
-    domain_changed_ = true;  // reported by flush_domain() once the PDU is done
 }
 
 void SrpPort::on_peer_domain_declared(statusbar::srp::msrp::DomainFirstValue const& fv) noexcept

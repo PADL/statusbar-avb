@@ -377,9 +377,12 @@ class MsrpHandler
     /// The domain in use: the configured one, or the one adopted
     /// from the bridge's Domain declaration.
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return domain_; }
+    /// The configured domain (set_domain()), which reset_domain() returns to.
+    [[nodiscard]] auto configured_domain() const noexcept -> DomainInfo const& { return default_domain_; }
 
-    /// Called with (old VID, new VID) when the SRclassVID in use changes (adopted, or
-    /// reset_domain()); the talker moves its MVRP join, Talker Advertise and stream frames.
+    /// Called with (old VID, new VID) when the Domain in use changes, its SRclassVID or priority (adopted, or
+    /// reset_domain()): the talker moves its MVRP join, Talker Advertise and stream frames' tag. A priority
+    /// change alone passes the VID twice; its talkers are declared again here.
     void set_on_domain_vid_changed(statusbar::sg14::inplace_function<void(uint16_t, uint16_t, TimePoint), 64> cb)
     {
         on_domain_vid_changed_ = std::move(cb);
@@ -833,16 +836,17 @@ class MsrpHandler
         follow_domain(old, last_event_time_);
     }
 
-    /// The talkers after the Domain moved from @p old: a new VID told on_domain_vid_changed_ (which
-    /// re-advertises them), a new priority alone declared again here.
+    /// The talkers after the Domain moved from @p old: a new priority alone declared again here, a new VID
+    /// by on_domain_vid_changed_'s consumers; either change told it.
     void follow_domain(DomainInfo const& old, TimePoint const now)
     {
-        if (old.sr_class_vid != domain_.sr_class_vid && on_domain_vid_changed_) {
-            on_domain_vid_changed_(old.sr_class_vid, domain_.sr_class_vid, now);
-            return;
-        }
-        if (old.sr_class_priority != domain_.sr_class_priority) {
+        bool const moved = old.sr_class_vid != domain_.sr_class_vid;
+        bool const reprioritised = old.sr_class_priority != domain_.sr_class_priority;
+        if (reprioritised && !moved) {
             redeclare_talkers(now);
+        }
+        if ((moved || reprioritised) && on_domain_vid_changed_) {
+            on_domain_vid_changed_(old.sr_class_vid, domain_.sr_class_vid, now);
         }
     }
 

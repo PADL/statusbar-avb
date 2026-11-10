@@ -374,7 +374,8 @@ TEST(nanoavb_srp_msrp, adopts_a_class_a_domain_at_another_priority_and_ignores_c
     b.run(4);
     EXPECT_EQ(b.station.domain().sr_class_priority, 4);
     EXPECT_EQ(b.station.domain().sr_class_vid, 2);
-    EXPECT_TRUE(changes.empty());  // the VID is the same
+    using Changes = std::vector<std::pair<uint16_t, uint16_t>>;
+    EXPECT_TRUE(changes == Changes({{2, 2}}));  // told, the VID unchanged: the frames' tag follows
     EXPECT_EQ(b.station.talker_streams().front().priority, 4);
     auto const* fv = b.bridge.find_registered_talker_advertise(info.stream_id);
     EXPECT_FALSE(fv == nullptr || fv->get_priority() != 4);
@@ -382,6 +383,7 @@ TEST(nanoavb_srp_msrp, adopts_a_class_a_domain_at_another_priority_and_ignores_c
     (void)b.station.reset_domain(b.now);
     EXPECT_EQ(b.station.domain().sr_class_priority, 3);
     EXPECT_EQ(b.station.talker_streams().front().priority, 3);
+    EXPECT_TRUE(changes == Changes({{2, 2}, {2, 2}}));
 }
 
 //

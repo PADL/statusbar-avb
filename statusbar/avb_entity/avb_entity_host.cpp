@@ -84,16 +84,25 @@ void AvbEntityHost::wire_domain_callbacks()
     // it in ACMP, let the entity re-tag, and re-advertise the talker streams.
     components_.msrp_handler.set_on_domain_vid_changed(
         [this](uint16_t const old_vid, uint16_t const new_vid, TimePoint const time) {
-            ctl_log().status("msrp: Class A VID {} -> {} (Domain)", old_vid, new_vid);
-            move_class_a_vlan(components_, old_vid, new_vid, time);
+            auto const priority = components_.msrp_handler.domain().sr_class_priority;
+            ctl_log().status("msrp: Class A VID {} -> {}, priority {} (Domain)", old_vid, new_vid, priority);
+            if (old_vid != new_vid) {
+                move_class_a_vlan(components_, old_vid, new_vid, time);
+            }
             if (on_domain_vid_changed_) {
                 on_domain_vid_changed_(new_vid, time);
             }
             refresh_avb_info();
-            if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready && advertise_streams_) {
-                advertise_streams_(time);
-            }
+            readvertise_after_move(old_vid != new_vid, time);
         });
+}
+
+void AvbEntityHost::readvertise_after_move(bool const moved, TimePoint const time)
+{
+    // A priority change alone: MsrpHandler declared the talkers again already.
+    if (moved && supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready && advertise_streams_) {
+        advertise_streams_(time);
+    }
 }
 
 void AvbEntityHost::wire_identify_control()
