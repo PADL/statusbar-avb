@@ -270,10 +270,11 @@ struct ListenerStreams
 
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
-    /// Whether @p frame is for @p slot: its kind and its connected stream_id.
-    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) const -> bool;
-    /// @p frame into @p slot unless it is stopped or being re-shaped. Reactor/RX thread.
-    void receive_into(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// Whether @p frame, of subtype_kind() @p kind, is for @p slot: its kind and its connected stream_id.
+    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, StreamKind kind, std::span<uint8_t const> frame) const
+        -> bool;
+    /// @p frame, of subtype_kind() @p kind, into @p slot unless it is stopped or being re-shaped. Reactor/RX thread.
+    void receive_into(ListenerStreamSlot& slot, StreamKind kind, std::span<uint8_t const> frame, int64_t gptp_now_ns);
     /// One AM824, AAF or CRF frame into @p slot (held under its guard) and its engaged @p ctx: checked,
     /// delivered, counted.
     void receive_am824(

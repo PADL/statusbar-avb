@@ -209,8 +209,6 @@ TEST(raw_aaf, render_fills_the_payload_and_the_header_carries_the_pts)
     EXPECT_EQ(ctx.sequence_num, uint8_t{1});
 }
 
-// The raw path's pts is the wire presentation time: a context presentation
-// offset is not added on top (the caller has applied its own).
 // An AAF stream whose format names other samples per frame than class A's at its rate is not
 // opened: the talker sends class A packets (IEEE 1722-2016 Clause 7.7, Table 17)
 TEST(talker_streams, an_aaf_format_not_framed_for_class_a_is_not_opened)
@@ -228,6 +226,8 @@ TEST(talker_streams, an_aaf_format_not_framed_for_class_a_is_not_opened)
     EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
 }
 
+// The raw path's pts is the wire presentation time: a context presentation
+// offset is not added on top (the caller has applied its own).
 TEST(raw_aaf, pts_is_the_wire_timestamp_whatever_the_context_offset)
 {
     avtp::AafStreamOutputContext ctx{

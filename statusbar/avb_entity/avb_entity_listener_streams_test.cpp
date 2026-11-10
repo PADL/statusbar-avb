@@ -419,8 +419,6 @@ TEST(listener_timed, refusals_and_trailing_bytes)
     EXPECT_EQ(wide.packets_received, uint32_t{0});
 }
 
-// The timed sink gets each AAF packet through on_stream_rx_frame, with or without a consume fn
-// (same packet, same counters); detaching stops delivery.
 // Two inputs connected to one talker stream each receive its frames
 TEST(listener_timed, a_stream_shared_by_two_inputs_reaches_both)
 {
@@ -446,6 +444,8 @@ TEST(listener_timed, a_stream_shared_by_two_inputs_reaches_both)
     EXPECT_EQ(std::ranges::count(sink.seen, uint16_t{1}, [](auto const& r) { return r.packet.stream_index; }), 1);
 }
 
+// The timed sink gets each AAF packet through on_stream_rx_frame, with or without a consume fn
+// (same packet, same counters); detaching stops delivery.
 TEST(listener_timed, delivery_through_on_stream_rx_frame)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
