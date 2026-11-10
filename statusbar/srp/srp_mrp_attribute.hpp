@@ -28,6 +28,16 @@ enum class Operation : uint8_t
     Declare = 1,   ///< declared by a local client
 };
 
+/// A local declaration's next value, declared once the old value has been joined since the last LeaveAll
+/// and then left (IEEE 802.1Q-2022 Clause 10.7: a changed value is another attribute).
+template <typename FirstValue>
+struct PendingValue
+{
+    FirstValue value{};
+    bool rejoined{false};  ///< a Join or New of the old value sent since the change or the last LeaveAll
+    bool left{false};      ///< then its Lv sent
+};
+
 /// Combined per-attribute state: Applicant FSM instance + Registrar
 /// FSM instance + the protocol-specific FirstValue payload.
 ///
@@ -40,9 +50,7 @@ struct AttributeRecord
 {
     FirstValue first_value{};
     Operation operation{Operation::Register};
-    /// A local declaration's next value, declared once the Leave for first_value is sent (IEEE 802.1Q-2022
-    /// Clause 10.7: a changed value is another attribute).
-    std::optional<FirstValue> pending_value{};
+    std::optional<PendingValue<FirstValue>> pending{};  ///< the next value, while the old one is left
 
     // Per-attribute state machine instances. The Contexts hold only
     // transition side-effect outputs; the state_ itself lives inside
