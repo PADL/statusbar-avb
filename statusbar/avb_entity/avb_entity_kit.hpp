@@ -140,9 +140,9 @@ class AvbEntityKit
 #if defined(__linux__)
     // --- The listener's VID on the NIC's VLAN filter (Linux) -------------------
 
-    /// Keep the SR-class VID in use on @p ifindex's receive VLAN filter through
-    /// @p control until stop(); a no-op without stream inputs. start() calls it
-    /// unless called first; @p control must outlive the kit.
+    /// Keep the SR-class VID in use, and each other VID a settled input uses, on @p ifindex's
+    /// receive VLAN filter through @p control until stop(); a no-op without stream inputs. start()
+    /// calls it unless called first; @p control must outlive the kit.
     void bind_listener_vlan(net::vlan::VlanControl& control, int ifindex);
 #endif
 
@@ -592,8 +592,8 @@ class AvbEntityKit
     /// Report settled Milan sink @p index's Talker registration (Section
     /// 5.5.3.3: matching stream ID, destination address and VLAN ID).
     void refresh_sink_registration(uint16_t index, TimePoint now);
-    /// A settled Milan input's VID joins MVRP at @p now (refcounted; the Class
-    /// A VID is the host's), and leaves when the last such input goes.
+    /// A settled Milan input's VID joins MVRP and the NIC's VLAN filter at @p now (refcounted;
+    /// the Class A VID is the host's), and leaves both when the last such input goes.
     void join_sink_vlan(uint16_t vid, TimePoint now);
     void leave_sink_vlan(uint16_t vid, TimePoint now);
     /// Re-read talker stream @p idx's registered Listener; true when it changed (GET_STREAM_INFO
@@ -960,6 +960,8 @@ class AvbEntityKit
     /// that deletes its link through it on destruction.
     std::unique_ptr<net::vlan::VlanLinkClient> vlan_client_{};
     ListenerVlan listener_vlan_{host_.ctl_log()};
+    /// The other VIDs settled listener streams use (sink_vlans_), on the same filter.
+    SinkVlanFilters<MAX_ENTITY_STREAMS> sink_vlan_filters_{host_.ctl_log()};
 #endif
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
