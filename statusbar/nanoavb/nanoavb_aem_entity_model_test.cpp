@@ -1474,6 +1474,11 @@ TEST(entity_name, get_set_round_trip_and_callback_and_read_descriptor)
     EXPECT_EQ(malformed.status, AEM_STATUS_BAD_ARGUMENTS);
     EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"LiveName"});
 
+    // A body shorter than AemNamePayload is refused, not read past (found by nanoavb_aem_fuzzer).
+    std::array<uint8_t, 2> const short_body{};
+    EXPECT_NE(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, short_body).status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"LiveName"});
+
     // READ_DESCRIPTOR of the ENTITY now reflects the updated name too.
     AemEntityModel const model{handler, *storage_result};
     std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> dbuf{};
