@@ -1107,6 +1107,11 @@ class AemCommandHandler
     /// The GET that reads what a SET writes (SET_NAME -> GET_NAME, SET_CONTROL ->
     /// GET_CONTROL, ...), or nullopt for a SET without one.
     [[nodiscard]] static auto get_twin_of(uint16_t set_command_type) noexcept -> std::optional<uint16_t>;
+    /// @p set_command's response @p r on SUCCESS, else refused_set()'s: for a SET with no deferral, whose
+    /// hook's IN_PROGRESS is a refusal too (SET_CONFIGURATION, IEEE 1722.1-2021 Clause 7.4.7.1).
+    [[nodiscard]] auto refuse_unless_success(
+        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
     /// @p set_command's response @p r on SUCCESS or IN_PROGRESS, or when the value in force cannot be
     /// read; else @p r's status with that value (a handler-answered SET: SET_STREAM_INFO, SET_MAX_TRANSIT_TIME).
     [[nodiscard]] auto answer_set(

@@ -298,7 +298,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             if (auto const blocked = check_exclusive_access(header)) {
                 return refused_set(*blocked, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
             }
-            return answer_set(
+            return refuse_unless_success(
                 AEM_COMMAND_SET_CONFIGURATION, handle_set_configuration(command_data, out_buffer), command_data, out_buffer);
 
         case AEM_COMMAND_CONTROLLER_AVAILABLE:
@@ -713,6 +713,13 @@ auto AemCommandHandler::answer_set(
     }
     span_copy(out_buffer.first(n), std::span<uint8_t const>{in_force}.first(n));
     return {.status = r.status, .size = n};
+}
+
+auto AemCommandHandler::refuse_unless_success(
+    uint16_t const set_command, AemCommandResponse const r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    return r.status == AEM_STATUS_SUCCESS ? r : refused_set(r.status, set_command, command_data, out_buffer);
 }
 
 auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uint8_t const> request, std::span<uint8_t> out_buffer)
