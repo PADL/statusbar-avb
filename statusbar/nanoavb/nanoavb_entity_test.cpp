@@ -3254,6 +3254,85 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_in_the_2021_layout)
     EXPECT_EQ(body_of(*solicited(sends)).size(), AemStreamInfoPayload::LENGTH);
 }
 
+namespace {
+
+/// A get_stream_info callback reporting stream output @p index's offset in @p store as its accumulated latency.
+void serve_offsets_as_stream_info(AemCommandHandler& handler, OffsetStore& store)
+{
+    handler.set_get_stream_info(
+        [&store](uint16_t const type, uint16_t const index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension&) -> bool {
+            if (type != DESCRIPTOR_STREAM_OUTPUT || index >= store.offsets.size()) {
+                return false;
+            }
+            out.flags = quadlet_t{stream_info_flags::MSRP_ACC_LAT_VALID};
+            out.msrp_accumulated_latency = quadlet_t{store.offsets[index]};
+            return true;
+        });
+}
+
+}  // namespace
+
+// IEEE 1722.1-2021 Clause 7.4.15.1: a refused SET_STREAM_INFO answers the stream's values in force.
+TEST(nanoavb_entity_presentation_offset, a_refused_set_stream_info_answers_the_values_in_force)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    OffsetStore store;
+    store.install(handler);
+    serve_offsets_as_stream_info(handler, store);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    handler.set_stream_info_layout(StreamInfoLayout::ieee_2021);
+
+    using namespace stream_info_flags;
+    auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, MSRP_ACC_LAT_VALID, 3'000'000);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
+    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(body_of(*solicited(sends)).size(), AEM_STREAM_INFO_2021_LENGTH);
+    AemStreamInfoPayload answered{};
+    span_load(answered, body_of(*solicited(sends)).first(AemStreamInfoPayload::LENGTH));
+    EXPECT_EQ(answered.msrp_accumulated_latency.get(), 2'000'000U);
+}
+
+// IEEE 1722.1-2021 Clause 7.4.77.1: a refused SET_MAX_TRANSIT_TIME answers the max transit time in force.
+TEST(nanoavb_entity_presentation_offset, a_refused_set_max_transit_time_answers_the_time_in_force)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    OffsetStore store;
+    store.install(handler);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    auto const answered = [&sends] {
+        AemSetMaxTransitTimePayload payload{};
+        span_load(payload, body_of(*solicited(sends)).first(AemSetMaxTransitTimePayload::LENGTH));
+        return payload.max_transit_time.get();
+    };
+
+    inject_command(
+        handler,
+        kEntity,
+        kControllerA,
+        kMacA,
+        AEM_COMMAND_SET_MAX_TRANSIT_TIME,
+        max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, 0x80000000));
+    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(answered(), uint64_t{2'000'000});
+    sends.clear();
+    store.set_status = AEM_STATUS_STREAM_IS_RUNNING;
+    inject_command(
+        handler,
+        kEntity,
+        kControllerA,
+        kMacA,
+        AEM_COMMAND_SET_MAX_TRANSIT_TIME,
+        max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 1, 3'000'000));
+    EXPECT_EQ(status_of(sends), int{AEM_STATUS_STREAM_IS_RUNNING});
+    EXPECT_EQ(answered(), uint64_t{2'000'000});
+}
+
 TEST(nanoavb_entity_milan, start_stop_streaming_not_supported_on_outputs)
 {
     SetAcceptingHandler app;
