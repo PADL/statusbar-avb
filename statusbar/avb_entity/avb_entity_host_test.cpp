@@ -23,11 +23,12 @@
 #    include "statusbar/itc/itc_stop_token.hpp"
 #    include "statusbar/net/net_message_reactor.hpp"
 
+#    include <poll.h>
 #    include <sched.h>
 #    include <unistd.h>
 
+#    include <csignal>
 #    include <cstdio>
-#    include <optional>
 
 #    include <net/if.h>
 #    include <sys/ioctl.h>
@@ -651,13 +652,23 @@ TEST(avb_entity_host_link, a_link_back_after_a_down_sends_a_leave_all_at_once)
 
 namespace {
 
-/// The one msrp_mapping a live control plane reported, or none: POD, to cross the pipe.
+/// What the child saw: POD, to cross the pipe.
 struct MappingReport
 {
-    bool live{false};
+    bool entered{false};  ///< the namespace was entered and its loopback brought up
+    bool live{false};     ///< the control plane started with its MSRP socket open
     size_t mappings{0};
     uint8_t traffic_class{0};
 };
+
+/// The child's report, and whether it exited 0 with all of it within the probe's time.
+struct ProbeResult
+{
+    bool finished{false};
+    MappingReport report{};
+};
+
+constexpr int PROBE_TIMEOUT_MS = 5000;
 
 auto write_own_map(char const* path, char const* line) -> bool
 {
@@ -699,7 +710,8 @@ auto enter_namespace_with_loopback_up() -> bool
 /// In the child: the msrp_mapping a host declaring @p domain reports on the namespace's loopback.
 void report_mapping(statusbar::nanoavb::DomainInfo const& domain, MappingReport& out)
 {
-    if (!enter_namespace_with_loopback_up()) {
+    out.entered = enter_namespace_with_loopback_up();
+    if (!out.entered) {
         return;
     }
     auto const blob = make_interface_blob();
@@ -716,12 +728,22 @@ void report_mapping(statusbar::nanoavb::DomainInfo const& domain, MappingReport&
     out.traffic_class = info.msrp_mappings.empty() ? 0 : info.msrp_mappings[0].traffic_class;
 }
 
-/// report_mapping() for @p domain, run in a child; nullopt when the child could not run it.
-auto probe_mapping(statusbar::nanoavb::DomainInfo const& domain) -> std::optional<MappingReport>
+/// The child's report through @p fd, if it comes within PROBE_TIMEOUT_MS.
+auto read_report(int const fd, MappingReport& report) -> bool
+{
+    pollfd ready{.fd = fd, .events = POLLIN, .revents = 0};
+    if (::poll(&ready, 1, PROBE_TIMEOUT_MS) != 1) {
+        return false;
+    }
+    return ::read(fd, &report, sizeof(report)) == static_cast<ssize_t>(sizeof(report));
+}
+
+/// report_mapping() for @p domain, run in a child; a child that does not report in time is killed.
+auto probe_mapping(statusbar::nanoavb::DomainInfo const& domain) -> ProbeResult
 {
     std::array<int, 2> fds{-1, -1};
     if (::pipe(fds.data()) != 0) {
-        return std::nullopt;
+        return {};
     }
     pid_t const child = ::fork();
     if (child == 0) {
@@ -730,14 +752,19 @@ auto probe_mapping(statusbar::nanoavb::DomainInfo const& domain) -> std::optiona
         ::_exit(::write(fds[1], &report, sizeof(report)) == static_cast<ssize_t>(sizeof(report)) ? 0 : 1);
     }
     (void)::close(fds[1]);
-    MappingReport report{};
-    bool const read = child > 0 && ::read(fds[0], &report, sizeof(report)) == static_cast<ssize_t>(sizeof(report));
+    ProbeResult result{};
+    bool const reported = child > 0 && read_report(fds[0], result.report);
     (void)::close(fds[0]);
-    if (child > 0) {
-        int status = 0;
-        (void)::waitpid(child, &status, 0);
+    if (child <= 0) {
+        return result;
     }
-    return read && report.live ? std::optional{report} : std::nullopt;
+    if (!reported) {
+        (void)::kill(child, SIGKILL);
+    }
+    int status = 0;
+    bool const exited = ::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    result.finished = reported && exited;
+    return result;
 }
 
 }  // namespace
@@ -747,13 +774,15 @@ TEST(avb_entity_host_avb_info, an_msrp_mapping_names_its_class_by_sr_class_id)
 {
     auto const class_a = probe_mapping(statusbar::nanoavb::DomainInfo{});
     auto const class_b = probe_mapping(statusbar::nanoavb::CLASS_B_DOMAIN);
-    if (!class_a || !class_b) {
-        SKIP("no user and network namespace, or no MSRP socket on its loopback");
+    EXPECT_TRUE(class_a.finished && class_b.finished);
+    if (!class_a.report.entered || !class_b.report.entered) {
+        SKIP("no user and network namespace for this uid");
     }
-    EXPECT_EQ(class_a->mappings, size_t{1});
-    EXPECT_EQ(class_a->traffic_class, uint8_t{6});
-    EXPECT_EQ(class_b->mappings, size_t{1});
-    EXPECT_EQ(class_b->traffic_class, uint8_t{5});
+    EXPECT_TRUE(class_a.report.live && class_b.report.live);
+    EXPECT_EQ(class_a.report.mappings, size_t{1});
+    EXPECT_EQ(class_a.report.traffic_class, uint8_t{6});
+    EXPECT_EQ(class_b.report.mappings, size_t{1});
+    EXPECT_EQ(class_b.report.traffic_class, uint8_t{5});
 }
 
 #endif  // __linux__
