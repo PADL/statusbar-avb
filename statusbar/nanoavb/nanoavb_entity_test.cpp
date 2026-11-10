@@ -2790,8 +2790,8 @@ class NotifyingHandler : public AemEntityHandler
     auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
         -> uint8_t override
     {
-        std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, 0x00};
         for (size_t n = 0; n < side_effects; ++n) {
+            std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, static_cast<uint8_t>(n)};  // STREAM_OUTPUT n
             aem->emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, body);
         }
         return AEM_STATUS_SUCCESS;
@@ -2822,7 +2822,35 @@ TEST(nanoavb_entity_unsolicited_notify, the_commands_own_notification_follows_it
     EXPECT_TRUE(response != sends.end() && response->dest == kMacA);
     EXPECT_TRUE(header_of(sends.back()).is_unsolicited());
     EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
-    EXPECT_EQ(std::ranges::count_if(response, sends.end(), [](CapturedSend const& s) { return header_of(s).is_unsolicited(); }), 4);
+    EXPECT_EQ(
+        std::ranges::count_if(response, sends.end(), [](CapturedSend const& s) { return header_of(s).is_unsolicited(); }),
+        3);  // n4, n5 and its own
+}
+
+// Notifications a hook raises past the queue keep the order they were raised in; the command's own is last.
+TEST(nanoavb_entity_unsolicited_notify, notifications_past_the_queue_keep_their_order)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 7;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    std::vector<uint8_t> raised;
+    for (auto const& s : sends) {
+        if (header_of(s).is_unsolicited() && header_of(s).command_code() == AEM_COMMAND_GET_STREAM_INFO) {
+            raised.push_back(body_of(s)[3]);
+        }
+    }
+    EXPECT_TRUE(raised == (std::vector<uint8_t>{0, 1, 2, 3, 4, 5, 6}));
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_TRUE(
+        std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); }) < sends.end() - 1);
 }
 
 namespace {
