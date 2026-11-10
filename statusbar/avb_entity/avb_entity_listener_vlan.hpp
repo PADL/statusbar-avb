@@ -134,7 +134,7 @@ class SinkVlanFilters
             free->reset();  // not created (warned): the slot stays free, the next hold tries again
         }
     }
-    /// Take @p vid off the filter (its link deleted if created here).
+    /// Remove @p vid from the filter (its link deleted if created here).
     void drop(uint16_t const vid)
     {
         if (auto* const held = slot_of(vid); held != nullptr) {
@@ -162,7 +162,7 @@ class SinkVlanFilters
             }
         }
     }
-    /// Take every VID off and unbind.
+    /// Remove every VID from the filter and unbind.
     void release()
     {
         for (auto& link : links_) {
