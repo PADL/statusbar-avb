@@ -51,11 +51,6 @@ class MvuCommandHandler
     /// current. NanoAvbComponents seeds it, so a notification before any MVU command carries it.
     void set_entity_id(Eui64 const& entity_id) noexcept { our_entity_id_ = entity_id; }
 
-    /// GET_MILAN_INFO certification_version (atdecc::mvu::milan_certification_version);
-    /// 0, the default, until the entity has passed Milan certification.
-    void set_certification_version(uint32_t const version) noexcept { certification_version_ = version; }
-    [[nodiscard]] auto certification_version() const noexcept -> uint32_t { return certification_version_; }
-
     /// GET_MILAN_INFO features_flags beyond MVU_BINDING (which a Milan listener gives), such as
     /// MVU_FEATURES_TALKER_SIGNAL_PRESENCE: set before the entity is advertised, as they may not
     /// change (Milan v1.3 Section 5.4.4.1).
@@ -225,7 +220,6 @@ class MvuCommandHandler
     void send_unsolicited(uint16_t command_type, Eui64 const& requester, std::span<uint8_t const> body);
 
     EntityProfile profile_{};
-    uint32_t certification_version_{0};
     uint32_t extra_features_{0};
     SendAemResponseFn send_response_{};
     AemCommandHandler* aem_{nullptr};

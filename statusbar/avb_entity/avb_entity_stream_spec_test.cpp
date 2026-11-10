@@ -245,7 +245,7 @@ TEST(stream_spec_decode, am824_motu_16a_words_are_accepted)
 TEST(stream_spec_decode, am824_channel_counts_outside_1_2_4_6_8_are_other)
 {
     for (uint8_t ch = 0; ch <= 64; ++ch) {
-        auto const f = decode_stream_format(avtp::make_am824_stream_format(2, ch));
+        auto const f = decode_stream_format(0x00a0020040000000ULL | (uint64_t{ch} << 32U) | (uint64_t{ch} << 8U));
         bool const carried = ch == 1 || ch == 2 || ch == 4 || ch == 6 || ch == 8;
         EXPECT_EQ(f.kind == StreamKind::am824, carried);
         EXPECT_EQ(f.channels, carried ? ch : 0);

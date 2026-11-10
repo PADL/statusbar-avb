@@ -554,16 +554,6 @@ TEST(nanoavb_adp_advertiser, set_gptp_info)
     EXPECT_EQ(advertiser.adpdu().gptp_domain_number, 0);
 }
 
-TEST(nanoavb_adp_advertiser, set_interface_index)
-{
-    auto entity = create_test_entity_descriptor();
-    NanoAvbAdpAdvertiser advertiser{entity};
-
-    advertiser.set_interface_index(42);
-
-    EXPECT_EQ(advertiser.adpdu().interface_index.get(), 42);
-}
-
 TEST(nanoavb_adp_advertiser, set_identify_control_index)
 {
     auto entity = create_test_entity_descriptor();

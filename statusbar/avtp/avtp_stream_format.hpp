@@ -241,18 +241,6 @@ static_assert(offsetof(Am824StreamFormat, label_iec_60958_cnt) == 5);
 static_assert(offsetof(Am824StreamFormat, label_mbla_cnt) == 6);
 static_assert(offsetof(Am824StreamFormat, label_midi_smpte_cnt) == 7);
 
-/// The non-blocking, MBLA-only IEC 61883-6 format word for @p channels at sampling frequency code
-/// @p sfc (IEEE 1722-2016 Annex I), with the ut and sc flags as given.
-[[nodiscard]] constexpr auto make_am824_stream_format(
-    uint8_t const sfc, uint8_t const channels, bool const up_to = false, bool const synchronous_clock = false) noexcept -> uint64_t
-{
-    uint8_t const flags = static_cast<uint8_t>(
-        Am824StreamFormat::FLAG_NB | (up_to ? Am824StreamFormat::FLAG_UT : 0U) |
-        (synchronous_clock ? Am824StreamFormat::FLAG_SC : 0U));
-    return (uint64_t{Am824StreamFormat::SF_FMT_AM824} << 48U) | (uint64_t{static_cast<uint8_t>(sfc & 0x07U)} << 40U) |
-        (uint64_t{channels} << 32U) | (uint64_t{flags} << 24U) | (uint64_t{channels} << 8U);
-}
-
 /// Decode an IEC 61883-6 stream format (layout: Am824StreamFormat) as "AM824 <DBS>ch <rate>";
 /// a word whose byte 1 is not IEC 61883-6 falls back to hex.
 [[nodiscard]] inline auto decode_am824_stream_format(uint64_t fmt) -> std::string
