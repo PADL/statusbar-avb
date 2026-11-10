@@ -167,6 +167,15 @@ class MilanListener
     using DelayFn = sg14::inplace_function<Duration(), 32>;
     /// Answers a BIND_STREAM / UNBIND_STREAM with the ACMP status its ACMP form would carry.
     using ReplyFn = sg14::inplace_function<void(uint8_t acmp_status), 64>;
+    /// A talker's last ENTITY_AVAILABLE, received before a bind, and when it stops being valid.
+    struct KnownTalker
+    {
+        AdpDu adp{};
+        TimePoint valid_until{};
+    };
+    /// Talker @p entity_id's last ENTITY_AVAILABLE still valid and naming this entity's gPTP grandmaster
+    /// and domain (the checks Section 5.6.4.5.1 makes of an ADP), or nullopt.
+    using TalkerLookupFn = sg14::inplace_function<std::optional<KnownTalker>(ieee::Eui64 const& entity_id), 64>;
 
     explicit MilanListener(ieee::Eui64 entity_id = {}, size_t sinks = 0);
 
@@ -189,6 +198,9 @@ class MilanListener
     void set_on_info_ex_changed(SinkFn fn) { on_info_ex_changed_ = std::move(fn); }
     void set_authorized(AuthorizedFn fn) { authorized_ = std::move(fn); }
     void set_delay(DelayFn fn) { delay_ = std::move(fn); }
+    /// The ADP already received of a talker a new binding names: the sink starts discovered when there is one,
+    /// where Milan restarts discovery at a bind (docs/AVB_ENTITY_KIT.md says why).
+    void set_talker_lookup(TalkerLookupFn fn) { talker_lookup_ = std::move(fn); }
     /// Whether a discovered talker's new current_configuration_index departs it (Milan v1.3
     /// Section 5.6.4.5.2; not in v1.2). Default true.
     void set_configuration_departs(bool const departs) noexcept { configuration_departs_ = departs; }
@@ -338,6 +350,8 @@ class MilanListener
     void adp_not_discovered(uint16_t index, AdpDu const& adp, bool same_gptp, TimePoint valid_until, TimePoint now);
     /// Sections 5.6.4.5.2-3: an ADP message from the discovered talker of sink @p index.
     void adp_discovered(uint16_t index, AdpDu const& adp, bool same_gptp, TimePoint valid_until, TimePoint now);
+    /// A new binding of sink @p index: its talker discovered already when its ENTITY_AVAILABLE came before.
+    void rediscover(uint16_t index, TimePoint now);
     /// Whether the discovered talker of sink @p s restarted or changed configuration, by its @p adp.
     [[nodiscard]] auto talker_changed(MilanSink const& s, AdpDu const& adp) const noexcept -> bool;
     /// The timer of sink @p index expired (Section 5.5.3.6).
@@ -357,6 +371,7 @@ class MilanListener
     SinkFn on_status_changed_{};
     SinkFn on_info_ex_changed_{};
     AuthorizedFn authorized_{};
+    TalkerLookupFn talker_lookup_{};
     bool configuration_departs_{true};
     /// The MVU reply of the binding command being processed; null for an ACMP one.
     ReplyFn const* reply_{nullptr};
