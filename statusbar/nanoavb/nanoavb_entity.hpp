@@ -660,9 +660,9 @@ class AemCommandHandler
     /// is taken is refused NO_RESOURCES before its hook runs, so no work is
     /// begun that could not be finished through complete_pending_command().
     static constexpr size_t MAX_PENDING_COMMANDS = 8;
-    /// Longest command body a deferred command keeps for its echoed responses
-    /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
-    static constexpr size_t MAX_PENDING_BODY = 64;
+    /// Longest command body a deferred command keeps for its echoed responses: any an AECPDU
+    /// carries, so no deferral is refused for its length after its hook has started.
+    static constexpr size_t MAX_PENDING_BODY = MAX_AEM_BODY;
     /// How long a deferred command waits for complete_pending_command() before
     /// tick() answers it PENDING_COMMAND_EXPIRED_STATUS with the value in force
     /// and frees its slot. Twice the SRP re-registration the corrigendum
