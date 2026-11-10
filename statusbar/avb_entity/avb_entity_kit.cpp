@@ -228,6 +228,9 @@ void AvbEntityKit::wire_controller_hooks()
 {
     wire_storage_hooks();
     wire_dynamic_mappings();
+    // Every local change through the AEM handler, except a clock source the host has applied (request_clock_source).
+    host_.components().aem_handler.set_local_change_refusal(
+        [this] { return applying_local_clock_source_ ? std::nullopt : local_change_refusal(); });
     // The Milan talker's and listener's hooks need no network.
     wire_milan_talker();
     wire_milan_listener();
@@ -636,7 +639,8 @@ auto AvbEntityKit::stream_format_refusal(bool const output, StreamSpec const& sp
     if (!kind_change_allowed(spec.format.kind, updated.format.kind)) {
         return atdecc::AEM_STATUS_BAD_ARGUMENTS;  // a listed format this stream cannot carry (IEEE 1722.1-2021 Clause 7.4.9)
     }
-    if (!is_audio_kind(updated.format.kind)) {
+    // The talker sends AAF in class A packets and sizes its TSpec so (IEEE 1722-2016 Clause 7.7, Table 17).
+    if (!is_audio_kind(updated.format.kind) || (output && !class_a_framed(updated.format))) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Milan v1.2 Section 5.4.2.7.
@@ -806,9 +810,6 @@ auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
 {
     auto& aem = host_.components().aem_handler;
-    if (auto const refusal = local_change_refusal()) {
-        return *refusal;
-    }
     if (name.size() > atdecc::aem::AtdeccString::LENGTH) {
         return atdecc::AEM_STATUS_BAD_ARGUMENTS;
     }
@@ -833,9 +834,6 @@ auto AvbEntityKit::request_audio_mappings(
     std::span<nanoavb::DynamicAudioMapping const> const add,
     std::span<nanoavb::DynamicAudioMapping const> const remove) -> uint8_t
 {
-    if (auto const refusal = local_change_refusal()) {
-        return *refusal;
-    }
     return host_.components().aem_handler.apply_local_audio_mappings(port_index, add, remove);
 }
 
@@ -1925,6 +1923,7 @@ void AvbEntityKit::close_data_plane()
     listener_vlan_.release();
 #endif
     close_streams();                   // the port's memberships close with it
+    rx_static_groups_.clear();         // held on that port only: the next start joins them afresh
     refresh_pending_.reset();          // a re-declaration asked for in this run: the next run declares afresh
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {

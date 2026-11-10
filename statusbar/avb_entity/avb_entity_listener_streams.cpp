@@ -551,20 +551,34 @@ void ListenerStreams::end_port_cycle()
 
 void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
 {
-    auto* const slot = rx_slot_for(frame);
-    if (slot == nullptr || slot->stopped.load(std::memory_order_relaxed)) {
+    auto const kind = subtype_kind(frame);
+    if (kind == StreamKind::other) {
         return;
     }
-    std::unique_lock const entry{slot->guard, std::try_to_lock};
-    if (!entry.owns_lock() || slot->kind.load(std::memory_order_relaxed) != subtype_kind(frame)) {
+    // Every input connected to the frame's stream receives it: several may share one talker stream.
+    for (auto& slot : slots_) {
+        if (rx_slot_matches(slot, kind, frame)) {
+            receive_into(slot, kind, frame, gptp_now_ns);
+        }
+    }
+}
+
+void ListenerStreams::receive_into(
+    ListenerStreamSlot& slot, StreamKind const kind, std::span<uint8_t const> frame, int64_t const gptp_now_ns)
+{
+    if (slot.stopped.load(std::memory_order_relaxed)) {
+        return;
+    }
+    std::unique_lock const entry{slot.guard, std::try_to_lock};
+    if (!entry.owns_lock() || slot.kind.load(std::memory_order_relaxed) != kind) {
         return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
     }
-    if (slot->am824) {
-        receive_am824(*slot, *slot->am824, frame, gptp_now_ns);
-    } else if (slot->aaf) {
-        receive_aaf(*slot, *slot->aaf, frame, gptp_now_ns);
-    } else if (slot->crf) {
-        receive_crf(*slot, *slot->crf, frame, gptp_now_ns);
+    if (slot.am824) {
+        receive_am824(slot, *slot.am824, frame, gptp_now_ns);
+    } else if (slot.aaf) {
+        receive_aaf(slot, *slot.aaf, frame, gptp_now_ns);
+    } else if (slot.crf) {
+        receive_crf(slot, *slot.crf, frame, gptp_now_ns);
     }
 }
 
@@ -579,18 +593,12 @@ auto ListenerStreams::subtype_kind(std::span<uint8_t const> const frame) noexcep
                                                          : StreamKind::other;
 }
 
-auto ListenerStreams::rx_slot_for(std::span<uint8_t const> const frame) -> ListenerStreamSlot*
+auto ListenerStreams::rx_slot_matches(
+    ListenerStreamSlot const& slot, StreamKind const kind, std::span<uint8_t const> const frame) const -> bool
 {
-    // The slot whose kind matches the AVTP subtype and whose connected stream_id the frame
-    // carries (the socket also sees our own TX and other streams); stream_ids are unique.
-    auto const kind = subtype_kind(frame);
-    if (kind == StreamKind::other) {
-        return nullptr;
-    }
-    auto* const found = std::ranges::find_if(slots_, [&](ListenerStreamSlot const& s) {
-        return s.kind.load(std::memory_order_relaxed) == kind && frame_is_for_listener(s.spec.index, frame);
-    });
-    return found != slots_.end() ? &*found : nullptr;
+    // The slot's kind is the frame's and the frame carries its connected stream_id (the socket also
+    // sees our own TX and other streams); several inputs may be connected to one stream.
+    return slot.kind.load(std::memory_order_relaxed) == kind && frame_is_for_listener(slot.spec.index, frame);
 }
 
 void ListenerStreams::receive_am824(
@@ -986,8 +994,9 @@ void ListenerStreams::on_listener_connected(
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
     // The connection as it was made: a classic DISCONNECT_RX has cleared the ACMP stream by now.
+    bool kept = false;
     if (auto const connection = end_connection(stream_index); connection.has_value()) {
-        withdraw_listener(connection->stream_id, now);
+        kept = !withdraw_listener(connection->stream_id, now);
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
         if (port_ != nullptr && connection->group.is_multicast()) {  // no guard: a leave is a socket call
@@ -996,17 +1005,23 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
     }
     if (logger_) {
         logger_->status(
-            "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener withdrawn",
+            "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener {}",
             stream_index,
-            kind_lit(slot_for(stream_index)));
+            kind_lit(slot_for(stream_index)),
+            kept ? logging::lit("kept: another input uses its stream") : logging::lit("withdrawn"));
     }
 }
 
-void ListenerStreams::withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint const now)
+auto ListenerStreams::withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
 {
+    // One Listener declaration per StreamID, merged across inputs (IEEE 802.1Q-2022 Clause 35.2.4.4).
+    if (std::ranges::contains(connections_, stream_id, &Connection::stream_id)) {
+        return false;
+    }
     tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
     (void)components_.msrp_handler.listener_withdraw(sid, now);
+    return true;
 }
 
 auto ListenerStreams::end_replaced_connection(uint16_t const stream_index, ieee::Eui64 const& stream_id, sm::TimePoint const now)
@@ -1018,7 +1033,7 @@ auto ListenerStreams::end_replaced_connection(uint16_t const stream_index, ieee:
         return {};
     }
     if (previous->stream_id != stream_id) {
-        withdraw_listener(previous->stream_id, now);
+        (void)withdraw_listener(previous->stream_id, now);
     }
     return previous->group;
 }

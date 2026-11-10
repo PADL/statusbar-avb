@@ -474,7 +474,7 @@ auto run_entity_main_loop(
 
     while (!realtime::is_shutdown_requested()) {
         (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
+        (void)reactor.poll_once(nanoavb::MaapNetHandler::PROTOCOL_TICK_PERIOD_MS);
         if (hooks.poll) {
             hooks.poll();
         }

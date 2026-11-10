@@ -334,14 +334,15 @@ class AvbEntityKit
     void set_output_mappings_across_rates(bool const across) noexcept { output_mappings_across_rates_ = across; }
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
-    /// With @p refuse, a change by other than ATDECC is refused while a controller holds the lock or
-    /// the acquisition (Milan v1.3 Section 5.3.4.1): local_change_refusal(). Default false. Reactor thread.
+    /// With @p refuse, a change by other than ATDECC (a request_* setter, or any AemCommandHandler local
+    /// path but request_clock_source()'s) is refused while a controller holds the lock or the acquisition
+    /// (Milan v1.3 Section 5.3.4.1): local_change_refusal(). Default false. Reactor thread.
     void set_lock_refuses_local_changes(bool const refuse) noexcept { lock_refuses_local_changes_ = refuse; }
     /// ENTITY_ACQUIRED or ENTITY_LOCKED when set_lock_refuses_local_changes() is on and a controller holds
-    /// the acquisition or the lock, else nullopt; a local setter (request_entity_name(), ...) answers it first.
+    /// the acquisition or the lock, else nullopt; the AEM handler's local paths answer it first.
     [[nodiscard]] auto local_change_refusal() const noexcept -> std::optional<uint8_t>;
-    /// An entity-name change by other than ATDECC: local_change_refusal(), BAD_ARGUMENTS
-    /// over 64 bytes, else as SET_NAME (empty: configured name). Notified and saved;
+    /// An entity-name change by other than ATDECC: BAD_ARGUMENTS over 64 bytes, else as SET_NAME
+    /// (empty: configured name), local_change_refusal() first. Notified and saved;
     /// answers the AEM status. Reactor thread.
     [[nodiscard]] auto request_entity_name(std::string_view name) -> uint8_t;
     // --- Dynamic audio mappings (Milan v1.2 Sections 5.3.9-5.3.10) --------------

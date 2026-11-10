@@ -75,7 +75,8 @@ using ieee::protocols::MVRP_MULTICAST_MAC;
 class MaapNetHandler : public net::Pollable
 {
   public:
-    static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
+    /// The longest reactor poll (ms) that keeps MAAP's sends inside their intervals (MaapHandler::MAX_TICK_PERIOD_NS).
+    static constexpr int PROTOCOL_TICK_PERIOD_MS = static_cast<int>(avtp::MaapHandler::MAX_TICK_PERIOD_NS / 1'000'000);
 
     /// @param interface_name The network interface name
     /// @param handler Reference to the MAAP protocol handler (must outlive this)

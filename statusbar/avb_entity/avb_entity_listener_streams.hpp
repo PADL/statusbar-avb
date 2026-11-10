@@ -261,7 +261,7 @@ struct ListenerStreams
     /// (last_gptp_ns_). The RT-timer path passes its own, fresher wake time instead.
     [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t { return last_gptp_ns_.load(std::memory_order_relaxed); }
 
-    /// Decode one received AVTP stream frame: match it to the slot whose
+    /// Decode one received AVTP stream frame: match it to every slot whose
     /// connected stream_id it carries (kind checked against the subtype),
     /// deserialize, update counters, and offer the accepted audio to the sink.
     /// @p gptp_now_ns is the gPTP receive time used for the deserialize anchor and the
@@ -270,8 +270,11 @@ struct ListenerStreams
 
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
-    /// The slot @p frame is for: its kind and its connected stream_id; nullptr when none.
-    [[nodiscard]] auto rx_slot_for(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
+    /// Whether @p frame, of subtype_kind() @p kind, is for @p slot: its kind and its connected stream_id.
+    [[nodiscard]] auto rx_slot_matches(ListenerStreamSlot const& slot, StreamKind kind, std::span<uint8_t const> frame) const
+        -> bool;
+    /// @p frame, of subtype_kind() @p kind, into @p slot unless it is stopped or being re-shaped. Reactor/RX thread.
+    void receive_into(ListenerStreamSlot& slot, StreamKind kind, std::span<uint8_t const> frame, int64_t gptp_now_ns);
     /// One AM824, AAF or CRF frame into @p slot (held under its guard) and its engaged @p ctx: checked,
     /// delivered, counted.
     void receive_am824(
@@ -474,8 +477,9 @@ struct ListenerStreams
         ieee::Eui48 group{};
     };
     sg14::inplace_vector<Connection, MAX_ENTITY_STREAMS> connections_{};
-    /// Withdraw the MSRP Listener declaration of stream @p stream_id at @p now.
-    void withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint now);
+    /// Withdraw the MSRP Listener declaration of stream @p stream_id at @p now, unless a kept
+    /// connection of another input still uses it: whether it was withdrawn.
+    [[nodiscard]] auto withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
     /// End input @p stream_index's connection before a new one to @p stream_id, withdrawing its
     /// stream when that differs: the group it held (zero: none).
     [[nodiscard]] auto end_replaced_connection(uint16_t stream_index, ieee::Eui64 const& stream_id, sm::TimePoint now)
