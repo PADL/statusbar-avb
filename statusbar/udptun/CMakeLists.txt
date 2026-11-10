@@ -48,6 +48,6 @@ statusbar_add_module(
   udptun_audio_egress_test.cpp
   udptun_session_helpers_test.cpp)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 # The AAF-v1/AnnexJ codec parses WAN-untrusted inter-site tunnel datagrams.
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/udptun_aaf_v1_codec_fuzzer.cpp)

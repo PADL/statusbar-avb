@@ -284,9 +284,8 @@ every aggregated package.
 ## Fuzz testing
 
 Every byte parser that consumes untrusted input has a libFuzzer harness
-(`*_fuzzer.cpp`). When the compiler is Clang (the toolchain default),
-`-DENABLE_FUZZING=ON` is automatic; the harnesses build with
-`-fsanitize=fuzzer,address,undefined`.
+(`*_fuzzer.cpp`). They build with `-DENABLE_FUZZING=ON` (off by default; it
+needs Clang), with `-fsanitize=fuzzer,address,undefined`.
 
 Two aggregate targets sweep every `*_fuzzer` executable in the build tree:
 
@@ -296,7 +295,7 @@ Two aggregate targets sweep every `*_fuzzer` executable in the build tree:
 | `fuzz-all`   | Extended run (Linux: 30 s of libFuzzer mutation per fuzzer with a persistent corpus; macOS: 1000 random inputs per fuzzer via the standalone driver). |
 
 ```
-cmake --build build                          # builds the fuzzers
+cmake --build build                          # builds the fuzzers (with -DENABLE_FUZZING=ON)
 cmake --build build --target fuzz-smoke      # smoke pass
 cmake --build build --target fuzz-all        # extended pass
 ```
@@ -309,7 +308,7 @@ Or run a single fuzzer directly with any libFuzzer arguments:
 
 Persistent corpora live under `build/fuzz/corpus/<fuzzer_name>/`.
 
-To disable: `-DENABLE_FUZZING=OFF`.
+To disable again: `-DENABLE_FUZZING=OFF`.
 
 ## Sanitizers
 

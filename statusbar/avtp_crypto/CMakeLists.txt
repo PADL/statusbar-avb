@@ -27,6 +27,6 @@ set_target_properties(avtp_crypto_tool PROPERTIES OUTPUT_NAME
                                                   statusbar-avtp-crypto-tool)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS avtp_crypto_tool)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_pdu_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_keychain_fuzzer.cpp)

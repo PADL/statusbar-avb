@@ -44,6 +44,6 @@ target_link_libraries(srp_sm_tool PRIVATE statusbar)
 set_target_properties(srp_sm_tool PROPERTIES OUTPUT_NAME statusbar-srp-sm)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS srp_sm_tool)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/srp_msrp_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/srp_mvrp_fuzzer.cpp)

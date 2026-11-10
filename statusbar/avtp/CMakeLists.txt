@@ -103,7 +103,7 @@ set_target_properties(avtp_retransmit_tool PROPERTIES OUTPUT_NAME
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     avtp_retransmit_tool)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_v1_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_acf_fuzzer.cpp)

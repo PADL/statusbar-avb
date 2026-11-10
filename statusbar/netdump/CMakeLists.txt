@@ -16,5 +16,5 @@ statusbar_add_module(
   TESTS
   netdump_print_test.cpp)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/netdump_format_fuzzer.cpp)

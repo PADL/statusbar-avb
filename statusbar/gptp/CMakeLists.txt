@@ -51,7 +51,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                                       gptp_slave_linux_tool)
 endif()
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/gptp_message_fuzzer.cpp)
 
 add_executable(gptp_sm_tool gptp_sm_tool.cpp)

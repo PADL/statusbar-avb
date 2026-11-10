@@ -105,7 +105,7 @@ set_target_properties(aecp_aa_analyzer_tool
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     aecp_aa_analyzer_tool)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_descriptor_storage_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_adp_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_acmp_fuzzer.cpp)

@@ -22,7 +22,7 @@ statusbar_add_module(
   owlm_eui64_test.cpp
   owlm_packet_test.cpp)
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 # OWLM measurement packets arrive over UDP from an untrusted source.
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/owlm_packet_fuzzer.cpp)
 

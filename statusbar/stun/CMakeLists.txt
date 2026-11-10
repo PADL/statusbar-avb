@@ -33,5 +33,5 @@ statusbar_add_module(
 # stun_server_tool / stun_client_tool / stun_sm_tool live in ../tools/ — the
 # package's shared tools directory — not next to the library module.
 
-# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults OFF).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/stun_decode_fuzzer.cpp)
