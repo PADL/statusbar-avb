@@ -251,7 +251,7 @@ auto append_scalars(std::string& out, PersistentState const& state) -> void
     }
 }
 
-/// The [[name]], [[stream_format]], [[clock_source]] and [[presentation_offset]] tables
+/// The [[name]], [[stream_format]], [[sampling_rate]], [[clock_source]] and [[presentation_offset]] tables
 auto append_descriptor_tables(std::string& out, PersistentState const& state) -> void
 {
     for (auto const& name : state.names) {
@@ -268,6 +268,9 @@ auto append_descriptor_tables(std::string& out, PersistentState const& state) ->
             format.descriptor_type,
             format.descriptor_index,
             toml_hex(format.format));
+    }
+    for (auto const& rate : state.sampling_rates) {
+        out += std::format("\n[[sampling_rate]]\naudio_unit = {}\nrate = {}\n", rate.audio_unit, rate.rate);
     }
     for (auto const& source : state.clock_sources) {
         out += std::format("\n[[clock_source]]\nclock_domain = {}\nclock_source = {}\n", source.clock_domain, source.clock_source);
@@ -426,6 +429,17 @@ struct DescriptorKey
     return true;
 }
 
+[[nodiscard]] auto load_sampling_rate(Table const& t, PersistentState& state) -> bool
+{
+    auto const unit = u16_at(t, "audio_unit");
+    auto const rate = u32_at(t, "rate");
+    if (!unit || !rate) {
+        return false;
+    }
+    state.sampling_rates.push_back({.audio_unit = *unit, .rate = *rate});
+    return true;
+}
+
 [[nodiscard]] auto load_clock_source(Table const& t, PersistentState& state) -> bool
 {
     auto const domain = u16_at(t, "clock_domain");
@@ -527,6 +541,7 @@ struct DescriptorKey
 [[nodiscard]] auto parse_tables(Table const& root, PersistentState& state) -> bool
 {
     return each_table(root, "name", state, load_name) && each_table(root, "stream_format", state, load_stream_format) &&
+        each_table(root, "sampling_rate", state, load_sampling_rate) &&
         each_table(root, "clock_source", state, load_clock_source) &&
         each_table(root, "presentation_offset", state, load_presentation_offset) &&
         each_table(root, "listener_binding", state, load_listener_binding) &&
