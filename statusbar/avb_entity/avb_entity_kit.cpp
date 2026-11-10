@@ -1973,6 +1973,7 @@ void AvbEntityKit::close_data_plane()
     listener_vlan_.release();
 #endif
     close_streams();                   // the port's memberships close with it
+    rx_static_groups_.clear();         // held on that port only: the next start joins them afresh
     refresh_pending_.reset();          // a re-declaration asked for in this run: the next run declares afresh
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {

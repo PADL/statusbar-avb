@@ -3848,6 +3848,30 @@ TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
     EXPECT_TRUE(joined());
 }
 
+// A stop forgets the static groups with the port that held them: a port opened again before the
+// next start sees no kind change leave or join, and the start joins each group once
+TEST(avb_entity_kit_kind, a_port_reopened_before_start_holds_each_static_group_once)
+{
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
+    RateKit m{{}, 0x78, false, false, /*am824=*/true};
+    auto const mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x78};
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = mac}).has_value());
+    EXPECT_TRUE(m.start_ready());
+    auto const group = m.kit.talker().slot_for(0)->dest_mac;
+    EXPECT_TRUE(m.kit.stop().has_value());
+
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = mac}).has_value());
+    m.kit.stream_port().test_port()->record_memberships(&log);
+    auto const set = [&m](uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, word));
+    };
+    EXPECT_EQ(set(AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(set(INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(log.empty());
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(std::ranges::count(m.kit.stream_port().test_port()->joined_multicast_groups(), group), 1);
+}
+
 // An input whose connection uses its pre-joined group holds two memberships of it: the output's
 // kind change leaves the pre-joined one and the unbind the connection's, the count back to zero
 TEST(avb_entity_kit_kind, a_static_group_shared_with_a_connection_is_left_by_each)
