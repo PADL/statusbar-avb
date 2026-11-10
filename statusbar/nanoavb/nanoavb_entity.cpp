@@ -198,6 +198,15 @@ void store_max_transit_time(std::span<uint8_t> const out, uint16_t const index, 
     return header;
 }
 
+/// The command data of the AEM command @p header in @p payload: as long as its
+/// control_data_length says (IEEE 1722.1-2021 Clause 9.2.1.1.7), not the octets behind it.
+[[nodiscard]] auto aem_command_data(AemDu const& header, std::span<uint8_t const> const payload) noexcept
+    -> std::span<uint8_t const>
+{
+    size_t const declared = size_t{header.control_data_length()} - AemDu::AEM_DATA_LENGTH;
+    return payload.subspan(AemDu::LENGTH).first(std::min(payload.size() - AemDu::LENGTH, declared));
+}
+
 }  // namespace
 
 auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool
@@ -221,7 +230,7 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     if (!header) {
         return false;
     }
-    return process_aem_command(src_mac, *header, payload.subspan(AemDu::LENGTH), our_entity_id);
+    return process_aem_command(src_mac, *header, aem_command_data(*header, payload), our_entity_id);
 }
 
 auto AemCommandHandler::process_aem_command(
