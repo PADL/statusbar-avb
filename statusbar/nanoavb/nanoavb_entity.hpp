@@ -665,9 +665,10 @@ class AemCommandHandler
     /// AemEntityModel::apply_set_name -> the handler's symbol-keyed
     /// on_set_name, echoing the command as the response.
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// SET_NAME, its notification leaving out @p requester (none: every controller).
+    /// SET_NAME, its notification leaving out @p requester (none: every controller); no
+    /// notification when @p in_force says the name was already in force (name_in_force()).
     [[nodiscard]] auto set_name(
-        std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer, std::optional<Eui64> const& requester)
+        std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer, std::optional<Eui64> const& requester, bool in_force)
         -> AemCommandResponse;
 
     /// AVDECC exclusive-access gate (IEEE 1722.1 7.4). Returns the AEM status a
