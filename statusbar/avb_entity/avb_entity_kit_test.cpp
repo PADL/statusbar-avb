@@ -2793,6 +2793,33 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
     EXPECT_EQ(counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
 }
 
+// IEEE 1722.1-2021 Table 7-145: a classic output stopped by STOP_STREAMING reports STREAMING_WAIT
+// until START_STREAMING; each command is pushed as an unsolicited GET_STREAM_INFO.
+TEST(avb_entity_kit_classic_talker, a_stopped_output_reports_streaming_wait)
+{
+    MilanKit m{false, 0x63};
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    m.aem.clear();
+    auto const waiting = [&m] {
+        return (load_info(m.stream_info(0).body).first.flags.get() & atdecc::aem::stream_info_flags::STREAMING_WAIT) != 0;
+    };
+    std::array<uint8_t, 4> output{0x00, 0x06, 0x00, 0x00};
+    EXPECT_FALSE(waiting());
+
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_STOP_STREAMING, output).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(waiting());
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_STREAM_INFO), 1);
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_STOP_STREAMING, output).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(waiting());
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_STREAM_INFO), 2);
+
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_START_STREAMING, output).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(waiting());
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_STREAM_INFO), 3);
+}
+
 // Milan v1.3 Table 5.14: the output's counters at IEEE 1722.1-2021's positions; with signal presence
 // reported (Section 5.3.7.7.1) ENTITY_SPECIFIC_9 and _10 too, channel 0 at the MSB, from the next fold
 TEST(avb_entity_kit_counters, milan_v1_3_output_counters_and_signal_presence)
