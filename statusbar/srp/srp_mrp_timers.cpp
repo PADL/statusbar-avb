@@ -34,6 +34,13 @@ void TimerScheduler::start_leave(TimePoint now) noexcept
     }
 }
 
+void TimerScheduler::start_leave_at(TimePoint const deadline) noexcept
+{
+    if (!leave_.has_value() || deadline < *leave_) {
+        leave_ = deadline;
+    }
+}
+
 void TimerScheduler::start_leaveall(TimePoint now)
 {
     if (!leaveall_.has_value()) {

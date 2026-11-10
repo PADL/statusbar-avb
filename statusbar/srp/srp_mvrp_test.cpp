@@ -407,6 +407,30 @@ TEST(mvrp_participant, withdraw_notifies_leave)
     }
 }
 
+// stop() stops every timer and keeps the FSMs: a VLAN left in LV runs the port's leave timer
+// to its own deadline once started again, not never (IEEE 802.1Q-2022 Clause 10.7.4.2).
+TEST(mvrp_participant, a_restart_keeps_a_leaving_vlans_leavetimer)
+{
+    MvrpParticipant a{test_mvrp_config(), 0xcc35};
+    MvrpParticipant b{test_mvrp_config(), 0xdd46};
+    MvrpFabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    MvrpTestClock c{};
+    a.start(c.now);
+    b.start(c.now);
+    (void)a.declare_vlan(200, c.now);
+    auto const t1 = c.advance(std::chrono::milliseconds(250));
+    a.tick(t1);
+    fab.deliver_a_to_b(b, t1);
+    (void)a.withdraw_vlan(200, c.now);
+    auto const t2 = c.advance(std::chrono::milliseconds(250));
+    a.tick(t2);
+    fab.deliver_a_to_b(b, t2);  // b's registrar: LV until t2 + LeaveTime
+    b.stop();
+    b.start(c.advance(std::chrono::milliseconds(100)));
+    EXPECT_TRUE(b.next_deadline() == t2 + b.config().timers.leave_time);
+}
+
 // MVRP keeps the standard registrar on rLv!: IN -> LV with the LeaveTimer
 // (IEEE 802.1Q-2018 Table 10-7: 1 s), even where MSRP leaves at once (Milan
 // v1.2 Section 4.2.7.2.2). The registration is Leaving until the timer expires.

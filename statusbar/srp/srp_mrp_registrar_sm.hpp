@@ -19,9 +19,9 @@
 // Side effects — Context outputs:
 //   notify          — set by actions; what to report to observers
 //                      (None / New / Join / Lv)
-//   lvtimer_request — set true by actions that require the per-port
-//                      LeaveTimer to be (re)started; cleared by the
-//                      participant driver after it schedules the timer
+//   lvtimer_request — set true by actions that require the Registrar's
+//                      LeaveTimer to be started; cleared by the participant
+//                      driver after it schedules the timer (leave_at)
 //
 // The participant driver MUST reset both fields via
 // Context::clear_outputs() immediately before dispatching any event
@@ -67,9 +67,14 @@ struct Context
     // then read them back afterward.
     Notify notify{Notify::None};
 
-    /// Set true by transitions that require the per-port LeaveTimer
-    /// to be (re)started. See mrp.c:956 (mrp_lvtimer_start).
+    /// Set true by transitions that require the Registrar's LeaveTimer
+    /// to be started. See mrp.c:956 (mrp_lvtimer_start).
     bool lvtimer_request{false};
+
+    // --- Driver state (not an output: clear_outputs() keeps it) ---
+    /// When this Registrar's own leavetimer expires (IEEE 802.1Q-2022 Clause 10.7.4.2: one per
+    /// Registrar); set by mrp::start_registrar_leave() with lvtimer_request, read only in Lv.
+    TimePoint leave_at{};
 
     constexpr void clear_outputs() noexcept
     {
