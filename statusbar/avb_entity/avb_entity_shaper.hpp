@@ -19,6 +19,7 @@
 #    include "statusbar/net/net_tc_qdisc.hpp"
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -185,6 +186,25 @@ inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
     uint64_t const bits_per_sec = uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * 8U *
         tspec.max_interval_frames * intervals_per_sec;
     return static_cast<uint32_t>((bits_per_sec + 999U) / 1000U);
+}
+
+/// The MSDU of the largest frame that may delay a stream frame on the port: a full-size 802.3 frame.
+inline constexpr uint16_t MAX_INTERFERING_MSDU = 1500;
+
+/// The octets @p tspec's frames of one class measurement interval occupy on the wire (wire_frame_size).
+[[nodiscard]] constexpr auto interval_wire_octets(TSpec const& tspec) noexcept -> uint64_t
+{
+    return uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * tspec.max_interval_frames;
+}
+
+/// A talker port's worst-case latency in ns, rounded up: one MAX_INTERFERING_MSDU frame, then @p class_octets
+/// (interval_wire_octets of every stream in the SR class's queue), at @p link_mbps (0, unknown: 1000).
+/// The Talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+[[nodiscard]] constexpr auto talker_port_latency_ns(uint64_t const class_octets, uint32_t const link_mbps) noexcept -> uint32_t
+{
+    uint64_t const octets = wire_frame_size(MAX_INTERFERING_MSDU) + class_octets;
+    uint64_t const mbps = link_mbps == 0 ? 1000 : link_mbps;
+    return static_cast<uint32_t>(std::min<uint64_t>(((octets * 8000U) + mbps - 1) / mbps, UINT32_MAX));
 }
 
 /// One SR class's cbs settings (tc's units: kbit/s and octets). All zero
