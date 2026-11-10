@@ -1572,8 +1572,9 @@ auto AemCommandHandler::removed_mappings(
     std::span<DynamicAudioMapping const> const listed,
     DynamicAudioMaps::Mappings& kept) const -> uint8_t
 {
-    // Milan v1.2 Section 5.4.2.28: duplicates are ignored, and so is a mapping
-    // that is not there; one naming nothing in the model is not a mapping at all.
+    // Milan v1.3 Section 5.4.2.28: duplicates are ignored. A mapping not held is ignored here (the
+    // entity's own changes; next_mappings() refuses it to a controller); one naming nothing in the
+    // model is not a mapping at all.
     for (auto const& mapping : listed) {
         if (auto const status = check_mapping(port_index, port, mapping, false); status != AEM_STATUS_SUCCESS) {
             return status;
@@ -1646,6 +1647,11 @@ auto AemCommandHandler::next_mappings(
     std::span<DynamicAudioMapping const> const listed,
     DynamicAudioMaps::Mappings& next) const -> uint8_t
 {
+    // IEEE 1722.1-2021 Clause 7.4.46.1: a REMOVE listing a mapping not held removes nothing.
+    auto const held = [&current](DynamicAudioMapping const& m) { return std::ranges::find(current, m) != current.end(); };
+    if (!add && !std::ranges::all_of(listed, held)) {
+        return AEM_STATUS_BAD_ARGUMENTS;
+    }
     auto const status =
         add ? merged_mappings(port_index, port, current, listed, next) : removed_mappings(port_index, port, current, listed, next);
     if (status == AEM_STATUS_SUCCESS) {

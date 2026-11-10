@@ -448,9 +448,11 @@ STREAM_INPUT; a stream channel may feed several.
   an already mapped cluster channel from another stream channel (Milan allows
   refusing it: the controller removes the old one first). Anything else is
   BAD_ARGUMENTS with nothing added.
-- REMOVE_AUDIO_MAPPINGS removes what it lists; a mapping not there, or listed
-  twice, is ignored, and one naming no cluster channel or stream of the model
-  is BAD_ARGUMENTS.
+- REMOVE_AUDIO_MAPPINGS removes what it lists; a mapping listed twice is
+  ignored, and one the port does not hold, or naming no cluster channel or
+  stream of the model, is BAD_ARGUMENTS with nothing removed (IEEE
+  1722.1-2021 Clause 7.4.46.1). The entity's own changes
+  (`apply_local_audio_mappings()`) ignore a mapping not held.
 - Each change goes through `on_audio_mappings_changed` before it is kept (all
   or nothing; the data plane may refuse with BAD_ARGUMENTS), is answered with
   the command echoed, notified to the other registered controllers, and
