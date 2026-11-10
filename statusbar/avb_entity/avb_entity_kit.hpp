@@ -154,10 +154,10 @@ class AvbEntityKit
     // --- Event handlers (drive the shared SM stack) ---------------------------
     /// A link up: the control plane's Link Up and MAAP's PortOperational! (IEEE 1722-2025 B.3.5.9);
     /// an unshaped port's speed and MTU read again, a change declared again in each talker's
-    /// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6). MAAP goes first and the host holds
-    /// ADP while the block is probed, so the first ENTITY_AVAILABLE waits until it is defended. A
-    /// Link Up while the link is already up reaches neither MAAP nor the hold, or it would restart
-    /// the probe sequence the first began. A Link Down, or stop(), ends the link-up state.
+    /// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified. MAAP goes first and the
+    /// host holds ADP while the block is probed, so the first ENTITY_AVAILABLE waits until it is
+    /// defended. A Link Up while the link is already up reaches neither MAAP nor the hold, or it
+    /// would restart the probe sequence the first began. A Link Down, or stop(), ends the link-up state.
     void on_link_up(TimePoint time);
     void on_link_down(TimePoint time)
     {
@@ -376,9 +376,9 @@ class AvbEntityKit
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
-    /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the shaper keeps it current) whose
-    /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that pushes every
-    /// talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
+    /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the
+    /// shaper keeps it current) whose SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that
+    /// pushes every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
     void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
     /// With @p across, an output stream's mappings (static AUDIO_MAPs, or the kit's identity) also hold at
     /// another listed rate than the unit's, so SET_STREAM_FORMAT accepts it mapped (Milan v1.2 Section 5.4.2.27's
