@@ -342,11 +342,9 @@ class AvbEntityKit
     void set_output_mappings_across_rates(bool const across) noexcept { output_mappings_across_rates_ = across; }
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
-    /// With @p refuse, a change by other than ATDECC is refused while a controller holds the lock or
-    /// the acquisition (Milan v1.3 Section 5.3.4.1): local_change_refusal(). Default false. Reactor thread.
-    void set_lock_refuses_local_changes(bool const refuse) noexcept { lock_refuses_local_changes_ = refuse; }
-    /// ENTITY_ACQUIRED or ENTITY_LOCKED when set_lock_refuses_local_changes() is on and a controller holds
-    /// the acquisition or the lock, else nullopt; a local setter (request_entity_name(), ...) answers it first.
+    /// ENTITY_LOCKED while a controller holds the lock under atdecc.profile = "milan13" (Milan v1.3
+    /// Section 5.3.4.1), else nullopt: the AEM handler's local_change_refusal(). A host answers it
+    /// before a change of its own (a SET_STREAM_FORMAT); request_clock_source() is never refused.
     [[nodiscard]] auto local_change_refusal() const noexcept -> std::optional<uint8_t>;
     /// An entity-name change by other than ATDECC: local_change_refusal(), BAD_ARGUMENTS
     /// over 64 bytes, else as SET_NAME (empty: configured name). Notified and saved;
@@ -790,7 +788,6 @@ class AvbEntityKit
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
     bool output_mappings_across_rates_{false};  ///< set_output_mappings_across_rates()
-    bool lock_refuses_local_changes_{false};    ///< set_lock_refuses_local_changes()
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
     nanoavb::DescriptorStorageHandler& storage_handler_;

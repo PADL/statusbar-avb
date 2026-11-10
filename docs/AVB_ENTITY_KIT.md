@@ -295,11 +295,13 @@ installed falls back to the default.
 hook call; a change is notified as the REMOVE and ADD it amounts to and saved.
 
 Milan v1.3 Section 5.3.4.1 has a locked entity refuse changes by other than
-ATDECC. That is opt-in: after `set_lock_refuses_local_changes(true)` the local
-setters (`request_entity_name`, `request_audio_mappings`, and a host's own
-SET_STREAM_FORMAT through `local_change_refusal()`) answer ENTITY_ACQUIRED or
-ENTITY_LOCKED while a controller holds the acquisition or the lock, as its
-commands would be. By default they go through.
+ATDECC. Under `atdecc.profile = "milan13"` every local path of the AEM handler
+(`apply_local_name`, `apply_local_audio_mappings`,
+`apply_local_descriptor_value`, and `set_local_identify`, Milan v1.3 Section
+5.4.2.17) answers ENTITY_LOCKED while a controller holds the lock, and so do
+the kit's local setters (`request_entity_name`, `request_audio_mappings`) and
+a host's own SET_STREAM_FORMAT through `local_change_refusal()`. Under
+classic they go through.
 `request_clock_source` follows a source the host has already applied, so it
 is never refused.
 

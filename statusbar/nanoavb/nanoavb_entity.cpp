@@ -549,6 +549,9 @@ auto AemCommandHandler::name_in_force(std::span<uint8_t const> const command_dat
 
 auto AemCommandHandler::apply_local_name(std::span<uint8_t const> const command_body) -> uint8_t
 {
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = set_name(command_body, echo);
@@ -1737,6 +1740,9 @@ auto AemCommandHandler::apply_local_audio_mappings(
     uint16_t const port_index, std::span<DynamicAudioMapping const> const add, std::span<DynamicAudioMapping const> const remove)
     -> uint8_t
 {
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
     auto const current = dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index);
     DynamicAudioMaps::Mappings next{};
     if (auto const status = local_mappings(port_index, current, add, remove, next); status != AEM_STATUS_SUCCESS) {
@@ -2782,6 +2788,13 @@ auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type
     if (profile_ == Profile::milan13 && locked_) {
         return AEM_STATUS_ENTITY_LOCKED;
     }
+    requester_ = {};  // nobody asked over ATDECC: every registered controller is told
+    return apply_and_notify(command_type, command_body);
+}
+
+auto AemCommandHandler::follow_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body)
+    -> uint8_t
+{
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told
     return apply_and_notify(command_type, command_body);
 }
