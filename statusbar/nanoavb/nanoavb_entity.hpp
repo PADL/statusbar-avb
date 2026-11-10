@@ -577,7 +577,8 @@ class AemCommandHandler
     /// entry point. No-op if no send_response callback is wired.
     /// Milan v1.2 Section 5.4.5.1: a command's own notification passes its
     /// @p requester, who is left out (the response told it); a change not
-    /// the command's own (a side effect, or none) passes none.
+    /// the command's own (a side effect, or none) passes none. Called while a
+    /// command is dispatched, it sends (and calls identify_changed) after the response.
     void emit_unsolicited(
         uint16_t command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester = std::nullopt);
 
@@ -977,6 +978,13 @@ class AemCommandHandler
 
     /// Unsolicited LOCK_ENTITY (UNLOCK, locked_entity_id 0) when a lock expires.
     void emit_lock_released();
+    /// Hold a notification raised while a command is dispatched; false (send it now) when its body
+    /// exceeds an AECPDU's or no slot is free, the last slot being the command's own.
+    [[nodiscard]] auto queue_notification(
+        uint16_t command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester) -> bool;
+    /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1);
+    /// those a nested dispatch raises wait for the outer one's.
+    void flush_notifications();
 
     /// DescriptorId for MEMORY_OBJECT @p descriptor_index in @p configuration_index.
     [[nodiscard]] auto memory_object_id(uint16_t configuration_index, uint16_t descriptor_index) const -> DescriptorId;
@@ -1101,6 +1109,20 @@ class AemCommandHandler
         sm::TimePoint next_in_progress{};
     };
     SlotTable<PendingCommand, MAX_PENDING_COMMANDS> pending_commands_{};
+
+    // Notifications a command's dispatch raises, held until its response is sent; the last
+    // slot is kept for the command's own (the one naming its requester).
+    static constexpr size_t MAX_QUEUED_NOTIFICATIONS = 4;
+    static constexpr size_t MAX_QUEUED_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
+    struct QueuedNotification
+    {
+        uint16_t command_type{0};
+        std::optional<Eui64> requester{};
+        std::array<uint8_t, MAX_QUEUED_BODY> body;
+        size_t body_size{0};
+    };
+    sg14::inplace_vector<QueuedNotification, MAX_QUEUED_NOTIFICATIONS> queued_notifications_{};
+    bool dispatching_{false};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will
