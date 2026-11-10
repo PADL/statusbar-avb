@@ -788,8 +788,8 @@ class AemCommandHandler
         PortModel const& port,
         std::span<uint8_t const> command_data,
         std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// The set an ADD (@p add) or REMOVE of @p listed leaves @p current at, in @p next (cluster
-    /// order), or the status to refuse with.
+    /// The set a controller's ADD (@p add) or REMOVE of @p listed leaves @p current at, in @p next
+    /// (cluster order), or the status to refuse with: BAD_ARGUMENTS for a REMOVE of a mapping not held.
     [[nodiscard]] auto next_mappings(
         bool add,
         uint16_t port_index,
