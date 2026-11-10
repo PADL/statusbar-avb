@@ -499,10 +499,9 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams,
-    std::optional<bool> const milan)
+    size_t const listener_max_streams)
     : entity_model{std::move(model)}
-    , profile{entity_profile_from_model(entity_model.descriptor_storage(), milan)}
+    , profile{entity_profile_from_model(entity_model.descriptor_storage())}
     , aem_handler{entity_model}
     , adp_advertiser{entity_model.get_entity(), AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
@@ -539,16 +538,9 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams,
-    std::optional<bool> const milan)
+    size_t const listener_max_streams)
     : NanoAvbComponents{
-          handler,
-          resolve_entity_descriptor(handler),
-          adp_config,
-          talker_max_streams,
-          talker_max_listeners,
-          listener_max_streams,
-          milan}
+          handler, resolve_entity_descriptor(handler), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
 {}
 
 NanoAvbComponents::NanoAvbComponents(
@@ -557,10 +549,9 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams,
-    std::optional<bool> const milan)
+    size_t const listener_max_streams)
     : entity_model{}  // empty: descriptors are served by the handler, not this member
-    , profile{entity_profile_from_model(handler.descriptor_storage(), milan)}
+    , profile{entity_profile_from_model(handler.descriptor_storage())}
     , aem_handler{handler}
     , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
