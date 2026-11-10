@@ -1528,6 +1528,7 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoin
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
+    read_port();
     if (auto status = start_control(reactor, now); !status) {
         return status;
     }
@@ -1545,6 +1546,14 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
         }
     }
     return success();
+}
+
+void AvbEntityKit::read_port()
+{
+#if defined(__linux__)
+    link_mbps_ = net::link_speed_mbps(config_.interface_name).value_or(link_mbps_);
+    mtu_ = net::interface_mtu(config_.interface_name).value_or(mtu_);
+#endif
 }
 
 auto AvbEntityKit::stream_port_config(std::string_view const backend) const -> StreamPortConfig
