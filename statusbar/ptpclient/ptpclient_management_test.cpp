@@ -261,6 +261,21 @@ TEST(ptp_management, parses_port_data_set)
     EXPECT_FALSE(parse_management_message(response(management_id::port_data_set, std::vector<uint8_t>(25))).has_value());
 }
 
+// linuxptp's PORT_DATA_SET_NP (struct port_ds_np): neighborPropDelayThresh 800 ns, asCapable 1
+TEST(ptp_management, parses_port_data_set_np)
+{
+    auto const parsed =
+        parse_management_message(response(management_id::port_data_set_np, {0x00, 0x00, 0x03, 0x20, 0x00, 0x00, 0x00, 0x01}));
+    EXPECT_TRUE(parsed.has_value());
+    auto const* np = parsed ? std::get_if<PortDataSetNp>(&parsed->data) : nullptr;
+    EXPECT_TRUE(np != nullptr);
+    if (np != nullptr) {
+        EXPECT_EQ(np->neighbor_prop_delay_thresh_ns, uint32_t{800});
+        EXPECT_TRUE(np->as_capable);
+    }
+    EXPECT_FALSE(parse_management_message(response(management_id::port_data_set_np, std::vector<uint8_t>(7))).has_value());
+}
+
 TEST(ptp_management, parses_port_properties_np)
 {
     auto const parsed = parse_management_message(response(management_id::port_properties_np, port_properties(2, "enp8s0")));
@@ -1039,3 +1054,42 @@ TEST(ptp_management, without_a_subscription_the_parent_is_polled)
 #endif  // __linux__
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_management_test)
+
+// The followed port's asCapable: PORT_DATA_SET_NP is fetched with the port and polled with its PORT_DATA_SET
+// (ptp4l notifies no change of it); another port's answer is not the followed one's
+TEST(ptp_management, client_follows_the_named_port_s_as_capable)
+{
+    auto const dir = socket_dir("ascapable");
+    Ptp4l ptp4l{dir};
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .port_interface = "enp8s0"},
+        [&](PtpManagementState const& state) { last = state; });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 10);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::port_data_set_np, ManagementAction::get), 1);
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 11);
+    auto const from_port = [](uint16_t const port, bool const as_capable) {
+        auto out = response(
+            management_id::port_data_set_np, {0x00, 0x00, 0x03, 0x20, 0x00, 0x00, 0x00, as_capable ? uint8_t{1} : uint8_t{0}});
+        std::array<uint8_t, 8> const bridge{0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00};  // BRIDGE
+        std::copy(bridge.begin(), bridge.end(), out.begin() + 20);
+        out[29] = static_cast<uint8_t>(port);
+        return out;
+    };
+    c.handle(from_port(1, true), 12);
+    EXPECT_FALSE(last.as_capable.has_value());
+    c.handle(from_port(2, true), 13);
+    EXPECT_TRUE(last.as_capable == std::optional<bool>{true});
+    c.handle(from_port(2, false), 14);
+    EXPECT_TRUE(last.as_capable == std::optional<bool>{false});
+    (void)ptp4l.drain();
+    c.tick(3 * SECOND);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::port_data_set_np, ManagementAction::get), 1);
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
