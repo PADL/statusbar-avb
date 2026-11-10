@@ -125,7 +125,8 @@ auto make_multirate_blob(
     bool const one_rate = false,
     bool const am824 = false,
     bool const narrow_output = false,
-    uint16_t const port_flags = 0) -> std::vector<uint8_t>
+    uint16_t const port_flags = 0,
+    bool const dynamic_output = false) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -190,7 +191,7 @@ auto make_multirate_blob(
         out_port.port_flags = port_flags;
         out_port.number_of_clusters = uint16_t{1};
         out_port.base_cluster = uint16_t{8};
-        out_port.number_of_maps = static_cast<uint16_t>(one_rate ? 0 : 1);
+        out_port.number_of_maps = static_cast<uint16_t>(one_rate || dynamic_output ? 0 : 1);
         w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 0, make_const_span(out_port));
         atdecc::aem::DescriptorAudioCluster out_cluster{};
         out_cluster.descriptor_index = uint16_t{8};
@@ -204,7 +205,7 @@ auto make_multirate_blob(
                  .mapping_cluster_offset = uint16_t{0},
                  .mapping_cluster_channel = ch});
         }
-        if (!one_rate) {
+        if (!one_rate && !dynamic_output) {
             w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_MAP, 0, wire(map));
         }
         atdecc::aem::DescriptorClockSource source{};
@@ -1946,9 +1947,14 @@ struct RateKit : PersistentKit
         bool const one_rate = false,
         bool const am824 = false,
         bool const gate = true,
-        uint16_t const port_flags = 0)
+        uint16_t const port_flags = 0,
+        bool const dynamic_output = false)
         : PersistentKit{
-              path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate, am824, false, port_flags), gate}
+              path,
+              entity_low,
+              std::nullopt,
+              make_multirate_blob(ports || one_rate, one_rate, am824, false, port_flags, dynamic_output),
+              gate}
     {
         kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
             formats.push_back({type, index, format});
@@ -2269,6 +2275,21 @@ TEST(avb_entity_kit_formats, a_running_output_on_a_plain_port_refuses_the_rate)
     EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
     EXPECT_EQ(m.kit.sample_rate(), 48000U);
     EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K);
+    EXPECT_TRUE(m.unit_rates.empty() && m.formats.empty());
+}
+
+// The identity the kit installed on a dynamic output port that converts no rates maps the stream too: a streaming
+// output there cannot follow the unit, and the rate is refused rather than the output unmapped under its stream
+TEST(avb_entity_kit_formats, a_running_output_under_the_kits_identity_refuses_the_rate)
+{
+    RateKit m{"", 0x78, true, false, false, true, 0, true};
+    EXPECT_TRUE(m.start_ready());
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::raw_now()));
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
     EXPECT_TRUE(m.unit_rates.empty() && m.formats.empty());
 }
 

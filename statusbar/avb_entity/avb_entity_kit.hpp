@@ -660,6 +660,9 @@ class AvbEntityKit
     /// Whether a map on a port that converts no rates names stream @p index of the direction (@p output): a static
     /// AUDIO_MAP, or an input's dynamic mapping; the kit's own output identity does not count.
     [[nodiscard]] auto stream_mapped(bool output, uint16_t index) const -> bool;
+    /// Whether the identity the kit installed on a dynamic output port that converts no rates maps STREAM_OUTPUT
+    /// @p index: a re-time that would leave the stream behind would unmap it under its stream.
+    [[nodiscard]] auto identity_installed(uint16_t index) const -> bool;
     /// Whether stream port (@p port_type, @p port_index) sets ASYNC_ or SYNC_SAMPLE_RATE_CONV (Milan v1.3 Section 5.3.3.7).
     [[nodiscard]] auto port_converts(uint16_t port_type, uint16_t port_index) const -> bool;
     /// Whether stream @p index of that direction must stay at the unit's rate: mapped, and not an output
