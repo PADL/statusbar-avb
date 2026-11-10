@@ -241,12 +241,13 @@ TEST(stream_spec_decode, am824_motu_16a_words_are_accepted)
     EXPECT_EQ(decode_stream_format(0x00A0060140000100ULL).kind, StreamKind::am824);  // 192 kHz, 1 ch
 }
 
-// The kit carries 1, 2, 4, 6 or 8 AM824 channels; any other MBLA count is unsupported.
-TEST(stream_spec_decode, am824_channel_counts_outside_1_2_4_6_8_are_other)
+// The kit carries AM824 at any channel count whose frame fits the MTU (7 samples at 48 kHz: 1 to
+// 52 channels); 0, or a frame past it, is other.
+TEST(stream_spec_decode, am824_channel_counts_past_the_mtu_are_other)
 {
-    for (uint8_t ch = 0; ch <= 64; ++ch) {
+    for (uint8_t ch = 0; ch <= 65; ++ch) {
         auto const f = decode_stream_format(0x00a0020040000000ULL | (uint64_t{ch} << 32U) | (uint64_t{ch} << 8U));
-        bool const carried = ch == 1 || ch == 2 || ch == 4 || ch == 6 || ch == 8;
+        bool const carried = ch >= 1 && ch <= 52;
         EXPECT_EQ(f.kind == StreamKind::am824, carried);
         EXPECT_EQ(f.channels, carried ? ch : 0);
     }
@@ -262,7 +263,7 @@ TEST(stream_spec_decode, am824_blocking_mixed_and_odd_words_are_other)
     EXPECT_EQ(decode_stream_format(0x00A0020840000600ULL).kind, StreamKind::other);  // DBS 8, 6 MBLA
     EXPECT_EQ(decode_stream_format(0x00A00A0840000800ULL).kind, StreamKind::other);  // FDF evt 1
     EXPECT_EQ(decode_stream_format(0x00A0070840000800ULL).kind, StreamKind::other);  // SFC 7
-    EXPECT_EQ(decode_stream_format(0x00A0021040001000ULL).kind, StreamKind::other);  // 16 MBLA
+    EXPECT_EQ(decode_stream_format(0x00A0024140004100ULL).kind, StreamKind::other);  // 65 MBLA
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_spec_test)
