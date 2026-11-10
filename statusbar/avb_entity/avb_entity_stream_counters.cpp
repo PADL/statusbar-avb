@@ -191,12 +191,12 @@ void tally_stream_input_packet(
         c.have_prev_delta = false;
     }
     c.frames_rx.fetch_add(1, relaxed);
+    // Every Stream Data AVTPDU counts toward sequence and mr, whatever its format (Milan v1.3 Section 5.3.8.10).
+    tally_continuity(c, seq, mr);
     if (!format_ok) {
         c.unsupported_format.fetch_add(1, relaxed);
         return;
     }
-
-    tally_continuity(c, seq, mr);
 
     if (tv) {
         c.timestamp_valid.fetch_add(1, relaxed);
