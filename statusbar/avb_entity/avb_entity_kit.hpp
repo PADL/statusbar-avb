@@ -149,7 +149,6 @@ class AvbEntityKit
     /// @p control until stop(); a no-op without stream inputs. start() calls it
     /// unless called first; @p control must outlive the kit.
     void bind_listener_vlan(net::vlan::VlanControl& control, int ifindex);
-    [[nodiscard]] auto listener_vlan() const noexcept -> ListenerVlan const& { return listener_vlan_; }
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
