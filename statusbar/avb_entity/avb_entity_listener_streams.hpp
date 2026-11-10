@@ -320,7 +320,7 @@ struct ListenerStreams
     /// (last_gptp_ns_). The RT-timer path passes its own, fresher wake time instead.
     [[nodiscard]] auto current_gptp_ns() const noexcept -> int64_t { return last_gptp_ns_.load(std::memory_order_relaxed); }
 
-    /// Decode one received AVTP stream frame: match it to the slot whose
+    /// Decode one received AVTP stream frame: match it to every slot whose
     /// connected stream_id it carries (kind checked against the subtype),
     /// deserialize, update counters, and offer the accepted audio to the sink.
     /// @p gptp_now_ns is the gPTP receive time used for the deserialize anchor and the
