@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <array>
-#include <ranges>
 #include <system_error>
 #include <utility>
 
@@ -205,10 +204,9 @@ void AvbEntityKit::configure_class_a_domain()
     host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint const time) {
         talker_->set_tag(stream_tag(vlan_id));
 #if defined(__linux__)
-        // A sink's VID that is Class A now is listener_vlan_'s; the old Class A VID, still a sink's, the filters'.
-        sink_vlan_filters_.drop_except(sink_vlans_ | std::views::keys, vlan_id);
-        listener_vlan_.follow(vlan_id);
-        sink_vlan_filters_.hold_all(sink_vlans_ | std::views::keys, vlan_id);
+        // The new VID held before the old is dropped: a link an input also holds stays as it is.
+        vlan_filters_.hold(vlan_id);
+        vlan_filters_.drop(std::exchange(class_a_filtered_, vlan_id));
 #endif
         // The host withdrew the old Class A VID: keep the ones settled
         // listener streams still use.
@@ -1246,16 +1244,12 @@ void AvbEntityKit::wire_stream_callbacks()
             [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
                 listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
                 if (host_.components().profile.milan) {
-                    if (auto const* s = host_.components().acmp_listener.get_stream(stream_index); s != nullptr) {
-                        join_sink_vlan(s->stream_vlan_id, now);
-                    }
-                    refresh_sink_registration(stream_index, now);
+                    refresh_sink_registration(stream_index, now);  // the input's VID joined there
                 }
             },
             [this](uint16_t stream_index, TimePoint now) {
-                if (auto const* s = host_.components().acmp_listener.get_stream(stream_index);
-                    host_.components().profile.milan && s != nullptr && s->connected) {
-                    leave_sink_vlan(s->stream_vlan_id, now);
+                if (stream_index < input_vid_.size()) {
+                    leave_sink_vlan(std::exchange(input_vid_[stream_index], uint16_t{0}), now);
                 }
                 // A classic disconnect is the controller's: no interruption.
                 // (A Milan input unsettles for other reasons too; its unbind is
@@ -1448,7 +1442,18 @@ void AvbEntityKit::refresh_sink_registration(uint16_t const index, TimePoint con
     if (sink == nullptr || !sink->settled()) {
         return;
     }
+    join_input_vlan(index, *sink, now);
     sinks.set_registration(index, talker_registration(*sink), now);
+}
+
+void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSink const& sink, TimePoint const now)
+{
+    // Once per settle, the probe answer's VID.
+    uint16_t const vid = sink.stream.vlan_id;
+    if (index < input_vid_.size() && input_vid_[index] == 0 && vid != 0) {
+        input_vid_[index] = vid;
+        join_sink_vlan(vid, now);
+    }
 }
 
 auto AvbEntityKit::talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration
@@ -1471,6 +1476,9 @@ void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
     if (vid == 0 || vid > 4094) {
         return;
     }
+#if defined(__linux__)
+    vlan_filters_.hold(vid);  // one hold per input, beside the Class A VID's own
+#endif
     for (auto& [joined, count] : sink_vlans_) {
         if (joined == vid) {
             ++count;
@@ -1481,9 +1489,6 @@ void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
     // The Class A VID in use is the host's (always joined).
     if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
         (void)host_.components().mvrp_handler.register_vlan(vid, now);
-#if defined(__linux__)
-        sink_vlan_filters_.hold(vid);
-#endif
     }
 }
 
@@ -1493,13 +1498,13 @@ void AvbEntityKit::leave_sink_vlan(uint16_t const vid, TimePoint const now)
         if (it->first != vid) {
             continue;
         }
+#if defined(__linux__)
+        vlan_filters_.drop(vid);
+#endif
         if (--it->second == 0) {
             sink_vlans_.erase(it);
             if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
                 (void)host_.components().mvrp_handler.withdraw_vlan(vid, now);
-#if defined(__linux__)
-                sink_vlan_filters_.drop(vid);
-#endif
             }
         }
         return;
@@ -1786,7 +1791,7 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     // The VID's tagged stream frames must get past the NIC's VLAN filter.
     // Never fatal: without CAP_NET_ADMIN this only warns.
     // (A control bound before start() -- a test's -- is used as it is.)
-    if (!listener_vlan_.bound()) {
+    if (!vlan_filters_.bound()) {
         open_listener_vlan_filter();
     }
 #endif
@@ -1852,10 +1857,12 @@ void AvbEntityKit::bind_listener_vlan(net::vlan::VlanControl& control, int const
     if (listener_ == nullptr) {
         return;
     }
-    listener_vlan_.bind(control, config_.interface_name, ifindex);
-    listener_vlan_.follow(host_.components().msrp_handler.domain().sr_class_vid);
-    sink_vlan_filters_.bind(control, config_.interface_name, ifindex);
-    sink_vlan_filters_.hold_all(sink_vlans_ | std::views::keys, host_.components().msrp_handler.domain().sr_class_vid);
+    vlan_filters_.bind(control, config_.interface_name, ifindex);
+    class_a_filtered_ = host_.components().msrp_handler.domain().sr_class_vid;
+    vlan_filters_.hold(class_a_filtered_);
+    for (auto const vid : input_vid_) {
+        vlan_filters_.hold(vid);  // the inputs settled before (0: none)
+    }
 }
 #endif
 
@@ -1925,8 +1932,7 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
 void AvbEntityKit::close_data_plane()
 {
 #if defined(__linux__)
-    sink_vlan_filters_.release();
-    listener_vlan_.release();
+    vlan_filters_.release();
 #endif
     close_streams();                   // the port's memberships close with it
     refresh_pending_.reset();          // a re-declaration asked for in this run: the next run declares afresh
