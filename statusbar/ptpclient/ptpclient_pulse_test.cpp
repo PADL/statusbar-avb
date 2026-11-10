@@ -96,7 +96,7 @@ TEST(ptpclient_pulse, silence_unlocks_and_only_once)
     for (int64_t k = 1; k <= 3; ++k) {
         (void)feed(lock, pulse_at(k, 0));
     }
-    int64_t const last = lock.last_pulse_ns();
+    int64_t const last = pulse_at(3, 0).local_ns;
     EXPECT_FALSE(lock.expire(last + (2 * SECOND_NS)));
     EXPECT_TRUE(lock.locked());
     EXPECT_TRUE(lock.expire(last + (3 * SECOND_NS)));
@@ -110,7 +110,7 @@ TEST(ptpclient_pulse, a_silence_restarts_the_settle)
     PulseLock lock;
     (void)feed(lock, pulse_at(1, 0));
     (void)feed(lock, pulse_at(2, 0));
-    EXPECT_FALSE(lock.expire(lock.last_pulse_ns() + (3 * SECOND_NS)));
+    EXPECT_FALSE(lock.expire(pulse_at(2, 0).local_ns + (3 * SECOND_NS)));
     EXPECT_FALSE(feed(lock, pulse_at(6, 0)));
     EXPECT_FALSE(lock.locked());
 }

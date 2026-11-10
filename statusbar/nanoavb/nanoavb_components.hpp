@@ -575,8 +575,6 @@ class NanoAvbNetHandlers
 
     /// The local ATDECC port, or nullptr (none configured, or it would not open).
     [[nodiscard]] auto local_port() noexcept -> AtdeccLocalPort* { return local_ptr_; }
-    /// Why the configured local port would not open (empty: it opened).
-    [[nodiscard]] auto local_port_error() const noexcept -> std::error_code { return local_port_error_; }
 
     /// Close the local port and detach it from the ATDECC handler. Call while
     /// the reactor (which owns both) is alive, before destroying this.

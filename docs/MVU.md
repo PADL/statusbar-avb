@@ -71,7 +71,7 @@ command's, as ACMP's `receive` is told its time).
 Implemented (Milan profile only):
 
 - GET_MILAN_INFO (Section 5.4.4.1): protocol_version 1, certification_version
-  (`set_certification_version`, 0 until certified),
+  0 (not certified),
   specification_version 1.3.0.0 and features_flags: MVU_BINDING when there
   are sinks to bind, plus what `set_extra_features` adds (the kit adds
   TALKER_SIGNAL_PRESENCE when the application reports signal presence). No

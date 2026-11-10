@@ -129,17 +129,6 @@ TEST(nanoavb_mvu, get_milan_info_reply_bytes)
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), reply.begin() + MvuDu::LENGTH));
 }
 
-TEST(nanoavb_mvu, get_milan_info_certification_version)
-{
-    std::vector<std::vector<uint8_t>> sent;
-    auto handler = make_handler(sent);
-    handler.set_certification_version(milan_certification_version(1, 2, 0, 0));
-    EXPECT_TRUE(handler.process_packet(SRC, get_milan_info_command(), US, {}));
-    EXPECT_EQ(sent.size(), size_t{1});
-    std::array<uint8_t, 4> const expected{0x01, 0x02, 0x00, 0x00};
-    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), sent[0].begin() + 40));
-}
-
 // A command whose r bit is set is still answered, with r = 0
 TEST(nanoavb_mvu, response_clears_r)
 {
