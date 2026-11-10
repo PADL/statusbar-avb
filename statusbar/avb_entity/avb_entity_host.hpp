@@ -332,6 +332,9 @@ class AvbEntityHost
     /// Propagation delay (ns) to report in the observed (non-mirrored) state
     /// (e.g. the gPTP port's neighborPropDelay); a change is notified (Clause 7.4.40).
     void set_propagation_delay_ns(uint32_t ns);
+    /// The gPTP stack's asCapable for this port (IEEE 802.1AS-2020 Clause 10.2.5.1): from the first call,
+    /// GET_AVB_INFO's AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows it, not the entity's gPTP lock.
+    void note_port_as_capable(bool as_capable);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
     // --- Typed stream hooks (the stream-specific bits of the SM wiring) ---------
@@ -491,6 +494,7 @@ class AvbEntityHost
     bool grandmaster_from_parent_{false};                ///< note_parent_grandmaster has been told
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
+    std::optional<bool> port_as_capable_{};                   ///< see note_port_as_capable
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
     nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
     bool running_{false};
