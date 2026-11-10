@@ -319,14 +319,10 @@ class ShaperQdiscs
     [[nodiscard]] auto reused() const noexcept -> bool { return reused_; }
     /// Whether the driver refused cbs offload (EOPNOTSUPP, EINVAL) on class A's queue, and so on both.
     [[nodiscard]] auto cbs_unsupported() const noexcept -> bool { return cbs_refused_a_; }
-    /// Whether it refused it on class B's queue alone (igc offloads cbs on queues 0 and 1).
-    [[nodiscard]] auto class_b_cbs_refused() const noexcept -> bool { return cbs_refused_b_; }
     /// The mode set_launch_time() gave.
     [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return launch_time_mode_; }
     /// Whether our etf is on class A's queue, under its cbs or alone (LaunchTimeMode::on, settled).
     [[nodiscard]] auto launch_time() const noexcept -> bool { return etf_a_.placed; }
-    /// The etf request that failed (logged; no further etf requests until the next install()).
-    [[nodiscard]] auto etf_error() const noexcept -> std::error_code { return etf_error_; }
     /// What is programmed now (empty: no cbs of ours on that class's queue).
     [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return class_a_; }
     [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return class_b_; }
