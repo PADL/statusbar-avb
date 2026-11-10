@@ -230,21 +230,32 @@ auto AemCommandHandler::process_aem_command(
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
     note_controller_command(header.controller_entity_id, src_mac);
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
+    auto const response = dispatch_aem_command(src_mac, header, command_data, out_buffer);
+    return answer_aem_command(src_mac, header, response, std::span<uint8_t const>{out_buffer.data(), response.size});
+}
+
+auto AemCommandHandler::dispatch_aem_command(
+    Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> const command_data, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{  // NOLINT(statusbar-block-statements) the per-dispatch state, set and cleared around the one call
     // Stash the source MAC so per-command handlers can retain it if they
     // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
     // CONTROLLER_AVAILABLE handshake). Cleared after dispatch.
     current_src_mac_ = src_mac;
-    // One output buffer per dispatch — handlers write into this and return
-    // status + bytes-written, avoiding the per-return 1 KB struct copy that
-    // the previous AemCommandResult shape incurred.
-    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
     setting_unchanged_ = false;  // here, not in handle_command: a read_back() dispatches too
-    bool const nested = std::exchange(dispatching_, true);
+    dispatching_ = true;
     auto const response = handle_command(header, command_data, out_buffer);
-    dispatching_ = nested;
+    dispatching_ = false;
     current_src_mac_ = {};
-    // Build and send response, then the notifications it raised: the response goes first.
-    bool const sent = send_response(src_mac, header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    return response;
+}
+
+auto AemCommandHandler::answer_aem_command(
+    Eui48 const& src_mac, AemDu const& header, AemCommandResponse const& response, std::span<uint8_t const> const body) -> bool
+{
+    // The response, then the notifications it raised: the response goes first.
+    bool const sent = send_response(src_mac, header, response.status, body);
     flush_notifications();
     // Then let the entity save a changed setting (after the response: a
     // write to non-volatile storage must not delay it).
@@ -2974,15 +2985,12 @@ auto AemCommandHandler::queue_notification(uint16_t const command_type, std::spa
 
 void AemCommandHandler::flush_notifications()
 {
-    if (dispatching_) {
-        return;  // a nested dispatch: the outer one sends them after its response
-    }
-    auto const queued = std::exchange(queued_notifications_, {});
     Eui64 const requester = requester_;
-    for (auto const& n : queued) {
+    for (auto const& n : queued_notifications_) {
         requester_ = n.requester;  // left out as it was when the notification was raised
         emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
     }
+    queued_notifications_.clear();
     requester_ = requester;
 }
 

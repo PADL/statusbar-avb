@@ -1164,8 +1164,7 @@ class AemCommandHandler
     /// Hold a notification raised while a command is dispatched; false (send it now) when its body
     /// exceeds an AECPDU's or no slot is free, the last slot being the command's own (its type).
     [[nodiscard]] auto queue_notification(uint16_t command_type, std::span<uint8_t const> body) -> bool;
-    /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1);
-    /// those a nested dispatch raises wait for the outer one's.
+    /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1).
     void flush_notifications();
 
     /// DescriptorId for MEMORY_OBJECT @p descriptor_index in @p configuration_index.
@@ -1249,6 +1248,13 @@ class AemCommandHandler
     /// An AEM command addressed to us arrived: dispatch it and send the response.
     [[nodiscard]] auto process_aem_command(
         Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> command_data, Eui64 const& our_entity_id) -> bool;
+    /// Dispatch one AEM command into @p out_buffer, with the per-dispatch state set around it.
+    [[nodiscard]] auto dispatch_aem_command(
+        Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// Send @p response (body @p body), then the notifications it raised, then the settings hook.
+    [[nodiscard]] auto answer_aem_command(
+        Eui48 const& src_mac, AemDu const& header, AemCommandResponse const& response, std::span<uint8_t const> body) -> bool;
 
     /// A VENDOR_UNIQUE command arrived: answer it if it is Milan's and this is a Milan device.
     [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
