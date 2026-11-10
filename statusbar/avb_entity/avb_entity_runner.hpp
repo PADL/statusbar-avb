@@ -472,7 +472,7 @@ auto run_entity_main_loop(
     }
     entity.set_log_verbosity(tool.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {
+    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements) the main loop; pre-dates the gate
         (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(nanoavb::MaapNetHandler::PROTOCOL_TICK_PERIOD_MS);
         if (hooks.poll) {
