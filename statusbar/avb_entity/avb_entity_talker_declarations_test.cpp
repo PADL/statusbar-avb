@@ -76,35 +76,35 @@ TEST(talker_declarations, a_registered_listener_keeps_it_declared)
     auto d = milan_ready();
     d.note_probe(0, T0);
     d.note_declared(0, params());
-    d.note_listener_registered(0, true, T0);
+    d.note_listener_registered(0, true);
     // No probe deadline while a Listener is registered.
     EXPECT_FALSE(d.next_deadline(T0).has_value());
     EXPECT_TRUE(d.evaluate(0, T0 + (60 * S), params(), false) == Action::none);
-    // The listener goes after the window: held through the grace (a LeaveAll
-    // blip re-registers within it), withdrawn once it has run out.
-    d.note_listener_registered(0, false, T0 + (61 * S));
-    int64_t const grace_end = T0 + (61 * S) + TalkerDeclarations::LISTENER_GRACE_NS;
-    EXPECT_TRUE(d.evaluate(0, T0 + (62 * S), params(), false) == Action::none);
-    EXPECT_TRUE(d.next_deadline(T0 + (62 * S)) == grace_end);
-    EXPECT_TRUE(d.evaluate(0, grace_end - 1, params(), false) == Action::none);
-    EXPECT_TRUE(d.evaluate(0, grace_end, params(), false) == Action::withdraw);
 }
 
-TEST(talker_declarations, a_leave_all_blip_does_not_withdraw)
+// The registrar's Lv state already holds a Listener through a LeaveAll: its
+// leave after the probe window withdraws at once, with no deadline to wait for.
+TEST(talker_declarations, the_last_listeners_leave_withdraws_at_once)
 {
     auto d = milan_ready();
     d.note_probe(0, T0);
     d.note_declared(0, params());
-    d.note_listener_registered(0, true, T0 + (1 * S));
-    // Past the probe window the Listener blips out for 2 s and comes back.
-    d.note_listener_registered(0, false, T0 + (20 * S));
-    EXPECT_TRUE(d.evaluate(0, T0 + (21 * S), params(), false) == Action::none);
-    d.note_listener_registered(0, true, T0 + (22 * S));
-    EXPECT_TRUE(d.evaluate(0, T0 + (30 * S), params(), false) == Action::none);
-    // A repeated "gone" does not extend the grace.
-    d.note_listener_registered(0, false, T0 + (40 * S));
-    d.note_listener_registered(0, false, T0 + (44 * S));
-    EXPECT_TRUE(d.evaluate(0, T0 + (45 * S), params(), false) == Action::withdraw);
+    d.note_listener_registered(0, true);
+    d.note_listener_registered(0, false);
+    EXPECT_FALSE(d.next_deadline(T0 + (20 * S)).has_value());
+    EXPECT_TRUE(d.evaluate(0, T0 + (20 * S), params(), false) == Action::withdraw);
+}
+
+TEST(talker_declarations, a_listener_leaving_within_the_probe_window_keeps_it_declared_to_its_end)
+{
+    auto d = milan_ready();
+    d.note_probe(0, T0);
+    d.note_declared(0, params());
+    d.note_listener_registered(0, true);
+    d.note_listener_registered(0, false);
+    EXPECT_TRUE(d.evaluate(0, T0 + (1 * S), params(), false) == Action::none);
+    EXPECT_TRUE(d.next_deadline(T0 + (1 * S)) == T0 + TalkerDeclarations::PROBE_WINDOW_NS);
+    EXPECT_TRUE(d.evaluate(0, T0 + TalkerDeclarations::PROBE_WINDOW_NS, params(), false) == Action::withdraw);
 }
 
 TEST(talker_declarations, a_probe_after_the_window_redeclares_the_same_stream_at_once)
@@ -121,7 +121,7 @@ TEST(talker_declarations, a_probe_after_the_window_redeclares_the_same_stream_at
 TEST(talker_declarations, maap_conflict_withdraws_and_holds_two_leave_alls)
 {
     auto d = milan_ready();
-    d.note_listener_registered(0, true, T0);
+    d.note_listener_registered(0, true);
     EXPECT_TRUE(d.evaluate(0, T0, params(0x01), false) == Action::declare);
     d.note_declared(0, params(0x01));
 
@@ -142,7 +142,7 @@ TEST(talker_declarations, maap_conflict_withdraws_and_holds_two_leave_alls)
 TEST(talker_declarations, new_parameters_while_declared_withdraw_first)
 {
     auto d = milan_ready();
-    d.note_listener_registered(0, true, T0);
+    d.note_listener_registered(0, true);
     d.note_declared(0, params(0x01));
     // A different address with no conflict seen: withdrawn, then held.
     EXPECT_TRUE(d.evaluate(0, T0, params(0x02), false) == Action::withdraw);
@@ -150,7 +150,7 @@ TEST(talker_declarations, new_parameters_while_declared_withdraw_first)
     EXPECT_TRUE(d.evaluate(0, T0 + (1 * S), params(0x02), false) == Action::none);
     // The control plane's own change (the adopted VID) re-declares at once.
     auto r = milan_ready();
-    r.note_listener_registered(0, true, T0);
+    r.note_listener_registered(0, true);
     r.note_declared(0, params(0x01, 2));
     EXPECT_TRUE(r.evaluate(0, T0, params(0x01, 3), true) == Action::declare);
     // A refresh re-asserts an unchanged declaration too.
@@ -208,7 +208,7 @@ TEST(talker_declarations, classic_and_a_new_vid_are_not_held)
     // Milan: withdrawn (the control plane went down), then a new Class A VID
     // adopted: declared at once when active again.
     auto m = milan_ready();
-    m.note_listener_registered(0, true, T0);
+    m.note_listener_registered(0, true);
     m.note_declared(0, params(0x01, 2));
     m.set_active(false);
     m.note_all_withdrawn(T0);
