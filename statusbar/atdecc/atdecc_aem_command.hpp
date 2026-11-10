@@ -991,7 +991,7 @@ struct AemMatrixPayloadHeader
 static_assert(sizeof(AemMatrixPayloadHeader) == 16, "AemMatrixPayloadHeader must be 16 bytes");
 
 //
-// SET_MIXER / GET_MIXER - Clause 7.4.35 / 7.4.36
+// SET_MIXER / GET_MIXER - Clause 7.4.31 / 7.4.32
 //
 /// Fixed header of the SET_MIXER / GET_MIXER command and response
 /// payloads (Figure 7-58 / 7-59). Followed on the wire by the mixer's
@@ -1248,7 +1248,7 @@ struct AemOperationStatusPayload
 static_assert(sizeof(AemOperationStatusPayload) == 8, "AemOperationStatusPayload must be 8 bytes");
 
 //
-// SET_MAX_TRANSIT_TIME / GET_MAX_TRANSIT_TIME - IEEE 1722.1-2021 Clause 7.4.76 / 7.4.77
+// SET_MAX_TRANSIT_TIME / GET_MAX_TRANSIT_TIME - IEEE 1722.1-2021 Clause 7.4.77 / 7.4.78
 //
 /// SET_MAX_TRANSIT_TIME command/response payload
 struct AemSetMaxTransitTimePayload
