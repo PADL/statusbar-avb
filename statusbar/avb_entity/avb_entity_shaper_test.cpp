@@ -235,22 +235,22 @@ TEST(shaper_mqprio, refuses_bad_priorities)
 }
 
 // IEEE 802.1Q-2022 Clause 35.2.2.8.6: without a cbs every queued frame leaves at the link speed, after one MTU
-// frame.
+// frame; item d) adds 500 ns of propagation.
 TEST(shaper_talker_latency, an_unshaped_port_sends_the_mtu_frame_then_the_class_s_frames_at_the_link_speed)
 {
     // AAF 8 ch: 168 + 42 + 1 spare = 211 octets an interval; 1542 + 211 = 1753 octets, 14024 ns at 1 Gbit/s.
     auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()));
     EXPECT_EQ(aaf, uint64_t{211});
-    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500}, aaf, aaf), uint32_t{14024});
-    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 100, .mtu = 1500}, aaf, aaf), uint32_t{140240});
+    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500}, aaf, aaf), uint32_t{14024 + 500});
+    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 100, .mtu = 1500}, aaf, aaf), uint32_t{140240 + 500});
     // Twelve such streams queue together: 1542 + 12 x 211 = 4074 octets.
-    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500}, 12 * aaf, aaf), uint32_t{32592});
+    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500}, 12 * aaf, aaf), uint32_t{32592 + 500});
     // A 9000-octet MTU interferes as 9042 octets.
-    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 9000}, aaf, aaf), uint32_t{(9042 + 211) * 8});
+    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 9000}, aaf, aaf), uint32_t{((9042 + 211) * 8) + 500});
     // Three frames an interval: 3 x 142 octets.
     EXPECT_EQ(interval_wire_octets(TSpec{.max_frame_size = 100, .max_interval_frames = 3}), uint64_t{426});
     // Rounds up: 1753 x 8000 / 7 = 2003428.6 -> 2003429.
-    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 7, .mtu = 1500}, aaf, aaf), uint32_t{2003429});
+    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 7, .mtu = 1500}, aaf, aaf), uint32_t{2003429 + 500});
 }
 
 // IEEE 802.1Q-2022 Annex L: a cbs at the class's bandwidth sends the other streams' frames at idleSlope, spread
@@ -259,11 +259,11 @@ TEST(shaper_talker_latency, a_cbs_port_drains_the_class_s_other_frames_at_idle_s
 {
     auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()));
     // Twelve streams at 1 Gbit/s (idleSlope 162 Mbit/s): 14024 ns, then 11/12 of 125 us = 114583.3 -> 114584 ns.
-    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500, .cbs = true}, 12 * aaf, aaf), uint32_t{128608});
+    EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500, .cbs = true}, 12 * aaf, aaf), uint32_t{129108});
     EXPECT_EQ(cbs_drain_ns(11 * aaf, 12 * aaf, CLASS_A_INTERVALS_PER_SEC), uint64_t{114584});
     // Class B's 250 us interval: 11/12 of it is 229166.7 -> 229167 ns.
     TalkerPort const class_b{.link_mbps = 1000, .mtu = 1500, .intervals_per_sec = CLASS_B_INTERVALS_PER_SEC, .cbs = true};
-    EXPECT_EQ(talker_port_latency_ns(class_b, 12 * aaf, aaf), uint32_t{14024 + 229167});
+    EXPECT_EQ(talker_port_latency_ns(class_b, 12 * aaf, aaf), uint32_t{14024 + 229167 + 500});
     // A stream alone in its class waits behind nothing but the MTU frame, shaped or not.
     EXPECT_EQ(
         talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500, .cbs = true}, aaf, aaf),
@@ -276,9 +276,10 @@ TEST(shaper_talker_latency, an_unknown_link_speed_or_mtu_counts_as_1000_mbit_s_a
     EXPECT_EQ(
         talker_port_latency_ns(TalkerPort{}, aaf, aaf),
         talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = FALLBACK_MTU}, aaf, aaf));
-    EXPECT_EQ(interface_talker_latency_ns("no-such-if0", TalkerPort{}, aaf), uint32_t{14024});
+    EXPECT_EQ(interface_talker_latency_ns("no-such-if0", TalkerPort{}, aaf), uint32_t{14024 + 500});
     EXPECT_EQ(
-        interface_talker_latency_ns("no-such-if0", TalkerPort{.link_mbps = 100, .mtu = 9000}, aaf), uint32_t{(9042 + 211) * 80});
+        interface_talker_latency_ns("no-such-if0", TalkerPort{.link_mbps = 100, .mtu = 9000}, aaf),
+        uint32_t{((9042 + 211) * 80) + 500});
 }
 
 TEST(shaper_cbs, frame_sizes_and_bandwidth)

@@ -278,6 +278,9 @@ inline constexpr uint32_t FALLBACK_MTU = 1500;
     return uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * tspec.max_interval_frames;
 }
 
+/// The wire propagation time a Talker counts, ns (IEEE 802.1Q-2022 Clause 35.2.2.8.6 item d).
+inline constexpr uint32_t PROPAGATION_DELAY_NS = 500;
+
 /// The egress port a Talker's AccumulatedLatency is for. 0 is unknown: 1000 Mbit/s, FALLBACK_MTU.
 struct TalkerPort
 {
@@ -307,7 +310,7 @@ struct TalkerPort
 
 /// A talker port's portTcMaxLatency for a stream of @p own_octets among its class's @p class_octets (interval_wire_octets
 /// each), ns, rounded up (IEEE 802.1Q-2022 Clause 35.2.2.8.6): a) the class's other frames, at the link speed or, under a
-/// cbs, at idleSlope; b) one MTU frame and then its own at the link speed.
+/// cbs, at idleSlope; b) one MTU frame and then its own at the link speed; d) PROPAGATION_DELAY_NS.
 [[nodiscard]] constexpr auto talker_port_latency_ns(
     TalkerPort const& port, uint64_t const class_octets, uint64_t const own_octets) noexcept -> uint32_t
 {
@@ -315,7 +318,8 @@ struct TalkerPort
     uint64_t const others = class_octets - std::min(own_octets, class_octets);
     uint64_t const at_link = wire_frame_size(interfering) + own_octets + (port.cbs ? 0 : others);
     uint64_t const queue_ns = port.cbs ? cbs_drain_ns(others, class_octets, port.intervals_per_sec) : 0;
-    return static_cast<uint32_t>(std::min<uint64_t>(wire_time_ns(at_link, port.link_mbps) + queue_ns, UINT32_MAX));
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(wire_time_ns(at_link, port.link_mbps) + queue_ns + PROPAGATION_DELAY_NS, UINT32_MAX));
 }
 
 /// talker_port_latency_ns for a lone, unshaped stream of @p octets on @p interface_name: @p port's link speed

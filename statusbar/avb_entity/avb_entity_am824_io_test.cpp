@@ -120,7 +120,7 @@ TEST(am824_io_channels, extracts_8_channels)
 }
 
 // IEEE 802.1Q-2022 Clause 35.2.2.8.6: the Talker declares its port's latency: one MTU frame, then its own
-// 32 + 12 x 8 x 4 = 416-octet MSDU (458 on the wire), 80 ns an octet at 100 Mbit/s.
+// 32 + 12 x 8 x 4 = 416-octet MSDU (458 on the wire), 80 ns an octet at 100 Mbit/s, then 500 ns of propagation.
 TEST(am824_io_msrp, a_talker_advertise_declares_the_port_latency)
 {
     auto config = make_config_with_blob(load_file(simple2_bin_path()));
@@ -133,7 +133,7 @@ TEST(am824_io_msrp, a_talker_advertise_declares_the_port_latency)
     }
     auto const info = (*result)->talker_srp_info();
     EXPECT_EQ(info.max_frame_size, uint16_t{416});
-    EXPECT_EQ(info.accumulated_latency, uint32_t{(1542 + 458) * 80});
+    EXPECT_EQ(info.accumulated_latency, uint32_t{((1542 + 458) * 80) + 500});
 }
 
 TEST(am824_io_model, descriptor_counts)
