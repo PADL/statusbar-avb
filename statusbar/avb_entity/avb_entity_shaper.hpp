@@ -10,6 +10,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/net/net_tc_launch_time.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
@@ -308,6 +309,9 @@ class ShaperQdiscs
     /// and again after each change of mode: under our cbs, or on the mqprio class with no cbs offload;
     /// offloaded, CLOCK_TAI, @p delta_ns, skip_sock_check. Unsupported until set.
     void set_launch_time(LaunchTimeMode mode, int32_t delta_ns = DEFAULT_ETF_DELTA_NS) noexcept;
+    /// Told, with launch time on, how class A's etf settled: placed (no error) or the refusal.
+    using EtfSettledFn = sg14::inplace_function<void(std::error_code), 32>;
+    void set_on_etf_settled(EtfSettledFn fn) noexcept { on_etf_settled_ = std::move(fn); }
     /// Remove everything: pfifo_fast on class B's queue, then class A's, then delete the mqprio
     /// root (one adapter reset on igb/igc). A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
@@ -352,6 +356,8 @@ class ShaperQdiscs
     /// Bring class @p label's queue @p queue to the launch-time mode once our cbs is on it (@p current), or
     /// at once with no cbs offload.
     void settle_etf(uint16_t queue, CbsParameters const& current, EtfState& state, logging::StrLit label);
+    /// Tell on_etf_settled_ how an etf asked for with launch time @p on settled (@p error: refused).
+    void tell_etf_settled(bool on, std::error_code error);
     /// The etf slot on @p queue: under our cbs (@p under_cbs), else the mqprio class itself. Errors: the
     /// netlink errno.
     [[nodiscard]] auto etf_slot(uint16_t queue, bool under_cbs) -> StatusValue<EtfSlot>;
@@ -408,6 +414,7 @@ class ShaperQdiscs
     uint16_t cbs_major_b_{0};
     LaunchTimeMode launch_time_mode_{LaunchTimeMode::unsupported};
     int32_t etf_delta_ns_{DEFAULT_ETF_DELTA_NS};
+    EtfSettledFn on_etf_settled_{};
     EtfState etf_a_{};
     std::error_code etf_error_{};
 };
@@ -489,6 +496,8 @@ class PortShaper final : public net::Pollable
     /// Another launch-time mode: settled by the next tick(); under a cbs that stays no adapter reset, but
     /// with no cbs offload each change switches igc's TSN mode (a reset). A no-op before install().
     void set_launch_time(LaunchTimeMode mode) noexcept;
+    /// See ShaperQdiscs::set_on_etf_settled: the etf's outcome with launch time on, from tick().
+    void set_on_etf_settled(ShaperQdiscs::EtfSettledFn fn) noexcept { qdiscs_.set_on_etf_settled(std::move(fn)); }
     /// Program the cbs for the TSpecs given and the current link speed now. A no-op success before
     /// install(). Errors: the first netlink failure (each is logged).
     [[nodiscard]] auto reprogram() -> Status;
@@ -588,6 +597,8 @@ class EntityShaper final : public net::Pollable
     void on_admission_changed(std::span<uint16_t const> admitted) noexcept;
     /// See PortShaper::set_launch_time.
     void set_launch_time(LaunchTimeMode mode) noexcept { port_.set_launch_time(mode); }
+    /// See PortShaper::set_on_etf_settled.
+    void set_on_etf_settled(ShaperQdiscs::EtfSettledFn fn) noexcept { port_.set_on_etf_settled(std::move(fn)); }
     /// Recompute and program the cbs for the recorded admitted set and the
     /// current link speed. A no-op success before install(). Errors: the
     /// first netlink failure (each is logged).
