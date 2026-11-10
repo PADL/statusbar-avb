@@ -9,6 +9,7 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
+#include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/net/net_tc_launch_time.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
@@ -207,6 +208,20 @@ inline constexpr uint32_t FALLBACK_MTU = 1500;
     uint64_t const octets = wire_frame_size(interfering) + class_octets;
     uint64_t const mbps = link_mbps == 0 ? 1000 : link_mbps;
     return static_cast<uint32_t>(std::min<uint64_t>(((octets * 8000U) + mbps - 1) / mbps, UINT32_MAX));
+}
+
+/// talker_port_latency_ns on @p interface_name for an entity without a PortShaper: @p link_mbps and @p mtu
+/// where nonzero, else the interface's as read now (Linux; elsewhere, and unknown, the fallbacks).
+[[nodiscard]] inline auto interface_talker_latency_ns(
+    uint64_t const class_octets, std::string_view const interface_name, uint32_t link_mbps, uint32_t mtu) -> uint32_t
+{
+#if defined(__linux__)
+    link_mbps = link_mbps != 0 ? link_mbps : net::link_speed_mbps(interface_name).value_or(0);
+    mtu = mtu != 0 ? mtu : net::interface_mtu(interface_name).value_or(0);
+#else
+    (void)interface_name;
+#endif
+    return talker_port_latency_ns(class_octets, link_mbps, mtu);
 }
 
 /// One SR class's cbs settings (tc's units: kbit/s and octets). All zero
