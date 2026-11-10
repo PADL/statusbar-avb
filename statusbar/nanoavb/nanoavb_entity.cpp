@@ -2755,12 +2755,29 @@ auto AemCommandHandler::queue_notification(uint16_t const command_type, std::spa
 {
     bool const own = command_type == current_header_.command_code();  // the command's own, not a side effect
     if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_QUEUED_BODY) {
+        release_side_effects();  // the held ones go first, so the order on the wire is the order raised
         return false;
     }
     auto& queued = queued_notifications_.emplace_back();
-    queued = {.command_type = command_type, .requester = requester_, .body_size = body.size()};
+    queued = {.command_type = command_type, .requester = requester_, .own = own, .body_size = body.size()};
     span_copy(std::span{queued.body}.first(body.size()), body);
     return true;
+}
+
+void AemCommandHandler::release_side_effects()
+{
+    dispatching_ = false;  // send them rather than hold them again
+    Eui64 const requester = requester_;
+    for (auto const& n : queued_notifications_) {
+        if (!n.own) {
+            requester_ = n.requester;
+            emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
+        }
+    }
+    requester_ = requester;
+    dispatching_ = true;
+    auto const sent = std::ranges::remove_if(queued_notifications_, [](QueuedNotification const& n) { return !n.own; });
+    queued_notifications_.erase(sent.begin(), sent.end());
 }
 
 void AemCommandHandler::flush_notifications()
