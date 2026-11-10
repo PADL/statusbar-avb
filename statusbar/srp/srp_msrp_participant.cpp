@@ -556,7 +556,9 @@ void MsrpParticipantT<Limits>::declare_pending_talkers(TimePoint const now)
 {
     for (auto& rec : talker_adv_) {
         if (rec.pending_value && !detail_msrp::leaving(rec)) {
-            declare_value(rec, *std::exchange(rec.pending_value, std::nullopt), now);
+            auto const fv = rec.pending_value.value_or(rec.first_value);
+            rec.pending_value.reset();
+            declare_value(rec, fv, now);
         }
     }
 }
