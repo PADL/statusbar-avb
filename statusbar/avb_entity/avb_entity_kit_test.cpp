@@ -1027,6 +1027,9 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     }
     auto const at_100 = static_cast<uint32_t>(octets * 80);
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100);  // not declared yet
+    m.kit.set_mtu(9000);  // the port's MTU frame interferes: 7500 octets more
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100 + (7500 * 80));
+    m.kit.set_mtu(1500);
 
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     auto const* declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
