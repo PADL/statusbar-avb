@@ -658,7 +658,7 @@ void MsrpParticipantT<Limits>::on_leave_timer(TimePoint now)
     // were in Lv state transition to Mt and notify Leave.
     auto drive = [&](auto& records, auto&& notify_leave_id) {
         for (auto& rec : records) {
-            if (!mrp::registrar_leave_due(rec, now, port_.timers())) {
+            if (!mrp::registrar_leave_due_or_rearm(rec, now, port_.timers())) {
                 continue;
             }
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
