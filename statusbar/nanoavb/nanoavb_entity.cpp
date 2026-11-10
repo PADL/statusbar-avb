@@ -2751,27 +2751,48 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
 
 auto AemCommandHandler::queue_notification(uint16_t const command_type, std::span<uint8_t const> body) -> bool
 {
-    bool const own = command_type == current_header_.command_code();  // the command's own, not a side effect
-    if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_AEM_BODY) {
+    if (body.size() > MAX_AEM_BODY) {
         release_side_effects();  // the held ones go first, so the order on the wire is the order raised
         return false;
     }
+    if (!make_room(command_type)) {
+        return false;
+    }
     auto& queued = queued_notifications_.emplace_back();
-    queued = {.command_type = command_type, .requester = requester_, .own = own, .body_size = body.size()};
+    queued = {.command_type = command_type, .requester = requester_, .body_size = body.size()};
     span_copy(std::span{queued.body}.first(body.size()), body);
     return true;
+}
+
+auto AemCommandHandler::is_commands_own(uint16_t const command_type) const noexcept -> bool
+{
+    return command_type == current_header_.command_code();
+}
+
+auto AemCommandHandler::make_room(uint16_t const command_type) -> bool
+{
+    // The last slot is kept for the command's own notification.
+    auto const fits = [&] {
+        return queued_notifications_.size() + (is_commands_own(command_type) ? 0U : 1U) < MAX_QUEUED_NOTIFICATIONS;
+    };
+    if (fits()) {
+        return true;
+    }
+    release_side_effects();
+    return fits();
 }
 
 void AemCommandHandler::release_side_effects()
 {
     dispatching_ = false;  // send them rather than hold them again
     for (auto const& n : queued_notifications_) {
-        if (!n.own) {
+        if (!is_commands_own(n.command_type)) {
             emit_held(n);
         }
     }
     dispatching_ = true;
-    auto const sent = std::ranges::remove_if(queued_notifications_, [](QueuedNotification const& n) { return !n.own; });
+    auto const sent = std::ranges::remove_if(
+        queued_notifications_, [this](QueuedNotification const& n) { return !is_commands_own(n.command_type); });
     queued_notifications_.erase(sent.begin(), sent.end());
 }
 

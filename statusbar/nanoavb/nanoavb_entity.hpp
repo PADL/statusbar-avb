@@ -1126,6 +1126,11 @@ class AemCommandHandler
     /// Hold a notification raised while a command is dispatched; false (send it now, after the side
     /// effects held) when its body exceeds an AECPDU's or no slot is free, the last being the command's own.
     [[nodiscard]] auto queue_notification(uint16_t command_type, std::span<uint8_t const> body) -> bool;
+    /// Whether a notification of @p command_type is the dispatched command's own.
+    [[nodiscard]] auto is_commands_own(uint16_t command_type) const noexcept -> bool;
+    /// Whether a notification of @p command_type has a slot, after releasing the held side effects
+    /// if need be; the last slot is the command's own.
+    [[nodiscard]] auto make_room(uint16_t command_type) -> bool;
     /// Send the held notifications other than the command's own, in the order raised, before the response.
     void release_side_effects();
     /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1).
@@ -1282,7 +1287,6 @@ class AemCommandHandler
     {
         uint16_t command_type{0};
         Eui64 requester{};
-        bool own{false};  ///< the command's own notification, held for after its response
         std::array<uint8_t, MAX_AEM_BODY> body;
         size_t body_size{0};
     };
