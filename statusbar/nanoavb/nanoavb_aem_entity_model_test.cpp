@@ -1950,6 +1950,26 @@ TEST(matrix, invalid_regions_and_callback_veto)
     EXPECT_TRUE(response_matrix_values(get.bytes) == (std::vector<int32_t>{7, 7, 7, 7}));
 }
 
+// IEEE 1722.1-2021 Clause 7.4.33.2: a refused SET_MATRIX answers the values in force of the cells it names.
+TEST(matrix, a_refused_set_answers_the_values_in_force)
+{
+    auto blob = make_blob_with_matrix();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    auto const column = make_matrix_body(0, 1, 0, 1, 2, true, 1, 1, 0, {-5});
+    EXPECT_EQ(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MATRIX, column).status, AEM_STATUS_SUCCESS);
+
+    handler.set_on_matrix_changed(
+        [](uint16_t, DescriptorStorageHandler::MatrixWrite const&) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    auto const vetoed =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MATRIX, make_matrix_body(0, 0, 0, 2, 2, false, 0, 2, 1, {99, 98}));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(vetoed.bytes.size(), size_t{16 + (2 * 4)});
+    EXPECT_TRUE(response_matrix_values(vetoed.bytes) == (std::vector<int32_t>{-5, 7}));  // cells #1 and #2, row-major
+}
+
 // ===========================================================================
 // CLOCK_SOURCE built-in (kit phase 3c): SET_CLOCK_SOURCE validated against the
 // CLOCK_DOMAIN's authored clock_sources, selection in RAM, reflected by
@@ -2232,6 +2252,22 @@ TEST(mixer, invalid_writes_rejected_and_callback_gates)
     EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
     EXPECT_EQ(seen_index, static_cast<uint16_t>(0));
     EXPECT_EQ(seen_value, int32_t{-9});
+}
+
+// IEEE 1722.1-2021 Clause 7.4.31.1: a refused SET_MIXER answers the value in force.
+TEST(mixer, a_refused_set_answers_the_value_in_force)
+{
+    auto blob = make_blob_with_mixer();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    handler.set_on_mixer_changed([](uint16_t, std::span<uint8_t const>) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MIXER, make_mixer_body(0, int32_t{3}));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(vetoed.bytes.size(), size_t{8});
+    EXPECT_EQ(response_mixer_value(vetoed.bytes), MIXER_AUTHORED_CURRENT);
 }
 
 // ===========================================================================
@@ -2693,6 +2729,45 @@ TEST(configuration, set_validates_switches_and_round_trips)
     EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
     auto const still1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CONFIGURATION, {});
     EXPECT_EQ(response_configuration(still1.bytes), uint16_t{1});
+}
+
+// IEEE 1722.1-2021 Clause 7.4.7.1: a failed SET_CONFIGURATION answers the configuration in force.
+TEST(configuration, a_failed_set_answers_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    auto const unhooked = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(unhooked.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(unhooked.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(unhooked.bytes), uint16_t{0});
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(5));
+    EXPECT_EQ(bad.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(response_configuration(bad.bytes), uint16_t{0});
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_STREAM_IS_RUNNING; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(response_configuration(vetoed.bytes), uint16_t{0});
+}
+
+// SET_CONFIGURATION has no deferral: a hook's IN_PROGRESS answers the configuration in force (IEEE 1722.1-2021
+// Clause 7.4.7.1), and the configuration stays as it was.
+TEST(configuration, a_hook_answering_in_progress_answers_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_IN_PROGRESS; });
+
+    auto const answered = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(answered.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(answered.bytes), uint16_t{0});
+    EXPECT_EQ(cmd_handler.current_configuration(), uint16_t{0});
 }
 
 //
