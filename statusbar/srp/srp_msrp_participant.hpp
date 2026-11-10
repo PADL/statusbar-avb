@@ -635,6 +635,10 @@ class MsrpParticipantT
     // talker blink out and drop its reservation. Re-declaring synchronously beats
     // that window.
     bool rx_leaveall_seen_{false};
+    /// Talker leaves received in the MRPDU receive_pdu is reading: delivered once it is read, before the
+    /// LeaveAll answer (deliver_rx_talker_leaves); a full list delivers at once.
+    statusbar::sg14::inplace_vector<tsn::StreamId, Limits::max_talker_advertise + Limits::max_talker_failed> rx_talker_leaves_{};
+    bool reading_pdu_{false};
 
     // ============================================================
     // Internal helpers
@@ -1000,6 +1004,13 @@ class MsrpParticipantT
     void notify_talker_advertise(TalkerAdvertiseFirstValue const& fv, Operation op);
     void notify_talker_failed(TalkerFailedFirstValue const& fv, Operation op);
     void notify_talker_leave(tsn::StreamId const& id);
+    /// Read @p pdu's messages, then deliver the Talker leaves it held (deliver_rx_talker_leaves).
+    void read_pdu(std::span<uint8_t const> pdu, TimePoint now);
+    /// Each message of @p pdu, decoded.
+    void decode_messages(std::span<uint8_t const> pdu, TimePoint now);
+    /// The Talker leaves of the MRPDU just read, each but a StreamID still registered In under its other
+    /// Talker attribute (a Talker Advertise turned Talker Failed, or back).
+    void deliver_rx_talker_leaves();
     void notify_listener(tsn::StreamId const& id, ListenerDeclaration decl, Operation op);
     void notify_listener_leave(tsn::StreamId const& id);
     void notify_domain(DomainFirstValue const& fv, Operation op);
