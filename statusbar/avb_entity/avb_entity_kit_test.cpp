@@ -4814,4 +4814,46 @@ TEST(avb_entity_kit_milan_listener, an_input_settled_on_another_vlan_holds_its_v
     EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(2)}));
 }
 
+// A probe answer naming no VLAN (0) matches the Talker Advertise on any; the input joins the VLAN that
+// Advertise is on (3) once it is registered, and leaves it at its unbind.
+TEST(avb_entity_kit_milan_listener, an_input_probed_without_a_vlan_joins_its_talker_advertises)
+{
+    VlanRecorder fake;  // first: it outlives the kit, which deletes its links through it
+    MilanPair p;
+    p.l.kit.bind_listener_vlan(fake, 9);
+    EXPECT_TRUE(p.start());
+    auto const link = [&p](uint16_t const vid) { return net::vlan::vlan_link_name(p.l.config.interface_name, vid); };
+    ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x11};
+    uint64_t const stream = 0x0200000000000888ULL;
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    p.probe_answered(group, stream, 0);
+    EXPECT_TRUE(p.sink().settled());
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2)}));  // no VID yet
+
+    std::vector<std::vector<uint8_t>> out;
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9f};
+    bridge.set_send_pdu([&out](std::span<uint8_t const> pdu) {
+        out.emplace_back(pdu.begin(), pdu.end());
+        return true;
+    });
+    bridge.start(p.now);
+    srp::msrp::TalkerAdvertiseFirstValue fv{};
+    (void)tsn::load_unchecked(ieee::Eui64{}.from_uint64(stream).span(), &fv.stream_id);
+    fv.destination_address = group;
+    fv.vlan_identifier = 3;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    (void)bridge.declare_talker_advertise(fv, p.now);
+    for (int i = 0; i < 4; ++i) {
+        p.now += std::chrono::milliseconds(250);
+        bridge.tick(p.now);
+        for (auto const& pdu : std::exchange(out, {})) {
+            p.lc().msrp_handler.receive_packet(pdu, p.now);
+        }
+    }
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(3)}));
+}
+
 #endif  // __linux__
