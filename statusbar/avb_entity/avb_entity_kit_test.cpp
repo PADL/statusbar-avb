@@ -2113,12 +2113,18 @@ struct RateKit : PersistentKit
         bool const ports = false,
         bool const one_rate = false,
         bool const am824 = false,
-        bool const gate = true)
-        : PersistentKit{path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate, am824), gate}
+        bool const gate = true,
+        uint16_t const port_flags = 0)
+        : PersistentKit{
+              path, entity_low, std::nullopt, make_multirate_blob(ports || one_rate, one_rate, am824, false, port_flags), gate}
     {
         kit.set_on_stream_format_changed([this](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
             formats.push_back({type, index, format});
             return format_status;
+        });
+        kit.set_on_unit_rate_changed([this](uint32_t const rate, std::span<AvbEntityKit::RetimedFormat const> const streams) {
+            unit_rates.push_back({rate, streams.size()});
+            return unit_status;
         });
     }
 
@@ -2148,6 +2154,8 @@ struct RateKit : PersistentKit
     };
     std::vector<Format> formats;
     uint8_t format_status{atdecc::AEM_STATUS_SUCCESS};
+    std::vector<std::pair<uint32_t, size_t>> unit_rates;  ///< each unit-rate hook call: the rate, how many streams
+    uint8_t unit_status{atdecc::AEM_STATUS_SUCCESS};
 };
 
 /// The unsolicited AEM responses in @p frames with command @p command.
@@ -2307,8 +2315,10 @@ TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
         EXPECT_EQ(
             m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 8))),
             atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-        // The rate change would re-time the bound input (Milan v1.2 Section 5.4.2.7); the rate in force is a no-op.
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+        // Milan v1.3 Section 5.4.2.13: the bound input keeps its format on a port that converts no rates; the rate in
+        // force is a no-op.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        EXPECT_TRUE(m.unit_rates.empty());
         EXPECT_EQ(m.kit.sample_rate(), 48000U);
         EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
         EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
@@ -2370,6 +2380,7 @@ TEST(avb_entity_kit_formats, a_refused_rate_change_is_undone)
     EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);  // re-timed, then put back
     EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K);
     EXPECT_EQ(m.formats.size(), size_t{3});
+    EXPECT_TRUE(m.unit_rates == (std::vector<std::pair<uint32_t, size_t>>{{96000, 2}, {48000, 2}}));  // the data plane back
     m.kit.on_declaration_timer(MilanKit::steady_ns());
     EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
 }
@@ -2397,6 +2408,157 @@ TEST(avb_entity_kit_formats, a_saved_sampling_rate_is_restored_at_start)
         EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());  // a restore notifies nobody
     }
     std::filesystem::remove_all(dir);
+}
+
+// Milan v1.3 Section 5.4.2.13: a streaming output on a port that converts rates keeps its format while the unit
+// changes rate; the idle input follows
+TEST(avb_entity_kit_formats, a_running_output_on_a_converting_port_keeps_its_format)
+{
+    constexpr uint16_t SYNC_SAMPLE_RATE_CONV = 0x0004;
+    RateKit m{"", 0x71, true, false, false, true, SYNC_SAMPLE_RATE_CONV};
+    EXPECT_TRUE(m.start_ready());
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::raw_now()));
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.sample_rate(), 96000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_96K);
+    EXPECT_TRUE(m.unit_rates == (std::vector<std::pair<uint32_t, size_t>>{{96000, 1}}));
+}
+
+// The same output on a port that converts no rates cannot follow: NOT_SUPPORTED, the data plane not asked
+TEST(avb_entity_kit_formats, a_running_output_on_a_plain_port_refuses_the_rate)
+{
+    RateKit m{"", 0x72, true};
+    EXPECT_TRUE(m.start_ready());
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K);
+    EXPECT_TRUE(m.unit_rates.empty() && m.formats.empty());
+}
+
+// With nothing to re-time the data plane is still asked, and its refusal stands; without the hook the unit keeps its rate
+TEST(avb_entity_kit_formats, an_empty_retime_still_asks_the_data_plane)
+{
+    constexpr uint16_t SYNC_SAMPLE_RATE_CONV = 0x0004;
+    RateKit m{"", 0x73, true, false, false, true, SYNC_SAMPLE_RATE_CONV};
+    EXPECT_TRUE(m.start_ready());
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    auto& sinks = m.kit.host().components().acmp_listener.milan_sinks();
+    EXPECT_TRUE(sinks.restore(0, {.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200001111110001ULL)}));
+    m.unit_status = atdecc::AEM_STATUS_NO_RESOURCES;
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_TRUE(m.unit_rates == (std::vector<std::pair<uint32_t, size_t>>{{96000, 0}}));
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    m.unit_status = atdecc::AEM_STATUS_SUCCESS;
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.sample_rate(), 96000U);
+    EXPECT_TRUE(m.formats.empty());
+    m.kit.set_on_unit_rate_changed({});
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+}
+
+// IEEE 802.1Q-2022 Clause 34.3.1: a re-time past the class A budget is refused before the data plane moves
+TEST(avb_entity_kit_formats, a_retime_past_the_class_a_budget_is_refused_first)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    m.kit.set_link_mbps(1);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_TRUE(m.unit_rates.empty() && m.formats.empty());
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+}
+
+namespace {
+
+/// Two AAF outputs (8 ch INT_24, 48 and 96 kHz listed), both carried by STREAM_PORT_OUTPUT 0 of AUDIO_UNIT 0;
+/// with @p two_units output 1 and a second unit (port 1) are in clock domain 1.
+auto make_two_unit_blob(bool const two_units) -> std::vector<uint8_t>
+{
+    nanoavb::AemBlobWriter w;
+    atdecc::aem::DescriptorEntity entity{};
+    entity.configurations_count = 1;
+    entity.talker_stream_sources = 2;
+    w.add(0, DESCRIPTOR_ENTITY, 0, make_const_span(entity));
+    atdecc::aem::DescriptorConfiguration config{};
+    w.add(0, DESCRIPTOR_CONFIGURATION, 0, make_const_span(config));
+    for (uint16_t index = 0; index < 2; ++index) {
+        atdecc::aem::DescriptorStream stream{};
+        stream.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        stream.descriptor_index = index;
+        stream.clock_domain_index = static_cast<uint16_t>(two_units ? index : 0);
+        stream.current_format.from_uint64(INT24_8CH_48K);
+        (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(INT24_8CH_48K));
+        (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(INT24_8CH_96K));
+        w.add(0, DESCRIPTOR_STREAM_OUTPUT, index, wire(stream));
+    }
+    for (uint16_t index = 0; index < (two_units ? 2 : 1); ++index) {
+        atdecc::aem::DescriptorStreamPort port{};
+        port.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
+        port.descriptor_index = index;
+        w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, index, make_const_span(port));
+        atdecc::aem::DescriptorAudioUnit unit{};
+        unit.clock_domain_index = index;
+        unit.current_sampling_rate = uint32_t{48000};
+        unit.sampling_rates_count = uint16_t{2};
+        unit.sampling_rates[0] = uint32_t{48000};
+        unit.sampling_rates[1] = uint32_t{96000};
+        unit.number_of_stream_output_ports = uint16_t{1};
+        unit.base_stream_output_port = index;
+        w.add(0, atdecc::aem::DESCRIPTOR_AUDIO_UNIT, index, wire(unit));
+    }
+    atdecc::aem::DescriptorAvbInterface iface{};
+    w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    return w.write();
+}
+
+/// The two-unit model's kit, both hooks accepting and counting what they were asked.
+struct TwoUnitKit : PersistentKit
+{
+    explicit TwoUnitKit(bool const two_units, uint64_t const entity_low)
+        : PersistentKit{{}, entity_low, std::nullopt, make_two_unit_blob(two_units)}
+    {
+        kit.set_on_stream_format_changed([this](uint16_t, uint16_t, StreamFormatFields const&) {
+            ++formats;
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
+        kit.set_on_unit_rate_changed([this](uint32_t, std::span<AvbEntityKit::RetimedFormat const> const streams) {
+            asked.push_back(streams.size());
+            return atdecc::AEM_STATUS_SUCCESS;
+        });
+    }
+
+    size_t formats{0};
+    std::vector<size_t> asked;
+};
+
+}  // namespace
+
+// A unit holds the streams of its clock domain, not another unit's (IEEE 1722.1-2021 Clauses 7.2.3, 7.2.6)
+TEST(avb_entity_kit_formats, a_rate_change_retimes_its_own_units_streams_only)
+{
+    TwoUnitKit m{true, 0x74};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.asked == std::vector<size_t>{1});
+    EXPECT_EQ(m.kit.talker_specs()[0].format_word, INT24_8CH_96K);
+    EXPECT_EQ(m.kit.talker_specs()[1].format_word, INT24_8CH_48K);
+}
+
+// One port carrying several streams: the unit re-times every one of them, not only the port's own index
+TEST(avb_entity_kit_formats, every_stream_one_port_carries_follows_the_unit)
+{
+    TwoUnitKit m{false, 0x75};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.asked == std::vector<size_t>{2});
+    EXPECT_EQ(m.formats, size_t{2});
+    EXPECT_EQ(m.kit.talker_specs()[0].format_word, INT24_8CH_96K);
+    EXPECT_EQ(m.kit.talker_specs()[1].format_word, INT24_8CH_96K);
 }
 
 // A stream path refuses a format it cannot carry and keeps its own

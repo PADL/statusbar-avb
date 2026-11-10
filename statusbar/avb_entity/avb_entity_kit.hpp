@@ -329,13 +329,25 @@ class AvbEntityKit
     // SET_STREAM_FORMAT goes through the entity's hook and is persisted; SET_SAMPLING_RATE
     // re-times AUDIO_UNIT 0's streams through it. The rules are in docs/AVB_ENTITY_KIT.md.
 
-    /// The entity's data plane adopts a stream's new (decoded) format before the kit does, answering an
-    /// AEM status (reactor thread); a format at another rate than the unit's comes unmapped unless its port
-    /// converts rates (or set_output_mappings_across_rates). A data plane refuses a rate it cannot run (one
-    /// that sends through TalkerStreams at the unit's rate refuses any other), and so refuses a unit re-time.
+    /// The entity's data plane adopts a stream's new format before the kit does (reactor thread), answering an
+    /// AEM status; one at another rate than the unit's comes unmapped unless its port converts rates (or
+    /// set_output_mappings_across_rates). It refuses a rate it cannot run (docs/AVB_ENTITY_KIT.md).
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
+    /// A stream a SET_SAMPLING_RATE re-times: its descriptor and its format before and after.
+    struct RetimedFormat
+    {
+        uint16_t type{0};
+        uint16_t index{0};
+        uint64_t from{0};
+        uint64_t to{0};
+    };
+    using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
+    /// The entity's data plane moves AUDIO_UNIT 0 to @p rate and @p streams with it, all or none, before each
+    /// stream's format hook (reactor thread); answers an AEM status. Without it the unit keeps its rate.
+    using UnitRateFn = sg14::inplace_function<uint8_t(uint32_t rate, std::span<RetimedFormat const> streams), 32>;
+    void set_on_unit_rate_changed(UnitRateFn fn) noexcept { on_unit_rate_changed_ = std::move(fn); }
     /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the
     /// shaper keeps it current) whose SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that
     /// pushes every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
@@ -622,34 +634,26 @@ class AvbEntityKit
     /// streams at its rate through the former, all or none: docs/AVB_ENTITY_KIT.md).
     [[nodiscard]] auto change_stream_format(uint16_t descriptor_type, uint16_t descriptor_index, uint64_t format) -> uint8_t;
     [[nodiscard]] auto change_sampling_rate(uint16_t audio_unit, uint32_t rate) -> uint8_t;
-    /// A stream a rate change re-times: its descriptor and its format before and after.
-    struct RetimedFormat
-    {
-        uint16_t type{0};
-        uint16_t index{0};
-        uint64_t from{0};
-        uint64_t to{0};
-    };
-    using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
-    /// AUDIO_UNIT 0's audio streams at @p from, each at @p rate; else NOT_SUPPORTED (one lists no such
-    /// format) or STREAM_IS_RUNNING (one runs, Milan v1.2 Section 5.4.2.7).
+    /// AUDIO_UNIT 0's idle audio streams at @p from, each at @p rate; else NOT_SUPPORTED (one on a port that
+    /// converts no rates cannot follow, Milan v1.3 Section 5.4.2.13) or NO_RESOURCES (the class A budget).
     [[nodiscard]] auto retimed_formats(uint32_t from, uint32_t rate) const -> std::expected<RetimedFormats, uint8_t>;
     /// Stream @p spec of the direction (@p output) added to @p out when retimed_formats() re-times it; else as there.
     [[nodiscard]] auto add_retimed(bool output, StreamSpec const& spec, uint32_t from, uint32_t rate, RetimedFormats& out) const
         -> uint8_t;
-    /// Stream @p spec's format at @p rate when its descriptor lists it (aaf_format_at_rate()); else nullopt.
-    [[nodiscard]] auto listed_at_rate(bool output, StreamSpec const& spec, uint32_t rate) const -> std::optional<uint64_t>;
-    /// Whether that stream is AUDIO_UNIT 0's: its stream port is, or the unit has none.
+    /// Stream @p spec's format at @p rate when it is idle and its descriptor lists it; else nullopt.
+    [[nodiscard]] auto following_format(bool output, StreamSpec const& spec, uint32_t rate) const -> std::optional<uint64_t>;
+    /// Whether that stream is AUDIO_UNIT 0's: in its clock domain, whichever port carries it.
     [[nodiscard]] auto in_unit_zero(bool output, uint16_t index) const noexcept -> bool;
     /// The rate of the unit holding that stream: AUDIO_UNIT 0's in force, else the one the kit was built with.
     [[nodiscard]] auto unit_rate_of(bool output, uint16_t index) const noexcept -> uint32_t;
-    /// @p retimed in force with the unit at @p rate, the output mappings refreshed once; else as retime_all().
+    /// The data plane (on_unit_rate_changed_), then @p retimed in force with the unit at @p rate, the output
+    /// mappings refreshed once; a refusal leaves both as they were.
     [[nodiscard]] auto retime_streams(uint32_t rate, RetimedFormats const& retimed) -> uint8_t;
     /// Each of @p retimed at its new format, their notifications queued; a refusal puts the unit back at
     /// @p before and those changed back at their formats, and answers its status.
     [[nodiscard]] auto retime_all(uint32_t before, RetimedFormats const& retimed) -> uint8_t;
-    /// Each of @p changed back at its format before.
-    void undo_retimed(std::span<RetimedFormat const> changed);
+    /// The first @p changed of @p retimed back at their formats, then the data plane back at @p before.
+    void undo_retimed(uint32_t before, RetimedFormats const& retimed, size_t changed);
     /// Stream format @p word as a SET_STREAM_FORMAT applies it (the handler's checks, change_stream_format()).
     [[nodiscard]] auto set_stream_word(uint16_t type, uint16_t index, uint64_t word) -> uint8_t;
     /// The re-timed streams' SET_STREAM_FORMAT notifications, to every registered controller.
@@ -659,6 +663,8 @@ class AvbEntityKit
     /// Whether the talkers fit the class A budget (see set_link_mbps) with STREAM_OUTPUT
     /// @p index at format @p word; a change that lowers the total always does.
     [[nodiscard]] auto talkers_fit(uint16_t index, uint64_t word) const noexcept -> bool;
+    /// As talkers_fit() with every STREAM_OUTPUT of @p changed at its new format.
+    [[nodiscard]] auto talkers_fit(std::span<RetimedFormat const> changed) const noexcept -> bool;
     /// Whether a map on a port that converts no rates names stream @p index of the direction (@p output): a static
     /// AUDIO_MAP, or an input's dynamic mapping; the kit's own output identity does not count.
     [[nodiscard]] auto stream_mapped(bool output, uint16_t index) const -> bool;
@@ -849,7 +855,7 @@ class AvbEntityKit
     /// Reusable AVB control plane: talker/listener stream counts from the
     /// blob, 4 max listeners per talker stream.
     AvbEntityHost host_;
-    /// AUDIO_UNIT 0 as the blob has it (its stream ports); nullopt without one.
+    /// AUDIO_UNIT 0 as the blob has it (its clock domain); nullopt without one.
     std::optional<atdecc::aem::DescriptorAudioUnit> unit_zero_;
 
     /// Per-stream transmit gate (MSRP listener declaration + grace). Binds config_ + components.
@@ -886,6 +892,7 @@ class AvbEntityKit
     /// Restore the saved mappings (after the formats), defaults elsewhere.
     void apply_saved_audio_maps(PersistentState const& saved);
     StreamFormatFn on_stream_format_changed_{};
+    UnitRateFn on_unit_rate_changed_{};
     /// Streams (descriptor type, index) a rate change re-timed, notified after its response.
     sg14::inplace_vector<std::pair<uint16_t, uint16_t>, 2 * MAX_ENTITY_STREAMS> format_notifications_{};
     /// The persistent state: the entity name the handler was configured
