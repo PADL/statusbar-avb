@@ -211,6 +211,13 @@ GET_AVB_INFO of interface 0 is notified asynchronously (Milan v1.2 Table 5.22)
 when a field the table lists changes; the events that can change one call
 `refresh_avb_info()`, and a mirrored device's updates notify themselves.
 
+AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows the entity's own gPTP
+state until the integrator reports the gPTP stack's asCapable for the port with
+`AvbEntityHost::note_port_as_capable` (from ptp4l, `PtpManagementState::as_capable`;
+linuxptp's `asCapable true` says nothing of the link and is not reported);
+`std::nullopt` returns to the entity's own state. It is never set while the link
+is down (IEEE 802.1AS-2020 Clause 10.2.5.1).
+
 ## Listener VLAN
 
 `bind_listener_vlan` keeps the SR-class VID in use (configured, or adopted from
@@ -416,14 +423,25 @@ the MSB, notified with the other counters at most once a second. Classic (IEEE 1
 of mr toggles (bit 3), tu PDUs (bit 4) and PDUs (FRAMES_TX, bit 7).
 
 The host accounts for ENTITY (no counters beyond ENTITY_SPECIFIC, so none
-valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: changes after the
-first grandmaster, the one found at start not being a change) and the
+valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: each change of the
+grandmaster in force after the first) and the
 CLOCK_DOMAINs (LOCKED, UNLOCKED: each transition once, notified). CLOCK_DOMAIN
 0 follows the gPTP lock until the entity reports its lock with
 `note_clock_domain_locked`, and again after `release_clock_domain_lock(0)`;
 the others, up to four, count once the entity reports them and stop at their
 release. Other interfaces and domains the model has answer with none
 valid. Only configuration 0 is served.
+
+The grandmaster in force is the gPTP stack's PARENT_DATA_SET
+grandmasterIdentity, its own clock while it is grandmaster, once the
+integrator reports it with `AvbEntityHost::note_parent_grandmaster`; a proxy
+entity's AVB info mirror reports the mirrored device's. Until then the
+Announce handler's grandmaster stands, and an Announce receipt timeout makes
+a grandmaster-capable entity (AVB_INTERFACE 0 priority1 below 255, IEEE
+802.1AS-2020 Clause 8.6.2.1) its own grandmaster: A lost and found again is
+two changes. An integrator that follows a gPTP stack calls
+`use_parent_grandmaster` first, so the Announce handler counts nothing even
+before the stack names a grandmaster.
 
 CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
 PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE

@@ -317,6 +317,12 @@ void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
     ctl_log().status("avb info mirror: following entity {:016x}", cfg.target_entity_id.to_uint64());
 }
 
+void AvbEntityHost::note_port_as_capable(std::optional<bool> const as_capable)
+{
+    port_as_capable_ = as_capable;
+    refresh_avb_info();  // a change notifies GET_AVB_INFO's subscribers
+}
+
 void AvbEntityHost::set_propagation_delay_ns(uint32_t const ns)
 {
     propagation_delay_override_ = true;
@@ -356,6 +362,9 @@ void AvbEntityHost::on_mirror_update(
             // ADP carries the grandmaster too; keep it in step with what we report.
             components_.adp_advertiser.set_gptp_info(
                 tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number, sm::Clock::now());
+            if (info->gptp_grandmaster_id.to_uint64() != 0) {
+                note_parent_grandmaster(info->gptp_grandmaster_id);  // the mirrored device's parent data set
+            }
         }
         // IEEE 1722.1 7.5.2: gPTP changes are unsolicited GET_AVB_INFO notifications.
         (void)components_.aem_handler.notify_avb_info_changed(index);
@@ -456,7 +465,8 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
             info.gptp_domain_number = last->header.domain_number.get();
         }
     }
-    if (gptp_ctx_.as_capable || gptp_ctx_.time_locked) {
+    // No asCapable on a link that is down (IEEE 802.1AS-2020 Clause 10.2.5.1).
+    if (supervisor_ctx_.link_up && port_as_capable_.value_or(gptp_ctx_.as_capable || gptp_ctx_.time_locked)) {
         info.flags |= AS_CAPABLE;
     }
     if (propagation_delay_override_) {
@@ -509,21 +519,46 @@ void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandm
     }
 }
 
-void AvbEntityHost::note_grandmaster_changed()
+void AvbEntityHost::note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
 {
     refresh_avb_info();
-    // The first grandmaster found is not a change.
-    if (!grandmaster_seen_) {
-        grandmaster_seen_ = true;
+    if (!grandmaster_from_parent_) {
+        note_grandmaster_in_force(grandmaster.to_eui64());
+    }
+}
+
+void AvbEntityHost::note_grandmaster_lost()
+{
+    refresh_avb_info();
+    // Nothing announced: a grandmaster-capable entity is grandmaster itself (Milan v1.3 Section 4.2.6.2.1).
+    if (!grandmaster_from_parent_ && grandmaster_capable()) {
+        note_grandmaster_in_force(own_clock_identity_.value_or(ieee::Eui64{}));
+    }
+}
+
+void AvbEntityHost::note_parent_grandmaster(ieee::Eui64 const& grandmaster)
+{
+    grandmaster_from_parent_ = true;
+    note_grandmaster_in_force(grandmaster);
+}
+
+void AvbEntityHost::note_grandmaster_in_force(ieee::Eui64 const& grandmaster)
+{
+    bool const changed = grandmaster_in_force_.has_value() && grandmaster != *grandmaster_in_force_;
+    grandmaster_in_force_ = grandmaster;
+    if (!changed) {
         return;
     }
     ++gm_changed_count_;
     (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
 }
 
-void AvbEntityHost::note_grandmaster_lost()
+auto AvbEntityHost::grandmaster_capable() const -> bool
 {
-    refresh_avb_info();
+    atdecc::aem::DescriptorAvbInterface desc{};
+    nanoavb::DescriptorId const id{
+        .ref = {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_AVB_INTERFACE, .descriptor_index = 0}};
+    return handler_ != nullptr && handler_->on_get_avb_interface(id, desc) && static_cast<uint8_t>(desc.priority1) != 255;
 }
 
 void AvbEntityHost::note_media_clock_locked(bool const locked)

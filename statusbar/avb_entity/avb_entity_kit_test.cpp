@@ -3219,6 +3219,117 @@ TEST(avb_entity_kit_counters, a_crf_input_counts_media_lock_from_its_timestamps)
     EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
 }
 
+// Milan v1.3 Section 5.3.8.10: a CRF PDU the input rejects is still a Stream Data AVTPDU, counted
+// in UNSUPPORTED_FORMAT and holding its place in the sequence.
+TEST(avb_entity_kit_counters, a_rejected_crf_pdu_keeps_its_place_in_the_sequence)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
+    p.talker_advertises();
+    p.pump(20);
+    auto* listener = p.l.kit.listener();
+    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
+
+    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    uint64_t ts = 9'000'000'000ULL;
+    auto const send = [&](uint8_t const type, bool const sv) {
+        std::array<uint64_t, 1> const one{ts};
+        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
+        avtp::CrfPdu pdu{};
+        span_load(pdu, std::span<uint8_t const>{frame}.first(avtp::CrfPdu::HEADER_LENGTH));
+        pdu.set_type(type);
+        pdu.set_sv(sv);
+        span_store(std::span{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+        listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
+        ts += 2'000'000;
+    };
+    int64_t const t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);
+    send(1, true);
+    send(7, true);  // a CRF type IEEE 1722-2016 does not define
+    send(1, true);
+    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
+    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
+
+    // sv=0 is no stream data of this stream: not counted, and the sequence passes over it.
+    send(1, false);
+    p.l.kit.poll_counters(t + (2 * AvbEntityKit::COUNTERS_INTERVAL_NS));
+    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[8].get(), 1U);
+}
+
+// A CRF PDU cut short past its AVTP common header still counts in UNSUPPORTED_FORMAT and holds its
+// place in the sequence (Milan v1.3 Section 5.3.8.10).
+TEST(avb_entity_kit_counters, a_short_crf_pdu_is_unsupported_and_keeps_its_place_in_the_sequence)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
+    p.talker_advertises();
+    p.pump(20);
+    auto* listener = p.l.kit.listener();
+    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
+
+    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    uint64_t ts = 9'000'000'000ULL;
+    auto const send = [&](size_t const length) {
+        std::array<uint64_t, 1> const one{ts};
+        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
+        listener->on_stream_rx_frame(std::span{frame}.first(length), static_cast<int64_t>(ts) - 2'000'000);
+        ts += 2'000'000;
+    };
+    int64_t const t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);
+    send(frame.size());
+    send(avtp::AVTP_COMMON_HEADER_LENGTH + 4);  // the common header, then cut short
+    send(frame.size());
+    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
+    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
+}
+
+// A frame of another AVTP subtype carrying a CRF input's stream_id is a Stream Data AVTPDU of
+// that stream in a format it does not accept: UNSUPPORTED_FORMAT, in sequence (Milan v1.3 Section 5.3.8.10).
+TEST(avb_entity_kit_counters, a_frame_of_another_subtype_on_an_input_stream_is_an_unsupported_format)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
+    p.talker_advertises();
+    p.pump(20);
+    auto* listener = p.l.kit.listener();
+    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
+
+    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    uint64_t ts = 9'000'000'000ULL;
+    auto const send = [&](uint8_t const subtype) {
+        std::array<uint64_t, 1> const one{ts};
+        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
+        avtp::CrfPdu pdu{};
+        span_load(pdu, std::span<uint8_t const>{frame}.first(avtp::CrfPdu::HEADER_LENGTH));
+        pdu.subtype = subtype;
+        span_store(std::span{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+        listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
+        ts += 2'000'000;
+    };
+    int64_t const t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);
+    send(avtp::AvtpSubtype::crf);
+    send(avtp::AvtpSubtype::aaf);
+    send(avtp::AvtpSubtype::crf);
+    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
+    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
+}
+
 // GET_AS_PATH (Milan v1.2 Section 5.4.2.24) from the Announces' path trace,
 // and its notification; GET_AVB_INFO notified asynchronously when the
 // grandmaster changes (Table 5.22).
@@ -3245,7 +3356,7 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     trace.push_back(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0002ULL));
     handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
         .grandmaster_id_changed =
-            [&m](int64_t, gptp::ClockIdentity const&, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(); },
+            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(gm); },
         .path_trace_changed = [&m](int64_t) { m.kit.note_as_path_changed(); }});
     handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
@@ -3259,6 +3370,36 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
+}
+
+// GPTP_GM_CHANGED (Milan v1.3 Section 5.3.6.3, IEEE 1722.1-2021 Clause 7.4.42.2.2) follows the grandmaster
+// in force: the first is none; lost to the Announce receipt timeout, this grandmaster-capable entity is its
+// own (one), the same one found again another, and a different one another.
+TEST(avb_entity_kit_counters, gptp_gm_changed_follows_the_grandmaster_in_force)
+{
+    MilanKit m{std::nullopt, 0x9A};
+    EXPECT_TRUE(m.start_ready());
+    auto& announces = m.kit.host().net_handlers()->gptp_handler();
+    announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{
+        .grandmaster_id_changed =
+            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(gm); },
+        .grandmaster_lost = [&m](int64_t) { m.kit.note_grandmaster_lost(); }});
+    gptp::AnnounceMessage announce{};
+    announce.init();
+    announce.header.log_message_interval = 0;  // 1 s: lost after 4.5 s
+    announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+
+    int64_t t = MilanKit::steady_ns();
+    announces.on_announce(announce, t);
+    announces.tick(t += 10'000'000'000);
+    EXPECT_FALSE(announces.has_grandmaster());
+    announces.on_announce(announce, t += 1'000'000'000);
+    EXPECT_TRUE(announces.has_grandmaster());
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 2U);  // GPTP_GM_CHANGED
+
+    announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL};
+    announces.on_announce(announce, t + 1'000'000'000);
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 3U);
 }
 
 // Milan v1.2 Section 5.5.2.7 / Table 5.47: connection_count stays 0 whatever

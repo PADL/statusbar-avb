@@ -159,12 +159,18 @@ class AvbEntityHost
     void on_gptp_announce(TimePoint time, bool has_grandmaster);
     void on_timeout(TimePoint time);
 
-    /// A gPTP grandmaster change seen (the Announce handler's): counted for
-    /// GET_COUNTERS (AVB_INTERFACE GPTP_GM_CHANGED). Reactor thread.
-    void note_grandmaster_changed();
-    /// The grandmaster was lost (no Announce within the receipt timeout).
-    /// Reactor thread.
+    /// gPTP grandmaster @p grandmaster found by the Announce handler: the grandmaster in force for
+    /// GPTP_GM_CHANGED (IEEE 1722.1-2021 Clause 7.4.42.2.2) until note_parent_grandmaster is told. Reactor thread.
+    void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster);
+    /// The grandmaster was lost (no Announce within the receipt timeout): a grandmaster-capable
+    /// entity is its own grandmaster in force from now. Reactor thread.
     void note_grandmaster_lost();
+    /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
+    /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
+    void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
+    /// GPTP_GM_CHANGED follows note_parent_grandmaster alone from now, before its first report too, and
+    /// even if none ever comes: a gPTP stack that never answers leaves it unchanged.
+    void use_parent_grandmaster() noexcept { grandmaster_from_parent_ = true; }
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
     void note_as_path_changed();
@@ -329,6 +335,10 @@ class AvbEntityHost
     /// Propagation delay (ns) to report in the observed (non-mirrored) state
     /// (e.g. the gPTP port's neighborPropDelay); a change is notified (Clause 7.4.40).
     void set_propagation_delay_ns(uint32_t ns);
+    /// The gPTP stack's asCapable for this port (IEEE 802.1AS-2020 Clause 10.2.5.1): GET_AVB_INFO's
+    /// AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows it, not the entity's gPTP lock; nullopt
+    /// returns to the entity's own state. Never while the link is down. Reactor thread.
+    void note_port_as_capable(std::optional<bool> as_capable);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
     // --- Typed stream hooks (the stream-specific bits of the SM wiring) ---------
@@ -383,6 +393,10 @@ class AvbEntityHost
     [[nodiscard]] auto interface_runtime(uint16_t index, std::optional<ieee::Eui48> const& mac) const
         -> nanoavb::AvbInterfaceRuntime;
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
+    /// GPTP_GM_CHANGED counts @p grandmaster when another one was in force (the first is no change).
+    void note_grandmaster_in_force(ieee::Eui64 const& grandmaster);
+    /// AVB_INTERFACE 0's priority1 is below 255 (IEEE 802.1AS-2020 Clause 8.6.2.1).
+    [[nodiscard]] auto grandmaster_capable() const -> bool;
 
     /// stop_control_plane's first half: the MSRP reservations and the MVRP
     /// VID withdrawn with their Leaves sent at once, then ENTITY_DEPARTING.
@@ -480,9 +494,11 @@ class AvbEntityHost
         bool entity_driven{false};  ///< note_clock_domain_locked was called: gPTP no longer drives it
     };
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
-    bool grandmaster_seen_{false};
+    std::optional<ieee::Eui64> grandmaster_in_force_{};  ///< for GPTP_GM_CHANGED; none before the first
+    bool grandmaster_from_parent_{false};                ///< note_parent_grandmaster has been told
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
+    std::optional<bool> port_as_capable_{};                   ///< see note_port_as_capable
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
     nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
     bool running_{false};
