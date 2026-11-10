@@ -1002,7 +1002,7 @@ void AvbEntityKit::note_listener_ready(
     }
     // Any Listener registration keeps the stream declared (Section 4.3.3.1),
     // and GET_STREAM_INFO reports REGISTERING / REGISTERING_FAILED.
-    if (!idx || !refresh_talker_listener(*idx, now_ns)) {
+    if (!idx || !refresh_talker_listener(*idx)) {
         note_admission(gate_now);
         return;
     }
@@ -1030,7 +1030,7 @@ auto AvbEntityKit::talker_index_of(nanoavb::StreamId const& stream_id) const noe
     return std::nullopt;
 }
 
-auto AvbEntityKit::refresh_talker_listener(uint16_t const idx, int64_t const now_ns) -> bool
+auto AvbEntityKit::refresh_talker_listener(uint16_t const idx) -> bool
 {
     auto const listener = registered_listener_of(idx);
     if (!listener) {
@@ -1038,7 +1038,6 @@ auto AvbEntityKit::refresh_talker_listener(uint16_t const idx, int64_t const now
     }
     bool const changed = *listener != talker_listener_[idx];
     talker_listener_[idx] = *listener;
-    declarations_.note_listener_registered(idx, *listener != srp::msrp::ListenerDeclaration::Ignore, now_ns);
     return changed;
 }
 
@@ -1124,6 +1123,10 @@ void AvbEntityKit::run_declaration_passes(int64_t const now_ns, RefreshSet const
 void AvbEntityKit::run_talker_declarations(int64_t const now_ns, RefreshSet const refresh)
 {
     for (auto const& spec : talker_specs_) {
+        // Milan v1.3 Section 4.3.3.1 condition 2 reads the registration as it is now: a pass can run
+        // on an MSRP event before the kit's Listener hook has been told of it.
+        auto const listener = registered_listener_of(spec.index).value_or(srp::msrp::ListenerDeclaration::Ignore);
+        declarations_.note_listener_registered(spec.index, listener != srp::msrp::ListenerDeclaration::Ignore, now_ns);
         run_talker_declaration(spec, now_ns, refresh.test(spec.index));
     }
 }
@@ -1167,7 +1170,7 @@ void AvbEntityKit::declare_talker(
     // and a registration that stayed raises no fresh MSRP event.
     gate_.note_listener_ready(info.stream_id, msrp.listener_permit_debug(info.stream_id).permits, declarations_gate_now_);
     // A Listener registered or gone changes REGISTERING (Milan v1.2 Table 5.12).
-    announce_talker_declared(spec, was_declared, refresh_talker_listener(spec.index, now_ns));
+    announce_talker_declared(spec, was_declared, refresh_talker_listener(spec.index));
 }
 
 void AvbEntityKit::announce_talker_declared(StreamSpec const& spec, bool const was_declared, bool const listener_changed)
