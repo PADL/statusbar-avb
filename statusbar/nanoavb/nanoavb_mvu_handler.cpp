@@ -43,23 +43,6 @@ constexpr size_t MAX_AECP_PDU_LENGTH = AecpDuCommon::HEADER_LENGTH + AECP_MAX_CO
     return payload.first(declared);
 }
 
-/// The requested id of a SET_SYSTEM_UNIQUE_ID's @p data; nullopt when too short. The v1.3 payload
-/// (Milan v1.3 Figure 5.7); below v1.3 anything shorter that holds the v1.2 id is v1.2's (and a
-/// v1.3 payload's name is not kept).
-[[nodiscard]] auto requested_system_unique_id(std::span<uint8_t const> const data, bool const v1_3)
-    -> std::optional<MvuSystemUniqueIdPayloadV13>
-{
-    if (auto const v13 = load_payload<MvuSystemUniqueIdPayloadV13>(data)) {
-        return v13;
-    }
-    if (v1_3 || data.size() < MvuSystemUniqueIdPayload::LENGTH) {
-        return std::nullopt;
-    }
-    MvuSystemUniqueIdPayload v12{};
-    span_load(v12, data.first(MvuSystemUniqueIdPayload::LENGTH));
-    return MvuSystemUniqueIdPayloadV13{.number = uint64_t{v12.system_unique_id.get()}};
-}
-
 /// The MVU status of a binding answered @p acmp_status by the Milan listener (Milan v1.3 Tables
 /// 5.33-5.41: a locked entity is ENTITY_LOCKED).
 [[nodiscard]] constexpr auto binding_status(uint8_t const acmp_status) noexcept -> uint8_t
@@ -165,7 +148,6 @@ auto MvuCommandHandler::dispatch_command(
     Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command, sm::TimePoint const now) -> bool
 {  // NOLINT(statusbar-block-statements): one case per command type of Milan v1.3 Table 5.15
     std::array<uint8_t, MvuSystemUniqueIdPayloadV13::LENGTH> body{};
-    bool const v1_3 = profile_.milan_v1_3();
     switch (header.command_type()) {
         case MVU_COMMAND_GET_MILAN_INFO:
             // The reserved field is ignored by the receiver (Figure 5.5), so a
@@ -185,15 +167,15 @@ auto MvuCommandHandler::dispatch_command(
         case MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO:
             return get_mcr_info_command(src_mac, header, command);
 
-        // Milan v1.3 Sections 5.4.4.6-8; reserved command types below v1.3.
+        // Milan v1.3 Sections 5.4.4.6-8.
         case MVU_COMMAND_BIND_STREAM:
-            return v1_3 ? bind_stream_command(src_mac, header, command, now) : send_not_implemented(src_mac, command);
+            return bind_stream_command(src_mac, header, command, now);
 
         case MVU_COMMAND_UNBIND_STREAM:
-            return v1_3 ? unbind_stream_command(src_mac, header, command, now) : send_not_implemented(src_mac, command);
+            return unbind_stream_command(src_mac, header, command, now);
 
         case MVU_COMMAND_GET_STREAM_INPUT_INFO_EX:
-            return v1_3 ? stream_input_info_ex_command(src_mac, header, command) : send_not_implemented(src_mac, command);
+            return stream_input_info_ex_command(src_mac, header, command);
 
         default:
             return send_not_implemented(src_mac, command);
@@ -202,12 +184,7 @@ auto MvuCommandHandler::dispatch_command(
 
 auto MvuCommandHandler::features_flags() const noexcept -> uint32_t
 {
-    // What the application adds, less v1.3's bits below v1.3 (Milan v1.2 Table 5.14 has only
-    // REDUNDANCY and TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING); MVU binding wherever there are sinks to bind.
-    constexpr uint32_t V1_3_FEATURES = MVU_FEATURES_MVU_BINDING | MVU_FEATURES_TALKER_SIGNAL_PRESENCE;
-    if (!profile_.milan_v1_3()) {
-        return extra_features_ & ~V1_3_FEATURES;
-    }
+    // What the application adds, and MVU binding wherever there are sinks to bind (Milan v1.3 Table 5.17).
     return extra_features_ | (bindable(0) ? MVU_FEATURES_MVU_BINDING : 0U);
 }
 
@@ -218,11 +195,9 @@ auto MvuCommandHandler::milan_info_payload(std::span<uint8_t> const out) const n
             {.protocol_version = quadlet_t{MVU_PROTOCOL_VERSION},
              .features_flags = quadlet_t{features_flags()},
              .certification_version = quadlet_t{certification_version_}},
-        .specification_version = quadlet_t{milan_specification_version(profile_.milan_version)}};
-    // Milan v1.2 Figure 5.4 has no specification_version.
-    size_t const length = profile_.milan_v1_3() ? MvuGetMilanInfoResponseV13::LENGTH : MvuGetMilanInfoResponse::LENGTH;
+        .specification_version = quadlet_t{MILAN_SPECIFICATION_VERSION}};
     span_store(out.first(MvuGetMilanInfoResponseV13::LENGTH), response);
-    return out.first(length);
+    return out.first(MvuGetMilanInfoResponseV13::LENGTH);
 }
 
 void MvuCommandHandler::set_clock_domain_count(size_t const count) noexcept
@@ -280,21 +255,16 @@ auto MvuCommandHandler::locked_against(MvuDu const& header) const noexcept -> bo
 
 auto MvuCommandHandler::system_unique_id_payload(std::span<uint8_t> const out) const noexcept -> std::span<uint8_t const>
 {
-    if (profile_.milan_v1_3()) {
-        MvuSystemUniqueIdPayloadV13 const payload{.number = system_unique_id_, .name = system_unique_name_};
-        span_store(out.first(MvuSystemUniqueIdPayloadV13::LENGTH), payload);
-        return out.first(MvuSystemUniqueIdPayloadV13::LENGTH);
-    }
-    MvuSystemUniqueIdPayload payload{};
-    payload.system_unique_id = static_cast<uint32_t>(system_unique_id_);
-    span_store(out.first(MvuSystemUniqueIdPayload::LENGTH), payload);
-    return out.first(MvuSystemUniqueIdPayload::LENGTH);
+    MvuSystemUniqueIdPayloadV13 const payload{.number = system_unique_id_, .name = system_unique_name_};
+    span_store(out.first(MvuSystemUniqueIdPayloadV13::LENGTH), payload);
+    return out.first(MvuSystemUniqueIdPayloadV13::LENGTH);
 }
 
 auto MvuCommandHandler::set_system_unique_id_command(
     Eui48 const& src_mac, MvuDu const& header, std::span<uint8_t const> const command) -> bool
 {
-    auto const requested = requested_system_unique_id(command.subspan(MvuDu::LENGTH), profile_.milan_v1_3());
+    // Milan v1.3 Figure 5.7: a u64 number and a 64-octet name.
+    auto const requested = load_payload<MvuSystemUniqueIdPayloadV13>(command.subspan(MvuDu::LENGTH));
     if (!requested) {
         return send_response(src_mac, header, MVU_STATUS_PAYLOAD_TOO_SHORT, {});
     }
@@ -308,18 +278,11 @@ auto MvuCommandHandler::apply_system_unique_id(
     if (locked_against(header)) {
         return send_response(src_mac, header, MVU_STATUS_ENTITY_LOCKED, system_unique_id_payload(body));
     }
-    if (!system_unique_id_settable(number) || !atdecc::utf8_well_formed(atdecc::atdecc_string_text(name))) {
+    if (!atdecc::utf8_well_formed(atdecc::atdecc_string_text(name))) {
         return send_response(src_mac, header, MVU_STATUS_BAD_ARGUMENTS, system_unique_id_payload(body));
     }
     bool const changed = replace_system_unique_id(number, name);
     return respond_and_notify(src_mac, header, system_unique_id_payload(body), changed);
-}
-
-auto MvuCommandHandler::system_unique_id_settable(uint64_t const number) const noexcept -> bool
-{
-    // Milan v1.2 Section 5.4.4.2: the new id differs from the default, 0, and is a u32. Milan
-    // v1.3 makes 0 (with an empty name) the factory default, a value like any other.
-    return profile_.milan_v1_3() || (number != 0 && number <= UINT32_MAX);
 }
 
 auto MvuCommandHandler::replace_system_unique_id(uint64_t const number, std::array<char, 64> const& name) noexcept -> bool
@@ -348,13 +311,6 @@ auto MvuCommandHandler::bindable(uint16_t const index) const noexcept -> bool
 {
     bool const described = !stream_input_count_ || index < *stream_input_count_;
     return listener_ != nullptr && listener_->sink(index) != nullptr && described;
-}
-
-void MvuCommandHandler::set_system_unique_id(uint64_t const id, std::array<char, 64> const& name) noexcept
-{
-    bool const v1_3 = profile_.milan_v1_3();
-    system_unique_id_ = v1_3 || id <= UINT32_MAX ? id : 0;  // never truncated into another id
-    system_unique_name_ = v1_3 ? name : std::array<char, 64>{};
 }
 
 auto MvuCommandHandler::answer_binding(
@@ -458,7 +414,7 @@ auto MvuCommandHandler::stream_input_info_ex_command(
 
 void MvuCommandHandler::notify_stream_input_info_ex(uint16_t const index)
 {
-    if (!profile_.milan_v1_3() || listener_ == nullptr || listener_->sink(index) == nullptr) {
+    if (!profile_.milan || listener_ == nullptr || listener_->sink(index) == nullptr) {
         return;
     }
     auto const payload = stream_input_info_ex(index);

@@ -574,12 +574,6 @@ NanoAvbComponents::NanoAvbComponents(
     wire_profile();
 }
 
-void NanoAvbComponents::set_milan_version(MilanVersion const version) noexcept
-{
-    profile.milan_version = version;
-    wire_profile();
-}
-
 void NanoAvbComponents::wire_mvu_binding()
 {
     aem_handler.set_profile(profile);
@@ -589,7 +583,7 @@ void NanoAvbComponents::wire_mvu_binding()
     mvu_handler.set_milan_listener(&acmp_listener.milan_sinks());
     acmp_listener.milan_sinks().set_on_info_ex_changed(
         [this](uint16_t const index) { mvu_handler.notify_stream_input_info_ex(index); });
-    acmp_listener.milan_sinks().set_configuration_departs(profile.milan_v1_3());
+    acmp_listener.milan_sinks().set_configuration_departs(profile.milan);
 }
 
 void NanoAvbComponents::wire_profile()
