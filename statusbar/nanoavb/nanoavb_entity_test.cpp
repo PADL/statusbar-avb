@@ -17,6 +17,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 using namespace statusbar;
@@ -1841,6 +1842,66 @@ TEST(nanoavb_entity_lock, identify_control_honours_the_lock)
     auto owner_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
     owner_header.controller_entity_id = lock_header.controller_entity_id;
     EXPECT_EQ(make_test_result(handler, owner_header, identify_body).status, AEM_STATUS_SUCCESS);
+}
+
+namespace {
+
+/// Serves IDENTIFY CONTROL 3 as off and every name as "Box"; accepts every SET.
+class ValueServingHandler : public SetAcceptingHandler
+{
+  public:
+    auto on_get_descriptor_value(
+        uint16_t command_type, DescriptorId id, std::span<uint8_t const> /*request*/, std::span<uint8_t> out) -> size_t override
+    {
+        if (command_type != AEM_COMMAND_GET_CONTROL || id.ref.descriptor_index != 3 || out.empty()) {
+            return 0;
+        }
+        out[0] = 0x00;
+        return 1;
+    }
+
+    auto on_get_name(DescriptorId /*id*/, uint16_t /*name_index*/) const -> std::optional<AtdeccString> override
+    {
+        return AtdeccString{"Box"};
+    }
+};
+
+}  // namespace
+
+// IEEE 1722.1-2021 Clauses 7.4.25.1, 7.4.17.1: a refused SET answers with the value in force, not the request.
+TEST(nanoavb_entity_lock, a_refused_set_answers_the_current_value)
+{
+    ValueServingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_identify_control_index(3);
+
+    auto lock_header = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock_header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> const lock_data{};
+    EXPECT_EQ(make_test_result(handler, lock_header, lock_data).status, AEM_STATUS_SUCCESS);
+
+    auto set_control = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    set_control.controller_entity_id = statusbar::ieee::Eui64{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+    std::array<uint8_t, 5> const identify_on{0x00, 0x1A, 0x00, 0x03, 0xFF};
+    auto const control = make_test_result(handler, set_control, identify_on);
+    EXPECT_EQ(control.status, AEM_STATUS_ENTITY_LOCKED);
+    std::vector<uint8_t> const current{0x00, 0x1A, 0x00, 0x03, 0x00};
+    EXPECT_TRUE(control.bytes == current);
+
+    auto set_name = create_aem_header(AEM_COMMAND_SET_NAME);
+    set_name.controller_entity_id = set_control.controller_entity_id;
+    AemNamePayload request{};
+    request.name[0] = 'X';
+    std::array<uint8_t, AemNamePayload::LENGTH> name_bytes{};
+    span_store(name_bytes, request);
+    auto const name = make_test_result(handler, set_name, name_bytes);
+    EXPECT_EQ(name.status, AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(name.bytes.size(), AemNamePayload::LENGTH);
+    AemNamePayload answered{};
+    span_load(answered, std::span<uint8_t const>{name.bytes});
+    std::string_view const answered_name(answered.name.data(), 3);
+    EXPECT_EQ(answered_name, std::string_view{"Box"});
+    EXPECT_EQ(app_handler.set_count, 0);
 }
 
 //

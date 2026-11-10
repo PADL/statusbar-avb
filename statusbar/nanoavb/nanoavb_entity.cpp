@@ -242,7 +242,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_NAME:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_NAME, command_data, out_buffer);
             }
             return handle_set_name(command_data, out_buffer);
 
@@ -309,7 +309,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_SET_CONTROL:
             // IDENTIFY included: IEEE 1722.1-2021 Clause 7.4.25.2, Milan v1.3 Section 5.4.2.17.
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
 
@@ -318,7 +318,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_SIGNAL_SELECTOR:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_SIGNAL_SELECTOR, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_SIGNAL_SELECTOR, command_data, out_buffer);
 
@@ -345,7 +345,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_CLOCK_SOURCE:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_CLOCK_SOURCE, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_CLOCK_SOURCE, command_data, out_buffer);
 
@@ -354,13 +354,13 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_STREAM_FORMAT:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_STREAM_FORMAT, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_STREAM_FORMAT, command_data, out_buffer);
 
         case AEM_COMMAND_SET_SAMPLING_RATE:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_SAMPLING_RATE, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_SAMPLING_RATE, command_data, out_buffer);
 
@@ -556,6 +556,32 @@ auto AemCommandHandler::reject_command(uint8_t const status, std::span<uint8_t c
         size = command_data.size();
     }
     return {.status = status, .size = size};
+}
+
+auto AemCommandHandler::reject_set(
+    uint8_t const status, uint16_t const set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    auto const current = current_value(set_command, command_data, out_buffer);
+    if (current.status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data, out_buffer);
+    }
+    return {.status = status, .size = current.size};
+}
+
+auto AemCommandHandler::current_value(
+    uint16_t const set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    switch (set_command) {
+        case AEM_COMMAND_SET_NAME:
+            return handle_get_name(command_data, out_buffer);
+        case AEM_COMMAND_SET_STREAM_FORMAT:
+            return handle_get_stream_format(AemDu{}, command_data, out_buffer);
+        case AEM_COMMAND_SET_SAMPLING_RATE:
+            return handle_get_sampling_rate(AemDu{}, command_data, out_buffer);
+        default:  // SET_CLOCK_SOURCE, SET_CONTROL, SET_SIGNAL_SELECTOR: the GET is the next code
+            return handle_get_descriptor_value(static_cast<uint16_t>(set_command + 1U), command_data, out_buffer);
+    }
 }
 
 auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
