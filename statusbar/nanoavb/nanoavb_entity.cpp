@@ -1193,9 +1193,6 @@ constexpr std::array<uint16_t, 24> DYNAMIC_INFO_COMMANDS{
     AEM_COMMAND_GET_PATH_LATENCY,
 };
 
-/// The most AEM command-specific data one AECPDU can carry.
-constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
-
 auto read_u16(std::span<uint8_t const> bytes, size_t const at) -> uint16_t
 {
     doublet_t v{};
@@ -2826,7 +2823,7 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
 auto AemCommandHandler::queue_notification(uint16_t const command_type, std::span<uint8_t const> body) -> bool
 {
     bool const own = command_type == current_header_.command_code();  // the command's own, not a side effect
-    if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_QUEUED_BODY) {
+    if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_AEM_BODY) {
         release_side_effects();  // the held ones go first, so the order on the wire is the order raised
         return false;
     }

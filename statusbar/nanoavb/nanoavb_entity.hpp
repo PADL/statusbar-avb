@@ -58,6 +58,9 @@ template <typename T>
 /// as Milan v1.3 Section 5.4.1 allows. Sizes the stack-local buffer of process_packet().
 constexpr size_t MAX_AEM_RESPONSE_SIZE = 1476;
 
+/// The most AEM command-specific data one AECPDU can carry (IEEE 1722.1-2021 Clause 9.2.1.1.7).
+constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
+
 /// Small value returned by each AEM command handler.
 ///
 /// Handlers write their response bytes into a caller-supplied
@@ -1320,13 +1323,12 @@ class AemCommandHandler
     // Notifications a command's dispatch raises, held until its response is sent; the last
     // slot is kept for the command's own (of the command's type), each with its requester_.
     static constexpr size_t MAX_QUEUED_NOTIFICATIONS = 4;
-    static constexpr size_t MAX_QUEUED_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
     struct QueuedNotification
     {
         uint16_t command_type{0};
         Eui64 requester{};
         bool own{false};  ///< the command's own notification, held for after its response
-        std::array<uint8_t, MAX_QUEUED_BODY> body;
+        std::array<uint8_t, MAX_AEM_BODY> body;
         size_t body_size{0};
     };
     /// Send held notification @p n with the requester_ it was raised with.
