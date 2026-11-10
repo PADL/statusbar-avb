@@ -703,6 +703,36 @@ TEST(acmp_milan_listener, resp_refusals_retry)
     }
 }
 
+// A talker whose ENTITY_AVAILABLE came before the bind is discovered from the bind (Section 5.6.4.5.1): an
+// error answer to the first probe is retried after TMR_RETRY and TMR_DELAY, not held for the talker's next ADP,
+// which may come several seconds later. Without one, the retry still waits for the ADP.
+TEST(acmp_milan_listener, a_retry_after_a_bind_probes_a_talker_advertised_before_it)
+{
+    for (bool const advertised : {true, false}) {
+        Fixture f;
+        f.delay = milliseconds{500};
+        auto const before = f.adp(7);
+        f.l.set_talker_lookup([&f, &before, advertised](Eui64 const& talker) -> std::optional<MilanListener::KnownTalker> {
+            if (!advertised || talker != TALKER) {
+                return std::nullopt;
+            }
+            return MilanListener::KnownTalker{.adp = before, .valid_until = f.now + seconds{20}};
+        });
+        f.bind();
+        f.respond(ACMP_STATUS_TALKER_UNKNOWN_ID);
+        EXPECT_TRUE(f.state() == State::prb_w_retry);
+        f.advance(seconds{4});
+        f.advance(milliseconds{500});
+        bool const probed = !f.sent.empty() && f.sent.back().message_type() == ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND;
+        EXPECT_EQ(probed, advertised);
+        EXPECT_TRUE(f.state() == (advertised ? State::prb_w_resp : State::prb_w_avail));
+        if (advertised) {
+            f.discover(8);  // the talker's next ADP, moving forward: no restart
+            EXPECT_TRUE(f.state() == State::prb_w_resp);
+        }
+    }
+}
+
 // 5.5.3.5.19
 TEST(acmp_milan_listener, get_rx_state_while_awaiting_the_probe_response_answers)
 {
