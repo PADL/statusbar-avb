@@ -149,7 +149,7 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
     DescriptorStorageHandler model{storage};
     AemCommandHandler aem{model};
     aem.set_entity_id(US);
-    aem.set_profile(EntityProfile{.milan = (input[0] & 0x40U) == 0});
+    aem.set_entity_profile(EntityProfile{.milan = (input[0] & 0x40U) == 0});
     install_hooks(model, aem, verdict);
     auto const rest = input.subspan(1);
     (void)aem.process_packet(MAC, rest, US);
