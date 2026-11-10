@@ -743,7 +743,8 @@ class AvbEntityKit
     /// stop(), after close_data_plane() saved the bindings: no input stays connected. The next
     /// start() reloads the saved bindings and reconnects them through the connect path.
     void drop_listener_connections(TimePoint now);
-    /// Unbind Milan input @p index, or clear classic input @p index's connection (its goal kept).
+    /// Release Milan input @p index (MilanListener::release()), or clear classic input @p index's
+    /// connection (its goal kept) with on_talker_departed(), the classic listener's local teardown.
     void drop_listener_connection(uint16_t index, TimePoint now);
 
     //

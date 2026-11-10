@@ -246,6 +246,18 @@ auto MilanListener::unbind_stream(uint16_t const index, ieee::Eui64 const& contr
     return true;
 }
 
+auto MilanListener::release(uint16_t const index, TimePoint const now) -> bool
+{
+    if (index >= sinks_.size()) {
+        return false;
+    }
+    if (sinks_[index].bound()) {
+        stop(index, now);
+        sinks_[index] = MilanSink{.probing_status = probing_status::DISABLED};
+    }
+    return true;
+}
+
 auto MilanListener::binding_command(uint8_t const type, uint16_t const index, ieee::Eui64 const& controller) const noexcept
     -> AcmpCommandResponse
 {

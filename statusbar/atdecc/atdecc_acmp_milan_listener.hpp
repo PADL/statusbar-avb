@@ -215,6 +215,10 @@ class MilanListener
     [[nodiscard]] auto bind_stream(uint16_t index, MilanBindRequest const& request, TimePoint now, ReplyFn const& reply) -> bool;
     /// UNBIND_STREAM for sink @p index from @p controller: RCV_UNBIND_RX_CMD, as bind_stream().
     [[nodiscard]] auto unbind_stream(uint16_t index, ieee::Eui64 const& controller, TimePoint now, ReplyFn const& reply) -> bool;
+    /// Unbind sink @p index locally, as an entity stopping does: no authorisation check, no response,
+    /// no notification and no binding-changed hook (the saved binding is the caller's to restore()).
+    /// A settled sink unsettles first. False for an unknown sink.
+    [[nodiscard]] auto release(uint16_t index, TimePoint now) -> bool;
 
     /// Section 5.6.4.1: an ENTITY_AVAILABLE / ENTITY_DEPARTING, for every
     /// bound sink whose talker sent it. @p grandmaster and @p domain are this
