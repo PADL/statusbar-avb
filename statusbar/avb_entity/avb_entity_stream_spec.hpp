@@ -32,7 +32,6 @@
 #include "statusbar/avtp/avtp_am824_v1.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
-#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -103,12 +102,15 @@ struct StreamFormatFields
     uint32_t crf_base_frequency_hz{0};
 };
 
+/// An Ethernet frame's largest payload, its MAC client data (IEEE 802.3-2022 Clause 3.2.7).
+inline constexpr size_t ETHERNET_PAYLOAD_MAX = 1500;
+
 /// Whether an AM824 frame of @p channels at @p rate_hz fits the MTU: a class A packet's samples
 /// and one more, as the talker may send (srp_max_frame_size).
 [[nodiscard]] constexpr auto am824_frame_fits(uint32_t const channels, uint32_t const rate_hz) noexcept -> bool
 {
     auto const samples = static_cast<uint8_t>((rate_hz / 8000U) + 1U);
-    return avtp::am824_packet_size(static_cast<uint8_t>(channels), samples) <= net::MAX_ETHERNET_PAYLOAD;
+    return avtp::am824_packet_size(static_cast<uint8_t>(channels), samples) <= ETHERNET_PAYLOAD_MAX;
 }
 
 /// Whether the kit carries @p format (IEEE 1722-2016 Annex I): IEC 61883-6 AM824 data, non-blocking,
