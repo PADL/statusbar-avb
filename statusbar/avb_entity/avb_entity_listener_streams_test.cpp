@@ -529,6 +529,31 @@ TEST(listener_timed, refusals_and_trailing_bytes)
 
 // The timed sink gets each AAF packet through on_stream_rx_frame, with or without a consume fn
 // (same packet, same counters); detaching stops delivery.
+// Two inputs connected to one talker stream each receive its frames
+TEST(listener_timed, a_stream_shared_by_two_inputs_reaches_both)
+{
+    auto donor = make_connected_donor(kAafId, kAafId);
+    auto aaf_spec = audio_specs()[1];
+    auto other_spec = aaf_spec;
+    other_spec.index = 0;
+    std::atomic<int64_t> const gptp{0};
+    RecordingSink sink;
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(other_spec).has_value());
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    ls.set_timed_audio_sink(&sink);
+    auto const rate = avtp::aaf_sample_rate_from_hz(aaf_spec.format.sample_rate_hz);
+    EXPECT_TRUE(rate.has_value());
+    uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(aaf_spec.format.sample_rate_hz));
+    avtp::AafStreamOutputContext tx{
+        kAafId, aaf_spec.format.aaf_format, *rate, aaf_spec.format.channels, aaf_spec.format.bit_depth, 0};
+    uint64_t const pts0 = 9'000'000'000ULL;
+    ls.on_stream_rx_frame(aaf_frame(tx, spp, pts0, 0), static_cast<int64_t>(pts0 - 1'000'000));
+    EXPECT_EQ(sink.seen.size(), size_t{2});
+    EXPECT_EQ(std::ranges::count(sink.seen, uint16_t{0}, [](auto const& r) { return r.packet.stream_index; }), 1);
+    EXPECT_EQ(std::ranges::count(sink.seen, uint16_t{1}, [](auto const& r) { return r.packet.stream_index; }), 1);
+}
+
 TEST(listener_timed, delivery_through_on_stream_rx_frame)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
