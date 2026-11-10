@@ -158,15 +158,18 @@ struct PortPropertiesNpPayload
 static_assert(sizeof(PortPropertiesNpPayload) == PortPropertiesNpPayload::LENGTH);
 static_assert(offsetof(PortPropertiesNpPayload, interface_length) == 12);
 
-/// linuxptp's PORT_DATA_SET_NP (struct port_ds_np): neighborPropDelayThresh in ns, then asCapable.
-struct PortDataSetNpPayload
+/// linuxptp's CMLDS_INFO_NP (struct cmlds_info_np): meanLinkDelay (ns scaled by 2^16),
+/// scaledNeighborRateRatio, asCapable.
+struct CmldsInfoNpPayload
 {
-    static constexpr size_t LENGTH = 8;
-    quadlet_t neighbor_prop_delay_thresh;
+    static constexpr size_t LENGTH = 16;
+    octlet_t mean_link_delay;
+    quadlet_t scaled_neighbor_rate_ratio;
     quadlet_t as_capable;
 };
-static_assert(sizeof(PortDataSetNpPayload) == PortDataSetNpPayload::LENGTH);
-static_assert(offsetof(PortDataSetNpPayload, as_capable) == 4);
+static_assert(sizeof(CmldsInfoNpPayload) == CmldsInfoNpPayload::LENGTH);
+static_assert(offsetof(CmldsInfoNpPayload, scaled_neighbor_rate_ratio) == 8);
+static_assert(offsetof(CmldsInfoNpPayload, as_capable) == 12);
 
 /// TIME_STATUS_NP: lastGmPhaseChange is a ScaledNs (16-bit msb, 64-bit lsb, 16-bit fraction).
 struct TimeStatusNpPayload
