@@ -3121,9 +3121,10 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
 }
 
-// GPTP_GM_CHANGED (Milan v1.3 Section 5.3.6.3, IEEE 1722.1-2021 Clause 7.4.42.2.2) counts a new
-// grandmaster identity; the same one lost to the Announce receipt timeout and found again is none.
-TEST(avb_entity_kit_counters, gptp_gm_changed_counts_a_new_grandmaster_not_the_same_one_regained)
+// GPTP_GM_CHANGED (Milan v1.3 Section 5.3.6.3, IEEE 1722.1-2021 Clause 7.4.42.2.2) follows the grandmaster
+// in force: the first is none; lost to the Announce receipt timeout, this grandmaster-capable entity is its
+// own (one), the same one found again another, and a different one another.
+TEST(avb_entity_kit_counters, gptp_gm_changed_follows_the_grandmaster_in_force)
 {
     MilanKit m{std::nullopt, 0x9A};
     EXPECT_TRUE(m.start_ready());
@@ -3143,11 +3144,11 @@ TEST(avb_entity_kit_counters, gptp_gm_changed_counts_a_new_grandmaster_not_the_s
     EXPECT_FALSE(announces.has_grandmaster());
     announces.on_announce(announce, t += 1'000'000'000);
     EXPECT_TRUE(announces.has_grandmaster());
-    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 0U);  // GPTP_GM_CHANGED
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 2U);  // GPTP_GM_CHANGED
 
     announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL};
     announces.on_announce(announce, t + 1'000'000'000);
-    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 1U);
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 3U);
 }
 
 // Milan v1.2 Section 5.5.2.7 / Table 5.47: connection_count stays 0 whatever
