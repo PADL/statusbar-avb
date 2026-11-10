@@ -2460,6 +2460,69 @@ TEST(nanoavb_entity_in_progress, table_full_answers_no_resources)
     EXPECT_EQ(handler.pending_command_count(), AemCommandHandler::MAX_PENDING_COMMANDS);
 }
 
+namespace {
+
+/// A DeferringHandler whose STREAM_OUTPUT 0 is in force at kFormatInForce.
+class DeferringStreamHandler : public DeferringHandler
+{
+  public:
+    static constexpr Eui64 kFormatInForce{0x02, 0x05, 0x02, 0x18, 0x00, 0x80, 0x60, 0x00};
+
+    auto on_get_stream(DescriptorId id, DescriptorStream& desc) -> bool override
+    {
+        desc.current_format = kFormatInForce;
+        return id.ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT && id.ref.descriptor_index == 0;
+    }
+};
+
+/// The stream format a SET_STREAM_FORMAT response carries.
+[[nodiscard]] auto answered_format(CapturedSend const& send) -> Eui64
+{
+    AemStreamFormatPayload payload{};
+    span_load(payload, body_of(send).first(AemStreamFormatPayload::LENGTH));
+    Eui64 format{};
+    span_load(format, make_const_span(payload.stream_format));
+    return format;
+}
+
+}  // namespace
+
+// IEEE 1722.1-2021 Clause 7.4.9.1: a deferred SET_STREAM_FORMAT that fails answers the format in force.
+TEST(nanoavb_entity_in_progress, a_failed_completion_answers_the_format_in_force)
+{
+    DeferringStreamHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    sends.clear();
+    EXPECT_TRUE(
+        handler.complete_pending_command(AEM_COMMAND_SET_STREAM_FORMAT, DESCRIPTOR_STREAM_OUTPUT, 0, AEM_STATUS_NOT_SUPPORTED));
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(answered_format(sends[0]), DeferringStreamHandler::kFormatInForce);
+}
+
+// A SET_STREAM_FORMAT refused NO_RESOURCES for a full pending table answers the format in force.
+TEST(nanoavb_entity_in_progress, a_set_refused_for_a_full_table_answers_the_format_in_force)
+{
+    DeferringStreamHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    for (uint16_t n = 0; n <= AemCommandHandler::MAX_PENDING_COMMANDS; ++n) {
+        sends.clear();
+        inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, n);
+    }
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_NO_RESOURCES);
+    EXPECT_EQ(answered_format(sends[0]), DeferringStreamHandler::kFormatInForce);
+}
+
 //
 // GET_AVB_INFO (7.4.40) through the get_avb_info callback, and its
 // unsolicited notification (7.5.2).
