@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <system_error>
@@ -1167,6 +1168,66 @@ TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
                      }}};
     idle.withdraw_all(now);
     EXPECT_EQ(idle_sent, 0U);
+}
+
+namespace {
+
+/// A sender counting the PDUs it is given into `sent`.
+auto counting_sender(size_t* const sent)
+{
+    return [sent](std::span<uint8_t const>) {
+        ++*sent;
+        return true;
+    };
+}
+
+/// A run of `handler` through a sender released once withdraw_all() ends it (a stop's net handlers),
+/// then `next` set as a restart's callbacks; returns the time the run ended.
+template <class Handler, class Callbacks>
+auto run_and_restart(Handler& handler, Callbacks next) -> TimePoint
+{
+    auto stopped = std::make_unique<size_t>(0);
+    handler.set_callbacks(Callbacks{.send_packet = counting_sender(stopped.get())});
+    auto const now = TimePoint{std::chrono::seconds{1}} + std::chrono::milliseconds{250};  // past JoinTime
+    handler.tick(now);
+    handler.withdraw_all(now);
+    EXPECT_TRUE(*stopped > 0);
+    stopped.reset();
+    handler.set_callbacks(std::move(next));
+    return now;
+}
+
+}  // namespace
+
+// A restart's callbacks replace the stopped run's, whose sender is gone: the LeaveAll of the resume
+// at declare_domain(), of a rejoin() and of a leave_all() go through the new ones before any tick.
+TEST(nanoavb_srp_msrp, a_restart_sends_its_leave_all_through_the_new_callbacks)
+{
+    for (int const way : {0, 1, 2}) {
+        MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}};
+        EXPECT_TRUE(handler.declare_domain(TimePoint{std::chrono::seconds{1}}).has_value());
+        size_t sent = 0;
+        auto const now = run_and_restart(handler, MsrpCallbacks{.send_packet = counting_sender(&sent)});
+        if (way == 0) {
+            EXPECT_TRUE(handler.declare_domain(now).has_value());
+        } else if (way == 1) {
+            handler.rejoin(now);
+        } else {
+            handler.leave_all(now);
+        }
+        EXPECT_TRUE(sent > 0);
+    }
+}
+
+// MVRP's leave_all() after a restart goes through the restart's callbacks, not the stopped run's.
+TEST(nanoavb_srp_mvrp, a_restart_sends_its_leave_all_through_the_new_callbacks)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    EXPECT_TRUE(handler.register_vlan(2, TimePoint{std::chrono::seconds{1}}).has_value());
+    size_t sent = 0;
+    auto const now = run_and_restart(handler, MvrpCallbacks{.send_packet = counting_sender(&sent)});
+    handler.leave_all(now);
+    EXPECT_TRUE(sent > 0);
 }
 
 //
