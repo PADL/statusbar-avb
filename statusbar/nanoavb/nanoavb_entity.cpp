@@ -568,6 +568,9 @@ auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, s
 
 auto AemCommandHandler::name_in_force(std::span<uint8_t const> const command_data) const -> bool
 {
+    if (command_data.size() < atdecc::aem::AemNamePayload::LENGTH) {
+        return false;  // short: set_name() refuses it
+    }
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> current{};
     AemEntityModel const aem_model{*handler_};
     size_t const n = aem_model.get_name_for_wire(name_ref_of(command_data), current);
