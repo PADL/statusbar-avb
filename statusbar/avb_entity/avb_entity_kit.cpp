@@ -807,9 +807,6 @@ auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
 {
     auto& aem = host_.components().aem_handler;
-    if (aem.is_locked() || aem.is_acquired()) {
-        return atdecc::AEM_STATUS_ENTITY_LOCKED;
-    }
     if (name.size() > atdecc::aem::AtdeccString::LENGTH) {
         return atdecc::AEM_STATUS_BAD_ARGUMENTS;
     }
