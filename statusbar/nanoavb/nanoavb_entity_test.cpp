@@ -2679,6 +2679,32 @@ TEST(nanoavb_entity_in_progress, a_deferred_set_with_a_long_body_is_completed_an
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
 }
 
+// IEEE 1722.1-2021 Clause 9.2.1.1.7: octets past control_data_length are not the command's, nor echoed or held.
+TEST(nanoavb_entity_in_progress, octets_past_control_data_length_are_ignored)
+{
+    DeferringEveryHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    std::array<uint8_t, 8> const body{0x00, static_cast<uint8_t>(DESCRIPTOR_CONTROL), 0x00, 0x00, 0x01, 0x02, 0x03, 0x04};
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_SET_CONTROL, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + body.size()));
+    cmd.target_entity_id = kEntity;
+    cmd.controller_entity_id = kControllerA;
+    std::vector<uint8_t> packet(AemDu::LENGTH + body.size() + 80, uint8_t{0xEE});  // 80 trailing octets
+    span_copy(std::span<uint8_t>{packet}.first(AemDu::LENGTH), make_const_span(cmd));
+    std::ranges::copy(body, packet.begin() + static_cast<std::ptrdiff_t>(AemDu::LENGTH));
+    (void)handler.process_packet(kMacA, packet, kEntity);
+
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), body));
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 0, AEM_STATUS_SUCCESS));
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), body));
+}
+
 namespace {
 
 /// A DeferringHandler whose STREAM_OUTPUT 0 is in force at kFormatInForce.
