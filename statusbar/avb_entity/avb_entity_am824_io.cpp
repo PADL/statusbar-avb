@@ -183,7 +183,7 @@ void AvbEntityAm824IO::wire_stream_callbacks()
         }
     });
     host_.set_withdraw_streams(
-        [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time); });
+        [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(talker_stream_id(), time); });
 
     // ACMP talker connection callbacks are wired once, in start(): the
     // connection log (a second registration here would just be overwritten).
@@ -352,6 +352,15 @@ void AvbEntityAm824IO::print_state() const
 //
 // MSRP talker reservation
 //
+
+auto AvbEntityAm824IO::talker_stream_id() const noexcept -> nanoavb::StreamId
+{
+    nanoavb::StreamId stream_id{};
+    if (auto const* stream = host_.components().acmp_talker.get_stream(0); stream != nullptr) {
+        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &stream_id);
+    }
+    return stream_id;
+}
 
 auto AvbEntityAm824IO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo
 {  // NOLINT(statusbar-block-statements): the Talker Advertise's fields, one by one
