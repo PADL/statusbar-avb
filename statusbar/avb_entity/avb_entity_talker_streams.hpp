@@ -27,6 +27,7 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
@@ -54,6 +55,13 @@ struct TalkerStreamsConfig
     uint32_t sample_rate;  ///< the media clock's rate (Hz), e.g. 96000 or 48000: transmit_if_due's streams'
     uint16_t vlan_id;      ///< AVB VLAN id
     uint8_t stream_pcp;    ///< AVB priority code point
+};
+
+/// The VLAN tag the stream frames carry: the SR class's VID and priority in use.
+struct StreamTag
+{
+    uint16_t vlan_id{0};
+    uint8_t pcp{0};
 };
 
 /// One TX stream slot: the StreamSpec that shaped it, its destination MAC,
@@ -99,7 +107,7 @@ struct TalkerStreams
         : config_{config}
         , media_clock_{media_clock}
         , last_gptp_ns_{last_gptp_ns}
-        , vlan_id_{config.vlan_id}
+        , tag_{StreamTag{.vlan_id = config.vlan_id, .pcp = config.stream_pcp}}
         , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
         , mem_resource_{memory_resource}
     {}
@@ -212,8 +220,12 @@ struct TalkerStreams
     /// VLAN ID the stream frames are tagged with: config.vlan_id until the
     /// Class A VID in use changes (adopted from the bridge's MSRP Domain,
     /// Milan v1.2 Section 4.2.7.2.1). Reactor thread writes, media thread reads.
-    void set_vlan_id(uint16_t const vlan_id) noexcept { vlan_id_.store(vlan_id, std::memory_order_relaxed); }
-    [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
+    void set_vlan_id(uint16_t const vlan_id) noexcept { tag_.store(StreamTag{.vlan_id = vlan_id, .pcp = tag_.load().pcp}); }
+    [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return tag_.load().vlan_id; }
+    /// The VID and PCP the stream frames are tagged with, the SR class's in use (an adopted Domain's,
+    /// IEEE 802.1Q-2022 Clause 35.2.2.8.5). Reactor thread writes, media thread reads (itc::SeqlockValue).
+    void set_tag(StreamTag const tag) noexcept { tag_.store(tag); }
+    [[nodiscard]] auto tag() const noexcept -> StreamTag { return tag_.load(); }
 
     /// STOP_STREAMING gate for one STREAM_OUTPUT descriptor index (kit
     /// phase 5): a stopped stream is treated as gate-closed by
@@ -309,7 +321,7 @@ struct TalkerStreams
 
     // References / values (bound at construction).
     TalkerStreamsConfig config_;           ///< destructured entity config (rate + VLAN/PCP), by value
-    std::atomic<uint16_t> vlan_id_;        ///< VLAN tag for stream frames (config_.vlan_id, or the adopted Domain VID)
+    itc::SeqlockValue<StreamTag> tag_;     ///< VLAN tag for stream frames (config's, or the adopted Domain's)
     std::atomic<int64_t> tu_until_ns_{0};  ///< steady-clock end of the post-GM-change tu window
     std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
     ptpclient::MediaClockGenerator const& media_clock_;
@@ -333,7 +345,7 @@ struct TalkerStreams
     /// empty with no port or for a length past it. Media thread.
     [[nodiscard]] auto tx_begin(size_t length) noexcept -> std::span<uint8_t>;
     /// One AVTP stream frame to @p dest_mac on the port, due at @p launch_time_ns: VLAN tag from
-    /// vlan_id_, source the port's address, recorded to the pcap tap. False when the port refuses it.
+    /// tag_, source the port's address, recorded to the pcap tap. False when the port refuses it.
     [[nodiscard]] auto send_to_port(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload, uint64_t launch_time_ns) -> bool;
     /// send_serialized() on a port only this thread drives: the AVTPDU rendered into the port's slot.
     template <typename Context, typename Serialize>
@@ -363,6 +375,10 @@ struct TalkerStreams
         TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length, uint64_t launch_time_ns) -> bool;
     /// One sent AVTPDU @p frame counted on @p slot.
     void count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> frame) noexcept;
+    /// @p payload to @p dest_mac framed into @p buffer from the port's address, tagged with one read of
+    /// tag_: the frame's length, 0 when it does not fit.
+    [[nodiscard]] auto build_tagged_frame(
+        std::span<uint8_t> buffer, ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload) const noexcept -> size_t;
     /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
     [[nodiscard]] auto commit_stream_frame(net::EthernetTxSlot const& slot, size_t length) -> bool;
 

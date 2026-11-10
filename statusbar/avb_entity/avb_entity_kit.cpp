@@ -202,7 +202,7 @@ void AvbEntityKit::configure_class_a_domain()
     // it, and keep it on the NIC's VLAN filter for the listener streams (a
     // no-op until bind_listener_vlan()).
     host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint const time) {
-        talker_->set_vlan_id(vlan_id);
+        talker_->set_tag(stream_tag(vlan_id));
 #if defined(__linux__)
         listener_vlan_.follow(vlan_id);
 #endif
@@ -214,6 +214,14 @@ void AvbEntityKit::configure_class_a_domain()
     });
     host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
     host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
+}
+
+auto AvbEntityKit::stream_tag(uint16_t const vlan_id) const noexcept -> StreamTag
+{
+    // The SR class priority in use when adopted from a Domain, else the configured PCP.
+    auto const& msrp = host_.components().msrp_handler;
+    bool const adopted = msrp.domain().sr_class_priority != msrp.configured_domain().sr_class_priority;
+    return StreamTag{.vlan_id = vlan_id, .pcp = adopted ? msrp.domain().sr_class_priority : config_.stream_pcp};
 }
 
 void AvbEntityKit::wire_controller_hooks()

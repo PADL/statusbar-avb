@@ -372,6 +372,21 @@ struct MilanKit
         }
     }
 
+    /// A bridge port declaring the Domain @p fv, its MSRPDUs fed to the entity.
+    void bridge_domain(srp::msrp::DomainFirstValue const& fv)
+    {
+        bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);  // the bridge port up
+        (void)bridge.declare_domain(fv, bridge_now);
+        for (int i = 0; i < 4; ++i) {
+            bridge_now += std::chrono::milliseconds(250);
+            bridge.tick(bridge_now);
+            for (auto const& p : bridge_out) {
+                kit.host().components().msrp_handler.receive_packet(p, bridge_now);
+            }
+            bridge_out.clear();
+        }
+    }
+
     /// The bridge port withdraws its Listener for talker stream @p idx.
     void bridge_withdraw(uint16_t const idx)
     {
@@ -735,6 +750,35 @@ TEST(avb_entity_kit_domain, adopted_class_a_vid_reaches_mvrp_acmp_and_tx)
     EXPECT_EQ(components.acmp_talker.get_stream(0)->stream_vlan_id, uint16_t{2});
     EXPECT_EQ(kit.talker().vlan_id(), uint16_t{2});
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(2) != nanoavb::VlanState::Unregistered);
+}
+
+// Milan v1.3 Section 4.2.7.2.1, IEEE 802.1Q-2022 Clause 35.2.2.8.5: a Domain at another priority on the
+// same VID has the talker declared again at it and its frames tagged with it; a link up restores both.
+TEST(avb_entity_kit_domain, a_priority_only_domain_retags_and_redeclares_the_talker)
+{
+    MilanKit m{std::nullopt, 0x0C};
+    EXPECT_TRUE(m.start_ready());
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    auto& msrp = m.kit.host().components().msrp_handler;
+    EXPECT_EQ(m.kit.talker().tag().pcp, uint8_t{3});
+    srp::msrp::DomainFirstValue domain{};
+    domain.sr_class_id = srp::msrp::SR_CLASS_A;
+    domain.sr_class_priority = 2;
+    domain.sr_class_vid = 2;
+    m.bridge_domain(domain);
+    EXPECT_EQ(msrp.domain().sr_class_priority, uint8_t{2});
+    EXPECT_EQ(m.kit.talker().tag().pcp, uint8_t{2});
+    EXPECT_EQ(m.kit.talker().tag().vlan_id, uint16_t{2});
+    auto const* declared = msrp.get_talker_stream(m.sid(0));
+    EXPECT_FALSE(declared == nullptr || declared->priority != 2);
+
+    auto const now = sm::Clock::now();
+    m.kit.on_link_down(now);
+    m.kit.on_link_up(now);
+    EXPECT_EQ(msrp.domain().sr_class_priority, uint8_t{3});
+    EXPECT_EQ(m.kit.talker().tag().pcp, uint8_t{3});
+    declared = msrp.get_talker_stream(m.sid(0));
+    EXPECT_FALSE(declared != nullptr && declared->priority != 3);
 }
 
 // The model's ENTITY profile symbol is the entity profile every handler reads

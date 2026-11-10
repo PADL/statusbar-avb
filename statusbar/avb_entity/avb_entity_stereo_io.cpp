@@ -94,8 +94,10 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
         .sr_class_id = 6,                   // SR Class A
         .sr_class_priority = 3,             // Priority 3
         .sr_class_vid = config_.vlan_id});  // VLAN ID
-    // Tag stream frames with the Class A VID in use (adopted MSRP Domain).
-    host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint) { talker_.set_vlan_id(vlan_id); });
+    // Tag stream frames with the Class A VID and priority in use (adopted MSRP Domain).
+    host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint) {
+        talker_.set_tag(StreamTag{.vlan_id = vlan_id, .pcp = host_.components().msrp_handler.domain().sr_class_priority});
+    });
 }
 
 AvbEntityStereoIO::~AvbEntityStereoIO()

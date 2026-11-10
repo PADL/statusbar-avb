@@ -533,8 +533,12 @@ talker's attribute is registered).
   a VID change is reported so the talker moves its MVRP join, Talker Advertise
   and stream frames, and a priority change alone declares them again (a
   talker's priority is its SR class's, IEEE 802.1Q-2022 Clause 35.2.2.8.5);
-  `reset_domain()` brings both back. The stream frames' PCP and the shaper's
-  queue map stay at the configured priority (`stream_pcp`). The VID is the
+  `reset_domain()` brings both back. Either change is told
+  `set_on_domain_vid_changed` (the VID twice for a priority alone), and the
+  kit tags its stream frames with the adopted priority (`TalkerStreams::set_tag`),
+  `stream_pcp` again once reset. The stream socket's skb priority and the
+  shaper's mqprio map stay keyed to `stream_pcp`: they pick the local queue,
+  class A's, not the wire PCP. The VID is the
   same at every position of a Domain vector (a bridge's default
   `{5,2,VID},{6,3,VID}`); the participant hands over the per-position value.
   A deviation: the section adopts every Domain declared, the entity one per
