@@ -252,10 +252,7 @@ void SrpPort::report_leave(StreamId const& stream_id)
     if (msrp_.peer_talker_in(stream_id) || std::ranges::contains(reported_leaves_, stream_id)) {
         return;
     }
-    if (reported_leaves_.size() == decltype(reported_leaves_)::capacity()) {
-        reported_leaves_.erase(reported_leaves_.begin());  // the oldest: at worst reported again
-    }
-    (void)reported_leaves_.try_push_back(stream_id);
+    (void)reported_leaves_.try_push_back(stream_id);  // each still registered: room for every one
     if (observer_.on_talker_leave) {
         observer_.on_talker_leave(stream_id);
     }
