@@ -318,9 +318,8 @@ MainLoopResult run_main_loop(
     }
 
     // ---- Optional dedicated RT RX timer (stream_rx.rt_timer) -------------------
-    // Drain AM824 on its own SCHED_FIFO core so the reactor/control-plane can't delay
-    // RX (which otherwise batch-tallies queued frames against a now-later clock and
-    // reads as spurious LATE_TIMESTAMP). Stats mirror the media timer.
+    // RX on its own SCHED_FIFO core, so the control plane cannot delay it into spurious
+    // LATE_TIMESTAMPs (frames tallied against a later clock). Stats mirror the media timer.
     itc::TelemetryCounter<int64_t> rx_timer_error_count;
     itc::TelemetryCounter<uint64_t> rx_frames_drained;
     itc::Published<int64_t> rx_last_wake_error_ns;
@@ -395,17 +394,15 @@ MainLoopResult run_main_loop(
                 }});
     }
 
-    // Poll reactor for network I/O until shutdown
-    // Drain the entity's SPSC log channels (ctl = reactor thread, media = RT
-    // media timer) here on the main thread — the entities/libraries only ever
-    // enqueue; formatting and stderr I/O happen in this loop.
+    // Run the reactor until shutdown, draining the entity's log channels (ctl: reactor, media: the
+    // media timer) here: the libraries only enqueue, formatting and stderr I/O happen in this loop.
     logging::LogCollector<4> log_collector;
     logging::StderrSink log_sink;
     (void)log_collector.add(entity.ctl_log_channel());
     (void)log_collector.add(entity.media_log_channel());
     entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {
+    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements): the tool's loop, a step a line
         (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(100);
 
@@ -424,11 +421,8 @@ MainLoopResult run_main_loop(
         auto const time_in_state = now - last_state_change_time;
         auto const sm_now = TimePoint{now.time_since_epoch()};
 
-        // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
-        // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
-        // SM/MSRP stack is only ever driven from one thread. First-acquire is
-        // also handled promptly by the grandmaster_id_changed reactor callback;
-        // this poll additionally covers GM regained with an unchanged identity.
+        // Grandmaster edge-detect on the reactor thread, not the media timer, so one thread drives the SM
+        // and MSRP; grandmaster_id_changed handles a new identity, this a grandmaster regained unchanged.
         if (net_handlers != nullptr) {
             bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
             if (has_gm && !had_grandmaster) {
