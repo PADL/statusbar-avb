@@ -442,12 +442,9 @@ void AvbEntityHost::add_srp_mapping(nanoavb::AvbInfo& info) const
 void AvbEntityHost::add_gptp_state(nanoavb::AvbInfo& info) const
 {
     using namespace atdecc::aem::avb_info_flags;
+    info.gptp_grandmaster_id = reported_grandmaster();
     if (net_handlers_ != nullptr) {
-        auto const& announce = net_handlers_->gptp_handler();
-        if (announce.has_grandmaster()) {
-            info.gptp_grandmaster_id = announce.grandmaster_identity().to_eui64();
-        }
-        if (auto const* last = announce.last_announce()) {
+        if (auto const* last = net_handlers_->gptp_handler().last_announce()) {
             info.gptp_domain_number = last->header.domain_number.get();
         }
     }
@@ -499,19 +496,21 @@ void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandm
 
 void AvbEntityHost::note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
 {
-    refresh_avb_info();
     if (!grandmaster_from_parent_) {
         note_grandmaster_in_force(grandmaster.to_eui64());
+    } else if (grandmaster_in_force_.has_value()) {
+        advertise_grandmaster(*grandmaster_in_force_);  // ADP keeps the parent data set's, not the Announces'
     }
+    refresh_avb_info();
 }
 
 void AvbEntityHost::note_grandmaster_lost()
 {
-    refresh_avb_info();
     // Nothing announced: a grandmaster-capable entity is grandmaster itself (Milan v1.3 Section 4.2.6.2.1).
     if (!grandmaster_from_parent_ && grandmaster_capable()) {
         note_grandmaster_in_force(own_clock_identity_.value_or(ieee::Eui64{}));
     }
+    refresh_avb_info();
 }
 
 void AvbEntityHost::use_parent_grandmaster() noexcept
@@ -525,17 +524,35 @@ void AvbEntityHost::note_parent_grandmaster(ieee::Eui64 const& grandmaster)
 {
     grandmaster_from_parent_ = true;
     note_grandmaster_in_force(grandmaster);
+    refresh_avb_info();
 }
 
 void AvbEntityHost::note_grandmaster_in_force(ieee::Eui64 const& grandmaster)
 {
     bool const changed = grandmaster_in_force_.has_value() && grandmaster != *grandmaster_in_force_;
     grandmaster_in_force_ = grandmaster;
+    advertise_grandmaster(grandmaster);
     if (!changed) {
         return;
     }
     ++gm_changed_count_;
     (void)components_.aem_handler.notify_counters_changed(atdecc::aem::DESCRIPTOR_AVB_INTERFACE, 0);
+}
+
+auto AvbEntityHost::reported_grandmaster() const -> ieee::Eui64
+{
+    if (grandmaster_in_force_.has_value() || grandmaster_from_parent_) {
+        return grandmaster_in_force_.value_or(ieee::Eui64{});
+    }
+    auto const* const handlers = net_handlers_.get();
+    bool const announced = handlers != nullptr && handlers->gptp_handler().has_grandmaster();
+    return announced ? handlers->gptp_handler().grandmaster_identity().to_eui64() : ieee::Eui64{};
+}
+
+void AvbEntityHost::advertise_grandmaster(ieee::Eui64 const& grandmaster)
+{
+    auto& adp = components_.adp_advertiser;
+    adp.set_gptp_info(tsn::ClockIdentity{grandmaster}, adp.adpdu().gptp_domain_number.get(), sm::Clock::now());
 }
 
 auto AvbEntityHost::grandmaster_capable() const -> bool

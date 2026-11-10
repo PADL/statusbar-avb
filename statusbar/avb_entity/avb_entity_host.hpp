@@ -394,8 +394,15 @@ class AvbEntityHost
     [[nodiscard]] auto interface_runtime(uint16_t index, std::optional<ieee::Eui48> const& mac) const
         -> nanoavb::AvbInterfaceRuntime;
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
-    /// GPTP_GM_CHANGED counts @p grandmaster when another one was in force (the first is no change).
+    /// @p grandmaster is in force: ADP names it, and GPTP_GM_CHANGED counts it when another one was
+    /// in force (the first is no change).
     void note_grandmaster_in_force(ieee::Eui64 const& grandmaster);
+    /// GET_AVB_INFO's gptp_grandmaster_id: the grandmaster in force, as ADP names it; before one is,
+    /// the Announces' (an entity whose loop tells the host none), else zero.
+    [[nodiscard]] auto reported_grandmaster() const -> ieee::Eui64;
+    /// ADP's gptp_grandmaster_id (IEEE 1722.1-2021 Clause 6.2.2.16) is @p grandmaster; its domain
+    /// is the one last advertised.
+    void advertise_grandmaster(ieee::Eui64 const& grandmaster);
     /// AVB_INTERFACE 0's priority1 is below 255 (IEEE 802.1AS-2020 Clause 8.6.2.1).
     [[nodiscard]] auto grandmaster_capable() const -> bool;
 
