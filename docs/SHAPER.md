@@ -474,8 +474,17 @@ frames. Without CAP_NET_ADMIN (or 8021q) the kit logs a warning and goes on;
 on a filtering NIC the listener's streams then stay dropped. A talker-only
 entity creates nothing: transmitting tagged frames needs no filter entry.
 
-The VID followed is our own SR-class VID; a talker whose stream frames carry
-another VID (its Talker Advertise's DataFrameParameters) is not covered.
+A Milan input settles on the VID its talker's probe answer names (Milan v1.3
+Section 5.5.3.6), which need not be the Class A VID. Each such VID gets its
+own `<if>.<vid>` link in the same way, through `avb_entity::SinkVlanFilters`,
+while any settled input uses it (the same count that keeps it joined with
+MVRP); the last input to leave deletes it, and `stop()` deletes them all.
+When an adopted Domain moves the Class A VID, a link the inputs hold on the
+new VID is deleted first, so that `ListenerVlan` creates and owns it, and the
+old VID, if an input still uses it, is created again right after
+`ListenerVlan` deletes it. The VID held is the one the probe answer names; a
+talker whose stream frames carry yet another VID (its Talker Advertise's
+DataFrameParameters) is not covered, and its Talker Advertise is not followed.
 
 A listener of IP streams on the SR class VLAN (AES67-2018 Annex C.1.1.2)
 constructs its `ListenerVlan` with `ListenerLinkUse::ip_multicast`: the link
