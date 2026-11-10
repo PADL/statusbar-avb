@@ -327,7 +327,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_MATRIX:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_MATRIX, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_MATRIX, command_data, out_buffer);
 
@@ -336,7 +336,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_MIXER:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_MIXER, command_data, out_buffer);
             }
             return handle_set_descriptor_value(AEM_COMMAND_SET_MIXER, command_data, out_buffer);
 
@@ -581,9 +581,11 @@ auto AemCommandHandler::current_value(
             return handle_get_sampling_rate(AemDu{}, command_data, out_buffer);
         case AEM_COMMAND_SET_CLOCK_SOURCE:
         case AEM_COMMAND_SET_CONTROL:
-        case AEM_COMMAND_SET_SIGNAL_SELECTOR:  // the GET is the next code
+        case AEM_COMMAND_SET_SIGNAL_SELECTOR:
+        case AEM_COMMAND_SET_MIXER:
+        case AEM_COMMAND_SET_MATRIX:  // the GET is the next code; GET_MATRIX reads the SET's region
             return handle_get_descriptor_value(static_cast<uint16_t>(set_command + 1U), command_data, out_buffer);
-        default:  // no GET in the SET's layout (SET_MIXER, SET_MATRIX, the streaming commands)
+        default:  // no GET in the SET's layout (the streaming commands)
             return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
 }
