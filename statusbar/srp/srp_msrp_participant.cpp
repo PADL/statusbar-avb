@@ -658,7 +658,7 @@ void MsrpParticipantT<Limits>::on_leave_timer(TimePoint now)
     // were in Lv state transition to Mt and notify Leave.
     auto drive = [&](auto& records, auto&& notify_leave_id) {
         for (auto& rec : records) {
-            if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
+            if (!mrp::registrar_leave_due_or_rearm(rec, now, port_.timers())) {
                 continue;
             }
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
@@ -1156,12 +1156,12 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
             rec.registrar_ctx.lvtimer_request);
     }
     if (rec.registrar_ctx.lvtimer_request) {
-        port_.timers().start_leave(now);
+        mrp::start_registrar_leave(rec, now, port_.timers());
     }
     auto const n = rec.registrar_ctx.notify;
     if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join || (was_registered && prev_substate != decl)) {
         notify_listener(rec.first_value.stream_id, decl, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && was_registered) {
+    } else if (mrp::registrar_rx_ended(rec, state_before)) {
         notify_listener_leave(rec.first_value.stream_id);
     }
 }

@@ -93,7 +93,10 @@ See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
 - **Side-effect outputs** in `registrar_sm::Context`:
   - `notify` (enum) — `None` / `New` / `Join` / `Leave`
   - `lvtimer_request` (bool) — when true, the participant starts the
-    per-port LeaveTimer (idempotent if already running)
+    Registrar's own LeaveTimer: `leave_at` = now + LeaveTime (one per
+    Registrar, Clause 10.7.4.2). The port's LeaveTimer runs to the
+    earliest `leave_at`; at its expiry only the Registrars due go to `Mt`
+    and it is re-armed for the rest (`start_leave_at`).
 - **Asymmetric self-loop behaviour.** A subtle point inherited from
   `mrp.c`: `rNew!` on state `In` *does* set `notify = New` (self-loop
   with a side effect). `rJoinIn!` / `rJoinMt!` on state `In` does *not*
@@ -195,7 +198,7 @@ Per-attribute dispatch helpers (free templates constrained by the
 
 - `dispatch_applicant(rec, event, now)` — clears outputs then fires
 - `dispatch_registrar(rec, event, now, timers)` — clears outputs, fires,
-  then forwards `lvtimer_request` to `timers.start_leave()`
+  then forwards `lvtimer_request` to `start_registrar_leave()`
 - `dispatch_applicant_tx(rec, now)` — automatically selects
   `TxRegistrarIn` vs `TxRegistrarMt` based on the paired Registrar's
   state (Clause 10.7.7 Note 8)
