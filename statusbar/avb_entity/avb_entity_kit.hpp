@@ -150,8 +150,8 @@ class AvbEntityKit
     /// declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified.
     void on_link_up(TimePoint time);
     /// gPTP grandmaster @p grandmaster found or changed / lost (EntityUpkeep wires these to the Announce
-    /// handler): drives AVTP tu (Milan v1.2 Section 4.3.5.2, Annex B.1.1); GPTP_GM_CHANGED counts only an
-    /// identity other than the last one found. Reactor thread.
+    /// handler): drives AVTP tu (Milan v1.2 Section 4.3.5.2, Annex B.1.1); GPTP_GM_CHANGED follows the
+    /// grandmaster in force (AvbEntityHost::note_grandmaster_lost). Reactor thread.
     void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
     {
         host_.note_grandmaster_changed(grandmaster);
