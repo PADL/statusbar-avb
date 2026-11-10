@@ -2746,6 +2746,154 @@ TEST(stream_lifecycle, set_sampling_rate_validates_and_round_trips)
 }
 
 // ===========================================================================
+// Milan v1.3 Section 5.4.5.3: a successful SET is notified to the other registered
+// controllers only when it changes the state in force.
+// ===========================================================================
+
+namespace {
+
+Eui64 const OTHER_CONTROLLER{0xC0, 0, 0, 0, 0, 0, 0, 0x0B};
+
+/// Register OTHER_CONTROLLER with @p cmd_handler and count its unsolicited notifications in @p count.
+void count_notifications(AemCommandHandler& cmd_handler, int& count)
+{
+    cmd_handler.set_send_response([&count](Eui48 const&, std::span<uint8_t const> frame) {
+        atdecc::AemDu hdr{};
+        span_load(hdr, frame.first(atdecc::AemDu::LENGTH));
+        count += hdr.is_unsolicited() ? 1 : 0;
+        return true;
+    });
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
+    header.controller_entity_id = OTHER_CONTROLLER;
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> buf{};
+    EXPECT_EQ(cmd_handler.handle_command(header, {}, make_span(buf)).status, AEM_STATUS_SUCCESS);
+}
+
+}  // namespace
+
+TEST(nanoavb_set_notification, a_sampling_rate_set_to_the_rate_in_force_is_not_notified)
+{
+    auto blob = make_blob_with_audio_unit();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    int notified = 0;
+    count_notifications(cmd_handler, notified);
+
+    auto const same = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 48000u));
+    EXPECT_EQ(same.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 0);
+    auto const changed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 96000u));
+    EXPECT_EQ(changed.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+    auto const again = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 96000u));
+    EXPECT_EQ(again.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+}
+
+TEST(nanoavb_set_notification, a_stream_format_set_to_the_format_in_force_is_not_notified)
+{
+    auto blob = make_blob_with_stream_output();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    int notified = 0;
+    count_notifications(cmd_handler, notified);
+
+    auto const same = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_A));
+    EXPECT_EQ(same.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 0);
+    auto const changed =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_B));
+    EXPECT_EQ(changed.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+}
+
+TEST(nanoavb_set_notification, a_clock_source_set_to_the_source_in_force_is_not_notified)
+{
+    auto blob = make_blob_with_clock_domain();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    int notified = 0;
+    count_notifications(cmd_handler, notified);
+
+    auto const same = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(0, uint16_t{0}));
+    EXPECT_EQ(same.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 0);
+    auto const changed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, make_clock_source_body(0, uint16_t{1}));
+    EXPECT_EQ(changed.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+}
+
+TEST(nanoavb_set_notification, a_signal_selector_set_to_the_source_in_force_is_not_notified)
+{
+    auto blob = make_blob_with_signal_selector();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    int notified = 0;
+    count_notifications(cmd_handler, notified);
+
+    auto const same = run_aem_command(
+        cmd_handler, atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR, make_signal_selector_body(0, {{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}}));
+    EXPECT_EQ(same.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 0);
+    auto const changed = run_aem_command(
+        cmd_handler, atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR, make_signal_selector_body(0, {{DESCRIPTOR_AUDIO_CLUSTER, 1, 0}}));
+    EXPECT_EQ(changed.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+}
+
+TEST(nanoavb_set_notification, a_control_set_to_the_value_in_force_is_not_notified)
+{
+    auto blob = make_blob_with_entity();
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    ValueHandler handler{*storage};
+    AemCommandHandler cmd_handler{handler};
+    int notified = 0;
+    count_notifications(cmd_handler, notified);
+
+    std::array<uint8_t, 5> const on{0x00, 0x00, 0x00, 0x00, 0x01};
+    EXPECT_EQ(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONTROL, on).status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+    EXPECT_EQ(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONTROL, on).status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+    EXPECT_EQ(cmd_handler.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_CONTROL, on), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+}
+
+TEST(nanoavb_set_notification, a_name_set_to_the_name_in_force_is_not_notified)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    handler.set_on_entity_name_changed([](AtdeccString const&) { return AEM_STATUS_SUCCESS; });
+    AemCommandHandler cmd_handler{handler};
+    int notified = 0;
+    count_notifications(cmd_handler, notified);
+
+    auto const same =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "SeedName"));
+    EXPECT_EQ(same.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 0);
+    EXPECT_EQ(cmd_handler.apply_local_name(make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "SeedName")), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 0);
+    auto const changed =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "LiveName"));
+    EXPECT_EQ(changed.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(notified, 1);
+}
+
+// ===========================================================================
 // SET/GET_CONFIGURATION (kit phase 5c): validated against the ENTITY's
 // configurations_count; a real switch needs the application hook (the data
 // plane must re-shape); idempotent SETs and GET always succeed.
