@@ -729,7 +729,7 @@ MainLoopResult run_main_loop(
     statusbar::itc::TelemetryCounter<int64_t>& ptp_wake_count,
     SupervisedNanoAvb& supervised,
     statusbar::nanoavb::NanoAvbNetHandlers& handlers)
-{  // NOLINT(statusbar-block-statements): the example's main loop; pre-dates the gate
+{  // NOLINT(statusbar-block-statements) the main loop; pre-dates the gate
     using namespace statusbar::ptpclient;
     using TimePoint = statusbar::sm::TimePoint;
 
@@ -792,7 +792,7 @@ MainLoopResult run_main_loop(
     auto last_supervisor_state = supervised.supervisor.current_state();
 
     // Poll reactor for network I/O until shutdown
-    while (!statusbar::realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements): main loop, pre-dates the gate
+    while (!statusbar::realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements) the main loop; pre-dates the gate
         (void)reactor.poll_once(statusbar::nanoavb::MaapNetHandler::PROTOCOL_TICK_PERIOD_MS);
 
         // Check for state changes to reset watchdog
