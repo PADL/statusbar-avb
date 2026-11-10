@@ -3030,7 +3030,7 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     trace.push_back(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0002ULL));
     handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
         .grandmaster_id_changed =
-            [&m](int64_t, gptp::ClockIdentity const&, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(); },
+            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(gm); },
         .path_trace_changed = [&m](int64_t) { m.kit.note_as_path_changed(); }});
     handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
@@ -3044,6 +3044,35 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     handlers->gptp_handler().on_announce(announce, MilanKit::steady_ns(), trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
+}
+
+// GPTP_GM_CHANGED (Milan v1.3 Section 5.3.6.3, IEEE 1722.1-2021 Clause 7.4.42.2.2) counts a new
+// grandmaster identity; the same one lost to the Announce receipt timeout and found again is none.
+TEST(avb_entity_kit_counters, gptp_gm_changed_counts_a_new_grandmaster_not_the_same_one_regained)
+{
+    MilanKit m{std::nullopt, 0x9A};
+    EXPECT_TRUE(m.start_ready());
+    auto& announces = m.kit.host().net_handlers()->gptp_handler();
+    announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{
+        .grandmaster_id_changed =
+            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(gm); },
+        .grandmaster_lost = [&m](int64_t) { m.kit.note_grandmaster_lost(); }});
+    gptp::AnnounceMessage announce{};
+    announce.init();
+    announce.header.log_message_interval = 0;  // 1 s: lost after 4.5 s
+    announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+
+    int64_t t = MilanKit::steady_ns();
+    announces.on_announce(announce, t);
+    announces.tick(t += 10'000'000'000);
+    EXPECT_FALSE(announces.has_grandmaster());
+    announces.on_announce(announce, t += 1'000'000'000);
+    EXPECT_TRUE(announces.has_grandmaster());
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 0U);  // GPTP_GM_CHANGED
+
+    announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL};
+    announces.on_announce(announce, t + 1'000'000'000);
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 1U);
 }
 
 // Milan v1.2 Section 5.5.2.7 / Table 5.47: connection_count stays 0 whatever
