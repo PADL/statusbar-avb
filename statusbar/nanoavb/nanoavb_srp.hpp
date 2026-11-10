@@ -198,7 +198,15 @@ class MvrpHandler
         // vlans_ is fixed-capacity (inplace_vector); nothing to reserve. The
         // participant_ ctor already validates config.max_vlans against the
         // compile-time limit (throws std::bad_alloc if it exceeds capacity).
+        participant_.set_send_pdu(
+            [this](std::span<uint8_t const> pdu) { return callbacks_.send_packet && callbacks_.send_packet(pdu); });
     }
+    /// The participant sends through this handler's callbacks, whichever are set when it sends.
+    MvrpHandler(MvrpHandler const&) = delete;
+    auto operator=(MvrpHandler const&) -> MvrpHandler& = delete;
+    MvrpHandler(MvrpHandler&&) = delete;
+    auto operator=(MvrpHandler&&) -> MvrpHandler& = delete;
+    ~MvrpHandler() = default;
 
     /// Get the MVRP EtherType
     [[nodiscard]] static constexpr auto ethertype() noexcept -> uint16_t { return srp::MVRP_ETHERTYPE; }
@@ -210,6 +218,12 @@ class MvrpHandler
     /// This allows wiring up network handlers after both components are created
     /// @param callbacks The new callback interface
     void set_callbacks(MvrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
+
+    /// Set just the packet sender (set_callbacks replaces the whole struct).
+    void set_send_packet(statusbar::sg14::inplace_function<bool(std::span<uint8_t const> packet), 64> send)
+    {
+        callbacks_.send_packet = std::move(send);
+    }
 
     /// Register a VLAN
     /// @param vlan_id The VLAN ID to register (1-4094)
@@ -239,11 +253,7 @@ class MvrpHandler
     auto tick(TimePoint now) -> void;
 
     /// A LeaveAll sent now (MvrpParticipant::leave_all()), through the callbacks set last.
-    auto leave_all(TimePoint now) -> void
-    {
-        install_sender();
-        participant_.leave_all(now);
-    }
+    auto leave_all(TimePoint now) -> void { participant_.leave_all(now); }
 
     /// The MVRP participant's configuration (its tables and MRP timers).
     [[nodiscard]] auto mvrp_config() const noexcept -> statusbar::srp::mvrp::MvrpConfig const& { return participant_.config(); }
@@ -252,9 +262,6 @@ class MvrpHandler
     [[nodiscard]] auto vlans() const noexcept -> std::span<VlanInfo const> { return vlans_; }
 
   private:
-    /// Give the participant the current send_packet, even an empty one: its copy may be a stopped run's.
-    auto install_sender() -> void { participant_.set_send_pdu(callbacks_.send_packet); }
-
     MvrpCallbacks callbacks_;
     // Fixed-capacity (no heap): VLAN count per endpoint is tiny in practice.
     // Capacity matches the wrapped MvrpParticipant's compile-time limit.
@@ -304,6 +311,8 @@ class MsrpHandler
         : callbacks_{std::move(callbacks)}
         , participant_{config}
     {
+        participant_.set_send_pdu(
+            [this](std::span<uint8_t const> pdu) { return callbacks_.send_packet && callbacks_.send_packet(pdu); });
         // Observe remote listener declarations so we can tell a talker when a
         // listener becomes ready (or stops being ready) for one of its streams.
         // Safe: MsrpHandler lives in the non-movable NanoAvbComponents, so
@@ -330,6 +339,12 @@ class MsrpHandler
             .on_domain_declared = [this](statusbar::srp::msrp::DomainFirstValue const& fv) { on_peer_domain(fv); },
         });
     }
+    /// The participant sends through this handler's callbacks, whichever are set when it sends.
+    MsrpHandler(MsrpHandler const&) = delete;
+    auto operator=(MsrpHandler const&) -> MsrpHandler& = delete;
+    MsrpHandler(MsrpHandler&&) = delete;
+    auto operator=(MsrpHandler&&) -> MsrpHandler& = delete;
+    ~MsrpHandler() = default;
 
     [[nodiscard]] static constexpr auto ethertype() noexcept -> uint16_t { return srp::MSRP_ETHERTYPE; }
     [[nodiscard]] static constexpr auto multicast_address() noexcept -> uint64_t { return srp::MSRP_MULTICAST_ADDRESS; }
@@ -475,17 +490,9 @@ class MsrpHandler
     /// Whether withdraw_all() ended a run and no declare_domain() has begun one since: the next resumes.
     [[nodiscard]] auto withdrawn() const noexcept -> bool { return withdrawn_; }
     /// The link is back after a down (MsrpParticipant::rejoin()), its LeaveAll through the callbacks set last.
-    auto rejoin(TimePoint now) -> void
-    {
-        install_sender();
-        participant_.rejoin(now);
-    }
+    auto rejoin(TimePoint now) -> void { participant_.rejoin(now); }
     /// A LeaveAll sent now (MsrpParticipant::leave_all()), through the callbacks set last.
-    auto leave_all(TimePoint now) -> void
-    {
-        install_sender();
-        participant_.leave_all(now);
-    }
+    auto leave_all(TimePoint now) -> void { participant_.leave_all(now); }
 
     [[nodiscard]] auto get_talker_stream(StreamId const& stream_id) const noexcept -> TalkerStreamSrpInfo const*
     {
@@ -664,11 +671,6 @@ class MsrpHandler
             started_ = true;
         }
         last_event_time_ = now;
-        // Before the timers run, or the first join timer of a run builds
-        // its PDU with nowhere to send it.
-        if (callbacks_.send_packet) {
-            participant_.set_send_pdu(callbacks_.send_packet);
-        }
         participant_.tick(now);
     }
 
@@ -704,13 +706,9 @@ class MsrpHandler
     void resume(TimePoint now)
     {
         last_event_time_ = now;
-        install_sender();  // its LeaveAll goes now, before the run's first tick installs it
         participant_.resume(now);
         follow_waiting_listeners(now);
     }
-
-    /// Give the participant the current send_packet, even an empty one: its copy may be a stopped run's.
-    auto install_sender() -> void { participant_.set_send_pdu(callbacks_.send_packet); }
 
     /// Every Waiting listener re-checked against the peer's registrations, at @p now.
     void follow_waiting_listeners(TimePoint now)
@@ -722,15 +720,8 @@ class MsrpHandler
         }
     }
 
-    /// What the applicants have pending, sent now through send_packet - which
-    /// tick() installs, but a run that ends before its first tick has not.
-    void transmit_now(TimePoint now)
-    {
-        if (callbacks_.send_packet) {
-            participant_.set_send_pdu(callbacks_.send_packet);
-        }
-        participant_.transmit_pending(now);
-    }
+    /// What the applicants have pending, sent now through send_packet.
+    void transmit_now(TimePoint now) { participant_.transmit_pending(now); }
 
     /// Attach @p stream_id in Waiting: recorded, nothing declared (a declaration made is withdrawn at @p now).
     [[nodiscard]] auto attach_waiting(StreamId const& stream_id, TimePoint now) -> Status
