@@ -116,6 +116,20 @@ TEST(stream_counters, a_gap_between_wrongly_formatted_frames_is_flagged)
     EXPECT_EQ(c.seq_num_mismatch.load(), 1U);
 }
 
+// Milan v1.3 Section 5.3.8.10: after an unbind the first frame of the next talker continues no
+// sequence, so neither its sequence_num nor its mr counts.
+TEST(stream_counters, the_first_frame_after_an_unbind_counts_no_sequence_or_mr_change)
+{
+    StreamInputCounters c;
+    feed(c, 36, 0, true, false);
+    feed(c, 37, 125'000, true, false);
+    statusbar::avb_entity::unlock_stream_input(c);
+    tally_stream_input_packet(c, 200, 250'000, true, false, /*mr=*/true, true, SAMPLES_PER_PKT, false, GPTP_OFF, LOCK_TOL_NS, FS);
+    tally_stream_input_packet(c, 202, 375'000, true, false, /*mr=*/true, true, SAMPLES_PER_PKT, false, GPTP_OFF, LOCK_TOL_NS, FS);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 1U);  // 202 after 200 only
+    EXPECT_EQ(c.media_reset.load(), 0U);
+}
+
 TEST(stream_counters, media_locks_on_steady_step)
 {
     StreamInputCounters c;
