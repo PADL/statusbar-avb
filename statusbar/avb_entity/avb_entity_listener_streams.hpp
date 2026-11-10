@@ -364,7 +364,7 @@ struct ListenerStreams
     void on_listener_connected(uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, sm::TimePoint now);
 
     /// Our listener disconnected: withdraw the MSRP reservation and leave the
-    /// talker's multicast group. Wired as the acmp_listener disconnect callback,
+    /// group that on_listener_connected recorded. Wired as the acmp_listener disconnect callback,
     /// told that handler's time.
     void on_listener_disconnected(uint16_t stream_index, sm::TimePoint now);
 
@@ -463,6 +463,20 @@ struct ListenerStreams
         StreamCrfFn fn{};
     };
     sg14::inplace_vector<PendingCrf, MAX_ENTITY_STREAMS> pending_crf_{};
+
+    /// An input's connection as on_listener_connected made it: its StreamID and the group joined
+    /// for it (zero: none). Kept until it ends, across close_rx(). Reactor thread.
+    struct Connection
+    {
+        uint16_t stream_index{0};
+        ieee::Eui64 stream_id{};
+        ieee::Eui48 group{};
+    };
+    sg14::inplace_vector<Connection, MAX_ENTITY_STREAMS> connections_{};
+    /// Keep @p connection, replacing the one kept for its input.
+    void keep_connection(Connection const& connection);
+    /// The connection kept for input @p stream_index, no longer kept; nullopt when none.
+    [[nodiscard]] auto end_connection(uint16_t stream_index) -> std::optional<Connection>;
 };
 
 }  // namespace statusbar::avb_entity
