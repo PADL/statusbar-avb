@@ -168,24 +168,14 @@ TEST(stream_spec_tspec, milan_table_4_4_sizes)
 {
     // Milan v1.3 Section 4.3.3.2, Table 4.4: AVTPDU header + payload.
     // AAF PCM32 96 kHz 8 ch: 48*8 + 24 = 408; CRF 1 ts/pdu: 28.
-    auto const v1_3 = nanoavb::MilanVersion::v1_3;
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH), v1_3), 408);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K), v1_3), 28);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
 
     // AM824 (not a Milan format) 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH), v1_3), 256);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
 
     // Unknown formats size to 0 (callers must treat as authoring error).
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(0), v1_3), 0);
-}
-
-// Milan v1.2 Table 4.4 adds the clock-drift byte to MaxFrameSize: 48*8 + 24 + 1, 28 + 1.
-TEST(stream_spec_tspec, milan_v1_2_adds_a_byte_to_max_frame_size)
-{
-    auto const v1_2 = nanoavb::MilanVersion::v1_2;
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH), v1_2), 409);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K), v1_2), 29);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH), v1_2), 256);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(0)), 0);
 }
 
 // IEEE 1722-2025 Table 18 (1722-2016 Table 17): the 44.1 kHz family carries
@@ -220,10 +210,9 @@ TEST(stream_spec_tspec, aaf_is_sized_by_its_format_word_then_by_table_18)
     EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_96K_INT32_8CH)), 12U);
 
     // The TSpec frame follows (Milan v1.3 Table 4.4): 24-byte header + frames * 8ch * 4B.
-    auto const v1_3 = nanoavb::MilanVersion::v1_3;
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH), v1_3), 24 + (6 * 8 * 4));      // 216
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH_5SPF), v1_3), 24 + (5 * 8 * 4));  // 184
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH), v1_3), 408);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH)), 24 + (6 * 8 * 4));      // 216
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 24 + (5 * 8 * 4));  // 184
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
 }
 
 TEST(stream_spec_rate, mixed_audio_rates_rejected)

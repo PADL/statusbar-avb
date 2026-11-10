@@ -3,8 +3,8 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// NanoAVB MVU handler - AECP Milan Vendor Unique commands (Milan v1.3 Sections 5.4.3-5.4.4,
-/// or v1.2's), beside the AEM handler (nanoavb_entity.hpp). What is implemented and what is
+/// NanoAVB MVU handler - AECP Milan Vendor Unique commands (Milan v1.3 Sections 5.4.3-5.4.4),
+/// beside the AEM handler (nanoavb_entity.hpp). What is implemented and what is
 /// answered is in docs/MVU.md.
 
 #include "statusbar/atdecc/atdecc_acmp_milan_listener.hpp"
@@ -40,7 +40,7 @@ class MvuCommandHandler
 {
   public:
     /// The entity's profile (EntityProfile): MVU commands are answered only in the Milan profile,
-    /// in its Milan version's layouts. NanoAvbComponents sets it. Default: Milan v1.3.
+    /// in Milan v1.3's layouts. NanoAvbComponents sets it. Default: Milan.
     void set_profile(EntityProfile const profile) noexcept { profile_ = profile; }
     [[nodiscard]] auto profile() const noexcept -> EntityProfile { return profile_; }
 
@@ -71,7 +71,7 @@ class MvuCommandHandler
     void set_stream_input_count(std::optional<size_t> const count) noexcept { stream_input_count_ = count; }
 
     /// Send sink @p index's GET_STREAM_INPUT_INFO_EX, unsolicited, to every registered controller
-    /// (Milan v1.3 Table 5.21); nothing below Milan v1.3.
+    /// (Milan v1.3 Table 5.21); nothing for a classic entity.
     void notify_stream_input_info_ex(uint16_t index);
 
     /// The AEM handler whose lock and acquisition gate the SETs and whose registrations receive
@@ -85,11 +85,15 @@ class MvuCommandHandler
     void set_on_settings_changed(MvuSettingsChangedFn fn) { on_settings_changed_ = std::move(fn); }
 
     // ---- SYSTEM_UNIQUE_ID ----------------------------------------------------
-    /// The system unique id's number (a u32 in Milan v1.2) and name (Milan v1.3 Section 5.4.4.2).
+    /// The system unique id's number and name (Milan v1.3 Section 5.4.4.2).
     [[nodiscard]] auto system_unique_id() const noexcept -> uint64_t { return system_unique_id_; }
     [[nodiscard]] auto system_unique_name() const noexcept -> std::array<char, 64> const& { return system_unique_name_; }
-    /// Restore a saved system unique id (no notification): below v1.3 one past the u32, or a name, is not kept.
-    void set_system_unique_id(uint64_t id, std::array<char, 64> const& name = {}) noexcept;
+    /// Restore a saved system unique id (no notification).
+    void set_system_unique_id(uint64_t const id, std::array<char, 64> const& name = {}) noexcept
+    {
+        system_unique_id_ = id;
+        system_unique_name_ = name;
+    }
 
     // ---- MEDIA_CLOCK_REFERENCE_INFO (one per CLOCK_DOMAIN) --------------------
     /// The CLOCK_DOMAIN descriptors the entity has (others are refused
@@ -160,9 +164,7 @@ class MvuCommandHandler
     /// Answer @p header with SUCCESS and @p body, then notify_changed() if @p changed
     [[nodiscard]] auto respond_and_notify(
         Eui48 const& src_mac, atdecc::mvu::MvuDu const& header, std::span<uint8_t const> body, bool changed) -> bool;
-    /// Whether SET_SYSTEM_UNIQUE_ID may set @p number in the profile's version
-    [[nodiscard]] auto system_unique_id_settable(uint64_t number) const noexcept -> bool;
-    /// Set the id to @p number and @p name (kept from v1.3, well-formed UTF-8); true when it changed
+    /// Set the id to @p number and @p name (well-formed UTF-8); true when it changed
     [[nodiscard]] auto replace_system_unique_id(uint64_t number, std::array<char, 64> const& name) noexcept -> bool;
     /// SET_SYSTEM_UNIQUE_ID's requested id @p number and @p name applied and answered
     [[nodiscard]] auto apply_system_unique_id(

@@ -146,9 +146,7 @@ AvbEntityKit::AvbEntityKit(
 
 void AvbEntityKit::configure_milan()
 {
-    // The Milan version and GET_MILAN_INFO's features, fixed before the entity is advertised
-    // (Milan v1.3 Section 5.4.4.1).
-    host_.components().set_milan_version(config_.milan_version);
+    // GET_MILAN_INFO's features, fixed before the entity is advertised (Milan v1.3 Section 5.4.4.1).
     host_.components().mvu_handler.set_extra_features(
         config_.signal_presence ? atdecc::mvu::MVU_FEATURES_TALKER_SIGNAL_PRESENCE : 0U);
     // Advertised, so reported from the start: no signal until the application says otherwise.
@@ -802,7 +800,7 @@ void AvbEntityKit::leave_rx_groups()
 auto AvbEntityKit::talkers_fit(uint16_t const index, uint64_t const word) const noexcept -> bool
 {
     auto const kbps = [this](StreamSpec const& s) {
-        return uint64_t{stream_bandwidth_kbps(talker_tspec(s, host_.components().profile), CLASS_A_INTERVALS_PER_SEC)};
+        return uint64_t{stream_bandwidth_kbps(talker_tspec(s), CLASS_A_INTERVALS_PER_SEC)};
     };
     uint64_t before = 0;
     uint64_t after = 0;
@@ -2459,7 +2457,7 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     fill_talker_srp_identity(spec.index, info);
     // TSpec from the format word (kit phase 1) — no per-entity byte math to
     // keep in step with the model; the hardware shaper sizes by the same one.
-    auto const tspec = talker_tspec(spec, host_.components().profile);
+    auto const tspec = talker_tspec(spec);
     info.max_interval_frames = tspec.max_interval_frames;
     info.max_frame_size = tspec.max_frame_size;
     return info;
