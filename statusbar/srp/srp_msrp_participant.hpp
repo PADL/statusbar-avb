@@ -307,8 +307,7 @@ class MsrpParticipantT
     [[nodiscard]] auto config() const noexcept -> MsrpConfig const& { return config_; }
 
     /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
-    /// initial timers. Must be called once after construction; after a
-    /// stop(), a Registrar still in LV leaves at its own deadline.
+    /// initial timers. Must be called once after construction.
     void start(TimePoint now);
 
     /// Stop all timers. FSMs retain their current state; attribute
@@ -689,7 +688,7 @@ class MsrpParticipantT
             return;  // peer attribute, table full -- silently drop
         }
         auto& rec = *rec_ptr;
-        bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
+        auto const state_before = rec.registrar_sm.current_state();
         // Adopt the received payload ONLY for a pure peer registration. If WE are
         // locally declaring this key, a peer declaring the same one is a conflict
         // (802.1Q-2018 35.2.4): keep OUR value so our next JoinIn re-advertises our
@@ -707,7 +706,7 @@ class MsrpParticipantT
         auto const n = rec.registrar_ctx.notify;
         if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
             notify_register(rec.first_value);
-        } else if (n == registrar_sm::Notify::Leave && was_registered) {
+        } else if (mrp::registrar_rx_ended(rec, state_before)) {
             notify_leave(rec.first_value);
         }
     }

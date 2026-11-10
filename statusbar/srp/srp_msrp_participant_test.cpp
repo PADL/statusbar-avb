@@ -800,15 +800,20 @@ TEST(msrp_participant, a_second_leave_all_restarts_the_listeners_own_leavetimer)
     EXPECT_TRUE(rig.left.has_value());
 }
 
-// A Listener in LV across a stop() and start() leaves at its own deadline once started again.
-TEST(msrp_participant, a_restart_keeps_a_leaving_listeners_leavetimer)
+// IEEE 802.1Q-2022 Clause 10.7.5 with MsrpConfig::leave_immediate: a Listener left in LV by a
+// LeaveAll it was not re-declared in, then withdrawn with an Lv, goes LV to MT and is reported gone.
+TEST(msrp_participant, a_listener_leave_in_lv_ends_the_registration)
 {
-    ListenerLeaveRig rig{test_msrp_config()};
-    rig.declare_then_withdraw();  // LV, LeaveTime 1 s
-    rig.a.stop();
-    rig.a.start(rig.clock.advance(std::chrono::milliseconds(100)));
+    auto config = test_msrp_config();
+    config.leave_immediate = true;
+    config.timers.leave_time = std::chrono::milliseconds{5000};
+    ListenerLeaveRig rig{config};
+    (void)rig.b.declare_listener(rig.sid, ListenerDeclaration::Ready, rig.clock.now);
+    rig.exchange();
+    rig.a.receive_pdu(listener_leave_all_pdu(), rig.clock.now);  // IN to LV, not re-declared
     EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
-    rig.a.tick(rig.clock.advance(std::chrono::milliseconds(1000)));
+    (void)rig.b.withdraw_listener(rig.sid, rig.clock.now);
+    rig.exchange();
     EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
     EXPECT_TRUE(rig.left.has_value());
 }

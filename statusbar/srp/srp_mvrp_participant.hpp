@@ -203,15 +203,8 @@ class MvrpParticipantT
     /// The configuration the participant runs with.
     [[nodiscard]] auto config() const noexcept -> MvrpConfig const& { return config_; }
 
-    /// Run BEGIN! on the per-port FSMs and arm initial timers; a VLAN still in LV after a
-    /// stop() leaves at its own deadline.
-    void start(TimePoint now)
-    {
-        port_.start(now);
-        for (auto const& rec : vlans_) {
-            mrp::resume_registrar_leave(rec, port_.timers());
-        }
-    }
+    /// Run BEGIN! on the per-port FSMs and arm initial timers.
+    void start(TimePoint now) { port_.start(now); }
 
     /// Stop all timers. FSMs retain their current state.
     void stop() noexcept { port_.stop(); }
@@ -414,7 +407,7 @@ class MvrpParticipantT
     void on_leave_timer(TimePoint now)
     {
         for (auto& rec : vlans_) {
-            if (!mrp::registrar_leave_due(rec, now, port_.timers())) {
+            if (!mrp::registrar_leave_due_or_rearm(rec, now, port_.timers())) {
                 continue;
             }
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
