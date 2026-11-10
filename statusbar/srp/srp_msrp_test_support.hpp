@@ -3,8 +3,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// Test support: crafted MSRPDUs for the tests of MSRP peers (srp, the AVB entity, the AES67
-/// SRP port).
+/// Test support: crafted MSRPDUs for the tests of any MSRP participant or the entities built on one.
 
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/srp/srp_mrp.hpp"

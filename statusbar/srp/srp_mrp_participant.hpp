@@ -131,9 +131,9 @@ void dispatch_registrar(Record& rec, registrar_sm::Def::Event event, TimePoint n
 }
 
 /// At the port's leave timer expiry: true when @p rec is in LV and its own leavetimer has run out (the
-/// caller dispatches LvTimer); an LV Registrar not yet due runs the port's timer on to its deadline.
+/// caller dispatches LvTimer); otherwise re-arms the port's timer to an LV Registrar's later deadline.
 template <MrpAttributeLike Record>
-[[nodiscard]] auto registrar_leave_due(Record const& rec, TimePoint now, TimerScheduler& timers) noexcept -> bool
+[[nodiscard]] auto registrar_leave_due_or_rearm(Record const& rec, TimePoint now, TimerScheduler& timers) noexcept -> bool
 {
     if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
         return false;
@@ -145,14 +145,16 @@ template <MrpAttributeLike Record>
     return true;
 }
 
-/// At a restart (stop() stops every timer, the FSMs keep their states): run the port's leave timer
-/// on to @p rec's own deadline while it is in LV, so its registration still ends (Clause 10.7.4.2).
+/// True when a received event ended @p rec's registration: a Leave notified from IN, or from LV to MT
+/// (rLv! with RLeaveImmediate). @p before is the Registrar's state before the event (Clause 10.7.5).
 template <MrpAttributeLike Record>
-void resume_registrar_leave(Record const& rec, TimerScheduler& timers) noexcept
+[[nodiscard]] auto registrar_rx_ended(Record const& rec, registrar_sm::Def::State before) noexcept -> bool
 {
-    if (rec.registrar_sm.current_state() == registrar_sm::Def::State::Lv) {
-        timers.start_leave_at(rec.registrar_ctx.leave_at);
+    if (rec.registrar_ctx.notify != registrar_sm::Notify::Leave) {
+        return false;
     }
+    return before == registrar_sm::Def::State::In ||
+        (before == registrar_sm::Def::State::Lv && rec.registrar_sm.current_state() == registrar_sm::Def::State::Mt);
 }
 
 /// Dispatch the tx! event to an attribute's Applicant. Selects the
