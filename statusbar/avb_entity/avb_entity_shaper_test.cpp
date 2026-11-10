@@ -919,6 +919,8 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
     RecordingTc tc{};
     tc.root = qdisc_info(0, net::tc::ROOT, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
+    std::vector<std::error_code> settled{};
+    qdiscs.set_on_etf_settled([&settled](std::error_code const e) { settled.push_back(e); });
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
@@ -933,6 +935,8 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
             "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
+    EXPECT_EQ(settled.size(), size_t{1});
+    EXPECT_FALSE(settled.empty() || static_cast<bool>(settled.front()));  // placed
     EXPECT_TRUE(qdiscs.launch_time_mode() == LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
@@ -1168,14 +1172,16 @@ TEST(shaper_qdiscs, class_b_s_cbs_waits_for_class_a_s)
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
 }
 
-// A refused etf offload (EOPNOTSUPP) is recorded and logged once; the cbs stay, program() succeeds
-// (nothing for tick() to retry) and no further etf is asked for until the next install().
+// A refused etf offload (EOPNOTSUPP) is told to set_on_etf_settled and logged once; the cbs stay,
+// program() succeeds (nothing for tick() to retry) and no further etf is asked for until the next install().
 TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
     tc.etf_error = std::make_error_code(std::errc::operation_not_supported);
     ShaperQdiscs qdiscs{tc, channel.logger()};
+    std::vector<std::error_code> settled{};
+    qdiscs.set_on_etf_settled([&settled](std::error_code const e) { settled.push_back(e); });
     qdiscs.set_launch_time(LaunchTimeMode::on, 200'000);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
@@ -1190,7 +1196,10 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
             "replace 9001:1 etf clockid 11 delta 200000 offload skip_sock_check",
         }));
     EXPECT_FALSE(qdiscs.launch_time());
+    EXPECT_EQ(settled.size(), size_t{1});
+    EXPECT_FALSE(settled.empty() || settled.front() != std::errc::operation_not_supported);
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_EQ(settled.size(), size_t{1});  // said once
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
     // Uninstall is unchanged: grafting pfifo_fast on each class removes cbs and etf together.
     EXPECT_TRUE(qdiscs.uninstall().has_value());
