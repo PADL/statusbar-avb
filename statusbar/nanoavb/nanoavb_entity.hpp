@@ -58,6 +58,9 @@ template <typename T>
 /// as Milan v1.3 Section 5.4.1 allows. Sizes the stack-local buffer of process_packet().
 constexpr size_t MAX_AEM_RESPONSE_SIZE = 1476;
 
+/// The most AEM command-specific data one AECPDU can carry (IEEE 1722.1-2021 Clause 9.2.1.1.7).
+constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
+
 /// Small value returned by each AEM command handler.
 ///
 /// Handlers write their response bytes into a caller-supplied
@@ -582,9 +585,10 @@ class AemCommandHandler
     /// change targets the IDENTIFY control). Exposed so an entity can push a
     /// notification it framed itself; apply_local_descriptor_value() is the usual
     /// entry point. No-op if no send_response callback is wired.
-    /// Milan v1.2 Section 5.4.5.1: a command's own notification passes its
+    /// Milan v1.3 Section 5.4.5.1: a command's own notification passes its
     /// @p requester, who is left out (the response told it); a change not
-    /// the command's own (a side effect, or none) passes none.
+    /// the command's own (a side effect, or none) passes none. Called while a
+    /// command is dispatched, it sends (and calls identify_changed) after the response.
     void emit_unsolicited(
         uint16_t command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester = std::nullopt);
 
@@ -619,17 +623,16 @@ class AemCommandHandler
     // flight at once (the corrigendum recommends accepting the SET_STREAM_FORMAT
     // of every stream together so one re-reservation wait covers them all).
 
-    /// Deferred commands held at once; beyond this the hook's IN_PROGRESS is
-    /// answered NO_RESOURCES.
+    /// Deferred commands held at once; with this many held, a SET is answered
+    /// NO_RESOURCES without calling its hook.
     static constexpr size_t MAX_PENDING_COMMANDS = 8;
-    /// Longest command body a deferred command keeps for its echoed responses
-    /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
-    static constexpr size_t MAX_PENDING_BODY = 64;
+    /// Longest command body a deferred command keeps for its echoed responses: any an AECPDU
+    /// carries, so no deferral is refused for its length after its hook has started.
+    static constexpr size_t MAX_PENDING_BODY = MAX_AEM_BODY;
 
-    /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index):
-    /// send its final response with @p status and @p response_body (the echoed
-    /// command when empty) and, on SUCCESS, the unsolicited notification. Returns
-    /// false when no such command is pending.
+    /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index) with @p status, answering
+    /// @p response_body, else the echoed command on SUCCESS or, on a failure, the value in force at this call
+    /// (restore it first). SUCCESS also notifies. Returns false when no such command is pending.
     [[nodiscard]] auto complete_pending_command(
         uint16_t command_type,
         uint16_t descriptor_type,
@@ -670,7 +673,7 @@ class AemCommandHandler
 
     /// Handle SET_NAME command (IEEE 1722.1 Clause 7.4.17). Routes through
     /// AemEntityModel::apply_set_name -> the handler's symbol-keyed
-    /// on_set_name, echoing the command as the response.
+    /// on_set_name, answering the name in force (the old one on a failure).
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// SET_NAME, its notification leaving out @p requester (none: every controller).
     [[nodiscard]] auto set_name(
@@ -687,14 +690,26 @@ class AemCommandHandler
     /// the controller can match the response. Applies no mutation.
     [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// Fail a SET with @p status, answering the value in force where current_value() reads it, else the
-    /// echo (IEEE 1722.1-2021 Clauses 7.4.9.1, 7.4.17.1, 7.4.21.1, 7.4.23.1, 7.4.25.1, 7.4.29.1).
+    /// Fail a SET with @p status, answering the value in force where current_value() reads it, else the echo
+    /// (IEEE 1722.1-2021 Clauses 7.4.7.1, 7.4.9.1, 7.4.15.1, 7.4.17.1, 7.4.21.1, 7.4.23.1, 7.4.25.1, 7.4.29.1,
+    /// 7.4.31.1, 7.4.33.2, 7.4.77.1).
     [[nodiscard]] auto reject_set(
         uint8_t status, uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// The GET answer, in the SET's layout, for SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE,
-    /// SET_CLOCK_SOURCE, SET_CONTROL or SET_SIGNAL_SELECTOR; NOT_IMPLEMENTED for any other.
+    /// The GET answer, in the SET's layout, for SET_CONFIGURATION, SET_NAME, SET_STREAM_FORMAT, SET_STREAM_INFO,
+    /// SET_SAMPLING_RATE, SET_CLOCK_SOURCE, SET_CONTROL, SET_SIGNAL_SELECTOR, SET_MIXER, SET_MATRIX (the region it
+    /// names) or SET_MAX_TRANSIT_TIME; NOT_IMPLEMENTED for any other.
     [[nodiscard]] auto current_value(uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// @p set_command's response @p r on SUCCESS, else reject_set()'s: for a SET with no deferral, whose
+    /// hook's IN_PROGRESS is a refusal too (SET_CONFIGURATION, IEEE 1722.1-2021 Clause 7.4.7.1).
+    [[nodiscard]] auto refuse_unless_success(
+        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// @p set_command's response @p r on SUCCESS or IN_PROGRESS, or when current_value() cannot read the
+    /// value in force; else @p r's status with that value.
+    [[nodiscard]] auto answer_set(
+        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
     /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
@@ -752,8 +767,8 @@ class AemCommandHandler
         PortModel const& port,
         std::span<uint8_t const> command_data,
         std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// The set an ADD (@p add) or REMOVE of @p listed leaves @p current at, in @p next (cluster
-    /// order), or the status to refuse with.
+    /// The set a controller's ADD (@p add) or REMOVE of @p listed leaves @p current at, in @p next
+    /// (cluster order), or the status to refuse with: BAD_ARGUMENTS for a REMOVE of a mapping not held.
     [[nodiscard]] auto next_mappings(
         bool add,
         uint16_t port_index,
@@ -867,11 +882,12 @@ class AemCommandHandler
     }
 
     /// Handle a SET descriptor-value command (SET_CONTROL, and the wider family).
-    /// Routes through AemEntityModel::apply_set_descriptor_value -> the handler's
-    /// symbol-keyed on_set_descriptor_value, echoing the command as the response.
+    /// Routes through AemEntityModel::apply_set_descriptor_value -> the handler's symbol-keyed
+    /// on_set_descriptor_value; a success echoes the command, a failure answers reject_set()'s.
     [[nodiscard]] auto handle_set_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// Apply a SET descriptor value through a per-call AemEntityModel.
+    /// Apply a SET descriptor value through a per-call AemEntityModel; NO_RESOURCES, the hook not
+    /// called, while MAX_PENDING_COMMANDS deferred commands are held.
     [[nodiscard]] auto apply_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// Whether @p set_command's value in @p command_data is the one its GET answers now.
@@ -902,6 +918,9 @@ class AemCommandHandler
     /// GET_STREAM_INFO @p cmd answered from the get_stream_info callback into @p out_buffer:
     /// NOT_IMPLEMENTED without one, NO_SUCH_DESCRIPTOR when it declines.
     [[nodiscard]] auto answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// GET_STREAM_INFO's answer for @p command_data cut to SET_STREAM_INFO's length in stream_info_layout().
+    [[nodiscard]] auto stream_info_in_force(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
     /// GET_STREAM_INFO's response in stream_info_layout()'s form: @p ext only in Milan v1.2's,
     /// a zero IP tail in IEEE 1722.1-2021's. NOT_SUPPORTED when @p out_buffer is too short.
@@ -975,6 +994,19 @@ class AemCommandHandler
 
     /// Unsolicited LOCK_ENTITY (UNLOCK, locked_entity_id 0) when a lock expires.
     void emit_lock_released();
+    /// Hold a notification raised while a command is dispatched; false (send it now, after the side
+    /// effects held) when its body exceeds an AECPDU's or no slot is free, the last being the command's own.
+    [[nodiscard]] auto queue_notification(
+        uint16_t command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester) -> bool;
+    /// Whether a notification naming @p requester is the dispatched command's own.
+    [[nodiscard]] auto is_commands_own(std::optional<Eui64> const& requester) const noexcept -> bool;
+    /// Whether a notification naming @p requester has a slot, after releasing the held side effects
+    /// if need be; the last slot is the command's own.
+    [[nodiscard]] auto make_room(std::optional<Eui64> const& requester) -> bool;
+    /// Send the held notifications other than the command's own, in the order raised, before the response.
+    void release_side_effects();
+    /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1).
+    void flush_notifications();
 
     /// DescriptorId for MEMORY_OBJECT @p descriptor_index in @p configuration_index.
     [[nodiscard]] auto memory_object_id(uint16_t configuration_index, uint16_t descriptor_index) const -> DescriptorId;
@@ -1099,6 +1131,19 @@ class AemCommandHandler
         sm::TimePoint next_in_progress{};
     };
     SlotTable<PendingCommand, MAX_PENDING_COMMANDS> pending_commands_{};
+
+    // Notifications a command's dispatch raises, held until its response is sent; the last
+    // slot is kept for the command's own (the one naming its requester).
+    static constexpr size_t MAX_QUEUED_NOTIFICATIONS = 4;
+    struct QueuedNotification
+    {
+        uint16_t command_type{0};
+        std::optional<Eui64> requester{};
+        std::array<uint8_t, MAX_AEM_BODY> body;
+        size_t body_size{0};
+    };
+    sg14::inplace_vector<QueuedNotification, MAX_QUEUED_NOTIFICATIONS> queued_notifications_{};
+    bool dispatching_{false};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will
