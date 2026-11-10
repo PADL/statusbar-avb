@@ -478,7 +478,8 @@ entity creates nothing: transmitting tagged frames needs no filter entry.
 
 A Milan input settles on the VID its talker's probe answer names (Milan v1.3
 Section 5.5.3.6), which need not be the Class A VID; an answer naming none
-(0) uses the VID of the matched Talker Advertise once it is registered. The
+(0) uses the VID of the matched Talker Advertise once it is registered, and
+keeps it until the input unsettles, even if the talker later moves its VLAN. The
 table refcounts each VID: the Class A VID is one holder and each settled
 input another, so a link is created at the first hold and deleted with the
 last, and a Domain move that lands on a VID an input uses, or leaves one,
