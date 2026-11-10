@@ -329,7 +329,8 @@ class GptpAnnounceHandler : public net::Pollable
     [[nodiscard]] auto path_trace() const noexcept -> AsPath const& { return path_trace_; }
 
     /// Process one parsed Announce received at @p now_ns, @p path_trace from
-    /// its TLVs (on_ready's work after the socket read; public for tests).
+    /// its TLVs (on_ready's work after the socket read; public for tests). The
+    /// callbacks it calls already see it as last_announce().
     void on_announce(gptp::AnnounceMessage const& announce, int64_t now_ns, AsPath const& path_trace = {});
 
   private:
