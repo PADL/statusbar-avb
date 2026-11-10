@@ -18,7 +18,8 @@ settings to be saved in non-volatile memory.
 
 Not kept (Milan v1.2 Section 5.3.4): the lock and the registered controllers.
 The sampling rate is restored first, then the stream formats (a rate re-times
-the streams at the unit's rate; a saved format then stands on its own).
+the streams at the unit's rate; a saved format then stands on its own). While a
+unit is off its authored rate, every stream of it is saved at its format.
 
 A listener binding records the talker a stream input connects to and the
 input's stream format when it was saved (0: unknown, e.g. imported); a binding
