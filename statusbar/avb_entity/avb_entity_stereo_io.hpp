@@ -66,6 +66,11 @@ struct AvbEntityStereoIOConfig
     /// Network interface name (e.g., "en0" on macOS, "eth0" on Linux)
     std::string interface_name{"en0"};
 
+    /// The link speed (Mbit/s) and MTU of the Talker Advertise's AccumulatedLatency; 0: the
+    /// interface's, read at each declaration (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+    uint32_t link_mbps{0};
+    uint32_t mtu{0};
+
     /// Destination multicast MAC address for talker stream (no MAAP)
     ieee::Eui48 talker_dest_mac{0x71, 0xB3, 0xD5, 0xED, 0xCF, 0x00};
 
@@ -283,6 +288,9 @@ class AvbEntityStereoIO
     /// @param gain_db Filter gain in dB (negative for cut, positive for boost)
     /// @param q Filter Q factor (bandwidth)
     auto configure_filter(double freq_hz, double gain_db, double q) -> void;
+
+    /// The Talker Advertise this entity declares for its stream (make_talker_srp_info()).
+    [[nodiscard]] auto talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo { return make_talker_srp_info(); }
 
   private:
     /// Create the entity model with stereo I/O descriptors (hand-built in code -- the
