@@ -610,6 +610,7 @@ void ListenerStreams::receive_am824(
         span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
     }
     if (!whole || !pdu.is_valid()) {
+        slot.rx_bad.add(1);
         count_rejected(slot, frame, /*ts_sparse=*/true, gptp_now_ns);
         return;
     }
@@ -689,6 +690,7 @@ void ListenerStreams::receive_aaf(
 {
     auto const pdu = avtp::aaf_parse_header(frame);
     if (!pdu) {
+        slot.rx_bad.add(1);
         count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);
         return;
     }
@@ -780,6 +782,7 @@ void ListenerStreams::receive_crf(
         span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
     }
     if (!whole || !pdu.is_valid()) {
+        slot.rx_bad.add(1);
         count_rejected(slot, frame, /*ts_sparse=*/true, 0);
         return;
     }
@@ -838,7 +841,10 @@ void ListenerStreams::deliver_crf(
 void ListenerStreams::count_rejected(
     ListenerStreamSlot& slot, std::span<uint8_t const> const frame, bool const ts_sparse, int64_t const gptp_now_ns)
 {
-    slot.rx_bad.add(1);
+    // sv=0 or a version other than 0 is no stream data of this stream (IEEE 1722-2016 Clauses 4.4.3.4, 4.4.4.2).
+    if (!avtp::avtp_get_sv(frame).value_or(false) || avtp::avtp_get_version(frame).value_or(1) != 0) {
+        return;
+    }
     auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
     auto const mr = avtp::avtp_get_mr(frame).value_or(false);
     update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, ts_sparse, gptp_now_ns);
