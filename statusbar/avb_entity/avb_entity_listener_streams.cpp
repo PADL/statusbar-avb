@@ -960,9 +960,10 @@ void ListenerStreams::on_listener_connected(
     auto const result = components_.msrp_handler.listener_attach(sid, now);
     bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
     bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
-    // Join the talker's stream group so the NIC delivers its frames to us.
+    // Join the talker's stream group so the NIC delivers its frames to us; a zero or unicast
+    // stream_dest_mac is no group (IEEE 1722.1-2021 Clause 8.2.1.13).
     bool joined = false;
-    if (port_ != nullptr) {  // no guard: a join is a socket call and touches no ring
+    if (port_ != nullptr && dest_mac.is_multicast()) {  // no guard: a join is a socket call and touches no ring
         joined = port_->port().join_multicast(dest_mac).has_value();
     }
     if (logger_) {
@@ -987,7 +988,7 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
         (void)components_.msrp_handler.listener_withdraw(sid, now);
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
-        if (port_ != nullptr) {  // no guard: a leave is a socket call and touches no ring
+        if (port_ != nullptr && stream->stream_dest_mac.is_multicast()) {  // no guard: a leave is a socket call
             (void)port_->port().leave_multicast(stream->stream_dest_mac);
         }
     }
