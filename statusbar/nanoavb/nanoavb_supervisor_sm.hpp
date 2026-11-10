@@ -46,9 +46,8 @@ struct Context
 //   Ready --GptpLost--> Degraded --GptpLocked--> Ready   (dynamic re-lock)
 //   any --LinkDown--> Down;  Init --Timeout--> Init       (gPTP-lock watchdog)
 //
-// The watchdog only reports: without gPTP the entity keeps advertising (Milan v1.3
-// Section 5.6.3; the ADPDU's gPTP fields per IEEE 1722.1-2021 Clause 6.2.2.16) and
-// waits for a lock, which still brings it to Ready.
+// The watchdog only reports: without gPTP the entity keeps advertising and waits for a lock,
+// which still brings it to Ready (Milan v1.3 Section 5.6.3, IEEE 1722.1-2021 Clause 6.2.2.16).
 struct Def
 {
     using Context = supervisor_sm::Context;
