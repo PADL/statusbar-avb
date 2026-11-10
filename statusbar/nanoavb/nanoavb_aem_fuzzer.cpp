@@ -18,12 +18,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <optional>
 #include <span>
-#include <vector>
 
 namespace {
 
@@ -37,7 +33,7 @@ std::array<ieee::Eui64, 2> const CONTROLLERS{{{0xC0, 0, 0, 0, 0, 0, 0, 0x0A}, {0
 ieee::Eui48 const MAC{0x02, 0, 0, 0, 0, 0x0A};
 
 /// The commands the entity's hooks and state serve, picked by a type octet's low bits when its top
-/// bit is set; otherwise the type is taken as given.
+/// bit is set; otherwise the octet is the command type itself.
 constexpr std::array<uint16_t, 24> COMMANDS{
     AEM_COMMAND_SET_STREAM_FORMAT,
     AEM_COMMAND_GET_STREAM_FORMAT,
@@ -65,15 +61,21 @@ constexpr std::array<uint16_t, 24> COMMANDS{
     AEM_COMMAND_SET_CONTROL,
 };
 
-/// The test model, read and parsed once from avb_entity's committed fixture; without it the run aborts.
+/// avb_entity's committed test model, compiled in; a tree without it (the block gate's copy) parses
+/// a one-octet model, which model_storage() refuses.
+// NOLINTNEXTLINE(*-avoid-c-arrays): #embed fills a braced array
+constexpr uint8_t MODEL[] = {
+#if __has_embed("../avb_entity/testdata/entity_audio.bin")
+#    embed "../avb_entity/testdata/entity_audio.bin"
+#else
+    0
+#endif
+};
+
+/// The test model, parsed once; a malformed one aborts the run.
 auto model_storage() -> DescriptorStorage const&
 {
-    static std::vector<uint8_t> const blob = [] {
-        auto const path = std::filesystem::path{__FILE__}.parent_path() / ".." / "avb_entity" / "testdata" / "entity_audio.bin";
-        std::ifstream in{path, std::ios::binary};
-        return std::vector<uint8_t>{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
-    }();
-    static auto const storage = DescriptorStorage::create(blob);
+    static auto const storage = DescriptorStorage::create(std::span<uint8_t const>{MODEL});
     if (!storage) {
         std::fputs("nanoavb_aem_fuzzer: entity_audio.bin missing or malformed\n", stderr);
         std::abort();
