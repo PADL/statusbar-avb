@@ -2767,14 +2767,11 @@ auto AemCommandHandler::queue_notification(uint16_t const command_type, std::spa
 void AemCommandHandler::release_side_effects()
 {
     dispatching_ = false;  // send them rather than hold them again
-    Eui64 const requester = requester_;
     for (auto const& n : queued_notifications_) {
         if (!n.own) {
-            requester_ = n.requester;
-            emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
+            emit_held(n);
         }
     }
-    requester_ = requester;
     dispatching_ = true;
     auto const sent = std::ranges::remove_if(queued_notifications_, [](QueuedNotification const& n) { return !n.own; });
     queued_notifications_.erase(sent.begin(), sent.end());
@@ -2782,12 +2779,16 @@ void AemCommandHandler::release_side_effects()
 
 void AemCommandHandler::flush_notifications()
 {
-    Eui64 const requester = requester_;
     for (auto const& n : queued_notifications_) {
-        requester_ = n.requester;  // left out as it was when the notification was raised
-        emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
+        emit_held(n);
     }
     queued_notifications_.clear();
+}
+
+void AemCommandHandler::emit_held(QueuedNotification const& n)
+{
+    Eui64 const requester = std::exchange(requester_, n.requester);  // left out as when it was raised
+    emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
     requester_ = requester;
 }
 

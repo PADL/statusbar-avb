@@ -1284,6 +1284,8 @@ class AemCommandHandler
         std::array<uint8_t, MAX_QUEUED_BODY> body;
         size_t body_size{0};
     };
+    /// Send held notification @p n with the requester_ it was raised with.
+    void emit_held(QueuedNotification const& n);
     sg14::inplace_vector<QueuedNotification, MAX_QUEUED_NOTIFICATIONS> queued_notifications_{};
     bool dispatching_{false};
 
