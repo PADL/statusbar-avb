@@ -246,6 +246,25 @@ auto MilanListener::unbind_stream(uint16_t const index, ieee::Eui64 const& contr
     return true;
 }
 
+auto MilanListener::release(uint16_t const index, TimePoint const now) -> bool
+{
+    if (index >= sinks_.size()) {
+        return false;
+    }
+    (void)clear_binding(index, now);
+    return true;
+}
+
+auto MilanListener::clear_binding(uint16_t const index, TimePoint const now) -> bool
+{
+    if (!sinks_[index].bound()) {
+        return false;
+    }
+    stop(index, now);
+    sinks_[index] = MilanSink{.probing_status = probing_status::DISABLED};  // binding cleared, discovery stopped
+    return true;
+}
+
 auto MilanListener::binding_command(uint8_t const type, uint16_t const index, ieee::Eui64 const& controller) const noexcept
     -> AcmpCommandResponse
 {
@@ -331,9 +350,7 @@ void MilanListener::unbind(uint16_t const index, AcmpCommandResponse const& cmd,
         respond(cmd, ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);  // Table 5.38
         return;
     }
-    if (sinks_[index].bound()) {
-        stop(index, now);
-        sinks_[index] = MilanSink{.probing_status = probing_status::DISABLED};  // binding cleared, discovery stopped
+    if (clear_binding(index, now)) {
         binding_changed(index);
     }
     // Table 5.40. No DISCONNECT_TX: the talker learns from MSRP.
