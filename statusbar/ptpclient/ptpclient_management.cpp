@@ -36,13 +36,14 @@ constexpr uint16_t TLV_MANAGEMENT_ERROR_STATUS = 0x0002;
 constexpr gptp::SourcePortIdentity ALL_PORTS{gptp::ClockIdentity{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 0xFFFF};
 
 /// What fetch_all() asks for, in order: the clock's data sets, then (with a port
-/// interface) PORT_PROPERTIES_NP, then every port's PORT_DATA_SET.
-constexpr std::array<uint16_t, 5> FETCHED_DATA_SETS{
+/// interface) PORT_PROPERTIES_NP, then every port's PORT_DATA_SET and (with one) PORT_DATA_SET_NP.
+constexpr std::array<uint16_t, 6> FETCHED_DATA_SETS{
     management_id::parent_data_set,
     management_id::current_data_set,
     management_id::time_properties_data_set,
     management_id::port_properties_np,
-    management_id::port_data_set};
+    management_id::port_data_set,
+    management_id::port_data_set_np};
 
 /// The smallest data field a RESPONSE for each data set parsed here carries.
 struct DataSetSize
@@ -50,12 +51,13 @@ struct DataSetSize
     uint16_t id;
     size_t size;
 };
-constexpr std::array<DataSetSize, 8> DATA_SET_SIZES{{
+constexpr std::array<DataSetSize, 9> DATA_SET_SIZES{{
     {.id = management_id::parent_data_set, .size = ParentDataSet::SIZE},
     {.id = management_id::current_data_set, .size = CurrentDataSet::SIZE},
     {.id = management_id::time_properties_data_set, .size = TimePropertiesDataSet::SIZE},
     {.id = management_id::port_data_set, .size = PortDataSet::SIZE},
     {.id = management_id::port_properties_np, .size = PortPropertiesNp::SIZE},
+    {.id = management_id::port_data_set_np, .size = PortDataSetNp::SIZE},
     {.id = management_id::time_status_np, .size = TimeStatusNp::SIZE},
     {.id = management_id::grandmaster_settings_np, .size = GrandmasterSettingsNp::SIZE},
     {.id = management_id::subscribe_events_np, .size = SubscribeEventsNp::SIZE},
@@ -237,6 +239,13 @@ void copy_interface_name(PortPropertiesNp& properties, std::span<uint8_t const> 
     return properties;
 }
 
+[[nodiscard]] auto decode_port_data_set_np(std::span<uint8_t const> const data) noexcept -> PortDataSetNp
+{
+    auto const p = load<PortDataSetNpPayload>(data);
+    return PortDataSetNp{
+        .neighbor_prop_delay_thresh_ns = p.neighbor_prop_delay_thresh.get(), .as_capable = p.as_capable.get() != 0};
+}
+
 [[nodiscard]] auto decode_time_status(std::span<uint8_t const> const data) noexcept -> TimeStatusNp
 {
     auto const p = load<TimeStatusNpPayload>(data);
@@ -295,6 +304,9 @@ void copy_interface_name(PortPropertiesNp& properties, std::span<uint8_t const> 
             message.data = *properties;
             break;
         }
+        case management_id::port_data_set_np:
+            message.data = decode_port_data_set_np(data);
+            break;
         case management_id::time_status_np:
             message.data = decode_time_status(data);
             break;
@@ -483,6 +495,8 @@ void PtpManagementClient::apply(ManagementMessage const& message, int64_t const 
         }
     } else if (auto const* port_data = std::get_if<PortDataSet>(&message.data)) {
         apply_port_data_set(*port_data);
+    } else if (auto const* port_np = std::get_if<PortDataSetNp>(&message.data)) {
+        state_.as_capable = state_.port == message.source ? std::optional{port_np->as_capable} : state_.as_capable;
     } else if (auto const* time_status = std::get_if<TimeStatusNp>(&message.data)) {
         state_.time_status = *time_status;
     } else if (auto const* settings = std::get_if<GrandmasterSettingsNp>(&message.data)) {
@@ -556,9 +570,10 @@ void PtpManagementClient::publish_if_changed()
 {  // NOLINT(statusbar-block-statements): one reported field per statement
     if (state_.status == reported_status_ && state_.grandmaster == reported_grandmaster_ && state_.error == reported_error_ &&
         state_.peer_mean_path_delay_ns == reported_peer_delay_ns_ && state_.port_state == reported_port_state_ &&
-        state_.port_states == reported_port_states_ && state_.delay_mechanism == reported_delay_mechanism_ &&
-        state_.grandmaster_settings == reported_settings_ && state_.refused == reported_refused_ &&
-        state_.subscribed == reported_subscribed_ && state_.time_properties == reported_time_properties_) {
+        state_.as_capable == reported_as_capable_ && state_.port_states == reported_port_states_ &&
+        state_.delay_mechanism == reported_delay_mechanism_ && state_.grandmaster_settings == reported_settings_ &&
+        state_.refused == reported_refused_ && state_.subscribed == reported_subscribed_ &&
+        state_.time_properties == reported_time_properties_) {
         return;
     }
     reported_settings_ = state_.grandmaster_settings;
@@ -572,6 +587,7 @@ void PtpManagementClient::publish_if_changed()
     reported_port_state_ = state_.port_state;
     reported_port_states_ = state_.port_states;
     reported_delay_mechanism_ = state_.delay_mechanism;
+    reported_as_capable_ = state_.as_capable;
     if (listener_) {
         listener_(state_);
     }
@@ -634,7 +650,7 @@ void PtpManagementClient::fetch_all(int64_t const now_ns)
     // PORT_PROPERTIES_NP before PORT_DATA_SET: ptp4l answers in order, so the port is known first.
     // Every port's PORT_DATA_SET either way: clock_synchronized() reads their states.
     send_gets(std::span{FETCHED_DATA_SETS}.first(config_.port_interface.empty() ? 3 : 4));
-    send_gets(std::span{FETCHED_DATA_SETS}.last(1));
+    send_gets(std::span{FETCHED_DATA_SETS}.subspan(4, config_.port_interface.empty() ? 1 : 2));
     send_settings();
     send_subscription(now_ns);
     next_poll_ns_ = now_ns + config_.poll_period_ns;
@@ -646,16 +662,17 @@ void PtpManagementClient::poll_if_due(int64_t const now_ns)
         return;
     }
     next_poll_ns_ = now_ns + config_.poll_period_ns;
-    // The followed port's PORT_DATA_SET once PORT_PROPERTIES_NP named it; without notifications
-    // (no subscription), every port's and PARENT_DATA_SET too.
+    // The followed port's PORT_DATA_SET and PORT_DATA_SET_NP once PORT_PROPERTIES_NP named it;
+    // without notifications (no subscription), every port's and PARENT_DATA_SET too.
     bool const follows = !config_.port_interface.empty();
-    std::array<uint16_t, 4> const ids{
+    std::array<uint16_t, 5> const ids{
         management_id::time_properties_data_set,
         management_id::port_properties_np,
         management_id::port_data_set,
+        management_id::port_data_set_np,
         management_id::parent_data_set};
-    std::array<bool, 4> const wanted{
-        true, follows && !state_.port, (follows && state_.port) || !state_.subscribed, !state_.subscribed};
+    std::array<bool, 5> const wanted{
+        true, follows && !state_.port, (follows && state_.port) || !state_.subscribed, follows && state_.port, !state_.subscribed};
     for (size_t i = 0; i < ids.size(); ++i) {
         if (wanted.at(i)) {
             send_gets(std::span{ids}.subspan(i, 1));
