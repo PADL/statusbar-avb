@@ -623,9 +623,12 @@ auto AemCommandHandler::set_name(
     // symbol). The response echoes the command (header + 64-byte name).
     AemEntityModel aem_model{*handler_};
     auto const status = aem_model.apply_set_name(command_data);
+    if (status != AEM_STATUS_SUCCESS) {
+        return reject_set(status, AEM_COMMAND_SET_NAME, command_data, out_buffer);
+    }
 
     size_t size = 0;
-    if (status == AEM_STATUS_SUCCESS && out_buffer.size() >= command_data.size()) {
+    if (out_buffer.size() >= command_data.size()) {
         std::copy(command_data.begin(), command_data.end(), out_buffer.begin());
         size = command_data.size();
         // The name in force, which an empty one (cleared to the configured or
@@ -635,8 +638,7 @@ auto AemCommandHandler::set_name(
         // controller, like handle_set_descriptor_value does for values.
         emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size}, requester);
     }
-    return status == AEM_STATUS_SUCCESS ? AemCommandResponse{.status = status, .size = size}
-                                        : reject_set(status, AEM_COMMAND_SET_NAME, command_data, out_buffer);
+    return {.status = status, .size = size};
 }
 
 auto AemCommandHandler::handle_set_descriptor_value(
@@ -652,13 +654,14 @@ auto AemCommandHandler::handle_set_descriptor_value(
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size}, current_header_.controller_entity_id);
     }
-    if (r.status == AEM_STATUS_IN_PROGRESS) {
-        // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT):
-        // answer IN_PROGRESS now, keep repeating it from tick(), and finish when
-        // the application calls complete_pending_command().
-        return defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
+    // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT): answer IN_PROGRESS
+    // now, keep repeating it from tick(), and finish when the application calls complete_pending_command().
+    auto const answer =
+        r.status == AEM_STATUS_IN_PROGRESS ? defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size}) : r;
+    if (answer.status == AEM_STATUS_SUCCESS || answer.status == AEM_STATUS_IN_PROGRESS) {
+        return answer;
     }
-    return r.status == AEM_STATUS_SUCCESS ? r : reject_set(r.status, command_type, command_data, out_buffer);
+    return reject_set(answer.status, command_type, command_data, out_buffer);
 }
 
 auto AemCommandHandler::apply_descriptor_value(
@@ -674,7 +677,7 @@ auto AemCommandHandler::apply_descriptor_value(
 
 auto AemCommandHandler::value_in_force(uint16_t const set_command, std::span<uint8_t const> const command_data) -> bool
 {
-    // The value in force answers in the command's own layout (IEEE 1722.1-2021 Clauses 7.4.9-7.4.24).
+    // The value in force, in the command's own layout (current_value()).
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> current{};
     auto const r = current_value(set_command, command_data, current);
     return r.status == AEM_STATUS_SUCCESS && r.size <= command_data.size() &&
@@ -722,7 +725,11 @@ auto AemCommandHandler::complete_pending_command(
     PendingCommand const done = pending_commands_[idx];
     pending_commands_.remove(idx);
 
-    auto const body = response_body.empty() ? std::span<uint8_t const>{done.body}.first(done.body_size) : response_body;
+    auto body = response_body.empty() ? std::span<uint8_t const>{done.body}.first(done.body_size) : response_body;
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
+    if (status != AEM_STATUS_SUCCESS && response_body.empty()) {
+        body = std::span<uint8_t const>{in_force}.first(reject_set(status, command_type, body, in_force).size);
+    }
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(command_type, body, done.header.controller_entity_id);
