@@ -948,7 +948,7 @@ class MsrpParticipantT
             !(rec.first_value == fv);
         if (registered && (!before.was_registered || before.value_changed || conflict)) {
             notify_register(fv);
-        } else if (!registered && before.was_registered) {
+        } else if (mrp::registrar_rx_ended(rec, was_registered)) {
             notify_leave(rec.first_value);
         }
     }
