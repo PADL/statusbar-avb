@@ -1723,23 +1723,31 @@ auto AvbEntityKit::open_talker_streams() -> Status
 
 void AvbEntityKit::open_stream_port()
 {
-    // An xdp backend that does not open falls back to rawnet when the host
-    // allows it, the reason kept (stream_xdp_error()).
+    // The auto backend is xdp, else rawnet, the reason kept (stream_xdp_error()).
     stream_tx_error_ = stream_rx_error_ = stream_xdp_error_ = stream_launch_time_error_ = std::error_code{};
     if (stream_port_.valid()) {
         log_stream_port();  // the host opened it before start() (a test port): kept
         return;
     }
-    auto opened = open_stream_port_on(config_.net_backend);
-    if (!opened && config_.net_backend == "xdp" && config_.net_xdp_fallback) {
-        stream_xdp_error_ = opened.error();
-        opened = open_stream_port_on("rawnet");
-    }
+    auto const opened = open_configured_stream_port();
     if (!opened) {
         stream_tx_error_ = opened.error();
         stream_rx_error_ = opened.error();
     }
     log_stream_port();
+}
+
+auto AvbEntityKit::open_configured_stream_port() -> Status
+{
+    if (config_.net_backend != "auto") {
+        return open_stream_port_on(config_.net_backend);
+    }
+    auto opened = open_stream_port_on("xdp");
+    if (!opened) {
+        stream_xdp_error_ = opened.error();
+        opened = open_stream_port_on("rawnet");
+    }
+    return opened;
 }
 
 auto AvbEntityKit::open_stream_port_on(std::string_view const backend) -> Status
