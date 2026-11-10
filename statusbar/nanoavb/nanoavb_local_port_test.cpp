@@ -12,6 +12,7 @@
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
+#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -69,7 +70,8 @@ auto temporary_socket_path() -> std::string
     return lock_files.paths.back();
 }
 
-auto make_model() -> EntityModel
+/// The test entity: Milan, or classic by its storage's profile symbol.
+auto make_model(bool const milan = true) -> EntityModel
 {
     EntityModelConfig cfg;
     cfg.max_configurations = 1;
@@ -89,6 +91,9 @@ auto make_model() -> EntityModel
     (void)model.add_stream_output(DescriptorStream{});
     (void)model.add_stream_input(DescriptorStream{});
     (void)model.add_stream_input(DescriptorStream{});
+    if (!milan) {
+        model.set_descriptor_storage(classic_profile_storage());
+    }
     return model;
 }
 
@@ -96,7 +101,7 @@ auto make_model() -> EntityModel
 struct Bench
 {
     explicit Bench(bool const milan = true, AtdeccLocalPort::Config config = {.path = temporary_socket_path()})
-        : components{make_model(), AdpAdvertiserConfig{}, 2, 4, 2, milan}
+        : components{make_model(milan), AdpAdvertiserConfig{}, 2, 4, 2}
         , handlers{"nanoavb-none0", components}
         , reactor{stop, [this] { return now_ns; }, 0}
         , path{config.path}
