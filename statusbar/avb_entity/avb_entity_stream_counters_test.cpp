@@ -334,7 +334,6 @@ TEST(stream_output_intervals, start_stop_and_intervals)
     using statusbar::avb_entity::StreamOutputIntervals;
     using statusbar::avb_entity::StreamOutputTotals;
     StreamOutputIntervals iv;
-    EXPECT_EQ(StreamOutputIntervals::VALID, 0x1FU);
     EXPECT_FALSE(iv.set_streaming(false, {}));
     EXPECT_TRUE(iv.set_streaming(true, {.pdus = 10}));
     EXPECT_EQ(iv.values[StreamOutputIntervals::STREAM_START], 1U);

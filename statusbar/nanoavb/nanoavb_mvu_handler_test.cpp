@@ -1,8 +1,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// Unit tests for the AECP Milan Vendor Unique handler (Milan v1.2 and v1.3 Sections
-// 5.4.3-5.4.4); a handler is Milan v1.2 unless a test says v1.3.
+// Unit tests for the AECP Milan Vendor Unique handler (Milan v1.3 Sections 5.4.3-5.4.4).
 
 #include "statusbar/nanoavb/nanoavb_mvu_handler.hpp"
 
@@ -58,11 +57,10 @@ auto get_milan_info_command(size_t const padding = 0) -> std::vector<uint8_t>
 }
 
 /// A handler whose responses land in @p sent
-auto make_handler(std::vector<std::vector<uint8_t>>& sent, bool const milan = true, MilanVersion const version = MilanVersion::v1_2)
-    -> MvuCommandHandler
+auto make_handler(std::vector<std::vector<uint8_t>>& sent, bool const milan = true) -> MvuCommandHandler
 {
     MvuCommandHandler handler{};
-    handler.set_profile(EntityProfile{.milan = milan, .milan_version = version});
+    handler.set_profile(EntityProfile{.milan = milan});
     handler.set_send_response([&sent](Eui48 const&, std::span<uint8_t const> const resp) {
         sent.emplace_back(resp.begin(), resp.end());
         return true;
@@ -95,8 +93,8 @@ void expect_mvu_response(std::vector<uint8_t> const& reply, uint16_t const comma
 
 }  // namespace
 
-// GET_MILAN_INFO (Milan v1.2 Section 5.4.4.1, Figure 5.4), padded to the Ethernet minimum;
-// control_data_length counts no padding.
+// GET_MILAN_INFO (Milan v1.3 Section 5.4.4.1, Figure 5.6) to a command padded to the Ethernet
+// minimum; control_data_length counts no padding.
 TEST(nanoavb_mvu, get_milan_info_reply_bytes)
 {
     std::vector<std::vector<uint8_t>> sent;
@@ -106,10 +104,9 @@ TEST(nanoavb_mvu, get_milan_info_reply_bytes)
     EXPECT_EQ(sent.size(), size_t{1});
     auto const& reply = sent[0];
     expect_mvu_response(reply, MVU_COMMAND_GET_MILAN_INFO, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(reply_header(reply).common.control_data_length(), uint16_t{32});
-    EXPECT_EQ(reply.size(), MVU_MIN_PDU_LENGTH);
-    EXPECT_EQ(MVU_MIN_PDU_LENGTH, size_t{46});  // 64-octet frame less header and FCS
-    std::array<uint8_t, 14> const expected{
+    EXPECT_EQ(reply_header(reply).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 18});
+    EXPECT_EQ(reply.size(), MvuDu::LENGTH + 18);
+    std::array<uint8_t, 18> const expected{
         0x00,
         0x00,  // reserved
         0x00,
@@ -119,21 +116,17 @@ TEST(nanoavb_mvu, get_milan_info_reply_bytes)
         0x00,
         0x00,
         0x00,
-        0x00,  // features_flags
+        0x00,  // features_flags: no sinks to bind
         0x00,
         0x00,
         0x00,
         0x00,  // certification_version
+        0x01,
+        0x03,
+        0x00,
+        0x00,  // specification_version
     };
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), reply.begin() + MvuDu::LENGTH));
-    // The padding is zero
-    EXPECT_TRUE(std::all_of(reply.begin() + MvuDu::LENGTH + 14, reply.end(), [](uint8_t const b) { return b == 0; }));
-
-    MvuGetMilanInfoResponse info{};
-    span_load(info, std::span<uint8_t const>{reply}.subspan(MvuDu::LENGTH, MvuGetMilanInfoResponse::LENGTH));
-    EXPECT_EQ(info.protocol_version.get(), MVU_PROTOCOL_VERSION);
-    EXPECT_EQ(info.features_flags.get() & MVU_FEATURES_REDUNDANCY, uint32_t{0});
-    EXPECT_EQ(info.features_flags.get() & MVU_FEATURES_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING, uint32_t{0});
 }
 
 TEST(nanoavb_mvu, get_milan_info_certification_version)
@@ -193,10 +186,10 @@ auto get_system_unique_id_command() -> std::vector<uint8_t>
     return mvu_command(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, reserved);
 }
 
-auto set_system_unique_id_command(uint32_t const id) -> std::vector<uint8_t>
+auto set_system_unique_id_command(uint64_t const id) -> std::vector<uint8_t>
 {
-    MvuSystemUniqueIdPayload payload{};
-    payload.system_unique_id = id;
+    MvuSystemUniqueIdPayloadV13 payload{};
+    payload.number = id;
     return mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(payload));
 }
 
@@ -259,74 +252,6 @@ struct AemSide
 };
 
 }  // namespace
-
-// Sections 5.4.4.2-3: the system unique id is 0 until a SET; a SET of 0 is
-// refused; a change is reported once for saving
-TEST(nanoavb_mvu, system_unique_id_set_get)
-{
-    std::vector<std::vector<uint8_t>> sent;
-    auto handler = make_handler(sent);
-    int changes = 0;
-    handler.set_on_settings_changed([&changes] { ++changes; });
-
-    EXPECT_TRUE(handler.process_packet(SRC, get_system_unique_id_command(), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(reply_header(sent.back()).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 6});
-    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0});
-
-    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(0x12345678), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0x12345678});
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{0x12345678});
-    EXPECT_EQ(changes, 1);
-
-    EXPECT_TRUE(handler.process_packet(SRC, get_system_unique_id_command(), US, {}));
-    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0x12345678});
-
-    // The same id again changes nothing
-    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(0x12345678), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(changes, 1);
-
-    // 0 is the default, never a new id
-    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(0), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
-    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0x12345678});
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{0x12345678});
-
-    // A SET without the id
-    std::array<uint8_t, 2> const reserved{};
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, reserved), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_PAYLOAD_TOO_SHORT);
-    EXPECT_EQ(changes, 1);
-}
-
-// la_avdecc always sends the v1.3 form (u64 number + 64-octet name): its number
-// is accepted when it fits the v1.2 u32, and the answer is the v1.2 layout
-TEST(nanoavb_mvu, system_unique_id_v13_command)
-{
-    std::vector<std::vector<uint8_t>> sent;
-    auto handler = make_handler(sent);
-    MvuSystemUniqueIdPayloadV13 v13{};
-    v13.number = uint64_t{0xABCDEF01};
-    v13.name = mcr_domain_name("System A");
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(reply_header(sent.back()).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 6});
-    EXPECT_EQ(reply_payload<MvuSystemUniqueIdPayload>(sent.back()).system_unique_id.get(), uint32_t{0xABCDEF01});
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{0xABCDEF01});
-
-    // Shorter than the full v1.3 payload: the v1.2 id, whatever follows it
-    std::array<uint8_t, 10> const long_v12{0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xAA, 0xBB, 0xCC, 0xDD};
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, long_v12), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{7});
-
-    v13.number = uint64_t{0x100000000};
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US, {}));
-    expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_BAD_ARGUMENTS);
-    EXPECT_EQ(handler.system_unique_id(), uint32_t{7});
-}
 
 // Milan v1.2 Sections 5.4.4.4-5, 7.6: default priority 192, user priority following it, name
 // "DEFAULT"; a SET changes only the flagged fields, the response carries every supported flag
@@ -476,7 +401,7 @@ TEST(nanoavb_mvu, sets_refused_while_locked)
 
 // A SET that changes something is sent, u bit set, to every controller
 // registered for unsolicited notifications but the one that asked (Milan
-// v1.2 Section 5.4.5.1), with its own controller id
+// v1.3 Section 5.4.5.1), with its own controller id
 TEST(nanoavb_mvu, set_notifies_registered_controllers)
 {
     AemSide side;
@@ -487,7 +412,6 @@ TEST(nanoavb_mvu, set_notifies_registered_controllers)
     };
     std::vector<Sent> sent;
     MvuCommandHandler handler{};
-    handler.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});
     handler.set_aem_handler(&side.aem);
     handler.set_send_response([&sent](Eui48 const& mac, std::span<uint8_t const> const resp) {
         sent.push_back({mac, {resp.begin(), resp.end()}});
@@ -520,20 +444,19 @@ TEST(nanoavb_mvu, set_notifies_registered_controllers)
     EXPECT_TRUE(reply_header(sent[4].bytes).unsolicited());
     EXPECT_EQ(
         reply_header(sent[4].bytes).common.sequence_id.get(), uint16_t(reply_header(sent[1].bytes).common.sequence_id.get() + 1));
-    EXPECT_EQ(sent[4].bytes.size(), MVU_MIN_PDU_LENGTH);
+    EXPECT_EQ(sent[4].bytes.size(), MvuDu::LENGTH + MvuSystemUniqueIdPayloadV13::LENGTH);
 }
 
-// A reserved command type (v1.2 Table 5.18: 0x0005-0x7FFF, which v1.3 uses
-// for BIND_STREAM and others) is NOT_IMPLEMENTED
+// A command type Milan v1.3 Table 5.15 does not define is NOT_IMPLEMENTED
 TEST(nanoavb_mvu, unknown_command_type_not_implemented)
 {
     std::vector<std::vector<uint8_t>> sent;
     auto handler = make_handler(sent);
-    std::array<uint8_t, 20> const bind{};
-    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(0x0005, bind), US, {}));
+    std::array<uint8_t, 20> const data{};
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(0x0100, data), US, {}));
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(0x7FFF, {}), US, {}));
     EXPECT_EQ(sent.size(), size_t{2});
-    expect_mvu_response(sent[0], 0x0005, MVU_STATUS_NOT_IMPLEMENTED);
+    expect_mvu_response(sent[0], 0x0100, MVU_STATUS_NOT_IMPLEMENTED);
     expect_mvu_response(sent[1], 0x7FFF, MVU_STATUS_NOT_IMPLEMENTED);
     EXPECT_EQ(reply_header(sent[1]).common.control_data_length(), MvuDu::BASE_CONTROL_DATA_LENGTH);
     EXPECT_EQ(sent[1].size(), MVU_MIN_PDU_LENGTH);
@@ -552,7 +475,7 @@ TEST(nanoavb_mvu, short_payload)
     EXPECT_TRUE(handler.process_packet(SRC, no_reserved, US, {}));
     EXPECT_EQ(sent.size(), size_t{1});
     expect_mvu_response(sent[0], MVU_COMMAND_GET_MILAN_INFO, MVU_STATUS_SUCCESS);
-    EXPECT_EQ(reply_header(sent[0]).common.control_data_length(), uint16_t{32});
+    EXPECT_EQ(reply_header(sent[0]).common.control_data_length(), uint16_t{MvuDu::BASE_CONTROL_DATA_LENGTH + 18});
     EXPECT_EQ(sent[0][35], uint8_t{0x01});  // protocol_version
 
     // Declares the reserved field but the frame stops before it: malformed
@@ -658,9 +581,9 @@ auto stream_input_command(uint16_t const command_type, uint16_t const index, uin
     return mvu_command(command_type, make_const_span(payload));
 }
 
-/// A Milan v1.3 MVU handler beside an AEM handler and a two-sink Milan listener, wired as
+/// An MVU handler beside an AEM handler and a two-sink Milan listener, wired as
 /// NanoAvbComponents wires them; MVU responses land in sent, ACMP messages in acmp.
-struct V13Side
+struct MilanSide
 {
     struct Sent
     {
@@ -675,9 +598,8 @@ struct V13Side
     /// Every message, in the order sent: 'm' an MVU one, 'a' an ACMP one.
     std::string order;
 
-    V13Side()
+    MilanSide()
     {
-        mvu.set_profile(EntityProfile{.milan_version = MilanVersion::v1_3});
         mvu.set_aem_handler(&side.aem);
         mvu.set_milan_listener(&listener);
         mvu.set_send_response([this](Eui48 const& mac, std::span<uint8_t const> const resp) {
@@ -698,11 +620,11 @@ struct V13Side
 
 }  // namespace
 
-// GET_MILAN_INFO in v1.3 (Figure 5.6): specification_version 1.3.0.0 after the v1.2 fields,
+// GET_MILAN_INFO (Figure 5.6): specification_version 1.3.0.0 after the other fields,
 // MVU_BINDING with sinks to bind, and the features the entity adds
 TEST(nanoavb_mvu, get_milan_info_v1_3)
 {
-    V13Side v;
+    MilanSide v;
     v.mvu.set_extra_features(MVU_FEATURES_TALKER_SIGNAL_PRESENCE);
     EXPECT_TRUE(v.mvu.process_packet(SRC, get_milan_info_command(), US, {}));
     expect_mvu_response(v.sent.back().bytes, MVU_COMMAND_GET_MILAN_INFO, MVU_STATUS_SUCCESS);
@@ -712,19 +634,17 @@ TEST(nanoavb_mvu, get_milan_info_v1_3)
     EXPECT_EQ(info.info.features_flags.get(), MVU_FEATURES_MVU_BINDING | MVU_FEATURES_TALKER_SIGNAL_PRESENCE);
     EXPECT_EQ(info.specification_version.get(), uint32_t{0x01030000});
 
-    // Without sinks, no MVU binding; v1.2 reports no features, as before
+    // Without sinks, no MVU binding
     v.mvu.set_milan_listener(nullptr);
     EXPECT_EQ(v.mvu.features_flags(), MVU_FEATURES_TALKER_SIGNAL_PRESENCE);
-    v.mvu.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});
-    EXPECT_EQ(v.mvu.features_flags(), uint32_t{0});
 }
 
-// Sections 5.4.4.2-3 in v1.3: a u64 number and a 64-octet name, both kept and answered; 0 is
-// the factory default and may be set; the v1.2 payload is too short
+// Sections 5.4.4.2-3: a u64 number and a 64-octet name, both kept and answered; 0 is the factory
+// default and may be set; Milan v1.2's 6-octet payload is too short
 TEST(nanoavb_mvu, system_unique_id_v1_3)
 {
     std::vector<std::vector<uint8_t>> sent;
-    auto handler = make_handler(sent, true, MilanVersion::v1_3);
+    auto handler = make_handler(sent);
     int changes = 0;
     handler.set_on_settings_changed([&changes] { ++changes; });
     EXPECT_TRUE(handler.process_packet(SRC, get_system_unique_id_command(), US, {}));
@@ -742,12 +662,16 @@ TEST(nanoavb_mvu, system_unique_id_v1_3)
     EXPECT_TRUE(handler.process_packet(SRC, get_system_unique_id_command(), US, {}));
     EXPECT_TRUE(reply_payload<MvuSystemUniqueIdPayloadV13>(sent.back()) == v13);
 
-    // Another name alone is a change
+    // The same id again changes nothing; another name alone is a change
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US, {}));
+    EXPECT_EQ(changes, 1);
     v13.name = mcr_domain_name("Monitor system");
     EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v13)), US, {}));
     EXPECT_EQ(changes, 2);
 
-    EXPECT_TRUE(handler.process_packet(SRC, set_system_unique_id_command(5), US, {}));
+    MvuSystemUniqueIdPayload v12{};
+    v12.system_unique_id = 5;
+    EXPECT_TRUE(handler.process_packet(SRC, mvu_command(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(v12)), US, {}));
     expect_mvu_response(sent.back(), MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, MVU_STATUS_PAYLOAD_TOO_SHORT);
     EXPECT_EQ(handler.system_unique_id(), uint64_t{0x0123456789ABCDEF});
 
@@ -771,22 +695,11 @@ TEST(nanoavb_mvu, system_unique_id_v1_3)
     EXPECT_EQ(changes, 4);
 }
 
-// Below v1.3 the features are v1.2's alone (Milan v1.2 Table 5.14): v1.3's bits an application
-// adds are masked, not served
-TEST(nanoavb_mvu, v1_2_serves_its_own_features_and_none_of_v1_3s)
-{
-    std::vector<std::vector<uint8_t>> sent;
-    auto handler = make_handler(sent);
-    handler.set_extra_features(MVU_FEATURES_REDUNDANCY | MVU_FEATURES_TALKER_SIGNAL_PRESENCE);
-    EXPECT_TRUE(handler.process_packet(SRC, get_milan_info_command(), US, {}));
-    EXPECT_EQ(reply_payload<MvuGetMilanInfoResponse>(sent.back()).features_flags.get(), MVU_FEATURES_REDUNDANCY);
-}
-
 // BIND_STREAM (Section 5.4.4.6) is RCV_BIND_RX_CMD: answered with the command's fields, before
 // the probe the sink then sends; GET_STREAM_INPUT_INFO_EX (Section 5.4.4.8) reports the binding
 TEST(nanoavb_mvu, bind_stream_binds_the_sink_and_probes)
 {
-    V13Side v;
+    MilanSide v;
     auto const bind = bind_stream_command(1, TALKER, 3, MVU_BIND_FLAGS_STREAMING_WAIT);
     EXPECT_TRUE(v.mvu.process_packet(SRC, bind, US, {}));
     EXPECT_EQ(v.order, std::string{"ma"});  // the response, then the probe
@@ -822,7 +735,7 @@ TEST(nanoavb_mvu, bind_stream_binds_the_sink_and_probes)
 // UNBIND_STREAM (Section 5.4.4.7) is RCV_UNBIND_RX_CMD: the sink is unbound, no ACMP goes
 TEST(nanoavb_mvu, unbind_stream_unbinds_the_sink)
 {
-    V13Side v;
+    MilanSide v;
     EXPECT_TRUE(v.mvu.process_packet(SRC, bind_stream_command(0, TALKER, 0), US, {}));
     v.sent.clear();
     v.acmp.clear();
@@ -838,7 +751,7 @@ TEST(nanoavb_mvu, unbind_stream_unbinds_the_sink)
 // from a controller other than the one locking the entity ENTITY_LOCKED
 TEST(nanoavb_mvu, binding_refusals)
 {
-    V13Side v;
+    MilanSide v;
     EXPECT_TRUE(v.mvu.process_packet(SRC, bind_stream_command(2, TALKER, 0), US, {}));
     expect_mvu_response(v.sent.back().bytes, MVU_COMMAND_BIND_STREAM, MVU_STATUS_NO_SUCH_DESCRIPTOR);
     EXPECT_TRUE(v.mvu.process_packet(SRC, bind_stream_command(0, TALKER, 0, 0, DESCRIPTOR_STREAM_OUTPUT), US, {}));
@@ -865,7 +778,7 @@ TEST(nanoavb_mvu, binding_refusals)
 // with its own MVU sequence_id
 TEST(nanoavb_mvu, binding_notifies_registered_controllers)
 {
-    V13Side v;
+    MilanSide v;
     EXPECT_TRUE(v.side.aem.process_packet(SRC, aem_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, CONTROLLER), US));
     EXPECT_TRUE(v.side.aem.process_packet(OTHER_MAC, aem_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, OTHER), US));
     EXPECT_TRUE(v.mvu.process_packet(SRC, bind_stream_command(0, TALKER, 1), US, {}));
@@ -902,26 +815,12 @@ TEST(nanoavb_mvu, binding_notifies_registered_controllers)
 // seeded entity id as its target_entity_id, not 0 (Milan v1.3 Section 5.4.5.2).
 TEST(nanoavb_mvu, a_notification_before_any_command_carries_the_seeded_entity_id)
 {
-    V13Side v;
+    MilanSide v;
     v.mvu.set_entity_id(US);
     EXPECT_TRUE(v.side.aem.process_packet(OTHER_MAC, aem_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, OTHER), US));
     v.mvu.notify_stream_input_info_ex(0);
     EXPECT_EQ(v.sent.size(), size_t{1});
     EXPECT_FALSE(v.sent.empty() || reply_header(v.sent.back().bytes).common.target_entity_id != US);
-}
-
-// Below v1.3 the binding commands are reserved: NOT_IMPLEMENTED, nothing bound
-TEST(nanoavb_mvu, binding_commands_are_v1_3_only)
-{
-    V13Side v;
-    v.mvu.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});
-    EXPECT_TRUE(v.mvu.process_packet(SRC, bind_stream_command(0, TALKER, 0), US, {}));
-    expect_mvu_response(v.sent.back().bytes, MVU_COMMAND_BIND_STREAM, MVU_STATUS_NOT_IMPLEMENTED);
-    EXPECT_TRUE(v.mvu.process_packet(SRC, stream_input_command(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, 0), US, {}));
-    expect_mvu_response(v.sent.back().bytes, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, MVU_STATUS_NOT_IMPLEMENTED);
-    EXPECT_FALSE(v.listener.sink(0)->bound());
-    v.mvu.notify_stream_input_info_ex(0);
-    EXPECT_EQ(v.sent.size(), size_t{2});
 }
 
 TEST_MAIN(statusbar_nanoavb, nanoavb_mvu_handler_test)

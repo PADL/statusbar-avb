@@ -60,22 +60,21 @@ auto listener_stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16
     return stream_specs(storage, config_idx, atdecc::aem::DESCRIPTOR_STREAM_INPUT);
 }
 
-auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion const version) noexcept -> uint16_t
+auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
 {
-    // Milan v1.3 Section 4.3.3.2, Table 4.4: MaxFrameSize is the AVTPDU header plus the payload
-    // (v1.2's adds one byte); MaxIntervalFrames 1.
-    uint16_t const spare = version == nanoavb::MilanVersion::v1_2 ? MILAN_TSPEC_SPARE_BYTES : 0;
+    // Milan v1.3 Section 4.3.3.2, Table 4.4: MaxFrameSize is the AVTPDU header plus the payload;
+    // MaxIntervalFrames 1.
     switch (format.kind) {
         case StreamKind::aaf: {
             // The AAF talker emits exactly its frames per PDU (the reframer
             // and the raw path send constant blocks), so no spare sample:
-            // AAF PCM32 48 kHz N ch is 24*N + 24 (v1.2: + 1).
+            // AAF PCM32 48 kHz N ch is 24*N + 24.
             auto const per_pdu = aaf_samples_per_pdu(format);
             if (per_pdu == 0) {
                 return 0;
             }
             return static_cast<uint16_t>(
-                avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(per_pdu)) + spare);
+                avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(per_pdu)));
         }
         case StreamKind::am824: {
             // Not a Milan format. The AM824 path sends each media-clock tick's
@@ -89,10 +88,9 @@ auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion 
                 avtp::am824_packet_size(static_cast<uint8_t>(format.channels), static_cast<uint8_t>(samples)));
         }
         case StreamKind::crf:
-            // Milan v1.3 Table 4.4: "CRF, 1 ts/pdu: 28" (v1.2's "28 + 1").
+            // Milan v1.3 Table 4.4: "CRF, 1 ts/pdu: 28".
             return static_cast<uint16_t>(
-                avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(format.crf_timestamps_per_pdu) * avtp::CrfPdu::TIMESTAMP_SIZE) +
-                spare);
+                avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(format.crf_timestamps_per_pdu) * avtp::CrfPdu::TIMESTAMP_SIZE));
         case StreamKind::other:
         default:
             return 0;
