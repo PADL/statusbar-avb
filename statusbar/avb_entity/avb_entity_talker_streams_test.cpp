@@ -20,10 +20,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory_resource>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace statusbar;
@@ -1111,6 +1113,97 @@ TEST(talker_streams, a_stream_tag_round_trips_through_its_packed_word)
         EXPECT_EQ(back.pcp, tag.pcp);
     }
     EXPECT_EQ((avb_entity::StreamTag{.vlan_id = 0x123, .pcp = 2}.packed()), uint32_t{0x0002'0123});
+}
+
+namespace {
+
+/// One AVTPDU sent, and the class A wake (0, 1, ...) that sent it.
+struct WakePdu
+{
+    int wake{0};
+    std::vector<uint8_t> avtpdu;
+};
+
+/// What a talker whose media clock runs at @p rate sends for stream format @p format over @p wakes
+/// wakes 125 us apart, its gate open.
+auto pdus_over_wakes(uint32_t const rate, uint64_t const format, int const wakes) -> std::vector<WakePdu>
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator media_clock{{.sample_rate_hz = static_cast<double>(rate)}};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = rate, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, format), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    std::vector<float> const src(64U * 8U, 0.0F);
+    std::vector<WakePdu> sent;
+    for (int wake = 0; wake < wakes; ++wake) {
+        auto const at = 1'000'000'000ULL + (static_cast<uint64_t>(wake) * 125'000ULL);
+        auto const tick = media_clock.advance(at, 1.0, rate / avb_entity::CLASS_A_PACKETS_PER_SEC);
+        talker.transmit_if_due(*talker.slot_for(0), tick, true, tick.samples, src);
+        while (auto const frame = wire.pop_tx()) {
+            sent.push_back({.wake = wake, .avtpdu = {frame->frame.begin() + VLAN_HEADER_LENGTH, frame->frame.end()}});
+        }
+    }
+    return sent;
+}
+
+}  // namespace
+
+// The Milan CRF sends one PDU per 96 samples of the media clock, a rate the class A wakes need not
+// divide: under 44.1 kHz audio as under 48 kHz, its timestamps run 96 samples apart, none repeated
+// or skipped (Milan v1.3 Sections 7.3.1-2)
+TEST(talker_crf, pdus_follow_the_media_clock_at_44_1_and_48_khz)
+{
+    for (auto const& [rate, format] : {std::pair{44'100U, 0x041060010000AC44ULL}, std::pair{48'000U, 0x041060010000BB80ULL}}) {
+        auto const sent = pdus_over_wakes(rate, format, 8000);  // one second
+        EXPECT_TRUE(sent.size() >= rate / 96U && sent.size() <= (rate / 96U) + 1U);
+        double const step_ns = 96.0e9 / rate;
+        uint64_t last = 0;
+        for (auto const& pdu : sent) {
+            auto const ts = avtp::crf_get_timestamp(avtp::crf_get_timestamp_data(pdu.avtpdu), 0);
+            EXPECT_TRUE(ts.has_value());
+            EXPECT_TRUE(last == 0 || std::abs(static_cast<double>(*ts - last) - step_ns) <= 1.0);
+            last = ts.value_or(0);
+        }
+    }
+}
+
+// A media clock reset while the CRF gate stays open (its sample index back to zero) does not stall
+// the stream: the PDUs go on at their rate from the new position
+TEST(talker_crf, a_media_clock_reset_does_not_stall_the_pdus)
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator media_clock{{.sample_rate_hz = 48'000.0}};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x041060010000BB80ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    std::vector<float> const src(64U, 0.0F);
+    auto const run = [&](uint64_t const from_wake, int const wakes) {
+        size_t sent = 0;
+        for (int wake = 0; wake < wakes; ++wake) {
+            auto const at = 1'000'000'000ULL + ((from_wake + static_cast<uint64_t>(wake)) * 125'000ULL);
+            auto const tick = media_clock.advance(at, 1.0, 6);
+            talker.transmit_if_due(*talker.slot_for(0), tick, true, tick.samples, src);
+            while (wire.pop_tx()) {
+                ++sent;
+            }
+        }
+        return sent;
+    };
+    EXPECT_EQ(run(0, 1600), size_t{100});  // one PDU per 96 samples, 16 wakes
+    media_clock.reset();
+    EXPECT_TRUE(run(1600, 160) >= size_t{9});
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)
