@@ -176,6 +176,15 @@ class NanoAvbAdpAdvertiser
     /// change (IEEE 1722.1-2021 Clause 6.2.7).
     auto set_gptp_info(ClockIdentity const& grandmaster_id, uint8_t domain_number, TimePoint now) -> void;
 
+    /// Set the AVB_INTERFACE index the ADPDU carries, always with AEM_INTERFACE_INDEX_VALID
+    /// (IEEE 1722.1-2021 Clause 6.2.1.10, Milan v1.2 Section 5.6.2); default 0, kept across
+    /// update_adpdu_from_model().
+    void set_interface_index(uint16_t index)
+    {
+        interface_index_ = index;
+        adpdu_.interface_index = index;
+    }
+
     /// Set the identify control index and advertise it as valid.
     /// Sets the ADPDU identify_control_index and the AEM_IDENTIFY_CONTROL_INDEX_VALID
     /// entity-capability bit (IEEE 1722.1 6.2.1.10) so controllers know which CONTROL
@@ -257,6 +266,7 @@ class NanoAvbAdpAdvertiser
     AdpAdvertiserConfig config_;
     uint16_t identify_control_index_ = 0;
     bool identify_control_index_valid_ = false;
+    uint16_t interface_index_ = 0;
 
     adp_adv_sm::Machine machine_{};
     adp_adv_sm::Context ctx_{};
