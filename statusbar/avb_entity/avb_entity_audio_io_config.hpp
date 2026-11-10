@@ -54,9 +54,7 @@ struct AvbEntityAudioIOConfig
     net::XdpAttachMode net_xdp_attach_mode{net::XdpAttachMode::native};
     /// Where the xdp backend pins its program and maps (bpffs); empty: not pinned.
     std::string net_xdp_pin_path{};
-    /// Open rawnet when the xdp backend does not open, the reason kept
-    /// (AvbEntityKit::stream_xdp_error()); false: no stream port then.
-    bool net_xdp_fallback{false};
+    // net_backend "auto" is xdp, else rawnet, the reason kept (AvbEntityKit::stream_xdp_error()).
     /// Give each stream frame a launch time (AF_XDP TX metadata, the NIC's
     /// etf/TBS), in the sending PHC's time; xdp backend only.
     bool stream_launch_time{false};
