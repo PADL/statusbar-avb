@@ -89,7 +89,11 @@ class MaapHandler
     /// Release the current allocation and return to idle (stops defending/announcing).
     void release(int64_t now_ns);
 
-    /// Drive the probe/announce timers. Call frequently (e.g. every reactor tick).
+    /// The longest gap between tick() calls the timer draws leave room for, so a send stays inside
+    /// IEEE 1722-2016 Annex B.3.4's interval when a tick is late (ns).
+    static constexpr int64_t MAX_TICK_PERIOD_NS = 10'000'000;
+
+    /// Drive the probe/announce timers. Call at least every MAX_TICK_PERIOD_NS (e.g. every reactor tick).
     void tick(int64_t now_ns);
 
     /// Feed a received Ethernet MAAP frame from @p src_mac (AVTP payload, i.e.

@@ -99,15 +99,27 @@ auto make_frame(uint8_t message_type, Eui48 const& start, uint16_t count) -> std
     return v >= MAAP_DYNAMIC_POOL_START.to_uint64() && (v + count - 1) <= MAAP_DYNAMIC_POOL_END.to_uint64();
 }
 
-/// Whether the timer armed at @p armed_ns sends its one frame strictly between
-/// armed_ns + base_us and armed_ns + base_us + var_us (IEEE 1722-2016 Annex B.3.4).
-[[nodiscard]] auto next_send_within(Rig& rig, int64_t armed_ns, uint64_t base_us, uint64_t var_us) -> bool
+/// Tick every MAX_TICK_PERIOD_NS from @p armed_ns, as MaapNetHandler does, until the timer armed then sends one
+/// frame; the send time, or 0 when nothing (or more than one frame) is sent within @p limit_us.
+[[nodiscard]] auto send_time(Rig& rig, int64_t armed_ns, uint64_t limit_us) -> int64_t
 {
     auto const before = rig.sent.size();
-    rig.handler.tick(armed_ns + static_cast<int64_t>(base_us * 1000));
-    bool const early = rig.sent.size() != before;
-    rig.handler.tick(armed_ns + static_cast<int64_t>((base_us + var_us) * 1000) - 1);
-    return !early && rig.sent.size() == before + 1;
+    int64_t const limit = armed_ns + static_cast<int64_t>(limit_us * 1000);
+    for (int64_t t = armed_ns + MaapHandler::MAX_TICK_PERIOD_NS; t <= limit; t += MaapHandler::MAX_TICK_PERIOD_NS) {
+        rig.handler.tick(t);
+        if (rig.sent.size() != before) {
+            return rig.sent.size() == before + 1 ? t : 0;
+        }
+    }
+    return 0;
+}
+
+/// Whether @p sent_ns lies strictly between armed_ns + base_us and armed_ns + base_us + var_us
+/// (IEEE 1722-2016 Annex B.3.4).
+[[nodiscard]] auto within(int64_t armed_ns, int64_t sent_ns, uint64_t base_us, uint64_t var_us) -> bool
+{
+    int64_t const gap = sent_ns - armed_ns;
+    return gap > static_cast<int64_t>(base_us * 1000) && gap < static_cast<int64_t>((base_us + var_us) * 1000);
 }
 
 }  // namespace
@@ -289,14 +301,17 @@ TEST(maap_handler, block_address_helper_offsets_within_block)
 
 TEST(maap_handler, probe_intervals_lie_between_base_and_base_plus_variation)
 {
+    constexpr uint64_t base = MAAP_PROBE_INTERVAL_BASE_US;
+    constexpr uint64_t var = MAAP_PROBE_INTERVAL_VARIATION_US;
     for (uint64_t seed = 1; seed <= 64; ++seed) {
         Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}, seed};
         int64_t armed = SEC;
         rig.handler.acquire(1, armed);
         // Each probe_timer expiry sends one frame: the PROBE retransmissions, then the ANNOUNCE.
         for (uint32_t k = 0; k <= MAAP_PROBE_RETRANSMITS; ++k) {
-            EXPECT_TRUE(next_send_within(rig, armed, MAAP_PROBE_INTERVAL_BASE_US, MAAP_PROBE_INTERVAL_VARIATION_US));
-            armed += static_cast<int64_t>((MAAP_PROBE_INTERVAL_BASE_US + MAAP_PROBE_INTERVAL_VARIATION_US) * 1000) - 1;
+            int64_t const sent = send_time(rig, armed, 2 * (base + var));
+            EXPECT_TRUE(within(armed, sent, base, var));
+            armed = sent;
         }
         EXPECT_TRUE(rig.handler.is_acquired());
     }
@@ -304,19 +319,22 @@ TEST(maap_handler, probe_intervals_lie_between_base_and_base_plus_variation)
 
 TEST(maap_handler, announce_intervals_lie_between_base_and_base_plus_variation)
 {
+    constexpr uint64_t probe_limit = 2 * (MAAP_PROBE_INTERVAL_BASE_US + MAAP_PROBE_INTERVAL_VARIATION_US);
+    constexpr uint64_t base = MAAP_ANNOUNCE_INTERVAL_BASE_US;
+    constexpr uint64_t var = MAAP_ANNOUNCE_INTERVAL_VARIATION_US;
     for (uint64_t seed = 1; seed <= 64; ++seed) {
         Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}, seed};
         int64_t armed = SEC;
         rig.handler.acquire(1, armed);
         for (uint32_t k = 0; k <= MAAP_PROBE_RETRANSMITS; ++k) {
-            (void)next_send_within(rig, armed, MAAP_PROBE_INTERVAL_BASE_US, MAAP_PROBE_INTERVAL_VARIATION_US);
-            armed += static_cast<int64_t>((MAAP_PROBE_INTERVAL_BASE_US + MAAP_PROBE_INTERVAL_VARIATION_US) * 1000) - 1;
+            armed = send_time(rig, armed, probe_limit);
         }
         EXPECT_TRUE(rig.handler.is_acquired());
         for (int k = 0; k < 4; ++k) {
-            EXPECT_TRUE(next_send_within(rig, armed, MAAP_ANNOUNCE_INTERVAL_BASE_US, MAAP_ANNOUNCE_INTERVAL_VARIATION_US));
+            int64_t const sent = send_time(rig, armed, 2 * (base + var));
+            EXPECT_TRUE(within(armed, sent, base, var));
             EXPECT_TRUE(rig.sent.back().is_announce());
-            armed += static_cast<int64_t>((MAAP_ANNOUNCE_INTERVAL_BASE_US + MAAP_ANNOUNCE_INTERVAL_VARIATION_US) * 1000) - 1;
+            armed = sent;
         }
     }
 }
