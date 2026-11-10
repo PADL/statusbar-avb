@@ -428,7 +428,8 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
 - A settled Milan input joins its stream's VID with MVRP (Milan v1.2 Section
   4.4.1). The Milan sink settles once per probe and is still intact when it
   unsettles, so the join count stays balanced. The Milan MSRP Listener
-  declaration is made only once the talker's attribute is registered.
+  declaration is made only once the talker's attribute is registered on the
+  destination and VLAN the probe answer named; one on another VLAN is ignored.
 - Every backend counts multicast memberships per socket
   (PACKET_ADD_MEMBERSHIP) and drops them when the port closes, so each join
   has one leave: a pre-joined group is left when its input's kind changes, a

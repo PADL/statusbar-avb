@@ -1450,19 +1450,16 @@ void AvbEntityKit::refresh_sink_registration(uint16_t const index, TimePoint con
 auto AvbEntityKit::talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration
 {
     // Milan v1.2 Section 5.5.3.3: a Talker attribute matching the stream ID,
-    // destination address and VLAN ID the probe returned.
+    // destination address and VLAN ID the probe returned, as the Listener declaration follows.
     statusbar::tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
-    auto const matches = [&sink](srp::msrp::TalkerAdvertiseFirstValue const& fv) {
-        return fv.destination_address == sink.stream.dest_mac && fv.vlan_identifier.get() == sink.stream.vlan_id;
-    };
-    if (auto const* failed = host_.components().msrp_handler.peer_talker_failed(sid);
-        failed != nullptr && matches(failed->advertise)) {
+    auto const& msrp = host_.components().msrp_handler;
+    nanoavb::TalkerMatch const match{.destination = sink.stream.dest_mac, .vid = sink.stream.vlan_id};
+    if (msrp.talker_failed_registered(sid, match)) {
         return atdecc::MilanTalkerRegistration::failed;
     }
-    auto const* advertise = host_.components().msrp_handler.peer_talker_advertise(sid);
-    return advertise != nullptr && matches(*advertise) ? atdecc::MilanTalkerRegistration::advertise
-                                                       : atdecc::MilanTalkerRegistration::none;
+    return msrp.talker_advertise_registered(sid, match) ? atdecc::MilanTalkerRegistration::advertise
+                                                        : atdecc::MilanTalkerRegistration::none;
 }
 
 void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
