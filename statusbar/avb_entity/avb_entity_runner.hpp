@@ -163,8 +163,9 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
     specs.add<std::string>(
         "net.backend",
-        "Stream packet I/O: rawnet (default; AF_PACKET, any platform), mmap (PACKET_MMAP rings, Linux) or xdp "
-        "(AF_XDP on one NIC queue, Linux). The ATDECC control plane keeps its own raw socket regardless.",
+        "Stream packet I/O: rawnet (default; AF_PACKET, any platform), mmap (PACKET_MMAP rings, Linux), xdp "
+        "(AF_XDP on one NIC queue, Linux) or auto (xdp, else rawnet). The ATDECC control plane keeps its own raw "
+        "socket regardless.",
         entity.net_backend,
         [&entity](auto v) { entity.net_backend = std::string{v}; });
     specs.add<uint32_t>("net.xdp_queue", "NIC queue for net.backend=xdp (default 0)", entity.net_xdp_queue, [&entity](auto v) {
