@@ -168,6 +168,8 @@ class AvbEntityHost
     /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
     /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
     void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
+    /// GPTP_GM_CHANGED follows note_parent_grandmaster alone from now, before its first report too.
+    void use_parent_grandmaster() noexcept { grandmaster_from_parent_ = true; }
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
     void note_as_path_changed();
