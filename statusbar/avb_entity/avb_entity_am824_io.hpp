@@ -70,6 +70,11 @@ struct AvbEntityAm824IOConfig
     /// Network interface name (e.g., "en0" on macOS, "eth0" on Linux)
     std::string interface_name{"eth0"};
 
+    /// The link speed (Mbit/s) and MTU of the Talker Advertise's AccumulatedLatency; 0: the
+    /// interface's, read at each declaration (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+    uint32_t link_mbps{0};
+    uint32_t mtu{0};
+
     /// Destination multicast MAC address for talker stream (no MAAP)
     ieee::Eui48 talker_dest_mac{0x71, 0xB3, 0xD5, 0xED, 0xCF, 0x00};
 
@@ -324,6 +329,9 @@ class AvbEntityAm824IO
 
     /// Get the number of audio channels
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
+
+    /// The Talker Advertise this entity declares for its stream (make_talker_srp_info()).
+    [[nodiscard]] auto talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo { return make_talker_srp_info(); }
 
   private:
     /// Attach this entity's stream-specific control-plane behavior to the host:
