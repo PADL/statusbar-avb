@@ -56,6 +56,7 @@ auto sample_state() -> PersistentState
         {.descriptor_type = 0, .descriptor_index = 0, .name_index = 0, .value = "FOH \"left\" \\ bridge\t\xC3\xA9"});
     state.names.push_back({.descriptor_type = 0x1A, .descriptor_index = 3, .name_index = 0, .value = std::string(64, 'x')});
     state.stream_formats.push_back({.descriptor_type = 5, .descriptor_index = 1, .format = 0x0205022002006000ULL});
+    state.sampling_rates.push_back({.audio_unit = 0, .rate = 96000});
     state.clock_sources.push_back({.clock_domain = 0, .clock_source = 1});
     state.presentation_offsets.push_back({.stream_output = 2, .ns = 1500000});
     state.listener_bindings.push_back(
@@ -147,9 +148,8 @@ TEST(avb_persistent_state, malformed_rejected)
     EXPECT_TRUE(is_malformed("version = 0\nentity_model_id = \"0x01\"\n"));
 }
 
-// An older file's [[sampling_rate]] tables load and are ignored: the kit keeps
-// no unit rate, and the rewritten file has none
-TEST(avb_persistent_state, a_saved_sampling_rate_is_ignored)
+// A [[sampling_rate]] table round-trips: the unit's rate a controller set
+TEST(avb_persistent_state, a_saved_sampling_rate_is_kept)
 {
     std::string const text = "version = 1\nentity_model_id = \"0x001b92fffe000001\"\n"
                              "[[sampling_rate]]\naudio_unit = 0\nrate = 96000\n"
@@ -157,8 +157,9 @@ TEST(avb_persistent_state, a_saved_sampling_rate_is_ignored)
     auto const parsed = parse_persistent_state(text);
     EXPECT_TRUE(parsed.has_value());
     if (parsed) {
-        EXPECT_EQ(parsed->clock_sources.size(), size_t{1});
-        EXPECT_EQ(serialize_persistent_state(*parsed).find("sampling_rate"), std::string::npos);
+        EXPECT_EQ(parsed->sampling_rates.size(), size_t{1});
+        EXPECT_TRUE(parsed->sampling_rates.front() == (PersistedSamplingRate{.audio_unit = 0, .rate = 96000}));
+        EXPECT_NE(serialize_persistent_state(*parsed).find("[[sampling_rate]]\naudio_unit = 0\nrate = 96000"), std::string::npos);
     }
 }
 
