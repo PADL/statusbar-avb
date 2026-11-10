@@ -706,12 +706,9 @@ class AvbEntityKit
     /// a test port, is kept), the auto backend's rawnet when xdp does not open;
     /// errors recorded (stream_tx_error()).
     void open_stream_port();
-    /// The stream port on config_.net_backend, the auto backend's xdp, else rawnet (stream_xdp_error()).
+    /// The stream port on config_.net_backend (StreamPort::open_resolved()), its xdp and launch-time
+    /// refusals kept (stream_xdp_error(), stream_launch_time_error()).
     [[nodiscard]] auto open_configured_stream_port() -> Status;
-    /// The stream port opened on @p backend; untimed when launch time was asked for and only
-    /// an untimed socket opens, whatever refused the timed one (stream_launch_time_error()
-    /// keeps that error).
-    [[nodiscard]] auto open_stream_port_on(std::string_view backend) -> Status;
     /// Log what open_stream_port() ended with.
     void log_stream_port();
     /// The talker's TX on the stream port, and where its kick comes from.

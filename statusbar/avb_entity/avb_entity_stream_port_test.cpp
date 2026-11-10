@@ -29,6 +29,17 @@ TEST(stream_port, a_name_that_is_not_a_backend_is_refused_before_any_socket)
     EXPECT_EQ(port.fd(), -1);
 }
 
+// The auto backend through plain open(), as the AM824 and stereo entities call it: xdp, then rawnet, xdp's
+// refusal kept. Neither opens on an interface that does not exist; auto is not refused as a name.
+TEST(stream_port, the_auto_backend_tries_xdp_then_rawnet)
+{
+    StreamPort port;
+    auto const status = port.open({.backend = STREAM_BACKEND_AUTO, .interface_name = "sb-no-such0"});
+    EXPECT_FALSE(status.has_value());
+    EXPECT_TRUE(static_cast<bool>(port.xdp_error()));
+    EXPECT_FALSE(port.valid());
+}
+
 TEST(stream_port, a_closed_port_is_not_serialised_and_its_guard_is_free)
 {
     StreamPort port;
