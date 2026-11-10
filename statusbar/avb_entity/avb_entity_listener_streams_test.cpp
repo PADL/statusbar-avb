@@ -22,6 +22,7 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
+#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -286,8 +287,7 @@ auto make_connected_donor(tsn::StreamId const am824_id, tsn::StreamId const aaf_
 {
     AvbEntityAudioIOConfig config{};
     config.entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
-    config.descriptor_storage_blob = audio_blob();
-    config.milan = false;  // the classic CONNECT_RX / CONNECT_TX handshake
+    config.descriptor_storage_blob = nanoavb::with_classic_profile(audio_blob());  // classic CONNECT_RX / CONNECT_TX
     auto created = AvbEntityAudioIO::create(std::move(config));
     EXPECT_TRUE(created.has_value());
     auto& listener = (*created)->components().acmp_listener;
@@ -976,7 +976,7 @@ TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
     auto const aaf_spec = audio_specs()[1];
     uint32_t const rate_hz = aaf_spec.format.sample_rate_hz;
     StreamSpec am824_spec = aaf_spec;
-    am824_spec.format_word = avtp::make_am824_stream_format(rate_hz == 96000 ? 4 : 2, 2);
+    am824_spec.format_word = rate_hz == 96000 ? 0x00a0040240000200ULL : 0x00a0020240000200ULL;  // 2 channels
     am824_spec.format = decode_stream_format(am824_spec.format_word);
     EXPECT_TRUE(am824_spec.format.kind == StreamKind::am824 && am824_spec.format.sample_rate_hz == rate_hz);
     std::atomic<int64_t> gptp{0};

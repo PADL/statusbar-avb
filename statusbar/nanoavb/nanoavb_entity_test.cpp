@@ -317,9 +317,9 @@ TEST(nanoavb_entity_acquire, milan_profile_answers_not_supported)
 }
 
 // The profile is a property of the model: the blob's ENTITY descriptor may
-// carry a well-known profile symbol (blob metadata, never served); a runtime
-// setting overrides it; a model that says nothing is Milan.
-TEST(nanoavb_entity_profile, from_model_symbol_with_runtime_override)
+// carry a well-known profile symbol (blob metadata, never served); a model
+// that says nothing is Milan.
+TEST(nanoavb_entity_profile, from_the_model_symbol)
 {
     static_assert(entity_profile_symbol_code("identify") == 0x12619917U);  // aemxml's CRC-32
     auto blob_with = [](std::optional<uint32_t> const symbol) {
@@ -334,19 +334,17 @@ TEST(nanoavb_entity_profile, from_model_symbol_with_runtime_override)
         }
         return w.write();
     };
-    auto profile_of = [](std::vector<uint8_t> const& blob, std::optional<bool> const override) {
+    auto profile_of = [](std::vector<uint8_t> const& blob) {
         auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
         EXPECT_TRUE(storage.has_value());
-        return entity_profile_from_model(&*storage, override);
+        return entity_profile_from_model(&*storage);
     };
     auto const plain = blob_with(std::nullopt);
     auto const classic = blob_with(entity_profile_symbol_code(ENTITY_PROFILE_CLASSIC_SYMBOL));
     auto const milan = blob_with(entity_profile_symbol_code(ENTITY_PROFILE_MILAN_SYMBOL));
-    EXPECT_TRUE(profile_of(plain, std::nullopt).milan);
-    EXPECT_FALSE(profile_of(classic, std::nullopt).milan);
-    EXPECT_TRUE(profile_of(milan, std::nullopt).milan);
-    EXPECT_TRUE(profile_of(classic, true).milan);
-    EXPECT_FALSE(profile_of(milan, false).milan);
+    EXPECT_TRUE(profile_of(plain).milan);
+    EXPECT_FALSE(profile_of(classic).milan);
+    EXPECT_TRUE(profile_of(milan).milan);
     EXPECT_TRUE(entity_profile_from_model(nullptr).milan);
 
     // The symbol is not part of what a controller reads: the ENTITY descriptor
@@ -1090,7 +1088,7 @@ TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
 {
     auto model = create_test_model();
     AemCommandHandler handler{model};
-    handler.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);  // Milan v1.2's GET_STREAM_INFO
     handler.set_get_stream_info(
         [](uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext)
             -> bool {
@@ -1135,6 +1133,7 @@ TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
     EXPECT_EQ(ext.flags_ex.get(), stream_info_flags_ex::REGISTERING);
 
     // A classic entity answers IEEE 1722.1-2013's 48 octets.
+    handler.set_stream_info_layout(std::nullopt);
     handler.set_profile(EntityProfile{.milan = false});
     auto const classic = make_test_result(handler, header, cmd);
     EXPECT_EQ(classic.status, AEM_STATUS_SUCCESS);
@@ -1168,11 +1167,12 @@ TEST(nanoavb_entity_get_stream_info, the_layout_sets_the_response_length)
     std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> cmd{0x00, 0x06, 0x00, 0x00};
     auto header = create_aem_header(AEM_COMMAND_GET_STREAM_INFO);
 
-    // The profile's form until a layout is set (Milan v1.3 Section 5.4.2.10.2): Milan v1.3's is
-    // IEEE 1722.1-2021's, v1.2's its own.
+    // The profile's form until a layout is set (Milan v1.3 Section 5.4.2.10.2): Milan's is
+    // IEEE 1722.1-2021's, classic's IEEE 1722.1-2013's.
     EXPECT_EQ(handler.stream_info_layout(), StreamInfoLayout::ieee_2021);
-    handler.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});
-    EXPECT_EQ(handler.stream_info_layout(), StreamInfoLayout::milan_v1_2);
+    handler.set_profile(EntityProfile{.milan = false});
+    EXPECT_EQ(handler.stream_info_layout(), StreamInfoLayout::ieee_2013);
+    handler.set_profile(EntityProfile{});
     handler.set_stream_info_layout(StreamInfoLayout::ieee_2021);
     auto const v2021 = make_test_result(handler, header, cmd);
     EXPECT_EQ(v2021.status, AEM_STATUS_SUCCESS);
@@ -1185,9 +1185,9 @@ TEST(nanoavb_entity_get_stream_info, the_layout_sets_the_response_length)
     auto const tail = v2021.response_data().subspan(AemStreamInfoPayload::LENGTH);
     EXPECT_TRUE(std::ranges::all_of(tail, [](uint8_t const b) { return b == 0; }));
 
-    // Unset again: Milan's 56 octets, the classic profile's 48.
+    // Unset again: Milan's IEEE 1722.1-2021 84 octets, the classic profile's 48.
     handler.set_stream_info_layout(std::nullopt);
-    EXPECT_EQ(make_test_result(handler, header, cmd).response_data().size(), AEM_STREAM_INFO_MILAN_LENGTH);
+    EXPECT_EQ(make_test_result(handler, header, cmd).response_data().size(), AEM_STREAM_INFO_2021_LENGTH);
     handler.set_profile(EntityProfile{.milan = false});
     EXPECT_EQ(make_test_result(handler, header, cmd).response_data().size(), AemStreamInfoPayload::LENGTH);
 }
@@ -2606,7 +2606,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
-    handler.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);  // Milan v1.2's GET_STREAM_INFO
     handler.set_entity_id(kEntity);
     OffsetStore store;
     store.install(handler);
@@ -2658,7 +2658,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_refusals)
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
-    handler.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);  // Milan v1.2's GET_STREAM_INFO
     handler.set_entity_id(kEntity);
     std::vector<CapturedSend> sends;
     capture_sends(handler, sends);
@@ -2702,7 +2702,7 @@ TEST(nanoavb_entity_presentation_offset, refused_while_another_controller_holds_
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
-    handler.set_profile(EntityProfile{.milan_version = MilanVersion::v1_2});  // Milan v1.2's layouts
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);  // Milan v1.2's GET_STREAM_INFO
     handler.set_entity_id(kEntity);
     OffsetStore store;
     store.install(handler);

@@ -53,14 +53,11 @@ auto crf_one_timestamp() -> StreamSpec
     return spec;
 }
 
-/// A Milan v1.3 entity's profile, the default.
-constexpr nanoavb::EntityProfile V1_3{};
-
-/// @p spec's TSpec as a Milan v1.2 entity declares it (the clock-drift byte in MaxFrameSize):
-/// the CBS arithmetic below was worked out from these.
-auto v1_2_tspec(StreamSpec const& spec) -> TSpec
+/// @p spec's TSpec with the clock-drift byte in MaxFrameSize, as Milan v1.2 Table 4.4 had it: the
+/// CBS arithmetic below and docs/SHAPER.md's worked examples use these.
+auto worked_tspec(StreamSpec const& spec) -> TSpec
 {
-    return AvbEntityKit::talker_tspec(spec, nanoavb::EntityProfile{.milan_version = nanoavb::MilanVersion::v1_2});
+    return TSpec{.max_frame_size = static_cast<uint16_t>(srp_max_frame_size(spec.format) + 1), .max_interval_frames = 1};
 }
 
 }  // namespace
@@ -242,8 +239,8 @@ TEST(shaper_cbs, frame_sizes_and_bandwidth)
     // The TSpecs the kit advertises (srp_max_frame_size, Milan v1.3 Table 4.4):
     //   AAF 8 ch INT_24 48 kHz: 24-byte AAF header + 6 samples x 8 ch x 3 B = 18*8 + 24 = 168
     //   CRF, one timestamp a PDU: 20-byte CRF header + 1 x 8 = 28
-    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24(), V1_3);
-    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp(), V1_3);
+    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24());
+    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp());
     EXPECT_EQ(aaf.max_frame_size, uint16_t{168});
     EXPECT_EQ(aaf.max_interval_frames, uint16_t{1});
     EXPECT_EQ(crf.max_frame_size, uint16_t{28});
@@ -264,21 +261,6 @@ TEST(shaper_cbs, frame_sizes_and_bandwidth)
         stream_bandwidth_kbps(TSpec{.max_frame_size = 100, .max_interval_frames = 3}, CLASS_B_INTERVALS_PER_SEC), uint32_t{13632});
     // Rounds up: one 142-octet frame a second is 142 x 8 / 1000 = 1.136 -> 2 kbit/s
     EXPECT_EQ(stream_bandwidth_kbps(TSpec{.max_frame_size = 100, .max_interval_frames = 1}, 1), uint32_t{2});
-}
-
-// Milan v1.2 Table 4.4 has the byte in MaxFrameSize, before the minimum-frame rule: the CRF's
-// 29 + 22 = 51 -> 68 + 20 = 88 octets, 5632 kbit/s; the AAF's bandwidth is v1.3's.
-TEST(shaper_cbs, milan_v1_2_table_4_4)
-{
-    auto const aaf = v1_2_tspec(aaf_8ch_48k_int24());
-    auto const crf = v1_2_tspec(crf_one_timestamp());
-    EXPECT_EQ(aaf.max_frame_size, uint16_t{169});
-    EXPECT_EQ(crf.max_frame_size, uint16_t{29});
-    EXPECT_EQ(crf.clock_drift_bytes, uint16_t{0});
-    EXPECT_EQ(wire_frame_size(169), uint32_t{211});
-    EXPECT_EQ(wire_frame_size(29), uint32_t{88});
-    EXPECT_EQ(stream_bandwidth_kbps(aaf, CLASS_A_INTERVALS_PER_SEC), uint32_t{13504});
-    EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5632});
 }
 
 // Milan v1.3 Section 4.3.3.2, Table 4.4, every row: MaxFrameSize and the
@@ -310,7 +292,7 @@ TEST(shaper_cbs, milan_table_4_4)
             if (mfs > 1500) {
                 continue;  // past the MTU: not a stream the model allows
             }
-            auto const tspec = AvbEntityKit::talker_tspec(spec, V1_3);
+            auto const tspec = AvbEntityKit::talker_tspec(spec);
             EXPECT_EQ(uint32_t{tspec.max_frame_size}, mfs);
             EXPECT_EQ(tspec.max_interval_frames, uint16_t{1});
             // The column's linear formula holds while the frame is past the
@@ -319,7 +301,7 @@ TEST(shaper_cbs, milan_table_4_4)
             EXPECT_EQ(stream_bandwidth_kbps(tspec, CLASS_A_INTERVALS_PER_SEC), expected);
         }
     }
-    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp(), V1_3);
+    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp());
     EXPECT_EQ(crf.max_frame_size, uint16_t{28});
     EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5696});
 }
@@ -328,7 +310,7 @@ TEST(shaper_cbs, class_a_aaf_and_crf_on_a_gigabit_link)
 {
     // One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s, MTU 1500 interfering:
     // idleSlope 19136, sendSlope -980864, hiCredit 30, loCredit -206 (docs/SHAPER.md).
-    std::array<TSpec, 2> const streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const streams{worked_tspec(aaf_8ch_48k_int24()), worked_tspec(crf_one_timestamp())};
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
     EXPECT_EQ(a.idleslope_kbps, int32_t{19136});
     EXPECT_EQ(a.sendslope_kbps, int32_t{-980864});
@@ -351,11 +333,11 @@ TEST(shaper_cbs, class_a_aaf_and_crf_on_a_gigabit_link)
 
 TEST(shaper_cbs, class_b_sees_class_a_as_interference)
 {
-    std::array<TSpec, 2> const a_streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const a_streams{worked_tspec(aaf_8ch_48k_int24()), worked_tspec(crf_one_timestamp())};
     auto const a = class_a_cbs(a_streams, 1'000'000, 1500);
     // One AAF stream in class B (6752 kbit/s), class A as above: sendSlopeB -993248,
     // hiCreditB 13 (L-11), loCreditB -209 (docs/SHAPER.md).
-    std::array<TSpec, 1> const b_streams{v1_2_tspec(aaf_8ch_48k_int24())};
+    std::array<TSpec, 1> const b_streams{worked_tspec(aaf_8ch_48k_int24())};
     auto const b = class_b_cbs(b_streams, a, 1'000'000, 1500);
     EXPECT_EQ(b.idleslope_kbps, int32_t{6752});
     EXPECT_EQ(b.sendslope_kbps, int32_t{-993248});
@@ -374,10 +356,10 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
 {
     auto aaf = aaf_8ch_48k_int24();
     aaf.format.channels = 32;
-    EXPECT_EQ(v1_2_tspec(aaf).max_frame_size, uint16_t{601});
-    EXPECT_EQ(stream_bandwidth_kbps(v1_2_tspec(aaf), CLASS_A_INTERVALS_PER_SEC), uint32_t{41152});
-    std::vector<TSpec> streams(MAX_ENTITY_AUDIO_STREAMS, v1_2_tspec(aaf));
-    streams.insert(streams.end(), MAX_ENTITY_CRF_STREAMS, v1_2_tspec(crf_one_timestamp()));
+    EXPECT_EQ(worked_tspec(aaf).max_frame_size, uint16_t{601});
+    EXPECT_EQ(stream_bandwidth_kbps(worked_tspec(aaf), CLASS_A_INTERVALS_PER_SEC), uint32_t{41152});
+    std::vector<TSpec> streams(MAX_ENTITY_AUDIO_STREAMS, worked_tspec(aaf));
+    streams.insert(streams.end(), MAX_ENTITY_CRF_STREAMS, worked_tspec(crf_one_timestamp()));
     EXPECT_EQ(streams.size(), MAX_ENTITY_STREAMS);
     auto const a = class_a_cbs(streams, 1'000'000, 1500);
     EXPECT_EQ(a.idleslope_kbps, int32_t{680960});
@@ -388,8 +370,8 @@ TEST(shaper_cbs, class_a_at_the_kits_stream_bound)
     EXPECT_TRUE(a.idleslope_kbps < 750'000);
 
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
-    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, v1_2_tspec(aaf));
-    wide.insert(wide.end(), MAX_ENTITY_CRF_STREAMS, v1_2_tspec(crf_one_timestamp()));
+    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, worked_tspec(aaf));
+    wide.insert(wide.end(), MAX_ENTITY_CRF_STREAMS, worked_tspec(crf_one_timestamp()));
     EXPECT_EQ(class_a_cbs(wide, 1'000'000, 1500).idleslope_kbps, int32_t{877568});
 }
 
@@ -421,7 +403,7 @@ TEST(shaper_cbs, placeholders)
     EXPECT_EQ(slow.class_a.locredit, int32_t{-963});
     // The AAF and the CRF admitted (19136 kbit/s): class B's placeholder receives the rest of the
     // budget: idleSlope 730864, sendSlope -269136, hiCredit 1127, loCredit -415.
-    std::array<TSpec, 2> const streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const streams{worked_tspec(aaf_8ch_48k_int24()), worked_tspec(crf_one_timestamp())};
     auto const some = cbs_targets(streams, {}, 1'000'000, 1500);
     EXPECT_TRUE(some.class_a == class_a_cbs(streams, 1'000'000, 1500));
     EXPECT_FALSE(some.class_a.placeholder);
@@ -436,7 +418,7 @@ TEST(shaper_cbs, placeholders)
     auto aaf = aaf_8ch_48k_int24();
     aaf.format.channels = 32;
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
-    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, v1_2_tspec(aaf));
+    std::vector<TSpec> wide(MAX_ENTITY_AUDIO_STREAMS, worked_tspec(aaf));
     EXPECT_EQ(cbs_targets(wide, {}, 1'000'000, 1500).class_b.idleslope_kbps, int32_t{10'000});
 }
 
@@ -446,7 +428,7 @@ TEST(shaper_cbs, one_int32_talker_as_captured_on_an_i210)
 {
     auto aaf = aaf_8ch_48k_int24();
     aaf.format.aaf_format = avtp::AafFormat::int_32bit;
-    std::array<TSpec, 1> const streams{v1_2_tspec(aaf)};
+    std::array<TSpec, 1> const streams{worked_tspec(aaf)};
     EXPECT_EQ(streams[0].max_frame_size, uint16_t{217});
     auto const targets = cbs_targets(streams, {}, 1'000'000, 1500);
     EXPECT_EQ(targets.class_a.idleslope_kbps, int32_t{16576});
@@ -641,7 +623,7 @@ auto igb_mqprio() -> net::tc::MqprioQdisc
 /// The admitted AAF + CRF (class A 19136 kbit/s) and nothing, at 1 Gbit/s.
 auto admitted_targets() -> CbsTargets
 {
-    std::array<TSpec, 2> const streams{v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
+    std::array<TSpec, 2> const streams{worked_tspec(aaf_8ch_48k_int24()), worked_tspec(crf_one_timestamp())};
     return cbs_targets(streams, {}, 1'000'000, 1500);
 }
 
@@ -937,6 +919,8 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
     RecordingTc tc{};
     tc.root = qdisc_info(0, net::tc::ROOT, "mq");
     ShaperQdiscs qdiscs{tc, channel.logger()};
+    std::vector<std::error_code> settled{};
+    qdiscs.set_on_etf_settled([&settled](std::error_code const e) { settled.push_back(e); });
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
@@ -951,8 +935,9 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
             "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
+    EXPECT_EQ(settled.size(), size_t{1});
+    EXPECT_FALSE(settled.empty() || static_cast<bool>(settled.front()));  // placed
     EXPECT_TRUE(qdiscs.launch_time_mode() == LaunchTimeMode::on);
-    EXPECT_FALSE(qdiscs.etf_error());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
 }
@@ -1145,7 +1130,7 @@ TEST(shaper_launch_time, a_refused_class_b_cbs_leaves_the_etf_under_class_a_s)
             "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
-    EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported());
+    EXPECT_FALSE(qdiscs.cbs_unsupported());
     // Class A's cbs still follows its streams; class B's is not asked again.
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
@@ -1163,7 +1148,8 @@ TEST(shaper_launch_time, an_einval_class_b_cbs_is_a_refusal_too)
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported() && qdiscs.launch_time());
+    EXPECT_FALSE(qdiscs.cbs_unsupported());
+    EXPECT_TRUE(qdiscs.launch_time());
     (void)tc.drain();
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
@@ -1186,14 +1172,16 @@ TEST(shaper_qdiscs, class_b_s_cbs_waits_for_class_a_s)
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 375000", "replace 9000:2 cbs 9002: idleslope 375000"}));
 }
 
-// A refused etf offload (EOPNOTSUPP) is recorded and logged once; the cbs stay, program() succeeds
-// (nothing for tick() to retry) and no further etf is asked for until the next install().
+// A refused etf offload (EOPNOTSUPP) is told to set_on_etf_settled and logged once; the cbs stay,
+// program() succeeds (nothing for tick() to retry) and no further etf is asked for until the next install().
 TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
 {
     logging::LogChannel<64> channel{logging::lit("test")};
     RecordingTc tc{};
     tc.etf_error = std::make_error_code(std::errc::operation_not_supported);
     ShaperQdiscs qdiscs{tc, channel.logger()};
+    std::vector<std::error_code> settled{};
+    qdiscs.set_on_etf_settled([&settled](std::error_code const e) { settled.push_back(e); });
     qdiscs.set_launch_time(LaunchTimeMode::on, 200'000);
     EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
@@ -1207,13 +1195,41 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
             "show 9001:1",
             "replace 9001:1 etf clockid 11 delta 200000 offload skip_sock_check",
         }));
-    EXPECT_TRUE(qdiscs.etf_error() == std::errc::operation_not_supported);
     EXPECT_FALSE(qdiscs.launch_time());
+    EXPECT_EQ(settled.size(), size_t{1});
+    EXPECT_FALSE(settled.empty() || settled.front() != std::errc::operation_not_supported);
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_EQ(settled.size(), size_t{1});  // said once
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
     // Uninstall is unchanged: grafting pfifo_fast on each class removes cbs and etf together.
     EXPECT_TRUE(qdiscs.uninstall().has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:2 pfifo_fast", "replace 9000:1 pfifo_fast", "del root 9000:"}));
+}
+
+// The listener of a refused etf turns launch time off from inside the call (as the bridge's launch-time
+// follower does): told once, after the etf settled; the next program() settles off and asks for no etf.
+TEST(shaper_launch_time, a_refusal_may_turn_launch_time_off_from_its_listener)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingTc tc{};
+    tc.etf_error = std::make_error_code(std::errc::operation_not_supported);
+    ShaperQdiscs qdiscs{tc, channel.logger()};
+    std::vector<std::error_code> settled{};
+    qdiscs.set_on_etf_settled([&](std::error_code const e) {
+        settled.push_back(e);
+        qdiscs.set_launch_time(LaunchTimeMode::off, 200'000);
+    });
+    qdiscs.set_launch_time(LaunchTimeMode::on, 200'000);
+    EXPECT_TRUE(qdiscs.install(3, "enp1s0", igb_mqprio(), igb_layout()).has_value());
+    EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
+    EXPECT_EQ(settled.size(), size_t{1});
+    EXPECT_FALSE(qdiscs.launch_time());
+    (void)tc.drain();
+    EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
+    EXPECT_EQ(settled.size(), size_t{1});
+    for (auto const& request : tc.drain()) {
+        EXPECT_FALSE(request.find(" etf ") != std::string::npos);
+    }
 }
 
 namespace {
@@ -1227,7 +1243,7 @@ auto igb_port() -> ShaperPort
 /// The AAF + CRF TSpecs of admitted_targets().
 auto aaf_and_crf() -> std::array<TSpec, 2>
 {
-    return {v1_2_tspec(aaf_8ch_48k_int24()), v1_2_tspec(crf_one_timestamp())};
+    return {worked_tspec(aaf_8ch_48k_int24()), worked_tspec(crf_one_timestamp())};
 }
 
 }  // namespace

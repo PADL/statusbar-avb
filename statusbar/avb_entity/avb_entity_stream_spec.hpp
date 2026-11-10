@@ -28,9 +28,10 @@
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
+#include "statusbar/avtp/avtp_am824.hpp"
+#include "statusbar/avtp/avtp_am824_v1.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
-#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -101,20 +102,25 @@ struct StreamFormatFields
     uint32_t crf_base_frequency_hz{0};
 };
 
-/// The AM824 channel counts the kit carries: 1, 2, 4, 6 or 8 MBLA quadlets per data block.
-[[nodiscard]] constexpr auto am824_channel_count_supported(uint32_t const channels) noexcept -> bool
+/// An Ethernet frame's largest payload, its MAC client data (IEEE 802.3-2022 Clause 3.2.7).
+inline constexpr size_t ETHERNET_PAYLOAD_MAX = 1500;
+
+/// Whether an AM824 frame of @p channels at @p rate_hz fits the MTU: a class A packet's samples
+/// and one more, as the talker may send (srp_max_frame_size).
+[[nodiscard]] constexpr auto am824_frame_fits(uint32_t const channels, uint32_t const rate_hz) noexcept -> bool
 {
-    return channels == 1 || channels == 2 || channels == 4 || channels == 6 || channels == 8;
+    auto const samples = static_cast<uint8_t>((rate_hz / 8000U) + 1U);
+    return avtp::am824_packet_size(static_cast<uint8_t>(channels), samples) <= ETHERNET_PAYLOAD_MAX;
 }
 
 /// Whether the kit carries @p format (IEEE 1722-2016 Annex I): IEC 61883-6 AM824 data, non-blocking,
-/// MBLA only (DBS = MBLA count, no IEC 60958/MIDI/SMPTE), 32-192 kHz, am824_channel_count_supported.
+/// MBLA only (DBS = MBLA count, no IEC 60958/MIDI/SMPTE), 32-192 kHz, 1 to Am824Pdu::MAX_CHANNELS in the MTU.
 [[nodiscard]] constexpr auto am824_format_supported(avtp::Am824StreamFormat const& format) noexcept -> bool
 {
     return format.is_61883_6() && format.evt() == 0 && avtp::am824_sfc_to_hz(format.sfc()) != 0 && format.non_blocking() &&
         !format.blocking() && format.label_iec_60958_cnt.get() == 0 && format.label_midi_cnt() == 0 &&
-        format.label_smpte_cnt() == 0 && format.label_mbla_cnt.get() == format.dbs.get() &&
-        am824_channel_count_supported(format.dbs.get());
+        format.label_smpte_cnt() == 0 && format.label_mbla_cnt.get() == format.dbs.get() && format.dbs.get() >= 1 &&
+        format.dbs.get() <= avtp::Am824Pdu::MAX_CHANNELS && am824_frame_fits(format.dbs.get(), avtp::am824_sfc_to_hz(format.sfc()));
 }
 
 [[nodiscard]] constexpr auto decode_stream_format(uint64_t fmt) noexcept -> StreamFormatFields
@@ -206,14 +212,13 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
     return sample_rate_hz / CLASS_A_PACKETS_PER_SEC;
 }
 
-/// The byte Milan Table 4.4 adds for a sampling clock a little faster than nominal: to
-/// MaxFrameSize in v1.2, to the frame after the minimum-size rule in v1.3 (step 3).
+/// The byte Milan v1.3 Table 4.4 adds for a sampling clock a little faster than nominal, to the
+/// frame after the minimum-size rule (step 3).
 inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
 
 /// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence: the AVTPDU (Milan
-/// v1.3 Section 4.3.3.2, Table 4.4), MILAN_TSPEC_SPARE_BYTES more in @p version v1.2. Returns 0
-/// for StreamKind::other or an unknown rate.
-[[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion version) noexcept -> uint16_t;
+/// v1.3 Section 4.3.3.2, Table 4.4). Returns 0 for StreamKind::other or an unknown rate.
+[[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
 
 /// One stream's MSRP TSpec (IEEE 802.1Q 35.2.2.8.4).
 struct TSpec

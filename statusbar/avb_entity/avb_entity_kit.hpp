@@ -143,7 +143,6 @@ class AvbEntityKit
     /// @p control until stop(); a no-op without stream inputs. start() calls it
     /// unless called first; @p control must outlive the kit.
     void bind_listener_vlan(net::vlan::VlanControl& control, int ifindex);
-    [[nodiscard]] auto listener_vlan() const noexcept -> ListenerVlan const& { return listener_vlan_; }
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
@@ -247,10 +246,12 @@ class AvbEntityKit
     /// (@p ready) or withdrawn at the reactor's @p now_ns, the gate's clock reading
     /// @p gate_now; feeds the gate and the declarations, re-evaluates admission.
     void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns, GateTimePoint gate_now);
-    /// Reactor thread, periodically (EntityUpkeep::tick): re-evaluate admission
-    /// at @p now, so a grace window that runs out with no MSRP event still
-    /// closes the stream's admission and fires the callback.
-    void poll_admission(GateTimePoint const now) { note_admission(now); }
+    /// Reactor thread, from the kit's timer: at the admission deadline (the earliest grace end,
+    /// TalkerGate::grace_ends) re-evaluate admission at @p now, so a grace window that runs out
+    /// with no MSRP event still closes the stream's admission and fires the callback.
+    void on_admission_timer(GateTimePoint now);
+    /// The admission deadline armed, on the gate's clock; nullopt: no grace running.
+    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<GateTimePoint> { return admission_deadline_; }
 
     /// The GET_COUNTERS observation interval (Milan v1.2 Tables 5.4 and 5.6:
     /// at most 1 s).
@@ -259,12 +260,6 @@ class AvbEntityKit
     /// COUNTERS_INTERVAL_NS has passed and notify each stream descriptor whose
     /// counters changed (the AEM handler holds them to one a second).
     void poll_counters(int64_t now_ns);
-    /// STREAM_OUTPUT @p idx's Milan counters (StreamOutputIntervals), or
-    /// nullptr for a stream the kit does not have.
-    [[nodiscard]] auto output_counters(uint16_t const idx) const noexcept -> StreamOutputIntervals const*
-    {
-        return is_talker_index(idx) ? &output_counters_[idx] : nullptr;
-    }
     /// Reactor thread: the signal presence of STREAM_OUTPUT @p idx's channels, bit k channel k, cut
     /// to the channels its format has (again at a SET_STREAM_FORMAT), reported from the next observation
     /// interval (Milan v1.3 Section 5.3.7.7.1). Ignored unless config().signal_presence and Milan v1.3.
@@ -274,14 +269,11 @@ class AvbEntityKit
     /// The kit reports signal presence: configured and Milan v1.3.
     [[nodiscard]] auto reports_signal_presence() const noexcept -> bool
     {
-        return config_.signal_presence && host_.components().profile.milan_v1_3();
+        return config_.signal_presence && host_.components().profile.milan;
     }
 
     // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
 
-    /// Whether talker stream @p idx declares its Talker Advertise now
-    /// (TalkerDeclarations; the rules are in docs/AVB_ENTITY_KIT.md).
-    [[nodiscard]] auto talker_declared(uint16_t const idx) const noexcept -> bool { return declarations_.declared(idx); }
     [[nodiscard]] auto talker_declarations() const noexcept -> TalkerDeclarations const& { return declarations_; }
     /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx counted at
     /// steady-clock @p now_ns (the ACMP talker's on_probe lands here): its
@@ -294,8 +286,6 @@ class AvbEntityKit
     /// at the reactor's @p now_ns, the streams in @p refresh re-declared, the gate told
     /// @p gate_now; the kit's timer at each deadline, the reactor's events directly.
     void update_talker_declarations(int64_t now_ns, GateTimePoint gate_now, RefreshSet refresh);
-    /// The re-declarations an AEM hook asked for, run at the next reactor pass; empty after stop().
-    [[nodiscard]] auto pending_refresh() const noexcept -> RefreshSet { return refresh_pending_; }
     /// As above for a caller with no gate reading in hand (reads the gate's clock once);
     /// @p refresh re-declares every stream.
     void update_talker_declarations(int64_t const now_ns, bool const refresh = false)
@@ -484,34 +474,25 @@ class AvbEntityKit
     /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
 
-    /// The MSRP TSpec advertised for talker stream @p spec of an entity of @p profile (the kit's is
-    /// host().components().profile): srp_max_frame_size at the class A cadence, one frame per
-    /// interval, by Milan Table 4.4 (tspec_version). Also the shaper's input.
-    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec, nanoavb::EntityProfile const profile) noexcept -> TSpec
+    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at the class A
+    /// cadence, one frame per interval, by Milan v1.3 Table 4.4. Also the shaper's input.
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
     {
-        bool const v1_3 = profile.milan_v1_3();
         return TSpec{
-            .max_frame_size = srp_max_frame_size(spec.format, tspec_version(profile)),
+            .max_frame_size = srp_max_frame_size(spec.format),
             .max_interval_frames = 1,
-            .clock_drift_bytes = v1_3 && spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
-    }
-    /// The Milan Table 4.4 an entity of @p profile sizes its TSpecs by: v1.3's for a Milan v1.3
-    /// entity, v1.2's for a v1.2 or classic one.
-    [[nodiscard]] static constexpr auto tspec_version(nanoavb::EntityProfile const profile) noexcept -> nanoavb::MilanVersion
-    {
-        return profile.milan_v1_3() ? nanoavb::MilanVersion::v1_3 : nanoavb::MilanVersion::v1_2;
+            .clock_drift_bytes = spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
     }
 
     // --- Stream socket health (after start()) ---------------------------------
-    /// Why start() could not open the stream TX socket (empty: it opened). The
-    /// kit carries on without it (a control-plane-only entity); a host that
-    /// needs the data plane checks here.
+    /// Why start() could not open the stream TX socket (empty: it opened); the kit carries on
+    /// without it, a control-plane-only entity.
     [[nodiscard]] auto stream_tx_error() const noexcept -> std::error_code { return stream_tx_error_; }
     /// Why start() could not open the stream RX socket (empty: it opened, or
     /// the blob declares no stream inputs).
     [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }
-    /// Why the xdp backend did not open when the kit fell back to rawnet
-    /// (config.net_xdp_fallback); empty when it did not fall back.
+    /// Why the xdp backend did not open when the auto backend fell back to
+    /// rawnet; empty when it did not fall back.
     [[nodiscard]] auto stream_xdp_error() const noexcept -> std::error_code { return stream_xdp_error_; }
     /// Why the stream port carries no launch time although config.stream_launch_time
     /// asked for it (the NIC, kernel or probe refused it); empty otherwise.
@@ -598,6 +579,8 @@ class AvbEntityKit
     /// Recompute the admitted set at @p now after a gate input changed (or time
     /// passed); fire on_admission_changed_ when it differs from the last one.
     void note_admission(GateTimePoint now);
+    /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
+    void arm_admission_deadline(GateTimePoint now) noexcept;
     /// The storage handler's SET_STREAM_FORMAT and SET_SAMPLING_RATE hooks (the latter
     /// SUCCESS for the unit's current rate, else NOT_SUPPORTED: Milan v1.2 Section 5.4.2.13).
     [[nodiscard]] auto change_stream_format(uint16_t descriptor_type, uint16_t descriptor_index, uint64_t format) -> uint8_t;
@@ -645,9 +628,13 @@ class AvbEntityKit
     //
     // Construction phases
     //
-    /// The talker streams' ACMP identities, address validity and presentation offsets.
-    /// The configured Milan version and GET_MILAN_INFO features (construction).
+
+    /// The tag of stream frames on @p vlan_id: the Domain's priority once adopted (IEEE 802.1Q-2022
+    /// Clause 35.2.2.8.5), else config().stream_pcp.
+    [[nodiscard]] auto stream_tag(uint16_t vlan_id) const noexcept -> StreamTag;
+    /// GET_MILAN_INFO's features and the outputs' signal presence (construction).
     void configure_milan();
+    /// The talker streams' ACMP identities, address validity and presentation offsets.
     void configure_talker_streams();
     /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
     void note_talker_interface(uint16_t index);
@@ -663,6 +650,7 @@ class AvbEntityKit
     //
     // Stream formats and mappings
     //
+
     /// Stream @p port_index's @p channels onto @p port's cluster channels in order, as far as both go.
     [[nodiscard]] auto cluster_identity_mappings(
         uint16_t port_index, atdecc::aem::DescriptorStreamPort const& port, uint16_t channels) const
@@ -688,6 +676,7 @@ class AvbEntityKit
     //
     // Declarations and registrations
     //
+
     /// Fold each stream's counters into the interval just ended, notifying the changed ones.
     void fold_stream_counters();
     /// Talker stream @p idx's registered Listener; nullopt for no such stream.
@@ -702,6 +691,7 @@ class AvbEntityKit
     //
     // start() and stop() phases
     //
+
     /// The stream port's configuration on @p backend, from the kit's.
     [[nodiscard]] auto stream_port_config(std::string_view backend) const -> StreamPortConfig;
     /// The control plane up, its stream callbacks wired, the declarations started.
@@ -719,13 +709,12 @@ class AvbEntityKit
     /// One TX slot per talker stream, with the identity the ACMP model carries.
     [[nodiscard]] auto open_talker_streams() -> Status;
     /// The stream port on config_.net_backend (one the host opened before start(),
-    /// a test port, is kept), rawnet when xdp does not open and
-    /// config_.net_xdp_fallback allows it; errors recorded (stream_tx_error()).
+    /// a test port, is kept), the auto backend's rawnet when xdp does not open;
+    /// errors recorded (stream_tx_error()).
     void open_stream_port();
-    /// The stream port opened on @p backend; untimed when launch time was asked for and only
-    /// an untimed socket opens, whatever refused the timed one (stream_launch_time_error()
-    /// keeps that error).
-    [[nodiscard]] auto open_stream_port_on(std::string_view backend) -> Status;
+    /// The stream port on config_.net_backend (StreamPort::open_resolved()), its xdp and launch-time
+    /// refusals kept (stream_xdp_error(), stream_launch_time_error()).
+    [[nodiscard]] auto open_configured_stream_port() -> Status;
     /// Log what open_stream_port() ended with.
     void log_stream_port();
     /// The talker's TX on the stream port, and where its kick comes from.
@@ -749,6 +738,7 @@ class AvbEntityKit
     //
     // Persistent state
     //
+
     /// load_persistent_state() with a file configured.
     void restore_persistent_state();
     /// Save every later AEM and MVU settings change.
@@ -834,6 +824,7 @@ class AvbEntityKit
     sg14::inplace_vector<std::pair<uint16_t, uint16_t>, MAX_ENTITY_STREAMS> sink_vlans_{};
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
+    std::optional<GateTimePoint> admission_deadline_{};  ///< the earliest grace end, on the gate's clock
     AdmissionChangedFn on_admission_changed_{};
     /// GET_COUNTERS per talker stream (StreamOutputIntervals), the next end of
     /// the observation interval, and each Milan input's bound state.

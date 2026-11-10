@@ -319,17 +319,14 @@ class AemCommandHandler
     [[nodiscard]] auto profile() const noexcept -> EntityProfile { return profile_; }
 
     /// The GET_STREAM_INFO response form (StreamInfoLayout); unset, the profile's: IEEE
-    /// 1722.1-2021's for Milan v1.3 (Section 5.4.2.10), Milan v1.2's for v1.2, 1722.1-2013's for classic.
+    /// 1722.1-2021's for Milan (Milan v1.3 Section 5.4.2.10), 1722.1-2013's for classic.
     void set_stream_info_layout(std::optional<StreamInfoLayout> const layout) noexcept { stream_info_layout_ = layout; }
     [[nodiscard]] auto stream_info_layout() const noexcept -> StreamInfoLayout
     {
         if (stream_info_layout_) {
             return *stream_info_layout_;
         }
-        if (profile_.milan_v1_3()) {
-            return StreamInfoLayout::ieee_2021;
-        }
-        return profile_.milan ? StreamInfoLayout::milan_v1_2 : StreamInfoLayout::ieee_2013;
+        return profile_.milan ? StreamInfoLayout::ieee_2021 : StreamInfoLayout::ieee_2013;
     }
 
     /// Set only the GET_COUNTERS provider, without disturbing the others

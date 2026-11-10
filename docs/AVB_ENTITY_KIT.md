@@ -22,9 +22,9 @@ loop. It works on the `AvbEntityKit`, so any kit entity can use it.
 - `tick()`, every reactor pass, drains the entity's ctl/media log channels (and
   any added) to a sink; detects a grandmaster regained under an unchanged
   identity and calls `on_gptp_announce`; fires the Init timeout
-  (`GPTP_LOCK_TIMEOUT`) as `on_timeout`; re-evaluates talker admission
-  (`poll_admission`: a Listener Ready grace window can expire with no MSRP
-  event); and logs state changes on the ctl channel.
+  (`GPTP_LOCK_TIMEOUT`) as `on_timeout`; folds the stream counters at their
+  interval; and logs state changes on the ctl channel. Talker admission needs
+  no tick: the kit's own timer re-evaluates it at the admission deadline.
 
 The grandmaster edge detection runs on the reactor thread so that the state
 machine and MSRP stack are only ever driven from one thread.
@@ -49,10 +49,9 @@ samples per PDU the talker sends (AAF PCM32 48 kHz N channels: 24*N + 24); CRF
 its timestamps (28 for one). The byte for a sampling clock a little faster than
 nominal (`MILAN_TSPEC_SPARE_BYTES`) is the shaper's, added to the frame after
 the 68-octet minimum (`TSpec::clock_drift_bytes`, Table 4.4 step 3): the CRF's
-5696 kbit/s. Milan v1.2's Table 4.4 puts it in MaxFrameSize instead (24*N + 24
-+ 1, CRF 28 + 1 and 5632 kbit/s); `talker_tspec` follows the entity's Milan
-version, a classic entity v1.2's. AM824, not a Milan format, reserves a spare
-sample instead: its talker may send nominal+1 samples on a wake.
+5696 kbit/s. A classic entity sizes its TSpecs the same way. AM824, not a
+Milan format, reserves a spare sample instead: its talker may send nominal+1
+samples on a wake.
 
 The raw TX render (`StreamRawRenderFn`) is the fast path alongside the float
 `StreamRenderFn`: the payload is interleaved big-endian samples of the
@@ -74,7 +73,7 @@ MBLA; the MOTU 16A lists `0x00a00N0860000800` (nb, ut) on its inputs and
 `decode_stream_format` decodes as `StreamKind::am824` only what the kit
 carries (`am824_format_supported`): AM824 data (evt 0), non-blocking, MBLA
 only (DBS equal to the MBLA count, no IEC 60958, MIDI or SMPTE), 32 to 192
-kHz, and 1, 2, 4, 6 or 8 channels. Any other 61883 word is `StreamKind::other`,
+kHz, and 1 to 64 channels in a frame within the MTU. Any other 61883 word is `StreamKind::other`,
 so SET_STREAM_FORMAT refuses it NOT_SUPPORTED and a model naming it opens no
 slot. The `ut` and `sc` flags are read (`avtp::Am824StreamFormat`) but not
 honoured: the stream carries exactly DBS channels, and an input refuses packets
@@ -108,12 +107,11 @@ says nothing is Milan. Only behaviour that could break a classic controller
 follows it: under Milan, ACQUIRE_ENTITY answers NOT_SUPPORTED (Milan v1.3
 Section 5.4.2.1).
 
-`AudioIoConfig::milan_version` (default v1.3) is the Milan version a Milan
-entity implements: GET_MILAN_INFO's specification_version, the MVU layouts and
-commands (docs/MVU.md), GET_STREAM_INFO's form, the STREAM_OUTPUT counters'
-positions and the TSpec's MaxFrameSize below. Milan v1.3 Section 5.3.1 makes
-GET_MILAN_INFO's fields part of the entity model: an entity that changes its
-version or features reports another entity_model_id.
+A Milan entity implements Milan v1.3: GET_MILAN_INFO's specification_version,
+the MVU layouts and commands (docs/MVU.md), GET_STREAM_INFO's form, the
+STREAM_OUTPUT counters' positions and the TSpec's MaxFrameSize above. Milan
+v1.3 Section 5.3.1 makes GET_MILAN_INFO's fields part of the entity model: an
+entity that changes its features reports another entity_model_id.
 `AudioIoConfig::signal_presence` says the application reports each output's
 signal presence (`set_output_signal_presence`, a channel bit mask, reactor
 thread), kept to the channels the stream's format has, and cut again when a
@@ -152,8 +150,9 @@ probe window closing, a hold ending).
 
 The admitted set changes after an MSRP listener declaration for a talker stream
 is registered or withdrawn, after the Talker declarations are withdrawn, or
-when `poll_admission()` sees a grace window expire or a stream Started or
-Stopped. The host's `on_listener_ready` hook lands in `note_listener_ready`.
+when a stream is Started or Stopped, or when the kit's timer reaches the
+admission deadline (`on_admission_timer()`): the earliest end of a grace window
+whose listener is no longer registered (`admission_deadline()`). The host's `on_listener_ready` hook lands in `note_listener_ready`.
 
 The presentation time offset (Milan v1.2 Section 5.3.7.6) is changed with
 SET_STREAM_INFO (MSRP_ACC_LAT_VALID) or SET_MAX_TRANSIT_TIME while the stream
@@ -353,8 +352,8 @@ the ACMP connection count; STREAMING_WAIT after STOP_STREAMING until START_STREA
 before sustaining a connection.
 
 The response form is the AEM handler's `stream_info_layout()`: the profile's
-(Milan v1.3's IEEE 1722.1-2021 84 octets, Milan v1.2's 56, classic IEEE
-1722.1-2013's 48) unless `set_stream_info_layout` picks another. A controller tells them
+(Milan's IEEE 1722.1-2021 84 octets, classic IEEE 1722.1-2013's 48) unless
+`set_stream_info_layout` picks another, Milan v1.2's 56 among them. A controller tells them
 by length, and the form gives an output's msrp_accumulated_latency its meaning
 (Milan v1.3 Section 5.4.2.10.2): the presentation time offset in the older
 forms, the AccumulatedLatency the Talker Advertise declares (0, the bridges
@@ -386,8 +385,7 @@ STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX from the interval
 counts at IEEE 1722.1-2021's bit values 0x01, 0x02, 0x08, 0x10 and 0x80, and,
 once the application reports it, signal presence (Section 5.3.7.7.1) in
 ENTITY_SPECIFIC_9 (channels 0-31) and ENTITY_SPECIFIC_10 (32-59), channel 0 at
-the MSB, notified with the other counters at most once a second. Milan v1.2
-(Table 5.17) has the five at bit values 0x01-0x10. Classic (IEEE 1722.1-2021 Clause
+the MSB, notified with the other counters at most once a second. Classic (IEEE 1722.1-2021 Clause
 7.4.42.2.5): STREAM_START and STREAM_STOP as Milan's, then the running totals
 of mr toggles (bit 3), tu PDUs (bit 4) and PDUs (FRAMES_TX, bit 7).
 

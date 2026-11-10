@@ -116,7 +116,7 @@ AvbEntityKit::AvbEntityKit(
     , listener_specs_{listener_specs}
     , sample_rate_{sample_rate}
     , storage_handler_{handler}
-    , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size(), config.milan}
+    , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
     , gate_{config.gate_talker_on_listener, host_.components()}
     , declarations_{host_.components().profile.milan}
     , talker_{std::make_unique<TalkerStreams>(
@@ -145,9 +145,7 @@ AvbEntityKit::AvbEntityKit(
 
 void AvbEntityKit::configure_milan()
 {
-    // The Milan version and GET_MILAN_INFO's features, fixed before the entity is advertised
-    // (Milan v1.3 Section 5.4.4.1).
-    host_.components().set_milan_version(config_.milan_version);
+    // GET_MILAN_INFO's features, fixed before the entity is advertised (Milan v1.3 Section 5.4.4.1).
     host_.components().mvu_handler.set_extra_features(
         config_.signal_presence ? atdecc::mvu::MVU_FEATURES_TALKER_SIGNAL_PRESENCE : 0U);
     // Advertised, so reported from the start: no signal until the application says otherwise.
@@ -204,7 +202,7 @@ void AvbEntityKit::configure_class_a_domain()
     // it, and keep it on the NIC's VLAN filter for the listener streams (a
     // no-op until bind_listener_vlan()).
     host_.set_on_domain_vid_changed([this](uint16_t const vlan_id, TimePoint const time) {
-        talker_->set_vlan_id(vlan_id);
+        talker_->set_tag(stream_tag(vlan_id));
 #if defined(__linux__)
         listener_vlan_.follow(vlan_id);
 #endif
@@ -216,6 +214,14 @@ void AvbEntityKit::configure_class_a_domain()
     });
     host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
     host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
+}
+
+auto AvbEntityKit::stream_tag(uint16_t const vlan_id) const noexcept -> StreamTag
+{
+    // The SR class priority in use when adopted from a Domain, else the configured PCP.
+    auto const& msrp = host_.components().msrp_handler;
+    bool const adopted = msrp.domain().sr_class_priority != msrp.configured_domain().sr_class_priority;
+    return StreamTag{.vlan_id = vlan_id, .pcp = adopted ? msrp.domain().sr_class_priority : config_.stream_pcp};
 }
 
 void AvbEntityKit::wire_controller_hooks()
@@ -798,7 +804,7 @@ void AvbEntityKit::leave_rx_groups()
 auto AvbEntityKit::talkers_fit(uint16_t const index, uint64_t const word) const noexcept -> bool
 {
     auto const kbps = [this](StreamSpec const& s) {
-        return uint64_t{stream_bandwidth_kbps(talker_tspec(s, host_.components().profile), CLASS_A_INTERVALS_PER_SEC)};
+        return uint64_t{stream_bandwidth_kbps(talker_tspec(s), CLASS_A_INTERVALS_PER_SEC)};
     };
     uint64_t before = 0;
     uint64_t after = 0;
@@ -907,6 +913,7 @@ auto AvbEntityKit::admitted_talker_streams(GateTimePoint const now) const noexce
 void AvbEntityKit::note_admission(GateTimePoint const now)
 {
     update_output_streaming(now);
+    arm_admission_deadline(now);
     auto admitted = admitted_talker_streams(now);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
@@ -914,6 +921,24 @@ void AvbEntityKit::note_admission(GateTimePoint const now)
     admitted_ = admitted;
     if (on_admission_changed_) {
         on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
+}
+
+void AvbEntityKit::arm_admission_deadline(GateTimePoint const now) noexcept
+{
+    admission_deadline_.reset();
+    for (auto const& spec : talker_specs_) {
+        // A grace running out: one not yet past, its listener no longer registered (admitted at its end).
+        if (auto const ends = gate_.grace_ends(spec.index); ends && now < *ends && !gate_.listener_admitted(spec.index, *ends)) {
+            admission_deadline_ = std::min(admission_deadline_.value_or(*ends), *ends);
+        }
+    }
+}
+
+void AvbEntityKit::on_admission_timer(GateTimePoint const now)
+{
+    if (admission_deadline_ && now >= *admission_deadline_) {
+        note_admission(now);
     }
 }
 
@@ -1725,18 +1750,12 @@ auto AvbEntityKit::open_talker_streams() -> Status
 
 void AvbEntityKit::open_stream_port()
 {
-    // An xdp backend that does not open falls back to rawnet when the host
-    // allows it, the reason kept (stream_xdp_error()).
     stream_tx_error_ = stream_rx_error_ = stream_xdp_error_ = stream_launch_time_error_ = std::error_code{};
     if (stream_port_.valid()) {
         log_stream_port();  // the host opened it before start() (a test port): kept
         return;
     }
-    auto opened = open_stream_port_on(config_.net_backend);
-    if (!opened && config_.net_backend == "xdp" && config_.net_xdp_fallback) {
-        stream_xdp_error_ = opened.error();
-        opened = open_stream_port_on("rawnet");
-    }
+    auto const opened = open_configured_stream_port();
     if (!opened) {
         stream_tx_error_ = opened.error();
         stream_rx_error_ = opened.error();
@@ -1744,15 +1763,12 @@ void AvbEntityKit::open_stream_port()
     log_stream_port();
 }
 
-auto AvbEntityKit::open_stream_port_on(std::string_view const backend) -> Status
+auto AvbEntityKit::open_configured_stream_port() -> Status
 {
-    auto config = stream_port_config(backend);
-    auto opened = stream_port_.open(config);
-    if (opened || !config.tx_launch_time) {
-        return opened;
-    }
-    config.tx_launch_time = false;  // the NIC, kernel or probe refused it: untimed, the reason kept
-    return stream_port_.open(config).transform([&] { stream_launch_time_error_ = opened.error(); });
+    auto opened = stream_port_.open_resolved(stream_port_config(config_.net_backend));
+    stream_xdp_error_ = stream_port_.xdp_error();
+    stream_launch_time_error_ = stream_port_.launch_time_error();
+    return opened;
 }
 
 void AvbEntityKit::log_stream_port()
@@ -1784,10 +1800,9 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     if (auto status = open_listener_streams(); !status) {
         return status;
     }
-    // In RT-timer mode the returned handler is kept alive here; the tool's
-    // SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake gPTP
-    // time, so RX can't be starved by the control plane. rx_to_reactor()
-    // is the way back should that timer not start.
+    // In RT-timer mode the handler is kept here for the tool's SCHED_FIFO RX timer (drain_stream_rx(),
+    // its wake's gPTP time), so the control plane cannot starve RX; rx_to_reactor() is the way back
+    // should that timer not start.
     if (!stream_rx_error_) {
         if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
@@ -1823,10 +1838,8 @@ auto AvbEntityKit::open_listener_streams() -> Status
     // recovery unless the host bound it (set_crf before start); the ACMP listener
     // callbacks (wired above) drive the MSRP attach + the multicast join per connection.
     auto const recovery_input = crf_recovery_input();
-    // Static RX groups: an audio input pre-joins the same-kind talker
-    // output's group (the loopback topology listens on its own output
-    // group); everything else joins dynamically on ACMP connect (a zero
-    // MAC just opens the socket).
+    // Static RX groups: an audio input pre-joins the same-kind talker output's group (the loopback
+    // topology listens on its own); everything else joins on ACMP connect (a zero MAC opens the socket).
     rx_static_groups_.clear();
     for (auto const& spec : listener_specs_) {
         if (auto status = listener_->open_stream(spec); !status) {
@@ -1953,6 +1966,9 @@ void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
     // response.
     if (persist_pending_) {
         persist();
+    }
+    if (admission_deadline_) {
+        on_admission_timer(net::rx_clock_now());  // the gate's clock, read while a grace runs
     }
     if (!host_.is_running()) {
         return;
@@ -2411,7 +2427,7 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     }
     // TSpec from the format word (kit phase 1) — no per-entity byte math to
     // keep in step with the model; the hardware shaper sizes by the same one.
-    auto const tspec = talker_tspec(spec, host_.components().profile);
+    auto const tspec = talker_tspec(spec);
     info.max_interval_frames = tspec.max_interval_frames;
     info.max_frame_size = tspec.max_frame_size;
     return info;

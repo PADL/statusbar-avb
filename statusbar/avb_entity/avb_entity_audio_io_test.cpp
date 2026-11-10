@@ -19,6 +19,7 @@
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
@@ -72,7 +73,7 @@ auto make_config_with_blob(std::vector<uint8_t> blob) -> AvbEntityAudioIOConfig
     config.descriptor_storage_blob = std::move(blob);
     // The ACMP tests below drive the classic 1722.1 listener (CONNECT_RX
     // relayed as CONNECT_TX); the Milan listener has its own tests.
-    config.milan = false;
+    config.descriptor_storage_blob = nanoavb::with_classic_profile(config.descriptor_storage_blob);
     return config;
 }
 

@@ -162,6 +162,7 @@ void SrpPort::withdraw_all(TimePoint const now)
     }
     msrp_.withdraw_all(now);
     mvrp_.withdraw_all(now);
+    reported_leaves_.clear();  // the next run reports afresh
 }
 
 void SrpPort::rejoin(TimePoint const now)
@@ -196,6 +197,14 @@ auto SrpPort::find_registered_talker_failed(Eui48 const& destination, uint16_t c
 
 void SrpPort::on_vid_changed(uint16_t const old_vid, uint16_t const new_vid, TimePoint const now)
 {
+    domain_changed_ = true;  // reported by flush_domain() once the PDU is done
+    if (old_vid != new_vid) {
+        move_talkers(old_vid, new_vid, now);
+    }
+}
+
+void SrpPort::move_talkers(uint16_t const old_vid, uint16_t const new_vid, TimePoint const now)
+{
     (void)mvrp_.withdraw_vlan(old_vid, now);
     (void)mvrp_.register_vlan(new_vid, now);
     for (size_t i = 0; i < msrp_.talker_streams().size(); ++i) {
@@ -205,7 +214,6 @@ void SrpPort::on_vid_changed(uint16_t const old_vid, uint16_t const new_vid, Tim
             (void)msrp_.talker_advertise(info, now);  // updates the entry in place
         }
     }
-    domain_changed_ = true;  // reported by flush_domain() once the PDU is done
 }
 
 void SrpPort::on_peer_domain_declared(statusbar::srp::msrp::DomainFirstValue const& fv) noexcept
@@ -247,7 +255,7 @@ void SrpPort::report_leave(StreamId const& stream_id)
     if (msrp_.peer_talker_in(stream_id) || std::ranges::contains(reported_leaves_, stream_id)) {
         return;
     }
-    (void)reported_leaves_.try_push_back(stream_id);
+    (void)reported_leaves_.try_push_back(stream_id);  // each still registered: room for every one
     if (observer_.on_talker_leave) {
         observer_.on_talker_leave(stream_id);
     }
@@ -265,8 +273,19 @@ void SrpPort::flush()
     for (auto const& sid : pending_leaves_) {
         report_leave(sid);
     }
+    if (!pending_leaves_.empty()) {
+        forget_left_talkers();  // a LeaveTime expiry is a leave too: its registration has gone
+    }
     pending_leaves_.clear();
     flush_domain();
+}
+
+void SrpPort::forget_left_talkers() noexcept
+{
+    auto const gone = std::ranges::remove_if(reported_leaves_, [this](StreamId const& sid) {
+        return msrp_.peer_talker_advertise(sid) == nullptr && msrp_.peer_talker_failed(sid) == nullptr;
+    });
+    reported_leaves_.erase(gone.begin(), gone.end());
 }
 
 void SrpPort::flush_domain()

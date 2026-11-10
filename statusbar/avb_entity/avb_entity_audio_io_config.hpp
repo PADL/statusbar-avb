@@ -8,7 +8,6 @@
 /// EntityUdptunBridge can hold a config_ ref without an include cycle.
 
 #include "statusbar/ieee/ieee.hpp"
-#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
@@ -46,6 +45,7 @@ struct AvbEntityAudioIOConfig
     /// queue with the stream subtypes steered into it (Linux, needs the XDP
     /// program loadable, zero-copy only on a NIC with a native driver). The
     /// control plane stays on its own raw socket whichever this is.
+    /// "auto" is xdp, else rawnet, the reason kept (StreamPort::open_resolved()).
     std::string net_backend{"rawnet"};
 
     /// The NIC queue the xdp backend binds to.
@@ -55,9 +55,6 @@ struct AvbEntityAudioIOConfig
     net::XdpAttachMode net_xdp_attach_mode{net::XdpAttachMode::native};
     /// Where the xdp backend pins its program and maps (bpffs); empty: not pinned.
     std::string net_xdp_pin_path{};
-    /// Open rawnet when the xdp backend does not open, the reason kept
-    /// (AvbEntityKit::stream_xdp_error()); false: no stream port then.
-    bool net_xdp_fallback{false};
     /// Give each stream frame a launch time (AF_XDP TX metadata, the NIC's
     /// etf/TBS), in the sending PHC's time; xdp backend only.
     bool stream_launch_time{false};
@@ -193,17 +190,8 @@ struct AvbEntityAudioIOConfig
     /// is deferred until there is an IP-stream use case. Default "2016".
     std::string atdecc_version{"2016"};
 
-    /// The ATDECC profile: true Milan, false classic IEEE 1722.1. Unset follows
-    /// the model's (Milan when it says nothing). Under Milan, ACQUIRE_ENTITY answers
-    /// NOT_SUPPORTED (Milan v1.3 Section 5.4.2.1).
-    std::optional<bool> milan{};
-
-    /// The Milan version a Milan entity implements (GET_MILAN_INFO's specification_version and
-    /// every layout that differs; nanoavb::MilanVersion). Default Milan v1.3.
-    nanoavb::MilanVersion milan_version{nanoavb::MilanVersion::v1_3};
-
     /// The application reports each output's signal presence (AvbEntityKit::set_output_signal_presence):
-    /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan v1.3 only.
+    /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan only.
     bool signal_presence{false};
 
     /// Each CLOCK_DOMAIN's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1), by

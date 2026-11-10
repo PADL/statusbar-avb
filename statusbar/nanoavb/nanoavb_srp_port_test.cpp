@@ -221,7 +221,7 @@ TEST(nanoavb_srp_port, a_talker_failed_is_reported_and_asked_for)
     EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::AskingFailed);
 }
 
-// Milan v1.2 Section 4.2.7.2.1: the bridge's Class A VID is adopted; the port moves its MVRP join
+// Milan v1.3 Section 4.2.7.2.1: the bridge's Class A VID is adopted; the port moves its MVRP join
 // and re-advertises its talker on it, and declare_domain() (link up) returns to the configured VID.
 TEST(nanoavb_srp_port, an_adopted_vid_moves_the_vlan_and_the_talkers)
 {
@@ -250,20 +250,25 @@ TEST(nanoavb_srp_port, an_adopted_vid_moves_the_vlan_and_the_talkers)
     EXPECT_TRUE(b.port.msrp().get_talker_stream(stream_id(3))->vlan_id == 2);
 }
 
-// IEEE 802.1Q-2022 Clause 35.2.1.4: a peer's Class A Domain at another SRclassPriority leaves the
-// port an SRP domain boundary; it is neither adopted nor reported as registered.
-TEST(nanoavb_srp_port, a_peer_domain_at_another_priority_is_a_boundary)
+// Milan v1.3 Section 4.2.7.2.1: a peer's Class A Domain at another SRclassPriority is adopted, so
+// the port is no SRP domain boundary (IEEE 802.1Q-2022 Clause 35.2.1.4), and its talkers follow.
+TEST(nanoavb_srp_port, a_peer_domain_at_another_priority_is_adopted)
 {
     Bridge b{};
     std::vector<std::pair<uint16_t, bool>> reports{};
     b.port.set_observer(
         SrpPortObserver{.on_domain = [&](DomainInfo const& d, bool const r) { reports.emplace_back(d.sr_class_vid, r); }});
     EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+    EXPECT_TRUE(b.port.declare_talker(talker(3), b.now).has_value());
     (void)b.bridge.declare_domain(Bridge::domain(7, 2), b.now);
     b.run(8);
-    EXPECT_FALSE(b.port.peer_domain_registered());
-    EXPECT_EQ(b.port.domain().sr_class_vid, 2);
-    EXPECT_TRUE(reports.empty());
+    EXPECT_TRUE(b.port.peer_domain_registered());
+    EXPECT_EQ(b.port.domain().sr_class_priority, 2);
+    EXPECT_EQ(b.port.domain().sr_class_vid, 7);
+    using Reports = std::vector<std::pair<uint16_t, bool>>;
+    EXPECT_TRUE(reports == Reports({{7, true}}));
+    auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(3));
+    EXPECT_FALSE(fv == nullptr || fv->get_priority() != 2 || fv->vlan_identifier.get() != 7);
 }
 
 // A Class B port (IEEE 802.1Q-2022 Clause 35.2.2.9) declares SRclassID 5 at priority 2, counts only the
@@ -284,6 +289,31 @@ TEST(nanoavb_srp_port, a_class_b_port_follows_the_class_b_domain)
     EXPECT_EQ(b.port.domain().sr_class_vid, 7);
     auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(4));
     EXPECT_TRUE(fv != nullptr && fv->get_priority() == 2 && fv->vlan_identifier.get() == 7);
+}
+
+// Each class's port adopts its own class's priority alone (Milan v1.3 Section 4.2.7.2.1): its talkers
+// are declared again at it and the Domain reported, the VID kept; declare_domain() at link up restores it.
+TEST(nanoavb_srp_port, a_priority_only_domain_is_adopted_by_its_class_and_reset)
+{
+    for (auto const& configured : {DomainInfo{}, CLASS_B_DOMAIN}) {
+        Bridge b{configured};
+        std::vector<std::pair<uint8_t, bool>> reports{};
+        b.port.set_observer(
+            SrpPortObserver{.on_domain = [&](DomainInfo const& d, bool const r) { reports.emplace_back(d.sr_class_priority, r); }});
+        EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+        EXPECT_TRUE(b.port.declare_talker(talker(5), b.now).has_value());
+        auto const other = static_cast<uint8_t>(configured.sr_class_priority == 3 ? 4 : 1);
+        (void)b.bridge.declare_domain(Bridge::domain(configured.sr_class_vid, other, configured.sr_class_id), b.now);
+        b.run(8);
+        EXPECT_EQ(b.port.domain().sr_class_priority, other);
+        EXPECT_EQ(b.port.domain().sr_class_vid, configured.sr_class_vid);
+        EXPECT_FALSE(reports.empty() || reports.back().first != other || !reports.back().second);
+        auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(5));
+        EXPECT_FALSE(fv == nullptr || fv->get_priority() != other);
+        EXPECT_TRUE(b.port.declare_domain(b.now).has_value());  // a link up
+        EXPECT_EQ(b.port.domain().sr_class_priority, configured.sr_class_priority);
+        EXPECT_EQ(b.port.msrp().get_talker_stream(stream_id(5))->priority, configured.sr_class_priority);
+    }
 }
 
 // After a link down and up (IEEE 802.1Q-2022 Clauses 10.7.5.2, 10.7.5.8): rejoin() forgets the peer's Listener
@@ -404,6 +434,32 @@ TEST(nanoavb_srp_port, a_talker_leave_is_reported_when_it_arrives)
     EXPECT_EQ(leaves, 1);
     b.run(12);
     EXPECT_EQ(leaves, 1);
+}
+
+// A reported leave is forgotten once its LeaveTime has run out (IEEE 802.1Q-2022 Clause 10.7.7), so
+// more StreamIDs than the port holds attributes for each leave, and each leave is reported once.
+TEST(nanoavb_srp_port, every_one_of_more_talkers_than_the_table_holds_leaves_once)
+{
+    Bridge b{};
+    int leaves = 0;
+    b.port.set_observer(SrpPortObserver{.on_talker_leave = [&](StreamId const&) { ++leaves; }});
+    constexpr int TALKERS = 520;  // more than the 512 talker attributes the port holds
+    int registered = 0;           // a declaration the bridge's full PDU deferred may not arrive in time
+    for (int uid = 0; uid < TALKERS; ++uid) {
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fv.stream_id = stream_id(static_cast<uint16_t>(0x200 + uid));
+        fv.destination_address = GROUP;
+        fv.vlan_identifier = 2;
+        fv.max_frame_size = 185;
+        fv.max_interval_frames = 1;
+        (void)b.bridge.declare_talker_advertise(fv, b.now);
+        b.run(4);
+        registered += b.port.msrp().peer_talker_advertise(fv.stream_id) != nullptr ? 1 : 0;
+        (void)b.bridge.withdraw_talker(fv.stream_id, b.now);
+        b.run(8);
+    }
+    EXPECT_TRUE(registered > 512);
+    EXPECT_EQ(leaves, registered);
 }
 
 // The port's participant holds every advertise a bridge propagates (Clause 35.2.2.8.3 discovery):

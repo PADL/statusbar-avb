@@ -496,7 +496,10 @@ auto ShaperQdiscs::program(CbsTargets const& targets, uint32_t const link_mbps) 
     link_mbps_ = link_mbps;
     auto status = program_classes(targets);
     // Class A's queue alone carries the AF_XDP socket's timed frames; class B's (AF_PACKET) gets none.
-    settle_etf(layout_.class_a_queue, class_a_, etf_a_, logging::lit("A"));
+    // Told last, the etf settled: the listener may change the launch-time mode (set_launch_time()).
+    if (auto const settled = settle_etf(layout_.class_a_queue, class_a_, etf_a_, logging::lit("A")); settled && on_etf_settled_) {
+        on_etf_settled_(*settled);
+    }
     return status;
 }
 
@@ -524,11 +527,12 @@ void ShaperQdiscs::set_launch_time(LaunchTimeMode const mode, int32_t const delt
     etf_delta_ns_ = delta_ns;
 }
 
-void ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current, EtfState& state, logging::StrLit const label)
+auto ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current, EtfState& state, logging::StrLit const label)
+    -> std::optional<std::error_code>
 {
     // Under our cbs once it is on the queue; with no cbs offload, on the queue's mqprio class.
     if (launch_time_mode_ == LaunchTimeMode::unsupported || state.settled || etf_error_ || (current.empty() && !cbs_refused_a_)) {
-        return;
+        return std::nullopt;
     }
     bool const on = launch_time_mode_ == LaunchTimeMode::on;
     auto const status = etf_slot(queue, !current.empty()).and_then([&](EtfSlot const& slot) {
@@ -545,9 +549,10 @@ void ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current
             etf_error_.value(),
             logging::embed<32>(tc_.last_message()),
             on ? logging::lit("no launch time") : logging::lit("an earlier etf stays"));
-        return;
+        return on ? std::optional{etf_error_} : std::nullopt;
     }
     state = EtfState{.settled = true, .placed = on};
+    return on ? std::optional{std::error_code{}} : std::nullopt;
 }
 
 auto ShaperQdiscs::etf_slot(uint16_t const queue, bool const under_cbs) -> StatusValue<EtfSlot>
@@ -1109,7 +1114,7 @@ void EntityShaper::program_admitted() noexcept
     for (uint16_t const index : admitted_) {
         for (auto const& spec : kit_.talker_specs()) {
             if (spec.index == index) {
-                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec, kit_.host().components().profile));
+                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
             }
         }
     }

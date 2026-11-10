@@ -499,10 +499,9 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams,
-    std::optional<bool> const milan)
+    size_t const listener_max_streams)
     : entity_model{std::move(model)}
-    , profile{entity_profile_from_model(entity_model.descriptor_storage(), milan)}
+    , profile{entity_profile_from_model(entity_model.descriptor_storage())}
     , aem_handler{entity_model}
     , adp_advertiser{entity_model.get_entity(), AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
@@ -539,16 +538,9 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams,
-    std::optional<bool> const milan)
+    size_t const listener_max_streams)
     : NanoAvbComponents{
-          handler,
-          resolve_entity_descriptor(handler),
-          adp_config,
-          talker_max_streams,
-          talker_max_listeners,
-          listener_max_streams,
-          milan}
+          handler, resolve_entity_descriptor(handler), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
 {}
 
 NanoAvbComponents::NanoAvbComponents(
@@ -557,10 +549,9 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams,
-    std::optional<bool> const milan)
+    size_t const listener_max_streams)
     : entity_model{}  // empty: descriptors are served by the handler, not this member
-    , profile{entity_profile_from_model(handler.descriptor_storage(), milan)}
+    , profile{entity_profile_from_model(handler.descriptor_storage())}
     , aem_handler{handler}
     , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
@@ -574,12 +565,6 @@ NanoAvbComponents::NanoAvbComponents(
     wire_profile();
 }
 
-void NanoAvbComponents::set_milan_version(MilanVersion const version) noexcept
-{
-    profile.milan_version = version;
-    wire_profile();
-}
-
 void NanoAvbComponents::wire_mvu_binding()
 {
     aem_handler.set_profile(profile);
@@ -589,7 +574,7 @@ void NanoAvbComponents::wire_mvu_binding()
     mvu_handler.set_milan_listener(&acmp_listener.milan_sinks());
     acmp_listener.milan_sinks().set_on_info_ex_changed(
         [this](uint16_t const index) { mvu_handler.notify_stream_input_info_ex(index); });
-    acmp_listener.milan_sinks().set_configuration_departs(profile.milan_v1_3());
+    acmp_listener.milan_sinks().set_configuration_departs(profile.milan);
 }
 
 void NanoAvbComponents::wire_profile()
@@ -802,6 +787,7 @@ void wire_aecp(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
     // command (e.g. an IDENTIFY button pressed at startup). process_packet keeps it
     // current thereafter.
     components.aem_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
+    components.mvu_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
 }
 
 /// MVRP and MSRP transmit to their multicast addresses.

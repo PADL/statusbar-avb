@@ -50,12 +50,17 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace statusbar::avb_entity {
+
+/// The backend name that opens xdp, else rawnet (StreamPort::open_resolved()).
+inline constexpr std::string_view STREAM_BACKEND_AUTO{"auto"};
 
 struct StreamPortConfig
 {
     /// One of net::ETHERNET_BACKEND_CHOICES. Not a backend name: refused.
+    /// Or STREAM_BACKEND_AUTO: xdp, else rawnet (StreamPort::open_resolved()).
     std::string_view backend{"rawnet"};
     std::string_view interface_name;
     /// skb->priority for the stream frames, where the backend takes one.
@@ -137,6 +142,9 @@ class StreamPort
 
     [[nodiscard]] auto open(StreamPortConfig const& config) -> Status
     {
+        if (config.backend == STREAM_BACKEND_AUTO) {
+            return open_resolved(config);
+        }
         auto const backend = net::parse_ethernet_backend(config.backend);
         if (!backend) {
             return failure(net::NetError::invalid_argument);
@@ -161,6 +169,25 @@ class StreamPort
         settle_mode(status.has_value());
         return status;
     }
+    /// open() on @p config's backend, STREAM_BACKEND_AUTO being xdp, else rawnet (xdp_error() says why);
+    /// a launch time the backend refuses is dropped and the port opened untimed (launch_time_error()).
+    [[nodiscard]] auto open_resolved(StreamPortConfig const& config) -> Status
+    {
+        xdp_error_ = launch_time_error_ = std::error_code{};
+        if (config.backend != STREAM_BACKEND_AUTO) {
+            return open_timed(config);
+        }
+        auto opened = open_timed(on_backend(config, "xdp"));
+        if (!opened) {
+            xdp_error_ = opened.error();
+            opened = open_timed(on_backend(config, "rawnet"));
+        }
+        return opened;
+    }
+    /// Why the last open_resolved()'s auto backend did not open xdp; empty when it did or was not asked.
+    [[nodiscard]] auto xdp_error() const noexcept -> std::error_code { return xdp_error_; }
+    /// Why the last open_resolved() opened the port untimed; empty when it did not.
+    [[nodiscard]] auto launch_time_error() const noexcept -> std::error_code { return launch_time_error_; }
     /// An in-process test port (net::AnyEthernetPort::open_test), its frames
     /// timed as an xdp socket with TX metadata would be when @p launch_time
     /// (test_launch_time_: the one thing a test port cannot report itself).
@@ -276,6 +303,22 @@ class StreamPort
     }
 
   private:
+    /// open(), and once more untimed when a timed open is refused, the refusal kept.
+    [[nodiscard]] auto open_timed(StreamPortConfig config) -> Status
+    {
+        auto opened = open(config);
+        if (opened || !config.tx_launch_time) {
+            return opened;
+        }
+        config.tx_launch_time = false;
+        return open(config).transform([&] { launch_time_error_ = opened.error(); });
+    }
+    /// @p config on @p backend.
+    [[nodiscard]] static auto on_backend(StreamPortConfig config, std::string_view const backend) noexcept -> StreamPortConfig
+    {
+        config.backend = backend;
+        return config;
+    }
     /// The mode of the port open() opened (or none, when @p ok is false): its threading and timing.
     void settle_mode(bool const ok) noexcept
     {
@@ -304,6 +347,8 @@ class StreamPort
     net::ClockFn phc_{};
     net::LaunchOrder launch_order_{};
     std::atomic<bool> reset_pending_{false};
+    std::error_code xdp_error_{};          ///< open_resolved()'s
+    std::error_code launch_time_error_{};  ///< open_resolved()'s
 };
 
 }  // namespace statusbar::avb_entity

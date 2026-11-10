@@ -636,6 +636,13 @@ TEST(talker_port, aaf_frame_is_the_tagged_frame_send_vlan_builds)
     EXPECT_TRUE(second.has_value());
     EXPECT_TRUE(same_bytes(second->frame, vlan_frame(std::span{expected}.first(len2), 0x123, 3)));
     EXPECT_EQ(slot->tx_packets, uint64_t{2});
+
+    // An adopted Domain's priority (IEEE 802.1Q-2022 Clause 35.2.2.8.5) tags the next frame.
+    talker.set_tag(avb_entity::StreamTag{.vlan_id = 0x123, .pcp = 2});
+    EXPECT_TRUE(talker.transmit_aaf_raw(*slot, 1224, pts + 250'000, 12, render));
+    size_t const len3 = avb_entity::serialize_aaf_raw(twin, expected, 12, 1224, pts + 250'000, render);
+    auto const third = wire.pop_tx();
+    EXPECT_TRUE(third.has_value() && same_bytes(third->frame, vlan_frame(std::span{expected}.first(len3), 0x123, 2)));
 }
 
 namespace {
@@ -917,8 +924,8 @@ TEST(talker_port, am824_frames_carry_the_streams_own_rate)
         media_clock,
         last_gptp_ns,
         std::pmr::get_default_resource()};
-    EXPECT_TRUE(talker.open_stream(spec_of(0, avtp::make_am824_stream_format(2, 2)), kStreamId, kDest).has_value());
-    EXPECT_TRUE(talker.reformat_stream(spec_of(0, avtp::make_am824_stream_format(4, 2))).has_value());
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x00a0020240000200ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, 0x00a0040240000200ULL)).has_value());
     EXPECT_TRUE(talker.open_tx(port).has_value());
     auto* slot = talker.slot_for(0);
     EXPECT_TRUE(slot != nullptr && slot->am824.has_value());
@@ -982,7 +989,7 @@ TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numb
     for (int i = 0; i < 3; ++i, index += 6) {
         EXPECT_TRUE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
     }
-    EXPECT_TRUE(talker.reformat_stream(spec_of(0, avtp::make_am824_stream_format(2, 2))).has_value());
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, 0x00a0020240000200ULL)).has_value());
     EXPECT_TRUE(slot->am824.has_value() && !slot->aaf.has_value() && !slot->reframer.has_value());
     EXPECT_FALSE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
     for (int i = 0; i < 2; ++i, index += 6) {
@@ -1090,6 +1097,20 @@ TEST(talker_crf, close_tx_forgets_the_crf_streams)
     auto const pdu = avtp::crf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(VLAN_HEADER_LENGTH));
     EXPECT_TRUE(pdu.has_value() && !pdu->mr());
     EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
+}
+
+// The stream tag packs into one word for its wait-free atomic and back unchanged, at the field limits too.
+TEST(talker_streams, a_stream_tag_round_trips_through_its_packed_word)
+{
+    for (auto const tag :
+         {avb_entity::StreamTag{.vlan_id = 2, .pcp = 3},
+          avb_entity::StreamTag{.vlan_id = 0x0FFF, .pcp = 7},
+          avb_entity::StreamTag{}}) {
+        auto const back = avb_entity::StreamTag::unpacked(tag.packed());
+        EXPECT_EQ(back.vlan_id, tag.vlan_id);
+        EXPECT_EQ(back.pcp, tag.pcp);
+    }
+    EXPECT_EQ((avb_entity::StreamTag{.vlan_id = 0x123, .pcp = 2}.packed()), uint32_t{0x0002'0123});
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

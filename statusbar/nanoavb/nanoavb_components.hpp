@@ -378,15 +378,12 @@ struct NanoAvbComponents
     /// @param talker_max_streams    Max talker streams.
     /// @param talker_max_listeners  Max listeners per talker stream.
     /// @param listener_max_streams  Max listener streams.
-    /// @param milan                 Profile override (EntityProfile): unset follows
-    ///                              the model's (its ENTITY symbol), else Milan.
     NanoAvbComponents(
         EntityModel model,
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan = std::nullopt);
+        size_t listener_max_streams);
 
     /// Symbol-aware construction: serve descriptors (and resolve their well-known
     /// symbols) through a caller-owned @p handler — typically a DescriptorStorageHandler
@@ -399,8 +396,7 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan = std::nullopt);
+        size_t listener_max_streams);
 
     NanoAvbComponents(NanoAvbComponents const&) = delete;
     auto operator=(NanoAvbComponents const&) -> NanoAvbComponents& = delete;
@@ -417,8 +413,7 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan);
+        size_t listener_max_streams);
 
   public:
     // Declaration order matters: `entity_model` must precede the handlers that
@@ -437,15 +432,11 @@ struct NanoAvbComponents
 
     void print_info() const;
 
-    /// The Milan version a Milan entity implements (EntityProfile::milan_version): set before the
-    /// entity is advertised, as GET_MILAN_INFO may not change (Milan v1.3 Section 5.4.4.1).
-    void set_milan_version(MilanVersion version) noexcept;
-
     /// Get total talker connection count
     [[nodiscard]] auto talker_connection_count() const -> size_t;
 
   private:
-    /// Every reader of profile told it (both constructors, set_milan_version); each install is idempotent.
+    /// Every reader of profile told it (both constructors); each install is idempotent.
     void wire_profile();
     /// The AEM and MVU handlers' profile, and the MVU handler on the Milan sinks (Milan v1.3 Sections 5.4.4.6-8).
     void wire_mvu_binding();
@@ -577,8 +568,6 @@ class NanoAvbNetHandlers
 
     /// The local ATDECC port, or nullptr (none configured, or it would not open).
     [[nodiscard]] auto local_port() noexcept -> AtdeccLocalPort* { return local_ptr_; }
-    /// Why the configured local port would not open (empty: it opened).
-    [[nodiscard]] auto local_port_error() const noexcept -> std::error_code { return local_port_error_; }
 
     /// Close the local port and detach it from the ATDECC handler. Call while
     /// the reactor (which owns both) is alive, before destroying this.

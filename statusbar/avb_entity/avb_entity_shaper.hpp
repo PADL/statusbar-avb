@@ -10,6 +10,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/net/net_tc_launch_time.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
@@ -112,11 +113,9 @@ struct QueueLayout
 /// priority, so the SR classes use the bottom queues.
 [[nodiscard]] auto is_intel_qav_driver(std::string_view driver) noexcept -> bool;
 
-/// The queue layout for @p driver with @p tx_queues TX queues (docs/SHAPER.md, "Queue order per
-/// driver"); an explicit @p override wins. On igb/igc a port running class B alone puts it on queue 0, the one
-/// igc shapes first, and refuses it elsewhere. With two legacy queues or more, PTP uses the one next to the SR
-/// classes.
-/// Errors: ShaperError::not_avb_capable below MIN_AVB_TX_QUEUES; bad_queue_override.
+/// The queue layout for @p driver with @p tx_queues TX queues, an explicit @p override winning (docs/SHAPER.md,
+/// "Queue order per driver": class B alone on igb/igc, PTP's queue). Errors: ShaperError::not_avb_capable below
+/// MIN_AVB_TX_QUEUES; bad_queue_override.
 [[nodiscard]] auto make_queue_layout(
     std::string_view driver, uint16_t tx_queues, QueueOverride const& override = {}, SrClasses classes = SrClasses::a)
     -> StatusValue<QueueLayout>;
@@ -308,6 +307,10 @@ class ShaperQdiscs
     /// and again after each change of mode: under our cbs, or on the mqprio class with no cbs offload;
     /// offloaded, CLOCK_TAI, @p delta_ns, skip_sock_check. Unsupported until set.
     void set_launch_time(LaunchTimeMode mode, int32_t delta_ns = DEFAULT_ETF_DELTA_NS) noexcept;
+    /// Told, with launch time on, how class A's etf settled: placed (no error) or the refusal. Called last
+    /// in program(), so it may call set_launch_time().
+    using EtfSettledFn = sg14::inplace_function<void(std::error_code), 32>;
+    void set_on_etf_settled(EtfSettledFn fn) noexcept { on_etf_settled_ = std::move(fn); }
     /// Remove everything: pfifo_fast on class B's queue, then class A's, then delete the mqprio
     /// root (one adapter reset on igb/igc). A no-op success when not installed.
     [[nodiscard]] auto uninstall() -> Status;
@@ -319,14 +322,10 @@ class ShaperQdiscs
     [[nodiscard]] auto reused() const noexcept -> bool { return reused_; }
     /// Whether the driver refused cbs offload (EOPNOTSUPP, EINVAL) on class A's queue, and so on both.
     [[nodiscard]] auto cbs_unsupported() const noexcept -> bool { return cbs_refused_a_; }
-    /// Whether it refused it on class B's queue alone (igc offloads cbs on queues 0 and 1).
-    [[nodiscard]] auto class_b_cbs_refused() const noexcept -> bool { return cbs_refused_b_; }
     /// The mode set_launch_time() gave.
     [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return launch_time_mode_; }
     /// Whether our etf is on class A's queue, under its cbs or alone (LaunchTimeMode::on, settled).
     [[nodiscard]] auto launch_time() const noexcept -> bool { return etf_a_.placed; }
-    /// The etf request that failed (logged; no further etf requests until the next install()).
-    [[nodiscard]] auto etf_error() const noexcept -> std::error_code { return etf_error_; }
     /// What is programmed now (empty: no cbs of ours on that class's queue).
     [[nodiscard]] auto class_a() const noexcept -> CbsParameters const& { return class_a_; }
     [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return class_b_; }
@@ -354,8 +353,10 @@ class ShaperQdiscs
     /// A's was refused. Errors: the first failure.
     [[nodiscard]] auto program_classes(CbsTargets const& targets) -> Status;
     /// Bring class @p label's queue @p queue to the launch-time mode once our cbs is on it (@p current), or
-    /// at once with no cbs offload.
-    void settle_etf(uint16_t queue, CbsParameters const& current, EtfState& state, logging::StrLit label);
+    /// at once with no cbs offload. With launch time on, how the etf settled (an error: refused) for
+    /// on_etf_settled_; nullopt otherwise.
+    [[nodiscard]] auto settle_etf(uint16_t queue, CbsParameters const& current, EtfState& state, logging::StrLit label)
+        -> std::optional<std::error_code>;
     /// The etf slot on @p queue: under our cbs (@p under_cbs), else the mqprio class itself. Errors: the
     /// netlink errno.
     [[nodiscard]] auto etf_slot(uint16_t queue, bool under_cbs) -> StatusValue<EtfSlot>;
@@ -412,6 +413,7 @@ class ShaperQdiscs
     uint16_t cbs_major_b_{0};
     LaunchTimeMode launch_time_mode_{LaunchTimeMode::unsupported};
     int32_t etf_delta_ns_{DEFAULT_ETF_DELTA_NS};
+    EtfSettledFn on_etf_settled_{};
     EtfState etf_a_{};
     std::error_code etf_error_{};
 };
@@ -493,6 +495,8 @@ class PortShaper final : public net::Pollable
     /// Another launch-time mode: settled by the next tick(); under a cbs that stays no adapter reset, but
     /// with no cbs offload each change switches igc's TSN mode (a reset). A no-op before install().
     void set_launch_time(LaunchTimeMode mode) noexcept;
+    /// See ShaperQdiscs::set_on_etf_settled: the etf's outcome with launch time on, from tick().
+    void set_on_etf_settled(ShaperQdiscs::EtfSettledFn fn) noexcept { qdiscs_.set_on_etf_settled(std::move(fn)); }
     /// Program the cbs for the TSpecs given and the current link speed now. A no-op success before
     /// install(). Errors: the first netlink failure (each is logged).
     [[nodiscard]] auto reprogram() -> Status;
@@ -592,6 +596,8 @@ class EntityShaper final : public net::Pollable
     void on_admission_changed(std::span<uint16_t const> admitted) noexcept;
     /// See PortShaper::set_launch_time.
     void set_launch_time(LaunchTimeMode mode) noexcept { port_.set_launch_time(mode); }
+    /// See PortShaper::set_on_etf_settled.
+    void set_on_etf_settled(ShaperQdiscs::EtfSettledFn fn) noexcept { port_.set_on_etf_settled(std::move(fn)); }
     /// Recompute and program the cbs for the recorded admitted set and the
     /// current link speed. A no-op success before install(). Errors: the
     /// first netlink failure (each is logged).

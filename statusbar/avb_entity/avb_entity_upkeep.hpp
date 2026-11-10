@@ -24,14 +24,11 @@ class EntityUpkeep final : public net::Pollable
   public:
     /// How long the supervisor may sit in Init (no gPTP lock) before on_timeout.
     static constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
-    static constexpr size_t MAX_LOG_CHANNELS = 4;
+    static constexpr size_t MAX_LOG_CHANNELS = 2;  ///< the kit's ctl and media channels
 
     /// Upkeep for @p kit, draining its ctl and media log channels to @p sink
     /// (both must outlive this).
     EntityUpkeep(AvbEntityKit& kit, logging::LogSink& sink);
-
-    /// Drain another log channel too (false when full).
-    [[nodiscard]] auto add_log_channel(logging::LogChannelBase& channel) noexcept -> bool { return collector_.add(channel); }
 
     /// The first link-up, a LinkMonitor on @p interface_name and the
     /// grandmaster-changed callback, for @p kit on @p reactor. Once, after the
@@ -51,7 +48,7 @@ class EntityUpkeep final : public net::Pollable
     void note_state(std::chrono::steady_clock::time_point now);
     /// A grandmaster regained under the same identity, and the gPTP lock watchdog.
     void watch_gptp(std::chrono::steady_clock::time_point now);
-    /// Re-evaluate talker admission and the stream counters at @p now.
+    /// Fold the stream counters at @p now.
     void reevaluate(std::chrono::steady_clock::time_point now);
 
     AvbEntityKit& kit_;

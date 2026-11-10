@@ -99,9 +99,8 @@ class SrpPort
     [[nodiscard]] auto add_to_reactor(net::MessageReactor& reactor) -> Status;
     /// Send MSRPDUs through @p msrp and MVRPDUs through @p mvrp instead (tests, or other I/O).
     void set_senders(SendFn msrp, SendFn mvrp) noexcept;
-    /// Feed a received MSRPDU / MVRPDU (payload only) at @p now; add_to_reactor's sockets do this.
+    /// Feed a received MSRPDU (payload only) at @p now; add_to_reactor's sockets do this.
     void receive_msrp(std::span<uint8_t const> pdu, TimePoint now);
-    void receive_mvrp(std::span<uint8_t const> pdu, TimePoint now) { mvrp_.receive_packet(pdu, now); }
     /// Run the MSRP / MVRP timers at @p now; add_to_reactor's sockets do this every 10 ms.
     void tick_msrp(TimePoint now);
     void tick_mvrp(TimePoint now) { mvrp_.tick(now); }
@@ -148,10 +147,9 @@ class SrpPort
         return msrp_.registered_listener(stream_id);
     }
 
-    /// The handlers, for what the port does not wrap (another VLAN, the MSRP workarounds). The
-    /// Domain's VID is the port's: it is withdrawn when the Domain moves, whoever joined it.
-    /// Driving msrp() directly defers the Domain and leave reports to the next receive or tick;
-    /// declare_domain() called from an observer reports at once.
+    /// The handlers, for what the port does not wrap (another VLAN, the MSRP workarounds); the Domain's VID
+    /// is the port's, withdrawn when the Domain moves. Driving msrp() directly defers the Domain and leave
+    /// reports to the next receive or tick (declare_domain() from an observer reports at once).
     [[nodiscard]] auto msrp() noexcept -> SrpPortMsrpHandler& { return msrp_; }
     [[nodiscard]] auto mvrp() noexcept -> MvrpHandler& { return mvrp_; }
 
@@ -169,8 +167,10 @@ class SrpPort
     /// Send through the opened @p msrp and @p mvrp sockets and give them to @p reactor.
     void hand_over(
         net::MessageReactor& reactor, std::unique_ptr<MsrpNetHandlerT<MsrpIo>> msrp, std::unique_ptr<MvrpNetHandler> mvrp);
-    /// The Domain's VID moved: rejoin with MVRP and re-advertise the talkers on it.
+    /// The Domain changed, its VID or priority alone: reported, and a VID moved (move_talkers).
     void on_vid_changed(uint16_t old_vid, uint16_t new_vid, TimePoint now);
+    /// The Domain's VID moved: rejoin with MVRP and re-advertise the talkers on it.
+    void move_talkers(uint16_t old_vid, uint16_t new_vid, TimePoint now);
     /// A peer declared a Domain (@p fv as on the wire): keep its SRclassPriority for our SR class.
     void on_peer_domain_declared(statusbar::srp::msrp::DomainFirstValue const& fv) noexcept;
     /// A peer's Domain for our SR class registered (@p registered) or left.
@@ -183,6 +183,8 @@ class SrpPort
     void report_leave(StreamId const& stream_id);
     /// The talker leaves, then the Domain, as the received PDU or the tick left them.
     void flush();
+    /// Forget the reported leaves whose registration has gone (LeaveTime expired, record freed).
+    void forget_left_talkers() noexcept;
     /// A peer's Listener declaration for @p stream_id registered, changed or left.
     void on_peer_listener(StreamId const& stream_id);
     /// Report the Domain once, with its final state, if it changed since the last report.
@@ -206,7 +208,7 @@ class SrpPort
         statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_advertise +
             statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_failed>
         pending_leaves_{};
-    /// Talkers reported gone, so the leave's LeaveTime expiry is not reported again; a join clears one.
+    /// Talkers reported gone and still registered Leaving, so their LeaveTime expiry is not reported again.
     sg14::inplace_vector<
         StreamId,
         statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_advertise +

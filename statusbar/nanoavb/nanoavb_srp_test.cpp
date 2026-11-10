@@ -296,9 +296,28 @@ TEST(nanoavb_srp_msrp, adopts_bridge_class_a_vid_from_domain_vector)
     }
 }
 
-// Two adopting end stations on a direct link, configured VIDs 2 and 7: each
-// adopts at most once per link up instead of swapping each other's previous
-// value on every periodic PDU.
+// Milan v1.3 Section 4.2.7.2.1 has each Domain the bridge declares adopted; the entity adopts one per
+// link up (a deviation): a second VID waits for reset_domain(), which then adopts it.
+TEST(nanoavb_srp_msrp, a_later_class_a_domain_waits_for_the_next_link_up)
+{
+    DomainBench b{};
+    std::vector<std::pair<uint16_t, uint16_t>> changes{};
+    b.station.set_on_domain_vid_changed([&](uint16_t o, uint16_t n, TimePoint) { changes.emplace_back(o, n); });
+    (void)b.station.declare_domain(b.now);
+    (void)b.bridge.declare_domain(DomainBench::domain(6, 3, 7), b.now);
+    b.run(4);
+    (void)b.bridge.declare_domain(DomainBench::domain(6, 3, 9), b.now);
+    b.run(4);
+    EXPECT_EQ(b.station.domain().sr_class_vid, 7);
+    (void)b.station.reset_domain(b.now);
+    b.run(4);
+    EXPECT_EQ(b.station.domain().sr_class_vid, 9);
+    using Changes = std::vector<std::pair<uint16_t, uint16_t>>;
+    EXPECT_TRUE(changes == Changes({{2, 7}, {7, 2}, {2, 9}}));
+}
+
+// Two adopting end stations on a direct link, configured VIDs 2 and 7: each adopts at most once per
+// link up instead of swapping each other's previous value on every periodic PDU.
 TEST(nanoavb_srp_msrp, two_adopting_stations_do_not_oscillate)
 {
     TimePoint now{std::chrono::seconds{1}};
@@ -337,20 +356,35 @@ TEST(nanoavb_srp_msrp, two_adopting_stations_do_not_oscillate)
     EXPECT_TRUE(b_changes <= 1);
 }
 
-// A Class A domain at another priority is not adopted: our frames always use
-// PCP 3, so the port stays an SRP domain boundary (802.1Q 35.2.1.4 h). A
-// Class B domain never changes the Class A VID either.
-TEST(nanoavb_srp_msrp, ignores_class_a_domain_at_other_priority_and_class_b)
+// Milan v1.3 Section 4.2.7.2.1: a Class A Domain at another priority is adopted, priority and VID,
+// and the talkers are declared again at it (IEEE 802.1Q-2022 Clause 35.2.2.8.5). A Class B
+// Domain changes nothing.
+TEST(nanoavb_srp_msrp, adopts_a_class_a_domain_at_another_priority_and_ignores_class_b)
 {
     DomainBench b{};
-    bool changed = false;
-    b.station.set_on_domain_vid_changed([&](uint16_t, uint16_t, TimePoint) { changed = true; });
+    std::vector<std::pair<uint16_t, uint16_t>> changes{};
+    b.station.set_on_domain_vid_changed([&](uint16_t o, uint16_t n, TimePoint) { changes.emplace_back(o, n); });
     (void)b.station.declare_domain(b.now);
-    (void)b.bridge.declare_domain(DomainBench::domain(6, 2, 9), b.now);
+    TalkerStreamSrpInfo info{.max_frame_size = 224, .max_interval_frames = 1};
+    info.stream_id.set_unique_id(1);
+    EXPECT_TRUE(b.station.talker_advertise(info, b.now).has_value());
     (void)b.bridge.declare_domain(DomainBench::domain(5, 2, 11), b.now);
     b.run(4);
-    EXPECT_FALSE(changed);
+    EXPECT_TRUE(changes.empty());
+    (void)b.bridge.declare_domain(DomainBench::domain(6, 4, 2), b.now);
+    b.run(4);
+    EXPECT_EQ(b.station.domain().sr_class_priority, 4);
     EXPECT_EQ(b.station.domain().sr_class_vid, 2);
+    using Changes = std::vector<std::pair<uint16_t, uint16_t>>;
+    EXPECT_TRUE(changes == Changes({{2, 2}}));  // told, the VID unchanged: the frames' tag follows
+    EXPECT_EQ(b.station.talker_streams().front().priority, 4);
+    auto const* fv = b.bridge.find_registered_talker_advertise(info.stream_id);
+    EXPECT_FALSE(fv == nullptr || fv->get_priority() != 4);
+    // A link up returns to the configured Domain, and the talkers to its priority.
+    (void)b.station.reset_domain(b.now);
+    EXPECT_EQ(b.station.domain().sr_class_priority, 3);
+    EXPECT_EQ(b.station.talker_streams().front().priority, 3);
+    EXPECT_TRUE(changes == Changes({{2, 2}, {2, 2}}));
 }
 
 //

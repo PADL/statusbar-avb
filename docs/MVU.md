@@ -11,13 +11,10 @@ Clause 9.2.1.5) whose protocol_id is Avnu's MVU protocol, 00-1B-C5-0A-C1-00.
 `statusbar/nanoavb/nanoavb_mvu_handler.hpp` answers them for a nanoavb entity,
 beside the AEM handler.
 
-The entity implements one Milan version, `nanoavb::MilanVersion` in its
-`EntityProfile` (default v1.3; `NanoAvbComponents::set_milan_version`, the
-kit's `AvbEntityAudioIOConfig::milan_version`). It selects every MVU layout
-and rule that differs between v1.2 and v1.3, and GET_MILAN_INFO says which
-(specification_version, v1.3 only). Milan v1.3 Section 5.4.4.1 forbids
-changing GET_MILAN_INFO's fields at run time: set the version and the features
-before the entity is advertised.
+A Milan entity implements Milan v1.3, and GET_MILAN_INFO says so
+(specification_version 1.3.0.0). Milan v1.3 Section 5.4.4.1 forbids changing
+GET_MILAN_INFO's fields at run time: set the features before the entity is
+advertised.
 
 ## Wire format
 
@@ -30,32 +27,30 @@ Bytes 28-29: u (bit 15) | command_type (bits 14-0)
 Bytes 30+:   command_specific_data (per command, Section 5.4.4)
 ```
 
-u is set in an unsolicited response (Section 5.4.3.2.2; v1.2 calls the bit r,
-reserved). A frame shorter than the Ethernet minimum is padded; the padding is
+u is set in an unsolicited response (Section 5.4.3.2.2). A frame shorter than the Ethernet minimum is padded; the padding is
 not counted in control_data_length (Section 5.4.3.2).
 
-| Command | v1.3 layout | v1.2 layout |
-|---|---|---|
-| GET_MILAN_INFO response | 18 octets, with specification_version (Figure 5.6) | 14 octets (v1.2 Figure 5.4) |
-| SET/GET_SYSTEM_UNIQUE_ID | u64 number and 64-octet name, 74 octets (Figure 5.7) | one quadlet, 6 octets (v1.2 Figure 5.5) |
-| SET/GET_MEDIA_CLOCK_REFERENCE_INFO | 74 octets (Figure 5.8) | the same |
-| BIND_STREAM | 18 octets (Figure 5.10) | reserved command type |
-| UNBIND_STREAM, GET_STREAM_INPUT_INFO_EX command | 6 octets (Figure 5.11) | reserved |
-| GET_STREAM_INPUT_INFO_EX response | 18 octets (Figure 5.12) | reserved |
+| Command | Layout |
+|---|---|
+| GET_MILAN_INFO response | 18 octets, with specification_version (Figure 5.6) |
+| SET/GET_SYSTEM_UNIQUE_ID | u64 number and 64-octet name, 74 octets (Figure 5.7) |
+| SET/GET_MEDIA_CLOCK_REFERENCE_INFO | 74 octets (Figure 5.8) |
+| BIND_STREAM | 18 octets (Figure 5.10) |
+| UNBIND_STREAM, GET_STREAM_INPUT_INFO_EX command | 6 octets (Figure 5.11) |
+| GET_STREAM_INPUT_INFO_EX response | 18 octets (Figure 5.12) |
+
+`atdecc_aecp_mvu.hpp` keeps Milan v1.2's shorter GET_MILAN_INFO and
+SYSTEM_UNIQUE_ID layouts for controllers that read them.
 
 ### SYSTEM_UNIQUE_ID
 
-The v1.2 text calls system_unique_id "64 bit" but its Figure 5.5 draws one
-quadlet. The figure is followed, as la_avdecc (whose 1.2 payload is 6
-octets, the id a u32) does. la_avdecc (Hive) always sends the v1.3 form, so a
-v1.2 entity accepts its number when it fits the u32 and answers in the v1.2
-layout, which la_avdecc tells apart by its length. A v1.3 entity keeps the
-number and the name, answers in the 74-octet form, and refuses a shorter SET
-PAYLOAD_TOO_SHORT; 0 with an empty name is its factory default and may be set.
+The entity keeps the number and the name, answers in the 74-octet form, and
+refuses a shorter SET PAYLOAD_TOO_SHORT (Milan v1.2's 6-octet one among them);
+0 with an empty name is its factory default and may be set.
 
 ### GET_STREAM_INPUT_INFO_EX
 
-pbsta (3 bits) and acmpsta (5 bits) share one octet, as in v1.2's
+pbsta (3 bits) and acmpsta (5 bits) share one octet, as in Milan v1.2's
 GET_STREAM_INFO extension; the talker fields are zero for an unbound input.
 
 ## The handler
@@ -76,14 +71,13 @@ command's, as ACMP's `receive` is told its time).
 Implemented (Milan profile only):
 
 - GET_MILAN_INFO (Section 5.4.4.1): protocol_version 1, certification_version
-  (`set_certification_version`, 0 until certified), and in v1.3
+  0 (not certified),
   specification_version 1.3.0.0 and features_flags: MVU_BINDING when there
   are sinks to bind, plus what `set_extra_features` adds (the kit adds
   TALKER_SIGNAL_PRESENCE when the application reports signal presence). No
   REDUNDANCY, no TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING. A command without its
   reserved field is answered too (the receiver ignores it).
-- SET/GET_SYSTEM_UNIQUE_ID (Sections 5.4.4.2-3), as above; v1.2 refuses a SET
-  of 0 BAD_ARGUMENTS.
+- SET/GET_SYSTEM_UNIQUE_ID (Sections 5.4.4.2-3), as above.
 - SET/GET_MEDIA_CLOCK_REFERENCE_INFO (Sections 5.4.4.4-5, 7.6) per
   CLOCK_DOMAIN: default_mcr_prio, user_mcr_prio and media_clock_domain_name
   ("DEFAULT"). The default priority is MVU_MCR_PRIO_NETWORK_INTERFACE (192,
@@ -93,12 +87,12 @@ Implemented (Milan profile only):
   response carries every supported flag. Milan v1.3 Section 5.4.4.4 makes the
   default part of the entity model: an entity whose default changes reports a
   different entity_model_id.
-- BIND_STREAM and UNBIND_STREAM (Sections 5.4.4.6-7, v1.3): the sink's
+- BIND_STREAM and UNBIND_STREAM (Sections 5.4.4.6-7): the sink's
   RCV_BIND_RX_CMD and RCV_UNBIND_RX_CMD (Section 5.5.3.2), answered in MVU
   form before the sink probes (Section 5.5.3.6.3 steps 3 and 5): a locked
   entity ENTITY_LOCKED, an unknown STREAM_INPUT NO_SUCH_DESCRIPTOR, another
   descriptor type BAD_ARGUMENTS. The binding is saved as an ACMP one is.
-- GET_STREAM_INPUT_INFO_EX (Section 5.4.4.8, v1.3): the input's talker, pbsta
+- GET_STREAM_INPUT_INFO_EX (Section 5.4.4.8): the input's talker, pbsta
   and acmpsta.
 
 SETs and bindings are refused ENTITY_LOCKED while another controller holds the
@@ -106,15 +100,14 @@ AEM lock or acquisition (Section 5.4.4.4). A SET or binding that changes
 something is sent, u bit set, to the other controllers registered for
 unsolicited notifications (Section 5.4.5.3), each with the registration's own
 MVU sequence id (Section 5.4.5.2); a SET is also reported to
-`set_on_settings_changed` (the values are non-volatile). In v1.3, every change
+`set_on_settings_changed` (the values are non-volatile). Every change
 of what GET_STREAM_INPUT_INFO_EX reports, or of the talker's registration, is
 sent to every registered controller (Table 5.21; the listener's
 `set_on_info_ex_changed`). An MVU command restarts the controller's monitor
 timer (Section 5.4.5.4).
 
-Answered NOT_IMPLEMENTED: every MVU command in the classic profile, the
-binding commands and GET_STREAM_INPUT_INFO_EX below v1.3, and reserved
-command types.
+Answered NOT_IMPLEMENTED: every MVU command in the classic profile, and
+command types Milan v1.3 Table 5.15 does not define.
 
 Not answered:
 

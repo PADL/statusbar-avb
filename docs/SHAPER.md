@@ -222,13 +222,14 @@ of another delta deleted and laid down again. `uninstall()`'s pfifo_fast
 graft removes the cbs and its etf together.
 
 A refused etf (EOPNOTSUPP: no etf offload, e.g. igc on a MAC other than
-i225/i226) is logged with the kernel's text and kept in `etf_error()`; no
-further etf is asked for until the next `install()`, the cbs stay, and frames
+i225/i226) is logged with the kernel's text and told to
+`set_on_etf_settled` (which is told of an etf placed too); no further etf is asked for until the next `install()`, the cbs stay, and frames
 on the queue go out at once. Stock igc places the launch time in a 1 s cycle
 it estimates from the system's CLOCK_TAI (`igc_tx_launchtime`); a PHC on
-another timescale needs an igc that estimates it from SYSTIM. None of this has
-run on an igc yet: the requests are checked by `shaper_launch_time.*` against
-a recording `TcControl` and the etf bytes by `tc_qdisc.etf`.
+another timescale needs an igc that estimates it from SYSTIM. It runs on an
+i226 (igc), the etf alone and under class A's cbs; the requests are checked by
+`shaper_launch_time.*` against a recording `TcControl` and the etf bytes by
+`tc_qdisc.etf`.
 
 ### Launch time and cbs together
 
@@ -332,14 +333,14 @@ matter to drivers that use them.
 
 Example (one admitted 8-channel 48 kHz INT_32 AAF talker, 6 frames a packet,
 1 Gbit/s, MTU 1500, as captured on an i210 below): MaxFrameSize 24 + 6 x 8 x 4
-+ 1 = 217, wire 259, 16576 kbit/s; idleSlope 16576, sendSlope -983424,
+= 216, wire 259, 16576 kbit/s; idleSlope 16576, sendSlope -983424,
 hiCredit 26, loCredit -254.
 
-The frame size follows the rules under Milan v1.2 Table 4.4: F = MaxFrameSize
-+ 22 (Ethernet header with the VLAN tag, and the FCS), at least 68; W = F + 20
-(preamble and inter-packet gap). `wire_frame_size` does not add the
-clock-drift byte, because `srp_max_frame_size` already includes it in
-MaxFrameSize.
+The frame size follows the rules under Milan v1.3 Table 4.4: F = MaxFrameSize
++ 22 (Ethernet header with the VLAN tag, and the FCS), at least 68, plus the
+clock-drift byte (`TSpec::clock_drift_bytes`; none for AM824, whose
+MaxFrameSize reserves a spare sample); W = F + 20 (preamble and inter-packet
+gap).
 
 ## Worked examples
 
@@ -350,8 +351,8 @@ talker gated for want of a listener, 1 Gbit/s, MTU 1500; the i210 capture
 under "Verifying on a target":
 
 ```
-MaxFrameSize = 24 + 6 x 8 x 4 + 1             = 217 octets (srp_max_frame_size)
-wire frame   = 217 + 22 + 20                  = 259 octets
+MaxFrameSize = 24 + 6 x 8 x 4                 = 216 octets (srp_max_frame_size)
+wire frame   = 216 + 22 + 1 + 20              = 259 octets
 idleSlope    = 259 x 8 x 8000 / 1000          = 16576 kbit/s
 sendSlope    = 16576 - 1000000                = -983424 kbit/s
 hiCredit     = ceil(16576 x 1542 / 1000000)   = ceil(25.560)    = 26
@@ -363,9 +364,9 @@ hiCredit     = ceil(733424 x 1542 / 1000000)  = ceil(1130.940)  = 1131
 loCredit     = ceil(-266576 x 1542 / 1000000) = ceil(-411.060)  = -411
 ```
 
-The examples below use Milan v1.2's TSpecs (the clock-drift byte in MaxFrameSize). A Milan
-v1.3 entity declares one octet less and adds it after the 68-octet rule (Table 4.4 step 3):
-the AAF bandwidths are unchanged, a CRF reserves 5696 kbit/s instead of 5632.
+The examples below put the clock-drift byte in MaxFrameSize, as Milan v1.2's Table 4.4 did.
+The entity declares one octet less and adds it after the 68-octet rule (Milan v1.3 Table 4.4
+step 3): the AAF bandwidths are the same, a CRF reserves 5696 kbit/s instead of 5632.
 
 One 8-channel 48 kHz INT_24 AAF stream and the CRF, 1 Gbit/s (1,000,000
 kbit/s), an MTU 1500 frame (1542 octets on the wire) as the largest interfering one:

@@ -332,7 +332,7 @@ inline void fill_milan_v13_talker_counters(StreamOutputIntervals const& interval
 }
 
 /// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index in @p profile's layout: Milan v1.3
-/// Table 5.14, Milan v1.2 Table 5.17, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
+/// Table 5.14, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
 /// False when the talker has no such stream.
 [[nodiscard]] inline auto fill_talker_stream_counters(
     TalkerStreams const& talker,
@@ -345,11 +345,8 @@ inline void fill_milan_v13_talker_counters(StreamOutputIntervals const& interval
     if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    if (profile.milan_v1_3()) {
+    if (profile.milan) {
         fill_milan_v13_talker_counters(intervals, valid, out);
-    } else if (profile.milan) {
-        valid |= StreamOutputIntervals::VALID;
-        std::copy(intervals.values.begin(), intervals.values.end(), out.begin());
     } else {
         fill_classic_talker_counters(talker, descriptor_index, intervals, valid, out);
     }

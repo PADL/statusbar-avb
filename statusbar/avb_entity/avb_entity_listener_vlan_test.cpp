@@ -252,7 +252,7 @@ TEST(listener_vlan, the_kit_follows_the_class_a_vid)
     RecordingVlan fake;
     with_kit(1, [&fake](AvbEntityKit& kit) {
         kit.bind_listener_vlan(fake, 9);
-        EXPECT_TRUE(kit.listener_vlan().created());
+        EXPECT_TRUE(same(fake.requests, {"add 9 vlantest0.2 2"}));
 
         // A bridge's Class A Domain on VID 7 is adopted, then a link up returns to 2.
         auto& components = kit.host().components();
@@ -275,12 +275,8 @@ TEST(listener_vlan, the_kit_follows_the_class_a_vid)
             }
             bridge_out.clear();
         }
-        EXPECT_EQ(kit.listener_vlan().vid(), uint16_t{7});
         kit.on_link_up(now);
-        EXPECT_EQ(kit.listener_vlan().vid(), uint16_t{2});
         (void)kit.stop();  // not running, but the link goes and the kit unbinds
-        EXPECT_EQ(kit.listener_vlan().vid(), uint16_t{0});
-        EXPECT_FALSE(kit.listener_vlan().bound());
     });
     EXPECT_TRUE(same(
         fake.requests,
@@ -295,10 +291,7 @@ TEST(listener_vlan, the_kit_follows_the_class_a_vid)
 TEST(listener_vlan, a_talker_only_kit_registers_nothing)
 {
     RecordingVlan fake;
-    with_kit(0, [&fake](AvbEntityKit& kit) {
-        kit.bind_listener_vlan(fake, 9);
-        EXPECT_FALSE(kit.listener_vlan().bound());
-    });
+    with_kit(0, [&fake](AvbEntityKit& kit) { kit.bind_listener_vlan(fake, 9); });
     EXPECT_TRUE(fake.requests.empty());
 }
 

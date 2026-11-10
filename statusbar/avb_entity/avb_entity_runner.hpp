@@ -88,7 +88,7 @@ struct EntityToolOptions
 };
 
 /// The xdp backend's options beyond its queue: bind and attach modes, pin
-/// path, the rawnet fallback, and launch time.
+/// path and launch time.
 inline void add_xdp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
 {
     specs.add_choice(
@@ -114,10 +114,6 @@ inline void add_xdp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig
         "bpffs directory to pin the XDP program and maps in (empty: not pinned)",
         entity.net_xdp_pin_path,
         [&entity](auto v) { entity.net_xdp_pin_path = std::string{v}; });
-    specs.add<bool>(
-        "net.xdp_fallback", "Open rawnet when net.backend=xdp does not open", entity.net_xdp_fallback, [&entity](auto v) {
-            entity.net_xdp_fallback = v;
-        });
     specs.add<bool>(
         "stream.launch_time",
         "Open the xdp socket with TX metadata for launch times (net.backend=xdp); frames are timed once the host "

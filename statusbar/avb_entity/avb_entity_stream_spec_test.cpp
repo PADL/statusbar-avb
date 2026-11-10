@@ -168,28 +168,18 @@ TEST(stream_spec_tspec, milan_table_4_4_sizes)
 {
     // Milan v1.3 Section 4.3.3.2, Table 4.4: AVTPDU header + payload.
     // AAF PCM32 96 kHz 8 ch: 48*8 + 24 = 408; CRF 1 ts/pdu: 28.
-    auto const v1_3 = nanoavb::MilanVersion::v1_3;
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH), v1_3), 408);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K), v1_3), 28);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
     // 44.1 kHz: 5 or 6 samples a PDU, the TSpec sized for 6: 6*8*4 + 24 = 216.
     auto const aaf_44k = decode_stream_format(0x020402200200C000ULL);
     EXPECT_EQ(aaf_44k.sample_rate_hz, 44'100U);
-    EXPECT_EQ(srp_max_frame_size(aaf_44k, v1_3), 216);
+    EXPECT_EQ(srp_max_frame_size(aaf_44k), 216);
 
     // AM824 (not a Milan format) 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH), v1_3), 256);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
 
     // Unknown formats size to 0 (callers must treat as authoring error).
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(0), v1_3), 0);
-}
-
-// Milan v1.2 Table 4.4 adds the clock-drift byte to MaxFrameSize: 48*8 + 24 + 1, 28 + 1.
-TEST(stream_spec_tspec, milan_v1_2_adds_a_byte_to_max_frame_size)
-{
-    auto const v1_2 = nanoavb::MilanVersion::v1_2;
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH), v1_2), 409);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K), v1_2), 29);
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH), v1_2), 256);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(0)), 0);
 }
 
 TEST(stream_spec_rate, mixed_audio_rates_rejected)
@@ -251,12 +241,13 @@ TEST(stream_spec_decode, am824_motu_16a_words_are_accepted)
     EXPECT_EQ(decode_stream_format(0x00A0060140000100ULL).kind, StreamKind::am824);  // 192 kHz, 1 ch
 }
 
-// The kit carries 1, 2, 4, 6 or 8 AM824 channels; any other MBLA count is unsupported.
-TEST(stream_spec_decode, am824_channel_counts_outside_1_2_4_6_8_are_other)
+// The kit carries AM824 at any channel count whose frame fits the MTU (7 samples at 48 kHz: 1 to
+// 52 channels); 0, or a frame past it, is other.
+TEST(stream_spec_decode, am824_channel_counts_past_the_mtu_are_other)
 {
-    for (uint8_t ch = 0; ch <= 64; ++ch) {
-        auto const f = decode_stream_format(avtp::make_am824_stream_format(2, ch));
-        bool const carried = ch == 1 || ch == 2 || ch == 4 || ch == 6 || ch == 8;
+    for (uint8_t ch = 0; ch <= 65; ++ch) {
+        auto const f = decode_stream_format(0x00a0020040000000ULL | (uint64_t{ch} << 32U) | (uint64_t{ch} << 8U));
+        bool const carried = ch >= 1 && ch <= 52;
         EXPECT_EQ(f.kind == StreamKind::am824, carried);
         EXPECT_EQ(f.channels, carried ? ch : 0);
     }
@@ -272,7 +263,7 @@ TEST(stream_spec_decode, am824_blocking_mixed_and_odd_words_are_other)
     EXPECT_EQ(decode_stream_format(0x00A0020840000600ULL).kind, StreamKind::other);  // DBS 8, 6 MBLA
     EXPECT_EQ(decode_stream_format(0x00A00A0840000800ULL).kind, StreamKind::other);  // FDF evt 1
     EXPECT_EQ(decode_stream_format(0x00A0070840000800ULL).kind, StreamKind::other);  // SFC 7
-    EXPECT_EQ(decode_stream_format(0x00A0021040001000ULL).kind, StreamKind::other);  // 16 MBLA
+    EXPECT_EQ(decode_stream_format(0x00A0024140004100ULL).kind, StreamKind::other);  // 65 MBLA
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_spec_test)
