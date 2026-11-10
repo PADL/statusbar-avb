@@ -617,11 +617,14 @@ struct TalkerStreams
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
-    /// Per-stream media clock restart pending (toggle_media_clock_restart), by STREAM_OUTPUT index.
-    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> mr_pending_{};
+    /// Per-stream media clock restart pending (toggle_media_clock_restart): the open generation it was asked of, 0
+    /// for none; it fires only on that generation. By STREAM_OUTPUT index.
+    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_pending_{};
+    /// Each STREAM_OUTPUT index's open generation, bumped by every open_stream (mark_open); 0 before the first.
+    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> open_generation_{};
     /// A slot is open at this STREAM_OUTPUT index (open_stream), for toggle_media_clock_restart.
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> open_{};
-    static_assert(std::atomic<bool>::is_always_lock_free);
+    static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<uint32_t>::is_always_lock_free);
     StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
     /// The TX kick lives on another thread (set_external_kick).
     bool external_kick_{false};

@@ -251,7 +251,8 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
 void TalkerStreams::mark_open(uint16_t const stream_index) noexcept
 {
     // A request that raced a stop is no restart of this stream: cleared before a toggle may be accepted here.
-    mr_pending_[stream_index].store(false, std::memory_order_relaxed);
+    mr_pending_[stream_index].store(0, std::memory_order_relaxed);
+    open_generation_[stream_index].fetch_add(1, std::memory_order_release);  // a stalled request names the old one
     open_[stream_index].store(true, std::memory_order_release);
 }
 
@@ -638,6 +639,7 @@ auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
 void TalkerStreams::count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> const frame) noexcept
 {
     ++slot.tx_packets;
+    slot.mr_hold -= slot.mr_hold != 0 ? 1 : 0;  // a toggle holds for PDUs sent, not tried
     if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
         count_pdu(tx_counters_[slot.spec.index], frame);
     }
