@@ -9,6 +9,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/avb_entity/avb_entity_shaper.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
@@ -410,7 +411,7 @@ void AvbEntityStereoIO::print_state() const
 //
 
 auto AvbEntityStereoIO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo
-{
+{  // NOLINT(statusbar-block-statements): the Talker Advertise's fields, one by one
     nanoavb::TalkerStreamSrpInfo info{};
 
     // Source stream id / destination / VLAN from the ACMP-configured talker
@@ -433,8 +434,9 @@ auto AvbEntityStereoIO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrp
     constexpr uint16_t AM824_QUADLET_BYTES = 4;
     info.max_frame_size = static_cast<uint16_t>(AVTP_AM824_HEADER_BYTES + (SAMPLES_PER_PACKET * CHANNELS * AM824_QUADLET_BYTES));
 
-    // We are the media source; downstream bridges accumulate their own latency.
-    info.accumulated_latency = 0;
+    // The talker port's own latency (IEEE 802.1Q-2022 Clause 35.2.2.8.6); downstream bridges add theirs.
+    info.accumulated_latency = interface_talker_latency_ns(
+        interval_wire_octets(TSpec{.max_frame_size = info.max_frame_size}), config_.interface_name, config_.link_mbps, config_.mtu);
     return info;
 }
 
