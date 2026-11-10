@@ -894,6 +894,7 @@ auto AvbEntityKit::admitted_talker_streams(GateTimePoint const now) const noexce
 void AvbEntityKit::note_admission(GateTimePoint const now)
 {
     update_output_streaming(now);
+    arm_admission_deadline(now);
     auto admitted = admitted_talker_streams(now);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
@@ -901,6 +902,24 @@ void AvbEntityKit::note_admission(GateTimePoint const now)
     admitted_ = admitted;
     if (on_admission_changed_) {
         on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
+}
+
+void AvbEntityKit::arm_admission_deadline(GateTimePoint const now) noexcept
+{
+    admission_deadline_.reset();
+    for (auto const& spec : talker_specs_) {
+        // A grace running out: one not yet past, its listener no longer registered (admitted at its end).
+        if (auto const ends = gate_.grace_ends(spec.index); ends && now < *ends && !gate_.listener_admitted(spec.index, *ends)) {
+            admission_deadline_ = std::min(admission_deadline_.value_or(*ends), *ends);
+        }
+    }
+}
+
+void AvbEntityKit::on_admission_timer(GateTimePoint const now)
+{
+    if (admission_deadline_ && now >= *admission_deadline_) {
+        note_admission(now);
     }
 }
 
@@ -1948,6 +1967,9 @@ void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
     // response.
     if (persist_pending_) {
         persist();
+    }
+    if (admission_deadline_) {
+        on_admission_timer(net::rx_clock_now());  // the gate's clock, read while a grace runs
     }
     if (!host_.is_running()) {
         return;
