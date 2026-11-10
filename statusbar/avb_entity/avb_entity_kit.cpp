@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <ranges>
 #include <system_error>
 #include <utility>
 
@@ -1051,7 +1052,10 @@ void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
     }
     move_talker_streams_to(domain, now);
 #if defined(__linux__)
+    // A sink's VID that is Class A now is listener_vlan_'s; the old Class A VID, still a sink's, the filters'.
+    sink_vlan_filters_.drop_except(sink_vlans_ | std::views::keys, domain.sr_class_vid);
     listener_vlan_.follow(domain.sr_class_vid);  // past the NIC's receive VLAN filter
+    sink_vlan_filters_.hold_all(sink_vlans_ | std::views::keys, domain.sr_class_vid);
 #endif
     (void)host_.components().aem_handler.notify_avb_info_changed(0);
     host_.ctl_log().status(
@@ -1695,10 +1699,7 @@ void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
     if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
         (void)host_.components().mvrp_handler.register_vlan(vid, now);
 #if defined(__linux__)
-        host_.ctl_log().warning(
-            "listener: a stream on VLAN {}, not the Class A VLAN {}: joined with MVRP, but not on the NIC's VLAN filter",
-            vid,
-            host_.components().msrp_handler.domain().sr_class_vid);
+        sink_vlan_filters_.hold(vid);
 #endif
     }
 }
@@ -1713,6 +1714,9 @@ void AvbEntityKit::leave_sink_vlan(uint16_t const vid, TimePoint const now)
             sink_vlans_.erase(it);
             if (vid != host_.components().msrp_handler.domain().sr_class_vid) {
                 (void)host_.components().mvrp_handler.withdraw_vlan(vid, now);
+#if defined(__linux__)
+                sink_vlan_filters_.drop(vid);
+#endif
             }
         }
         return;
@@ -2093,6 +2097,8 @@ void AvbEntityKit::bind_listener_vlan(net::vlan::VlanControl& control, int const
     }
     listener_vlan_.bind(control, config_.interface_name, ifindex);
     listener_vlan_.follow(current_vlan_id());
+    sink_vlan_filters_.bind(control, config_.interface_name, ifindex);
+    sink_vlan_filters_.hold_all(sink_vlans_ | std::views::keys, current_vlan_id());
 }
 #endif
 
@@ -2165,6 +2171,7 @@ void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
 void AvbEntityKit::close_data_plane()
 {
 #if defined(__linux__)
+    sink_vlan_filters_.release();
     listener_vlan_.release();
 #endif
     close_streams();                   // the port's memberships close with it
