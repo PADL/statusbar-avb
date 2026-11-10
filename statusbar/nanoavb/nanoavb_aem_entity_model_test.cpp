@@ -1684,15 +1684,15 @@ TEST(signal_selector, source_not_in_descriptor_is_rejected)
     auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(0));
     EXPECT_TRUE(response_source(get.bytes) == (std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}));
 
-    // A selector index the blob doesn't have: SET names the missing
-    // descriptor, GET reports not-implemented.
+    // A selector index the blob doesn't have: SET and GET both name the
+    // missing descriptor.
     auto const set_missing = run_aem_command(
         cmd_handler,
         atdecc::AEM_COMMAND_SET_SIGNAL_SELECTOR,
         make_signal_selector_body(7, std::array<uint16_t, 3>{DESCRIPTOR_AUDIO_CLUSTER, 0, 0}));
     EXPECT_EQ(set_missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
     auto const get_missing = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SIGNAL_SELECTOR, make_signal_selector_body(7));
-    EXPECT_EQ(get_missing.status, AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(get_missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
 }
 
 TEST(signal_selector, change_callback_gates_and_observes)
@@ -1898,13 +1898,13 @@ TEST(matrix, invalid_regions_and_callback_veto)
         EXPECT_EQ(r.status, AEM_STATUS_BAD_ARGUMENTS);
     }
 
-    // Unknown matrix index: SET names the missing descriptor, GET is 0/not-implemented.
+    // Unknown matrix index: SET and GET both name the missing descriptor.
     auto const set_missing =
         run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_MATRIX, make_matrix_body(7, 0, 0, 1, 1, false, 0, 1, 0, {1}));
     EXPECT_EQ(set_missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
     auto const get_missing =
         run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_MATRIX, make_matrix_body(7, 0, 0, 1, 1, false, 0, 0, 0));
-    EXPECT_EQ(get_missing.status, AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(get_missing.status, atdecc::AEM_STATUS_NO_SUCH_DESCRIPTOR);
 
     // A vetoing change callback rejects the write and the grid is untouched.
     // The callback sees the full pending write, including the incoming value.
