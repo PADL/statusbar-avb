@@ -346,8 +346,8 @@ class AvbEntityKit
     /// Section 5.3.4.1), else nullopt: the AEM handler's local_change_refusal(). A host answers it
     /// before a change of its own (a SET_STREAM_FORMAT); request_clock_source() is never refused.
     [[nodiscard]] auto local_change_refusal() const noexcept -> std::optional<uint8_t>;
-    /// An entity-name change by other than ATDECC: local_change_refusal(), BAD_ARGUMENTS
-    /// over 64 bytes, else as SET_NAME (empty: configured name). Notified and saved;
+    /// An entity-name change by other than ATDECC: BAD_ARGUMENTS over 64 bytes, else as SET_NAME
+    /// (empty: configured name), the handler answering local_change_refusal() first. Notified and saved;
     /// answers the AEM status. Reactor thread.
     [[nodiscard]] auto request_entity_name(std::string_view name) -> uint8_t;
     // --- Dynamic audio mappings (Milan v1.2 Sections 5.3.9-5.3.10) --------------
