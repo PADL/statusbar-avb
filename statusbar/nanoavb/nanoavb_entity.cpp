@@ -62,12 +62,19 @@ void store_stream_info_tail(
     return std::nullopt;
 }
 
+/// SET_STREAM_INFO's response length in @p layout: 84 octets in IEEE 1722.1-2021's, else 48
+/// (Milan v1.2's extension is GET_STREAM_INFO's only).
+[[nodiscard]] constexpr auto set_stream_info_length(StreamInfoLayout const layout) noexcept -> size_t
+{
+    return layout == StreamInfoLayout::ieee_2021 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+}
+
 /// SET_STREAM_INFO's response in @p layout's form at the head of @p out: @p command echoed,
 /// zero-padded to 84 octets in IEEE 1722.1-2021's, else its 48. Empty when @p out is short.
 [[nodiscard]] auto echo_stream_info(
     StreamInfoLayout const layout, std::span<uint8_t const> const command, std::span<uint8_t> const out) -> std::span<uint8_t const>
 {
-    size_t const size = layout == StreamInfoLayout::ieee_2021 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+    size_t const size = set_stream_info_length(layout);
     if (out.size() < size) {
         return {};
     }
@@ -365,15 +372,17 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
 
         case AEM_COMMAND_SET_STREAM_INFO:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return refused_set(*blocked, AEM_COMMAND_SET_STREAM_INFO, command_data, out_buffer);
             }
-            return handle_set_stream_info(command_data, out_buffer);
+            return answer_set(
+                AEM_COMMAND_SET_STREAM_INFO, handle_set_stream_info(command_data, out_buffer), command_data, out_buffer);
 
         case AEM_COMMAND_SET_MAX_TRANSIT_TIME:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return refused_set(*blocked, AEM_COMMAND_SET_MAX_TRANSIT_TIME, command_data, out_buffer);
             }
-            return handle_set_max_transit_time(command_data, out_buffer);
+            return answer_set(
+                AEM_COMMAND_SET_MAX_TRANSIT_TIME, handle_set_max_transit_time(command_data, out_buffer), command_data, out_buffer);
 
         case AEM_COMMAND_GET_MAX_TRANSIT_TIME:
             return handle_get_max_transit_time(command_data, out_buffer);
@@ -665,7 +674,7 @@ auto AemCommandHandler::failed_set_body(
 
 auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept -> std::optional<uint16_t>
 {
-    constexpr std::array<std::pair<uint16_t, uint16_t>, 9> twins{
+    constexpr std::array<std::pair<uint16_t, uint16_t>, 11> twins{
         {{AEM_COMMAND_SET_CONFIGURATION, AEM_COMMAND_GET_CONFIGURATION},  // 7.4.7.1: the configuration in force
          {AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
          {AEM_COMMAND_SET_CONTROL, AEM_COMMAND_GET_CONTROL},
@@ -674,7 +683,9 @@ auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept ->
          {AEM_COMMAND_SET_CLOCK_SOURCE, AEM_COMMAND_GET_CLOCK_SOURCE},
          {AEM_COMMAND_SET_SIGNAL_SELECTOR, AEM_COMMAND_GET_SIGNAL_SELECTOR},
          {AEM_COMMAND_SET_MIXER, AEM_COMMAND_GET_MIXER},
-         {AEM_COMMAND_SET_MATRIX, AEM_COMMAND_GET_MATRIX}}};
+         {AEM_COMMAND_SET_MATRIX, AEM_COMMAND_GET_MATRIX},
+         {AEM_COMMAND_SET_STREAM_INFO, AEM_COMMAND_GET_STREAM_INFO},  // 7.4.15.1, cut to the SET's length
+         {AEM_COMMAND_SET_MAX_TRANSIT_TIME, AEM_COMMAND_GET_MAX_TRANSIT_TIME}}};  // 7.4.77.1
     auto const it = std::find_if(twins.begin(), twins.end(), [=](auto const& pair) { return pair.first == set_command_type; });
     return it == twins.end() ? std::nullopt : std::optional<uint16_t>{it->second};
 }
@@ -701,7 +712,25 @@ auto AemCommandHandler::value_in_force(
     if (!twin || command_data.size() < request_size) {
         return 0;
     }
-    return read_back(*twin, command_data.first(request_size), out_buffer);
+    auto const n = read_back(*twin, command_data.first(request_size), out_buffer);
+    // GET_STREAM_INFO's Milan v1.2 extension is not SET_STREAM_INFO's.
+    return set_command_type == AEM_COMMAND_SET_STREAM_INFO ? std::min(n, set_stream_info_length(stream_info_layout())) : n;
+}
+
+auto AemCommandHandler::answer_set(
+    uint16_t const set_command, AemCommandResponse const r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (r.status == AEM_STATUS_SUCCESS || r.status == AEM_STATUS_IN_PROGRESS) {
+        return r;
+    }
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
+    auto const n = value_in_force(set_command, command_data, in_force);
+    if (n == 0 || out_buffer.size() < n) {
+        return r;  // unreadable: the handler's own answer
+    }
+    span_copy(out_buffer.first(n), std::span<uint8_t const>{in_force}.first(n));
+    return {.status = r.status, .size = n};
 }
 
 auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uint8_t const> request, std::span<uint8_t> out_buffer)
