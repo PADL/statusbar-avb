@@ -40,6 +40,8 @@ inline constexpr uint16_t port_data_set = 0x2004;
 inline constexpr uint16_t time_status_np = 0xC000;
 /// linuxptp's GRANDMASTER_SETTINGS_NP: the quality and time properties ptp4l announces as grandmaster.
 inline constexpr uint16_t grandmaster_settings_np = 0xC001;
+/// linuxptp's PORT_DATA_SET_NP: a port's neighborPropDelayThresh and asCapable.
+inline constexpr uint16_t port_data_set_np = 0xC002;
 /// linuxptp's SUBSCRIBE_EVENTS_NP: push notifications to the subscribing socket.
 inline constexpr uint16_t subscribe_events_np = 0xC003;
 /// linuxptp's PORT_PROPERTIES_NP: a port's interface name.
@@ -154,6 +156,15 @@ struct PortPropertiesNp
     static constexpr size_t SIZE = PortPropertiesNpPayload::LENGTH;  ///< up to the PTPText's lengthField
 };
 
+/// linuxptp's PORT_DATA_SET_NP, answered by the port it describes (the message's sourcePortIdentity).
+struct PortDataSetNp
+{
+    uint32_t neighbor_prop_delay_thresh_ns{0};
+    bool as_capable{false};  ///< IEEE 802.1AS-2020 Clause 10.2.5.1
+
+    static constexpr size_t SIZE = PortDataSetNpPayload::LENGTH;
+};
+
 /// linuxptp's TIME_STATUS_NP, as ptp4l sends it on each clock update (lastGmPhaseChange skipped).
 struct TimeStatusNp
 {
@@ -251,6 +262,7 @@ struct ManagementMessage
         TimePropertiesDataSet,
         PortDataSet,
         PortPropertiesNp,
+        PortDataSetNp,
         TimeStatusNp,
         GrandmasterSettingsNp,
         SubscribeEventsNp>
@@ -323,6 +335,8 @@ struct PtpManagementState
     std::optional<int64_t> peer_mean_path_delay_ns;
     std::optional<PortState> port_state;
     std::optional<DelayMechanism> delay_mechanism;
+    /// That port's asCapable, from PORT_DATA_SET_NP (polled: ptp4l notifies no change of it).
+    std::optional<bool> as_capable;
     /// Every port's portState by portNumber - 1, from each PORT_DATA_SET ptp4l answers or notifies.
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> port_states{};
     /// The settings ptp4l acknowledged for a SET GRANDMASTER_SETTINGS_NP.
@@ -460,6 +474,7 @@ class PtpManagementClient final : public net::Pollable
     std::optional<PortState> reported_port_state_;
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> reported_port_states_{};
     std::optional<DelayMechanism> reported_delay_mechanism_;
+    std::optional<bool> reported_as_capable_;
     std::optional<GrandmasterSettingsNp> reported_settings_;
     std::optional<TimePropertiesDataSet> reported_time_properties_;
     std::optional<uint16_t> reported_refused_;
