@@ -27,7 +27,6 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
-#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
@@ -62,6 +61,14 @@ struct StreamTag
 {
     uint16_t vlan_id{0};
     uint8_t pcp{0};
+
+    /// One word, PCP in bits 16-23 and the VID in bits 0-15, for a wait-free atomic.
+    [[nodiscard]] constexpr auto packed() const noexcept -> uint32_t { return (uint32_t{pcp} << 16U) | vlan_id; }
+    /// The tag packed() made @p word from.
+    [[nodiscard]] static constexpr auto unpacked(uint32_t const word) noexcept -> StreamTag
+    {
+        return StreamTag{.vlan_id = static_cast<uint16_t>(word & 0xFFFFU), .pcp = static_cast<uint8_t>((word >> 16U) & 0xFFU)};
+    }
 };
 
 /// One TX stream slot: the StreamSpec that shaped it, its destination MAC,
@@ -107,7 +114,7 @@ struct TalkerStreams
         : config_{config}
         , media_clock_{media_clock}
         , last_gptp_ns_{last_gptp_ns}
-        , tag_{StreamTag{.vlan_id = config.vlan_id, .pcp = config.stream_pcp}}
+        , tag_{StreamTag{.vlan_id = config.vlan_id, .pcp = config.stream_pcp}.packed()}
         , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
         , mem_resource_{memory_resource}
     {}
@@ -220,12 +227,12 @@ struct TalkerStreams
     /// VLAN ID the stream frames are tagged with: config.vlan_id until the
     /// Class A VID in use changes (adopted from the bridge's MSRP Domain,
     /// Milan v1.2 Section 4.2.7.2.1). Reactor thread writes, media thread reads.
-    void set_vlan_id(uint16_t const vlan_id) noexcept { tag_.store(StreamTag{.vlan_id = vlan_id, .pcp = tag_.load().pcp}); }
-    [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return tag_.load().vlan_id; }
+    void set_vlan_id(uint16_t const vlan_id) noexcept { set_tag(StreamTag{.vlan_id = vlan_id, .pcp = tag().pcp}); }
+    [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return tag().vlan_id; }
     /// The VID and PCP the stream frames are tagged with, the SR class's in use (an adopted Domain's,
-    /// IEEE 802.1Q-2022 Clause 35.2.2.8.5). Reactor thread writes, media thread reads (itc::SeqlockValue).
-    void set_tag(StreamTag const tag) noexcept { tag_.store(tag); }
-    [[nodiscard]] auto tag() const noexcept -> StreamTag { return tag_.load(); }
+    /// IEEE 802.1Q-2022 Clause 35.2.2.8.5). Reactor thread writes, media thread reads (one wait-free atomic word).
+    void set_tag(StreamTag const tag) noexcept { tag_.store(tag.packed(), std::memory_order_relaxed); }
+    [[nodiscard]] auto tag() const noexcept -> StreamTag { return StreamTag::unpacked(tag_.load(std::memory_order_relaxed)); }
 
     /// STOP_STREAMING gate for one STREAM_OUTPUT descriptor index (kit
     /// phase 5): a stopped stream is treated as gate-closed by
@@ -321,7 +328,7 @@ struct TalkerStreams
 
     // References / values (bound at construction).
     TalkerStreamsConfig config_;           ///< destructured entity config (rate + VLAN/PCP), by value
-    itc::SeqlockValue<StreamTag> tag_;     ///< VLAN tag for stream frames (config's, or the adopted Domain's)
+    std::atomic<uint32_t> tag_;            ///< VLAN tag for stream frames (config's, or the adopted Domain's)
     std::atomic<int64_t> tu_until_ns_{0};  ///< steady-clock end of the post-GM-change tu window
     std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
     ptpclient::MediaClockGenerator const& media_clock_;
