@@ -1933,6 +1933,9 @@ void AvbEntityKit::bind_listener_vlan(net::vlan::VlanControl& control, int const
 
 auto AvbEntityKit::stop(TimePoint const now) -> Status
 {
+    if (listener_ != nullptr && host_.is_running()) {
+        listener_->release_connections(now);  // a Waiting declaration outlives withdraw_all()
+    }
     close_data_plane();
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));

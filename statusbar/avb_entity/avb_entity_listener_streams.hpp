@@ -265,6 +265,9 @@ struct ListenerStreams
     /// from the owning entity's stop(), once whatever drains RX has stopped;
     /// a handler the reactor holds retires itself when the port closes.
     void close_rx() noexcept;
+    /// Withdraw and leave what each input's connection declared and joined, before close_rx()
+    /// discards the slots; the disconnects of a stop then find nothing left. Reactor thread.
+    void release_connections(sm::TimePoint now);
 
     /// Told form. Non-blocking-drain every queued frame from the RX socket in
     /// one pass and process each via on_stream_rx_frame, all stamped with
