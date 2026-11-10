@@ -274,7 +274,7 @@ class AvbEntityKit
     /// The kit reports signal presence: configured and Milan v1.3.
     [[nodiscard]] auto reports_signal_presence() const noexcept -> bool
     {
-        return config_.signal_presence && host_.components().profile.milan_v1_3();
+        return config_.signal_presence && host_.components().profile.milan;
     }
 
     // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
@@ -484,22 +484,14 @@ class AvbEntityKit
     /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
 
-    /// The MSRP TSpec advertised for talker stream @p spec of an entity of @p profile (the kit's is
-    /// host().components().profile): srp_max_frame_size at the class A cadence, one frame per
-    /// interval, by Milan Table 4.4 (tspec_version). Also the shaper's input.
-    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec, nanoavb::EntityProfile const profile) noexcept -> TSpec
+    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at the class A
+    /// cadence, one frame per interval, by Milan v1.3 Table 4.4. Also the shaper's input.
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
     {
-        bool const v1_3 = profile.milan_v1_3();
         return TSpec{
-            .max_frame_size = srp_max_frame_size(spec.format, tspec_version(profile)),
+            .max_frame_size = srp_max_frame_size(spec.format),
             .max_interval_frames = 1,
-            .clock_drift_bytes = v1_3 && spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
-    }
-    /// The Milan Table 4.4 an entity of @p profile sizes its TSpecs by: v1.3's for a Milan v1.3
-    /// entity, v1.2's for a v1.2 or classic one.
-    [[nodiscard]] static constexpr auto tspec_version(nanoavb::EntityProfile const profile) noexcept -> nanoavb::MilanVersion
-    {
-        return profile.milan_v1_3() ? nanoavb::MilanVersion::v1_3 : nanoavb::MilanVersion::v1_2;
+            .clock_drift_bytes = spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
     }
 
     // --- Stream socket health (after start()) ---------------------------------
