@@ -420,7 +420,7 @@ auto AvbEntityStereoIO::talker_stream_id() const noexcept -> nanoavb::StreamId
 }
 
 auto AvbEntityStereoIO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo
-{  // NOLINT(statusbar-block-statements): the Talker Advertise's fields, one by one
+{  // NOLINT(statusbar-block-statements) the Talker Advertise's fields, one by one; pre-dates the gate
     nanoavb::TalkerStreamSrpInfo info{};
 
     // Source stream id / destination / VLAN from the ACMP-configured talker
