@@ -2368,8 +2368,11 @@ class DeferringHandler : public AemEntityHandler
   public:
     auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
     {
+        ++hook_calls;
         return command_type == AEM_COMMAND_SET_STREAM_FORMAT ? AEM_STATUS_IN_PROGRESS : AEM_STATUS_SUCCESS;
     }
+
+    size_t hook_calls{0};
 };
 
 std::array<uint8_t, AemStreamFormatPayload::LENGTH> const kSetFormatOut0{
@@ -2458,6 +2461,24 @@ TEST(nanoavb_entity_in_progress, table_full_answers_no_resources)
         EXPECT_EQ(header_of(sends[0]).status(), expected);
     }
     EXPECT_EQ(handler.pending_command_count(), AemCommandHandler::MAX_PENDING_COMMANDS);
+}
+
+// A SET refused NO_RESOURCES for a full pending table never reaches its hook, so nothing comes into force unanswered.
+TEST(nanoavb_entity_in_progress, a_set_refused_for_a_full_table_does_not_call_its_hook)
+{
+    DeferringHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    for (uint16_t index = 0; index <= AemCommandHandler::MAX_PENDING_COMMANDS; ++index) {
+        auto body = kSetFormatOut0;
+        body[3] = static_cast<uint8_t>(index);
+        inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, body, index);
+    }
+    EXPECT_EQ(app.hook_calls, AemCommandHandler::MAX_PENDING_COMMANDS);
+    EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_NO_RESOURCES);
 }
 
 namespace {
