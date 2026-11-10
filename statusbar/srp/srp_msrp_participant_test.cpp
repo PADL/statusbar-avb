@@ -830,7 +830,7 @@ TEST(msrp_participant, a_changed_tspec_leaves_the_old_value_before_the_new_one)
     EXPECT_EQ(sent.empty() ? std::string{} : sent.front(), std::string{"Lv 150"});
     EXPECT_EQ(sent.size() < 2 ? std::string{} : sent.at(1), std::string{"New 224"});
     auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
-    EXPECT_TRUE(reg != nullptr && reg->max_frame_size.get() == 224);
+    EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
 }
 
 // A Talker moved to another VID (an adopted Class A domain) leaves the old value, then declares the
@@ -843,7 +843,9 @@ TEST(msrp_participant, a_changed_vid_is_left_then_declared_promptly)
     fv.vlan_identifier = 7;
     (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
     auto const sent = rig.run(2);
-    EXPECT_TRUE(sent.size() >= 2 && sent.front() == "Lv 150" && sent.at(1) == "New 150");
+    EXPECT_TRUE(sent.size() >= 2);
+    EXPECT_EQ(sent.empty() ? std::string{} : sent.front(), std::string{"Lv 150"});
+    EXPECT_EQ(sent.size() < 2 ? std::string{} : sent.at(1), std::string{"New 150"});
     auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
     EXPECT_TRUE(reg != nullptr);
     EXPECT_EQ(reg != nullptr ? reg->vlan_identifier.get() : uint16_t{0}, uint16_t{7});
