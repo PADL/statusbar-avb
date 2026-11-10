@@ -260,17 +260,17 @@ TEST(audio_map, add_get_remove_and_notify)
     EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 0);  // the requester has the response
 
     // The same mapping again changes nothing: no data plane call, no
-    // notification, nothing to save (as a REMOVE of what is not there).
+    // notification, nothing to save; nor does a refused REMOVE of what is not there.
     int saves = 0;
     b.aem.set_on_settings_changed([&saves](uint16_t) { ++saves; });
     EXPECT_EQ(b.mappings(true, 0, {m(0, 3, 0)}), AEM_STATUS_SUCCESS);
-    EXPECT_EQ(b.mappings(false, 0, {m(0, 2, 3)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 2, 3)}), AEM_STATUS_BAD_ARGUMENTS);
     EXPECT_EQ(b.applied.size(), size_t{1});
     EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 1);
     EXPECT_EQ(saves, 0);
 
-    // REMOVE: duplicates and absent mappings ignored.
-    EXPECT_EQ(b.mappings(false, 0, {m(0, 1, 1), m(0, 1, 1), m(0, 2, 3)}), AEM_STATUS_SUCCESS);
+    // REMOVE: duplicates ignored.
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 1, 1), m(0, 1, 1)}), AEM_STATUS_SUCCESS);
     std::vector<DynamicAudioMapping> const left{m(0, 3, 0), m(0, 1, 2)};
     EXPECT_TRUE(b.get_map(0, 0).mappings == left);
     EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 1);
@@ -282,6 +282,40 @@ TEST(audio_map, add_get_remove_and_notify)
     EXPECT_EQ(b.get_map(3, 0).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
     EXPECT_EQ(b.mappings(true, 3, {m(0, 0, 0)}), AEM_STATUS_NO_SUCH_DESCRIPTOR);
     EXPECT_EQ(b.get_map(0, 1).status, AEM_STATUS_BAD_ARGUMENTS);  // one partition only
+}
+
+// IEEE 1722.1-2021 Clause 7.4.46.1: a REMOVE listing one mapping the port does not hold removes none.
+TEST(audio_map, a_remove_listing_a_mapping_not_held_removes_nothing)
+{
+    Bench b;
+    std::vector<DynamicAudioMapping> const held{m(0, 0, 0), m(0, 1, 1)};
+    EXPECT_EQ(b.mappings(true, 0, held), AEM_STATUS_SUCCESS);
+    b.sent.clear();
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 0, 0), m(0, 1, 1), m(0, 2, 2)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(b.get_map(0, 0).mappings == held);
+    EXPECT_EQ(b.applied.size(), size_t{1});
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 0);
+}
+
+// IEEE 1722.1-2021 Clause 7.4.46.1: a REMOVE on a port holding none of the listed mappings is refused.
+TEST(audio_map, a_remove_on_an_empty_port_is_refused)
+{
+    Bench b;
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 0, 0)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(b.applied.empty());
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 0);
+}
+
+// Milan v1.3 Sections 5.4.2.28 and 5.4.5.3: a REMOVE listing each held mapping twice removes them
+// and is notified to the other registered controllers.
+TEST(audio_map, a_remove_listing_mappings_twice_removes_them_and_is_notified)
+{
+    Bench b;
+    EXPECT_EQ(b.mappings(true, 0, {m(0, 0, 0), m(0, 1, 1)}), AEM_STATUS_SUCCESS);
+    b.sent.clear();
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 0, 0), m(0, 0, 0), m(0, 1, 1), m(0, 1, 1)}), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(b.get_map(0, 0).mappings.empty());
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 1);
 }
 
 // Milan v1.2 Section 5.4.2.27: each rule refuses BAD_ARGUMENTS and adds nothing.
