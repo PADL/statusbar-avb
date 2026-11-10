@@ -23,6 +23,7 @@
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
+#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -438,8 +439,7 @@ auto make_connected_donor(tsn::StreamId const am824_id, tsn::StreamId const aaf_
 {
     AvbEntityAudioIOConfig config{};
     config.entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
-    config.descriptor_storage_blob = audio_blob();
-    config.milan = false;  // the classic CONNECT_RX / CONNECT_TX handshake
+    config.descriptor_storage_blob = nanoavb::with_classic_profile(audio_blob());  // classic CONNECT_RX / CONNECT_TX
     auto created = AvbEntityAudioIO::create(std::move(config));
     EXPECT_TRUE(created.has_value());
     auto& listener = (*created)->components().acmp_listener;

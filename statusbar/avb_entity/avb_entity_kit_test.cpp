@@ -18,6 +18,7 @@
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
@@ -245,11 +246,11 @@ struct MilanKit
         std::optional<uint16_t> const crf_clock_source = std::nullopt,
         net::ClockFn clock = net::monotonic_ns,
         bool const signal_presence = false)
-        : blob{std::move(model)}
+        : blob{milan == false ? nanoavb::with_classic_profile(model) : std::move(model)}
         , storage{*atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob})}
         , talkers{*talker_stream_specs(storage, 0)}
         , listeners{*listener_stream_specs(storage, 0)}
-        , config{make_config(milan, entity_low, gate, signal_presence)}
+        , config{make_config(entity_low, gate, signal_presence)}
         , handler{storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit milan", std::nullopt, /*patch_avb_interface=*/false}
         , kit{config,
               handler,
@@ -271,8 +272,7 @@ struct MilanKit
     ~MilanKit() { (void)kit.stop(); }
 
     /// The kit's configuration.
-    static auto make_config(
-        std::optional<bool> const milan, uint64_t const entity_low, bool const gate, bool const signal_presence = false)
+    static auto make_config(uint64_t const entity_low, bool const gate, bool const signal_presence = false)
         -> AvbEntityAudioIOConfig
     {
         AvbEntityAudioIOConfig c{};
@@ -281,7 +281,6 @@ struct MilanKit
         c.interface_name = "kit-milan-test0";  // no such interface: no MAC, no sockets
         c.entity_id = ieee::Eui64{}.from_uint64(0x020000fffe000000ULL | entity_low);
         c.stream_address_mode = "static";
-        c.milan = milan;
         return c;
     }
 
@@ -831,22 +830,21 @@ TEST(avb_entity_kit_domain, a_restart_with_the_link_up_adopts_a_bridges_vid)
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(7) != nanoavb::VlanState::Unregistered);
 }
 
-// The kit's `milan` setting reaches the entity profile every handler reads
-// (nanoavb::EntityProfile): unset follows the model's (this test model says
-// nothing: Milan), false runs classic IEEE 1722.1.
-TEST(avb_entity_kit_profile, config_milan_overrides_the_model)
+// The model's ENTITY profile symbol is the entity profile every handler reads
+// (nanoavb::EntityProfile): a model that says nothing is Milan, the classic
+// symbol runs classic IEEE 1722.1.
+TEST(avb_entity_kit_profile, the_models_profile_symbol_decides)
 {
-    auto const blob = make_blob(1, 1);
-    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
-    EXPECT_TRUE(storage.has_value());
-    auto const talkers = *talker_stream_specs(*storage, 0);
-    auto const listeners = *listener_stream_specs(*storage, 0);
-    for (auto const setting : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+    for (bool const classic : {false, true}) {
+        auto const blob = classic ? nanoavb::with_classic_profile(make_blob(1, 1)) : make_blob(1, 1);
+        auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+        EXPECT_TRUE(storage.has_value());
+        auto const talkers = *talker_stream_specs(*storage, 0);
+        auto const listeners = *listener_stream_specs(*storage, 0);
         AvbEntityAudioIOConfig config{};
         config.interface_name = "kit-profile-test0";
         config.entity_id = ieee::Eui64{0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x04};
         config.stream_address_mode = "static";
-        config.milan = setting;
         EntityIdentityDescriptorHandler handler{
             *storage, config.entity_id, ieee::Eui64{}, "1.0.0", "kit profile", std::nullopt, /*patch_avb_interface=*/false};
         ptpclient::MediaClockGenerator media_clock{};
@@ -863,7 +861,7 @@ TEST(avb_entity_kit_profile, config_milan_overrides_the_model)
             last_gptp_ns,
             nullptr,
             std::pmr::get_default_resource()};
-        bool const expected = setting.value_or(true);
+        bool const expected = !classic;
         EXPECT_EQ(kit.host().components().profile.milan, expected);
         EXPECT_EQ(kit.host().components().aem_handler.entity_profile().milan, expected);
         EXPECT_EQ(kit.host().components().mvu_handler.profile().milan, expected);
