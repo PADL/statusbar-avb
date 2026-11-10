@@ -76,8 +76,8 @@ constexpr std::array<CounterDef, 13> STREAM_INPUT_COUNTERS{{
 // STREAM_OUTPUT counters (IEEE 1722.1-2021 Clause 7.4.42, Table 7-158), indexed
 // by bit position in counters_valid. FRAMES_TX (bit 7) is the talker frame
 // count -- the actual on-wire transmit rate. (The pre-2021 draft order had no
-// STREAM_INTERRUPTED, which put every later name one bit early.) A Milan entity
-// uses Milan v1.2 Table 5.17 instead.
+// STREAM_INTERRUPTED, which put every later name one bit early.) A Milan v1.2
+// entity uses Milan v1.2 Table 5.17 instead.
 constexpr std::array<CounterDef, 8> STREAM_OUTPUT_COUNTERS{{
     {.name = "STREAM_START", .is_error = false},
     {.name = "STREAM_STOP", .is_error = false},
