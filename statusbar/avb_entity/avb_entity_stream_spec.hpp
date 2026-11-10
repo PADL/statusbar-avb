@@ -316,9 +316,9 @@ struct TalkerPort
     return per_sec == 0 ? 0 : ((queued * 1'000'000'000U) + per_sec - 1) / per_sec;
 }
 
-/// A talker port's portTcMaxLatency for a stream of @p own_octets among its class's @p class_octets (interval_wire_octets
-/// each), ns, rounded up (IEEE 802.1Q-2022 Clause 35.2.2.8.6): a) the class's other frames, at the link speed or, under a
-/// cbs, at idleSlope; b) one MTU frame and then its own at the link speed; d) PROPAGATION_DELAY_NS.
+/// A talker port's portTcMaxLatency for @p own_octets among its class's @p class_octets, ns, rounded up (IEEE 802.1Q-2022
+/// Clause 35.2.2.8.6): a) the others at the link speed or a cbs's idleSlope; b) an MTU frame, then its own; d) propagation.
+/// A class B stream on a port also running class A would add class A's queue to a), which is not counted.
 [[nodiscard]] constexpr auto talker_port_latency_ns(
     TalkerPort const& port, uint64_t const class_octets, uint64_t const own_octets) noexcept -> uint32_t
 {
