@@ -636,6 +636,13 @@ TEST(talker_port, aaf_frame_is_the_tagged_frame_send_vlan_builds)
     EXPECT_TRUE(second.has_value());
     EXPECT_TRUE(same_bytes(second->frame, vlan_frame(std::span{expected}.first(len2), 0x123, 3)));
     EXPECT_EQ(slot->tx_packets, uint64_t{2});
+
+    // An adopted Domain's priority (IEEE 802.1Q-2022 Clause 35.2.2.8.5) tags the next frame.
+    talker.set_tag(avb_entity::StreamTag{.vlan_id = 0x123, .pcp = 2});
+    EXPECT_TRUE(talker.transmit_aaf_raw(*slot, 1224, pts + 250'000, 12, render));
+    size_t const len3 = avb_entity::serialize_aaf_raw(twin, expected, 12, 1224, pts + 250'000, render);
+    auto const third = wire.pop_tx();
+    EXPECT_TRUE(third.has_value() && same_bytes(third->frame, vlan_frame(std::span{expected}.first(len3), 0x123, 2)));
 }
 
 namespace {
