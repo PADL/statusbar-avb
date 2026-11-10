@@ -345,7 +345,8 @@ class MsrpParticipantT
     /// Withdraw local Listener interest.
     auto withdraw_listener(tsn::StreamId const& stream_id, TimePoint now) -> Status;
 
-    /// Declare an SR class Domain.
+    /// Declare an SR class Domain. Another value for a declared class is a change: the old value
+    /// joined, then left, then the new one declared New (IEEE 802.1Q-2022 Clause 10.7).
     auto declare_domain(DomainFirstValue const& fv, TimePoint now) -> Status;
 
     /// Withdraw an SR class Domain by its sr_class_id.
@@ -751,13 +752,17 @@ class MsrpParticipantT
     // PDU encode
     //
     void build_and_send_pdu(TimePoint now, bool leave_all = false);
-    /// Each Talker Advertise with a pending value: Lv! once the old value's Join is sent, the pending value
-    /// declared New once that Lv is sent. Called after every transmit opportunity.
-    void declare_pending_talkers(TimePoint now);
-    /// Each Talker Advertise with a pending value joins its old value again: a LeaveAll was sent or received.
-    void rejoin_pending_talkers(TimePoint now);
+    /// Each Talker Advertise and Domain with a pending value: Lv! once the old value's Join is sent, the
+    /// pending value declared New once that Lv is sent. Called after every transmit opportunity.
+    void declare_pending(TimePoint now);
+    /// declare_pending()'s step for @p rec.
+    template <typename Record>
+    void settle_pending(Record& rec, TimePoint now);
+    /// Each record with a pending value joins its old value again: a LeaveAll was sent or received.
+    void rejoin_pending(TimePoint now);
     /// @p fv pending on @p rec: the old value joined (Join!, then periodic! so QA sends), then left, then @p fv.
-    void change_talker(AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
+    template <typename Record, typename FirstValue>
+    void change_value(Record& rec, FirstValue const& fv, TimePoint now);
 
     template <typename RecordVec>
     auto append_attribute_message(
