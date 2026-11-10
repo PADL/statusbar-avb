@@ -145,6 +145,18 @@ template <MrpAttributeLike Record>
     return true;
 }
 
+/// True when a received event ended @p rec's registration: a Leave notified from IN, or from LV to MT
+/// (rLv! with RLeaveImmediate). @p before is the Registrar's state before the event (Clause 10.7.5).
+template <MrpAttributeLike Record>
+[[nodiscard]] auto registrar_rx_ended(Record const& rec, registrar_sm::Def::State before) noexcept -> bool
+{
+    if (rec.registrar_ctx.notify != registrar_sm::Notify::Leave) {
+        return false;
+    }
+    return before == registrar_sm::Def::State::In ||
+        (before == registrar_sm::Def::State::Lv && rec.registrar_sm.current_state() == registrar_sm::Def::State::Mt);
+}
+
 /// Dispatch the tx! event to an attribute's Applicant. Selects the
 /// TxRegistrarIn or TxRegistrarMt variant automatically based on the
 /// paired Registrar's current state, as required by Clause 10.7.7
