@@ -226,9 +226,10 @@ i225/i226) is logged with the kernel's text and told to
 `set_on_etf_settled` (which is told of an etf placed too); no further etf is asked for until the next `install()`, the cbs stay, and frames
 on the queue go out at once. Stock igc places the launch time in a 1 s cycle
 it estimates from the system's CLOCK_TAI (`igc_tx_launchtime`); a PHC on
-another timescale needs an igc that estimates it from SYSTIM. None of this has
-run on an igc yet: the requests are checked by `shaper_launch_time.*` against
-a recording `TcControl` and the etf bytes by `tc_qdisc.etf`.
+another timescale needs an igc that estimates it from SYSTIM. It runs on an
+i226 (igc), the etf alone and under class A's cbs; the requests are checked by
+`shaper_launch_time.*` against a recording `TcControl` and the etf bytes by
+`tc_qdisc.etf`.
 
 ### Launch time and cbs together
 
