@@ -110,11 +110,8 @@ void EntityUpkeep::watch_gptp(std::chrono::steady_clock::time_point const now)
 
 void EntityUpkeep::reevaluate(std::chrono::steady_clock::time_point const now)
 {
-    // Talker admission is time-dependent (the Listener Ready grace window):
-    // re-evaluate it so an expiry with no MSRP event still reaches the
-    // admission-changed callback (the hardware shaper).
+    // Admission's grace deadline is the kit's own timer; the counters fold at their interval.
     auto const now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-    kit_.poll_admission(net::rx_clock_now());  // the gate's clock, read once a pass
     kit_.poll_counters(now_ns);
 }
 
