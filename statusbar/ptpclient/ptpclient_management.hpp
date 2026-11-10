@@ -40,12 +40,12 @@ inline constexpr uint16_t port_data_set = 0x2004;
 inline constexpr uint16_t time_status_np = 0xC000;
 /// linuxptp's GRANDMASTER_SETTINGS_NP: the quality and time properties ptp4l announces as grandmaster.
 inline constexpr uint16_t grandmaster_settings_np = 0xC001;
-/// linuxptp's PORT_DATA_SET_NP: a port's neighborPropDelayThresh and asCapable.
-inline constexpr uint16_t port_data_set_np = 0xC002;
 /// linuxptp's SUBSCRIBE_EVENTS_NP: push notifications to the subscribing socket.
 inline constexpr uint16_t subscribe_events_np = 0xC003;
 /// linuxptp's PORT_PROPERTIES_NP: a port's interface name.
 inline constexpr uint16_t port_properties_np = 0xC004;
+/// linuxptp's CMLDS_INFO_NP (4.3): a port's link delay and asCapable, notified on each change.
+inline constexpr uint16_t cmlds_info_np = 0xC00B;
 }  // namespace management_id
 
 /// actionField (Table 57).
@@ -156,13 +156,23 @@ struct PortPropertiesNp
     static constexpr size_t SIZE = PortPropertiesNpPayload::LENGTH;  ///< up to the PTPText's lengthField
 };
 
-/// linuxptp's PORT_DATA_SET_NP, answered by the port it describes (the message's sourcePortIdentity).
-struct PortDataSetNp
+/// A port's asCapable as linuxptp reports it: always_capable is its `asCapable true`, never changing.
+enum class AsCapable : uint8_t
 {
-    uint32_t neighbor_prop_delay_thresh_ns{0};
-    bool as_capable{false};  ///< IEEE 802.1AS-2020 Clause 10.2.5.1
+    not_capable = 0,
+    capable = 1,
+    always_capable = 2,
+};
 
-    static constexpr size_t SIZE = PortDataSetNpPayload::LENGTH;
+/// linuxptp's CMLDS_INFO_NP, from the port it describes (the message's sourcePortIdentity): sent
+/// on each asCapable change and each peer delay measurement.
+struct CmldsInfoNp
+{
+    int64_t mean_link_delay_scaled{0};             ///< ns scaled by 2^16 (802.1AS-2020 meanLinkDelay)
+    int32_t scaled_neighbor_rate_ratio{0};         ///< (neighborRateRatio - 1) * 2^41
+    AsCapable as_capable{AsCapable::not_capable};  ///< IEEE 802.1AS-2020 Clause 10.2.5.1
+
+    static constexpr size_t SIZE = CmldsInfoNpPayload::LENGTH;
 };
 
 /// linuxptp's TIME_STATUS_NP, as ptp4l sends it on each clock update (lastGmPhaseChange skipped).
@@ -212,7 +222,7 @@ enum class ManagementEvent : uint8_t
     port_state = 0,       ///< a port's PORT_DATA_SET on each state change
     time_sync = 1,        ///< TIME_STATUS_NP on each clock update
     parent_data_set = 2,  ///< PARENT_DATA_SET when it changes (linuxptp 4.2)
-    cmlds = 3,            ///< CMLDS_INFO_NP (linuxptp 4.3); not parsed here
+    cmlds = 3,            ///< CMLDS_INFO_NP on each asCapable change and peer delay (linuxptp 4.3)
 };
 
 /// linuxptp's SUBSCRIBE_EVENTS_NP: a duration in seconds (65535: never expires; an empty
@@ -262,7 +272,7 @@ struct ManagementMessage
         TimePropertiesDataSet,
         PortDataSet,
         PortPropertiesNp,
-        PortDataSetNp,
+        CmldsInfoNp,
         TimeStatusNp,
         GrandmasterSettingsNp,
         SubscribeEventsNp>
@@ -335,8 +345,9 @@ struct PtpManagementState
     std::optional<int64_t> peer_mean_path_delay_ns;
     std::optional<PortState> port_state;
     std::optional<DelayMechanism> delay_mechanism;
-    /// That port's asCapable, from PORT_DATA_SET_NP (polled: ptp4l notifies no change of it).
-    std::optional<bool> as_capable;
+    /// That port's asCapable, from CMLDS_INFO_NP: fetched once, then notified (NOTIFY_CMLDS); not_capable
+    /// while the port is DISABLED or FAULTY. Unknown with a ptp4l before 4.3.
+    std::optional<AsCapable> as_capable;
     /// Every port's portState by portNumber - 1, from each PORT_DATA_SET ptp4l answers or notifies.
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> port_states{};
     /// The settings ptp4l acknowledged for a SET GRANDMASTER_SETTINGS_NP.
@@ -426,6 +437,8 @@ class PtpManagementClient final : public net::Pollable
     /// A port's state @p now into @p held; a change while subscribed asks for the parent.
     void note_port_state(std::optional<PortState>& held, PortState now);
     void apply_port_data_set(PortDataSet const& port_data);
+    /// The followed port moved to @p now: its asCapable again, which a state change may reset unnotified.
+    void note_followed_port_state(PortState now);
     void apply_settings(GrandmasterSettingsNp const& settings);
     void apply_subscription(SubscribeEventsNp const& held, int64_t now_ns);
     void publish_if_changed();
@@ -474,7 +487,7 @@ class PtpManagementClient final : public net::Pollable
     std::optional<PortState> reported_port_state_;
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> reported_port_states_{};
     std::optional<DelayMechanism> reported_delay_mechanism_;
-    std::optional<bool> reported_as_capable_;
+    std::optional<AsCapable> reported_as_capable_;
     std::optional<GrandmasterSettingsNp> reported_settings_;
     std::optional<TimePropertiesDataSet> reported_time_properties_;
     std::optional<uint16_t> reported_refused_;
