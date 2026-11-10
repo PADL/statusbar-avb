@@ -498,8 +498,6 @@ void AvbEntityHost::note_grandmaster_changed(gptp::ClockIdentity const& grandmas
 {
     if (!grandmaster_from_parent_) {
         note_grandmaster_in_force(grandmaster.to_eui64());
-    } else if (grandmaster_in_force_.has_value()) {
-        advertise_grandmaster(*grandmaster_in_force_);  // ADP keeps the parent data set's, not the Announces'
     }
     refresh_avb_info();
 }
@@ -552,7 +550,10 @@ auto AvbEntityHost::reported_grandmaster() const -> ieee::Eui64
 void AvbEntityHost::advertise_grandmaster(ieee::Eui64 const& grandmaster)
 {
     auto& adp = components_.adp_advertiser;
-    adp.set_gptp_info(tsn::ClockIdentity{grandmaster}, adp.adpdu().gptp_domain_number.get(), sm::Clock::now());
+    auto const* const announce =
+        net_handlers_ != nullptr && !grandmaster_from_parent_ ? net_handlers_->gptp_handler().last_announce() : nullptr;
+    uint8_t const domain = announce != nullptr ? announce->header.domain_number.get() : adp.adpdu().gptp_domain_number.get();
+    adp.set_gptp_info(tsn::ClockIdentity{grandmaster}, domain, sm::Clock::now());
 }
 
 auto AvbEntityHost::grandmaster_capable() const -> bool
