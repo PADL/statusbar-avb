@@ -579,8 +579,12 @@ auto AemCommandHandler::current_value(
             return handle_get_stream_format(AemDu{}, command_data, out_buffer);
         case AEM_COMMAND_SET_SAMPLING_RATE:
             return handle_get_sampling_rate(AemDu{}, command_data, out_buffer);
-        default:  // SET_CLOCK_SOURCE, SET_CONTROL, SET_SIGNAL_SELECTOR: the GET is the next code
+        case AEM_COMMAND_SET_CLOCK_SOURCE:
+        case AEM_COMMAND_SET_CONTROL:
+        case AEM_COMMAND_SET_SIGNAL_SELECTOR:  // the GET is the next code
             return handle_get_descriptor_value(static_cast<uint16_t>(set_command + 1U), command_data, out_buffer);
+        default:  // no GET in the SET's layout (SET_MIXER, SET_MATRIX, the streaming commands)
+            return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
 }
 
@@ -631,7 +635,8 @@ auto AemCommandHandler::set_name(
         // controller, like handle_set_descriptor_value does for values.
         emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size}, requester);
     }
-    return {.status = status, .size = size};
+    return status == AEM_STATUS_SUCCESS ? AemCommandResponse{.status = status, .size = size}
+                                        : reject_set(status, AEM_COMMAND_SET_NAME, command_data, out_buffer);
 }
 
 auto AemCommandHandler::handle_set_descriptor_value(
@@ -653,7 +658,7 @@ auto AemCommandHandler::handle_set_descriptor_value(
         // the application calls complete_pending_command().
         return defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
     }
-    return {.status = r.status, .size = r.size};
+    return r.status == AEM_STATUS_SUCCESS ? r : reject_set(r.status, command_type, command_data, out_buffer);
 }
 
 auto AemCommandHandler::apply_descriptor_value(

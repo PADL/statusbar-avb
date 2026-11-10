@@ -1433,6 +1433,24 @@ TEST(entity_name, a_set_to_the_value_in_force_is_not_saved)
     EXPECT_EQ(saves, 1);
 }
 
+// IEEE 1722.1-2021 Clause 7.4.17.1: a SET_NAME the application refuses answers the name in force.
+TEST(entity_name, a_refused_set_name_answers_the_name_in_force)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    handler.set_on_entity_name_changed([](AtdeccString const&) { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    AemCommandHandler cmd_handler{handler};
+
+    auto const refused =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "LiveName"));
+    EXPECT_EQ(refused.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(refused.bytes.size(), atdecc::aem::AemNamePayload::LENGTH);
+    EXPECT_EQ(name_from_response(refused.bytes), std::string{"SeedName"});
+}
+
 TEST(entity_name, get_set_round_trip_and_callback_and_read_descriptor)
 {
     auto blob = make_blob_with_entity("SeedName");
@@ -2504,6 +2522,7 @@ TEST(stream_lifecycle, a_refused_sampling_rate_leaves_no_state)
     handler.set_on_sampling_rate_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
     auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, make_sampling_rate_body(0, 96000u));
     EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(response_sampling_rate(vetoed.bytes), 48000u);  // the rate in force (IEEE 1722.1-2021 Clause 7.4.21.1)
     auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, make_sampling_rate_body(0));
     EXPECT_EQ(response_sampling_rate(get.bytes), 48000u);
 }

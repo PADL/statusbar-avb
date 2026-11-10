@@ -680,13 +680,14 @@ class AemCommandHandler
     /// the controller can match the response. Applies no mutation.
     [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// Refuse SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE, SET_CLOCK_SOURCE, SET_CONTROL or SET_SIGNAL_SELECTOR
-    /// with @p status, answering the value in force (IEEE 1722.1-2021 Clauses 7.4.17.1, 7.4.25.1); the echo
-    /// when that value cannot be read.
+    /// Fail a SET with @p status, answering the value in force (IEEE 1722.1-2021 Clauses 7.4.17.1, 7.4.25.1)
+    /// for SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE, SET_CLOCK_SOURCE, SET_CONTROL and
+    /// SET_SIGNAL_SELECTOR; the echo for any other SET, or when that value cannot be read.
     [[nodiscard]] auto reject_set(
         uint8_t status, uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// The GET answer, in the SET's layout, for one of the SET commands reject_set() covers.
+    /// The GET answer, in the SET's layout, for one of the SET commands reject_set() covers; NOT_IMPLEMENTED
+    /// for any other.
     [[nodiscard]] auto current_value(uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
