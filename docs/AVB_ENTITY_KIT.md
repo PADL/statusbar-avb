@@ -426,11 +426,13 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
   registration, since a withdraw forgot it and a registration that stayed in
   place raises no fresh MSRP event.
 - A settled Milan input joins its stream's VID with MVRP (Milan v1.2 Section
-  4.4.1) and holds it on the NIC's VLAN filter (docs/SHAPER.md). The kit
-  records the VID each input joined and leaves that one, so the join count
-  stays balanced. The Milan MSRP Listener declaration is made only once the
-  talker's attribute is registered on the destination and VLAN the probe
-  answer named (any VLAN for 0); one on another VLAN is ignored. The MSRP participant keeps the registered attribute when an Lv
+  4.4.1) and holds it on the NIC's VLAN filter (docs/SHAPER.md): the probe
+  answer's VID, or with none (0) the matched Talker Advertise's once it is
+  registered. The kit records the VID each input joined and leaves that one,
+  so the join count stays balanced. The Milan MSRP Listener declaration is
+  made only once the talker's attribute is registered on the destination and
+  VLAN the probe answer named (any VLAN for 0); one on another VLAN is
+  ignored. The MSRP participant keeps the registered attribute when an Lv
   names another destination or VLAN for its StreamID; a join with another
   value is adopted (a talker that moved), so two talkers declaring one
   StreamID on two VLANs at once is not told apart.
