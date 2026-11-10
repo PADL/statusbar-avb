@@ -294,8 +294,10 @@ since nothing in the model ties a stream of that domain to one of them. Of the
 unit's streams at its rate, each idle one (not a bound input, not a streaming
 output) whose descriptor lists its format at the new rate (sample format and
 channels kept, class A framing) follows the unit. One that cannot follow keeps
-its format, unless a port that converts no rates maps it (a static AUDIO_MAP or
-a dynamic mapping; ASYNC_ and SYNC_SAMPLE_RATE_CONV ports convert, Milan v1.3
+its format, unless a port that converts no rates maps it (a static AUDIO_MAP, a
+dynamic mapping, or the identity the kit installed on a dynamic output port,
+which a re-time would otherwise remove under the running stream; ASYNC_ and
+SYNC_SAMPLE_RATE_CONV ports convert, Milan v1.3
 Section 5.3.3.7): then the request is NOT_SUPPORTED, the one status Section
 5.4.2.13 names. Clause 7.4.21 names no STREAM_IS_RUNNING.
 

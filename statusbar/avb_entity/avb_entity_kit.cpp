@@ -92,6 +92,11 @@ auto descriptor_id(uint16_t const type, uint16_t const index) -> nanoavb::Descri
 }
 
 /// A saved value the model refused is dropped (the file is rewritten without it).
+void log_refused(logging::Logger log, std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status)
+{
+    log.warning("kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
+}
+
 /// Whether another AUDIO_UNIT is in @p unit_zero's clock domain (then the domain's streams belong to neither alone).
 auto shares_clock_domain(AvbEntityHost const& host, std::optional<atdecc::aem::DescriptorAudioUnit> const& unit_zero) -> bool
 {
@@ -105,11 +110,6 @@ auto shares_clock_domain(AvbEntityHost const& host, std::optional<atdecc::aem::D
         }
     }
     return false;
-}
-
-void log_refused(logging::Logger log, std::string_view const what, uint16_t const type, uint16_t const index, uint8_t const status)
-{
-    log.warning("kit: saved {} of descriptor {}:{} refused (status {}): dropped", logging::embed<24>(what), type, index, status);
 }
 
 }  // namespace
@@ -587,6 +587,16 @@ auto AvbEntityKit::stream_mapped(bool const output, uint16_t const index) const 
     return named;
 }
 
+auto AvbEntityKit::identity_installed(uint16_t const index) const -> bool
+{
+    bool named = false;
+    host_.components().aem_handler.output_audio_maps().for_each(
+        [this, &named, index](uint16_t const type, uint16_t const port_index, nanoavb::DynamicAudioMapping const& m) {
+            named = named || (m.stream_index == index && !port_converts(type, port_index));
+        });
+    return named;
+}
+
 auto AvbEntityKit::port_converts(uint16_t const port_type, uint16_t const port_index) const -> bool
 {
     auto const port = load_descriptor<atdecc::aem::DescriptorStreamPort>(host_, port_type, port_index);
@@ -855,10 +865,11 @@ auto AvbEntityKit::add_retimed(
         return atdecc::AEM_STATUS_SUCCESS;  // a CRF's format stays, as does one at another rate or of another unit
     }
     // Milan v1.3 Section 5.4.2.13: one that cannot follow (running, or listing no such format) stays, unless a
-    // port that converts no rates maps it (stream_mapped(): its static AUDIO_MAPs or dynamic mappings).
+    // port that converts no rates maps it, the identity the kit installed on an output port included.
     auto const word = following_format(output, spec, rate);
     if (!word) {
-        return stream_mapped(output, spec.index) ? atdecc::AEM_STATUS_NOT_SUPPORTED : atdecc::AEM_STATUS_SUCCESS;
+        bool const mapped = stream_mapped(output, spec.index) || (output && identity_installed(spec.index));
+        return mapped ? atdecc::AEM_STATUS_NOT_SUPPORTED : atdecc::AEM_STATUS_SUCCESS;
     }
     (void)out.try_push_back(
         {.type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT,
