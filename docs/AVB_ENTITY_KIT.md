@@ -49,10 +49,9 @@ samples per PDU the talker sends (AAF PCM32 48 kHz N channels: 24*N + 24); CRF
 its timestamps (28 for one). The byte for a sampling clock a little faster than
 nominal (`MILAN_TSPEC_SPARE_BYTES`) is the shaper's, added to the frame after
 the 68-octet minimum (`TSpec::clock_drift_bytes`, Table 4.4 step 3): the CRF's
-5696 kbit/s. Milan v1.2's Table 4.4 puts it in MaxFrameSize instead (24*N + 24
-+ 1, CRF 28 + 1 and 5632 kbit/s); `talker_tspec` follows the entity's Milan
-version, a classic entity v1.2's. AM824, not a Milan format, reserves a spare
-sample instead: its talker may send nominal+1 samples on a wake.
+5696 kbit/s. A classic entity sizes its TSpecs the same way. AM824, not a
+Milan format, reserves a spare sample instead: its talker may send nominal+1
+samples on a wake.
 
 The raw TX render (`StreamRawRenderFn`) is the fast path alongside the float
 `StreamRenderFn`: the payload is interleaved big-endian samples of the
@@ -108,12 +107,11 @@ says nothing is Milan. Only behaviour that could break a classic controller
 follows it: under Milan, ACQUIRE_ENTITY answers NOT_SUPPORTED (Milan v1.3
 Section 5.4.2.1).
 
-`AudioIoConfig::milan_version` (default v1.3) is the Milan version a Milan
-entity implements: GET_MILAN_INFO's specification_version, the MVU layouts and
-commands (docs/MVU.md), GET_STREAM_INFO's form, the STREAM_OUTPUT counters'
-positions and the TSpec's MaxFrameSize below. Milan v1.3 Section 5.3.1 makes
-GET_MILAN_INFO's fields part of the entity model: an entity that changes its
-version or features reports another entity_model_id.
+A Milan entity implements Milan v1.3: GET_MILAN_INFO's specification_version,
+the MVU layouts and commands (docs/MVU.md), GET_STREAM_INFO's form, the
+STREAM_OUTPUT counters' positions and the TSpec's MaxFrameSize above. Milan
+v1.3 Section 5.3.1 makes GET_MILAN_INFO's fields part of the entity model: an
+entity that changes its features reports another entity_model_id.
 `AudioIoConfig::signal_presence` says the application reports each output's
 signal presence (`set_output_signal_presence`, a channel bit mask, reactor
 thread), kept to the channels the stream's format has, and cut again when a
@@ -349,8 +347,8 @@ the ACMP connection count. A Milan listener queries this to verify the stream
 before sustaining a connection.
 
 The response form is the AEM handler's `stream_info_layout()`: the profile's
-(Milan v1.3's IEEE 1722.1-2021 84 octets, Milan v1.2's 56, classic IEEE
-1722.1-2013's 48) unless `set_stream_info_layout` picks another. A controller tells them
+(Milan's IEEE 1722.1-2021 84 octets, classic IEEE 1722.1-2013's 48) unless
+`set_stream_info_layout` picks another, Milan v1.2's 56 among them. A controller tells them
 by length, and the form gives an output's msrp_accumulated_latency its meaning
 (Milan v1.3 Section 5.4.2.10.2): the presentation time offset in the older
 forms, the AccumulatedLatency the Talker Advertise declares (0, the bridges
@@ -382,8 +380,7 @@ STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX from the interval
 counts at IEEE 1722.1-2021's bit values 0x01, 0x02, 0x08, 0x10 and 0x80, and,
 once the application reports it, signal presence (Section 5.3.7.7.1) in
 ENTITY_SPECIFIC_9 (channels 0-31) and ENTITY_SPECIFIC_10 (32-59), channel 0 at
-the MSB, notified with the other counters at most once a second. Milan v1.2
-(Table 5.17) has the five at bit values 0x01-0x10. Classic (IEEE 1722.1-2021 Clause
+the MSB, notified with the other counters at most once a second. Classic (IEEE 1722.1-2021 Clause
 7.4.42.2.5): STREAM_START and STREAM_STOP as Milan's, then the running totals
 of mr toggles (bit 3), tu PDUs (bit 4) and PDUs (FRAMES_TX, bit 7).
 
