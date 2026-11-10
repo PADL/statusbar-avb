@@ -400,8 +400,8 @@ class AvbEntityHost
     /// GET_AVB_INFO's gptp_grandmaster_id: the grandmaster in force, as ADP names it; before one is,
     /// the Announces' (an entity whose loop tells the host none), else zero.
     [[nodiscard]] auto reported_grandmaster() const -> ieee::Eui64;
-    /// ADP's gptp_grandmaster_id (IEEE 1722.1-2021 Clause 6.2.2.16) is @p grandmaster; its domain
-    /// is the one last advertised.
+    /// ADP's gptp_grandmaster_id and gptp_domain_number (IEEE 1722.1-2021 Clauses 6.2.2.16, 6.2.2.17):
+    /// @p grandmaster, in the last Announce's domain unless the parent data set is the source.
     void advertise_grandmaster(ieee::Eui64 const& grandmaster);
     /// AVB_INTERFACE 0's priority1 is below 255 (IEEE 802.1AS-2020 Clause 8.6.2.1).
     [[nodiscard]] auto grandmaster_capable() const -> bool;
