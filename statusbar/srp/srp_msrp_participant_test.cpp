@@ -5,6 +5,7 @@
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/srp/srp_msrp_format.hpp"
+#include "statusbar/srp/srp_msrp_test_support.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
@@ -809,6 +810,14 @@ TEST(msrp_participant, listener_leave_runs_the_leavetimer_by_default)
     EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
     rig.a.tick(rig.clock.advance(std::chrono::milliseconds(600)));
     EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
+}
+
+// The crafted Listener LeaveAll is the MSRPDU the receive path parses: a Listener message with an
+// empty LeaveAll vector, then the EndMarks.
+TEST(msrp_test_support, the_listener_leave_all_pdu_has_the_wire_layout)
+{
+    std::array<uint8_t, 11> const wire{0x00, 0x03, 0x08, 0x00, 0x04, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00};
+    EXPECT_TRUE(listener_leave_all_pdu() == wire);
 }
 
 TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
