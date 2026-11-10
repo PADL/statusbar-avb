@@ -619,9 +619,9 @@ class AemCommandHandler
     /// Deferred commands held at once; with this many held, a SET is answered
     /// NO_RESOURCES without calling its hook.
     static constexpr size_t MAX_PENDING_COMMANDS = 8;
-    /// Longest command body a deferred command keeps for its echoed responses
-    /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
-    static constexpr size_t MAX_PENDING_BODY = 64;
+    /// Longest command body a deferred command keeps for its echoed responses: any an AECPDU
+    /// carries, so no deferral is refused for its length after its hook has started.
+    static constexpr size_t MAX_PENDING_BODY = MAX_AEM_BODY;
 
     /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index) with @p status, answering
     /// @p response_body, else the echoed command on SUCCESS or, on a failure, the value in force at this call
