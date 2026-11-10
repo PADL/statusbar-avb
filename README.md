@@ -84,6 +84,9 @@ What 2.3.0 added to the entity data path, and how it measured on a
 Raspberry Pi 5 rig: **[`docs/REPORT_2_3_0_PI5.md`](docs/REPORT_2_3_0_PI5.md)**.
 What 2.4.0 changed, the "told the time" migration and the API changes a
 downstream tree meets: **[`docs/RELEASE_2_4_0.md`](docs/RELEASE_2_4_0.md)**.
+What 2.5.0 changed, the IEEE 1722 security work (ECC1 corrected, HPKE
+ECC2/ECC3 and Ed25519 ESCF) and the IEEE 1722.1-2021 conformance fixes:
+**[`docs/RELEASE_2_5_0.md`](docs/RELEASE_2_5_0.md)**.
 
 - **AVB endpoints** (Linux): `statusbar-avb-audio-io` (dual-format
   AM824 + AAF + CRF), `statusbar-avb-am824-io`, `statusbar-avb-stereo-io`,
