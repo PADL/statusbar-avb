@@ -211,6 +211,13 @@ GET_AVB_INFO of interface 0 is notified asynchronously (Milan v1.2 Table 5.22)
 when a field the table lists changes; the events that can change one call
 `refresh_avb_info()`, and a mirrored device's updates notify themselves.
 
+AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows the entity's own gPTP
+state until the integrator reports the gPTP stack's asCapable for the port with
+`AvbEntityHost::note_port_as_capable` (from ptp4l, `PtpManagementState::as_capable`;
+linuxptp's `asCapable true` says nothing of the link and is not reported);
+`std::nullopt` returns to the entity's own state. It is never set while the link
+is down (IEEE 802.1AS-2020 Clause 10.2.5.1).
+
 ## Listener VLAN
 
 `bind_listener_vlan` keeps the SR-class VID in use (configured, or adopted from
