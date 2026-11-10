@@ -108,7 +108,7 @@ The gate's clock is `CLOCK_MONOTONIC_RAW` (`TalkerGate::RawTimePoint`,
 reactor is told its own time (`sm::TimePoint`, the reactor's `ClockFn`) and has
 no line to RAW, so for each event that changes or evaluates the gate it reads
 RAW once (`AvbEntityKit::note_listener_ready` receives that reading beside the
-reactor's time; `poll_admission` is told one). The reactor is not real-time;
+reactor's time; `on_admission_timer` is told one). The reactor is not real-time;
 the media thread never reads a clock for the gate.
 
 Per stream the gate holds one stamp, `ready_raw_ns_`: the last RAW instant the
@@ -142,9 +142,9 @@ ages out and re-declares on a roughly 10 s cycle, momentarily withdrawn for 1-3
 s, which must not chop the stream. Only a registration or a withdrawal moves
 the stamp, so a withdrawn declaration closes the gate `GRACE` later and the
 window cannot be extended without a fresh registration. A genuine departure
-closes the gate; `admitted()` depends on time, so the reactor re-evaluates it
-periodically (`AvbEntityKit::poll_admission`) to notice a grace expiry without
-an MSRP event. `listener_admitted()` reports the listener half alone (whatever
+closes the gate; `admitted()` depends on time, so the kit arms one timer at the
+earliest grace end (`AvbEntityKit::admission_deadline()`) and re-evaluates it
+then (`on_admission_timer`), noticing a grace expiry without an MSRP event. `listener_admitted()` reports the listener half alone (whatever
 `gate_enabled_` says, Started/Stopped playing no part).
 
 The declarations' deadlines (`TalkerDeclarations`, the probe window and the
