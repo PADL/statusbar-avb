@@ -122,8 +122,10 @@ GET_MILAN_INFO then says TALKER_SIGNAL_PRESENCE (v1.3 only).
 
 With `gate_talker_on_listener` (the default) each talker stream emits its AVTP
 stream only when the stream is Started and an MSRP Listener Ready or Listener
-Ready Failed is registered for it (Milan v1.2 Section 5.3.7.3), held across an
-MRP LeaveAll re-registration blip by a short grace window. Listener Asking
+Ready Failed is registered for it (Milan v1.2 Section 5.3.7.3). A classic
+entity holds it across an MRP LeaveAll re-registration blip by a short grace
+window; a Milan entity relies on its registrar's 5 s LeaveTime and stops at the
+last Listener's Lv (Milan v1.3 Section 4.2.7.2.2). Listener Asking
 Failed does not admit. ACMP connections play no part: a Milan listener binds
 with PROBE_TX and makes none, and a classic listener declares Ready after
 CONNECT_RX anyway. With no listener the talker stays silent. The CRF media

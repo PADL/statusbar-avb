@@ -431,13 +431,14 @@ The shaper sizes class A by the kit's admitted set
 (`AvbEntityKit::admitted_talker_streams()`, reported through
 `set_on_admission_changed`): a Started talker stream for which an MSRP
 Listener Ready or Listener Ready Failed is registered, or was within the
-transmit gate's 5 s grace window (`TalkerGate::admitted`). That is the
+transmit gate's grace window (`TalkerGate::admitted`; 5 s for a classic entity,
+none for a Milan one, whose registrar holds a LeaveAll for LeaveTime). That is the
 Milan 1.2 5.3.7.3 streaming condition; Listener Asking Failed does not
 admit, and ACMP connections play no part (a Milan listener binds with
 PROBE_TX and makes none). The grace window runs from the last moment the
 declaration was known registered, so the LeaveAll re-registration blip
 never withdraws bandwidth from a stream still on the wire, and a listener that
-really leaves gives its bandwidth back 5 s later. The kit re-evaluates the
+really leaves gives its bandwidth back when the grace runs out. The kit re-evaluates the
 set on every MSRP listener event and on every `EntityUpkeep` tick, which is
 what notices a grace expiry. The transmit gate is the same predicate (the
 kit's MAAP and STOP_STREAMING checks only narrow it), and the reactor
