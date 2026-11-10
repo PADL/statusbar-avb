@@ -348,6 +348,8 @@ class AvbEntityKit
     /// stream's format hook (reactor thread); answers an AEM status. Without it the unit keeps its rate.
     using UnitRateFn = sg14::inplace_function<uint8_t(uint32_t rate, std::span<RetimedFormat const> streams), 32>;
     void set_on_unit_rate_changed(UnitRateFn fn) noexcept { on_unit_rate_changed_ = std::move(fn); }
+    /// Whether a SET_SAMPLING_RATE is moving its streams through the format hook now (not while undoing).
+    [[nodiscard]] auto retiming() const noexcept -> bool { return retiming_; }
     /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the
     /// shaper keeps it current) whose SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that
     /// pushes every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
@@ -831,6 +833,8 @@ class AvbEntityKit
     [[nodiscard]] auto restore_milan_binding(PersistedListenerBinding const& binding) -> bool;
     void collect_entity_settings(PersistentState& state) const;
     void collect_stream_settings(PersistentState& state) const;
+    /// With AUDIO_UNIT 0 off its authored rate, every audio stream of it not yet in @p state, at its format.
+    void collect_unit_formats(PersistentState& state) const;
     void collect_listener_bindings(PersistentState& state) const;
     void collect_mvu_settings(PersistentState& state) const;
 
@@ -857,6 +861,8 @@ class AvbEntityKit
     AvbEntityHost host_;
     /// AUDIO_UNIT 0 as the blob has it (its clock domain); nullopt without one.
     std::optional<atdecc::aem::DescriptorAudioUnit> unit_zero_;
+    /// Another AUDIO_UNIT is in unit 0's clock domain: no stream is unit 0's alone, so its rate stays.
+    bool unit_zero_shares_domain_{false};
 
     /// Per-stream transmit gate (MSRP listener declaration + grace). Binds config_ + components.
     TalkerGate gate_;

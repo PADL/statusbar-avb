@@ -2315,13 +2315,13 @@ TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
         EXPECT_EQ(
             m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 8))),
             atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-        // Milan v1.3 Section 5.4.2.13: the bound input keeps its format on a port that converts no rates; the rate in
-        // force is a no-op.
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
-        EXPECT_TRUE(m.unit_rates.empty());
-        EXPECT_EQ(m.kit.sample_rate(), 48000U);
-        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
+        // Milan v1.3 Section 5.4.2.13: the bound input, which no port maps here, keeps its format; the idle output
+        // follows; the rate in force is a no-op.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.kit.sample_rate(), 96000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 6));
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
     }
     std::filesystem::remove_all(dir);
 }
@@ -2476,8 +2476,8 @@ TEST(avb_entity_kit_formats, a_retime_past_the_class_a_budget_is_refused_first)
 namespace {
 
 /// Two AAF outputs (8 ch INT_24, 48 and 96 kHz listed), both carried by STREAM_PORT_OUTPUT 0 of AUDIO_UNIT 0;
-/// with @p two_units output 1 and a second unit (port 1) are in clock domain 1.
-auto make_two_unit_blob(bool const two_units) -> std::vector<uint8_t>
+/// with @p two_units output 1 and a second unit (port 1) are in clock domain 1, or with @p shared both in 0.
+auto make_two_unit_blob(bool const two_units, bool const shared = false) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -2490,7 +2490,7 @@ auto make_two_unit_blob(bool const two_units) -> std::vector<uint8_t>
         atdecc::aem::DescriptorStream stream{};
         stream.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
         stream.descriptor_index = index;
-        stream.clock_domain_index = static_cast<uint16_t>(two_units ? index : 0);
+        stream.clock_domain_index = static_cast<uint16_t>(two_units && !shared ? index : 0);
         stream.current_format.from_uint64(INT24_8CH_48K);
         (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(INT24_8CH_48K));
         (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(INT24_8CH_96K));
@@ -2502,7 +2502,7 @@ auto make_two_unit_blob(bool const two_units) -> std::vector<uint8_t>
         port.descriptor_index = index;
         w.add(0, atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, index, make_const_span(port));
         atdecc::aem::DescriptorAudioUnit unit{};
-        unit.clock_domain_index = index;
+        unit.clock_domain_index = static_cast<uint16_t>(shared ? 0 : index);
         unit.current_sampling_rate = uint32_t{48000};
         unit.sampling_rates_count = uint16_t{2};
         unit.sampling_rates[0] = uint32_t{48000};
@@ -2519,8 +2519,8 @@ auto make_two_unit_blob(bool const two_units) -> std::vector<uint8_t>
 /// The two-unit model's kit, both hooks accepting and counting what they were asked.
 struct TwoUnitKit : PersistentKit
 {
-    explicit TwoUnitKit(bool const two_units, uint64_t const entity_low)
-        : PersistentKit{{}, entity_low, std::nullopt, make_two_unit_blob(two_units)}
+    explicit TwoUnitKit(bool const two_units, uint64_t const entity_low, bool const shared = false)
+        : PersistentKit{{}, entity_low, std::nullopt, make_two_unit_blob(two_units, shared)}
     {
         kit.set_on_stream_format_changed([this](uint16_t, uint16_t, StreamFormatFields const&) {
             ++formats;
@@ -2559,6 +2559,42 @@ TEST(avb_entity_kit_formats, every_stream_one_port_carries_follows_the_unit)
     EXPECT_EQ(m.formats, size_t{2});
     EXPECT_EQ(m.kit.talker_specs()[0].format_word, INT24_8CH_96K);
     EXPECT_EQ(m.kit.talker_specs()[1].format_word, INT24_8CH_96K);
+}
+
+// Two units in one clock domain: no stream is unit 0's alone (Clauses 7.2.3, 7.2.6 tie no stream to a unit's
+// rate), so its rate stays: NOT_SUPPORTED, the data plane not asked
+TEST(avb_entity_kit_formats, a_unit_sharing_its_clock_domain_keeps_its_rate)
+{
+    TwoUnitKit m{true, 0x76, true};
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(m.asked.empty());
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+}
+
+// A running stream kept at 48 kHz while the unit went to 96 kHz is still at 48 kHz after a restart: the rate is
+// restored first, then every stream of the unit at the format it had
+TEST(avb_entity_kit_formats, a_stream_kept_at_its_rate_stays_there_across_a_restart)
+{
+    constexpr uint16_t SYNC_SAMPLE_RATE_CONV = 0x0004;
+    auto const dir = state_dir("kept-rate");
+    auto const path = (dir / "avb-state.toml").string();
+    {
+        RateKit m{path, 0x77, true, false, false, true, SYNC_SAMPLE_RATE_CONV};
+        EXPECT_TRUE(m.start_ready());
+        (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+        m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    }
+    {
+        RateKit m{path, 0x77, true, false, false, true, SYNC_SAMPLE_RATE_CONV};
+        EXPECT_TRUE(m.start_ready());
+        EXPECT_EQ(m.kit.sample_rate(), 96000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_96K);
+    }
+    std::filesystem::remove_all(dir);
 }
 
 // A stream path refuses a format it cannot carry and keeps its own
