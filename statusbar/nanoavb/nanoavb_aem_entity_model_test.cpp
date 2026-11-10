@@ -2508,6 +2508,35 @@ TEST(stream_lifecycle, a_refused_sampling_rate_leaves_no_state)
     EXPECT_EQ(response_sampling_rate(get.bytes), 48000u);
 }
 
+// A SET_SAMPLING_RATE to the rate in force succeeds and has nothing for on_settings_changed to save.
+TEST(stream_lifecycle, a_set_sampling_rate_to_the_rate_in_force_is_not_saved)
+{
+    auto blob = make_blob_with_audio_unit();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_send_response([](Eui48 const&, std::span<uint8_t const>) { return true; });
+    int saves = 0;
+    cmd_handler.set_on_settings_changed([&saves](uint16_t) { ++saves; });
+    auto const set_rate = [&cmd_handler](uint32_t const rate) {
+        auto const body = make_sampling_rate_body(0, rate);
+        atdecc::AemDu header{};
+        header.init_command(
+            atdecc::AEM_COMMAND_SET_SAMPLING_RATE, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        std::vector<uint8_t> packet(atdecc::AemDu::LENGTH + body.size());
+        span_store(std::span<uint8_t>{packet}.first(atdecc::AemDu::LENGTH), header);
+        std::ranges::copy(body, packet.begin() + atdecc::AemDu::LENGTH);
+        (void)cmd_handler.process_packet(Eui48{}, packet, Eui64{});
+    };
+    set_rate(48000u);  // the authored rate
+    EXPECT_EQ(saves, 0);
+    set_rate(96000u);
+    EXPECT_EQ(saves, 1);
+    set_rate(96000u);
+    EXPECT_EQ(saves, 1);
+}
+
 TEST(stream_lifecycle, set_sampling_rate_validates_and_round_trips)
 {
     auto blob = make_blob_with_audio_unit();

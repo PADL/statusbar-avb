@@ -669,12 +669,9 @@ auto AemCommandHandler::apply_descriptor_value(
 
 auto AemCommandHandler::value_in_force(uint16_t const set_command, std::span<uint8_t const> const command_data) -> bool
 {
-    // The GET of SET_STREAM_FORMAT, SET_SAMPLING_RATE and SET_CLOCK_SOURCE is the next code,
-    // and answers in the command's own layout (IEEE 1722.1-2021 Clauses 7.4.9-7.4.24).
+    // The value in force answers in the command's own layout (IEEE 1722.1-2021 Clauses 7.4.9-7.4.24).
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> current{};
-    auto const get = static_cast<uint16_t>(set_command + 1U);
-    auto const r = get == AEM_COMMAND_GET_STREAM_FORMAT ? handle_get_stream_format(AemDu{}, command_data, current)
-                                                        : handle_get_descriptor_value(get, command_data, current);
+    auto const r = current_value(set_command, command_data, current);
     return r.status == AEM_STATUS_SUCCESS && r.size <= command_data.size() &&
         std::ranges::equal(std::span{current}.first(r.size), command_data.first(r.size));
 }
