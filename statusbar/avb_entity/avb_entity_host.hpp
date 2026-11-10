@@ -332,9 +332,10 @@ class AvbEntityHost
     /// Propagation delay (ns) to report in the observed (non-mirrored) state
     /// (e.g. the gPTP port's neighborPropDelay); a change is notified (Clause 7.4.40).
     void set_propagation_delay_ns(uint32_t ns);
-    /// The gPTP stack's asCapable for this port (IEEE 802.1AS-2020 Clause 10.2.5.1): from the first call,
-    /// GET_AVB_INFO's AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows it, not the entity's gPTP lock.
-    void note_port_as_capable(bool as_capable);
+    /// The gPTP stack's asCapable for this port (IEEE 802.1AS-2020 Clause 10.2.5.1): GET_AVB_INFO's
+    /// AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows it, not the entity's gPTP lock; nullopt
+    /// returns to the entity's own state. Never while the link is down. Reactor thread.
+    void note_port_as_capable(std::optional<bool> as_capable);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
     // --- Typed stream hooks (the stream-specific bits of the SM wiring) ---------
