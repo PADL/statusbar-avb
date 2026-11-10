@@ -167,7 +167,8 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
 void TalkerStreams::mark_open(uint16_t const stream_index) noexcept
 {
     // A request that raced a stop is no restart of this stream: cleared before a toggle may be accepted here.
-    mr_pending_[stream_index].store(false, std::memory_order_relaxed);
+    mr_pending_[stream_index].store(0, std::memory_order_relaxed);
+    open_generation_[stream_index].fetch_add(1, std::memory_order_release);  // a stalled request names the old one
     open_[stream_index].store(true, std::memory_order_release);
 }
 
@@ -554,6 +555,7 @@ auto TalkerStreams::send_stream_frame(TalkerStreamSlot& slot, std::span<uint8_t 
 void TalkerStreams::count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> const frame) noexcept
 {
     ++slot.tx_packets;
+    slot.mr_hold -= slot.mr_hold != 0 ? 1 : 0;  // a toggle holds for PDUs sent, not tried
     if (slot.spec.index < tx_counters_.size() && frame.size() >= 4) {
         count_pdu(tx_counters_[slot.spec.index], frame);
     }
@@ -637,23 +639,29 @@ auto TalkerStreams::transmit_crf_raw(
 
 auto TalkerStreams::next_mr(TalkerStreamSlot& slot) noexcept -> bool
 {
-    // Requests since the last toggle toggle mr once (a load first: no read-modify-write while none is pending), once
-    // the last toggle has held for MR_HOLD_PDUS PDUs; this PDU is the first of its hold.
+    // Requests of this open since the last toggle toggle mr once (a load first: no read-modify-write while none is
+    // pending), once the last toggle has held for MR_HOLD_PDUS PDUs sent (count_sent).
     auto& pending = mr_pending_[slot.spec.index];
-    if (slot.mr_hold == 0 && pending.load(std::memory_order_relaxed) && pending.exchange(false, std::memory_order_relaxed)) {
+    uint32_t const asked = open_generation_[slot.spec.index].load(std::memory_order_relaxed);
+    if (slot.mr_hold == 0 && pending.load(std::memory_order_relaxed) != 0 &&
+        pending.exchange(0, std::memory_order_relaxed) == asked) {
         slot.mr = !slot.mr;
         slot.mr_hold = MR_HOLD_PDUS;
     }
-    slot.mr_hold -= slot.mr_hold != 0 ? 1 : 0;
     return slot.mr;
 }
 
 auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status
 {
-    if (stream_index >= MAX_ENTITY_STREAMS || !open_[stream_index].load(std::memory_order_acquire)) {
+    if (stream_index >= MAX_ENTITY_STREAMS) {
         return failure(std::errc::invalid_argument);
     }
-    mr_pending_[stream_index].store(true, std::memory_order_relaxed);
+    // The generation read before the open check: a request outlasting a stop names the open it was made of.
+    uint32_t const generation = open_generation_[stream_index].load(std::memory_order_acquire);
+    if (!open_[stream_index].load(std::memory_order_acquire)) {
+        return failure(std::errc::invalid_argument);
+    }
+    mr_pending_[stream_index].store(generation, std::memory_order_relaxed);
     return success();
 }
 
@@ -680,7 +688,7 @@ void TalkerStreams::close_tx() noexcept
     for (size_t idx = 0; idx < MAX_ENTITY_STREAMS; ++idx) {
         stream_stopped_[idx].store(false, std::memory_order_release);
         open_[idx].store(false, std::memory_order_release);  // a toggle is refused until a stream opens here again
-        mr_pending_[idx].store(false, std::memory_order_release);
+        mr_pending_[idx].store(0, std::memory_order_release);
         tx_counters_[idx].have_mr = false;  // a reopened stream's first mr is no toggle
     }
 }
