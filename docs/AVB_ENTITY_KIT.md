@@ -22,9 +22,9 @@ loop. It works on the `AvbEntityKit`, so any kit entity can use it.
 - `tick()`, every reactor pass, drains the entity's ctl/media log channels (and
   any added) to a sink; detects a grandmaster regained under an unchanged
   identity and calls `on_gptp_announce`; fires the Init timeout
-  (`GPTP_LOCK_TIMEOUT`) as `on_timeout`; re-evaluates talker admission
-  (`poll_admission`: a Listener Ready grace window can expire with no MSRP
-  event); and logs state changes on the ctl channel.
+  (`GPTP_LOCK_TIMEOUT`) as `on_timeout`; folds the stream counters at their
+  interval; and logs state changes on the ctl channel. Talker admission needs
+  no tick: the kit's own timer re-evaluates it at the admission deadline.
 
 The grandmaster edge detection runs on the reactor thread so that the state
 machine and MSRP stack are only ever driven from one thread.
@@ -150,8 +150,9 @@ probe window closing, a hold ending).
 
 The admitted set changes after an MSRP listener declaration for a talker stream
 is registered or withdrawn, after the Talker declarations are withdrawn, or
-when `poll_admission()` sees a grace window expire or a stream Started or
-Stopped. The host's `on_listener_ready` hook lands in `note_listener_ready`.
+when a stream is Started or Stopped, or when the kit's timer reaches the
+admission deadline (`on_admission_timer()`): the earliest end of a grace window
+whose listener is no longer registered (`admission_deadline()`). The host's `on_listener_ready` hook lands in `note_listener_ready`.
 
 The presentation time offset (Milan v1.2 Section 5.3.7.6) is changed with
 SET_STREAM_INFO (MSRP_ACC_LAT_VALID) or SET_MAX_TRANSIT_TIME while the stream
