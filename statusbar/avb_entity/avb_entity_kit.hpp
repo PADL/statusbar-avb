@@ -152,32 +152,13 @@ class AvbEntityKit
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
-    /// The link is up: the control plane's Link Up, and MAAP's
-    /// PortOperational! (IEEE 1722-2025 B.3.5.9) — the first begins acquiring
-    /// the stream addresses, a later one re-probes the range held. A Link Up
-    /// while the link is already up is a repeat, not a bounce (a runner that
-    /// drives the start-up Link Up itself and then installs a link monitor
-    /// reporting the first state it sees raises two within milliseconds):
-    /// the supervisor's table has no row for it, and MAAP is not told, or the
-    /// second one would restart the probe sequence the first began (five
-    /// PROBEs for four). A Link Down, or stop(), ends the link-up state, so a
-    /// genuine bounce and the Link Up after a restart both go through.
-    void on_link_up(TimePoint time)
-    {
-        // MAAP first, the host after: the host's Link Up starts ADP unless
-        // the kit holds it, and it is held while the block is being probed
-        // (a first acquisition, or a bounce re-probing the range held). The
-        // first ENTITY_AVAILABLE then goes out once the addresses are
-        // defended, from the acquirer's ready callback, so no listener probes
-        // a talker whose destination address is not yet its own. A repeat
-        // (the link already up) reaches neither MAAP nor the hold.
-        if (!link_up_) {
-            maap_.port_operational(time);
-        }
-        link_up_ = true;
-        host_.hold_adp(!maap_.ready());
-        host_.on_link_up(time);
-    }
+    /// A link up: the control plane's Link Up and MAAP's PortOperational! (IEEE 1722-2025 B.3.5.9);
+    /// an unshaped port's speed and MTU read again, a change declared again in each talker's
+    /// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6). MAAP goes first and the host holds
+    /// ADP while the block is probed, so the first ENTITY_AVAILABLE waits until it is defended. A
+    /// Link Up while the link is already up reaches neither MAAP nor the hold, or it would restart
+    /// the probe sequence the first began. A Link Down, or stop(), ends the link-up state.
+    void on_link_up(TimePoint time);
     void on_link_down(TimePoint time)
     {
         link_up_ = false;
@@ -395,7 +376,7 @@ class AvbEntityKit
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
-    /// The link speed (Mbit/s, reactor thread; the interface's from start(), 1000 unknown; the shaper keeps it current) whose
+    /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the shaper keeps it current) whose
     /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that pushes every
     /// talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
     void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
@@ -406,7 +387,7 @@ class AvbEntityKit
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
     /// The port's MTU, whose frame is the interfering one in a Talker Advertise's AccumulatedLatency
-    /// (reactor thread; the interface's from start(), FALLBACK_MTU unknown; the shaper sets it on install).
+    /// (reactor thread; the interface's from start() and each link up, FALLBACK_MTU unknown; the shaper sets it on install).
     void set_mtu(uint32_t const mtu) noexcept { mtu_ = mtu; }
     /// Whether a cbs shapes class A at its streams' bandwidth (reactor thread; false until set, the shaper
     /// sets it on install): the queue then drains at idleSlope (talker_port_latency_ns).
@@ -1121,9 +1102,9 @@ class AvbEntityKit
     [[nodiscard]] auto stream_port_config(std::string_view backend) const -> StreamPortConfig;
     /// The control plane up, its stream callbacks wired, the declarations started.
     [[nodiscard]] auto start_control(net::MessageReactor& reactor, TimePoint now) -> Status;
-    /// The interface's link speed and MTU, read once at start(); an unknown one keeps the last (1000, FALLBACK_MTU).
-    /// A shaper replaces both on install.
-    void read_port();
+    /// The interface's link speed and MTU, read at start() and each link up; an unknown one keeps the last (1000,
+    /// FALLBACK_MTU). A shaper replaces both on install. Returns whether either changed.
+    auto read_port() -> bool;
     /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
     /// start(): register the configured VID; after a stop(), declare the MSRP Domain, which resumes MSRP.
