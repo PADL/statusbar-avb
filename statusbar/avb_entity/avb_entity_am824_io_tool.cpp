@@ -399,9 +399,9 @@ MainLoopResult run_main_loop(
     (void)log_collector.add(entity.media_log_channel());
     entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {
+    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements) the main loop; pre-dates the gate
         (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
+        (void)reactor.poll_once(nanoavb::MaapNetHandler::PROTOCOL_TICK_PERIOD_MS);
 
         // Check for state changes to reset watchdog
         auto const current_state = entity.state_string();

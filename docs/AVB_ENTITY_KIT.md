@@ -202,7 +202,10 @@ recorder).
 ## Stream formats and the sampling rate
 
 SET_STREAM_FORMAT accepts any audio format the stream's descriptor lists, at any
-rate and of either audio kind: a stream's rate is set through its format, and a
+rate and of either audio kind, except an output's AAF format whose samples per
+frame are not class A's at its rate (NOT_SUPPORTED: the talker sends class A
+packets, IEEE 1722-2016 Clause 7.7, Table 17; an output authored so fails
+`start()`): a stream's rate is set through its format, and a
 descriptor may list AAF and IEC 61883-6 AM824 formats together (up to the
 descriptor's 46 formats), so a controller moves the stream between them. A CRF
 stream keeps its format, and no stream changes to or from CRF (BAD_ARGUMENTS).
@@ -298,10 +301,12 @@ hook call; a change is notified as the REMOVE and ADD it amounts to and saved.
 
 Milan v1.3 Section 5.3.4.1 has a locked entity refuse changes by other than
 ATDECC. That is opt-in: after `set_lock_refuses_local_changes(true)` the local
-setters (`request_entity_name`, `request_audio_mappings`, and a host's own
-SET_STREAM_FORMAT through `local_change_refusal()`) answer ENTITY_ACQUIRED or
-ENTITY_LOCKED while a controller holds the acquisition or the lock, as its
-commands would be. By default they go through.
+setters (`request_entity_name`, `request_audio_mappings`) and every local path
+of the AEM handler (`apply_local_name`, `apply_local_audio_mappings`,
+`apply_local_descriptor_value`, and `set_local_identify`, Milan v1.3 Section
+5.4.2.17), through the hook the kit installs with `set_local_change_refusal()`,
+answer ENTITY_ACQUIRED or ENTITY_LOCKED while a controller holds the
+acquisition or the lock, as its commands would be. By default they go through.
 `request_clock_source` follows a source the host has already applied, so it
 is never refused.
 

@@ -61,8 +61,9 @@ auto wire(Descriptor const& desc) -> std::span<uint8_t const>
 }
 
 /// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then @p crf CRF
-/// streams in each direction.
-auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1) -> std::vector<uint8_t>
+/// streams in each direction; with @p identify, CONTROL 0 is an IDENTIFY control.
+auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1, bool const identify = false)
+    -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -84,6 +85,13 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16
     }
     atdecc::aem::DescriptorAvbInterface iface{};
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    if (identify) {
+        atdecc::aem::DescriptorControl control{};
+        control.control_type = atdecc::aem::CONTROL_TYPE_IDENTIFY;
+        control.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8
+        control.number_of_values = 1;
+        w.add(0, atdecc::aem::DESCRIPTOR_CONTROL, 0, wire(control));
+    }
     return w.write();
 }
 
@@ -91,6 +99,8 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16
 /// (Base Audio Formats FIS v1.1 Table 4: INT_32, class A framing).
 constexpr uint64_t INT24_8CH_48K = 0x0205031802006000ULL;
 constexpr uint64_t INT24_8CH_96K = 0x020703180200C000ULL;
+/// INT24_8CH_48K at 12 frames a packet: not class A framing at 48 kHz.
+constexpr uint64_t INT24_8CH_48K_12_FRAMES = 0x020503180200C000ULL;
 constexpr auto base_format(uint32_t const rate, uint16_t const channels) -> uint64_t
 {
     uint64_t const nsr = rate == 96000 ? 0x07 : 0x05;
@@ -138,9 +148,10 @@ auto make_multirate_blob(
             }
         }
         if (am824) {
-            // And each kind the other stream has, which the kit refuses.
+            // And each kind the other stream has, and a framing, which the kit refuses.
             (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(AM824_8CH_48K));
             (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(CRF_MILAN_48K));
+            (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(INT24_8CH_48K_12_FRAMES));
         }
         w.add(0, type, 0, wire(stream));
         atdecc::aem::DescriptorStream crf{};
@@ -1480,6 +1491,60 @@ TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
         EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{1});
     }
     std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+/// LOCK_ENTITY (@p unlock: UNLOCK) of @p m from another controller, through the AEM handler.
+auto lock_entity(MilanKit& m, bool const unlock = false) -> uint8_t
+{
+    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+    lock[3] = unlock ? 0x01 : 0x00;
+    nanoavb::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+    header.controller_entity_id = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return m.kit.host().components().aem_handler.handle_command(header, lock, out).status;
+}
+
+}  // namespace
+
+// Identify set by other than ATDECC, through the AEM handler or the host, is refused while a
+// controller holds the lock once the kit is opted in (Milan v1.3 Section 5.4.2.17)
+TEST(avb_entity_kit_lock, a_local_identify_is_refused_while_locked)
+{
+    MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
+    EXPECT_TRUE(m.start_ready());
+    auto& aem = m.kit.host().components().aem_handler;
+    std::vector<bool> told;
+    aem.set_identify_changed([&told](bool const on) { told.push_back(on); });
+    EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.host().set_local_identify(false));  // not opted in
+    m.kit.set_lock_refuses_local_changes(true);
+    EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_FALSE(m.kit.host().set_local_identify(true));
+    EXPECT_TRUE(told == std::vector<bool>({true, false}));  // the refused changes applied nothing
+    EXPECT_EQ(lock_entity(m, true), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.host().set_local_identify(true));
+}
+
+// Every local path of the AEM handler answers the kit's refusal while locked and opted in
+// (Milan v1.3 Section 5.3.4.1), its change not applied
+TEST(avb_entity_kit_lock, every_local_aem_path_is_refused_while_locked)
+{
+    PersistentKit m{"", 0x3B};
+    EXPECT_TRUE(m.start_ready());
+    auto& aem = m.kit.host().components().aem_handler;
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_lock_refuses_local_changes(true);
+    std::array<uint8_t, 8 + atdecc::aem::AtdeccString::LENGTH> name{};
+    std::ranges::copy(std::string_view{"Locked"}, name.begin() + 8);
+    EXPECT_EQ(aem.apply_local_name(name), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_TRUE(m.entity_name() == "kit milan");
+    EXPECT_EQ(aem.apply_local_audio_mappings(0, {}, {}), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> format{};
+    EXPECT_EQ(aem.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format), atdecc::AEM_STATUS_ENTITY_LOCKED);
 }
 
 // The entity renamed by other than ATDECC (the bridge's control socket): as
@@ -3881,6 +3946,46 @@ TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
     EXPECT_TRUE(joined());
 }
 
+// A listed AAF format framed other than class A is refused NOT_SUPPORTED on an output, whose talker
+// sends class A packets (IEEE 1722-2016 Clause 7.7, Table 17); an input receives it as it says
+TEST(avb_entity_kit_formats, an_output_format_not_framed_for_class_a_is_refused)
+{
+    RateKit m{{}, 0x79, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.start_ready());
+    auto const set = [&m](uint16_t const type) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, INT24_8CH_48K_12_FRAMES));
+    };
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_OUTPUT), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+    EXPECT_TRUE(m.formats.empty());
+    EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K_12_FRAMES);
+}
+
+// A stop forgets the static groups with the port that held them: a port opened again before the
+// next start sees no kind change leave or join, and the start joins each group once
+TEST(avb_entity_kit_kind, a_port_reopened_before_start_holds_each_static_group_once)
+{
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
+    RateKit m{{}, 0x78, false, false, /*am824=*/true};
+    auto const mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x78};
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = mac}).has_value());
+    EXPECT_TRUE(m.start_ready());
+    auto const group = m.kit.talker().slot_for(0)->dest_mac;
+    EXPECT_TRUE(m.kit.stop().has_value());
+
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = mac}).has_value());
+    m.kit.stream_port().test_port()->record_memberships(&log);
+    auto const set = [&m](uint64_t const word) {
+        return m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, word));
+    };
+    EXPECT_EQ(set(AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(set(INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(log.empty());
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(std::ranges::count(m.kit.stream_port().test_port()->joined_multicast_groups(), group), 1);
+}
+
 // An input whose connection uses its pre-joined group holds two memberships of it: the output's
 // kind change leaves the pre-joined one and the unbind the connection's, the count back to zero
 TEST(avb_entity_kit_kind, a_static_group_shared_with_a_connection_is_left_by_each)
@@ -4067,6 +4172,12 @@ TEST(avb_entity_kit_clock_source, a_host_clock_source_is_notified_without_the_ho
 
     EXPECT_EQ(m.kit.request_clock_source(1, 0), atdecc::AEM_STATUS_BAD_ARGUMENTS);
     EXPECT_EQ(get_clock_source(m, 1), uint16_t{2});
+    // A source the host has applied is followed while locked, the kit opted in.
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_lock_refuses_local_changes(true);
+    EXPECT_EQ(m.kit.request_clock_source(1, 2), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(m, true), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_lock_refuses_local_changes(false);
     // A controller's change still asks the hook.
     EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(1, 1)), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_EQ(calls, 1);

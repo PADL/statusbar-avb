@@ -419,6 +419,31 @@ TEST(listener_timed, refusals_and_trailing_bytes)
     EXPECT_EQ(wide.packets_received, uint32_t{0});
 }
 
+// Two inputs connected to one talker stream each receive its frames
+TEST(listener_timed, a_stream_shared_by_two_inputs_reaches_both)
+{
+    auto donor = make_connected_donor(kAafId, kAafId);
+    auto aaf_spec = audio_specs()[1];
+    auto other_spec = aaf_spec;
+    other_spec.index = 0;
+    std::atomic<int64_t> const gptp{0};
+    RecordingSink sink;
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(other_spec).has_value());
+    EXPECT_TRUE(ls.open_stream(aaf_spec).has_value());
+    ls.set_timed_audio_sink(&sink);
+    auto const rate = avtp::aaf_sample_rate_from_hz(aaf_spec.format.sample_rate_hz);
+    EXPECT_TRUE(rate.has_value());
+    uint16_t const spp = static_cast<uint16_t>(class_a_samples_per_packet(aaf_spec.format.sample_rate_hz));
+    avtp::AafStreamOutputContext tx{
+        kAafId, aaf_spec.format.aaf_format, *rate, aaf_spec.format.channels, aaf_spec.format.bit_depth, 0};
+    uint64_t const pts0 = 9'000'000'000ULL;
+    ls.on_stream_rx_frame(aaf_frame(tx, spp, pts0, 0), static_cast<int64_t>(pts0 - 1'000'000));
+    EXPECT_EQ(sink.seen.size(), size_t{2});
+    EXPECT_EQ(std::ranges::count(sink.seen, uint16_t{0}, [](auto const& r) { return r.packet.stream_index; }), 1);
+    EXPECT_EQ(std::ranges::count(sink.seen, uint16_t{1}, [](auto const& r) { return r.packet.stream_index; }), 1);
+}
+
 // The timed sink gets each AAF packet through on_stream_rx_frame, with or without a consume fn
 // (same packet, same counters); detaching stops delivery.
 TEST(listener_timed, delivery_through_on_stream_rx_frame)
@@ -845,6 +870,55 @@ TEST(listener_port, a_connect_to_another_stream_withdraws_the_earlier_one)
     EXPECT_TRUE(state(second) != nanoavb::ListenerReservationState::Idle);
     ls.on_listener_disconnected(1, sm::Clock::now());
     EXPECT_TRUE(state(second) == nanoavb::ListenerReservationState::Idle);
+}
+
+namespace {
+
+/// The MSRP Listener state @p msrp holds for @p id (Idle when none).
+auto listener_state(auto const& msrp, ieee::Eui64 const& id) -> nanoavb::ListenerReservationState
+{
+    tsn::StreamId sid{};
+    (void)tsn::load_unchecked(id.span(), &sid);
+    auto const* stream = msrp.get_listener_stream(sid);
+    return stream != nullptr ? stream->state : nanoavb::ListenerReservationState::Idle;
+}
+
+}  // namespace
+
+// Two inputs connected to one stream share its Listener declaration (IEEE 802.1Q-2022 Clause
+// 35.2.4.4): the first disconnect keeps it, the last withdraws it
+TEST(listener_port, a_stream_shared_by_two_inputs_is_withdrawn_by_the_last)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    auto const& msrp = donor->components().msrp_handler;
+    auto const shared = ieee::Eui64{}.from_uint64(0x0200000000000201ULL);
+    ls.on_listener_connected(0, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_connected(1, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_disconnected(1, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) != nanoavb::ListenerReservationState::Idle);
+    ls.on_listener_disconnected(0, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) == nanoavb::ListenerReservationState::Idle);
+}
+
+// A repeated connect of one input to another stream keeps the earlier stream's declaration while
+// another input still uses it
+TEST(listener_port, a_connect_to_another_stream_keeps_a_shared_one)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    auto const& msrp = donor->components().msrp_handler;
+    auto const shared = ieee::Eui64{}.from_uint64(0x0200000000000301ULL);
+    auto const other = ieee::Eui64{}.from_uint64(0x0200000000000302ULL);
+    ls.on_listener_connected(0, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_connected(1, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_connected(1, other, kAafGroup, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) != nanoavb::ListenerReservationState::Idle);
+    EXPECT_TRUE(listener_state(msrp, other) != nanoavb::ListenerReservationState::Idle);
+    ls.on_listener_disconnected(0, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) == nanoavb::ListenerReservationState::Idle);
 }
 
 //
