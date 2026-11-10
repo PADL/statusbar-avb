@@ -100,15 +100,12 @@ class AvbEntityHost
     /// @param talker_max_streams  number of STREAM_OUTPUT (talker) streams.
     /// @param talker_max_listeners max listeners per talker stream.
     /// @param listener_max_streams number of STREAM_INPUT (listener) streams.
-    /// @param milan  entity profile override (nanoavb::EntityProfile); unset
-    ///               follows the model's, else Milan.
     AvbEntityHost(
         nanoavb::EntityModel model,
         nanoavb::AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan = std::nullopt);
+        size_t listener_max_streams);
 
     /// Symbol-aware construction. The host serves descriptors and resolves their
     /// well-known **symbols** through a caller-built @p handler (typically a
@@ -122,8 +119,7 @@ class AvbEntityHost
         nanoavb::AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan = std::nullopt);
+        size_t listener_max_streams);
 
     AvbEntityHost(AvbEntityHost const&) = delete;
     auto operator=(AvbEntityHost const&) -> AvbEntityHost& = delete;
