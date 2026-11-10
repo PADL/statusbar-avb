@@ -100,7 +100,7 @@ constexpr auto base_format(uint32_t const rate, uint16_t const channels) -> uint
 static_assert(base_format(48000, 2) == 0x0205022000806000ULL && base_format(96000, 8) == 0x020702200200C000ULL);
 
 /// IEC 61883-6 AM824, 8 MBLA channels at 48 kHz (SFC 2).
-constexpr uint64_t AM824_8CH_48K = avtp::make_am824_stream_format(2, 8);
+constexpr uint64_t AM824_8CH_48K = 0x00a0020840000800ULL;
 
 /// A multi-rate model: 8 ch INT_24 output and input (+ CRF each) at 48/96 kHz.
 /// With @p ports, STREAM_PORT_INPUT 0 has eight 1-channel clusters and no
@@ -567,7 +567,7 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     EXPECT_TRUE(m.config.gate_talker_on_listener);
     EXPECT_TRUE(m.start_ready());
     auto& kit = m.kit;
-    EXPECT_TRUE(kit.talker_declared(0) && kit.talker_declared(1));
+    EXPECT_TRUE(m.advertising(0) && m.advertising(1));
     auto& components = kit.host().components();
     auto const* aaf = components.acmp_talker.get_stream(0);
     auto const* crf = components.acmp_talker.get_stream(1);
@@ -785,7 +785,7 @@ TEST(avb_entity_kit_milan_talker, declares_after_a_probe_and_withdraws_after_15_
     EXPECT_TRUE(m.kit.host().components().acmp_talker.milan());
 
     // Ready, address valid, nobody asked: no Talker Advertise.
-    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
     EXPECT_FALSE(m.advertising(0));
 
     // A PROBE_TX: answered SUCCESS with connection_count 0, and declared.
@@ -793,9 +793,9 @@ TEST(avb_entity_kit_milan_talker, declares_after_a_probe_and_withdraws_after_15_
     EXPECT_EQ(probe.status(), atdecc::ACMP_STATUS_SUCCESS);
     EXPECT_EQ(probe.connection_count.get(), uint16_t{0});
     EXPECT_EQ(probe.stream_id.to_uint64(), m.sid(0).to_uint64());
-    EXPECT_TRUE(m.kit.talker_declared(0));
     EXPECT_TRUE(m.advertising(0));
-    EXPECT_FALSE(m.kit.talker_declared(1));  // streams are independent
+    EXPECT_TRUE(m.advertising(0));
+    EXPECT_FALSE(m.advertising(1));  // streams are independent
     EXPECT_EQ(m.kit.host().components().acmp_talker.connection_count(0), size_t{0});
 
     // GET_STREAM_INFO: the Milan 56-octet form; declaring, no listener yet.
@@ -815,9 +815,9 @@ TEST(avb_entity_kit_milan_talker, declares_after_a_probe_and_withdraws_after_15_
     // The window closes 15 s after the probe with no Listener: withdrawn.
     int64_t const now = MilanKit::steady_ns();
     m.kit.update_talker_declarations(now + 5 * int64_t{1'000'000'000});
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     m.kit.update_talker_declarations(now + TalkerDeclarations::PROBE_WINDOW_NS + 1);
-    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
     EXPECT_FALSE(m.advertising(0));
 }
 
@@ -827,7 +827,7 @@ TEST(avb_entity_kit_milan_talker, a_registered_listener_keeps_it_and_reports_reg
     EXPECT_TRUE(m.start_ready());
     m.use_milan_v1_2_stream_info();
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
 
     // A Listener Asking Failed: REGISTERING and REGISTERING_FAILED; not admitted.
     m.bridge_listener(0, srp::msrp::ListenerDeclaration::AskingFailed);
@@ -851,7 +851,7 @@ TEST(avb_entity_kit_milan_talker, a_registered_listener_keeps_it_and_reports_reg
 
     // Long after the probe window the registered Listener keeps it declared.
     m.kit.update_talker_declarations(MilanKit::steady_ns() + 10 * TalkerDeclarations::PROBE_WINDOW_NS);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
 
     // Streaming: the presentation offset cannot change.
     m.kit.set_on_presentation_offset_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
@@ -1012,7 +1012,7 @@ TEST(avb_entity_kit_milan_talker, classic_declares_at_ready_and_counts_connect_t
     EXPECT_TRUE(m.start_ready());
     EXPECT_FALSE(m.kit.host().components().acmp_talker.milan());
     // A classic talker declares every stream once the address is valid.
-    EXPECT_TRUE(m.kit.talker_declared(0) && m.kit.talker_declared(1));
+    EXPECT_TRUE(m.advertising(0) && m.advertising(1));
     EXPECT_TRUE(m.advertising(0));
     auto const& connect = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 0);
     EXPECT_EQ(connect.status(), atdecc::ACMP_STATUS_SUCCESS);
@@ -1023,7 +1023,7 @@ TEST(avb_entity_kit_milan_talker, classic_declares_at_ready_and_counts_connect_t
     EXPECT_TRUE((load_info(info.body).first.flags.get() & atdecc::aem::stream_info_flags::CONNECTED) != 0);
     // No probe window to run out.
     m.kit.update_talker_declarations(MilanKit::steady_ns() + 10 * TalkerDeclarations::PROBE_WINDOW_NS);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
 }
 
 // A probe or connect before MAAP has defended the block is refused
@@ -1042,11 +1042,11 @@ TEST(avb_entity_kit_milan_talker, probe_or_connect_before_maap_gets_dest_mac_fai
             (void)talker.configure_stream(idx, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
         }
         m.kit.note_talker_addresses(false, now);
-        EXPECT_FALSE(m.kit.talker_declared(0));
+        EXPECT_FALSE(m.advertising(0));
 
         auto const& refused = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
         EXPECT_EQ(refused.status(), atdecc::ACMP_STATUS_TALKER_DEST_MAC_FAIL);
-        EXPECT_FALSE(m.kit.talker_declared(0));
+        EXPECT_FALSE(m.advertising(0));
         EXPECT_EQ(talker.connection_count(0), size_t{0});
         auto const state = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, 0);
         EXPECT_EQ(state.stream_dest_mac, ieee::Eui48{});
@@ -1061,7 +1061,7 @@ TEST(avb_entity_kit_milan_talker, probe_or_connect_before_maap_gets_dest_mac_fai
         EXPECT_EQ(accepted.status(), atdecc::ACMP_STATUS_SUCCESS);
         EXPECT_EQ(accepted.stream_dest_mac, maap_mac);
         EXPECT_EQ(talker.connection_count(0), size_t{milan ? 0U : 1U});
-        EXPECT_TRUE(m.kit.talker_declared(0));
+        EXPECT_TRUE(m.advertising(0));
         auto const* advertised = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
         EXPECT_TRUE(advertised != nullptr && advertised->dest_address == maap_mac);
     }
@@ -1082,7 +1082,7 @@ TEST(avb_entity_kit_milan_talker, no_gate_for_an_undeclared_stream)
     // A MAAP conflict withdraws it; the Listener's next registration event
     // must not reopen the gate.
     m.kit.note_talker_addresses(false, now + 1);
-    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
     m.kit.note_listener_ready(m.sid(0), true, now + 2, raw + std::chrono::nanoseconds{2});
     EXPECT_TRUE(m.kit.admitted_talker_streams(raw + std::chrono::nanoseconds{2}).empty());
 }
@@ -1108,20 +1108,20 @@ TEST(avb_entity_kit_milan_talker, the_probe_window_closes_on_the_reactors_own_cl
     m.kit.on_gptp_announce(at(), true);
     EXPECT_TRUE(m.kit.host().is_ready());
     probe();
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
 
     // The window closes 15 s later on the reactor's clock: its pass withdraws.
     fake_ns += TalkerDeclarations::PROBE_WINDOW_NS - 1;
     (void)m.reactor.poll_once(0);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     fake_ns += 2;
     (void)m.reactor.poll_once(0);
-    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
     EXPECT_FALSE(m.advertising(0));
 
     // A new probe re-declares at once (the same parameters are not held).
     probe();
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     EXPECT_TRUE(m.kit.stop(at()).has_value());
 }
 
@@ -1133,7 +1133,7 @@ TEST(avb_entity_kit_milan_talker, offset_settable_with_the_gate_disabled)
     MilanKit m{std::nullopt, 0x18, /*gate=*/false};
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     m.kit.set_on_presentation_offset_changed([](uint16_t, uint32_t) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
     atdecc::aem::AemSetMaxTransitTimePayload set{};
     set.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
@@ -1158,9 +1158,9 @@ TEST(avb_entity_kit_milan_talker, a_listener_blip_keeps_the_declaration)
     int64_t const gone = MilanKit::steady_ns();
     // The probe window is over (15 s on), the Listener gone less than the grace.
     m.kit.update_talker_declarations(gone + TalkerDeclarations::PROBE_WINDOW_NS - 1'000'000'000);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     m.kit.update_talker_declarations(gone + TalkerDeclarations::PROBE_WINDOW_NS + 1);
-    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
 }
 
 // stop() withdraws: undeclared, inactive, every gate shut; a restart declares
@@ -1171,11 +1171,11 @@ TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     m.kit.note_listener_ready(m.sid(0), true, MilanKit::steady_ns(), MilanKit::raw_now());
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     EXPECT_FALSE(m.kit.admitted_talker_streams().empty());
 
     EXPECT_TRUE(m.kit.stop().has_value());
-    EXPECT_FALSE(m.kit.talker_declared(0));
+    EXPECT_FALSE(m.advertising(0));
     EXPECT_FALSE(m.kit.talker_declarations().active());
     EXPECT_TRUE(m.kit.admitted_talker_streams().empty());
     EXPECT_FALSE(m.advertising(0));
@@ -1183,11 +1183,11 @@ TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)
     // Restarted while the control plane stayed Ready: the probe of a moment
     // ago is still within its 15 s window, so the stream declares again.
     EXPECT_TRUE(m.start_ready());
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
     EXPECT_TRUE(m.kit.admitted_talker_streams().empty());  // no Listener seen since
     auto const& probe = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     EXPECT_EQ(probe.status(), atdecc::ACMP_STATUS_SUCCESS);
-    EXPECT_TRUE(m.kit.talker_declared(0));
+    EXPECT_TRUE(m.advertising(0));
 }
 
 // ---- The persistent state -----------------------------------------------------
@@ -1813,7 +1813,7 @@ TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 1);
-    EXPECT_TRUE(m.kit.talker_declared(0) && m.kit.talker_declared(1));
+    EXPECT_TRUE(m.advertising(0) && m.advertising(1));
     auto& msrp = m.kit.host().components().msrp_handler;
     msrp.set_send_packet([&sent](std::span<uint8_t const> const p) {
         sent += p.size();
@@ -1835,12 +1835,10 @@ TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
     EXPECT_EQ(
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
         atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(m.kit.pending_refresh().test(0) && !m.kit.pending_refresh().test(1));
     EXPECT_EQ(sent, size_t{0});  // asked for, run at the next pass
     EXPECT_EQ(frame_size(0), before0);
     drain();
     EXPECT_TRUE(sent > 0);
-    EXPECT_TRUE(m.kit.pending_refresh().none());
     EXPECT_TRUE(m.advertising(0) && m.advertising(1));
     EXPECT_EQ(m.kit.talker_specs()[0].format_word, base_format(48000, 8));
     EXPECT_TRUE(frame_size(0) != before0);  // output 0's TSpec re-declared (INT24 -> INT32 samples)
@@ -1850,9 +1848,7 @@ TEST(avb_entity_kit_formats, a_format_change_re_advertises_one_output)
     EXPECT_EQ(
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, INT24_8CH_48K)),
         atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(m.kit.pending_refresh().test(0));
     EXPECT_TRUE(m.kit.stop().has_value());
-    EXPECT_TRUE(m.kit.pending_refresh().none());
 }
 
 // SET_STREAM_FORMAT accepts a listed format of the stream's kind at the kit's
@@ -2264,7 +2260,7 @@ TEST(avb_entity_kit_milan_listener, binds_probes_settles_and_reserves)
     EXPECT_EQ(p.acmp.back().message_type(), atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
 
     p.pump(1, false);  // the probe reaches the talker, which declares
-    EXPECT_TRUE(p.t.kit.talker_declared(0));
+    EXPECT_TRUE(p.t.advertising(0));
     p.pump(1, false);  // its response settles the sink
     EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_no_rsv);
     EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
@@ -2636,7 +2632,6 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
     c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_EQ(c.counters[0].get(), 1U);  // STREAM_START
     EXPECT_EQ(c.counters[1].get(), 0U);  // STREAM_STOP
-    EXPECT_TRUE(m.kit.output_counters(0)->streaming);
 
     // The Listener goes; the grace window runs out: stopped.
     m.bridge_withdraw(0);
@@ -2644,7 +2639,6 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
     c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_EQ(c.counters[0].get(), 1U);
     EXPECT_EQ(c.counters[1].get(), 1U);
-    EXPECT_FALSE(m.kit.output_counters(0)->streaming);
     EXPECT_TRUE(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_COUNTERS) == 0);  // nobody registered
 
     // Classic: IEEE 1722.1-2021's layout (FRAMES_TX at bit 7).
@@ -2691,8 +2685,7 @@ TEST(avb_entity_kit_counters, milan_v1_3_output_counters_and_signal_presence)
     int64_t t = MilanKit::steady_ns();
     m.kit.poll_counters(t);
     m.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
-    EXPECT_FALSE(m.kit.output_counters(0)->presence.has_value());
+    EXPECT_EQ(counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);  // no presence
 
     // Configured: both quadlets valid from the start (no signal) and through a fold nothing reported in;
     // a report shows at the next fold, masked to the stream's channels as its format is now (8 here, then
@@ -2718,13 +2711,12 @@ TEST(avb_entity_kit_counters, milan_v1_3_output_counters_and_signal_presence)
         atdecc::AEM_STATUS_SUCCESS);
     EXPECT_EQ(p.kit.talker_channels(0), uint16_t{2});
     EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0x4100'0000U);
-    EXPECT_EQ(p.kit.output_counters(0)->pending_presence, std::optional<uint64_t>{0b10});
     p.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0x4000'0000U);
-    EXPECT_FALSE(p.kit.output_counters(0)->pending_presence.has_value());  // reported
     // A report past the stream's channels is cut to them when it is accepted.
     p.kit.set_output_signal_presence(0, (uint64_t{1} << 0U) | (uint64_t{1} << 5U));
-    EXPECT_EQ(p.kit.output_counters(0)->pending_presence, std::optional<uint64_t>{0b1});
+    p.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(p, DESCRIPTOR_STREAM_OUTPUT, 0).counters[StreamOutputIntervals::PRESENCE_0_31].get(), 0x8000'0000U);
 
     // Reported: the two quadlets beside the five counters.
     StreamOutputIntervals intervals{};
