@@ -248,6 +248,13 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
     return success();
 }
 
+void TalkerStreams::mark_open(uint16_t const stream_index) noexcept
+{
+    // A request that raced a stop is no restart of this stream: cleared before a toggle may be accepted here.
+    mr_pending_[stream_index].store(false, std::memory_order_relaxed);
+    open_[stream_index].store(true, std::memory_order_release);
+}
+
 auto TalkerStreams::reformat_stream(StreamSpec const& spec) -> Status
 {
     auto* const slot = slot_for(spec.index);
@@ -335,7 +342,8 @@ auto serialize_am824_float(
     uint32_t const samples,
     uint64_t const now_ns,
     std::span<float const> const src,
-    bool const timestamp_uncertain) -> size_t
+    bool const timestamp_uncertain,
+    bool const media_clock_restart) -> size_t
 {  // NOLINT(statusbar-block-statements): one frame, built field by field
     span_zero(frame);
     size_t const channels = ctx.config.channel_count;
@@ -357,6 +365,7 @@ auto serialize_am824_float(
         return 0;
     }
     pdu.stream_header.set_tu(timestamp_uncertain);
+    pdu.stream_header.set_mr(media_clock_restart);
     span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
     return avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
 }
@@ -367,7 +376,8 @@ auto serialize_aaf_float(
     uint16_t const samples,
     uint64_t const now_ns,
     std::span<float const> const src,
-    bool const timestamp_uncertain) -> size_t
+    bool const timestamp_uncertain,
+    bool const media_clock_restart) -> size_t
 {  // NOLINT(statusbar-block-statements): one frame, built field by field
     span_zero(frame);
     size_t const channels = ctx.channel_count;
@@ -382,6 +392,7 @@ auto serialize_aaf_float(
         return 0;
     }
     pdu.set_tu(timestamp_uncertain);
+    pdu.set_mr(media_clock_restart);
     span_store(frame.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     return avtp::AafPdu::HEADER_LENGTH + audio_bytes;
 }
@@ -396,7 +407,7 @@ void TalkerStreams::transmit_am824(
     auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     bool const tu = timestamp_uncertain(net::monotonic_ns());
     (void)send_serialized(slot, *slot.am824, MAX_AUDIO_PAYLOAD, 0, [&](std::span<uint8_t> const frame) {
-        return serialize_am824_float(*slot.am824, frame, samples, presentation_ns, src, tu);
+        return serialize_am824_float(*slot.am824, frame, samples, presentation_ns, src, tu, next_mr(slot));
     });
 }
 
@@ -409,7 +420,7 @@ void TalkerStreams::transmit_aaf(
     auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     bool const tu = timestamp_uncertain(net::monotonic_ns());
     (void)send_serialized(slot, *slot.aaf, MAX_AUDIO_PAYLOAD, 0, [&](std::span<uint8_t> const frame) {
-        return serialize_aaf_float(*slot.aaf, frame, samples, presentation_ns, src, tu);
+        return serialize_aaf_float(*slot.aaf, frame, samples, presentation_ns, src, tu, next_mr(slot));
     });
 }
 
