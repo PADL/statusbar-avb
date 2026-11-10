@@ -172,13 +172,14 @@ class SrpPort
     void on_domain_moved(uint16_t old_vid, TimePoint now);
     /// A peer's Domain for our SR class registered (@p registered) or left.
     void on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv, bool registered) noexcept;
-    /// A peer's Talker for @p stream_id left: decided when the PDU or tick is done.
+    /// A peer's Talker for @p stream_id left (from a received MRPDU, once it is read): reported unless
+    /// its other attribute is In.
     void on_peer_talker_leave(StreamId const& stream_id);
     /// A peer's Talker for @p stream_id registered: a later leave is reported again.
     void on_peer_talker_join(StreamId const& stream_id) noexcept;
     /// Report @p stream_id's talker gone, once, if neither of its attributes is registered In.
     void report_leave(StreamId const& stream_id);
-    /// The talker leaves, then the Domain, as the received PDU or the tick left them.
+    /// The Domain, as the received PDU or the tick left it.
     void flush();
     /// Forget the reported leaves whose registration has gone (LeaveTime expired, record freed).
     void forget_left_talkers() noexcept;
@@ -200,12 +201,6 @@ class SrpPort
     bool domain_changed_{false};              ///< the Domain moved since the last report
     bool reported_peer_{false};               ///< peer_domain_registered() as last reported
     bool added_{false};                       ///< add_to_reactor() handed the sockets over
-    /// Talkers that left during this PDU or tick, one entry per StreamID.
-    sg14::inplace_vector<
-        StreamId,
-        statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_advertise +
-            statusbar::srp::msrp::DiscoveryMsrpLimits::max_talker_failed>
-        pending_leaves_{};
     /// Talkers reported gone and still registered Leaving, so their LeaveTime expiry is not reported again.
     sg14::inplace_vector<
         StreamId,
