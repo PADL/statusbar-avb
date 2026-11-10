@@ -1585,8 +1585,12 @@ void AvbEntityKit::on_link_up(TimePoint const time)
 {
     bool const changed = !class_a_cbs_ && read_port();  // a shaper keeps its own
     host_.on_link_up(time);
-    if (changed) {
-        update_talker_declarations(steady_ns_of(time), true);
+    if (!changed) {
+        return;
+    }
+    update_talker_declarations(steady_ns_of(time), true);
+    for (auto const& spec : talker_specs_) {
+        notify_talker_stream_info(spec.index);  // GET_STREAM_INFO's msrp_accumulated_latency moved
     }
 }
 

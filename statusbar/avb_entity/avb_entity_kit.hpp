@@ -146,8 +146,8 @@ class AvbEntityKit
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
-    /// A link up: an unshaped port's speed and MTU read again (an igb link may be down at start()), a change
-    /// declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+    /// A link up: an unshaped port's speed and MTU read again (a link may still be down at start()), a change
+    /// declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified.
     void on_link_up(TimePoint time);
     /// gPTP grandmaster found or changed / lost (EntityUpkeep wires these to
     /// the Announce handler): drives the talker streams' AVTP tu bit (Milan
@@ -334,9 +334,9 @@ class AvbEntityKit
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
-    /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the shaper keeps it current) whose
-    /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that pushes every
-    /// talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
+    /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the
+    /// shaper keeps it current) whose SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that
+    /// pushes every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
     void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
     /// With @p across, an output stream's mappings (static AUDIO_MAPs, or the kit's identity) also hold at
     /// another listed rate than the unit's, so SET_STREAM_FORMAT accepts it mapped (Milan v1.2 Section 5.4.2.27's
