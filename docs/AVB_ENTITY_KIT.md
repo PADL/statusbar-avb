@@ -276,13 +276,16 @@ to the unit's current rate is a no-op SUCCESS; a rate the AUDIO_UNIT does not
 list is NOT_SUPPORTED (the storage handler). Another listed rate of AUDIO_UNIT 0
 needs the entity's unit-rate hook (`set_on_unit_rate_changed`; without it the
 unit keeps its rate, NOT_SUPPORTED). The unit's audio streams are those in its
-clock domain (Clauses 7.2.3, 7.2.6), whichever port carries them. Of those at
-the unit's rate, each idle one (not a bound input, not a streaming output) whose
-descriptor lists its format at the new rate (sample format and channels kept,
-class A framing) follows the unit. One that cannot follow keeps its format when
-its port converts rates (ASYNC_ or SYNC_SAMPLE_RATE_CONV, Milan v1.3 Section
-5.3.3.7); on a port that does not, the request is NOT_SUPPORTED, the one status
-Section 5.4.2.13 names. Clause 7.4.21 names no STREAM_IS_RUNNING.
+clock domain (Clauses 7.2.3, 7.2.6), whichever port carries them; a unit that
+shares its clock domain with another AUDIO_UNIT keeps its rate (NOT_SUPPORTED),
+since nothing in the model ties a stream of that domain to one of them. Of the
+unit's streams at its rate, each idle one (not a bound input, not a streaming
+output) whose descriptor lists its format at the new rate (sample format and
+channels kept, class A framing) follows the unit. One that cannot follow keeps
+its format, unless a port that converts no rates maps it (a static AUDIO_MAP or
+a dynamic mapping; ASYNC_ and SYNC_SAMPLE_RATE_CONV ports convert, Milan v1.3
+Section 5.3.3.7): then the request is NOT_SUPPORTED, the one status Section
+5.4.2.13 names. Clause 7.4.21 names no STREAM_IS_RUNNING.
 
 The streams that follow are checked against the class A budget first
 (NO_RESOURCES). The unit-rate hook then moves the data plane, all or none, even
@@ -297,7 +300,8 @@ Another unit's rate is NOT_SUPPORTED: the kit's rate is AUDIO_UNIT 0's, and
 another unit's streams keep the mapping rules at the rate the kit was built
 with. An entity whose talkers send through `TalkerStreams` at the unit's rate
 refuses another rate in its hooks. The rate is persisted and restored before
-the formats.
+the formats; while the unit is off its authored rate every stream of it is saved
+at its format, so one that stayed at the old rate stays there after a restart.
 
 `request_entity_name` serves SET_NAME for a host's own control socket: it is
 applied with the same checks as the ATDECC command, every registered controller
