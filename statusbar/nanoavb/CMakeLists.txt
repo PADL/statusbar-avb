@@ -65,6 +65,7 @@ statusbar_add_module(
   nanoavb_integration_test.cpp
   nanoavb_local_port_test.cpp)
 
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_aem_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_mvu_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_audio_mappings_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_local_port_fuzzer.cpp)
