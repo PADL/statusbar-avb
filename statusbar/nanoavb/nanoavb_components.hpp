@@ -76,6 +76,7 @@ class MaapNetHandler : public net::Pollable
 {
   public:
     static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
+    static_assert(int64_t{PROTOCOL_TICK_PERIOD_MS} * 1'000'000 <= avtp::MaapHandler::MAX_TICK_PERIOD_NS);
 
     /// @param interface_name The network interface name
     /// @param handler Reference to the MAAP protocol handler (must outlive this)
