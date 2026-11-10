@@ -540,9 +540,11 @@ class AvbEntityKit
     void close_streams() noexcept;
     /// Stream @p index's identity (ACMP), VLAN and priority (the domain in force) into @p info.
     void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
-    /// The AccumulatedLatency every Talker Advertise declares, ns: none of the talker's own
-    /// (IEEE 802.1Q-2022 Clause 35.2.2.8.6); the bridges add theirs.
-    static constexpr uint32_t TALKER_ACCUMULATED_LATENCY_NS = 0;
+    /// The octets every talker stream's frames of one interval occupy on the wire: class A's queue.
+    [[nodiscard]] auto talker_class_octets() const noexcept -> uint64_t;
+    /// Talker @p idx's AccumulatedLatency, ns: what its Talker Advertise declares, else what it would
+    /// (talker_port_latency_ns at link_mbps(); IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+    [[nodiscard]] auto talker_accumulated_latency_ns(uint16_t idx) const noexcept -> uint32_t;
     void advertise_talker_streams(TimePoint time);
     void withdraw_talker_streams(TimePoint time);
     /// One pass of update_talker_declarations over the talker streams.
