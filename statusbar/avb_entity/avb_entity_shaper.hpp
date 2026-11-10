@@ -113,11 +113,9 @@ struct QueueLayout
 /// priority, so the SR classes use the bottom queues.
 [[nodiscard]] auto is_intel_qav_driver(std::string_view driver) noexcept -> bool;
 
-/// The queue layout for @p driver with @p tx_queues TX queues (docs/SHAPER.md, "Queue order per
-/// driver"); an explicit @p override wins. On igb/igc a port running class B alone puts it on queue 0, the one
-/// igc shapes first, and refuses it elsewhere. With two legacy queues or more, PTP uses the one next to the SR
-/// classes.
-/// Errors: ShaperError::not_avb_capable below MIN_AVB_TX_QUEUES; bad_queue_override.
+/// The queue layout for @p driver with @p tx_queues TX queues, an explicit @p override winning (docs/SHAPER.md,
+/// "Queue order per driver": class B alone on igb/igc, PTP's queue). Errors: ShaperError::not_avb_capable below
+/// MIN_AVB_TX_QUEUES; bad_queue_override.
 [[nodiscard]] auto make_queue_layout(
     std::string_view driver, uint16_t tx_queues, QueueOverride const& override = {}, SrClasses classes = SrClasses::a)
     -> StatusValue<QueueLayout>;

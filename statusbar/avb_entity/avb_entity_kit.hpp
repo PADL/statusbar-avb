@@ -597,9 +597,8 @@ class AvbEntityKit
     [[nodiscard]] auto talker_tspec(StreamSpec const& spec) const noexcept -> TSpec { return talker_tspec(spec, milan_profile()); }
 
     // --- Stream socket health (after start()) ---------------------------------
-    /// Why start() could not open the stream TX socket (empty: it opened). The
-    /// kit carries on without it (a control-plane-only entity); a host that
-    /// needs the data plane checks here.
+    /// Why start() could not open the stream TX socket (empty: it opened); the kit carries on
+    /// without it, a control-plane-only entity.
     [[nodiscard]] auto stream_tx_error() const noexcept -> std::error_code { return stream_tx_error_; }
     /// Why start() could not open the stream RX socket (empty: it opened, or
     /// the blob declares no stream inputs).
@@ -1051,9 +1050,10 @@ class AvbEntityKit
     //
     // Construction phases
     //
-    /// The talker streams' ACMP identities, address validity and presentation offsets.
-    /// The configured Milan version and GET_MILAN_INFO features (construction).
+
+    /// GET_MILAN_INFO's features and the outputs' signal presence (construction).
     void configure_milan();
+    /// The talker streams' ACMP identities, address validity and presentation offsets.
     void configure_talker_streams();
     /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
     void note_talker_interface(uint16_t index);
@@ -1071,6 +1071,7 @@ class AvbEntityKit
     //
     // Stream formats and mappings
     //
+
     /// Stream @p port_index's @p channels onto @p port's cluster channels in order, as far as both go.
     [[nodiscard]] auto cluster_identity_mappings(
         uint16_t port_index, atdecc::aem::DescriptorStreamPort const& port, uint16_t channels) const
@@ -1096,6 +1097,7 @@ class AvbEntityKit
     //
     // Declarations and registrations
     //
+
     /// Fold each stream's counters into the interval just ended, notifying the changed ones.
     void fold_stream_counters();
     /// Talker stream @p idx's registered Listener; nullopt for no such stream.
@@ -1110,6 +1112,7 @@ class AvbEntityKit
     //
     // start() and stop() phases
     //
+
     /// The stream port's configuration on @p backend, from the kit's.
     [[nodiscard]] auto stream_port_config(std::string_view backend) const -> StreamPortConfig;
     /// The control plane up, its stream callbacks wired, the declarations started.
@@ -1159,6 +1162,7 @@ class AvbEntityKit
     //
     // Persistent state
     //
+
     /// load_persistent_state() with a file configured.
     void restore_persistent_state();
     /// Save every later AEM and MVU settings change.
