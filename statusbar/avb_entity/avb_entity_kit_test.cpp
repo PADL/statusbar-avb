@@ -3005,6 +3005,38 @@ TEST(avb_entity_kit_counters, a_rejected_crf_pdu_keeps_its_place_in_the_sequence
     EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
 }
 
+// A CRF PDU cut short past its AVTP common header still counts in UNSUPPORTED_FORMAT and holds its
+// place in the sequence (Milan v1.3 Section 5.3.8.10).
+TEST(avb_entity_kit_counters, a_short_crf_pdu_is_unsupported_and_keeps_its_place_in_the_sequence)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
+    p.talker_advertises();
+    p.pump(20);
+    auto* listener = p.l.kit.listener();
+    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
+
+    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    uint64_t ts = 9'000'000'000ULL;
+    auto const send = [&](size_t const length) {
+        std::array<uint64_t, 1> const one{ts};
+        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
+        listener->on_stream_rx_frame(std::span{frame}.first(length), static_cast<int64_t>(ts) - 2'000'000);
+        ts += 2'000'000;
+    };
+    int64_t const t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);
+    send(frame.size());
+    send(avtp::AVTP_COMMON_HEADER_LENGTH + 4);  // the common header, then cut short
+    send(frame.size());
+    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
+    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
+}
+
 // GET_AS_PATH (Milan v1.2 Section 5.4.2.24) from the Announces' path trace,
 // and its notification; GET_AVB_INFO notified asynchronously when the
 // grandmaster changes (Table 5.22).
