@@ -88,7 +88,7 @@ struct EntityToolOptions
 };
 
 /// The xdp backend's options beyond its queue: bind and attach modes, pin
-/// path, the rawnet fallback, and launch time.
+/// path and launch time.
 inline void add_xdp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
 {
     specs.add_choice(
