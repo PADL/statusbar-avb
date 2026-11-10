@@ -654,14 +654,18 @@ auto AemCommandHandler::handle_set_descriptor_value(
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size}, current_header_.controller_entity_id);
     }
-    // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT): answer IN_PROGRESS
-    // now, keep repeating it from tick(), and finish when the application calls complete_pending_command().
-    auto const answer =
-        r.status == AEM_STATUS_IN_PROGRESS ? defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size}) : r;
-    if (answer.status == AEM_STATUS_SUCCESS || answer.status == AEM_STATUS_IN_PROGRESS) {
-        return answer;
+    if (r.status == AEM_STATUS_IN_PROGRESS) {
+        // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT):
+        // answer IN_PROGRESS now, keep repeating it from tick(), and finish when
+        // the application calls complete_pending_command().
+        auto const deferred = defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
+        return deferred.status == AEM_STATUS_IN_PROGRESS ? deferred
+                                                         : reject_set(deferred.status, command_type, command_data, out_buffer);
     }
-    return reject_set(answer.status, command_type, command_data, out_buffer);
+    if (r.status != AEM_STATUS_SUCCESS) {
+        return reject_set(r.status, command_type, command_data, out_buffer);
+    }
+    return {.status = r.status, .size = r.size};
 }
 
 auto AemCommandHandler::apply_descriptor_value(
