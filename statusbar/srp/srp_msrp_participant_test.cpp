@@ -2300,3 +2300,22 @@ TEST(msrp_participant, a_talker_advertise_replaced_by_a_failed_in_one_mrpdu_repo
     rig.receive(talker_message(tf, AttributeEvent::Lv));  // the stream gone: its leave, once the MRPDU is read
     EXPECT_EQ(rig.leaves, 1);
 }
+
+// A Talker attribute's Lv on another VLAN than the one registered for its StreamID leaves an attribute not
+// registered: the registered one stays, and no leave is reported.
+TEST(msrp_participant, an_lv_on_another_vlan_leaves_the_registered_talker_advertise)
+{
+    TalkerRig rig{};
+    auto const ta = make_talker_adv(0x0011);
+    rig.receive(talker_message(ta, AttributeEvent::New));
+    auto other = ta;
+    other.vlan_identifier = 3;
+    rig.receive(talker_message(other, AttributeEvent::Lv));
+    auto const* registered = rig.p.find_registered_talker_advertise(ta.stream_id);
+    EXPECT_NE(registered, nullptr);
+    EXPECT_EQ(registered != nullptr ? registered->vlan_identifier.get() : uint16_t{0}, ta.vlan_identifier.get());
+    EXPECT_EQ(rig.leaves, 0);
+    rig.receive(talker_message(ta, AttributeEvent::Lv));
+    EXPECT_EQ(rig.p.find_registered_talker_advertise(ta.stream_id), nullptr);
+    EXPECT_EQ(rig.leaves, 1);
+}

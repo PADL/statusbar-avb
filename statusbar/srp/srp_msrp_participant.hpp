@@ -675,7 +675,7 @@ class MsrpParticipantT
         FindRec find_rec,
         NotifyRegister notify_register,
         NotifyLeave notify_leave)
-    {
+    {  // NOLINT(statusbar-block-statements) one received attribute through both state machines; pre-dates the gate
         if (attr_length < FirstValue::LENGTH) {
             return;
         }
@@ -688,8 +688,8 @@ class MsrpParticipantT
             return;
         }
         auto* rec_ptr = find_rec(fv);
-        if (rec_ptr == nullptr) {
-            return;  // peer attribute, table full -- silently drop
+        if (rec_ptr == nullptr || leaves_another_talker_attribute(*rec_ptr, fv, registrar_event)) {
+            return;  // peer attribute, table full -- silently drop; or an Lv of another attribute
         }
         auto& rec = *rec_ptr;
         auto const state_before = rec.registrar_sm.current_state();
@@ -878,6 +878,37 @@ class MsrpParticipantT
     /// The Talker leaves of the MRPDU just read, each but a StreamID still registered In under its other
     /// Talker attribute (a Talker Advertise turned Talker Failed, or back).
     void deliver_rx_talker_leaves();
+    /// An Lv (@p event) of a peer Talker attribute @p fv on another destination or VLAN than @p rec's registered
+    /// one: it leaves an attribute not registered, so @p rec stays. A join adopts its value (a talker that moved).
+    template <class Record>
+    [[nodiscard]] static auto leaves_another_talker_attribute(
+        Record const& rec, TalkerAdvertiseFirstValue const& fv, registrar_sm::Def::Event const event) noexcept -> bool
+    {
+        return leaving(event) && rec.operation == Operation::Register && rec.registrar_is_registered() &&
+            !same_stream(rec.first_value, fv);
+    }
+    template <class Record>
+    [[nodiscard]] static auto leaves_another_talker_attribute(
+        Record const& rec, TalkerFailedFirstValue const& fv, registrar_sm::Def::Event const event) noexcept -> bool
+    {
+        return leaving(event) && rec.operation == Operation::Register && rec.registrar_is_registered() &&
+            !same_stream(rec.first_value.advertise, fv.advertise);
+    }
+    /// Any other attribute (a Domain): never.
+    template <class Record, class FirstValue>
+    [[nodiscard]] static auto leaves_another_talker_attribute(
+        Record const& /*rec*/, FirstValue const& /*fv*/, registrar_sm::Def::Event /*event*/) noexcept -> bool
+    {
+        return false;
+    }
+    [[nodiscard]] static auto leaving(registrar_sm::Def::Event const event) noexcept -> bool
+    {
+        return event == registrar_sm::Def::Event::RLeave || event == registrar_sm::Def::Event::RLeaveImmediate;
+    }
+    [[nodiscard]] static auto same_stream(TalkerAdvertiseFirstValue const& a, TalkerAdvertiseFirstValue const& b) noexcept -> bool
+    {
+        return a.destination_address == b.destination_address && a.vlan_identifier.get() == b.vlan_identifier.get();
+    }
     void notify_listener(tsn::StreamId const& id, ListenerDeclaration decl, Operation op);
     void notify_listener_leave(tsn::StreamId const& id);
     void notify_domain(DomainFirstValue const& fv, Operation op);
