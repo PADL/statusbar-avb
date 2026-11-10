@@ -800,6 +800,24 @@ TEST(msrp_participant, a_second_leave_all_restarts_the_listeners_own_leavetimer)
     EXPECT_TRUE(rig.left.has_value());
 }
 
+// IEEE 802.1Q-2022 Clause 10.7.5 with MsrpConfig::leave_immediate: a Listener left in LV by a
+// LeaveAll it was not re-declared in, then withdrawn with an Lv, goes LV to MT and is reported gone.
+TEST(msrp_participant, a_listener_leave_in_lv_ends_the_registration)
+{
+    auto config = test_msrp_config();
+    config.leave_immediate = true;
+    config.timers.leave_time = std::chrono::milliseconds{5000};
+    ListenerLeaveRig rig{config};
+    (void)rig.b.declare_listener(rig.sid, ListenerDeclaration::Ready, rig.clock.now);
+    rig.exchange();
+    rig.a.receive_pdu(listener_leave_all_pdu(), rig.clock.now);  // IN to LV, not re-declared
+    EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
+    (void)rig.b.withdraw_listener(rig.sid, rig.clock.now);
+    rig.exchange();
+    EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
+    EXPECT_TRUE(rig.left.has_value());
+}
+
 // A declared Talker Advertise whose value changes (the talker moved to an
 // adopted Class A VID) is sent New at once, so the peer learns the new VID
 // within one join period, not at the next periodic transmission.
