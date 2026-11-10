@@ -156,7 +156,7 @@ port's MTU (`set_mtu`, 1500 until set); the stream's own frame; and item d),
 500 ns of propagation. Without a cbs every frame leaves at the link speed
 (`set_link_mbps`, 1000 until set). Under the shaper's cbs (`set_class_a_cbs`),
 whose idleSlope is the streams' bandwidth (Annex L), the other streams' frames
-are spread over the interval: they take their share of 125 us. Twelve 8-channel
+are spread over the interval: they need their share of 125 us. Twelve 8-channel
 24-bit 48 kHz AAF talkers at 1 Gbit/s declare 129.1 us each under the cbs
 (14.0 us at the link speed, 114.6 us at idleSlope, 0.5 us), 33.1 us unshaped.
 Configured streams count, not only admitted ones: an upper bound that does not
