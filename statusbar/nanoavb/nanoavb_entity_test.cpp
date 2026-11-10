@@ -294,9 +294,9 @@ TEST(nanoavb_entity_acquire, acquire_success)
 }
 
 // The profile is a property of the model: the blob's ENTITY descriptor may
-// carry a well-known profile symbol (blob metadata, never served); a runtime
-// setting overrides it; a model that says nothing is Milan.
-TEST(nanoavb_entity_profile, from_model_symbol_with_runtime_override)
+// carry a well-known profile symbol (blob metadata, never served); a model
+// that says nothing is Milan.
+TEST(nanoavb_entity_profile, from_the_model_symbol)
 {
     static_assert(entity_profile_symbol_code("identify") == 0x12619917U);  // aemxml's CRC-32
     auto blob_with = [](std::optional<uint32_t> const symbol) {
@@ -311,19 +311,17 @@ TEST(nanoavb_entity_profile, from_model_symbol_with_runtime_override)
         }
         return w.write();
     };
-    auto profile_of = [](std::vector<uint8_t> const& blob, std::optional<bool> const override) {
+    auto profile_of = [](std::vector<uint8_t> const& blob) {
         auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
         EXPECT_TRUE(storage.has_value());
-        return entity_profile_from_model(&*storage, override);
+        return entity_profile_from_model(&*storage);
     };
     auto const plain = blob_with(std::nullopt);
     auto const classic = blob_with(entity_profile_symbol_code(ENTITY_PROFILE_CLASSIC_SYMBOL));
     auto const milan = blob_with(entity_profile_symbol_code(ENTITY_PROFILE_MILAN_SYMBOL));
-    EXPECT_TRUE(profile_of(plain, std::nullopt).milan);
-    EXPECT_FALSE(profile_of(classic, std::nullopt).milan);
-    EXPECT_TRUE(profile_of(milan, std::nullopt).milan);
-    EXPECT_TRUE(profile_of(classic, true).milan);
-    EXPECT_FALSE(profile_of(milan, false).milan);
+    EXPECT_TRUE(profile_of(plain).milan);
+    EXPECT_FALSE(profile_of(classic).milan);
+    EXPECT_TRUE(profile_of(milan).milan);
     EXPECT_TRUE(entity_profile_from_model(nullptr).milan);
 
     // The symbol is not part of what a controller reads: the ENTITY descriptor

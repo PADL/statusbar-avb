@@ -204,10 +204,6 @@ struct AvbEntityAudioIOConfig
     /// value already in force is not notified, 5.4.5.3).
     std::string atdecc_profile{"classic"};
 
-    /// The entity profile: true Milan, false classic IEEE 1722.1. Unset follows
-    /// the model's (Milan when it says nothing). Separate from atdecc_profile above.
-    std::optional<bool> milan{};
-
     /// The application reports each output's signal presence (AvbEntityKit::set_output_signal_presence):
     /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan only.
     bool signal_presence{false};

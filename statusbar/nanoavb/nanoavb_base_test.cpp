@@ -4,6 +4,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <chrono>
@@ -185,7 +186,10 @@ TEST(nanoavb_base_builder, the_profile_picks_the_msrp_timers)
     auto const components = [](bool const milan) {
         EntityModel model{EntityModelConfig{}};
         model.set_entity(DescriptorEntity{});
-        return std::make_unique<NanoAvbComponents>(std::move(model), AdpAdvertiserConfig{}, 1, 1, 1, milan);
+        if (!milan) {
+            model.set_descriptor_storage(classic_profile_storage());
+        }
+        return std::make_unique<NanoAvbComponents>(std::move(model), AdpAdvertiserConfig{}, 1, 1, 1);
     };
     auto const milan = components(true);
     EXPECT_TRUE(milan->msrp_handler.msrp_config().timers == MILAN_MRP_TIMERS);
