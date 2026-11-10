@@ -1034,6 +1034,24 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100);
 }
 
+// A link up reads the port again: an interface whose speed is unknown keeps the last, and the declared
+// AccumulatedLatency with it (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+TEST(avb_entity_kit_milan_talker, a_link_up_on_an_unknown_port_keeps_its_speed_and_latency)
+{
+    MilanKit m{std::nullopt, 0x17};
+    EXPECT_TRUE(m.start_ready());
+    m.kit.set_link_mbps(100);
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    auto const* declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
+    auto const before = declared != nullptr ? declared->accumulated_latency : 0U;
+    auto const now = sm::Clock::now();
+    m.kit.on_link_down(now);
+    m.kit.on_link_up(now);
+    EXPECT_EQ(m.kit.link_mbps(), 100U);
+    declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
+    EXPECT_EQ(declared != nullptr ? declared->accumulated_latency : 1U, before);
+}
+
 // Milan v1.3 Section 5.4.2.10.2: in the IEEE 1722.1-2021 layout an output reports the
 // AccumulatedLatency its Talker Advertise declares; Milan v1.2's keeps the offset.
 TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_the_declared_accumulated_latency)
