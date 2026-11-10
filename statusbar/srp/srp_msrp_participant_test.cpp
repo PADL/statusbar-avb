@@ -12,11 +12,14 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <format>
 #include <iterator>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace statusbar;
@@ -161,10 +164,9 @@ auto talker_advertise_unique_ids(std::span<uint8_t const> pdu) -> std::vector<ui
     return ids;
 }
 
-// The three-packed event (802.1Q 10.8.2.10: New 0, JoinIn 1, In 2, JoinMt 3,
-// Mt 4, Lv 5) of the first value of the first non-empty TalkerAdvertise
-// vector in the PDU, if any.
-auto first_talker_advertise_event(std::span<uint8_t const> pdu) -> std::optional<uint8_t>
+// The offset of the FirstValue of the first non-empty TalkerAdvertise vector
+// in the PDU that has its first three-packed event after it, if any.
+auto first_talker_advertise_at(std::span<uint8_t const> pdu) -> std::optional<size_t>
 {
     size_t p = 1;
     while (p + 4 <= pdu.size()) {
@@ -188,12 +190,33 @@ auto first_talker_advertise_event(std::span<uint8_t const> pdu) -> std::optional
                 if (vp + attr_len >= list_end) {
                     break;
                 }
-                return static_cast<uint8_t>(pdu[vp + attr_len] / 36);
+                return vp;
             }
         }
         p = list_end;
     }
     return std::nullopt;
+}
+
+// The three-packed event (802.1Q 10.8.2.10: New 0, JoinIn 1, In 2, JoinMt 3,
+// Mt 4, Lv 5) of the first value of the first non-empty TalkerAdvertise
+// vector in the PDU, if any.
+auto first_talker_advertise_event(std::span<uint8_t const> pdu) -> std::optional<uint8_t>
+{
+    auto const at = first_talker_advertise_at(pdu);
+    return at ? std::optional{static_cast<uint8_t>(pdu[*at + TalkerAdvertiseFirstValue::LENGTH] / 36)} : std::nullopt;
+}
+
+// That first value's event and MaxFrameSize, as "Lv 150".
+auto first_talker_advertise(std::span<uint8_t const> pdu) -> std::string
+{
+    static constexpr std::array<std::string_view, 6> NAMES{"New", "JoinIn", "In", "JoinMt", "Mt", "Lv"};
+    auto const at = first_talker_advertise_at(pdu);
+    auto const event = first_talker_advertise_event(pdu);
+    if (!at || !event || *event >= NAMES.size()) {
+        return {};
+    }
+    return std::format("{} {}", NAMES.at(*event), (static_cast<unsigned>(pdu[*at + 16]) << 8) | pdu[*at + 17]);
 }
 
 // True if any message in the PDU has its first vector header carrying the
@@ -818,47 +841,156 @@ TEST(msrp_participant, a_listener_leave_in_lv_ends_the_registration)
     EXPECT_TRUE(rig.left.has_value());
 }
 
-// A declared Talker Advertise whose value changes (the talker moved to an
-// adopted Class A VID) is sent New at once, so the peer learns the new VID
-// within one join period, not at the next periodic transmission.
-TEST(msrp_participant, changed_talker_advertise_is_sent_promptly)
+// Two participants with `fv` declared by a and registered by b, a's applicant quiet.
+struct TalkerChangeRig
 {
     MsrpParticipant a{test_msrp_config(), 0xab12};
     MsrpParticipant b{test_msrp_config(), 0xcd34};
     Fabric fab{};
-    a.set_send_pdu(fab.make_a_sender());
-    b.set_send_pdu(fab.make_b_sender());
     TestClock clock{};
-    a.start(clock.now);
-    b.start(clock.now);
-    auto fv = make_talker_adv(0x0101);
-    (void)a.declare_talker_advertise(fv, clock.now);
-    // Settle: a few join periods, so the applicant is quiet (QA).
-    for (int i = 0; i < 4; ++i) {
-        auto const t = clock.advance(std::chrono::milliseconds(250));
-        a.tick(t);
-        fab.deliver_a_to_b(b, t);
-        b.tick(t);
-        fab.deliver_b_to_a(a, t);
-    }
-    auto const* reg = b.find_talker_advertise(make_stream_id(0x0101));
-    EXPECT_TRUE(reg != nullptr);
-    EXPECT_EQ(reg->vlan_identifier.get(), default_sr_class_vid);
 
-    fv.vlan_identifier = 7;
-    (void)a.declare_talker_advertise(fv, clock.now);
-    auto const t = clock.advance(std::chrono::milliseconds(250));  // one join period: before any periodic
-    a.tick(t);
-    EXPECT_FALSE(fab.a_to_b.empty());
-    bool saw_new = false;
-    for (auto const& pdu : fab.a_to_b) {
-        saw_new = saw_new || first_talker_advertise_event(pdu) == std::optional<uint8_t>{0};  // New
+    explicit TalkerChangeRig(TalkerAdvertiseFirstValue const& fv)
+    {
+        a.set_send_pdu(fab.make_a_sender());
+        b.set_send_pdu(fab.make_b_sender());
+        a.start(clock.now);
+        b.start(clock.now);
+        (void)a.declare_talker_advertise(fv, clock.now);
+        run(4);
     }
-    EXPECT_TRUE(saw_new);
-    fab.deliver_a_to_b(b, t);
-    reg = b.find_talker_advertise(make_stream_id(0x0101));
-    EXPECT_TRUE(reg != nullptr);
-    EXPECT_EQ(reg->vlan_identifier.get(), uint16_t{7});
+
+    /// `rounds` join periods, both ways; what a sent, first Talker Advertise value of each PDU.
+    auto run(int const rounds) -> std::vector<std::string>
+    {
+        std::vector<std::string> sent;
+        for (int i = 0; i < rounds; ++i) {
+            auto const t = clock.advance(std::chrono::milliseconds(250));
+            a.tick(t);
+            std::ranges::transform(
+                fab.a_to_b, std::back_inserter(sent), [](auto const& pdu) { return first_talker_advertise(pdu); });
+            fab.deliver_a_to_b(b, t);
+            b.tick(t);
+            fab.deliver_b_to_a(a, t);
+        }
+        return sent;
+    }
+};
+
+// The index of the first of `sent` from `from` on that starts with `prefix`; sent.size() if none.
+auto position(std::vector<std::string> const& sent, std::string_view const prefix, size_t const from = 0) -> size_t
+{
+    auto const found = std::ranges::find_if(
+        sent.begin() + static_cast<std::ptrdiff_t>(std::min(from, sent.size())), sent.end(), [prefix](std::string const& s) {
+            return s.starts_with(prefix);
+        });
+    return static_cast<size_t>(found - sent.begin());
+}
+
+// Whether `sent` holds a Join of the old value (`old_size`), then its Lv, then the new value New (`new_size`).
+auto joined_left_then_new(std::vector<std::string> const& sent, int const old_size, int const new_size) -> bool
+{
+    auto const join = position(sent, std::format("JoinMt {}", old_size)) < sent.size()
+        ? position(sent, std::format("JoinMt {}", old_size))
+        : position(sent, std::format("JoinIn {}", old_size));
+    auto const leave = position(sent, std::format("Lv {}", old_size), join);
+    auto const fresh = position(sent, std::format("New {}", new_size), leave);
+    bool const nothing_new_before = position(sent, std::format("New {}", new_size)) == fresh;
+    return join < leave && leave < fresh && fresh < sent.size() && nothing_new_before;
+}
+
+// IEEE 802.1Q-2022 Clause 10.7 and Table 35-6 code 16: a Talker whose TSpec changes joins the old value,
+// leaves it (Lv), then declares the new one New, never a changed FirstValue in place.
+TEST(msrp_participant, a_changed_tspec_leaves_the_old_value_before_the_new_one)
+{
+    auto fv = make_talker_adv(0x0101);
+    TalkerChangeRig rig{fv};
+    fv.max_frame_size = 224;
+    (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
+    EXPECT_TRUE(joined_left_then_new(rig.run(4), 150, 224));
+    auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
+}
+
+// A Talker moved to another VID (an adopted Class A domain) leaves the old value, then declares the new one.
+TEST(msrp_participant, a_changed_vid_is_left_then_declared_promptly)
+{
+    auto fv = make_talker_adv(0x0101);
+    TalkerChangeRig rig{fv};
+    EXPECT_TRUE(rig.b.find_talker_advertise(make_stream_id(0x0101)) != nullptr);
+    fv.vlan_identifier = 7;
+    (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
+    EXPECT_TRUE(joined_left_then_new(rig.run(4), 150, 150));
+    auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_EQ(reg != nullptr ? reg->vlan_identifier.get() : uint16_t{0}, uint16_t{7});
+}
+
+// Our own LeaveAll after the old value's Join but before its Lv (LA to LO, nothing sent): the old value
+// is joined again after the LeaveAll, then left, and only then is the new one declared.
+TEST(msrp_participant, a_leaveall_sent_before_the_lv_joins_the_old_value_again)
+{
+    auto fv = make_talker_adv(0x0101);
+    TalkerChangeRig rig{fv};
+    fv.max_frame_size = 224;
+    (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
+    auto const t = rig.clock.advance(std::chrono::milliseconds(250));
+    rig.a.tick(t);  // the old value's Join; Lv! now pending (LA)
+    rig.fab.deliver_a_to_b(rig.b, t);
+    rig.a.leave_all(t);
+    auto sent = std::vector<std::string>{};
+    std::ranges::transform(rig.fab.a_to_b, std::back_inserter(sent), [](auto const& pdu) { return first_talker_advertise(pdu); });
+    rig.fab.deliver_a_to_b(rig.b, t);
+    std::ranges::copy(rig.run(4), std::back_inserter(sent));
+    EXPECT_TRUE(joined_left_then_new(sent, 150, 224));
+    auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
+}
+
+// A LeaveAll received after the old value's Join, with its Lv pending (LA): the old value is joined again,
+// then left, before the new one is declared.
+TEST(msrp_participant, a_leaveall_received_before_the_lv_joins_the_old_value_again)
+{
+    auto fv = make_talker_adv(0x0101);
+    TalkerChangeRig rig{fv};
+    fv.max_frame_size = 224;
+    (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
+    auto const t = rig.clock.advance(std::chrono::milliseconds(250));
+    rig.a.tick(t);  // the old value's Join; Lv! now pending (LA)
+    rig.fab.deliver_a_to_b(rig.b, t);
+    rig.b.leave_all(t);
+    rig.fab.deliver_b_to_a(rig.a, t);  // a answers it at once
+    auto sent = std::vector<std::string>{};
+    std::ranges::transform(rig.fab.a_to_b, std::back_inserter(sent), [](auto const& pdu) { return first_talker_advertise(pdu); });
+    rig.fab.deliver_a_to_b(rig.b, t);
+    std::ranges::copy(rig.run(4), std::back_inserter(sent));
+    EXPECT_TRUE(joined_left_then_new(sent, 150, 224));
+    auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
+}
+
+// A change of AccumulatedLatency alone is declared New in place, with no Leave.
+TEST(msrp_participant, a_changed_latency_alone_is_declared_new_in_place)
+{
+    auto fv = make_talker_adv(0x0101);
+    TalkerChangeRig rig{fv};
+    fv.accumulated_latency = 50'000;
+    (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
+    auto const sent = rig.run(1);
+    EXPECT_EQ(sent.empty() ? std::string{} : sent.front(), std::string{"New 150"});
+    auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_EQ(reg != nullptr ? reg->accumulated_latency.get() : 0U, 50'000U);
+}
+
+// A withdrawal while a changed value waits for its Leave drops that value: nothing is declared after.
+TEST(msrp_participant, a_withdrawal_drops_a_value_waiting_for_its_leave)
+{
+    auto fv = make_talker_adv(0x0101);
+    TalkerChangeRig rig{fv};
+    fv.max_frame_size = 224;
+    (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
+    (void)rig.a.withdraw_talker(fv.stream_id, rig.clock.now);
+    auto const sent = rig.run(4);
+    EXPECT_FALSE(sent.empty());
+    EXPECT_TRUE(std::ranges::none_of(sent, [](std::string const& s) { return s.starts_with("New") || s.starts_with("Join"); }));
 }
 
 TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)

@@ -114,6 +114,49 @@ void erase_if(Container& c, Pred pred)
     return static_cast<bool>(buf.append(std::span<uint8_t const>(src)));
 }
 
+/// Whether @p rec's Applicant has a Leave to send (LA, LO).
+template <class Record>
+[[nodiscard]] constexpr auto leaving(Record const& rec) noexcept -> bool
+{
+    auto const state = rec.applicant_sm.current_state();
+    return state == applicant_sm::Def::State::La || state == applicant_sm::Def::State::Lo;
+}
+
+/// @p rec's old value declared again so that its Join is sent: Join! (VO, LO, LA), then periodic! (QA).
+template <class Record>
+void join_again(Record& rec, sm::TimePoint const now)
+{
+    mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Join, now);
+    mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Periodic, now);
+}
+
+/// A sent @p rec's message noted against its pending value: a Join or New of the old value, then an Lv after it.
+template <class Record>
+void note_sent(Record& rec) noexcept
+{
+    if constexpr (requires { rec.pending; }) {
+        auto const message = rec.applicant_ctx.send_msg;
+        if (auto& pending = rec.pending; pending) {
+            pending->left = pending->left || (pending->rejoined && message == applicant_sm::SendMessage::Leave);
+            pending->rejoined =
+                pending->rejoined || message == applicant_sm::SendMessage::Join || message == applicant_sm::SendMessage::New;
+        }
+    }
+}
+
+/// Whether declaring @p fv on @p rec, declared and not yet withdrawn to VO, changes more than its
+/// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8; Table 35-6 code 16).
+template <class Record>
+[[nodiscard]] constexpr auto changes_reservation(Record const& rec, TalkerAdvertiseFirstValue const& fv) noexcept -> bool
+{
+    auto const state = rec.applicant_sm.current_state();
+    bool const declared = rec.operation == mrp::Operation::Declare && state != applicant_sm::Def::State::Start &&
+        state != applicant_sm::Def::State::Vo;
+    auto same = rec.first_value;
+    same.accumulated_latency = fv.accumulated_latency;
+    return declared && !(same == fv);
+}
+
 }  // namespace detail_msrp
 
 // Convenience using-declarations so method bodies can refer to the
@@ -511,8 +554,53 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
+    if (detail_msrp::changes_reservation(*rec_ptr, fv)) {
+        change_talker(*rec_ptr, fv, now);
+        return success();
+    }
+    rec_ptr->pending.reset();
     declare_value(*rec_ptr, fv, now);
     return success();
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::change_talker(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint const now)
+{
+    if (rec.pending) {
+        rec.pending->value = fv;  // the old value's Join and Leave go on as they were
+        return;
+    }
+    rec.pending = mrp::PendingValue<TalkerAdvertiseFirstValue>{.value = fv};
+    detail_msrp::join_again(rec, now);
+    port_.timers().start_join(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::rejoin_pending_talkers(TimePoint const now)
+{
+    for (auto& rec : talker_adv_) {
+        if (rec.pending) {
+            rec.pending->rejoined = false;
+            rec.pending->left = false;
+            detail_msrp::join_again(rec, now);
+        }
+    }
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::declare_pending_talkers(TimePoint const now)
+{
+    for (auto& rec : talker_adv_) {
+        auto const pending = rec.pending.value_or(mrp::PendingValue<TalkerAdvertiseFirstValue>{});
+        if (pending.left) {
+            rec.pending.reset();
+            declare_value(rec, pending.value, now);
+        } else if (pending.rejoined && !detail_msrp::leaving(rec)) {
+            mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
+            port_.timers().start_join(now);
+        }
+    }
 }
 
 template <class Limits>
@@ -532,6 +620,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
     bool found = false;
     for (auto& rec : talker_adv_) {
         if (rec.first_value.stream_id == stream_id) {
+            rec.pending.reset();
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             found = true;
         }
@@ -752,6 +841,7 @@ void MsrpParticipantT<Limits>::send_leave_all(TimePoint now)
         }
     };
     [&](auto&... all) { (drive(all), ...); }(talker_adv_, talker_failed_, listeners_, domains_);
+    rejoin_pending_talkers(now);  // the old value joined again, in this PDU, before its Lv
 
     // The LeaveAll FSM is now in Active; dispatch Tx so it transitions back to
     // Passive with tx_leaveall_pending=true, and emit the PDU WITH the LeaveAll
@@ -961,6 +1051,7 @@ void MsrpParticipantT<Limits>::decode_vector_attribute(
         switch (attr_type) {
             case AttributeType::TalkerAdvertise:
                 drive_leaveall(talker_adv_);
+                rejoin_pending_talkers(now);  // the old value joined again before its Lv
                 break;
             case AttributeType::TalkerFailed:
                 drive_leaveall(talker_failed_);
@@ -1212,7 +1303,7 @@ template <class Limits>
 template <typename RecordVec>
 auto MsrpParticipantT<Limits>::append_attribute_message(
     MutableBuffer& out, RecordVec& records, AttributeType attr_type, uint8_t attr_length, bool include_leave_all) -> bool
-{
+{  // NOLINT(statusbar-block-statements) one attribute message counted, sized, then written; pre-dates the gate
     // Count how many records actually want to tx in this pass. End-station
     // MAD-only participant: only attributes WE declared (operation==Declare) are
     // transmitted. Registered peer attributes (operation==Register) are tracked
@@ -1408,6 +1499,7 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
         // Clear tx_pending across the whole run so the next build doesn't re-emit.
         for (size_t k = 0; k < run_len; ++k) {
             auto& rec = records[s + k];
+            detail_msrp::note_sent(rec);
             rec.applicant_ctx.tx_pending = false;
             rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
             rec.applicant_ctx.encode = applicant_sm::Encoding::None;
@@ -1434,7 +1526,7 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
 
 template <class Limits>
 void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
-{
+{  // NOLINT(statusbar-block-statements) the PDU built message by message, then sent; pre-dates the gate
     // First, dispatch the appropriate TX event to every attribute's
     // Applicant to generate tx outputs. We pick TxRegistrarIn vs
     // TxRegistrarMt per-attribute based on the paired Registrar's
@@ -1478,6 +1570,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     // Reuse the participant's pre-allocated PDU buffer; no per-tx heap.
     pdu_buffer_.rewind();
     if (!append_u8(pdu_buffer_, PROTOCOL_VERSION)) {
+        declare_pending_talkers(now);
         return;
     }
 
@@ -1504,6 +1597,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     }
 
     if (!any_message) {
+        declare_pending_talkers(now);
         return;
     }
     // Final message EndMark
@@ -1512,8 +1606,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     if (send_pdu_) {
         (void)send_pdu_(pdu_buffer_.get_span());
     }
-
-    (void)now;
+    declare_pending_talkers(now);
 }
 
 // ============================================================
