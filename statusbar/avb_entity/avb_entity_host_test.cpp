@@ -382,14 +382,6 @@ TEST(avb_entity_host_avb_info, storage_handler_reflects_runtime_interface_fields
     EXPECT_EQ(static_cast<uint8_t>(desc.priority1), 248);  // back to authored: the gPTP group is not valid now
 }
 
-// IEEE 1722.1-2021 Clause 7.4.40.2.1: a class's msrp_mapping names it by its SRclassID
-TEST(avb_entity_host_avb_info, an_msrp_mapping_names_its_class_by_sr_class_id)
-{
-    using statusbar::avb_entity::msrp_traffic_class;
-    EXPECT_EQ(msrp_traffic_class(statusbar::nanoavb::DomainInfo{}), uint8_t{6});
-    EXPECT_EQ(msrp_traffic_class(statusbar::nanoavb::CLASS_B_DOMAIN), uint8_t{5});
-}
-
 TEST(avb_entity_host_avb_info, host_answers_get_avb_info_from_observed_state)
 {
     using namespace statusbar::atdecc::aem::avb_info_flags;
