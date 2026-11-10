@@ -307,6 +307,19 @@ void MilanListener::bind(uint16_t const index, AcmpCommandResponse const& cmd, T
     notify(index);
 }
 
+void MilanListener::rediscover(uint16_t const index, TimePoint const now)
+{
+    // A talker whose ENTITY_AVAILABLE came before the bind is discovered (Section 5.6.4.5.1): a retry after an
+    // error answer probes after TMR_RETRY and TMR_DELAY, not at the talker's next ADP.
+    auto& s = sinks_[index];
+    auto const known = talker_lookup_ ? talker_lookup_(s.binding.talker_entity_id) : std::nullopt;
+    if (known && known->valid_until > now) {
+        s.interface_index = known->adp.interface_index.get();
+        note_adp(s, known->adp, known->valid_until);
+        s.discovered = true;
+    }
+}
+
 void MilanListener::update_binding(uint16_t const index, AcmpCommandResponse const& cmd)
 {
     auto& s = sinks_[index];
@@ -331,6 +344,7 @@ void MilanListener::rebind(uint16_t const index, AcmpCommandResponse const& cmd,
     // Restart discovery and probe at once: an immediate consequence of a bind skips
     // waiting for ADP (Section 5.5.2.6). Bound before the hook runs: it sees the new state.
     enter(s, probing_status::ACTIVE, MilanSinkState::prb_w_resp);
+    rediscover(index, now);
     binding_changed(index);
 }
 
