@@ -324,7 +324,7 @@ class AvbEntityKit
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
-    /// The link speed (Mbit/s, reactor thread; 1000 until set, the shaper keeps it current) whose
+    /// The link speed (Mbit/s, reactor thread; the interface's from start(), 1000 unknown; the shaper keeps it current) whose
     /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that pushes every
     /// talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
     void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
@@ -335,7 +335,7 @@ class AvbEntityKit
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
     /// The port's MTU, whose frame is the interfering one in a Talker Advertise's AccumulatedLatency
-    /// (reactor thread; 0, FALLBACK_MTU, until set; the shaper sets it on install).
+    /// (reactor thread; the interface's from start(), FALLBACK_MTU unknown; the shaper sets it on install).
     void set_mtu(uint32_t const mtu) noexcept { mtu_ = mtu; }
     /// Whether a cbs shapes class A at its streams' bandwidth (reactor thread; false until set, the shaper
     /// sets it on install): the queue then drains at idleSlope (talker_port_latency_ns).
@@ -703,6 +703,9 @@ class AvbEntityKit
     [[nodiscard]] auto stream_port_config(std::string_view backend) const -> StreamPortConfig;
     /// The control plane up, its stream callbacks wired, the declarations started.
     [[nodiscard]] auto start_control(net::MessageReactor& reactor, TimePoint now) -> Status;
+    /// The interface's link speed and MTU, read once at start(); an unknown one keeps the last (1000, FALLBACK_MTU).
+    /// A shaper replaces both on install.
+    void read_port();
     /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
     /// start(): register the configured VID; after a stop(), declare the configured MSRP Domain, which resumes MSRP.
