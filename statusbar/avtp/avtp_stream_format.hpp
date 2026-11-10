@@ -185,6 +185,7 @@ inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNE
 //
 // IEC 61883-6 stream format - IEEE 1722-2016 Annex I
 //
+
 /// The IEC 61883-6 (AM824) stream-format word (IEEE 1722-2016 Annex I), viewed over the 8 octets:
 /// subtype, sf|fmt|r, FDF (evt[7:3] | sfc[2:0]), DBS, b|nb|ut|sc|rsv, then the IEC 60958, MBLA and
 /// MIDI|SMPTE label counts. E.g. 0x00a0020840000800 is 48 kHz, non-blocking, 8 MBLA quadlets.
