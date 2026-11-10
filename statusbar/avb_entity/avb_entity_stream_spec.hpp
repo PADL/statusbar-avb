@@ -31,7 +31,6 @@
 #include "statusbar/avtp/avtp_stream_common.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
-#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
