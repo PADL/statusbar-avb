@@ -611,7 +611,17 @@ void ListenerStreams::receive_am824(
     span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
     if (!pdu.is_valid()) {
         slot.rx_bad.add(1);
-        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
+        update_stream_input_counters(
+            slot,
+            pdu.sequence_num(),
+            0,
+            false,
+            false,
+            pdu.stream_header.mr(),
+            /*format_ok=*/false,
+            0,
+            /*ts_sparse=*/true,
+            gptp_now_ns);
         return;
     }
     auto const& header = pdu.stream_header;
@@ -691,7 +701,9 @@ void ListenerStreams::receive_aaf(
     auto const pdu = avtp::aaf_parse_header(frame);
     if (!pdu) {
         slot.rx_bad.add(1);
-        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
+        auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
+        auto const mr = avtp::avtp_get_mr(frame).value_or(false);
+        update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
         return;
     }
     // Milan v1.2 Section 4.4.2.2: a mismatched format is discarded, counted in UNSUPPORTED_FORMAT.
@@ -783,6 +795,8 @@ void ListenerStreams::receive_crf(
     span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
     if (!pdu.is_valid()) {
         slot.rx_bad.add(1);
+        update_stream_input_counters(
+            slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/false, 0, /*ts_sparse=*/true, 0);
         return;
     }
     std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);

@@ -95,6 +95,27 @@ TEST(stream_counters, sequence_gap_is_flagged)
     EXPECT_EQ(c.seq_num_mismatch.load(), 1U);
 }
 
+// Milan v1.3 Section 5.3.8.10: SEQ_NUM_MISMATCH covers every Stream Data AVTPDU, a wrongly
+// formatted one too, so it neither hides a gap nor opens a false one.
+TEST(stream_counters, a_wrongly_formatted_frame_keeps_its_place_in_the_sequence)
+{
+    StreamInputCounters c;
+    feed(c, 0, 0, true, false);
+    tally_stream_input_packet(c, 1, 0, false, false, false, /*format_ok=*/false, 0, false, GPTP_OFF, LOCK_TOL_NS, FS);
+    feed(c, 2, 250'000, true, false);
+    EXPECT_EQ(c.unsupported_format.load(), 1U);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
+}
+
+TEST(stream_counters, a_gap_between_wrongly_formatted_frames_is_flagged)
+{
+    StreamInputCounters c;
+    tally_stream_input_packet(c, 0, 0, false, false, false, /*format_ok=*/false, 0, false, GPTP_OFF, LOCK_TOL_NS, FS);
+    tally_stream_input_packet(c, 2, 0, false, false, false, /*format_ok=*/false, 0, false, GPTP_OFF, LOCK_TOL_NS, FS);
+    EXPECT_EQ(c.unsupported_format.load(), 2U);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 1U);
+}
+
 TEST(stream_counters, media_locks_on_steady_step)
 {
     StreamInputCounters c;
