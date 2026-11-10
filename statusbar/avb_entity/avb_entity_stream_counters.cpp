@@ -189,6 +189,7 @@ void tally_stream_input_packet(
     if (c.restart_run.load(relaxed) && c.restart_run.exchange(false, relaxed)) {
         c.locked_run = 0;
         c.have_prev_delta = false;
+        c.have_prev = false;  // a new talker's first frame is not compared with the last one's
     }
     c.frames_rx.fetch_add(1, relaxed);
     // Every Stream Data AVTPDU counts toward sequence and mr, whatever its format (Milan v1.3 Section 5.3.8.10).
