@@ -84,8 +84,8 @@ struct StreamInputCounters
     bool have_prev_delta{false};
     int locked_run{0};
     std::atomic<bool> is_locked{false};
-    /// Set by the reactor when it drops the lock: the RX thread starts its
-    /// clean-step run again before it may lock anew.
+    /// Set by the reactor when it drops the lock (an unbind, a bind, a stop): the RX thread
+    /// starts its clean-step run and its sequence and mr tracking again.
     std::atomic<bool> restart_run{false};
 };
 
