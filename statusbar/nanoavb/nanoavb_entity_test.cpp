@@ -2524,7 +2524,55 @@ TEST(nanoavb_entity_unsolicited_notify, the_commands_own_notification_follows_it
     EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
     EXPECT_EQ(
         std::ranges::count_if(response, sends.end(), [](CapturedSend const& s) { return header_of(s).is_unsolicited(); }),
-        3);  // n4, n5 and its own
+        4);  // n3, n4, n5 and its own
+}
+
+namespace {
+
+/// Accepts every SET, its hook raising the command's own notification (true) or a side effect (false), in turn.
+class ScriptedNotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, 0x00};
+        for (bool const own : script) {
+            aem->emit_unsolicited(
+                own ? AEM_COMMAND_SET_CONTROL : AEM_COMMAND_GET_STREAM_INFO,
+                body,
+                own ? std::optional{kControllerA} : std::nullopt);
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    std::vector<bool> script;
+};
+
+}  // namespace
+
+// Milan v1.3 Section 5.4.5.1: a command's own notification follows its response even when side effects fill the queue.
+TEST(nanoavb_entity_unsolicited_notify, every_own_notification_follows_the_response)
+{
+    ScriptedNotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.script = {true, false, false, true};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    auto const response = std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); });
+    EXPECT_TRUE(response != sends.end());
+    auto const own_before = std::ranges::count_if(
+        sends.begin(), response, [](CapturedSend const& s) { return header_of(s).command_code() != AEM_COMMAND_GET_STREAM_INFO; });
+    EXPECT_EQ(own_before, 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 2);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_FORMAT, kMacB), 1);
 }
 
 // Notifications a hook raises past the queue keep the order they were raised in; the command's own is last.
