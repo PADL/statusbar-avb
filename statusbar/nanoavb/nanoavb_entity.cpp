@@ -218,9 +218,9 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     // status + bytes-written, avoiding the per-return 1 KB struct copy that
     // the previous AemCommandResult shape incurred.
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
-    bool const nested = std::exchange(dispatching_, true);
+    dispatching_ = true;
     auto const response = handle_command(header, command_data, out_buffer);
-    dispatching_ = nested;
+    dispatching_ = false;
 
     current_src_mac_ = {};
 
@@ -2675,13 +2675,10 @@ auto AemCommandHandler::queue_notification(
 
 void AemCommandHandler::flush_notifications()
 {
-    if (dispatching_) {
-        return;  // a nested dispatch: the outer one sends them after its response
-    }
-    auto const queued = std::exchange(queued_notifications_, {});
-    for (auto const& n : queued) {
+    for (auto const& n : queued_notifications_) {
         emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size), n.requester);
     }
+    queued_notifications_.clear();
 }
 
 auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
