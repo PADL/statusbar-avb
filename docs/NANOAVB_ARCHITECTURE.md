@@ -527,9 +527,12 @@ talker's attribute is registered).
   descriptor sets CLASS_A, Section 5.3.3.4). After startup or link up
   `reset_domain()` restores the configured domain (priority 3, VID 2 by
   default) and declares it, whether or not gPTP is up.
-- **Domain adoption.** A peer's Domain for our SR class with other parameters
-  is adopted, its SRclassPriority and SRclassVID both (Milan v1.3 Section
-  4.2.7.2.1), until `reset_domain()` at the next link up. The talkers follow:
+- **Domain adoption.** Each Domain a peer declares for our SR class with other
+  parameters is adopted, its SRclassPriority and SRclassVID both (Milan v1.3
+  Section 4.2.7.2.1), and `reset_domain()` returns to the configured one at the
+  next link up. The participant declares the adopted Domain as a change of
+  value: the old one joined, then left, then the new one New (IEEE 802.1Q-2022
+  Clause 10.7), so the bridge never registers two. The talkers follow:
   a VID change is reported so the talker moves its MVRP join, Talker Advertise
   and stream frames, and a priority change alone declares them again (a
   talker's priority is its SR class's, IEEE 802.1Q-2022 Clause 35.2.2.8.5);
@@ -541,10 +544,9 @@ talker's attribute is registered).
   class A's, not the wire PCP. The VID is the
   same at every position of a Domain vector (a bridge's default
   `{5,2,VID},{6,3,VID}`); the participant hands over the per-position value.
-  A deviation: the section adopts every Domain declared, the entity one per
-  link up. Two end stations on a direct link with different configured
-  Domains would otherwise swap each other's previous one on every PDU,
-  churning MVRP, ACMP, the TX tag and the advertisements.
+  Two end stations on a direct link configured with different Domains swap
+  each other's on every change; Milan's defaults after a link up (priority 3,
+  VID 2) keep two Milan entities on one.
 - **Milan listener.** With `set_listener_waits_for_talker` (Milan v1.2
   Section 5.3.8.5) an attached listener declares Listener Ready while the
   talker's Advertise is registered, Asking Failed while its Talker Failed is,
