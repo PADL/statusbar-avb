@@ -405,11 +405,12 @@ class AvbEntityKit
     void set_output_mappings_across_rates(bool const across) noexcept { output_mappings_across_rates_ = across; }
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
-    /// With @p refuse, a change by other than ATDECC is refused while a controller holds the lock or
-    /// the acquisition (Milan v1.3 Section 5.3.4.1): local_change_refusal(). Default false. Reactor thread.
-    void set_lock_refuses_local_changes(bool const refuse) noexcept { lock_refuses_local_changes_ = refuse; }
-    /// ENTITY_ACQUIRED or ENTITY_LOCKED when set_lock_refuses_local_changes() is on and a controller holds
-    /// the acquisition or the lock, else nullopt; a local setter (request_entity_name(), ...) answers it first.
+    /// The port's MTU, whose frame is the interfering one in a Talker Advertise's AccumulatedLatency
+    /// (reactor thread; 0, FALLBACK_MTU, until set; the shaper sets it on install).
+    void set_mtu(uint32_t const mtu) noexcept { mtu_ = mtu; }
+    /// ENTITY_LOCKED while a controller holds the lock under atdecc.profile = "milan13" (Milan v1.3
+    /// Section 5.3.4.1), else nullopt: the AEM handler's local_change_refusal(). A host answers it
+    /// before a change of its own (a SET_STREAM_FORMAT); request_clock_source() is never refused.
     [[nodiscard]] auto local_change_refusal() const noexcept -> std::optional<uint8_t>;
     /// An entity-name change by other than ATDECC: BAD_ARGUMENTS over 64 bytes, else as SET_NAME
     /// (empty: configured name), the handler answering local_change_refusal() first. Notified and saved;
@@ -944,8 +945,9 @@ class AvbEntityKit
     void close_streams() noexcept;
     /// Stream @p index's identity (ACMP), VLAN and priority (the domain in force) into @p info.
     void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
-    /// The octets every talker stream's frames of one interval occupy on the wire: class A's queue.
-    [[nodiscard]] auto talker_class_octets() const noexcept -> uint64_t;
+    /// talker_port_latency_ns over every talker stream's frames of one interval (class A's queue) at
+    /// link_mbps() and the port's MTU: what a Talker Advertise declares now.
+    [[nodiscard]] auto talker_port_latency() const noexcept -> uint32_t;
     /// Talker @p idx's AccumulatedLatency, ns: what its Talker Advertise declares, else what it would
     /// (talker_port_latency_ns at link_mbps(); IEEE 802.1Q-2022 Clause 35.2.2.8.6).
     [[nodiscard]] auto talker_accumulated_latency_ns(uint16_t idx) const noexcept -> uint32_t;
@@ -1187,6 +1189,7 @@ class AvbEntityKit
     sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_static_groups_{};
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
+    uint32_t mtu_{0};
     bool output_mappings_across_rates_{false};  ///< set_output_mappings_across_rates()
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
