@@ -1511,7 +1511,14 @@ TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
     EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{1});
     EXPECT_EQ(m.kit.request_entity_name(std::string(65, 'x')), atdecc::AEM_STATUS_BAD_ARGUMENTS);
     std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
-    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    auto const lock_entity = [&m, &lock] {
+        nanoavb::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+        header.controller_entity_id = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+        std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+        return m.kit.host().components().aem_handler.handle_command(header, lock, out).status;
+    };
+    EXPECT_EQ(lock_entity(), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_FALSE(m.kit.local_change_refusal().has_value());  // opt-in (Milan v1.3 Section 5.3.4.1)
     EXPECT_EQ(m.kit.request_entity_name("Locked"), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(m.entity_name() == "Locked");
@@ -1519,7 +1526,7 @@ TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
     EXPECT_EQ(m.kit.request_entity_name("Other"), atdecc::AEM_STATUS_ENTITY_LOCKED);
     EXPECT_TRUE(m.entity_name() == "Locked");
     lock[3] = 0x01;  // UNLOCK
-    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_FALSE(m.kit.local_change_refusal().has_value());
     EXPECT_EQ(m.kit.request_entity_name(""), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(m.entity_name() == "kit milan");
