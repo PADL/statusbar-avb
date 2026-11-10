@@ -222,8 +222,7 @@ of another delta deleted and laid down again. `uninstall()`'s pfifo_fast
 graft removes the cbs and its etf together.
 
 A refused etf (EOPNOTSUPP: no etf offload, e.g. igc on a MAC other than
-i225/i226) is logged with the kernel's text and kept in `etf_error()`; no
-further etf is asked for until the next `install()`, the cbs stay, and frames
+i225/i226) is logged with the kernel's text; no further etf is asked for until the next `install()`, the cbs stay, and frames
 on the queue go out at once. Stock igc places the launch time in a 1 s cycle
 it estimates from the system's CLOCK_TAI (`igc_tx_launchtime`); a PHC on
 another timescale needs an igc that estimates it from SYSTIM. None of this has
