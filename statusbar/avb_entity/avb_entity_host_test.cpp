@@ -504,12 +504,20 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
 TEST(avb_entity_host_avb_info, as_capable_follows_the_gptp_stack_s_port)
 {
     using statusbar::atdecc::aem::avb_info_flags::AS_CAPABLE;
+    using TimePoint = statusbar::sm::TimePoint;
     auto const blob = make_interface_blob();
     auto host = make_host_from_blob(blob);
+    host->on_link_up(TimePoint{});
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);  // the entity has no gPTP lock
     host->note_port_as_capable(true);
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) != 0);
     host->note_port_as_capable(false);
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
+    host->note_port_as_capable(true);
+    host->on_link_down(TimePoint{});  // a link that is down is never asCapable
+    EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
+    host->on_link_up(TimePoint{});
+    host->note_port_as_capable(std::nullopt);  // ptp4l gone: the entity's own state again
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
 }
 
