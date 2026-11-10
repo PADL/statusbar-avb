@@ -407,8 +407,12 @@ starts its estimate again on either. `start()` binds `crf_recovery()` to one
 CRF input, the one the CRF clock source locates (else the first), unless the
 host bound its own consumer there with `ListenerStreams::set_crf` before
 `start()`; the other CRF inputs are the host's.
-`TalkerStreams::toggle_media_clock_restart` toggles a CRF STREAM_OUTPUT's mr
-from its next PDU on, where it stays; it is callable from any thread.
+`TalkerStreams::toggle_media_clock_restart` toggles a STREAM_OUTPUT's mr from
+its next raw AAF, AM824 or CRF PDU on, where it stays; it is callable from any
+thread. A host whose talker timestamps follow a CRF input calls it for those
+streams on that CRF's disruptions and mr toggles (IEEE 1722-2016 Clause
+4.4.4.3); a stream reopened after a stop starts with mr clear and counts no
+MEDIA_RESET for it.
 
 ## Local ATDECC socket
 
