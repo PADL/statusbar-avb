@@ -449,6 +449,13 @@ void ListenerStreams::close_rx() noexcept
     port_ = nullptr;
 }
 
+void ListenerStreams::release_connections(sm::TimePoint const now)
+{
+    for (auto& slot : slots_) {
+        release_connection(slot.connection, now);
+    }
+}
+
 auto ListenerStreams::take_rx_frame(net::RxTimePoint const rx_now) -> std::optional<size_t>
 {
     StreamPort::Guard const guard{*port_};
