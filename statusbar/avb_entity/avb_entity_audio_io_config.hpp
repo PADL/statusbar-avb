@@ -45,6 +45,7 @@ struct AvbEntityAudioIOConfig
     /// queue with the stream subtypes steered into it (Linux, needs the XDP
     /// program loadable, zero-copy only on a NIC with a native driver). The
     /// control plane stays on its own raw socket whichever this is.
+    /// "auto" is xdp, else rawnet, the reason kept (StreamPort::open_resolved()).
     std::string net_backend{"rawnet"};
 
     /// The NIC queue the xdp backend binds to.
@@ -54,7 +55,6 @@ struct AvbEntityAudioIOConfig
     net::XdpAttachMode net_xdp_attach_mode{net::XdpAttachMode::native};
     /// Where the xdp backend pins its program and maps (bpffs); empty: not pinned.
     std::string net_xdp_pin_path{};
-    // net_backend "auto" is xdp, else rawnet, the reason kept (AvbEntityKit::stream_xdp_error()).
     /// Give each stream frame a launch time (AF_XDP TX metadata, the NIC's
     /// etf/TBS), in the sending PHC's time; xdp backend only.
     bool stream_launch_time{false};
