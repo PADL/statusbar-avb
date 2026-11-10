@@ -519,6 +519,17 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
   joins the VID.
 - A binding change (bound, rebound, unbound, its controller or started state)
   is saved once the reactor pass that made it is done, after the ACMP response.
+- A departure from Milan: every RCV_BIND_RX_CMD row (Milan v1.3 Section
+  5.5.3.6.6, steps 3 and 6) restarts the sink's ADP discovery with the talker
+  not discovered. A talker's ENTITY_AVAILABLE usually comes just before a bind
+  (a controller binds what it has just seen), so its first probe goes at once
+  but, refused, its retry waited in PRB_W_AVAIL for the talker's next ADP,
+  seconds after TMR_RETRY and TMR_DELAY. The kit instead replays the talker's
+  last ENTITY_AVAILABLE from the ADP discovery database at the bind
+  (`MilanListener::set_talker_lookup`), when it is still valid and names this
+  entity's gPTP grandmaster and domain, the checks Section 5.6.4.5.1 makes of
+  a received ADP; the sink starts discovered, as if the ADP had come after the
+  bind. Without such an ADP the sink waits, as Milan says.
 - Until a talker's address is valid the stream has no destination address:
   the configured static default must not reach a listener (CONNECT_TX and
   PROBE_TX answer TALKER_DEST_MAC_FAIL, GET_TX_STATE and GET_STREAM_INFO show
