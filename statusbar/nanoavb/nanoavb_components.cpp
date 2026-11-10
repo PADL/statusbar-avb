@@ -36,7 +36,7 @@ namespace statusbar::nanoavb {
 namespace {
 
 /// @p talker's ENTITY_AVAILABLE in @p discovery while valid and naming the gPTP grandmaster and domain of
-/// @p ours (Milan v1.3 Section 5.6.4.5.1), for a Milan sink bound to it; nullopt otherwise.
+/// @p ours (the checks Milan v1.3 Section 5.6.4.5.1 makes), for a Milan sink bound to it; nullopt otherwise.
 auto known_talker(NanoAvbAdpDiscovery const& discovery, AdpDu const& ours, Eui64 const& talker)
     -> std::optional<atdecc::MilanListener::KnownTalker>
 {
@@ -664,7 +664,8 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
     };
     discovery_.set_callbacks(std::move(discovery_callbacks));
     atdecc->set_adp_discovery(&discovery_);
-    // A new binding finds its talker discovered when its ENTITY_AVAILABLE came first (Milan v1.3 Section 5.6.4.5.1).
+    // A new binding replays its talker's last valid ENTITY_AVAILABLE, a departure from Milan's restart of
+    // discovery at a bind (docs/AVB_ENTITY_KIT.md); released with the handlers (release_net_handlers).
     components_->acmp_listener.milan_sinks().set_talker_lookup(
         [this](Eui64 const& talker) { return known_talker(discovery_, components_->adp_advertiser.adpdu(), talker); });
 
