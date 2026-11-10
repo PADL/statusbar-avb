@@ -7,6 +7,7 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -1174,6 +1175,38 @@ TEST(nanoavb_srp_msrp, a_peer_domain_while_withdrawn_declares_nothing)
     EXPECT_EQ(b.listener.domain().sr_class_vid, 7);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
     EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+}
+
+// A talker that turns its Talker Advertise into a Talker Failed sends the Advertise's Lv and the Failed in
+// one MRPDU: the listener follows that MRPDU once it is read whole, so its talker is never seen unregistered
+// and its Listener goes from Ready to Asking Failed without a withdrawal between.
+TEST(nanoavb_srp_msrp, a_talker_advertise_replaced_by_a_talker_failed_in_one_mrpdu_is_one_change)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(16);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    EXPECT_EQ(*b.listener.listener_attach(sid, b.now), ListenerReservationState::Waiting);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+
+    int unregistered = 0;
+    b.listener.set_on_remote_talker([&b, &unregistered](statusbar::tsn::StreamId const& changed, TimePoint) {
+        unregistered += b.listener.peer_talker_advertise(changed) == nullptr && b.listener.peer_talker_failed(changed) == nullptr;
+    });
+    statusbar::srp::msrp::TalkerFailedFirstValue failed{};
+    failed.advertise = *b.listener.peer_talker_advertise(sid);
+    failed.failure_code = 1;
+    (void)b.talker.withdraw_talker(sid, b.now);
+    (void)b.talker.declare_talker_failed(failed, b.now);
+    std::vector<ListenerReservationState> states{};
+    for (int round = 0; round < 12; ++round) {
+        b.run(1);
+        states.push_back(b.state(sid));
+    }
+    EXPECT_EQ(unregistered, 0);
+    EXPECT_TRUE(std::ranges::find(states, ListenerReservationState::Waiting) == states.end());
+    EXPECT_EQ(b.state(sid), ListenerReservationState::AskingFailed);
 }
 
 TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
