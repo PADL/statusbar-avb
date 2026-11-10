@@ -158,7 +158,7 @@ inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNE
 /// byte-for-byte against a reference device (02 07 02 20 02 00 c0 00 =
 /// AAF 96 kHz INT_32 8ch 12 samples/frame):
 ///   Byte 0: subtype (0x02)
-///   Byte 1: reserved[7:4] | nsr[3:0]
+///   Byte 1: reserved[7:5] | ut[4] | nsr[3:0]
 ///   Byte 2: format (AAF sample format code: INT_32=0x02, ...)
 ///   Byte 3: bit_depth
 ///   Bytes 4-7 (32-bit BE): channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
