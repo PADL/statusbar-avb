@@ -499,7 +499,7 @@ void PtpManagementClient::apply(ManagementMessage const& message, int64_t const 
     } else if (auto const* port_data = std::get_if<PortDataSet>(&message.data)) {
         apply_port_data_set(*port_data);
     } else if (auto const* cmlds = std::get_if<CmldsInfoNp>(&message.data)) {
-        state_.as_capable = state_.port == message.source ? std::optional{cmlds->as_capable} : state_.as_capable;
+        apply_cmlds(*cmlds, message.source);
     } else if (auto const* time_status = std::get_if<TimeStatusNp>(&message.data)) {
         state_.time_status = *time_status;
     } else if (auto const* settings = std::get_if<GrandmasterSettingsNp>(&message.data)) {
@@ -548,6 +548,15 @@ void PtpManagementClient::note_followed_port_state(PortState const now)
     }
     std::array<uint16_t, 1> const cmlds{management_id::cmlds_info_np};
     send_gets(cmlds);
+}
+
+void PtpManagementClient::apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePortIdentity const& sender)
+{
+    if (state_.port != sender) {
+        return;
+    }
+    state_.as_capable = cmlds.as_capable;
+    state_.peer_mean_path_delay_ns = time_interval_ns(cmlds.mean_link_delay_scaled);
 }
 
 void PtpManagementClient::note_port_state(std::optional<PortState>& held, PortState const now)
@@ -680,16 +689,15 @@ void PtpManagementClient::poll_if_due(int64_t const now_ns)
         return;
     }
     next_poll_ns_ = now_ns + config_.poll_period_ns;
-    // The followed port's PORT_DATA_SET once PORT_PROPERTIES_NP named it; without notifications
-    // (no subscription), every port's and PARENT_DATA_SET too.
+    // PORT_PROPERTIES_NP until it names the followed port; without notifications (no subscription),
+    // every port's PORT_DATA_SET and PARENT_DATA_SET too. Subscribed, CMLDS_INFO_NP brings the peer delay.
     bool const follows = !config_.port_interface.empty();
     std::array<uint16_t, 4> const ids{
         management_id::time_properties_data_set,
         management_id::port_properties_np,
         management_id::port_data_set,
         management_id::parent_data_set};
-    std::array<bool, 4> const wanted{
-        true, follows && !state_.port, (follows && state_.port) || !state_.subscribed, !state_.subscribed};
+    std::array<bool, 4> const wanted{true, follows && !state_.port, !state_.subscribed, !state_.subscribed};
     for (size_t i = 0; i < ids.size(); ++i) {
         if (wanted.at(i)) {
             send_gets(std::span{ids}.subspan(i, 1));
