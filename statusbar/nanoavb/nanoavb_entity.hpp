@@ -189,6 +189,9 @@ using GetAvbInfoFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_
 /// cleared.
 using IdentifyChangedFn = statusbar::sg14::inplace_function<void(bool active), 64>;
 
+/// Asked before a change by other than ATDECC (set_local_identify): an AEM status refuses it, nullopt lets it through.
+using LocalChangeRefusalFn = statusbar::sg14::inplace_function<std::optional<uint8_t>(), 32>;
+
 /// REBOOT (IEEE 1722.1 7.4.43): decide whether to reboot the target named by
 /// @p descriptor_type / @p descriptor_index (normally ENTITY 0) and return an
 /// AEM status. The callback runs BEFORE the response and the unsolicited
@@ -345,6 +348,8 @@ class AemCommandHandler
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
     void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
+    /// set_local_identify() answers @p fn's status while it returns one (Milan v1.3 Section 5.4.2.17).
+    void set_local_change_refusal(LocalChangeRefusalFn fn) { local_change_refusal_ = std::move(fn); }
     void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
     void set_get_as_path(GetAsPathFn fn) { callbacks_.get_as_path = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
@@ -1163,6 +1168,7 @@ class AemCommandHandler
     // When valid, a SET_CONTROL on this index also notifies the IDENTIFY multicast.
     uint16_t identify_control_index_{0};
     bool identify_control_index_valid_{false};
+    LocalChangeRefusalFn local_change_refusal_{};
 
     // The stream ports' dynamic audio mappings: the inputs', the outputs'.
     DynamicAudioMaps dynamic_maps_{};

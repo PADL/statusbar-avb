@@ -344,8 +344,8 @@ class AvbEntityKit
     /// over 64 bytes, else as SET_NAME (empty: configured name). Notified and saved;
     /// answers the AEM status. Reactor thread.
     [[nodiscard]] auto request_entity_name(std::string_view name) -> uint8_t;
-    /// An identify change by other than ATDECC (Milan v1.3 Section 5.4.2.17): local_change_refusal(), else
-    /// as AemCommandHandler::set_local_identify(); answers the AEM status. Reactor thread.
+    /// An identify change by other than ATDECC: AemCommandHandler::set_local_identify(), which the kit has
+    /// answer local_change_refusal() first, as any caller of it (Milan v1.3 Section 5.4.2.17). Reactor thread.
     [[nodiscard]] auto request_identify(bool on) -> uint8_t;
     // --- Dynamic audio mappings (Milan v1.2 Sections 5.3.9-5.3.10) --------------
     // Ports without a static AUDIO_MAP keep dynamic mappings: an input's start at a

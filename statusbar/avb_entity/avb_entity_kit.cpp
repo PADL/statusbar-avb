@@ -228,6 +228,7 @@ void AvbEntityKit::wire_controller_hooks()
 {
     wire_storage_hooks();
     wire_dynamic_mappings();
+    host_.components().aem_handler.set_local_change_refusal([this] { return local_change_refusal(); });
     // The Milan talker's and listener's hooks need no network.
     wire_milan_talker();
     wire_milan_listener();
@@ -821,10 +822,7 @@ auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
 
 auto AvbEntityKit::request_identify(bool const on) -> uint8_t
 {
-    if (auto const refusal = local_change_refusal()) {
-        return *refusal;
-    }
-    return host_.components().aem_handler.set_local_identify(on);
+    return host_.components().aem_handler.set_local_identify(on);  // local_change_refusal() first (wire_controller_hooks)
 }
 
 auto AvbEntityKit::request_clock_source(uint16_t const clock_domain_index, uint16_t const clock_source_index) -> uint8_t
