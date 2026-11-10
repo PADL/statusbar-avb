@@ -145,6 +145,16 @@ template <MrpAttributeLike Record>
     return true;
 }
 
+/// At a restart (stop() stops every timer, the FSMs keep their states): run the port's leave timer
+/// on to @p rec's own deadline while it is in LV, so its registration still ends (Clause 10.7.4.2).
+template <MrpAttributeLike Record>
+void resume_registrar_leave(Record const& rec, TimerScheduler& timers) noexcept
+{
+    if (rec.registrar_sm.current_state() == registrar_sm::Def::State::Lv) {
+        timers.start_leave_at(rec.registrar_ctx.leave_at);
+    }
+}
+
 /// Dispatch the tx! event to an attribute's Applicant. Selects the
 /// TxRegistrarIn or TxRegistrarMt variant automatically based on the
 /// paired Registrar's current state, as required by Clause 10.7.7
