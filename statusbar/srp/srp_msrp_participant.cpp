@@ -1166,7 +1166,12 @@ void MsrpParticipantT<Limits>::notify_talker_failed(TalkerFailedFirstValue const
 template <class Limits>
 void MsrpParticipantT<Limits>::notify_talker_leave(tsn::StreamId const& id)
 {
-    notify_all(&Observer::on_talker_leave, id);
+    // Held while an MRPDU is read: a Talker Failed replacing an Advertise follows its Lv (immediate leave).
+    bool const held =
+        reading_pdu_ && (std::ranges::contains(rx_talker_leaves_, id) || rx_talker_leaves_.try_push_back(id) != nullptr);
+    if (!held) {
+        notify_all(&Observer::on_talker_leave, id);
+    }
 }
 
 template <class Limits>
@@ -1217,160 +1222,15 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
     if (pdu.size() < 3 || pdu[0] != PROTOCOL_VERSION) {  // version + EndMark at least; another version is not ours
         return;
     }
-    rx_leaveall_seen_ = false;
-    decode_messages(pdu, now);
-    finish_receive(now);
-}
-
-/// The Messages of one MSRPDU in order, up to the PDU's EndMark. Milan v1.3
-/// 4.2.7.1.2: what precedes an invalid field has been processed; what follows
-/// it in the same AttributeList is discarded, and so is every later Message.
-template <class Limits>
-void MsrpParticipantT<Limits>::decode_messages(std::span<uint8_t const> pdu, TimePoint now)
-{
-    size_t pos = 1;
-    bool valid = true;
-    while (valid && pos + 2 <= pdu.size() && mrp::read_doublet_at(pdu, pos) != mrp::END_MARK) {
-        valid = decode_message(pdu, pos, now);
+    if (pdu[0] != PROTOCOL_VERSION) {
+        return;  // unknown protocol version
     }
-}
+    read_pdu(pdu, now);
 
-/// The header of the Message at @p pos, or nullopt when the header or the
-/// AttributeListLength it gives (IEEE 802.1Q 10.8.2.3: the vectors and their
-/// EndMark) runs past the PDU.
-template <class Limits>
-auto MsrpParticipantT<Limits>::parse_message_header(std::span<uint8_t const> pdu, size_t const pos) -> std::optional<RxMessage>
-{
-    if (pos + AttributeListHeader::LENGTH + 2 > pdu.size()) {
-        return std::nullopt;
-    }
-    AttributeListHeader hdr;
-    (void)load_unchecked(pdu.subspan(pos), &hdr);
-    size_t const list_begin = pos + AttributeListHeader::LENGTH + 2;
-    RxMessage const message{
-        .type = static_cast<AttributeType>(hdr.attribute_type.get()),
-        .attr_length = hdr.attribute_length.get(),
-        .list_begin = list_begin,
-        .list_end = list_begin + mrp::read_doublet_at(pdu, pos + AttributeListHeader::LENGTH)};
-    return message.list_end > pdu.size() ? std::nullopt : std::optional<RxMessage>{message};
-}
-
-/// One Message. @p pos moves to the next one by the AttributeListLength,
-/// whatever the list decoder consumed. False when the Message is invalid.
-template <class Limits>
-auto MsrpParticipantT<Limits>::decode_message(std::span<uint8_t const> pdu, size_t& pos, TimePoint now) -> bool
-{
-    auto const message = parse_message_header(pdu, pos);
-    if (!message) {
-        return false;
-    }
-    pos = message->list_end;
-    return decode_attribute_list(*message, pdu.first(message->list_end), now);
-}
-
-/// The VectorAttributes of one Message up to the list's EndMark. A type MSRP
-/// does not define is passed over whole; a known type whose AttributeLength
-/// is short of its FirstValue, a vector that overruns the list and a list
-/// that ends without its EndMark are invalid.
-template <class Limits>
-auto MsrpParticipantT<Limits>::decode_attribute_list(RxMessage const& message, std::span<uint8_t const> payload, TimePoint now)
-    -> bool
-{
-    size_t const first_value_length = detail_msrp::first_value_length(message.type);
-    if (first_value_length == 0 || message.attr_length < first_value_length) {
-        return first_value_length == 0;
-    }
-    size_t pos = message.list_begin;
-    bool valid = true;
-    while (valid && pos + 2 <= payload.size() && mrp::read_doublet_at(payload, pos) != mrp::END_MARK) {
-        valid = decode_vector_attribute(message, payload, pos, now);
-    }
-    return valid && pos + 2 <= payload.size();
-}
-
-/// One VectorAttribute at @p pos: its header, the LeaveAll it may carry, then
-/// its FirstValue and packed events. False when it overruns the list or holds
-/// an event value outside the six.
-template <class Limits>
-auto MsrpParticipantT<Limits>::decode_vector_attribute(
-    RxMessage const& message, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool
-{
-    VectorAttributeHeader vec_hdr;
-    (void)load_unchecked(payload.subspan(pos), &vec_hdr);
-    pos += VectorAttributeHeader::LENGTH;
-    uint16_t const num_values = vec_hdr.get_number_of_values();
-    if (vec_hdr.get_leave_all()) {
-        receive_leaveall(message.type, num_values, now);
-    }
-    return decode_vector_values(message, num_values, payload, pos, now);
-}
-
-/// A LeaveAll in a vector's header applies to every attribute of the
-/// Message's type on this port, and restarts our own leavealltimer.
-template <class Limits>
-void MsrpParticipantT<Limits>::receive_leaveall(AttributeType const type, uint16_t const num_values, TimePoint now)
-{
-    rx_leaveall_seen_ = true;  // finish_receive re-declares at once (see there)
-    // Diagnostic: a LeaveAll on the Listener type drives EVERY listener
-    // registrar to Leaving (registrar_in -> false) until the next Join
-    // re-registers it -- a prime suspect for the listener-ready flap.
-    if (logger_ && type == AttributeType::Listener) {
-        logger_->debug("msrp: Listener LeaveAll (num_values={}) -> all listener registrars leave", num_values);
-    }
-    for_each_record_of(type, [&](auto& rec) {
-        mrp::dispatch_applicant(rec, applicant_sm::Def::Event::RLeaveAll, now);
-        mrp::dispatch_registrar(rec, registrar_sm::Def::Event::RLeaveAll, now, port_.timers());
-    });
-    // Also ack the LeaveAll into our LeaveAll FSM to restart its timer.
-    port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::RLeaveAll, now);
-}
-
-/// The FirstValue, ThreePackedEvents and (for a Listener) FourPackedEvents of
-/// one vector of @p num_values values; @p pos moves past them.
-template <class Limits>
-auto MsrpParticipantT<Limits>::decode_vector_values(
-    RxMessage const& message, uint16_t const num_values, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool
-{
-    size_t const event_octets = mrp::threepacked_octet_count(num_values);
-    size_t const decl_octets = (message.type == AttributeType::Listener) ? mrp::fourpacked_octet_count(num_values) : 0;
-    if (pos + message.attr_length + event_octets + decl_octets > payload.size()) {
-        return false;
-    }
-    RxVector const vector{
-        .first_value = payload.subspan(pos, message.attr_length),
-        .events = payload.subspan(pos + message.attr_length, event_octets),
-        .declarations = payload.subspan(pos + message.attr_length + event_octets, decl_octets)};
-    pos += message.attr_length + event_octets + decl_octets;
-    return deliver_vector_values(message, num_values, vector, now);
-}
-
-/// Each value of one vector to the machines, in order. An AttributeEvent
-/// outside the six the standard defines is an invalid field: the values
-/// before it have been delivered, and nothing after it is.
-template <class Limits>
-auto MsrpParticipantT<Limits>::deliver_vector_values(
-    RxMessage const& message, uint16_t const num_values, RxVector const& vector, TimePoint now) -> bool
-{
-    for (uint16_t i = 0; i < num_values; ++i) {
-        AttributeEvent const event = mrp::nth_of_three(mrp::unpack3_events(vector.events[i / 3]), i);
-        if (detail_msrp::rx_events_for(event).applicant == applicant_sm::Def::Event::Count) {
-            return false;
-        }
-        uint8_t const decl =
-            vector.declarations.empty() ? uint8_t{0} : mrp::nth_of_four(mrp::unpack4_declarations(vector.declarations[i / 4]), i);
-        handle_rx_event(
-            message.type, message.attr_length, vector.first_value, i, event, static_cast<ListenerDeclaration>(decl), now);
-    }
-    return true;
-}
-
-template <class Limits>
-void MsrpParticipantT<Limits>::finish_receive(TimePoint now)
-{
     // A received LeaveAll asked everyone to re-declare. Do it SYNCHRONOUSLY here
-    // rather than only arming the join timer: the bridge that sent the
+    // rather than only arming the join timer (~100 ms): the bridge that sent the
     // LeaveAll declares our (now-leaving) attributes as Mt toward downstream
-    // listeners on its own join timer, and a re-declare that lands just
+    // listeners on its own ~100 ms join timer, and a re-declare that lands just
     // after that window makes the listener see our talker momentarily disappear
     // and tear down its reservation (observed feeding a downstream listener through an
     // AVB switch: the downstream stream stopped being forwarded). Emitting our re-declarations
@@ -1378,10 +1238,73 @@ void MsrpParticipantT<Limits>::finish_receive(TimePoint now)
     if (rx_leaveall_seen_) {
         build_and_send_pdu(now);
     }
+
     // After processing received events, a join timer opportunity may
     // be needed so that state transitions triggered by rx events can
     // be transmitted.
     port_.timers().start_join(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::read_pdu(std::span<uint8_t const> pdu, TimePoint now)
+{
+    rx_leaveall_seen_ = false;
+    reading_pdu_ = true;
+    decode_messages(pdu, now);
+    reading_pdu_ = false;
+    deliver_rx_talker_leaves();  // before the LeaveAll answer, which then carries what observers re-declared
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::deliver_rx_talker_leaves()
+{
+    for (auto const& id : rx_talker_leaves_) {
+        if (!talker_registered_in(id)) {
+            notify_all(&Observer::on_talker_leave, id);
+        }
+    }
+    rx_talker_leaves_.clear();
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::decode_messages(std::span<uint8_t const> pdu, TimePoint now)
+{  // NOLINT(statusbar-block-statements) the message walk of receive_pdu, moved whole; pre-dates the gate
+    size_t pos = 1;
+    while (pos + 2 <= pdu.size()) {  // NOLINT(statusbar-block-statements) one message, read as receive_pdu read it
+        uint16_t const end_check = mrp::read_doublet_at(pdu, pos);
+        if (end_check == mrp::END_MARK) {
+            break;
+        }
+
+        if (pos + AttributeListHeader::LENGTH + 2 > pdu.size()) {
+            return;
+        }
+        AttributeListHeader hdr;
+        (void)load_unchecked(pdu.subspan(pos), &hdr);
+        pos += AttributeListHeader::LENGTH;
+
+        // AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3): length in
+        // octets of the AttributeList (vectors + trailing EndMark). Consumed
+        // here and used to bound the per-message decode scope so a malformed
+        // length can't make us read past the message.
+        uint16_t const attr_list_length = mrp::read_doublet_at(pdu, pos);
+        pos += 2;
+
+        size_t const attr_list_end = pos + attr_list_length;
+        if (attr_list_end > pdu.size()) {
+            return;
+        }
+
+        auto const attr_type = static_cast<AttributeType>(hdr.attribute_type.get());
+        uint8_t const attr_length = hdr.attribute_length.get();
+
+        auto const message_payload = pdu.first(attr_list_end);
+        decode_attribute_list(attr_type, attr_length, message_payload, pos, now);
+
+        // Skip over any trailing bytes the inner decoder didn't consume,
+        // keeping the outer message-walk cursor aligned with the sender.
+        pos = attr_list_end;
+    }
 }
 
 template <class Limits>
