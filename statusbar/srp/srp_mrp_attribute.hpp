@@ -16,6 +16,7 @@
 #include "statusbar/srp/srp_mrp_registrar_sm.hpp"
 
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::srp::mrp {
 
@@ -39,6 +40,9 @@ struct AttributeRecord
 {
     FirstValue first_value{};
     Operation operation{Operation::Register};
+    /// A local declaration's next value, declared once the Leave for first_value is sent (IEEE 802.1Q-2022
+    /// Clause 10.7: a changed value is another attribute).
+    std::optional<FirstValue> pending_value{};
 
     // Per-attribute state machine instances. The Contexts hold only
     // transition side-effect outputs; the state_ itself lives inside
