@@ -1077,22 +1077,26 @@ void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 con
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
-auto ListenerStreams::attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
+auto ListenerStreams::attach_ready(
+    ieee::Eui64 const& stream_id, std::optional<nanoavb::TalkerMatch> const& match, sm::TimePoint const now) -> bool
 {
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the
     // talker's boot) -- the handler upgrades to Ready when it appears.
-    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now);
+    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, match);
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }
 
-auto ListenerStreams::attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint const now)
-    -> bool
+auto ListenerStreams::attach_or_held_ready(
+    ListenerConnection const& held,
+    ieee::Eui64 const& stream_id,
+    std::optional<nanoavb::TalkerMatch> const& match,
+    sm::TimePoint const now) -> bool
 {
     // One attachment per stream a slot holds: a slot already on this stream
     // re-declares nothing, so attach and withdraw stay one-for-one however
     // many times a controller repeats the CONNECT.
-    return held.stream_id != stream_id ? attach_ready(stream_id, now) : held_ready(stream_id);
+    return held.stream_id != stream_id ? attach_ready(stream_id, match, now) : held_ready(stream_id);
 }
 
 auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
@@ -1114,10 +1118,20 @@ void ListenerStreams::on_listener_connected(
         return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
     count_connection(*slot, stream_id);
-    bool const ready = attach_or_held_ready(slot->connection, stream_id, now);
+    bool const ready = attach_or_held_ready(slot->connection, stream_id, talker_match(stream_index, dest_mac), now);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
     slot->rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
     log_connected(stream_index, dest_mac, ready, slot->connection.group.has_value());
+}
+
+auto ListenerStreams::talker_match(uint16_t const stream_index, ieee::Eui48 const& dest_mac) const
+    -> std::optional<nanoavb::TalkerMatch>
+{
+    auto const* const stream = components_.acmp_listener.get_stream(stream_index);
+    if (!components_.profile.milan || stream == nullptr) {
+        return std::nullopt;  // a classic connection follows any Talker attribute of its StreamID
+    }
+    return nanoavb::TalkerMatch{.destination = dest_mac, .vid = stream->stream_vlan_id};
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
