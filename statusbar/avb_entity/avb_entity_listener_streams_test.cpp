@@ -801,6 +801,52 @@ TEST(listener_port, groups_are_joined_and_left_on_the_port)
     EXPECT_TRUE(wire.joined_multicast_groups()[0] == static_group);
 }
 
+// A connection kept across close_rx() holds no membership of the next port: connected again to the
+// same group, the input joins it on the new port
+TEST(listener_port, a_connection_kept_across_a_close_joins_the_next_port)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    auto const specs = audio_specs();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    itc::StopToken stop{};
+    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
+    for (int run = 0; run < 2; ++run) {
+        EXPECT_TRUE(ls.open_stream(specs[1]).has_value());
+        StreamPort port;
+        EXPECT_TRUE(port.open_test({.hardware_address = kRxPortMac}).has_value());
+        EXPECT_TRUE(ls.attach_rx(port, {}, reactor).has_value());
+        ls.on_listener_connected(1, ieee::Eui64{}, kAafGroup, sm::Clock::now());
+        EXPECT_EQ(std::ranges::count(port.test_port()->joined_multicast_groups(), kAafGroup), 1);
+        ls.close_rx();
+    }
+}
+
+// A repeated connect of an input to another stream withdraws the earlier stream's Listener
+// declaration; the disconnect then withdraws the later one
+TEST(listener_port, a_connect_to_another_stream_withdraws_the_earlier_one)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    auto& msrp = donor->components().msrp_handler;
+    auto const first = ieee::Eui64{}.from_uint64(0x0200000000000101ULL);
+    auto const second = ieee::Eui64{}.from_uint64(0x0200000000000102ULL);
+    auto const state = [&msrp](ieee::Eui64 const& id) {
+        tsn::StreamId sid{};
+        (void)tsn::load_unchecked(id.span(), &sid);
+        auto const* stream = msrp.get_listener_stream(sid);
+        return stream != nullptr ? stream->state : nanoavb::ListenerReservationState::Idle;
+    };
+    ls.on_listener_connected(1, first, kAafGroup, sm::Clock::now());
+    EXPECT_TRUE(state(first) != nanoavb::ListenerReservationState::Idle);
+    ls.on_listener_connected(1, second, kAafGroup, sm::Clock::now());
+    EXPECT_TRUE(state(first) == nanoavb::ListenerReservationState::Idle);
+    EXPECT_TRUE(state(second) != nanoavb::ListenerReservationState::Idle);
+    ls.on_listener_disconnected(1, sm::Clock::now());
+    EXPECT_TRUE(state(second) == nanoavb::ListenerReservationState::Idle);
+}
+
 //
 // Raw AM824 receive (IEC 61883-6, IEEE 1722-2016 Clause 5)
 //

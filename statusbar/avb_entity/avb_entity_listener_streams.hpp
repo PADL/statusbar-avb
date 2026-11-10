@@ -243,6 +243,7 @@ struct ListenerStreams
     /// consumer is registered once, at construction, not per run. One call
     /// from the owning entity's stop(), once whatever drains RX has stopped;
     /// a handler the reactor holds retires itself when the port closes.
+    /// Connections stay; the groups they joined go with the port.
     void close_rx() noexcept;
 
     /// Told form. Non-blocking-drain every queued frame from the RX socket in
@@ -473,10 +474,18 @@ struct ListenerStreams
         ieee::Eui48 group{};
     };
     sg14::inplace_vector<Connection, MAX_ENTITY_STREAMS> connections_{};
+    /// Withdraw the MSRP Listener declaration of stream @p stream_id at @p now.
+    void withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint now);
+    /// End input @p stream_index's connection before a new one to @p stream_id, withdrawing its
+    /// stream when that differs: the group it held (zero: none).
+    [[nodiscard]] auto end_replaced_connection(uint16_t stream_index, ieee::Eui64 const& stream_id, sm::TimePoint now)
+        -> ieee::Eui48;
+    /// Join @p dest_mac when it is a group, leaving @p held unless it is the same: whether it is joined now.
+    [[nodiscard]] auto join_connection_group(ieee::Eui48 const& held, ieee::Eui48 const& dest_mac) -> bool;
     /// Keep @p connection, replacing the one kept for its input.
-    void keep_connection(Connection const& connection);
+    void keep_connection(Connection const& connection) noexcept;
     /// The connection kept for input @p stream_index, no longer kept; nullopt when none.
-    [[nodiscard]] auto end_connection(uint16_t stream_index) -> std::optional<Connection>;
+    [[nodiscard]] auto end_connection(uint16_t stream_index) noexcept -> std::optional<Connection>;
 };
 
 }  // namespace statusbar::avb_entity

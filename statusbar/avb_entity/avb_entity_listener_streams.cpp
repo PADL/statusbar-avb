@@ -447,6 +447,9 @@ void ListenerStreams::close_rx() noexcept
     }
     slots_.clear();
     port_ = nullptr;
+    for (auto& connection : connections_) {
+        connection.group = {};  // the closing port's membership, not the next one's
+    }
 }
 
 auto ListenerStreams::take_rx_frame(net::RxTimePoint const rx_now) -> std::optional<size_t>
@@ -962,10 +965,7 @@ void ListenerStreams::on_listener_connected(
     bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
     // Join the talker's stream group so the NIC delivers its frames to us; a zero or unicast
     // stream_dest_mac is no group (IEEE 1722.1-2021 Clause 8.2.1.13).
-    bool joined = false;
-    if (port_ != nullptr && dest_mac.is_multicast()) {  // no guard: a join is a socket call and touches no ring
-        joined = port_->port().join_multicast(dest_mac).has_value();
-    }
+    bool const joined = join_connection_group(end_replaced_connection(stream_index, stream_id, now), dest_mac);
     keep_connection({.stream_index = stream_index, .stream_id = stream_id, .group = joined ? dest_mac : ieee::Eui48{}});
     if (logger_) {
         logger_->status(
@@ -977,7 +977,9 @@ void ListenerStreams::on_listener_connected(
                 : ready         ? logging::lit("Ready")
                 : waiting       ? logging::lit("once the talker's attribute is registered")
                                 : logging::lit("AskingFailed (talker not advertising yet)"),
-            joined ? logging::lit("ok") : logging::lit("FAILED"));
+            joined                        ? logging::lit("ok")
+                : dest_mac.is_multicast() ? logging::lit("FAILED")
+                                          : logging::lit("none (no group)"));
     }
 }
 
@@ -985,9 +987,7 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
 {
     // The connection as it was made: a classic DISCONNECT_RX has cleared the ACMP stream by now.
     if (auto const connection = end_connection(stream_index); connection.has_value()) {
-        tsn::StreamId sid{};
-        (void)statusbar::tsn::load_unchecked(connection->stream_id.span(), &sid);
-        (void)components_.msrp_handler.listener_withdraw(sid, now);
+        withdraw_listener(connection->stream_id, now);
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
         if (port_ != nullptr && connection->group.is_multicast()) {  // no guard: a leave is a socket call
@@ -1002,7 +1002,40 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
     }
 }
 
-void ListenerStreams::keep_connection(Connection const& connection)
+void ListenerStreams::withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint const now)
+{
+    tsn::StreamId sid{};
+    (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
+    (void)components_.msrp_handler.listener_withdraw(sid, now);
+}
+
+auto ListenerStreams::end_replaced_connection(uint16_t const stream_index, ieee::Eui64 const& stream_id, sm::TimePoint const now)
+    -> ieee::Eui48
+{
+    // A repeated connect to another stream withdraws the earlier stream's Listener declaration.
+    auto const previous = end_connection(stream_index);
+    if (!previous.has_value()) {
+        return {};
+    }
+    if (previous->stream_id != stream_id) {
+        withdraw_listener(previous->stream_id, now);
+    }
+    return previous->group;
+}
+
+auto ListenerStreams::join_connection_group(ieee::Eui48 const& held, ieee::Eui48 const& dest_mac) -> bool
+{
+    // One membership per connected input: a repeated connect keeps the same group, leaves another.
+    if (held.is_multicast() && held == dest_mac) {
+        return true;
+    }
+    if (port_ != nullptr && held.is_multicast()) {  // no guard: a join or leave is a socket call and touches no ring
+        (void)port_->port().leave_multicast(held);
+    }
+    return port_ != nullptr && dest_mac.is_multicast() && port_->port().join_multicast(dest_mac).has_value();
+}
+
+void ListenerStreams::keep_connection(Connection const& connection) noexcept
 {
     auto* const kept = std::ranges::find(connections_, connection.stream_index, &Connection::stream_index);
     if (kept != connections_.end()) {
@@ -1012,7 +1045,7 @@ void ListenerStreams::keep_connection(Connection const& connection)
     (void)connections_.try_push_back(connection);
 }
 
-auto ListenerStreams::end_connection(uint16_t const stream_index) -> std::optional<Connection>
+auto ListenerStreams::end_connection(uint16_t const stream_index) noexcept -> std::optional<Connection>
 {
     auto* const kept = std::ranges::find(connections_, stream_index, &Connection::stream_index);
     if (kept == connections_.end()) {
