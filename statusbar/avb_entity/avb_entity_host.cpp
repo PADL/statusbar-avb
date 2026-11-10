@@ -24,10 +24,11 @@ namespace statusbar::avb_entity {
 
 namespace {
 
-/// The Class A (traffic class 0) priority and VID of @p info; zeros when it has none.
+/// The Class A priority and VID of @p info (its traffic class the SRclassID); zeros when it has none.
 auto class_a_mapping(nanoavb::AvbInfo const& info) -> std::pair<uint8_t, uint16_t>
 {
-    auto const* const m = std::ranges::find_if(info.msrp_mappings, [](auto const& x) { return x.traffic_class == 0; });
+    auto const* const m =
+        std::ranges::find_if(info.msrp_mappings, [](auto const& x) { return x.traffic_class == srp::msrp::SR_CLASS_A; });
     return m != info.msrp_mappings.end() ? std::pair{m->priority, m->vlan_id} : std::pair<uint8_t, uint16_t>{};
 }
 
