@@ -352,6 +352,11 @@ struct TalkerPort
 /// when nonzero.
 [[nodiscard]] auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t fallback_hz = 0) -> StatusValue<uint32_t>;
 
+/// The AAF format word @p word at @p rate_hz (nominal rate and class A framing; sample
+/// format, depth and channels kept), as a SET_SAMPLING_RATE re-times it. nullopt for a
+/// word not AAF or a rate AAF has no code for.
+[[nodiscard]] auto aaf_format_at_rate(uint64_t word, uint32_t rate_hz) noexcept -> std::optional<uint64_t>;
+
 /// The StreamSpec @p spec with the format word @p word (decoded into its
 /// fields); the index, clock domain and interface are kept.
 [[nodiscard]] auto with_format(StreamSpec const& spec, uint64_t word) noexcept -> StreamSpec;
