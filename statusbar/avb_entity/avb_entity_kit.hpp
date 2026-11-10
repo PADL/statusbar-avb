@@ -352,9 +352,15 @@ class AvbEntityKit
     void set_output_mappings_across_rates(bool const across) noexcept { output_mappings_across_rates_ = across; }
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
-    /// An entity-name change by other than ATDECC: ENTITY_LOCKED while locked or
-    /// acquired, BAD_ARGUMENTS over 64 bytes, else as SET_NAME (empty: configured
-    /// name). Notified and saved; answers the AEM status. Reactor thread.
+    /// With @p refuse, a change by other than ATDECC is ENTITY_LOCKED while a controller holds the lock or
+    /// the acquisition (Milan v1.3 Section 5.3.4.1): local_change_refusal(). Default false. Reactor thread.
+    void set_lock_refuses_local_changes(bool const refuse) noexcept { lock_refuses_local_changes_ = refuse; }
+    /// ENTITY_LOCKED when set_lock_refuses_local_changes() is on and a controller holds the lock or the
+    /// acquisition, else nullopt; a local setter (request_entity_name(), ...) answers it first.
+    [[nodiscard]] auto local_change_refusal() const noexcept -> std::optional<uint8_t>;
+    /// An entity-name change by other than ATDECC: local_change_refusal(), BAD_ARGUMENTS
+    /// over 64 bytes, else as SET_NAME (empty: configured name). Notified and saved;
+    /// answers the AEM status. Reactor thread.
     [[nodiscard]] auto request_entity_name(std::string_view name) -> uint8_t;
     // --- Dynamic audio mappings (Milan v1.2 Sections 5.3.9-5.3.10) --------------
     // Ports without a static AUDIO_MAP keep dynamic mappings: an input's start at a
@@ -368,7 +374,7 @@ class AvbEntityKit
     void set_on_input_mappings_changed(InputMappingsFn fn) noexcept { on_input_mappings_changed_ = std::move(fn); }
     /// A dynamic mappings change by other than ATDECC on STREAM_PORT_INPUT @p port_index: as a
     /// REMOVE_AUDIO_MAPPINGS of @p remove then an ADD_AUDIO_MAPPINGS of @p add, all or nothing,
-    /// through the hook; ENTITY_LOCKED while locked or acquired. Notified and saved. Reactor thread.
+    /// through the hook; local_change_refusal() first. Notified and saved. Reactor thread.
     [[nodiscard]] auto request_audio_mappings(
         uint16_t port_index,
         std::span<nanoavb::DynamicAudioMapping const> add,
@@ -791,6 +797,7 @@ class AvbEntityKit
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
     bool output_mappings_across_rates_{false};  ///< set_output_mappings_across_rates()
+    bool lock_refuses_local_changes_{false};    ///< set_lock_refuses_local_changes()
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
     nanoavb::DescriptorStorageHandler& storage_handler_;
