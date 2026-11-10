@@ -2464,6 +2464,30 @@ TEST(avb_entity_kit_milan_listener, an_answer_without_a_group_joins_nothing)
     EXPECT_EQ(log.size(), before);
 }
 
+// A classic DISCONNECT_RX leaves the group the connection joined and withdraws its Listener
+// declaration, though the ACMP stream is cleared first (IEEE 1722.1-2021 Clause 8.2.4.2.7)
+TEST(avb_entity_kit_milan_listener, a_classic_disconnect_leaves_the_connection_group)
+{
+    MilanPair p{{}, false};
+    auto const& wire = p.listener_wire();
+    EXPECT_TRUE(p.start());
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    p.pump(3);
+    auto const* stream = p.lc().acmp_listener.get_stream(0);
+    EXPECT_TRUE(stream != nullptr && stream->connected && stream->stream_dest_mac.is_multicast());
+    auto const group = stream->stream_dest_mac;
+    auto const joined = std::ranges::count(wire.joined_multicast_groups(), group);  // a pre-joined group may be the same
+    EXPECT_TRUE(joined >= 1);
+    EXPECT_TRUE(p.listener_reservation() != nanoavb::ListenerReservationState::Idle);
+
+    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    p.pump(3, false, std::chrono::milliseconds{10});  // ACMP only: the withdraw is the listener's own
+    EXPECT_FALSE(p.lc().acmp_listener.is_connected(0));
+    EXPECT_EQ(std::ranges::count(wire.joined_multicast_groups(), group), joined - 1);
+    EXPECT_FALSE(std::ranges::contains(wire.joined_multicast_groups(), ieee::Eui48{}));
+    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Idle);
+}
+
 // A locked entity's stop() still unbinds its inputs, as the locking controller
 TEST(avb_entity_kit_milan_listener, a_stop_unbinds_a_locked_entitys_input)
 {
