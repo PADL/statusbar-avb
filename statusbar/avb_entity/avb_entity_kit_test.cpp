@@ -592,7 +592,7 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     int64_t const now_ns = MilanKit::steady_ns();
 
     EXPECT_TRUE(kit.admitted_talker_streams(t0).empty());
-    kit.poll_admission(t0);
+    kit.on_admission_timer(t0);
     EXPECT_TRUE(reports.empty());  // no change, no report
 
     kit.note_listener_ready(aaf_sid, true, now_ns, t0);
@@ -602,16 +602,18 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     EXPECT_TRUE(reports.back() == (V{0, 1}));
     EXPECT_EQ(reports.size(), size_t{2});
 
-    // AAF's Ready withdrawn: still admitted through the grace window (no report),
-    // then the poll past it reports the drop -- no MSRP event needed.
+    // AAF's Ready withdrawn: still admitted through the grace window (no report), its end the
+    // deadline armed; the timer at it reports the drop -- no MSRP event needed.
     kit.note_listener_ready(aaf_sid, false, now_ns, t0 + nanoseconds{10});
     EXPECT_EQ(reports.size(), size_t{2});
-    kit.poll_admission(t0 + nanoseconds{10} + grace - nanoseconds{1});
+    EXPECT_TRUE(kit.admission_deadline() == t0 + nanoseconds{10} + grace);
+    kit.on_admission_timer(t0 + nanoseconds{10} + grace - nanoseconds{1});
     EXPECT_EQ(reports.size(), size_t{2});
-    kit.poll_admission(t0 + nanoseconds{10} + grace);
+    kit.on_admission_timer(t0 + nanoseconds{10} + grace);
     EXPECT_EQ(reports.size(), size_t{3});
     EXPECT_TRUE(reports.back() == V{1});
-    kit.poll_admission(t0 + 10 * grace);
+    EXPECT_FALSE(kit.admission_deadline().has_value());  // no grace running
+    kit.on_admission_timer(t0 + 10 * grace);
     EXPECT_EQ(reports.size(), size_t{3});
 
     // Re-registered: back in.
@@ -2576,7 +2578,7 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
 
     // The Listener goes; the grace window runs out: stopped.
     m.bridge_withdraw(0);
-    m.kit.poll_admission(MilanKit::raw_now() + TalkerGate::GRACE + std::chrono::seconds{1});
+    m.kit.on_admission_timer(MilanKit::raw_now() + TalkerGate::GRACE + std::chrono::seconds{1});
     c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_EQ(c.counters[0].get(), 1U);
     EXPECT_EQ(c.counters[1].get(), 1U);

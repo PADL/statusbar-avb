@@ -254,10 +254,12 @@ class AvbEntityKit
     /// (@p ready) or withdrawn at the reactor's @p now_ns, the gate's clock reading
     /// @p gate_now; feeds the gate and the declarations, re-evaluates admission.
     void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns, GateTimePoint gate_now);
-    /// Reactor thread, periodically (EntityUpkeep::tick): re-evaluate admission
-    /// at @p now, so a grace window that runs out with no MSRP event still
-    /// closes the stream's admission and fires the callback.
-    void poll_admission(GateTimePoint const now) { note_admission(now); }
+    /// Reactor thread, from the kit's timer: at the admission deadline (the earliest grace end,
+    /// TalkerGate::grace_ends) re-evaluate admission at @p now, so a grace window that runs out
+    /// with no MSRP event still closes the stream's admission and fires the callback.
+    void on_admission_timer(GateTimePoint now);
+    /// The admission deadline armed, on the gate's clock; nullopt: no grace running.
+    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<GateTimePoint> { return admission_deadline_; }
 
     /// The GET_COUNTERS observation interval (Milan v1.2 Tables 5.4 and 5.6:
     /// at most 1 s).
@@ -593,6 +595,8 @@ class AvbEntityKit
     /// Recompute the admitted set at @p now after a gate input changed (or time
     /// passed); fire on_admission_changed_ when it differs from the last one.
     void note_admission(GateTimePoint now);
+    /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
+    void arm_admission_deadline(GateTimePoint now) noexcept;
     /// The storage handler's SET_STREAM_FORMAT and SET_SAMPLING_RATE hooks (the latter
     /// SUCCESS for the unit's current rate, else NOT_SUPPORTED: Milan v1.2 Section 5.4.2.13).
     [[nodiscard]] auto change_stream_format(uint16_t descriptor_type, uint16_t descriptor_index, uint64_t format) -> uint8_t;
@@ -835,6 +839,7 @@ class AvbEntityKit
     sg14::inplace_vector<std::pair<uint16_t, uint16_t>, MAX_ENTITY_STREAMS> sink_vlans_{};
     /// The admitted set last reported, and its listener.
     AdmittedStreams admitted_{};
+    std::optional<GateTimePoint> admission_deadline_{};  ///< the earliest grace end, on the gate's clock
     AdmissionChangedFn on_admission_changed_{};
     /// GET_COUNTERS per talker stream (StreamOutputIntervals), the next end of
     /// the observation interval, and each Milan input's bound state.
