@@ -373,8 +373,8 @@ struct PtpManagementConfig
 {
     std::string uds_address{"/var/run/ptp4l"};  ///< ptp4l's uds_address; absolute
     uint8_t domain{0};                          ///< ptp4l's domainNumber (pmc -d)
-    /// Between polls of what ptp4l pushes no notification for: TIME_PROPERTIES_DATA_SET, and
-    /// everything while it refuses a subscription.
+    /// Between polls of what ptp4l pushes no notification for: TIME_PROPERTIES_DATA_SET, the followed
+    /// port's PORT_DATA_SET until its first CMLDS_INFO_NP, and everything while it refuses a subscription.
     int64_t poll_period_ns{2'000'000'000};
     int64_t retry_period_ns{1'000'000'000};  ///< between probes while ptp4l is unreachable
     std::string port_interface;              ///< the port whose PORT_DATA_SET to follow (empty: none)
@@ -490,6 +490,8 @@ class PtpManagementClient final : public net::Pollable
     std::array<std::optional<PortState>, MAX_PTP4L_PORTS> reported_port_states_{};
     std::optional<DelayMechanism> reported_delay_mechanism_;
     std::optional<AsCapable> reported_as_capable_;
+    /// The followed port's CMLDS_INFO_NP has come since ptp4l was found or last subscribed afresh.
+    bool cmlds_seen_{false};
     std::optional<GrandmasterSettingsNp> reported_settings_;
     std::optional<TimePropertiesDataSet> reported_time_properties_;
     std::optional<uint16_t> reported_refused_;
