@@ -1012,6 +1012,57 @@ TEST(avb_entity_kit_milan_talker, presentation_offset_through_the_entity)
     EXPECT_FALSE(m.kit.talker().stream_stopped(0));
 }
 
+// IEEE 802.1Q-2022 Clause 35.2.2.8.6: the Talker declares its port's latency at the link speed,
+// and GET_STREAM_INFO reports the declared value until the next declaration.
+TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_at_the_link_speed)
+{
+    MilanKit m{std::nullopt, 0x16};
+    EXPECT_TRUE(m.start_ready());
+    m.kit.set_link_mbps(100);
+    m.kit.host().components().aem_handler.set_stream_info_layout(atdecc::aem::StreamInfoLayout::ieee_2021);
+    // Every talker's frames queue in class A behind one 1542-octet frame; 80 ns an octet at 100 Mbit/s.
+    uint64_t octets = 1542;
+    for (auto const& spec : m.kit.talker_specs()) {
+        octets += interval_wire_octets(AvbEntityKit::talker_tspec(spec));
+    }
+    auto const at_100 = static_cast<uint32_t>((octets * 80) + PROPAGATION_DELAY_NS);
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100);  // not declared yet
+    m.kit.set_mtu(9000);  // the port's MTU frame interferes: 7500 octets more
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100 + (7500 * 80));
+    m.kit.set_mtu(1500);
+    // Under the shaper's cbs the other talkers' frames leave at idleSlope; this one's at the link speed.
+    uint64_t const own = interval_wire_octets(AvbEntityKit::talker_tspec(m.kit.talker_specs()[0]));
+    auto const shaped = (1542 + own) * 80 + cbs_drain_ns(octets - 1542 - own, octets - 1542, CLASS_A_INTERVALS_PER_SEC);
+    m.kit.set_class_a_cbs(true);
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), shaped + PROPAGATION_DELAY_NS);
+    m.kit.set_class_a_cbs(false);
+
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    auto const* declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
+    EXPECT_TRUE(declared != nullptr);
+    EXPECT_EQ(declared != nullptr ? declared->accumulated_latency : 0U, at_100);
+    m.kit.set_link_mbps(1000);
+    EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100);
+}
+
+// A link up reads the port again: an interface whose speed is unknown keeps the last, and the declared
+// AccumulatedLatency with it (IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+TEST(avb_entity_kit_milan_talker, a_link_up_on_an_unknown_port_keeps_its_speed_and_latency)
+{
+    MilanKit m{std::nullopt, 0x17};
+    EXPECT_TRUE(m.start_ready());
+    m.kit.set_link_mbps(100);
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    auto const* declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
+    auto const before = declared != nullptr ? declared->accumulated_latency : 0U;
+    auto const now = sm::Clock::now();
+    m.kit.on_link_down(now);
+    m.kit.on_link_up(now);
+    EXPECT_EQ(m.kit.link_mbps(), 100U);
+    declared = m.kit.host().components().msrp_handler.get_talker_stream(m.sid(0));
+    EXPECT_EQ(declared != nullptr ? declared->accumulated_latency : 1U, before);
+}
+
 // Milan v1.3 Section 5.4.2.10.2: in the IEEE 1722.1-2021 layout an output reports the
 // AccumulatedLatency its Talker Advertise declares; Milan v1.2's keeps the offset.
 TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_the_declared_accumulated_latency)
@@ -1036,7 +1087,11 @@ TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_the_declared_accumulat
     auto const payload = load_info(info.body).first;
     EXPECT_TRUE((payload.flags.get() & atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID) != 0);
     EXPECT_EQ(payload.msrp_accumulated_latency.get(), declared != nullptr ? declared->accumulated_latency : 1U);
-    EXPECT_EQ(payload.msrp_accumulated_latency.get(), 0U);
+    uint64_t octets = 1542;  // one interfering frame, then every talker's frames; 8 ns an octet at 1 Gbit/s
+    for (auto const& spec : m.kit.talker_specs()) {
+        octets += interval_wire_octets(AvbEntityKit::talker_tspec(spec));
+    }
+    EXPECT_EQ(payload.msrp_accumulated_latency.get(), static_cast<uint32_t>((octets * 8) + PROPAGATION_DELAY_NS));
 
     // Milan v1.2's layout: the presentation time offset, as GET_MAX_TRANSIT_TIME reads it.
     m.kit.host().components().aem_handler.set_stream_info_layout(atdecc::aem::StreamInfoLayout::milan_v1_2);

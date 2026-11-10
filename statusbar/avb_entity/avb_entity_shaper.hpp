@@ -19,6 +19,7 @@
 #    include "statusbar/net/net_tc_qdisc.hpp"
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -154,28 +155,6 @@ inline constexpr uint8_t PTP_TC = 3;
 //
 // Credit-based shaper parameters (pure) - IEEE 802.1Q-2022 Annex L
 //
-
-/// Per-frame media overhead on an 802.3 port (802.1Q 35.2.2.8.3: 42 octets).
-inline constexpr uint32_t VLAN_OVERHEAD = 4;  ///< the 802.1Q tag
-inline constexpr uint32_t L2_OVERHEAD = 18;   ///< Ethernet header + FCS
-inline constexpr uint32_t L1_OVERHEAD = 20;   ///< preamble + SFD + inter-packet gap
-/// Avnu ProAV Bridge 9.1: count at least a 68-octet frame (before L1).
-inline constexpr uint32_t MIN_L2_FRAME = 68;
-/// Class measurement intervals as frames per second (125 us, 250 us).
-inline constexpr uint32_t CLASS_A_INTERVALS_PER_SEC = 8000;
-inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
-
-/// The octets a stream frame occupies on the wire (Milan v1.3 Table 4.4): F = MaxFrameSize + 22,
-/// at least 68, plus @p clock_drift_bytes (v1.3's step 3; v1.2 has it in MaxFrameSize), plus 20.
-[[nodiscard]] constexpr auto wire_frame_size(uint16_t const max_frame_size, uint16_t const clock_drift_bytes = 0) noexcept
-    -> uint32_t
-{
-    uint32_t frame = uint32_t{max_frame_size} + VLAN_OVERHEAD + L2_OVERHEAD;
-    if (frame < MIN_L2_FRAME) {
-        frame = MIN_L2_FRAME;
-    }
-    return frame + clock_drift_bytes + L1_OVERHEAD;
-}
 
 /// A stream's reserved bandwidth in kbit/s, rounded up:
 /// wire_frame_size * 8 * max_interval_frames * @p intervals_per_sec / 1000
@@ -459,7 +438,7 @@ struct ShaperPort
     int ifindex{0};
     std::string driver{};
     uint16_t tx_queues{0};
-    uint32_t mtu{1500};
+    uint32_t mtu{FALLBACK_MTU};
 };
 
 #if defined(__linux__)
@@ -520,6 +499,8 @@ class PortShaper final : public net::Pollable
     [[nodiscard]] auto class_b() const noexcept -> CbsParameters const& { return qdiscs_.class_b(); }
     /// The link speed the shaper sizes against (Mbit/s).
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t;
+    /// The MTU the shaper sizes its interfering frame by (install(); FALLBACK_MTU unknown).
+    [[nodiscard]] auto mtu() const noexcept -> uint32_t { return mtu_; }
     [[nodiscard]] auto last_kernel_message() const noexcept -> std::string const& { return tc_->last_message(); }
     /// config.launch_time, as install() gave it to the qdiscs.
     [[nodiscard]] auto launch_time_mode() const noexcept -> LaunchTimeMode { return qdiscs_.launch_time_mode(); }
@@ -559,7 +540,7 @@ class PortShaper final : public net::Pollable
     ShaperQdiscs qdiscs_;
     std::string driver_{};
     QueueLayout layout_{};
-    uint32_t mtu_{1500};
+    uint32_t mtu_{FALLBACK_MTU};
     uint32_t known_link_mbps_{0};   ///< last speed the kernel reported (0: never)
     std::error_code link_error_{};  ///< last non-"unknown" speed read error (logged on change)
     uint32_t programmed_link_mbps_{0};
