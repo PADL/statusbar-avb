@@ -148,6 +148,18 @@ address is valid. After a withdrawal, a different declaration waits two
 LeaveAll periods. The kit's own timer runs the declarations at each deadline (a
 probe window closing, a hold ending).
 
+A Talker Advertise's AccumulatedLatency is the talker port's own latency
+(IEEE 802.1Q-2022 Clause 35.2.2.8.6), `talker_port_latency_ns()`: one
+full-size (1500-octet MSDU) interfering frame, then one interval's frames of
+every talker stream in class A's queue (`interval_wire_octets()`, as the shaper
+sizes them), at the link speed the shaper reports (`set_link_mbps`, 1000 until
+set). Twelve 8-channel 24-bit 48 kHz AAF talkers declare 32.6 us at 1 Gbit/s.
+GET_STREAM_INFO reports the value the MSRP handler holds while declared, else
+the one it would declare; a changed link speed or format applies when a stream
+is next declared. The latency inside the entity before a frame is queued is the
+presentation time offset's, not the network's, and is not counted; the
+interfering frame assumes a 1500-octet MTU.
+
 The admitted set changes after an MSRP listener declaration for a talker stream
 is registered or withdrawn, after the Talker declarations are withdrawn, or
 when a stream is Started or Stopped, or when the kit's timer reaches the
@@ -361,9 +373,8 @@ The response form is the AEM handler's `stream_info_layout()`: the profile's
 `set_stream_info_layout` picks another, Milan v1.2's 56 among them. A controller tells them
 by length, and the form gives an output's msrp_accumulated_latency its meaning
 (Milan v1.3 Section 5.4.2.10.2): the presentation time offset in the older
-forms, the AccumulatedLatency the Talker Advertise declares (0, the bridges
-adding theirs) in 2021's. A Milan output in 2021's form uses Milan v1.3 Table
-5.9's flags instead of flags_ex: NOT_REGISTERING_SRP while declaring without
+forms, the AccumulatedLatency the Talker Advertise declares in 2021's. A Milan
+output in 2021's form uses Milan v1.3 Table 5.9's flags instead of flags_ex: NOT_REGISTERING_SRP while declaring without
 a Listener, REGISTERING_FAILED with Listener Asking Failed, CONNECTED with
 Listener Ready or Ready Failed. A classic output in 2021's form has
 MSRP_ACC_LAT_VALID only while it declares (IEEE 1722.1-2021 Clause 7.4.16.2).
