@@ -19,6 +19,22 @@
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/test/test.hpp"
 
+#ifdef __linux__
+#    include "statusbar/itc/itc_stop_token.hpp"
+#    include "statusbar/net/net_message_reactor.hpp"
+
+#    include <sched.h>
+#    include <unistd.h>
+
+#    include <cstdio>
+#    include <optional>
+
+#    include <net/if.h>
+#    include <sys/ioctl.h>
+#    include <sys/socket.h>
+#    include <sys/wait.h>
+#endif
+
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -510,5 +526,122 @@ TEST(avb_entity_host_link, a_link_back_after_a_down_sends_a_leave_all_at_once)
     EXPECT_TRUE(sent.size() > first);  // the return after a down: a LeaveAll PDU at once, before any tick
     EXPECT_TRUE(!sent.empty() && (sent.back().size() > 4));
 }
+
+#ifdef __linux__
+
+//
+// GET_AVB_INFO's msrp_mappings on a live control plane - IEEE 1722.1-2021 Clause 7.4.40.2.1
+//
+// avb_info() maps a class only while the MSRP socket is open. A fork()ed child (unshare() needs a
+// single-threaded process) opens the control plane on its own network namespace's loopback.
+
+namespace {
+
+/// The one msrp_mapping a live control plane reported, or none: POD, to cross the pipe.
+struct MappingReport
+{
+    bool live{false};
+    size_t mappings{0};
+    uint8_t traffic_class{0};
+};
+
+auto write_own_map(char const* path, char const* line) -> bool
+{
+    FILE* const f = std::fopen(path, "we");
+    if (f == nullptr) {
+        return false;
+    }
+    bool const wrote = std::fputs(line, f) >= 0;
+    return std::fclose(f) == 0 && wrote;
+}
+
+/// Root in a new user namespace over a new network namespace, with its loopback up.
+auto enter_namespace_with_loopback_up() -> bool
+{
+    std::array<char, 32> uid_line{};
+    std::array<char, 32> gid_line{};
+    (void)std::snprintf(uid_line.data(), uid_line.size(), "0 %u 1", static_cast<unsigned>(::getuid()));
+    (void)std::snprintf(gid_line.data(), gid_line.size(), "0 %u 1", static_cast<unsigned>(::getgid()));
+    if (::unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0) {
+        return false;
+    }
+    (void)write_own_map("/proc/self/setgroups", "deny");
+    if (!write_own_map("/proc/self/uid_map", uid_line.data()) || !write_own_map("/proc/self/gid_map", gid_line.data())) {
+        return false;
+    }
+    int const control = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (control < 0) {
+        return false;
+    }
+    ifreq request{};
+    std::strncpy(request.ifr_name, "lo", sizeof(request.ifr_name) - 1);
+    bool up = ::ioctl(control, SIOCGIFFLAGS, &request) == 0;
+    request.ifr_flags = static_cast<short>(request.ifr_flags | IFF_UP);
+    up = up && ::ioctl(control, SIOCSIFFLAGS, &request) == 0;
+    (void)::close(control);
+    return up;
+}
+
+/// In the child: the msrp_mapping a host declaring @p domain reports on the namespace's loopback.
+void report_mapping(statusbar::nanoavb::DomainInfo const& domain, MappingReport& out)
+{
+    if (!enter_namespace_with_loopback_up()) {
+        return;
+    }
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    host->components().msrp_handler.set_domain(domain);
+    statusbar::itc::StopToken stop{};
+    statusbar::net::MessageReactor reactor{stop, statusbar::net::monotonic_ns, 0};
+    if (!host->start_control_plane(reactor, "lo").has_value()) {
+        return;
+    }
+    auto const info = host->avb_info(0);
+    out.live = (info.flags & statusbar::atdecc::aem::avb_info_flags::SRP_ENABLED) != 0;
+    out.mappings = info.msrp_mappings.size();
+    out.traffic_class = info.msrp_mappings.empty() ? 0 : info.msrp_mappings[0].traffic_class;
+}
+
+/// report_mapping() for @p domain, run in a child; nullopt when the child could not run it.
+auto probe_mapping(statusbar::nanoavb::DomainInfo const& domain) -> std::optional<MappingReport>
+{
+    std::array<int, 2> fds{-1, -1};
+    if (::pipe(fds.data()) != 0) {
+        return std::nullopt;
+    }
+    pid_t const child = ::fork();
+    if (child == 0) {
+        MappingReport report{};
+        report_mapping(domain, report);
+        ::_exit(::write(fds[1], &report, sizeof(report)) == static_cast<ssize_t>(sizeof(report)) ? 0 : 1);
+    }
+    (void)::close(fds[1]);
+    MappingReport report{};
+    bool const read = child > 0 && ::read(fds[0], &report, sizeof(report)) == static_cast<ssize_t>(sizeof(report));
+    (void)::close(fds[0]);
+    if (child > 0) {
+        int status = 0;
+        (void)::waitpid(child, &status, 0);
+    }
+    return read && report.live ? std::optional{report} : std::nullopt;
+}
+
+}  // namespace
+
+// Milan devices name a class by its SRclassID (6 class A, 5 class B), not 0 and 1.
+TEST(avb_entity_host_avb_info, an_msrp_mapping_names_its_class_by_sr_class_id)
+{
+    auto const class_a = probe_mapping(statusbar::nanoavb::DomainInfo{});
+    auto const class_b = probe_mapping(statusbar::nanoavb::CLASS_B_DOMAIN);
+    if (!class_a || !class_b) {
+        SKIP("no user and network namespace, or no MSRP socket on its loopback");
+    }
+    EXPECT_EQ(class_a->mappings, size_t{1});
+    EXPECT_EQ(class_a->traffic_class, uint8_t{6});
+    EXPECT_EQ(class_b->mappings, size_t{1});
+    EXPECT_EQ(class_b->traffic_class, uint8_t{5});
+}
+
+#endif  // __linux__
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_host_test)
