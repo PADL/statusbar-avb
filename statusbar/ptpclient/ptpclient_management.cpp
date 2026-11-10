@@ -543,7 +543,7 @@ void PtpManagementClient::note_followed_port_state(PortState const now)
     // linuxptp leaves asCapable as it was on a DISABLED or FAULTY port (port_disable): not asCapable
     // there (IEEE 802.1AS-2020 Clause 10.2.5.1). Any other change may reset it without a notification.
     if (now == PortState::disabled || now == PortState::faulty) {
-        state_.as_capable = AsCapable::not_capable;
+        state_.as_capable = state_.as_capable ? std::optional{AsCapable::not_capable} : std::nullopt;
         return;
     }
     std::array<uint16_t, 1> const cmlds{management_id::cmlds_info_np};
@@ -555,7 +555,9 @@ void PtpManagementClient::apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePort
     if (state_.port != sender) {
         return;
     }
-    state_.as_capable = cmlds.as_capable;
+    // An answer for a DISABLED or FAULTY port carries the asCapable linuxptp kept from before.
+    bool const down = state_.port_state == PortState::disabled || state_.port_state == PortState::faulty;
+    state_.as_capable = down ? AsCapable::not_capable : cmlds.as_capable;
     state_.peer_mean_path_delay_ns = time_interval_ns(cmlds.mean_link_delay_scaled);
 }
 

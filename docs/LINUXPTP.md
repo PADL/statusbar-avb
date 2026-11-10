@@ -164,7 +164,7 @@ CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET again; TIME_STATUS_NP is kept in
 CMLDS_INFO_NP gives `state().as_capable` (as linuxptp reports it: `asCapable
 true` is always_capable) and its peer delay; it is fetched once with the rest,
 again when the port's state changes, and DISABLED or FAULTY makes it
-not_capable, since linuxptp keeps asCapable as it was there. A ptp4l before 4.3
+not_capable once known, since linuxptp keeps asCapable as it was there. A ptp4l before 4.3
 echoes the `cmlds` bit without honouring it: asCapable then stays unknown.
 ptp4l notifies nothing for TIME_PROPERTIES_DATA_SET, so it is polled every
 `poll_period_ns`, with every port's PORT_DATA_SET and PARENT_DATA_SET too while
