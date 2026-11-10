@@ -1305,7 +1305,7 @@ void AvbEntityKit::wire_aecp_queries()
                     .declaring = declarations_.declared(descriptor_index),
                     .listener = talker_listener_[descriptor_index],
                     .presentation_offset_ns = presentation_offset_ns(descriptor_index),
-                    .accumulated_latency_ns = TALKER_ACCUMULATED_LATENCY_NS,
+                    .accumulated_latency_ns = talker_accumulated_latency_ns(descriptor_index),
                     .stopped = talker_->stream_stopped(descriptor_index)};
                 filled = fill_talker_stream_info(host_, descriptor_index, status, out, ext);
             } else if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
@@ -1526,6 +1526,7 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoin
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
+    (void)read_port();
     if (auto status = start_control(reactor, now); !status) {
         return status;
     }
@@ -1543,6 +1544,31 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
         }
     }
     return success();
+}
+
+auto AvbEntityKit::read_port() -> bool
+{
+#if defined(__linux__)
+    auto const before = std::pair{link_mbps_, mtu_};
+    link_mbps_ = net::link_speed_mbps(config_.interface_name).value_or(link_mbps_);
+    mtu_ = net::interface_mtu(config_.interface_name).value_or(mtu_);
+    return std::pair{link_mbps_, mtu_} != before;
+#else
+    return false;
+#endif
+}
+
+void AvbEntityKit::on_link_up(TimePoint const time)
+{
+    bool const changed = !class_a_cbs_ && read_port();  // a shaper keeps its own
+    host_.on_link_up(time);
+    if (!changed) {
+        return;
+    }
+    update_talker_declarations(steady_ns_of(time), true);
+    for (auto const& spec : talker_specs_) {
+        notify_talker_stream_info(spec.index);  // GET_STREAM_INFO's msrp_accumulated_latency moved
+    }
 }
 
 auto AvbEntityKit::stream_port_config(std::string_view const backend) const -> StreamPortConfig
@@ -2388,7 +2414,13 @@ void AvbEntityKit::save_persisted(std::string text)
 
 auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo
 {
-    nanoavb::TalkerStreamSrpInfo info{.accumulated_latency = TALKER_ACCUMULATED_LATENCY_NS};
+    // TSpec from the format word — no per-entity byte math to keep in step
+    // with the model; the hardware shaper sizes by the same one.
+    auto const tspec = talker_tspec(spec);
+    nanoavb::TalkerStreamSrpInfo info{
+        .max_frame_size = tspec.max_frame_size,
+        .max_interval_frames = tspec.max_interval_frames,
+        .accumulated_latency = talker_port_latency(spec)};
     if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
         (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
         info.dest_address = stream->stream_dest_mac;
@@ -2396,12 +2428,38 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     } else {
         info.vlan_id = config_.vlan_id;
     }
-    // TSpec from the format word (kit phase 1) — no per-entity byte math to
-    // keep in step with the model; the hardware shaper sizes by the same one.
-    auto const tspec = talker_tspec(spec);
-    info.max_interval_frames = tspec.max_interval_frames;
-    info.max_frame_size = tspec.max_frame_size;
     return info;
+}
+
+auto AvbEntityKit::talker_port_latency(StreamSpec const& spec) const noexcept -> uint32_t
+{
+    uint64_t octets = 0;
+    for (auto const& talker : talker_specs_) {
+        octets += interval_wire_octets(talker_tspec(talker));
+    }
+    TalkerPort const port{.link_mbps = link_mbps_, .mtu = mtu_, .cbs = class_a_cbs_};
+    return talker_port_latency_ns(port, octets, interval_wire_octets(talker_tspec(spec)));
+}
+
+auto AvbEntityKit::declared_talker_latency_ns(uint16_t const idx) const noexcept -> std::optional<uint32_t>
+{
+    auto const* const stream = host_.components().acmp_talker.get_stream(idx);
+    if (stream == nullptr || !declarations_.declared(idx)) {
+        return std::nullopt;
+    }
+    nanoavb::StreamId stream_id{};
+    (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &stream_id);
+    auto const* const declared = host_.components().msrp_handler.get_talker_stream(stream_id);
+    return declared != nullptr ? std::optional{declared->accumulated_latency} : std::nullopt;
+}
+
+auto AvbEntityKit::talker_accumulated_latency_ns(uint16_t const idx) const noexcept -> uint32_t
+{
+    if (auto const declared = declared_talker_latency_ns(idx)) {
+        return *declared;
+    }
+    auto const* const spec = std::ranges::find(talker_specs_, idx, &StreamSpec::index);
+    return spec == talker_specs_.end() ? 0U : talker_port_latency(*spec);
 }
 
 void AvbEntityKit::advertise_talker_streams(TimePoint const time)

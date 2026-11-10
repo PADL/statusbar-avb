@@ -32,10 +32,12 @@
 #include "statusbar/avtp/avtp_am824_v1.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
+#include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -248,6 +250,99 @@ struct TSpec
 
     auto operator==(TSpec const&) const noexcept -> bool = default;
 };
+
+//
+// A Talker's frames on the wire and its port's latency - IEEE 802.1Q-2022 Clause 35.2.2.8.6
+//
+
+/// Per-frame media overhead on an 802.3 port (802.1Q 35.2.2.8.3: 42 octets).
+inline constexpr uint32_t VLAN_OVERHEAD = 4;  ///< the 802.1Q tag
+inline constexpr uint32_t L2_OVERHEAD = 18;   ///< Ethernet header + FCS
+inline constexpr uint32_t L1_OVERHEAD = 20;   ///< preamble + SFD + inter-packet gap
+/// Avnu ProAV Bridge 9.1: count at least a 68-octet frame (before L1).
+inline constexpr uint32_t MIN_L2_FRAME = 68;
+/// Class measurement intervals as frames per second (125 us, 250 us).
+inline constexpr uint32_t CLASS_A_INTERVALS_PER_SEC = 8000;
+inline constexpr uint32_t CLASS_B_INTERVALS_PER_SEC = 4000;
+
+/// The octets a stream frame occupies on the wire (Milan v1.3 Table 4.4): F = MaxFrameSize + 22,
+/// at least 68, plus @p clock_drift_bytes (v1.3's step 3; v1.2 has it in MaxFrameSize), plus 20.
+[[nodiscard]] constexpr auto wire_frame_size(uint16_t const max_frame_size, uint16_t const clock_drift_bytes = 0) noexcept
+    -> uint32_t
+{
+    uint32_t frame = uint32_t{max_frame_size} + VLAN_OVERHEAD + L2_OVERHEAD;
+    if (frame < MIN_L2_FRAME) {
+        frame = MIN_L2_FRAME;
+    }
+    return frame + clock_drift_bytes + L1_OVERHEAD;
+}
+
+/// The MTU assumed for the interfering frame when the port's is unknown: a full-size 802.3 frame's MSDU.
+inline constexpr uint32_t FALLBACK_MTU = 1500;
+
+/// The octets @p tspec's frames of one class measurement interval occupy on the wire (wire_frame_size).
+[[nodiscard]] constexpr auto interval_wire_octets(TSpec const& tspec) noexcept -> uint64_t
+{
+    return uint64_t{wire_frame_size(tspec.max_frame_size, tspec.clock_drift_bytes)} * tspec.max_interval_frames;
+}
+
+/// The wire propagation time a Talker counts, ns (IEEE 802.1Q-2022 Clause 35.2.2.8.6 item d).
+inline constexpr uint32_t PROPAGATION_DELAY_NS = 500;
+
+/// The egress port a Talker's AccumulatedLatency is for. 0 is unknown: 1000 Mbit/s, FALLBACK_MTU.
+struct TalkerPort
+{
+    uint32_t link_mbps{0};
+    uint32_t mtu{0};
+    /// The SR class's measurement intervals a second (CLASS_A_INTERVALS_PER_SEC, CLASS_B_INTERVALS_PER_SEC).
+    uint32_t intervals_per_sec{CLASS_A_INTERVALS_PER_SEC};
+    /// A cbs shapes the class's queue at an idleSlope of its streams' bandwidth (IEEE 802.1Q-2022 Annex L).
+    bool cbs{false};
+};
+
+/// @p octets' transmission time at @p link_mbps (0: 1000), ns, rounded up.
+[[nodiscard]] constexpr auto wire_time_ns(uint64_t const octets, uint32_t const link_mbps) noexcept -> uint64_t
+{
+    uint64_t const mbps = link_mbps == 0 ? 1000 : link_mbps;
+    return ((octets * 8000U) + mbps - 1) / mbps;
+}
+
+/// The time a cbs whose idleSlope is @p class_octets an interval needs to send @p queued of them, ns,
+/// rounded up: their share of the interval.
+[[nodiscard]] constexpr auto cbs_drain_ns(
+    uint64_t const queued, uint64_t const class_octets, uint32_t const intervals_per_sec) noexcept -> uint64_t
+{
+    uint64_t const per_sec = class_octets * intervals_per_sec;
+    return per_sec == 0 ? 0 : ((queued * 1'000'000'000U) + per_sec - 1) / per_sec;
+}
+
+/// A talker port's portTcMaxLatency for @p own_octets among its class's @p class_octets, ns, rounded up (IEEE 802.1Q-2022
+/// Clause 35.2.2.8.6): a) the others at the link speed or a cbs's idleSlope; b) an MTU frame, then its own; d) propagation.
+/// A class B stream on a port also running class A would add class A's queue to a), which is not counted.
+[[nodiscard]] constexpr auto talker_port_latency_ns(
+    TalkerPort const& port, uint64_t const class_octets, uint64_t const own_octets) noexcept -> uint32_t
+{
+    auto const interfering = static_cast<uint16_t>(std::min<uint32_t>(port.mtu == 0 ? FALLBACK_MTU : port.mtu, UINT16_MAX));
+    uint64_t const others = class_octets - std::min(own_octets, class_octets);
+    uint64_t const at_link = wire_frame_size(interfering) + own_octets + (port.cbs ? 0 : others);
+    uint64_t const queue_ns = port.cbs ? cbs_drain_ns(others, class_octets, port.intervals_per_sec) : 0;
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(wire_time_ns(at_link, port.link_mbps) + queue_ns + PROPAGATION_DELAY_NS, UINT32_MAX));
+}
+
+/// talker_port_latency_ns for a lone, unshaped stream of @p octets on @p interface_name: @p port's link speed
+/// and MTU where nonzero, else the interface's as read now (Linux; elsewhere, and unknown, the fallbacks).
+[[nodiscard]] inline auto interface_talker_latency_ns(std::string_view const interface_name, TalkerPort port, uint64_t const octets)
+    -> uint32_t
+{
+#if defined(__linux__)
+    port.link_mbps = port.link_mbps != 0 ? port.link_mbps : net::link_speed_mbps(interface_name).value_or(0);
+    port.mtu = port.mtu != 0 ? port.mtu : net::interface_mtu(interface_name).value_or(0);
+#else
+    (void)interface_name;
+#endif
+    return talker_port_latency_ns(port, octets, octets);
+}
 
 /// The single audio sample rate shared by every AM824/AAF stream in @p specs
 /// — the rate the entity's one media clock must run at. CRF streams don't

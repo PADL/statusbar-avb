@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_handler.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/dsp/dsp.hpp"
@@ -186,7 +187,7 @@ void AvbEntityAm824IO::wire_stream_callbacks()
         }
     });
     host_.set_withdraw_streams(
-        [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time); });
+        [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(talker_stream_id(), time); });
 
     // ACMP talker connection callbacks are wired once, in start(): the
     // connection log (a second registration here would just be overwritten).
@@ -356,8 +357,17 @@ void AvbEntityAm824IO::print_state() const
 // MSRP talker reservation
 //
 
-auto AvbEntityAm824IO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo
+auto AvbEntityAm824IO::talker_stream_id() const noexcept -> nanoavb::StreamId
 {
+    nanoavb::StreamId stream_id{};
+    if (auto const* stream = host_.components().acmp_talker.get_stream(0); stream != nullptr) {
+        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &stream_id);
+    }
+    return stream_id;
+}
+
+auto AvbEntityAm824IO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo
+{  // NOLINT(statusbar-block-statements) the Talker Advertise's fields, one by one; pre-dates the gate
     nanoavb::TalkerStreamSrpInfo info{};
 
     // Source stream id / destination / VLAN from the ACMP-configured talker
@@ -380,8 +390,11 @@ auto AvbEntityAm824IO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpI
     constexpr uint16_t AM824_QUADLET_BYTES = 4;
     info.max_frame_size = static_cast<uint16_t>(AVTP_AM824_HEADER_BYTES + (SAMPLES_PER_PACKET * channels_ * AM824_QUADLET_BYTES));
 
-    // We are the media source; downstream bridges accumulate their own latency.
-    info.accumulated_latency = 0;
+    // The talker port's own latency (IEEE 802.1Q-2022 Clause 35.2.2.8.6); downstream bridges add theirs.
+    info.accumulated_latency = interface_talker_latency_ns(
+        config_.interface_name,
+        TalkerPort{.link_mbps = config_.link_mbps, .mtu = config_.mtu},
+        interval_wire_octets(TSpec{.max_frame_size = info.max_frame_size}));
     return info;
 }
 

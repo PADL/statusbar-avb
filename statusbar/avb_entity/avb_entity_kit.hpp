@@ -146,7 +146,9 @@ class AvbEntityKit
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
-    void on_link_up(TimePoint time) { host_.on_link_up(time); }
+    /// A link up: an unshaped port's speed and MTU read again (a link may still be down at start()), a change
+    /// declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified.
+    void on_link_up(TimePoint time);
     /// gPTP grandmaster found or changed / lost (EntityUpkeep wires these to
     /// the Announce handler): drives the talker streams' AVTP tu bit (Milan
     /// v1.2 Section 4.3.5.2, Annex B.1.1). Reactor thread.
@@ -324,9 +326,9 @@ class AvbEntityKit
     using StreamFormatFn =
         sg14::inplace_function<uint8_t(uint16_t descriptor_type, uint16_t descriptor_index, StreamFormatFields const& format), 32>;
     void set_on_stream_format_changed(StreamFormatFn fn) noexcept { on_stream_format_changed_ = std::move(fn); }
-    /// The link speed (Mbit/s, reactor thread; 1000 until set, the shaper keeps it current) whose
-    /// SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that pushes every
-    /// talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
+    /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the
+    /// shaper keeps it current) whose SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that
+    /// pushes every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
     void set_link_mbps(uint32_t const mbps) noexcept { link_mbps_ = mbps; }
     /// With @p across, an output stream's mappings (static AUDIO_MAPs, or the kit's identity) also hold at
     /// another listed rate than the unit's, so SET_STREAM_FORMAT accepts it mapped (Milan v1.2 Section 5.4.2.27's
@@ -334,6 +336,12 @@ class AvbEntityKit
     void set_output_mappings_across_rates(bool const across) noexcept { output_mappings_across_rates_ = across; }
     [[nodiscard]] auto output_mappings_across_rates() const noexcept -> bool { return output_mappings_across_rates_; }
     [[nodiscard]] auto link_mbps() const noexcept -> uint32_t { return link_mbps_; }
+    /// The port's MTU, whose frame is the interfering one in a Talker Advertise's AccumulatedLatency
+    /// (reactor thread; the interface's from start() and each link up, FALLBACK_MTU unknown; the shaper sets it on install).
+    void set_mtu(uint32_t const mtu) noexcept { mtu_ = mtu; }
+    /// Whether a cbs shapes class A at its streams' bandwidth (reactor thread; false until set, the shaper
+    /// sets it on install): the queue then drains at idleSlope (talker_port_latency_ns).
+    void set_class_a_cbs(bool const cbs) noexcept { class_a_cbs_ = cbs; }
     /// With @p refuse, a change by other than ATDECC (a request_* setter, or any AemCommandHandler local
     /// path but request_clock_source()'s) is refused while a controller holds the lock or the acquisition
     /// (Milan v1.3 Section 5.3.4.1): local_change_refusal(). Default false. Reactor thread.
@@ -518,9 +526,14 @@ class AvbEntityKit
     /// next start() opens is then the whole of it, as on a first start.
     void close_streams() noexcept;
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
-    /// The AccumulatedLatency every Talker Advertise declares, ns: none of the talker's own
-    /// (IEEE 802.1Q-2022 Clause 35.2.2.8.6); the bridges add theirs.
-    static constexpr uint32_t TALKER_ACCUMULATED_LATENCY_NS = 0;
+    /// talker_port_latency_ns for @p spec among every talker stream's frames of one interval (class A's
+    /// queue), at link_mbps(), the port's MTU and its cbs: what its Talker Advertise declares now.
+    [[nodiscard]] auto talker_port_latency(StreamSpec const& spec) const noexcept -> uint32_t;
+    /// The AccumulatedLatency the MSRP handler holds for talker @p idx while it is declared, ns.
+    [[nodiscard]] auto declared_talker_latency_ns(uint16_t idx) const noexcept -> std::optional<uint32_t>;
+    /// Talker @p idx's AccumulatedLatency, ns: what its Talker Advertise declares, else what it would
+    /// (talker_port_latency_ns at link_mbps(); IEEE 802.1Q-2022 Clause 35.2.2.8.6).
+    [[nodiscard]] auto talker_accumulated_latency_ns(uint16_t idx) const noexcept -> uint32_t;
     void advertise_talker_streams(TimePoint time);
     void withdraw_talker_streams(TimePoint time);
     /// One pass of update_talker_declarations over the talker streams.
@@ -692,6 +705,9 @@ class AvbEntityKit
     [[nodiscard]] auto stream_port_config(std::string_view backend) const -> StreamPortConfig;
     /// The control plane up, its stream callbacks wired, the declarations started.
     [[nodiscard]] auto start_control(net::MessageReactor& reactor, TimePoint now) -> Status;
+    /// The interface's link speed and MTU, read at start() and each link up; an unknown one keeps the last (1000,
+    /// FALLBACK_MTU). A shaper replaces both on install. Returns whether either changed.
+    auto read_port() -> bool;
     /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
     /// start(): register the configured VID; after a stop(), declare the configured MSRP Domain, which resumes MSRP.
@@ -764,6 +780,8 @@ class AvbEntityKit
     sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_static_groups_{};
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
+    uint32_t mtu_{0};
+    bool class_a_cbs_{false};
     bool output_mappings_across_rates_{false};  ///< set_output_mappings_across_rates()
     bool lock_refuses_local_changes_{false};    ///< set_lock_refuses_local_changes()
     /// The owning entity's blob-backed descriptor handler; carries the
