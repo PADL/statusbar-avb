@@ -114,6 +114,27 @@ void erase_if(Container& c, Pred pred)
     return static_cast<bool>(buf.append(std::span<uint8_t const>(src)));
 }
 
+/// Whether @p rec's Applicant has a Leave to send (LA, LO).
+template <class Record>
+[[nodiscard]] constexpr auto leaving(Record const& rec) noexcept -> bool
+{
+    auto const state = rec.applicant_sm.current_state();
+    return state == applicant_sm::Def::State::La || state == applicant_sm::Def::State::Lo;
+}
+
+/// Whether declaring @p fv on @p rec, declared and not yet withdrawn to VO, changes more than its
+/// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8; Table 35-6 code 16).
+template <class Record>
+[[nodiscard]] constexpr auto changes_reservation(Record const& rec, TalkerAdvertiseFirstValue const& fv) noexcept -> bool
+{
+    auto const state = rec.applicant_sm.current_state();
+    bool const declared = rec.operation == mrp::Operation::Declare && state != applicant_sm::Def::State::Start &&
+        state != applicant_sm::Def::State::Vo;
+    auto same = rec.first_value;
+    same.accumulated_latency = fv.accumulated_latency;
+    return declared && !(same == fv);
+}
+
 }  // namespace detail_msrp
 
 // Convenience using-declarations so method bodies can refer to the
@@ -511,8 +532,33 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
+    if (detail_msrp::changes_reservation(*rec_ptr, fv)) {
+        leave_then_declare(*rec_ptr, fv, now);
+        return success();
+    }
+    rec_ptr->pending_value.reset();
     declare_value(*rec_ptr, fv, now);
     return success();
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::leave_then_declare(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint const now)
+{
+    rec.pending_value = fv;
+    mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
+    port_.timers().start_join(now);
+    declare_pending_talkers(now);  // a Leave not owed (nothing was sent) declares it now
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::declare_pending_talkers(TimePoint const now)
+{
+    for (auto& rec : talker_adv_) {
+        if (rec.pending_value && !detail_msrp::leaving(rec)) {
+            declare_value(rec, *std::exchange(rec.pending_value, std::nullopt), now);
+        }
+    }
 }
 
 template <class Limits>
@@ -532,6 +578,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
     bool found = false;
     for (auto& rec : talker_adv_) {
         if (rec.first_value.stream_id == stream_id) {
+            rec.pending_value.reset();
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             found = true;
         }
@@ -1434,7 +1481,7 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
 
 template <class Limits>
 void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
-{
+{  // NOLINT(statusbar-block-statements) the PDU built message by message, then sent; pre-dates the gate
     // First, dispatch the appropriate TX event to every attribute's
     // Applicant to generate tx outputs. We pick TxRegistrarIn vs
     // TxRegistrarMt per-attribute based on the paired Registrar's
@@ -1512,8 +1559,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     if (send_pdu_) {
         (void)send_pdu_(pdu_buffer_.get_span());
     }
-
-    (void)now;
+    declare_pending_talkers(now);
 }
 
 // ============================================================
