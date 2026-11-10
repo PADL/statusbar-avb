@@ -2555,6 +2555,49 @@ TEST(nanoavb_entity_unsolicited_notify, notifications_past_the_queue_keep_their_
 
 namespace {
 
+/// Defers every SET (as an entity applying a large control value off the event loop would).
+class DeferringEveryHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        return AEM_STATUS_IN_PROGRESS;
+    }
+};
+
+}  // namespace
+
+// IEEE 1722.1-2021 Table 7-141: a deferred SET with a body over 64 octets is held, completed and answered.
+TEST(nanoavb_entity_in_progress, a_deferred_set_with_a_long_body_is_completed_and_answered)
+{
+    DeferringEveryHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    std::array<uint8_t, 100> body{0x00, static_cast<uint8_t>(DESCRIPTOR_CONTROL), 0x00, 0x00};
+    std::ranges::fill(std::span{body}.subspan(4), uint8_t{0x5A});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, body);
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 0, AEM_STATUS_SUCCESS));
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    if (reply != nullptr) {
+        EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(std::ranges::equal(body_of(*reply), body));
+    }
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
+namespace {
+
 /// A DeferringHandler whose STREAM_OUTPUT 0 is in force at kFormatInForce.
 class DeferringStreamHandler : public DeferringHandler
 {
