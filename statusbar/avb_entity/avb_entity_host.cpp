@@ -278,7 +278,7 @@ void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
     ctl_log().status("avb info mirror: following entity {:016x}", cfg.target_entity_id.to_uint64());
 }
 
-void AvbEntityHost::note_port_as_capable(bool const as_capable)
+void AvbEntityHost::note_port_as_capable(std::optional<bool> const as_capable)
 {
     port_as_capable_ = as_capable;
     refresh_avb_info();  // a change notifies GET_AVB_INFO's subscribers
@@ -451,7 +451,8 @@ void AvbEntityHost::add_gptp_state(nanoavb::AvbInfo& info) const
             info.gptp_domain_number = last->header.domain_number.get();
         }
     }
-    if (port_as_capable_.value_or(gptp_ctx_.as_capable || gptp_ctx_.time_locked)) {
+    // No asCapable on a link that is down (IEEE 802.1AS-2020 Clause 10.2.5.1).
+    if (supervisor_ctx_.link_up && port_as_capable_.value_or(gptp_ctx_.as_capable || gptp_ctx_.time_locked)) {
         info.flags |= AS_CAPABLE;
     }
     if (propagation_delay_override_) {
