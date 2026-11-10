@@ -1099,4 +1099,18 @@ TEST(talker_crf, close_tx_forgets_the_crf_streams)
     EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
 }
 
+// The stream tag packs into one word for its wait-free atomic and back unchanged, at the field limits too.
+TEST(talker_streams, a_stream_tag_round_trips_through_its_packed_word)
+{
+    for (auto const tag :
+         {avb_entity::StreamTag{.vlan_id = 2, .pcp = 3},
+          avb_entity::StreamTag{.vlan_id = 0x0FFF, .pcp = 7},
+          avb_entity::StreamTag{}}) {
+        auto const back = avb_entity::StreamTag::unpacked(tag.packed());
+        EXPECT_EQ(back.vlan_id, tag.vlan_id);
+        EXPECT_EQ(back.pcp, tag.pcp);
+    }
+    EXPECT_EQ((avb_entity::StreamTag{.vlan_id = 0x123, .pcp = 2}.packed()), uint32_t{0x0002'0123});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

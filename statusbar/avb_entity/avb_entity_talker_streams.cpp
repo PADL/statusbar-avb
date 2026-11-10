@@ -629,7 +629,7 @@ auto TalkerStreams::tx_begin(size_t const length) noexcept -> std::span<uint8_t>
 
 auto TalkerStreams::store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> const buffer) const noexcept -> size_t
 {
-    auto const tag = tag_.load();
+    auto const tag = this->tag();
     auto const header = stream_frame_header(slot.dest_mac, port_->port().hardware_address(), tag.vlan_id, tag.pcp);
     return buffer.size() > ieee::wire_size(header) ? ieee::store_unchecked(buffer, header) : 0;
 }
@@ -676,7 +676,7 @@ auto TalkerStreams::send_to_port(ieee::Eui48 const& dest_mac, std::span<uint8_t 
 auto TalkerStreams::build_tagged_frame(
     std::span<uint8_t> const buffer, ieee::Eui48 const& dest_mac, std::span<uint8_t const> const payload) const noexcept -> size_t
 {
-    auto const tag = tag_.load();
+    auto const tag = this->tag();
     return build_stream_frame(buffer, dest_mac, port_->port().hardware_address(), tag.vlan_id, tag.pcp, payload);
 }
 
