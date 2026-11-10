@@ -395,27 +395,19 @@ MainLoopResult run_main_loop(
     (void)log_collector.add(entity.media_log_channel());
     entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements): the tool's loop, a step a line
-        (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
-
-        // Check for state changes to reset watchdog
+    // The state watchdog: a change restarts it, Init past GPTP_LOCK_TIMEOUT times out. The grandmaster
+    // edge is checked here, so one thread drives the SM and MSRP; grandmaster_id_changed handles a new
+    // identity, this a grandmaster regained unchanged.
+    auto const watch_entity = [&](std::chrono::steady_clock::time_point const now) {
         auto const current_state = entity.state_string();
         if (current_state != last_state) {
             if (config.verbose) {
                 std::print("State: {} -> {}\n", last_state, current_state);
             }
-            last_state_change_time = std::chrono::steady_clock::now();
+            last_state_change_time = now;
             last_state = current_state;
         }
-
-        // Check for watchdog timeout in waiting states
-        auto const now = std::chrono::steady_clock::now();
-        auto const time_in_state = now - last_state_change_time;
         auto const sm_now = TimePoint{now.time_since_epoch()};
-
-        // Grandmaster edge-detect on the reactor thread, not the media timer, so one thread drives the SM
-        // and MSRP; grandmaster_id_changed handles a new identity, this a grandmaster regained unchanged.
         if (net_handlers != nullptr) {
             bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
             if (has_gm && !had_grandmaster) {
@@ -423,54 +415,63 @@ MainLoopResult run_main_loop(
             }
             had_grandmaster = has_gm;
         }
-
-        if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
+        if (current_state == "Init" && now - last_state_change_time > GPTP_LOCK_TIMEOUT) {
             entity.on_timeout(sm_now);
             last_state_change_time = now;
         }
+    };
 
-        // Periodic PTP-bridge / timer telemetry on the main thread, so it keeps
-        // reporting even when the media timer stalls (that's the diagnostic
-        // point). stderr is unbuffered → visible immediately under systemd/nohup.
-        if (config.verbose && ctx.bridge && now - last_telemetry_time >= std::chrono::seconds(1)) {
-            last_telemetry_time = now;
-            auto const bt = ctx.bridge->telemetry();
-            std::print(
-                stderr,
-                "[bridge] healthy={} epoch={} samp={} rms={}ns bracket(min/mean/max)={}/{}/{}ns "
-                "reject={} step={} last_step_resid={}ns overruns={} | timer recovery={} missed={}\n",
-                bt.healthy,
-                bt.epoch,
-                bt.sample_count,
-                bt.rms_residual_ns,
-                bt.bracket_min_ns,
-                bt.bracket_mean_ns,
-                bt.bracket_max_ns,
-                bt.reject_count,
-                bt.step_count,
-                bt.last_step_residual_ns,
-                bt.regression_overruns,
-                timer.recovery_count(),
-                timer.missed_cycles());
-            std::print(
-                stderr,
-                "[media] wake={} err={:+}ns state={} timer_errors={}\n",
-                last_wake_count.load(),
-                last_wake_error_ns.load(),
-                entity.state_string(),
-                timer_error_count.load());
-            if (config.entity.stream_rx_rt_timer) {
-                std::print(
-                    stderr,
-                    "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
-                    rx_last_wake_error_ns.load(),
-                    rx_last_batch.load(),
-                    rx_frames_drained.load(),
-                    rx_timer.recovery_count(),
-                    rx_timer.missed_cycles(),
-                    rx_timer_error_count.load());
-            }
+    // Bridge, media and RX timer telemetry once a second when verbose, from this thread so it keeps
+    // reporting while the media timer stalls; stderr is unbuffered.
+    auto const report_telemetry = [&](std::chrono::steady_clock::time_point const now) {
+        if (!config.verbose || !ctx.bridge || now - last_telemetry_time < std::chrono::seconds(1)) {
+            return;
         }
+        last_telemetry_time = now;
+        auto const bt = ctx.bridge->telemetry();
+        std::print(
+            stderr,
+            "[bridge] healthy={} epoch={} samp={} rms={}ns bracket(min/mean/max)={}/{}/{}ns "
+            "reject={} step={} last_step_resid={}ns overruns={} | timer recovery={} missed={}\n",
+            bt.healthy,
+            bt.epoch,
+            bt.sample_count,
+            bt.rms_residual_ns,
+            bt.bracket_min_ns,
+            bt.bracket_mean_ns,
+            bt.bracket_max_ns,
+            bt.reject_count,
+            bt.step_count,
+            bt.last_step_residual_ns,
+            bt.regression_overruns,
+            timer.recovery_count(),
+            timer.missed_cycles());
+        std::print(
+            stderr,
+            "[media] wake={} err={:+}ns state={} timer_errors={}\n",
+            last_wake_count.load(),
+            last_wake_error_ns.load(),
+            entity.state_string(),
+            timer_error_count.load());
+        if (config.entity.stream_rx_rt_timer) {
+            std::print(
+                stderr,
+                "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
+                rx_last_wake_error_ns.load(),
+                rx_last_batch.load(),
+                rx_frames_drained.load(),
+                rx_timer.recovery_count(),
+                rx_timer.missed_cycles(),
+                rx_timer_error_count.load());
+        }
+    };
+
+    while (!realtime::is_shutdown_requested()) {
+        (void)log_collector.poll(log_sink);
+        (void)reactor.poll_once(100);
+        auto const now = std::chrono::steady_clock::now();
+        watch_entity(now);
+        report_telemetry(now);
     }
 
     if (config.entity.stream_rx_rt_timer) {

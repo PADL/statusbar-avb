@@ -365,27 +365,19 @@ MainLoopResult run_main_loop(
     (void)log_collector.add(entity.media_log_channel());
     entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements): the tool's loop, a step a line
-        (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
-
-        // Check for state changes to reset watchdog
+    // The state watchdog: a change restarts it, Init past GPTP_LOCK_TIMEOUT times out. The grandmaster
+    // edge is checked here, so one thread drives the SM and MSRP; grandmaster_id_changed handles a new
+    // identity, this a grandmaster regained unchanged.
+    auto const watch_entity = [&](std::chrono::steady_clock::time_point const now) {
         auto const current_state = entity.state_string();
         if (current_state != last_state) {
             if (config.verbose) {
                 std::print("State: {} -> {}\n", last_state, current_state);
             }
-            last_state_change_time = std::chrono::steady_clock::now();
+            last_state_change_time = now;
             last_state = current_state;
         }
-
-        // Check for watchdog timeout in waiting states
-        auto const now = std::chrono::steady_clock::now();
-        auto const time_in_state = now - last_state_change_time;
         auto const sm_now = TimePoint{now.time_since_epoch()};
-
-        // Grandmaster edge-detect on the reactor thread, not the media timer, so one thread drives the SM
-        // and MSRP; grandmaster_id_changed handles a new identity, this a grandmaster regained unchanged.
         if (net_handlers != nullptr) {
             bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
             if (has_gm && !had_grandmaster) {
@@ -393,36 +385,46 @@ MainLoopResult run_main_loop(
             }
             had_grandmaster = has_gm;
         }
-
-        if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
+        if (current_state == "Init" && now - last_state_change_time > GPTP_LOCK_TIMEOUT) {
             entity.on_timeout(sm_now);
             last_state_change_time = now;
         }
+    };
 
-        // Surface the media-timer's published wake stats off the RT thread.
-        if (config.verbose && now - last_telemetry_time >= std::chrono::seconds(1)) {
-            last_telemetry_time = now;
+    // The media and RX timers' published wake stats once a second when verbose, off the RT threads.
+    auto const report_telemetry = [&](std::chrono::steady_clock::time_point const now) {
+        if (!config.verbose || now - last_telemetry_time < std::chrono::seconds(1)) {
+            return;
+        }
+        last_telemetry_time = now;
+        std::print(
+            stderr,
+            "[media] wake={} err={:+}ns state={} timer_errors={} recovery={} missed={}\n",
+            last_wake_count.load(),
+            last_wake_error_ns.load(),
+            entity.state_string(),
+            timer_error_count.load(),
+            timer.recovery_count(),
+            timer.missed_cycles());
+        if (config.entity.stream_rx_rt_timer) {
             std::print(
                 stderr,
-                "[media] wake={} err={:+}ns state={} timer_errors={} recovery={} missed={}\n",
-                last_wake_count.load(),
-                last_wake_error_ns.load(),
-                current_state,
-                timer_error_count.load(),
-                timer.recovery_count(),
-                timer.missed_cycles());
-            if (config.entity.stream_rx_rt_timer) {
-                std::print(
-                    stderr,
-                    "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
-                    rx_last_wake_error_ns.load(),
-                    rx_last_batch.load(),
-                    rx_frames_drained.load(),
-                    rx_timer.recovery_count(),
-                    rx_timer.missed_cycles(),
-                    rx_timer_error_count.load());
-            }
+                "[rx-timer] wake_err={:+}ns last_batch={} frames={} recovery={} missed={} errors={}\n",
+                rx_last_wake_error_ns.load(),
+                rx_last_batch.load(),
+                rx_frames_drained.load(),
+                rx_timer.recovery_count(),
+                rx_timer.missed_cycles(),
+                rx_timer_error_count.load());
         }
+    };
+
+    while (!realtime::is_shutdown_requested()) {
+        (void)log_collector.poll(log_sink);
+        (void)reactor.poll_once(100);
+        auto const now = std::chrono::steady_clock::now();
+        watch_entity(now);
+        report_telemetry(now);
     }
 
     if (config.entity.stream_rx_rt_timer) {
