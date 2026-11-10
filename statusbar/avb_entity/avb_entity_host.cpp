@@ -536,6 +536,13 @@ void AvbEntityHost::note_grandmaster_lost()
     }
 }
 
+void AvbEntityHost::use_parent_grandmaster() noexcept
+{
+    if (!std::exchange(grandmaster_from_parent_, true)) {
+        grandmaster_in_force_.reset();
+    }
+}
+
 void AvbEntityHost::note_parent_grandmaster(ieee::Eui64 const& grandmaster)
 {
     grandmaster_from_parent_ = true;
