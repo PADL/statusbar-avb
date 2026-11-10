@@ -285,10 +285,10 @@ struct MsrpCallbacks
 //
 // MSRP Handler
 //
-
-/// MsrpHandler - MSRP stream reservation. @tparam MaxStreams the talker and listener streams it
-/// tracks (a withdrawn, Idle, entry is reused by the next new StreamID); @tparam Limits the MSRP
-/// participant's table capacities
+/// MsrpHandler - skeleton class for MSRP stream reservation
+/// @tparam MaxStreams Compile-time capacity for talker/listener stream tracking; a withdrawn
+///         (Idle) entry is reused by the next new StreamID
+/// @tparam Limits The MSRP participant's table capacities
 template <size_t MaxStreams = 32, class Limits = statusbar::srp::msrp::DefaultMsrpLimits>
 class MsrpHandler
 {
