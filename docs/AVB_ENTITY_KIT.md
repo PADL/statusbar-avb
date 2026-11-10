@@ -152,12 +152,13 @@ A Talker Advertise's AccumulatedLatency is the talker port's portTcMaxLatency
 (IEEE 802.1Q-2022 Clause 35.2.2.8.6), `talker_port_latency_ns()`: item a), the
 other talker streams' frames of one interval in class A's queue
 (`interval_wire_octets()`, as the shaper sizes them); item b), one frame of the
-port's MTU (`set_mtu`, 1500 until set); and the stream's own frame. Without a
-cbs every frame leaves at the link speed (`set_link_mbps`, 1000 until set). Under the shaper's cbs (`set_class_a_cbs`),
+port's MTU (`set_mtu`, 1500 until set); the stream's own frame; and item d),
+500 ns of propagation. Without a cbs every frame leaves at the link speed
+(`set_link_mbps`, 1000 until set). Under the shaper's cbs (`set_class_a_cbs`),
 whose idleSlope is the streams' bandwidth (Annex L), the other streams' frames
 are spread over the interval: they take their share of 125 us. Twelve 8-channel
-24-bit 48 kHz AAF talkers at 1 Gbit/s declare 128.6 us each under the cbs
-(14.0 us at the link speed, 114.6 us at idleSlope), 32.6 us unshaped.
+24-bit 48 kHz AAF talkers at 1 Gbit/s declare 129.1 us each under the cbs
+(14.0 us at the link speed, 114.6 us at idleSlope, 0.5 us), 33.1 us unshaped.
 Configured streams count, not only admitted ones: an upper bound that does not
 move with each connection. GET_STREAM_INFO reports the value the MSRP handler
 holds while declared, else the one it would declare; a changed link speed,
