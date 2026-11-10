@@ -992,6 +992,10 @@ class AemCommandHandler
     /// After a command handled with SUCCESS, send its response body as the
     /// unsolicited notification (IEEE 1722.1 7.5.2 list).
     void notify_on_success(uint16_t command_type, AemCommandResponse const& response, std::span<uint8_t const> out_buffer);
+    /// Notify @p echo and report the setting when a local SET succeeded with a value not
+    /// already in force (@p in_force false). Returns @p status.
+    [[nodiscard]] auto announce_local_change(uint16_t command_type, uint8_t status, std::span<uint8_t const> echo, bool in_force)
+        -> uint8_t;
 
     /// Unsolicited LOCK_ENTITY (UNLOCK, locked_entity_id 0) when a lock expires.
     void emit_lock_released();

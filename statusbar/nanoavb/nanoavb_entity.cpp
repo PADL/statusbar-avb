@@ -2746,13 +2746,19 @@ auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     bool const in_force = value_in_force(command_type, command_body);  // nothing to notify or save
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
-    if (r.status == AEM_STATUS_SUCCESS && !in_force) {
-        emit_unsolicited(command_type, std::span<uint8_t const>{echo.data(), r.size});
+    return announce_local_change(command_type, r.status, std::span<uint8_t const>{echo.data(), r.size}, in_force);
+}
+
+auto AemCommandHandler::announce_local_change(
+    uint16_t const command_type, uint8_t const status, std::span<uint8_t const> const echo, bool const in_force) -> uint8_t
+{
+    if (status == AEM_STATUS_SUCCESS && !in_force) {
+        emit_unsolicited(command_type, echo);
         if (is_persistent_setting_command(command_type) && callbacks_.on_settings_changed) {
             callbacks_.on_settings_changed(command_type);
         }
     }
-    return r.status;
+    return status;
 }
 
 void AemCommandHandler::controller_available_response_received()
