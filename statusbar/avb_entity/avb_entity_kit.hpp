@@ -149,12 +149,12 @@ class AvbEntityKit
     /// A link up: an unshaped port's speed and MTU read again (a link may still be down at start()), a change
     /// declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified.
     void on_link_up(TimePoint time);
-    /// gPTP grandmaster found or changed / lost (EntityUpkeep wires these to
-    /// the Announce handler): drives the talker streams' AVTP tu bit (Milan
-    /// v1.2 Section 4.3.5.2, Annex B.1.1). Reactor thread.
-    void note_grandmaster_changed()
+    /// gPTP grandmaster @p grandmaster found or changed / lost (EntityUpkeep wires these to the Announce
+    /// handler): drives AVTP tu (Milan v1.2 Section 4.3.5.2, Annex B.1.1); GPTP_GM_CHANGED counts only an
+    /// identity other than the last one found. Reactor thread.
+    void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
     {
-        host_.note_grandmaster_changed();
+        host_.note_grandmaster_changed(grandmaster);
         talker_->note_grandmaster_changed(net::monotonic_ns());  // the tu window runs on the talker's clock
     }
     void note_grandmaster_lost()

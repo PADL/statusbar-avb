@@ -475,8 +475,11 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
     host->on_link_up(TimePoint{});
     host->on_link_down(TimePoint{});
     host->on_link_up(TimePoint{});
-    host->note_grandmaster_changed();  // the first: found, not changed
-    host->note_grandmaster_changed();
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);  // the first: found, not changed
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(gm_a);  // the same one found again: not changed
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
     EXPECT_TRUE(host->fill_counters(DESCRIPTOR_AVB_INTERFACE, 0, valid, counters));
     EXPECT_EQ(valid, 0x23U);
     EXPECT_EQ(counters[0], 2U);  // LINK_UP
