@@ -50,8 +50,6 @@ class PulseLock
     [[nodiscard]] auto locked() const noexcept -> bool { return locked_; }
     /// The last pulse's PHC time less its whole second (ns); 0 before one.
     [[nodiscard]] auto offset_ns() const noexcept -> int64_t { return offset_ns_; }
-    /// Local time of the last pulse, which expire() checks silence against (0: none yet).
-    [[nodiscard]] auto last_pulse_ns() const noexcept -> int64_t { return last_pulse_ns_; }
 
   private:
     /// Notes the latest pulse checked @p good (false: off, or silence); whether locked() changed.
