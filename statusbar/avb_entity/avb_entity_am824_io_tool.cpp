@@ -401,7 +401,7 @@ MainLoopResult run_main_loop(
 
     while (!realtime::is_shutdown_requested()) {
         (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
+        (void)reactor.poll_once(nanoavb::MaapNetHandler::PROTOCOL_TICK_PERIOD_MS);
 
         // Check for state changes to reset watchdog
         auto const current_state = entity.state_string();
