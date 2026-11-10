@@ -342,6 +342,8 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
     sid.set_unique_id(7);
 
     std::vector<ListenerReservationState> state_changes;
+    std::vector<TimePoint> change_times;  // the time each change was told
+    std::vector<TimePoint> event_times;   // the receive_packet()/tick() time it fired from
     MsrpHandler<> talker{MsrpConfig{}, MsrpCallbacks{.send_packet = [&talker_out](std::span<uint8_t const> p) {
                              talker_out.emplace_back(p.begin(), p.end());
                              return true;
@@ -355,9 +357,11 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
                     return true;
                 },
             .on_listener_state_change =
-                [&](StreamId const& s, ListenerReservationState state) {
+                [&](StreamId const& s, ListenerReservationState state, TimePoint told) {
                     if (s == sid) {
                         state_changes.push_back(state);
+                        change_times.push_back(told);
+                        event_times.push_back(now);
                     }
                 }}};
 
@@ -395,6 +399,8 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
     EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
     EXPECT_TRUE(!state_changes.empty());
     EXPECT_EQ(state_changes.back(), ListenerReservationState::Ready);
+    // The hook is told the time of the receive_packet()/tick() it fired from.
+    EXPECT_TRUE(change_times == event_times);
 
     // A fresh attach while the talker is advertising is immediately Ready.
     statusbar::tsn::StreamId sid2 = sid;

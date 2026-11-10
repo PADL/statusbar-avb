@@ -207,11 +207,20 @@ struct MsrpCallbacks
     /// @return true if send was successful
     statusbar::sg14::inplace_function<bool(std::span<uint8_t const> packet), 64> send_packet;
 
-    /// Called when talker stream reservation state changes
-    statusbar::sg14::inplace_function<void(StreamId const& stream_id, TalkerReservationState state), 64> on_talker_state_change;
+    /// Called when talker stream reservation state changes, told the time of
+    /// the call that changed it. Reserved: the handler declares its own talker
+    /// state from talker_advertise()/talker_withdraw() and fires nothing here
+    /// yet; a consumer written against it gets the time once it does.
+    statusbar::sg14::inplace_function<void(StreamId const& stream_id, TalkerReservationState state, TimePoint now), 64>
+        on_talker_state_change;
 
-    /// Called when listener stream reservation state changes
-    statusbar::sg14::inplace_function<void(StreamId const& stream_id, ListenerReservationState state), 64> on_listener_state_change;
+    /// Called when an attached listener stream's declaration changes because
+    /// the remote talker's registration did (AskingFailed <-> Ready, see
+    /// on_remote_talker_changed). Fires from receive_packet()/tick(), told that
+    /// call's time: a Milan sink's re-probe timer starts from the event's
+    /// instant, not from whatever the consumer has lying around.
+    statusbar::sg14::inplace_function<void(StreamId const& stream_id, ListenerReservationState state, TimePoint now), 64>
+        on_listener_state_change;
 
     /// Called when the set of remote listeners for one of OUR advertised talker
     /// streams changes. `ready` is true when at least one registered listener
@@ -596,31 +605,41 @@ class MsrpHandler
     /// Failed registered, or the talker left): re-derive the declaration of
     /// an attached listener stream — AskingFailed -> Ready when the
     /// Advertise appears, Ready -> AskingFailed when it goes away — and
-    /// surface the change through on_listener_state_change. Fires from
-    /// receive_packet()/tick() via the participant observer.
+    /// surface the change through on_listener_state_change, told the time
+    /// of the receive_packet()/tick() this fires from (last_event_time_).
     void on_remote_talker_changed(tsn::StreamId const& sid)
     {
         for (auto& stream : listener_streams_) {
-            if (stream.stream_id != sid) {
-                continue;
-            }
-            bool const ready = talker_advertise_registered(sid);
-            ListenerReservationState const want = ready ? ListenerReservationState::Ready : ListenerReservationState::AskingFailed;
-            if (stream.state != ListenerReservationState::Ready && stream.state != ListenerReservationState::AskingFailed) {
-                return;  // not attached (Idle/withdrawn): nothing to re-declare
-            }
-            if (stream.state == want) {
+            if (stream.stream_id == sid) {
+                redeclare_attached_listener(stream);
                 return;
             }
-            stream.state = want;
-            (void)participant_.declare_listener(
-                sid,
-                ready ? statusbar::srp::msrp::ListenerDeclaration::Ready : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
-                last_event_time_);
-            if (callbacks_.on_listener_state_change) {
-                callbacks_.on_listener_state_change(sid, stream.state);
-            }
+        }
+    }
+
+    /// Re-derive one attached listener stream's declaration from the remote
+    /// talker's registration and declare it when it changed, telling the
+    /// on_listener_state_change hook the event's time. A stream that is not
+    /// attached (Idle/withdrawn) has nothing to re-declare.
+    [[nodiscard]] static constexpr auto listener_is_attached(ListenerReservationState const state) noexcept -> bool
+    {
+        return state == ListenerReservationState::Ready || state == ListenerReservationState::AskingFailed;
+    }
+
+    void redeclare_attached_listener(ListenerStreamSrpInfo& stream)
+    {
+        bool const ready = talker_advertise_registered(stream.stream_id);
+        ListenerReservationState const want = ready ? ListenerReservationState::Ready : ListenerReservationState::AskingFailed;
+        if (!listener_is_attached(stream.state) || stream.state == want) {
             return;
+        }
+        stream.state = want;
+        (void)participant_.declare_listener(
+            stream.stream_id,
+            ready ? statusbar::srp::msrp::ListenerDeclaration::Ready : statusbar::srp::msrp::ListenerDeclaration::AskingFailed,
+            last_event_time_);
+        if (callbacks_.on_listener_state_change) {
+            callbacks_.on_listener_state_change(stream.stream_id, stream.state, last_event_time_);
         }
     }
 
