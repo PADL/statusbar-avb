@@ -270,7 +270,7 @@ struct ListenerStreams
 
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
-    /// The slot @p frame is for: its kind and its connected stream_id; nullptr when none.
+    /// The slot @p frame is for: its connected stream_id, its kind first; nullptr when none.
     [[nodiscard]] auto rx_slot_for(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
     /// One AM824, AAF or CRF frame into @p slot (held under its guard) and its engaged @p ctx: checked,
     /// delivered, counted.

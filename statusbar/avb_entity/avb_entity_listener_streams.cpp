@@ -556,8 +556,12 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         return;
     }
     std::unique_lock const entry{slot->guard, std::try_to_lock};
-    if (!entry.owns_lock() || slot->kind.load(std::memory_order_relaxed) != subtype_kind(frame)) {
-        return;  // being re-shaped (reformat_stream), or re-shaped to another kind since matched
+    if (!entry.owns_lock()) {
+        return;  // being re-shaped (reformat_stream)
+    }
+    if (slot->kind.load(std::memory_order_relaxed) != subtype_kind(frame)) {
+        count_rejected(*slot, frame, /*ts_sparse=*/false, gptp_now_ns);  // another subtype on its stream_id
+        return;
     }
     if (slot->am824) {
         receive_am824(*slot, *slot->am824, frame, gptp_now_ns);
@@ -581,15 +585,15 @@ auto ListenerStreams::subtype_kind(std::span<uint8_t const> const frame) noexcep
 
 auto ListenerStreams::rx_slot_for(std::span<uint8_t const> const frame) -> ListenerStreamSlot*
 {
-    // The slot whose kind matches the AVTP subtype and whose connected stream_id the frame
-    // carries (the socket also sees our own TX and other streams); stream_ids are unique.
+    // The slot whose connected stream_id the frame carries (the socket also sees our own TX and
+    // other streams), one whose kind matches the AVTP subtype first; else any, to count it rejected.
     auto const kind = subtype_kind(frame);
-    if (kind == StreamKind::other) {
-        return nullptr;
+    auto const for_frame = [&](ListenerStreamSlot const& s) { return frame_is_for_listener(s.spec.index, frame); };
+    auto* found = std::ranges::find_if(
+        slots_, [&](ListenerStreamSlot const& s) { return s.kind.load(std::memory_order_relaxed) == kind && for_frame(s); });
+    if (found == slots_.end()) {
+        found = std::ranges::find_if(slots_, for_frame);
     }
-    auto* const found = std::ranges::find_if(slots_, [&](ListenerStreamSlot const& s) {
-        return s.kind.load(std::memory_order_relaxed) == kind && frame_is_for_listener(s.spec.index, frame);
-    });
     return found != slots_.end() ? &*found : nullptr;
 }
 
