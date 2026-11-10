@@ -35,10 +35,11 @@ void move_class_a_vlan(
     }
 }
 
-/// The Class A (traffic class 0) priority and VID of @p info; zeros when it has none.
+/// The Class A priority and VID of @p info (its traffic class the SRclassID); zeros when it has none.
 auto class_a_mapping(nanoavb::AvbInfo const& info) -> std::pair<uint8_t, uint16_t>
 {
-    auto const* const m = std::ranges::find_if(info.msrp_mappings, [](auto const& x) { return x.traffic_class == 0; });
+    auto const* const m =
+        std::ranges::find_if(info.msrp_mappings, [](auto const& x) { return x.traffic_class == srp::msrp::SR_CLASS_A; });
     return m != info.msrp_mappings.end() ? std::pair{m->priority, m->vlan_id} : std::pair<uint8_t, uint16_t>{};
 }
 
@@ -430,12 +431,10 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
     }
     if (net_handlers_ != nullptr && net_handlers_->msrp_handler().valid()) {
         info.flags |= SRP_ENABLED;
-        // One mapping per declared SR class: class A is traffic class 0, class B 1.
+        // One mapping per declared SR class, its traffic_class the SRclassID.
         auto const& domain = components_.msrp_handler.domain();
         info.msrp_mappings.push_back(
-            {.traffic_class = static_cast<uint8_t>(domain.sr_class_id == srp::msrp::SR_CLASS_A ? 0 : 1),
-             .priority = domain.sr_class_priority,
-             .vlan_id = domain.sr_class_vid});
+            {.traffic_class = msrp_traffic_class(domain), .priority = domain.sr_class_priority, .vlan_id = domain.sr_class_vid});
     }
     if (net_handlers_ != nullptr) {
         auto const& announce = net_handlers_->gptp_handler();
