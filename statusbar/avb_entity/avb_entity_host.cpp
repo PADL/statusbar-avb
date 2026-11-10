@@ -431,10 +431,11 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
     }
     if (net_handlers_ != nullptr && net_handlers_->msrp_handler().valid()) {
         info.flags |= SRP_ENABLED;
-        // One mapping per declared SR class, its traffic_class the SRclassID.
+        // One mapping per declared SR class, its traffic_class the SRclassID (6 class A, 5 class B),
+        // as Milan devices report it (IEEE 1722.1-2021 Clause 7.4.40.2.1).
         auto const& domain = components_.msrp_handler.domain();
         info.msrp_mappings.push_back(
-            {.traffic_class = msrp_traffic_class(domain), .priority = domain.sr_class_priority, .vlan_id = domain.sr_class_vid});
+            {.traffic_class = domain.sr_class_id, .priority = domain.sr_class_priority, .vlan_id = domain.sr_class_vid});
     }
     if (net_handlers_ != nullptr) {
         auto const& announce = net_handlers_->gptp_handler();

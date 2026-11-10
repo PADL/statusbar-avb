@@ -86,13 +86,6 @@ using statusbar::Status;
 [[nodiscard]] auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity)
     -> nanoavb::AsPath;
 
-/// The traffic_class of GET_AVB_INFO's msrp_mapping for SR class Domain @p domain (IEEE 1722.1-2021
-/// Clause 7.4.40.2.1): its SRclassID (6 class A, 5 class B), as Milan devices report it.
-[[nodiscard]] constexpr auto msrp_traffic_class(nanoavb::DomainInfo const& domain) noexcept -> uint8_t
-{
-    return domain.sr_class_id;
-}
-
 /// The shared AVB entity control plane: state machines + NanoAvbComponents + net
 /// handlers + lifecycle. Owned by a concrete entity (composition). Non-copyable and
 /// non-movable (NanoAvbComponents pins itself), so build it in place in the entity's
