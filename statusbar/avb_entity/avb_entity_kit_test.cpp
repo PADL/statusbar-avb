@@ -3029,25 +3029,32 @@ TEST(avb_entity_kit_counters, a_rejected_crf_pdu_keeps_its_place_in_the_sequence
     avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
     std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
     uint64_t ts = 9'000'000'000ULL;
-    auto const send = [&](uint8_t const version) {
+    auto const send = [&](uint8_t const type, bool const sv) {
         std::array<uint64_t, 1> const one{ts};
         EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
         avtp::CrfPdu pdu{};
         span_load(pdu, std::span<uint8_t const>{frame}.first(avtp::CrfPdu::HEADER_LENGTH));
-        pdu.set_version(version);
+        pdu.set_type(type);
+        pdu.set_sv(sv);
         span_store(std::span{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
         listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
         ts += 2'000'000;
     };
     int64_t const t = MilanKit::steady_ns();
     p.l.kit.poll_counters(t);
-    send(0);
-    send(1);  // not a CRF version this input reads
-    send(0);
+    send(1, true);
+    send(7, true);  // a CRF type IEEE 1722-2016 does not define
+    send(1, true);
     p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
     EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
     EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
+
+    // sv=0 is no stream data of this stream: not counted, and the sequence passes over it.
+    send(1, false);
+    p.l.kit.poll_counters(t + (2 * AvbEntityKit::COUNTERS_INTERVAL_NS));
+    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
+    EXPECT_EQ(c.counters[8].get(), 1U);
 }
 
 // A CRF PDU cut short past its AVTP common header still counts in UNSUPPORTED_FORMAT and holds its
