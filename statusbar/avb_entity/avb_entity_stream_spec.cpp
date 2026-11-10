@@ -67,12 +67,12 @@ auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion 
     uint16_t const spare = version == nanoavb::MilanVersion::v1_2 ? MILAN_TSPEC_SPARE_BYTES : 0;
     switch (format.kind) {
         case StreamKind::aaf: {
-            // Constant blocks at a rate the class A cadence divides (PCM32 48 kHz N ch: 24*N + 24);
-            // at 44.1, 88.2 and 176.4 kHz a PDU carries one sample more now and then.
+            // Constant blocks (PCM32 48 kHz N ch: 24*N + 24); at 44.1, 88.2 and 176.4 kHz the same
+            // blocks as at 48, 96 and 192 kHz, sent a little less often than once per interval.
             if (format.sample_rate_hz == 0) {
                 return 0;
             }
-            auto const samples = (format.sample_rate_hz + CLASS_A_PACKETS_PER_SEC - 1) / CLASS_A_PACKETS_PER_SEC;
+            auto const samples = class_a_samples_per_packet(format.sample_rate_hz);
             return static_cast<uint16_t>(
                 avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(samples)) + spare);
         }
@@ -83,7 +83,7 @@ auto srp_max_frame_size(StreamFormatFields const& format, nanoavb::MilanVersion 
             if (format.sample_rate_hz == 0) {
                 return 0;
             }
-            auto const samples = class_a_samples_per_packet(format.sample_rate_hz) + 1;
+            auto const samples = (format.sample_rate_hz / CLASS_A_PACKETS_PER_SEC) + 1;
             return static_cast<uint16_t>(
                 avtp::am824_packet_size(static_cast<uint8_t>(format.channels), static_cast<uint8_t>(samples)));
         }

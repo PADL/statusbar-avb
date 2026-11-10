@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory_resource>
+#include <optional>
 #include <span>
 #include <thread>
 #include <utility>
@@ -1148,6 +1149,38 @@ TEST(talker_crf, pdus_follow_the_media_clock_at_44_1_and_48_khz)
             EXPECT_TRUE(ts.has_value());
             EXPECT_TRUE(last == 0 || std::abs(static_cast<double>(*ts - last) - step_ns) <= 1.0);
             last = ts.value_or(0);
+        }
+    }
+}
+
+// A class A AAF stream carries the same samples in every PDU, at 44.1, 88.2 and 176.4 kHz as many as
+// at 48, 96 and 192 kHz, at most one PDU a wake, each timestamp that many samples after the last
+// (IEEE 1722-2016 Clause 7.7, Table 17; Milan v1.3 Section 6.2)
+TEST(talker_aaf, a_rate_off_the_class_a_cadence_sends_whole_blocks)
+{
+    struct Case
+    {
+        uint32_t rate;
+        uint64_t format;  // AAF INT_32, 2 channels
+        uint16_t samples;
+    };
+    for (auto const& c :
+         {Case{44'100, 0x0204022000806000ULL, 6},
+          Case{88'200, 0x020602200080C000ULL, 12},
+          Case{176'400, 0x0208022000818000ULL, 24}}) {
+        auto const sent = pdus_over_wakes(c.rate, c.format, 8000);  // one second
+        EXPECT_TRUE(sent.size() + 2 >= c.rate / c.samples && sent.size() <= c.rate / c.samples);
+        double const step_ns = 1.0e9 * c.samples / c.rate;
+        int last_wake = -1;
+        std::optional<uint32_t> last_ts;
+        for (auto const& pdu : sent) {
+            auto const aaf = avtp::aaf_parse_header(pdu.avtpdu);
+            EXPECT_TRUE(aaf.has_value() && aaf->sample_count() == c.samples);
+            EXPECT_TRUE(pdu.wake != last_wake);
+            uint32_t const ts = aaf.has_value() ? aaf->get_avtp_timestamp() : 0;
+            EXPECT_TRUE(!last_ts || std::abs(static_cast<double>(ts - *last_ts) - step_ns) <= 1.0);
+            last_wake = pdu.wake;
+            last_ts = ts;
         }
     }
 }

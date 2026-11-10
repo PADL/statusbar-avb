@@ -100,7 +100,7 @@ struct TalkerStreams
         , media_clock_{media_clock}
         , last_gptp_ns_{last_gptp_ns}
         , vlan_id_{config.vlan_id}
-        , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
+        , samples_per_packet_{class_a_samples_per_packet(config.sample_rate)}
         , mem_resource_{memory_resource}
     {}
 
@@ -299,8 +299,8 @@ struct TalkerStreams
     [[nodiscard]] auto transmit_crf_raw(
         TalkerStreamSlot& slot, std::span<uint64_t const> timestamps_ns, uint64_t launch_time_ns = 0) -> bool;
 
-    /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
-    /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
+    /// Class A wire cadence: at most one packet per 125 us; an AAF packet carries
+    /// class_a_samples_per_packet() samples (12 @ 96k and 88.2k, 6 @ 48k and 44.1k).
     static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = avb_entity::CLASS_A_PACKETS_PER_SEC;
 
     /// The most timestamps one CRF PDU carries: open_stream refuses a CRF
@@ -314,7 +314,7 @@ struct TalkerStreams
     std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
-    uint32_t samples_per_packet_;  ///< the media clock's per class A packet: 12 @ 96k, 6 @ 48k
+    uint32_t samples_per_packet_;  ///< per AAF packet: class_a_samples_per_packet() of the media clock's rate
     std::pmr::memory_resource* mem_resource_;
 
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
