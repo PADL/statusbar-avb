@@ -589,10 +589,7 @@ TEST(avb_entity_host_avb_info, get_avb_info_names_the_grandmaster_adp_names)
     host->note_parent_grandmaster(gm_b);
     EXPECT_EQ(host->avb_info(0).gptp_grandmaster_id, gm_b);
     EXPECT_TRUE(same());
-    statusbar::gptp::ClockIdentity const gm_c{0x0011'22FF'FE33'8899ULL};
-    adp.set_gptp_info(
-        statusbar::tsn::ClockIdentity{gm_c.to_eui64()}, 0, statusbar::sm::TimePoint{});  // EntityUpkeep's, before the host
-    host->note_grandmaster_changed(gm_c);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'8899ULL});
     EXPECT_EQ(host->avb_info(0).gptp_grandmaster_id, gm_b);
     EXPECT_TRUE(same());
 }
