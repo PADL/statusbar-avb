@@ -1448,12 +1448,22 @@ void AvbEntityKit::refresh_sink_registration(uint16_t const index, TimePoint con
 
 void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSink const& sink, TimePoint const now)
 {
-    // Once per settle, the probe answer's VID.
-    uint16_t const vid = sink.stream.vlan_id;
+    // Once per settle; a probe answer naming no VID (0) uses the matched Talker attribute's, when registered.
+    uint16_t const vid = sink.stream.vlan_id != 0 ? sink.stream.vlan_id : matched_talker_vid(sink);
     if (index < input_vid_.size() && input_vid_[index] == 0 && vid != 0) {
         input_vid_[index] = vid;
         join_sink_vlan(vid, now);
     }
+}
+
+auto AvbEntityKit::matched_talker_vid(atdecc::MilanSink const& sink) const -> uint16_t
+{
+    statusbar::tsn::StreamId sid{};
+    (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
+    auto const& msrp = host_.components().msrp_handler;
+    auto const* const failed = msrp.peer_talker_failed(sid);
+    auto const* const fv = failed != nullptr ? &failed->advertise : msrp.peer_talker_advertise(sid);
+    return fv != nullptr && fv->destination_address == sink.stream.dest_mac ? fv->vlan_identifier.get() : uint16_t{0};
 }
 
 auto AvbEntityKit::talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration
