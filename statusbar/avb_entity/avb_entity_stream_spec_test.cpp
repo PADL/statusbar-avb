@@ -170,10 +170,16 @@ TEST(stream_spec_tspec, milan_table_4_4_sizes)
     // AAF PCM32 96 kHz 8 ch: 48*8 + 24 = 408; CRF 1 ts/pdu: 28.
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
-    // 44.1 kHz: 5 or 6 samples a PDU, the TSpec sized for 6: 6*8*4 + 24 = 216.
+    // 44.1, 88.2 and 176.4 kHz: the 48, 96 and 192 kHz rows (6, 12 and 24 samples a PDU).
     auto const aaf_44k = decode_stream_format(0x020402200200C000ULL);
     EXPECT_EQ(aaf_44k.sample_rate_hz, 44'100U);
-    EXPECT_EQ(srp_max_frame_size(aaf_44k), 216);
+    EXPECT_EQ(srp_max_frame_size(aaf_44k), 216);                                      // 24*8 + 24
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(0x020602200200C000ULL)), 408);  // 88.2: 48*8 + 24
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(0x020802200200C000ULL)), 792);  // 176.4: 96*8 + 24
+    EXPECT_EQ(class_a_samples_per_packet(44'100), 6U);
+    EXPECT_EQ(class_a_samples_per_packet(88'200), 12U);
+    EXPECT_EQ(class_a_samples_per_packet(176'400), 24U);
+    EXPECT_EQ(class_a_samples_per_packet(48'000), 6U);
 
     // AM824 (not a Milan format) 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
