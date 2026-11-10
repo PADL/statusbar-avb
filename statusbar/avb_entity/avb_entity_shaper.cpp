@@ -1109,7 +1109,7 @@ void EntityShaper::program_admitted() noexcept
     for (uint16_t const index : admitted_) {
         for (auto const& spec : kit_.talker_specs()) {
             if (spec.index == index) {
-                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec, kit_.host().components().profile));
+                (void)class_a_streams.try_push_back(AvbEntityKit::talker_tspec(spec));
             }
         }
     }

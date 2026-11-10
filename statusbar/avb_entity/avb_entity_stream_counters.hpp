@@ -145,7 +145,7 @@ struct StreamOutputTotals
 /// AVTPDU, zeroed at each start; the optional signal presence (Section 5.3.7.7.1). Reactor thread only.
 struct StreamOutputIntervals
 {
-    /// GET_COUNTERS values, indexed by bit value position in Milan v1.2 (Table 5.17).
+    /// The counters, each at its V1_3_POSITIONS bit value position in GET_COUNTERS.
     enum Index : uint8_t
     {
         STREAM_START = 0,
@@ -154,7 +154,6 @@ struct StreamOutputIntervals
         TIMESTAMP_UNCERTAIN = 3,
         FRAMES_TX = 4,
     };
-    static constexpr uint32_t VALID = 0x0000'001FU;
     /// Each value's bit value position in Milan v1.3 (Table 5.14), IEEE 1722.1-2021's (Clause 7.4.42.2.5).
     static constexpr std::array<uint8_t, 5> V1_3_POSITIONS{0, 1, 3, 4, 7};
     /// ENTITY_SPECIFIC_9 and _10's positions: signal presence of channels 0-31 and 32-59 (Table 5.4).
