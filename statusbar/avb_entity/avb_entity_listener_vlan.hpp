@@ -4,9 +4,9 @@
 // SPDX-License-Identifier: MIT
 
 /// ListenerVlan: keeps the listener's SR-class VID on the NIC's receive VLAN filter by holding a
-/// down `<interface>.<vid>` VLAN link, or an up one with no address for IP listeners; SinkVlanFilters
-/// holds the other VIDs listener streams use. Never fatal; a failure is a warning. Linux only. See
-/// docs/SHAPER.md ("Listener VLAN").
+/// down `<interface>.<vid>` VLAN link, or an up one with no address for IP listeners; VlanFilterTable
+/// holds every VID an AVB listener receives on, refcounted. Never fatal; a failure is a warning. Linux
+/// only. See docs/SHAPER.md ("Listener VLAN").
 
 #if defined(__linux__)
 
@@ -96,19 +96,19 @@ class ListenerVlan
     std::string name_{};
 };
 
-/// The listener streams' VIDs besides the SR-class one (ListenerVlan's) on the NIC's receive VLAN
-/// filter: a Milan sink settles on the VID its talker's probe answer gives (Milan v1.3 Section 5.5.3.6).
-/// One ListenerVlan per VID held, at most @p Capacity.
+/// Every VID the listener receives on (the SR-class VID and each settled input's) on the NIC's receive
+/// VLAN filter, refcounted: one ListenerVlan, and so one `<interface>.<vid>` link, per VID while anything
+/// holds it, deleted with the last holder. A VID moves by holding the new one before dropping the old.
 template <size_t Capacity>
-class SinkVlanFilters
+class VlanFilterTable
 {
   public:
-    explicit SinkVlanFilters(logging::Logger log) noexcept
+    explicit VlanFilterTable(logging::Logger log) noexcept
         : log_{log}
     {}
 
-    /// Hold VIDs through @p control on @p interface_name (@p ifindex) from now on, those held before released;
-    /// @p control must outlive release().
+    /// Hold VIDs through @p control on @p interface_name (@p ifindex) from now on, those held before
+    /// released; @p control must outlive release().
     void bind(net::vlan::VlanControl& control, std::string_view const interface_name, int const ifindex)
     {
         release();
@@ -116,75 +116,92 @@ class SinkVlanFilters
         interface_name_ = interface_name;
         ifindex_ = ifindex;
     }
-    /// Put @p vid on the filter; a no-op when held or unbound, warned when Capacity are held.
+    [[nodiscard]] auto bound() const noexcept -> bool { return control_ != nullptr; }
+    /// Hold @p vid once more (1..4094; others, or unbound, nothing); its link is created at the first hold,
+    /// and tried again at each later one while it is missing (a refused create is warned).
     void hold(uint16_t const vid)
     {
-        if (control_ == nullptr || slot_of(vid) != nullptr) {
+        if (control_ == nullptr || vid == 0 || vid > ListenerVlan::MAX_VID) {
             return;
         }
-        auto* const free = slot_of(0);
-        if (free == nullptr) {
-            log_.warning("listener: VID {} not put on the NIC's VLAN filter: {} VIDs held already", vid, Capacity);
+        if (auto* const held = find(vid); held != nullptr) {
+            ++held->count;
+            follow(*held);
             return;
         }
-        free->emplace(log_);
-        (*free)->bind(*control_, interface_name_, ifindex_);
-        (*free)->follow(vid);
-        if ((*free)->vid() != vid) {
-            free->reset();  // not created (warned): the slot stays free, the next hold tries again
-        }
+        add(vid);
     }
-    /// Remove @p vid from the filter (its link deleted if created here).
+    /// Drop one hold of @p vid; the last deletes its link (if created here).
     void drop(uint16_t const vid)
     {
-        if (auto* const held = slot_of(vid); held != nullptr) {
-            held->reset();
+        auto* const held = find(vid);
+        if (held != nullptr && --held->count == 0) {
+            clear(*held);
         }
     }
-    /// Hold each of @p vids but @p class_a, which ListenerVlan holds.
-    template <class Vids>
-    void hold_all(Vids const& vids, uint16_t const class_a)
-    {
-        for (uint16_t const vid : vids) {
-            if (vid != class_a) {
-                hold(vid);
-            }
-        }
-    }
-    /// Drop each VID held that is @p class_a or not one of @p vids: before ListenerVlan follows a new
-    /// @p class_a, so that it creates (and owns) its link.
-    template <class Vids>
-    void drop_except(Vids const& vids, uint16_t const class_a)
-    {
-        for (auto& link : links_) {
-            if (link && (link->vid() == class_a || !std::ranges::contains(vids, link->vid()))) {
-                link.reset();
-            }
-        }
-    }
-    /// Remove every VID from the filter and unbind.
+    /// Drop every VID and unbind.
     void release()
     {
-        for (auto& link : links_) {
-            link.reset();
+        for (auto& entry : entries_) {
+            clear(entry);
         }
         control_ = nullptr;
     }
-    /// Whether @p vid is held.
-    [[nodiscard]] auto holds(uint16_t const vid) const noexcept -> bool
+    /// How many holds @p vid has.
+    [[nodiscard]] auto holds(uint16_t const vid) const noexcept -> uint16_t
     {
-        return std::ranges::any_of(links_, [vid](auto const& link) { return link && link->vid() == vid; });
+        auto const* const held = std::ranges::find_if(entries_, [vid](Entry const& e) { return e.count != 0 && e.vid == vid; });
+        return held != entries_.end() ? held->count : uint16_t{0};
     }
 
   private:
-    /// The slot holding @p vid; with 0, a free one; nullptr when none.
-    [[nodiscard]] auto slot_of(uint16_t const vid) noexcept -> std::optional<ListenerVlan>*
+    struct Entry
     {
-        auto* const found = std::ranges::find_if(links_, [vid](auto const& link) { return link ? link->vid() == vid : vid == 0; });
-        return found != links_.end() ? &*found : nullptr;
+        uint16_t vid{0};
+        uint16_t count{0};  ///< 0: free
+        std::optional<ListenerVlan> link{};
+    };
+
+    /// Free @p entry, its link deleted if created here.
+    static void clear(Entry& entry) noexcept
+    {
+        entry.link.reset();
+        entry.vid = 0;
+        entry.count = 0;
     }
 
-    std::array<std::optional<ListenerVlan>, Capacity> links_{};
+    [[nodiscard]] auto find(uint16_t const vid) noexcept -> Entry*
+    {
+        auto* const held = std::ranges::find_if(entries_, [vid](Entry const& e) { return e.count != 0 && e.vid == vid; });
+        return held != entries_.end() ? &*held : nullptr;
+    }
+    /// A first hold of @p vid in a free entry; warned when Capacity are held.
+    void add(uint16_t const vid)
+    {
+        auto* const free = std::ranges::find(entries_, uint16_t{0}, &Entry::count);
+        if (free == entries_.end()) {
+            log_.warning("listener: VID {} not put on the NIC's VLAN filter: {} VIDs held already", vid, Capacity);
+            return;
+        }
+        open(*free, vid);
+    }
+    /// @p entry holding @p vid once, its link created.
+    void open(Entry& entry, uint16_t const vid)
+    {
+        entry.vid = vid;
+        entry.count = 1;
+        entry.link.emplace(log_).bind(*control_, interface_name_, ifindex_);
+        follow(entry);
+    }
+    /// Create @p entry's link unless it is there.
+    static void follow(Entry& entry)
+    {
+        if (entry.link && entry.link->vid() != entry.vid) {
+            entry.link->follow(entry.vid);
+        }
+    }
+
+    std::array<Entry, Capacity> entries_{};
     net::vlan::VlanControl* control_{nullptr};
     std::string interface_name_{};
     int ifindex_{0};
