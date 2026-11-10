@@ -261,19 +261,20 @@ TEST(ptp_management, parses_port_data_set)
     EXPECT_FALSE(parse_management_message(response(management_id::port_data_set, std::vector<uint8_t>(25))).has_value());
 }
 
-// linuxptp's PORT_DATA_SET_NP (struct port_ds_np): neighborPropDelayThresh 800 ns, asCapable 1
-TEST(ptp_management, parses_port_data_set_np)
+// linuxptp's CMLDS_INFO_NP (struct cmlds_info_np): meanLinkDelay 74.25 ns, a neighbor rate ratio, asCapable 1
+TEST(ptp_management, parses_cmlds_info_np)
 {
-    auto const parsed =
-        parse_management_message(response(management_id::port_data_set_np, {0x00, 0x00, 0x03, 0x20, 0x00, 0x00, 0x00, 0x01}));
+    std::vector<uint8_t> const data{0x00, 0x00, 0x00, 0x00, 0x00, 0x4A, 0x40, 0x00, 0xFF, 0xFF, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x01};
+    auto const parsed = parse_management_message(response(management_id::cmlds_info_np, data));
     EXPECT_TRUE(parsed.has_value());
-    auto const* np = parsed ? std::get_if<PortDataSetNp>(&parsed->data) : nullptr;
-    EXPECT_TRUE(np != nullptr);
-    if (np != nullptr) {
-        EXPECT_EQ(np->neighbor_prop_delay_thresh_ns, uint32_t{800});
-        EXPECT_TRUE(np->as_capable);
+    auto const* cmlds = parsed ? std::get_if<CmldsInfoNp>(&parsed->data) : nullptr;
+    EXPECT_TRUE(cmlds != nullptr);
+    if (cmlds != nullptr) {
+        EXPECT_EQ(time_interval_ns(cmlds->mean_link_delay_scaled), int64_t{74});
+        EXPECT_EQ(cmlds->scaled_neighbor_rate_ratio, int32_t{-1024});
+        EXPECT_TRUE(cmlds->as_capable == AsCapable::capable);
     }
-    EXPECT_FALSE(parse_management_message(response(management_id::port_data_set_np, std::vector<uint8_t>(7))).has_value());
+    EXPECT_FALSE(parse_management_message(response(management_id::cmlds_info_np, std::vector<uint8_t>(15))).has_value());
 }
 
 TEST(ptp_management, parses_port_properties_np)
@@ -556,11 +557,14 @@ auto count(std::vector<Received> const& seen, uint16_t const id, ManagementActio
 }
 
 /// The subscription a client holds once ptp4l answers its SET or GET.
-auto held_subscription(uint16_t const duration_s) -> std::vector<uint8_t>
+auto held_subscription(uint16_t const duration_s, bool const cmlds = false) -> std::vector<uint8_t>
 {
     SubscribeEventsNp held{.duration_s = duration_s};
     held.add(ManagementEvent::port_state);
     held.add(ManagementEvent::parent_data_set);
+    if (cmlds) {
+        held.add(ManagementEvent::cmlds);
+    }
     auto const data = encode(held);
     return response(management_id::subscribe_events_np, {data.begin(), data.end()});
 }
@@ -1051,13 +1055,10 @@ TEST(ptp_management, without_a_subscription_the_parent_is_polled)
     std::filesystem::remove_all(dir);
 }
 
-#endif  // __linux__
-
-TEST_MAIN(statusbar_ptpclient, ptpclient_management_test)
-
-// The followed port's asCapable: PORT_DATA_SET_NP is fetched with the port and polled with its PORT_DATA_SET
-// (ptp4l notifies no change of it); another port's answer is not the followed one's
-TEST(ptp_management, client_follows_the_named_port_s_as_capable)
+// The followed port's asCapable: CMLDS_INFO_NP is fetched once and then notified (NOTIFY_CMLDS, named by
+// the header's sourcePortIdentity); another port's is not the followed one's; a state change of the
+// followed port fetches it once, and DISABLED or FAULTY drops it (linuxptp keeps it then); nothing polls it
+TEST(ptp_management, client_follows_the_named_port_s_as_capable_from_notifications)
 {
     auto const dir = socket_dir("ascapable");
     Ptp4l ptp4l{dir};
@@ -1071,25 +1072,50 @@ TEST(ptp_management, client_follows_the_named_port_s_as_capable)
     }
     auto& c = **client;
     c.handle(PARENT_RESPONSE, 10);
-    EXPECT_EQ(count(ptp4l.drain(), management_id::port_data_set_np, ManagementAction::get), 1);
-    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 11);
-    auto const from_port = [](uint16_t const port, bool const as_capable) {
-        auto out = response(
-            management_id::port_data_set_np, {0x00, 0x00, 0x03, 0x20, 0x00, 0x00, 0x00, as_capable ? uint8_t{1} : uint8_t{0}});
+    auto const fetch = ptp4l.drain();
+    EXPECT_EQ(count(fetch, management_id::cmlds_info_np, ManagementAction::get), 1);
+    c.handle(held_subscription(6, true), 11);
+    EXPECT_TRUE(c.state().subscribed);  // NOTIFY_CMLDS held with the others
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 12);
+    c.handle(PORT_RESPONSE, 13);
+    auto const from_port = [](uint16_t const port, uint8_t const as_capable) {
+        std::vector<uint8_t> data(CmldsInfoNp::SIZE);  // meanLinkDelay 0, rate ratio 0
+        data.back() = as_capable;
+        auto out = response(management_id::cmlds_info_np, data);
         std::array<uint8_t, 8> const bridge{0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00};  // BRIDGE
         std::copy(bridge.begin(), bridge.end(), out.begin() + 20);
         out[29] = static_cast<uint8_t>(port);
         return out;
     };
-    c.handle(from_port(1, true), 12);
+    c.handle(from_port(1, 1), 14);
     EXPECT_FALSE(last.as_capable.has_value());
-    c.handle(from_port(2, true), 13);
-    EXPECT_TRUE(last.as_capable == std::optional<bool>{true});
-    c.handle(from_port(2, false), 14);
-    EXPECT_TRUE(last.as_capable == std::optional<bool>{false});
+    c.handle(from_port(2, 1), 15);
+    EXPECT_TRUE(last.as_capable == std::optional{AsCapable::capable});
+    c.handle(from_port(2, 0), 16);
+    EXPECT_TRUE(last.as_capable == std::optional{AsCapable::not_capable});
+    c.handle(from_port(2, 2), 17);  // asCapable true: always
+    EXPECT_TRUE(last.as_capable == std::optional{AsCapable::always_capable});
+    c.handle(from_port(2, 1), 18);
     (void)ptp4l.drain();
+
+    // DISABLED: linuxptp keeps asCapable as it was, so the client drops it without asking.
+    auto const port_in = [](PortState const state) {
+        auto data = port_data(2, int64_t{74} * 65536);
+        data[10] = static_cast<uint8_t>(state);
+        return response(management_id::port_data_set, data);
+    };
+    c.handle(port_in(PortState::disabled), 20);
+    EXPECT_TRUE(last.as_capable == std::optional{AsCapable::not_capable});
+    EXPECT_EQ(count(ptp4l.drain(), management_id::cmlds_info_np, ManagementAction::get), 0);
+    c.handle(port_in(PortState::disabled), 21);   // the same state: nothing
+    c.handle(port_in(PortState::listening), 22);  // another change: fetched once
+    EXPECT_EQ(count(ptp4l.drain(), management_id::cmlds_info_np, ManagementAction::get), 1);
     c.tick(3 * SECOND);
-    EXPECT_EQ(count(ptp4l.drain(), management_id::port_data_set_np, ManagementAction::get), 1);
+    EXPECT_EQ(count(ptp4l.drain(), management_id::cmlds_info_np, ManagementAction::get), 0);
     client->reset();
     std::filesystem::remove_all(dir);
 }
+
+#endif  // __linux__
+
+TEST_MAIN(statusbar_ptpclient, ptpclient_management_test)
