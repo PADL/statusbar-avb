@@ -976,6 +976,16 @@ void ListenerStreams::note_input_unbound(uint16_t const descriptor_index)
 
 namespace {
 
+/// A new CRF source for the slot (StreamCrfFn); a rebind to another stream's first frame continues
+/// no sequence (Milan v1.3 Section 5.3.8.10).
+void count_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id) noexcept
+{
+    slot.connections.fetch_add(1, std::memory_order_release);
+    if (slot.connection.stream_id != ieee::Eui64{} && slot.connection.stream_id != stream_id) {
+        slot.counters.restart_run.store(true, std::memory_order_relaxed);
+    }
+}
+
 auto to_stream_id(ieee::Eui64 const& id) -> tsn::StreamId
 {
     tsn::StreamId sid{};
@@ -1087,7 +1097,7 @@ void ListenerStreams::on_listener_connected(
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
-    slot->connections.fetch_add(1, std::memory_order_release);  // a new CRF source (StreamCrfFn)
+    count_connection(*slot, stream_id);
     // One attachment per stream a slot holds: a slot already on this stream
     // re-declares nothing, so attach and withdraw stay one-for-one however
     // many times a controller repeats the CONNECT.

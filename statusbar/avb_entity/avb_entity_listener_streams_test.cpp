@@ -1269,3 +1269,28 @@ TEST(listener_crf, a_rebind_steps_the_crf_source_generation)
     send(kAafId, false);
     EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2, 2, 3, 4}));
 }
+
+// A BIND_RX that moves a bound input to another stream, without an unbind, starts its sequence
+// again (Milan v1.3 Section 5.3.8.10); the same stream bound again continues it.
+TEST(listener_counters, a_rebind_to_another_stream_counts_no_sequence_mismatch)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(audio_specs()[1]).has_value());
+    auto* const slot = ls.slot_for(1);
+    auto const frame = [slot](uint8_t const seq) {
+        tally_stream_input_packet(slot->counters, seq, 0, false, false, false, true, 0, false, 0, 5'000, 48'000);
+    };
+    auto const first = ieee::Eui64{}.from_uint64(0x0200000000000101ULL);
+    auto const second = ieee::Eui64{}.from_uint64(0x0200000000000102ULL);
+    ls.on_listener_connected(1, first, kAafGroup, sm::Clock::now());
+    frame(36);
+    frame(37);
+    ls.on_listener_connected(1, second, kAafGroup, sm::Clock::now());
+    frame(200);
+    EXPECT_EQ(slot->counters.seq_num_mismatch.load(), 0U);
+    ls.on_listener_connected(1, second, kAafGroup, sm::Clock::now());
+    frame(202);
+    EXPECT_EQ(slot->counters.seq_num_mismatch.load(), 1U);
+}
