@@ -73,7 +73,7 @@ MBLA; the MOTU 16A lists `0x00a00N0860000800` (nb, ut) on its inputs and
 `decode_stream_format` decodes as `StreamKind::am824` only what the kit
 carries (`am824_format_supported`): AM824 data (evt 0), non-blocking, MBLA
 only (DBS equal to the MBLA count, no IEC 60958, MIDI or SMPTE), 32 to 192
-kHz, and 1, 2, 4, 6 or 8 channels. Any other 61883 word is `StreamKind::other`,
+kHz, and 1 to 64 channels in a frame within the MTU. Any other 61883 word is `StreamKind::other`,
 so SET_STREAM_FORMAT refuses it NOT_SUPPORTED and a model naming it opens no
 slot. The `ut` and `sc` flags are read (`avtp::Am824StreamFormat`) but not
 honoured: the stream carries exactly DBS channels, and an input refuses packets
