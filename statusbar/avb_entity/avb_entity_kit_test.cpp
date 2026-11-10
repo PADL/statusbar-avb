@@ -61,8 +61,9 @@ auto wire(Descriptor const& desc) -> std::span<uint8_t const>
 }
 
 /// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then @p crf CRF
-/// streams in each direction.
-auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1) -> std::vector<uint8_t>
+/// streams in each direction; with @p identify, CONTROL 0 is an IDENTIFY control.
+auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1, bool const identify = false)
+    -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -84,6 +85,13 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16
     }
     atdecc::aem::DescriptorAvbInterface iface{};
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    if (identify) {
+        atdecc::aem::DescriptorControl control{};
+        control.control_type = atdecc::aem::CONTROL_TYPE_IDENTIFY;
+        control.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8
+        control.number_of_values = 1;
+        w.add(0, atdecc::aem::DESCRIPTOR_CONTROL, 0, wire(control));
+    }
     return w.write();
 }
 
@@ -1480,6 +1488,27 @@ TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
         EXPECT_EQ(load_persistent_state(path, 0, {}).state.names.size(), size_t{1});
     }
     std::filesystem::remove_all(dir);
+}
+
+// Identify set by other than ATDECC is refused while a controller holds the lock, once the kit
+// is opted in (Milan v1.3 Section 5.4.2.17), as a name change is
+TEST(avb_entity_kit_lock, request_identify_is_refused_while_locked)
+{
+    MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
+    EXPECT_TRUE(m.start_ready());
+    std::vector<bool> told;
+    m.kit.host().components().aem_handler.set_identify_changed([&told](bool const on) { told.push_back(on); });
+    EXPECT_EQ(m.kit.request_identify(true), atdecc::AEM_STATUS_SUCCESS);
+    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+    nanoavb::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+    header.controller_entity_id = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    EXPECT_EQ(m.kit.host().components().aem_handler.handle_command(header, lock, out).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.request_identify(false), atdecc::AEM_STATUS_SUCCESS);  // not opted in
+    m.kit.set_lock_refuses_local_changes(true);
+    EXPECT_EQ(m.kit.request_identify(true), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_TRUE(told == std::vector<bool>({true, false}));  // the refused change applied nothing
 }
 
 // The entity renamed by other than ATDECC (the bridge's control socket): as
