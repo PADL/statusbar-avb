@@ -431,6 +431,10 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
   when it unsettles, so the join count stays balanced. The Milan MSRP Listener
   declaration is made only once the talker's attribute is registered on the
   destination and VLAN the probe answer named; one on another VLAN is ignored.
+  The MSRP participant keeps the registered attribute when an Lv names another
+  destination or VLAN for its StreamID; a join with another value is adopted
+  (a talker that moved), so two talkers declaring one StreamID on two VLANs at
+  once is not told apart.
 - Every backend counts multicast memberships per socket
   (PACKET_ADD_MEMBERSHIP) and drops them when the port closes, so each join
   has one leave: a pre-joined group is left when its input's kind changes, a
