@@ -2411,8 +2411,8 @@ TEST(nanoavb_entity_avb_info, response_carries_state_and_msrp_mappings)
         out.propagation_delay = 412;
         out.gptp_domain_number = 0;
         out.flags = avb_info_flags::AS_CAPABLE | avb_info_flags::GPTP_ENABLED | avb_info_flags::SRP_ENABLED;
-        out.msrp_mappings.push_back({.traffic_class = 0, .priority = 3, .vlan_id = 2});
-        out.msrp_mappings.push_back({.traffic_class = 1, .priority = 2, .vlan_id = 2});
+        out.msrp_mappings.push_back({.traffic_class = 6, .priority = 3, .vlan_id = 2});  // SRclassID A
+        out.msrp_mappings.push_back({.traffic_class = 5, .priority = 2, .vlan_id = 2});  // SRclassID B
         return true;
     });
 
@@ -2429,10 +2429,10 @@ TEST(nanoavb_entity_avb_info, response_carries_state_and_msrp_mappings)
     EXPECT_TRUE(payload.is_srp_enabled());
     EXPECT_EQ(payload.msrp_mappings_count.get(), 2);
     auto const tail = result.response_data().subspan(AemAvbInfoPayload::LENGTH);
-    EXPECT_EQ(tail[0], 0);  // class A
+    EXPECT_EQ(tail[0], 6);  // class A
     EXPECT_EQ(tail[1], 3);  // PCP 3
     EXPECT_EQ(tail[3], 2);  // VLAN 2
-    EXPECT_EQ(tail[4], 1);  // class B
+    EXPECT_EQ(tail[4], 5);  // class B
     EXPECT_EQ(tail[5], 2);
 
     // The wrong descriptor type, or an index the callback declines: NO_SUCH_DESCRIPTOR.
