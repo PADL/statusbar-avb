@@ -454,15 +454,12 @@ struct NanoAvbComponents
     /// @param talker_max_streams    Max talker streams.
     /// @param talker_max_listeners  Max listeners per talker stream.
     /// @param listener_max_streams  Max listener streams.
-    /// @param milan                 Profile override (EntityProfile): unset follows
-    ///                              the model's (its ENTITY symbol), else Milan.
     NanoAvbComponents(
         EntityModel model,
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan = std::nullopt);
+        size_t listener_max_streams);
 
     /// Symbol-aware construction: serve descriptors (and resolve their well-known
     /// symbols) through a caller-owned @p handler — typically a DescriptorStorageHandler
@@ -475,8 +472,7 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan = std::nullopt);
+        size_t listener_max_streams);
 
     NanoAvbComponents(NanoAvbComponents const&) = delete;
     auto operator=(NanoAvbComponents const&) -> NanoAvbComponents& = delete;
@@ -493,8 +489,7 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams,
-        std::optional<bool> milan);
+        size_t listener_max_streams);
 
   public:
     // Declaration order matters: `entity_model` must precede the handlers that
