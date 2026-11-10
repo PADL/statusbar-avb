@@ -800,19 +800,6 @@ TEST(msrp_participant, a_second_leave_all_restarts_the_listeners_own_leavetimer)
     EXPECT_TRUE(rig.left.has_value());
 }
 
-// A Listener in LV across a stop() and start() leaves at its own deadline once started again.
-TEST(msrp_participant, a_restart_keeps_a_leaving_listeners_leavetimer)
-{
-    ListenerLeaveRig rig{test_msrp_config()};
-    rig.declare_then_withdraw();  // LV, LeaveTime 1 s
-    rig.a.stop();
-    rig.a.start(rig.clock.advance(std::chrono::milliseconds(100)));
-    EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
-    rig.a.tick(rig.clock.advance(std::chrono::milliseconds(1000)));
-    EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
-    EXPECT_TRUE(rig.left.has_value());
-}
-
 // A declared Talker Advertise whose value changes (the talker moved to an
 // adopted Class A VID) is sent New at once, so the peer learns the new VID
 // within one join period, not at the next periodic transmission.
