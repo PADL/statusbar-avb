@@ -670,10 +670,9 @@ class AemCommandHandler
     /// for (a reservation, the application) was not had in time.
     static constexpr uint8_t PENDING_COMMAND_EXPIRED_STATUS = AEM_STATUS_NO_RESOURCES;
 
-    /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index):
-    /// send its final response with @p status and @p response_body (the echoed
-    /// command when empty) and, on SUCCESS, the unsolicited notification. Returns
-    /// false when no such command is pending.
+    /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index) with @p status, answering
+    /// @p response_body, else the echoed command on SUCCESS or, on a failure, the value in force at this call
+    /// (restore it first). SUCCESS also notifies. Returns false when no such command is pending.
     [[nodiscard]] auto complete_pending_command(
         uint16_t command_type,
         uint16_t descriptor_type,
