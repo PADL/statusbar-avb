@@ -35,7 +35,7 @@ namespace statusbar::avtp {
 /// AAF stream-format wire layout (IEEE 1722-2016 Clause 7.3.4), viewed over
 /// the 8-byte format code:
 ///   octet 0:    subtype (0x02 AAF)
-///   octet 1:    ut[7] | reserved[6:4] | nsr[3:0]
+///   octet 1:    reserved[7:5] | ut[4] | nsr[3:0]
 ///   octet 2:    format (AAF sample format code: INT_32=0x02, ...)
 ///   octet 3:    bit_depth
 ///   octets 4-7: channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
