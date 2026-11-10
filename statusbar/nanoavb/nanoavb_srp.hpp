@@ -238,8 +238,12 @@ class MvrpHandler
     /// @param now Current time for timer processing
     auto tick(TimePoint now) -> void;
 
-    /// A LeaveAll sent now (MvrpParticipant::leave_all()).
-    auto leave_all(TimePoint now) -> void { participant_.leave_all(now); }
+    /// A LeaveAll sent now (MvrpParticipant::leave_all()), through the callbacks set last.
+    auto leave_all(TimePoint now) -> void
+    {
+        install_sender();
+        participant_.leave_all(now);
+    }
 
     /// The MVRP participant's configuration (its tables and MRP timers).
     [[nodiscard]] auto mvrp_config() const noexcept -> statusbar::srp::mvrp::MvrpConfig const& { return participant_.config(); }
@@ -248,6 +252,9 @@ class MvrpHandler
     [[nodiscard]] auto vlans() const noexcept -> std::span<VlanInfo const> { return vlans_; }
 
   private:
+    /// Give the participant the current send_packet, even an empty one: its copy may be a stopped run's.
+    auto install_sender() -> void { participant_.set_send_pdu(callbacks_.send_packet); }
+
     MvrpCallbacks callbacks_;
     // Fixed-capacity (no heap): VLAN count per endpoint is tiny in practice.
     // Capacity matches the wrapped MvrpParticipant's compile-time limit.
@@ -473,10 +480,18 @@ class MsrpHandler
 
     /// Whether withdraw_all() ended a run and no declare_domain() has begun one since: the next resumes.
     [[nodiscard]] auto withdrawn() const noexcept -> bool { return withdrawn_; }
-    /// The link is back after a down (MsrpParticipant::rejoin()).
-    void rejoin(TimePoint now) { participant_.rejoin(now); }
-    /// A LeaveAll sent now (MsrpParticipant::leave_all()).
-    void leave_all(TimePoint now) { participant_.leave_all(now); }
+    /// The link is back after a down (MsrpParticipant::rejoin()), its LeaveAll through the callbacks set last.
+    auto rejoin(TimePoint now) -> void
+    {
+        install_sender();
+        participant_.rejoin(now);
+    }
+    /// A LeaveAll sent now (MsrpParticipant::leave_all()), through the callbacks set last.
+    auto leave_all(TimePoint now) -> void
+    {
+        install_sender();
+        participant_.leave_all(now);
+    }
 
     [[nodiscard]] auto get_talker_stream(StreamId const& stream_id) const noexcept -> TalkerStreamSrpInfo const*
     {
@@ -696,9 +711,13 @@ class MsrpHandler
     void resume(TimePoint now)
     {
         last_event_time_ = now;
+        install_sender();  // its LeaveAll goes now, before the run's first tick installs it
         participant_.resume(now);
         follow_waiting_listeners(now);
     }
+
+    /// Give the participant the current send_packet, even an empty one: its copy may be a stopped run's.
+    auto install_sender() -> void { participant_.set_send_pdu(callbacks_.send_packet); }
 
     /// Every Waiting listener re-checked against the peer's registrations, at @p now.
     void follow_waiting_listeners(TimePoint now)
