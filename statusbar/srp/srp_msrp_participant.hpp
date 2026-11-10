@@ -326,8 +326,8 @@ class MsrpParticipantT
     // -------------------- Local declaration API --------------------
 
     /// Declare a Talker Advertise attribute, creating its record if absent, and arm the join timer. A change of
-    /// AccumulatedLatency alone is declared New in place; any other change is withdrawn (Lv!) and the new value
-    /// declared once that Leave is sent (IEEE 802.1Q-2022 Clause 35.2.4, Table 35-6 code 16).
+    /// AccumulatedLatency alone is declared New in place; for any other the old value is joined, then left, then
+    /// the new value declared New (IEEE 802.1Q-2022 Clause 35.2.4, Table 35-6 code 16).
     auto declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status;
 
     /// Declare a Talker Failed attribute (used when a previously
@@ -751,10 +751,13 @@ class MsrpParticipantT
     // PDU encode
     //
     void build_and_send_pdu(TimePoint now, bool leave_all = false);
-    /// Each Talker Advertise whose Leave has been sent declares its pending value.
+    /// Each Talker Advertise with a pending value: Lv! once the old value's Join is sent, the pending value
+    /// declared New once that Lv is sent. Called after every transmit opportunity.
     void declare_pending_talkers(TimePoint now);
-    /// @p rec withdrawn (Lv!), @p fv declared once that Leave is sent (IEEE 802.1Q-2022 Clause 10.7).
-    void leave_then_declare(AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
+    /// Each Talker Advertise with a pending value joins its old value again: a LeaveAll was sent or received.
+    void rejoin_pending_talkers(TimePoint now);
+    /// @p fv pending on @p rec: the old value joined (Join!, then periodic! so QA sends), then left, then @p fv.
+    void change_talker(AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
 
     template <typename RecordVec>
     auto append_attribute_message(
