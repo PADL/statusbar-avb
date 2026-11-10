@@ -18,6 +18,7 @@
 #include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/srp/srp_msrp_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <unistd.h>
@@ -1155,11 +1156,6 @@ TEST(avb_entity_kit_milan_talker, offset_settable_with_the_gate_disabled)
 
 namespace {
 
-/// A Listener LeaveAll MRPDU (IEEE 802.1Q-2022 Clause 10.8.1) from a bridge port whose Listener left
-/// without an Lv: ProtocolVersion; a Listener message (length 8, list length 4) of one VectorHeader with
-/// LeaveAllEvent and no values, and its EndMark; the PDU's EndMark.
-constexpr std::array<uint8_t, 11> LISTENER_LEAVE_ALL{0x00, 0x03, 0x08, 0x00, 0x04, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00};
-
 /// A Milan kit's talker stream 0, probed and registered by a bridge's Listener Ready, run past
 /// the 15 s probe window on the MRP clock so only the Listener keeps it declared.
 struct ListenerDepartureRig
@@ -1170,8 +1166,6 @@ struct ListenerDepartureRig
         : m{std::nullopt, entity_low}
     {
         ok = m.start_ready();
-        // The entity's registrars share one leavetimer: only the tests' LeaveAll starts it.
-        m.bridge.set_suppress_leaveall(true);
         (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
         m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
         run(std::chrono::seconds{16}, /*bridge=*/true);
@@ -1199,7 +1193,7 @@ struct ListenerDepartureRig
             m.kit.host().components().msrp_handler.receive_packet(p, m.bridge_now);
         }
     }
-    void leave_all() { m.kit.host().components().msrp_handler.receive_packet(LISTENER_LEAVE_ALL, m.bridge_now); }
+    void leave_all() { m.kit.host().components().msrp_handler.receive_packet(srp::msrp::listener_leave_all_pdu(), m.bridge_now); }
 
     /// Stream 0 is declared and its gate open, on the gate's clock now.
     [[nodiscard]] auto streaming() -> bool
@@ -1276,7 +1270,7 @@ TEST(avb_entity_kit_milan_talker, a_listener_redeclaring_after_a_leave_all_keeps
     ListenerDepartureRig rig{0x1D};
     EXPECT_TRUE(rig.ok);
     rig.leave_all();
-    rig.m.bridge.receive_pdu(LISTENER_LEAVE_ALL, rig.m.bridge_now);  // its re-declaration held back
+    rig.m.bridge.receive_pdu(srp::msrp::listener_leave_all_pdu(), rig.m.bridge_now);  // its re-declaration held back
     bool held = true;
     for (int i = 0; i < 30; ++i) {
         rig.step(false);
