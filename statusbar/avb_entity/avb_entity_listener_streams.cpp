@@ -966,6 +966,7 @@ void ListenerStreams::on_listener_connected(
     if (port_ != nullptr && dest_mac.is_multicast()) {  // no guard: a join is a socket call and touches no ring
         joined = port_->port().join_multicast(dest_mac).has_value();
     }
+    keep_connection({.stream_index = stream_index, .stream_id = stream_id, .group = joined ? dest_mac : ieee::Eui48{}});
     if (logger_) {
         logger_->status(
             "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener {}, mcast join {}",
@@ -982,14 +983,15 @@ void ListenerStreams::on_listener_connected(
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
-    if (auto const* stream = components_.acmp_listener.get_stream(stream_index); stream != nullptr) {
+    // The connection as it was made: a classic DISCONNECT_RX has cleared the ACMP stream by now.
+    if (auto const connection = end_connection(stream_index); connection.has_value()) {
         tsn::StreamId sid{};
-        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &sid);
+        (void)statusbar::tsn::load_unchecked(connection->stream_id.span(), &sid);
         (void)components_.msrp_handler.listener_withdraw(sid, now);
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
-        if (port_ != nullptr && stream->stream_dest_mac.is_multicast()) {  // no guard: a leave is a socket call
-            (void)port_->port().leave_multicast(stream->stream_dest_mac);
+        if (port_ != nullptr && connection->group.is_multicast()) {  // no guard: a leave is a socket call
+            (void)port_->port().leave_multicast(connection->group);
         }
     }
     if (logger_) {
@@ -998,6 +1000,27 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
             stream_index,
             kind_lit(slot_for(stream_index)));
     }
+}
+
+void ListenerStreams::keep_connection(Connection const& connection)
+{
+    auto* const kept = std::ranges::find(connections_, connection.stream_index, &Connection::stream_index);
+    if (kept != connections_.end()) {
+        *kept = connection;
+        return;
+    }
+    (void)connections_.try_push_back(connection);
+}
+
+auto ListenerStreams::end_connection(uint16_t const stream_index) -> std::optional<Connection>
+{
+    auto* const kept = std::ranges::find(connections_, stream_index, &Connection::stream_index);
+    if (kept == connections_.end()) {
+        return std::nullopt;
+    }
+    auto const connection = *kept;
+    connections_.erase(kept);
+    return connection;
 }
 
 }  // namespace statusbar::avb_entity
