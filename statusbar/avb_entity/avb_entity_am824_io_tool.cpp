@@ -399,7 +399,7 @@ MainLoopResult run_main_loop(
     (void)log_collector.add(entity.media_log_channel());
     entity.set_log_verbosity(config.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements): the tool's main loop; pre-dates the gate
+    while (!realtime::is_shutdown_requested()) {  // NOLINT(statusbar-block-statements) the main loop; pre-dates the gate
         (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(nanoavb::MaapNetHandler::PROTOCOL_TICK_PERIOD_MS);
 
