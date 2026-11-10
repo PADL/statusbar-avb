@@ -2366,9 +2366,9 @@ TEST(avb_entity_kit_milan_listener, a_rebind_leaves_the_old_group_and_joins_the_
     EXPECT_EQ(joins(second), 1);
 }
 
-// stop() leaves every group an input holds, the connected one included; the
-// log outlives the port stop() closes
-TEST(avb_entity_kit_milan_listener, a_stop_leaves_the_connected_group)
+// stop() releases the connected group before it closes the port, which drops what else it holds;
+// the log outlives the port
+TEST(avb_entity_kit_milan_listener, a_stop_leaves_the_connected_group_and_closes_the_port)
 {
     std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
     MilanPair p;
@@ -2384,8 +2384,8 @@ TEST(avb_entity_kit_milan_listener, a_stop_leaves_the_connected_group)
     EXPECT_EQ(held(group), 1);
 
     EXPECT_TRUE(p.l.kit.stop(p.now).has_value());
+    EXPECT_FALSE(p.l.kit.stream_port().valid());
     EXPECT_EQ(held(group), 0);
-    EXPECT_TRUE(std::ranges::all_of(log, [&held](auto const& change) { return held(change.group) == 0; }));
 }
 
 // A locked entity's stop() still unbinds its inputs, as the locking controller
@@ -3650,6 +3650,47 @@ TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
     EXPECT_FALSE(joined());
     EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(joined());
+}
+
+// An input whose connection uses its pre-joined group holds two memberships of it: the output's
+// kind change leaves the pre-joined one and the unbind the connection's, the count back to zero
+TEST(avb_entity_kit_kind, a_static_group_shared_with_a_connection_is_left_by_each)
+{
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
+    RateKit m{{}, 0x77, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}}).has_value());
+    m.kit.stream_port().test_port()->record_memberships(&log);
+    EXPECT_TRUE(m.start_ready());
+    auto const group = m.kit.talker().slot_for(0)->dest_mac;
+    auto const held = [&log, group] {
+        return std::ranges::count(log, net::TestPortContext::MembershipChange{.group = group, .joined = true}) -
+            std::ranges::count(log, net::TestPortContext::MembershipChange{.group = group, .joined = false});
+    };
+    EXPECT_EQ(held(), 1);  // pre-joined
+
+    auto& acmp = m.kit.host().components().acmp_listener;
+    atdecc::AcmpCommandResponse bind{};
+    bind.init_command(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+    bind.controller_entity_id = BINDING_CONTROLLER;
+    bind.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200000000000042ULL);
+    bind.listener_entity_id = m.config.entity_id;
+    EXPECT_TRUE(acmp.receive_controller_command(bind, sm::Clock::now()));
+    auto answer = acmp.milan_sinks().sink(0)->probe;
+    answer.set_message_type(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
+    answer.stream_id = ieee::Eui64{}.from_uint64(0x0200000000000777ULL);
+    answer.stream_dest_mac = group;
+    answer.stream_vlan_id = uint16_t{2};
+    (void)acmp.receive_talker_response(answer, sm::Clock::now());
+    EXPECT_TRUE(acmp.milan_sinks().sink(0)->settled());
+    EXPECT_EQ(held(), 2);
+
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, AM824_8CH_48K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(held(), 1);
+    bind.set_message_type(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+    EXPECT_TRUE(acmp.receive_controller_command(bind, sm::Clock::now()));
+    EXPECT_EQ(held(), 0);
 }
 
 // ---- Clock sources and clock domain lock (IEEE 1722.1-2021 Clauses 7.2.32, 7.4.23-24, 7.4.42) ----
