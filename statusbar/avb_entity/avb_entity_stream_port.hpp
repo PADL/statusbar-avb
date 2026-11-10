@@ -20,13 +20,9 @@
 /// shares a core with a SCHED_FIFO waiter would be spun against until the
 /// kernel's RT throttling let it run.
 ///
-/// Guard holds that lock for the shortest stretch that is still right: a
-/// tx_start/copy/tx_commit triple, or an rx_start/copy/rx_release one. The
-/// talker builds each frame outside it and the listener decodes each frame
-/// outside it, so neither side ever waits on the other's render or decode. A
-/// host that drives both sides from one thread says so (set_single_threaded()):
-/// no lock is used then, the talker renders into the slot and the listener
-/// decodes in place.
+/// Guard holds that lock over a tx_start/copy/tx_commit or rx_start/copy/rx_release alone: frames render
+/// and decode outside it. A host driving both sides from one thread (set_single_threaded()) uses no lock:
+/// the talker renders into the slot and the listener decodes in place.
 ///
 /// The XDP backend is opened with the AVTP stream rules from
 /// net_xdp_avtp_rules.hpp: only the three stream subtypes are steered into

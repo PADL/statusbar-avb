@@ -448,10 +448,10 @@ struct MsrpCallbacks
 //
 // MSRP Handler
 //
-/// MsrpHandler - skeleton class for MSRP stream reservation
-/// @tparam MaxStreams Compile-time capacity for talker/listener stream tracking; a withdrawn
-///         (Idle) entry is reused by the next new StreamID
-/// @tparam Limits The MSRP participant's table capacities
+
+/// MsrpHandler - MSRP stream reservation. @tparam MaxStreams the talker and listener streams it
+/// tracks (a withdrawn, Idle, entry is reused by the next new StreamID); @tparam Limits the MSRP
+/// participant's table capacities
 template <size_t MaxStreams = 32, class Limits = statusbar::srp::msrp::DefaultMsrpLimits>
 class MsrpHandler
 {
@@ -842,26 +842,18 @@ class MsrpHandler
         return listener_state_wanted(stream_id) == ListenerReservationState::Ready;
     }
 
-    /// What an attached listener declares while neither a Talker Advertise
-    /// nor a Talker Failed is registered for its stream. Waiting (the
-    /// default) declares nothing until one is; false declares Listener
-    /// Asking Failed at once, the other choice IEEE 802.1Q 35.1.2.2 and Milan
-    /// v1.3 5.3.8.5 leave open, which then changes type when the talker's
-    /// attribute arrives. Set before the listeners attach.
-    void set_listener_waits_for_talker(bool const wait) noexcept { listener_waits_for_talker_ = wait; }
-
-    /// What an attached listener holds for @p stream_id as the talker's
-    /// registration stands now. IEEE 802.1Q 35.1.2.2: Ready for a registered
-    /// Talker Advertise, Asking Failed for a registered Talker Failed (which
-    /// takes precedence when both are, 35.2.6). With neither registered the
-    /// listener is Waiting and declares nothing, which Milan v1.3 5.3.8.5
-    /// allows ("may either be declaring a Listener Asking Failed attribute,
-    /// or not be declaring anything") and 802.1Q does too: it sets no order
-    /// between the two declarations. set_listener_waits_for_talker(false)
-    /// makes that case Asking Failed. With @p only, a Talker attribute it
-    /// does not admit is not registered as far as this listener goes.
-    [[nodiscard]] auto listener_state_wanted(
-        StreamId const& stream_id, std::optional<TalkerMatch> const& only = std::nullopt) const noexcept -> ListenerReservationState
+    /// Attach this listener to @p stream_id (kit phase 5d, IEEE 802.1Q
+    /// 35.2.4.4): declare Listener Ready when the talker's Advertise is
+    /// registered, Listener Asking Failed otherwise (the talker is not
+    /// advertising yet, or registered Talker Failed). While attached, the
+    /// declaration is upgraded/downgraded automatically as the talker's
+    /// registration changes (see on_remote_talker_changed). Returns the
+    /// state actually declared. Use instead of listener_ready() when the
+    /// talker may not be up yet — e.g. an ACMP fast-connect at boot.
+    ///
+    /// With set_listener_waits_for_talker (Milan), nothing is declared until the talker's
+    /// Advertise (Ready) or Talker Failed (Asking Failed) is registered: attached in Waiting.
+    [[nodiscard]] auto listener_attach(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>
     {
         if (talker_advertise_registered(stream_id)) {
             if (auto const r = listener_ready(stream_id, now); !r) {
