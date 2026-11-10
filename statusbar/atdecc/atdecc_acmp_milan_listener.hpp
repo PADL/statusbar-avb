@@ -174,7 +174,7 @@ class MilanListener
         TimePoint valid_until{};
     };
     /// Talker @p entity_id's last ENTITY_AVAILABLE still valid and naming this entity's gPTP grandmaster
-    /// and domain (Section 5.6.4.5.1), or nullopt.
+    /// and domain (the checks Section 5.6.4.5.1 makes of an ADP), or nullopt.
     using TalkerLookupFn = sg14::inplace_function<std::optional<KnownTalker>(ieee::Eui64 const& entity_id), 64>;
 
     explicit MilanListener(ieee::Eui64 entity_id = {}, size_t sinks = 0);
@@ -198,7 +198,8 @@ class MilanListener
     void set_on_info_ex_changed(SinkFn fn) { on_info_ex_changed_ = std::move(fn); }
     void set_authorized(AuthorizedFn fn) { authorized_ = std::move(fn); }
     void set_delay(DelayFn fn) { delay_ = std::move(fn); }
-    /// The ADP already received of a talker a new binding names: the sink starts discovered when there is one.
+    /// The ADP already received of a talker a new binding names: the sink starts discovered when there is one,
+    /// where Milan restarts discovery at a bind (docs/AVB_ENTITY_KIT.md says why).
     void set_talker_lookup(TalkerLookupFn fn) { talker_lookup_ = std::move(fn); }
     /// Whether a discovered talker's new current_configuration_index departs it (Milan v1.3
     /// Section 5.6.4.5.2; not in v1.2). Default true.

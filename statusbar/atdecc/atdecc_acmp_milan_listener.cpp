@@ -309,8 +309,8 @@ void MilanListener::bind(uint16_t const index, AcmpCommandResponse const& cmd, T
 
 void MilanListener::rediscover(uint16_t const index, TimePoint const now)
 {
-    // A talker whose ENTITY_AVAILABLE came before the bind is discovered (Section 5.6.4.5.1): a retry after an
-    // error answer probes after TMR_RETRY and TMR_DELAY, not at the talker's next ADP.
+    // Milan restarts discovery at a bind (Section 5.5.3.6.6); this replays the talker's last valid ADP instead, so
+    // a retry after an error answer probes after TMR_RETRY and TMR_DELAY, not at the talker's next ADP.
     auto& s = sinks_[index];
     auto const known = talker_lookup_ ? talker_lookup_(s.binding.talker_entity_id) : std::nullopt;
     if (known && known->valid_until > now) {
