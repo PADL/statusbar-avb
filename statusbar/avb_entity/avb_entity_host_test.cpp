@@ -531,6 +531,20 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
+// use_parent_grandmaster hands GPTP_GM_CHANGED to the gPTP stack before it names a grandmaster: a
+// clientOnly ptp4l following none names none, and the Announce handler's reports count nothing.
+TEST(avb_entity_host_counters, the_parent_data_set_can_be_the_source_before_its_first_report)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->use_parent_grandmaster();
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(gm_a);
+    EXPECT_EQ(gm_changed(host), 0U);
+}
+
 // A link back after a down (IEEE 802.1Q-2022 Clause 10.7): MSRP sends a LeaveAll at once, re-declaring the
 // Domain, rather than waiting for its timers; the first link up waits for the join timer
 TEST(avb_entity_host_link, a_link_back_after_a_down_sends_a_leave_all_at_once)
