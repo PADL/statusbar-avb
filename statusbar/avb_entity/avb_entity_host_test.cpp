@@ -569,6 +569,34 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
+// GET_AVB_INFO's gptp_grandmaster_id is ADP's (IEEE 1722.1-2021 Clauses 6.2.2.16, 7.4.40.2): the grandmaster in
+// force, through an Announce, a loss, the parent data set and an Announce while that is the source.
+TEST(avb_entity_host_avb_info, get_avb_info_names_the_grandmaster_adp_names)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    auto& adp = host->components().adp_advertiser;
+    auto const same = [&] {
+        return host->avb_info(0).gptp_grandmaster_id.to_uint64() == adp.adpdu().gptp_grandmaster_id.to_uint64();
+    };
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    host->note_grandmaster_changed(gm_a);
+    EXPECT_EQ(host->avb_info(0).gptp_grandmaster_id.to_uint64(), gm_a.get());
+    EXPECT_TRUE(same());
+    host->note_grandmaster_lost();
+    EXPECT_TRUE(same());
+    auto const gm_b = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'6677ULL);
+    host->note_parent_grandmaster(gm_b);
+    EXPECT_EQ(host->avb_info(0).gptp_grandmaster_id, gm_b);
+    EXPECT_TRUE(same());
+    statusbar::gptp::ClockIdentity const gm_c{0x0011'22FF'FE33'8899ULL};
+    adp.set_gptp_info(
+        statusbar::tsn::ClockIdentity{gm_c.to_eui64()}, 0, statusbar::sm::TimePoint{});  // EntityUpkeep's, before the host
+    host->note_grandmaster_changed(gm_c);
+    EXPECT_EQ(host->avb_info(0).gptp_grandmaster_id, gm_b);
+    EXPECT_TRUE(same());
+}
+
 // use_parent_grandmaster after an Announce: the Announce handler's grandmaster in force is dropped, its
 // grandmasters found or lost (the local ptp4l's own among them) count nothing, and the stack's first
 // report is no change.
