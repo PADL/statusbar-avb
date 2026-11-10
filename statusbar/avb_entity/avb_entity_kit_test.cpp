@@ -1493,26 +1493,58 @@ TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
     std::filesystem::remove_all(dir);
 }
 
-// Identify set by other than ATDECC, through the kit or the host, is refused while a controller
-// holds the lock once the kit is opted in (Milan v1.3 Section 5.4.2.17), as a name change is
-TEST(avb_entity_kit_lock, request_identify_is_refused_while_locked)
+namespace {
+
+/// LOCK_ENTITY (@p unlock: UNLOCK) of @p m from another controller, through the AEM handler.
+auto lock_entity(MilanKit& m, bool const unlock = false) -> uint8_t
 {
-    MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
-    EXPECT_TRUE(m.start_ready());
-    std::vector<bool> told;
-    m.kit.host().components().aem_handler.set_identify_changed([&told](bool const on) { told.push_back(on); });
-    EXPECT_EQ(m.kit.request_identify(true), atdecc::AEM_STATUS_SUCCESS);
     std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+    lock[3] = unlock ? 0x01 : 0x00;
     nanoavb::AemDu header{};
     header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
     header.controller_entity_id = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
     std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    EXPECT_EQ(m.kit.host().components().aem_handler.handle_command(header, lock, out).status, atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(m.kit.request_identify(false), atdecc::AEM_STATUS_SUCCESS);  // not opted in
+    return m.kit.host().components().aem_handler.handle_command(header, lock, out).status;
+}
+
+}  // namespace
+
+// Identify set by other than ATDECC, through the AEM handler or the host, is refused while a
+// controller holds the lock once the kit is opted in (Milan v1.3 Section 5.4.2.17)
+TEST(avb_entity_kit_lock, a_local_identify_is_refused_while_locked)
+{
+    MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
+    EXPECT_TRUE(m.start_ready());
+    auto& aem = m.kit.host().components().aem_handler;
+    std::vector<bool> told;
+    aem.set_identify_changed([&told](bool const on) { told.push_back(on); });
+    EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.host().set_local_identify(false));  // not opted in
     m.kit.set_lock_refuses_local_changes(true);
-    EXPECT_EQ(m.kit.request_identify(true), atdecc::AEM_STATUS_ENTITY_LOCKED);
-    EXPECT_FALSE(m.kit.host().set_local_identify(true));    // the host's own setter, refused the same
+    EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_FALSE(m.kit.host().set_local_identify(true));
     EXPECT_TRUE(told == std::vector<bool>({true, false}));  // the refused changes applied nothing
+    EXPECT_EQ(lock_entity(m, true), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.host().set_local_identify(true));
+}
+
+// Every local path of the AEM handler answers the kit's refusal while locked and opted in
+// (Milan v1.3 Section 5.3.4.1), its change not applied
+TEST(avb_entity_kit_lock, every_local_aem_path_is_refused_while_locked)
+{
+    PersistentKit m{"", 0x3B};
+    EXPECT_TRUE(m.start_ready());
+    auto& aem = m.kit.host().components().aem_handler;
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_lock_refuses_local_changes(true);
+    std::array<uint8_t, 8 + atdecc::aem::AtdeccString::LENGTH> name{};
+    std::ranges::copy(std::string_view{"Locked"}, name.begin() + 8);
+    EXPECT_EQ(aem.apply_local_name(name), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_TRUE(m.entity_name() == "kit milan");
+    EXPECT_EQ(aem.apply_local_audio_mappings(0, {}, {}), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> format{};
+    EXPECT_EQ(aem.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format), atdecc::AEM_STATUS_ENTITY_LOCKED);
 }
 
 // The entity renamed by other than ATDECC (the bridge's control socket): as
@@ -4141,6 +4173,12 @@ TEST(avb_entity_kit_clock_source, a_host_clock_source_is_notified_without_the_ho
 
     EXPECT_EQ(m.kit.request_clock_source(1, 0), atdecc::AEM_STATUS_BAD_ARGUMENTS);
     EXPECT_EQ(get_clock_source(m, 1), uint16_t{2});
+    // A source the host has applied is followed while locked, the kit opted in.
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_lock_refuses_local_changes(true);
+    EXPECT_EQ(m.kit.request_clock_source(1, 2), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(m, true), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.set_lock_refuses_local_changes(false);
     // A controller's change still asks the hook.
     EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, clock_source_body(1, 1)), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_EQ(calls, 1);
