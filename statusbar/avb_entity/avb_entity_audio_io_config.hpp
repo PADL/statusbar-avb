@@ -192,11 +192,6 @@ struct AvbEntityAudioIOConfig
     /// is deferred until there is an IP-stream use case. Default "2016".
     std::string atdecc_version{"2016"};
 
-    /// The ATDECC profile: true Milan, false classic IEEE 1722.1. Unset follows
-    /// the model's (Milan when it says nothing). Under Milan, ACQUIRE_ENTITY answers
-    /// NOT_SUPPORTED (Milan v1.3 Section 5.4.2.1).
-    std::optional<bool> milan{};
-
     /// The application reports each output's signal presence (AvbEntityKit::set_output_signal_presence):
     /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan only.
     bool signal_presence{false};
