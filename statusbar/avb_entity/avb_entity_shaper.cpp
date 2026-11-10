@@ -822,7 +822,7 @@ namespace {
         return failure(queues.error());
     }
     port.tx_queues = *queues;
-    port.mtu = net::interface_mtu(name).value_or(1500U);
+    port.mtu = net::interface_mtu(name).value_or(FALLBACK_MTU);
     return success();
 }
 
@@ -1086,6 +1086,7 @@ auto EntityShaper::installed_on(Status status) -> Status
         return status;
     }
     kit_.set_link_mbps(port_.link_mbps());  // its class A budget
+    kit_.set_mtu(port_.mtu());
     return success();
 }
 
