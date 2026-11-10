@@ -745,54 +745,25 @@ void AvbEntityKit::rejoin_static_rx_groups()
     if (listener_ == nullptr || !stream_port_.valid()) {
         return;
     }
-    // No guard: a join or leave is a socket call (SIOCADDMULTI, PACKET_ADD_MEMBERSHIP) on every
-    // backend and touches no ring, so neither the media thread nor the drain need wait on it.
-    auto const before = rx_static_groups_;
+    // No guard: a join or leave is a socket call and touches no ring, so neither the media thread nor
+    // the drain need wait on it. The port counts memberships: one per input, a changed group swapped.
     for (size_t i = 0; i < rx_static_groups_.size() && i < listener_specs_.size(); ++i) {
-        rx_static_groups_[i] = static_rx_group(listener_specs_[i]);
-    }
-    // A port's memberships may not be counted (AF_XDP): a group goes once nothing holds it, statically
-    // or by an ACMP connection, and a new one comes once.
-    for (auto const& group : before) {
-        if (group != ieee::Eui48{} && std::ranges::find(rx_static_groups_, group) == rx_static_groups_.end() &&
-            !group_connected(group)) {
-            (void)stream_port_.port().leave_multicast(group);
-        }
-    }
-    for (auto const& group : rx_static_groups_) {
-        if (group != ieee::Eui48{} && std::ranges::find(before, group) == before.end()) {
-            (void)stream_port_.port().join_multicast(group);
+        auto const group = static_rx_group(listener_specs_[i]);
+        if (group != rx_static_groups_[i]) {
+            swap_static_rx_group(rx_static_groups_[i], group);
         }
     }
 }
 
-auto AvbEntityKit::group_connected(ieee::Eui48 const& group) const -> bool
+void AvbEntityKit::swap_static_rx_group(ieee::Eui48& held, ieee::Eui48 const& group)
 {
-    return std::ranges::any_of(
-        listener_specs_, [this, &group](StreamSpec const& spec) { return connected_rx_group(spec) == group; });
-}
-
-auto AvbEntityKit::connected_rx_group(StreamSpec const& spec) const -> ieee::Eui48
-{
-    auto const* const stream = host_.components().acmp_listener.get_stream(spec.index);
-    return stream != nullptr && stream->connected ? stream->stream_dest_mac : ieee::Eui48{};
-}
-
-void AvbEntityKit::leave_rx_groups()
-{
-    sg14::inplace_vector<ieee::Eui48, 2 * MAX_ENTITY_STREAMS> held{};
-    for (size_t i = 0; i < listener_specs_.size(); ++i) {
-        (void)held.try_push_back(connected_rx_group(listener_specs_[i]));
-        (void)held.try_push_back(i < rx_static_groups_.size() ? rx_static_groups_[i] : ieee::Eui48{});
+    if (held.is_set()) {
+        (void)stream_port_.port().leave_multicast(held);
     }
-    rx_static_groups_.clear();
-    std::ranges::sort(held);
-    auto const repeated = std::ranges::unique(held);
-    for (auto const& group : std::ranges::subrange{held.begin(), repeated.begin()}) {
-        if (group.is_multicast() && stream_port_.valid()) {
-            (void)stream_port_.port().leave_multicast(group);
-        }
+    if (group.is_set()) {
+        (void)stream_port_.port().join_multicast(group);
     }
+    held = group;
 }
 
 auto AvbEntityKit::talkers_fit(uint16_t const index, uint64_t const word) const noexcept -> bool
@@ -1940,8 +1911,7 @@ void AvbEntityKit::close_data_plane()
 #if defined(__linux__)
     listener_vlan_.release();
 #endif
-    leave_rx_groups();
-    close_streams();
+    close_streams();                   // the port's memberships close with it
     refresh_pending_.reset();          // a re-declaration asked for in this run: the next run declares afresh
     declaration_timer_token_.reset();  // the timer finishes
     if (persist_pending_) {

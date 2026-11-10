@@ -962,10 +962,7 @@ void ListenerStreams::on_listener_connected(
     bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
     // Join the talker's stream group so the NIC delivers its frames to us; a zero or unicast
     // stream_dest_mac is no group (IEEE 1722.1-2021 Clause 8.2.1.13).
-    bool joined = false;
-    if (port_ != nullptr && dest_mac.is_multicast()) {  // no guard: a join is a socket call and touches no ring
-        joined = port_->port().join_multicast(dest_mac).has_value();
-    }
+    bool const joined = join_connection_group(stream_index, dest_mac);
     keep_connection({.stream_index = stream_index, .stream_id = stream_id, .group = joined ? dest_mac : ieee::Eui48{}});
     if (logger_) {
         logger_->status(
@@ -1000,6 +997,20 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
             stream_index,
             kind_lit(slot_for(stream_index)));
     }
+}
+
+auto ListenerStreams::join_connection_group(uint16_t const stream_index, ieee::Eui48 const& dest_mac) -> bool
+{
+    // One membership per connected input: a repeated connect keeps the same group, leaves another.
+    auto const previous = end_connection(stream_index);
+    auto const held = previous.has_value() ? previous->group : ieee::Eui48{};
+    if (held.is_multicast() && held == dest_mac) {
+        return true;
+    }
+    if (port_ != nullptr && held.is_multicast()) {  // no guard: a join or leave is a socket call and touches no ring
+        (void)port_->port().leave_multicast(held);
+    }
+    return port_ != nullptr && dest_mac.is_multicast() && port_->port().join_multicast(dest_mac).has_value();
 }
 
 void ListenerStreams::keep_connection(Connection const& connection)

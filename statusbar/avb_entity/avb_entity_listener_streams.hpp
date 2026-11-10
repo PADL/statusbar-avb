@@ -473,6 +473,9 @@ struct ListenerStreams
         ieee::Eui48 group{};
     };
     sg14::inplace_vector<Connection, MAX_ENTITY_STREAMS> connections_{};
+    /// Join @p dest_mac for input @p stream_index's connection when it is a group, ending the input's
+    /// earlier connection's membership unless it is the same group: whether it is joined now.
+    [[nodiscard]] auto join_connection_group(uint16_t stream_index, ieee::Eui48 const& dest_mac) -> bool;
     /// Keep @p connection, replacing the one kept for its input.
     void keep_connection(Connection const& connection);
     /// The connection kept for input @p stream_index, no longer kept; nullopt when none.

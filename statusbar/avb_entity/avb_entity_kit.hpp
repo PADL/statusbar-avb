@@ -639,6 +639,8 @@ class AvbEntityKit
     [[nodiscard]] auto crf_recovery_input() const -> std::optional<uint16_t>;
     /// After a kind change, leave each input's pre-joined group that changed and join the new one.
     void rejoin_static_rx_groups();
+    /// An input's pre-joined group @p held left and @p group joined in its place (zero: none).
+    void swap_static_rx_group(ieee::Eui48& held, ieee::Eui48 const& group);
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 
@@ -677,13 +679,6 @@ class AvbEntityKit
     [[nodiscard]] auto install_stream_format(uint16_t type, bool output, StreamSpec& spec, StreamSpec const& updated) -> uint8_t;
     /// After a format change: the runtime format, the output identity map, the log and the TSpec.
     void announce_stream_format(uint16_t type, uint64_t before, StreamSpec const& updated);
-    /// Whether an ACMP-connected input listens on @p group.
-    [[nodiscard]] auto group_connected(ieee::Eui48 const& group) const -> bool;
-    /// The group input @p spec's ACMP connection listens on; zero when not connected.
-    [[nodiscard]] auto connected_rx_group(StreamSpec const& spec) const -> ieee::Eui48;
-    /// stop(): leave every group an input holds, pre-joined or connected, once each, and forget the
-    /// pre-joined ones. An AF_XDP port's memberships are the interface's and outlive the process.
-    void leave_rx_groups();
 
     //
     // Declarations and registrations
