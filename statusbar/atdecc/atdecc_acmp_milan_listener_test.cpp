@@ -952,6 +952,28 @@ TEST(acmp_milan_listener, an_unbind_while_settled_unbinds)
     EXPECT_EQ(f.unsettled.size(), size_t{1});
 }
 
+// A local release unbinds a settled sink as an UNBIND_RX does, unsettling it, but sends nothing and
+// calls neither the binding nor the status hook; the saved binding can then be restored
+TEST(acmp_milan_listener, a_release_unbinds_silently)
+{
+    Fixture f;
+    f.settle();
+    auto const binding = f.sink().binding;
+    f.sent.clear();
+    f.binding_changes.clear();
+    f.status_changes.clear();
+    f.locked_by = OTHER_CONTROLLER;
+    EXPECT_TRUE(f.l.release(SINK, f.now));
+    EXPECT_FALSE(f.sink().bound());
+    EXPECT_EQ(f.unsettled.size(), size_t{1});
+    EXPECT_TRUE(f.sent.empty());
+    EXPECT_TRUE(f.binding_changes.empty());
+    EXPECT_TRUE(f.status_changes.empty());
+    EXPECT_FALSE(f.l.release(7, f.now));
+    EXPECT_TRUE(f.l.restore(SINK, binding));
+    EXPECT_TRUE(f.state() == State::prb_w_avail);
+}
+
 // 5.5.3.5.40-41: noted only
 TEST(acmp_milan_listener, discovery_and_departure_while_settled_are_only_noted)
 {
