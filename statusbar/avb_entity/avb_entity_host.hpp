@@ -159,12 +159,15 @@ class AvbEntityHost
     void on_gptp_announce(TimePoint time, bool has_grandmaster);
     void on_timeout(TimePoint time);
 
-    /// gPTP grandmaster @p grandmaster found (the Announce handler's): AVB_INTERFACE GPTP_GM_CHANGED
-    /// counts it when it differs from the last one found (IEEE 1722.1-2021 Clause 7.4.42.2.2). Reactor thread.
+    /// gPTP grandmaster @p grandmaster found by the Announce handler: the grandmaster in force for
+    /// GPTP_GM_CHANGED (IEEE 1722.1-2021 Clause 7.4.42.2.2) until note_parent_grandmaster is told. Reactor thread.
     void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster);
-    /// The grandmaster was lost (no Announce within the receipt timeout).
-    /// Reactor thread.
+    /// The grandmaster was lost (no Announce within the receipt timeout): a grandmaster-capable
+    /// entity is its own grandmaster in force from now. Reactor thread.
     void note_grandmaster_lost();
+    /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
+    /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
+    void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
     void note_as_path_changed();
@@ -383,6 +386,10 @@ class AvbEntityHost
     [[nodiscard]] auto interface_runtime(uint16_t index, std::optional<ieee::Eui48> const& mac) const
         -> nanoavb::AvbInterfaceRuntime;
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
+    /// GPTP_GM_CHANGED counts @p grandmaster when another one was in force (the first is no change).
+    void note_grandmaster_in_force(ieee::Eui64 const& grandmaster);
+    /// AVB_INTERFACE 0's priority1 is below 255 (IEEE 802.1AS-2020 Clause 8.6.2.1).
+    [[nodiscard]] auto grandmaster_capable() const -> bool;
 
     /// stop_control_plane's first half: the MSRP reservations and the MVRP
     /// VID withdrawn with their Leaves sent at once, then ENTITY_DEPARTING.
@@ -474,7 +481,8 @@ class AvbEntityHost
         bool entity_driven{false};  ///< note_clock_domain_locked was called: gPTP no longer drives it
     };
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
-    std::optional<gptp::ClockIdentity> last_grandmaster_{};  ///< the last grandmaster found, kept across its loss
+    std::optional<ieee::Eui64> grandmaster_in_force_{};  ///< for GPTP_GM_CHANGED; none before the first
+    bool grandmaster_from_parent_{false};                ///< note_parent_grandmaster has been told
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
