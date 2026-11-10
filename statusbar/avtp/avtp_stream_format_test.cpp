@@ -161,4 +161,17 @@ TEST(stream_format, an_up_to_word_covers_every_count_to_its_own)
     EXPECT_EQ(stream_format_widest(0x041060010000BB80ULL), uint64_t{0x041060010000BB80ULL});
 }
 
+// IEEE 1722-2016 Figure I.12: ut is octet 1 bit 4, between header[7:5] and nsr
+TEST(stream_format, the_up_to_bit_sits_just_above_nsr)
+{
+    constexpr uint64_t XF24_48K = 0x0215022006006000ULL;
+    EXPECT_EQ(stream_format_bytes(XF24_48K)[1], uint8_t{0x15});
+    EXPECT_EQ(AafStreamFormat::from_u64(XF24_48K).nsr(), uint8_t{0x05});
+    EXPECT_TRUE(decode_aaf_stream_format(XF24_48K) == "AAF 24ch 48kHz 32-bit");
+    EXPECT_EQ(stream_format_widest(XF24_48K), uint64_t{0x0205022006006000ULL});
+    // A header bit is no ut: the word covers itself only
+    EXPECT_FALSE(stream_format_covers(0x0285022006006000ULL, 0x0205022003406000ULL));
+    EXPECT_EQ(stream_format_widest(0x0285022006006000ULL), uint64_t{0x0285022006006000ULL});
+}
+
 TEST_MAIN(statusbar_avtp, avtp_stream_format_test)
