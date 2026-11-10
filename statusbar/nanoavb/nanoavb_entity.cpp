@@ -197,8 +197,11 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     // CONTROLLER_AVAILABLE handshake). Cleared after dispatch.
     current_src_mac_ = src_mac;
 
-    // Extract command data (after AemDu header)
-    auto const command_data = payload.subspan(AemDu::LENGTH);
+    // Extract command data (after AemDu header), as long as control_data_length says
+    // (IEEE 1722.1-2021 Clause 9.2.1.1.7): trailing octets are not the command's.
+    auto const command_data =
+        payload.subspan(AemDu::LENGTH)
+            .first(std::min(payload.size() - AemDu::LENGTH, size_t{header.control_data_length()} - AemDu::AEM_DATA_LENGTH));
 
     // One output buffer per dispatch — handlers write into this and return
     // status + bytes-written, avoiding the per-return 1 KB struct copy that
