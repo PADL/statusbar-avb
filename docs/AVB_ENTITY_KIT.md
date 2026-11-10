@@ -283,14 +283,25 @@ talker counts, admitted or not: an output's format changes only while it does
 not stream, so the check is the last chance to keep them all admissible.
 Milan v1.2 Section 5.4.2.7 names no status for this. Listeners do not count.
 
-SET_SAMPLING_RATE to the unit's current rate is a no-op SUCCESS; any other rate
-is NOT_SUPPORTED, whether the AUDIO_UNIT lists it (the kit) or not (the storage
-handler). The kit re-times no unit: Milan v1.2 Section 5.4.2.13 requires the
-command per Audio Unit and Section 5.3.3.3 only that the list report the rates
-the unit supports, so a unit lists one rate and keeps it, and a stream runs at
-another rate through its own format (above). A model whose unit lists more is
-answered honestly: the other rates are refused, never accepted without the data
-plane following. The unit's rate is not persisted.
+SET_SAMPLING_RATE (IEEE 1722.1-2021 Clause 7.4.21; Milan v1.2 Section 5.4.2.13)
+to the unit's current rate is a no-op SUCCESS; a rate the AUDIO_UNIT does not
+list is NOT_SUPPORTED (the storage handler). Another listed rate of AUDIO_UNIT 0
+re-times the unit's audio streams that run at its rate (those whose stream port
+is the unit's, every stream when it has no ports): each goes to its format at
+the new rate, sample format and channels kept, class A framing, through the
+SET_STREAM_FORMAT path above and so through the entity's hook. It is all or
+nothing: NOT_SUPPORTED when such a stream lists no format at the new rate (an
+AM824 stream, which the kit does not re-time), STREAM_IS_RUNNING when such a
+stream is a bound input or a streaming output (as its own SET_STREAM_FORMAT
+would be, Section 5.4.2.7), and a stream the hook refuses puts back those
+already re-timed and answers its status. A CRF stream keeps its format, as does
+a stream at another rate than the unit's. The re-timed streams are notified
+after the response, as unsolicited SET_STREAM_FORMATs to every registered
+controller (Section 5.4.5.2). Another unit's rate is NOT_SUPPORTED: the kit's
+rate is AUDIO_UNIT 0's, and another unit's streams keep the mapping rules at the
+rate the kit was built with. An entity whose talkers send through
+`TalkerStreams` at the unit's rate refuses another rate in its hook, and so the
+re-time. The rate is persisted and restored before the formats.
 
 `request_entity_name` serves SET_NAME for a host's own control socket: it is
 applied with the same checks as the ATDECC command, every registered controller
