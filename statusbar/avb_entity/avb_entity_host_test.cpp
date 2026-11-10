@@ -531,6 +531,26 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
+// use_parent_grandmaster after an Announce: the Announce handler's grandmaster in force is dropped, its
+// grandmasters found or lost (the local ptp4l's own among them) count nothing, and the stack's first
+// report is no change.
+TEST(avb_entity_host_counters, use_parent_grandmaster_drops_the_announce_handler_s_grandmaster)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'7788ULL});  // before: in force
+    host->use_parent_grandmaster();
+    host->use_parent_grandmaster();                                                            // again: nothing more
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x70B3'D5FF'FEED'0001ULL});  // ptp4l's own Announces
+    host->note_grandmaster_lost();
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    EXPECT_EQ(gm_changed(host), 0U);  // the first
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL));
+    EXPECT_EQ(gm_changed(host), 1U);
+}
+
 // use_parent_grandmaster hands GPTP_GM_CHANGED to the gPTP stack before it names a grandmaster: a
 // clientOnly ptp4l following none names none, and the Announce handler's reports count nothing.
 TEST(avb_entity_host_counters, the_parent_data_set_can_be_the_source_before_its_first_report)
