@@ -307,7 +307,8 @@ class ShaperQdiscs
     /// and again after each change of mode: under our cbs, or on the mqprio class with no cbs offload;
     /// offloaded, CLOCK_TAI, @p delta_ns, skip_sock_check. Unsupported until set.
     void set_launch_time(LaunchTimeMode mode, int32_t delta_ns = DEFAULT_ETF_DELTA_NS) noexcept;
-    /// Told, with launch time on, how class A's etf settled: placed (no error) or the refusal.
+    /// Told, with launch time on, how class A's etf settled: placed (no error) or the refusal. Called last
+    /// in program(), so it may call set_launch_time().
     using EtfSettledFn = sg14::inplace_function<void(std::error_code), 32>;
     void set_on_etf_settled(EtfSettledFn fn) noexcept { on_etf_settled_ = std::move(fn); }
     /// Remove everything: pfifo_fast on class B's queue, then class A's, then delete the mqprio
@@ -352,10 +353,10 @@ class ShaperQdiscs
     /// A's was refused. Errors: the first failure.
     [[nodiscard]] auto program_classes(CbsTargets const& targets) -> Status;
     /// Bring class @p label's queue @p queue to the launch-time mode once our cbs is on it (@p current), or
-    /// at once with no cbs offload.
-    void settle_etf(uint16_t queue, CbsParameters const& current, EtfState& state, logging::StrLit label);
-    /// Tell on_etf_settled_ how an etf asked for with launch time @p on settled (@p error: refused).
-    void tell_etf_settled(bool on, std::error_code error);
+    /// at once with no cbs offload. With launch time on, how the etf settled (an error: refused) for
+    /// on_etf_settled_; nullopt otherwise.
+    [[nodiscard]] auto settle_etf(uint16_t queue, CbsParameters const& current, EtfState& state, logging::StrLit label)
+        -> std::optional<std::error_code>;
     /// The etf slot on @p queue: under our cbs (@p under_cbs), else the mqprio class itself. Errors: the
     /// netlink errno.
     [[nodiscard]] auto etf_slot(uint16_t queue, bool under_cbs) -> StatusValue<EtfSlot>;
