@@ -568,10 +568,9 @@ class AvbEntityKit
     /// A VID is the host's), and leaves when the last such input goes.
     void join_sink_vlan(uint16_t vid, TimePoint now);
     void leave_sink_vlan(uint16_t vid, TimePoint now);
-    /// Re-read talker stream @p idx's registered Listener at steady-clock
-    /// @p now_ns; true when it changed (the declaration predicate and
-    /// GET_STREAM_INFO follow it).
-    [[nodiscard]] auto refresh_talker_listener(uint16_t idx, int64_t now_ns) -> bool;
+    /// Re-read talker stream @p idx's registered Listener; true when it changed (GET_STREAM_INFO
+    /// follows it, and a change runs the declaration passes).
+    [[nodiscard]] auto refresh_talker_listener(uint16_t idx) -> bool;
     /// The talker spec index for @p stream_id, or nullopt.
     [[nodiscard]] auto talker_index_of(nanoavb::StreamId const& stream_id) const noexcept -> std::optional<uint16_t>;
     [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
