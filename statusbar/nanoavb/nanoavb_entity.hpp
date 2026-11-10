@@ -985,10 +985,12 @@ class AemCommandHandler
 
     /// Unsolicited LOCK_ENTITY (UNLOCK, locked_entity_id 0) when a lock expires.
     void emit_lock_released();
-    /// Hold a notification raised while a command is dispatched; false (send it now) when its body
-    /// exceeds an AECPDU's or no slot is free, the last slot being the command's own.
+    /// Hold a notification raised while a command is dispatched; false (send it now, after the side
+    /// effects held) when its body exceeds an AECPDU's or no slot is free, the last being the command's own.
     [[nodiscard]] auto queue_notification(
         uint16_t command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester) -> bool;
+    /// Send the held notifications other than the command's own, in the order raised, before the response.
+    void release_side_effects();
     /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1).
     void flush_notifications();
 
@@ -1124,6 +1126,7 @@ class AemCommandHandler
     {
         uint16_t command_type{0};
         std::optional<Eui64> requester{};
+        bool own{false};  ///< the command's own notification, held for after its response
         std::array<uint8_t, MAX_QUEUED_BODY> body;
         size_t body_size{0};
     };
