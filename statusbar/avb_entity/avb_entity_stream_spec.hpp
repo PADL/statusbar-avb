@@ -221,6 +221,14 @@ inline constexpr uint32_t CLASS_A_44_1_KHZ_PACKETS_PER_SEC = 7350;
     return (sample_rate_hz + CLASS_A_PACKETS_PER_SEC - 1) / CLASS_A_PACKETS_PER_SEC;
 }
 
+/// Whether @p format is framed for class A: an AAF format's samples per frame, when it names them, are
+/// class_a_samples_per_packet() of its rate (IEEE 1722-2016 Clause 7.3, Milan v1.3 Section 6); other kinds are.
+[[nodiscard]] constexpr auto class_a_framed(StreamFormatFields const& format) noexcept -> bool
+{
+    return format.kind != StreamKind::aaf || format.aaf_samples_per_frame == 0 ||
+        format.aaf_samples_per_frame == class_a_samples_per_packet(format.sample_rate_hz);
+}
+
 /// The byte Milan v1.3 Table 4.4 adds for a sampling clock a little faster than nominal, to the
 /// frame after the minimum-size rule (step 3).
 inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;

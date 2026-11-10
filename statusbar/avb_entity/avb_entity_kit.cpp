@@ -636,7 +636,8 @@ auto AvbEntityKit::stream_format_refusal(bool const output, StreamSpec const& sp
     if (!kind_change_allowed(spec.format.kind, updated.format.kind)) {
         return atdecc::AEM_STATUS_BAD_ARGUMENTS;  // a listed format this stream cannot carry (IEEE 1722.1-2021 Clause 7.4.9)
     }
-    if (!is_audio_kind(updated.format.kind)) {
+    // The talker sends AAF in class A packets and sizes its TSpec so (IEEE 1722-2016 Clause 7.3, Milan v1.3 Section 6).
+    if (!is_audio_kind(updated.format.kind) || !class_a_framed(updated.format)) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Milan v1.2 Section 5.4.2.7.

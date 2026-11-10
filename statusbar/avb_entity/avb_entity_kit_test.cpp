@@ -99,6 +99,8 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16
 /// (Base Audio Formats FIS v1.1 Table 4: INT_32, class A framing).
 constexpr uint64_t INT24_8CH_48K = 0x0205031802006000ULL;
 constexpr uint64_t INT24_8CH_96K = 0x020703180200C000ULL;
+/// INT24_8CH_48K at 12 frames a packet: not class A framing at 48 kHz.
+constexpr uint64_t INT24_8CH_48K_12_FRAMES = 0x020503180200C000ULL;
 constexpr auto base_format(uint32_t const rate, uint16_t const channels) -> uint64_t
 {
     uint64_t const nsr = rate == 96000 ? 0x07 : 0x05;
@@ -146,9 +148,10 @@ auto make_multirate_blob(
             }
         }
         if (am824) {
-            // And each kind the other stream has, which the kit refuses.
+            // And each kind the other stream has, and a framing, which the kit refuses.
             (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(AM824_8CH_48K));
             (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(CRF_MILAN_48K));
+            (void)stream.push_stream_format(ieee::Eui64{}.from_uint64(INT24_8CH_48K_12_FRAMES));
         }
         w.add(0, type, 0, wire(stream));
         atdecc::aem::DescriptorStream crf{};
@@ -3909,6 +3912,21 @@ TEST(avb_entity_kit_kind, the_static_rx_group_follows_the_kind)
     EXPECT_FALSE(joined());
     EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, INT24_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(joined());
+}
+
+// A listed AAF format framed other than class A is refused NOT_SUPPORTED on either stream: the
+// talker sends class A packets (IEEE 1722-2016 Clause 7.3, Milan v1.3 Section 6)
+TEST(avb_entity_kit_formats, an_aaf_format_not_framed_for_class_a_is_refused)
+{
+    RateKit m{{}, 0x79, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.start_ready());
+    for (auto const type : {DESCRIPTOR_STREAM_OUTPUT, DESCRIPTOR_STREAM_INPUT}) {
+        EXPECT_EQ(
+            m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(type, 0, INT24_8CH_48K_12_FRAMES)),
+            atdecc::AEM_STATUS_NOT_SUPPORTED);
+        EXPECT_EQ(m.current_format(type, 0), INT24_8CH_48K);
+    }
+    EXPECT_TRUE(m.formats.empty());
 }
 
 // A stop forgets the static groups with the port that held them: a port opened again before the
