@@ -296,64 +296,22 @@ TEST(nanoavb_srp_msrp, adopts_bridge_class_a_vid_from_domain_vector)
     }
 }
 
-// Milan v1.3 Section 4.2.7.2.1 has each Domain the bridge declares adopted; the entity adopts one per
-// link up (a deviation): a second VID waits for reset_domain(), which then adopts it.
-TEST(nanoavb_srp_msrp, a_later_class_a_domain_waits_for_the_next_link_up)
+// Milan v1.3 Section 4.2.7.2.1: each Class A Domain the bridge declares with other parameters is adopted,
+// back to the configured one included.
+TEST(nanoavb_srp_msrp, each_class_a_domain_the_bridge_declares_is_adopted)
 {
     DomainBench b{};
     std::vector<std::pair<uint16_t, uint16_t>> changes{};
     b.station.set_on_domain_vid_changed([&](uint16_t o, uint16_t n, TimePoint) { changes.emplace_back(o, n); });
     (void)b.station.declare_domain(b.now);
-    (void)b.bridge.declare_domain(DomainBench::domain(6, 3, 7), b.now);
-    b.run(4);
-    (void)b.bridge.declare_domain(DomainBench::domain(6, 3, 9), b.now);
-    b.run(4);
-    EXPECT_EQ(b.station.domain().sr_class_vid, 7);
-    (void)b.station.reset_domain(b.now);
-    b.run(4);
-    EXPECT_EQ(b.station.domain().sr_class_vid, 9);
-    using Changes = std::vector<std::pair<uint16_t, uint16_t>>;
-    EXPECT_TRUE(changes == Changes({{2, 7}, {7, 2}, {2, 9}}));
-}
-
-// Two adopting end stations on a direct link, configured VIDs 2 and 7: each adopts at most once per
-// link up instead of swapping each other's previous value on every periodic PDU.
-TEST(nanoavb_srp_msrp, two_adopting_stations_do_not_oscillate)
-{
-    TimePoint now{std::chrono::seconds{1}};
-    std::vector<std::vector<uint8_t>> a_out;
-    std::vector<std::vector<uint8_t>> b_out;
-    MsrpHandler<> a{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&a_out](std::span<uint8_t const> p) {
-                        a_out.emplace_back(p.begin(), p.end());
-                        return true;
-                    }}};
-    MsrpHandler<> b{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&b_out](std::span<uint8_t const> p) {
-                        b_out.emplace_back(p.begin(), p.end());
-                        return true;
-                    }}};
-    a.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = 2});
-    b.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = 7});
-    int a_changes = 0;
-    int b_changes = 0;
-    a.set_on_domain_vid_changed([&](uint16_t, uint16_t, TimePoint) { ++a_changes; });
-    b.set_on_domain_vid_changed([&](uint16_t, uint16_t, TimePoint) { ++b_changes; });
-    (void)a.declare_domain(now);
-    (void)b.declare_domain(now);
-    for (int round = 0; round < 200; ++round) {  // 50 s: dozens of periodic and LeaveAll PDUs
-        now += std::chrono::milliseconds{250};
-        a.tick(now);
-        b.tick(now);
-        for (auto const& p : a_out) {
-            b.receive_packet(p, now);
-        }
-        a_out.clear();
-        for (auto const& p : b_out) {
-            a.receive_packet(p, now);
-        }
-        b_out.clear();
+    for (auto const& [priority, vid] : std::array<std::pair<uint8_t, uint16_t>, 3>{{{5, 5}, {5, 50}, {3, 2}}}) {
+        (void)b.bridge.declare_domain(DomainBench::domain(6, priority, vid), b.now);
+        b.run(8);
+        EXPECT_EQ(b.station.domain().sr_class_priority, priority);
+        EXPECT_EQ(b.station.domain().sr_class_vid, vid);
     }
-    EXPECT_TRUE(a_changes <= 1);
-    EXPECT_TRUE(b_changes <= 1);
+    using Changes = std::vector<std::pair<uint16_t, uint16_t>>;
+    EXPECT_TRUE(changes == Changes({{2, 5}, {5, 50}, {50, 2}}));
 }
 
 // Milan v1.3 Section 4.2.7.2.1: a Class A Domain at another priority is adopted, priority and VID,

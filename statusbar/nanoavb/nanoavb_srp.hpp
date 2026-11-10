@@ -845,7 +845,7 @@ class MsrpHandler
     }
 
     /// A peer declared a Domain: adopt its SRclassPriority and SRclassVID for our SR class (Milan v1.3
-    /// Section 4.2.7.2.1), once until reset_domain() (a deviation: docs/NANOAVB_ARCHITECTURE.md).
+    /// Section 4.2.7.2.1), each time they differ from the Domain in use.
     void on_peer_domain(statusbar::srp::msrp::DomainFirstValue const& fv)
     {
         auto const adopted = adoptable_domain(fv);
@@ -872,7 +872,7 @@ class MsrpHandler
     }
 
     /// The Domain a peer's Domain @p fv for our SR class has us adopt, or nullopt: another class, an
-    /// invalid VID, the Domain in use, or one adopted since reset_domain() already.
+    /// invalid VID, or the Domain in use.
     [[nodiscard]] auto adoptable_domain(statusbar::srp::msrp::DomainFirstValue const& fv) const noexcept
         -> std::optional<DomainInfo>
     {
@@ -880,9 +880,7 @@ class MsrpHandler
         if (fv.sr_class_id.get() != domain_.sr_class_id || vid == 0 || vid > 4094) {
             return std::nullopt;
         }
-        bool const adopted =
-            domain_.sr_class_vid != default_domain_.sr_class_vid || domain_.sr_class_priority != default_domain_.sr_class_priority;
-        if (adopted || (fv.sr_class_priority.get() == domain_.sr_class_priority && vid == domain_.sr_class_vid)) {
+        if (fv.sr_class_priority.get() == domain_.sr_class_priority && vid == domain_.sr_class_vid) {
             return std::nullopt;
         }
         return DomainInfo{.sr_class_id = domain_.sr_class_id, .sr_class_priority = fv.sr_class_priority.get(), .sr_class_vid = vid};
