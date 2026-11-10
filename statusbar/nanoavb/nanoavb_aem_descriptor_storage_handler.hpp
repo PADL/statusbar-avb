@@ -1617,7 +1617,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         return mixer_states_.try_push_back(state);
     }
 
-    /// Apply a SET_MIXER value write (Clause 7.4.35). @p value is the
+    /// Apply a SET_MIXER value write (Clause 7.4.31). @p value is the
     /// payload after the 4-byte AemMixerPayloadHeader: the mixer's new
     /// value (one element of its control_value_type).
     [[nodiscard]] auto set_mixer(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
@@ -1639,7 +1639,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
-    /// Serve a GET_MIXER value read (Clause 7.4.36): the stored value.
+    /// Serve a GET_MIXER value read (Clause 7.4.32): the stored value.
     [[nodiscard]] auto get_mixer(DescriptorRef ref, std::span<uint8_t> out) noexcept -> size_t { return mixer_value(ref, out); }
 
     statusbar::sg14::inplace_vector<MixerState, MAX_MIXER_STATES> mixer_states_;
