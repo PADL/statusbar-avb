@@ -434,7 +434,9 @@ entity's AVB info mirror reports the mirrored device's. Until then the
 Announce handler's grandmaster stands, and an Announce receipt timeout makes
 a grandmaster-capable entity (AVB_INTERFACE 0 priority1 below 255, IEEE
 802.1AS-2020 Clause 8.6.2.1) its own grandmaster: A lost and found again is
-two changes.
+two changes. An integrator that follows a gPTP stack calls
+`use_parent_grandmaster` first, so the Announce handler counts nothing even
+before the stack names a grandmaster.
 
 CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
 PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE
