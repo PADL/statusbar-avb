@@ -983,6 +983,16 @@ void ListenerStreams::note_input_unbound(uint16_t const descriptor_index)
 
 namespace {
 
+/// A new CRF source for the slot (StreamCrfFn); a rebind to another stream's first frame continues
+/// no sequence (Milan v1.3 Section 5.3.8.10).
+void count_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id) noexcept
+{
+    slot.connections.fetch_add(1, std::memory_order_release);
+    if (slot.connection.stream_id != ieee::Eui64{} && slot.connection.stream_id != stream_id) {
+        slot.counters.restart_run.store(true, std::memory_order_relaxed);
+    }
+}
+
 auto to_stream_id(ieee::Eui64 const& id) -> tsn::StreamId
 {
     tsn::StreamId sid{};
@@ -1103,7 +1113,7 @@ void ListenerStreams::on_listener_connected(
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
-    slot->connections.fetch_add(1, std::memory_order_release);  // a new CRF source (StreamCrfFn)
+    count_connection(*slot, stream_id);
     bool const ready = attach_or_held_ready(slot->connection, stream_id, now);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
     slot->rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
