@@ -989,8 +989,7 @@ class AemCommandHandler
     /// exceeds an AECPDU's or no slot is free, the last slot being the command's own.
     [[nodiscard]] auto queue_notification(
         uint16_t command_type, std::span<uint8_t const> body, std::optional<Eui64> const& requester) -> bool;
-    /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1);
-    /// those a nested dispatch raises wait for the outer one's.
+    /// Send the held notifications, after the command's response (Milan v1.3 Section 5.4.5.1).
     void flush_notifications();
 
     /// DescriptorId for MEMORY_OBJECT @p descriptor_index in @p configuration_index.
