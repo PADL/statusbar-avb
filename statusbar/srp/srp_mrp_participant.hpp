@@ -131,9 +131,9 @@ void dispatch_registrar(Record& rec, registrar_sm::Def::Event event, TimePoint n
 }
 
 /// At the port's leave timer expiry: true when @p rec is in LV and its own leavetimer has run out (the
-/// caller dispatches LvTimer); an LV Registrar not yet due runs the port's timer on to its deadline.
+/// caller dispatches LvTimer); otherwise re-arms the port's timer to an LV Registrar's later deadline.
 template <MrpAttributeLike Record>
-[[nodiscard]] auto registrar_leave_due(Record const& rec, TimePoint now, TimerScheduler& timers) noexcept -> bool
+[[nodiscard]] auto registrar_leave_due_or_rearm(Record const& rec, TimePoint now, TimerScheduler& timers) noexcept -> bool
 {
     if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
         return false;

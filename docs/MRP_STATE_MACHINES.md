@@ -198,7 +198,7 @@ Per-attribute dispatch helpers (free templates constrained by the
 
 - `dispatch_applicant(rec, event, now)` — clears outputs then fires
 - `dispatch_registrar(rec, event, now, timers)` — clears outputs, fires,
-  then forwards `lvtimer_request` to `timers.start_leave()`
+  then forwards `lvtimer_request` to `start_registrar_leave()`
 - `dispatch_applicant_tx(rec, now)` — automatically selects
   `TxRegistrarIn` vs `TxRegistrarMt` based on the paired Registrar's
   state (Clause 10.7.7 Note 8)
