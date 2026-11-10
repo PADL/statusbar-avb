@@ -878,7 +878,8 @@ class AemCommandHandler
     /// on_set_descriptor_value; a success echoes the command, a failure answers reject_set()'s.
     [[nodiscard]] auto handle_set_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// Apply a SET descriptor value through a per-call AemEntityModel.
+    /// Apply a SET descriptor value through a per-call AemEntityModel; NO_RESOURCES, the hook not
+    /// called, while MAX_PENDING_COMMANDS deferred commands are held.
     [[nodiscard]] auto apply_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// Whether @p set_command's value in @p command_data is the one its GET answers now.
