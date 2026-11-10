@@ -1051,6 +1051,7 @@ void EntityShaper::unhook() noexcept
 {
     if (hooked_) {
         kit_.set_on_admission_changed({});
+        kit_.set_class_a_cbs(false);
         hooked_ = false;
     }
 }
@@ -1087,6 +1088,7 @@ auto EntityShaper::installed_on(Status status) -> Status
     }
     kit_.set_link_mbps(port_.link_mbps());  // its class A budget
     kit_.set_mtu(port_.mtu());
+    kit_.set_class_a_cbs(true);
     return success();
 }
 
