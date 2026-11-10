@@ -1958,14 +1958,16 @@ void AvbEntityKit::drop_listener_connection(uint16_t const index, TimePoint cons
 {
     auto& acmp = host_.components().acmp_listener;
     if (auto const* sink = acmp.milan_sinks().sink(index); sink != nullptr && sink->bound()) {
-        // As the controller the entity's acquisition or lock admits (Milan v1.3 Section 5.5.3.6.3).
-        auto const& aem = host_.components().aem_handler;
-        auto const owner = aem.is_acquired() ? aem.acquiring_controller() : aem.locking_controller();
-        (void)acmp.milan_sinks().unbind_stream(index, owner, now, [](uint8_t) {});
+        // Locally: no controller's authority, no response, no notification; unbound until restored.
+        (void)acmp.milan_sinks().release(index, now);
+        if (index < input_bound_.size()) {
+            input_bound_[index] = false;
+        }
         return;
     }
+    // Every input of the talker; stop() drops them all. Its fast-connect goal stays.
     if (auto const* stream = acmp.get_stream(index); stream != nullptr && stream->connected) {
-        (void)acmp.on_talker_departed(stream->talker_entity_id, now);  // its fast-connect goal stays
+        (void)acmp.on_talker_departed(stream->talker_entity_id, now);
     }
 }
 
