@@ -1152,6 +1152,58 @@ TEST(ptp_management, client_follows_the_named_port_s_peer_delay_from_notificatio
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+/// A CMLDS_INFO_NP notification from port @p port of BRIDGE with @p as_capable (meanLinkDelay 0).
+auto cmlds_from(uint16_t const port, uint8_t const as_capable) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> data(CmldsInfoNp::SIZE);
+    data.back() = as_capable;
+    auto out = response(management_id::cmlds_info_np, data);
+    std::array<uint8_t, 8> const bridge{0x8C, 0x1F, 0x64, 0xFF, 0xFE, 0xE8, 0x90, 0x00};  // BRIDGE
+    std::copy(bridge.begin(), bridge.end(), out.begin() + 20);
+    out[29] = static_cast<uint8_t>(port);
+    return out;
+}
+
+/// The followed port's (BRIDGE port 2) PORT_DATA_SET in @p state.
+auto port_in(PortState const state) -> std::vector<uint8_t>
+{
+    auto data = port_data(2, int64_t{74} * 65536);
+    data[10] = static_cast<uint8_t>(state);
+    return response(management_id::port_data_set, data);
+}
+
+}  // namespace
+
+// An unknown asCapable stays unknown on a FAULTY port; an answer for one carries the asCapable linuxptp kept
+// from before the fault: not capable
+TEST(ptp_management, a_cmlds_answer_for_a_faulty_port_is_not_capable)
+{
+    auto const dir = socket_dir("faulty");
+    Ptp4l const ptp4l{dir};
+    PtpManagementState last{};
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l.path, .port_interface = "enp8s0"},
+        [&](PtpManagementState const& state) { last = state; });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    c.handle(PARENT_RESPONSE, 10);
+    c.handle(response(management_id::port_properties_np, port_properties(2, "enp8s0")), 11);
+    c.handle(port_in(PortState::faulty), 12);
+    EXPECT_FALSE(last.as_capable.has_value());  // never known: not made not_capable
+    c.handle(cmlds_from(2, 1), 13);
+    EXPECT_TRUE(last.as_capable == std::optional{AsCapable::not_capable});
+    c.handle(port_in(PortState::listening), 14);
+    c.handle(cmlds_from(2, 1), 15);
+    EXPECT_TRUE(last.as_capable == std::optional{AsCapable::capable});
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
 #endif  // __linux__
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_management_test)
