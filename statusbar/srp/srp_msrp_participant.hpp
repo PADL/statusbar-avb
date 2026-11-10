@@ -307,7 +307,8 @@ class MsrpParticipantT
     [[nodiscard]] auto config() const noexcept -> MsrpConfig const& { return config_; }
 
     /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
-    /// initial timers. Must be called once after construction.
+    /// initial timers. Must be called once after construction; after a
+    /// stop(), a Registrar still in LV leaves at its own deadline.
     void start(TimePoint now);
 
     /// Stop all timers. FSMs retain their current state; attribute

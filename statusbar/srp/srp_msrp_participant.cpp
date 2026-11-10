@@ -165,6 +165,12 @@ template <class Limits>
 void MsrpParticipantT<Limits>::start(TimePoint now)
 {
     port_.start(now);
+    auto resume = [this](auto const& records) {
+        for (auto const& rec : records) {
+            mrp::resume_registrar_leave(rec, port_.timers());
+        }
+    };
+    [&](auto const&... all) { (resume(all), ...); }(talker_adv_, talker_failed_, listeners_, domains_);
 }
 
 template <class Limits>
