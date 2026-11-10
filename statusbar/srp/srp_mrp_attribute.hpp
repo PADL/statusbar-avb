@@ -16,6 +16,7 @@
 #include "statusbar/srp/srp_mrp_registrar_sm.hpp"
 
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::srp::mrp {
 
@@ -25,6 +26,16 @@ enum class Operation : uint8_t
 {
     Register = 0,  ///< learned from a peer PDU
     Declare = 1,   ///< declared by a local client
+};
+
+/// A local declaration's next value, declared once the old value has been joined since the last LeaveAll
+/// and then left (IEEE 802.1Q-2022 Clause 10.7: a changed value is another attribute).
+template <typename FirstValue>
+struct PendingValue
+{
+    FirstValue value{};
+    bool rejoined{false};  ///< a Join or New of the old value sent since the change or the last LeaveAll
+    bool left{false};      ///< then its Lv sent
 };
 
 /// Combined per-attribute state: Applicant FSM instance + Registrar
@@ -39,6 +50,7 @@ struct AttributeRecord
 {
     FirstValue first_value{};
     Operation operation{Operation::Register};
+    std::optional<PendingValue<FirstValue>> pending{};  ///< the next value, while the old one is left
 
     // Per-attribute state machine instances. The Contexts hold only
     // transition side-effect outputs; the state_ itself lives inside
