@@ -2506,6 +2506,25 @@ TEST(avb_entity_kit_milan_listener, a_stop_leaves_the_connected_group)
     EXPECT_TRUE(std::ranges::all_of(log, [&held](auto const& change) { return held(change.group) == 0; }));
 }
 
+// A talker's answer whose stream_dest_mac is zero or unicast names no group (IEEE 1722.1-2021
+// Clause 8.2.1.13): the input joins nothing, and its unbind leaves nothing
+TEST(avb_entity_kit_milan_listener, an_answer_without_a_group_joins_nothing)
+{
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
+    MilanPair p;
+    p.listener_wire().record_memberships(&log);
+    EXPECT_TRUE(p.start());
+    auto const before = log.size();
+    for (auto const& dest : {ieee::Eui48{}, ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x41}}) {
+        (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
+        p.probe_answered(dest);
+        EXPECT_TRUE(p.sink().settled());
+        (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
+        EXPECT_FALSE(p.sink().bound());
+    }
+    EXPECT_EQ(log.size(), before);
+}
+
 // A locked entity's stop() still unbinds its inputs, as the locking controller
 TEST(avb_entity_kit_milan_listener, a_stop_unbinds_a_locked_entitys_input)
 {
