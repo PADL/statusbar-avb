@@ -545,9 +545,18 @@ void ShaperQdiscs::settle_etf(uint16_t const queue, CbsParameters const& current
             etf_error_.value(),
             logging::embed<32>(tc_.last_message()),
             on ? logging::lit("no launch time") : logging::lit("an earlier etf stays"));
+        tell_etf_settled(on, etf_error_);
         return;
     }
     state = EtfState{.settled = true, .placed = on};
+    tell_etf_settled(on, {});
+}
+
+void ShaperQdiscs::tell_etf_settled(bool const on, std::error_code const error)
+{
+    if (on && on_etf_settled_) {
+        on_etf_settled_(error);
+    }
 }
 
 auto ShaperQdiscs::etf_slot(uint16_t const queue, bool const under_cbs) -> StatusValue<EtfSlot>
