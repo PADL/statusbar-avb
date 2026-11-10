@@ -1070,12 +1070,13 @@ void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 con
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
-auto ListenerStreams::attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
+auto ListenerStreams::attach_ready(
+    ieee::Eui64 const& stream_id, std::optional<nanoavb::TalkerMatch> const& match, sm::TimePoint const now) -> bool
 {
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the
     // talker's boot) -- the handler upgrades to Ready when it appears.
-    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now);
+    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, match);
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }
 
@@ -1102,9 +1103,19 @@ void ListenerStreams::on_listener_connected(
     // re-declares nothing, so attach and withdraw stay one-for-one however
     // many times a controller repeats the CONNECT.
     bool const fresh = slot->connection.stream_id != stream_id;
-    bool const ready = fresh ? attach_ready(stream_id, now) : held_ready(stream_id);
+    bool const ready = fresh ? attach_ready(stream_id, talker_match(stream_index, dest_mac), now) : held_ready(stream_id);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
     log_connected(stream_index, dest_mac, ready, slot->connection.group.has_value());
+}
+
+auto ListenerStreams::talker_match(uint16_t const stream_index, ieee::Eui48 const& dest_mac) const
+    -> std::optional<nanoavb::TalkerMatch>
+{
+    auto const* const stream = components_.acmp_listener.get_stream(stream_index);
+    if (!components_.profile.milan || stream == nullptr) {
+        return std::nullopt;  // a classic connection follows any Talker attribute of its StreamID
+    }
+    return nanoavb::TalkerMatch{.destination = dest_mac, .vid = stream->stream_vlan_id};
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
