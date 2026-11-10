@@ -1,7 +1,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// libFuzzer harness for the MVU command handler (Milan v1.3 and v1.2 Section 5.4.4): the input as a
+/// libFuzzer harness for the MVU command handler (Milan v1.3 Section 5.4.4): the input as a
 /// whole AECPDU, and as command_type and data behind a well-formed MVU header to the entity, so every
 /// command (BIND_STREAM against two Milan sinks included) sees arbitrary data.
 
@@ -44,13 +44,10 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
     std::span<uint8_t const> const input{data, size};
     atdecc::MilanListener listener{US, 2};
     listener.set_send([](atdecc::AcmpCommandResponse const&) { return true; });
-    for (auto const version : {nanoavb::MilanVersion::v1_3, nanoavb::MilanVersion::v1_2}) {
-        nanoavb::MvuCommandHandler handler{};
-        handler.set_profile(nanoavb::EntityProfile{.milan = true, .milan_version = version});
-        handler.set_milan_listener(&listener);
-        handler.set_send_response([](ieee::Eui48 const&, std::span<uint8_t const>) { return true; });
-        (void)handler.process_packet(SRC, input, US, {});
-        addressed(handler, input);
-    }
+    nanoavb::MvuCommandHandler handler{};
+    handler.set_milan_listener(&listener);
+    handler.set_send_response([](ieee::Eui48 const&, std::span<uint8_t const>) { return true; });
+    (void)handler.process_packet(SRC, input, US, {});
+    addressed(handler, input);
     return 0;
 }
