@@ -1105,6 +1105,14 @@ void ListenerStreams::note_input_unbound(uint16_t const descriptor_index)
 
 namespace {
 
+/// A rebind to another stream's first frame continues no sequence (Milan v1.3 Section 5.3.8.10).
+void restart_run_on_rebind(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id) noexcept
+{
+    if (slot.connection.stream_id != ieee::Eui64{} && slot.connection.stream_id != stream_id) {
+        slot.counters.restart_run.store(true, std::memory_order_relaxed);
+    }
+}
+
 auto to_stream_id(ieee::Eui64 const& id) -> tsn::StreamId
 {
     tsn::StreamId sid{};
