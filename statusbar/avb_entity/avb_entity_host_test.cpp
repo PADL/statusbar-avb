@@ -13,6 +13,7 @@
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -415,6 +416,40 @@ TEST(avb_entity_host_avb_info, host_answers_get_avb_info_from_observed_state)
     // An index the model does not author is NO_SUCH_DESCRIPTOR.
     std::array<uint8_t, 4> const other{0x00, 0x09, 0x00, 0x05};
     EXPECT_EQ(host->components().aem_handler.handle_command(header, other, out).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(avb_entity_host_stream_info, stopped_talker_reports_streaming_wait)
+{
+    // IEEE 1722.1-2021 Table 7-145: a stream "stopped with STOP_STREAMING
+    // command" is reported as STREAMING_WAIT; a streaming one is not.
+    using namespace statusbar::avb_entity;
+    namespace stream_info_flags = statusbar::atdecc::aem::stream_info_flags;
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    auto& talker = host->components().acmp_talker;
+    statusbar::ieee::Eui64 const stream_id{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x00, 0x01};
+    statusbar::ieee::Eui48 const dest{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x01};
+    EXPECT_TRUE(talker.get_stream(0) != nullptr);
+    AvbEntityHost const& h = *host.operator->();
+    (void)talker.configure_stream(0, stream_id, dest);
+
+    statusbar::atdecc::aem::AemStreamInfoPayload streaming{};
+    EXPECT_TRUE(fill_talker_stream_info(h, 0, 2'000'000, /*stopped=*/false, streaming));
+    EXPECT_TRUE((streaming.flags.get() & stream_info_flags::STREAMING_WAIT) == 0);
+    EXPECT_TRUE((streaming.flags.get() & stream_info_flags::STREAM_ID_VALID) != 0);
+    EXPECT_EQ(streaming.stream_id, stream_id);
+
+    statusbar::atdecc::aem::AemStreamInfoPayload stopped{};
+    EXPECT_TRUE(fill_talker_stream_info(h, 0, 2'000'000, /*stopped=*/true, stopped));
+    EXPECT_TRUE((stopped.flags.get() & stream_info_flags::STREAMING_WAIT) != 0);
+    EXPECT_EQ(stopped.stream_id, stream_id);
+
+    // An index the talker does not have is declined either way.
+    statusbar::atdecc::aem::AemStreamInfoPayload none{};
+    EXPECT_FALSE(fill_talker_stream_info(h, 200, 2'000'000, true, none));
+
+    // IEEE 1722.1-2021 Table 7-158: FRAMES_TX is STREAM_OUTPUT counter bit 7.
+    EXPECT_EQ(stream_output_frames_tx_bit, 7U);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_host_test)

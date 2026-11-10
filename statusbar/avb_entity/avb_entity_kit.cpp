@@ -102,9 +102,13 @@ AvbEntityKit::AvbEntityKit(
     });
     // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
     // (the media thread treats it as a closed SRP gate); START reopens.
+    // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
+    // Table 7-145), so every subscribed controller is told by an unsolicited
+    // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
     storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
         if (type == DESCRIPTOR_STREAM_OUTPUT) {
             talker_->set_stream_stopped(index, !streaming);
+            (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
@@ -212,7 +216,8 @@ void AvbEntityKit::wire_stream_callbacks()
     host_.components().aem_handler.set_get_stream_info(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_talker_stream_info(host_, descriptor_index, config_.presentation_offset_ns, out);
+                return fill_talker_stream_info(
+                    host_, descriptor_index, config_.presentation_offset_ns, talker_->stream_stopped(descriptor_index), out);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 return fill_listener_stream_info(host_, descriptor_index, out);

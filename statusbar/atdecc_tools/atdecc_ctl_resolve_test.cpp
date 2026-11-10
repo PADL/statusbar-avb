@@ -246,6 +246,9 @@ TEST(atdecc_ctl_supervise, select_local_counter_we_are_talker)
     EXPECT_EQ(lc->descriptor_type, statusbar::atdecc::aem::DESCRIPTOR_STREAM_OUTPUT);
     EXPECT_EQ(lc->descriptor_index, 3U);
     EXPECT_EQ(lc->counter_bit, STREAM_OUTPUT_FRAMES_TX_BIT);
+    // IEEE 1722.1-2021 Table 7-158: FRAMES_TX is bit 7 (bit 6 is TIMESTAMP_NOT_VALID).
+    EXPECT_EQ(STREAM_OUTPUT_FRAMES_TX_BIT, 7U);
+    EXPECT_EQ(STREAM_INPUT_FRAMES_RX_BIT, 11U);
 }
 
 TEST(atdecc_ctl_supervise, select_local_counter_we_are_listener)

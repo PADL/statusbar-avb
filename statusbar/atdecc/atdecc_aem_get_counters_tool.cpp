@@ -73,11 +73,14 @@ constexpr std::array<CounterDef, 13> STREAM_INPUT_COUNTERS{{
     {.name = "FRAMES_TX", .is_error = false},
 }};
 
-// STREAM_OUTPUT counters (IEEE 1722.1 Clause 7.4.43), indexed by bit position.
-// FRAMES_TX (bit 6) is the talker frame count -- the actual on-wire transmit rate.
-constexpr std::array<CounterDef, 7> STREAM_OUTPUT_COUNTERS{{
+// STREAM_OUTPUT counters (IEEE 1722.1-2021 Clause 7.4.42, Table 7-158), indexed
+// by bit position in counters_valid. FRAMES_TX (bit 7) is the talker frame
+// count -- the actual on-wire transmit rate. (The pre-2021 draft order had no
+// STREAM_INTERRUPTED, which put every later name one bit early.)
+constexpr std::array<CounterDef, 8> STREAM_OUTPUT_COUNTERS{{
     {.name = "STREAM_START", .is_error = false},
     {.name = "STREAM_STOP", .is_error = false},
+    {.name = "STREAM_INTERRUPTED", .is_error = true},
     {.name = "MEDIA_RESET", .is_error = true},
     {.name = "TIMESTAMP_UNCERTAIN", .is_error = true},
     {.name = "TIMESTAMP_VALID", .is_error = false},
@@ -93,7 +96,8 @@ constexpr std::array<CounterDef, 7> STREAM_OUTPUT_COUNTERS{{
         return std::string{table[bit].name};
     }
     if (bit >= 24) {
-        return std::format("ENTITY_SPECIFIC_{}", bit - 23);
+        // Tables 7-156/7-158: bit 31 is ENTITY_SPECIFIC_1, bit 24 ENTITY_SPECIFIC_8.
+        return std::format("ENTITY_SPECIFIC_{}", 32 - bit);
     }
     return std::format("counter[{}]", bit);
 }

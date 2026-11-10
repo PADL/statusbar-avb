@@ -1701,6 +1701,41 @@ TEST(nanoavb_entity_notify_cor1, notify_counters_changed_pushes_get_counters)
     EXPECT_TRUE(sends.empty());
 }
 
+TEST(nanoavb_entity_notify_cor1, notify_stream_info_changed_pushes_get_stream_info)
+{
+    // IEEE 1722.1-2021 7.5.2: a stream-info change (here STOP_STREAMING, which
+    // Table 7-145 reports as STREAMING_WAIT) goes out as an unsolicited
+    // GET_STREAM_INFO response to every registered controller.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_get_stream_info([](uint16_t type, uint16_t index, AemStreamInfoPayload& out) -> bool {
+        if (type != DESCRIPTOR_STREAM_OUTPUT || index != 0) {
+            return false;
+        }
+        out.flags = quadlet_t{stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAMING_WAIT};
+        return true;
+    });
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    EXPECT_EQ(handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, 0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_STREAM_INFO, kMacB), 1);
+    AemStreamInfoPayload payload{};
+    span_load(payload, body_of(sends.front()).first(AemStreamInfoPayload::LENGTH));
+    EXPECT_EQ(payload.descriptor_type.get(), DESCRIPTOR_STREAM_OUTPUT);
+    EXPECT_EQ(payload.descriptor_index.get(), 0);
+    EXPECT_TRUE((payload.flags.get() & stream_info_flags::STREAMING_WAIT) != 0);
+    EXPECT_TRUE((stream_info_flags::STREAMING_WAIT == 0x00000008U));  // Table 7-145 bit 28
+
+    sends.clear();
+    EXPECT_EQ(handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, 1), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_TRUE(sends.empty());
+}
+
 TEST(nanoavb_entity_notify_cor1, reboot_not_implemented_without_callback)
 {
     auto model = create_test_model();
