@@ -1014,8 +1014,8 @@ TEST(listener_timed, am824_raw_delivery_through_on_stream_rx_frame)
 }
 
 // An AAF input re-shaped to AM824 and back (reformat_stream): each kind's frames land while it is the
-// slot's, the other kind's are not matched (none parsed as the wrong kind), and a frame arriving while
-// the reactor holds the slot is dropped.
+// slot's, the other kind's count in UNSUPPORTED_FORMAT (none parsed as the wrong kind), and a frame
+// arriving while the reactor holds the slot is dropped.
 TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
 {
     auto donor = make_connected_donor(kAm824Id, kAafId);
@@ -1082,7 +1082,7 @@ TEST(listener_kind, frames_follow_a_change_between_aaf_and_am824)
     }
     EXPECT_EQ(slot->rx_packets.load(), uint64_t{4});
     EXPECT_EQ(slot->rx_bad.load(), uint64_t{0});
-    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{0});
+    EXPECT_EQ(slot->counters.unsupported_format.load(), uint32_t{3});
 }
 
 // A CRF slot never changes kind, nor an audio slot to CRF.
