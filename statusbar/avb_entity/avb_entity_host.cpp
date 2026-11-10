@@ -197,6 +197,9 @@ void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
 
 void AvbEntityHost::release_net_handlers()
 {
+    // The SRP senders refer to the handlers released here.
+    components_.msrp_handler.set_send_packet({});
+    components_.mvrp_handler.set_send_packet({});
     net_handlers_->close_local_port();
     net_handlers_.reset();
     if (mirror_ != nullptr) {
