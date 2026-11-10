@@ -73,6 +73,9 @@ class TimerScheduler
     void start_leave(TimePoint now) noexcept;
     void start_leaveall(TimePoint now);
     void start_periodic(TimePoint now) noexcept;
+    /// Run the leave timer to @p deadline, or keep it if it already runs to an earlier one. The
+    /// Registrars drive the leave timer this way (mrp::start_registrar_leave), not with start_leave().
+    void start_leave_at(TimePoint deadline) noexcept;
 
     // --- Force rearm --------------------------------------------------
     // Unconditionally (re)sets the deadline, even if already running.

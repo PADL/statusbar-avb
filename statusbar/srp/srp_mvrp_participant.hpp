@@ -407,7 +407,7 @@ class MvrpParticipantT
     void on_leave_timer(TimePoint now)
     {
         for (auto& rec : vlans_) {
-            if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
+            if (!mrp::registrar_leave_due(rec, now, port_.timers())) {
                 continue;
             }
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
