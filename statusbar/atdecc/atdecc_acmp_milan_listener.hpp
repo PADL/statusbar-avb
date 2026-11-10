@@ -215,6 +215,10 @@ class MilanListener
     [[nodiscard]] auto bind_stream(uint16_t index, MilanBindRequest const& request, TimePoint now, ReplyFn const& reply) -> bool;
     /// UNBIND_STREAM for sink @p index from @p controller: RCV_UNBIND_RX_CMD, as bind_stream().
     [[nodiscard]] auto unbind_stream(uint16_t index, ieee::Eui64 const& controller, TimePoint now, ReplyFn const& reply) -> bool;
+    /// Unbind sink @p index locally, as an entity stopping does: no authorisation check, no response,
+    /// no notification and no binding-changed hook (the saved binding is the caller's to restore()).
+    /// A settled sink unsettles first. False for an unknown sink.
+    [[nodiscard]] auto release(uint16_t index, TimePoint now) -> bool;
 
     /// Section 5.6.4.1: an ENTITY_AVAILABLE / ENTITY_DEPARTING, for every
     /// bound sink whose talker sent it. @p grandmaster and @p domain are this
@@ -274,6 +278,8 @@ class MilanListener
     /// Stop what runs: the timer, the SRP reservation and the ADP discovery state machine.
     void stop(uint16_t index, TimePoint now);
     void unbind(uint16_t index, AcmpCommandResponse const& cmd, TimePoint now);
+    /// Unbind sink @p index (unsettled first), without hooks or replies: whether it was bound.
+    [[nodiscard]] auto clear_binding(uint16_t index, TimePoint now) -> bool;
     void get_rx_state(uint16_t index, AcmpCommandResponse const& cmd);
     void probe_response(uint16_t index, AcmpCommandResponse const& resp, TimePoint now);
     /// Section 5.5.3.6.18 step 4: settle on the stream already in sink @p index.
