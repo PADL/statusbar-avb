@@ -1343,7 +1343,7 @@ struct ListenerDepartureRig
     {
         return m.advertising(0) && !m.kit.admitted_talker_streams(MilanKit::raw_now()).empty();
     }
-    /// Steps (the bridge silent) until stream 0 is neither declared nor admitted; how long that took.
+    /// Steps (the bridge silent) until stream 0 is neither declared nor admitted; returns the time elapsed.
     auto time_to_withdrawal(std::chrono::milliseconds const limit) -> std::chrono::milliseconds
     {
         auto elapsed = std::chrono::milliseconds{0};
@@ -1404,6 +1404,22 @@ TEST(avb_entity_kit_milan_talker, a_listener_lost_through_a_leave_all_withdraws_
     EXPECT_TRUE(elapsed <= nanoavb::MILAN_MRP_TIMERS.leave_time + ListenerDepartureRig::STEP);
     EXPECT_FALSE(rig.m.advertising(0));
     EXPECT_FALSE(rig.m.kit.admission_deadline().has_value());
+}
+
+// A Listener left in LV by a LeaveAll it was not re-declared in, then withdrawn with an Lv, goes
+// LV to MT (IEEE 802.1Q-2022 Clause 10.7.5, Milan v1.3 Section 4.2.7.2.2): the stream stops at once.
+TEST(avb_entity_kit_milan_talker, a_listeners_leave_after_a_leave_all_withdraws_at_once)
+{
+    ListenerDepartureRig rig{0x1E};
+    EXPECT_TRUE(rig.ok);
+    rig.leave_all();
+    EXPECT_TRUE(rig.streaming());
+    (void)rig.m.bridge.withdraw_listener(rig.m.sid(0), rig.m.bridge_now);
+    for (int i = 0; i < 5; ++i) {
+        rig.step(true);  // the bridge's Lv goes on its JoinTime, well within LeaveTime
+    }
+    EXPECT_FALSE(rig.m.advertising(0));
+    EXPECT_TRUE(rig.m.kit.admitted_talker_streams(MilanKit::raw_now()).empty());
 }
 
 // A Listener re-declaring within LeaveTime of a LeaveAll (3 s late here) keeps the stream
