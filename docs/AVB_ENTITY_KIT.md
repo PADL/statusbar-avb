@@ -271,25 +271,33 @@ talker counts, admitted or not: an output's format changes only while it does
 not stream, so the check is the last chance to keep them all admissible.
 Milan v1.2 Section 5.4.2.7 names no status for this. Listeners do not count.
 
-SET_SAMPLING_RATE (IEEE 1722.1-2021 Clause 7.4.21; Milan v1.2 Section 5.4.2.13)
+SET_SAMPLING_RATE (IEEE 1722.1-2021 Clause 7.4.21; Milan v1.3 Section 5.4.2.13)
 to the unit's current rate is a no-op SUCCESS; a rate the AUDIO_UNIT does not
 list is NOT_SUPPORTED (the storage handler). Another listed rate of AUDIO_UNIT 0
-re-times the unit's audio streams that run at its rate (those whose stream port
-is the unit's, every stream when it has no ports): each goes to its format at
-the new rate, sample format and channels kept, class A framing, through the
-SET_STREAM_FORMAT path above and so through the entity's hook. It is all or
-nothing: NOT_SUPPORTED when such a stream lists no format at the new rate (an
-AM824 stream, which the kit does not re-time), STREAM_IS_RUNNING when such a
-stream is a bound input or a streaming output (as its own SET_STREAM_FORMAT
-would be, Section 5.4.2.7), and a stream the hook refuses puts back those
-already re-timed and answers its status. A CRF stream keeps its format, as does
-a stream at another rate than the unit's. The re-timed streams are notified
-after the response, as unsolicited SET_STREAM_FORMATs to every registered
-controller (Section 5.4.5.2). Another unit's rate is NOT_SUPPORTED: the kit's
-rate is AUDIO_UNIT 0's, and another unit's streams keep the mapping rules at the
-rate the kit was built with. An entity whose talkers send through
-`TalkerStreams` at the unit's rate refuses another rate in its hook, and so the
-re-time. The rate is persisted and restored before the formats.
+needs the entity's unit-rate hook (`set_on_unit_rate_changed`; without it the
+unit keeps its rate, NOT_SUPPORTED). The unit's audio streams are those in its
+clock domain (Clauses 7.2.3, 7.2.6), whichever port carries them. Of those at
+the unit's rate, each idle one (not a bound input, not a streaming output) whose
+descriptor lists its format at the new rate (sample format and channels kept,
+class A framing) follows the unit. One that cannot follow keeps its format when
+its port converts rates (ASYNC_ or SYNC_SAMPLE_RATE_CONV, Milan v1.3 Section
+5.3.3.7); on a port that does not, the request is NOT_SUPPORTED, the one status
+Section 5.4.2.13 names. Clause 7.4.21 names no STREAM_IS_RUNNING.
+
+The streams that follow are checked against the class A budget first
+(NO_RESOURCES). The unit-rate hook then moves the data plane, all or none, even
+with no stream to move; then each stream goes through the SET_STREAM_FORMAT
+path above and so through the entity's format hook, and the output mappings are
+refreshed once. A stream the format hook refuses puts back those re-timed and
+the data plane (the unit-rate hook asked for the old rate) and answers its
+status. CRF streams and streams at another rate keep their formats. The
+re-timed streams are notified after the response, as unsolicited
+SET_STREAM_FORMATs to every registered controller (Milan v1.2 Section 5.4.5.2).
+Another unit's rate is NOT_SUPPORTED: the kit's rate is AUDIO_UNIT 0's, and
+another unit's streams keep the mapping rules at the rate the kit was built
+with. An entity whose talkers send through `TalkerStreams` at the unit's rate
+refuses another rate in its hooks. The rate is persisted and restored before
+the formats.
 
 `request_entity_name` serves SET_NAME for a host's own control socket: it is
 applied with the same checks as the ATDECC command, every registered controller
