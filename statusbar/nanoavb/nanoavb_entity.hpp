@@ -701,6 +701,11 @@ class AemCommandHandler
     /// names) or SET_MAX_TRANSIT_TIME; NOT_IMPLEMENTED for any other.
     [[nodiscard]] auto current_value(uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
+    /// @p set_command's response @p r on SUCCESS, else reject_set()'s: for a SET with no deferral, whose
+    /// hook's IN_PROGRESS is a refusal too (SET_CONFIGURATION, IEEE 1722.1-2021 Clause 7.4.7.1).
+    [[nodiscard]] auto refuse_unless_success(
+        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
     /// @p set_command's response @p r on SUCCESS or IN_PROGRESS, or when current_value() cannot read the
     /// value in force; else @p r's status with that value.
     [[nodiscard]] auto answer_set(
