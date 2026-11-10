@@ -165,11 +165,12 @@ void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
 
 void AvbEntityHost::release_net_handlers()
 {
-    // The senders first: they reach into the net handlers, and a Leave or
+    // The senders and the Milan sinks' talker lookup first: they reach into the net handlers, and a Leave or
     // re-declaration falling due after this has nowhere stale to go. The
     // next start_control_plane() installs the new ones.
     components_.msrp_handler.drop_sender();
     components_.mvrp_handler.drop_sender();
+    components_.acmp_listener.milan_sinks().set_talker_lookup({});
     net_handlers_->close_local_port();
     net_handlers_.reset();
     if (mirror_ != nullptr) {
