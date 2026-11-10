@@ -2082,7 +2082,7 @@ auto AemCommandHandler::build_acquire_response(AcquireLockResponseParams const& 
 
 auto AemCommandHandler::handle_lock_entity(
     AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
-{
+{  // NOLINT(statusbar-block-statements) LOCK_ENTITY's cases; pre-dates the gate
     // LOCK_ENTITY command payload (AemLockEntityPayload):
     //   flags(4) + locked_entity_id(8) + descriptor_type(2) + descriptor_index(2)
     if (command_data.size() < AemLockEntityPayload::LENGTH) {
@@ -2094,6 +2094,13 @@ auto AemCommandHandler::handle_lock_entity(
     uint32_t const flags = cmd.flags;  // host order via wire-type conversion
 
     bool const unlock = cmd.is_unlock();
+
+    // IEEE 1722.1-2021 Clause 7.4.2.2: an acquired entity refuses any other controller's LOCK_ENTITY.
+    if (acquired_ && !(acquiring_controller_ == header.controller_entity_id)) {
+        return build_lock_response(
+            {.status = AEM_STATUS_ENTITY_ACQUIRED, .flags = flags, .entity_id = locking_controller_, .command_data = command_data},
+            out_buffer);
+    }
 
     if (unlock) {
         // Unlock
@@ -2112,7 +2119,12 @@ auto AemCommandHandler::handle_lock_entity(
             out_buffer);
     }
 
-    // Lock
+    // Lock: Milan v1.3 Section 5.4.2.2 locks the ENTITY descriptor alone.
+    if (profile_.milan && cmd.descriptor_type.get() != DESCRIPTOR_ENTITY) {
+        return build_lock_response(
+            {.status = AEM_STATUS_NOT_SUPPORTED, .flags = flags, .entity_id = locking_controller_, .command_data = command_data},
+            out_buffer);
+    }
     if (!locked_) {
         locked_ = true;
         locking_controller_ = header.controller_entity_id;
