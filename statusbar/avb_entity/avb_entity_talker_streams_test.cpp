@@ -917,8 +917,8 @@ TEST(talker_port, am824_frames_carry_the_streams_own_rate)
         media_clock,
         last_gptp_ns,
         std::pmr::get_default_resource()};
-    EXPECT_TRUE(talker.open_stream(spec_of(0, avtp::make_am824_stream_format(2, 2)), kStreamId, kDest).has_value());
-    EXPECT_TRUE(talker.reformat_stream(spec_of(0, avtp::make_am824_stream_format(4, 2))).has_value());
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x00a0020240000200ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, 0x00a0040240000200ULL)).has_value());
     EXPECT_TRUE(talker.open_tx(port).has_value());
     auto* slot = talker.slot_for(0);
     EXPECT_TRUE(slot != nullptr && slot->am824.has_value());
@@ -982,7 +982,7 @@ TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numb
     for (int i = 0; i < 3; ++i, index += 6) {
         EXPECT_TRUE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
     }
-    EXPECT_TRUE(talker.reformat_stream(spec_of(0, avtp::make_am824_stream_format(2, 2))).has_value());
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, 0x00a0020240000200ULL)).has_value());
     EXPECT_TRUE(slot->am824.has_value() && !slot->aaf.has_value() && !slot->reframer.has_value());
     EXPECT_FALSE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + index, 6, render));
     for (int i = 0; i < 2; ++i, index += 6) {

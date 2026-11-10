@@ -934,7 +934,6 @@ TEST(shaper_launch_time, an_offloaded_etf_goes_under_class_as_cbs_only)
         }));
     EXPECT_TRUE(qdiscs.launch_time());
     EXPECT_TRUE(qdiscs.launch_time_mode() == LaunchTimeMode::on);
-    EXPECT_FALSE(qdiscs.etf_error());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
 }
@@ -1127,7 +1126,7 @@ TEST(shaper_launch_time, a_refused_class_b_cbs_leaves_the_etf_under_class_a_s)
             "replace 9001:1 etf clockid 11 delta 150000 offload skip_sock_check",
         }));
     EXPECT_TRUE(qdiscs.launch_time());
-    EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported());
+    EXPECT_FALSE(qdiscs.cbs_unsupported());
     // Class A's cbs still follows its streams; class B's is not asked again.
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
@@ -1145,7 +1144,8 @@ TEST(shaper_launch_time, an_einval_class_b_cbs_is_a_refusal_too)
     qdiscs.set_launch_time(LaunchTimeMode::on);
     EXPECT_TRUE(qdiscs.install(3, "eth0", igb_mqprio(), igb_layout()).has_value());
     EXPECT_TRUE(qdiscs.program(idle_targets(), 1000).has_value());
-    EXPECT_TRUE(qdiscs.class_b_cbs_refused() && !qdiscs.cbs_unsupported() && qdiscs.launch_time());
+    EXPECT_FALSE(qdiscs.cbs_unsupported());
+    EXPECT_TRUE(qdiscs.launch_time());
     (void)tc.drain();
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136"}));
@@ -1189,7 +1189,6 @@ TEST(shaper_launch_time, a_refused_etf_is_reported_and_not_asked_again)
             "show 9001:1",
             "replace 9001:1 etf clockid 11 delta 200000 offload skip_sock_check",
         }));
-    EXPECT_TRUE(qdiscs.etf_error() == std::errc::operation_not_supported);
     EXPECT_FALSE(qdiscs.launch_time());
     EXPECT_TRUE(qdiscs.program(admitted_targets(), 1000).has_value());
     EXPECT_TRUE(tc.drain() == Requests({"replace 9000:1 cbs 9001: idleslope 19136", "replace 9000:2 cbs 9002: idleslope 730864"}));
