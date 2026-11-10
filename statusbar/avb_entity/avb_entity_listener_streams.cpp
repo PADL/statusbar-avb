@@ -653,24 +653,13 @@ auto ListenerStreams::rx_slot_matches(
 void ListenerStreams::receive_am824(
     ListenerStreamSlot& slot, avtp::Am824StreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) one PDU checked, delivered and counted
-    if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
-        return;
-    }
     avtp::Am824Pdu pdu{};
-    span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
-        slot.rx_bad.add(1);
-        update_stream_input_counters(
-            slot,
-            pdu.sequence_num(),
-            0,
-            false,
-            false,
-            pdu.stream_header.mr(),
-            /*format_ok=*/false,
-            0,
-            /*ts_sparse=*/true,
-            gptp_now_ns);
+    bool const whole = frame.size() >= avtp::Am824Pdu::HEADER_LENGTH;
+    if (whole) {
+        span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
+    }
+    if (!whole || !pdu.is_valid()) {
+        count_rejected(slot, frame, /*ts_sparse=*/true, gptp_now_ns);
         return;
     }
     auto const& header = pdu.stream_header;
@@ -748,10 +737,7 @@ void ListenerStreams::receive_aaf(
 {
     auto const pdu = accepted_aaf_pdu(slot, frame, now);
     if (!pdu) {
-        slot.rx_bad.add(1);
-        auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
-        auto const mr = avtp::avtp_get_mr(frame).value_or(false);
-        update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
+        count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);
         return;
     }
     // Milan v1.2 Section 4.4.2.2: a mismatched format is discarded, counted in UNSUPPORTED_FORMAT.
@@ -836,15 +822,13 @@ void ListenerStreams::count_received(
 void ListenerStreams::receive_crf(
     ListenerStreamSlot& slot, avtp::CrfStreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {  // NOLINT(statusbar-block-statements) a CRF frame's checks, then counted and delivered
-    if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
-        return;
-    }
     avtp::CrfPdu pdu{};
-    span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
-        slot.rx_bad.add(1);
-        update_stream_input_counters(
-            slot, pdu.get_sequence_num(), 0, false, pdu.tu(), pdu.mr(), /*format_ok=*/false, 0, /*ts_sparse=*/true, 0);
+    bool const whole = frame.size() >= avtp::CrfPdu::HEADER_LENGTH;
+    if (whole) {
+        span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+    }
+    if (!whole || !pdu.is_valid()) {
+        count_rejected(slot, frame, /*ts_sparse=*/true, 0);
         return;
     }
     deliver_crf_timestamps(slot, *pdu, frame.subspan(avtp::CrfPdu::HEADER_LENGTH), gptp_now_ns);
@@ -853,12 +837,72 @@ void ListenerStreams::receive_crf(
 
 auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& /*slot*/, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>
 {
-    // Media lock on the first timestamps' step, timestamp_interval x timestamps_per_pdu
-    // events apart (IEEE 1722-2016 Clause 10.4); no AVTP timestamp to call late or early.
-    auto const first_ts = avtp::crf_get_timestamp(ts_data, 0);
-    uint64_t const events_per_pdu = uint64_t{pdu.timestamp_interval()} * pdu.timestamp_count();
-    update_stream_input_counters(
-        slot,
+    if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
+        return std::nullopt;
+    }
+    avtp::CrfPdu pdu{};
+    span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+    return pdu.is_valid() ? std::optional{pdu} : std::nullopt;
+}
+
+auto ListenerStreams::accepted_crf_pdu(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t const gptp_now_ns)
+    -> std::optional<avtp::CrfPdu>
+{
+    auto const pdu = parse_crf_frame(slot, frame);
+    if (pdu && crf_pdu_is_of_format(slot.spec.format, *pdu, frame.size() - avtp::CrfPdu::HEADER_LENGTH)) {
+        return pdu;
+    }
+    slot.rx_bad.add(1);
+    count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);  // its sequence_num kept (Milan v1.3 5.3.8.10)
+    return std::nullopt;
+}
+
+void ListenerStreams::deliver_crf_timestamps(
+    ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> const timestamp_data, int64_t const gptp_now_ns)
+{
+    if (!slot.crf) {
+        return;  // no CRF input: the dispatcher sends none here, and a direct caller gets nothing
+    }
+    uint32_t const source = crf_source_for(slot, pdu);
+    slot.crf->process_packet(pdu, timestamp_data, [&slot, gptp_now_ns, mr = pdu.mr(), source](uint64_t ts_ns, uint16_t index) {
+        // Each (CRF timestamp, local receive time) pair feeds media-clock
+        // recovery via the registered consumer, with the PDU's mr and source.
+        if (slot.on_crf) {
+            slot.on_crf(ts_ns, index, gptp_now_ns, mr, source);
+        }
+    });
+    slot.rx_packets.add(1);
+    slot.rx_samples.add(slot.crf->last_timestamp_count);
+}
+
+auto ListenerStreams::crf_media_clock_events(uint16_t const stream_index) const noexcept -> std::optional<uint32_t>
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr || !slot->crf) {
+        return std::nullopt;
+    }
+    auto const& c = slot->counters;
+    return c.media_reset.load(std::memory_order_relaxed) + c.stream_interrupted.load(std::memory_order_relaxed) +
+        slot->stream_changes.load(std::memory_order_acquire);
+}
+
+auto ListenerStreams::crf_source_for(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu) noexcept -> uint32_t
+{
+    uint64_t const stream_id = pdu.stream_id().to_uint64();
+    uint32_t const change = slot.stream_changes.load(std::memory_order_acquire);
+    if (slot.crf_source == 0 || stream_id != slot.crf_stream_id || change != slot.crf_stream_change) {
+        slot.crf_stream_id = stream_id;
+        slot.crf_stream_change = change;
+        slot.crf_source = ++crf_sources_;
+    }
+    return slot.crf_source;
+}
+
+void ListenerStreams::tally_crf_pdu(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, int64_t const gptp_now_ns)
+{
+    auto const& format = slot.spec.format;
+    tally_stream_input_packet(
+        slot.counters,
         pdu.get_sequence_num(),
         static_cast<uint32_t>(slot.crf->first_timestamp_ns),  // the low 32 bits, which an avtp_timestamp is of gPTP time
         /*tv=*/true,
@@ -891,6 +935,15 @@ void ListenerStreams::deliver_crf(
     });
     slot.rx_packets.add(1);
     slot.rx_samples.add(ctx.last_timestamp_count);
+}
+
+void ListenerStreams::count_rejected(
+    ListenerStreamSlot& slot, std::span<uint8_t const> const frame, bool const ts_sparse, int64_t const gptp_now_ns)
+{
+    slot.rx_bad.add(1);
+    auto const seq = avtp::avtp_get_sequence_num(frame).value_or(0);
+    auto const mr = avtp::avtp_get_mr(frame).value_or(false);
+    update_stream_input_counters(slot, seq, 0, false, false, mr, /*format_ok=*/false, 0, ts_sparse, gptp_now_ns);
 }
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
