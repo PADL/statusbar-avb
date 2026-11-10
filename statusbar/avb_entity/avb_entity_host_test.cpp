@@ -594,6 +594,62 @@ TEST(avb_entity_host_avb_info, get_avb_info_names_the_grandmaster_adp_names)
     EXPECT_TRUE(same());
 }
 
+namespace {
+
+/// GET_AVB_INFO's and ADP's gptp_grandmaster_id, which must be the same.
+auto named_grandmaster(SymbolAwareHost& host) -> uint64_t
+{
+    auto const reported = host->avb_info(0).gptp_grandmaster_id.to_uint64();
+    EXPECT_EQ(host->components().adp_advertiser.adpdu().gptp_grandmaster_id.to_uint64(), reported);
+    return reported;
+}
+
+constexpr uint64_t OWN_CLOCK = 0x70B3'D5FF'FEED'0001ULL;  // make_interface_blob's clock_identity
+
+}  // namespace
+
+// Milan v1.3 Section 4.2.6.2.1: with nothing announced, as after a restart with no peer, a
+// grandmaster-capable entity is its own grandmaster, and GET_AVB_INFO and ADP name its clock.
+TEST(avb_entity_host_avb_info, an_entity_with_nothing_announced_names_its_own_clock)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->on_link_up(statusbar::sm::TimePoint{});
+    EXPECT_EQ(named_grandmaster(host), OWN_CLOCK);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL});
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0x0011'22FF'FE33'4455ULL});
+    host->note_grandmaster_lost();
+    EXPECT_EQ(named_grandmaster(host), OWN_CLOCK);
+}
+
+// An entity that cannot be grandmaster (priority1 255) names none once its grandmaster is lost.
+TEST(avb_entity_host_avb_info, an_entity_that_cannot_be_grandmaster_names_none_after_a_loss)
+{
+    auto const blob = make_interface_blob(255);
+    auto host = make_host_from_blob(blob);
+    host->on_link_up(statusbar::sm::TimePoint{});
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0});
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL});
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0x0011'22FF'FE33'4455ULL});
+    host->note_grandmaster_lost();
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0});
+}
+
+// A clientOnly gPTP stack following no grandmaster names none, whatever the Announces say; its
+// parent data set's grandmaster once it reports one.
+TEST(avb_entity_host_avb_info, a_parent_data_set_naming_none_names_none)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL});
+    host->use_parent_grandmaster();
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0});
+    host->note_grandmaster_lost();
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0});
+    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'6677ULL));
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0x0011'22FF'FE33'6677ULL});
+}
+
 // use_parent_grandmaster after an Announce: the Announce handler's grandmaster in force is dropped, its
 // grandmasters found or lost (the local ptp4l's own among them) count nothing, and the stack's first
 // report is no change.
