@@ -85,6 +85,22 @@ TEST(stereo_io_construct, basic_construction)
     EXPECT_FALSE(entity.is_ready());
 }
 
+// IEEE 802.1Q-2022 Clause 35.2.2.8.6: the Talker declares its port's latency: one MTU frame, then its own
+// 32 + 6 x 2 x 4 = 80-octet MSDU (122 on the wire), 8 ns an octet at 1 Gbit/s.
+TEST(stereo_io_msrp, a_talker_advertise_declares_the_port_latency)
+{
+    AvbEntityStereoIOConfig config{};
+    config.interface_name = "en0";
+    config.link_mbps = 1000;
+    config.mtu = 1500;
+    AvbEntityStereoIO const standard{config};
+    EXPECT_EQ(standard.talker_srp_info().max_frame_size, uint16_t{80});
+    EXPECT_EQ(standard.talker_srp_info().accumulated_latency, uint32_t{(1542 + 122) * 8});
+    config.mtu = 9000;
+    AvbEntityStereoIO const jumbo{config};
+    EXPECT_EQ(jumbo.talker_srp_info().accumulated_latency, uint32_t{(9042 + 122) * 8});
+}
+
 TEST(stereo_io_construct, entity_model_created)
 {
     AvbEntityStereoIOConfig config{};

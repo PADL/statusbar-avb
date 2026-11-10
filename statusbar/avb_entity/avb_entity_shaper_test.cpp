@@ -255,6 +255,8 @@ TEST(shaper_talker_latency, an_unknown_link_speed_or_mtu_counts_as_1000_mbit_s_a
 {
     auto const octets = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()));
     EXPECT_EQ(talker_port_latency_ns(octets, 0, 0), talker_port_latency_ns(octets, 1000, FALLBACK_MTU));
+    EXPECT_EQ(interface_talker_latency_ns(octets, "no-such-if0", 0, 0), uint32_t{14024});
+    EXPECT_EQ(interface_talker_latency_ns(octets, "no-such-if0", 100, 9000), uint32_t{(9042 + 211) * 80});
 }
 
 TEST(shaper_cbs, frame_sizes_and_bandwidth)
