@@ -340,8 +340,8 @@ struct PtpManagementState
     std::optional<TimePropertiesDataSet> time_properties;
     /// The port named PtpManagementConfig::port_interface, once PORT_PROPERTIES_NP names it.
     std::optional<gptp::SourcePortIdentity> port;
-    /// That port's PORT_DATA_SET: peerMeanPathDelay in ns (802.1AS-2020 neighborPropDelay,
-    /// measured whatever the port's role), portState and delayMechanism.
+    /// That port's PORT_DATA_SET: peerMeanPathDelay in ns (802.1AS-2020 neighborPropDelay, measured
+    /// whatever the port's role; then each CMLDS_INFO_NP meanLinkDelay), portState and delayMechanism.
     std::optional<int64_t> peer_mean_path_delay_ns;
     std::optional<PortState> port_state;
     std::optional<DelayMechanism> delay_mechanism;
@@ -373,8 +373,8 @@ struct PtpManagementConfig
 {
     std::string uds_address{"/var/run/ptp4l"};  ///< ptp4l's uds_address; absolute
     uint8_t domain{0};                          ///< ptp4l's domainNumber (pmc -d)
-    /// Between polls of what ptp4l pushes no notification for: TIME_PROPERTIES_DATA_SET and the
-    /// followed port's PORT_DATA_SET (its peer delay), and everything while it refuses a subscription.
+    /// Between polls of what ptp4l pushes no notification for: TIME_PROPERTIES_DATA_SET, and
+    /// everything while it refuses a subscription.
     int64_t poll_period_ns{2'000'000'000};
     int64_t retry_period_ns{1'000'000'000};  ///< between probes while ptp4l is unreachable
     std::string port_interface;              ///< the port whose PORT_DATA_SET to follow (empty: none)
@@ -391,9 +391,9 @@ struct PtpManagementConfig
 class PtpManagementClient final : public net::Pollable
 {
   public:
-    /// Called on the reactor thread when the status, the grandmaster, the error, the followed
-    /// port's peer delay, state or delay mechanism, any port's state, the grandmaster settings, a
-    /// refusal or the subscription changes.
+    /// Called on the reactor thread when the status, the grandmaster, the error, the followed port's
+    /// peer delay, asCapable, state or delay mechanism, any port's state, the time properties, the
+    /// grandmaster settings, a refusal or the subscription changes.
     using Listener = sg14::inplace_function<void(PtpManagementState const&), 64>;
 
     /// Bind the client's socket. Fails with invalid_argument for a bad
@@ -439,6 +439,8 @@ class PtpManagementClient final : public net::Pollable
     void apply_port_data_set(PortDataSet const& port_data);
     /// The followed port moved to @p now: its asCapable again, which a state change may reset unnotified.
     void note_followed_port_state(PortState now);
+    /// The followed port's asCapable and peer delay from @p sender's CMLDS_INFO_NP.
+    void apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePortIdentity const& sender);
     void apply_settings(GrandmasterSettingsNp const& settings);
     void apply_subscription(SubscribeEventsNp const& held, int64_t now_ns);
     void publish_if_changed();
