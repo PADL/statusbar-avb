@@ -205,11 +205,20 @@ using StreamSpecs = sg14::inplace_vector<StreamSpec, MAX_ENTITY_STREAMS>;
 
 /// AVB Class A wire cadence (packets per second per stream).
 inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
+/// The 44.1 kHz family's Class A AAF packets per second: one per 136 us (IEEE 1722-2016 Table 17).
+inline constexpr uint32_t CLASS_A_44_1_KHZ_PACKETS_PER_SEC = 7350;
 
-/// Audio samples per Class A packet at @p sample_rate_hz (12 @ 96k, 6 @ 48k).
+/// Audio samples per Class A AAF packet at @p sample_rate_hz, the same in every packet: 6 @ 44.1k and
+/// 48k, 12 @ 88.2k and 96k, 24 @ 176.4k and 192k (IEEE 1722-2016 Clause 7.7, Table 17).
 [[nodiscard]] constexpr auto class_a_samples_per_packet(uint32_t sample_rate_hz) noexcept -> uint32_t
 {
-    return sample_rate_hz / CLASS_A_PACKETS_PER_SEC;
+    if (sample_rate_hz % CLASS_A_PACKETS_PER_SEC == 0) {
+        return sample_rate_hz / CLASS_A_PACKETS_PER_SEC;
+    }
+    if (sample_rate_hz % CLASS_A_44_1_KHZ_PACKETS_PER_SEC == 0) {
+        return sample_rate_hz / CLASS_A_44_1_KHZ_PACKETS_PER_SEC;
+    }
+    return (sample_rate_hz + CLASS_A_PACKETS_PER_SEC - 1) / CLASS_A_PACKETS_PER_SEC;
 }
 
 /// The byte Milan v1.3 Table 4.4 adds for a sampling clock a little faster than nominal, to the
