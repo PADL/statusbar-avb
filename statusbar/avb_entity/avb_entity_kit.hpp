@@ -498,8 +498,8 @@ class AvbEntityKit
     /// Why start() could not open the stream RX socket (empty: it opened, or
     /// the blob declares no stream inputs).
     [[nodiscard]] auto stream_rx_error() const noexcept -> std::error_code { return stream_rx_error_; }
-    /// Why the xdp backend did not open when the kit fell back to rawnet
-    /// (config.net_xdp_fallback); empty when it did not fall back.
+    /// Why the xdp backend did not open when the auto backend fell back to
+    /// rawnet; empty when it did not fall back.
     [[nodiscard]] auto stream_xdp_error() const noexcept -> std::error_code { return stream_xdp_error_; }
     /// Why the stream port carries no launch time although config.stream_launch_time
     /// asked for it (the NIC, kernel or probe refused it); empty otherwise.
@@ -716,9 +716,11 @@ class AvbEntityKit
     /// One TX slot per talker stream, with the identity the ACMP model carries.
     [[nodiscard]] auto open_talker_streams() -> Status;
     /// The stream port on config_.net_backend (one the host opened before start(),
-    /// a test port, is kept), rawnet when xdp does not open and
-    /// config_.net_xdp_fallback allows it; errors recorded (stream_tx_error()).
+    /// a test port, is kept), the auto backend's rawnet when xdp does not open;
+    /// errors recorded (stream_tx_error()).
     void open_stream_port();
+    /// The stream port on config_.net_backend, the auto backend's xdp, else rawnet (stream_xdp_error()).
+    [[nodiscard]] auto open_configured_stream_port() -> Status;
     /// The stream port opened on @p backend; untimed when launch time was asked for and only
     /// an untimed socket opens, whatever refused the timed one (stream_launch_time_error()
     /// keeps that error).

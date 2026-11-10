@@ -699,6 +699,21 @@ TEST(avb_entity_kit_profile, the_models_profile_symbol_decides)
     }
 }
 
+// The auto backend opens xdp, else rawnet, the reason xdp did not open kept: on an interface
+// that does not exist both refuse, and both reasons are there.
+TEST(avb_entity_kit_stream_port, the_auto_backend_tries_xdp_then_rawnet)
+{
+    MilanKit m{std::nullopt, 0x0A};
+    m.config.net_backend = "auto";
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_TRUE(static_cast<bool>(m.kit.stream_xdp_error()));
+    EXPECT_TRUE(static_cast<bool>(m.kit.stream_tx_error()));
+
+    MilanKit r{std::nullopt, 0x0B};
+    EXPECT_TRUE(r.start_ready());  // rawnet alone: no xdp tried
+    EXPECT_FALSE(static_cast<bool>(r.kit.stream_xdp_error()));
+}
+
 // The Milan talker through the kit on a nonexistent interface (sends fail
 // quietly): declarations follow probes (Milan v1.2 Section 4.3.3.1), and the
 // presentation offset goes only through the entity's hook, never while streaming.
