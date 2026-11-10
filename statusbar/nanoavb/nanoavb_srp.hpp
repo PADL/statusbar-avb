@@ -526,6 +526,8 @@ class MsrpHandler
         return success();
     }
 
+    /// Withdraw @p stream_id's Listener declaration: one per StreamID (IEEE 802.1Q-2022 Clause 35.2.4.4),
+    /// so a caller with several users of the stream calls it after the last.
     [[nodiscard]] auto listener_withdraw(StreamId const& stream_id, TimePoint now) -> Status
     {
         for (auto& stream : listener_streams_) {
