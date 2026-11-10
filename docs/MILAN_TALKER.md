@@ -64,7 +64,8 @@ until LeaveTime (5 s, Milan v1.3 Table 4.3) runs out, which is what rides out a
 Listener's re-declaration. A Listener's Lv moves the registrar to MT at once
 (Section 4.2.7.2.2), so the last Listener's Lv withdraws a stream whose probe
 window is over at once, and a Listener lost without one is withdrawn LeaveTime
-after the next LeaveAll.
+after the next LeaveAll received. The entity's own LeaveAll does not age its
+MSRP registrars, so only a peer's LeaveAll starts that LeaveTime.
 
 A classic (non-Milan) entity skips condition 2 (`interest_required` false):
 every stream declares as soon as its address is valid and is not held (a new
@@ -146,7 +147,7 @@ not chop the stream. The registrar already does that: a LeaveAll leaves the
 Listener registered (Lv) for LeaveTime, so the grace only adds to it. A Milan
 entity's LeaveTime is 5 s and its MSRP Lv immediate (Milan v1.3 Section
 4.2.7.2.2), so its gate has no grace: it closes at the last Listener's Lv, or
-LeaveTime after the LeaveAll that finds the Listener gone, and SET_STREAM_FORMAT
+LeaveTime after the next LeaveAll received, and SET_STREAM_FORMAT
 stops answering STREAM_IS_RUNNING then. A classic entity keeps `GRACE` (5 s)
 over IEEE 802.1Q's 1 s LeaveTime. Only a registration or a withdrawal moves the
 stamp, so a withdrawn declaration closes the gate the grace later and the
