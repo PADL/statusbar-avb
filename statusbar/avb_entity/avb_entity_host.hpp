@@ -391,7 +391,7 @@ class AvbEntityHost
     /// stop_control_plane's first half: the MSRP reservations and the MVRP
     /// VID withdrawn with their Leaves sent at once, then ENTITY_DEPARTING.
     void withdraw_from_the_network(TimePoint now);
-    /// Its second: the net handlers released, the mirror detached from them.
+    /// Its second: the SRP senders cleared, the net handlers released, the mirror detached from them.
     void release_net_handlers();
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.

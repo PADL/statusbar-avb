@@ -662,6 +662,28 @@ TEST(avb_entity_kit_domain, a_restart_with_the_link_up_adopts_a_bridges_vid)
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(7) != nanoavb::VlanState::Unregistered);
 }
 
+// stop() clears the MSRP and MVRP senders with the net handlers they refer to: a LeaveAll between
+// a stop and the next start sends nothing
+TEST(avb_entity_kit_domain, a_stop_clears_the_srp_senders)
+{
+    size_t sent = 0;  // outlives the kit
+    MilanKit m{std::nullopt, 0x32};
+    EXPECT_TRUE(m.start_ready());
+    auto& components = m.kit.host().components();
+    auto const counting = [&sent](std::span<uint8_t const>) {
+        ++sent;
+        return true;
+    };
+    components.msrp_handler.set_send_packet(counting);
+    components.mvrp_handler.set_send_packet(counting);
+    EXPECT_TRUE(m.kit.stop().has_value());
+    auto const at_stop = sent;
+    EXPECT_TRUE(at_stop > 0);  // the stop's Leaves
+    components.msrp_handler.leave_all(sm::Clock::now());
+    components.mvrp_handler.leave_all(sm::Clock::now());
+    EXPECT_EQ(sent, at_stop);
+}
+
 // Milan v1.2 Section 4.2.7.2.1: an adopted Class A VID reaches the MVRP join,
 // ACMP stream_vlan_id and the frames' tag; a link up restores the configured VID,
 // a repeated report of a link already up does not.

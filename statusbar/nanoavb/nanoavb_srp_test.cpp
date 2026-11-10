@@ -1230,6 +1230,40 @@ TEST(nanoavb_srp_mvrp, a_restart_sends_its_leave_all_through_the_new_callbacks)
     EXPECT_TRUE(sent > 0);
 }
 
+namespace {
+
+/// The LeaveAll PDU a peer's MSRP participant sends at `now`, its Domain declared.
+auto peer_leave_all(TimePoint const now) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> pdu;
+    MsrpHandler<> peer{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [&pdu](std::span<uint8_t const> p) {
+                           pdu.assign(p.begin(), p.end());
+                           return true;
+                       }}};
+    EXPECT_TRUE(peer.declare_domain(now).has_value());
+    peer.leave_all(now);
+    return pdu;
+}
+
+}  // namespace
+
+// A LeaveAll received after a stop and a start, before any tick, is answered at once through the
+// sender set last (rLA!, IEEE 802.1Q-2022 Clause 10.7.5.20): the participant keeps no copy of an earlier one.
+TEST(nanoavb_srp_msrp, a_leave_all_received_before_a_tick_answers_through_the_current_sender)
+{
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}};
+    EXPECT_TRUE(handler.declare_domain(TimePoint{std::chrono::seconds{1}}).has_value());
+    size_t restarted = 0;
+    auto const now = run_and_restart(handler, MsrpCallbacks{.send_packet = counting_sender(&restarted)});
+    EXPECT_TRUE(handler.declare_domain(now).has_value());
+    size_t current = 0;
+    handler.set_send_packet(counting_sender(&current));
+    auto const before = restarted;
+    handler.receive_packet(peer_leave_all(now), now + std::chrono::milliseconds{1});
+    EXPECT_TRUE(current > 0);
+    EXPECT_EQ(restarted, before);
+}
+
 //
 // Test Runner
 //

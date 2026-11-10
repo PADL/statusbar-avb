@@ -85,9 +85,6 @@ void MvrpHandler::withdraw_all(TimePoint now)
             (void)participant_.withdraw_vlan(vlan.vlan_id, now);
         }
     }
-    if (callbacks_.send_packet) {
-        participant_.set_send_pdu(callbacks_.send_packet);
-    }
     participant_.transmit_pending(now);
 }
 
@@ -119,13 +116,6 @@ auto MvrpHandler::tick(TimePoint now) -> void
     if (!started_) {
         participant_.start(now);
         started_ = true;
-    }
-    // The send_packet callback carries what the protocol engine transmits
-    // through the nanoavb callback path. Installed before the timers run,
-    // or the first join timer of a run builds its PDU with nowhere to send
-    // it. Harmless to re-set each tick.
-    if (callbacks_.send_packet) {
-        participant_.set_send_pdu(callbacks_.send_packet);
     }
     participant_.tick(now);
 }
