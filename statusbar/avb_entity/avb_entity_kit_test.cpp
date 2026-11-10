@@ -2139,55 +2139,94 @@ TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
         EXPECT_EQ(
             m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 8))),
             atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-        // Another listed rate is no re-time to refuse as running: it is simply not supported.
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        // The rate change would re-time the bound input (Milan v1.2 Section 5.4.2.7); the rate in force is a no-op.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+        EXPECT_EQ(m.kit.sample_rate(), 48000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
         EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
     }
     std::filesystem::remove_all(dir);
 }
 
-// Milan v1.2 Section 5.4.2.13: a unit listing more rates still keeps its own; another
-// listed rate is NOT_SUPPORTED, nothing re-timed, notified or saved, and an older
-// file's saved rate is ignored
-TEST(avb_entity_kit_formats, a_multi_rate_unit_keeps_its_rate)
+// IEEE 1722.1-2021 Clause 7.4.21: with no stream running, another listed rate re-times every audio
+// stream at the unit's rate through the entity's hook; the CRF stays; an unlisted rate is NOT_SUPPORTED
+TEST(avb_entity_kit_formats, an_idle_rate_change_retimes_the_unit_streams)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(192000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.kit.sample_rate(), 96000U);
+    EXPECT_EQ(m.formats.size(), size_t{2});
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_96K);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 1), CRF_MILAN_48K);
+    EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 96000U);
+    std::array<uint8_t, 4> get_rate{0x00, 0x02, 0x00, 0x00};
+    auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_SAMPLING_RATE, get_rate);
+    EXPECT_TRUE(r.status == atdecc::AEM_STATUS_SUCCESS && r.body.size() >= 8 && r.body[6] == 0x77 && r.body[7] == 0x00);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
+}
+
+// The re-timed streams are notified as SET_STREAM_FORMATs to every registered controller, after the response
+TEST(avb_entity_kit_formats, a_rate_change_notifies_the_retimed_formats)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
+    m.kit.on_declaration_timer(MilanKit::steady_ns());
+    auto const sent = unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_EQ(sent.size(), size_t{2});
+    EXPECT_TRUE(sent.size() == 2 && sent[0].size() >= 12 && sent[0][1] == DESCRIPTOR_STREAM_OUTPUT && sent[0][6] == 0x03);
+    m.aem.clear();
+    m.kit.on_declaration_timer(MilanKit::steady_ns());
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());  // sent once
+}
+
+// A stream the entity refuses at the new rate refuses the change: those re-timed go back, nothing is notified
+TEST(avb_entity_kit_formats, a_refused_rate_change_is_undone)
+{
+    RateKit m;
+    EXPECT_TRUE(m.start_ready());
+    m.kit.set_on_stream_format_changed([&m](uint16_t const type, uint16_t const index, StreamFormatFields const& format) {
+        m.formats.push_back({type, index, format});
+        bool const refused = type == DESCRIPTOR_STREAM_INPUT && format.sample_rate_hz == 96000;
+        return refused ? atdecc::AEM_STATUS_NO_RESOURCES : atdecc::AEM_STATUS_SUCCESS;
+    });
+    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
+    EXPECT_EQ(m.kit.sample_rate(), 48000U);
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);  // re-timed, then put back
+    EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), INT24_8CH_48K);
+    EXPECT_EQ(m.formats.size(), size_t{3});
+    m.kit.on_declaration_timer(MilanKit::steady_ns());
+    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
+}
+
+// Milan v1.2 Section 5.3.4: the unit's rate is saved and restored at the next start, before the formats
+TEST(avb_entity_kit_formats, a_saved_sampling_rate_is_restored_at_start)
 {
     auto const dir = state_dir("multi-rate");
     auto const path = (dir / "avb-state.toml").string();
     {
         RateKit m{path};
         EXPECT_TRUE(m.start_ready());
-        std::array<uint8_t, 0> none{};
-        (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(192000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
-        EXPECT_EQ(m.kit.sample_rate(), 48000U);
-        EXPECT_EQ(m.kit.talker().config_.sample_rate, 48000U);
-        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
-        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 48000U);
-        EXPECT_TRUE(m.formats.empty());
-        std::array<uint8_t, 4> get_rate{0x00, 0x02, 0x00, 0x00};
-        auto const r = m.aem_command(atdecc::AEM_COMMAND_GET_SAMPLING_RATE, get_rate);
-        EXPECT_TRUE(
-            r.status == atdecc::AEM_STATUS_SUCCESS && r.body.size() >= 8 && r.body[5] == 0x00 && r.body[6] == 0xBB &&
-            r.body[7] == 0x80);
-        m.kit.on_declaration_timer(MilanKit::steady_ns());
-        EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
-    }
-    {
-        // An older file with a saved rate: none was written, it is ignored.
-        EXPECT_TRUE(std::filesystem::exists(path));
-        auto const text = serialize_persistent_state(load_persistent_state(path, 0, {}).state);
-        EXPECT_EQ(text.find("sampling_rate"), std::string::npos);
-        std::ofstream out{path};
-        out << text << "\n[[sampling_rate]]\naudio_unit = 0\nrate = 96000\n";
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+        auto const saved = load_persistent_state(path, 0, {});
+        EXPECT_EQ(saved.state.sampling_rates.size(), size_t{1});
+        EXPECT_EQ(saved.state.stream_formats.size(), size_t{2});
     }
     {
         RateKit m{path};
         EXPECT_TRUE(m.start_ready());
-        EXPECT_EQ(m.kit.sample_rate(), 48000U);
-        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
-        EXPECT_TRUE(m.formats.empty());
+        EXPECT_EQ(m.kit.sample_rate(), 96000U);
+        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+        EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.sample_rate_hz, 96000U);
+        m.kit.on_declaration_timer(MilanKit::steady_ns());
+        EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());  // a restore notifies nobody
     }
     std::filesystem::remove_all(dir);
 }
