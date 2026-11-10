@@ -674,6 +674,10 @@ auto AemCommandHandler::handle_set_descriptor_value(
 auto AemCommandHandler::apply_descriptor_value(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
+    // A hook that answers IN_PROGRESS has its work under way: call it only when the command can be held.
+    if (pending_commands_.size() >= MAX_PENDING_COMMANDS) {
+        return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};
+    }
     // Per-call model (handler_ resolves the descriptor symbol via its storage). The
     // handler applies the value by (command_type, symbol); the response echoes the command.
     AemEntityModel aem_model{*handler_};
