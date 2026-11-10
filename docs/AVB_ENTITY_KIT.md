@@ -416,14 +416,23 @@ the MSB, notified with the other counters at most once a second. Classic (IEEE 1
 of mr toggles (bit 3), tu PDUs (bit 4) and PDUs (FRAMES_TX, bit 7).
 
 The host accounts for ENTITY (no counters beyond ENTITY_SPECIFIC, so none
-valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: changes after the
-first grandmaster, the one found at start not being a change) and the
+valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: each change of the
+grandmaster in force after the first) and the
 CLOCK_DOMAINs (LOCKED, UNLOCKED: each transition once, notified). CLOCK_DOMAIN
 0 follows the gPTP lock until the entity reports its lock with
 `note_clock_domain_locked`, and again after `release_clock_domain_lock(0)`;
 the others, up to four, count once the entity reports them and stop at their
 release. Other interfaces and domains the model has answer with none
 valid. Only configuration 0 is served.
+
+The grandmaster in force is the gPTP stack's PARENT_DATA_SET
+grandmasterIdentity, its own clock while it is grandmaster, once the
+integrator reports it with `AvbEntityHost::note_parent_grandmaster`; a proxy
+entity's AVB info mirror reports the mirrored device's. Until then the
+Announce handler's grandmaster stands, and an Announce receipt timeout makes
+a grandmaster-capable entity (AVB_INTERFACE 0 priority1 below 255, IEEE
+802.1AS-2020 Clause 8.6.2.1) its own grandmaster: A lost and found again is
+two changes.
 
 CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
 PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE
