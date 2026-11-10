@@ -908,6 +908,44 @@ TEST(nanoavb_entity_stubs, get_control_not_implemented)
     EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
 
+// IEEE 1722.1-2021 Table 7-141: a GET_* naming a descriptor the entity lacks is NO_SUCH_DESCRIPTOR.
+TEST(nanoavb_entity_get_value, a_get_on_a_missing_descriptor_is_no_such_descriptor)
+{
+    auto model = create_test_model();  // no CONTROL, SIGNAL_SELECTOR, MATRIX, MIXER or CLOCK_DOMAIN
+    AemCommandHandler handler{model};
+
+    auto const get = [&](uint16_t command, uint16_t descriptor_type) {
+        std::array<uint8_t, 4> cmd{};
+        span_store(cmd, AemControlPayloadHeader{.descriptor_type = descriptor_type, .descriptor_index = 0});
+        return make_test_result(handler, create_aem_header(command), cmd).status;
+    };
+    EXPECT_EQ(get(AEM_COMMAND_GET_CONTROL, DESCRIPTOR_CONTROL), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get(AEM_COMMAND_GET_SIGNAL_SELECTOR, DESCRIPTOR_SIGNAL_SELECTOR), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get(AEM_COMMAND_GET_MATRIX, DESCRIPTOR_MATRIX), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get(AEM_COMMAND_GET_MIXER, DESCRIPTOR_MIXER), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get(AEM_COMMAND_GET_CLOCK_SOURCE, DESCRIPTOR_CLOCK_DOMAIN), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+// A descriptor that exists but whose value the entity does not serve stays NOT_IMPLEMENTED.
+TEST(nanoavb_entity_get_value, a_get_on_a_present_descriptor_without_a_value_is_not_implemented)
+{
+    DescriptorEntity entity{};
+    entity.configurations_count = 1;
+    auto model = EntityModelBuilder{}
+                     .entity(entity)
+                     .configuration(DescriptorConfiguration{})
+                     .control(DescriptorControl{})
+                     .clock_domain(DescriptorClockDomain{})
+                     .build();
+    AemCommandHandler handler{model};
+
+    std::array<uint8_t, 4> cmd{};
+    span_store(cmd, AemControlPayloadHeader{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 0});
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_CONTROL), cmd).status, AEM_STATUS_NOT_IMPLEMENTED);
+    span_store(cmd, AemControlPayloadHeader{.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0});
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_CLOCK_SOURCE), cmd).status, AEM_STATUS_NOT_IMPLEMENTED);
+}
+
 TEST(nanoavb_entity_stubs, get_counters_not_implemented)
 {
     auto model = create_test_model();

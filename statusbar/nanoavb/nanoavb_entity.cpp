@@ -1009,6 +1009,20 @@ void write_u16(std::span<uint8_t> bytes, size_t const at, uint16_t const value)
     span_store(bytes.subspan(at, 2), v);
 }
 
+/// The status of a GET_* whose handler served no value (IEEE 1722.1-2021 Table 7-141):
+/// NO_SUCH_DESCRIPTOR when the addressed descriptor is absent, else NOT_IMPLEMENTED.
+[[nodiscard]] auto no_value_status(AemEntityModel const& model, uint16_t const configuration, std::span<uint8_t const> body)
+    -> uint8_t
+{
+    if (body.size() < 4) {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+    DescriptorRef const ref{
+        .configuration_index = configuration, .descriptor_type = read_u16(body, 0), .descriptor_index = read_u16(body, 2)};
+    std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
+    return model.get_descriptor_for_wire(ref, desc) == 0 ? AEM_STATUS_NO_SUCH_DESCRIPTOR : AEM_STATUS_NOT_IMPLEMENTED;
+}
+
 }  // namespace
 
 auto AemCommandHandler::handle_get_dynamic_info(
@@ -1078,9 +1092,7 @@ auto AemCommandHandler::handle_get_descriptor_value(
     aem_model.set_configuration(current_configuration_);
     auto const n = aem_model.get_descriptor_value_for_wire(command_type, command_data, out_buffer);
     if (n == 0) {
-        // The handler served no value: the entity does not implement this GET (the
-        // conservative default, consistent with the SET hook's NOT_IMPLEMENTED).
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+        return {.status = no_value_status(aem_model, current_configuration_, command_data), .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = n};
 }
