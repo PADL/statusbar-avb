@@ -2665,12 +2665,26 @@ auto AemCommandHandler::queue_notification(
 {
     bool const own = requester == std::optional<Eui64>{current_header_.controller_entity_id};  // the command's own
     if (queued_notifications_.size() + (own ? 0U : 1U) >= MAX_QUEUED_NOTIFICATIONS || body.size() > MAX_QUEUED_BODY) {
+        release_side_effects();  // the held ones go first, so the order on the wire is the order raised
         return false;
     }
     auto& queued = queued_notifications_.emplace_back();
-    queued = {.command_type = command_type, .requester = requester, .body_size = body.size()};
+    queued = {.command_type = command_type, .requester = requester, .own = own, .body_size = body.size()};
     span_copy(std::span{queued.body}.first(body.size()), body);
     return true;
+}
+
+void AemCommandHandler::release_side_effects()
+{
+    dispatching_ = false;  // send them rather than hold them again
+    for (auto const& n : queued_notifications_) {
+        if (!n.own) {
+            emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size), n.requester);
+        }
+    }
+    dispatching_ = true;
+    auto const sent = std::ranges::remove_if(queued_notifications_, [](QueuedNotification const& n) { return !n.own; });
+    queued_notifications_.erase(sent.begin(), sent.end());
 }
 
 void AemCommandHandler::flush_notifications()
