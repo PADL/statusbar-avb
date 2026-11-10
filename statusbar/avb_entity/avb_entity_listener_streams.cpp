@@ -977,6 +977,11 @@ void ListenerStreams::on_listener_connected(
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
     if (auto* const slot = slot_for(stream_index); slot != nullptr) {
         slot->connections.fetch_add(1, std::memory_order_release);  // a new CRF source (StreamCrfFn)
+        // A rebind to another stream: its first frame continues no sequence (Milan v1.3 Section 5.3.8.10).
+        auto const* const held = std::ranges::find(connections_, stream_index, &Connection::stream_index);
+        if (held != connections_.end() && held->stream_id != stream_id) {
+            slot->counters.restart_run.store(true, std::memory_order_relaxed);
+        }
     }
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the
