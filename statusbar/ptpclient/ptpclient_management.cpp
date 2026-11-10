@@ -555,6 +555,7 @@ void PtpManagementClient::apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePort
     if (state_.port != sender) {
         return;
     }
+    cmlds_seen_ = true;
     // An answer for a DISABLED or FAULTY port carries the asCapable linuxptp kept from before.
     bool const down = state_.port_state == PortState::disabled || state_.port_state == PortState::faulty;
     state_.as_capable = down ? AsCapable::not_capable : cmlds.as_capable;
@@ -591,6 +592,7 @@ void PtpManagementClient::apply_subscription(SubscribeEventsNp const& held, int6
     // Not held: a restarted ptp4l has forgotten everything we told it and may hold new data sets.
     if (state_.subscribed) {
         state_.subscribed = false;
+        cmlds_seen_ = false;
         fetch_all(now_ns);
     }
 }
@@ -646,6 +648,7 @@ void PtpManagementClient::forget(int64_t const now_ns)
 {  // NOLINT(statusbar-block-statements): a member-wise reset
     std::error_code const error = state_.error;
     state_ = PtpManagementState{.error = error};
+    cmlds_seen_ = false;
     reachable_ = false;
     transport_specific_.reset();
     server_gone_ = false;
@@ -691,15 +694,22 @@ void PtpManagementClient::poll_if_due(int64_t const now_ns)
         return;
     }
     next_poll_ns_ = now_ns + config_.poll_period_ns;
-    // PORT_PROPERTIES_NP until it names the followed port; without notifications (no subscription),
-    // every port's PORT_DATA_SET and PARENT_DATA_SET too. Subscribed, CMLDS_INFO_NP brings the peer delay.
-    bool const follows = !config_.port_interface.empty();
-    std::array<uint16_t, 4> const ids{
+    // PORT_PROPERTIES_NP until it names the followed port; without notifications (no subscription), every
+    // port's PORT_DATA_SET, CMLDS_INFO_NP and PARENT_DATA_SET too. Subscribed, the followed port's CMLDS_INFO_NP
+    // brings its peer delay, once one has come (a ptp4l before 4.3 sends none: its PORT_DATA_SET is polled).
+    bool const follows = !config_.port_interface.empty() && state_.port;
+    std::array<uint16_t, 5> const ids{
         management_id::time_properties_data_set,
         management_id::port_properties_np,
         management_id::port_data_set,
+        management_id::cmlds_info_np,
         management_id::parent_data_set};
-    std::array<bool, 4> const wanted{true, follows && !state_.port, !state_.subscribed, !state_.subscribed};
+    std::array<bool, 5> const wanted{
+        true,
+        !config_.port_interface.empty() && !state_.port,
+        !state_.subscribed || (follows && !cmlds_seen_),
+        follows && !state_.subscribed,
+        !state_.subscribed};
     for (size_t i = 0; i < ids.size(); ++i) {
         if (wanted.at(i)) {
             send_gets(std::span{ids}.subspan(i, 1));
