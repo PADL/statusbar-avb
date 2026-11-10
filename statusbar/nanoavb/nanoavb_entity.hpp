@@ -680,15 +680,20 @@ class AemCommandHandler
     [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
     /// Fail a SET with @p status, answering the value in force where current_value() reads it, else the echo
-    /// (IEEE 1722.1-2021 Clauses 7.4.7.1, 7.4.9.1, 7.4.17.1, 7.4.21.1, 7.4.23.1, 7.4.25.1, 7.4.29.1, 7.4.31.1,
-    /// 7.4.33.2).
+    /// (IEEE 1722.1-2021 Clauses 7.4.7.1, 7.4.9.1, 7.4.15.1, 7.4.17.1, 7.4.21.1, 7.4.23.1, 7.4.25.1, 7.4.29.1,
+    /// 7.4.31.1, 7.4.33.2, 7.4.77.1).
     [[nodiscard]] auto reject_set(
         uint8_t status, uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// The GET answer, in the SET's layout, for SET_CONFIGURATION, SET_NAME, SET_STREAM_FORMAT, SET_SAMPLING_RATE,
-    /// SET_CLOCK_SOURCE, SET_CONTROL, SET_SIGNAL_SELECTOR, SET_MIXER or SET_MATRIX (the region it names);
-    /// NOT_IMPLEMENTED for any other.
+    /// The GET answer, in the SET's layout, for SET_CONFIGURATION, SET_NAME, SET_STREAM_FORMAT, SET_STREAM_INFO,
+    /// SET_SAMPLING_RATE, SET_CLOCK_SOURCE, SET_CONTROL, SET_SIGNAL_SELECTOR, SET_MIXER, SET_MATRIX (the region it
+    /// names) or SET_MAX_TRANSIT_TIME; NOT_IMPLEMENTED for any other.
     [[nodiscard]] auto current_value(uint16_t set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// @p set_command's response @p r on SUCCESS or IN_PROGRESS, or when current_value() cannot read the
+    /// value in force; else @p r's status with that value.
+    [[nodiscard]] auto answer_set(
+        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
     /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
@@ -896,6 +901,9 @@ class AemCommandHandler
     /// GET_STREAM_INFO @p cmd answered from the get_stream_info callback into @p out_buffer:
     /// NOT_IMPLEMENTED without one, NO_SUCH_DESCRIPTOR when it declines.
     [[nodiscard]] auto answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// GET_STREAM_INFO's answer for @p command_data cut to SET_STREAM_INFO's length in stream_info_layout().
+    [[nodiscard]] auto stream_info_in_force(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
     /// GET_STREAM_INFO's response in stream_info_layout()'s form: @p ext only in Milan v1.2's,
     /// a zero IP tail in IEEE 1722.1-2021's. NOT_SUPPORTED when @p out_buffer is too short.

@@ -76,12 +76,19 @@ void store_stream_info_tail(
     return std::nullopt;
 }
 
+/// SET_STREAM_INFO's response length in @p layout: 84 octets in IEEE 1722.1-2021's, else 48
+/// (Milan v1.2's extension is GET_STREAM_INFO's only).
+[[nodiscard]] constexpr auto set_stream_info_length(StreamInfoLayout const layout) noexcept -> size_t
+{
+    return layout == StreamInfoLayout::ieee_2021 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+}
+
 /// SET_STREAM_INFO's response in @p layout's form at the head of @p out: @p command echoed,
 /// zero-padded to 84 octets in IEEE 1722.1-2021's, else its 48. Empty when @p out is short.
 [[nodiscard]] auto echo_stream_info(
     StreamInfoLayout const layout, std::span<uint8_t const> const command, std::span<uint8_t> const out) -> std::span<uint8_t const>
 {
-    size_t const size = layout == StreamInfoLayout::ieee_2021 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+    size_t const size = set_stream_info_length(layout);
     if (out.size() < size) {
         return {};
     }
@@ -379,15 +386,17 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_STREAM_INFO:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_STREAM_INFO, command_data, out_buffer);
             }
-            return handle_set_stream_info(command_data, out_buffer);
+            return answer_set(
+                AEM_COMMAND_SET_STREAM_INFO, handle_set_stream_info(command_data, out_buffer), command_data, out_buffer);
 
         case AEM_COMMAND_SET_MAX_TRANSIT_TIME:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return reject_set(*blocked, AEM_COMMAND_SET_MAX_TRANSIT_TIME, command_data, out_buffer);
             }
-            return handle_set_max_transit_time(command_data, out_buffer);
+            return answer_set(
+                AEM_COMMAND_SET_MAX_TRANSIT_TIME, handle_set_max_transit_time(command_data, out_buffer), command_data, out_buffer);
 
         case AEM_COMMAND_GET_MAX_TRANSIT_TIME:
             return handle_get_max_transit_time(command_data, out_buffer);
@@ -569,6 +578,22 @@ auto AemCommandHandler::reject_set(
     return {.status = status, .size = current.size};
 }
 
+auto AemCommandHandler::answer_set(
+    uint16_t const set_command, AemCommandResponse const r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (r.status == AEM_STATUS_SUCCESS || r.status == AEM_STATUS_IN_PROGRESS) {
+        return r;
+    }
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> current{};
+    auto const in_force = current_value(set_command, command_data, current);
+    if (in_force.status != AEM_STATUS_SUCCESS || out_buffer.size() < in_force.size) {
+        return r;  // unreadable: the handler's own answer
+    }
+    span_copy(out_buffer.first(in_force.size), std::span<uint8_t const>{current}.first(in_force.size));
+    return {.status = r.status, .size = in_force.size};
+}
+
 auto AemCommandHandler::current_value(
     uint16_t const set_command, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
@@ -584,6 +609,10 @@ auto AemCommandHandler::current_value(
             return handle_get_stream_format(AemDu{}, command_data, out_buffer);
         case AEM_COMMAND_SET_SAMPLING_RATE:
             return handle_get_sampling_rate(AemDu{}, command_data, out_buffer);
+        case AEM_COMMAND_SET_STREAM_INFO:
+            return stream_info_in_force(command_data, out_buffer);
+        case AEM_COMMAND_SET_MAX_TRANSIT_TIME:
+            return handle_get_max_transit_time(command_data, out_buffer);
         case AEM_COMMAND_SET_CLOCK_SOURCE:
         case AEM_COMMAND_SET_CONTROL:
         case AEM_COMMAND_SET_SIGNAL_SELECTOR:
@@ -1897,6 +1926,13 @@ auto AemCommandHandler::answer_stream_info(AemGetStreamInfoCommandPayload const&
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
     return store_stream_info(resp, ext, out_buffer);
+}
+
+auto AemCommandHandler::stream_info_in_force(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    auto const r = handle_get_stream_info(AemDu{}, command_data, out_buffer);
+    return {.status = r.status, .size = std::min(r.size, set_stream_info_length(stream_info_layout()))};
 }
 
 auto AemCommandHandler::store_stream_info(
