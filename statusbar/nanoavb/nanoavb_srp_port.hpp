@@ -167,8 +167,10 @@ class SrpPort
     /// Send through the opened @p msrp and @p mvrp sockets and give them to @p reactor.
     void hand_over(
         net::MessageReactor& reactor, std::unique_ptr<MsrpNetHandlerT<MsrpIo>> msrp, std::unique_ptr<MvrpNetHandler> mvrp);
-    /// The Domain's VID moved: rejoin with MVRP and re-advertise the talkers on it.
+    /// The Domain changed, its VID or priority alone: reported, and a VID moved (move_talkers).
     void on_vid_changed(uint16_t old_vid, uint16_t new_vid, TimePoint now);
+    /// The Domain's VID moved: rejoin with MVRP and re-advertise the talkers on it.
+    void move_talkers(uint16_t old_vid, uint16_t new_vid, TimePoint now);
     /// A peer declared a Domain (@p fv as on the wire): keep its SRclassPriority for our SR class.
     void on_peer_domain_declared(statusbar::srp::msrp::DomainFirstValue const& fv) noexcept;
     /// A peer's Domain for our SR class registered (@p registered) or left.

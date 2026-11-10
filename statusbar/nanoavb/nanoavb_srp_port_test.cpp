@@ -291,6 +291,31 @@ TEST(nanoavb_srp_port, a_class_b_port_follows_the_class_b_domain)
     EXPECT_TRUE(fv != nullptr && fv->get_priority() == 2 && fv->vlan_identifier.get() == 7);
 }
 
+// Each class's port adopts its own class's priority alone (Milan v1.3 Section 4.2.7.2.1): its talkers
+// are declared again at it and the Domain reported, the VID kept; declare_domain() at link up restores it.
+TEST(nanoavb_srp_port, a_priority_only_domain_is_adopted_by_its_class_and_reset)
+{
+    for (auto const& configured : {DomainInfo{}, CLASS_B_DOMAIN}) {
+        Bridge b{configured};
+        std::vector<std::pair<uint8_t, bool>> reports{};
+        b.port.set_observer(
+            SrpPortObserver{.on_domain = [&](DomainInfo const& d, bool const r) { reports.emplace_back(d.sr_class_priority, r); }});
+        EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
+        EXPECT_TRUE(b.port.declare_talker(talker(5), b.now).has_value());
+        auto const other = static_cast<uint8_t>(configured.sr_class_priority == 3 ? 4 : 1);
+        (void)b.bridge.declare_domain(Bridge::domain(configured.sr_class_vid, other, configured.sr_class_id), b.now);
+        b.run(8);
+        EXPECT_EQ(b.port.domain().sr_class_priority, other);
+        EXPECT_EQ(b.port.domain().sr_class_vid, configured.sr_class_vid);
+        EXPECT_FALSE(reports.empty() || reports.back().first != other || !reports.back().second);
+        auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(5));
+        EXPECT_FALSE(fv == nullptr || fv->get_priority() != other);
+        EXPECT_TRUE(b.port.declare_domain(b.now).has_value());  // a link up
+        EXPECT_EQ(b.port.domain().sr_class_priority, configured.sr_class_priority);
+        EXPECT_EQ(b.port.msrp().get_talker_stream(stream_id(5))->priority, configured.sr_class_priority);
+    }
+}
+
 // After a link down and up (IEEE 802.1Q-2022 Clauses 10.7.5.2, 10.7.5.8): rejoin() forgets the peer's Listener
 // registrations and sends a LeaveAll at once, which the peer answers by declaring its own again; our Listener
 // declarations and the peer's Talkers stay, and no Leave goes out
