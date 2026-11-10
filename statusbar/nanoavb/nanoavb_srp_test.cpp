@@ -1209,6 +1209,39 @@ TEST(nanoavb_srp_msrp, a_talker_advertise_replaced_by_a_talker_failed_in_one_mrp
     EXPECT_EQ(b.state(sid), ListenerReservationState::AskingFailed);
 }
 
+// A listener attached to the destination and VLAN its connection names declares nothing for a Talker
+// Advertise of its StreamID on another VLAN, and Ready once the talker declares it on the named one.
+TEST(nanoavb_srp_msrp, a_talker_advertise_on_another_vlan_declares_no_listener)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(17);
+    Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0x01, 0x00};
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = sid;
+    fv.destination_address = group;
+    fv.vlan_identifier = 3;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    (void)b.talker.declare_talker_advertise(fv, b.now);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    b.run(12);
+    EXPECT_EQ(
+        *b.listener.listener_attach(sid, b.now, TalkerMatch{.destination = group, .vid = 2}), ListenerReservationState::Waiting);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
+    auto const* const declared = b.talker.find_listener(sid);
+    EXPECT_FALSE(declared != nullptr && declared->registrar_is_registered());
+
+    EXPECT_TRUE(b.listener.listener_asking_failed(sid, b.now).has_value());  // declared again: the match stays
+    EXPECT_TRUE(b.listener.get_listener_stream(sid)->talker.has_value());
+
+    (void)b.talker.withdraw_talker(sid, b.now);
+    fv.vlan_identifier = 2;
+    (void)b.talker.declare_talker_advertise(fv, b.now);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+}
+
 TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
 {
     size_t sent = 0;

@@ -486,6 +486,10 @@ struct ListenerStreams
     void keep_connection(Connection const& connection) noexcept;
     /// The connection kept for input @p stream_index, no longer kept; nullopt when none.
     [[nodiscard]] auto end_connection(uint16_t stream_index) noexcept -> std::optional<Connection>;
+    /// The Talker attribute Milan input @p stream_index's connection follows: @p dest_mac on the VLAN its
+    /// ACMP stream names (Milan v1.3 Section 5.5.3.6: the probe's answer); nullopt for a classic one.
+    [[nodiscard]] auto talker_match(uint16_t stream_index, ieee::Eui48 const& dest_mac) const
+        -> std::optional<nanoavb::TalkerMatch>;
 };
 
 }  // namespace statusbar::avb_entity
