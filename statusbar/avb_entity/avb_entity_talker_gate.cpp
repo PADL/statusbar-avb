@@ -8,6 +8,7 @@
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_ethernet_port.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -31,9 +32,10 @@ namespace {
 
 }  // namespace
 
-TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index) noexcept
+TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index, std::chrono::nanoseconds const grace) noexcept
     : gate_enabled_{gate_enabled}
     , stream_index_{std::move(stream_index)}
+    , grace_{grace}
 {
     // Stream Started defaults true: a stream is admitted once a listener's
     // Ready is registered unless explicitly stopped via note_stream_started().
@@ -43,7 +45,10 @@ TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index) noex
 }
 
 TalkerGate::TalkerGate(bool const gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept
-    : TalkerGate{gate_enabled, [&components](tsn::StreamId const& sid) { return acmp_talker_index(components, sid); }}
+    : TalkerGate{
+          gate_enabled,
+          [&components](tsn::StreamId const& sid) { return acmp_talker_index(components, sid); },
+          components.profile.milan ? std::chrono::nanoseconds{MILAN_GRACE} : std::chrono::nanoseconds{GRACE}}
 {}
 
 void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const ready, RawTimePoint const now)
@@ -113,7 +118,7 @@ auto TalkerGate::listener_admitted(uint16_t const idx, RawTimePoint const now) c
         return false;
     }
     // Listener Ready / Ready Failed registered, held across the MRP LeaveAll re-registration
-    // blip by GRACE; a listener that does not re-declare within it closes the gate.
+    // blip by the grace; a listener that does not re-declare within it closes the gate.
     if (listener_ready_[idx].load(std::memory_order_acquire)) {
         return true;
     }
@@ -130,7 +135,7 @@ auto TalkerGate::grace_ends(uint16_t const idx) const noexcept -> std::optional<
     if (last_ready == 0) {
         return std::nullopt;
     }
-    return RawTimePoint::clock::from_ns(last_ready) + GRACE;
+    return RawTimePoint::clock::from_ns(last_ready) + grace_;
 }
 
 }  // namespace statusbar::avb_entity

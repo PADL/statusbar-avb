@@ -16,27 +16,11 @@ void TalkerDeclarations::note_probe(uint16_t const idx, int64_t const now_ns) no
     }
 }
 
-void TalkerDeclarations::note_listener_registered(uint16_t const idx, bool const registered, int64_t const now_ns) noexcept
+void TalkerDeclarations::note_listener_registered(uint16_t const idx, bool const registered) noexcept
 {
-    if (idx >= STREAM_COUNT) {
-        return;
+    if (idx < STREAM_COUNT) {
+        streams_[idx].listener_registered = registered;
     }
-    auto& s = streams_[idx];
-    // Registered now, or registered until now: the grace runs from the last
-    // moment it was known registered (a repeated "gone" moves nothing).
-    if (registered || s.listener_registered) {
-        s.listener_seen_ns = now_ns;
-    }
-    s.listener_registered = registered;
-}
-
-auto TalkerDeclarations::listener_interest(uint16_t const idx, int64_t const now_ns) const noexcept -> bool
-{
-    if (idx >= STREAM_COUNT) {
-        return false;
-    }
-    auto const& s = streams_[idx];
-    return s.listener_registered || (s.listener_seen_ns != 0 && now_ns - s.listener_seen_ns < LISTENER_GRACE_NS);
 }
 
 void TalkerDeclarations::note_address_valid(uint16_t const idx, bool const valid) noexcept
@@ -57,7 +41,7 @@ auto TalkerDeclarations::wants_declared(uint16_t const idx, int64_t const now_ns
         return false;
     }
     auto const& s = streams_[idx];
-    return s.address_valid && (!interest_required_ || listener_interest(idx, now_ns) || probe_window_open(idx, now_ns));
+    return s.address_valid && (!interest_required_ || s.listener_registered || probe_window_open(idx, now_ns));
 }
 
 auto TalkerDeclarations::evaluate(uint16_t const idx, int64_t const now_ns, Params const& params, bool const refresh) const noexcept
@@ -119,9 +103,6 @@ auto TalkerDeclarations::next_deadline(int64_t const now_ns) const noexcept -> s
     for (auto const& s : streams_) {
         if (s.declared && interest_required_ && !s.listener_registered) {
             consider(s.probe_until_ns);  // the window closing withdraws it
-            if (s.listener_seen_ns != 0) {
-                consider(s.listener_seen_ns + LISTENER_GRACE_NS);  // ... or the departed Listener's grace ending
-            }
         }
         if (!s.declared) {
             consider(s.hold_until_ns);  // a held declaration may go ahead
