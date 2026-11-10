@@ -1380,7 +1380,7 @@ void MsrpParticipantT<Limits>::notify_listener_rx(
     auto const n = rec.registrar_ctx.notify;
     if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join || (before.was_registered && before.substate != decl)) {
         notify_listener(rec.first_value.stream_id, decl, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && before.was_registered) {
+    } else if (mrp::registrar_rx_ended(rec, before.was_registered)) {
         notify_listener_leave(rec.first_value.stream_id);
     }
 }

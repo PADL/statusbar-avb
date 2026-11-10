@@ -820,6 +820,24 @@ TEST(msrp_test_support, the_listener_leave_all_pdu_has_the_wire_layout)
     EXPECT_TRUE(listener_leave_all_pdu() == wire);
 }
 
+// IEEE 802.1Q-2022 Clause 10.7.5 under MSRP instant leave: a Listener left in LV by a LeaveAll it
+// was not re-declared in, then withdrawn with an Lv, goes LV to MT and is reported gone.
+TEST(msrp_participant, a_listener_leave_in_lv_ends_the_registration)
+{
+    auto config = test_msrp_config();
+    config.timers.leave_time = std::chrono::milliseconds{5000};
+    ListenerLeaveRig rig{config};
+    rig.a.set_instant_leave(true);
+    (void)rig.b.declare_listener(rig.sid, ListenerDeclaration::Ready, rig.clock.now);
+    rig.exchange();
+    rig.a.receive_pdu(listener_leave_all_pdu(), rig.clock.now);  // IN to LV, not re-declared
+    EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
+    (void)rig.b.withdraw_listener(rig.sid, rig.clock.now);
+    rig.exchange();
+    EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
+    EXPECT_TRUE(rig.left.has_value());
+}
+
 TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
 {
     // A's OWN periodic LeaveAll must NOT garbage-collect its registrar for a

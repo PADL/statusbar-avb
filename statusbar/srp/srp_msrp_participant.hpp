@@ -783,7 +783,7 @@ class MsrpParticipantT
         auto const n = rec.registrar_ctx.notify;
         if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
             notify_register(fv);
-        } else if (n == registrar_sm::Notify::Leave && was_registered) {
+        } else if (mrp::registrar_rx_ended(rec, was_registered)) {
             notify_leave(rec.first_value);
         }
     }
