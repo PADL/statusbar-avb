@@ -28,8 +28,11 @@
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
+#include "statusbar/avtp/avtp_am824.hpp"
+#include "statusbar/avtp/avtp_am824_v1.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
+#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -100,20 +103,22 @@ struct StreamFormatFields
     uint32_t crf_base_frequency_hz{0};
 };
 
-/// The AM824 channel counts the kit carries: 1, 2, 4, 6 or 8 MBLA quadlets per data block.
-[[nodiscard]] constexpr auto am824_channel_count_supported(uint32_t const channels) noexcept -> bool
+/// Whether an AM824 frame of @p channels at @p rate_hz fits the MTU: a class A packet's samples
+/// and one more, as the talker may send (srp_max_frame_size).
+[[nodiscard]] constexpr auto am824_frame_fits(uint32_t const channels, uint32_t const rate_hz) noexcept -> bool
 {
-    return channels == 1 || channels == 2 || channels == 4 || channels == 6 || channels == 8;
+    auto const samples = static_cast<uint8_t>((rate_hz / 8000U) + 1U);
+    return avtp::am824_packet_size(static_cast<uint8_t>(channels), samples) <= net::MAX_ETHERNET_PAYLOAD;
 }
 
 /// Whether the kit carries @p format (IEEE 1722-2016 Annex I): IEC 61883-6 AM824 data, non-blocking,
-/// MBLA only (DBS = MBLA count, no IEC 60958/MIDI/SMPTE), 32-192 kHz, am824_channel_count_supported.
+/// MBLA only (DBS = MBLA count, no IEC 60958/MIDI/SMPTE), 32-192 kHz, 1 to Am824Pdu::MAX_CHANNELS in the MTU.
 [[nodiscard]] constexpr auto am824_format_supported(avtp::Am824StreamFormat const& format) noexcept -> bool
 {
     return format.is_61883_6() && format.evt() == 0 && avtp::am824_sfc_to_hz(format.sfc()) != 0 && format.non_blocking() &&
         !format.blocking() && format.label_iec_60958_cnt.get() == 0 && format.label_midi_cnt() == 0 &&
-        format.label_smpte_cnt() == 0 && format.label_mbla_cnt.get() == format.dbs.get() &&
-        am824_channel_count_supported(format.dbs.get());
+        format.label_smpte_cnt() == 0 && format.label_mbla_cnt.get() == format.dbs.get() && format.dbs.get() >= 1 &&
+        format.dbs.get() <= avtp::Am824Pdu::MAX_CHANNELS && am824_frame_fits(format.dbs.get(), avtp::am824_sfc_to_hz(format.sfc()));
 }
 
 [[nodiscard]] constexpr auto decode_stream_format(uint64_t fmt) noexcept -> StreamFormatFields
