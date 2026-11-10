@@ -597,7 +597,7 @@ class AemCommandHandler
     /// SET code (SET_CONTROL, SET_NAME, ...); @p command_body is the SET
     /// command body (descriptor_type + descriptor_index + value). Returns the
     /// AEM status from the handler's symbol-keyed set hook; notifications are
-    /// emitted only on AEM_STATUS_SUCCESS.
+    /// emitted only on AEM_STATUS_SUCCESS, under milan13 only for a value not already in force.
     [[nodiscard]] auto apply_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
     /// A SET_NAME by the entity itself (@p command_body as the command's), applied, notified and
     /// reported to the settings hook as a controller's. The AEM status.

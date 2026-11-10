@@ -554,9 +554,10 @@ auto AemCommandHandler::apply_local_name(std::span<uint8_t const> const command_
         return *refusal;
     }
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told
+    bool const as_is = set_leaves_value_as_is(AEM_COMMAND_SET_NAME, command_body);  // milan13: nothing to save
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = set_name(command_body, echo);
-    if (r.status == AEM_STATUS_SUCCESS && callbacks_.on_settings_changed) {
+    if (r.status == AEM_STATUS_SUCCESS && !as_is && callbacks_.on_settings_changed) {
         callbacks_.on_settings_changed(AEM_COMMAND_SET_NAME);
     }
     return r.status;
@@ -2845,6 +2846,9 @@ auto AemCommandHandler::apply_and_notify(uint16_t const command_type, std::span<
     // Apply the change exactly as a controller's SET would (same symbol-keyed
     // hook), then fan out unsolicited notifications. This is the entry point for
     // an entity changing its own controls (e.g. a software IDENTIFY button).
+    if (set_leaves_value_as_is(command_type, command_body)) {
+        return AEM_STATUS_SUCCESS;  // under milan13 the value in force: nothing to notify or save
+    }
     AemEntityModel aem_model{*handler_};
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);

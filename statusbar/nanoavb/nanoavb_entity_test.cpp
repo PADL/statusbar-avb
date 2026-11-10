@@ -2939,6 +2939,28 @@ TEST(nanoavb_entity_profile, milan13_leaves_a_set_to_the_value_in_force_unapplie
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
 }
 
+TEST(nanoavb_entity_profile, milan13_leaves_a_local_set_to_the_value_in_force_unapplied_and_unnotified)
+{
+    StoringControlHandler app;
+    AemCommandHandler handler{app};
+    handler.set_profile(AemCommandHandler::Profile::milan13);
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    std::array<uint8_t, 5> const same{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0x40};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, same), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(app.set_calls, 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 0);
+
+    std::array<uint8_t, 5> const changed{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0xFF};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, changed), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(app.set_calls, 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
 TEST(nanoavb_entity_profile, milan13_never_grants_an_acquisition)
 {
     // Milan v1.3 5.4.2.1: ACQUIRE_ENTITY is answered NOT_SUPPORTED, never SUCCESS.
