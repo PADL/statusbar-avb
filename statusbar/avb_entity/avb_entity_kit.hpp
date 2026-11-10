@@ -345,6 +345,9 @@ class AvbEntityKit
     /// The port's MTU, whose frame is the interfering one in a Talker Advertise's AccumulatedLatency
     /// (reactor thread; 0, FALLBACK_MTU, until set; the shaper sets it on install).
     void set_mtu(uint32_t const mtu) noexcept { mtu_ = mtu; }
+    /// Whether a cbs shapes class A at its streams' bandwidth (reactor thread; false until set, the shaper
+    /// sets it on install): the queue then drains at idleSlope (talker_port_latency_ns).
+    void set_class_a_cbs(bool const cbs) noexcept { class_a_cbs_ = cbs; }
     /// ENTITY_LOCKED while a controller holds the lock under atdecc.profile = "milan13" (Milan v1.3
     /// Section 5.3.4.1), else nullopt: the AEM handler's local_change_refusal(). A host answers it
     /// before a change of its own (a SET_STREAM_FORMAT); request_clock_source() is never refused.
@@ -543,9 +546,11 @@ class AvbEntityKit
     void close_streams() noexcept;
     /// Stream @p index's identity (ACMP), VLAN and priority (the domain in force) into @p info.
     void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
-    /// talker_port_latency_ns over every talker stream's frames of one interval (class A's queue) at
-    /// link_mbps() and the port's MTU: what a Talker Advertise declares now.
-    [[nodiscard]] auto talker_port_latency() const noexcept -> uint32_t;
+    /// talker_port_latency_ns for @p spec among every talker stream's frames of one interval (class A's
+    /// queue), at link_mbps(), the port's MTU and its cbs: what its Talker Advertise declares now.
+    [[nodiscard]] auto talker_port_latency(StreamSpec const& spec) const noexcept -> uint32_t;
+    /// The AccumulatedLatency the MSRP handler holds for talker @p idx while it is declared, ns.
+    [[nodiscard]] auto declared_talker_latency_ns(uint16_t idx) const noexcept -> std::optional<uint32_t>;
     /// Talker @p idx's AccumulatedLatency, ns: what its Talker Advertise declares, else what it would
     /// (talker_port_latency_ns at link_mbps(); IEEE 802.1Q-2022 Clause 35.2.2.8.6).
     [[nodiscard]] auto talker_accumulated_latency_ns(uint16_t idx) const noexcept -> uint32_t;
@@ -794,6 +799,7 @@ class AvbEntityKit
     uint32_t sample_rate_;
     uint32_t link_mbps_{1000};
     uint32_t mtu_{0};
+    bool class_a_cbs_{false};
     bool output_mappings_across_rates_{false};  ///< set_output_mappings_across_rates()
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.

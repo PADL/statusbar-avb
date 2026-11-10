@@ -379,7 +379,9 @@ auto AvbEntityAm824IO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrpI
 
     // The talker port's own latency (IEEE 802.1Q-2022 Clause 35.2.2.8.6); downstream bridges add theirs.
     info.accumulated_latency = interface_talker_latency_ns(
-        interval_wire_octets(TSpec{.max_frame_size = info.max_frame_size}), config_.interface_name, config_.link_mbps, config_.mtu);
+        config_.interface_name,
+        TalkerPort{.link_mbps = config_.link_mbps, .mtu = config_.mtu},
+        interval_wire_octets(TSpec{.max_frame_size = info.max_frame_size}));
     return info;
 }
 
