@@ -1209,6 +1209,31 @@ TEST(nanoavb_srp_msrp, a_talker_advertise_replaced_by_a_talker_failed_in_one_mrp
     EXPECT_EQ(b.state(sid), ListenerReservationState::AskingFailed);
 }
 
+// The reverse: a Talker Failed replaced by the Advertise in one MRPDU (the Advertise's New first, then the
+// Failed's Lv) leaves the listener Ready, once the MRPDU is read, not Asking Failed.
+TEST(nanoavb_srp_msrp, a_talker_failed_replaced_by_an_advertise_in_one_mrpdu_is_one_change)
+{
+    WaitingBench b;
+    auto const sid = WaitingBench::stream(26);
+    EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
+    EXPECT_EQ(*b.listener.listener_attach(sid, b.now), ListenerReservationState::Waiting);
+    b.advertise(sid);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+    auto const adv = *b.listener.peer_talker_advertise(sid);
+    statusbar::srp::msrp::TalkerFailedFirstValue failed{};
+    failed.advertise = adv;
+    failed.failure_code = 1;
+    (void)b.talker.withdraw_talker(sid, b.now);
+    (void)b.talker.declare_talker_failed(failed, b.now);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::AskingFailed);
+    (void)b.talker.withdraw_talker(sid, b.now);
+    (void)b.talker.declare_talker_advertise(adv, b.now);
+    b.run(12);
+    EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
+}
+
 // A listener attached to the destination and VLAN its connection names declares nothing for a Talker
 // Advertise of its StreamID on another VLAN, and Ready once the talker declares it on the named one.
 TEST(nanoavb_srp_msrp, a_talker_advertise_on_another_vlan_declares_no_listener)

@@ -894,10 +894,10 @@ void MsrpParticipantT<Limits>::read_pdu(std::span<uint8_t const> pdu, TimePoint 
 template <class Limits>
 void MsrpParticipantT<Limits>::deliver_rx_talker_leaves()
 {
+    // Each once, after the whole MRPDU: an observer reads the registrations it left (a Failed's Lv with the
+    // Advertise registered in the same MRPDU is a change too, back to the Advertise).
     for (auto const& id : rx_talker_leaves_) {
-        if (!talker_registered_in(id)) {
-            notify_all(&Observer::on_talker_leave, id);
-        }
+        notify_all(&Observer::on_talker_leave, id);
     }
     rx_talker_leaves_.clear();
 }
