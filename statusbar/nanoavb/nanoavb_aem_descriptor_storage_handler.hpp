@@ -420,7 +420,8 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (!load(id.ref, desc)) {
             return false;
         }
-        apply_object_name(id.ref, desc.object_name);  // READ_DESCRIPTOR agrees with SET_NAME
+        apply_control_value(id.ref.descriptor_index, desc);  // READ_DESCRIPTOR agrees with GET_CONTROL
+        apply_object_name(id.ref, desc.object_name);         // READ_DESCRIPTOR agrees with SET_NAME
         return true;
     }
 
@@ -1310,6 +1311,27 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
         }
         return total;
+    }
+
+    /// Overlay a SET_CONTROL value on @p desc's value_details current fields
+    /// (linear types, IEEE 1722.1-2021 Table 7.13). No-op before any SET.
+    void apply_control_value(uint16_t const descriptor_index, DescriptorControl& desc) const noexcept
+    {
+        auto const* state = find_control_state(descriptor_index);
+        auto const base = static_cast<uint16_t>(desc.control_value_type.get() & atdecc::aem::CONTROL_VALUE_TYPE_MASK);
+        if (state == nullptr || !atdecc::aem::is_linear_value_type(base) || desc.values_offset.get() < DescriptorControl::LENGTH) {
+            return;
+        }
+        size_t const elem = atdecc::aem::control_value_element_size(base);
+        size_t const first = desc.values_offset.get() - DescriptorControl::LENGTH + atdecc::aem::linear_entry_current_offset(elem);
+        for (size_t i = 0; i < state->value.size() / elem; ++i) {
+            size_t const at = first + (i * atdecc::aem::linear_entry_size(elem));
+            if (at + elem > desc.value_details.size()) {
+                return;
+            }
+            span_copy(
+                make_span(desc.value_details, {.start = at, .length = elem}), std::span{state->value}.subspan(i * elem, elem));
+        }
     }
 
     statusbar::sg14::inplace_vector<ControlState, MAX_CONTROL_STATES> control_states_;

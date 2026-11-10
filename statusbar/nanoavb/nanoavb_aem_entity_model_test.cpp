@@ -9,6 +9,9 @@
 #include "statusbar/nanoavb/nanoavb_aem_entity_model.hpp"
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/atdecc/atdecc_aem_command.hpp"
+#include "statusbar/atdecc/atdecc_aem_control_types.hpp"
+#include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/buffer/span_utils.hpp"
@@ -2268,6 +2271,110 @@ TEST(mixer, a_refused_set_answers_the_value_in_force)
     EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
     EXPECT_EQ(vetoed.bytes.size(), size_t{8});
     EXPECT_EQ(response_mixer_value(vetoed.bytes), MIXER_AUTHORED_CURRENT);
+}
+
+// ===========================================================================
+// CONTROL values (IEEE 1722.1-2021 Clauses 7.2.22, 7.4.25): READ_DESCRIPTOR
+// serves the value SET_CONTROL put in force in value_details' current fields.
+// ===========================================================================
+
+namespace {
+
+using atdecc::aem::DESCRIPTOR_CONTROL;
+using atdecc::aem::DescriptorControl;
+
+/// Build a blob with one CONTROL descriptor (index 0) of @p count linear
+/// entries of @p value_type, each authored with 0x7F leading its max and current 0.
+auto make_blob_with_control(ieee::Eui64 const& control_type, uint16_t const value_type, uint16_t const count)
+    -> std::vector<uint8_t>
+{
+    size_t const elem = atdecc::aem::control_value_element_size(value_type);
+    auto const desc_size = static_cast<uint32_t>(DescriptorControl::LENGTH + (count * atdecc::aem::linear_entry_size(elem)));
+    constexpr uint32_t desc_offset = 20 + 12;  // header + one TOC entry
+    std::vector<uint8_t> blob(desc_offset + desc_size, 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_CONTROL, static_cast<uint16_t>(desc_size), desc_offset);
+
+    DescriptorControl desc{};
+    desc.control_value_type = value_type;
+    desc.control_type = control_type;
+    desc.number_of_values = count;
+    span_copy(make_span(blob, {.start = desc_offset, .length = DescriptorControl::LENGTH}), make_const_span(desc));
+    for (uint16_t i = 0; i < count; ++i) {
+        size_t const entry = desc_offset + DescriptorControl::LENGTH + (i * atdecc::aem::linear_entry_size(elem));
+        blob[entry + elem] = 0x7F;  // max, most significant byte
+    }
+    return blob;
+}
+
+/// SET/GET_CONTROL command body: the descriptor header, plus @p values on SET.
+auto make_control_body(std::span<uint8_t const> const values = {}) -> std::vector<uint8_t>
+{
+    atdecc::aem::AemControlPayloadHeader const header{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 0};
+    std::vector<uint8_t> body(atdecc::aem::AemControlPayloadHeader::LENGTH, 0);
+    span_store(make_span(body), header);
+    body.insert(body.end(), values.begin(), values.end());
+    return body;
+}
+
+/// READ_DESCRIPTOR of CONTROL 0 through the model, as a controller sees it.
+auto read_control(DescriptorStorageHandler& handler) -> DescriptorControl
+{
+    AemEntityModel const model{handler};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = 0}, make_span(buf));
+    EXPECT_TRUE(n >= DescriptorControl::LENGTH);
+    DescriptorControl parsed{};
+    span_load_padded(parsed, make_const_span(buf, {.start = 0, .length = n}));
+    return parsed;
+}
+
+}  // namespace
+
+TEST(control_value, read_descriptor_serves_the_identify_value_in_force)
+{
+    auto blob = make_blob_with_control(atdecc::aem::CONTROL_TYPE_IDENTIFY, atdecc::aem::CONTROL_LINEAR_UINT8, 1);
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    constexpr size_t CURRENT = 4;  // LINEAR_UINT8: min, max, step, default, current
+
+    EXPECT_EQ(read_control(handler).value_details[CURRENT], uint8_t{0});
+    std::array<uint8_t, 1> const on{0xFF};
+    EXPECT_EQ(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONTROL, make_control_body(on)).status, AEM_STATUS_SUCCESS);
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CONTROL, make_control_body());
+    EXPECT_EQ(get.bytes.back(), uint8_t{0xFF});
+    auto const served = read_control(handler);
+    EXPECT_EQ(served.value_details[CURRENT], uint8_t{0xFF});
+    EXPECT_EQ(served.value_details[1], uint8_t{0x7F});  // the authored max stands
+}
+
+TEST(control_value, read_descriptor_serves_each_linear_value_in_force)
+{
+    auto blob = make_blob_with_control(atdecc::aem::CONTROL_TYPE_GAIN, atdecc::aem::CONTROL_LINEAR_INT16, 2);
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    constexpr size_t CURRENT = 8;  // LINEAR_INT16: four doublets before current
+    constexpr size_t ENTRY = 14;   // 5 * 2 + 4
+
+    std::array<uint8_t, 4> const gains{0xFF, 0xFA, 0x00, 0x03};  // -6, 3
+    EXPECT_EQ(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONTROL, make_control_body(gains)).status, AEM_STATUS_SUCCESS);
+    auto served = read_control(handler);
+    EXPECT_EQ(served.value_details[CURRENT], uint8_t{0xFF});
+    EXPECT_EQ(served.value_details[CURRENT + 1], uint8_t{0xFA});
+    EXPECT_EQ(served.value_details[ENTRY + CURRENT], uint8_t{0x00});
+    EXPECT_EQ(served.value_details[ENTRY + CURRENT + 1], uint8_t{0x03});
+
+    // A refused SET leaves READ_DESCRIPTOR on the value in force.
+    handler.set_on_control_changed([](uint16_t, std::span<uint8_t const>) -> uint8_t { return atdecc::AEM_STATUS_NOT_SUPPORTED; });
+    std::array<uint8_t, 4> const other{0x00, 0x01, 0x00, 0x02};
+    EXPECT_NE(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONTROL, make_control_body(other)).status, AEM_STATUS_SUCCESS);
+    served = read_control(handler);
+    EXPECT_EQ(served.value_details[CURRENT + 1], uint8_t{0xFA});
+    EXPECT_EQ(served.value_details[ENTRY + CURRENT + 1], uint8_t{0x03});
 }
 
 // ===========================================================================
