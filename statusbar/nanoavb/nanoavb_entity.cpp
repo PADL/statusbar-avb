@@ -205,9 +205,9 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     // the previous AemCommandResult shape incurred.
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
     setting_unchanged_ = false;  // here, not in handle_command: a read_back() dispatches too
-    bool const nested = std::exchange(dispatching_, true);
+    dispatching_ = true;
     auto const response = handle_command(header, command_data, out_buffer);
-    dispatching_ = nested;
+    dispatching_ = false;
 
     current_src_mac_ = {};
 
@@ -2765,15 +2765,12 @@ auto AemCommandHandler::queue_notification(uint16_t const command_type, std::spa
 
 void AemCommandHandler::flush_notifications()
 {
-    if (dispatching_) {
-        return;  // a nested dispatch: the outer one sends them after its response
-    }
-    auto const queued = std::exchange(queued_notifications_, {});
     Eui64 const requester = requester_;
-    for (auto const& n : queued) {
+    for (auto const& n : queued_notifications_) {
         requester_ = n.requester;  // left out as it was when the notification was raised
         emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
     }
+    queued_notifications_.clear();
     requester_ = requester;
 }
 
