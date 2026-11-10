@@ -1267,6 +1267,40 @@ TEST(talker_mr, a_toggle_holds_for_eight_pdus_before_the_next)
     EXPECT_TRUE(mr == expected);
 }
 
+// The hold counts PDUs sent: a render refused within it neither sends nor shortens it, so the toggled state still
+// reaches eight PDUs on the wire before the next request toggles it back.
+TEST(talker_mr, a_refused_render_does_not_shorten_the_hold)
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x0205022000806000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
+    avb_entity::StreamRawRenderFn const refuse = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return false; };
+    auto* const slot = talker.slot_for(0);
+    std::vector<bool> mr;
+    for (uint64_t index = 0; index < 10 * 6; index += 6) {
+        EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
+        EXPECT_FALSE(talker.transmit_aaf_raw(*slot, index, 1'000'000, 6, refuse));
+        EXPECT_FALSE(talker.transmit_aaf_raw(*slot, index, 1'000'000, 6, refuse));
+        EXPECT_TRUE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + (index * 20'833), 6, render));
+        auto const sent = wire.pop_tx();
+        auto const pdu =
+            sent ? avtp::aaf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(VLAN_HEADER_LENGTH)) : std::nullopt;
+        mr.push_back(pdu.has_value() && pdu->mr());
+    }
+    std::vector<bool> expected(8, true);
+    expected.insert(expected.end(), 2, false);
+    EXPECT_TRUE(mr == expected);
+}
+
 // The float paths (an entity that renders its own samples) carry a requested restart as the raw ones do.
 TEST(talker_mr, the_float_paths_carry_a_toggle)
 {
@@ -1297,7 +1331,8 @@ TEST(talker_mr, the_float_paths_carry_a_toggle)
     EXPECT_TRUE(am824_pdu.has_value() && am824_pdu->stream_header.mr());
 }
 
-// A restart asked for while a stream is stopped is no restart of the stream reopened at that index.
+// A restart asked for of a stream that then stops is no restart of the stream reopened at that index, even when the
+// request lands after the reopen (a caller stalled between its open check and its store).
 TEST(talker_mr, a_request_racing_a_stop_is_dropped_at_the_reopen)
 {
     avb_entity::StreamPort port;
@@ -1312,10 +1347,11 @@ TEST(talker_mr, a_request_racing_a_stop_is_dropped_at_the_reopen)
     constexpr uint64_t AAF = 0x0205022000806000ULL;
     EXPECT_TRUE(talker.open_stream(spec_of(0, AAF), kStreamId, kDest).has_value());
     EXPECT_TRUE(talker.open_tx(port).has_value());
+    uint32_t const before = talker.open_generation_[0].load();  // what a stalled request read before the stop
     talker.close_tx();
-    talker.mr_pending_[0].store(true);  // a request that passed the open check just before the stop
     EXPECT_TRUE(talker.open_stream(spec_of(0, AAF), kStreamId, kDest).has_value());
     EXPECT_TRUE(talker.open_tx(port).has_value());
+    talker.mr_pending_[0].store(before);  // its store, after the reopen
     avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
     EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 1'000'000, 6, render));
     auto const sent = wire.pop_tx();
