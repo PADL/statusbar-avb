@@ -35,9 +35,10 @@ struct TalkerGate
     using RawTimePoint = realtime::MonotonicRawClock::time_point;
 
     /// A gate whose note_listener_ready() finds streams by @p stream_index (reactor thread); with
-    /// @p gate_enabled false every stream is admitted.
-    TalkerGate(bool gate_enabled, StreamIndexFn stream_index) noexcept;
-    /// The kit's gate: @p components' ACMP talker streams, which must outlive it.
+    /// @p gate_enabled false every stream is admitted. A departed Listener admits for @p grace.
+    TalkerGate(bool gate_enabled, StreamIndexFn stream_index, std::chrono::nanoseconds grace = GRACE) noexcept;
+    /// The kit's gate: @p components' ACMP talker streams, which must outlive it; MILAN_GRACE
+    /// for a Milan entity, GRACE for a classic one.
     TalkerGate(bool gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept;
 
     /// Install the reactor-thread logger for gate-transition status lines.
@@ -49,10 +50,13 @@ struct TalkerGate
     /// How long the gate stays open after the listener declaration was last seen registered, so
     /// an MRP LeaveAll re-registration blip does not chop the stream.
     static constexpr auto GRACE = std::chrono::seconds{5};
+    /// A Milan entity's grace: none. Its MSRP registrar holds a Listener through a LeaveAll for
+    /// LeaveTime and drops one at its Lv (Milan v1.3 Section 4.2.7.2.2).
+    static constexpr auto MILAN_GRACE = std::chrono::nanoseconds{0};
 
     /// Reactor thread: whether a Listener declaration permitting transmission (Ready or Ready
     /// Failed) is registered for @p stream_id at @p now. Registration and withdrawal both stamp
-    /// the last-ready instant, from which GRACE runs.
+    /// the last-ready instant, from which the grace runs.
     void note_listener_ready(tsn::StreamId const& stream_id, bool ready, RawTimePoint now);
     /// As above, for a caller with no RAW reading in hand: reads the clock once.
     void note_listener_ready(tsn::StreamId const& stream_id, bool ready);
@@ -77,14 +81,14 @@ struct TalkerGate
 
     /// Any thread: is talker stream @p idx admitted at @p now? True if gating is disabled, or
     /// the stream is Started and a permitting listener declaration is registered now or was
-    /// within GRACE. Time-dependent: the kit re-evaluates it at grace_ends() (AvbEntityKit::on_admission_timer).
+    /// within the grace. Time-dependent: the kit re-evaluates it at grace_ends() (AvbEntityKit::on_admission_timer).
     [[nodiscard]] auto admitted(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
-    /// Whether stream @p idx has a permitting listener declaration now or within GRACE,
+    /// Whether stream @p idx has a permitting listener declaration now or within the grace,
     /// regardless of gate_enabled_ and Started (Milan v1.2 Section 5.3.7.3).
     [[nodiscard]] auto listener_admitted(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
-    /// When stream @p idx's grace runs out: its last-ready stamp plus GRACE, nullopt with no stamp
+    /// When stream @p idx's grace runs out: its last-ready stamp plus the grace, nullopt with no stamp
     /// (never registered, or forgotten by a withdrawal). The declaration may still be registered.
     [[nodiscard]] auto grace_ends(uint16_t idx) const noexcept -> std::optional<RawTimePoint>;
 
@@ -98,6 +102,7 @@ struct TalkerGate
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                        ///< config.gate_talker_on_listener, destructured at the call site
     StreamIndexFn stream_index_;               ///< maps stream_id -> talker stream index
+    std::chrono::nanoseconds grace_;           ///< how long a departed Listener still admits
     std::optional<logging::Logger> logger_{};  ///< reactor-thread gate-transition logging
 
   private:
@@ -108,7 +113,7 @@ struct TalkerGate
     /// note_listener_ready (reactor, after the stamp, release), read by admitted (acquire).
     std::array<std::atomic<bool>, STREAM_COUNT> listener_ready_{};
     /// The RAW instant (ns) each stream's listener declaration was last known registered
-    /// (0 = never, or forgotten by note_talker_withdrawn); the gate stays open for GRACE past it.
+    /// (0 = never, or forgotten by note_talker_withdrawn); the gate stays open for the grace past it.
     std::array<std::atomic<int64_t>, STREAM_COUNT> ready_raw_ns_{};
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even with Listener Ready registered.
