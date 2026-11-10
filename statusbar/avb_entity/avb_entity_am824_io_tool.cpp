@@ -140,8 +140,9 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", config.entity.vlan_id, [&](auto v) { config.entity.vlan_id = v; });
     specs.add<std::string>(
         "net.backend",
-        "Stream packet I/O: rawnet (default; AF_PACKET, any platform), mmap (PACKET_MMAP rings, Linux) or xdp "
-        "(AF_XDP on one NIC queue, Linux). The ATDECC control plane keeps its own raw socket regardless.",
+        "Stream packet I/O: rawnet (default; AF_PACKET, any platform), mmap (PACKET_MMAP rings, Linux), xdp "
+        "(AF_XDP on one NIC queue, Linux) or auto (xdp, else rawnet). The ATDECC control plane keeps its own raw "
+        "socket regardless.",
         config.entity.net_backend,
         [&](auto v) { config.entity.net_backend = std::string{v}; });
     specs.add<uint32_t>("net.xdp_queue", "NIC queue for net.backend=xdp (default 0)", config.entity.net_xdp_queue, [&](auto v) {
