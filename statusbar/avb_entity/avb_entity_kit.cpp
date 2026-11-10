@@ -1105,7 +1105,7 @@ void AvbEntityKit::run_talker_declarations(int64_t const now_ns, RefreshSet cons
         // Milan v1.3 Section 4.3.3.1 condition 2 reads the registration as it is now: a pass can run
         // on an MSRP event before the kit's Listener hook has been told of it.
         auto const listener = registered_listener_of(spec.index).value_or(srp::msrp::ListenerDeclaration::Ignore);
-        declarations_.note_listener_registered(spec.index, listener != srp::msrp::ListenerDeclaration::Ignore, now_ns);
+        declarations_.note_listener_registered(spec.index, listener != srp::msrp::ListenerDeclaration::Ignore);
         run_talker_declaration(spec, now_ns, refresh.test(spec.index));
     }
 }
