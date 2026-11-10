@@ -234,6 +234,22 @@ TEST(shaper_mqprio, refuses_bad_priorities)
     EXPECT_TRUE(validate_priorities(3, 2).has_value());
 }
 
+TEST(shaper_talker_latency, a_talker_port_latency_counts_one_interfering_frame_then_its_class_s_frames)
+{
+    // AAF 8 ch: 168 + 42 + 1 spare = 211 octets an interval; 1542 + 211 = 1753 octets, 14024 ns at 1 Gbit/s.
+    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24());
+    EXPECT_EQ(interval_wire_octets(aaf), uint64_t{211});
+    EXPECT_EQ(talker_port_latency_ns(interval_wire_octets(aaf), 1000), uint32_t{14024});
+    EXPECT_EQ(talker_port_latency_ns(interval_wire_octets(aaf), 100), uint32_t{140240});
+    // Twelve such streams queue together: 1542 + 12 x 211 = 4074 octets.
+    EXPECT_EQ(talker_port_latency_ns(12 * interval_wire_octets(aaf), 1000), uint32_t{32592});
+    // Three frames an interval: 3 x 142 octets.
+    EXPECT_EQ(interval_wire_octets(TSpec{.max_frame_size = 100, .max_interval_frames = 3}), uint64_t{426});
+    // Rounds up: 1753 x 8000 / 7 = 2003428.6 -> 2003429; an unknown (0) link counts as 1 Gbit/s.
+    EXPECT_EQ(talker_port_latency_ns(interval_wire_octets(aaf), 7), uint32_t{2003429});
+    EXPECT_EQ(talker_port_latency_ns(interval_wire_octets(aaf), 0), uint32_t{14024});
+}
+
 TEST(shaper_cbs, frame_sizes_and_bandwidth)
 {
     // The TSpecs the kit advertises (srp_max_frame_size, Milan v1.3 Table 4.4):
