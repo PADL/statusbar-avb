@@ -945,19 +945,26 @@ TEST(msrp_participant, a_leaveall_sent_before_the_lv_joins_the_old_value_again)
     EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
 }
 
-// A LeaveAll received just before the change (QA to VP, where Lv! sends nothing): the old value is joined
-// again, then left, before the new one is declared.
-TEST(msrp_participant, a_change_after_a_received_leaveall_joins_the_old_value_first)
+// A LeaveAll received after the old value's Join, with its Lv pending (LA): the old value is joined again,
+// then left, before the new one is declared.
+TEST(msrp_participant, a_leaveall_received_before_the_lv_joins_the_old_value_again)
 {
     auto fv = make_talker_adv(0x0101);
     TalkerChangeRig rig{fv};
-    auto const t = rig.clock.advance(std::chrono::milliseconds(10));
-    rig.b.leave_all(t);
-    rig.fab.deliver_b_to_a(rig.a, t);  // a answers it at once
-    rig.fab.a_to_b.clear();            // that answer is the old value's Join before the change: not counted
     fv.max_frame_size = 224;
     (void)rig.a.declare_talker_advertise(fv, rig.clock.now);
-    EXPECT_TRUE(joined_left_then_new(rig.run(4), 150, 224));
+    auto const t = rig.clock.advance(std::chrono::milliseconds(250));
+    rig.a.tick(t);  // the old value's Join; Lv! now pending (LA)
+    rig.fab.deliver_a_to_b(rig.b, t);
+    rig.b.leave_all(t);
+    rig.fab.deliver_b_to_a(rig.a, t);  // a answers it at once
+    auto sent = std::vector<std::string>{};
+    std::ranges::transform(rig.fab.a_to_b, std::back_inserter(sent), [](auto const& pdu) { return first_talker_advertise(pdu); });
+    rig.fab.deliver_a_to_b(rig.b, t);
+    std::ranges::copy(rig.run(4), std::back_inserter(sent));
+    EXPECT_TRUE(joined_left_then_new(sent, 150, 224));
+    auto const* reg = rig.b.find_talker_advertise(make_stream_id(0x0101));
+    EXPECT_EQ(reg != nullptr ? reg->max_frame_size.get() : uint16_t{0}, uint16_t{224});
 }
 
 // A change of AccumulatedLatency alone is declared New in place, with no Leave.
