@@ -48,7 +48,7 @@ class EntityUpkeep final : public net::Pollable
     void note_state(std::chrono::steady_clock::time_point now);
     /// A grandmaster regained under the same identity, and the gPTP lock watchdog.
     void watch_gptp(std::chrono::steady_clock::time_point now);
-    /// Re-evaluate talker admission and the stream counters at @p now.
+    /// Fold the stream counters at @p now.
     void reevaluate(std::chrono::steady_clock::time_point now);
 
     AvbEntityKit& kit_;
