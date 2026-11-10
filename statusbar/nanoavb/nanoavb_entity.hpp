@@ -657,8 +657,8 @@ class AemCommandHandler
     /// Handle GET_NAME command (IEEE 1722.1 Clause 7.4.18). Parses the
     /// descriptor_type/index/name_index/config header and routes through
     /// AemEntityModel::get_name_for_wire -> the handler's symbol-keyed
-    /// on_get_name. NOT_IMPLEMENTED if the handler serves no name for the
-    /// requested (descriptor, name_index).
+    /// on_get_name. NO_SUCH_DESCRIPTOR for an absent descriptor, NOT_IMPLEMENTED if
+    /// the handler serves no name for the requested (descriptor, name_index).
     [[nodiscard]] auto handle_get_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// Handle SET_NAME command (IEEE 1722.1 Clause 7.4.17). Routes through

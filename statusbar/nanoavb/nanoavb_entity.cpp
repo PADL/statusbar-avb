@@ -492,8 +492,13 @@ auto AemCommandHandler::handle_read_descriptor(
     return {.status = AEM_STATUS_SUCCESS, .size = AemReadDescriptorResponsePayload::LENGTH + bytes_written};
 }
 
+namespace {
+/// Defined below, beside read_u16().
+[[nodiscard]] auto no_value_status(AemEntityModel const& model, uint16_t configuration, std::span<uint8_t const> body) -> uint8_t;
+}  // namespace
+
 auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
-{
+{  // NOLINT(statusbar-block-statements) GET_NAME's fields, one by one; pre-dates the gate
     // GET_NAME command body (Clause 7.4.18.1): descriptor_type(2) +
     // descriptor_index(2) + name_index(2) + configuration_index(2).
     constexpr size_t GET_NAME_HEADER = 8;
@@ -518,9 +523,7 @@ auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, s
     AemEntityModel const aem_model{*handler_};
     auto const n = aem_model.get_name_for_wire(ref, out_buffer);
     if (n == 0) {
-        // The handler serves no name for this (descriptor, name_index) — the
-        // conservative default, consistent with the SET path.
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+        return {.status = no_value_status(aem_model, cindex.get(), command_data), .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = n};
 }

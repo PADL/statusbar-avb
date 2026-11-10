@@ -997,6 +997,19 @@ TEST(nanoavb_entity_get_value, a_get_on_a_present_descriptor_without_a_value_is_
     EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_CLOCK_SOURCE), cmd).status, AEM_STATUS_NOT_IMPLEMENTED);
 }
 
+// IEEE 1722.1-2021 Table 7-141: GET_NAME on a descriptor the entity lacks is NO_SUCH_DESCRIPTOR.
+TEST(nanoavb_entity_get_value, a_get_name_on_a_missing_descriptor_is_no_such_descriptor)
+{
+    auto model = create_test_model();  // STREAM_INPUT[0], no STREAM_OUTPUT
+    AemCommandHandler handler{model};
+
+    std::array<uint8_t, AemNameCommandPayload::LENGTH> cmd{};
+    span_store(cmd, AemNameCommandPayload{.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0});
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_NAME), cmd).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    span_store(cmd, AemNameCommandPayload{.descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = 0, .name_index = 7});
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_NAME), cmd).status, AEM_STATUS_NOT_IMPLEMENTED);
+}
+
 TEST(nanoavb_entity_stubs, get_counters_not_implemented)
 {
     auto model = create_test_model();
