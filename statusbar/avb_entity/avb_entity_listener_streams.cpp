@@ -986,8 +986,9 @@ void ListenerStreams::on_listener_connected(
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
     // The connection as it was made: a classic DISCONNECT_RX has cleared the ACMP stream by now.
+    bool kept = false;
     if (auto const connection = end_connection(stream_index); connection.has_value()) {
-        withdraw_listener(connection->stream_id, now);
+        kept = !withdraw_listener(connection->stream_id, now);
         // Release the talker's stream group so per-connection dest-MAC churn does
         // not pile up stale NIC multicast filter entries.
         if (port_ != nullptr && connection->group.is_multicast()) {  // no guard: a leave is a socket call
@@ -996,17 +997,23 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
     }
     if (logger_) {
         logger_->status(
-            "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener withdrawn",
+            "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener {}",
             stream_index,
-            kind_lit(slot_for(stream_index)));
+            kind_lit(slot_for(stream_index)),
+            kept ? logging::lit("kept: another input uses its stream") : logging::lit("withdrawn"));
     }
 }
 
-void ListenerStreams::withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint const now)
+auto ListenerStreams::withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
 {
+    // One Listener declaration per StreamID, merged across inputs (IEEE 802.1Q-2022 Clause 35.2.4.4).
+    if (std::ranges::contains(connections_, stream_id, &Connection::stream_id)) {
+        return false;
+    }
     tsn::StreamId sid{};
     (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
     (void)components_.msrp_handler.listener_withdraw(sid, now);
+    return true;
 }
 
 auto ListenerStreams::end_replaced_connection(uint16_t const stream_index, ieee::Eui64 const& stream_id, sm::TimePoint const now)
@@ -1018,7 +1025,7 @@ auto ListenerStreams::end_replaced_connection(uint16_t const stream_index, ieee:
         return {};
     }
     if (previous->stream_id != stream_id) {
-        withdraw_listener(previous->stream_id, now);
+        (void)withdraw_listener(previous->stream_id, now);
     }
     return previous->group;
 }

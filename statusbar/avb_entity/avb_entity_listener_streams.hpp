@@ -474,8 +474,9 @@ struct ListenerStreams
         ieee::Eui48 group{};
     };
     sg14::inplace_vector<Connection, MAX_ENTITY_STREAMS> connections_{};
-    /// Withdraw the MSRP Listener declaration of stream @p stream_id at @p now.
-    void withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint now);
+    /// Withdraw the MSRP Listener declaration of stream @p stream_id at @p now, unless a kept
+    /// connection of another input still uses it: whether it was withdrawn.
+    [[nodiscard]] auto withdraw_listener(ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
     /// End input @p stream_index's connection before a new one to @p stream_id, withdrawing its
     /// stream when that differs: the group it held (zero: none).
     [[nodiscard]] auto end_replaced_connection(uint16_t stream_index, ieee::Eui64 const& stream_id, sm::TimePoint now)

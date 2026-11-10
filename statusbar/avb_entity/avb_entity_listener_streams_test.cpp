@@ -847,6 +847,55 @@ TEST(listener_port, a_connect_to_another_stream_withdraws_the_earlier_one)
     EXPECT_TRUE(state(second) == nanoavb::ListenerReservationState::Idle);
 }
 
+namespace {
+
+/// The MSRP Listener state @p msrp holds for @p id (Idle when none).
+auto listener_state(auto const& msrp, ieee::Eui64 const& id) -> nanoavb::ListenerReservationState
+{
+    tsn::StreamId sid{};
+    (void)tsn::load_unchecked(id.span(), &sid);
+    auto const* stream = msrp.get_listener_stream(sid);
+    return stream != nullptr ? stream->state : nanoavb::ListenerReservationState::Idle;
+}
+
+}  // namespace
+
+// Two inputs connected to one stream share its Listener declaration (IEEE 802.1Q-2022 Clause
+// 35.2.4.4): the first disconnect keeps it, the last withdraws it
+TEST(listener_port, a_stream_shared_by_two_inputs_is_withdrawn_by_the_last)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    auto const& msrp = donor->components().msrp_handler;
+    auto const shared = ieee::Eui64{}.from_uint64(0x0200000000000201ULL);
+    ls.on_listener_connected(0, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_connected(1, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_disconnected(1, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) != nanoavb::ListenerReservationState::Idle);
+    ls.on_listener_disconnected(0, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) == nanoavb::ListenerReservationState::Idle);
+}
+
+// A repeated connect of one input to another stream keeps the earlier stream's declaration while
+// another input still uses it
+TEST(listener_port, a_connect_to_another_stream_keeps_a_shared_one)
+{
+    auto donor = make_connected_donor(kAm824Id, kAafId);
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    auto const& msrp = donor->components().msrp_handler;
+    auto const shared = ieee::Eui64{}.from_uint64(0x0200000000000301ULL);
+    auto const other = ieee::Eui64{}.from_uint64(0x0200000000000302ULL);
+    ls.on_listener_connected(0, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_connected(1, shared, kAafGroup, sm::Clock::now());
+    ls.on_listener_connected(1, other, kAafGroup, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) != nanoavb::ListenerReservationState::Idle);
+    EXPECT_TRUE(listener_state(msrp, other) != nanoavb::ListenerReservationState::Idle);
+    ls.on_listener_disconnected(0, sm::Clock::now());
+    EXPECT_TRUE(listener_state(msrp, shared) == nanoavb::ListenerReservationState::Idle);
+}
+
 //
 // Raw AM824 receive (IEC 61883-6, IEEE 1722-2016 Clause 5)
 //
