@@ -307,7 +307,7 @@ struct TalkerPort
     return ((octets * 8000U) + mbps - 1) / mbps;
 }
 
-/// The time a cbs whose idleSlope is @p class_octets an interval takes to send @p queued of them, ns,
+/// The time a cbs whose idleSlope is @p class_octets an interval needs to send @p queued of them, ns,
 /// rounded up: their share of the interval.
 [[nodiscard]] constexpr auto cbs_drain_ns(
     uint64_t const queued, uint64_t const class_octets, uint32_t const intervals_per_sec) noexcept -> uint64_t
