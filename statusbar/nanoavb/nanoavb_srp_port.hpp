@@ -147,10 +147,9 @@ class SrpPort
         return msrp_.registered_listener(stream_id);
     }
 
-    /// The handlers, for what the port does not wrap (another VLAN, the MSRP workarounds). The
-    /// Domain's VID is the port's: it is withdrawn when the Domain moves, whoever joined it.
-    /// Driving msrp() directly defers the Domain and leave reports to the next receive or tick;
-    /// declare_domain() called from an observer reports at once.
+    /// The handlers, for what the port does not wrap (another VLAN, the MSRP workarounds); the Domain's VID
+    /// is the port's, withdrawn when the Domain moves. Driving msrp() directly defers the Domain and leave
+    /// reports to the next receive or tick (declare_domain() from an observer reports at once).
     [[nodiscard]] auto msrp() noexcept -> SrpPortMsrpHandler& { return msrp_; }
     [[nodiscard]] auto mvrp() noexcept -> MvrpHandler& { return mvrp_; }
 

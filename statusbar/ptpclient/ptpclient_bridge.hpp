@@ -369,11 +369,9 @@ class PtpTimeBridge : public PtpTimeBridgeBase
         int64_t raw_ns{0};
     };
 
-    /// Sleep (clock_nanosleep on CLOCK_MONOTONIC through raw_line()) to wake_refine_spin_ns before
-    /// @p ptp_deadline_ns, then spin on CLOCK_MONOTONIC_RAW to it. Once @p keep_going (optional)
-    /// reads false the call returns bridge_not_running. @p spin_headroom_ns, if given, gets what was
-    /// left of the spin window (negative on overrun), only when it slept. Returns the wake instant on
-    /// both clocks, or an error.
+    /// Sleep (CLOCK_MONOTONIC, through raw_line()) to wake_refine_spin_ns before @p ptp_deadline_ns, then spin
+    /// on CLOCK_MONOTONIC_RAW to it; the wake on both clocks, bridge_not_running once @p keep_going reads false.
+    /// @p spin_headroom_ns gets what was left of the spin window (negative on overrun) when it slept.
     [[nodiscard]] auto sleep_until_ptp(
         int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going = nullptr, int64_t* spin_headroom_ns = nullptr) noexcept
         -> StatusValue<WakeTimes>;
