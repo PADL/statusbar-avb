@@ -397,6 +397,22 @@ the others, up to four, count once the entity reports them and stop at their
 release. Other interfaces and domains the model has answer with none
 valid. Only configuration 0 is served.
 
+CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
+PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE
+1722-2016 Clause 10.4), and with a source generation that steps when the input
+is given a stream or loses one, or the PDUs' stream_id changes; a CONNECT
+repeated for the stream the input is on steps nothing. `CrfClockRecovery`
+starts its estimate again on either. `start()` binds `crf_recovery()` to one
+CRF input, the one an InputStream CRF clock source locates (none when that is
+no CRF input; the first with no CRF clock source), unless the host bound its
+own consumer there with `ListenerStreams::set_crf` before `start()`; the other
+CRF inputs are the host's.
+`TalkerStreams::toggle_media_clock_restart` toggles a STREAM_OUTPUT's mr from
+its next raw AAF, AM824 or CRF PDU on, where it stays; it is callable from any
+thread. A host whose talker timestamps follow a CRF input calls it for those
+streams on that CRF's disruptions and mr toggles (IEEE 1722-2016 Clause
+4.4.4.3); a stream reopened after a stop starts with mr clear and counts no
+MEDIA_RESET for it.
 
 ## Local ATDECC socket
 
