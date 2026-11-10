@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 // ListenerVlan over a recording VlanControl: create, move, release, EEXIST and EPERM handling, the
-// link brought up for IP listeners, and the kit's wiring (configured VID, adopted MSRP Domain VID, back on link up, stop()).
+// link brought up for IP listeners, the sinks' other VIDs, and the kit's wiring (configured VID, adopted
+// MSRP Domain VID, back on link up, stop()).
 
 #include "statusbar/test/test.hpp"
 
@@ -16,6 +17,7 @@
 #    include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #    include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 
+#    include <array>
 #    include <atomic>
 #    include <chrono>
 #    include <cstdint>
@@ -115,6 +117,80 @@ TEST(listener_vlan, creates_moves_and_deletes_its_own_link)
     EXPECT_TRUE(same(
         fake.requests,
         {"add 3 enp8s0.2 2", "add 3 enp8s0.7 7", "del enp8s0.2", "del enp8s0.7", "add 3 enp8s0.2 2", "del enp8s0.2"}));
+}
+
+TEST(listener_vlan, sink_vids_are_each_held_once_until_dropped)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingVlan fake;
+    {
+        SinkVlanFilters<2> filters{channel.logger()};
+        filters.hold(3);  // unbound: nothing
+        EXPECT_TRUE(fake.requests.empty());
+        filters.bind(fake, "enp8s0", 3);
+        filters.hold(3);
+        filters.hold(3);  // held: nothing
+        filters.hold(4);
+        filters.hold(5);  // both held already: warned, nothing
+        EXPECT_TRUE(filters.holds(3));
+        EXPECT_TRUE(filters.holds(4));
+        EXPECT_FALSE(filters.holds(5));
+        filters.drop(3);
+        filters.drop(6);  // not held: nothing
+        filters.hold(5);  // the freed one
+        EXPECT_FALSE(filters.holds(3));
+        EXPECT_TRUE(filters.holds(5));
+        filters.release();
+        filters.hold(7);  // released: unbound, nothing
+    }
+    EXPECT_TRUE(same(
+        fake.requests,
+        {"add 3 enp8s0.3 3", "add 3 enp8s0.4 4", "del enp8s0.3", "add 3 enp8s0.5 5", "del enp8s0.5", "del enp8s0.4"}));
+}
+
+// The kit's order at a Class A Domain change: the sinks' VIDs but the new Class A are kept (drop_except),
+// ListenerVlan follows the new VID, the old one is held again if a sink still uses it (hold_all). Each link
+// has one owner, which deletes it.
+TEST(listener_vlan, a_class_a_change_hands_each_link_to_one_owner)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingVlan fake;
+    {
+        ListenerVlan class_a{channel.logger()};
+        SinkVlanFilters<4> sinks{channel.logger()};
+        class_a.bind(fake, "enp8s0", 3);
+        sinks.bind(fake, "enp8s0", 3);
+        class_a.follow(2);
+        std::array<uint16_t, 2> const used{2, 3};  // sinks on the Class A VID and on 3
+        sinks.hold_all(used, 2);
+        auto const domain = [&](uint16_t const vid, auto const& vids) {
+            sinks.drop_except(vids, vid);
+            class_a.follow(vid);
+            sinks.hold_all(vids, vid);
+        };
+        domain(3, used);  // Class A moves onto the sinks' 3
+        EXPECT_TRUE(class_a.created());
+        EXPECT_TRUE(sinks.holds(2));
+        std::array<uint16_t, 1> const left{2};  // the sink on 3 leaves
+        sinks.drop_except(left, 3);
+        domain(2, left);  // back to 2: the sinks' link on it goes to ListenerVlan
+        EXPECT_FALSE(sinks.holds(2));
+        EXPECT_TRUE(class_a.created());
+        sinks.release();
+        class_a.release();
+    }
+    EXPECT_TRUE(same(
+        fake.requests,
+        {"add 3 enp8s0.2 2",
+         "add 3 enp8s0.3 3",
+         "del enp8s0.3",
+         "add 3 enp8s0.3 3",
+         "del enp8s0.2",
+         "add 3 enp8s0.2 2",
+         "del enp8s0.2",
+         "add 3 enp8s0.2 2",
+         "del enp8s0.3",
+         "del enp8s0.2"}));
 }
 
 TEST(listener_vlan, leaves_an_existing_link_and_survives_a_refusal)
