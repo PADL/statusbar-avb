@@ -1809,10 +1809,9 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     if (auto status = open_listener_streams(); !status) {
         return status;
     }
-    // In RT-timer mode the returned handler is kept alive here; the tool's
-    // SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake gPTP
-    // time, so RX can't be starved by the control plane. rx_to_reactor()
-    // is the way back should that timer not start.
+    // In RT-timer mode the handler is kept here for the tool's SCHED_FIFO RX timer (drain_stream_rx(),
+    // its wake's gPTP time), so the control plane cannot starve RX; rx_to_reactor() is the way back
+    // should that timer not start.
     if (!stream_rx_error_) {
         if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, config_.stream_rx_rt_timer)) {
             rt_rx_handler_ = std::move(*rx);
@@ -1848,10 +1847,8 @@ auto AvbEntityKit::open_listener_streams() -> Status
     // recovery unless the host bound it (set_crf before start); the ACMP listener
     // callbacks (wired above) drive the MSRP attach + the multicast join per connection.
     auto const recovery_input = crf_recovery_input();
-    // Static RX groups: an audio input pre-joins the same-kind talker
-    // output's group (the loopback topology listens on its own output
-    // group); everything else joins dynamically on ACMP connect (a zero
-    // MAC just opens the socket).
+    // Static RX groups: an audio input pre-joins the same-kind talker output's group (the loopback
+    // topology listens on its own); everything else joins on ACMP connect (a zero MAC opens the socket).
     rx_static_groups_.clear();
     for (auto const& spec : listener_specs_) {
         if (auto status = listener_->open_stream(spec); !status) {
