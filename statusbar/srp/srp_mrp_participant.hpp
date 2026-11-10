@@ -107,18 +107,42 @@ void dispatch_applicant(Record& rec, applicant_sm::Def::Event event, TimePoint n
     rec.applicant_sm.handle_event(rec.applicant_ctx, event, now);
 }
 
+/// Start @p rec's own leavetimer at @p now (IEEE 802.1Q-2022 Clause 10.7.4.2) and run the per-port
+/// leave timer to the earliest Registrar deadline.
+template <MrpAttributeLike Record>
+void start_registrar_leave(Record& rec, TimePoint now, TimerScheduler& timers) noexcept
+{
+    rec.registrar_ctx.leave_at = now + timers.config().leave_time;
+    timers.start_leave_at(rec.registrar_ctx.leave_at);
+}
+
 /// Dispatch an event to the Registrar FSM. Clears notify outputs
 /// before dispatch. If the transition sets lvtimer_request, the
-/// per-port leave timer is started (idempotent — preserves existing
-/// deadline if already running).
+/// Registrar's own leave deadline is set and the per-port leave timer
+/// runs to the earliest one.
 template <MrpAttributeLike Record>
 void dispatch_registrar(Record& rec, registrar_sm::Def::Event event, TimePoint now, TimerScheduler& timers)
 {
     rec.registrar_ctx.clear_outputs();
     rec.registrar_sm.handle_event(rec.registrar_ctx, event, now);
     if (rec.registrar_ctx.lvtimer_request) {
-        timers.start_leave(now);
+        start_registrar_leave(rec, now, timers);
     }
+}
+
+/// At the port's leave timer expiry: true when @p rec is in LV and its own leavetimer has run out (the
+/// caller dispatches LvTimer); an LV Registrar not yet due runs the port's timer on to its deadline.
+template <MrpAttributeLike Record>
+[[nodiscard]] auto registrar_leave_due(Record const& rec, TimePoint now, TimerScheduler& timers) noexcept -> bool
+{
+    if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
+        return false;
+    }
+    if (rec.registrar_ctx.leave_at > now) {
+        timers.start_leave_at(rec.registrar_ctx.leave_at);
+        return false;
+    }
+    return true;
 }
 
 /// Dispatch the tx! event to an attribute's Applicant. Selects the

@@ -9,6 +9,7 @@
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <iterator>
@@ -757,6 +758,39 @@ TEST(msrp_participant, listener_leave_runs_the_leavetimer_by_default)
     EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
     rig.a.tick(rig.clock.advance(std::chrono::milliseconds(600)));
     EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
+}
+
+// IEEE 802.1Q-2022 Clause 10.7.4.2: each Registrar has its own leavetimer. A Listener re-declared
+// after one LeaveAll and left in LV by a second, 3 s later, stays registered for a full LeaveTime
+// from the second, not until the first one's deadline.
+TEST(msrp_participant, a_second_leave_all_restarts_the_listeners_own_leavetimer)
+{
+    // A Listener LeaveAll re-declaring nothing: ProtocolVersion, one Listener message (length 8,
+    // list length 4) of a LeaveAll VectorHeader with no values and its EndMark, the PDU's EndMark.
+    std::array<uint8_t, 11> const leave_all{0x00, 0x03, 0x08, 0x00, 0x04, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00};
+    auto config = test_msrp_config();
+    config.leave_immediate = true;
+    config.timers.leave_time = std::chrono::milliseconds{5000};
+    ListenerLeaveRig rig{config};
+    (void)rig.b.declare_listener(rig.sid, ListenerDeclaration::Ready, rig.clock.now);
+    rig.exchange();
+    auto const run_a = [&rig](int const quarters) {
+        for (int i = 0; i < quarters; ++i) {
+            rig.a.tick(rig.clock.advance(std::chrono::milliseconds(250)));
+        }
+    };
+
+    rig.a.receive_pdu(leave_all, rig.clock.now);  // the first LeaveAll: answered at once
+    rig.b.receive_pdu(leave_all, rig.clock.now);
+    rig.exchange();
+    run_a(11);                                    // 3 s after the first LeaveAll
+    rig.a.receive_pdu(leave_all, rig.clock.now);  // the second: not answered
+    run_a(12);                                    // past the first one's deadline
+    EXPECT_TRUE(rig.a.listener_permits_transmit(rig.sid));
+    EXPECT_FALSE(rig.left.has_value());
+    run_a(8);  // a full LeaveTime after the second
+    EXPECT_FALSE(rig.a.listener_permits_transmit(rig.sid));
+    EXPECT_TRUE(rig.left.has_value());
 }
 
 // A declared Talker Advertise whose value changes (the talker moved to an
