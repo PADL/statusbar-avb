@@ -828,6 +828,14 @@ auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t cons
     return in_force == rate ? atdecc::AEM_STATUS_SUCCESS : atdecc::AEM_STATUS_NOT_SUPPORTED;
 }
 
+auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_t>
+{
+    if (!lock_refuses_local_changes_) {
+        return std::nullopt;
+    }
+    return host_.components().aem_handler.exclusive_access_status(ieee::Eui64{});  // as no controller's command
+}
+
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
 {
     auto& aem = host_.components().aem_handler;

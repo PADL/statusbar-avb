@@ -290,6 +290,20 @@ stream input is refused BAD_ARGUMENTS (Section 5.4.2.7): the controller removes
 those mappings first. A saved set the data plane cannot route once its hook is
 installed falls back to the default.
 
+`request_audio_mappings(port, add, remove)` is the same change made locally
+(a narrower input format's lost channels, a host's routing socket): a REMOVE of
+`remove` then an ADD of `add` under the controller's rules, all or nothing, one
+hook call; a change is notified as the REMOVE and ADD it amounts to and saved.
+
+Milan v1.3 Section 5.3.4.1 has a locked entity refuse changes by other than
+ATDECC. That is opt-in: after `set_lock_refuses_local_changes(true)` the local
+setters (`request_entity_name`, `request_audio_mappings`, and a host's own
+SET_STREAM_FORMAT through `local_change_refusal()`) answer ENTITY_ACQUIRED or
+ENTITY_LOCKED while a controller holds the acquisition or the lock, as its
+commands would be. By default they go through.
+`request_clock_source` follows a source the host has already applied, so it
+is never refused.
+
 ## Persistence
 
 With `persistent_state_path` set, `start()` loads the file before the control
