@@ -349,6 +349,8 @@ class AvbEntityAm824IO
     /// talker stream 0 so MSRP, ACMP, and the AVTP stream share one identity;
     /// the TSpec is derived from the 96 kHz AM824 framing.
     [[nodiscard]] auto make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo;
+    /// The ACMP-configured talker stream 0's ID (zero before ACMP has one): what a withdrawal names.
+    [[nodiscard]] auto talker_stream_id() const noexcept -> nanoavb::StreamId;
 
     // Member order optimized to minimize struct padding
     // (config_ must precede components_ for initialization dependency)
