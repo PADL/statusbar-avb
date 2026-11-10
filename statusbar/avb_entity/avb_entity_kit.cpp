@@ -1549,7 +1549,7 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoin
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
-    read_port();
+    (void)read_port();
     if (auto status = start_control(reactor, now); !status) {
         return status;
     }
@@ -1569,12 +1569,25 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     return success();
 }
 
-void AvbEntityKit::read_port()
+auto AvbEntityKit::read_port() -> bool
 {
 #if defined(__linux__)
+    auto const before = std::pair{link_mbps_, mtu_};
     link_mbps_ = net::link_speed_mbps(config_.interface_name).value_or(link_mbps_);
     mtu_ = net::interface_mtu(config_.interface_name).value_or(mtu_);
+    return std::pair{link_mbps_, mtu_} != before;
+#else
+    return false;
 #endif
+}
+
+void AvbEntityKit::on_link_up(TimePoint const time)
+{
+    bool const changed = !class_a_cbs_ && read_port();  // a shaper keeps its own
+    host_.on_link_up(time);
+    if (changed) {
+        update_talker_declarations(steady_ns_of(time), true);
+    }
 }
 
 auto AvbEntityKit::stream_port_config(std::string_view const backend) const -> StreamPortConfig
