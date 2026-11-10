@@ -75,7 +75,7 @@ struct AafStreamFormat
 
 static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
 
-/// An AAF format word's ut ("up to") bit, octet 1 bit 4 (IEEE 1722-2016 Annex I.2.4): its
+/// An AAF format word's ut ("up to") bit, octet 1 bit 4 (IEEE 1722-2016 Figure I.12): its
 /// channels_per_frame is a maximum, every count from 1 to it supported.
 inline constexpr uint64_t AAF_FORMAT_UP_TO = uint64_t{1} << 52U;
 inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNELS_MASK};
