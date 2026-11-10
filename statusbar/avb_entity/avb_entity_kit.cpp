@@ -810,9 +810,6 @@ auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
 {
     auto& aem = host_.components().aem_handler;
-    if (auto const refusal = local_change_refusal()) {
-        return *refusal;
-    }
     if (name.size() > atdecc::aem::AtdeccString::LENGTH) {
         return atdecc::AEM_STATUS_BAD_ARGUMENTS;
     }
@@ -837,9 +834,6 @@ auto AvbEntityKit::request_audio_mappings(
     std::span<nanoavb::DynamicAudioMapping const> const add,
     std::span<nanoavb::DynamicAudioMapping const> const remove) -> uint8_t
 {
-    if (auto const refusal = local_change_refusal()) {
-        return *refusal;
-    }
     return host_.components().aem_handler.apply_local_audio_mappings(port_index, add, remove);
 }
 
