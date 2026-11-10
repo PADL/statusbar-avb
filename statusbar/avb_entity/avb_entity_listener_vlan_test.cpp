@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 // ListenerVlan over a recording VlanControl: create, move, release, EEXIST and EPERM handling, the
-// link brought up for IP listeners, and the kit's wiring (configured VID, adopted MSRP Domain VID, back on link up, stop()).
+// link brought up for IP listeners, the refcounted VID table, and the kit's wiring (configured VID, adopted
+// MSRP Domain VID, back on link up, stop()).
 
 #include "statusbar/test/test.hpp"
 
@@ -16,6 +17,7 @@
 #    include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #    include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 
+#    include <array>
 #    include <atomic>
 #    include <chrono>
 #    include <cstdint>
@@ -115,6 +117,67 @@ TEST(listener_vlan, creates_moves_and_deletes_its_own_link)
     EXPECT_TRUE(same(
         fake.requests,
         {"add 3 enp8s0.2 2", "add 3 enp8s0.7 7", "del enp8s0.2", "del enp8s0.7", "add 3 enp8s0.2 2", "del enp8s0.2"}));
+}
+
+// VlanFilterTable refcounts each VID: the first hold creates its link, the last drop deletes it, and a VID
+// moving (the Class A VID adopted from a Domain) holds the new one before dropping the old, so a link another
+// holder shares is never deleted and created again. Unbound, or past 4094, nothing.
+TEST(listener_vlan, vids_are_refcounted_and_a_shared_link_is_kept_across_a_move)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingVlan fake;
+    {
+        VlanFilterTable<3> table{channel.logger()};
+        table.hold(3);  // unbound: nothing
+        EXPECT_TRUE(fake.requests.empty());
+        table.bind(fake, "enp8s0", 3);
+        table.hold(2);  // the Class A VID
+        table.hold(3);  // an input on 3
+        table.hold(0);  // none
+        table.hold(4095);
+        EXPECT_EQ(table.holds(3), uint16_t{1});
+        table.hold(3);  // Class A moves to 3: the new held first
+        table.drop(2);  // then the old
+        EXPECT_EQ(table.holds(3), uint16_t{2});
+        table.drop(3);  // the input leaves: Class A still holds it
+        table.drop(7);  // never held: nothing
+        table.hold(4);
+        table.hold(5);
+        table.hold(6);  // all three in use: warned, nothing
+        EXPECT_EQ(table.holds(6), uint16_t{0});
+        table.release();
+        table.hold(7);  // released: unbound, nothing
+    }
+    EXPECT_TRUE(same(
+        fake.requests,
+        {"add 3 enp8s0.2 2",
+         "add 3 enp8s0.3 3",
+         "del enp8s0.2",
+         "add 3 enp8s0.4 4",
+         "add 3 enp8s0.5 5",
+         "del enp8s0.4",
+         "del enp8s0.3",
+         "del enp8s0.5"}));
+}
+
+// A link that could not be created (EPERM: no CAP_NET_ADMIN) is still held, so the holds stay balanced, and
+// each later hold of its VID tries to create it again.
+TEST(listener_vlan, a_link_refused_is_created_at_a_later_hold)
+{
+    logging::LogChannel<64> channel{logging::lit("test")};
+    RecordingVlan fake;
+    {
+        VlanFilterTable<2> table{channel.logger()};
+        table.bind(fake, "enp8s0", 3);
+        fake.next = std::errc::operation_not_permitted;
+        table.hold(3);
+        EXPECT_EQ(table.holds(3), uint16_t{1});
+        table.hold(3);  // tried again: created
+        table.drop(3);
+        table.drop(3);  // the last: deleted
+        EXPECT_EQ(table.holds(3), uint16_t{0});
+    }
+    EXPECT_TRUE(same(fake.requests, {"add 3 enp8s0.3 3", "add 3 enp8s0.3 3", "del enp8s0.3"}));
 }
 
 TEST(listener_vlan, leaves_an_existing_link_and_survives_a_refusal)

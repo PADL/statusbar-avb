@@ -986,7 +986,7 @@ void ListenerStreams::on_listener_connected(
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the
     // talker's boot) — the handler upgrades to Ready when it appears.
-    auto const result = components_.msrp_handler.listener_attach(sid, now);
+    auto const result = components_.msrp_handler.listener_attach(sid, now, talker_match(stream_index, dest_mac));
     bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
     bool const waiting = result.has_value() && *result == nanoavb::ListenerReservationState::Waiting;
     // Join the talker's stream group so the NIC delivers its frames to us; a zero or unicast
@@ -1007,6 +1007,16 @@ void ListenerStreams::on_listener_connected(
                 : dest_mac.is_multicast() ? logging::lit("FAILED")
                                           : logging::lit("none (no group)"));
     }
+}
+
+auto ListenerStreams::talker_match(uint16_t const stream_index, ieee::Eui48 const& dest_mac) const
+    -> std::optional<nanoavb::TalkerMatch>
+{
+    auto const* const stream = components_.acmp_listener.get_stream(stream_index);
+    if (!components_.profile.milan || stream == nullptr) {
+        return std::nullopt;  // a classic connection follows any Talker attribute of its StreamID
+    }
+    return nanoavb::TalkerMatch{.destination = dest_mac, .vid = stream->stream_vlan_id};
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
