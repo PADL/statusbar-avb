@@ -221,7 +221,7 @@ auto MaapHandler::probe_interval_ns() noexcept -> int64_t
 {
     constexpr int64_t base = static_cast<int64_t>(MAAP_PROBE_INTERVAL_BASE_US) * 1000;
     constexpr int64_t var = static_cast<int64_t>(MAAP_PROBE_INTERVAL_VARIATION_US) * 1000;
-    int64_t const jitter = static_cast<int64_t>(next_random() % static_cast<uint64_t>((2 * var) + 1)) - var;
+    int64_t const jitter = 1 + static_cast<int64_t>(next_random() % static_cast<uint64_t>(var - 1));
     return base + jitter;
 }
 
@@ -229,7 +229,7 @@ auto MaapHandler::announce_interval_ns() noexcept -> int64_t
 {
     constexpr int64_t base = static_cast<int64_t>(MAAP_ANNOUNCE_INTERVAL_BASE_US) * 1000;
     constexpr int64_t var = static_cast<int64_t>(MAAP_ANNOUNCE_INTERVAL_VARIATION_US) * 1000;
-    int64_t const jitter = static_cast<int64_t>(next_random() % static_cast<uint64_t>((2 * var) + 1)) - var;
+    int64_t const jitter = 1 + static_cast<int64_t>(next_random() % static_cast<uint64_t>(var - 1));
     return base + jitter;
 }
 

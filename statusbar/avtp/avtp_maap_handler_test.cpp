@@ -15,8 +15,13 @@
 #include <span>
 #include <vector>
 
+using statusbar::avtp::MAAP_ANNOUNCE_INTERVAL_BASE_US;
+using statusbar::avtp::MAAP_ANNOUNCE_INTERVAL_VARIATION_US;
 using statusbar::avtp::MAAP_DYNAMIC_POOL_END;
 using statusbar::avtp::MAAP_DYNAMIC_POOL_START;
+using statusbar::avtp::MAAP_PROBE_INTERVAL_BASE_US;
+using statusbar::avtp::MAAP_PROBE_INTERVAL_VARIATION_US;
+using statusbar::avtp::MAAP_PROBE_RETRANSMITS;
 using statusbar::avtp::MaapDu;
 using statusbar::avtp::MaapHandler;
 using statusbar::ieee::Eui48;
@@ -92,6 +97,17 @@ auto make_frame(uint8_t message_type, Eui48 const& start, uint16_t count) -> std
 {
     uint64_t const v = a.to_uint64();
     return v >= MAAP_DYNAMIC_POOL_START.to_uint64() && (v + count - 1) <= MAAP_DYNAMIC_POOL_END.to_uint64();
+}
+
+/// Whether the timer armed at @p armed_ns sends its one frame strictly between
+/// armed_ns + base_us and armed_ns + base_us + var_us (IEEE 1722-2016 Annex B.3.4).
+[[nodiscard]] auto next_send_within(Rig& rig, int64_t armed_ns, uint64_t base_us, uint64_t var_us) -> bool
+{
+    auto const before = rig.sent.size();
+    rig.handler.tick(armed_ns + static_cast<int64_t>(base_us * 1000));
+    bool const early = rig.sent.size() != before;
+    rig.handler.tick(armed_ns + static_cast<int64_t>((base_us + var_us) * 1000) - 1);
+    return !early && rig.sent.size() == before + 1;
 }
 
 }  // namespace
@@ -269,6 +285,40 @@ TEST(maap_handler, block_address_helper_offsets_within_block)
     EXPECT_EQ(
         statusbar::avtp::maap_block_address(Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0xff}, 1),
         (Eui48{0x91, 0xe0, 0xf0, 0x00, 0x13, 0x00}));
+}
+
+TEST(maap_handler, probe_intervals_lie_between_base_and_base_plus_variation)
+{
+    for (uint64_t seed = 1; seed <= 64; ++seed) {
+        Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}, seed};
+        int64_t armed = SEC;
+        rig.handler.acquire(1, armed);
+        // Each probe_timer expiry sends one frame: the PROBE retransmissions, then the ANNOUNCE.
+        for (uint32_t k = 0; k <= MAAP_PROBE_RETRANSMITS; ++k) {
+            EXPECT_TRUE(next_send_within(rig, armed, MAAP_PROBE_INTERVAL_BASE_US, MAAP_PROBE_INTERVAL_VARIATION_US));
+            armed += static_cast<int64_t>((MAAP_PROBE_INTERVAL_BASE_US + MAAP_PROBE_INTERVAL_VARIATION_US) * 1000) - 1;
+        }
+        EXPECT_TRUE(rig.handler.is_acquired());
+    }
+}
+
+TEST(maap_handler, announce_intervals_lie_between_base_and_base_plus_variation)
+{
+    for (uint64_t seed = 1; seed <= 64; ++seed) {
+        Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}, seed};
+        int64_t armed = SEC;
+        rig.handler.acquire(1, armed);
+        for (uint32_t k = 0; k <= MAAP_PROBE_RETRANSMITS; ++k) {
+            (void)next_send_within(rig, armed, MAAP_PROBE_INTERVAL_BASE_US, MAAP_PROBE_INTERVAL_VARIATION_US);
+            armed += static_cast<int64_t>((MAAP_PROBE_INTERVAL_BASE_US + MAAP_PROBE_INTERVAL_VARIATION_US) * 1000) - 1;
+        }
+        EXPECT_TRUE(rig.handler.is_acquired());
+        for (int k = 0; k < 4; ++k) {
+            EXPECT_TRUE(next_send_within(rig, armed, MAAP_ANNOUNCE_INTERVAL_BASE_US, MAAP_ANNOUNCE_INTERVAL_VARIATION_US));
+            EXPECT_TRUE(rig.sent.back().is_announce());
+            armed += static_cast<int64_t>((MAAP_ANNOUNCE_INTERVAL_BASE_US + MAAP_ANNOUNCE_INTERVAL_VARIATION_US) * 1000) - 1;
+        }
+    }
 }
 
 //
