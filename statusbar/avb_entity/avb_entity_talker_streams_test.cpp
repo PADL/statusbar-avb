@@ -211,6 +211,23 @@ TEST(raw_aaf, render_fills_the_payload_and_the_header_carries_the_pts)
 
 // The raw path's pts is the wire presentation time: a context presentation
 // offset is not added on top (the caller has applied its own).
+// An AAF stream whose format names other samples per frame than class A's at its rate is not
+// opened: the talker sends class A packets (IEEE 1722-2016 Clause 7.7, Table 17)
+TEST(talker_streams, an_aaf_format_not_framed_for_class_a_is_not_opened)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    statusbar::avb_entity::TalkerStreams talker{
+        statusbar::avb_entity::TalkerStreamsConfig{.sample_rate = 48000}, mc, gptp_now, std::pmr::get_default_resource()};
+    statusbar::avb_entity::StreamSpec spec{};
+    spec.format_word = 0x020503180200C000ULL;  // AAF 48k int24 8ch, 12 frames a packet
+    spec.format = statusbar::avb_entity::decode_stream_format(spec.format_word);
+    EXPECT_FALSE(talker.open_stream(spec, {}, {}).has_value());
+    spec.format_word = 0x0205031802006000ULL;  // 6 frames: class A
+    spec.format = statusbar::avb_entity::decode_stream_format(spec.format_word);
+    EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
+}
+
 TEST(raw_aaf, pts_is_the_wire_timestamp_whatever_the_context_offset)
 {
     avtp::AafStreamOutputContext ctx{

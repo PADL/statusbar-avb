@@ -202,7 +202,10 @@ recorder).
 ## Stream formats and the sampling rate
 
 SET_STREAM_FORMAT accepts any audio format the stream's descriptor lists, at any
-rate and of either audio kind: a stream's rate is set through its format, and a
+rate and of either audio kind, except an output's AAF format whose samples per
+frame are not class A's at its rate (NOT_SUPPORTED: the talker sends class A
+packets, IEEE 1722-2016 Clause 7.7, Table 17; an output authored so fails
+`start()`): a stream's rate is set through its format, and a
 descriptor may list AAF and IEC 61883-6 AM824 formats together (up to the
 descriptor's 46 formats), so a controller moves the stream between them. A CRF
 stream keeps its format, and no stream changes to or from CRF (BAD_ARGUMENTS).
