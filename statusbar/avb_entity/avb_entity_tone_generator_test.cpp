@@ -317,7 +317,7 @@ void acmp_connect(nanoavb::NanoAvbComponents& comps, uint16_t talker_unique)
 
 // Milan (1.2 5.3.7.3): a listener bound with PROBE_TX makes no ACMP connection;
 // the talker streams while a Listener Ready (or Ready Failed) is registered and
-// stops GRACE_NS after the declaration goes.
+// stops when the declaration goes (Milan v1.3 Section 4.2.7.2.2).
 TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 {
     auto blob = load_file(entity_tone_bin_path());
@@ -334,7 +334,7 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
     }
     constexpr uint16_t k_aaf = 1;
     constexpr auto t0 = RAW_NOW;
-    constexpr auto grace = TalkerGate::GRACE;
+    constexpr auto later = std::chrono::seconds{60};
     using std::chrono::nanoseconds;
     TalkerGate gate{/*gate_enabled=*/true, comps};
     EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{0});
@@ -344,31 +344,22 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
     EXPECT_TRUE(gate.admitted(k_aaf, t0));
     EXPECT_TRUE(gate.should_transmit(k_aaf, RAW_NOW));
     // Registered: no expiry however long it stays.
-    EXPECT_TRUE(gate.admitted(k_aaf, t0 + 100 * grace));
+    EXPECT_TRUE(gate.admitted(k_aaf, t0 + later));
 
-    // Withdrawn at t1 (a LeaveAll blip or a real departure): open for GRACE_NS
-    // from the withdrawal, closed after.
-    auto const t1 = t0 + 60 * grace;
+    // Withdrawn at t1 (the registrar's Lv state already rode out any LeaveAll): closed from then.
+    auto const t1 = t0 + later;
     gate.note_listener_ready(*sid, false, t1);
-    EXPECT_TRUE(gate.admitted(k_aaf, t1));
-    EXPECT_TRUE(gate.admitted(k_aaf, t1 + grace - nanoseconds{1}));
-    EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
-    EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
+    EXPECT_TRUE(gate.admitted(k_aaf, t1 - nanoseconds{1}));
+    EXPECT_FALSE(gate.admitted(k_aaf, t1));
 
-    // A repeated withdrawal does not extend the window.
-    gate.note_listener_ready(*sid, false, t1 + grace - nanoseconds{1});
-    EXPECT_FALSE(gate.admitted(k_aaf, t1 + grace));
-
-    // The blip: re-registered within the grace window keeps it open throughout.
-    auto const t2 = t1 + 10 * grace;
+    // Registered again: open again.
+    auto const t2 = t1 + later;
     gate.note_listener_ready(*sid, true, t2);
-    gate.note_listener_ready(*sid, false, t2 + nanoseconds{1});
-    gate.note_listener_ready(*sid, true, t2 + grace / 2);
-    EXPECT_TRUE(gate.admitted(k_aaf, t2 + 2 * grace));
+    EXPECT_TRUE(gate.admitted(k_aaf, t2 + later));
 
-    // Our Talker withdrawn: closed at once, no grace, listener state forgotten.
+    // Our Talker withdrawn: closed at once, listener state forgotten.
     gate.note_talker_withdrawn();
-    EXPECT_FALSE(gate.admitted(k_aaf, t2 + 2 * grace));
+    EXPECT_FALSE(gate.admitted(k_aaf, t2 + later));
     EXPECT_FALSE(gate.grace_ends(k_aaf).has_value());
 
     // Out of range is never admitted.

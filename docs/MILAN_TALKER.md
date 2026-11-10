@@ -59,9 +59,12 @@ with different parameters: the same stream ID, address and VID come back at
 once (a probe after the 15 s window ran out re-declares without waiting). A parameter change the control plane chose (the
 adopted Class A VID) is re-declared without a hold.
 
-A departed Listener keeps condition 2 true for `LISTENER_GRACE_NS`, the same
-LeaveAll re-registration blip the transmit gate rides out: only a Listener gone
-that long withdraws a stream whose probe window is over.
+Condition 2's Listener arm is the MSRP registrar's: In, or Lv after a LeaveAll
+until LeaveTime (5 s, Milan v1.3 Table 4.3) runs out, which is what rides out a
+Listener's re-declaration. A Listener's Lv moves the registrar to MT at once
+(Section 4.2.7.2.2), so the last Listener's Lv withdraws a stream whose probe
+window is over at once, and a Listener lost without one is withdrawn LeaveTime
+after the next LeaveAll.
 
 A classic (non-Milan) entity skips condition 2 (`interest_required` false):
 every stream declares as soon as its address is valid and is not held (a new
@@ -85,7 +88,8 @@ transmitting the stream". A talker puts stream `idx` on the wire only when:
 
 1. an MSRP Listener declaration that permits transmission (Ready or Ready
    Failed, not Asking Failed) is registered for the stream's stream_id, or was
-   within `GRACE`;
+   within the gate's grace (`GRACE` for a classic entity, `MILAN_GRACE`, none,
+   for a Milan one);
 2. our Talker Advertise is declared. This is implied by (1): a listener
    declaration for our stream only arises against our Talker Advertise, and the
    gate closes at once when we withdraw it (`note_talker_withdrawn`);
@@ -119,7 +123,7 @@ stamp (no grace) before clearing the flag. A reader loads the flag with acquire
 and then the stamp, so a withdrawal never pairs an old stamp with a cleared flag.
 
 `admitted(idx, now)` is the whole predicate: gating off, or Started and
-(`listener_ready_` or `now < stamp + GRACE`). `should_transmit(idx, now)` is
+(`listener_ready_` or `now < stamp + grace`). `should_transmit(idx, now)` is
 `admitted()` by another name for the media wake, so a Ready set and cleared
 between two media wakes, a STOP through a LeaveAll blip and a START within the
 grace, a Talker withdrawal followed by a Ready, all read the same from the
@@ -137,10 +141,15 @@ and its share of the shaper, because its Talker Advertise stays declared (IEEE
 1722.1-2021 Clause 7.4.37, STOP_STREAMING, withdraws nothing) and the listener
 keeps its Ready; the credit is there the moment it streams again.
 
-The grace window covers the MRP LeaveAll cycle: the peer's Listener declaration
-ages out and re-declares on a roughly 10 s cycle, momentarily withdrawn for 1-3
-s, which must not chop the stream. Only a registration or a withdrawal moves
-the stamp, so a withdrawn declaration closes the gate `GRACE` later and the
+The grace window rides out a Listener re-declaring after a LeaveAll, which must
+not chop the stream. The registrar already does that: a LeaveAll leaves the
+Listener registered (Lv) for LeaveTime, so the grace only adds to it. A Milan
+entity's LeaveTime is 5 s and its MSRP Lv immediate (Milan v1.3 Section
+4.2.7.2.2), so its gate has no grace: it closes at the last Listener's Lv, or
+LeaveTime after the LeaveAll that finds the Listener gone, and SET_STREAM_FORMAT
+stops answering STREAM_IS_RUNNING then. A classic entity keeps `GRACE` (5 s)
+over IEEE 802.1Q's 1 s LeaveTime. Only a registration or a withdrawal moves the
+stamp, so a withdrawn declaration closes the gate the grace later and the
 window cannot be extended without a fresh registration. A genuine departure
 closes the gate; `admitted()` depends on time, so the kit arms one timer at the
 earliest grace end (`AvbEntityKit::admission_deadline()`) and re-evaluates it

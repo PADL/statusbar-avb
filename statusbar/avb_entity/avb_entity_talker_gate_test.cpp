@@ -90,6 +90,21 @@ TEST(talker_gate, a_withdrawn_listener_keeps_the_gate_open_for_the_grace)
     EXPECT_TRUE(gate.listener_admitted(1, T0 + 2ns));
 }
 
+// Milan v1.3 Section 4.2.7.2.2: the registrar's Lv state is the LeaveAll hold, so a Milan
+// gate closes the moment its last Listener is withdrawn and arms no deadline.
+TEST(talker_gate, a_milan_gate_closes_when_the_last_listener_is_withdrawn)
+{
+    TalkerGate gate{true, lookup, TalkerGate::MILAN_GRACE};
+    gate.note_listener_ready(sid(0x101), true, T0);
+    EXPECT_TRUE(gate.admitted(1, T0 + 1s));
+    gate.note_listener_ready(sid(0x101), false, T0 + 1s);
+    EXPECT_FALSE(gate.admitted(1, T0 + 1s));
+    EXPECT_FALSE(gate.listener_admitted(1, T0 + 1s));
+    EXPECT_TRUE(gate.grace_ends(1) == T0 + 1s);
+    // A wake told an instant before the withdrawal still reads the registration.
+    EXPECT_TRUE(gate.admitted(1, T0 + 1s - 1ns));
+}
+
 TEST(talker_gate, a_disabled_gate_admits_every_stream)
 {
     TalkerGate gate{false, lookup};
