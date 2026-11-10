@@ -1737,9 +1737,6 @@ auto AemCommandHandler::apply_local_audio_mappings(
     uint16_t const port_index, std::span<DynamicAudioMapping const> const add, std::span<DynamicAudioMapping const> const remove)
     -> uint8_t
 {
-    if (locked_ || acquired_) {
-        return AEM_STATUS_ENTITY_LOCKED;
-    }
     auto const current = dynamic_maps_.port(DESCRIPTOR_STREAM_PORT_INPUT, port_index);
     DynamicAudioMaps::Mappings next{};
     if (auto const status = local_mappings(port_index, current, add, remove, next); status != AEM_STATUS_SUCCESS) {
