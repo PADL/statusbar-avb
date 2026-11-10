@@ -2540,9 +2540,12 @@ auto AemCommandHandler::set_local_identify(bool const on) -> uint8_t
     if (!identify_control_index_valid_) {
         return AEM_STATUS_NOT_IMPLEMENTED;
     }
-    aem::AemControlPayloadHeader const header{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = identify_control_index_};
+    if (auto const refusal = local_change_refusal_ ? local_change_refusal_() : std::nullopt) {
+        return *refusal;
+    }
     std::array<uint8_t, aem::AemControlPayloadHeader::LENGTH + 1> body{};
-    span_store(body, header);
+    span_store(
+        body, aem::AemControlPayloadHeader{.descriptor_type = DESCRIPTOR_CONTROL, .descriptor_index = identify_control_index_});
     body[aem::AemControlPayloadHeader::LENGTH] = on ? uint8_t{0xFF} : uint8_t{0x00};
     return apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body);
 }
