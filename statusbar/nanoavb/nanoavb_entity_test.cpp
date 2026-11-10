@@ -1780,10 +1780,9 @@ TEST(nanoavb_entity_unsolicited_notify, set_local_identify_convenience)
     EXPECT_FALSE(identify_changes[1]);
 }
 
-TEST(nanoavb_entity_acquire, identify_control_exempt_from_acquire)
+// IEEE 1722.1-2021 Clause 7.4.25.2: SET_CONTROL, IDENTIFY included, honours another controller's acquisition.
+TEST(nanoavb_entity_acquire, identify_control_honours_the_acquisition)
 {
-    // Milan: SET_CONTROL of the IDENTIFY control works even while another
-    // controller holds the entity; every other control honors the claim.
     SetAcceptingHandler app_handler;
     AemCommandHandler handler{app_handler};
     handler.set_profile(EntityProfile{.milan = false});  // classic: ACQUIRE_ENTITY implemented
@@ -1797,14 +1796,38 @@ TEST(nanoavb_entity_acquire, identify_control_exempt_from_acquire)
 
     auto other_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
     other_header.controller_entity_id = statusbar::ieee::Eui64{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
-
-    // Identify control (index 3): allowed despite the foreign acquire.
     std::array<uint8_t, 5> identify_body{0x00, 0x1A, 0x00, 0x03, 0xFF};
-    EXPECT_EQ(make_test_result(handler, other_header, identify_body).status, AEM_STATUS_SUCCESS);
-
-    // A different control (index 5): still refused with ENTITY_ACQUIRED.
+    EXPECT_EQ(make_test_result(handler, other_header, identify_body).status, AEM_STATUS_ENTITY_ACQUIRED);
     std::array<uint8_t, 5> other_body{0x00, 0x1A, 0x00, 0x05, 0xFF};
     EXPECT_EQ(make_test_result(handler, other_header, other_body).status, AEM_STATUS_ENTITY_ACQUIRED);
+
+    // The acquiring controller identifies the entity.
+    auto owner_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    owner_header.controller_entity_id = acquire_header.controller_entity_id;
+    EXPECT_EQ(make_test_result(handler, owner_header, identify_body).status, AEM_STATUS_SUCCESS);
+}
+
+// Milan v1.3 Section 5.4.2.17: a locked entity refuses another controller's SET_CONTROL of IDENTIFY.
+TEST(nanoavb_entity_lock, identify_control_honours_the_lock)
+{
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};  // Milan by default
+    handler.set_identify_control_index(3);
+
+    auto lock_header = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock_header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    std::array<uint8_t, AemLockEntityPayload::LENGTH> const lock_data{};  // ENTITY 0
+    EXPECT_EQ(make_test_result(handler, lock_header, lock_data).status, AEM_STATUS_SUCCESS);
+
+    auto other_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    other_header.controller_entity_id = statusbar::ieee::Eui64{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+    std::array<uint8_t, 5> identify_body{0x00, 0x1A, 0x00, 0x03, 0xFF};
+    EXPECT_EQ(make_test_result(handler, other_header, identify_body).status, AEM_STATUS_ENTITY_LOCKED);
+
+    // The locking controller identifies the entity.
+    auto owner_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    owner_header.controller_entity_id = lock_header.controller_entity_id;
+    EXPECT_EQ(make_test_result(handler, owner_header, identify_body).status, AEM_STATUS_SUCCESS);
 }
 
 //
