@@ -88,6 +88,30 @@ inline constexpr uint8_t eecf_enc_ecc1 = static_cast<uint8_t>(statusbar::avtp::E
 /// ECC1 plaintext timestamp size (8-byte gPTP nanoseconds, IEEE 1722-2025 17.3.3).
 inline constexpr size_t eecf_timestamp_size = 8;
 
+/// The Listener's window on a timestamp carried by a security AVTPDU: 100 ms either side
+/// of its own PTP time. The amendment applies it to ESCF signing_timestamp (16.2.5, A3)
+/// and to EECF encryption_timestamp (17.3.3.2, A8); both parties share PTP time.
+inline constexpr uint64_t avtp_crypto_timestamp_window_ns = 100'000'000;
+
+/// True when @p timestamp is within avtp_crypto_timestamp_window_ns of @p now_ptp_ns in
+/// either direction. The Listener is told its PTP time; this function never asks a clock.
+[[nodiscard]] constexpr auto avtp_crypto_timestamp_is_acceptable(uint64_t const timestamp, uint64_t const now_ptp_ns) -> bool
+{
+    return timestamp <= now_ptp_ns ? now_ptp_ns - timestamp <= avtp_crypto_timestamp_window_ns
+                                   : timestamp - now_ptp_ns <= avtp_crypto_timestamp_window_ns;
+}
+
+/// 17.3.3.2 as amended (A8): a Listener discards a decrypted EECF AVTPDU whose
+/// encryption_timestamp is more than 100 ms from its PTP time. Defence in depth only:
+/// EECF does not authenticate its sender, so the AVTPDU's authority must come from its
+/// content (an IEEE 1722.1 nonce, or an ESCF carried inside).
+inline constexpr uint64_t eecf_encryption_timestamp_window_ns = avtp_crypto_timestamp_window_ns;
+[[nodiscard]] constexpr auto eecf_encryption_timestamp_is_acceptable(uint64_t const encryption_timestamp, uint64_t const now_ptp_ns)
+    -> bool
+{
+    return avtp_crypto_timestamp_is_acceptable(encryption_timestamp, now_ptp_ns);
+}
+
 /// The Ethernet MTU the amendment's size rule is written against (17.4.4:
 /// EncapMTU = MTU - 36 - Npk, the 36 being the EECF header, encryption_timestamp and tag).
 inline constexpr size_t eecf_mtu = 1500;

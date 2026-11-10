@@ -980,3 +980,20 @@ TEST(avtp_aem_frame, eecf_ecc3_full_frame_roundtrip)
 // ===========================================================================
 
 TEST_MAIN(statusbar_avtp_crypto, avtp_aem_frame_test)
+
+TEST(avtp_aem_frame, eecf_timestamp_window)
+{
+    // 17.3.3.2 as amended (A8): the same symmetric 100 ms window as ESCF's A3.
+    constexpr uint64_t now = 1'000'000'000'000ULL;
+    constexpr uint64_t window = eecf_encryption_timestamp_window_ns;
+    EXPECT_TRUE(window == 100'000'000ULL);
+    EXPECT_TRUE(eecf_encryption_timestamp_is_acceptable(now, now));
+    EXPECT_TRUE(eecf_encryption_timestamp_is_acceptable(now - window, now));
+    EXPECT_FALSE(eecf_encryption_timestamp_is_acceptable(now - window - 1, now));
+    EXPECT_TRUE(eecf_encryption_timestamp_is_acceptable(now + window, now));
+    EXPECT_FALSE(eecf_encryption_timestamp_is_acceptable(now + window + 1, now));
+    EXPECT_TRUE(eecf_encryption_timestamp_is_acceptable(0, window));
+    EXPECT_FALSE(eecf_encryption_timestamp_is_acceptable(0, window + 1));
+    EXPECT_TRUE(eecf_encryption_timestamp_is_acceptable(UINT64_MAX, UINT64_MAX - window));
+    EXPECT_FALSE(eecf_encryption_timestamp_is_acceptable(UINT64_MAX, UINT64_MAX - window - 1));
+}

@@ -102,7 +102,9 @@ ESCF_SIG_ECSSA = 0  # ECSSA_DSA_EMSA1_SHA256
 ESCF_SIG_ED25519 = 1  # ED25519 (amendment 16.4)
 ESCF_SIGNATURE_SIZE = 64
 ESCF_MAX_ENCAPSULATED_AVTPDU = 1416  # 16.2.6
-ESCF_TIMESTAMP_WINDOW_NS = 100_000_000  # 16.2.5 as amended (A3)
+AVTP_CRYPTO_TIMESTAMP_WINDOW_NS = 100_000_000  # 100 ms either side of PTP time
+ESCF_TIMESTAMP_WINDOW_NS = AVTP_CRYPTO_TIMESTAMP_WINDOW_NS  # 16.2.5 as amended (A3)
+EECF_TIMESTAMP_WINDOW_NS = AVTP_CRYPTO_TIMESTAMP_WINDOW_NS  # 17.3.3.2 as amended (A8)
 
 
 # ---------------------------------------------------------------------------
@@ -847,14 +849,23 @@ def escf_ed25519_verify(
     )
 
 
+def avtp_crypto_timestamp_is_acceptable(timestamp: int, now_ptp_ns: int) -> bool:
+    """Within 100 ms of the Listener's PTP time in either direction (A3, A8)."""
+    return abs(timestamp - now_ptp_ns) <= AVTP_CRYPTO_TIMESTAMP_WINDOW_NS
+
+
 def escf_signing_timestamp_is_acceptable(
     signing_timestamp: int, now_ptp_ns: int
 ) -> bool:
-    """16.2.5 as amended (A3): not later than now, and not more than 100 ms earlier."""
-    return (
-        signing_timestamp <= now_ptp_ns
-        and now_ptp_ns - signing_timestamp <= ESCF_TIMESTAMP_WINDOW_NS
-    )
+    """16.2.5 as amended (A3): within 100 ms of now, either side."""
+    return avtp_crypto_timestamp_is_acceptable(signing_timestamp, now_ptp_ns)
+
+
+def eecf_encryption_timestamp_is_acceptable(
+    encryption_timestamp: int, now_ptp_ns: int
+) -> bool:
+    """17.3.3.2 as amended (A8): the same window on a decrypted EECF timestamp."""
+    return avtp_crypto_timestamp_is_acceptable(encryption_timestamp, now_ptp_ns)
 
 
 def build_escf_frame(
@@ -1884,7 +1895,24 @@ class TestFrameBuildParse(unittest.TestCase):
                 now - ESCF_TIMESTAMP_WINDOW_NS - 1, now
             )
         )
-        self.assertFalse(escf_signing_timestamp_is_acceptable(now + 1, now))
+        self.assertTrue(
+            escf_signing_timestamp_is_acceptable(now + ESCF_TIMESTAMP_WINDOW_NS, now)
+        )
+        self.assertFalse(
+            escf_signing_timestamp_is_acceptable(
+                now + ESCF_TIMESTAMP_WINDOW_NS + 1, now
+            )
+        )
+
+    def test_eecf_timestamp_window(self):
+        now = 1_000_000_000_000
+        w = EECF_TIMESTAMP_WINDOW_NS
+        self.assertEqual(w, 100_000_000)
+        self.assertTrue(eecf_encryption_timestamp_is_acceptable(now, now))
+        self.assertTrue(eecf_encryption_timestamp_is_acceptable(now - w, now))
+        self.assertFalse(eecf_encryption_timestamp_is_acceptable(now - w - 1, now))
+        self.assertTrue(eecf_encryption_timestamp_is_acceptable(now + w, now))
+        self.assertFalse(eecf_encryption_timestamp_is_acceptable(now + w + 1, now))
 
     def test_eecf_ecc1_rejects_bad_shapes(self):
         """A payload without a whole cipher block after V and T is not ECC1."""

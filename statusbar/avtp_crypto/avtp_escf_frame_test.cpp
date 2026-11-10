@@ -174,7 +174,10 @@ TEST(avtp_escf_frame, timestamp_window)
     EXPECT_TRUE(escf_signing_timestamp_is_acceptable(now, now));
     EXPECT_TRUE(escf_signing_timestamp_is_acceptable(now - escf_signing_timestamp_window_ns, now));
     EXPECT_FALSE(escf_signing_timestamp_is_acceptable(now - escf_signing_timestamp_window_ns - 1, now));
-    EXPECT_FALSE(escf_signing_timestamp_is_acceptable(now + 1, now));
+    EXPECT_TRUE(escf_signing_timestamp_is_acceptable(now + escf_signing_timestamp_window_ns, now));
+    EXPECT_FALSE(escf_signing_timestamp_is_acceptable(now + escf_signing_timestamp_window_ns + 1, now));
+    EXPECT_TRUE(escf_signing_timestamp_is_acceptable(escf_signing_timestamp_window_ns, 0));
+    EXPECT_FALSE(escf_signing_timestamp_is_acceptable(0, escf_signing_timestamp_window_ns + 1));
     EXPECT_TRUE(escf_signing_timestamp_window_ns == 100'000'000ULL);
 }
 

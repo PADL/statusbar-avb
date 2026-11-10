@@ -18,11 +18,12 @@ need. statusbar implements every item that touches code; the table says how.
 |------|-------|--------|-----------|
 | A1 | 13.2.4 | An AES-SIV key is two AES keys (256 or 512 bits) | `Aes128SivKey` (32 octets) and `Aes256SivKey` (64 octets) in statusbar-crypto already carry K1 ‖ K2 |
 | A2 | 13.3.2, 13.3.3 | K is the AES-SIV key; AES-SIV is invoked with no associated data | The AES-SIV module takes the full key; AEF payload encryption with no AD is how the keychain tools use it |
-| A3 | 16.2.5, 16.2.7, F.43 | Discard a signing_timestamp more than 100 ms early or in the future; discard a failed signature | `escf_signing_timestamp_is_acceptable(ts, now)` and `escf_verify_frame`; the Listener is told its PTP time |
+| A3 | 16.2.5, 16.2.7, F.43 | Discard a signing_timestamp more than 100 ms from the Listener's PTP time in either direction; discard a failed signature; both parties share PTP time | `escf_signing_timestamp_is_acceptable(ts, now)` and `escf_verify_frame`; the Listener is told its PTP time |
 | A4 | 16.2.1, 17.2.1 | Field list entry `encrypted_payload_length: 2 octets`; `r` is 1 bit | Both headers model the length as a full 16-bit field (Figures 109 and 110), not reserved(5) ‖ length(11) as this stack did before |
-| A5 | 17.2.4 | key_id identifies the recipient's key pair; the sender uses its public key | So documented and used by every `eecf_ecc*` function |
+| A5 | 17.2.4, 16.2.4 | key_id identifies the recipient's key pair; the sender uses its public key. A key pair is used with exactly one option set: never more than one enc value, more than one sig value, or both an enc and a sig value (1363a D.5.3 Note 2) | So documented and used by every `eecf_ecc*` function; the test vectors share one P-256 seed between ECC2 and ECSSA for brevity only |
 | A6 | 16.3.1, 17.3.1, 17.3.2 | The 1363a options ECC1 and ECSSA leave unstated | ECC1: secp256r1, V of 33 octets, MAC1 with SHA-256 and a 256-bit tag, KDF2-SHA-256 with AES-256-CBC-IV0, K1 = leftmost 256 bits, P1 and P2 empty (`crypto/ecies`). ECSSA: secp256r1, SHA-256, c then d (`escf_ecssa_*`) |
 | A7 | 17.3.3.2, 2, 3.2, F.41, F.44, 16.3.1 | Editorial | n/a |
+| A8 | 17.3.3.2, 17.4.3 | Discard a decrypted EECF AVTPDU whose encryption_timestamp is more than 100 ms from the Listener's PTP time in either direction (defence in depth: EECF does not authenticate its sender) | `eecf_encryption_timestamp_is_acceptable(ts, now)`; the Listener is told its PTP time |
 | B1 | Tables 52, 53 | ED25519 = 1; ECC2 = 1, ECC3 = 2 | `EscfSigMode::ed25519`, `EecfEncMode::ecc2`, `EecfEncMode::ecc3`; the dissector's value tables |
 | B2 | 16.1, 16.2.1, Fig. 109, 16.2.7, 16.3.1 | One 64-octet `signature_value`; ECSSA keeps c in octets 0–31 and d in 32–63 | `EscfPdu::signature_value`, `escf_ecssa_sign` writes r ‖ s |
 | B3 | 16.4 (new) | Ed25519 variant: RFC 8032 5.1, no prehash, no context, over key_id ‖ signing_timestamp ‖ encapsulated_avtpdu | `escf_ed25519_sign` / `escf_ed25519_verify` (5.1.7's S < L check included) |
@@ -61,9 +62,12 @@ encrypted_payload_length = Npk + len(pt) + 16
 
 Decryption (17.4.3) discards the AVTPDU when any step fails: no key for
 key_id and enc; encrypted_payload_length below Npk + 24; `SetupBaseR` fails
-(an invalid enc, an all-zero X25519 result); `Open` does not authenticate.
-Replay protection is the higher layer's (the IEEE 1722.1 AUTH_GET_NONCE /
-AUTH_ADD_KEY_NONCE nonces travel inside the encrypted AVTPDU).
+(an invalid enc, an all-zero X25519 result); `Open` does not authenticate;
+the decrypted encryption_timestamp is more than 100 ms from the Listener's
+PTP time (A8). EECF proves nothing about its sender, so a Listener acts on an
+encrypted command's authority only when the content is bound to an IEEE
+1722.1 nonce (AUTH_GET_NONCE / AUTH_ADD_KEY_NONCE) or the encapsulated AVTPDU
+is itself an ESCF.
 
 Sizes (17.4.4): EncapMTU = MTU − 36 − Npk, so with a 1500-octet MTU the
 encapsulated AVTPDU is at most 1399 octets for ECC2 and 1432 for ECC3
@@ -171,13 +175,10 @@ the dissector in `wireshark/` splits into their fields.
 
 The proposal's open items, and what this proof of concept does meanwhile:
 
-1. Code points: ED25519 = 1, ECC2 = 1, ECC3 = 2, as proposed.
-2. Replay protection: left to the higher layer; nothing on the 1722 wire.
-3. info strings: the fixed `"IEEE 1722 EECF ECC2"` / `"IEEE 1722 EECF ECC3"`.
-4. AES-128-GCM suites: not registered; `crypto/hpke` implements them should
+1. AES-128-GCM suites: not registered; `crypto/hpke` implements them should
    the group want further enc values.
-5. One P-256 key for ECC1 and ECC2: the tests and vectors share one key
-   (1363a D.5.3 Note 2 recommends one option set per key; the group decides).
-6. ECSSA and ECC1 options: as A6, to be confirmed with other implementers.
-7. Future-timestamp tolerance: none; a timestamp later than the Listener's
-   PTP time is discarded.
+2. ECSSA and ECC1 options: as A6, to be confirmed with other implementers.
+
+Decided 2026-11-09: code points and info strings are the group's to rename;
+timestamps rely on shared PTP time with a symmetric 100 ms window for ESCF
+(A3) and EECF (A8); one option set per key (A5).

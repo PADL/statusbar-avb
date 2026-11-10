@@ -57,8 +57,8 @@ inline constexpr size_t escf_max_encapsulated_avtpdu_size = 1416;
 /// Largest signed message: key_id (8) || signing_timestamp (8) || encapsulated_avtpdu.
 inline constexpr size_t escf_max_signed_message_size = 8 + 8 + escf_max_encapsulated_avtpdu_size;
 
-/// The Listener's window on signing_timestamp (16.2.5 as amended, A3): 100 ms.
-inline constexpr uint64_t escf_signing_timestamp_window_ns = 100'000'000;
+/// The Listener's window on signing_timestamp (16.2.5 as amended, A3): 100 ms either side.
+inline constexpr uint64_t escf_signing_timestamp_window_ns = avtp_crypto_timestamp_window_ns;
 
 using EscfSignature = std::array<uint8_t, escf_signature_size>;
 
@@ -101,13 +101,13 @@ auto escf_ed25519_verify(
     std::span<uint8_t const> encapsulated_avtpdu,
     std::span<uint8_t const, escf_signature_size> signature_value) -> bool;
 
-/// 16.2.5 as amended (A3): a Listener discards an ESCF AVTPDU whose signing_timestamp is
-/// more than 100 ms earlier than, or later than, its current PTP time. The Listener
-/// is told its time; this function never asks a clock.
+/// 16.2.5 as amended (A3): a Listener discards an ESCF AVTPDU whose signing_timestamp
+/// differs from its current PTP time by more than 100 ms in either direction (both
+/// parties share PTP time). The Listener is told its time; this never asks a clock.
 [[nodiscard]] constexpr auto escf_signing_timestamp_is_acceptable(uint64_t const signing_timestamp, uint64_t const now_ptp_ns)
     -> bool
 {
-    return signing_timestamp <= now_ptp_ns && now_ptp_ns - signing_timestamp <= escf_signing_timestamp_window_ns;
+    return avtp_crypto_timestamp_is_acceptable(signing_timestamp, now_ptp_ns);
 }
 
 /// Parsed fields from a complete Ethernet + ESCF frame. encapsulated_avtpdu is a
