@@ -342,33 +342,17 @@ auto AemCommandHandler::handle_read_descriptor(
 
 auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // GET_NAME command body (Clause 7.4.18.1): descriptor_type(2) +
-    // descriptor_index(2) + name_index(2) + configuration_index(2).
-    constexpr size_t GET_NAME_HEADER = 8;
-    if (command_data.size() < GET_NAME_HEADER) {
+    auto const ref = name_ref_of(command_data);
+    if (!ref) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
-    doublet_t dtype{};
-    doublet_t dindex{};
-    doublet_t nindex{};
-    doublet_t cindex{};
-    span_load(dtype, command_data.subspan(0, 2));
-    span_load(dindex, command_data.subspan(2, 2));
-    span_load(nindex, command_data.subspan(4, 2));
-    span_load(cindex, command_data.subspan(6, 2));
-
-    NameRef const ref{
-        .descriptor =
-            DescriptorRef{.configuration_index = cindex.get(), .descriptor_type = dtype.get(), .descriptor_index = dindex.get()},
-        .name_index = nindex.get()};
-
     // Per-call model; symbols resolve through the handler's storage.
     AemEntityModel const aem_model{*handler_};
-    auto const n = aem_model.get_name_for_wire(ref, out_buffer);
+    auto const n = aem_model.get_name_for_wire(*ref, out_buffer);
     if (n == 0) {
-        // The handler serves no name for this (descriptor, name_index) — the
-        // conservative default, consistent with the SET path.
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+        // No name for this (descriptor, name_index): because there is no such
+        // descriptor, or because the handler has none to give for it.
+        return {.status = unserved_get_status(ref->descriptor), .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = n};
 }
@@ -722,6 +706,43 @@ void write_u16(std::span<uint8_t> bytes, size_t const at, uint16_t const value)
 
 }  // namespace
 
+auto AemCommandHandler::name_ref_of(std::span<uint8_t const> command_data) -> std::optional<NameRef>
+{
+    // GET_NAME command body (Clause 7.4.18.1): descriptor_type(2) +
+    // descriptor_index(2) + name_index(2) + configuration_index(2).
+    constexpr size_t GET_NAME_HEADER = 8;
+    if (command_data.size() < GET_NAME_HEADER) {
+        return std::nullopt;
+    }
+    return NameRef{
+        .descriptor =
+            DescriptorRef{
+                .configuration_index = read_u16(command_data, 6),
+                .descriptor_type = read_u16(command_data, 0),
+                .descriptor_index = read_u16(command_data, 2)},
+        .name_index = read_u16(command_data, 4)};
+}
+
+auto AemCommandHandler::descriptor_ref_of(std::span<uint8_t const> command_data) const -> std::optional<DescriptorRef>
+{
+    if (command_data.size() < 4) {
+        return std::nullopt;
+    }
+    return DescriptorRef{
+        .configuration_index = current_configuration_,
+        .descriptor_type = read_u16(command_data, 0),
+        .descriptor_index = read_u16(command_data, 2)};
+}
+
+auto AemCommandHandler::unserved_get_status(DescriptorRef const& ref) const -> uint8_t
+{
+    // Whether the entity has the descriptor at all is what the model answers
+    // when asked for its wire form; the bytes themselves are not wanted.
+    std::array<uint8_t, atdecc::aem::AEM_DESCRIPTOR_SIZE> scratch{};
+    AemEntityModel const aem_model{*handler_};
+    return aem_model.get_descriptor_for_wire(ref, scratch) == 0 ? AEM_STATUS_NO_SUCH_DESCRIPTOR : AEM_STATUS_NOT_IMPLEMENTED;
+}
+
 auto AemCommandHandler::handle_get_dynamic_info(
     AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
@@ -789,9 +810,11 @@ auto AemCommandHandler::handle_get_descriptor_value(
     aem_model.set_configuration(current_configuration_);
     auto const n = aem_model.get_descriptor_value_for_wire(command_type, command_data, out_buffer);
     if (n == 0) {
-        // The handler served no value: the entity does not implement this GET (the
-        // conservative default, consistent with the SET hook's NOT_IMPLEMENTED).
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+        // The handler served no value: there is no such descriptor, or the
+        // entity does not implement this GET for the one there is. A body too
+        // short to name a descriptor keeps the latter answer.
+        auto const ref = descriptor_ref_of(command_data);
+        return {.status = ref ? unserved_get_status(*ref) : AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = n};
 }

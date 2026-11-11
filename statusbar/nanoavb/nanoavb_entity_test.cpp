@@ -821,16 +821,114 @@ TEST(nanoavb_entity_stubs, set_control_not_implemented)
     EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
 
-TEST(nanoavb_entity_stubs, get_control_not_implemented)
+TEST(nanoavb_entity_stubs, get_control_on_a_control_the_model_lacks_is_no_such_descriptor)
 {
-    auto model = create_test_model();
+    auto model = create_test_model();  // no CONTROL descriptor at all
     AemCommandHandler handler{model};
 
     auto header = create_aem_header(AEM_COMMAND_GET_CONTROL);
-    std::array<uint8_t, 4> const cmd{0, 0, 0, 0};
+    std::array<uint8_t, 4> const cmd{0x00, 0x1A, 0x00, 0x00};  // CONTROL 0
     auto result = make_test_result(handler, header, cmd);
 
-    EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(result.status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+//
+// Table 7-141: a GET on a descriptor the entity does not have answers
+// NO_SUCH_DESCRIPTOR. One the entity has but serves no value for keeps
+// NOT_IMPLEMENTED. The model here has a CLOCK_DOMAIN and a CLOCK_SOURCE at
+// index 0 and nothing at index 1; it has no CONTROL, SIGNAL_SELECTOR, MATRIX
+// or MIXER at any index.
+//
+static EntityModel create_clock_model()
+{
+    DescriptorEntity entity{};
+    entity.configurations_count = 1;
+    DescriptorConfiguration config{};
+    DescriptorStream stream_in{};
+    stream_in.object_name = AtdeccString{"Audio In"};
+    DescriptorClockSource source{};
+    DescriptorClockDomain domain{};
+    return EntityModelBuilder{}
+        .entity(entity)
+        .configuration(config)
+        .stream_input(stream_in)
+        .clock_source(source)
+        .clock_domain(domain)
+        .build();
+}
+
+static void put_u16(std::span<uint8_t> bytes, size_t const at, uint16_t const value)
+{
+    doublet_t const v{value};
+    span_store(bytes.subspan(at, 2), v);
+}
+
+static auto get_value_status(uint16_t const command, uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
+{
+    auto model = create_clock_model();
+    AemCommandHandler handler{model};
+    std::array<uint8_t, 4> cmd{};
+    put_u16(cmd, 0, descriptor_type);
+    put_u16(cmd, 2, descriptor_index);
+    return make_test_result(handler, create_aem_header(command), cmd).status;
+}
+
+TEST(nanoavb_entity_no_such_descriptor, get_control_on_a_missing_control)
+{
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_CONTROL, DESCRIPTOR_CONTROL, 0), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_CONTROL, DESCRIPTOR_CONTROL, 7), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(nanoavb_entity_no_such_descriptor, get_signal_selector_on_a_missing_selector)
+{
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_SIGNAL_SELECTOR, DESCRIPTOR_SIGNAL_SELECTOR, 0), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(nanoavb_entity_no_such_descriptor, get_matrix_on_a_missing_matrix)
+{
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_MATRIX, DESCRIPTOR_MATRIX, 0), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(nanoavb_entity_no_such_descriptor, get_mixer_on_a_missing_mixer)
+{
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_MIXER, DESCRIPTOR_MIXER, 0), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(nanoavb_entity_no_such_descriptor, get_clock_source_tells_a_missing_domain_from_an_unserved_one)
+{
+    // CLOCK_DOMAIN 1 does not exist; CLOCK_DOMAIN 0 does, and the legacy
+    // model adapter serves no clock-source value for it.
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_CLOCK_SOURCE, DESCRIPTOR_CLOCK_DOMAIN, 1), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get_value_status(AEM_COMMAND_GET_CLOCK_SOURCE, DESCRIPTOR_CLOCK_DOMAIN, 0), AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+static auto get_name_status(uint16_t const descriptor_type, uint16_t const descriptor_index, uint16_t const name_index) -> uint8_t
+{
+    auto model = create_clock_model();
+    AemCommandHandler handler{model};
+    std::array<uint8_t, 8> cmd{};
+    put_u16(cmd, 0, descriptor_type);
+    put_u16(cmd, 2, descriptor_index);
+    put_u16(cmd, 4, name_index);
+    return make_test_result(handler, create_aem_header(AEM_COMMAND_GET_NAME), cmd).status;
+}
+
+TEST(nanoavb_entity_no_such_descriptor, get_name_tells_a_missing_descriptor_from_an_unserved_name)
+{
+    EXPECT_EQ(get_name_status(DESCRIPTOR_STREAM_INPUT, 3, 0), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(get_name_status(DESCRIPTOR_CONTROL, 0, 0), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    // STREAM_INPUT 0 exists; the legacy model adapter serves no name for it,
+    // so the answer stays NOT_IMPLEMENTED rather than becoming NO_SUCH_DESCRIPTOR.
+    EXPECT_EQ(get_name_status(DESCRIPTOR_STREAM_INPUT, 0, 0), AEM_STATUS_NOT_IMPLEMENTED);
+    // ENTITY 0 exists too; whatever the adapter answers for its name, it is
+    // not "no such descriptor".
+    EXPECT_TRUE(get_name_status(DESCRIPTOR_ENTITY, 0, 0) != AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    // A body too short to name a descriptor is a bad argument, as before.
+    auto model = create_clock_model();
+    AemCommandHandler handler{model};
+    std::array<uint8_t, 4> const short_cmd{};
+    EXPECT_EQ(make_test_result(handler, create_aem_header(AEM_COMMAND_GET_NAME), short_cmd).status, AEM_STATUS_BAD_ARGUMENTS);
 }
 
 TEST(nanoavb_entity_stubs, get_counters_not_implemented)

@@ -469,8 +469,8 @@ class AemCommandHandler
     /// Handle GET_NAME command (IEEE 1722.1 Clause 7.4.18). Parses the
     /// descriptor_type/index/name_index/config header and routes through
     /// AemEntityModel::get_name_for_wire -> the handler's symbol-keyed
-    /// on_get_name. NOT_IMPLEMENTED if the handler serves no name for the
-    /// requested (descriptor, name_index).
+    /// on_get_name. When the handler serves no name: NO_SUCH_DESCRIPTOR if
+    /// the entity has no such descriptor (Table 7-141), else NOT_IMPLEMENTED.
     [[nodiscard]] auto handle_get_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// Handle SET_NAME command (IEEE 1722.1 Clause 7.4.17). Routes through
@@ -540,9 +540,23 @@ class AemCommandHandler
 
     /// Handle a GET descriptor-value command (GET_CONTROL, and the wider family).
     /// Routes through AemEntityModel::get_descriptor_value_for_wire -> the handler's
-    /// symbol-keyed on_get_descriptor_value.
+    /// symbol-keyed on_get_descriptor_value. When the handler serves no value:
+    /// NO_SUCH_DESCRIPTOR if the entity has no such descriptor (Table 7-141),
+    /// else NOT_IMPLEMENTED.
     [[nodiscard]] auto handle_get_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// The status for a GET the handler served nothing for: NO_SUCH_DESCRIPTOR
+    /// when the entity has no descriptor at @p ref, else NOT_IMPLEMENTED, the
+    /// entity having the descriptor but no value to give for it.
+    [[nodiscard]] auto unserved_get_status(DescriptorRef const& ref) const -> uint8_t;
+    /// The descriptor a GET descriptor-value body names (descriptor_type(2) +
+    /// descriptor_index(2), in the current configuration), or nullopt for a
+    /// body too short to name one.
+    [[nodiscard]] auto descriptor_ref_of(std::span<uint8_t const> command_data) const -> std::optional<DescriptorRef>;
+    /// The (descriptor, name_index) a GET_NAME body names (Clause 7.4.18.1),
+    /// or nullopt for a body too short to name one.
+    [[nodiscard]] static auto name_ref_of(std::span<uint8_t const> command_data) -> std::optional<NameRef>;
 
     /// Handle GET_COUNTERS command (IEEE 1722.1 Clause 7.4.42): read the target
     /// descriptor's counters from the get_counters callback and emit an
