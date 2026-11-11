@@ -63,10 +63,14 @@ auto wire(Descriptor const& desc) -> std::span<uint8_t const>
     return std::span{reinterpret_cast<uint8_t const*>(&desc), desc.wire_size()};
 }
 
-/// ENTITY + CONFIGURATION + AVB_INTERFACE, @p audio AAF streams then @p crf CRF
+/// ENTITY + CONFIGURATION + AVB_INTERFACE (with @p priority1), @p audio AAF streams then @p crf CRF
 /// streams in each direction; with @p identify, CONTROL 0 is an IDENTIFY control.
-auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16_t const crf = 1, bool const identify = false)
-    -> std::vector<uint8_t>
+auto make_blob(
+    uint16_t const audio_outputs,
+    uint16_t const audio_inputs,
+    uint16_t const crf = 1,
+    bool const identify = false,
+    uint8_t const priority1 = 0) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -87,6 +91,7 @@ auto make_blob(uint16_t const audio_outputs, uint16_t const audio_inputs, uint16
         }
     }
     atdecc::aem::DescriptorAvbInterface iface{};
+    iface.priority1 = priority1;
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
     if (identify) {
         atdecc::aem::DescriptorControl control{};
@@ -3659,6 +3664,55 @@ TEST(avb_entity_kit_counters, gptp_gm_changed_follows_the_grandmaster_in_force)
     announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL};
     announces.on_announce(announce, t + 1'000'000'000);
     EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 3U);
+}
+
+namespace {
+
+/// Whether the kit's talker sets AVTP tu now and one second from now (past Milan v1.3 Annex B.1.1's window).
+auto tu_now_and_later(MilanKit& m) -> std::pair<bool, bool>
+{
+    int64_t const now = net::monotonic_ns();
+    return {m.kit.talker().timestamp_uncertain(now), m.kit.talker().timestamp_uncertain(now + 1'000'000'000)};
+}
+
+}  // namespace
+
+// AVTP tu on the Announce path (IEEE 1722-2016 Clause 4.4.4.7): a change opens the window; a grandmaster-capable
+// entity whose Announces time out is its own grandmaster, certain at once; one with priority1 255 is uncertain.
+TEST(avb_entity_kit_tu, an_announce_timeout_is_certain_for_a_capable_entity_alone)
+{
+    gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    MilanKit capable{std::nullopt, 0xA1};
+    capable.kit.notify_grandmaster_changed(gm_a);
+    EXPECT_TRUE((tu_now_and_later(capable) == std::pair{true, false}));
+    capable.kit.notify_grandmaster_lost();
+    EXPECT_TRUE((tu_now_and_later(capable) == std::pair{false, false}));
+
+    MilanKit incapable{std::nullopt, 0xA2, true, make_blob(1, 1, 1, false, 255)};
+    incapable.kit.notify_grandmaster_changed(gm_a);
+    incapable.kit.notify_grandmaster_lost();
+    EXPECT_TRUE((tu_now_and_later(incapable) == std::pair{true, true}));
+}
+
+// AVTP tu following a gPTP stack: none named yet or none named is uncertain until one is, another clock opens the
+// window, the integrator's own clock is certain at once, and the Announce handler changes nothing.
+TEST(avb_entity_kit_tu, tu_follows_the_gptp_stack_once_used)
+{
+    MilanKit m{std::nullopt, 0xA3};
+    auto& host = m.kit.host();
+    host.use_parent_grandmaster();
+    EXPECT_TRUE((tu_now_and_later(m) == std::pair{true, true}));
+    host.notify_parent_grandmaster(ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    EXPECT_TRUE((tu_now_and_later(m) == std::pair{true, false}));
+    host.notify_own_grandmaster(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0001ULL));
+    EXPECT_TRUE((tu_now_and_later(m) == std::pair{false, false}));
+    m.kit.notify_grandmaster_changed(gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    m.kit.notify_grandmaster_lost();
+    EXPECT_TRUE((tu_now_and_later(m) == std::pair{false, false}));
+    host.notify_parent_grandmaster_loss();
+    EXPECT_TRUE((tu_now_and_later(m) == std::pair{true, true}));
+    host.notify_parent_grandmaster(ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'6677ULL));
+    EXPECT_TRUE((tu_now_and_later(m) == std::pair{true, false}));
 }
 
 // Milan v1.2 Section 5.5.2.7 / Table 5.47: connection_count stays 0 whatever

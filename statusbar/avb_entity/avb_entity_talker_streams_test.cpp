@@ -376,6 +376,27 @@ TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lo
     EXPECT_FALSE(talker.timestamp_uncertain(t0 + 20'300'000'000));
 }
 
+// The grandmaster in force is this entity's own clock: its time base does not step, so tu is clear at once, a
+// running window or a loss cut short.
+TEST(talker_tu, clear_while_this_entity_is_the_grandmaster)
+{
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<int64_t> last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
+    constexpr int64_t t0 = 5'000'000'000;
+    talker.notify_grandmaster_changed(t0);
+    talker.notify_own_grandmaster();
+    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 1));
+    talker.notify_grandmaster_lost();
+    talker.notify_own_grandmaster();
+    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 2));
+    talker.notify_grandmaster_changed(t0 + 3);
+    talker.notify_grandmaster_lost();
+    talker.notify_own_grandmaster();
+    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 4));
+}
+
 // GET_COUNTERS' transmit totals (Milan v1.2 Table 5.4): every PDU handed to
 // the socket, those with tu set (octet 3 of an AAF PDU, octet 1 of a CRF
 // one), and each mr toggle, per STREAM_OUTPUT.

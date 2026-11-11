@@ -586,6 +586,61 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
+// AVTP tu follows the gPTP stack's grandmaster (IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Annex B.1.1): none yet and
+// none named are losses, the first named, another or one after none a change, a repeat nothing, and the integrator's
+// own clock (a boundary clock's, not this NIC's) its own transition once; the Announce handler tells nothing then.
+TEST(avb_entity_host_counters, parent_reports_tell_their_grandmaster_transition)
+{
+    using statusbar::avb_entity::GrandmasterTransition;
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    std::vector<GrandmasterTransition> told;
+    host->set_on_grandmaster_transition([&told](GrandmasterTransition const transition) { told.push_back(transition); });
+    auto const gm_a = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    auto const gm_b = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'6677ULL);
+    auto const boundary = statusbar::ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0001ULL);  // a boundary clock's, not this NIC's
+    host->use_parent_grandmaster();
+    host->use_parent_grandmaster();
+    host->notify_parent_grandmaster(gm_a);
+    host->notify_parent_grandmaster(gm_a);
+    host->notify_parent_grandmaster(gm_b);
+    host->notify_parent_grandmaster_loss();
+    host->notify_parent_grandmaster_loss();
+    host->notify_parent_grandmaster(gm_b);
+    host->notify_own_grandmaster(boundary);
+    EXPECT_TRUE(host->own_grandmaster_in_force());
+    host->notify_own_grandmaster(boundary);
+    host->notify_parent_grandmaster(gm_a);
+    EXPECT_FALSE(host->own_grandmaster_in_force());
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'8899ULL});
+    host->notify_grandmaster_lost();
+    using enum GrandmasterTransition;
+    std::vector<GrandmasterTransition> const expected{
+        lost, changed, unchanged, changed, lost, lost, changed, own, unchanged, changed};
+    EXPECT_TRUE(told == expected);
+}
+
+// A grandmaster-capable entity whose Announces time out is its own grandmaster in force (Milan v1.3 Section
+// 4.2.6.2.1), which keeps its AVTP tu clear after the usual window; one with priority1 255 is not, so tu stays set.
+TEST(avb_entity_host_counters, an_announce_timeout_makes_a_capable_entity_its_own_grandmaster)
+{
+    statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
+    auto const capable_blob = make_interface_blob(248);
+    auto capable = make_host_from_blob(capable_blob);
+    capable->notify_grandmaster_changed(gm_a);
+    EXPECT_FALSE(capable->own_grandmaster_in_force());
+    capable->notify_grandmaster_lost();
+    EXPECT_TRUE(capable->own_grandmaster_in_force());
+    capable->notify_grandmaster_changed(gm_a);
+    EXPECT_FALSE(capable->own_grandmaster_in_force());
+
+    auto const incapable_blob = make_interface_blob(255);
+    auto incapable = make_host_from_blob(incapable_blob);
+    incapable->notify_grandmaster_changed(gm_a);
+    incapable->notify_grandmaster_lost();
+    EXPECT_FALSE(incapable->own_grandmaster_in_force());
+}
+
 // GET_AVB_INFO's gptp_grandmaster_id is ADP's (IEEE 1722.1-2021 Clauses 6.2.2.16, 7.4.40.2): the grandmaster in
 // force, through an Announce, a loss, the parent data set and an Announce while that is the source.
 TEST(avb_entity_host_avb_info, get_avb_info_names_the_grandmaster_adp_names)
