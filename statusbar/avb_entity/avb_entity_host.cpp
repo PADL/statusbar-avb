@@ -254,7 +254,7 @@ auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui6
     return path;
 }
 
-void AvbEntityHost::note_as_path_changed()
+void AvbEntityHost::notify_as_path_changed()
 {
     (void)components_.aem_handler.notify_as_path_changed(0);
 }
@@ -318,7 +318,7 @@ void AvbEntityHost::attach_mirror(net::MessageReactor& reactor)
     ctl_log().status("avb info mirror: following entity {:016x}", cfg.target_entity_id.to_uint64());
 }
 
-void AvbEntityHost::note_port_as_capable(std::optional<bool> const as_capable)
+void AvbEntityHost::notify_port_as_capable(std::optional<bool> const as_capable)
 {
     port_as_capable_ = as_capable;
     refresh_avb_info();  // a change notifies GET_AVB_INFO's subscribers
@@ -364,7 +364,7 @@ void AvbEntityHost::on_mirror_update(
             components_.adp_advertiser.set_gptp_info(
                 tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number, sm::Clock::now());
             if (info->gptp_grandmaster_id.to_uint64() != 0) {
-                note_parent_grandmaster(info->gptp_grandmaster_id);  // the mirrored device's parent data set
+                notify_parent_grandmaster(info->gptp_grandmaster_id);  // the mirrored device's parent data set
             }
         }
         // IEEE 1722.1 7.5.2: gPTP changes are unsolicited GET_AVB_INFO notifications.
@@ -520,20 +520,20 @@ void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandm
     }
 }
 
-void AvbEntityHost::note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
+void AvbEntityHost::notify_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
 {
     refresh_avb_info();
     if (!grandmaster_from_parent_) {
-        note_grandmaster_in_force(grandmaster.to_eui64());
+        notify_grandmaster_in_force(grandmaster.to_eui64());
     }
 }
 
-void AvbEntityHost::note_grandmaster_lost()
+void AvbEntityHost::notify_grandmaster_lost()
 {
     refresh_avb_info();
     // Nothing announced: a grandmaster-capable entity is grandmaster itself (Milan v1.3 Section 4.2.6.2.1).
     if (!grandmaster_from_parent_ && grandmaster_capable()) {
-        note_grandmaster_in_force(own_clock_identity_.value_or(ieee::Eui64{}));
+        notify_grandmaster_in_force(own_clock_identity_.value_or(ieee::Eui64{}));
     }
 }
 
@@ -544,13 +544,13 @@ void AvbEntityHost::use_parent_grandmaster() noexcept
     }
 }
 
-void AvbEntityHost::note_parent_grandmaster(ieee::Eui64 const& grandmaster)
+void AvbEntityHost::notify_parent_grandmaster(ieee::Eui64 const& grandmaster)
 {
     grandmaster_from_parent_ = true;
-    note_grandmaster_in_force(grandmaster);
+    notify_grandmaster_in_force(grandmaster);
 }
 
-void AvbEntityHost::note_grandmaster_in_force(ieee::Eui64 const& grandmaster)
+void AvbEntityHost::notify_grandmaster_in_force(ieee::Eui64 const& grandmaster)
 {
     bool const changed = grandmaster_in_force_.has_value() && grandmaster != *grandmaster_in_force_;
     grandmaster_in_force_ = grandmaster;
@@ -569,7 +569,7 @@ auto AvbEntityHost::grandmaster_capable() const -> bool
     return handler_ != nullptr && handler_->on_get_avb_interface(id, desc) && static_cast<uint8_t>(desc.priority1) != 255;
 }
 
-void AvbEntityHost::note_media_clock_locked(bool const locked)
+void AvbEntityHost::notify_media_clock_locked(bool const locked)
 {
     if (!clock_domain_locks_[0].entity_driven) {
         count_clock_domain_lock(0, locked);
@@ -596,7 +596,7 @@ auto AvbEntityHost::has_clock_domain(uint16_t const index) const noexcept -> boo
     return exists && index < MAX_CLOCK_DOMAINS;
 }
 
-auto AvbEntityHost::note_clock_domain_locked(uint16_t const index, bool const locked) -> bool
+auto AvbEntityHost::notify_clock_domain_locked(uint16_t const index, bool const locked) -> bool
 {
     if (!has_clock_domain(index)) {
         return false;
@@ -753,7 +753,7 @@ void AvbEntityHost::wire_supervisor_callbacks()
 
     supervisor_ctx_.callbacks.stop_all = [this](auto& /*ctx*/, TimePoint time) -> void {
         components_.adp_advertiser.link_down(time);
-        note_media_clock_locked(false);  // the gPTP reset below drops the lock
+        notify_media_clock_locked(false);  // the gPTP reset below drops the lock
         close_stream_gates(time, nanoavb::talker_engine_sm::Def::Event::Fatal);
         gptp_.reset();
         reset_srp();
@@ -784,11 +784,11 @@ void AvbEntityHost::wire_gptp_callbacks()
     gptp_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     gptp_ctx_.callbacks.start_servo = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
     gptp_ctx_.callbacks.report_locked = [this](auto& /*ctx*/, TimePoint time) -> void {
-        note_media_clock_locked(true);
+        notify_media_clock_locked(true);
         supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLocked, time);
     };
     gptp_ctx_.callbacks.report_unlocked = [this](auto& /*ctx*/, TimePoint time) -> void {
-        note_media_clock_locked(false);
+        notify_media_clock_locked(false);
         supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLost, time);
     };
 }

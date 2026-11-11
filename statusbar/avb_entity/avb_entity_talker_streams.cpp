@@ -50,7 +50,7 @@ void bump(std::atomic<uint32_t>& n) noexcept
 }
 
 /// Count an mr toggle when @p mr differs from the last PDU's.
-void note_mr(TalkerTxCounters& c, bool const mr) noexcept
+void notify_mr(TalkerTxCounters& c, bool const mr) noexcept
 {
     if (c.have_mr && mr != c.last_mr) {
         bump(c.mr_toggles);
@@ -79,7 +79,7 @@ void count_pdu(TalkerTxCounters& c, std::span<uint8_t const> const frame) noexce
     if (tu) {
         bump(c.tu_pdus);
     }
-    note_mr(c, (frame[1] & 0x08U) != 0);
+    notify_mr(c, (frame[1] & 0x08U) != 0);
 }
 
 }  // namespace

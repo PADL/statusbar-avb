@@ -365,13 +365,13 @@ TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lo
         avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
     constexpr int64_t t0 = 5'000'000'000;
     EXPECT_FALSE(talker.timestamp_uncertain(t0));  // never told: certain
-    talker.note_grandmaster_changed(t0);
+    talker.notify_grandmaster_changed(t0);
     EXPECT_TRUE(talker.timestamp_uncertain(t0));
     EXPECT_TRUE(talker.timestamp_uncertain(t0 + 249'999'999));
     EXPECT_FALSE(talker.timestamp_uncertain(t0 + 250'000'000));
-    talker.note_grandmaster_lost();
+    talker.notify_grandmaster_lost();
     EXPECT_TRUE(talker.timestamp_uncertain(t0 + 10'000'000'000));
-    talker.note_grandmaster_changed(t0 + 20'000'000'000);  // a grandmaster again
+    talker.notify_grandmaster_changed(t0 + 20'000'000'000);  // a grandmaster again
     EXPECT_TRUE(talker.timestamp_uncertain(t0 + 20'100'000'000));
     EXPECT_FALSE(talker.timestamp_uncertain(t0 + 20'300'000'000));
 }

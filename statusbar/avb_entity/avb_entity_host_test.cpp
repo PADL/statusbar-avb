@@ -502,8 +502,8 @@ TEST(avb_entity_host_counters, entity_avb_interface_and_clock_domain)
     host->on_link_down(TimePoint{});
     host->on_link_up(TimePoint{});
     statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
-    host->note_grandmaster_changed(gm_a);  // the first: found, not changed
-    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    host->notify_grandmaster_changed(gm_a);  // the first: found, not changed
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
     EXPECT_TRUE(host->fill_counters(DESCRIPTOR_AVB_INTERFACE, 0, valid, counters));
     EXPECT_EQ(valid, 0x23U);
     EXPECT_EQ(counters[0], 2U);  // LINK_UP
@@ -526,15 +526,15 @@ TEST(avb_entity_host_avb_info, as_capable_follows_the_gptp_stack_s_port)
     auto host = make_host_from_blob(blob);
     host->on_link_up(TimePoint{});
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);  // the entity has no gPTP lock
-    host->note_port_as_capable(true);
+    host->notify_port_as_capable(true);
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) != 0);
-    host->note_port_as_capable(false);
+    host->notify_port_as_capable(false);
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
-    host->note_port_as_capable(true);
+    host->notify_port_as_capable(true);
     host->on_link_down(TimePoint{});  // a link that is down is never asCapable
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
     host->on_link_up(TimePoint{});
-    host->note_port_as_capable(std::nullopt);  // ptp4l gone: the entity's own state again
+    host->notify_port_as_capable(std::nullopt);  // ptp4l gone: the entity's own state again
     EXPECT_TRUE((host->avb_info(0).flags & AS_CAPABLE) == 0);
 }
 
@@ -545,11 +545,11 @@ TEST(avb_entity_host_counters, a_grandmaster_lost_and_found_again_is_two_changes
     auto const blob = make_interface_blob(248);
     auto host = make_host_from_blob(blob);
     statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
-    host->note_grandmaster_changed(gm_a);
+    host->notify_grandmaster_changed(gm_a);
     EXPECT_EQ(gm_changed(host), 0U);  // the first
-    host->note_grandmaster_lost();
+    host->notify_grandmaster_lost();
     EXPECT_EQ(gm_changed(host), 1U);  // to itself
-    host->note_grandmaster_changed(gm_a);
+    host->notify_grandmaster_changed(gm_a);
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
@@ -560,11 +560,11 @@ TEST(avb_entity_host_counters, a_grandmaster_lost_on_an_entity_not_capable_is_no
     auto const blob = make_interface_blob(255);
     auto host = make_host_from_blob(blob);
     statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
-    host->note_grandmaster_changed(gm_a);
-    host->note_grandmaster_lost();
-    host->note_grandmaster_changed(gm_a);
+    host->notify_grandmaster_changed(gm_a);
+    host->notify_grandmaster_lost();
+    host->notify_grandmaster_changed(gm_a);
     EXPECT_EQ(gm_changed(host), 0U);
-    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
     EXPECT_EQ(gm_changed(host), 1U);
 }
 
@@ -576,13 +576,13 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
     auto host = make_host_from_blob(blob);
     auto const gm_a = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
     auto const self = statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL);
-    host->note_parent_grandmaster(gm_a);
-    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
-    host->note_grandmaster_lost();
+    host->notify_parent_grandmaster(gm_a);
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    host->notify_grandmaster_lost();
     EXPECT_EQ(gm_changed(host), 0U);
-    host->note_parent_grandmaster(self);
-    host->note_parent_grandmaster(self);
-    host->note_parent_grandmaster(gm_a);
+    host->notify_parent_grandmaster(self);
+    host->notify_parent_grandmaster(self);
+    host->notify_parent_grandmaster(gm_a);
     EXPECT_EQ(gm_changed(host), 2U);
 }
 
@@ -593,16 +593,16 @@ TEST(avb_entity_host_counters, use_parent_grandmaster_drops_the_announce_handler
 {
     auto const blob = make_interface_blob(248);
     auto host = make_host_from_blob(blob);
-    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'7788ULL});  // before: in force
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'7788ULL});  // before: in force
     host->use_parent_grandmaster();
-    host->use_parent_grandmaster();                                                            // again: nothing more
-    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x70B3'D5FF'FEED'0001ULL});  // ptp4l's own Announces
-    host->note_grandmaster_lost();
-    host->note_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
+    host->use_parent_grandmaster();                                                              // again: nothing more
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x70B3'D5FF'FEED'0001ULL});  // ptp4l's own Announces
+    host->notify_grandmaster_lost();
+    host->notify_grandmaster_changed(statusbar::gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL});
     EXPECT_EQ(gm_changed(host), 0U);
-    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    host->notify_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
     EXPECT_EQ(gm_changed(host), 0U);  // the first
-    host->note_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL));
+    host->notify_parent_grandmaster(statusbar::ieee::Eui64{}.from_uint64(0x70B3'D5FF'FEED'0001ULL));
     EXPECT_EQ(gm_changed(host), 1U);
 }
 
@@ -614,9 +614,9 @@ TEST(avb_entity_host_counters, the_parent_data_set_can_be_the_source_before_its_
     auto host = make_host_from_blob(blob);
     host->use_parent_grandmaster();
     statusbar::gptp::ClockIdentity const gm_a{0x0011'22FF'FE33'4455ULL};
-    host->note_grandmaster_changed(gm_a);
-    host->note_grandmaster_lost();
-    host->note_grandmaster_changed(gm_a);
+    host->notify_grandmaster_changed(gm_a);
+    host->notify_grandmaster_lost();
+    host->notify_grandmaster_changed(gm_a);
     EXPECT_EQ(gm_changed(host), 0U);
 }
 

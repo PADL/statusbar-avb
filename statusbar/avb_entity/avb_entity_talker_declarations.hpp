@@ -56,13 +56,13 @@ class TalkerDeclarations
 
     /// A PROBE_TX_COMMAND for stream @p idx counted at @p now_ns: its window
     /// runs to now + PROBE_WINDOW_NS.
-    void note_probe(uint16_t idx, int64_t now_ns) noexcept;
+    void notify_probe(uint16_t idx, int64_t now_ns) noexcept;
     /// Whether a Listener attribute (any declaration type) for stream @p idx's stream ID is
     /// registered: the MSRP registrar's In or Lv, which holds it through a LeaveAll for LeaveTime.
-    void note_listener_registered(uint16_t idx, bool registered) noexcept;
+    void notify_listener_registered(uint16_t idx, bool registered) noexcept;
     /// Whether MAAP has a conflict-free destination address for stream @p idx
     /// (always true with static addresses).
-    void note_address_valid(uint16_t idx, bool valid) noexcept;
+    void notify_address_valid(uint16_t idx, bool valid) noexcept;
 
     /// Whether stream @p idx's probe window is open at @p now_ns.
     [[nodiscard]] auto probe_window_open(uint16_t idx, int64_t now_ns) const noexcept -> bool;
@@ -76,12 +76,12 @@ class TalkerDeclarations
     [[nodiscard]] auto evaluate(uint16_t idx, int64_t now_ns, Params const& params, bool refresh) const noexcept -> Action;
 
     /// The kit declared stream @p idx with @p params.
-    void note_declared(uint16_t idx, Params const& params) noexcept;
+    void notify_declared(uint16_t idx, Params const& params) noexcept;
     /// The kit withdrew stream @p idx at @p now_ns: the hold starts.
-    void note_withdrawn(uint16_t idx, int64_t now_ns) noexcept;
+    void notify_withdrawn(uint16_t idx, int64_t now_ns) noexcept;
     /// The control plane withdrew every stream (no Talker Advertise left) at
-    /// @p now_ns: each declared one is held as by note_withdrawn.
-    void note_all_withdrawn(int64_t now_ns) noexcept;
+    /// @p now_ns: each declared one is held as by notify_withdrawn.
+    void notify_all_withdrawn(int64_t now_ns) noexcept;
 
     [[nodiscard]] auto declared(uint16_t idx) const noexcept -> bool { return idx < STREAM_COUNT && streams_[idx].declared; }
     [[nodiscard]] auto address_valid(uint16_t idx) const noexcept -> bool

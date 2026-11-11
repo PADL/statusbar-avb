@@ -127,15 +127,15 @@ auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept
 
 void GptpAnnounceHandler::on_announce(gptp::AnnounceMessage const& announce, int64_t const now_ns, AsPath const& path_trace)
 {
-    note_grandmaster(announce, now_ns);
-    note_path_trace(path_trace, announce.grandmaster_identity, now_ns);
+    notify_grandmaster(announce, now_ns);
+    notify_path_trace(path_trace, announce.grandmaster_identity, now_ns);
     announce_timeout_ns_ = announce_timeout_ns(announce);
     last_announce_time_ns_ = now_ns;
     last_announce_ = announce;
     has_announce_ = true;
 }
 
-void GptpAnnounceHandler::note_grandmaster(gptp::AnnounceMessage const& announce, int64_t const now_ns)
+void GptpAnnounceHandler::notify_grandmaster(gptp::AnnounceMessage const& announce, int64_t const now_ns)
 {
     auto const new_gm = announce.grandmaster_identity;
     if (new_gm == grandmaster_identity_) {
@@ -147,7 +147,7 @@ void GptpAnnounceHandler::note_grandmaster(gptp::AnnounceMessage const& announce
     }
 }
 
-void GptpAnnounceHandler::note_path_trace(AsPath const& path_trace, gptp::ClockIdentity const& grandmaster, int64_t const now_ns)
+void GptpAnnounceHandler::notify_path_trace(AsPath const& path_trace, gptp::ClockIdentity const& grandmaster, int64_t const now_ns)
 {
     // An Announce without a path trace names its grandmaster alone.
     AsPath path = path_trace;

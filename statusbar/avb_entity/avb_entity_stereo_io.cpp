@@ -376,7 +376,7 @@ auto AvbEntityStereoIO::stop(TimePoint const now) -> Status
     // then the control plane. start() builds both again; its first wake
     // transmits on a reservation made in it, not this run's.
     close_streams();
-    gate_.note_talker_withdrawn();
+    gate_.notify_talker_withdrawn();
     return host_.stop_control_plane(now);
 }
 
