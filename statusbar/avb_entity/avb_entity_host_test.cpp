@@ -650,6 +650,30 @@ TEST(avb_entity_host_avb_info, a_parent_data_set_naming_none_names_none)
     EXPECT_EQ(named_grandmaster(host), uint64_t{0x0011'22FF'FE33'6677ULL});
 }
 
+// The parent data set naming no grandmaster after A (a clientOnly gPTP stack that lost it): GET_AVB_INFO and
+// ADP name none, and GPTP_GM_CHANGED compares the next with A, so A, none, A is no change and A, none, B one.
+TEST(avb_entity_host_counters, a_parent_data_set_losing_its_grandmaster_names_none_and_keeps_the_count)
+{
+    auto const blob = make_interface_blob(248);
+    auto host = make_host_from_blob(blob);
+    auto const gm_a = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    auto const gm_b = statusbar::ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'6677ULL);
+    host->use_parent_grandmaster();
+    host->note_parent_grandmaster(gm_a);
+    EXPECT_EQ(named_grandmaster(host), gm_a.to_uint64());
+    host->note_parent_names_no_grandmaster();
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0});
+    host->note_parent_grandmaster(gm_a);
+    EXPECT_EQ(named_grandmaster(host), gm_a.to_uint64());
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_parent_names_no_grandmaster();
+    EXPECT_EQ(named_grandmaster(host), uint64_t{0});
+    EXPECT_EQ(gm_changed(host), 0U);
+    host->note_parent_grandmaster(gm_b);
+    EXPECT_EQ(named_grandmaster(host), gm_b.to_uint64());
+    EXPECT_EQ(gm_changed(host), 1U);
+}
+
 // use_parent_grandmaster after an Announce: the Announce handler's grandmaster in force is dropped, its
 // grandmasters found or lost (the local ptp4l's own among them) count nothing, and the stack's first
 // report is no change.
