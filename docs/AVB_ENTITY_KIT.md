@@ -201,6 +201,13 @@ joins the new VLAN (Milan v1.2 Section 4.3.2), moves every ACMP talker stream's
 stream_vlan_id, lets the entity re-tag its stream frames
 (`TalkerStreams::set_vlan_id`) and re-advertises the talker streams.
 
+Each Class A Domain the peer declares with other parameters is adopted, as
+Milan v1.3 Section 4.2.7.2.1 has it, whatever the peer is. Two adopting end
+stations on one link, configured with different Domains that are not the
+default, therefore swap each other's Domain continuously, churning MVRP, ACMP,
+the TX tag and the advertisements. Two Milan entities agree: both return to
+priority 3, VID 2 on link up and declare it.
+
 start() after a stop() returns to the configured Domain and declares it, which
 resumes MSRP (every peer registration flushed, then a LeaveAll): a restart with
 the link up, which reports no link up, drops the VID adopted before the stop
