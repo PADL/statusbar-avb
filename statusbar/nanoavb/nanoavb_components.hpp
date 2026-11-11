@@ -341,17 +341,32 @@ class AtdeccNetHandler : public net::Pollable
 /// Callbacks for gPTP Announce message handling
 struct GptpAnnounceCallbacks
 {
-    /// Called when the grandmaster identity changes
+    /// Called when the grandmaster identity changes. The handler has already
+    /// recorded the Announce, so last_announce() inside the callback is the
+    /// one that named @p grandmaster_id.
     /// @param now Timestamp when the Announce message was received
     /// @param grandmaster_id The new grandmaster clock identity
     /// @param announce Reference to the full Announce message
     statusbar::sg14::
         inplace_function<void(int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce), 64>
             grandmaster_id_changed;
+
+    /// Called when no Announce has arrived for announceReceiptTimeout
+    /// (IEEE 802.1AS-2020 10.7.3.2: three announce intervals, the interval
+    /// the last Announce's header named): the grandmaster is lost, and
+    /// has_grandmaster() is already false.
+    statusbar::sg14::inplace_function<void(int64_t now_ns), 64> grandmaster_lost;
 };
 
-/// gPTP Announce Handler - receives gPTP Announce messages and notifies on grandmaster changes.
-/// Implements Pollable for use with MessageReactor.
+/// gPTP Announce Handler - receives gPTP Announce messages and notifies on
+/// grandmaster changes and loss. Implements Pollable for use with
+/// MessageReactor; its tick() is the announce receipt timeout.
+///
+/// grandmaster_identity() is the grandmaster in force: the one the Announces
+/// name, or unset once they have stopped for announceReceiptTimeout. Every
+/// report of the grandmaster, ADP's gptp_grandmaster_id and GET_AVB_INFO's
+/// alike, reads this one value, so they never disagree. (An entity of this
+/// tree follows a clock; it never is one, so there is no own clock to name.)
 class GptpAnnounceHandler : public net::Pollable
 {
   public:
@@ -370,11 +385,22 @@ class GptpAnnounceHandler : public net::Pollable
     /// @param callbacks The new callback interface
     void set_callbacks(GptpAnnounceCallbacks callbacks) { callbacks_ = std::move(callbacks); }
 
-    /// Get the current grandmaster identity (8-byte clock identity)
+    /// The grandmaster in force: named by the Announces, unset when they have
+    /// stopped for announceReceiptTimeout (or never came).
     [[nodiscard]] auto grandmaster_identity() const noexcept -> gptp::ClockIdentity { return grandmaster_identity_; }
 
-    /// Check if grandmaster identity has been received
+    /// Whether a grandmaster is in force.
     [[nodiscard]] auto has_grandmaster() const noexcept -> bool { return grandmaster_identity_.is_set(); }
+
+    /// Take one Announce as received at @p now_ns: record it, then tell the
+    /// callbacks what changed. on_ready() calls this for every Announce the
+    /// socket delivers; a test can call it directly.
+    void observe_announce(int64_t now_ns, gptp::AnnounceMessage const& announce);
+
+    /// How long after its last Announce a grandmaster is held: three times
+    /// the interval that Announce's header named (logMessageInterval, clamped
+    /// to the range 802.1AS allows), three seconds when none has been seen.
+    [[nodiscard]] auto announce_receipt_timeout_ns() const noexcept -> int64_t;
 
     /// Get the time of the last announce (nanoseconds since epoch)
     [[nodiscard]] auto last_announce_time_ns() const noexcept -> int64_t { return last_announce_time_ns_; }
@@ -394,7 +420,9 @@ class GptpAnnounceHandler : public net::Pollable
 
     void on_ready(int64_t now_ns) override;
 
-    void tick(int64_t /*now_ns*/) override {}
+    /// The announce receipt timeout: a grandmaster whose Announces have
+    /// stopped is forgotten and grandmaster_lost is called.
+    void tick(int64_t now_ns) override;
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
@@ -655,6 +683,13 @@ template <typename T>
 {
     return ::statusbar::make_const_span(obj);
 }
+
+/// Report @p grandmaster_id in @p domain as the grandmaster in force: ADP's
+/// gptp_grandmaster_id follows it (with an ADP re-announce) and the registered
+/// controllers get an unsolicited GET_AVB_INFO (IEEE 1722.1 7.5.2). An unset
+/// identity reports that no grandmaster is in force. One function for the
+/// change and the loss, so the two reports cannot drift apart.
+void report_grandmaster(NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t domain);
 
 /// Wire up all callbacks between NanoAvbComponents and NanoAvbNetHandlers
 /// @param components The NanoAVB protocol components to wire up

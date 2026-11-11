@@ -338,7 +338,7 @@ MainLoopResult run_main_loop(
     if (net_handlers != nullptr) {
         net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
             .grandmaster_id_changed =
-                [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
+                [&entity](int64_t /*now_ns*/, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
                     std::string gm_str;
                     gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
                     std::print(
@@ -347,14 +347,16 @@ MainLoopResult run_main_loop(
                         announce.grandmaster_priority1.get(),
                         announce.grandmaster_priority2.get());
 
-                    // Update ADP advertiser with new grandmaster info
-                    entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                    entity.components().adp_advertiser.notify_entity_changed();
+                    nanoavb::report_grandmaster(entity.components(), grandmaster_id, announce.header.domain_number.get());
 
                     // Notify entity state machine
-                    (void)now_ns;
                     auto const sm_now = std::chrono::steady_clock::now();
                     entity.on_gptp_announce(sm_now, true);
+                },
+            .grandmaster_lost =
+                [&entity](int64_t /*now_ns*/) {
+                    std::print("gPTP: Grandmaster lost (no Announce for the receipt timeout)\n");
+                    nanoavb::report_grandmaster(entity.components(), gptp::ClockIdentity{}, 0);
                 }});
     }
 

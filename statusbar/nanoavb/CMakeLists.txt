@@ -48,6 +48,7 @@ statusbar_add_module(
   nanoavb_aem_symbols_test.cpp
   nanoavb_aem_entity_model_test.cpp
   nanoavb_base_test.cpp
+  nanoavb_components_test.cpp
   nanoavb_entity_model_test.cpp
   nanoavb_entity_test.cpp
   nanoavb_gptp_sm_test.cpp

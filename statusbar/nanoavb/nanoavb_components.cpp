@@ -48,32 +48,56 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
         if (!result || *result <= 0) {
             break;
         }
-        auto const len = static_cast<size_t>(*result);
-        auto const payload = std::span<uint8_t const>{payload_buf_.data(), len};
-
-        auto const msg = parse_gptp(payload);
+        auto const msg = parse_gptp(std::span<uint8_t const>{payload_buf_.data(), static_cast<size_t>(*result)});
         if (!msg) {
             continue;
         }
 
-        // Check if it's an Announce message and extract grandmaster identity
         if (auto const* announce = std::get_if<AnnounceMessage>(&*msg)) {
-            auto const new_gm = announce->grandmaster_identity;
-            bool const gm_changed = (new_gm != grandmaster_identity_);
-
-            if (gm_changed) {
-                grandmaster_identity_ = new_gm;
-
-                // Invoke callback if set — convert nanoseconds to net::TimePoint for compatibility
-                if (callbacks_.grandmaster_id_changed) {
-                    auto const tp = now_ns;
-                    callbacks_.grandmaster_id_changed(tp, new_gm, *announce);
-                }
-            }
-            last_announce_time_ns_ = now_ns;
-            last_announce_ = *announce;
-            has_announce_ = true;
+            observe_announce(now_ns, *announce);
         }
+    }
+}
+
+void GptpAnnounceHandler::observe_announce(int64_t const now_ns, gptp::AnnounceMessage const& announce)
+{
+    // Record first: a callback that asks last_announce() must be told the
+    // Announce that named the grandmaster it is being told about.
+    last_announce_time_ns_ = now_ns;
+    last_announce_ = announce;
+    has_announce_ = true;
+    if (announce.grandmaster_identity == grandmaster_identity_) {
+        return;
+    }
+    grandmaster_identity_ = announce.grandmaster_identity;
+    if (callbacks_.grandmaster_id_changed) {
+        callbacks_.grandmaster_id_changed(now_ns, grandmaster_identity_, announce);
+    }
+}
+
+auto GptpAnnounceHandler::announce_receipt_timeout_ns() const noexcept -> int64_t
+{
+    // 802.1AS-2020 10.7.3.2: announceReceiptTimeout x announceInterval, the
+    // interval 2^logMessageInterval s; the default timeout is 3. 10.7.2.3
+    // gives logAnnounceInterval the range -3 (125 ms) to 4 (16 s).
+    constexpr int64_t ONE_SECOND_NS = 1'000'000'000;
+    constexpr int64_t ANNOUNCE_RECEIPT_TIMEOUT = 3;
+    int const log_interval =
+        has_announce_ ? std::clamp<int>(static_cast<int8_t>(last_announce_.header.log_message_interval), -3, 4) : 0;
+    int64_t const interval_ns = log_interval >= 0 ? ONE_SECOND_NS << log_interval : ONE_SECOND_NS >> -log_interval;
+    return ANNOUNCE_RECEIPT_TIMEOUT * interval_ns;
+}
+
+void GptpAnnounceHandler::tick(int64_t const now_ns)
+{
+    if (!has_grandmaster() || now_ns - last_announce_time_ns_ < announce_receipt_timeout_ns()) {
+        return;
+    }
+    // The Announces have stopped: nothing is in force to follow. The last
+    // Announce stays readable for the domain it was sent in.
+    grandmaster_identity_ = {};
+    if (callbacks_.grandmaster_lost) {
+        callbacks_.grandmaster_lost(now_ns);
     }
 }
 
@@ -442,7 +466,7 @@ void NanoAvbNetHandlers::print_warnings(std::string_view interface_name) const
 }
 
 void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& handlers)
-{
+{  // NOLINT(statusbar-block-statements) one wiring statement per component; pre-dates the gate
     // ADP: send Entity Available/Departing to multicast
     components.adp_advertiser.set_callbacks(AdpAdvertiserCallbacks{.send_adpdu = [&handlers](atdecc::AdpDu const& adpdu) -> bool {
         auto& atdecc = handlers.atdecc_handler();
@@ -521,14 +545,13 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
         return msrp.send(MSRP_MULTICAST_MAC, packet).has_value();
     }});
 
-    // gPTP Announce: notify when grandmaster changes
+    // gPTP Announce: the grandmaster in force, gained, changed or lost, is
+    // reported the same way to ADP and to the registered controllers.
     handlers.gptp_handler().set_callbacks(GptpAnnounceCallbacks{
         .grandmaster_id_changed =
             [&components](
                 int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) -> void {
             (void)now_ns;
-
-            // Print notification
             std::string gm_str;
             gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
             std::print(
@@ -537,19 +560,23 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
                 announce.grandmaster_priority1.get(),
                 announce.grandmaster_priority2.get(),
                 announce.steps_removed.get());
-
-            // Update ADP advertiser with the new grandmaster and the domain the
-            // Announce was sent in.
-            components.adp_advertiser.set_gptp_info(grandmaster_id, announce.header.domain_number.get());
-
-            // Notify that entity state has changed (triggers ADP announcement)
-            components.adp_advertiser.notify_entity_changed();
-
-            // IEEE 1722.1 7.5.2: a grandmaster change is also an unsolicited
-            // GET_AVB_INFO to the registered controllers (no-op until an
-            // entity wires get_avb_info).
-            (void)components.aem_handler.notify_avb_info_changed(0);
+            report_grandmaster(components, grandmaster_id, announce.header.domain_number.get());
+        },
+        .grandmaster_lost = [&components, &handlers](int64_t /*now_ns*/) -> void {
+            std::print("gPTP: Grandmaster lost (no Announce for the receipt timeout)\n");
+            auto const* last = handlers.gptp_handler().last_announce();
+            report_grandmaster(components, gptp::ClockIdentity{}, last != nullptr ? last->header.domain_number.get() : 0);
         }});
+}
+
+void report_grandmaster(NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t const domain)
+{
+    components.adp_advertiser.set_gptp_info(grandmaster_id, domain);
+    components.adp_advertiser.notify_entity_changed();
+    // IEEE 1722.1 7.5.2: a grandmaster change is also an unsolicited
+    // GET_AVB_INFO to the registered controllers (no-op until an entity wires
+    // get_avb_info).
+    (void)components.aem_handler.notify_avb_info_changed(0);
 }
 
 }  // namespace statusbar::nanoavb
