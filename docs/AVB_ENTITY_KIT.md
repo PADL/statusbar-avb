@@ -173,7 +173,7 @@ The admitted set changes after an MSRP listener declaration for a talker stream
 is registered or withdrawn, after the Talker declarations are withdrawn, or
 when a stream is Started or Stopped, or when the kit's timer reaches the
 admission deadline (`on_admission_timer()`): the earliest end of a grace window
-whose listener is no longer registered (`admission_deadline()`). The host's `on_listener_ready` hook lands in `note_listener_ready`.
+whose listener is no longer registered (`admission_deadline()`). The host's `on_listener_ready` hook lands in `notify_listener_ready`.
 
 The presentation time offset (Milan v1.2 Section 5.3.7.6) is changed with
 SET_STREAM_INFO (MSRP_ACC_LAT_VALID) or SET_MAX_TRANSIT_TIME while the stream
@@ -211,7 +211,7 @@ when a field the table lists changes; the events that can change one call
 
 AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows the entity's own gPTP
 state until the integrator reports the gPTP stack's asCapable for the port with
-`AvbEntityHost::note_port_as_capable` (from ptp4l, `PtpManagementState::as_capable`;
+`AvbEntityHost::notify_port_as_capable` (from ptp4l, `PtpManagementState::as_capable`;
 linuxptp's `asCapable true` says nothing of the link and is not reported);
 `std::nullopt` returns to the entity's own state. It is never set while the link
 is down (IEEE 802.1AS-2020 Clause 10.2.5.1).
@@ -448,14 +448,14 @@ valid), AVB_INTERFACE 0 (LINK_UP, LINK_DOWN, GPTP_GM_CHANGED: each change of the
 grandmaster in force after the first) and the
 CLOCK_DOMAINs (LOCKED, UNLOCKED: each transition once, notified). CLOCK_DOMAIN
 0 follows the gPTP lock until the entity reports its lock with
-`note_clock_domain_locked`, and again after `release_clock_domain_lock(0)`;
+`notify_clock_domain_locked`, and again after `release_clock_domain_lock(0)`;
 the others, up to four, count once the entity reports them and stop at their
 release. Other interfaces and domains the model has answer with none
 valid. Only configuration 0 is served.
 
 The grandmaster in force is the gPTP stack's PARENT_DATA_SET
 grandmasterIdentity, its own clock while it is grandmaster, once the
-integrator reports it with `AvbEntityHost::note_parent_grandmaster`; a proxy
+integrator reports it with `AvbEntityHost::notify_parent_grandmaster`; a proxy
 entity's AVB info mirror reports the mirrored device's. Until then the
 Announce handler's grandmaster stands, and an Announce receipt timeout makes
 a grandmaster-capable entity (AVB_INTERFACE 0 priority1 below 255, IEEE
