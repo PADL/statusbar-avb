@@ -238,7 +238,7 @@ auto AemCommandHandler::process_aem_command(
 {
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
-    note_controller_command(header.controller_entity_id, src_mac);
+    notify_controller_command(header.controller_entity_id, src_mac);
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
     auto const response = dispatch_aem_command(src_mac, header, command_data, out_buffer);
     return answer_aem_command(src_mac, header, response, std::span<uint8_t const>{out_buffer.data(), response.size});
@@ -750,7 +750,7 @@ auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept ->
          {AEM_COMMAND_SET_SIGNAL_SELECTOR, AEM_COMMAND_GET_SIGNAL_SELECTOR},
          {AEM_COMMAND_SET_MIXER, AEM_COMMAND_GET_MIXER},
          {AEM_COMMAND_SET_MATRIX, AEM_COMMAND_GET_MATRIX},
-         {AEM_COMMAND_SET_STREAM_INFO, AEM_COMMAND_GET_STREAM_INFO},  // 7.4.15.1, cut to the SET's length
+         {AEM_COMMAND_SET_STREAM_INFO, AEM_COMMAND_GET_STREAM_INFO},              // 7.4.15.1, cut to the SET's length
          {AEM_COMMAND_SET_MAX_TRANSIT_TIME, AEM_COMMAND_GET_MAX_TRANSIT_TIME}}};  // 7.4.77.1
     auto const it = std::find_if(twins.begin(), twins.end(), [=](auto const& pair) { return pair.first == set_command_type; });
     return it == twins.end() ? std::nullopt : std::optional<uint16_t>{it->second};
@@ -2726,7 +2726,7 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
 }
 
-void AemCommandHandler::note_controller_command(Eui64 const& controller_entity_id, Eui48 const& /*controller_mac*/)
+void AemCommandHandler::notify_controller_command(Eui64 const& controller_entity_id, Eui48 const& /*controller_mac*/)
 {
     // Registrations are kept by entity ID (handle_register_unsolicited), so is the timer.
     for (auto& reg : unsolicited_registrations_) {
@@ -3069,8 +3069,7 @@ auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type
     return apply_and_notify(command_type, command_body);
 }
 
-auto AemCommandHandler::follow_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body)
-    -> uint8_t
+auto AemCommandHandler::follow_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
 {
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told
     return apply_and_notify(command_type, command_body);

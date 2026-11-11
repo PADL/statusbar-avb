@@ -9,21 +9,21 @@
 
 namespace statusbar::avb_entity {
 
-void TalkerDeclarations::note_probe(uint16_t const idx, int64_t const now_ns) noexcept
+void TalkerDeclarations::notify_probe(uint16_t const idx, int64_t const now_ns) noexcept
 {
     if (idx < STREAM_COUNT) {
         streams_[idx].probe_until_ns = now_ns + PROBE_WINDOW_NS;
     }
 }
 
-void TalkerDeclarations::note_listener_registered(uint16_t const idx, bool const registered) noexcept
+void TalkerDeclarations::notify_listener_registered(uint16_t const idx, bool const registered) noexcept
 {
     if (idx < STREAM_COUNT) {
         streams_[idx].listener_registered = registered;
     }
 }
 
-void TalkerDeclarations::note_address_valid(uint16_t const idx, bool const valid) noexcept
+void TalkerDeclarations::notify_address_valid(uint16_t const idx, bool const valid) noexcept
 {
     if (idx < STREAM_COUNT) {
         streams_[idx].address_valid = valid;
@@ -66,7 +66,7 @@ auto TalkerDeclarations::evaluate(uint16_t const idx, int64_t const now_ns, Para
     return held(s, now_ns, params) ? Action::none : Action::declare;
 }
 
-void TalkerDeclarations::note_declared(uint16_t const idx, Params const& params) noexcept
+void TalkerDeclarations::notify_declared(uint16_t const idx, Params const& params) noexcept
 {
     if (idx < STREAM_COUNT) {
         streams_[idx].declared = true;
@@ -74,7 +74,7 @@ void TalkerDeclarations::note_declared(uint16_t const idx, Params const& params)
     }
 }
 
-void TalkerDeclarations::note_withdrawn(uint16_t const idx, int64_t const now_ns) noexcept
+void TalkerDeclarations::notify_withdrawn(uint16_t const idx, int64_t const now_ns) noexcept
 {
     if (idx >= STREAM_COUNT || !streams_[idx].declared) {
         return;
@@ -85,10 +85,10 @@ void TalkerDeclarations::note_withdrawn(uint16_t const idx, int64_t const now_ns
     s.hold_until_ns = now_ns + REDECLARE_HOLD_NS;
 }
 
-void TalkerDeclarations::note_all_withdrawn(int64_t const now_ns) noexcept
+void TalkerDeclarations::notify_all_withdrawn(int64_t const now_ns) noexcept
 {
     for (uint16_t idx = 0; idx < STREAM_COUNT; ++idx) {
-        note_withdrawn(idx, now_ns);
+        notify_withdrawn(idx, now_ns);
     }
 }
 
