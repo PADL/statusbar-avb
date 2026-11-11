@@ -351,6 +351,7 @@ class DescriptorStorageHandler : public AemEntityHandler
             return false;
         }
         apply_object_name(id.ref, desc.object_name);  // READ_DESCRIPTOR agrees with SET_NAME
+        apply_current_control_values(id.ref, desc);   // ... and with GET_CONTROL
         return true;
     }
 
@@ -1129,6 +1130,46 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
         }
         return total;
+    }
+
+    /// READ_DESCRIPTOR agrees with GET_CONTROL: a value a SET_CONTROL stored
+    /// replaces the CURRENT field of each value entry in the loaded
+    /// descriptor's value_details, for the linear types whose entries have
+    /// one, the same scope GET_CONTROL's fallback reads. Other types, and a
+    /// stored value of another size than the entries say, leave the authored
+    /// trailer as it is.
+    void apply_current_control_values(DescriptorRef const ref, atdecc::aem::DescriptorControl& desc) const noexcept
+    {
+        auto const* state = find_control_state(ref.descriptor_index);
+        uint16_t const base = static_cast<uint16_t>(desc.control_value_type.get() & atdecc::aem::CONTROL_VALUE_TYPE_MASK);
+        if (state == nullptr || !atdecc::aem::is_linear_value_type(base)) {
+            return;
+        }
+        size_t const elem = atdecc::aem::control_value_element_size(base);
+        if (state->value.size() == size_t{desc.number_of_values.get()} * elem) {
+            overlay_linear_current(desc, std::span<uint8_t const>{state->value.data(), state->value.size()}, elem);
+        }
+    }
+
+    /// Write @p current, one @p elem-octet element per value entry, into the
+    /// CURRENT field of each linear entry in @p desc's value_details.
+    static void overlay_linear_current(
+        atdecc::aem::DescriptorControl& desc, std::span<uint8_t const> current, size_t const elem) noexcept
+    {
+        auto trailer = desc.value_details_bytes_mutable();
+        size_t const item = atdecc::aem::linear_entry_size(elem);
+        // The entries begin at values_offset in the wire descriptor, so at
+        // values_offset - LENGTH in the trailer that follows the fixed fields.
+        size_t const first = std::max<size_t>(desc.values_offset.get(), atdecc::aem::DescriptorControl::LENGTH) -
+            atdecc::aem::DescriptorControl::LENGTH;
+        for (size_t i = 0; (i * elem) < current.size(); ++i) {
+            size_t const at = first + (i * item) + atdecc::aem::linear_entry_current_offset(elem);
+            if (at + elem > trailer.size()) {
+                return;
+            }
+            std::copy_n(
+                current.begin() + static_cast<std::ptrdiff_t>(i * elem), elem, trailer.begin() + static_cast<std::ptrdiff_t>(at));
+        }
     }
 
     statusbar::sg14::inplace_vector<ControlState, MAX_CONTROL_STATES> control_states_;

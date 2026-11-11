@@ -2277,6 +2277,99 @@ auto response_sampling_rate(std::span<uint8_t const> bytes) -> uint32_t
 
 }  // namespace
 
+namespace {
+
+constexpr int32_t CONTROL_AUTHORED_CURRENT = 7;
+
+/// Build a blob with one CONTROL descriptor (index 0): one LINEAR_INT32 value
+/// entry, min -60, max 12, step 1, default 0, current CONTROL_AUTHORED_CURRENT.
+auto make_blob_with_control() -> std::vector<uint8_t>
+{
+    constexpr uint32_t header_size = 20;
+    constexpr uint32_t toc_entry_size = 12;
+    constexpr size_t elem = 4;
+    constexpr size_t value_entry_bytes = (5 * elem) + 4;  // min..current + unit + string
+    constexpr uint32_t desc_size = DescriptorControl::LENGTH + value_entry_bytes;
+    constexpr uint32_t toc_offset = header_size;
+    constexpr uint32_t desc_offset = toc_offset + toc_entry_size;
+
+    // The struct carries its whole value_details buffer, so store it into a
+    // blob that has room for all of it and cut the blob to the wire size after.
+    std::vector<uint8_t> blob(desc_offset + sizeof(DescriptorControl), 0);
+    store_single_descriptor_container(make_span(blob), DESCRIPTOR_CONTROL, desc_size, desc_offset);
+
+    DescriptorControl desc{};
+    desc.descriptor_type = DESCRIPTOR_CONTROL;
+    desc.control_value_type = 0x0004;  // CONTROL_LINEAR_INT32
+    desc.values_offset = DescriptorControl::LENGTH;
+    desc.number_of_values = 1;
+    span_store(make_span(blob, {.start = desc_offset}), desc);
+    blob.resize(desc_offset + desc_size);
+
+    size_t const entry = desc_offset + DescriptorControl::LENGTH;
+    auto const put_i32 = [&blob](size_t off, int32_t v) {
+        ieee::quadlet_t const q{static_cast<uint32_t>(v)};
+        span_store(make_span(blob, {.start = off, .length = 4}), q);
+    };
+    put_i32(entry + (0 * elem), -60);                       // min
+    put_i32(entry + (1 * elem), 12);                        // max
+    put_i32(entry + (2 * elem), 1);                         // step
+    put_i32(entry + (3 * elem), 0);                         // default
+    put_i32(entry + (4 * elem), CONTROL_AUTHORED_CURRENT);  // current
+    return blob;
+}
+
+/// The int32 at @p offset of a response body.
+auto i32_at(std::span<uint8_t const> bytes, size_t const offset) -> int32_t
+{
+    ieee::quadlet_t q{};
+    span_load(q, bytes.subspan(offset, 4));
+    return static_cast<int32_t>(q.get());
+}
+
+}  // namespace
+
+TEST(control, read_descriptor_serves_the_value_a_set_control_stored)
+{
+    // 7.4.5: READ_DESCRIPTOR of a CONTROL carries the value in force, like
+    // GET_CONTROL does (7.4.26), not the value authored into the blob.
+    auto blob = make_blob_with_control();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // The response: configuration_index + reserved (4), then the descriptor; the
+    // one value entry starts after the 104 fixed octets, its CURRENT field fifth.
+    constexpr size_t entry = 4 + DescriptorControl::LENGTH;
+    constexpr size_t current_at = entry + (4 * 4);
+    std::array<uint8_t, 8> const read_body{0x00, 0x00, 0x00, 0x00, 0x00, DESCRIPTOR_CONTROL, 0x00, 0x00};
+
+    auto const before = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_READ_DESCRIPTOR, read_body);
+    EXPECT_EQ(before.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(before.bytes.size(), entry + 24);
+    EXPECT_EQ(i32_at(before.bytes, current_at), CONTROL_AUTHORED_CURRENT);
+
+    std::array<uint8_t, 8> const set_body{0x00, DESCRIPTOR_CONTROL, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05};  // := 5
+    EXPECT_EQ(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONTROL, set_body).status, AEM_STATUS_SUCCESS);
+
+    auto const after = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_READ_DESCRIPTOR, read_body);
+    EXPECT_EQ(after.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(after.bytes.size(), entry + 24);
+    EXPECT_EQ(i32_at(after.bytes, current_at), 5);
+    // The rest of the entry is still the authored one.
+    EXPECT_EQ(i32_at(after.bytes, entry + 0), -60);
+    EXPECT_EQ(i32_at(after.bytes, entry + 4), 12);
+    EXPECT_EQ(i32_at(after.bytes, entry + 8), 1);
+    EXPECT_EQ(i32_at(after.bytes, entry + 12), 0);
+
+    // And GET_CONTROL says the same.
+    std::array<uint8_t, 4> const get_body{0x00, DESCRIPTOR_CONTROL, 0x00, 0x00};
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_CONTROL, get_body);
+    EXPECT_EQ(get.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(i32_at(get.bytes, 4), 5);
+}
+
 TEST(stream_lifecycle, set_stream_format_validates_and_round_trips)
 {
     auto blob = make_blob_with_stream_output();
