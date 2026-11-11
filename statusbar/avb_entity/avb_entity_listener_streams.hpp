@@ -406,7 +406,7 @@ struct ListenerStreams
     /// The input was unbound (a controller's UNBIND_RX, or a classic
     /// DISCONNECT_RX): its media lock goes without counting an interruption.
     /// Reactor thread.
-    void note_input_unbound(uint16_t descriptor_index);
+    void notify_input_unbound(uint16_t descriptor_index);
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream group on the RX socket -- when the
@@ -520,9 +520,13 @@ struct ListenerStreams
     void take_connection(
         ListenerConnection& held, ieee::Eui64 const& stream_id, std::optional<ieee::Eui48> group, sm::TimePoint now);
     void release_connection(ListenerConnection& held, sm::TimePoint now);
-    /// Declare @p stream_id to MSRP, following @p only when it names a
-    /// Talker attribute; true when the reservation is Ready.
-    auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now, std::optional<nanoavb::TalkerMatch> const& only) -> bool;
+    /// Declare @p stream_id to MSRP, following only a Talker attribute that is @p match when set;
+    /// true when the reservation is Ready.
+    auto attach_ready(ieee::Eui64 const& stream_id, std::optional<nanoavb::TalkerMatch> const& match, sm::TimePoint now) -> bool;
+    /// The Talker attribute Milan input @p stream_index's connection follows: @p dest_mac on the VLAN its
+    /// ACMP stream names (Milan v1.3 Section 5.5.3.6: the probe's answer); nullopt for a classic one.
+    [[nodiscard]] auto talker_match(uint16_t stream_index, ieee::Eui48 const& dest_mac) const
+        -> std::optional<nanoavb::TalkerMatch>;
     /// Whether the declaration already standing for @p stream_id is Ready.
     [[nodiscard]] auto held_ready(ieee::Eui64 const& stream_id) const -> bool;
     /// Declare @p stream_id when @p held is not on it yet, else ask after the

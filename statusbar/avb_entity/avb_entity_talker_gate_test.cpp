@@ -175,7 +175,7 @@ TEST(talker_gate, a_talker_withdrawal_closes_at_once_and_a_later_ready_reopens)
     TalkerGate gate{true, lookup};
     gate.note_listener_ready(sid(0x102), true, T0);
     EXPECT_TRUE(gate.should_transmit(2, T0 + 125us));
-    gate.note_talker_withdrawn(2);
+    gate.notify_talker_withdrawn(2);
     EXPECT_FALSE(gate.should_transmit(2, T0 + 250us));
     EXPECT_FALSE(gate.admitted(2, T0 + 250us));
     EXPECT_FALSE(gate.grace_ends(2).has_value());
@@ -184,7 +184,7 @@ TEST(talker_gate, a_talker_withdrawal_closes_at_once_and_a_later_ready_reopens)
     EXPECT_TRUE(gate.should_transmit(2, T0 + 375us));
     EXPECT_TRUE(gate.admitted(2, T0 + 375us));
     EXPECT_FALSE(gate.should_transmit(2, T0 + 310us + GRACE));
-    gate.note_talker_withdrawn();
+    gate.notify_talker_withdrawn();
     EXPECT_FALSE(gate.should_transmit(2, T0 + 400us));
 }
 
