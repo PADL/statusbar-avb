@@ -158,6 +158,53 @@ auto talker_advertise_unique_ids(std::span<uint8_t const> pdu) -> std::vector<ui
     return ids;
 }
 
+/// One Talker Advertise value as a PDU carried it: its unique_id, its
+/// three-packed AttributeEvent and the TSpec MaxFrameSize of the FirstValue
+/// it was encoded under (the field the change tests vary).
+struct CarriedTalker
+{
+    uint16_t unique_id{0};
+    statusbar::srp::mrp::AttributeEvent event{};
+    uint16_t max_frame_size{0};
+};
+
+// Walk a raw MSRPDU and collect every Talker Advertise value it carries, in
+// wire order, with the event the sender attached to it. Same message walk as
+// talker_advertise_unique_ids(), reading the events as well.
+auto talker_advertise_carried(std::span<uint8_t const> pdu) -> std::vector<CarriedTalker>
+{
+    std::vector<CarriedTalker> out{};
+    size_t p = pdu.empty() ? pdu.size() : 1;  // skip ProtocolVersion
+    while (p + 4 <= pdu.size() && pdu[p] != 0) {
+        uint8_t const attr_type = pdu[p];
+        uint8_t const attr_len = pdu[p + 1];
+        size_t const list_end = p + 4 + ((static_cast<size_t>(pdu[p + 2]) << 8) | pdu[p + 3]);
+        size_t vp = p + 4;
+        if (list_end > pdu.size()) {
+            break;
+        }
+        while (attr_type == static_cast<uint8_t>(AttributeType::TalkerAdvertise) && vp + 2 <= list_end) {
+            uint16_t const vh = (static_cast<uint16_t>(pdu[vp]) << 8) | pdu[vp + 1];
+            uint16_t const num_values = vh & 0x1FFF;
+            vp += 2;
+            if (vh == 0 || num_values == 0 || vp + attr_len > list_end) {
+                break;  // EndMark, or an empty LeaveAll vector with no FirstValue
+            }
+            uint16_t const base_uid = (static_cast<uint16_t>(pdu[vp + 6]) << 8) | pdu[vp + 7];
+            uint16_t const max_frame_size = (static_cast<uint16_t>(pdu[vp + 16]) << 8) | pdu[vp + 17];
+            auto const events = pdu.subspan(vp + attr_len, (static_cast<size_t>(num_values) + 2) / 3);
+            for (uint16_t i = 0; i < num_values; ++i) {
+                auto const unpacked = statusbar::srp::mrp::unpack3_events(events[i / 3]);
+                auto const event = (i % 3 == 0) ? unpacked.first : (i % 3 == 1) ? unpacked.second : unpacked.third;
+                out.push_back({.unique_id = static_cast<uint16_t>(base_uid + i), .event = event, .max_frame_size = max_frame_size});
+            }
+            vp += attr_len + events.size();
+        }
+        p = list_end;
+    }
+    return out;
+}
+
 // True if any message in the PDU has its first vector header carrying the
 // LeaveAll event bits (top 3 bits of the 2-byte vector header).
 auto pdu_has_leaveall(std::span<uint8_t const> pdu) -> bool
@@ -1373,6 +1420,149 @@ TEST(msrp_participant, declare_redeclare_same_stream_id_idempotent)
     EXPECT_TRUE(is_success(p.declare_talker_advertise(make_talker_adv(1), clock.now)));
     EXPECT_TRUE(is_success(p.declare_talker_advertise(make_talker_adv(1), clock.now)));
     EXPECT_EQ(p.talker_advertise_count(), 1u);
+}
+
+// A re-declared Talker Advertise with a changed TSpec is a different attribute
+// (IEEE 802.1Q-2022 Clause 10.7): the value on the wire is left first, and the
+// new one is declared New only once that Lv has gone out. A bridge that saw a
+// changed FirstValue under a registered StreamID would otherwise fail the
+// reservation with Table 35-6 code 16.
+TEST(msrp_participant, a_changed_talker_advertise_leaves_the_old_value_before_declaring_the_new)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc001};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto const before = make_talker_adv(1);
+    auto after = before;
+    after.max_frame_size = 300;
+
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(before, clock.now)));
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(1))->max_frame_size.get(), 150U);  // the value still on the wire
+    EXPECT_EQ(a.talker_advertise_count(), 1u);
+
+    // The next PDU carries the Lv, under the OLD FirstValue.
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    auto const lv = talker_advertise_carried(fab.a_to_b.front());
+    EXPECT_EQ(lv.size(), 1u);
+    EXPECT_EQ(lv.front().event, AttributeEvent::Lv);
+    EXPECT_EQ(lv.front().max_frame_size, 150U);
+    fab.a_to_b.clear();
+    // Once the Lv has been encoded the new value is in force and owed a New.
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(1))->max_frame_size.get(), 300U);
+
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    auto const anew = talker_advertise_carried(fab.a_to_b.front());
+    EXPECT_EQ(anew.size(), 1u);
+    EXPECT_EQ(anew.front().event, AttributeEvent::New);
+    EXPECT_EQ(anew.front().max_frame_size, 300U);
+    EXPECT_EQ(a.talker_advertise_count(), 1u);
+}
+
+TEST(msrp_participant, a_same_value_redeclaration_sends_no_leave)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc002};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    a.transmit_pending(clock.now);
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    a.transmit_pending(clock.now);
+    for (auto const& pdu : fab.a_to_b) {
+        for (auto const& carried : talker_advertise_carried(pdu)) {
+            EXPECT_TRUE(carried.event != AttributeEvent::Lv);
+        }
+    }
+    EXPECT_EQ(a.talker_advertise_count(), 1u);
+}
+
+// AccumulatedLatency is the one Talker Advertise field 35.2.2.8.6 lets move
+// in place: no Lv, the record takes the new latency at once, and the next
+// re-assertion simply carries it.
+TEST(msrp_participant, an_accumulated_latency_change_stays_in_place)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc003};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    a.transmit_pending(clock.now);
+    fab.a_to_b.clear();
+
+    auto later = make_talker_adv(1);
+    later.accumulated_latency = 125'000;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(later, clock.now)));
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(1))->accumulated_latency.get(), 125'000U);
+    a.transmit_pending(clock.now);
+    for (auto const& pdu : fab.a_to_b) {
+        for (auto const& carried : talker_advertise_carried(pdu)) {
+            EXPECT_TRUE(carried.event != AttributeEvent::Lv);
+        }
+    }
+}
+
+// A peer's LeaveAll arriving between the Lv and the New: the new value is
+// already the one in force, so the immediate re-declaration the LeaveAll
+// provokes carries it as New, and the old value never comes back.
+TEST(msrp_participant, a_leaveall_between_the_leave_and_the_new_redeclares_the_new_value)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc004};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto after = make_talker_adv(1);
+    after.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    a.transmit_pending(clock.now);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    a.transmit_pending(clock.now);  // the Lv
+    fab.a_to_b.clear();
+
+    // A Talker Advertise message whose one vector is an empty LeaveAll.
+    uint16_t const vh = mrp::calculate_vector_header(true, 0);
+    std::vector<uint8_t> const leaveall{
+        PROTOCOL_VERSION,
+        static_cast<uint8_t>(AttributeType::TalkerAdvertise),
+        25,
+        0x00,
+        0x04,
+        static_cast<uint8_t>(vh >> 8),
+        static_cast<uint8_t>(vh & 0xFFU),
+        0x00,
+        0x00,
+        0x00,
+        0x00};
+    a.receive_pdu(leaveall, clock.now);
+
+    EXPECT_FALSE(fab.a_to_b.empty());
+    bool saw_new = false;
+    for (auto const& pdu : fab.a_to_b) {
+        for (auto const& carried : talker_advertise_carried(pdu)) {
+            EXPECT_EQ(carried.max_frame_size, 300U);
+            EXPECT_TRUE(carried.event != AttributeEvent::Lv);
+            saw_new |= carried.event == AttributeEvent::New;
+        }
+    }
+    EXPECT_TRUE(saw_new);
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
 }
 
 TEST(msrp_participant, declared_attribute_reasserts_each_periodic)

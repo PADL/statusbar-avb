@@ -433,13 +433,112 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    rec.first_value = fv;
-    rec.operation = Operation::Declare;
-
-    auto const event = first_declare_event(rec);
-    mrp::dispatch_applicant(rec, event, now);
+    if (is_actively_declared(rec) && changes_the_attribute(rec.first_value, fv)) {
+        change_talker_advertise(rec, fv, now);
+    } else {
+        adopt_talker_advertise(rec, fv, now);
+    }
     port_.timers().start_join(now);
     return success();
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool
+{
+    for (auto const& rec : talker_adv_) {
+        if (rec.first_value.stream_id == stream_id) {
+            return rec.pending_first_value.has_value();
+        }
+    }
+    return false;
+}
+
+/// Whether @p next is another attribute than @p current under the same
+/// StreamID: anything but AccumulatedLatency differs. AccumulatedLatency is
+/// the one field 35.2.2.8.6 lets a Talker update in place.
+template <class Limits>
+auto MsrpParticipantT<Limits>::changes_the_attribute(
+    TalkerAdvertiseFirstValue const& current, TalkerAdvertiseFirstValue const& next) noexcept -> bool
+{
+    auto latency_moved = current;
+    latency_moved.accumulated_latency = next.accumulated_latency;
+    return !(latency_moved == next);
+}
+
+/// Whether the record's value is ours on the wire, or about to be: a
+/// declaration the applicant is still asserting (Vn/An/Aa/Qa/Vp/Ap/Qp) or
+/// has yet to leave (La). An observer or idle applicant has nothing of ours
+/// out there for a changed value to collide with.
+template <class Limits>
+auto MsrpParticipantT<Limits>::is_actively_declared(AttributeRecord<TalkerAdvertiseFirstValue> const& rec) noexcept -> bool
+{
+    using S = applicant_sm::Def::State;
+    auto const s = rec.applicant_sm.current_state();
+    return rec.operation == Operation::Declare &&
+        (s == S::Vn || s == S::An || s == S::Aa || s == S::Qa || s == S::Vp || s == S::Ap || s == S::Qp || s == S::La);
+}
+
+/// The record takes @p fv as a value never declared before: New!.
+template <class Limits>
+void MsrpParticipantT<Limits>::declare_new_value(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now)
+{
+    rec.first_value = fv;
+    rec.operation = Operation::Declare;
+    rec.pending_first_value.reset();
+    mrp::dispatch_applicant(rec, applicant_sm::Def::Event::New, now);
+}
+
+/// A first declaration, a same-value re-declaration or an AccumulatedLatency
+/// update: the value goes into the record in place and the applicant is
+/// told New! or Join! as first_declare_event decides.
+template <class Limits>
+void MsrpParticipantT<Limits>::adopt_talker_advertise(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now)
+{
+    rec.first_value = fv;
+    rec.operation = Operation::Declare;
+    rec.pending_first_value.reset();
+    mrp::dispatch_applicant(rec, first_declare_event(rec), now);
+}
+
+/// A changed value under a declared StreamID: leave the old one first. When
+/// the applicant now owes an Lv (La), the new value waits on the record until
+/// that Lv has been encoded (complete_talker_changes); when it owed nothing
+/// (Vp/Ap/Qp went to Vo/Ao/Qo: our Join was never sent, or a LeaveAll already
+/// cleared it), the new value is declared at once.
+template <class Limits>
+void MsrpParticipantT<Limits>::change_talker_advertise(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now)
+{
+    mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
+    if (rec.applicant_sm.current_state() == applicant_sm::Def::State::La) {
+        rec.pending_first_value = fv;
+        return;
+    }
+    declare_new_value(rec, fv, now);
+}
+
+/// After a PDU has been built: a record whose Lv went out in it (La + tx! is
+/// Vo, and the emit loop cleared tx_pending only for what it wrote; a message
+/// skipped for space keeps the flag and waits) takes its pending value and
+/// declares it New!, to ride the next PDU. A LeaveAll of ours in between
+/// (La + txLA! is Lo, with no Lv owed) completes the change the same way.
+template <class Limits>
+void MsrpParticipantT<Limits>::complete_talker_changes(TimePoint now)
+{
+    bool any = false;
+    for (auto& rec : talker_adv_) {
+        bool const lv_still_owed = rec.applicant_ctx.tx_pending || rec.applicant_sm.current_state() == applicant_sm::Def::State::La;
+        if (!rec.pending_first_value.has_value() || lv_still_owed) {
+            continue;
+        }
+        declare_new_value(rec, *rec.pending_first_value, now);
+        any = true;
+    }
+    if (any) {
+        port_.timers().start_join(now);
+    }
 }
 
 template <class Limits>
@@ -465,6 +564,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
     bool found = false;
     for (auto& rec : talker_adv_) {
         if (rec.first_value.stream_id == stream_id) {
+            rec.pending_first_value.reset();  // a withdrawal cancels a change in flight
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             found = true;
         }
@@ -1347,8 +1447,18 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
     return true;
 }
 
+/// One transmit pass: the PDU, then whatever the PDU's going out has
+/// settled. A changed Talker Advertise whose Lv the pass encoded declares
+/// its new value now, to ride the next PDU.
 template <class Limits>
 void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
+{
+    encode_and_send_pdu(now, leave_all);
+    complete_talker_changes(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::encode_and_send_pdu(TimePoint now, bool leave_all)
 {
     // First, dispatch the appropriate TX event to every attribute's
     // Applicant to generate tx outputs. We pick TxRegistrarIn vs

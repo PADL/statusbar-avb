@@ -283,11 +283,21 @@ class MsrpParticipantT
 
     // -------------------- Local declaration API --------------------
 
-    /// Declare a Talker Advertise attribute. Creates a new attribute
-    /// record (if absent) or updates the existing record's
-    /// FirstValue. Triggers Applicant New! or Join! event as
-    /// appropriate and arms the join timer.
+    /// Declare a Talker Advertise attribute. Creates a new attribute record
+    /// (if absent) and triggers Applicant New! or Join! as appropriate, arming
+    /// the join timer. Re-declaring a StreamID already on the wire with a
+    /// changed DataFrameParameters, TSpec or PriorityAndRank is a different
+    /// attribute (IEEE 802.1Q-2022 Clause 10.7; a bridge refuses a changed
+    /// FirstValue under a registered StreamID, Table 35-6 code 16): the old
+    /// value is left (Lv!) first and the new one declared New! once that Lv
+    /// has been encoded, so for one JoinTime find_talker_advertise() still
+    /// answers the old value and talker_change_pending() is true. A change
+    /// to AccumulatedLatency alone stays in place (35.2.2.8.6).
     auto declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status;
+
+    /// Whether a re-declared Talker Advertise for @p stream_id is still
+    /// waiting for the Lv of its previous value to go out.
+    [[nodiscard]] auto talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool;
 
     /// Declare a Talker Failed attribute (used when a previously
     /// advertised talker cannot meet reservation requirements).
@@ -543,6 +553,21 @@ class MsrpParticipantT
     // ============================================================
 
     //
+    // Talker Advertise re-declaration with a changed value (see
+    // declare_talker_advertise).
+    //
+    [[nodiscard]] static auto changes_the_attribute(
+        TalkerAdvertiseFirstValue const& current, TalkerAdvertiseFirstValue const& next) noexcept -> bool;
+    [[nodiscard]] static auto is_actively_declared(AttributeRecord<TalkerAdvertiseFirstValue> const& rec) noexcept -> bool;
+    static void declare_new_value(
+        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
+    static void adopt_talker_advertise(
+        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
+    static void change_talker_advertise(
+        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
+    void complete_talker_changes(TimePoint now);
+
+    //
     // Timer expiry handlers
     //
     void on_join_timer(TimePoint now);
@@ -694,6 +719,9 @@ class MsrpParticipantT
     // PDU encode
     //
     void build_and_send_pdu(TimePoint now, bool leave_all = false);
+    /// The PDU itself: tx! to every applicant, then one message per attribute
+    /// type with what they asked for, through send_pdu.
+    void encode_and_send_pdu(TimePoint now, bool leave_all);
 
     template <typename RecordVec>
     auto append_attribute_message(

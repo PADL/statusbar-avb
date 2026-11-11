@@ -55,6 +55,15 @@ struct AttributeRecord
     /// TimerScheduler holds only the earliest of them.
     std::optional<sm::TimePoint> leave_deadline{};
 
+    /// A replacement FirstValue waiting for the Lv of the current one to
+    /// reach the wire. IEEE 802.1Q-2022 Clause 10.7 makes a changed value a
+    /// different attribute, so a participant that changes a declared value
+    /// leaves the old one first and declares the new one New afterwards (MSRP
+    /// Talker Advertise: 35.2.2.8, where only AccumulatedLatency moves in
+    /// place). Set by declare_*, consumed by the participant once the Lv has
+    /// been encoded; nullopt the rest of the time.
+    std::optional<FirstValue> pending_first_value{};
+
     /// Set by the participant when the attribute has fully decayed
     /// (Applicant in Vo and Registrar in Mt) and can be removed from
     /// the database on the next reclaim sweep. See mrp.c:3220-3242
