@@ -22,6 +22,7 @@
 using namespace statusbar;
 using statusbar::avb_entity::crf_aligned_base;
 using statusbar::avb_entity::crf_sample_stride;
+using statusbar::avb_entity::crf_schedule;
 using statusbar::avb_entity::fill_crf_timestamps;
 
 namespace {
@@ -104,6 +105,90 @@ TEST(crf_math, live_base_tracks_now_not_anchor)
     // ~1 s elapsed; allow a few ms of slack for pacing quantization.
     EXPECT_TRUE(delta > 995'000'000ULL);
     EXPECT_TRUE(delta < 1'005'000'000ULL);
+}
+
+// --- CRF PDUs are owed by sample index, not by wake count ----------------------
+
+// A Milan-style CRF at 44.1 kHz: base 44100, interval 96, one timestamp per
+// PDU, so a PDU every 96 media-clock samples = 459.375 PDU/s. The media clock
+// is paced at 8000 wakes/s and hands out 5 or 6 samples a wake (44100/8000 =
+// 5.5125 on average); the old rule, one PDU every floor(96/5) = 19 wakes, gave
+// 421 PDU/s. Counting samples gives the exact rate whatever the wake carries.
+TEST(crf_schedule, pdus_are_spaced_by_samples_whatever_the_wake_carries)
+{
+    constexpr uint32_t stride = 96;  // crf_sample_stride(96, 44100, 44100)
+    constexpr uint64_t span = 96;    // one timestamp per PDU
+    std::optional<uint64_t> due{};
+    std::optional<uint64_t> last_sent{};
+    uint64_t live = 0;
+    int sent = 0;
+    for (uint64_t k = 0; k < 80'000; ++k) {  // 10 s of wakes
+        auto const samples = static_cast<uint32_t>((((k + 1) * 44'100ULL) / 8000ULL) - ((k * 44'100ULL) / 8000ULL));
+        auto const plan = crf_schedule(due, live, samples, stride, span);
+        due = plan.due;
+        if (plan.send) {
+            if (last_sent) {
+                EXPECT_EQ(*plan.send - *last_sent, span);  // contiguous, never a gap or a repeat
+            }
+            last_sent = plan.send;
+            ++sent;
+        }
+        live += samples;
+    }
+    EXPECT_EQ(live, 441'000ULL);
+    EXPECT_EQ(sent, 4594);  // the PDUs at 0, 96, ..., 440928: 441000 / 96 = 4593.75, so 4594
+}
+
+// Nothing scheduled starts at the stride-aligned live position, a wake that
+// does not reach the owed index sends nothing and keeps it, the wake that
+// covers it sends it, and a media clock that stepped by more than a span in
+// either direction starts again from the live position.
+TEST(crf_schedule, a_closed_gate_or_a_clock_step_restarts_from_the_aligned_live_position)
+{
+    auto const first = crf_schedule(std::nullopt, 1000, 6, 96, 96);
+    EXPECT_TRUE(first.send.has_value());
+    EXPECT_EQ(*first.send, 960U);
+    EXPECT_EQ(*first.due, 1056U);
+
+    auto const waiting = crf_schedule(first.due, 1006, 6, 96, 96);  // covers 1006..1011: not yet
+    EXPECT_FALSE(waiting.send.has_value());
+    EXPECT_EQ(*waiting.due, 1056U);
+
+    auto const hit = crf_schedule(waiting.due, 1051, 6, 96, 96);  // covers 1051..1056
+    EXPECT_EQ(*hit.send, 1056U);
+    EXPECT_EQ(*hit.due, 1152U);
+
+    auto const forward = crf_schedule(hit.due, 50'000, 6, 96, 96);  // the clock stepped ahead
+    EXPECT_EQ(*forward.send, crf_aligned_base(50'000, 96));
+    EXPECT_EQ(*forward.due, crf_aligned_base(50'000, 96) + 96);
+
+    auto const back = crf_schedule(hit.due, 100, 6, 96, 96);  // and back
+    EXPECT_EQ(*back.send, 96U);
+
+    auto const degenerate = crf_schedule(std::nullopt, 1000, 6, 0, 0);  // stride 0: never owed
+    EXPECT_FALSE(degenerate.send.has_value());
+}
+
+// --- An AAF slot is blocked by its format, not by the media clock rate --------
+
+TEST(talker_streams, an_aaf_slot_carries_its_format_s_frames_per_pdu)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    statusbar::avb_entity::TalkerStreams talker{
+        statusbar::avb_entity::TalkerStreamsConfig{.sample_rate = 44'100}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto open = [&talker](uint16_t index, uint64_t word) -> uint16_t {
+        statusbar::avb_entity::StreamSpec spec{};
+        spec.index = index;
+        spec.format_word = word;
+        spec.format = statusbar::avb_entity::decode_stream_format(word);
+        EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
+        return talker.slot_for(index)->aaf_samples;
+    };
+    EXPECT_EQ(open(0, 0x0204022002000000ULL), 6U);   // 44.1k, unspecified: Table 18, not 44100/8000 = 5
+    EXPECT_EQ(open(1, 0x0204022002006000ULL), 6U);   // 44.1k, 6 named
+    EXPECT_EQ(open(2, 0x0205022002005000ULL), 5U);   // 48k, 5 named: the word wins
+    EXPECT_EQ(open(3, 0x020702200200C000ULL), 12U);  // 96k: unchanged
 }
 
 // --- The TX kick hand-off, with no port behind it -----------------------------

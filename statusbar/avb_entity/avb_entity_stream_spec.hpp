@@ -163,10 +163,42 @@ using StreamSpecs = sg14::inplace_vector<StreamSpec, MAX_ENTITY_STREAMS>;
 /// AVB Class A wire cadence (packets per second per stream).
 inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
 
-/// Audio samples per Class A packet at @p sample_rate_hz (12 @ 96k, 6 @ 48k).
+/// Audio samples per Class A packet at @p sample_rate_hz (12 @ 96k, 6 @ 48k):
+/// the AM824 cadence, one packet per 125 us observation interval. AAF is not
+/// sized this way, see aaf_samples_per_pdu.
 [[nodiscard]] constexpr auto class_a_samples_per_packet(uint32_t sample_rate_hz) noexcept -> uint32_t
 {
     return sample_rate_hz / CLASS_A_PACKETS_PER_SEC;
+}
+
+/// Audio sample frames per AAF AVTPDU at @p sample_rate_hz when the format
+/// word does not say: IEEE 1722-2025 Table 18 (1722-2016 Table 17), the
+/// recommended transmit intervals for a 125 us observation interval. The
+/// 44.1 kHz family carries the 48 kHz family's count, 6/12/24, one AVTPDU
+/// every ~136 us, not floor(rate/8000) = 5/11/22; every other rate is one
+/// AVTPDU per observation interval. 0 for a rate the table does not have.
+[[nodiscard]] constexpr auto aaf_table_samples_per_pdu(uint32_t sample_rate_hz) noexcept -> uint32_t
+{
+    switch (sample_rate_hz) {
+        case 44'100:
+            return 6;
+        case 88'200:
+            return 12;
+        case 176'400:
+            return 24;
+        default:
+            return sample_rate_hz / CLASS_A_PACKETS_PER_SEC;
+    }
+}
+
+/// Audio sample frames per AAF AVTPDU for @p format: what its format word
+/// names (1722-2025 I.2.4 samples_per_frame) when it names one, else the
+/// Table 18 count for its rate. AAF frames are constant-size (1722-2025
+/// 7.7), so this is both the talker's block and the TSpec's frame. 0 when
+/// neither the word nor the table gives a count.
+[[nodiscard]] constexpr auto aaf_samples_per_pdu(StreamFormatFields const& format) noexcept -> uint32_t
+{
+    return format.aaf_samples_per_frame != 0 ? format.aaf_samples_per_frame : aaf_table_samples_per_pdu(format.sample_rate_hz);
 }
 
 /// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence:

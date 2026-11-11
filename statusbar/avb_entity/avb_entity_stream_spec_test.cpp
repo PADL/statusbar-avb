@@ -179,6 +179,43 @@ TEST(stream_spec_tspec, matches_wire_registered_sizes)
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(0)), 0);
 }
 
+// IEEE 1722-2025 Table 18 (1722-2016 Table 17): the 44.1 kHz family carries
+// the 48 kHz family's sample frames per AAF AVTPDU, 6/12/24, one AVTPDU every
+// ~136 us -- not floor(rate/8000) = 5/11/22. Every other rate is one AVTPDU per
+// 125 us observation interval, which rate/8000 does give.
+TEST(stream_spec_tspec, aaf_frames_per_pdu_follow_table_18_not_the_rate_over_8000)
+{
+    EXPECT_EQ(aaf_table_samples_per_pdu(44'100), 6U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(88'200), 12U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(176'400), 24U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(48'000), 6U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(96'000), 12U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(192'000), 24U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(32'000), 4U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(8'000), 1U);
+    EXPECT_EQ(aaf_table_samples_per_pdu(0), 0U);  // an unknown rate code
+}
+
+// The format word's own samples_per_frame wins over the table when it names
+// one; a word that leaves it 0 is sized by the table for its rate.
+TEST(stream_spec_tspec, aaf_is_sized_by_its_format_word_then_by_table_18)
+{
+    constexpr uint64_t AAF_44K1_INT32_8CH = 0x0204022002000000ULL;       // 44.1k, samples_per_frame unspecified
+    constexpr uint64_t AAF_44K1_INT32_8CH_6SPF = 0x0204022002006000ULL;  // 44.1k, 6 named
+    constexpr uint64_t AAF_48K_INT32_8CH_5SPF = 0x0205022002005000ULL;   // 48k, 5 named: not the table's 6
+
+    EXPECT_EQ(decode_stream_format(AAF_44K1_INT32_8CH).aaf_samples_per_frame, 0U);
+    EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_44K1_INT32_8CH)), 6U);
+    EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_44K1_INT32_8CH_6SPF)), 6U);
+    EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 5U);
+    EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_96K_INT32_8CH)), 12U);
+
+    // The TSpec frame follows: 24-byte header + (frames+1) * 8ch * 4B.
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH)), 24 + (7 * 8 * 4));      // 248, was 216 at 5
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 24 + (6 * 8 * 4));  // 216
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 440);                    // unchanged
+}
+
 TEST(stream_spec_rate, mixed_audio_rates_rejected)
 {
     StreamSpecs specs{};

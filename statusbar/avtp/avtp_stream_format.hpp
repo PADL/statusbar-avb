@@ -34,7 +34,7 @@ namespace statusbar::avtp {
 /// AAF stream-format wire layout (IEEE 1722-2016 Clause 7.3.4), viewed over
 /// the 8-byte format code:
 ///   octet 0:    subtype (0x02 AAF)
-///   octet 1:    reserved[7:4] | nsr[3:0]
+///   octet 1:    header[7:5] (the AVTP version, 0) | ut[4] | nsr[3:0]
 ///   octet 2:    format (AAF sample format code: INT_32=0x02, ...)
 ///   octet 3:    bit_depth
 ///   octets 4-7: channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
@@ -52,6 +52,10 @@ struct AafStreamFormat
     static constexpr unsigned SAMPLES_SHIFT = 12;
 
     [[nodiscard]] constexpr auto nsr() const noexcept -> uint8_t { return nsr_field.get_bits<uint8_t>(0x0FU); }
+    /// The "up to" bit (IEEE 1722-2025 I.2.4): the source or sink can work
+    /// with fewer channels than channels_per_frame says. Zero in a current
+    /// format and in SET_STREAM_FORMAT; only a capability list sets it.
+    [[nodiscard]] constexpr auto ut() const noexcept -> bool { return nsr_field.get_bits<uint8_t>(0x10U, 4) != 0; }
     [[nodiscard]] constexpr auto channels_per_frame() const noexcept -> uint16_t
     {
         return packing.get_bits<uint16_t>(CHANNELS_MASK, CHANNELS_SHIFT);
@@ -126,7 +130,7 @@ static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-
 /// byte-for-byte against a reference device (02 07 02 20 02 00 c0 00 =
 /// AAF 96 kHz INT_32 8ch 12 samples/frame):
 ///   Byte 0: subtype (0x02)
-///   Byte 1: reserved[7:4] | nsr[3:0]
+///   Byte 1: header[7:5] (AVTP version) | ut[4] | nsr[3:0]
 ///   Byte 2: format (AAF sample format code: INT_32=0x02, ...)
 ///   Byte 3: bit_depth
 ///   Bytes 4-7 (32-bit BE): channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]

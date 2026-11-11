@@ -62,9 +62,14 @@ struct TalkerStreamSlot
     StreamSpec spec{};
     ieee::Eui48 dest_mac{};
     uint64_t tx_packets{0};
-    /// CRF decimation phase: transmit one PDU every pkts_per_crf audio packets.
-    /// Reset to 0 whenever the CRF gate is closed so a reconnect starts fresh.
-    uint16_t crf_decim{0};
+    /// AAF: sample frames per AVTPDU, the block the reframer emits and the
+    /// count every frame carries (aaf_samples_per_pdu of the spec).
+    uint16_t aaf_samples{0};
+    /// CRF: the media-clock sample index the next PDU's first timestamp is
+    /// owed at, or nothing while none is scheduled (gate closed, or not yet
+    /// opened). PDUs are spaced timestamps_per_packet x stride samples apart
+    /// in the media clock, whatever the wake cadence (crf_schedule).
+    std::optional<uint64_t> crf_due{};
     std::optional<avtp::Am824StreamOutputContext> am824{};
     std::optional<avtp::AafStreamOutputContext> aaf{};
     std::optional<avtp::CrfStreamOutputContext> crf{};
@@ -81,7 +86,6 @@ struct TalkerStreams
         : config_{config}
         , media_clock_{media_clock}
         , last_gptp_ns_{last_gptp_ns}
-        , samples_per_packet_{config.sample_rate / CLASS_A_PACKETS_PER_SEC}
         , mem_resource_{memory_resource}
     {}
 
@@ -151,9 +155,11 @@ struct TalkerStreams
     /// Emit this tick's traffic for @p slot from @p src (this stream's
     /// interleaved audio for the tick — per-stream sources are the entity's
     /// business; CRF slots ignore it): AM824 sends the tick's samples
-    /// directly; AAF reframes to constant blocks (gate closed clears the
-    /// FIFO); CRF emits one decimated PDU re-based to the live media-clock
-    /// position (gate closed resets the phase). Media-timer (SCHED_FIFO) thread.
+    /// directly; AAF reframes to constant blocks of the format's samples per
+    /// AVTPDU (gate closed clears the FIFO); CRF emits a PDU whenever the
+    /// media clock reaches the one it owes (gate closed forgets the schedule,
+    /// so the next PDU starts from the live position). Media-timer
+    /// (SCHED_FIFO) thread.
     void transmit_if_due(
         TalkerStreamSlot& slot,
         ptpclient::MediaClockGenerator::Emit const& tick,
@@ -197,15 +203,19 @@ struct TalkerStreams
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
 
-    /// Class A wire cadence is fixed at 8000 pkt/s/stream; samples-per-packet is then
-    /// sample_rate/8000 (12 @ 96k, 6 @ 48k).
-    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = avb_entity::CLASS_A_PACKETS_PER_SEC;
+    /// The AAF and CRF halves of transmit_if_due.
+    void serve_aaf(
+        TalkerStreamSlot& slot,
+        ptpclient::MediaClockGenerator::Emit const& tick,
+        bool gate_open,
+        size_t samples,
+        std::span<float const> src);
+    void serve_crf(TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
 
     // References / values (bound at construction).
     TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
-    uint32_t samples_per_packet_;  ///< sample_rate/CLASS_A_PACKETS_PER_SEC: 12 @ 96k, 6 @ 48k
     std::pmr::memory_resource* mem_resource_;
 
     // Owned TX state.
@@ -248,6 +258,37 @@ struct TalkerStreams
 [[nodiscard]] constexpr auto crf_aligned_base(uint64_t first_index, uint32_t sample_stride) noexcept -> uint64_t
 {
     return sample_stride == 0 ? first_index : (first_index / sample_stride) * sample_stride;
+}
+
+/// What crf_schedule decided for one wake: the base index of the PDU to send
+/// now, if one is owed, and the schedule to carry to the next wake.
+struct CrfSchedule
+{
+    std::optional<uint64_t> send{};
+    std::optional<uint64_t> due{};
+};
+
+/// Whether this wake owes a CRF PDU. A PDU covers @p span media-clock samples
+/// (timestamps_per_packet x stride), so PDUs are owed at every multiple of
+/// span from the first one, however many wakes that takes: the count per
+/// second is the sample rate over span (459.375 at 44.1 kHz for a span of
+/// 96), not a count of wakes. @p due is the index the next PDU is owed at,
+/// nullopt when nothing is scheduled; the wake covers [@p live, @p live +
+/// @p samples). Nothing scheduled, or a due index more than a span away from
+/// the live position (the gate just opened, the media clock stepped), starts
+/// again from the stride-aligned live position, as crf_aligned_base did
+/// every PDU.
+[[nodiscard]] constexpr auto crf_schedule(
+    std::optional<uint64_t> due, uint64_t const live, uint32_t const samples, uint32_t const stride, uint64_t const span) noexcept
+    -> CrfSchedule
+{
+    if (!due || *due + span <= live || live + span < *due) {
+        due = crf_aligned_base(live, stride);
+    }
+    if (span == 0 || *due >= live + samples) {
+        return {.send = std::nullopt, .due = due};
+    }
+    return {.send = *due, .due = *due + span};
 }
 
 /// Fill `n_ts` CRF timestamps into `ts_data` (each avtp::CrfPdu::TIMESTAMP_SIZE

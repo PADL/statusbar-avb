@@ -56,10 +56,11 @@ auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
 {
     switch (format.kind) {
         case StreamKind::aaf: {
-            if (format.sample_rate_hz == 0) {
+            auto const per_pdu = aaf_samples_per_pdu(format);
+            if (per_pdu == 0) {
                 return 0;
             }
-            auto const samples = class_a_samples_per_packet(format.sample_rate_hz) + 1;
+            auto const samples = per_pdu + 1;
             return static_cast<uint16_t>(avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(samples)));
         }
         case StreamKind::am824: {

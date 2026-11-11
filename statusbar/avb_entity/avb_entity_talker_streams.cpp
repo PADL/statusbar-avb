@@ -17,49 +17,78 @@
 
 namespace statusbar::avb_entity {
 
+namespace {
+
+/// One slot's serializer for an AM824 spec.
+auto open_am824(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id) -> Status
+{
+    auto const rate = avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
+    if (!rate || spec.format.channels == 0) {
+        return failure(std::errc::invalid_argument);
+    }
+    slot.am824.emplace(stream_id, *rate, static_cast<uint8_t>(spec.format.channels), /*pres_offset=*/0);
+    return success();
+}
+
+/// One slot's serializer and reframer for an AAF spec. The frame is the
+/// format's: its samples_per_frame, else the Table 18 count for its rate (6
+/// at 44.1 kHz, not rate/8000 = 5).
+auto open_aaf(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id, std::pmr::memory_resource* mr)
+    -> Status
+{
+    auto const rate = avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz);
+    slot.aaf_samples = static_cast<uint16_t>(aaf_samples_per_pdu(spec.format));
+    if (!rate || spec.format.channels == 0 || slot.aaf_samples == 0) {
+        return failure(std::errc::invalid_argument);
+    }
+    slot.aaf.emplace(stream_id, spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth, /*pres_offset=*/0);
+    slot.reframer.emplace(spec.format.channels, slot.aaf_samples, 4, mr);
+    return success();
+}
+
+/// One slot's serializer for a CRF spec.
+auto open_crf(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id) -> Status
+{
+    if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0) {
+        return failure(std::errc::invalid_argument);
+    }
+    slot.crf.emplace(
+        stream_id,
+        static_cast<avtp::CrfType>(spec.format.crf_type),
+        spec.format.crf_base_frequency_hz,
+        static_cast<avtp::CrfPull>(spec.format.crf_pull),
+        spec.format.crf_timestamp_interval,
+        spec.format.crf_timestamps_per_pdu);
+    return success();
+}
+
+/// The serializer @p spec's kind calls for, engaged on @p slot.
+auto open_kind(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id, std::pmr::memory_resource* mr)
+    -> Status
+{
+    switch (spec.format.kind) {
+        case StreamKind::am824:
+            return open_am824(slot, spec, stream_id);
+        case StreamKind::aaf:
+            return open_aaf(slot, spec, stream_id, mr);
+        case StreamKind::crf:
+            return open_crf(slot, spec, stream_id);
+        case StreamKind::other:
+        default:
+            return failure(std::errc::not_supported);
+    }
+}
+
+}  // namespace
+
 auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stream_id, ieee::Eui48 const dest_mac) -> Status
 {
     if (slots_.size() == MAX_ENTITY_STREAMS) {
         return failure(std::errc::result_out_of_range);
     }
-    TalkerStreamSlot slot{};
-    slot.spec = spec;
-    slot.dest_mac = dest_mac;
-    switch (spec.format.kind) {
-        case StreamKind::am824: {
-            auto const rate = avtp::am824_sample_rate_from_hz(spec.format.sample_rate_hz);
-            if (!rate || spec.format.channels == 0) {
-                return failure(std::errc::invalid_argument);
-            }
-            slot.am824.emplace(stream_id, *rate, static_cast<uint8_t>(spec.format.channels), /*pres_offset=*/0);
-            break;
-        }
-        case StreamKind::aaf: {
-            auto const rate = avtp::aaf_sample_rate_from_hz(spec.format.sample_rate_hz);
-            if (!rate || spec.format.channels == 0) {
-                return failure(std::errc::invalid_argument);
-            }
-            slot.aaf.emplace(
-                stream_id, spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth, /*pres_offset=*/0);
-            slot.reframer.emplace(spec.format.channels, samples_per_packet_, 4, mem_resource_);
-            break;
-        }
-        case StreamKind::crf: {
-            if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0) {
-                return failure(std::errc::invalid_argument);
-            }
-            slot.crf.emplace(
-                stream_id,
-                static_cast<avtp::CrfType>(spec.format.crf_type),
-                spec.format.crf_base_frequency_hz,
-                static_cast<avtp::CrfPull>(spec.format.crf_pull),
-                spec.format.crf_timestamp_interval,
-                spec.format.crf_timestamps_per_pdu);
-            break;
-        }
-        case StreamKind::other:
-        default:
-            return failure(std::errc::not_supported);
+    TalkerStreamSlot slot{.spec = spec, .dest_mac = dest_mac};
+    if (auto opened = open_kind(slot, spec, stream_id, mem_resource_); !opened) {
+        return opened;
     }
     slots_.push_back(std::move(slot));
     return success();
@@ -330,55 +359,73 @@ void TalkerStreams::transmit_if_due(
             }
             break;
         }
-        case StreamKind::aaf: {
-            if (!slot.reframer) {
-                break;
-            }
-            if (!gate_open) {
-                // Gate closed: drop any partial block so a later reconnect starts
-                // clean (no stale samples / stale timestamps).
-                slot.reframer->clear();
-                break;
-            }
-            // AAF must be constant-size: buffer this wake's variable samples and emit
-            // only whole SAMPLES_PER_PACKET blocks (0, 1, or 2+ this wake); the < block
-            // remainder carries to the next wake. Each block's avtp_timestamp is the
-            // jitter-free media-clock time of its first sample.
-            slot.reframer->push(src.first(samples * slot.spec.format.channels), static_cast<uint16_t>(samples), tick.first_index);
-            slot.reframer->drain([this, &slot](uint64_t first_index, std::span<float const> block) {
-                transmit_aaf(slot, presentation_for(first_index), static_cast<uint16_t>(samples_per_packet_), block);
-            });
+        case StreamKind::aaf:
+            serve_aaf(slot, tick, gate_open, samples, src);
             break;
-        }
-        case StreamKind::crf: {
-            if (!slot.crf) {
-                break;
-            }
-            if (!gate_open) {
-                slot.crf_decim = 0;  // gate closed: next emission starts a fresh PDU phase
-                break;
-            }
-            // One PDU carries timestamps_per_packet timestamps, each spaced
-            // sample_stride audio samples, so a PDU spans pkts_per_crf audio packets
-            // (the Milan 48 kHz/interval-96/1-ts format under 96 kHz audio -> 192
-            // samples = every 16 packets -> 500 PDU/s).
-            uint32_t const sample_stride =
-                crf_sample_stride(slot.crf->timestamp_interval, slot.crf->base_frequency, config_.sample_rate);
-            uint32_t pkts_per_crf = (static_cast<uint32_t>(slot.crf->timestamps_per_packet) * sample_stride) / samples_per_packet_;
-            if (pkts_per_crf == 0) {
-                pkts_per_crf = 1;
-            }
-            if (slot.crf_decim == 0) {
-                // Re-base to the live media-clock position each PDU so CRF timestamps
-                // track gPTP-now, not the (possibly long-past) media-clock anchor.
-                transmit_crf(slot, crf_aligned_base(tick.first_index, sample_stride));
-            }
-            slot.crf_decim = static_cast<uint16_t>((slot.crf_decim + 1U) % pkts_per_crf);
+        case StreamKind::crf:
+            serve_crf(slot, tick, gate_open, samples);
             break;
-        }
         case StreamKind::other:
         default:
             break;
+    }
+}
+
+void TalkerStreams::serve_aaf(
+    TalkerStreamSlot& slot,
+    ptpclient::MediaClockGenerator::Emit const& tick,
+    bool const gate_open,
+    size_t const samples,
+    std::span<float const> src)
+{
+    if (!slot.reframer) {
+        return;
+    }
+    if (!gate_open) {
+        // Gate closed: drop any partial block so a later reconnect starts
+        // clean (no stale samples / stale timestamps).
+        slot.reframer->clear();
+        return;
+    }
+    // AAF frames are constant-size (1722-2025 7.7): buffer this wake's
+    // variable samples and emit only whole blocks of the format's samples per
+    // AVTPDU (0, 1, or 2+ this wake); the remainder carries to the next wake.
+    // The cadence is the media clock's, not the wake's: 6 samples at 44.1 kHz
+    // is one frame per ~136 us, with a wake now and then that sends none. Each
+    // block's avtp_timestamp is the jitter-free media-clock time of its first
+    // sample.
+    slot.reframer->push(src.first(samples * slot.spec.format.channels), static_cast<uint16_t>(samples), tick.first_index);
+    slot.reframer->drain([this, &slot](uint64_t first_index, std::span<float const> block) {
+        transmit_aaf(slot, presentation_for(first_index), slot.aaf_samples, block);
+    });
+}
+
+void TalkerStreams::serve_crf(
+    TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool const gate_open, size_t const samples)
+{
+    if (!slot.crf) {
+        return;
+    }
+    if (!gate_open) {
+        slot.crf_due.reset();  // gate closed: the next PDU starts from the live position
+        return;
+    }
+    // One PDU carries timestamps_per_packet timestamps, each spaced
+    // sample_stride audio samples, so a PDU is owed every span samples of the
+    // media clock (the Milan 48 kHz/interval-96/1-ts format under 96 kHz audio:
+    // every 192 samples, 500 PDU/s; the same format at 44.1 kHz: every 96
+    // samples, 459.375 PDU/s). Counting samples rather than wakes is what
+    // gives a rate the wake cadence does not divide its exact count.
+    uint32_t const sample_stride = crf_sample_stride(slot.crf->timestamp_interval, slot.crf->base_frequency, config_.sample_rate);
+    auto const plan = crf_schedule(
+        slot.crf_due,
+        tick.first_index,
+        static_cast<uint32_t>(samples),
+        sample_stride,
+        static_cast<uint64_t>(slot.crf->timestamps_per_packet) * sample_stride);
+    slot.crf_due = plan.due;
+    if (plan.send) {
+        transmit_crf(slot, *plan.send);
     }
 }
 
