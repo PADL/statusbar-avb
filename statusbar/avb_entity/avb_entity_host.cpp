@@ -304,28 +304,51 @@ void AvbEntityHost::apply_interface_runtime()
 
 auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
 {
-    using namespace atdecc::aem::avb_info_flags;
     // A mirrored device's answer is reported as-is: it IS the state.
     auto const m = std::find_if(
         mirrored_.begin(), mirrored_.end(), [index](MirroredInterface const& x) { return x.index == index && x.info.has_value(); });
     if (m != mirrored_.end()) {
         return *m->info;
     }
+    return own_avb_info();
+}
+
+auto AvbEntityHost::own_avb_info() const -> nanoavb::AvbInfo
+{
     nanoavb::AvbInfo info{};
-    info.flags = GPTP_ENABLED | AVTP_DOWN_VALID;
+    info.flags = own_avb_flags();
+    add_srp_mapping(info);
+    add_gptp_state(info);
+    return info;
+}
+
+auto AvbEntityHost::own_avb_flags() const -> uint8_t
+{
+    namespace flags = atdecc::aem::avb_info_flags;
+    uint8_t value = flags::GPTP_ENABLED | flags::AVTP_DOWN_VALID;
     if (!supervisor_ctx_.link_up) {
-        info.flags |= AVTP_DOWN;
+        value |= flags::AVTP_DOWN;
     }
-    if (net_handlers_ != nullptr && net_handlers_->msrp_handler().valid()) {
-        info.flags |= SRP_ENABLED;
-        // One mapping per declared SR class: MSRP SRclassID 6 is class A
-        // (traffic class 0), 5 is class B (traffic class 1).
-        auto const& domain = components_.msrp_handler.domain();
-        info.msrp_mappings.push_back(
-            {.traffic_class = static_cast<uint8_t>(domain.sr_class_id == 6 ? 0 : 1),
-             .priority = domain.sr_class_priority,
-             .vlan_id = domain.sr_class_vid});
+    return value;
+}
+
+void AvbEntityHost::add_srp_mapping(nanoavb::AvbInfo& info) const
+{
+    using namespace atdecc::aem::avb_info_flags;
+    if (net_handlers_ == nullptr || !net_handlers_->msrp_handler().valid()) {
+        return;
     }
+    info.flags |= SRP_ENABLED;
+    // One mapping per declared SR class, its traffic_class the MSRP
+    // SRclassID itself (6 = class A, 5 = class B): see AvbInfoMsrpMapping.
+    auto const& domain = components_.msrp_handler.domain();
+    info.msrp_mappings.push_back(
+        {.traffic_class = domain.sr_class_id, .priority = domain.sr_class_priority, .vlan_id = domain.sr_class_vid});
+}
+
+void AvbEntityHost::add_gptp_state(nanoavb::AvbInfo& info) const
+{
+    using namespace atdecc::aem::avb_info_flags;
     if (net_handlers_ != nullptr) {
         auto const& announce = net_handlers_->gptp_handler();
         if (announce.has_grandmaster()) {
@@ -341,7 +364,6 @@ auto AvbEntityHost::avb_info(uint16_t const index) const -> nanoavb::AvbInfo
     if (propagation_delay_override_) {
         info.propagation_delay = propagation_delay_override_ns_;
     }
-    return info;
 }
 
 //

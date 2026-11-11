@@ -91,6 +91,13 @@ using GetStreamInfoFn =
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
+///
+/// traffic_class carries the MSRP SRclassID (IEEE 802.1Q 35.2.2.9.2: 6 for
+/// class A, 5 for class B), not a queue number. Table 7-149 says only "the
+/// traffic class" and Milan adds nothing, so the value follows what the
+/// devices and controllers in the field exchange: Milan and macOS entities
+/// answer 6 and 5, and a controller matching the mapping against the MSRP
+/// Domain attribute expects the same number it sees there.
 struct AvbInfoMsrpMapping
 {
     uint8_t traffic_class{0};

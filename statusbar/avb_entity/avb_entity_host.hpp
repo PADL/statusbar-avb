@@ -314,6 +314,14 @@ class AvbEntityHost
 
     // AVB_INTERFACE / GET_AVB_INFO plumbing (see mirror_avb_info_from).
     void wire_avb_info();
+    /// This entity's own GET_AVB_INFO answer, when no mirrored device's
+    /// stands in for it: link and gPTP state, and one MSRP mapping per
+    /// declared SR class.
+    [[nodiscard]] auto own_avb_info() const -> nanoavb::AvbInfo;
+    /// gPTP on, AVTP_DOWN valid, and AVTP_DOWN itself while the link is down.
+    [[nodiscard]] auto own_avb_flags() const -> uint8_t;
+    void add_srp_mapping(nanoavb::AvbInfo& info) const;
+    void add_gptp_state(nanoavb::AvbInfo& info) const;
     void attach_mirror(net::MessageReactor& reactor);
     void apply_interface_runtime();
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
