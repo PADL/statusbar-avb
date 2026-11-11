@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -69,7 +70,114 @@ auto make_aaf_spec(uint16_t index) -> StreamSpec
     return spec;
 }
 
+/// What MSRP holds for a stream this listener declared, nothing when it never did.
+auto srp_state_of(nanoavb::NanoAvbComponents& components, ieee::Eui64 const& id) -> std::optional<nanoavb::ListenerReservationState>
+{
+    tsn::StreamId sid{};
+    (void)tsn::load_unchecked(id.span(), &sid);
+    for (auto const& stream : components.msrp_handler.listener_streams()) {
+        if (stream.stream_id == sid) {
+            return stream.state;
+        }
+    }
+    return std::nullopt;
+}
+
+constexpr ieee::Eui64 STREAM_1{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x01};
+constexpr ieee::Eui64 STREAM_2{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x02};
+constexpr ieee::Eui48 GROUP{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+
 }  // namespace
+
+// IEEE 1722.1-2021 8.2.1.13: the group joined for a talker is its destination
+// when that is a multicast address; a unicast or zero destination has none.
+TEST(listener_connection, only_a_multicast_destination_is_a_group_to_join)
+{
+    EXPECT_FALSE(ListenerStreams::group_to_join(ieee::Eui48{}).has_value());
+    EXPECT_FALSE(ListenerStreams::group_to_join(ieee::Eui48{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x01}).has_value());
+    auto const group = ListenerStreams::group_to_join(GROUP);
+    EXPECT_TRUE(group.has_value());
+    EXPECT_EQ(group->to_uint64(), 0x91E0F0001234ULL);
+}
+
+// The disconnect works from what the slot recorded at connect time, not from
+// the ACMP state machine's copy of the stream, which it has cleared by the
+// time the hook runs: the declaration withdrawn is the one that was made.
+TEST(listener_connection, a_disconnect_withdraws_what_the_connect_declared)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+
+    // A SUCCESS whose destination is still zero: declared, nothing to join.
+    ls.on_listener_connected(0, STREAM_1, ieee::Eui48{}, sm::TimePoint{});
+    EXPECT_EQ(ls.slot_for(0)->connection.stream_id, STREAM_1);
+    EXPECT_FALSE(ls.slot_for(0)->connection.group.has_value());
+    auto const declared = srp_state_of(donor->components(), STREAM_1);
+    EXPECT_TRUE(declared.has_value());
+    EXPECT_TRUE(declared.has_value() && *declared != nanoavb::ListenerReservationState::Idle);
+
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    EXPECT_FALSE(ls.slot_for(0)->connection.stream_id.is_set());
+    auto const withdrawn = srp_state_of(donor->components(), STREAM_1);
+    EXPECT_TRUE(withdrawn.has_value() && *withdrawn == nanoavb::ListenerReservationState::Idle);
+}
+
+// One slot holds one connection: connecting it to another stream withdraws
+// the first declaration rather than leaving two standing.
+TEST(listener_connection, a_second_connect_replaces_the_first_declaration)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    ls.on_listener_connected(0, STREAM_2, GROUP, sm::TimePoint{});
+    EXPECT_EQ(ls.slot_for(0)->connection.stream_id, STREAM_2);
+    auto const first = srp_state_of(donor->components(), STREAM_1);
+    auto const second = srp_state_of(donor->components(), STREAM_2);
+    EXPECT_TRUE(first.has_value() && *first == nanoavb::ListenerReservationState::Idle);
+    EXPECT_TRUE(second.has_value() && *second != nanoavb::ListenerReservationState::Idle);
+    // No port in this test, so no group was joined -- the record says so
+    // rather than claiming a membership nothing holds.
+    EXPECT_FALSE(ls.slot_for(0)->connection.group.has_value());
+}
+
+// A slot contributes one attachment per stream it holds: the same CONNECT
+// repeated declares nothing more, so the one disconnect withdraws it all.
+TEST(listener_connection, the_same_stream_connected_twice_is_withdrawn_by_one_disconnect)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_EQ(ls.slot_for(0)->connection.stream_id, STREAM_1);
+    auto const held = srp_state_of(donor->components(), STREAM_1);
+    EXPECT_TRUE(held.has_value() && *held != nanoavb::ListenerReservationState::Idle);
+
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    auto const gone = srp_state_of(donor->components(), STREAM_1);
+    EXPECT_TRUE(gone.has_value() && *gone == nanoavb::ListenerReservationState::Idle);
+    EXPECT_FALSE(ls.slot_for(0)->connection.stream_id.is_set());
+}
+
+// A stream index with no RX slot is not one of our inputs: nothing is
+// declared for it and nothing joined, and no slot is invented.
+TEST(listener_connection, a_connect_for_an_index_without_a_slot_declares_nothing)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ls.on_listener_connected(7, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_FALSE(srp_state_of(donor->components(), STREAM_1).has_value());
+    EXPECT_EQ(ls.slot_for(7), nullptr);
+    ls.on_listener_disconnected(7, sm::TimePoint{});  // and nothing to undo
+}
 
 TEST(listener_consume, pending_binds_on_open_unknown_stays_inert)
 {

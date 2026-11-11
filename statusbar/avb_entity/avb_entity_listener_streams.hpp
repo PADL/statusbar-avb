@@ -55,9 +55,23 @@ namespace statusbar::avb_entity {
 /// (exactly one of am824/aaf engaged, per spec.format.kind), its data-plane
 /// telemetry, and its IEEE 1722.1 STREAM_INPUT health counters. Holds atomics,
 /// so slots are constructed in place and never moved.
+/// What a connected input holds on the network: the stream it declared to
+/// MSRP and the multicast group it joined, when the talker's destination was
+/// one. Recorded at CONNECT_RX and consumed at DISCONNECT_RX, so the leave
+/// and the withdrawal are of exactly what was joined and declared -- the
+/// ACMP state machine clears its own copy of the stream's identity before
+/// the disconnect hook runs.
+struct ListenerConnection
+{
+    ieee::Eui64 stream_id{};
+    std::optional<ieee::Eui48> group{};
+};
+
 struct ListenerStreamSlot
 {
     StreamSpec spec{};
+    /// The connection this input holds, empty while disconnected.
+    ListenerConnection connection{};
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
     std::optional<avtp::CrfStreamInputContext> crf{};
@@ -206,17 +220,43 @@ struct ListenerStreams
         -> bool;
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
-    /// and join the talker's stream multicast group on the RX socket. Wired as the
-    /// acmp_listener connect callback, told that handler's time. Reactor thread.
+    /// and join the talker's stream group on the RX socket -- when the
+    /// destination is a multicast address (IEEE 1722.1-2021 8.2.1.13); a
+    /// unicast or zero destination joins nothing. A slot contributes one
+    /// MSRP attachment per stream it holds and one membership per group: a
+    /// repeated connect of the same stream re-declares nothing, and of the
+    /// same group keeps the one membership. What was declared and joined is
+    /// recorded in the slot's ListenerConnection. Wired as the acmp_listener
+    /// connect callback, told that handler's time. Reactor thread.
     void on_listener_connected(uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, sm::TimePoint now);
 
     /// Our listener disconnected: withdraw the MSRP reservation and leave the
-    /// talker's multicast group. Wired as the acmp_listener disconnect callback,
-    /// told that handler's time.
+    /// group the slot's ListenerConnection records, not what the ACMP state
+    /// machine holds (cleared by then). Wired as the acmp_listener disconnect
+    /// callback, told that handler's time.
     void on_listener_disconnected(uint16_t stream_index, sm::TimePoint now);
+
+    /// The group a listener joins for a talker destination: the address when
+    /// it is multicast, nothing otherwise (8.2.1.13).
+    [[nodiscard]] static auto group_to_join(ieee::Eui48 dest_mac) noexcept -> std::optional<ieee::Eui48>;
 
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
+
+    /// Join @p group on the RX port; the group held on success, nothing
+    /// when there is no group, no port, or the join failed.
+    auto join_group(std::optional<ieee::Eui48> group) -> std::optional<ieee::Eui48>;
+    void leave_group(std::optional<ieee::Eui48> group);
+    /// Bring @p held to @p stream_id and @p group: one membership per slot,
+    /// the old declaration withdrawn when the stream changes.
+    void take_connection(
+        ListenerConnection& held, ieee::Eui64 const& stream_id, std::optional<ieee::Eui48> group, sm::TimePoint now);
+    void release_connection(ListenerConnection& held, sm::TimePoint now);
+    /// Declare @p stream_id to MSRP; true when the reservation is Ready.
+    auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
+    /// Whether the declaration already standing for @p stream_id is Ready.
+    [[nodiscard]] auto held_ready(ieee::Eui64 const& stream_id) const -> bool;
+    void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);
 
     /// Move a pending set_consume registration into its newly-opened slot.
     void bind_pending_consume(ListenerStreamSlot& slot);

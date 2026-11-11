@@ -567,47 +567,132 @@ auto ListenerStreams::fill_stream_input_counters(
     return true;
 }
 
-void ListenerStreams::on_listener_connected(
-    uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, sm::TimePoint const now)
-{  // NOLINT(statusbar-block-statements) the connect: declare, join, log; pre-dates the gate
+namespace {
+
+auto to_stream_id(ieee::Eui64 const& id) -> tsn::StreamId
+{
     tsn::StreamId sid{};
-    (void)statusbar::tsn::load_unchecked(stream_id.span(), &sid);
+    (void)statusbar::tsn::load_unchecked(id.span(), &sid);
+    return sid;
+}
+
+}  // namespace
+
+auto ListenerStreams::group_to_join(ieee::Eui48 const dest_mac) noexcept -> std::optional<ieee::Eui48>
+{
+    // IEEE 1722.1-2021 8.2.1.13: the listener joins stream_dest_mac when it
+    // is a multicast address. A unicast destination is delivered without a
+    // group, and a zero one (a talker that has none yet) is not a group
+    // either -- joining it put 00:00:00:00:00:00 in the NIC's table.
+    if (dest_mac.is_multicast()) {
+        return dest_mac;
+    }
+    return std::nullopt;
+}
+
+auto ListenerStreams::join_group(std::optional<ieee::Eui48> const group) -> std::optional<ieee::Eui48>
+{
+    if (!group.has_value() || port_ == nullptr) {
+        return std::nullopt;
+    }
+    StreamPort::Guard const guard{*port_};
+    if (!port_->port().join_multicast(*group).has_value()) {
+        return std::nullopt;
+    }
+    return group;
+}
+
+void ListenerStreams::leave_group(std::optional<ieee::Eui48> const group)
+{
+    if (!group.has_value() || port_ == nullptr) {
+        return;
+    }
+    StreamPort::Guard const guard{*port_};
+    (void)port_->port().leave_multicast(*group);
+}
+
+void ListenerStreams::take_connection(
+    ListenerConnection& held, ieee::Eui64 const& stream_id, std::optional<ieee::Eui48> const group, sm::TimePoint const now)
+{
+    // A stream this slot already declared and is leaving behind is withdrawn;
+    // the same stream again is one declaration (listener_attach is idempotent).
+    if (held.stream_id.is_set() && held.stream_id != stream_id) {
+        (void)components_.msrp_handler.listener_withdraw(to_stream_id(held.stream_id), now);
+    }
+    held.stream_id = stream_id;
+    // One membership per slot: the same group again is kept as it is, a
+    // different one replaces it, join and leave balanced either way.
+    if (held.group != group) {
+        leave_group(held.group);
+        held.group = join_group(group);
+    }
+}
+
+void ListenerStreams::release_connection(ListenerConnection& held, sm::TimePoint const now)
+{
+    if (held.stream_id.is_set()) {
+        (void)components_.msrp_handler.listener_withdraw(to_stream_id(held.stream_id), now);
+    }
+    // Release the talker's stream group so per-connection dest-MAC churn does
+    // not pile up stale NIC multicast filter entries.
+    leave_group(held.group);
+    held = ListenerConnection{};
+}
+
+void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 const dest_mac, bool const ready, bool const joined)
+{
+    if (!logger_) {
+        return;
+    }
+    logger_->status(
+        "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener {}, mcast join {}",
+        stream_index,
+        kind_lit(slot_for(stream_index)),
+        dest_mac.to_uint64(),
+        ready ? logging::lit("Ready") : logging::lit("AskingFailed (talker not advertising yet)"),
+        joined ? logging::lit("ok") : logging::lit("none"));
+}
+
+auto ListenerStreams::attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
+{
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered, AskingFailed until then (e.g. a fast-connect racing the
-    // talker's boot) — the handler upgrades to Ready when it appears.
-    auto const result = components_.msrp_handler.listener_attach(sid, now);
-    bool const ready = result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
-    // Join the talker's stream group so the NIC delivers its frames to us.
-    bool joined = false;
-    if (port_ != nullptr) {
-        StreamPort::Guard const guard{*port_};
-        joined = port_->port().join_multicast(dest_mac).has_value();
+    // talker's boot) -- the handler upgrades to Ready when it appears.
+    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now);
+    return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
+}
+
+auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
+{
+    auto const sid = to_stream_id(stream_id);
+    for (auto const& stream : components_.msrp_handler.listener_streams()) {
+        if (stream.stream_id == sid) {
+            return stream.state == nanoavb::ListenerReservationState::Ready;
+        }
     }
-    if (logger_) {
-        logger_->status(
-            "acmp: listener stream {} ({}) CONNECTED to talker dest={:012x} -> MSRP Listener {}, mcast join {}",
-            stream_index,
-            kind_lit(slot_for(stream_index)),
-            dest_mac.to_uint64(),
-            !result.has_value() ? logging::lit("declare FAILED")
-                : ready         ? logging::lit("Ready")
-                                : logging::lit("AskingFailed (talker not advertising yet)"),
-            joined ? logging::lit("ok") : logging::lit("FAILED"));
+    return false;
+}
+
+void ListenerStreams::on_listener_connected(
+    uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 const dest_mac, sm::TimePoint const now)
+{
+    auto* slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
+    // One attachment per stream a slot holds: a slot already on this stream
+    // re-declares nothing, so attach and withdraw stay one-for-one however
+    // many times a controller repeats the CONNECT.
+    bool const fresh = slot->connection.stream_id != stream_id;
+    bool const ready = fresh ? attach_ready(stream_id, now) : held_ready(stream_id);
+    take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
+    log_connected(stream_index, dest_mac, ready, slot->connection.group.has_value());
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
-    if (auto const* stream = components_.acmp_listener.get_stream(stream_index); stream != nullptr) {
-        tsn::StreamId sid{};
-        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &sid);
-        (void)components_.msrp_handler.listener_withdraw(sid, now);
-        // Release the talker's stream group so per-connection dest-MAC churn does
-        // not pile up stale NIC multicast filter entries.
-        if (port_ != nullptr) {
-            StreamPort::Guard const guard{*port_};
-            (void)port_->port().leave_multicast(stream->stream_dest_mac);
-        }
+    if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        release_connection(slot->connection, now);
     }
     if (logger_) {
         logger_->status(
