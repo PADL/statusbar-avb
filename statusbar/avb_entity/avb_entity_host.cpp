@@ -551,7 +551,15 @@ void AvbEntityHost::use_parent_grandmaster()
 void AvbEntityHost::note_parent_grandmaster(ieee::Eui64 const& grandmaster)
 {
     grandmaster_from_parent_ = true;
+    parent_names_none_ = false;
     note_grandmaster_in_force(grandmaster);
+    refresh_avb_info();
+}
+
+void AvbEntityHost::note_parent_names_no_grandmaster()
+{
+    grandmaster_from_parent_ = true;
+    parent_names_none_ = true;  // the one in force stays, for GPTP_GM_CHANGED's next comparison
     refresh_avb_info();
 }
 
@@ -569,7 +577,7 @@ void AvbEntityHost::note_grandmaster_in_force(ieee::Eui64 const& grandmaster)
 auto AvbEntityHost::reported_grandmaster() const -> ieee::Eui64
 {
     if (grandmaster_from_parent_) {
-        return grandmaster_in_force_.value_or(ieee::Eui64{});
+        return parent_names_none_ ? ieee::Eui64{} : grandmaster_in_force_.value_or(ieee::Eui64{});
     }
     if (announced_grandmaster_.has_value()) {
         return *announced_grandmaster_;
