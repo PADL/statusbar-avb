@@ -705,6 +705,10 @@ class AemCommandHandler
     /// A SET_NAME that took: the command echoed, and the subscribers notified.
     [[nodiscard]] auto applied_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
+    /// Apply a value change through the handler's hook and notify subscribers
+    /// on SUCCESS; the status. The body of apply_local_descriptor_value().
+    [[nodiscard]] auto apply_and_notify(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
+
     /// The response of a SET that did not take: @p status with failed_set_body().
     [[nodiscard]] auto refused_set(
         uint8_t status, uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -834,6 +838,16 @@ class AemCommandHandler
     /// Send a completed deferred command's final response (and its unsolicited
     /// notification on SUCCESS); see complete_pending_command() for the body.
     void answer_completed(PendingCommand const& done, uint8_t status, std::span<uint8_t const> response_body);
+
+    /// The body of that final response: what the application supplied, else
+    /// the command echoed on SUCCESS, else the value in force read into @p in_force.
+    [[nodiscard]] auto completion_body(
+        PendingCommand const& done, uint8_t status, std::span<uint8_t const> response_body, std::span<uint8_t> in_force)
+        -> std::span<uint8_t const>;
+
+    /// The controller whose command is being answered, for the unsolicited
+    /// fan-out to leave out under milan13; zero for a change nobody asked for.
+    Eui64 requester_{};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will

@@ -112,6 +112,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 {
     auto const cmd = header.command_code();
     current_header_ = header;
+    requester_ = header.controller_entity_id;
 
     switch (cmd) {
         case AEM_COMMAND_READ_DESCRIPTOR:
@@ -594,20 +595,31 @@ auto AemCommandHandler::complete_pending_command(
 
 void AemCommandHandler::answer_completed(PendingCommand const& done, uint8_t const status, std::span<uint8_t const> response_body)
 {
+    requester_ = done.header.controller_entity_id;
     auto const command_type = done.header.command_code();
-    auto const requested = std::span<uint8_t const>{done.body}.first(done.body_size);
-    // The application may say what the response carries. Otherwise a SET that
-    // succeeded echoes what was asked, and one that failed answers the value in
-    // force (7.4.9.1 and its siblings), read back now.
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
-    auto const body = !response_body.empty() ? response_body
-        : status == AEM_STATUS_SUCCESS
-        ? requested
-        : std::span<uint8_t const>{in_force}.first(failed_set_body(command_type, requested, in_force));
+    auto const body = completion_body(done, status, response_body, in_force);
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(command_type, body);
     }
+}
+
+auto AemCommandHandler::completion_body(
+    PendingCommand const& done, uint8_t const status, std::span<uint8_t const> response_body, std::span<uint8_t> in_force)
+    -> std::span<uint8_t const>
+{
+    // The application may say what the response carries. Otherwise a SET that
+    // succeeded echoes what was asked, and one that failed answers the value in
+    // force (7.4.9.1 and its siblings), read back now.
+    auto const requested = std::span<uint8_t const>{done.body}.first(done.body_size);
+    if (!response_body.empty()) {
+        return response_body;
+    }
+    if (status == AEM_STATUS_SUCCESS) {
+        return requested;
+    }
+    return std::span<uint8_t const>{in_force}.first(failed_set_body(done.header.command_code(), requested, in_force));
 }
 
 void AemCommandHandler::tick(sm::TimePoint const now)
@@ -1116,8 +1128,10 @@ auto AemCommandHandler::handle_acquire_entity(
 
     // 7.4.1.1: an entity shall support acquiring ENTITY and may support other
     // descriptor types; one that does not answers NOT_SUPPORTED. This entity is
-    // acquired whole or not at all, release included.
-    if (cmd.descriptor_type.get() != DESCRIPTOR_ENTITY) {
+    // acquired whole or not at all, release included. Under Milan v1.3 it is
+    // not acquired at all: 5.4.2.1 has a Milan entity answer NOT_SUPPORTED to
+    // every ACQUIRE_ENTITY, the lock being the one exclusive access it grants.
+    if (profile_ == Profile::milan13 || cmd.descriptor_type.get() != DESCRIPTOR_ENTITY) {
         return build_acquire_response(
             {.status = AEM_STATUS_NOT_SUPPORTED,
              .flags = cmd.flags,
@@ -1489,6 +1503,12 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
     }
 
     for (auto const& reg : unsolicited_registrations_) {
+        // Milan v1.3 5.4.5.3: every registered controller except the one whose
+        // command this is. (1722.1 7.5.2 says the same; the classic profile
+        // keeps sending it, as this entity always has, until told otherwise.)
+        if (profile_ == Profile::milan13 && reg.controller_entity_id == requester_) {
+            continue;
+        }
         send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, command_type, body);
     }
 
@@ -1517,15 +1537,25 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
 
 auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
 {
+    // Milan v1.3 5.3.4.1 and 5.4.2.17: while a controller holds the lock, the
+    // entity's state is not changed by non-ATDECC means either (a front panel,
+    // a software identify button).
+    if (profile_ == Profile::milan13 && locked_) {
+        return AEM_STATUS_ENTITY_LOCKED;
+    }
+    requester_ = {};  // nobody asked over ATDECC: every registered controller is told
+    return apply_and_notify(command_type, command_body);
+}
+
+auto AemCommandHandler::apply_and_notify(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
+{
     // Apply the change exactly as a controller's SET would (same symbol-keyed
     // hook), then fan out unsolicited notifications. This is the entry point for
     // an entity changing its own controls (e.g. a software IDENTIFY button).
     AemEntityModel aem_model{*handler_};
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
-    if (r.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(command_type, std::span<uint8_t const>{echo.data(), r.size});
-    }
+    notify_on_success(command_type, {.status = r.status, .size = r.size}, echo);
     return r.status;
 }
 

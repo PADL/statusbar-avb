@@ -2531,6 +2531,76 @@ TEST(nanoavb_entity_profile, milan13_leaves_a_set_to_the_value_in_force_unapplie
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
 }
 
+TEST(nanoavb_entity_profile, milan13_never_grants_an_acquisition)
+{
+    // Milan v1.3 5.4.2.1: ACQUIRE_ENTITY is answered NOT_SUPPORTED, never SUCCESS.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_profile(AemCommandHandler::Profile::milan13);
+    auto header = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    header.controller_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    std::array<uint8_t, 16> const body{};
+    EXPECT_EQ(make_test_result(handler, header, body).status, AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_FALSE(handler.is_acquired());
+}
+
+TEST(nanoavb_entity_profile, milan13_locked_entity_refuses_a_local_identify)
+{
+    // Milan v1.3 5.3.4.1 / 5.4.2.17: while locked, the identification state is
+    // not changed by non-ATDECC means either. Classic has no such rule.
+    for (auto const profile : {AemCommandHandler::Profile::classic, AemCommandHandler::Profile::milan13}) {
+        bool const milan = profile == AemCommandHandler::Profile::milan13;
+        SetAcceptingHandler app;
+        AemCommandHandler handler{app};
+        handler.set_profile(profile);
+        handler.set_identify_control_index(3);
+        auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+        lock.controller_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+        std::array<uint8_t, 16> const lock_body{};
+        EXPECT_EQ(make_test_result(handler, lock, lock_body).status, AEM_STATUS_SUCCESS);
+
+        EXPECT_EQ(handler.set_local_identify(true), milan ? AEM_STATUS_ENTITY_LOCKED : AEM_STATUS_SUCCESS);
+        EXPECT_EQ(app.set_count, milan ? 0 : 1);
+
+        // Unlocked, the local identify proceeds under either profile.
+        std::array<uint8_t, 16> unlock_body{};
+        unlock_body[3] = 0x01;  // UNLOCK
+        EXPECT_EQ(make_test_result(handler, lock, unlock_body).status, AEM_STATUS_SUCCESS);
+        EXPECT_EQ(handler.set_local_identify(false), AEM_STATUS_SUCCESS);
+    }
+}
+
+TEST(nanoavb_entity_profile, milan13_leaves_the_requesting_controller_out_of_the_fan_out)
+{
+    // Milan v1.3 5.4.5.3: the unsolicited notification goes to all registered
+    // controllers except the requesting one. Classic keeps sending it to all.
+    for (auto const profile : {AemCommandHandler::Profile::classic, AemCommandHandler::Profile::milan13}) {
+        bool const milan = profile == AemCommandHandler::Profile::milan13;
+        StoringControlHandler app;
+        AemCommandHandler handler{app};
+        handler.set_profile(profile);
+        handler.set_entity_id(kEntity);
+        std::vector<CapturedSend> sends;
+        capture_sends(handler, sends);
+        register_controller(handler, kEntity, kControllerA, kMacA);
+        register_controller(handler, kEntity, kControllerB, kMacB);
+        sends.clear();
+
+        std::array<uint8_t, 5> const changed{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0xFF};
+        inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, changed, 5);
+        EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacA), milan ? 0 : 1);
+
+        // A change nobody asked for over ATDECC reaches every registered controller.
+        sends.clear();
+        handler.set_identify_control_index(5);
+        EXPECT_EQ(handler.set_local_identify(true), AEM_STATUS_SUCCESS);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacA), 1);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+    }
+}
+
 //
 // GET_AVB_INFO (7.4.40) through the get_avb_info callback, and its
 // unsolicited notification (7.5.2).
