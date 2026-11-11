@@ -610,16 +610,16 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     kit.on_admission_timer(t0);
     EXPECT_TRUE(reports.empty());  // no change, no report
 
-    kit.note_listener_ready(aaf_sid, true, now_ns, t0);
+    kit.notify_listener_ready(aaf_sid, true, now_ns, t0);
     EXPECT_EQ(reports.size(), size_t{1});
     EXPECT_TRUE(reports.back() == V{0});
-    kit.note_listener_ready(crf_sid, true, now_ns, t0);
+    kit.notify_listener_ready(crf_sid, true, now_ns, t0);
     EXPECT_TRUE(reports.back() == (V{0, 1}));
     EXPECT_EQ(reports.size(), size_t{2});
 
     // AAF's Ready withdrawn: still admitted through the grace window (no report), its end the
     // deadline armed; the timer at it reports the drop -- no MSRP event needed.
-    kit.note_listener_ready(aaf_sid, false, now_ns, t0 + nanoseconds{10});
+    kit.notify_listener_ready(aaf_sid, false, now_ns, t0 + nanoseconds{10});
     EXPECT_EQ(reports.size(), size_t{2});
     EXPECT_TRUE(kit.admission_deadline() == t0 + nanoseconds{10} + grace);
     kit.on_admission_timer(t0 + nanoseconds{10} + grace - nanoseconds{1});
@@ -632,7 +632,7 @@ TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
     EXPECT_EQ(reports.size(), size_t{3});
 
     // Re-registered: back in.
-    kit.note_listener_ready(aaf_sid, true, now_ns, t0 + 11 * grace);
+    kit.notify_listener_ready(aaf_sid, true, now_ns, t0 + 11 * grace);
     EXPECT_TRUE(reports.back() == (V{0, 1}));
     EXPECT_EQ(reports.size(), size_t{4});
     kit.set_on_admission_changed({});
@@ -1054,7 +1054,7 @@ TEST(avb_entity_kit_milan_talker, probe_or_connect_before_maap_gets_dest_mac_fai
             auto const* s = talker.get_stream(idx);
             (void)talker.configure_stream(idx, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
         }
-        m.kit.note_talker_addresses(false, now);
+        m.kit.notify_talker_addresses(false, now);
         EXPECT_FALSE(m.advertising(0));
 
         auto const& refused = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
@@ -1069,7 +1069,7 @@ TEST(avb_entity_kit_milan_talker, probe_or_connect_before_maap_gets_dest_mac_fai
         // MAAP defends the block: the stream's address, then the callback.
         auto const* s0 = talker.get_stream(0);
         (void)talker.configure_stream(0, s0->stream_id, maap_mac, s0->stream_vlan_id);
-        m.kit.note_talker_addresses(true, now + 1);
+        m.kit.notify_talker_addresses(true, now + 1);
         auto const& accepted = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
         EXPECT_EQ(accepted.status(), atdecc::ACMP_STATUS_SUCCESS);
         EXPECT_EQ(accepted.stream_dest_mac, maap_mac);
@@ -1090,13 +1090,13 @@ TEST(avb_entity_kit_milan_talker, no_gate_for_an_undeclared_stream)
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
     int64_t const now = MilanKit::steady_ns();
     auto const raw = MilanKit::raw_now();
-    m.kit.note_listener_ready(m.sid(0), true, now, raw);
+    m.kit.notify_listener_ready(m.sid(0), true, now, raw);
     EXPECT_TRUE(m.kit.admitted_talker_streams(raw).size() == 1);
     // A MAAP conflict withdraws it; the Listener's next registration event
     // must not reopen the gate.
-    m.kit.note_talker_addresses(false, now + 1);
+    m.kit.notify_talker_addresses(false, now + 1);
     EXPECT_FALSE(m.advertising(0));
-    m.kit.note_listener_ready(m.sid(0), true, now + 2, raw + std::chrono::nanoseconds{2});
+    m.kit.notify_listener_ready(m.sid(0), true, now + 2, raw + std::chrono::nanoseconds{2});
     EXPECT_TRUE(m.kit.admitted_talker_streams(raw + std::chrono::nanoseconds{2}).empty());
 }
 
@@ -1311,7 +1311,7 @@ TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)
     MilanKit m{std::nullopt, 0x1A};
     EXPECT_TRUE(m.start_ready());
     (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
-    m.kit.note_listener_ready(m.sid(0), true, MilanKit::steady_ns(), MilanKit::raw_now());
+    m.kit.notify_listener_ready(m.sid(0), true, MilanKit::steady_ns(), MilanKit::raw_now());
     EXPECT_TRUE(m.advertising(0));
     EXPECT_FALSE(m.kit.admitted_talker_streams().empty());
 
@@ -3412,8 +3412,8 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     trace.push_back(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0002ULL));
     handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
         .grandmaster_id_changed =
-            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(gm); },
-        .path_trace_changed = [&m](int64_t) { m.kit.note_as_path_changed(); }});
+            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.notify_grandmaster_changed(gm); },
+        .path_trace_changed = [&m](int64_t) { m.kit.notify_as_path_changed(); }});
     handlers->gptp_handler().observe_announce(MilanKit::steady_ns(), announce, trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);
@@ -3438,8 +3438,8 @@ TEST(avb_entity_kit_counters, gptp_gm_changed_follows_the_grandmaster_in_force)
     auto& announces = m.kit.host().net_handlers()->gptp_handler();
     announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{
         .grandmaster_id_changed =
-            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.note_grandmaster_changed(gm); },
-        .grandmaster_lost = [&m](int64_t) { m.kit.note_grandmaster_lost(); }});
+            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.notify_grandmaster_changed(gm); },
+        .grandmaster_lost = [&m](int64_t) { m.kit.notify_grandmaster_lost(); }});
     gptp::AnnounceMessage announce{};
     announce.init();
     announce.header.log_message_interval = 0;  // 1 s: lost after 3 s
@@ -4563,15 +4563,15 @@ TEST(avb_entity_kit_clock_source, clock_domain_counters_follow_the_host_lock)
     m.aem.clear();
     EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1).counters_valid.get(), 0U);  // not driven yet
 
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, false));  // already unlocked: no transition
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, false));  // already unlocked: no transition
     auto c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1);
     EXPECT_EQ(c.counters_valid.get(), 0x3U);
     EXPECT_EQ(c.counters[0].get(), 0U);
     EXPECT_EQ(c.counters[1].get(), 0U);
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, false));
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, false));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, true));
     c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1);
     EXPECT_EQ(c.counters[0].get(), 2U);  // LOCKED
     EXPECT_EQ(c.counters[1].get(), 1U);  // UNLOCKED
@@ -4579,12 +4579,12 @@ TEST(avb_entity_kit_clock_source, clock_domain_counters_follow_the_host_lock)
 
     // Domain 0 is the entity's from its first report.
     auto const before = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(0, false));
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(0, true));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(0, false));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(0, true));
     auto const after = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
     EXPECT_EQ(after.counters[0].get(), before.counters[0].get() + 1);
     EXPECT_TRUE(after.counters[1].get() >= before.counters[1].get());
-    EXPECT_FALSE(m.kit.note_clock_domain_locked(2, true));
+    EXPECT_FALSE(m.kit.notify_clock_domain_locked(2, true));
 }
 
 // Released, CLOCK_DOMAIN 0 follows gPTP again from its lock as it is now; another domain counts as
@@ -4596,7 +4596,7 @@ TEST(avb_entity_kit_clock_source, a_released_clock_domain_hands_its_counters_bac
     EXPECT_TRUE(m.start_ready());
     EXPECT_TRUE(m.kit.host().gptp_locked());
     auto const start = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0);
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(0, false));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(0, false));
     m.kit.on_link_down(sm::Clock::now());  // the entity's domain 0: gPTP's loss does not count
     m.kit.on_link_up(sm::Clock::now());
     m.kit.on_gptp_announce(sm::Clock::now(), true);
@@ -4615,11 +4615,11 @@ TEST(avb_entity_kit_clock_source, a_released_clock_domain_hands_its_counters_bac
     EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 0).counters[1].get(), start.counters[1].get() + 2);
 
     // Domain 1 released while locked counts UNLOCKED, so its next lock counts again.
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, true));
     EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1).counters_valid.get(), 0x3U);
     EXPECT_TRUE(m.kit.release_clock_domain_lock(1));
     EXPECT_EQ(counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1).counters_valid.get(), 0U);
-    EXPECT_TRUE(m.kit.note_clock_domain_locked(1, true));
+    EXPECT_TRUE(m.kit.notify_clock_domain_locked(1, true));
     c = counters_of(m, DESCRIPTOR_CLOCK_DOMAIN, 1);
     EXPECT_EQ(c.counters[0].get(), 2U);
     EXPECT_EQ(c.counters[1].get(), 1U);

@@ -63,11 +63,11 @@ struct TalkerGate
 
     /// Reactor thread: our Talker declarations were withdrawn. Every stream closes at once (no
     /// grace) and forgets its listener state until note_listener_ready re-learns it.
-    void note_talker_withdrawn() noexcept;
+    void notify_talker_withdrawn() noexcept;
     /// Reactor thread: stream @p idx's Talker Advertise alone was withdrawn (a
     /// Milan talker's declaration window closed, or MAAP lost its address):
     /// that stream closes at once, as above.
-    void note_talker_withdrawn(uint16_t idx) noexcept;
+    void notify_talker_withdrawn(uint16_t idx) noexcept;
 
     /// Any thread: mark talker stream @p idx Started (@p started true) or Stopped.
     /// Stopped suppresses transmit without tearing down the reservation.
@@ -113,7 +113,7 @@ struct TalkerGate
     /// note_listener_ready (reactor, after the stamp, release), read by admitted (acquire).
     std::array<std::atomic<bool>, STREAM_COUNT> listener_ready_{};
     /// The RAW instant (ns) each stream's listener declaration was last known registered
-    /// (0 = never, or forgotten by note_talker_withdrawn); the gate stays open for the grace past it.
+    /// (0 = never, or forgotten by notify_talker_withdrawn); the gate stays open for the grace past it.
     std::array<std::atomic<int64_t>, STREAM_COUNT> ready_raw_ns_{};
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even with Listener Ready registered.

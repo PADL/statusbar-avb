@@ -150,7 +150,7 @@ auto bound_response(AcmpCommandResponse const& cmd, MilanSink const& s) noexcept
 
 /// What sink @p s keeps of each ENTITY_AVAILABLE @p adp of its talker (Section 5.6.4.5), valid until
 /// @p valid_until; the interface_index is the one it was discovered on (adp_not_discovered).
-void note_adp(MilanSink& s, AdpDu const& adp, sm::TimePoint const valid_until) noexcept
+void notify_adp(MilanSink& s, AdpDu const& adp, sm::TimePoint const valid_until) noexcept
 {
     s.available_index = adp.available_index.get();
     s.configuration_index = configuration_index_of(adp);
@@ -315,7 +315,7 @@ void MilanListener::rediscover(uint16_t const index, TimePoint const now)
     auto const known = talker_lookup_ ? talker_lookup_(s.binding.talker_entity_id) : std::nullopt;
     if (known && known->valid_until > now) {
         s.interface_index = known->adp.interface_index.get();
-        note_adp(s, known->adp, known->valid_until);
+        notify_adp(s, known->adp, known->valid_until);
         s.discovered = true;
     }
 }
@@ -579,7 +579,7 @@ void MilanListener::adp_not_discovered(
         return;
     }
     sinks_[index].interface_index = adp.interface_index.get();
-    note_adp(sinks_[index], adp, valid_until);
+    notify_adp(sinks_[index], adp, valid_until);
     discovered(index, now);
 }
 
@@ -601,7 +601,7 @@ void MilanListener::adp_discovered(
         }
         discovered(index, now);
     }
-    note_adp(s, adp, valid_until);
+    notify_adp(s, adp, valid_until);
 }
 
 auto MilanListener::talker_changed(MilanSink const& s, AdpDu const& adp) const noexcept -> bool

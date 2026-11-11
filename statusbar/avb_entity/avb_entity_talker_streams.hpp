@@ -209,13 +209,13 @@ struct TalkerStreams
     /// reads; an entity that never reports gPTP state never sets tu.
     static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
     /// A grandmaster was found or changed at steady-clock time @p now_ns.
-    void note_grandmaster_changed(int64_t const now_ns) noexcept
+    void notify_grandmaster_changed(int64_t const now_ns) noexcept
     {
         tu_until_ns_.store(now_ns + TU_AFTER_GM_CHANGE_NS, std::memory_order_relaxed);
         gptp_lost_.store(false, std::memory_order_relaxed);
     }
     /// No grandmaster is known (the Announces stopped).
-    void note_grandmaster_lost() noexcept { gptp_lost_.store(true, std::memory_order_relaxed); }
+    void notify_grandmaster_lost() noexcept { gptp_lost_.store(true, std::memory_order_relaxed); }
     /// Whether a PDU stamped at steady-clock time @p now_ns carries tu = 1.
     [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
     {

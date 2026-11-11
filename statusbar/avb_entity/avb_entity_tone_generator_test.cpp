@@ -358,7 +358,7 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
     EXPECT_TRUE(gate.admitted(k_aaf, t2 + later));
 
     // Our Talker withdrawn: closed at once, listener state forgotten.
-    gate.note_talker_withdrawn();
+    gate.notify_talker_withdrawn();
     EXPECT_FALSE(gate.admitted(k_aaf, t2 + later));
     EXPECT_FALSE(gate.grace_ends(k_aaf).has_value());
 

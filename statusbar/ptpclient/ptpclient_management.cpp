@@ -447,7 +447,7 @@ auto clock_synchronized(PtpManagementState const& state) noexcept -> bool
     return state.status == PtpManagementStatus::no_grandmaster && in(PortState::master) && !in(PortState::uncalibrated);
 }
 
-void PtpManagementClient::note_error(std::error_code const error)
+void PtpManagementClient::notify_error(std::error_code const error)
 {
     if (!state_.error) {
         state_.error = error;
@@ -461,12 +461,12 @@ void PtpManagementClient::handle(std::span<uint8_t const> const bytes, int64_t c
     if (!message || message->action != ManagementAction::response) {
         return;
     }
-    note_answer(*message, now_ns);
+    notify_answer(*message, now_ns);
     apply(*message, now_ns);
     publish_if_changed();
 }
 
-void PtpManagementClient::note_answer(ManagementMessage const& message, int64_t const now_ns)
+void PtpManagementClient::notify_answer(ManagementMessage const& message, int64_t const now_ns)
 {
     last_answer_ns_ = now_ns;
     server_gone_ = false;
@@ -525,20 +525,20 @@ void PtpManagementClient::apply_parent(ParentDataSet const& parent, gptp::ClockI
 void PtpManagementClient::apply_port_data_set(PortDataSet const& port_data)
 {
     if (uint16_t const number = port_data.port_identity.port_number.get(); number >= 1 && number <= MAX_PTP4L_PORTS) {
-        note_port_state(state_.port_states.at(number - 1U), port_data.port_state);
+        notify_port_state(state_.port_states.at(number - 1U), port_data.port_state);
     }
     if (state_.port != port_data.port_identity) {
         return;
     }
     if (state_.port_state && *state_.port_state != port_data.port_state) {
-        note_followed_port_state(port_data.port_state);
+        notify_followed_port_state(port_data.port_state);
     }
     state_.peer_mean_path_delay_ns = time_interval_ns(port_data.peer_mean_path_delay_scaled);
     state_.port_state = port_data.port_state;
     state_.delay_mechanism = port_data.delay_mechanism;
 }
 
-void PtpManagementClient::note_followed_port_state(PortState const now)
+void PtpManagementClient::notify_followed_port_state(PortState const now)
 {
     // linuxptp leaves asCapable as it was on a DISABLED or FAULTY port (port_disable): not asCapable
     // there (IEEE 802.1AS-2020 Clause 10.2.5.1). Any other change may reset it without a notification.
@@ -562,7 +562,7 @@ void PtpManagementClient::apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePort
     state_.peer_mean_path_delay_ns = time_interval_ns(cmlds.mean_link_delay_scaled);
 }
 
-void PtpManagementClient::note_port_state(std::optional<PortState>& held, PortState const now)
+void PtpManagementClient::notify_port_state(std::optional<PortState>& held, PortState const now)
 {
     // A linuxptp before 4.2 echoes the PARENT_DATA_SET notify bit without honouring it: a port's
     // state change asks for the parent, which a new grandmaster brings with it.
@@ -885,12 +885,12 @@ auto PtpManagementClient::send_as(
     if (length != 0 && ::sendto(fd_.get(), message.data(), length, 0, server_.sockaddr(), server_.length()) >= 0) {
         return success();
     }
-    return failure(note_send_error(length == 0 ? std::make_error_code(std::errc::message_size) : net::errno_code()));
+    return failure(notify_send_error(length == 0 ? std::make_error_code(std::errc::message_size) : net::errno_code()));
 }
 
-auto PtpManagementClient::note_send_error(std::error_code const error) -> std::error_code
+auto PtpManagementClient::notify_send_error(std::error_code const error) -> std::error_code
 {
-    note_error(error);
+    notify_error(error);
     server_gone_ = server_gone_ || server_gone(error);
     return error;
 }

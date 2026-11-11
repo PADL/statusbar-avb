@@ -572,7 +572,7 @@ auto dispatch_aecp(
             AecpDuCommon common{};
             span_load(common, payload.first(AecpDuCommon::LENGTH));
             if (common.target_entity_id == our_entity_id) {
-                aem.note_controller_command(common.controller_entity_id, src_mac);
+                aem.notify_controller_command(common.controller_entity_id, src_mac);
             }
         }
         return mvu.process_packet(src_mac, payload, our_entity_id, now);

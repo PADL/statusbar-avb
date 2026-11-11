@@ -51,7 +51,7 @@ auto PulseLock::pulse(int64_t const event_ns, int64_t const reference_ns, int64_
     // The reference read within a second after the edge: the sink is not whole seconds off, which a pulse
     // cannot show; a reactor late by under a second still finds it so.
     bool const same_second = reference_ns - second > -(SECOND_NS / 2) && reference_ns - second < SECOND_NS;
-    return note_pulse(same_second && magnitude(offset_ns_) <= params_.max_offset_ns);
+    return notify_pulse(same_second && magnitude(offset_ns_) <= params_.max_offset_ns);
 }
 
 auto PulseLock::expire(int64_t const local_ns) noexcept -> bool
@@ -59,10 +59,10 @@ auto PulseLock::expire(int64_t const local_ns) noexcept -> bool
     if (local_ns - last_pulse_ns_ < params_.max_silence_ns) {
         return false;
     }
-    return note_pulse(false);
+    return notify_pulse(false);
 }
 
-auto PulseLock::note_pulse(bool const good) noexcept -> bool
+auto PulseLock::notify_pulse(bool const good) noexcept -> bool
 {
     good_in_a_row_ = good ? std::min(good_in_a_row_ + 1, params_.settle_pulses) : 0;
     bool const locked = good && good_in_a_row_ >= params_.settle_pulses;
