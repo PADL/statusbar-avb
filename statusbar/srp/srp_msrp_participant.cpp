@@ -435,9 +435,42 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
     auto& rec = *rec_ptr;
     if (is_actively_declared(rec) && changes_the_attribute(rec.first_value, fv)) {
         change_declared_value(rec, fv, now);
+    } else if (is_actively_declared(rec) && fv.accumulated_latency.get() > rec.first_value.accumulated_latency.get()) {
+        return fail_talker_latency(rec, fv, now);
     } else {
         adopt_value(rec, fv, now);
     }
+    port_.timers().start_join(now);
+    return success();
+}
+
+/// IEEE 802.1Q 35.2.2.8.6: the latency a Talker Advertise reports "is not
+/// intended to increase during the life of the reservation. If some event
+/// occurs that would increase the latency beyond the original guarantee, MSRP
+/// will change the Talker Advertise to a Talker Failed and report Failure
+/// Code=7". The Advertise leaves and a Talker Failed carrying the new latency
+/// is declared in its place; an end station names no bridge in the failure.
+template <class Limits>
+auto MsrpParticipantT<Limits>::fail_talker_latency(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status
+{
+    rec.pending_first_value.reset();
+    mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
+    TalkerFailedFirstValue failed{};
+    failed.advertise = fv;
+    failed.failure_code = static_cast<uint8_t>(FailureCode::ReportedLatencyHasChanged);
+    return declare_new_talker_failed(failed, now);
+}
+
+/// A Talker Failed the port has not declared before, told New!.
+template <class Limits>
+auto MsrpParticipantT<Limits>::declare_new_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status
+{
+    auto* rec_ptr = find_or_create_talker_failed(fv.advertise.stream_id);
+    if (rec_ptr == nullptr) {
+        return failure(make_error_code(tsn::TsnError::attribute_table_full));
+    }
+    declare_new_value(*rec_ptr, fv, now);
     port_.timers().start_join(now);
     return success();
 }
@@ -1181,7 +1214,7 @@ void MsrpParticipantT<Limits>::drive_listener_rx(
     if (registrar_event == registrar_sm::Def::Event::Count) {
         return;
     }
-    mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
+    drive_registrar(rec, registrar_event, now);
     log_listener_rx(rec, before.state, decl, wire_event);
     notify_listener_rx(rec, before, decl);
 }

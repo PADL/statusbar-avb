@@ -1590,6 +1590,140 @@ TEST(msrp_participant, a_same_value_domain_redeclaration_sends_no_leave)
     }
 }
 
+namespace {
+
+/// One Talker Failed value as a PDU carried it: its unique_id, event,
+/// AccumulatedLatency and FailureCode.
+struct CarriedFailed
+{
+    uint16_t unique_id{0};
+    statusbar::srp::mrp::AttributeEvent event{};
+    uint32_t accumulated_latency{0};
+    uint8_t failure_code{0};
+};
+
+auto talker_failed_carried(std::span<uint8_t const> pdu) -> std::vector<CarriedFailed>
+{
+    std::vector<CarriedFailed> out{};
+    size_t p = pdu.empty() ? pdu.size() : 1;  // skip ProtocolVersion
+    while (p + 4 <= pdu.size() && pdu[p] != 0) {
+        uint8_t const attr_type = pdu[p];
+        uint8_t const attr_len = pdu[p + 1];
+        size_t const list_end = p + 4 + ((static_cast<size_t>(pdu[p + 2]) << 8) | pdu[p + 3]);
+        size_t vp = p + 4;
+        if (list_end > pdu.size()) {
+            break;
+        }
+        while (attr_type == static_cast<uint8_t>(AttributeType::TalkerFailed) && vp + 2 <= list_end) {
+            uint16_t const vh = (static_cast<uint16_t>(pdu[vp]) << 8) | pdu[vp + 1];
+            uint16_t const num_values = vh & 0x1FFF;
+            vp += 2;
+            if (vh == 0 || num_values == 0 || vp + attr_len > list_end) {
+                break;
+            }
+            auto const events = pdu.subspan(vp + attr_len, (static_cast<size_t>(num_values) + 2) / 3);
+            uint32_t const latency = (static_cast<uint32_t>(pdu[vp + 21]) << 24) | (static_cast<uint32_t>(pdu[vp + 22]) << 16) |
+                (static_cast<uint32_t>(pdu[vp + 23]) << 8) | pdu[vp + 24];
+            out.push_back(
+                {.unique_id = static_cast<uint16_t>((static_cast<uint16_t>(pdu[vp + 6]) << 8) | pdu[vp + 7]),
+                 .event = statusbar::srp::mrp::unpack3_events(events[0]).first,
+                 .accumulated_latency = latency,
+                 .failure_code = pdu[vp + 33]});
+            vp += attr_len + events.size();
+        }
+        p = list_end;
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(msrp_participant, a_talker_advertise_whose_latency_would_increase_becomes_a_talker_failed)
+{
+    // IEEE 802.1Q 35.2.2.8.6: the reported latency is not to increase during
+    // the life of the reservation; an increase turns the Advertise into a
+    // Talker Failed with Failure Code 7, Reported latency has changed.
+    MsrpParticipant a{test_msrp_config(), 0xf001};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto before = make_talker_adv(1);
+    before.accumulated_latency = 1'000'000;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(before, clock.now)));
+    a.transmit_pending(clock.now);
+    fab.a_to_b.clear();
+
+    // Less latency is a change in place: no Leave, no failure.
+    auto less = before;
+    less.accumulated_latency = 900'000;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(less, clock.now)));
+    a.transmit_pending(clock.now);
+    for (auto const& pdu : fab.a_to_b) {
+        EXPECT_TRUE(talker_failed_carried(pdu).empty());
+        for (auto const& carried : talker_advertise_carried(pdu)) {
+            EXPECT_TRUE(carried.event != AttributeEvent::Lv);
+        }
+    }
+    fab.a_to_b.clear();
+
+    // More latency: the Advertise leaves and a Talker Failed with code 7 and the
+    // new latency is declared.
+    auto more = before;
+    more.accumulated_latency = 2'000'000;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(more, clock.now)));
+    a.transmit_pending(clock.now);
+    bool advertise_left = false;
+    std::vector<CarriedFailed> failed{};
+    for (auto const& pdu : fab.a_to_b) {
+        for (auto const& carried : talker_advertise_carried(pdu)) {
+            advertise_left = advertise_left || carried.event == AttributeEvent::Lv;
+        }
+        auto const f = talker_failed_carried(pdu);
+        failed.insert(failed.end(), f.begin(), f.end());
+    }
+    EXPECT_TRUE(advertise_left);
+    EXPECT_EQ(failed.size(), 1u);
+    EXPECT_TRUE(!failed.empty() && failed.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!failed.empty() && failed.front().failure_code == 7);
+    EXPECT_TRUE(!failed.empty() && failed.front().accumulated_latency == 2'000'000U);
+    EXPECT_TRUE(a.find_talker_failed(make_stream_id(1)) != nullptr);
+}
+
+TEST(msrp_participant, instant_leave_retires_a_withdrawn_registration_on_arrival)
+{
+    // Milan v1.3 4.2.7.2.2: IN / rLv! goes straight to MT, so a peer's explicit
+    // withdrawal is seen when it arrives, not a LeaveTime later.
+    MsrpParticipant a{test_msrp_config(), 0xf003};
+    MsrpParticipant b{test_msrp_config(), 0xf004};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+    b.set_instant_leave(true);
+    std::vector<uint16_t> left{};
+    Observer obs{};
+    obs.on_talker_leave = [&](tsn::StreamId const& id) { left.push_back(id.get_unique_id()); };
+    b.subscribe(obs);
+
+    (void)a.declare_talker_advertise(make_talker_adv(0x0001), clock.now);
+    auto const t0 = clock.advance(std::chrono::milliseconds(150));
+    a.tick(t0);
+    fab.deliver_a_to_b(b, t0);
+    EXPECT_EQ(b.talker_advertise_count(), 1U);
+    EXPECT_TRUE(left.empty());
+
+    (void)a.withdraw_talker(make_stream_id(0x0001), clock.now);
+    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    a.tick(t1);
+    fab.deliver_a_to_b(b, t1);
+    // Told on arrival; the registration is gone without a leavetimer.
+    EXPECT_EQ(left.size(), 1U);
+    EXPECT_TRUE(!left.empty() && left.front() == 0x0001);
+}
+
 TEST(msrp_participant, a_same_value_redeclaration_sends_no_leave)
 {
     MsrpParticipant a{test_msrp_config(), 0xc002};
@@ -1615,14 +1749,18 @@ TEST(msrp_participant, a_same_value_redeclaration_sends_no_leave)
 // AccumulatedLatency is the one Talker Advertise field 35.2.2.8.6 lets move
 // in place: no Lv, the record takes the new latency at once, and the next
 // re-assertion simply carries it.
-TEST(msrp_participant, an_accumulated_latency_change_stays_in_place)
+TEST(msrp_participant, an_accumulated_latency_decrease_stays_in_place)
 {
+    // 35.2.2.8.6 lets AccumulatedLatency move in place; only an increase is a
+    // failure (see the latency test below), so a decrease is a plain re-join.
     MsrpParticipant a{test_msrp_config(), 0xc003};
     Fabric fab{};
     a.set_send_pdu(fab.make_a_sender());
     TestClock clock{};
     a.start(clock.now);
-    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    auto first = make_talker_adv(1);
+    first.accumulated_latency = 250'000;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(first, clock.now)));
     a.transmit_pending(clock.now);
     fab.a_to_b.clear();
 

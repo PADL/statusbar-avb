@@ -292,7 +292,10 @@ class MsrpParticipantT
     /// value is left (Lv!) first and the new one declared New! once that Lv
     /// has been encoded, so for one JoinTime find_talker_advertise() still
     /// answers the old value and talker_change_pending() is true. A change
-    /// to AccumulatedLatency alone stays in place (35.2.2.8.6).
+    /// to AccumulatedLatency alone stays in place when it is a decrease; an
+    /// increase turns the Advertise into a Talker Failed with Failure Code 7
+    /// (35.2.2.8.6: the reported latency is not to increase during the life
+    /// of the reservation).
     auto declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status;
 
     /// Whether a re-declared Talker Advertise for @p stream_id is still
@@ -302,6 +305,11 @@ class MsrpParticipantT
     /// Declare a Talker Failed attribute (used when a previously
     /// advertised talker cannot meet reservation requirements).
     auto declare_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status;
+
+    /// Milan v1.3 4.2.7.2.2: a Registrar in IN that receives Lv goes straight
+    /// to MT instead of waiting out the leavetimer. Off by default (IEEE
+    /// 802.1Q-2022 Table 10-4 as written).
+    void set_instant_leave(bool const on) noexcept { instant_leave_ = on; }
 
     /// Withdraw any Talker attribute (Advertise or Failed) matching
     /// `stream_id`. Fires Applicant Lv! event which drives the state
@@ -509,6 +517,9 @@ class MsrpParticipantT
     statusbar::sg14::inplace_vector<ListenerRecord, Limits::max_listeners> listeners_;
     statusbar::sg14::inplace_vector<AttributeRecord<DomainFirstValue>, Limits::max_domains> domains_;
 
+    /// Milan v1.3 4.2.7.2.2 instant leave (see set_instant_leave).
+    bool instant_leave_{false};
+
     //
     // --- Shared per-port state ---
     //
@@ -565,6 +576,11 @@ class MsrpParticipantT
     // Re-declaration with a changed value (see declare_talker_advertise and
     // declare_domain): the old value leaves first, the new one follows.
     //
+    /// 35.2.2.8.6: a Talker Advertise whose latency would increase becomes a
+    /// Talker Failed with Failure Code 7 (Reported latency has changed).
+    [[nodiscard]] auto fail_talker_latency(
+        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status;
+    [[nodiscard]] auto declare_new_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status;
     [[nodiscard]] static auto changes_the_attribute(
         TalkerAdvertiseFirstValue const& current, TalkerAdvertiseFirstValue const& next) noexcept -> bool;
     template <class FirstValue>
@@ -643,11 +659,24 @@ class MsrpParticipantT
         if (!interesting(fv)) {
             return;
         }
-        auto* rec_ptr = find_rec(fv);
-        if (rec_ptr == nullptr) {
-            return;  // peer attribute, table full -- silently drop
+        if (auto* rec_ptr = find_rec(fv); rec_ptr != nullptr) {  // table full: a peer attribute is silently dropped
+            settle_peer_rx(*rec_ptr, fv, applicant_event, registrar_event, now, notify_register, notify_leave);
         }
-        auto& rec = *rec_ptr;
+    }
+
+    /// The second half of handle_peer_attr_rx: the record takes the received
+    /// value or counts the conflict, both state machines run, and observers
+    /// are told what registered or left.
+    template <class Record, class FirstValue, class NotifyRegister, class NotifyLeave>
+    void settle_peer_rx(
+        Record& rec,
+        FirstValue const& fv,
+        applicant_sm::Def::Event applicant_event,
+        registrar_sm::Def::Event registrar_event,
+        TimePoint now,
+        NotifyRegister notify_register,
+        NotifyLeave notify_leave)
+    {
         bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
         // Adopt the received payload ONLY for a pure peer registration. If WE are
         // locally declaring this key, a peer declaring the same one is a conflict
@@ -662,12 +691,42 @@ class MsrpParticipantT
         if (registrar_event == registrar_sm::Def::Event::Count) {
             return;
         }
-        mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
+        drive_registrar(rec, registrar_event, now);
+        notify_peer_rx(rec, fv, was_registered, notify_register, notify_leave);
+    }
+
+    /// Observers hear what the wire said: the received value, which is the
+    /// record's own for a pure peer registration and the peer's conflicting
+    /// one otherwise (a Domain adopter needs the peer's); a Leave names the
+    /// value that was registered.
+    template <class Record, class FirstValue, class NotifyRegister, class NotifyLeave>
+    static void notify_peer_rx(
+        Record const& rec,
+        FirstValue const& fv,
+        bool const was_registered,
+        NotifyRegister notify_register,
+        NotifyLeave notify_leave)
+    {
         auto const n = rec.registrar_ctx.notify;
         if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
-            notify_register(rec.first_value);
+            notify_register(fv);
         } else if (n == registrar_sm::Notify::Leave && was_registered) {
             notify_leave(rec.first_value);
+        }
+    }
+
+    /// Dispatch a received event to a record's Registrar. With instant leave
+    /// on (Milan v1.3 4.2.7.2.2, set_instant_leave), IN / rLv! goes straight on
+    /// to MT instead of starting the leavetimer, so an explicit withdrawal is
+    /// seen the moment it arrives; everything else keeps 802.1Q Table 10-4.
+    template <class Record>
+    void drive_registrar(Record& rec, registrar_sm::Def::Event const event, TimePoint now)
+    {
+        mrp::dispatch_registrar(rec, event, now, port_.timers());
+        bool const left_in =
+            event == registrar_sm::Def::Event::RLeave && rec.registrar_sm.current_state() == registrar_sm::Def::State::Lv;
+        if (instant_leave_ && left_in) {
+            mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
         }
     }
 
