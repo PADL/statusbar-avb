@@ -128,6 +128,11 @@ class AvbEntityToneGenerator
     [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status { return kit_.stop(now); }
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
+    /// See AvbEntityKit::poll_timeout_ms.
+    [[nodiscard]] auto poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
+    {
+        return kit_.poll_timeout_ms(max_ms, now_ns);
+    }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
     [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;

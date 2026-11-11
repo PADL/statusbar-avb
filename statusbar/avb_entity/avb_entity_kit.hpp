@@ -109,6 +109,14 @@ class AvbEntityKit
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
+    /// How long the loop driving the reactor may wait this cycle: @p max_ms,
+    /// or less when a MAAP probe or announce falls due sooner, told the
+    /// reactor-clock @p now_ns the loop read. Reactor thread only.
+    [[nodiscard]] auto poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
+    {
+        return avtp::MaapHandler::poll_timeout_ms(maap_.next_deadline_ns(), now_ns, max_ms);
+    }
+
     // --- Media-thread (RT) calls ----------------------------------------------
     /// Whether talker stream @p idx should put its AVTP stream on the wire this
     /// tick (gating disabled, or a downstream listener is ready/connected), told

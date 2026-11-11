@@ -170,6 +170,11 @@ class AvbEntityAudioIO
 
     [[nodiscard]] auto is_running() const noexcept -> bool { return kit_.host().is_running(); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
+    /// See AvbEntityKit::poll_timeout_ms.
+    [[nodiscard]] auto poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
+    {
+        return kit_.poll_timeout_ms(max_ms, now_ns);
+    }
     [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;
     /// The listener RX path (its per-input counters and margin histograms), or nullptr.

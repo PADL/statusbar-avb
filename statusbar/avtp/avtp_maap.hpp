@@ -67,6 +67,12 @@ constexpr uint64_t MAAP_ANNOUNCE_INTERVAL_BASE_US = 30000000;
 /// Announce interval variation in microseconds (2s)
 constexpr uint64_t MAAP_ANNOUNCE_INTERVAL_VARIATION_US = 2000000;
 
+/// Room left under each interval's upper bound for the tick that serves the
+/// deadline (10 ms). B.3.4.1 and B.3.4.2 ask for BASE < T < BASE + VARIATION
+/// on the wire; a deadline drawn this far inside still lands a PDU inside
+/// after a tick that is this late.
+constexpr uint64_t MAAP_LATE_TICK_ALLOWANCE_US = 10000;
+
 //
 // MAAP Address Pools - IEEE 1722 Table B.4
 //

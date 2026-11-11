@@ -31,6 +31,7 @@
 #include "statusbar/sg14/inplace_function.h"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -89,8 +90,21 @@ class MaapHandler
     /// Release the current allocation and return to idle (stops defending/announcing).
     void release(int64_t now_ns);
 
-    /// Drive the probe/announce timers. Call frequently (e.g. every reactor tick).
+    /// Drive the probe/announce timers. Call at or soon after
+    /// next_deadline_ns(): a PDU goes out on the tick that finds its deadline
+    /// passed, and the deadlines are drawn so a tick up to
+    /// MAAP_LATE_TICK_ALLOWANCE_US late still lands it inside its window.
     void tick(int64_t now_ns);
+
+    /// When the next tick() has something to send: the nearer of the armed
+    /// probe and announce deadlines, in the caller's ns timebase, or nullopt
+    /// while neither timer runs.
+    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t>;
+
+    /// How long a poll loop may wait before a deadline: the whole of
+    /// @p max_ms when there is none or it is further off, else the time to it
+    /// rounded up to the millisecond, and 0 once it has passed.
+    [[nodiscard]] static auto poll_timeout_ms(std::optional<int64_t> deadline_ns, int64_t now_ns, int max_ms) noexcept -> int;
 
     /// Feed a received Ethernet MAAP frame from @p src_mac (AVTP payload, i.e.
     /// starting at the subtype octet).
@@ -118,6 +132,9 @@ class MaapHandler
     void pick_address() noexcept;  // generate_address callback body
     [[nodiscard]] auto probe_interval_ns() noexcept -> int64_t;
     [[nodiscard]] auto announce_interval_ns() noexcept -> int64_t;
+    /// A deadline strictly inside (BASE, BASE + VARIATION), with
+    /// MAAP_LATE_TICK_ALLOWANCE_US to spare under the top.
+    [[nodiscard]] auto interval_ns(uint64_t base_us, uint64_t variation_us) noexcept -> int64_t;
 
     /// True if [their_start, their_start+their_count) overlaps our current range.
     [[nodiscard]] auto overlaps(Eui48 const& their_start, uint16_t their_count) const noexcept -> bool;

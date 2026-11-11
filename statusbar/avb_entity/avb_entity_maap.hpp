@@ -137,6 +137,15 @@ class MaapAddressAcquirer
     /// defended; false while (re)acquiring.
     [[nodiscard]] auto ready() const noexcept -> bool { return ready_.load(std::memory_order_acquire); }
 
+    /// The MAAP handler's next probe or announce deadline (reactor ns
+    /// timebase), or nullopt without a handler or with its timers idle. For
+    /// the loop that drives the reactor: it bounds its poll timeout by this so
+    /// the PDU goes out inside its interval. Reactor thread only.
+    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t>
+    {
+        return handler_ ? handler_->next_deadline_ns() : std::nullopt;
+    }
+
   private:
     std::unique_ptr<avtp::MaapHandler> handler_;
     std::atomic<bool> ready_{true};

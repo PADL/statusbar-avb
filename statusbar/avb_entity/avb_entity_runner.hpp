@@ -17,7 +17,9 @@
 /// The Entity template parameter needs the kit entity surface:
 /// process_audio(TimePoint), on_link_up/down, on_gptp_announce,
 /// on_timeout, state_string, print_state, components(), net_handlers(),
-/// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors.
+/// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors, and
+/// optionally poll_timeout_ms(max_ms, now_ns), which bounds each reactor
+/// wait by the entity's next control-plane deadline (MAAP's, today).
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
@@ -277,6 +279,21 @@ struct EntityRunnerHooks
 /// SCHED_FIFO thread; link monitor, grandmaster edge-detect, Init
 /// timeout, log draining, TX-pcap flushing and telemetry on this thread.
 /// Returns when shutdown is requested (Ctrl-C).
+/// The longest the main loop waits in one reactor cycle.
+constexpr int REACTOR_POLL_MS = 100;
+
+/// @p max_ms, or the entity's own bound when it has one: a MAAP probe or
+/// announce due sooner than that must not wait for the whole period.
+template <typename Entity>
+[[nodiscard]] auto entity_poll_timeout_ms(Entity const& entity, int const max_ms) -> int
+{
+    if constexpr (requires { entity.poll_timeout_ms(max_ms, int64_t{}); }) {
+        return entity.poll_timeout_ms(max_ms, net::monotonic_ns());
+    } else {
+        return max_ms;
+    }
+}
+
 template <typename Entity>
 auto run_entity_main_loop(
     net::MessageReactor& reactor,
@@ -389,13 +406,14 @@ auto run_entity_main_loop(
     }
     entity.set_log_verbosity(tool.verbose ? logging::LogLevel::Debug : logging::LogLevel::Status);
 
-    while (!realtime::is_shutdown_requested()) {
+    // One reactor cycle: drain the logs, wait (no longer than the entity's
+    // next deadline), then the tool's own poll and any finished TX capture.
+    auto reactor_cycle = [&] {
         (void)log_collector.poll(log_sink);
-        (void)reactor.poll_once(100);
+        (void)reactor.poll_once(entity_poll_timeout_ms(entity, REACTOR_POLL_MS));
         if (hooks.poll) {
             hooks.poll();
         }
-
         // TX pcap capture finished (window elapsed / ring full): write the file
         // here, off the media RT thread.
         if (entity.tx_pcap_ready_to_write()) {
@@ -406,25 +424,27 @@ auto run_entity_main_loop(
                 std::print(stderr, "TX pcap: write failed: {}\n", wr.error().message());
             }
         }
+    };
 
+    // The entity's state this cycle, noting a change at @p now.
+    auto watch_state = [&](std::chrono::steady_clock::time_point const now) {
         auto const current_state = entity.state_string();
         if (current_state != last_state) {
             if (tool.verbose) {
                 std::print("State: {} -> {}\n", last_state, current_state);
             }
-            last_state_change_time = std::chrono::steady_clock::now();
+            last_state_change_time = now;
             last_state = current_state;
         }
+        return current_state;
+    };
 
-        auto const now = std::chrono::steady_clock::now();
-        auto const time_in_state = now - last_state_change_time;
-        auto const sm_now = TimePoint{now.time_since_epoch()};
-
-        // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
-        // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
-        // SM/MSRP stack is only ever driven from one thread. First-acquire is
-        // also handled promptly by the grandmaster_id_changed reactor callback;
-        // this poll additionally covers GM regained with an unchanged identity.
+    // Grandmaster edge-detect runs here on the reactor/main thread (NOT the
+    // SCHED_FIFO media-timer callback) so on_gptp_announce -> the non-atomic
+    // SM/MSRP stack is only ever driven from one thread. First-acquire is
+    // also handled promptly by the grandmaster_id_changed reactor callback;
+    // this poll additionally covers GM regained with an unchanged identity.
+    auto poll_grandmaster_edge = [&](TimePoint const sm_now) {
         if (net_handlers != nullptr) {
             bool const has_gm = net_handlers->gptp_handler().has_grandmaster();
             if (has_gm && !had_grandmaster) {
@@ -432,12 +452,9 @@ auto run_entity_main_loop(
             }
             had_grandmaster = has_gm;
         }
+    };
 
-        if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
-            entity.on_timeout(sm_now);
-            last_state_change_time = now;
-        }
-
+    auto print_telemetry = [&](std::chrono::steady_clock::time_point const now) {
         if (tool.verbose && ctx.bridge && now - last_telemetry_time >= std::chrono::seconds(1)) {
             last_telemetry_time = now;
             auto const bt = ctx.bridge->telemetry();
@@ -461,6 +478,18 @@ auto run_entity_main_loop(
                 hooks.extra_telemetry();
             }
         }
+    };
+
+    while (!realtime::is_shutdown_requested()) {
+        reactor_cycle();
+        auto const now = std::chrono::steady_clock::now();
+        auto const current_state = watch_state(now);
+        poll_grandmaster_edge(TimePoint{now.time_since_epoch()});
+        if (current_state == "Init" && now - last_state_change_time > GPTP_LOCK_TIMEOUT) {
+            entity.on_timeout(TimePoint{now.time_since_epoch()});
+            last_state_change_time = now;
+        }
+        print_telemetry(now);
     }
 
     // Final drain: flush log entries produced during shutdown.

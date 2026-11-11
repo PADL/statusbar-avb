@@ -258,6 +258,108 @@ TEST(maap_handler, ignores_our_own_echoed_frame)
     EXPECT_EQ(rig.handler.address(), addr);  // unchanged
 }
 
+namespace {
+
+constexpr int64_t US = 1'000;
+constexpr int64_t PROBE_BASE = static_cast<int64_t>(statusbar::avtp::MAAP_PROBE_INTERVAL_BASE_US) * US;
+constexpr int64_t PROBE_TOP = PROBE_BASE + static_cast<int64_t>(statusbar::avtp::MAAP_PROBE_INTERVAL_VARIATION_US) * US;
+constexpr int64_t ANNOUNCE_BASE = static_cast<int64_t>(statusbar::avtp::MAAP_ANNOUNCE_INTERVAL_BASE_US) * US;
+constexpr int64_t ANNOUNCE_TOP = ANNOUNCE_BASE + static_cast<int64_t>(statusbar::avtp::MAAP_ANNOUNCE_INTERVAL_VARIATION_US) * US;
+constexpr int64_t LATE_TICK = static_cast<int64_t>(statusbar::avtp::MAAP_LATE_TICK_ALLOWANCE_US) * US;
+constexpr int DRAWS = 8000;
+
+}  // namespace
+
+// B.3.4.1: every probe interval is strictly inside (BASE, BASE + VARIATION),
+// with room for a tick MAAP_LATE_TICK_ALLOWANCE_US late. acquire() arms the
+// probe timer with a fresh draw each time; the deadline is the draw.
+TEST(maap_handler, probe_intervals_are_drawn_strictly_inside_their_window)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, 7};
+    int inside = 0;
+    for (int k = 0; k < DRAWS; ++k) {
+        int64_t const now = static_cast<int64_t>(k + 1) * SEC;
+        rig.handler.release(now);
+        rig.handler.acquire(1, now);
+        auto const deadline = rig.handler.next_deadline_ns();
+        if (deadline && *deadline - now > PROBE_BASE && *deadline - now + LATE_TICK < PROBE_TOP) {
+            ++inside;
+        }
+    }
+    EXPECT_EQ(inside, DRAWS);
+}
+
+// B.3.4.2: the same for announce intervals. Once defending, each tick at the
+// deadline sends an ANNOUNCE and re-arms with a fresh draw.
+TEST(maap_handler, announce_intervals_are_drawn_strictly_inside_their_window)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x66}, 11};
+    rig.handler.acquire(1, SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    int64_t now = 100 * SEC;
+    rig.handler.tick(now);  // past whatever was armed on acquisition: from here each deadline is one draw
+    int inside = 0;
+    for (int k = 0; k < DRAWS; ++k) {
+        auto const deadline = rig.handler.next_deadline_ns();
+        if (deadline && *deadline - now > ANNOUNCE_BASE && *deadline - now + LATE_TICK < ANNOUNCE_TOP) {
+            ++inside;
+        }
+        now = deadline.value_or(now + ANNOUNCE_TOP);
+        rig.handler.tick(now);
+    }
+    EXPECT_EQ(inside, DRAWS);
+}
+
+// The tick that serves the deadline, even MAAP_LATE_TICK_ALLOWANCE_US late,
+// still puts the ANNOUNCE on the wire inside BASE + VARIATION of the one before.
+TEST(maap_handler, a_tick_at_the_deadline_sends_inside_the_window)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x77}, 5};
+    rig.handler.acquire(1, SEC);
+    rig.run_until_acquired();
+    int64_t const first = 100 * SEC;
+    rig.handler.tick(first);  // sends an ANNOUNCE now and arms the next
+    size_t const sent_before = rig.sent.size();
+    auto const deadline = rig.handler.next_deadline_ns();
+    EXPECT_TRUE(deadline.has_value());
+
+    rig.handler.tick(*deadline - 1);  // one ns early: nothing yet
+    EXPECT_EQ(rig.sent.size(), sent_before);
+    int64_t const late_tick = *deadline + LATE_TICK;
+    rig.handler.tick(late_tick);
+    EXPECT_EQ(rig.sent.size(), sent_before + 1);
+    EXPECT_TRUE(rig.sent.back().is_announce());
+    EXPECT_TRUE(late_tick - first > ANNOUNCE_BASE);
+    EXPECT_TRUE(late_tick - first < ANNOUNCE_TOP);
+}
+
+TEST(maap_handler, next_deadline_is_the_nearer_armed_timer_or_nothing)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x88}};
+    EXPECT_FALSE(rig.handler.next_deadline_ns().has_value());  // idle: nothing armed
+    rig.handler.acquire(1, SEC);
+    auto const probing = rig.handler.next_deadline_ns();
+    EXPECT_TRUE(probing.has_value());
+    EXPECT_TRUE(*probing > SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.next_deadline_ns().has_value());  // defending: the announce timer
+    rig.handler.release(200 * SEC);
+    EXPECT_FALSE(rig.handler.next_deadline_ns().has_value());
+}
+
+TEST(maap_handler, poll_timeout_is_bounded_by_the_deadline)
+{
+    constexpr int MAX = 100;
+    int64_t const now = 50 * SEC;
+    EXPECT_EQ(MaapHandler::poll_timeout_ms(std::nullopt, now, MAX), MAX);           // nothing armed: the whole period
+    EXPECT_EQ(MaapHandler::poll_timeout_ms(now + SEC, now, MAX), MAX);              // further off than the period
+    EXPECT_EQ(MaapHandler::poll_timeout_ms(now + 7 * 1'000'000, now, MAX), 7);      // 7 ms away: 7
+    EXPECT_EQ(MaapHandler::poll_timeout_ms(now + 7 * 1'000'000 + 1, now, MAX), 8);  // a hair more: rounded up
+    EXPECT_EQ(MaapHandler::poll_timeout_ms(now, now, MAX), 0);                      // due now
+    EXPECT_EQ(MaapHandler::poll_timeout_ms(now - SEC, now, MAX), 0);                // overdue
+}
+
 TEST(maap_handler, block_address_helper_offsets_within_block)
 {
     // A talker assigns block+0, +1, +2 to its streams from one acquired block.

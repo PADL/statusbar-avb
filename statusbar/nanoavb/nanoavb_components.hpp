@@ -198,8 +198,6 @@ class MsrpNetHandler : public net::Pollable
 class MaapNetHandler : public net::Pollable
 {
   public:
-    static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
-
     /// @param interface_name The network interface name
     /// @param handler Reference to the MAAP protocol handler (must outlive this)
     MaapNetHandler(std::string_view interface_name, avtp::MaapHandler& handler)
@@ -233,6 +231,11 @@ class MaapNetHandler : public net::Pollable
     }
 
     void tick(int64_t now_ns) override { handler_.tick(now_ns); }
+
+    /// The MaapHandler's next deadline: what the loop driving the reactor
+    /// bounds its poll timeout by, so the tick that sends a PDU is not up to
+    /// a whole poll period late.
+    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t> { return handler_.next_deadline_ns(); }
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 

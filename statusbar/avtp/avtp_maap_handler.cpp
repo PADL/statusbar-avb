@@ -127,6 +127,31 @@ void MaapHandler::tick(int64_t now_ns)
     }
 }
 
+auto MaapHandler::next_deadline_ns() const noexcept -> std::optional<int64_t>
+{
+    std::optional<int64_t> next{};
+    if (probe_timer_active_) {
+        next = probe_deadline_ns_;
+    }
+    if (announce_timer_active_ && (!next || announce_deadline_ns_ < *next)) {
+        next = announce_deadline_ns_;
+    }
+    return next;
+}
+
+auto MaapHandler::poll_timeout_ms(std::optional<int64_t> const deadline_ns, int64_t const now_ns, int const max_ms) noexcept -> int
+{
+    if (!deadline_ns) {
+        return max_ms;
+    }
+    int64_t const remaining_ns = *deadline_ns - now_ns;
+    if (remaining_ns <= 0) {
+        return 0;
+    }
+    int64_t const remaining_ms = (remaining_ns + 999'999) / 1'000'000;  // up, so a wait never ends short of it
+    return remaining_ms < max_ms ? static_cast<int>(remaining_ms) : max_ms;
+}
+
 void MaapHandler::receive(Eui48 const& src_mac, std::span<uint8_t const> frame, int64_t now_ns)
 {
     using S = maap_sm::Def::State;
@@ -219,18 +244,23 @@ void MaapHandler::pick_address() noexcept
 
 auto MaapHandler::probe_interval_ns() noexcept -> int64_t
 {
-    constexpr int64_t base = static_cast<int64_t>(MAAP_PROBE_INTERVAL_BASE_US) * 1000;
-    constexpr int64_t var = static_cast<int64_t>(MAAP_PROBE_INTERVAL_VARIATION_US) * 1000;
-    int64_t const jitter = static_cast<int64_t>(next_random() % static_cast<uint64_t>((2 * var) + 1)) - var;
-    return base + jitter;
+    return interval_ns(MAAP_PROBE_INTERVAL_BASE_US, MAAP_PROBE_INTERVAL_VARIATION_US);
 }
 
 auto MaapHandler::announce_interval_ns() noexcept -> int64_t
 {
-    constexpr int64_t base = static_cast<int64_t>(MAAP_ANNOUNCE_INTERVAL_BASE_US) * 1000;
-    constexpr int64_t var = static_cast<int64_t>(MAAP_ANNOUNCE_INTERVAL_VARIATION_US) * 1000;
-    int64_t const jitter = static_cast<int64_t>(next_random() % static_cast<uint64_t>((2 * var) + 1)) - var;
-    return base + jitter;
+    return interval_ns(MAAP_ANNOUNCE_INTERVAL_BASE_US, MAAP_ANNOUNCE_INTERVAL_VARIATION_US);
+}
+
+auto MaapHandler::interval_ns(uint64_t const base_us, uint64_t const variation_us) noexcept -> int64_t
+{
+    // B.3.4.1 / B.3.4.2: BASE < T < BASE + VARIATION, both ends open. The draw
+    // is uniform over [BASE + 1 us, BASE + VARIATION - ALLOWANCE - 1 us], so
+    // the PDU a late tick sends up to ALLOWANCE after the deadline is still
+    // inside the window.
+    uint64_t const room_us = variation_us - MAAP_LATE_TICK_ALLOWANCE_US - 1;
+    uint64_t const interval_us = base_us + 1 + (next_random() % room_us);
+    return static_cast<int64_t>(interval_us) * 1000;
 }
 
 auto MaapHandler::overlaps(Eui48 const& their_start, uint16_t their_count) const noexcept -> bool
