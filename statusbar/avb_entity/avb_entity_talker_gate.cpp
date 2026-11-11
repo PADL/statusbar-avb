@@ -83,14 +83,14 @@ void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const 
     note_listener_ready(stream_id, ready, net::rx_clock_now());
 }
 
-void TalkerGate::note_talker_withdrawn() noexcept
+void TalkerGate::notify_talker_withdrawn() noexcept
 {
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
-        note_talker_withdrawn(idx);
+        notify_talker_withdrawn(idx);
     }
 }
 
-void TalkerGate::note_talker_withdrawn(uint16_t const idx) noexcept
+void TalkerGate::notify_talker_withdrawn(uint16_t const idx) noexcept
 {
     if (idx < listener_ready_.size()) {
         ready_raw_ns_[idx].store(0, std::memory_order_relaxed);  // forgotten before the flag drops
