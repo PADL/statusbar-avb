@@ -314,8 +314,17 @@ class MsrpParticipantT
     /// Withdraw local Listener interest.
     auto withdraw_listener(tsn::StreamId const& stream_id, TimePoint now) -> Status;
 
-    /// Declare an SR class Domain.
+    /// Declare an SR class Domain. Re-declaring an SRclassID already on the
+    /// wire with another priority or VID is a different attribute (IEEE
+    /// 802.1Q-2022 Clause 10.7): the old value is left (Lv!) first and the new
+    /// one declared New! once that Lv has been encoded, so for one JoinTime
+    /// domain_change_pending() is true and the peer never registers both
+    /// values at once. A same-value re-declaration just joins again.
     auto declare_domain(DomainFirstValue const& fv, TimePoint now) -> Status;
+
+    /// Whether a re-declared Domain for @p sr_class_id is still waiting for
+    /// the Lv of its previous value to go out.
+    [[nodiscard]] auto domain_change_pending(uint8_t sr_class_id) const noexcept -> bool;
 
     /// Withdraw an SR class Domain by its sr_class_id.
     auto withdraw_domain(uint8_t sr_class_id, TimePoint now) -> Status;
@@ -553,19 +562,22 @@ class MsrpParticipantT
     // ============================================================
 
     //
-    // Talker Advertise re-declaration with a changed value (see
-    // declare_talker_advertise).
+    // Re-declaration with a changed value (see declare_talker_advertise and
+    // declare_domain): the old value leaves first, the new one follows.
     //
     [[nodiscard]] static auto changes_the_attribute(
         TalkerAdvertiseFirstValue const& current, TalkerAdvertiseFirstValue const& next) noexcept -> bool;
-    [[nodiscard]] static auto is_actively_declared(AttributeRecord<TalkerAdvertiseFirstValue> const& rec) noexcept -> bool;
-    static void declare_new_value(
-        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
-    static void adopt_talker_advertise(
-        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
-    static void change_talker_advertise(
-        AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now);
-    void complete_talker_changes(TimePoint now);
+    template <class FirstValue>
+    [[nodiscard]] static auto is_actively_declared(AttributeRecord<FirstValue> const& rec) noexcept -> bool;
+    template <class FirstValue>
+    static void declare_new_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
+    template <class FirstValue>
+    static void adopt_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
+    template <class FirstValue>
+    static void change_declared_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
+    template <class Table>
+    [[nodiscard]] static auto complete_value_changes(Table& table, TimePoint now) -> bool;
+    void complete_pending_changes(TimePoint now);
 
     //
     // Timer expiry handlers

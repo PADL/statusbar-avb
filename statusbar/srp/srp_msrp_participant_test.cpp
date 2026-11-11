@@ -1469,6 +1469,127 @@ TEST(msrp_participant, a_changed_talker_advertise_leaves_the_old_value_before_de
     EXPECT_EQ(a.talker_advertise_count(), 1u);
 }
 
+namespace {
+
+/// One Domain value as a PDU carried it.
+struct CarriedDomain
+{
+    uint8_t sr_class_id{0};
+    uint8_t sr_class_priority{0};
+    uint16_t sr_class_vid{0};
+    statusbar::srp::mrp::AttributeEvent event{};
+};
+
+// Walk a raw MSRPDU and collect every Domain value it carries, in wire order,
+// with the event the sender attached to it (the 4-octet FirstValue is
+// SRclassID, SRclassPriority, SRclassVID).
+auto domain_carried(std::span<uint8_t const> pdu) -> std::vector<CarriedDomain>
+{
+    std::vector<CarriedDomain> out{};
+    size_t p = pdu.empty() ? pdu.size() : 1;  // skip ProtocolVersion
+    while (p + 4 <= pdu.size() && pdu[p] != 0) {
+        uint8_t const attr_type = pdu[p];
+        uint8_t const attr_len = pdu[p + 1];
+        size_t const list_end = p + 4 + ((static_cast<size_t>(pdu[p + 2]) << 8) | pdu[p + 3]);
+        size_t vp = p + 4;
+        if (list_end > pdu.size()) {
+            break;
+        }
+        while (attr_type == static_cast<uint8_t>(AttributeType::Domain) && vp + 2 <= list_end) {
+            uint16_t const vh = (static_cast<uint16_t>(pdu[vp]) << 8) | pdu[vp + 1];
+            uint16_t const num_values = vh & 0x1FFF;
+            vp += 2;
+            if (vh == 0 || num_values == 0 || vp + attr_len > list_end) {
+                break;
+            }
+            auto const events = pdu.subspan(vp + attr_len, (static_cast<size_t>(num_values) + 2) / 3);
+            auto const unpacked = statusbar::srp::mrp::unpack3_events(events[0]);
+            out.push_back(
+                {.sr_class_id = pdu[vp],
+                 .sr_class_priority = pdu[vp + 1],
+                 .sr_class_vid = static_cast<uint16_t>((static_cast<uint16_t>(pdu[vp + 2]) << 8) | pdu[vp + 3]),
+                 .event = unpacked.first});
+            vp += attr_len + events.size();
+        }
+        p = list_end;
+    }
+    return out;
+}
+
+auto make_domain(uint8_t const priority, uint16_t const vid) -> DomainFirstValue
+{
+    DomainFirstValue fv{};
+    fv.sr_class_id = SR_CLASS_A;
+    fv.sr_class_priority = priority;
+    fv.sr_class_vid = vid;
+    return fv;
+}
+
+}  // namespace
+
+TEST(msrp_participant, a_changed_domain_leaves_the_old_value_before_declaring_the_new)
+{
+    // IEEE 802.1Q-2022 Clause 10.7: a Domain with another priority or VID under
+    // the same SRclassID is another attribute, so the old one leaves first and
+    // a peer never holds both at once.
+    MsrpParticipant a{test_msrp_config(), 0xd001};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+
+    EXPECT_TRUE(is_success(a.declare_domain(make_domain(3, 2), clock.now)));
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.declare_domain(make_domain(5, 5), clock.now)));
+    EXPECT_TRUE(a.domain_change_pending(SR_CLASS_A));
+    EXPECT_EQ(a.domain_count(), 1u);
+
+    // The next PDU carries the Lv, under the OLD value, and nothing else.
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    auto const lv = domain_carried(fab.a_to_b.front());
+    EXPECT_EQ(lv.size(), 1u);
+    EXPECT_EQ(lv.front().event, AttributeEvent::Lv);
+    EXPECT_EQ(lv.front().sr_class_priority, 3);
+    EXPECT_EQ(lv.front().sr_class_vid, 2);
+    fab.a_to_b.clear();
+    EXPECT_FALSE(a.domain_change_pending(SR_CLASS_A));
+
+    // Then the new value, New.
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    auto const anew = domain_carried(fab.a_to_b.front());
+    EXPECT_EQ(anew.size(), 1u);
+    EXPECT_EQ(anew.front().event, AttributeEvent::New);
+    EXPECT_EQ(anew.front().sr_class_priority, 5);
+    EXPECT_EQ(anew.front().sr_class_vid, 5);
+    EXPECT_EQ(a.domain_count(), 1u);
+}
+
+TEST(msrp_participant, a_same_value_domain_redeclaration_sends_no_leave)
+{
+    MsrpParticipant a{test_msrp_config(), 0xd002};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_TRUE(is_success(a.declare_domain(make_domain(3, 2), clock.now)));
+    a.transmit_pending(clock.now);
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.declare_domain(make_domain(3, 2), clock.now)));
+    EXPECT_FALSE(a.domain_change_pending(SR_CLASS_A));
+    a.transmit_pending(clock.now);
+    for (auto const& pdu : fab.a_to_b) {
+        for (auto const& carried : domain_carried(pdu)) {
+            EXPECT_TRUE(carried.event != AttributeEvent::Lv);
+        }
+    }
+}
+
 TEST(msrp_participant, a_same_value_redeclaration_sends_no_leave)
 {
     MsrpParticipant a{test_msrp_config(), 0xc002};

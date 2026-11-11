@@ -434,9 +434,9 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
     }
     auto& rec = *rec_ptr;
     if (is_actively_declared(rec) && changes_the_attribute(rec.first_value, fv)) {
-        change_talker_advertise(rec, fv, now);
+        change_declared_value(rec, fv, now);
     } else {
-        adopt_talker_advertise(rec, fv, now);
+        adopt_value(rec, fv, now);
     }
     port_.timers().start_join(now);
     return success();
@@ -470,7 +470,8 @@ auto MsrpParticipantT<Limits>::changes_the_attribute(
 /// has yet to leave (La). An observer or idle applicant has nothing of ours
 /// out there for a changed value to collide with.
 template <class Limits>
-auto MsrpParticipantT<Limits>::is_actively_declared(AttributeRecord<TalkerAdvertiseFirstValue> const& rec) noexcept -> bool
+template <class FirstValue>
+auto MsrpParticipantT<Limits>::is_actively_declared(AttributeRecord<FirstValue> const& rec) noexcept -> bool
 {
     using S = applicant_sm::Def::State;
     auto const s = rec.applicant_sm.current_state();
@@ -480,8 +481,8 @@ auto MsrpParticipantT<Limits>::is_actively_declared(AttributeRecord<TalkerAdvert
 
 /// The record takes @p fv as a value never declared before: New!.
 template <class Limits>
-void MsrpParticipantT<Limits>::declare_new_value(
-    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now)
+template <class FirstValue>
+void MsrpParticipantT<Limits>::declare_new_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now)
 {
     rec.first_value = fv;
     rec.operation = Operation::Declare;
@@ -489,12 +490,12 @@ void MsrpParticipantT<Limits>::declare_new_value(
     mrp::dispatch_applicant(rec, applicant_sm::Def::Event::New, now);
 }
 
-/// A first declaration, a same-value re-declaration or an AccumulatedLatency
-/// update: the value goes into the record in place and the applicant is
-/// told New! or Join! as first_declare_event decides.
+/// A first declaration, a same-value re-declaration or (for a Talker
+/// Advertise) an AccumulatedLatency update: the value goes into the record in
+/// place and the applicant is told New! or Join! as first_declare_event decides.
 template <class Limits>
-void MsrpParticipantT<Limits>::adopt_talker_advertise(
-    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now)
+template <class FirstValue>
+void MsrpParticipantT<Limits>::adopt_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now)
 {
     rec.first_value = fv;
     rec.operation = Operation::Declare;
@@ -502,14 +503,15 @@ void MsrpParticipantT<Limits>::adopt_talker_advertise(
     mrp::dispatch_applicant(rec, first_declare_event(rec), now);
 }
 
-/// A changed value under a declared StreamID: leave the old one first. When
-/// the applicant now owes an Lv (La), the new value waits on the record until
-/// that Lv has been encoded (complete_talker_changes); when it owed nothing
-/// (Vp/Ap/Qp went to Vo/Ao/Qo: our Join was never sent, or a LeaveAll already
-/// cleared it), the new value is declared at once.
+/// A changed value under a declared key (a Talker Advertise's StreamID, a
+/// Domain's SRclassID): leave the old one first. When the applicant now owes
+/// an Lv (La), the new value waits on the record until that Lv has been
+/// encoded (complete_pending_changes); when it owed nothing (Vp/Ap/Qp went to
+/// Vo/Ao/Qo: our Join was never sent, or a LeaveAll already cleared it), the
+/// new value is declared at once.
 template <class Limits>
-void MsrpParticipantT<Limits>::change_talker_advertise(
-    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now)
+template <class FirstValue>
+void MsrpParticipantT<Limits>::change_declared_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now)
 {
     mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
     if (rec.applicant_sm.current_state() == applicant_sm::Def::State::La) {
@@ -524,11 +526,13 @@ void MsrpParticipantT<Limits>::change_talker_advertise(
 /// skipped for space keeps the flag and waits) takes its pending value and
 /// declares it New!, to ride the next PDU. A LeaveAll of ours in between
 /// (La + txLA! is Lo, with no Lv owed) completes the change the same way.
+/// Returns whether any record did.
 template <class Limits>
-void MsrpParticipantT<Limits>::complete_talker_changes(TimePoint now)
+template <class Table>
+auto MsrpParticipantT<Limits>::complete_value_changes(Table& table, TimePoint now) -> bool
 {
     bool any = false;
-    for (auto& rec : talker_adv_) {
+    for (auto& rec : table) {
         bool const lv_still_owed = rec.applicant_ctx.tx_pending || rec.applicant_sm.current_state() == applicant_sm::Def::State::La;
         if (!rec.pending_first_value.has_value() || lv_still_owed) {
             continue;
@@ -536,7 +540,16 @@ void MsrpParticipantT<Limits>::complete_talker_changes(TimePoint now)
         declare_new_value(rec, *rec.pending_first_value, now);
         any = true;
     }
-    if (any) {
+    return any;
+}
+
+/// The changes a PDU's going out has settled, Talker Advertises and Domains alike.
+template <class Limits>
+void MsrpParticipantT<Limits>::complete_pending_changes(TimePoint now)
+{
+    bool const talkers = complete_value_changes(talker_adv_, now);
+    bool const domains = complete_value_changes(domains_, now);
+    if (talkers || domains) {
         port_.timers().start_join(now);
     }
 }
@@ -620,14 +633,27 @@ auto MsrpParticipantT<Limits>::declare_domain(DomainFirstValue const& fv, TimePo
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
+    // A Domain is identified by its SRclassID; another priority or VID under
+    // the same id is another attribute (10.7), left before it is declared.
     auto& rec = *rec_ptr;
-    rec.first_value = fv;
-    rec.operation = Operation::Declare;
-
-    auto const event = first_declare_event(rec);
-    mrp::dispatch_applicant(rec, event, now);
+    if (is_actively_declared(rec) && !(rec.first_value == fv)) {
+        change_declared_value(rec, fv, now);
+    } else {
+        adopt_value(rec, fv, now);
+    }
     port_.timers().start_join(now);
     return success();
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::domain_change_pending(uint8_t const sr_class_id) const noexcept -> bool
+{
+    for (auto const& rec : domains_) {
+        if (rec.first_value.sr_class_id.get() == sr_class_id) {
+            return rec.pending_first_value.has_value();
+        }
+    }
+    return false;
 }
 
 template <class Limits>
@@ -635,6 +661,7 @@ auto MsrpParticipantT<Limits>::withdraw_domain(uint8_t sr_class_id, TimePoint no
 {
     for (auto& rec : domains_) {
         if (rec.first_value.sr_class_id.get() == sr_class_id) {
+            rec.pending_first_value.reset();  // a withdrawal cancels a change in flight
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             port_.timers().start_join(now);
             return success();
@@ -1454,7 +1481,7 @@ template <class Limits>
 void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
 {
     encode_and_send_pdu(now, leave_all);
-    complete_talker_changes(now);
+    complete_pending_changes(now);
 }
 
 template <class Limits>
