@@ -476,6 +476,64 @@ TEST(nanoavb_srp_msrp, listener_withdraw_nonexistent)
     EXPECT_TRUE(result.has_value());
 }
 
+// Two inputs bound to one talker stream share one Listener declaration: the
+// first to unbind must not take it from the other.
+TEST(nanoavb_srp_msrp, two_inputs_on_one_stream_share_one_declaration)
+{
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}};
+    statusbar::tsn::StreamId stream_id;
+    stream_id.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    stream_id.set_unique_id(7);
+    TimePoint const now{std::chrono::seconds{1}};
+
+    EXPECT_TRUE(handler.listener_ready(stream_id, now).has_value());
+    EXPECT_TRUE(handler.listener_ready(stream_id, now).has_value());
+    EXPECT_EQ(handler.listener_streams().size(), 1);  // one record, two inputs
+    auto const* stored = handler.get_listener_stream(stream_id);
+    EXPECT_TRUE(stored != nullptr);
+    EXPECT_EQ(stored->attached, 2);
+    EXPECT_EQ(stored->state, ListenerReservationState::Ready);
+
+    // The first input goes: the declaration stays for the second.
+    EXPECT_TRUE(handler.listener_withdraw(stream_id, now).has_value());
+    EXPECT_EQ(stored->attached, 1);
+    EXPECT_EQ(stored->state, ListenerReservationState::Ready);
+
+    // The second goes: withdrawn.
+    EXPECT_TRUE(handler.listener_withdraw(stream_id, now).has_value());
+    EXPECT_EQ(stored->attached, 0);
+    EXPECT_EQ(stored->state, ListenerReservationState::Idle);
+
+    // One withdraw too many changes nothing and does not count below zero.
+    EXPECT_TRUE(handler.listener_withdraw(stream_id, now).has_value());
+    EXPECT_EQ(stored->attached, 0);
+    EXPECT_EQ(stored->state, ListenerReservationState::Idle);
+
+    // A new input attaches to the same stream and the declaration is back.
+    EXPECT_TRUE(handler.listener_asking_failed(stream_id, now).has_value());
+    EXPECT_EQ(stored->attached, 1);
+    EXPECT_EQ(stored->state, ListenerReservationState::AskingFailed);
+    EXPECT_EQ(handler.listener_streams().size(), 1);
+}
+
+// The end of a run withdraws every listener whatever its inputs.
+TEST(nanoavb_srp_msrp, withdraw_all_lets_every_input_go)
+{
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}};
+    statusbar::tsn::StreamId stream_id;
+    stream_id.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    stream_id.set_unique_id(8);
+    TimePoint const now{std::chrono::seconds{1}};
+
+    EXPECT_TRUE(handler.listener_ready(stream_id, now).has_value());
+    EXPECT_TRUE(handler.listener_ready(stream_id, now).has_value());
+    handler.withdraw_all(now);
+    auto const* stored = handler.get_listener_stream(stream_id);
+    EXPECT_TRUE(stored != nullptr);
+    EXPECT_EQ(stored->attached, 0);
+    EXPECT_EQ(stored->state, ListenerReservationState::Idle);
+}
+
 TEST(nanoavb_srp_msrp, multiple_streams)
 {
     MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}};

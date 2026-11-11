@@ -92,11 +92,15 @@ struct TalkerStreamSrpInfo
     Eui64 failure_bridge_id{};
 };
 
-/// Listener stream info for MSRP
+/// Listener stream info for MSRP: one record per talker stream this port
+/// listens to, however many of its inputs are bound to that stream.
 struct ListenerStreamSrpInfo
 {
     StreamId stream_id{};
     ListenerReservationState state = ListenerReservationState::Idle;
+    /// Inputs attached to the stream. The Listener declaration stands on the
+    /// wire while this is above zero and is withdrawn when the last goes.
+    uint16_t attached{0};
 };
 
 /// Domain info for MSRP
@@ -403,69 +407,50 @@ class MsrpHandler
         return nullptr;
     }
 
+    /// One more input attached to @p stream_id, declared Ready. A Listener
+    /// attribute is identified by its StreamID (IEEE 802.1Q 35.2.2.8), so a
+    /// port has one declaration per stream however many inputs are bound to
+    /// it: the record counts the inputs and the declaration follows the
+    /// count (see listener_withdraw). Returns the record's index.
     [[nodiscard]] auto listener_ready(StreamId const& stream_id, TimePoint now) -> StatusValue<size_t>
     {
-        size_t idx = 0;
-        bool found = false;
-        for (size_t i = 0; i < listener_streams_.size(); ++i) {
-            if (listener_streams_[i].stream_id == stream_id) {
-                listener_streams_[i].state = ListenerReservationState::Ready;
-                idx = i;
-                found = true;
-                break;
-            }
+        auto const idx = attach_listener_record(stream_id, ListenerReservationState::Ready);
+        if (!idx) {
+            return failure(idx.error());
         }
-        if (!found) {
-            // Reject rather than throw when the reservation table is full (reactor path).
-            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = ListenerReservationState::Ready}) == nullptr) {
-                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
-            }
-            idx = listener_streams_.size() - 1;
-        }
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
+        ensure_started(now);
         (void)participant_.declare_listener(stream_id, statusbar::srp::msrp::ListenerDeclaration::Ready, now);
-        return idx;
+        return *idx;
     }
 
+    /// One more input attached to @p stream_id, declared Asking Failed.
     [[nodiscard]] auto listener_asking_failed(StreamId const& stream_id, TimePoint now) -> Status
     {
-        bool found = false;
-        for (auto& stream : listener_streams_) {
-            if (stream.stream_id == stream_id) {
-                stream.state = ListenerReservationState::AskingFailed;
-                found = true;
-                break;
-            }
+        auto const idx = attach_listener_record(stream_id, ListenerReservationState::AskingFailed);
+        if (!idx) {
+            return failure(idx.error());
         }
-        if (!found) {
-            // Reject rather than throw when the reservation table is full (reactor path).
-            if (listener_streams_.try_push_back({.stream_id = stream_id, .state = ListenerReservationState::AskingFailed}) ==
-                nullptr) {
-                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
-            }
-        }
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
+        ensure_started(now);
         (void)participant_.declare_listener(stream_id, statusbar::srp::msrp::ListenerDeclaration::AskingFailed, now);
         return success();
     }
 
+    /// One input lets go of @p stream_id. The declaration is withdrawn from
+    /// the wire only when the last input attached to the stream has gone:
+    /// two inputs bound to one talker stream share one Listener declaration,
+    /// and the first to unbind must not take it from the other. A stream no
+    /// input is attached to is left as it is, and the call succeeds.
     [[nodiscard]] auto listener_withdraw(StreamId const& stream_id, TimePoint now) -> Status
     {
-        for (auto& stream : listener_streams_) {
-            if (stream.stream_id == stream_id) {
-                stream.state = ListenerReservationState::Idle;
-                (void)participant_.withdraw_listener(stream_id, now);
-                return success();
-            }
+        size_t const idx = listener_index(stream_id);
+        if (idx == listener_streams_.size() || listener_streams_[idx].attached == 0) {
+            return success();
         }
+        if (--listener_streams_[idx].attached > 0) {
+            return success();
+        }
+        listener_streams_[idx].state = ListenerReservationState::Idle;
+        (void)participant_.withdraw_listener(stream_id, now);
         return success();
     }
 
@@ -570,14 +555,53 @@ class MsrpHandler
         }
     }
 
-    /// Every listener that is attached, withdrawn (withdraw_all).
+    /// Every listener that is attached, withdrawn (withdraw_all), whatever
+    /// its inputs: the run is over for all of them.
     void withdraw_listeners(TimePoint now)
     {
         for (auto& stream : listener_streams_) {
             if (stream.state != ListenerReservationState::Idle) {
                 stream.state = ListenerReservationState::Idle;
+                stream.attached = 0;
                 (void)participant_.withdraw_listener(stream.stream_id, now);
             }
+        }
+    }
+
+    /// The index of @p stream_id's record, or listener_streams_.size().
+    [[nodiscard]] auto listener_index(StreamId const& stream_id) const noexcept -> size_t
+    {
+        for (size_t i = 0; i < listener_streams_.size(); ++i) {
+            if (listener_streams_[i].stream_id == stream_id) {
+                return i;
+            }
+        }
+        return listener_streams_.size();
+    }
+
+    /// The record for @p stream_id, made when there is none, put in @p state
+    /// with one more input attached. All inputs of one stream share its
+    /// state: Ready or Asking Failed is a fact about the talker's
+    /// registration, not about the input. Fails when the table is full.
+    [[nodiscard]] auto attach_listener_record(StreamId const& stream_id, ListenerReservationState state) -> StatusValue<size_t>
+    {
+        size_t const idx = listener_index(stream_id);
+        if (idx == listener_streams_.size() &&
+            listener_streams_.try_push_back({.stream_id = stream_id, .state = state}) == nullptr) {
+            // Reject rather than throw when the reservation table is full (reactor path).
+            return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
+        }
+        auto& record = listener_streams_[idx];
+        record.state = state;
+        ++record.attached;
+        return idx;
+    }
+
+    void ensure_started(TimePoint now)
+    {
+        if (!started_) {
+            participant_.start(now);
+            started_ = true;
         }
     }
 
