@@ -513,9 +513,8 @@ class AvbEntityHost
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
     std::optional<ieee::Eui64> grandmaster_in_force_{};   ///< for GPTP_GM_CHANGED; none before the first
     std::optional<ieee::Eui64> announced_grandmaster_{};  ///< the Announces' while one is known (note_grandmaster_*)
-    bool grandmaster_from_parent_{false};
-    bool parent_names_none_{
-        false};  ///< note_parent_names_no_grandmaster, until the next note_parent_grandmaster                 ///< note_parent_grandmaster has been told
+    bool grandmaster_from_parent_{false};                 ///< note_parent_grandmaster has been told
+    bool parent_names_none_{false};  ///< note_parent_names_no_grandmaster, until the next note_parent_grandmaster
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::optional<bool> port_as_capable_{};                   ///< see note_port_as_capable
