@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <memory>
 #include <span>
 #include <system_error>
 
@@ -626,6 +627,144 @@ TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
                      }}};
     idle.withdraw_all(now);
     EXPECT_EQ(idle_sent, 0U);
+}
+
+//
+// Sender lifetime: one trampoline to the callbacks in force
+//
+
+namespace {
+
+/// A MSRPDU carrying one Domain vector with the LeaveAll flag and no
+/// values: what a bridge sends to make everyone re-declare. The handler
+/// answers one synchronously (see MsrpParticipant::receive_pdu).
+constexpr std::array<uint8_t, 15> MSRP_LEAVEALL_PDU{
+    0x00,  // ProtocolVersion
+    0x04,
+    0x04,  // Domain, AttributeLength 4
+    0x00,
+    0x08,  // AttributeListLength: vector header + FirstValue + EndMark
+    0x20,
+    0x00,  // VectorHeader: LeaveAll, NumberOfValues 0
+    0x06,
+    0x03,
+    0x00,
+    0x02,  // FirstValue: class A, priority 3, VID 2
+    0x00,
+    0x00,  // EndMark (list)
+    0x00,
+    0x00,  // EndMark (PDU)
+};
+
+/// A counting sender whose count lives behind a shared_ptr, so a test can
+/// tell from a weak_ptr whether the handler still holds it.
+auto counting_sender(std::shared_ptr<size_t> const& count)
+{
+    return [count](std::span<uint8_t const>) {
+        ++*count;
+        return true;
+    };
+}
+
+}  // namespace
+
+TEST(nanoavb_srp_msrp, a_pdu_goes_to_the_sender_in_force_even_before_a_tick)
+{
+    auto const first = std::make_shared<size_t>(0);
+    auto const second = std::make_shared<size_t>(0);
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = counting_sender(first)}};
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(7);
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+
+    // A run on the first sender: declared, and sent at the join timer.
+    auto now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.declare_domain(now).has_value());
+    EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
+    now += std::chrono::milliseconds{150};
+    handler.tick(now);
+    EXPECT_TRUE(*first > 0);
+
+    // The network path is replaced (a restart) and, before any tick, the
+    // bridge's LeaveAll arrives: the re-declaration it asks for goes to the
+    // sender now in force, never to the one the last run had.
+    size_t const first_before = *first;
+    handler.set_callbacks(MsrpCallbacks{.send_packet = counting_sender(second)});
+    now += std::chrono::milliseconds{10};
+    handler.receive_packet(MSRP_LEAVEALL_PDU, now);
+    EXPECT_EQ(*first, first_before);
+    EXPECT_TRUE(*second > 0);
+}
+
+TEST(nanoavb_srp_msrp, a_dropped_sender_is_let_go_and_nothing_is_sent_after_it)
+{
+    auto count = std::make_shared<size_t>(0);
+    std::weak_ptr<size_t> const alive = count;
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = counting_sender(count)}};
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(8);
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+    auto now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.declare_domain(now).has_value());
+    EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
+    now += std::chrono::milliseconds{150};
+    handler.tick(now);
+    EXPECT_TRUE(*count > 0);
+
+    // Dropped: the handler holds no copy anywhere, so the test's own
+    // reference is the last and the count dies with it.
+    handler.drop_sender();
+    count.reset();
+    EXPECT_TRUE(alive.expired());
+
+    // What would have sent -- a LeaveAll's re-declaration, a Leave at the
+    // end of the run -- now has nowhere to go and goes nowhere.
+    now += std::chrono::milliseconds{10};
+    handler.receive_packet(MSRP_LEAVEALL_PDU, now);
+    handler.withdraw_all(now);
+    EXPECT_EQ(handler.get_talker_stream(sid)->state, TalkerReservationState::Idle);
+}
+
+TEST(nanoavb_srp_mvrp, a_pdu_goes_to_the_sender_in_force_even_before_a_tick)
+{
+    auto const first = std::make_shared<size_t>(0);
+    auto const second = std::make_shared<size_t>(0);
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = counting_sender(first)}};
+    auto now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.register_vlan(2, now).has_value());
+    now += std::chrono::milliseconds{150};
+    handler.tick(now);
+    EXPECT_TRUE(*first > 0);
+
+    // The path replaced and, with no tick in between, the run ends: the
+    // Leave goes to the sender in force.
+    size_t const first_before = *first;
+    handler.set_callbacks(MvrpCallbacks{.send_packet = counting_sender(second)});
+    handler.withdraw_all(now);
+    EXPECT_EQ(*first, first_before);
+    EXPECT_TRUE(*second > 0);
+}
+
+TEST(nanoavb_srp_mvrp, a_dropped_sender_is_let_go_and_nothing_is_sent_after_it)
+{
+    auto count = std::make_shared<size_t>(0);
+    std::weak_ptr<size_t> const alive = count;
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = counting_sender(count)}};
+    auto now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.register_vlan(2, now).has_value());
+    now += std::chrono::milliseconds{150};
+    handler.tick(now);
+    EXPECT_TRUE(*count > 0);
+
+    handler.drop_sender();
+    count.reset();
+    EXPECT_TRUE(alive.expired());
+    handler.withdraw_all(now);
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Unregistered);
 }
 
 //

@@ -147,7 +147,19 @@ class MvrpHandler
         // vlans_ is fixed-capacity (inplace_vector); nothing to reserve. The
         // participant_ ctor already validates config.max_vlans against the
         // compile-time limit (throws std::bad_alloc if it exceeds capacity).
+        //
+        // The participant sends through this handler, once and for good: every
+        // PDU goes to whatever send_packet is in force at that moment, so a
+        // callback replaced by set_callbacks() or cleared by drop_sender() is
+        // never outlived by a copy inside the participant. `this` is stable:
+        // the handler is neither copied nor moved (below).
+        participant_.set_send_pdu([this](std::span<uint8_t const> const packet) { return send(packet); });
     }
+    MvrpHandler(MvrpHandler const&) = delete;
+    MvrpHandler(MvrpHandler&&) = delete;
+    auto operator=(MvrpHandler const&) -> MvrpHandler& = delete;
+    auto operator=(MvrpHandler&&) -> MvrpHandler& = delete;
+    ~MvrpHandler() = default;
 
     /// Get the MVRP EtherType
     [[nodiscard]] static constexpr auto ethertype() noexcept -> uint16_t { return srp::MVRP_ETHERTYPE; }
@@ -159,6 +171,12 @@ class MvrpHandler
     /// This allows wiring up network handlers after both components are created
     /// @param callbacks The new callback interface
     void set_callbacks(MvrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
+
+    /// Forget the sender: nothing goes out until set_callbacks() installs
+    /// another. For the owner of the network path to call before it takes
+    /// that path away, so a Leave or re-declaration that falls due in
+    /// between has nowhere stale to go.
+    void drop_sender() noexcept { callbacks_.send_packet = {}; }
 
     /// Register a VLAN
     /// @param vlan_id The VLAN ID to register (1-4094)
@@ -191,6 +209,12 @@ class MvrpHandler
     [[nodiscard]] auto vlans() const noexcept -> std::span<VlanInfo const> { return vlans_; }
 
   private:
+    /// The one way a PDU leaves: through the send_packet in force now.
+    auto send(std::span<uint8_t const> const packet) -> bool
+    {
+        return callbacks_.send_packet ? callbacks_.send_packet(packet) : false;
+    }
+
     MvrpCallbacks callbacks_;
     // Fixed-capacity (no heap): VLAN count per endpoint is tiny in practice.
     // Capacity matches the wrapped MvrpParticipant's compile-time limit.
@@ -247,10 +271,15 @@ class MsrpHandler
         : callbacks_{std::move(callbacks)}
         , participant_{config}
     {
+        // The participant sends through this handler, once and for good: every
+        // PDU goes to whatever send_packet is in force at that moment, so a
+        // callback replaced by set_callbacks() or cleared by drop_sender() is
+        // never outlived by a copy inside the participant.
+        participant_.set_send_pdu([this](std::span<uint8_t const> const packet) { return send(packet); });
         // Observe remote listener declarations so we can tell a talker when a
         // listener becomes ready (or stops being ready) for one of its streams.
-        // Safe: MsrpHandler lives in the non-movable NanoAvbComponents, so
-        // `this` is stable for the lifetime of the captured observer.
+        // Safe: the handler is neither copied nor moved (below), so `this` is
+        // stable for the lifetime of the captured observer and sender.
         (void)participant_.subscribe(statusbar::srp::msrp::Observer{
             .on_talker_advertise =
                 [this](statusbar::srp::msrp::TalkerAdvertiseFirstValue const& fv, statusbar::srp::msrp::Operation op) {
@@ -273,10 +302,22 @@ class MsrpHandler
         });
     }
 
+    MsrpHandler(MsrpHandler const&) = delete;
+    MsrpHandler(MsrpHandler&&) = delete;
+    auto operator=(MsrpHandler const&) -> MsrpHandler& = delete;
+    auto operator=(MsrpHandler&&) -> MsrpHandler& = delete;
+    ~MsrpHandler() = default;
+
     [[nodiscard]] static constexpr auto ethertype() noexcept -> uint16_t { return srp::MSRP_ETHERTYPE; }
     [[nodiscard]] static constexpr auto multicast_address() noexcept -> uint64_t { return srp::MSRP_MULTICAST_ADDRESS; }
 
     void set_callbacks(MsrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
+
+    /// Forget the sender: nothing goes out until set_callbacks() installs
+    /// another. For the owner of the network path to call before it takes
+    /// that path away, so a Leave or re-declaration that falls due in
+    /// between has nowhere stale to go. The other hooks stay.
+    void drop_sender() noexcept { callbacks_.send_packet = {}; }
 
     /// Forward a reactor-thread logger to the MSRP participant (Debug-level
     /// MRP event diagnostics).
@@ -532,11 +573,6 @@ class MsrpHandler
             started_ = true;
         }
         last_event_time_ = now;
-        // Before the timers run, or the first join timer of a run builds
-        // its PDU with nowhere to send it.
-        if (callbacks_.send_packet) {
-            participant_.set_send_pdu(callbacks_.send_packet);
-        }
         participant_.tick(now);
     }
 
@@ -605,14 +641,14 @@ class MsrpHandler
         }
     }
 
-    /// What the applicants have pending, sent now through send_packet - which
-    /// tick() installs, but a run that ends before its first tick has not.
-    void transmit_now(TimePoint now)
+    /// What the applicants have pending, sent now through the send_packet in
+    /// force.
+    void transmit_now(TimePoint now) { participant_.transmit_pending(now); }
+
+    /// The one way a PDU leaves: through the send_packet in force now.
+    auto send(std::span<uint8_t const> const packet) -> bool
     {
-        if (callbacks_.send_packet) {
-            participant_.set_send_pdu(callbacks_.send_packet);
-        }
-        participant_.transmit_pending(now);
+        return callbacks_.send_packet ? callbacks_.send_packet(packet) : false;
     }
 
     /// Forward a listener register/leave for one of OUR talker streams to the
