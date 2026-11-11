@@ -13,8 +13,10 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <system_error>
+#include <vector>
 
 using namespace statusbar::nanoavb;
 using statusbar::ieee::Eui48;
@@ -550,6 +552,90 @@ TEST(nanoavb_srp_msrp, multiple_streams)
     }
 
     EXPECT_EQ(handler.talker_streams().size(), 4);
+}
+
+namespace {
+
+/// Two MSRP handlers on one wire, each told the other's PDUs.
+struct DomainWire
+{
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> bridge_out;
+    std::vector<std::vector<uint8_t>> device_out;
+    MsrpHandler<> bridge{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
+                             bridge_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+    MsrpHandler<> device{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
+                             device_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+
+    void run(int const rounds)
+    {
+        for (int round = 0; round < rounds; ++round) {
+            now += std::chrono::milliseconds{120};
+            bridge.tick(now);
+            device.tick(now);
+            for (auto const& p : bridge_out) {
+                device.receive_packet(p, now);
+            }
+            for (auto const& p : device_out) {
+                bridge.receive_packet(p, now);
+            }
+            bridge_out.clear();
+            device_out.clear();
+        }
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_srp_msrp, a_milan_handler_adopts_the_class_a_domain_registered_from_the_wire)
+{
+    // Milan v1.3 4.2.7.2.1: a Class A Domain received with other parameters
+    // replaces ours, is re-declared, and is reported with the receive time.
+    DomainWire wire;
+    wire.device.set_adopt_domain(true);
+    std::optional<DomainInfo> adopted{};
+    TimePoint adopted_at{};
+    wire.device.set_on_domain_adopted([&](DomainInfo const& d, TimePoint const at) {
+        adopted = d;
+        adopted_at = at;
+    });
+    wire.bridge.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    (void)wire.bridge.declare_domain(wire.now);
+    (void)wire.device.declare_domain(wire.now);  // ours: priority 3, VLAN 2
+    EXPECT_EQ(wire.device.domain().sr_class_priority, 3);
+    EXPECT_EQ(wire.device.domain().sr_class_vid, 2);
+
+    wire.run(6);
+    EXPECT_TRUE(adopted.has_value());
+    EXPECT_EQ(wire.device.domain().sr_class_priority, 5);
+    EXPECT_EQ(wire.device.domain().sr_class_vid, 5);
+    EXPECT_TRUE(adopted.has_value() && adopted->sr_class_priority == 5 && adopted->sr_class_vid == 5);
+    // Told the time of the receive that brought the peer's Domain, one of the rounds.
+    auto const since_start = std::chrono::duration_cast<std::chrono::milliseconds>(adopted_at - TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(since_start.count() > 0 && since_start.count() % 120 == 0);
+
+    // The same Domain again changes nothing more.
+    adopted.reset();
+    wire.run(6);
+    EXPECT_FALSE(adopted.has_value());
+}
+
+TEST(nanoavb_srp_msrp, a_classic_handler_keeps_its_own_domain)
+{
+    DomainWire wire;
+    bool adopted = false;
+    wire.device.set_on_domain_adopted([&](DomainInfo const&, TimePoint) { adopted = true; });
+    wire.bridge.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    (void)wire.bridge.declare_domain(wire.now);
+    (void)wire.device.declare_domain(wire.now);
+    wire.run(6);
+    EXPECT_FALSE(adopted);
+    EXPECT_EQ(wire.device.domain().sr_class_priority, 3);
+    EXPECT_EQ(wire.device.domain().sr_class_vid, 2);
 }
 
 TEST(nanoavb_srp_msrp, receive_short_packet)

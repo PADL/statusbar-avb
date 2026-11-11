@@ -203,6 +203,13 @@ class AvbEntityKit
     /// the ACMP listener connect/disconnect drive, and the AEM
     /// GET_COUNTERS / GET_STREAM_INFO fills.
     void wire_stream_callbacks();
+
+    /// The SRP handler adopted a Class A Domain from the wire (Milan v1.3
+    /// 4.2.7.2.1): move the stream frames, MVRP and GET_AVB_INFO to it.
+    void adopt_domain(nanoavb::DomainInfo const& domain, TimePoint now);
+
+    /// The VLAN the streams use now: the adopted one, else the configured one.
+    [[nodiscard]] auto current_vlan_id() const noexcept -> uint16_t;
     /// Let go of the data plane start() built: the RX handler kept for an RX
     /// timer, the talker's and the listener's slots, then the port. What the
     /// next start() opens is then the whole of it, as on a first start.
@@ -215,6 +222,8 @@ class AvbEntityKit
 
     AvbEntityAudioIOConfig const& config_;
     StreamSpecs talker_specs_;
+    /// The VLAN adopted from the wire (adopt_domain), 0 while it is the configured one.
+    uint16_t active_vlan_id_{0};
     StreamSpecs listener_specs_;
     uint32_t sample_rate_;
     /// The owning entity's blob-backed descriptor handler; carries the

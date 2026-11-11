@@ -89,6 +89,17 @@ struct TalkerStreams
         , mem_resource_{memory_resource}
     {}
 
+    /// Tag the stream frames with @p vlan_id and priority @p pcp from now on
+    /// (the SR class Domain adopted from the wire). Safe from the control
+    /// thread while the media thread transmits.
+    void set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
+    {
+        vlan_id_.store(vlan_id, std::memory_order_relaxed);
+        stream_pcp_.store(pcp, std::memory_order_relaxed);
+    }
+    [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
+    [[nodiscard]] auto stream_pcp() const noexcept -> uint8_t { return stream_pcp_.load(std::memory_order_relaxed); }
+
     /// TX pcap capture knobs for open_tx (see TxPcapRecorder). Empty path =
     /// capture disabled.
     struct TxPcapConfig
@@ -214,6 +225,11 @@ struct TalkerStreams
 
     // References / values (bound at construction).
     TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
+    /// The VLAN tag every stream frame carries: the configured one until
+    /// set_vlan() moves it (a Domain adopted from the wire, Milan 4.2.7.2.1).
+    /// Atomics: written from the control thread, read per frame on the media thread.
+    std::atomic<uint16_t> vlan_id_{config_.vlan_id};
+    std::atomic<uint8_t> stream_pcp_{config_.stream_pcp};
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
     std::pmr::memory_resource* mem_resource_;

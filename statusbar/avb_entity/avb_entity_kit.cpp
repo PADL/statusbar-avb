@@ -61,10 +61,16 @@ AvbEntityKit::AvbEntityKit(
     host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
-    // Where 1722.1 and Milan differ, the configured profile decides.
+    // Where 1722.1 and Milan differ, the configured profile decides: the AEM
+    // handler's answers, and on the SRP side the Class A Domain adopted from
+    // the wire (4.2.7.2.1) and the instant leave (4.2.7.2.2).
+    bool const milan = config_.atdecc_profile == "milan13";
     host_.components().aem_handler.set_profile(
-        config_.atdecc_profile == "milan13" ? nanoavb::AemCommandHandler::Profile::milan13
-                                            : nanoavb::AemCommandHandler::Profile::classic);
+        milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
+    host_.components().msrp_handler.set_adopt_domain(milan);
+    host_.components().msrp_handler.set_instant_leave(milan);
+    host_.components().msrp_handler.set_on_domain_adopted(
+        [this](DomainInfo const& domain, TimePoint const now) { adopt_domain(domain, now); });
 
     // Base the talker stream_ids on the NIC MAC (globally unique per box), and
     // seed the static dest MACs by kind (MAAP mode reassigns after acquisition).
@@ -157,6 +163,31 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
         }
     }
     return StreamKind::other;
+}
+
+void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
+{
+    // Milan v1.3 4.2.7.2.1: the Class A Domain registered from the wire has
+    // replaced ours and the SRP handler has re-declared it. The stream frames
+    // take the new VLAN and priority at once, MVRP follows the VLAN, and the
+    // registered controllers hear the new mapping (GET_AVB_INFO, Table 5.20).
+    // The talker advertisements pick the new values up on their next
+    // declaration pass, each leaving its old value first.
+    uint16_t const old_vlan = current_vlan_id();
+    if (domain.sr_class_vid != old_vlan) {
+        (void)host_.components().mvrp_handler.withdraw_vlan(old_vlan, now);
+        (void)host_.components().mvrp_handler.register_vlan(domain.sr_class_vid, now);
+    }
+    active_vlan_id_ = domain.sr_class_vid;
+    talker_->set_vlan(domain.sr_class_vid, domain.sr_class_priority);
+    (void)host_.components().aem_handler.notify_avb_info_changed(0);
+    host_.ctl_log().status(
+        "msrp: adopted the Class A domain from the wire: priority {} vlan {}", domain.sr_class_priority, domain.sr_class_vid);
+}
+
+auto AvbEntityKit::current_vlan_id() const noexcept -> uint16_t
+{
+    return active_vlan_id_ != 0 ? active_vlan_id_ : config_.vlan_id;
 }
 
 void AvbEntityKit::wire_stream_callbacks()

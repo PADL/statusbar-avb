@@ -256,6 +256,12 @@ struct MsrpCallbacks
     /// otherwise. Fires from receive_packet()/tick() on listener register/leave,
     /// told that call's time: the talker drives its own SM from it.
     statusbar::sg14::inplace_function<void(StreamId const& stream_id, bool ready, TimePoint now), 64> on_talker_listener;
+
+    /// Called when the handler adopted a Class A Domain registered from the
+    /// wire (Milan v1.3 4.2.7.2.1, see MsrpHandler::set_adopt_domain): the
+    /// Domain now declared, and the time of the receive_packet() that brought
+    /// the peer's. The entity takes the new VLAN and priority to its streams.
+    statusbar::sg14::inplace_function<void(DomainInfo const& domain, TimePoint now), 64> on_domain_adopted;
 };
 
 //
@@ -299,6 +305,10 @@ class MsrpHandler
                                statusbar::srp::msrp::ListenerDeclaration /*decl*/,
                                statusbar::srp::msrp::Operation /*op*/) { notify_talker_listener(sid); },
             .on_listener_leave = [this](tsn::StreamId const& sid) { notify_talker_listener(sid); },
+            .on_domain =
+                [this](statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation op) {
+                    on_remote_domain(fv, op);
+                },
         });
     }
 
@@ -329,6 +339,25 @@ class MsrpHandler
     {
         callbacks_.on_talker_listener = std::move(cb);
     }
+
+    /// Set just the on_domain_adopted hook without disturbing the others.
+    void set_on_domain_adopted(statusbar::sg14::inplace_function<void(DomainInfo const&, TimePoint), 64> cb)
+    {
+        callbacks_.on_domain_adopted = std::move(cb);
+    }
+
+    /// Milan v1.3 4.2.7.2.1: a PAAD declares Class A with priority 3 and VLAN 2
+    /// and, on receiving a Class A Domain with other parameters, "shall update
+    /// its parameters using the received FirstValue and start declaring a
+    /// matching MSRP Domain attribute". On, a registered Class A Domain that
+    /// differs from ours replaces our priority and VLAN (Class B follows the
+    /// VLAN), is re-declared (the old value leaves first) and is reported to
+    /// on_domain_adopted. Off by default: IEEE 802.1Q keeps our own.
+    void set_adopt_domain(bool const on) noexcept { adopt_domain_ = on; }
+
+    /// Milan v1.3 4.2.7.2.2 instant leave for every Registrar of this port
+    /// (see MsrpParticipant::set_instant_leave).
+    void set_instant_leave(bool const on) noexcept { participant_.set_instant_leave(on); }
 
     /// Diagnostic breakdown of why the talker gate is open/closed for a stream
     /// (record present? operation? registrar In? Ready substate?), for logging
@@ -424,18 +453,21 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
-        statusbar::srp::msrp::DomainFirstValue class_b{};
-        class_b.sr_class_id = statusbar::srp::msrp::SR_CLASS_B;  // 5
-        class_b.sr_class_priority = 2;
-        class_b.sr_class_vid = domain_.sr_class_vid;
-        (void)participant_.declare_domain(class_b, now);
-
-        statusbar::srp::msrp::DomainFirstValue class_a{};
-        class_a.sr_class_id = statusbar::srp::msrp::SR_CLASS_A;                       // 6
-        class_a.sr_class_priority = statusbar::srp::msrp::default_sr_class_priority;  // 3
-        class_a.sr_class_vid = domain_.sr_class_vid;
-        (void)participant_.declare_domain(class_a, now);
+        // Class B at its default priority 2; Class A at the domain's priority,
+        // 3 unless set_domain() or an adoption said otherwise; both on its VLAN.
+        declare_sr_class(statusbar::srp::msrp::SR_CLASS_B, 2, now);
+        declare_sr_class(statusbar::srp::msrp::SR_CLASS_A, domain_.sr_class_priority, now);
         return success();
+    }
+
+    /// Declare one SR class Domain on the handler's VLAN.
+    void declare_sr_class(uint8_t const sr_class_id, uint8_t const priority, TimePoint now)
+    {
+        statusbar::srp::msrp::DomainFirstValue fv{};
+        fv.sr_class_id = sr_class_id;
+        fv.sr_class_priority = priority;
+        fv.sr_class_vid = domain_.sr_class_vid;
+        (void)participant_.declare_domain(fv, now);
     }
 
     [[nodiscard]] auto get_talker_stream(StreamId const& stream_id) const noexcept -> TalkerStreamSrpInfo const*
@@ -667,6 +699,26 @@ class MsrpHandler
     /// Advertise appears, Ready -> AskingFailed when it goes away — and
     /// surface the change through on_listener_state_change, told the time
     /// of the receive_packet()/tick() this fires from (last_event_time_).
+    /// A Domain registered from the wire. Under adoption, a Class A Domain
+    /// whose priority or VLAN differs from ours becomes ours (see
+    /// set_adopt_domain); anything else is noted and left alone.
+    void on_remote_domain(statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation const op)
+    {
+        bool const class_a = fv.sr_class_id.get() == statusbar::srp::msrp::SR_CLASS_A;
+        bool const same = fv.sr_class_priority.get() == domain_.sr_class_priority && fv.sr_class_vid.get() == domain_.sr_class_vid;
+        if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !class_a || same) {
+            return;
+        }
+        domain_ = DomainInfo{
+            .sr_class_id = domain_.sr_class_id,
+            .sr_class_priority = fv.sr_class_priority.get(),
+            .sr_class_vid = fv.sr_class_vid.get()};
+        (void)declare_domain(last_event_time_);  // the old values leave first (10.7)
+        if (callbacks_.on_domain_adopted) {
+            callbacks_.on_domain_adopted(domain_, last_event_time_);
+        }
+    }
+
     void on_remote_talker_changed(tsn::StreamId const& sid)
     {
         for (auto& stream : listener_streams_) {
@@ -705,6 +757,7 @@ class MsrpHandler
 
     MsrpCallbacks callbacks_;
     DomainInfo domain_;
+    bool adopt_domain_{false};  ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipant participant_;
