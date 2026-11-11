@@ -79,11 +79,11 @@ struct TalkerGate
 
     /// Reactor thread: our Talker declarations were withdrawn. Every stream closes at once (no
     /// grace) and forgets its listener state until note_listener_ready re-learns it.
-    void note_talker_withdrawn() noexcept;
+    void notify_talker_withdrawn() noexcept;
     /// Reactor thread: stream @p idx's Talker Advertise alone was withdrawn (a
     /// Milan talker's declaration window closed, or MAAP lost its address):
     /// that stream closes at once, as above.
-    void note_talker_withdrawn(uint16_t idx) noexcept;
+    void notify_talker_withdrawn(uint16_t idx) noexcept;
 
     /// Reactor thread: the RAW instant of the reactor cycle now being served,
     /// read by the loop when the reactor read its own clock and before any

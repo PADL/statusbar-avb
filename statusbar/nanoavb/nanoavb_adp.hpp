@@ -222,7 +222,7 @@ class NanoAvbAdpAdvertiser
     template <typename Send>
     [[nodiscard]] auto reply_available(Send&& send) -> bool
     {
-        return note_available(std::forward<Send>(send)(available_adpdu()));
+        return notify_available(std::forward<Send>(send)(available_adpdu()));
     }
 
     /// Process an ADPDU received from the network: a discover for us is RCV_ADP_DISCOVER.

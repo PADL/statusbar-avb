@@ -93,7 +93,7 @@ transmitting the stream". A talker puts stream `idx` on the wire only when:
    for a Milan one);
 2. our Talker Advertise is declared. This is implied by (1): a listener
    declaration for our stream only arises against our Talker Advertise, and the
-   gate closes at once when we withdraw it (`note_talker_withdrawn`);
+   gate closes at once when we withdraw it (`notify_talker_withdrawn`);
 3. the stream is Started (default true; stops a stream without tearing down its
    reservation).
 
@@ -112,14 +112,14 @@ The gate's clock is `CLOCK_MONOTONIC_RAW` (`TalkerGate::RawTimePoint`,
 (`TimerWakeInfo::actual_raw`), and the one `net::rx_clock_now()` reads. The
 reactor is told its own time (`sm::TimePoint`, the reactor's `ClockFn`) and has
 no line to RAW, so for each event that changes or evaluates the gate it reads
-RAW once (`AvbEntityKit::note_listener_ready` receives that reading beside the
+RAW once (`AvbEntityKit::notify_listener_ready` receives that reading beside the
 reactor's time; `on_admission_timer` is told one). The reactor is not real-time;
 the media thread never reads a clock for the gate.
 
 Per stream the gate holds one stamp, `ready_raw_ns_`: the last RAW instant the
-Listener declaration was known registered. `note_listener_ready` writes it on a
+Listener declaration was known registered. `notify_listener_ready` writes it on a
 registration and on a withdrawal (the moment the registration was last known),
-then the `listener_ready_` flag with release; `note_talker_withdrawn` zeroes the
+then the `listener_ready_` flag with release; `notify_talker_withdrawn` zeroes the
 stamp (no grace) before clearing the flag. A reader loads the flag with acquire
 and then the stamp, so a withdrawal never pairs an old stamp with a cleared flag.
 

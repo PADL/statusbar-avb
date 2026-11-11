@@ -189,7 +189,7 @@ auto NanoAvbAdpAdvertiser::tick(TimePoint const now) -> void
 
 auto NanoAvbAdpAdvertiser::send_entity_available() -> bool
 {
-    return callbacks_.send_adpdu && note_send(note_available(callbacks_.send_adpdu(available_adpdu())));
+    return callbacks_.send_adpdu && notify_send(notify_available(callbacks_.send_adpdu(available_adpdu())));
 }
 
 auto NanoAvbAdpAdvertiser::available_adpdu() noexcept -> AdpDu const&
@@ -198,7 +198,7 @@ auto NanoAvbAdpAdvertiser::available_adpdu() noexcept -> AdpDu const&
     return adpdu_;
 }
 
-auto NanoAvbAdpAdvertiser::note_available(bool const sent) -> bool
+auto NanoAvbAdpAdvertiser::notify_available(bool const sent) -> bool
 {
     if (sent) {
         // IEEE 1722.1-2021 Clause 6.2.2.15: incremented after transmitting ENTITY_AVAILABLE.

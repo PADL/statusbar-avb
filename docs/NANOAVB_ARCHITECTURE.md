@@ -428,7 +428,7 @@ arrive before MAAP has defended its block.
 - **Notifications.** Each registration has its own MVU sequence id, a space
   apart from the AEM one (Milan v1.2 Section 5.3.4.2, as v1.3 Section 5.4.5.1
   and controllers have it), incremented whether or not the send succeeds.
-  `note_controller_command` restarts a controller's monitor timer for MVU
+  `notify_controller_command` restarts a controller's monitor timer for MVU
   commands, which the AEM handler does not see (Milan v1.2 Section 5.4.5.3).
   `forget_controller_at` drops a controller whose MAC will not come back (a
   local controller whose socket closed): otherwise a dead acquirer would

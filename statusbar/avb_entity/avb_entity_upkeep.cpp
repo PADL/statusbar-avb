@@ -55,28 +55,28 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
                         grandmaster.get(),
                         announce.grandmaster_priority1.get(),
                         announce.grandmaster_priority2.get());
-                    kit->note_grandmaster_changed(grandmaster);  // ADP through the host; AVTP tu (Milan v1.2 B.1.1)
+                    kit->notify_grandmaster_changed(grandmaster);  // ADP through the host; AVTP tu (Milan v1.2 B.1.1)
                     kit->on_gptp_announce(steady_time_point(), true);
                 },
             .grandmaster_lost =
                 [kit = &kit](int64_t /*now_ns*/) {
                     kit->host().ctl_log().warning("gPTP: no Announce within the receipt timeout: grandmaster lost");
-                    kit->note_grandmaster_lost();  // AVTP tu until a grandmaster returns
+                    kit->notify_grandmaster_lost();  // AVTP tu until a grandmaster returns
                 },
-            .path_trace_changed = [kit = &kit](int64_t /*now_ns*/) { kit->note_as_path_changed(); }});
+            .path_trace_changed = [kit = &kit](int64_t /*now_ns*/) { kit->notify_as_path_changed(); }});
     }
 }
 
 void EntityUpkeep::tick(int64_t /*now_ns*/)
 {
     auto const now = std::chrono::steady_clock::now();
-    note_state(now);
+    notify_state(now);
     watch_gptp(now);
     reevaluate(now);
     drain();
 }
 
-void EntityUpkeep::note_state(std::chrono::steady_clock::time_point const now)
+void EntityUpkeep::notify_state(std::chrono::steady_clock::time_point const now)
 {
     if (auto const state = kit_.host().state_string(); state != last_state_) {
         kit_.host().ctl_log().status("entity: {} -> {}", logging::static_str(last_state_), logging::static_str(state));
