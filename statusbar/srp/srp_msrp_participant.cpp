@@ -28,6 +28,35 @@ namespace statusbar::srp::msrp {
 
 namespace detail_msrp {
 
+/// A Registrar state for a log line.
+inline auto registrar_state_name(registrar_sm::Def::State s) noexcept -> char const*
+{
+    switch (s) {
+        case registrar_sm::Def::State::In:
+            return "In";
+        case registrar_sm::Def::State::Lv:
+            return "Lv";
+        case registrar_sm::Def::State::Mt:
+            return "Mt";
+        case registrar_sm::Def::State::Start:
+            return "Start";
+        default:
+            return "?";
+    }
+}
+
+/// The @p value_index-th Listener FirstValue of a vector that starts with
+/// the one encoded in @p first_value_bytes.
+inline auto listener_first_value_at(std::span<uint8_t const> first_value_bytes, uint16_t value_index) -> ListenerFirstValue
+{
+    ListenerFirstValue fv;
+    (void)protocol::load_unchecked(first_value_bytes, &fv);
+    for (uint16_t k = 0; k < value_index; ++k) {
+        increment_first_value(fv);
+    }
+    return fv;
+}
+
 using mrp::AttributeEvent;
 using mrp::AttributeListHeader;
 using mrp::VectorAttributeHeader;
@@ -162,6 +191,7 @@ template <class Limits>
 void MsrpParticipantT<Limits>::start(TimePoint now)
 {
     port_.start(now);
+    rearm_leave_timer();  // stop() dropped the slot; Registrars may still be in Lv
 }
 
 template <class Limits>
@@ -563,11 +593,13 @@ void MsrpParticipantT<Limits>::transmit_pending(TimePoint now)
 template <class Limits>
 void MsrpParticipantT<Limits>::on_leave_timer(TimePoint now)
 {
-    // Fire LvTimer event into every attribute's Registrar. Any that
-    // were in Lv state transition to Mt and notify Leave.
+    // The earliest Registrar leavetimer has expired. Fire LvTimer into each
+    // Registrar whose OWN timer is due (10.7.4.2 runs one per Registrar): it
+    // goes Lv -> Mt and notifies Leave. One that entered Lv later, in this
+    // same tick's LeaveAll included, keeps its full LeaveTime.
     auto drive = [&](auto& records, auto&& notify_leave_id) {
         for (auto& rec : records) {
-            if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
+            if (!mrp::leave_due(rec, now)) {
                 continue;
             }
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
@@ -580,6 +612,18 @@ void MsrpParticipantT<Limits>::on_leave_timer(TimePoint now)
     drive(talker_failed_, [&](auto const& rec) { notify_talker_leave(rec.first_value.advertise.stream_id); });
     drive(listeners_, [&](auto const& rec) { notify_listener_leave(rec.first_value.stream_id); });
     drive(domains_, [&](auto const& rec) { notify_domain_leave(rec.first_value); });
+    rearm_leave_timer();
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::rearm_leave_timer() noexcept
+{
+    std::optional<TimePoint> earliest{};
+    mrp::fold_earliest_leave(talker_adv_, earliest);
+    mrp::fold_earliest_leave(talker_failed_, earliest);
+    mrp::fold_earliest_leave(listeners_, earliest);
+    mrp::fold_earliest_leave(domains_, earliest);
+    mrp::rearm_leave(port_.timers(), earliest);
 }
 
 template <class Limits>
@@ -967,19 +1011,23 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     if (attr_length < ListenerFirstValue::LENGTH) {
         return;
     }
-    ListenerFirstValue fv;
-    (void)load_unchecked(first_value_bytes, &fv);
-    for (uint16_t k = 0; k < value_index; ++k) {
-        increment_first_value(fv);
-    }
+    auto const fv = detail_msrp::listener_first_value_at(first_value_bytes, value_index);
     auto* rec_ptr = find_or_create_listener(fv.stream_id);
     if (rec_ptr == nullptr) {
         return;  // peer attribute, table full — silently drop
     }
-    auto& rec = *rec_ptr;
-    auto const state_before = rec.registrar_sm.current_state();
-    bool const was_registered = (state_before == registrar_sm::Def::State::In);
-    auto const prev_substate = rec.substate;
+    auto const before = adopt_listener_rx(*rec_ptr, fv, decl);
+    drive_listener_rx(*rec_ptr, before, applicant_event, registrar_event, decl, wire_event, now);
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::adopt_listener_rx(ListenerRecord& rec, ListenerFirstValue const& fv, ListenerDeclaration decl)
+    -> ListenerRxBefore
+{
+    ListenerRxBefore const before{
+        .state = rec.registrar_sm.current_state(),
+        .was_registered = rec.registrar_sm.current_state() == registrar_sm::Def::State::In,
+        .substate = rec.substate};
     // Adopt the received listener declaration ONLY for a pure peer registration. If
     // WE declare this StreamID, keep OUR substate (first_value is just the StreamID
     // here; substate is the payload) so our next JoinIn re-advertises our own.
@@ -989,14 +1037,32 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     } else if (rec.substate != decl) {
         ++foreign_declaration_conflict_count_;
     }
+    return before;
+}
 
-    rec.applicant_ctx.clear_outputs();
-    rec.applicant_sm.handle_event(rec.applicant_ctx, applicant_event, now);
+template <class Limits>
+void MsrpParticipantT<Limits>::drive_listener_rx(
+    ListenerRecord& rec,
+    ListenerRxBefore const& before,
+    applicant_sm::Def::Event applicant_event,
+    registrar_sm::Def::Event registrar_event,
+    ListenerDeclaration decl,
+    AttributeEvent wire_event,
+    TimePoint now)
+{
+    mrp::dispatch_applicant(rec, applicant_event, now);
     if (registrar_event == registrar_sm::Def::Event::Count) {
         return;
     }
-    rec.registrar_ctx.clear_outputs();
-    rec.registrar_sm.handle_event(rec.registrar_ctx, registrar_event, now);
+    mrp::dispatch_registrar(rec, registrar_event, now, port_.timers());
+    log_listener_rx(rec, before.state, decl, wire_event);
+    notify_listener_rx(rec, before, decl);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::log_listener_rx(
+    ListenerRecord const& rec, registrar_sm::Def::State state_before, ListenerDeclaration decl, AttributeEvent wire_event)
+{
     // Diagnostic: a Listener attribute received for one of OUR talker streams --
     // print the wire MRP event and the registrar STATE transition, to trace what
     // drives the listener-ready flap ([srp-gate]). Seeing In<->Lv = a routine
@@ -1004,36 +1070,25 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     // truly de-registered (re-declaration / relay problem). `is_interesting`
     // keeps this to our streams.
     if (logger_ && logger_->enabled(logging::LogLevel::Debug) && is_interesting(rec.first_value.stream_id)) {
-        auto const state_name = [](registrar_sm::Def::State s) -> char const* {
-            switch (s) {
-                case registrar_sm::Def::State::In:
-                    return "In";
-                case registrar_sm::Def::State::Lv:
-                    return "Lv";
-                case registrar_sm::Def::State::Mt:
-                    return "Mt";
-                case registrar_sm::Def::State::Start:
-                    return "Start";
-                default:
-                    return "?";
-            }
-        };
         logger_->debug(
             "msrp: listener rx sid={:016x} wire_event={} decl={} reg {}->{} lvtimer={}",
             rec.first_value.stream_id.to_uint64(),
             logging::static_str(attribute_event_name(wire_event)),
             logging::static_str(listener_declaration_name(decl)),
-            logging::static_str(state_name(state_before)),
-            logging::static_str(state_name(rec.registrar_sm.current_state())),
+            logging::static_str(detail_msrp::registrar_state_name(state_before)),
+            logging::static_str(detail_msrp::registrar_state_name(rec.registrar_sm.current_state())),
             rec.registrar_ctx.lvtimer_request);
     }
-    if (rec.registrar_ctx.lvtimer_request) {
-        port_.timers().start_leave(now);
-    }
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::notify_listener_rx(
+    ListenerRecord const& rec, ListenerRxBefore const& before, ListenerDeclaration decl)
+{
     auto const n = rec.registrar_ctx.notify;
-    if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join || (was_registered && prev_substate != decl)) {
+    if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join || (before.was_registered && before.substate != decl)) {
         notify_listener(rec.first_value.stream_id, decl, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && was_registered) {
+    } else if (n == registrar_sm::Notify::Leave && before.was_registered) {
         notify_listener_leave(rec.first_value.stream_id);
     }
 }

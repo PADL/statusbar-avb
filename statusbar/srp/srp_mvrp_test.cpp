@@ -407,6 +407,56 @@ TEST(mvrp_participant, withdraw_notifies_leave)
     }
 }
 
+// A LeaveAll and a leave expiry in one tick: the LeaveAll moves every In
+// Registrar to Lv with a fresh LeaveTime, and only the Registrar whose own
+// timer was due goes to Mt. With one timer per port the just-left ones
+// went straight to Mt in the same tick.
+TEST(mvrp_participant, a_leaveall_in_the_same_tick_does_not_expire_the_registrars_it_just_moved)
+{
+    MvrpParticipant a{test_mvrp_config(), 0xcc33};
+    MvrpParticipant b{test_mvrp_config(), 0xdd44};
+    MvrpFabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    MvrpTestClock c{};
+    a.start(c.now);
+    b.start(c.now);
+    std::vector<uint16_t> timer_left{};
+    Observer obs{};
+    obs.on_vlan_leave = [&](uint16_t vid) { timer_left.push_back(vid); };
+    (void)a.declare_vlan(200, c.now);
+    (void)a.declare_vlan(300, c.now);
+    auto const t1 = c.advance(std::chrono::milliseconds(150));
+    a.tick(t1);
+    fab.deliver_a_to_b(b, t1);
+    EXPECT_TRUE(b.has_vlan(200));
+    EXPECT_TRUE(b.has_vlan(300));
+
+    (void)a.withdraw_vlan(300, c.now);
+    auto const t2 = c.advance(std::chrono::milliseconds(150));
+    a.tick(t2);
+    fab.deliver_a_to_b(b, t2);  // b's Registrar for 300 enters Lv at t2 (and notifies the peer's Lv)
+    b.subscribe(obs);           // from here only the timers can notify
+
+    // One tick far enough out that 300's leavetimer AND b's own LeaveAll
+    // timer (5 to 15 s) have both expired. The LeaveAll moves 200 to Lv
+    // with a timer ending LeaveTime from now; only 300 is due, and its
+    // record goes with it (reclaim).
+    auto const t3 = c.advance(std::chrono::seconds(20));
+    b.tick(t3);
+    EXPECT_EQ(timer_left.size(), 1U);
+    EXPECT_TRUE(!timer_left.empty() && timer_left.front() == 300);
+    EXPECT_FALSE(b.has_vlan(300));
+    EXPECT_TRUE(b.has_vlan(200));
+    EXPECT_TRUE(b.next_deadline() <= t3 + std::chrono::milliseconds(1000));
+
+    // Nobody re-declares 200 within LeaveTime: now it goes too.
+    b.tick(c.advance(std::chrono::milliseconds(1000)));
+    EXPECT_EQ(timer_left.size(), 2U);
+    EXPECT_TRUE(timer_left.size() == 2 && timer_left.back() == 200);
+    EXPECT_FALSE(b.has_vlan(200));
+}
+
 TEST(mvrp_participant, receive_too_short)
 {
     MvrpParticipant p{test_mvrp_config(), 0x1234};

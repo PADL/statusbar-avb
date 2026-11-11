@@ -194,7 +194,11 @@ class MvrpParticipantT
     void set_send_pdu(SendPduFn fn) { send_pdu_ = std::move(fn); }
 
     /// Run BEGIN! on the per-port FSMs and arm initial timers.
-    void start(TimePoint now) { port_.start(now); }
+    void start(TimePoint now)
+    {
+        port_.start(now);
+        rearm_leave_timer();  // stop() dropped the slot; Registrars may still be in Lv
+    }
 
     /// Stop all timers. FSMs retain their current state.
     void stop() noexcept { port_.stop(); }
@@ -390,10 +394,14 @@ class MvrpParticipantT
 
     void on_join_timer(TimePoint now) { build_and_send_pdu(now); }
 
+    /// The earliest Registrar leavetimer has expired: LvTimer into each
+    /// Registrar whose OWN timer is due (10.7.4.2 runs one per Registrar).
+    /// One that entered Lv later, in this tick's LeaveAll included, keeps
+    /// its full LeaveTime.
     void on_leave_timer(TimePoint now)
     {
         for (auto& rec : vlans_) {
-            if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
+            if (!mrp::leave_due(rec, now)) {
                 continue;
             }
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::LvTimer, now, port_.timers());
@@ -401,6 +409,15 @@ class MvrpParticipantT
                 notify_vlan_leave(rec.first_value.get_vid());
             }
         }
+        rearm_leave_timer();
+    }
+
+    /// The scheduler's Leave slot from the Registrars still in Lv.
+    void rearm_leave_timer() noexcept
+    {
+        std::optional<TimePoint> earliest{};
+        mrp::fold_earliest_leave(vlans_, earliest);
+        mrp::rearm_leave(port_.timers(), earliest);
     }
 
     void on_leaveall_timer(TimePoint now)

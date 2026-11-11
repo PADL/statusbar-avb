@@ -31,8 +31,13 @@ void TimerScheduler::start_join(TimePoint now) noexcept
 
 void TimerScheduler::start_leave(TimePoint now) noexcept
 {
-    if (!leave_.has_value()) {
-        leave_ = now + LEAVE_TIME;
+    start_leave_at(now + LEAVE_TIME);
+}
+
+void TimerScheduler::start_leave_at(TimePoint deadline) noexcept
+{
+    if (!leave_.has_value() || deadline < *leave_) {
+        leave_ = deadline;
     }
 }
 

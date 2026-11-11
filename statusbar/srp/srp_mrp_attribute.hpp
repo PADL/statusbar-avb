@@ -16,6 +16,7 @@
 #include "statusbar/srp/srp_mrp_registrar_sm.hpp"
 
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::srp::mrp {
 
@@ -47,6 +48,12 @@ struct AttributeRecord
     applicant_sm::Machine applicant_sm{};
     registrar_sm::Context registrar_ctx{};
     registrar_sm::Machine registrar_sm{};
+
+    /// This Registrar's leavetimer (IEEE 802.1Q-2022 10.7.4.2: one per
+    /// Registrar): the instant it expires while the Registrar is in Lv,
+    /// nothing otherwise. Kept by note_leave_timer(); the port's
+    /// TimerScheduler holds only the earliest of them.
+    std::optional<sm::TimePoint> leave_deadline{};
 
     /// Set by the participant when the attribute has fully decayed
     /// (Applicant in Vo and Registrar in Mt) and can be removed from

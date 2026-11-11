@@ -97,6 +97,8 @@ struct ListenerRecord
     applicant_sm::Machine applicant_sm{};
     registrar_sm::Context registrar_ctx{};
     registrar_sm::Machine registrar_sm{};
+    /// See AttributeRecord::leave_deadline.
+    std::optional<TimePoint> leave_deadline{};
     bool should_reclaim{false};
 
     [[nodiscard]] auto registrar_is_in() const noexcept -> bool
@@ -545,6 +547,8 @@ class MsrpParticipantT
     //
     void on_join_timer(TimePoint now);
     void on_leave_timer(TimePoint now);
+    /// The scheduler's Leave slot from the Registrars still in Lv.
+    void rearm_leave_timer() noexcept;
     void on_leaveall_timer(TimePoint now);
     void on_periodic_timer(TimePoint now);
 
@@ -649,6 +653,25 @@ class MsrpParticipantT
         registrar_sm::Def::Event registrar_event,
         TimePoint now);
 
+    /// What handle_listener_rx saw before the machines ran.
+    struct ListenerRxBefore
+    {
+        registrar_sm::Def::State state{registrar_sm::Def::State::Mt};
+        bool was_registered{false};
+        ListenerDeclaration substate{ListenerDeclaration::Ignore};
+    };
+    auto adopt_listener_rx(ListenerRecord& rec, ListenerFirstValue const& fv, ListenerDeclaration decl) -> ListenerRxBefore;
+    void drive_listener_rx(
+        ListenerRecord& rec,
+        ListenerRxBefore const& before,
+        applicant_sm::Def::Event applicant_event,
+        registrar_sm::Def::Event registrar_event,
+        ListenerDeclaration decl,
+        AttributeEvent wire_event,
+        TimePoint now);
+    void log_listener_rx(
+        ListenerRecord const& rec, registrar_sm::Def::State state_before, ListenerDeclaration decl, AttributeEvent wire_event);
+    void notify_listener_rx(ListenerRecord const& rec, ListenerRxBefore const& before, ListenerDeclaration decl);
     void handle_listener_rx(
         uint8_t attr_length,
         std::span<uint8_t const> first_value_bytes,

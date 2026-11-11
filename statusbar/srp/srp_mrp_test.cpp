@@ -528,6 +528,21 @@ TEST(mrp_timer_scheduler, start_leave_runs)
     EXPECT_TRUE(ts.leave_running());
 }
 
+// The Leave slot is the earliest of the Registrars' leavetimers: a later
+// one never pushes it back, an earlier one pulls it forward.
+TEST(mrp_timer_scheduler, the_leave_slot_keeps_the_earliest_registrar_deadline)
+{
+    TimerScheduler ts{1};
+    auto const now = TimePoint{} + std::chrono::seconds(1);
+    ts.start_leave_at(now + std::chrono::seconds(2));
+    ts.start_leave_at(now + std::chrono::seconds(3));
+    EXPECT_EQ(ts.next_deadline(), now + std::chrono::seconds(2));
+    ts.start_leave_at(now + std::chrono::seconds(1));
+    EXPECT_EQ(ts.next_deadline(), now + std::chrono::seconds(1));
+    ts.start_leave(now);  // a timer started now ends at now + LeaveTime, later than that
+    EXPECT_EQ(ts.next_deadline(), now + std::chrono::seconds(1));
+}
+
 TEST(mrp_timer_scheduler, start_leaveall_runs)
 {
     TimerScheduler ts{1};

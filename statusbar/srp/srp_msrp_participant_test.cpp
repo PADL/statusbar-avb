@@ -630,6 +630,59 @@ TEST(msrp_participant, withdraw_talker_notifies_peer_leave)
     }
 }
 
+// IEEE 802.1Q-2022 10.7.4.2: the leavetimer is per Registrar. Two talkers
+// withdrawn 650 ms apart are dropped 650 ms apart, each a full LeaveTime
+// after its own Leave, not both when the first one's timer runs out. The
+// record goes when its Registrar reaches Mt (reclaim), so the count says
+// which timers have fired; the Leave notification itself is also given
+// on the peer's Lv message, so it is not what is counted here.
+TEST(msrp_participant, each_registrar_leaves_a_full_leave_time_after_its_own_leave)
+{
+    MsrpParticipant a{test_msrp_config(), 0xcc33};
+    MsrpParticipant b{test_msrp_config(), 0xdd44};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    b.start(clock.now);
+    std::vector<uint16_t> timer_left{};
+    Observer obs{};
+    obs.on_talker_leave = [&](tsn::StreamId const& id) { timer_left.push_back(id.get_unique_id()); };
+    (void)a.declare_talker_advertise(make_talker_adv(0x0001), clock.now);
+    (void)a.declare_talker_advertise(make_talker_adv(0x0002), clock.now);
+    auto const t0 = clock.advance(std::chrono::milliseconds(150));
+    a.tick(t0);
+    fab.deliver_a_to_b(b, t0);
+    EXPECT_EQ(b.talker_advertise_count(), 2U);
+
+    (void)a.withdraw_talker(make_stream_id(0x0001), clock.now);
+    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    a.tick(t1);
+    fab.deliver_a_to_b(b, t1);  // b's Registrar for 0x0001 enters Lv at t1
+    EXPECT_TRUE(b.next_deadline() <= t1 + std::chrono::milliseconds(1000));
+
+    (void)a.withdraw_talker(make_stream_id(0x0002), clock.advance(std::chrono::milliseconds(500)));
+    auto const t2 = clock.advance(std::chrono::milliseconds(150));
+    a.tick(t2);
+    fab.deliver_a_to_b(b, t2);  // b's Registrar for 0x0002 enters Lv at t2 = t1 + 650 ms
+    EXPECT_EQ(b.talker_advertise_count(), 2U);
+    b.subscribe(obs);  // from here only the timers can notify
+
+    b.tick(clock.advance(std::chrono::milliseconds(350)));  // t1 + 1000: the first timer, not the second
+    EXPECT_EQ(b.talker_advertise_count(), 1U);
+    EXPECT_EQ(timer_left.size(), 1U);
+    EXPECT_TRUE(!timer_left.empty() && timer_left.front() == 0x0001);
+    EXPECT_TRUE(b.next_deadline() <= t2 + std::chrono::milliseconds(1000));
+
+    b.tick(clock.advance(std::chrono::milliseconds(300)));  // t1 + 1300: still only the first
+    EXPECT_EQ(b.talker_advertise_count(), 1U);
+    b.tick(clock.advance(std::chrono::milliseconds(350)));  // t2 + 1000: now the second
+    EXPECT_EQ(b.talker_advertise_count(), 0U);
+    EXPECT_EQ(timer_left.size(), 2U);
+    EXPECT_TRUE(timer_left.size() == 2 && timer_left.back() == 0x0002);
+}
+
 TEST(msrp_participant, listener_declare_reaches_peer)
 {
     MsrpParticipant a{test_msrp_config(), 0xee55};

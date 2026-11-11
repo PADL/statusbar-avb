@@ -7,7 +7,10 @@
 // Per-port MRP timer scheduler.
 //
 // Tracks four deadline-based timers — Join, Leave, LeaveAll, Periodic —
-// and exposes next_deadline() for integration with any event loop.
+// and exposes next_deadline() for integration with any event loop. Three
+// are the port's own; the Leave slot is the EARLIEST of the per-Registrar
+// leavetimers (IEEE 802.1Q-2022 10.7.4.2 runs one per Registrar), which
+// live on the attribute records and re-arm this slot as they expire.
 // Monotonic std::chrono::steady_clock based; no OS timers, no threads.
 //
 // The participant is responsible for driving tick() at or after the
@@ -58,9 +61,16 @@ class TimerScheduler
     // If the timer is already running, these are a no-op (deadline is
     // preserved). Mirrors mrp.c's start-if-not-running pattern.
     void start_join(TimePoint now) noexcept;
-    void start_leave(TimePoint now) noexcept;
     void start_leaveall(TimePoint now);
     void start_periodic(TimePoint now) noexcept;
+
+    // --- The Registrars' leavetimers ------------------------------------
+    // A Registrar's leavetimer started at @p now, or one with a known
+    // @p deadline: the slot keeps the earliest, so tick() reports when the
+    // first Registrar is due and the participant looks at each record's
+    // own deadline to see which.
+    void start_leave(TimePoint now) noexcept;
+    void start_leave_at(TimePoint deadline) noexcept;
 
     // --- Force rearm --------------------------------------------------
     // Unconditionally (re)sets the deadline, even if already running.

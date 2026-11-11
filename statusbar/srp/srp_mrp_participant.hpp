@@ -27,6 +27,7 @@
 
 #include <concepts>
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::srp::mrp {
 
@@ -86,6 +87,7 @@ class PortState
 //   .registrar_ctx          — registrar_sm::Context
 //   .registrar_sm           — registrar_sm::Machine
 //   .registrar_is_in()      — bool
+//   .leave_deadline         — std::optional<TimePoint>, the Registrar's leavetimer
 //
 
 template <typename Record>
@@ -95,6 +97,7 @@ concept MrpAttributeLike = requires(Record r) {
     r.registrar_ctx.clear_outputs();
     r.registrar_sm.handle_event(r.registrar_ctx, registrar_sm::Def::Event::UCT, TimePoint{});
     { r.registrar_is_in() } -> std::convertible_to<bool>;
+    { r.leave_deadline } -> std::convertible_to<std::optional<TimePoint>>;
 };
 
 /// Dispatch an event to the Applicant FSM. Clears tx outputs before
@@ -107,18 +110,59 @@ void dispatch_applicant(Record& rec, applicant_sm::Def::Event event, TimePoint n
     rec.applicant_sm.handle_event(rec.applicant_ctx, event, now);
 }
 
-/// Dispatch an event to the Registrar FSM. Clears notify outputs
-/// before dispatch. If the transition sets lvtimer_request, the
-/// per-port leave timer is started (idempotent — preserves existing
-/// deadline if already running).
+/// The leavetimer bookkeeping after a Registrar event (IEEE 802.1Q-2022
+/// 10.7.4.2: one leavetimer per Registrar). A transition that started it
+/// puts the deadline on the record and tells the port's scheduler, whose
+/// Leave slot is the earliest of them all; a Registrar that left Lv any
+/// other way has no timer running any more.
+template <MrpAttributeLike Record>
+void note_leave_timer(Record& rec, TimePoint now, TimerScheduler& timers)
+{
+    if (rec.registrar_ctx.lvtimer_request) {
+        rec.leave_deadline = now + TimerScheduler::LEAVE_TIME;
+        timers.start_leave_at(*rec.leave_deadline);
+    } else if (rec.registrar_sm.current_state() != registrar_sm::Def::State::Lv) {
+        rec.leave_deadline.reset();
+    }
+}
+
+/// Whether this Registrar's own leavetimer has expired by @p now.
+template <MrpAttributeLike Record>
+[[nodiscard]] auto leave_due(Record const& rec, TimePoint now) noexcept -> bool
+{
+    return rec.leave_deadline.has_value() && *rec.leave_deadline <= now;
+}
+
+/// Fold the leavetimers still running among @p records into @p earliest.
+template <typename Records>
+void fold_earliest_leave(Records const& records, std::optional<TimePoint>& earliest) noexcept
+{
+    for (auto const& rec : records) {
+        if (rec.leave_deadline.has_value() && (!earliest.has_value() || *rec.leave_deadline < *earliest)) {
+            earliest = rec.leave_deadline;
+        }
+    }
+}
+
+/// Set the scheduler's Leave slot to the earliest Registrar leavetimer
+/// still running, or stop it when none is: what a participant does after
+/// expiring the due ones, and on start, when records may already be in Lv.
+inline void rearm_leave(TimerScheduler& timers, std::optional<TimePoint> const& earliest) noexcept
+{
+    timers.stop_leave();
+    if (earliest.has_value()) {
+        timers.start_leave_at(*earliest);
+    }
+}
+
+/// Dispatch an event to the Registrar FSM. Clears notify outputs before
+/// dispatch, then keeps the Registrar's leavetimer (note_leave_timer).
 template <MrpAttributeLike Record>
 void dispatch_registrar(Record& rec, registrar_sm::Def::Event event, TimePoint now, TimerScheduler& timers)
 {
     rec.registrar_ctx.clear_outputs();
     rec.registrar_sm.handle_event(rec.registrar_ctx, event, now);
-    if (rec.registrar_ctx.lvtimer_request) {
-        timers.start_leave(now);
-    }
+    note_leave_timer(rec, now, timers);
 }
 
 /// Dispatch the tx! event to an attribute's Applicant. Selects the
