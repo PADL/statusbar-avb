@@ -335,9 +335,9 @@ class GptpAnnounceHandler : public net::Pollable
 
   private:
     /// Adopt @p announce's grandmaster, telling grandmaster_id_changed when it differs.
-    void note_grandmaster(gptp::AnnounceMessage const& announce, int64_t now_ns);
+    void notify_grandmaster(gptp::AnnounceMessage const& announce, int64_t now_ns);
     /// Adopt @p path_trace (or @p grandmaster alone), telling path_trace_changed when it differs.
-    void note_path_trace(AsPath const& path_trace, gptp::ClockIdentity const& grandmaster, int64_t now_ns);
+    void notify_path_trace(AsPath const& path_trace, gptp::ClockIdentity const& grandmaster, int64_t now_ns);
     /// The announce receipt timeout implied by @p announce's logMessageInterval, in ns.
     [[nodiscard]] static auto announce_timeout_ns(gptp::AnnounceMessage const& announce) noexcept -> int64_t;
 

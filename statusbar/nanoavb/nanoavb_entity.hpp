@@ -503,7 +503,7 @@ class AemCommandHandler
 
     /// Milan v1.2 Section 5.4.5.3: an MVU command from @p controller_entity_id restarts its
     /// monitor timer (process_packet() does this for AEM commands).
-    void note_controller_command(Eui64 const& controller_entity_id, Eui48 const& controller_mac);
+    void notify_controller_command(Eui64 const& controller_entity_id, Eui48 const& controller_mac);
 
     /// GET_COUNTERS notifications go at most once a second per descriptor
     /// (Milan v1.2 Table 5.22), from tick(): a change goes at the next tick,

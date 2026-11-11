@@ -132,7 +132,7 @@ void join_again(Record& rec, sm::TimePoint const now)
 
 /// A sent @p rec's message noted against its pending value: a Join or New of the old value, then an Lv after it.
 template <class Record>
-void note_sent(Record& rec) noexcept
+void notify_sent(Record& rec) noexcept
 {
     if constexpr (requires { rec.pending; }) {
         auto const message = rec.applicant_ctx.send_msg;
@@ -1560,7 +1560,7 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
         // Clear tx_pending across the whole run so the next build doesn't re-emit.
         for (size_t k = 0; k < run_len; ++k) {
             auto& rec = records[s + k];
-            detail_msrp::note_sent(rec);
+            detail_msrp::notify_sent(rec);
             rec.applicant_ctx.tx_pending = false;
             rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
             rec.applicant_ctx.encode = applicant_sm::Encoding::None;

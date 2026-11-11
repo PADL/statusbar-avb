@@ -363,7 +363,7 @@ struct ListenerStreams
     /// The input was unbound (a controller's UNBIND_RX, or a classic
     /// DISCONNECT_RX): its media lock goes without counting an interruption.
     /// Reactor thread.
-    void note_input_unbound(uint16_t descriptor_index);
+    void notify_input_unbound(uint16_t descriptor_index);
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream multicast group on the RX socket. Wired as the

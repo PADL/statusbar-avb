@@ -204,7 +204,7 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
 
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
-    note_controller_command(header.controller_entity_id, src_mac);
+    notify_controller_command(header.controller_entity_id, src_mac);
 
     // Stash the source MAC so per-command handlers can retain it if they
     // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
@@ -2420,7 +2420,7 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
 }
 
-void AemCommandHandler::note_controller_command(Eui64 const& controller_entity_id, Eui48 const& /*controller_mac*/)
+void AemCommandHandler::notify_controller_command(Eui64 const& controller_entity_id, Eui48 const& /*controller_mac*/)
 {
     // Registrations are kept by entity ID (handle_register_unsolicited), so is the timer.
     for (auto& reg : unsolicited_registrations_) {

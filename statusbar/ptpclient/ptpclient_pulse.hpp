@@ -53,7 +53,7 @@ class PulseLock
 
   private:
     /// Notes the latest pulse checked @p good (false: off, or silence); whether locked() changed.
-    [[nodiscard]] auto note_pulse(bool good) noexcept -> bool;
+    [[nodiscard]] auto notify_pulse(bool good) noexcept -> bool;
 
     PulseLockParams params_;
     int64_t offset_ns_{0};

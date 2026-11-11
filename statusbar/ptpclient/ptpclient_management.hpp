@@ -427,18 +427,18 @@ class PtpManagementClient final : public net::Pollable
         FileDescriptor fd,
         net::SocketAddress server,
         gptp::SourcePortIdentity const& source) noexcept;
-    void note_error(std::error_code error);
+    void notify_error(std::error_code error);
     /// An answer from ptp4l at @p now_ns: one that is not a port's notification makes an
     /// unreachable ptp4l reachable, in its transportSpecific, and fetched from scratch.
-    void note_answer(ManagementMessage const& message, int64_t now_ns);
+    void notify_answer(ManagementMessage const& message, int64_t now_ns);
     /// Apply what the RESPONSE @p message carries to state_.
     void apply(ManagementMessage const& message, int64_t now_ns);
     void apply_parent(ParentDataSet const& parent, gptp::ClockIdentity const& sender);
     /// A port's state @p now into @p held; a change while subscribed asks for the parent.
-    void note_port_state(std::optional<PortState>& held, PortState now);
+    void notify_port_state(std::optional<PortState>& held, PortState now);
     void apply_port_data_set(PortDataSet const& port_data);
     /// The followed port moved to @p now: its asCapable again, which a state change may reset unnotified.
-    void note_followed_port_state(PortState now);
+    void notify_followed_port_state(PortState now);
     /// The followed port's asCapable and peer delay from @p sender's CMLDS_INFO_NP.
     void apply_cmlds(CmldsInfoNp const& cmlds, gptp::SourcePortIdentity const& sender);
     void apply_settings(GrandmasterSettingsNp const& settings);
@@ -459,7 +459,7 @@ class PtpManagementClient final : public net::Pollable
         ManagementAction action, uint16_t management_id, std::span<uint8_t const> data, uint8_t transport_specific) -> Status;
     void send_gets(std::span<uint16_t const> ids);
     /// A send's @p error, noted (state().error, and whether ptp4l's socket is gone); returned.
-    auto note_send_error(std::error_code error) -> std::error_code;
+    auto notify_send_error(std::error_code error) -> std::error_code;
     void send_settings();
     void send_subscription(int64_t now_ns);
     [[nodiscard]] auto subscription() const noexcept -> SubscribeEventsNp;

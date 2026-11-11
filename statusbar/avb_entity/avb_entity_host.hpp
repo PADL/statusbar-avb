@@ -160,35 +160,35 @@ class AvbEntityHost
     void on_timeout(TimePoint time);
 
     /// gPTP grandmaster @p grandmaster found by the Announce handler: the grandmaster in force for
-    /// GPTP_GM_CHANGED (IEEE 1722.1-2021 Clause 7.4.42.2.2) until note_parent_grandmaster is told. Reactor thread.
-    void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster);
+    /// GPTP_GM_CHANGED (IEEE 1722.1-2021 Clause 7.4.42.2.2) until notify_parent_grandmaster is told. Reactor thread.
+    void notify_grandmaster_changed(gptp::ClockIdentity const& grandmaster);
     /// The grandmaster was lost (no Announce within the receipt timeout): a grandmaster-capable
     /// entity is its own grandmaster in force from now; GET_AVB_INFO and ADP name none on one that
     /// is not. Reactor thread.
-    void note_grandmaster_lost();
+    void notify_grandmaster_lost();
     /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
     /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
-    void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
+    void notify_parent_grandmaster(ieee::Eui64 const& grandmaster);
     /// The gPTP stack's PARENT_DATA_SET names no grandmaster now (a clientOnly stack naming its own
     /// clock): GET_AVB_INFO and ADP name none, and GPTP_GM_CHANGED compares the next with the last named.
-    void note_parent_names_no_grandmaster();
-    /// GPTP_GM_CHANGED follows note_parent_grandmaster alone from now, before its first report too, and
+    void notify_parent_grandmaster_loss();
+    /// GPTP_GM_CHANGED follows notify_parent_grandmaster alone from now, before its first report too, and
     /// even if none ever comes: a gPTP stack that never answers leaves it unchanged. The first call drops
     /// the Announce handler's grandmaster, so the stack's first report is no change.
     void use_parent_grandmaster();
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
-    void note_as_path_changed();
+    void notify_as_path_changed();
 
     /// The most CLOCK_DOMAINs whose LOCKED/UNLOCKED counters the host keeps.
     static constexpr uint16_t MAX_CLOCK_DOMAINS = 4;
     /// CLOCK_DOMAIN @p index locked or unlocked: a transition counts LOCKED or UNLOCKED (IEEE 1722.1-2021
     /// Clause 7.4.42.2.3) and is notified. From its first call for domain 0, domain 0 no longer follows
     /// gPTP. False for a domain the model lacks or past MAX_CLOCK_DOMAINS. Reactor thread.
-    [[nodiscard]] auto note_clock_domain_locked(uint16_t index, bool locked) -> bool;
+    [[nodiscard]] auto notify_clock_domain_locked(uint16_t index, bool locked) -> bool;
     /// The entity stops reporting CLOCK_DOMAIN @p index: domain 0 follows gPTP again (a difference
     /// counts as a transition); another counts UNLOCKED if locked, then reports no counters until
-    /// noted again. False as note_clock_domain_locked. Reactor thread.
+    /// noted again. False as notify_clock_domain_locked. Reactor thread.
     [[nodiscard]] auto release_clock_domain_lock(uint16_t index) -> bool;
 
     /// The gPTP path for AVB_INTERFACE @p index (IEEE 1722.1-2021 Clause 7.4.41): the
@@ -343,7 +343,7 @@ class AvbEntityHost
     /// The gPTP stack's asCapable for this port (IEEE 802.1AS-2020 Clause 10.2.5.1): GET_AVB_INFO's
     /// AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows it, not the entity's gPTP lock; nullopt
     /// returns to the entity's own state. Never while the link is down. Reactor thread.
-    void note_port_as_capable(std::optional<bool> as_capable);
+    void notify_port_as_capable(std::optional<bool> as_capable);
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
     // --- Typed stream hooks (the stream-specific bits of the SM wiring) ---------
@@ -400,7 +400,7 @@ class AvbEntityHost
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
     /// @p grandmaster is in force: GPTP_GM_CHANGED counts it when another one was in force (the
     /// first is no change).
-    void note_grandmaster_in_force(ieee::Eui64 const& grandmaster);
+    void notify_grandmaster_in_force(ieee::Eui64 const& grandmaster);
     /// GET_AVB_INFO's and ADP's gptp_grandmaster_id: the parent data set's (zero while it names none),
     /// else the Announces', else the entity's own clock when grandmaster-capable and its link is up, else zero.
     [[nodiscard]] auto reported_grandmaster() const -> ieee::Eui64;
@@ -488,7 +488,7 @@ class AvbEntityHost
     /// when a listed field differs from the last one sent.
     void refresh_avb_info();
     /// The gPTP lock state changed: CLOCK_DOMAIN 0's lock unless the entity drives it, and asCapable.
-    void note_media_clock_locked(bool locked);
+    void notify_media_clock_locked(bool locked);
     /// Count CLOCK_DOMAIN @p index's transition to @p locked, if one, and notify it.
     void count_clock_domain_lock(uint16_t index, bool locked);
     /// Return entity-driven CLOCK_DOMAIN @p index's lock to gPTP (domain 0) or to unlocked.
@@ -508,16 +508,16 @@ class AvbEntityHost
         uint32_t locked_count{0};
         uint32_t unlocked_count{0};
         bool locked{false};
-        bool entity_driven{false};  ///< note_clock_domain_locked was called: gPTP no longer drives it
+        bool entity_driven{false};  ///< notify_clock_domain_locked was called: gPTP no longer drives it
     };
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
     std::optional<ieee::Eui64> grandmaster_in_force_{};   ///< for GPTP_GM_CHANGED; none before the first
-    std::optional<ieee::Eui64> announced_grandmaster_{};  ///< the Announces' while one is known (note_grandmaster_*)
-    bool grandmaster_from_parent_{false};                 ///< note_parent_grandmaster has been told
-    bool parent_names_none_{false};  ///< note_parent_names_no_grandmaster, until the next note_parent_grandmaster
+    std::optional<ieee::Eui64> announced_grandmaster_{};  ///< the Announces' while one is known (notify_grandmaster_*)
+    bool grandmaster_from_parent_{false};                 ///< notify_parent_grandmaster has been told
+    bool parent_names_none_{false};  ///< notify_parent_grandmaster_loss, until the next notify_parent_grandmaster
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
-    std::optional<bool> port_as_capable_{};                   ///< see note_port_as_capable
+    std::optional<bool> port_as_capable_{};                   ///< see notify_port_as_capable
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
     nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
     bool running_{false};
