@@ -2447,6 +2447,91 @@ TEST(nanoavb_entity_in_progress, a_failed_completion_without_a_body_answers_the_
 }
 
 //
+// Profiles: 7.5.2 as written notifies every SET answered SUCCESS; Milan v1.3
+// 5.4.5.3 notifies only a SET that modifies the entity, so under milan13 a SET
+// to the value already in force is neither applied nor notified.
+//
+
+namespace {
+
+/// Accepts every SET and serves GET_CONTROL from one stored octet.
+class StoringControlHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> value) -> uint8_t override
+    {
+        ++set_calls;
+        if (command_type == AEM_COMMAND_SET_CONTROL && !value.empty()) {
+            current = value[0];
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    auto on_get_descriptor_value(
+        uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*request*/, std::span<uint8_t> out) -> size_t override
+    {
+        if (command_type != AEM_COMMAND_GET_CONTROL || out.empty()) {
+            return 0;
+        }
+        out[0] = current;
+        return 1;
+    }
+
+    uint8_t current{0x40};
+    int set_calls{0};
+};
+
+}  // namespace
+
+TEST(nanoavb_entity_profile, classic_notifies_a_set_to_the_value_in_force)
+{
+    StoringControlHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    std::array<uint8_t, 5> const same{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0x40};  // CONTROL 5 := its current 0x40
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, same, 3);
+    EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(app.set_calls, 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
+TEST(nanoavb_entity_profile, milan13_leaves_a_set_to_the_value_in_force_unapplied_and_unnotified)
+{
+    StoringControlHandler app;
+    AemCommandHandler handler{app};
+    handler.set_profile(AemCommandHandler::Profile::milan13);
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    std::array<uint8_t, 5> const same{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0x40};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, same, 3);
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(body_of(*reply).size(), size_t{5});
+    EXPECT_EQ(body_of(*reply)[4], 0x40);
+    EXPECT_EQ(app.set_calls, 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 0);
+
+    // A different value is applied and notified as ever.
+    sends.clear();
+    std::array<uint8_t, 5> const changed{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0xFF};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, changed, 4);
+    EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(app.set_calls, 1);
+    EXPECT_EQ(app.current, 0xFF);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
+//
 // GET_AVB_INFO (7.4.40) through the get_avb_info callback, and its
 // unsolicited notification (7.5.2).
 //

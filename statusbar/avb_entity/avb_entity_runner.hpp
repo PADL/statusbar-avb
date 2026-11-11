@@ -114,6 +114,13 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "other SET_CONTROL (ENTITY_ACQUIRED / ENTITY_LOCKED).",
         entity.identify_bypasses_lock,
         [&entity](auto v) { entity.identify_bypasses_lock = v; });
+    specs.add<std::string>(
+        "atdecc.profile",
+        "Where IEEE 1722.1-2021 and Milan v1.3 differ: 'classic' reads 1722.1 as written (every SET answered SUCCESS "
+        "is notified, 7.5.2); 'milan13' applies Milan v1.3 (a SET to the value already in force is not notified, "
+        "5.4.5.3). Default classic.",
+        entity.atdecc_profile,
+        [&entity](auto v) { entity.atdecc_profile = std::string{v}; });
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
     specs.add<std::string>(
         "net.backend",

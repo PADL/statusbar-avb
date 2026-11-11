@@ -191,6 +191,12 @@ struct AvbEntityAudioIOConfig
     /// entity refuses every other controller's SET_CONTROL, IDENTIFY included.
     bool identify_bypasses_lock{false};
 
+    /// The specification the entity answers to where IEEE 1722.1-2021 and
+    /// Milan v1.3 differ: "classic" (default) reads 1722.1 as written;
+    /// "milan13" applies Milan v1.3 where it says otherwise (a SET to the
+    /// value already in force is not notified, 5.4.5.3).
+    std::string atdecc_profile{"classic"};
+
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
     /// addresses from the IEEE 1722 dynamic pool via MAAP at start() and assigns

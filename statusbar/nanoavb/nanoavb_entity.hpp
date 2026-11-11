@@ -258,6 +258,21 @@ class AemCommandHandler
     /// show itself while it is held, which some installations prefer.
     void set_identify_bypasses_exclusive_access(bool const enable) noexcept { identify_bypasses_exclusive_access_ = enable; }
 
+    /// The specification the entity answers to where IEEE 1722.1-2021 and
+    /// Milan v1.3 differ. Under classic, 7.5.2 is read as written: every
+    /// SET_* answered SUCCESS is followed by an unsolicited notification.
+    /// Under milan13, 5.4.5.3 asks for a notification when a command modifies
+    /// the entity's state, so a SET to the value already in force is answered
+    /// SUCCESS without a notification, and without reaching the hook, since
+    /// there is nothing to apply.
+    enum class Profile : uint8_t
+    {
+        classic,
+        milan13,
+    };
+    void set_profile(Profile const profile) noexcept { profile_ = profile; }
+    [[nodiscard]] auto profile() const noexcept -> Profile { return profile_; }
+
     /// Set only the GET_STREAM_INFO provider, without disturbing the others.
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
@@ -668,6 +683,28 @@ class AemCommandHandler
         AemDu const& header, uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
+    /// Under milan13: whether @p command_data asks for the value already in
+    /// force, read back as GET reads it. Such a SET modifies nothing, so it is
+    /// not applied and not notified (Milan v1.3 5.4.5.3). Always false under
+    /// classic, where 7.5.2 notifies every SET answered SUCCESS.
+    [[nodiscard]] auto set_leaves_value_as_is(uint16_t command_type, std::span<uint8_t const> command_data) -> bool;
+
+    /// The SUCCESS answer (the command echoed) for a SET that leaves the value
+    /// as it is, or nullopt when the SET has something to apply.
+    [[nodiscard]] auto unchanged_set_answer(
+        uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> std::optional<AemCommandResponse>;
+
+    /// What a value SET is answered without its hook running: NO_RESOURCES
+    /// when no pending slot is left for it, or unchanged_set_answer(); nullopt
+    /// when the hook is to run.
+    [[nodiscard]] auto answered_before_hook(
+        uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> std::optional<AemCommandResponse>;
+
+    /// A SET_NAME that took: the command echoed, and the subscribers notified.
+    [[nodiscard]] auto applied_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
     /// The response of a SET that did not take: @p status with failed_set_body().
     [[nodiscard]] auto refused_set(
         uint8_t status, uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -754,6 +791,9 @@ class AemCommandHandler
     // SET_CONTROL of the IDENTIFY control ignores acquire and lock (an option;
     // the standards refuse it like any other SET_CONTROL).
     bool identify_bypasses_exclusive_access_ = false;
+
+    // Which specification settles the points where 1722.1 and Milan differ.
+    Profile profile_ = Profile::classic;
 
     // Acquisition state. The acquirer's MAC is kept because IEEE 1722.1 7.5.2
     // implicitly registers the acquiring controller for unsolicited notifications.

@@ -370,16 +370,47 @@ auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, s
     // Per-call model; the handler applies the name by (descriptor, name_index,
     // symbol). A name that was set is echoed back; one that was not is answered
     // with the name in force (7.4.17.1).
+    if (auto const as_is = unchanged_set_answer(AEM_COMMAND_SET_NAME, command_data, out_buffer)) {
+        return *as_is;
+    }
     AemEntityModel aem_model{*handler_};
     auto const status = aem_model.apply_set_name(command_data);
     if (status != AEM_STATUS_SUCCESS) {
         return refused_set(status, AEM_COMMAND_SET_NAME, command_data, out_buffer);
     }
+    return applied_set_name(command_data, out_buffer);
+}
+
+auto AemCommandHandler::applied_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
     // A controller renamed a descriptor: notify every registered controller,
     // like handle_set_descriptor_value does for values.
     size_t const size = echo_command(command_data, out_buffer);
     emit_unsolicited(AEM_COMMAND_SET_NAME, out_buffer.first(size));
-    return {.status = status, .size = size};
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+auto AemCommandHandler::answered_before_hook(
+    uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> std::optional<AemCommandResponse>
+{
+    // A hook that answers IN_PROGRESS needs a pending slot to be finished from,
+    // so the slot is spoken for before the hook runs: with none free the SET is
+    // refused NO_RESOURCES here, and no work is begun that nothing could report.
+    if (pending_commands_.size() >= pending_commands_.capacity()) {
+        return refused_set(AEM_STATUS_NO_RESOURCES, command_type, command_data, out_buffer);
+    }
+    return unchanged_set_answer(command_type, command_data, out_buffer);
+}
+
+auto AemCommandHandler::unchanged_set_answer(
+    uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> std::optional<AemCommandResponse>
+{
+    if (!set_leaves_value_as_is(command_type, command_data)) {
+        return std::nullopt;
+    }
+    return AemCommandResponse{.status = AEM_STATUS_SUCCESS, .size = echo_command(command_data, out_buffer)};
 }
 
 auto AemCommandHandler::guarded_set(
@@ -390,6 +421,18 @@ auto AemCommandHandler::guarded_set(
         return refused_set(*blocked, command_type, command_data, out_buffer);
     }
     return handle_set_descriptor_value(command_type, command_data, out_buffer);
+}
+
+auto AemCommandHandler::set_leaves_value_as_is(uint16_t const command_type, std::span<uint8_t const> command_data) -> bool
+{
+    if (profile_ != Profile::milan13) {
+        return false;
+    }
+    // The GET twin's response has the SET body's shape (the descriptor head and
+    // the value, the region header too for a matrix), so the two compare whole.
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
+    auto const n = value_in_force(command_type, command_data, in_force);
+    return n == command_data.size() && std::equal(command_data.begin(), command_data.end(), in_force.begin());
 }
 
 auto AemCommandHandler::refused_set(
@@ -466,11 +509,8 @@ auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uin
 auto AemCommandHandler::handle_set_descriptor_value(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // A hook that answers IN_PROGRESS needs a pending slot to be finished from,
-    // so the slot is spoken for before the hook runs: with none free the SET is
-    // refused NO_RESOURCES here, and no work is begun that nothing could report.
-    if (pending_commands_.size() >= pending_commands_.capacity()) {
-        return refused_set(AEM_STATUS_NO_RESOURCES, command_type, command_data, out_buffer);
+    if (auto const early = answered_before_hook(command_type, command_data, out_buffer)) {
+        return *early;
     }
     // Per-call model (handler_ resolves the descriptor symbol via its storage). The
     // handler applies the value by (command_type, symbol); the response echoes the command.
