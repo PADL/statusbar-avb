@@ -974,7 +974,7 @@ void ListenerStreams::reset_input_counters(uint16_t const descriptor_index)
     }
 }
 
-void ListenerStreams::note_input_unbound(uint16_t const descriptor_index)
+void ListenerStreams::notify_input_unbound(uint16_t const descriptor_index)
 {
     if (auto* const slot = slot_for(descriptor_index); slot != nullptr) {
         unlock_stream_input(slot->counters);

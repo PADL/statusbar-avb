@@ -152,19 +152,19 @@ class AvbEntityKit
     void on_link_up(TimePoint time);
     /// gPTP grandmaster @p grandmaster found or changed / lost (EntityUpkeep wires these to the Announce
     /// handler): drives AVTP tu (Milan v1.2 Section 4.3.5.2, Annex B.1.1); GPTP_GM_CHANGED follows the
-    /// grandmaster in force (AvbEntityHost::note_grandmaster_lost). Reactor thread.
-    void note_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
+    /// grandmaster in force (AvbEntityHost::notify_grandmaster_lost). Reactor thread.
+    void notify_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
     {
-        host_.note_grandmaster_changed(grandmaster);
-        talker_->note_grandmaster_changed(net::monotonic_ns());  // the tu window runs on the talker's clock
+        host_.notify_grandmaster_changed(grandmaster);
+        talker_->notify_grandmaster_changed(net::monotonic_ns());  // the tu window runs on the talker's clock
     }
-    void note_grandmaster_lost()
+    void notify_grandmaster_lost()
     {
-        talker_->note_grandmaster_lost();
-        host_.note_grandmaster_lost();
+        talker_->notify_grandmaster_lost();
+        host_.notify_grandmaster_lost();
     }
     /// The Announces' gPTP path trace changed (GET_AS_PATH). Reactor thread.
-    void note_as_path_changed() { host_.note_as_path_changed(); }
+    void notify_as_path_changed() { host_.notify_as_path_changed(); }
     void on_link_down(TimePoint time) { host_.on_link_down(time); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
@@ -256,7 +256,7 @@ class AvbEntityKit
     /// Reactor thread: an MSRP listener declaration for @p stream_id was registered
     /// (@p ready) or withdrawn at the reactor's @p now_ns, the gate's clock reading
     /// @p gate_now; feeds the gate and the declarations, re-evaluates admission.
-    void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns, GateTimePoint gate_now);
+    void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns, GateTimePoint gate_now);
     /// Reactor thread, from the kit's timer: at the admission deadline (the earliest grace end,
     /// TalkerGate::grace_ends) re-evaluate admission at @p now, so a grace window that runs out
     /// with no MSRP event still closes the stream's admission and fires the callback.
@@ -289,7 +289,7 @@ class AvbEntityKit
     /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx counted at
     /// steady-clock @p now_ns (the ACMP talker's on_probe lands here): its
     /// window opens and the declarations are re-evaluated.
-    void note_talker_probe(uint16_t idx, int64_t now_ns);
+    void notify_talker_probe(uint16_t idx, int64_t now_ns);
     /// The talker streams a declaration pass re-declares as they stand (a changed TSpec, a new
     /// Class A VID), by index; the rest only as TalkerDeclarations decides.
     using RefreshSet = std::bitset<MAX_ENTITY_STREAMS>;
@@ -306,7 +306,7 @@ class AvbEntityKit
     /// Reactor thread: the talker streams' MAAP addresses became valid (@p valid)
     /// or were lost to a conflict. Until valid, PROBE_TX / CONNECT_TX are answered
     /// TALKER_DEST_MAC_FAIL and nothing is declared.
-    void note_talker_addresses(bool valid, int64_t now_ns);
+    void notify_talker_addresses(bool valid, int64_t now_ns);
     /// Reactor thread, every pass while started: run the declarations once
     /// their next deadline (TalkerDeclarations::next_deadline) has come.
     void on_declaration_timer(int64_t now_ns);
@@ -464,10 +464,10 @@ class AvbEntityKit
     /// list). Notified and saved; answers the AEM status. Reactor thread.
     [[nodiscard]] auto request_clock_source(uint16_t clock_domain_index, uint16_t clock_source_index) -> uint8_t;
     /// CLOCK_DOMAIN @p clock_domain_index locked to its source or lost it: its LOCKED/UNLOCKED counters
-    /// (AvbEntityHost::note_clock_domain_locked). False for a domain the model lacks. Reactor thread.
-    [[nodiscard]] auto note_clock_domain_locked(uint16_t const clock_domain_index, bool const locked) -> bool
+    /// (AvbEntityHost::notify_clock_domain_locked). False for a domain the model lacks. Reactor thread.
+    [[nodiscard]] auto notify_clock_domain_locked(uint16_t const clock_domain_index, bool const locked) -> bool
     {
-        return host_.note_clock_domain_locked(clock_domain_index, locked);
+        return host_.notify_clock_domain_locked(clock_domain_index, locked);
     }
     /// The entity stops reporting CLOCK_DOMAIN @p clock_domain_index; domain 0 follows gPTP again
     /// (AvbEntityHost::release_clock_domain_lock). False for a domain the model lacks. Reactor thread.
@@ -629,7 +629,7 @@ class AvbEntityKit
     [[nodiscard]] auto default_presentation_offset_ns() const noexcept -> uint32_t;
     /// Recompute the admitted set at @p now after a gate input changed (or time
     /// passed); fire on_admission_changed_ when it differs from the last one.
-    void note_admission(GateTimePoint now);
+    void notify_admission(GateTimePoint now);
     /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
     void arm_admission_deadline(GateTimePoint now) noexcept;
     /// The storage handler's SET_STREAM_FORMAT and SET_SAMPLING_RATE hooks (the latter re-times AUDIO_UNIT 0's
@@ -716,7 +716,7 @@ class AvbEntityKit
     /// The talker streams' ACMP identities, address validity and presentation offsets.
     void configure_talker_streams();
     /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
-    void note_talker_interface(uint16_t index);
+    void notify_talker_interface(uint16_t index);
     /// The AEM and SRP behaviour the configured atdecc_profile selects (classic or milan13).
     void configure_profile();
     /// MVRP/MSRP for the configured Class A VLAN, and following a Domain's VID.
@@ -758,7 +758,7 @@ class AvbEntityKit
     /// update_talker_declarations()'s passes: one, then those asked for meanwhile (at most 4).
     void run_declaration_passes(int64_t now_ns, RefreshSet refresh);
     /// Every talker stream undeclared, inactive and gated at steady-clock @p now_ns.
-    void note_all_talkers_withdrawn(int64_t now_ns);
+    void notify_all_talkers_withdrawn(int64_t now_ns);
     /// The registration of the Talker that settled Milan sink @p sink probed.
     [[nodiscard]] auto talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration;
 
@@ -827,7 +827,7 @@ class AvbEntityKit
     /// Save every later AEM and MVU settings change.
     void save_settings_changes();
     /// Log what loading found; false when the file must not be applied nor overwritten.
-    [[nodiscard]] auto note_persistent_state_outcome(LoadedPersistentState const& loaded) -> bool;
+    [[nodiscard]] auto notify_persistent_state_outcome(LoadedPersistentState const& loaded) -> bool;
     void apply_saved_descriptor_values(PersistentState const& saved);
     void apply_saved_sampling_rates(PersistentState const& saved);
     void apply_saved_presentation_offsets(PersistentState const& saved);
