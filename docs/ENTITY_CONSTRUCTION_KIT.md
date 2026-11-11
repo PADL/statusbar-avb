@@ -288,6 +288,31 @@ Phases 1+2 are the bulk of the payoff; 3 is the CRF/media-clock feature
 set; 4 unlocks mixers and DSP controls; 5 removes operational pain observed
 in the field.
 
+## Profiles: classic and milan13
+
+IEEE 1722.1-2021 and Milan v1.3 disagree in a few places, so the entity kit
+answers to one of them at a time: `atdecc.profile = "classic"` (the default,
+1722.1 as written) or `"milan13"`. The AEM handler
+(`AemCommandHandler::set_profile`) and the MSRP handler take the choice from
+the kit. Everything not listed here is the same under both.
+
+| Point | classic (1722.1-2021) | milan13 (Milan v1.3) |
+|---|---|---|
+| ACQUIRE_ENTITY | granted for the ENTITY descriptor (7.4.1) | NOT_SUPPORTED, never granted (5.4.2.1) |
+| A SET to the value already in force | applied and notified: 7.5.2 notifies every SET answered SUCCESS | answered SUCCESS, not applied, not notified (5.4.5.3) |
+| Unsolicited notification of a command | to every registered controller, the requester included | to every registered controller except the requester (5.4.5.3) |
+| Changes by non-ATDECC means while locked (front panel, `set_local_identify`) | allowed | refused ENTITY_LOCKED (5.3.4.1, 5.4.2.17) |
+| MSRP Registrar receiving Lv in IN | starts the leavetimer (802.1Q Table 10-4) | goes straight to MT (4.2.7.2.2) |
+| A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1) |
+
+Profile-independent, because both documents agree: only the ENTITY
+descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while
+acquired, only the acquirer may lock or unlock; a failed SET answers the
+value in force; SET_CONTROL of the IDENTIFY control honours acquire and
+lock like any other control (7.4.25.2, 5.4.2.17). The last one has a knob,
+`atdecc.identify_bypasses_lock`, off by default, for installations that
+want any controller to be able to make a held box show itself.
+
 ## Constraints to preserve
 
 - RT discipline: hooks on the media/RX threads must be `inplace_function`
