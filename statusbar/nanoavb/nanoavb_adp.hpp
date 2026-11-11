@@ -211,7 +211,7 @@ class NanoAvbAdpAdvertiser
     template <typename Send>
     [[nodiscard]] auto reply_available(Send&& send) -> bool
     {
-        return note_available(std::forward<Send>(send)(available_adpdu()));
+        return notify_available(std::forward<Send>(send)(available_adpdu()));
     }
 
     /// Process an ADPDU received from the network: a discover for us is RCV_ADP_DISCOVER.
@@ -252,10 +252,10 @@ class NanoAvbAdpAdvertiser
     auto available_adpdu() noexcept -> AdpDu const&;
 
     /// Advance available_index after a sent ENTITY_AVAILABLE; returns @p sent. No failure counting.
-    [[nodiscard]] auto note_available(bool sent) -> bool;
+    [[nodiscard]] auto notify_available(bool sent) -> bool;
 
     /// Count a send's failure (or clear the count on success); returns @p sent.
-    [[nodiscard]] auto note_send(bool sent) noexcept -> bool;
+    [[nodiscard]] auto notify_send(bool sent) noexcept -> bool;
 
     /// Send Entity Departing message
     /// @return true if send succeeded, false if send failed or no callback
