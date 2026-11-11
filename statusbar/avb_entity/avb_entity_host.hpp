@@ -169,6 +169,9 @@ class AvbEntityHost
     /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
     /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
     void note_parent_grandmaster(ieee::Eui64 const& grandmaster);
+    /// The gPTP stack's PARENT_DATA_SET names no grandmaster now (a clientOnly stack naming its own
+    /// clock): GET_AVB_INFO and ADP name none, and GPTP_GM_CHANGED compares the next with the last named.
+    void note_parent_names_no_grandmaster();
     /// GPTP_GM_CHANGED follows note_parent_grandmaster alone from now, before its first report too, and
     /// even if none ever comes: a gPTP stack that never answers leaves it unchanged. The first call drops
     /// the Announce handler's grandmaster, so the stack's first report is no change.
@@ -510,7 +513,9 @@ class AvbEntityHost
     std::array<ClockDomainLock, MAX_CLOCK_DOMAINS> clock_domain_locks_{};
     std::optional<ieee::Eui64> grandmaster_in_force_{};   ///< for GPTP_GM_CHANGED; none before the first
     std::optional<ieee::Eui64> announced_grandmaster_{};  ///< the Announces' while one is known (note_grandmaster_*)
-    bool grandmaster_from_parent_{false};                 ///< note_parent_grandmaster has been told
+    bool grandmaster_from_parent_{false};
+    bool parent_names_none_{
+        false};  ///< note_parent_names_no_grandmaster, until the next note_parent_grandmaster                 ///< note_parent_grandmaster has been told
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::optional<bool> port_as_capable_{};                   ///< see note_port_as_capable
