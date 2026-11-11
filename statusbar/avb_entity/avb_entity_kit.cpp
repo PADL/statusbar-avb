@@ -59,6 +59,8 @@ AvbEntityKit::AvbEntityKit(
     // 1722.1-2013/2016 lengths so controllers that reject 2021-length descriptors
     // can enumerate the model. "2021" emits the full 2021 forms.
     host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
+    // IDENTIFY honours acquire and lock unless the configuration says otherwise.
+    host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
 
     // Base the talker stream_ids on the NIC MAC (globally unique per box), and
     // seed the static dest MACs by kind (MAAP mode reassigns after acquisition).

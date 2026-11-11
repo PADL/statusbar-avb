@@ -1670,13 +1670,40 @@ TEST(nanoavb_entity_unsolicited_notify, set_local_identify_convenience)
     EXPECT_FALSE(identify_changes[1]);
 }
 
-TEST(nanoavb_entity_acquire, identify_control_exempt_from_acquire)
+TEST(nanoavb_entity_acquire, identify_control_honours_acquire_by_default)
 {
-    // Milan: SET_CONTROL of the IDENTIFY control works even while another
-    // controller holds the entity; every other control honors the claim.
+    // 7.4.25.2 makes no exception for IDENTIFY: while another controller holds
+    // the entity, its SET_CONTROL is refused like any other.
     SetAcceptingHandler app_handler;
     AemCommandHandler handler{app_handler};
     handler.set_identify_control_index(3);
+
+    auto acquire_header = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    acquire_header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    std::array<uint8_t, 16> acquire_data{};
+    EXPECT_EQ(make_test_result(handler, acquire_header, acquire_data).status, AEM_STATUS_SUCCESS);
+
+    auto other_header = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    other_header.controller_entity_id = statusbar::ieee::Eui64{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+    std::array<uint8_t, 5> identify_body{0x00, 0x1A, 0x00, 0x03, 0xFF};
+    EXPECT_EQ(make_test_result(handler, other_header, identify_body).status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_EQ(app_handler.set_count, 0);
+
+    // The acquirer's own identify proceeds.
+    acquire_header.init_command(AEM_COMMAND_SET_CONTROL, 12);
+    EXPECT_EQ(make_test_result(handler, acquire_header, identify_body).status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(app_handler.set_count, 1);
+}
+
+TEST(nanoavb_entity_acquire, identify_control_bypasses_acquire_when_asked)
+{
+    // The option restores the pre-2.6 behaviour: SET_CONTROL of the IDENTIFY
+    // control works while another controller holds the entity; every other
+    // control still honours the claim.
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_identify_control_index(3);
+    handler.set_identify_bypasses_exclusive_access(true);
 
     auto acquire_header = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
     acquire_header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};

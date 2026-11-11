@@ -185,6 +185,12 @@ struct AvbEntityAudioIOConfig
     /// is deferred until there is an IP-stream use case. Default "2016".
     std::string atdecc_version{"2016"};
 
+    /// Let any controller's SET_CONTROL of the IDENTIFY control through while
+    /// another controller holds the entity acquired or locked. Off by default,
+    /// as IEEE 1722.1-2021 7.4.25.2 and Milan v1.3 5.4.2.17 have it: a held
+    /// entity refuses every other controller's SET_CONTROL, IDENTIFY included.
+    bool identify_bypasses_lock{false};
+
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
     /// addresses from the IEEE 1722 dynamic pool via MAAP at start() and assigns

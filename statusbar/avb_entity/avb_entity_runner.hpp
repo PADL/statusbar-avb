@@ -107,6 +107,13 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "2021 descriptors. Default 2016.",
         entity.atdecc_version,
         [&entity](auto v) { entity.atdecc_version = std::string{v}; });
+    specs.add<bool>(
+        "atdecc.identify_bypasses_lock",
+        "Let any controller's SET_CONTROL of the IDENTIFY control through while another controller holds the "
+        "entity acquired or locked. Default off: IEEE 1722.1-2021 7.4.25.2 and Milan v1.3 refuse it like any "
+        "other SET_CONTROL (ENTITY_ACQUIRED / ENTITY_LOCKED).",
+        entity.identify_bypasses_lock,
+        [&entity](auto v) { entity.identify_bypasses_lock = v; });
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
     specs.add<std::string>(
         "net.backend",

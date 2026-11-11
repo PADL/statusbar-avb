@@ -250,6 +250,14 @@ class AemCommandHandler
     /// (2021 lengths).
     void set_legacy_2016(bool enable) noexcept { legacy_2016_ = enable; }
 
+    /// Let a SET_CONTROL of the entity's IDENTIFY control through while another
+    /// controller holds the entity acquired or locked. Off by default: IEEE
+    /// 1722.1-2021 7.4.25.2 has a held entity answer every other controller's
+    /// SET_CONTROL with ENTITY_ACQUIRED or ENTITY_LOCKED, IDENTIFY included, and
+    /// Milan v1.3 5.4.2.17 asks the same. On, any controller can make the box
+    /// show itself while it is held, which some installations prefer.
+    void set_identify_bypasses_exclusive_access(bool const enable) noexcept { identify_bypasses_exclusive_access_ = enable; }
+
     /// Set only the GET_STREAM_INFO provider, without disturbing the others.
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
@@ -742,6 +750,10 @@ class AemCommandHandler
 
     // Emit 2013/2016-length descriptors in READ_DESCRIPTOR responses.
     bool legacy_2016_ = false;
+
+    // SET_CONTROL of the IDENTIFY control ignores acquire and lock (an option;
+    // the standards refuse it like any other SET_CONTROL).
+    bool identify_bypasses_exclusive_access_ = false;
 
     // Acquisition state. The acquirer's MAC is kept because IEEE 1722.1 7.5.2
     // implicitly registers the acquiring controller for unsolicited notifications.
