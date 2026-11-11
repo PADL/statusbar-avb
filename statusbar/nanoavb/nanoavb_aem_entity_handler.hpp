@@ -316,6 +316,8 @@ class AemEntityHandler
     /// code). Write the current value payload (the bytes that follow the
     /// descriptor_type/index header on the wire) into @p out and return the number of
     /// bytes written, or 0 for NOT_IMPLEMENTED / no such descriptor. Default: 0.
+    /// The same read answers a SET of the descriptor that did not take: 7.4.9.1 and
+    /// its siblings have a failed SET respond with the value in force.
     virtual auto on_get_descriptor_value(
         uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*request*/, std::span<uint8_t> /*out*/) -> size_t
     {

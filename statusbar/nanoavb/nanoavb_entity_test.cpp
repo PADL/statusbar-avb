@@ -2237,6 +2237,174 @@ TEST(nanoavb_entity_in_progress, table_full_answers_no_resources)
 }
 
 //
+// 7.4.9.1 and its siblings: a SET's response "always contains the current
+// value, that is it contains the new value if the command succeeds or the old
+// value if it fails" — however it failed: the hook, the lock, or a deferred
+// completion.
+//
+
+namespace {
+
+/// Refuses every SET, and serves GET_CONTROL and GET_MATRIX so a refused SET has
+/// a value in force to answer with. Records what each GET asked.
+class RefusingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        return AEM_STATUS_BAD_ARGUMENTS;
+    }
+
+    auto on_get_descriptor_value(
+        uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> request, std::span<uint8_t> out) -> size_t override
+    {
+        last_get = command_type;
+        last_request.assign(request.begin(), request.end());
+        if (command_type == AEM_COMMAND_GET_CONTROL && !out.empty()) {
+            out[0] = current_control;
+            return 1;
+        }
+        if (command_type == AEM_COMMAND_GET_MATRIX && out.size() >= request.size() + 2) {
+            span_copy(out.first(request.size()), request);
+            out[request.size()] = 0x12;
+            out[request.size() + 1] = 0x34;
+            return request.size() + 2;
+        }
+        return 0;
+    }
+
+    uint8_t current_control{0x40};
+    uint16_t last_get{0};
+    std::vector<uint8_t> last_request;
+};
+
+/// Has a name but takes no new one.
+class NamedHandler : public AemEntityHandler
+{
+  public:
+    auto on_get_name(DescriptorId /*id*/, uint16_t /*name_index*/) const -> std::optional<AtdeccString> override
+    {
+        return AtdeccString{"Old name"};
+    }
+};
+
+/// Defers every SET_CONTROL and serves GET_CONTROL.
+class DeferringControlHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
+    {
+        return command_type == AEM_COMMAND_SET_CONTROL ? AEM_STATUS_IN_PROGRESS : AEM_STATUS_SUCCESS;
+    }
+
+    auto on_get_descriptor_value(
+        uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*request*/, std::span<uint8_t> out) -> size_t override
+    {
+        if (command_type != AEM_COMMAND_GET_CONTROL || out.empty()) {
+            return 0;
+        }
+        out[0] = 0x40;
+        return 1;
+    }
+};
+
+// CONTROL 5 := 255
+std::array<uint8_t, 5> const kSetControl5{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05, 0xFF};
+
+}  // namespace
+
+TEST(nanoavb_entity_set_response, a_refused_set_answers_the_value_in_force)
+{
+    RefusingHandler app;
+    AemCommandHandler handler{app};
+    auto const result = make_test_result(handler, create_aem_header(AEM_COMMAND_SET_CONTROL), kSetControl5);
+    EXPECT_EQ(result.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(result.response_data().size(), size_t{5});
+    EXPECT_EQ(result.response_data()[3], 0x05);
+    EXPECT_EQ(result.response_data()[4], 0x40);  // the old value, not the 0xFF asked for
+    EXPECT_EQ(app.last_get, AEM_COMMAND_GET_CONTROL);
+}
+
+TEST(nanoavb_entity_set_response, a_set_refused_for_a_lock_answers_the_value_in_force)
+{
+    RefusingHandler app;
+    AemCommandHandler handler{app};
+    auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock.controller_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    std::array<uint8_t, 16> const lock_body{};
+    EXPECT_EQ(make_test_result(handler, lock, lock_body).status, AEM_STATUS_SUCCESS);
+
+    auto set = create_aem_header(AEM_COMMAND_SET_CONTROL);
+    set.controller_entity_id = Eui64{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+    auto const result = make_test_result(handler, set, kSetControl5);
+    EXPECT_EQ(result.status, AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(result.response_data().size(), size_t{5});
+    EXPECT_EQ(result.response_data()[4], 0x40);
+}
+
+TEST(nanoavb_entity_set_response, a_refused_set_matrix_reads_back_the_region_it_named)
+{
+    RefusingHandler app;
+    AemCommandHandler handler{app};
+    // MATRIX 2; region column 1, row 2, 1 x 1; horizontal, one value, no offset; one 2-octet value.
+    std::array<uint8_t, 18> const set_body{
+        0x00, DESCRIPTOR_MATRIX, 0x00, 0x02, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xAB, 0xCD};
+    auto const result = make_test_result(handler, create_aem_header(AEM_COMMAND_SET_MATRIX), set_body);
+    EXPECT_EQ(result.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(app.last_get, AEM_COMMAND_GET_MATRIX);
+    EXPECT_EQ(app.last_request.size(), size_t{12});  // the region header, without the values
+    EXPECT_EQ(result.response_data().size(), size_t{18});
+    EXPECT_EQ(result.response_data()[16], 0x12);
+    EXPECT_EQ(result.response_data()[17], 0x34);
+}
+
+TEST(nanoavb_entity_set_response, a_set_with_nothing_to_read_back_echoes_the_command)
+{
+    RefusingHandler app;  // serves no GET_SIGNAL_SELECTOR
+    AemCommandHandler handler{app};
+    std::array<uint8_t, 12> const set_body{
+        0x00, DESCRIPTOR_SIGNAL_SELECTOR, 0x00, 0x00, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
+    auto const result = make_test_result(handler, create_aem_header(AEM_COMMAND_SET_SIGNAL_SELECTOR), set_body);
+    EXPECT_EQ(result.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(result.response_data().size(), set_body.size());
+    EXPECT_TRUE(std::equal(set_body.begin(), set_body.end(), result.response_data().begin()));
+}
+
+TEST(nanoavb_entity_set_response, a_refused_set_name_answers_the_name_in_force)
+{
+    NamedHandler app;
+    AemCommandHandler handler{app};
+    std::array<uint8_t, 72> set_body{};  // ENTITY 0, entity_name, configuration 0
+    std::string_view const wanted{"New name"};
+    std::copy(wanted.begin(), wanted.end(), set_body.begin() + 8);
+    auto const result = make_test_result(handler, create_aem_header(AEM_COMMAND_SET_NAME), set_body);
+    EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(result.response_data().size(), size_t{72});
+    std::string_view const in_force{"Old name"};
+    EXPECT_TRUE(std::equal(in_force.begin(), in_force.end(), result.response_data().begin() + 8));
+}
+
+TEST(nanoavb_entity_in_progress, a_failed_completion_without_a_body_answers_the_value_in_force)
+{
+    DeferringControlHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, kSetControl5, 9);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 5, AEM_STATUS_BAD_ARGUMENTS));
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(header_of(sends[0]).sequence_id.get(), 9);
+    EXPECT_EQ(body_of(sends[0]).size(), size_t{5});
+    EXPECT_EQ(body_of(sends[0])[4], 0x40);
+}
+
+//
 // GET_AVB_INFO (7.4.40) through the get_avb_info callback, and its
 // unsolicited notification (7.5.2).
 //

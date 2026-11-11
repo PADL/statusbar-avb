@@ -122,7 +122,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 
         case AEM_COMMAND_SET_NAME:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return refused_set(*blocked, AEM_COMMAND_SET_NAME, command_data, out_buffer);
             }
             return handle_set_name(command_data, out_buffer);
 
@@ -182,63 +182,43 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             // shall work even when another controller holds the entity) — any
             // controller may ask "which box are you". Every other control honors
             // the exclusive claim.
-            if (!targets_identify_control(AEM_COMMAND_SET_CONTROL, command_data)) {
-                if (auto const blocked = check_exclusive_access(header)) {
-                    return reject_command(*blocked, command_data, out_buffer);
-                }
+            if (targets_identify_control(AEM_COMMAND_SET_CONTROL, command_data)) {
+                return handle_set_descriptor_value(AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
             }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
 
         case AEM_COMMAND_GET_CONTROL:
             return handle_get_descriptor_value(AEM_COMMAND_GET_CONTROL, command_data, out_buffer);
 
         case AEM_COMMAND_SET_SIGNAL_SELECTOR:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_SIGNAL_SELECTOR, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_SIGNAL_SELECTOR, command_data, out_buffer);
 
         case AEM_COMMAND_GET_SIGNAL_SELECTOR:
             return handle_get_descriptor_value(AEM_COMMAND_GET_SIGNAL_SELECTOR, command_data, out_buffer);
 
         case AEM_COMMAND_SET_MATRIX:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_MATRIX, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_MATRIX, command_data, out_buffer);
 
         case AEM_COMMAND_GET_MATRIX:
             return handle_get_descriptor_value(AEM_COMMAND_GET_MATRIX, command_data, out_buffer);
 
         case AEM_COMMAND_SET_MIXER:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_MIXER, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_MIXER, command_data, out_buffer);
 
         case AEM_COMMAND_GET_MIXER:
             return handle_get_descriptor_value(AEM_COMMAND_GET_MIXER, command_data, out_buffer);
 
         case AEM_COMMAND_SET_CLOCK_SOURCE:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_CLOCK_SOURCE, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_CLOCK_SOURCE, command_data, out_buffer);
 
         case AEM_COMMAND_GET_CLOCK_SOURCE:
             return handle_get_descriptor_value(AEM_COMMAND_GET_CLOCK_SOURCE, command_data, out_buffer);
 
         case AEM_COMMAND_SET_STREAM_FORMAT:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_STREAM_FORMAT, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_STREAM_FORMAT, command_data, out_buffer);
 
         case AEM_COMMAND_SET_SAMPLING_RATE:
-            if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
-            }
-            return handle_set_descriptor_value(AEM_COMMAND_SET_SAMPLING_RATE, command_data, out_buffer);
+            return guarded_set(header, AEM_COMMAND_SET_SAMPLING_RATE, command_data, out_buffer);
 
         case AEM_COMMAND_START_STREAMING:
             if (auto const blocked = check_exclusive_access(header)) {
@@ -374,30 +354,114 @@ auto AemCommandHandler::check_exclusive_access(AemDu const& header) const noexce
 auto AemCommandHandler::reject_command(uint8_t const status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
 {
-    size_t size = 0;
-    if (out_buffer.size() >= command_data.size()) {
-        span_copy(out_buffer, command_data);
-        size = command_data.size();
+    return {.status = status, .size = echo_command(command_data, out_buffer)};
+}
+
+auto AemCommandHandler::echo_command(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> size_t
+{
+    if (out_buffer.size() < command_data.size()) {
+        return 0;
     }
-    return {.status = status, .size = size};
+    span_copy(out_buffer.first(command_data.size()), command_data);
+    return command_data.size();
 }
 
 auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
     // Per-call model; the handler applies the name by (descriptor, name_index,
-    // symbol). The response echoes the command (header + 64-byte name).
+    // symbol). A name that was set is echoed back; one that was not is answered
+    // with the name in force (7.4.17.1).
     AemEntityModel aem_model{*handler_};
     auto const status = aem_model.apply_set_name(command_data);
-
-    size_t size = 0;
-    if (status == AEM_STATUS_SUCCESS && out_buffer.size() >= command_data.size()) {
-        std::copy(command_data.begin(), command_data.end(), out_buffer.begin());
-        size = command_data.size();
-        // A controller renamed a descriptor: notify every registered
-        // controller, like handle_set_descriptor_value does for values.
-        emit_unsolicited(AEM_COMMAND_SET_NAME, std::span<uint8_t const>{out_buffer.data(), size});
+    if (status != AEM_STATUS_SUCCESS) {
+        return refused_set(status, AEM_COMMAND_SET_NAME, command_data, out_buffer);
     }
+    // A controller renamed a descriptor: notify every registered controller,
+    // like handle_set_descriptor_value does for values.
+    size_t const size = echo_command(command_data, out_buffer);
+    emit_unsolicited(AEM_COMMAND_SET_NAME, out_buffer.first(size));
     return {.status = status, .size = size};
+}
+
+auto AemCommandHandler::guarded_set(
+    AemDu const& header, uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (auto const blocked = check_exclusive_access(header)) {
+        return refused_set(*blocked, command_type, command_data, out_buffer);
+    }
+    return handle_set_descriptor_value(command_type, command_data, out_buffer);
+}
+
+auto AemCommandHandler::refused_set(
+    uint8_t const status, uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    return {.status = status, .size = failed_set_body(command_type, command_data, out_buffer)};
+}
+
+auto AemCommandHandler::failed_set_body(
+    uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> size_t
+{
+    // 7.4.9.1 and its siblings: a SET's response "always contains the current
+    // value, that is ... the old value if it fails". The value in force is read
+    // the way GET reads it; a descriptor that cannot be read back is answered
+    // with the command echoed, so the response keeps the command's shape.
+    auto const n = value_in_force(command_type, command_data, out_buffer);
+    return n > 0 ? n : echo_command(command_data, out_buffer);
+}
+
+auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept -> std::optional<uint16_t>
+{
+    constexpr std::array<std::pair<uint16_t, uint16_t>, 8> twins{
+        {{AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
+         {AEM_COMMAND_SET_CONTROL, AEM_COMMAND_GET_CONTROL},
+         {AEM_COMMAND_SET_STREAM_FORMAT, AEM_COMMAND_GET_STREAM_FORMAT},
+         {AEM_COMMAND_SET_SAMPLING_RATE, AEM_COMMAND_GET_SAMPLING_RATE},
+         {AEM_COMMAND_SET_CLOCK_SOURCE, AEM_COMMAND_GET_CLOCK_SOURCE},
+         {AEM_COMMAND_SET_SIGNAL_SELECTOR, AEM_COMMAND_GET_SIGNAL_SELECTOR},
+         {AEM_COMMAND_SET_MIXER, AEM_COMMAND_GET_MIXER},
+         {AEM_COMMAND_SET_MATRIX, AEM_COMMAND_GET_MATRIX}}};
+    auto const it = std::find_if(twins.begin(), twins.end(), [=](auto const& pair) { return pair.first == set_command_type; });
+    return it == twins.end() ? std::nullopt : std::optional<uint16_t>{it->second};
+}
+
+auto AemCommandHandler::get_twin_request_size(uint16_t const set_command_type) noexcept -> size_t
+{
+    // The GET twin asks with the SET command's head: descriptor_type/index for
+    // most, plus the name_index/configuration_index of a name (7.4.18.1) or the
+    // region header of a matrix (7.4.34.1).
+    if (set_command_type == AEM_COMMAND_SET_NAME) {
+        return aem::AemNameCommandPayload::LENGTH;
+    }
+    if (set_command_type == AEM_COMMAND_SET_MATRIX) {
+        return aem::AemMatrixPayloadHeader::LENGTH;
+    }
+    return aem::AemControlPayloadHeader::LENGTH;
+}
+
+auto AemCommandHandler::value_in_force(
+    uint16_t const set_command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> size_t
+{
+    auto const twin = get_twin_of(set_command_type);
+    size_t const request_size = get_twin_request_size(set_command_type);
+    if (!twin || command_data.size() < request_size) {
+        return 0;
+    }
+    return read_back(*twin, command_data.first(request_size), out_buffer);
+}
+
+auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uint8_t const> request, std::span<uint8_t> out_buffer)
+    -> size_t
+{
+    // The GET runs through the ordinary dispatch so every path that serves a
+    // GET serves this too; the header of the command being answered is kept.
+    AemDu const saved_header = current_header_;
+    AemDu get_header = saved_header;
+    get_header.init_command(get_command_type, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + request.size()));
+    auto const r = handle_command(get_header, request, out_buffer);
+    current_header_ = saved_header;
+    return r.status == AEM_STATUS_SUCCESS ? r.size : 0;
 }
 
 auto AemCommandHandler::handle_set_descriptor_value(
@@ -408,21 +472,31 @@ auto AemCommandHandler::handle_set_descriptor_value(
     AemEntityModel aem_model{*handler_};
     aem_model.set_configuration(current_configuration_);
     auto const r = aem_model.apply_set_descriptor_value(command_type, command_data, out_buffer);
-
-    // A controller changed a control: notify every registered controller (IEEE
-    // 1722.1 9.6 unsolicited notifications). All subscribers are notified,
-    // including the originator — the U-bit + distinct sequence_id let a
-    // controller tell its own unsolicited echo from the direct response.
-    if (r.status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
-    }
     if (r.status == AEM_STATUS_IN_PROGRESS) {
         // The hook needs time (e.g. an SRP re-reservation after SET_STREAM_FORMAT):
         // answer IN_PROGRESS now, keep repeating it from tick(), and finish when
         // the application calls complete_pending_command().
         return defer_command(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
     }
-    return {.status = r.status, .size = r.size};
+    return settle_set(command_type, r.status, command_data, out_buffer.first(r.size), out_buffer);
+}
+
+auto AemCommandHandler::settle_set(
+    uint16_t const command_type,
+    uint8_t const status,
+    std::span<uint8_t const> command_data,
+    std::span<uint8_t const> echoed,
+    std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    if (status != AEM_STATUS_SUCCESS) {
+        return refused_set(status, command_type, command_data, out_buffer);
+    }
+    // A controller changed a value: notify every registered controller (IEEE
+    // 1722.1 9.6 unsolicited notifications). All subscribers are notified,
+    // including the originator — the U-bit + distinct sequence_id let a
+    // controller tell its own unsolicited echo from the direct response.
+    emit_unsolicited(command_type, echoed);
+    return {.status = status, .size = echoed.size()};
 }
 
 auto AemCommandHandler::defer_command(uint16_t const command_type, std::span<uint8_t const> echoed_body) -> AemCommandResponse
@@ -465,13 +539,26 @@ auto AemCommandHandler::complete_pending_command(
     }
     PendingCommand const done = pending_commands_[idx];
     pending_commands_.remove(idx);
+    answer_completed(done, status, response_body);
+    return true;
+}
 
-    auto const body = response_body.empty() ? std::span<uint8_t const>{done.body}.first(done.body_size) : response_body;
+void AemCommandHandler::answer_completed(PendingCommand const& done, uint8_t const status, std::span<uint8_t const> response_body)
+{
+    auto const command_type = done.header.command_code();
+    auto const requested = std::span<uint8_t const>{done.body}.first(done.body_size);
+    // The application may say what the response carries. Otherwise a SET that
+    // succeeded echoes what was asked, and one that failed answers the value in
+    // force (7.4.9.1 and its siblings), read back now.
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
+    auto const body = !response_body.empty() ? response_body
+        : status == AEM_STATUS_SUCCESS
+        ? requested
+        : std::span<uint8_t const>{in_force}.first(failed_set_body(command_type, requested, in_force));
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(command_type, body);
     }
-    return true;
 }
 
 void AemCommandHandler::tick(sm::TimePoint const now)

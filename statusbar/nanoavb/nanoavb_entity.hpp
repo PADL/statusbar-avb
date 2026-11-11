@@ -496,6 +496,10 @@ class AemCommandHandler
     [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
+    /// Copy the command body into @p out_buffer as the response body; the bytes
+    /// copied, 0 when it does not fit.
+    [[nodiscard]] static auto echo_command(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> size_t;
+
     /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
     [[nodiscard]] auto handle_get_stream_format(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
@@ -640,6 +644,51 @@ class AemCommandHandler
     /// echoed body) for the periodic IN_PROGRESS repeats and the final response.
     [[nodiscard]] auto defer_command(uint16_t command_type, std::span<uint8_t const> echoed_body) -> AemCommandResponse;
 
+    /// A SET's final answer: SUCCESS echoes the command (@p echoed) and notifies
+    /// subscribers; anything else answers the value in force.
+    [[nodiscard]] auto settle_set(
+        uint16_t command_type,
+        uint8_t status,
+        std::span<uint8_t const> command_data,
+        std::span<uint8_t const> echoed,
+        std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Run a value SET through check_exclusive_access() first; a refusal still
+    /// answers the value in force.
+    [[nodiscard]] auto guarded_set(
+        AemDu const& header, uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// The response of a SET that did not take: @p status with failed_set_body().
+    [[nodiscard]] auto refused_set(
+        uint8_t status, uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// The body a failed SET answers with (7.4.9.1 and its siblings: "the old
+    /// value if it fails"): the value in force as GET reads it, else the command
+    /// echoed. Returns the bytes written into @p out_buffer.
+    [[nodiscard]] auto failed_set_body(uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> size_t;
+
+    /// The value in force for the descriptor @p command_data (a SET body)
+    /// addresses, framed as the SET's GET twin frames it; 0 when there is no
+    /// twin or nothing to read.
+    [[nodiscard]] auto value_in_force(
+        uint16_t set_command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> size_t;
+
+    /// Dispatch @p get_command_type with @p request as if it had arrived, keeping
+    /// the current command's header; the response body size on SUCCESS, else 0.
+    [[nodiscard]] auto read_back(uint16_t get_command_type, std::span<uint8_t const> request, std::span<uint8_t> out_buffer)
+        -> size_t;
+
+    /// The GET that reads what a SET writes (SET_NAME -> GET_NAME, SET_CONTROL ->
+    /// GET_CONTROL, ...), or nullopt for a SET without one.
+    [[nodiscard]] static auto get_twin_of(uint16_t set_command_type) noexcept -> std::optional<uint16_t>;
+
+    /// How much of a SET body its GET twin asks with: the descriptor head, the
+    /// name head for SET_NAME, the region header for SET_MATRIX.
+    [[nodiscard]] static auto get_twin_request_size(uint16_t set_command_type) noexcept -> size_t;
+
     /// After a command handled with SUCCESS, send its response body as the
     /// unsolicited notification (IEEE 1722.1 7.5.2 list).
     void notify_on_success(uint16_t command_type, AemCommandResponse const& response, std::span<uint8_t const> out_buffer);
@@ -728,6 +777,10 @@ class AemCommandHandler
         sm::TimePoint next_in_progress{};
     };
     SlotTable<PendingCommand, MAX_PENDING_COMMANDS> pending_commands_{};
+
+    /// Send a completed deferred command's final response (and its unsolicited
+    /// notification on SUCCESS); see complete_pending_command() for the body.
+    void answer_completed(PendingCommand const& done, uint8_t status, std::span<uint8_t const> response_body);
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will
