@@ -510,14 +510,46 @@ class AemCommandHandler
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
 
+    /// Handle ACQUIRE_ENTITY (7.4.1). Only the ENTITY descriptor can be
+    /// acquired here: any other descriptor type answers NOT_SUPPORTED.
     [[nodiscard]] auto handle_acquire_entity(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// The acquisition's RELEASE: SUCCESS for the owner, ENTITY_ACQUIRED for anyone else.
+    [[nodiscard]] auto release_acquisition(AemDu const& header) noexcept -> uint8_t;
+
+    /// Take, keep or contest the acquisition: SUCCESS, IN_PROGRESS (a
+    /// CONTROLLER_AVAILABLE handshake with the owner has begun) or ENTITY_ACQUIRED.
+    [[nodiscard]] auto take_acquisition(
+        AemDu const& header, AemAcquireEntityPayload const& cmd, std::span<uint8_t const> command_data) -> uint8_t;
+
+    /// Park the requester and ask the current owner whether it is still there.
+    void begin_controller_available_handshake(AemDu const& header, uint32_t flags, std::span<uint8_t const> command_data);
+
+    /// The ACQUIRE_ENTITY response for @p status: nothing yet for IN_PROGRESS,
+    /// else the flags (zero after a successful release) and the owner.
+    [[nodiscard]] auto acquire_outcome(
+        uint8_t status, AemAcquireEntityPayload const& cmd, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
 
     [[nodiscard]] static auto build_acquire_response(AcquireLockResponseParams const& params, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
+    /// Handle LOCK_ENTITY (7.4.2). Only the ENTITY descriptor can be locked
+    /// here (NOT_SUPPORTED otherwise), and while the entity is acquired only
+    /// its acquirer may lock or unlock it (7.4.2.2: ENTITY_ACQUIRED otherwise).
     [[nodiscard]] auto handle_lock_entity(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
+
+    /// Why a LOCK_ENTITY command is refused before the lock itself is consulted,
+    /// or nullopt when it may proceed.
+    [[nodiscard]] auto lock_refusal(AemDu const& header, AemLockEntityPayload const& cmd) const noexcept -> std::optional<uint8_t>;
+
+    /// Take or refresh the lock: SUCCESS, or ENTITY_LOCKED when another controller holds it.
+    [[nodiscard]] auto apply_lock(AemDu const& header) noexcept -> uint8_t;
+
+    /// Release the lock: SUCCESS for the holder or a free entity, ENTITY_LOCKED otherwise.
+    [[nodiscard]] auto apply_unlock(AemDu const& header) noexcept -> uint8_t;
 
     [[nodiscard]] static auto build_lock_response(AcquireLockResponseParams const& params, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;

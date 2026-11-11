@@ -774,6 +774,91 @@ TEST(nanoavb_entity_lock, refresh_extends_timeout)
 //
 // Get Configuration Tests
 //
+
+namespace {
+
+/// A 16-octet ACQUIRE_ENTITY / LOCK_ENTITY body: flags, zero owner, then the descriptor.
+auto exclusive_access_body(uint32_t const flags, uint16_t const descriptor_type, uint16_t const descriptor_index)
+    -> std::array<uint8_t, 16>
+{
+    std::array<uint8_t, 16> body{};
+    body[0] = static_cast<uint8_t>(flags >> 24U);
+    body[3] = static_cast<uint8_t>(flags & 0xFFU);
+    body[12] = static_cast<uint8_t>(descriptor_type >> 8U);
+    body[13] = static_cast<uint8_t>(descriptor_type & 0xFFU);
+    body[14] = static_cast<uint8_t>(descriptor_index >> 8U);
+    body[15] = static_cast<uint8_t>(descriptor_index & 0xFFU);
+    return body;
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_acquire, acquire_of_a_descriptor_other_than_entity_is_not_supported)
+{
+    // 7.4.1.1: an entity that acquires only ENTITY answers NOT_SUPPORTED to any
+    // other descriptor type, and takes nothing.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    auto header = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+
+    auto const result = make_test_result(handler, header, exclusive_access_body(0, DESCRIPTOR_CONFIGURATION, 0));
+    EXPECT_EQ(result.status, AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_FALSE(handler.is_acquired());
+    // The response still echoes the descriptor it refused.
+    EXPECT_EQ(result.response_data()[13], DESCRIPTOR_CONFIGURATION);
+
+    // A release naming that descriptor is refused the same way.
+    auto const release = make_test_result(handler, header, exclusive_access_body(0x00000001U, DESCRIPTOR_CONFIGURATION, 0));
+    EXPECT_EQ(release.status, AEM_STATUS_NOT_SUPPORTED);
+}
+
+TEST(nanoavb_entity_lock, lock_of_a_descriptor_other_than_entity_is_not_supported)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    auto header = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    header.controller_entity_id = statusbar::ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+
+    auto const result = make_test_result(handler, header, exclusive_access_body(0, DESCRIPTOR_STREAM_INPUT, 0));
+    EXPECT_EQ(result.status, AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_FALSE(handler.is_locked());
+    EXPECT_EQ(result.response_data()[13], DESCRIPTOR_STREAM_INPUT);
+}
+
+TEST(nanoavb_entity_lock, only_the_acquirer_may_lock_or_unlock_an_acquired_entity)
+{
+    // 7.4.2.2: while acquired, a LOCK_ENTITY from any other controller answers
+    // ENTITY_ACQUIRED, lock and unlock alike; the acquirer's own lock proceeds.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    statusbar::ieee::Eui64 const owner{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    statusbar::ieee::Eui64 const other{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+
+    auto acquire = create_aem_header(AEM_COMMAND_ACQUIRE_ENTITY);
+    acquire.controller_entity_id = owner;
+    EXPECT_EQ(make_test_result(handler, acquire, exclusive_access_body(0, DESCRIPTOR_ENTITY, 0)).status, AEM_STATUS_SUCCESS);
+
+    auto lock_from_other = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock_from_other.controller_entity_id = other;
+    auto const refused = make_test_result(handler, lock_from_other, exclusive_access_body(0, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(refused.status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_FALSE(handler.is_locked());
+
+    auto lock_from_owner = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock_from_owner.controller_entity_id = owner;
+    EXPECT_EQ(
+        make_test_result(handler, lock_from_owner, exclusive_access_body(0, DESCRIPTOR_ENTITY, 0)).status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(handler.is_locked());
+
+    // The other controller cannot unlock it either, and the response names the holder.
+    auto const unlock_refused =
+        make_test_result(handler, lock_from_other, exclusive_access_body(0x00000001U, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(unlock_refused.status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_TRUE(handler.is_locked());
+    EXPECT_EQ(unlock_refused.response_data()[11], 0x07);
+}
+
 TEST(nanoavb_entity_config, get_configuration)
 {
     auto model = create_test_model();

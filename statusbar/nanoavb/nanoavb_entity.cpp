@@ -975,73 +975,89 @@ auto AemCommandHandler::handle_acquire_entity(
     if (command_data.size() < AemAcquireEntityPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
-
     AemAcquireEntityPayload cmd{};
     span_load(cmd, command_data);
-    uint32_t const flags = cmd.flags;  // host order via wire-type conversion
 
-    bool const release = cmd.is_release();
-
-    if (release) {
-        // Release acquisition
-        if (acquired_ && acquiring_controller_ == header.controller_entity_id) {
-            acquired_ = false;
-            acquired_persistent_ = false;
-            acquiring_controller_ = {};
-            acquiring_controller_mac_ = {};
-            return build_acquire_response(
-                {.status = AEM_STATUS_SUCCESS, .flags = 0, .entity_id = {}, .command_data = command_data}, out_buffer);
-        }
+    // 7.4.1.1: an entity shall support acquiring ENTITY and may support other
+    // descriptor types; one that does not answers NOT_SUPPORTED. This entity is
+    // acquired whole or not at all, release included.
+    if (cmd.descriptor_type.get() != DESCRIPTOR_ENTITY) {
         return build_acquire_response(
-            {.status = AEM_STATUS_ENTITY_ACQUIRED,
-             .flags = flags,
+            {.status = AEM_STATUS_NOT_SUPPORTED,
+             .flags = cmd.flags,
              .entity_id = acquiring_controller_,
              .command_data = command_data},
             out_buffer);
     }
+    auto const status = cmd.is_release() ? release_acquisition(header) : take_acquisition(header, cmd, command_data);
+    return acquire_outcome(status, cmd, command_data, out_buffer);
+}
 
-    // Acquire
-    bool const persistent = cmd.is_persistent();
+auto AemCommandHandler::release_acquisition(AemDu const& header) noexcept -> uint8_t
+{
+    if (!(acquired_ && acquiring_controller_ == header.controller_entity_id)) {
+        return AEM_STATUS_ENTITY_ACQUIRED;
+    }
+    acquired_ = false;
+    acquired_persistent_ = false;
+    acquiring_controller_ = {};
+    acquiring_controller_mac_ = {};
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::take_acquisition(
+    AemDu const& header, AemAcquireEntityPayload const& cmd, std::span<uint8_t const> command_data) -> uint8_t
+{
     if (!acquired_) {
         acquired_ = true;
-        acquired_persistent_ = persistent;
+        acquired_persistent_ = cmd.is_persistent();
         acquiring_controller_ = header.controller_entity_id;
         acquiring_controller_mac_ = current_src_mac_;
-        return build_acquire_response(
-            {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data},
-            out_buffer);
+        return AEM_STATUS_SUCCESS;
     }
     if (acquiring_controller_ == header.controller_entity_id) {
-        // Already acquired by this controller
-        return build_acquire_response(
-            {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data},
-            out_buffer);
+        return AEM_STATUS_SUCCESS;  // already this controller's
     }
-    // Acquired by another controller - initiate CONTROLLER_AVAILABLE handshake
-    // Skip if existing acquisition is persistent or no callback available
+    // Acquired by another controller: ask it whether it is still there, unless
+    // its acquisition is PERSISTENT or nobody can carry the question. The final
+    // answer then comes from controller_available_response_received() (deny) or
+    // controller_available_timed_out() (grant).
     if (!acquired_persistent_ && send_controller_available) {
-        // Store pending acquire and send CONTROLLER_AVAILABLE to current owner
-        pending_acquire_.requester_header = header;
-        pending_acquire_.requester_mac = current_src_mac_;
-        pending_acquire_.requester_flags = flags;
-        std::copy_n(
-            command_data.begin(),
-            std::min(command_data.size(), pending_acquire_.command_data_copy.size()),
-            pending_acquire_.command_data_copy.begin());
-        pending_acquire_.timeout = event_time_ + std::chrono::milliseconds(AEM_TIMEOUT_MS);
-        pending_acquire_.active = true;
+        begin_controller_available_handshake(header, cmd.flags, command_data);
+        return AEM_STATUS_IN_PROGRESS;
+    }
+    return AEM_STATUS_ENTITY_ACQUIRED;
+}
 
-        send_controller_available(acquiring_controller_);
+void AemCommandHandler::begin_controller_available_handshake(
+    AemDu const& header, uint32_t const flags, std::span<uint8_t const> command_data)
+{
+    pending_acquire_ = PendingAcquire{
+        .requester_header = header,
+        .requester_mac = current_src_mac_,
+        .requester_flags = flags,
+        .command_data_copy = {},
+        .timeout = event_time_ + std::chrono::milliseconds(AEM_TIMEOUT_MS),
+        .active = true};
+    std::copy_n(
+        command_data.begin(),
+        std::min(command_data.size(), pending_acquire_.command_data_copy.size()),
+        pending_acquire_.command_data_copy.begin());
+    send_controller_available(acquiring_controller_);
+}
 
-        // Return IN_PROGRESS - the final response will be sent by
-        // controller_available_response_received() or controller_available_timed_out()
+auto AemCommandHandler::acquire_outcome(
+    uint8_t const status, AemAcquireEntityPayload const& cmd, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (status == AEM_STATUS_IN_PROGRESS) {
         return {.status = AEM_STATUS_IN_PROGRESS, .size = 0};
     }
-
-    // No CONTROLLER_AVAILABLE callback or PERSISTENT - deny immediately
+    // A release that succeeded answers no flags and no owner; everything else
+    // echoes the flags and names the owner (zero when the entity is free).
+    uint32_t const flags = (cmd.is_release() && status == AEM_STATUS_SUCCESS) ? 0U : uint32_t{cmd.flags};
     return build_acquire_response(
-        {.status = AEM_STATUS_ENTITY_ACQUIRED, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data},
-        out_buffer);
+        {.status = status, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data}, out_buffer);
 }
 
 auto AemCommandHandler::build_acquire_response(AcquireLockResponseParams const& params, std::span<uint8_t> out_buffer)
@@ -1072,50 +1088,53 @@ auto AemCommandHandler::handle_lock_entity(
     if (command_data.size() < AemLockEntityPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
-
     AemLockEntityPayload cmd{};
     span_load(cmd, command_data);
-    uint32_t const flags = cmd.flags;  // host order via wire-type conversion
-
-    bool const unlock = cmd.is_unlock();
-
-    if (unlock) {
-        // Unlock
-        if (locked_ && locking_controller_ == header.controller_entity_id) {
-            locked_ = false;
-            locking_controller_ = {};
-            return build_lock_response(
-                {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = {}, .command_data = command_data}, out_buffer);
-        }
-        if (!locked_) {
-            return build_lock_response(
-                {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = {}, .command_data = command_data}, out_buffer);
-        }
-        return build_lock_response(
-            {.status = AEM_STATUS_ENTITY_LOCKED, .flags = flags, .entity_id = locking_controller_, .command_data = command_data},
-            out_buffer);
-    }
-
-    // Lock
-    if (!locked_) {
-        locked_ = true;
-        locking_controller_ = header.controller_entity_id;
-        lock_expiry_time_ = event_time_ + std::chrono::milliseconds(AEM_LOCK_TIMEOUT_MS);
-        return build_lock_response(
-            {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = locking_controller_, .command_data = command_data},
-            out_buffer);
-    }
-    if (locking_controller_ == header.controller_entity_id) {
-        // Already locked by this controller - refresh timeout
-        lock_expiry_time_ = event_time_ + std::chrono::milliseconds(AEM_LOCK_TIMEOUT_MS);
-        return build_lock_response(
-            {.status = AEM_STATUS_SUCCESS, .flags = flags, .entity_id = locking_controller_, .command_data = command_data},
-            out_buffer);
-    }
-    // Locked by another controller
+    // The response names whoever holds the lock once the command has been
+    // applied: zero after an unlock, the holder after a lock or a refusal.
+    auto const refused = lock_refusal(header, cmd);
+    auto const status = refused ? *refused : (cmd.is_unlock() ? apply_unlock(header) : apply_lock(header));
     return build_lock_response(
-        {.status = AEM_STATUS_ENTITY_LOCKED, .flags = flags, .entity_id = locking_controller_, .command_data = command_data},
-        out_buffer);
+        {.status = status, .flags = cmd.flags, .entity_id = locking_controller_, .command_data = command_data}, out_buffer);
+}
+
+auto AemCommandHandler::lock_refusal(AemDu const& header, AemLockEntityPayload const& cmd) const noexcept -> std::optional<uint8_t>
+{
+    // This entity is locked whole or not at all: a command naming any other
+    // descriptor type is NOT_SUPPORTED (the ACQUIRE_ENTITY rule of 7.4.1.1,
+    // which Milan asks of LOCK_ENTITY as well), unlock included.
+    if (cmd.descriptor_type.get() != DESCRIPTOR_ENTITY) {
+        return AEM_STATUS_NOT_SUPPORTED;
+    }
+    // 7.4.2.2: while acquired, only the acquirer may lock or unlock; every other
+    // controller is told ENTITY_ACQUIRED.
+    if (acquired_ && !(acquiring_controller_ == header.controller_entity_id)) {
+        return AEM_STATUS_ENTITY_ACQUIRED;
+    }
+    return std::nullopt;
+}
+
+auto AemCommandHandler::apply_lock(AemDu const& header) noexcept -> uint8_t
+{
+    if (locked_ && !(locking_controller_ == header.controller_entity_id)) {
+        return AEM_STATUS_ENTITY_LOCKED;
+    }
+    // A fresh lock, or the holder keeping its lock alive (7.4.2).
+    locked_ = true;
+    locking_controller_ = header.controller_entity_id;
+    lock_expiry_time_ = event_time_ + std::chrono::milliseconds(AEM_LOCK_TIMEOUT_MS);
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::apply_unlock(AemDu const& header) noexcept -> uint8_t
+{
+    if (locked_ && !(locking_controller_ == header.controller_entity_id)) {
+        return AEM_STATUS_ENTITY_LOCKED;
+    }
+    // The holder letting go, or nothing to let go of: both succeed.
+    locked_ = false;
+    locking_controller_ = {};
+    return AEM_STATUS_SUCCESS;
 }
 
 auto AemCommandHandler::build_lock_response(AcquireLockResponseParams const& params, std::span<uint8_t> out_buffer)
