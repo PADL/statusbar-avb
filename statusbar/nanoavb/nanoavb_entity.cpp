@@ -467,6 +467,12 @@ auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uin
 auto AemCommandHandler::handle_set_descriptor_value(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
+    // A hook that answers IN_PROGRESS needs a pending slot to be finished from,
+    // so the slot is spoken for before the hook runs: with none free the SET is
+    // refused NO_RESOURCES here, and no work is begun that nothing could report.
+    if (pending_commands_.size() >= pending_commands_.capacity()) {
+        return refused_set(AEM_STATUS_NO_RESOURCES, command_type, command_data, out_buffer);
+    }
     // Per-call model (handler_ resolves the descriptor symbol via its storage). The
     // handler applies the value by (command_type, symbol); the response echoes the command.
     AemEntityModel aem_model{*handler_};
@@ -502,15 +508,19 @@ auto AemCommandHandler::settle_set(
 auto AemCommandHandler::defer_command(uint16_t const command_type, std::span<uint8_t const> echoed_body) -> AemCommandResponse
 {
     (void)command_type;
+    // handle_set_descriptor_value() saw a free slot before the hook ran, so the
+    // add below cannot fail for want of one; a body too long to keep is the one
+    // refusal left here, and it is a property of the command, known to its sender.
     if (echoed_body.size() > MAX_PENDING_BODY) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = echoed_body.size()};
     }
-    PendingCommand pending{};
-    pending.header = current_header_;
-    pending.mac = current_src_mac_;
+    PendingCommand pending{
+        .header = current_header_,
+        .mac = current_src_mac_,
+        .body = {},
+        .body_size = echoed_body.size(),
+        .next_in_progress = event_time_ + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS)};
     std::copy(echoed_body.begin(), echoed_body.end(), pending.body.begin());
-    pending.body_size = echoed_body.size();
-    pending.next_in_progress = event_time_ + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
     if (!pending_commands_.add(pending)) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = echoed_body.size()};
     }

@@ -2144,8 +2144,11 @@ class DeferringHandler : public AemEntityHandler
   public:
     auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
     {
+        ++set_calls;
         return command_type == AEM_COMMAND_SET_STREAM_FORMAT ? AEM_STATUS_IN_PROGRESS : AEM_STATUS_SUCCESS;
     }
+
+    int set_calls{0};
 };
 
 std::array<uint8_t, AemStreamFormatPayload::LENGTH> const kSetFormatOut0{
@@ -2232,8 +2235,20 @@ TEST(nanoavb_entity_in_progress, table_full_answers_no_resources)
         EXPECT_EQ(sends.size(), size_t{1});
         auto const expected = index < AemCommandHandler::MAX_PENDING_COMMANDS ? AEM_STATUS_IN_PROGRESS : AEM_STATUS_NO_RESOURCES;
         EXPECT_EQ(header_of(sends[0]).status(), expected);
+        // The refusal carries the command's shape, as every failed SET does.
+        EXPECT_EQ(body_of(sends[0]).size(), kSetFormatOut0.size());
     }
     EXPECT_EQ(handler.pending_command_count(), AemCommandHandler::MAX_PENDING_COMMANDS);
+    // The ninth SET was refused before its hook ran: nothing was begun that
+    // complete_pending_command() could not finish.
+    EXPECT_EQ(app.set_calls, static_cast<int>(AemCommandHandler::MAX_PENDING_COMMANDS));
+
+    // A slot given back admits the next SET, hook and all.
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_STREAM_FORMAT, DESCRIPTOR_STREAM_OUTPUT, 0, AEM_STATUS_SUCCESS));
+    sends.clear();
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, 20);
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(app.set_calls, static_cast<int>(AemCommandHandler::MAX_PENDING_COMMANDS) + 1);
 }
 
 //

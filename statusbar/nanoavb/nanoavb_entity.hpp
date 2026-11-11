@@ -431,8 +431,9 @@ class AemCommandHandler
     // flight at once (the corrigendum recommends accepting the SET_STREAM_FORMAT
     // of every stream together so one re-reservation wait covers them all).
 
-    /// Deferred commands held at once; beyond this the hook's IN_PROGRESS is
-    /// answered NO_RESOURCES.
+    /// Deferred commands held at once. A value SET arriving while every slot
+    /// is taken is refused NO_RESOURCES before its hook runs, so no work is
+    /// begun that could not be finished through complete_pending_command().
     static constexpr size_t MAX_PENDING_COMMANDS = 8;
     /// Longest command body a deferred command keeps for its echoed responses
     /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
