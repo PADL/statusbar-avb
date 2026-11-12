@@ -168,4 +168,62 @@ auto parse_escf_frame(std::span<uint8_t const> frame) -> std::optional<ParsedEsc
 auto escf_verify_frame(ParsedEscfFrame const& frame, P256PublicKey const& pk) -> bool;
 auto escf_verify_frame(ParsedEscfFrame const& frame, Ed25519PublicKey const& pk) -> bool;
 
+/// The outcome of a told-the-time verification, in the order the gates run: the
+/// timestamp window (a comparison), the replay guard (a lookup), then the signature
+/// (the expensive one, reached only by a frame the first two let through).
+enum class EscfVerdict : uint8_t
+{
+    accepted,
+    stale_timestamp,  ///< signing_timestamp over 100 ms from the Listener's PTP time (A3)
+    replayed,         ///< signed no later than a frame already accepted from this key_id
+    bad_signature,    ///< the sig value is not the key's variant, or the signature fails
+};
+
+/// A Listener's replay guard for ESCF: the newest signing_timestamp accepted from each
+/// signer (key_id). A frame signed at or before it is a replay, since a signer stamps
+/// each frame with its PTP time as it signs. Fixed capacity, no allocation: a signer
+/// unseen beyond max_signers evicts the one whose last accepted frame is the oldest.
+///
+/// This tolerates no reordering: a frame overtaken by a later one from the same key is
+/// refused as replayed, which on one Ethernet segment is the dropped frame's fate anyway.
+/// A Listener that keeps its own replay state uses escf_verify_frame instead.
+class EscfReplayGuard
+{
+  public:
+    static constexpr size_t max_signers = 16;
+
+    /// True when a frame from @p key_id at @p signing_timestamp is a replay of one accepted.
+    [[nodiscard]] auto is_replay(statusbar::ieee::Eui64 const& key_id, uint64_t signing_timestamp) const noexcept -> bool;
+
+    /// Record an accepted frame.
+    void accept(statusbar::ieee::Eui64 const& key_id, uint64_t signing_timestamp) noexcept;
+
+    /// How many signers are remembered.
+    [[nodiscard]] auto signers() const noexcept -> size_t;
+
+  private:
+    struct Signer
+    {
+        statusbar::ieee::Eui64 key_id{};
+        uint64_t last_signing_timestamp{};
+        bool used{};
+    };
+
+    [[nodiscard]] auto find(statusbar::ieee::Eui64 const& key_id) const noexcept -> Signer const*;
+    /// The signer's slot, or the slot to take for a new one: unused first, else the oldest.
+    [[nodiscard]] auto slot_for(statusbar::ieee::Eui64 const& key_id) noexcept -> Signer&;
+
+    std::array<Signer, max_signers> signers_{};
+};
+
+/// Verify a parsed frame as a Listener told its PTP time (16.2.5 and 16.2.7 as amended,
+/// A3): the signing_timestamp has to be within 100 ms of @p now_ptp_ns, the frame must
+/// not replay one @p guard has accepted, and the signature must verify with the key
+/// key_id identifies. The two cheap gates run before the signature; an accepted frame
+/// is recorded in @p guard, a refused one leaves it as it was. Nothing here asks a clock.
+auto escf_verify_frame_at(ParsedEscfFrame const& frame, P256PublicKey const& pk, uint64_t now_ptp_ns, EscfReplayGuard& guard)
+    -> EscfVerdict;
+auto escf_verify_frame_at(ParsedEscfFrame const& frame, Ed25519PublicKey const& pk, uint64_t now_ptp_ns, EscfReplayGuard& guard)
+    -> EscfVerdict;
+
 }  // namespace statusbar::crypto::avtp

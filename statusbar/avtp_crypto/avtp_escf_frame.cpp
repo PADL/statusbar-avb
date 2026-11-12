@@ -262,4 +262,82 @@ auto escf_verify_frame(ParsedEscfFrame const& frame, Ed25519PublicKey const& pk)
         escf_ed25519_verify(pk, frame.key_id, frame.signing_timestamp, frame.encapsulated_avtpdu, frame.signature_value);
 }
 
+auto EscfReplayGuard::find(statusbar::ieee::Eui64 const& key_id) const noexcept -> Signer const*
+{
+    for (auto const& signer : signers_) {
+        if (signer.used && signer.key_id == key_id) {
+            return &signer;
+        }
+    }
+    return nullptr;
+}
+
+auto EscfReplayGuard::slot_for(statusbar::ieee::Eui64 const& key_id) noexcept -> Signer&
+{
+    Signer* oldest = &signers_[0];
+    for (auto& signer : signers_) {
+        if (!signer.used || signer.key_id == key_id) {
+            return signer;
+        }
+        if (signer.last_signing_timestamp < oldest->last_signing_timestamp) {
+            oldest = &signer;
+        }
+    }
+    return *oldest;
+}
+
+auto EscfReplayGuard::is_replay(statusbar::ieee::Eui64 const& key_id, uint64_t const signing_timestamp) const noexcept -> bool
+{
+    auto const* signer = find(key_id);
+    return signer != nullptr && signing_timestamp <= signer->last_signing_timestamp;
+}
+
+void EscfReplayGuard::accept(statusbar::ieee::Eui64 const& key_id, uint64_t const signing_timestamp) noexcept
+{
+    auto& signer = slot_for(key_id);
+    signer = Signer{.key_id = key_id, .last_signing_timestamp = signing_timestamp, .used = true};
+}
+
+auto EscfReplayGuard::signers() const noexcept -> size_t
+{
+    size_t n = 0;
+    for (auto const& signer : signers_) {
+        n += signer.used ? 1 : 0;
+    }
+    return n;
+}
+
+namespace {
+
+// The gates in order; Verify is the variant's signature check over the parsed frame.
+template <typename Verify>
+auto verify_at(ParsedEscfFrame const& frame, uint64_t const now_ptp_ns, EscfReplayGuard& guard, Verify const& verify) -> EscfVerdict
+{
+    if (!escf_signing_timestamp_is_acceptable(frame.signing_timestamp, now_ptp_ns)) {
+        return EscfVerdict::stale_timestamp;
+    }
+    if (guard.is_replay(frame.key_id, frame.signing_timestamp)) {
+        return EscfVerdict::replayed;
+    }
+    if (!verify()) {
+        return EscfVerdict::bad_signature;
+    }
+    guard.accept(frame.key_id, frame.signing_timestamp);
+    return EscfVerdict::accepted;
+}
+
+}  // namespace
+
+auto escf_verify_frame_at(ParsedEscfFrame const& frame, P256PublicKey const& pk, uint64_t const now_ptp_ns, EscfReplayGuard& guard)
+    -> EscfVerdict
+{
+    return verify_at(frame, now_ptp_ns, guard, [&] { return escf_verify_frame(frame, pk); });
+}
+
+auto escf_verify_frame_at(
+    ParsedEscfFrame const& frame, Ed25519PublicKey const& pk, uint64_t const now_ptp_ns, EscfReplayGuard& guard) -> EscfVerdict
+{
+    return verify_at(frame, now_ptp_ns, guard, [&] { return escf_verify_frame(frame, pk); });
+}
+
 }  // namespace statusbar::crypto::avtp

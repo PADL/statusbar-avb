@@ -258,4 +258,120 @@ TEST(avtp_escf_frame, parse_bounds_and_rejections)
                     .has_value());
 }
 
+namespace {
+
+/// A signed Ed25519 frame of the KAT inputs with the given signing_timestamp, parsed.
+struct SignedFrame
+{
+    std::array<uint8_t, 256> storage{};
+    ParsedEscfFrame parsed{};
+};
+
+auto signed_frame(Ed25519PrivateKey const& sk, uint64_t signing_timestamp, statusbar::ieee::Eui64 const& key_id = kat_key_id)
+    -> SignedFrame
+{
+    SignedFrame f{};
+    auto const built = build_signed_escf_frame(f.storage, dest_mac, src_mac, sk, key_id, signing_timestamp, kat_avtpdu);
+    f.parsed = *parse_escf_frame(*built);
+    return f;
+}
+
+}  // namespace
+
+// The three gates, in the order they run: a frame signed outside the window is refused
+// before any signature arithmetic and leaves no trace in the guard.
+TEST(avtp_escf_frame, told_verify_refuses_a_stale_timestamp_before_the_signature)
+{
+    auto const sk = ed25519_key();
+    EscfReplayGuard guard;
+    auto const frame = signed_frame(sk, kat_timestamp);
+    EXPECT_TRUE(
+        escf_verify_frame_at(frame.parsed, sk.public_key, kat_timestamp + escf_signing_timestamp_window_ns + 1, guard) ==
+        EscfVerdict::stale_timestamp);
+    EXPECT_TRUE(
+        escf_verify_frame_at(frame.parsed, sk.public_key, kat_timestamp - escf_signing_timestamp_window_ns - 1, guard) ==
+        EscfVerdict::stale_timestamp);
+    EXPECT_EQ(guard.signers(), 0U);
+    // At the window's edge, with the Listener a little ahead or behind, it is accepted.
+    EXPECT_TRUE(
+        escf_verify_frame_at(frame.parsed, sk.public_key, kat_timestamp + escf_signing_timestamp_window_ns, guard) ==
+        EscfVerdict::accepted);
+    EXPECT_EQ(guard.signers(), 1U);
+}
+
+TEST(avtp_escf_frame, told_verify_refuses_a_replay_and_a_frame_overtaken_by_a_later_one)
+{
+    auto const sk = ed25519_key();
+    EscfReplayGuard guard;
+    auto const first = signed_frame(sk, kat_timestamp);
+    auto const second = signed_frame(sk, kat_timestamp + 1'000'000);  // signed 1 ms later
+    uint64_t const now = kat_timestamp + 2'000'000;
+
+    EXPECT_TRUE(escf_verify_frame_at(first.parsed, sk.public_key, now, guard) == EscfVerdict::accepted);
+    EXPECT_TRUE(escf_verify_frame_at(first.parsed, sk.public_key, now, guard) == EscfVerdict::replayed);  // the same frame again
+    EXPECT_TRUE(escf_verify_frame_at(second.parsed, sk.public_key, now, guard) == EscfVerdict::accepted);
+    EXPECT_TRUE(
+        escf_verify_frame_at(first.parsed, sk.public_key, now, guard) == EscfVerdict::replayed);  // older than the last accepted
+    EXPECT_TRUE(escf_verify_frame_at(second.parsed, sk.public_key, now, guard) == EscfVerdict::replayed);
+    EXPECT_EQ(guard.signers(), 1U);  // one key_id throughout
+}
+
+TEST(avtp_escf_frame, told_verify_refuses_a_bad_signature_and_does_not_record_it)
+{
+    auto const sk = ed25519_key();
+    EscfReplayGuard guard;
+    auto frame = signed_frame(sk, kat_timestamp);
+    frame.storage[escf_payload_offset] ^= 0x01;  // touch the AVTPDU
+    auto const altered = *parse_escf_frame(std::span<uint8_t const>(frame.storage).first(escf_payload_offset + kat_avtpdu.size()));
+    EXPECT_TRUE(escf_verify_frame_at(altered, sk.public_key, kat_timestamp, guard) == EscfVerdict::bad_signature);
+    EXPECT_TRUE(
+        escf_verify_frame_at(altered, p256_key().public_key, kat_timestamp, guard) == EscfVerdict::bad_signature);  // wrong variant
+    EXPECT_EQ(guard.signers(), 0U);
+    // The genuine frame at the same timestamp is still accepted: the forgery recorded nothing.
+    frame.storage[escf_payload_offset] ^= 0x01;
+    auto const genuine = *parse_escf_frame(std::span<uint8_t const>(frame.storage).first(escf_payload_offset + kat_avtpdu.size()));
+    EXPECT_TRUE(escf_verify_frame_at(genuine, sk.public_key, kat_timestamp, guard) == EscfVerdict::accepted);
+}
+
+TEST(avtp_escf_frame, told_verify_works_for_the_ecssa_variant_too)
+{
+    auto const sk = p256_key();
+    EscfReplayGuard guard;
+    std::array<uint8_t, 256> storage{};
+    auto const built = build_signed_escf_frame(storage, dest_mac, src_mac, sk, kat_key_id, kat_timestamp, kat_avtpdu);
+    auto const parsed = *parse_escf_frame(*built);
+    EXPECT_TRUE(escf_verify_frame_at(parsed, sk.public_key, kat_timestamp, guard) == EscfVerdict::accepted);
+    EXPECT_TRUE(escf_verify_frame_at(parsed, sk.public_key, kat_timestamp, guard) == EscfVerdict::replayed);
+    EXPECT_TRUE(
+        escf_verify_frame_at(parsed, ed25519_key().public_key, kat_timestamp + 1, guard) ==
+        EscfVerdict::replayed);  // the guard runs before the key is consulted
+}
+
+TEST(avtp_escf_replay_guard, keeps_one_timestamp_per_signer_and_evicts_the_oldest)
+{
+    EscfReplayGuard guard;
+    // max_signers distinct keys, the i-th last seen at t + i.
+    for (size_t i = 0; i < EscfReplayGuard::max_signers; ++i) {
+        statusbar::ieee::Eui64 key{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x01, static_cast<uint8_t>(i)};
+        guard.accept(key, kat_timestamp + i);
+        EXPECT_TRUE(guard.is_replay(key, kat_timestamp + i));
+        EXPECT_FALSE(guard.is_replay(key, kat_timestamp + i + 1));
+    }
+    EXPECT_EQ(guard.signers(), EscfReplayGuard::max_signers);
+    // A known signer's newer frame updates its slot in place.
+    statusbar::ieee::Eui64 const fifth{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x01, 0x05};
+    guard.accept(fifth, kat_timestamp + 100);
+    EXPECT_EQ(guard.signers(), EscfReplayGuard::max_signers);
+    EXPECT_TRUE(guard.is_replay(fifth, kat_timestamp + 99));
+    // One more signer evicts the one with the oldest last frame (key 0 at t + 0), no other.
+    statusbar::ieee::Eui64 const newcomer{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x02, 0x00};
+    guard.accept(newcomer, kat_timestamp + 200);
+    statusbar::ieee::Eui64 const zeroth{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x01, 0x00};
+    statusbar::ieee::Eui64 const first{0x70, 0xB3, 0xD5, 0xED, 0xC4, 0x00, 0x01, 0x01};
+    EXPECT_FALSE(guard.is_replay(zeroth, kat_timestamp));    // forgotten
+    EXPECT_TRUE(guard.is_replay(first, kat_timestamp + 1));  // kept
+    EXPECT_TRUE(guard.is_replay(newcomer, kat_timestamp + 200));
+    EXPECT_EQ(guard.signers(), EscfReplayGuard::max_signers);
+}
+
 TEST_MAIN(statusbar_avtp_crypto, avtp_escf_frame_test)
