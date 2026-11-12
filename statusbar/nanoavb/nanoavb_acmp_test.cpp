@@ -8,12 +8,14 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <system_error>
+#include <vector>
 
 using namespace statusbar::nanoavb;
 using namespace statusbar::atdecc;
@@ -1056,6 +1058,42 @@ TEST(nanoavb_acmp_controller, unknown_response_ignored)
     resp.sequence_id = 99;  // No matching inflight
 
     EXPECT_FALSE(controller.receive_response(resp, statusbar::sm::TimePoint{}));
+}
+
+// A command that has had its retry is removed on its second timeout, and
+// SlotTable::remove moves the last inflight entry into its index: the
+// notification names the command that timed out, not whichever one sits
+// where it was by the time the state machine has run.
+TEST(nanoavb_acmp_controller, each_timeout_names_the_command_that_timed_out)
+{
+    auto controller_id = make_entity_id(0x01);
+    std::vector<uint16_t> timed_out;
+    AcmpControllerCallbacks callbacks;
+    callbacks.tx_command = [](AcmpCommandResponse const&) { return true; };
+    callbacks.on_timeout = [&](AcmpCommandResponse const& command, statusbar::sm::TimePoint) {
+        timed_out.push_back(command.sequence_id.get());
+    };
+
+    NanoAvbAcmpController controller{controller_id, callbacks};
+    controller.start();
+    auto const t0 = statusbar::sm::TimePoint{};
+    EXPECT_TRUE(controller.connect(make_entity_id(0x02), 0, make_entity_id(0x03), 0, t0));
+    EXPECT_TRUE(controller.connect(make_entity_id(0x04), 0, make_entity_id(0x05), 0, t0));
+    EXPECT_EQ(controller.inflight_count(), 2U);
+
+    // First expiry: both commands are retried, nothing is reported yet.
+    auto const timeout = acmp_timeout_for_message_type(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    controller.tick(t0 + timeout);
+    EXPECT_EQ(controller.inflight_count(), 2U);
+    EXPECT_TRUE(timed_out.empty());
+
+    // Second expiry: both are given up, each reported once as itself.
+    controller.tick(t0 + timeout + timeout);
+    EXPECT_EQ(controller.inflight_count(), 0U);
+    EXPECT_EQ(timed_out.size(), 2U);
+    std::sort(timed_out.begin(), timed_out.end());
+    EXPECT_EQ(timed_out[0], 0);
+    EXPECT_EQ(timed_out[1], 1);
 }
 
 TEST(nanoavb_acmp_controller, get_rx_state_sends_command)

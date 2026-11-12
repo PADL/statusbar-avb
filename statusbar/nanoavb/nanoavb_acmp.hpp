@@ -439,7 +439,8 @@ class NanoAvbAcmpController
     /// Process a received ACMP response from the network
     auto receive_response(AcmpCommandResponse const& resp, TimePoint event_time) -> bool;
 
-    /// Check for timed-out inflight commands
+    /// Check for timed-out inflight commands: each one is retried once, then
+    /// removed and reported through on_timeout with the command it was.
     void tick(TimePoint now);
 
     // Status
@@ -457,6 +458,10 @@ class NanoAvbAcmpController
     void wire_callbacks();
     /// Stash the told time for the hooks the state machine fires from inside
     /// its actions, then run the event.
+    /// Time out the inflight command at @p idx: retry it, or remove it and
+    /// report the command it was through on_timeout.
+    void expire_inflight(size_t idx, TimePoint now);
+
     void step(ControllerEvent ev, TimePoint now);
     auto send_command(
         uint8_t message_type,

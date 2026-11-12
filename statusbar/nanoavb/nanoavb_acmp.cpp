@@ -402,12 +402,6 @@ auto NanoAvbAcmpController::receive_response(AcmpCommandResponse const& resp, Ti
     return true;
 }
 
-[[nodiscard]] static auto should_notify_timeout(
-    bool was_retried, InflightCommand const* entry, AcmpControllerCallbacks const& callbacks) -> bool
-{
-    return was_retried && static_cast<bool>(callbacks.on_timeout) && entry != nullptr;
-}
-
 void NanoAvbAcmpController::step(ControllerEvent const ev, TimePoint const now)
 {
     last_event_time_ = now;
@@ -418,18 +412,24 @@ void NanoAvbAcmpController::tick(TimePoint now)
 {
     auto idx = ctx_.find_timed_out(now);
     while (idx < ctx_.max_inflight()) {
-        ctx_.current_inflight_index = idx;
-        auto const* entry = ctx_.get_inflight(idx);
-        bool const was_retried = entry != nullptr && entry->retried;
-
-        step(ControllerEvent::Timeout, now);
-
-        // If the entry was already retried, it was removed -> notify timeout
-        if (should_notify_timeout(was_retried, entry, callbacks_)) {
-            callbacks_.on_timeout(entry->command, now);
-        }
-
+        expire_inflight(idx, now);
         idx = ctx_.find_timed_out(now);
+    }
+}
+
+void NanoAvbAcmpController::expire_inflight(size_t const idx, TimePoint const now)
+{
+    // What the timeout notification names is copied out before the step: a
+    // command that has had its retry is removed by it, and SlotTable::remove
+    // moves the last entry into the index, so a pointer taken here would name
+    // another command afterwards (or storage that is no longer an entry).
+    ctx_.current_inflight_index = idx;
+    auto const* entry = ctx_.get_inflight(idx);
+    bool const gives_up = entry != nullptr && entry->retried;
+    AcmpCommandResponse const command = gives_up ? entry->command : AcmpCommandResponse{};
+    step(ControllerEvent::Timeout, now);
+    if (gives_up && callbacks_.on_timeout) {
+        callbacks_.on_timeout(command, now);
     }
 }
 
