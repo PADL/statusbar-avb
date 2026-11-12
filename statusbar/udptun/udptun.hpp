@@ -30,6 +30,7 @@
 #include "statusbar/udptun/udptun_csv_record.hpp"
 #include "statusbar/udptun/udptun_deadline_timer.hpp"
 #include "statusbar/udptun/udptun_identity.hpp"
+#include "statusbar/udptun/udptun_loss_snapshot.hpp"
 #include "statusbar/udptun/udptun_monotonic_ring.hpp"
 #include "statusbar/udptun/udptun_per_source_tracker.hpp"
 #include "statusbar/udptun/udptun_redundant_rx.hpp"

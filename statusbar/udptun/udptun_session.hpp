@@ -18,6 +18,7 @@
 #include "statusbar/colbin/colbin_writer.hpp"
 #include "statusbar/csv/csv.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/itc/itc_published.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
@@ -31,6 +32,7 @@
 #include "statusbar/udptun/udptun_csv_record.hpp"
 #include "statusbar/udptun/udptun_deadline_timer.hpp"
 #include "statusbar/udptun/udptun_identity.hpp"
+#include "statusbar/udptun/udptun_loss_snapshot.hpp"
 #include "statusbar/udptun/udptun_per_source_tracker.hpp"
 #include "statusbar/udptun/udptun_record_sink.hpp"
 #include "statusbar/udptun/udptun_redundant_rx.hpp"
@@ -718,7 +720,7 @@ class Session
             gptp_periodic_tick(now);
 
             int64_t const now_mraw_post = monotonic_raw_ns();
-            tai_sample_tick(now_mraw_post);
+            periodic_samples(now_mraw_post);
             if (tx_timer_.consume_due(now_mraw_post) > 0) {
                 send_packet(codec_, tx_ctx, sequence_, synced);
             }
@@ -916,7 +918,7 @@ class Session
             }
         }
         gptp_periodic_tick(now_steady);
-        tai_sample_tick(monotonic_raw_ns());
+        periodic_samples(monotonic_raw_ns());
 
         if (tx_interval_ns > 0 && synced) {
             // Use the bridge's live master-clock reading, not
@@ -1100,28 +1102,18 @@ class Session
     /// owning thread.
     void print_live_report(std::ostream& out)
     {
-        int64_t const now_mraw = monotonic_raw_ns();
-        double const wall = static_cast<double>(now_mraw - start_mraw_) / 1e9;
-        int64_t const grace_ns = natural_drain_ns();
+        double const wall = static_cast<double>(monotonic_raw_ns() - start_mraw_) / 1e9;
+        // The TX history and the redundancy tracker belong to the packet
+        // thread; this is their latest published snapshot (publish_loss_snapshot).
+        LossSnapshot const loss = loss_snapshot_.consume();
         TxLossStats tx{
-            .sent_total = sequence_.load(std::memory_order_relaxed),
-            .sent_at_cutoff = tx_history_.sent_count_at_or_before(now_mraw - grace_ns),
+            .sent_total = loss.sent_total,
+            .sent_at_cutoff = loss.sent_at_cutoff,
             .tx_failures = tx_failures_.load(),
         };
-        RedundancyDisplayStats red{};
+        RedundancyDisplayStats red{
+            .recovered = loss.recovered, .true_loss = loss.true_loss, .primary_received = loss.primary_received};
         bool const red_enabled = tx_state_.redundant_enabled;
-        if (red_enabled) {
-            // Use the latest observed PT (from any RX direction) as the
-            // scan reference. If we've sent but not yet received any
-            // self-loopback echo, fall back to the latest stamped PT —
-            // that bounds the cursor so we still retire empty slots.
-            int64_t const last_rx = last_rx_pt_.load();
-            int64_t const ref_pt = (last_rx != 0) ? last_rx : last_tx_pt_.load();
-            self_redundancy_.scan(ref_pt, grace_ns);
-            red.recovered = self_redundancy_.recovered();
-            red.true_loss = self_redundancy_.true_loss();
-            red.primary_received = self_redundancy_.primary_received();
-        }
         // Show wire-timeline time: master + the published TAI shift
         // (0 unless --wire-clock=gps-tai), so the printed gptp_ns matches
         // what actually goes on the wire.
@@ -1411,6 +1403,33 @@ class Session
     /// master read goes through master_clock_ (mraw→master mapping; no
     /// PHC syscall in ptp4l mode), the same timeline the RX path and
     /// the RT scheduler use. No-op unless wire_clock_gps_tai.
+    /// The packet thread's periodic bookkeeping: the TAI sampler and the live
+    /// report's loss snapshot.
+    void periodic_samples(int64_t now_mraw) noexcept
+    {
+        tai_sample_tick(now_mraw);
+        publish_loss_snapshot(now_mraw);
+    }
+
+    /// The live report's TX-side figures, taken here on the thread that owns
+    /// the TX history and the redundancy tracker and published whole for the
+    /// reporter thread (see udptun_loss_snapshot.hpp). 20 Hz is plenty for a
+    /// report printed about once a second and keeps the tracker scan off most
+    /// ticks. The scan reference is the latest observed PT from any RX, or,
+    /// before the first self-loopback echo, the latest stamped PT, so empty
+    /// slots are still retired.
+    void publish_loss_snapshot(int64_t now_mraw) noexcept
+    {
+        if (now_mraw < next_loss_snapshot_mraw_) {
+            return;
+        }
+        next_loss_snapshot_mraw_ = now_mraw + loss_snapshot_interval_ns_;
+        int64_t const last_rx = last_rx_pt_.load();
+        int64_t const ref_pt = (last_rx != 0) ? last_rx : last_tx_pt_.load();
+        loss_snapshot_.publish(take_loss_snapshot(
+            tx_history_, self_redundancy_, sequence_.load(std::memory_order_relaxed), now_mraw, natural_drain_ns(), ref_pt));
+    }
+
     void tai_sample_tick(int64_t now_mraw) noexcept
     {
         if (!cfg_.wire_clock_gps_tai || now_mraw < next_tai_sample_mraw_) {
@@ -1507,6 +1526,11 @@ class Session
     /// without touching the Kalman state. 0 until the first sample (and
     /// always 0 with wire_clock_gps_tai off).
     statusbar::itc::Published<int64_t> last_tai_shift_ns_{};
+    /// The live report's TX-side figures as the packet thread last published
+    /// them (publish_loss_snapshot); the reporter thread consumes.
+    statusbar::itc::AtomicTripleBuffer<LossSnapshot> loss_snapshot_{};
+    int64_t next_loss_snapshot_mraw_{0};
+    static constexpr int64_t loss_snapshot_interval_ns_ = 50'000'000;  // 20 Hz
     net::SocketAddress peer_{};
     net::FileDescriptor udp_{-1};
     DeadlineTimer tx_timer_{};
