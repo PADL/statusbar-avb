@@ -215,10 +215,12 @@ auto SlaveSession::start() -> bool
     // Fires on every successful Sync+FollowUp pairing — earlier in the
     // path than on_sync_update because it carries the wire timestamps
     // directly rather than the user-space-sampled "now" pair.
+    // The servo's rate_ratio is master against the PHC, not against the
+    // bridge's app clock; the bridge fits its own rate over the anchors.
     obs.on_anchor_update = [this,
-                            show_bridge](int64_t /*rx_local_ns*/, int64_t rx_app_ns, int64_t tx_master_ns, double rate_ratio) {
+                            show_bridge](int64_t /*rx_local_ns*/, int64_t rx_app_ns, int64_t tx_master_ns, double /*rate_ratio*/) {
         if (show_bridge) {
-            bridge_.update_from_anchor(rx_app_ns, tx_master_ns, rate_ratio);
+            bridge_.update_from_anchor(rx_app_ns, tx_master_ns);
         }
     };
 

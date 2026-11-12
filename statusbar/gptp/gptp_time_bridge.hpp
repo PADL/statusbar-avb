@@ -19,7 +19,7 @@
 //   // On every Sync+FollowUp pairing, TOLD the pair: the app-clock instant
 //   // of the Sync's arrival and the master time it carried. The bridge
 //   // reads no clock here (gptp_slave_session wires this).
-//   bridge.update_from_anchor(sync_rx_app_ns, tx_master_ns, rate_ratio);
+//   bridge.update_from_anchor(sync_rx_app_ns, tx_master_ns);
 //
 //   // Conversions are told an instant and read nothing:
 //   int64_t play_at_app = bridge.from_gptp(avtp_header.get_timestamp());
@@ -66,7 +66,9 @@
 #include "statusbar/itc/itc_atomic_triple_buffer.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
@@ -154,11 +156,37 @@ struct GptpTimeBridge
     /// Preferred over `update()` once sync runs: the master anchor is
     /// the wire pair, not `get_gptp_time_ns()` sampled afterwards.
     ///
-    /// `rate_ratio` is the servo's master/local rate estimate; stored
-    /// as `(rate_ratio - 1) x 10^12` in `rate_offset_ppt_`.
-    void update_from_anchor(int64_t sync_rx_app_ns, int64_t tx_master_ns, double rate_ratio) noexcept
+    /// The rate the rated conversions extrapolate with is the master
+    /// clock's rate against THIS app clock, and the anchors are the only
+    /// measurement of that pair: it is fitted over the anchors of the
+    /// last ANCHOR_WINDOW pairings (16 s of Syncs at 8/s), oldest to
+    /// newest. The servo's rate ratio is master against the PHC it
+    /// disciplines, a different pair; once the servo has locked that
+    /// ratio is 1.0 while the undisciplined app clock still runs its
+    /// crystal's ppm off master, and extrapolating with it sawtooths by
+    /// ppm x Sync interval every anchor. The long baseline is what keeps
+    /// the user-space jitter of the app stamp (tens of us) out of the
+    /// rate: it is divided by seconds, not by one Sync interval. Until
+    /// the baseline is MIN_RATE_BASELINE_NS long the last rate stands
+    /// (0 from construction). A skew past the step threshold, or a
+    /// master time that went backwards, is a master step: the window
+    /// restarts at this anchor and the rate is held.
+    void update_from_anchor(int64_t sync_rx_app_ns, int64_t tx_master_ns) noexcept
     {
-        publish_anchor(sync_rx_app_ns, tx_master_ns, static_cast<int64_t>((rate_ratio - 1.0) * 1e12));
+        int64_t ppt = rate_offset_ppt_.load(std::memory_order_relaxed);
+        if (anchor_count_ > 0) {
+            Anchor const& oldest = anchors_[(anchor_head_ + ANCHOR_WINDOW - anchor_count_) % ANCHOR_WINDOW];
+            int64_t const app_delta = sync_rx_app_ns - oldest.app_ns;
+            int64_t const skew_ns = (tx_master_ns - oldest.gptp_ns) - app_delta;
+            bool const looks_like_step = (app_delta <= 0) || (skew_ns < -STEP_THRESHOLD_NS) || (skew_ns > STEP_THRESHOLD_NS);
+            if (looks_like_step) {
+                anchor_count_ = 0;
+            } else if (app_delta >= MIN_RATE_BASELINE_NS) {
+                ppt = static_cast<int64_t>((static_cast<double>(skew_ns) * 1e12) / static_cast<double>(app_delta));
+            }
+        }
+        remember_anchor(sync_rx_app_ns, tx_master_ns);
+        publish_anchor(sync_rx_app_ns, tx_master_ns, ppt);
     }
 
     /// Refresh only the cached offset, NOT the rate or anchor
@@ -271,6 +299,16 @@ struct GptpTimeBridge
     /// Last anchor point's gPTP timestamp.
     [[nodiscard]] auto last_anchor_gptp_ns() const noexcept -> int64_t { return prev_gptp_ns_.load(std::memory_order_relaxed); }
 
+    /// Anchors the rate is fitted over: 16 s of Syncs at the 8/s gPTP rate.
+    static constexpr size_t ANCHOR_WINDOW = 128;
+    /// The shortest baseline the rate is fitted over; below it the last
+    /// rate stands. 20 us of app-stamp jitter over 1 s is 20 ppm of rate
+    /// noise at the start, 1.25 ppm once the window is full.
+    static constexpr int64_t MIN_RATE_BASELINE_NS = 1'000'000'000;
+    /// A skew of this much against the window's oldest anchor is a master
+    /// step, not drift (1000 ppm over the whole window is 16 ms).
+    static constexpr int64_t STEP_THRESHOLD_NS = 100'000'000;
+
     /// Total publishes that overwrote a still-unconsumed prior publish
     /// in the rated buffer. Diagnostic — non-zero is expected on
     /// healthy systems because the sampler publishes faster than the
@@ -290,6 +328,23 @@ struct GptpTimeBridge
     };
 
   private:
+    /// One Sync+FollowUp pairing as told to update_from_anchor.
+    struct Anchor
+    {
+        int64_t app_ns;
+        int64_t gptp_ns;
+    };
+
+    /// Append an anchor to the window, dropping the oldest when full.
+    void remember_anchor(int64_t const app, int64_t const gptp) noexcept
+    {
+        anchors_[anchor_head_] = Anchor{.app_ns = app, .gptp_ns = gptp};
+        anchor_head_ = (anchor_head_ + 1) % ANCHOR_WINDOW;
+        if (anchor_count_ < ANCHOR_WINDOW) {
+            ++anchor_count_;
+        }
+    }
+
     /// Publish one (app, gptp) anchor and rate as the four-field rated
     /// snapshot, atomically via the triple buffer: a phase jump would
     /// otherwise make a torn read catastrophic (NEW offset bumped by the
@@ -324,6 +379,10 @@ struct GptpTimeBridge
     // event-loop thread); single consumer (the RT timer thread via
     // GptpSlaveClockSource). Replaces the previous rated_seq_ seqlock.
     mutable statusbar::itc::AtomicTripleBuffer<RatedSnapshot> rated_buffer_{};
+    // The anchor window update_from_anchor fits the rate over (writer thread only).
+    std::array<Anchor, ANCHOR_WINDOW> anchors_{};
+    size_t anchor_head_{0};
+    size_t anchor_count_{0};
     bool have_previous_{false};
 };
 

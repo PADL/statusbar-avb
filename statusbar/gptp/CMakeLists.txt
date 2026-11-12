@@ -33,7 +33,8 @@ statusbar_add_module(
   gptp_servo_test.cpp
   gptp_slave_port_test.cpp
   gptp_slave_session_test.cpp
-  gptp_test.cpp)
+  gptp_test.cpp
+  gptp_time_bridge_test.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(gptp_read_ntpshm_tool gptp_read_ntpshm_tool.cpp)
