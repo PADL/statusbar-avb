@@ -194,6 +194,10 @@ class AvbEntityKit
     [[nodiscard]] auto listener() noexcept -> ListenerStreams* { return listener_.get(); }
     [[nodiscard]] auto listener() const noexcept -> ListenerStreams const* { return listener_.get(); }
     [[nodiscard]] auto talker_specs() const noexcept -> StreamSpecs const& { return talker_specs_; }
+    /// The MSRP Talker Advertise talker stream @p spec is declared with:
+    /// identity from ACMP's picture of the stream, VLAN and priority from the
+    /// SR class domain in force (configured, or adopted from the wire).
+    [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
     [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
 
@@ -208,13 +212,19 @@ class AvbEntityKit
     /// 4.2.7.2.1): move the stream frames, MVRP and GET_AVB_INFO to it.
     void adopt_domain(nanoavb::DomainInfo const& domain, TimePoint now);
 
+    /// Move the data plane, ACMP's stream picture and the Talker Advertises
+    /// to @p domain's VLAN and priority (the adopt_domain half that is the
+    /// streams'; MVRP and GET_AVB_INFO are the caller's).
+    void move_talker_streams_to(nanoavb::DomainInfo const& domain, TimePoint now);
+
     /// The VLAN the streams use now: the adopted one, else the configured one.
     [[nodiscard]] auto current_vlan_id() const noexcept -> uint16_t;
     /// Let go of the data plane start() built: the RX handler kept for an RX
     /// timer, the talker's and the listener's slots, then the port. What the
     /// next start() opens is then the whole of it, as on a first start.
     void close_streams() noexcept;
-    [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
+    /// Stream @p index's identity (ACMP), VLAN and priority (the domain in force) into @p info.
+    void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
     /// The stream kind of talker stream @p index ("other" when not in the table).

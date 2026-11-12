@@ -91,7 +91,8 @@ AvbEntityKit::AvbEntityKit(
             default:
                 break;
         }
-        (void)host_.components().acmp_talker.configure_stream(spec.index, stream_id_for(stream_base_mac, spec.index), dest);
+        (void)host_.components().acmp_talker.configure_stream(
+            spec.index, stream_id_for(stream_base_mac, spec.index), dest, config_.vlan_id);
     }
 
     // The VID itself is registered at start() (stop() withdraws it).
@@ -168,21 +169,39 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
 void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
 {
     // Milan v1.3 4.2.7.2.1: the Class A Domain registered from the wire has
-    // replaced ours and the SRP handler has re-declared it. The stream frames
-    // take the new VLAN and priority at once, MVRP follows the VLAN, and the
-    // registered controllers hear the new mapping (GET_AVB_INFO, Table 5.20).
-    // The talker advertisements pick the new values up on their next
-    // declaration pass, each leaving its old value first.
+    // replaced ours and the SRP handler has re-declared it. MVRP follows the
+    // VLAN, the streams move (move_talker_streams_to), and the registered
+    // controllers hear the new mapping (GET_AVB_INFO, Table 5.20).
     uint16_t const old_vlan = current_vlan_id();
     if (domain.sr_class_vid != old_vlan) {
         (void)host_.components().mvrp_handler.withdraw_vlan(old_vlan, now);
         (void)host_.components().mvrp_handler.register_vlan(domain.sr_class_vid, now);
     }
-    active_vlan_id_ = domain.sr_class_vid;
-    talker_->set_vlan(domain.sr_class_vid, domain.sr_class_priority);
+    move_talker_streams_to(domain, now);
     (void)host_.components().aem_handler.notify_avb_info_changed(0);
     host_.ctl_log().status(
         "msrp: adopted the Class A domain from the wire: priority {} vlan {}", domain.sr_class_priority, domain.sr_class_vid);
+}
+
+void AvbEntityKit::move_talker_streams_to(DomainInfo const& domain, TimePoint const now)
+{
+    // The stream frames take the new VLAN and priority at once; ACMP's
+    // picture of each stream (what a TX_RESPONSE and GET_STREAM_INFO carry)
+    // moves with them; and each Talker Advertise is declared again with the
+    // new VLAN and priority, the participant leaving its old value first
+    // (IEEE 802.1Q 10.7). A host not yet advertising declares them when it
+    // does, from the same picture (make_talker_srp_info).
+    active_vlan_id_ = domain.sr_class_vid;
+    talker_->set_vlan(domain.sr_class_vid, domain.sr_class_priority);
+    for (auto const& spec : talker_specs_) {
+        if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
+            (void)host_.components().acmp_talker.configure_stream(
+                spec.index, stream->stream_id, stream->stream_dest_mac, domain.sr_class_vid);
+        }
+    }
+    if (host_.is_ready()) {
+        advertise_talker_streams(now);
+    }
 }
 
 auto AvbEntityKit::current_vlan_id() const noexcept -> uint16_t
@@ -438,19 +457,29 @@ void AvbEntityKit::close_streams() noexcept
 auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo
 {
     nanoavb::TalkerStreamSrpInfo info{};
-    if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
-        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
-        info.dest_address = stream->stream_dest_mac;
-        info.vlan_id = stream->stream_vlan_id;
-    } else {
-        info.vlan_id = config_.vlan_id;
-    }
+    fill_talker_srp_identity(spec.index, info);
     info.max_interval_frames = 1;
     // TSpec frame size from the format word (kit phase 1) — no per-entity
     // byte math to keep in step with the model.
     info.max_frame_size = srp_max_frame_size(spec.format);
     info.accumulated_latency = 0;
     return info;
+}
+
+void AvbEntityKit::fill_talker_srp_identity(uint16_t const index, nanoavb::TalkerStreamSrpInfo& info) const
+{
+    // VLAN and priority are the SR class domain's in force: the configured
+    // one, or the one adopted from the wire (adopt_domain); never the
+    // header's defaults, which know nothing of how the frames are tagged.
+    // ACMP's picture of the stream, where there is one, has the identity.
+    auto const& domain = host_.components().msrp_handler.domain();
+    info.vlan_id = domain.sr_class_vid;
+    info.priority = domain.sr_class_priority;
+    if (auto const* stream = host_.components().acmp_talker.get_stream(index); stream != nullptr) {
+        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
+        info.dest_address = stream->stream_dest_mac;
+        info.vlan_id = stream->stream_vlan_id;
+    }
 }
 
 void AvbEntityKit::advertise_talker_streams(TimePoint const time)
