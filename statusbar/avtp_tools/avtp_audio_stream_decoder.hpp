@@ -27,6 +27,7 @@
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp_tools/avtp_audio_detect.hpp"
+#include "statusbar/avtp_tools/avtp_channel_interleaver.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
 #include <cstdint>
@@ -126,6 +127,23 @@ class AvtpAudioStreamDecoder
     [[nodiscard]] auto initialize_am824(avtp::Am824Pdu const& pdu) -> bool;
     [[nodiscard]] auto decode_aaf_payload(std::span<uint8_t const> payload, uint64_t gptp_now_ns) -> FeedResult;
     [[nodiscard]] auto decode_am824_payload(std::span<uint8_t const> payload, uint64_t gptp_now_ns) -> FeedResult;
+
+    /// What one packet's deserialization produced, for the delivery that follows it.
+    struct DecodedPacket
+    {
+        bool fired{false};     ///< the deserializer called back at all
+        size_t got_frames{0};  ///< sample frames per channel it delivered
+        uint64_t pts_ns{0};    ///< channel 0's presentation time
+        bool gap_seen{false};  ///< the sequence counter jumped on this packet
+    };
+    /// Lay out the scratch for @p expected_samples, decode into it and deliver to the sink.
+    [[nodiscard]] auto deliver_am824(
+        avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, size_t expected_samples, uint64_t gptp_now_ns) -> FeedResult;
+    /// Run the AM824 deserializer into @p il and account the sequence gap it may show.
+    [[nodiscard]] auto run_am824(
+        avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, ChannelInterleaver& il, uint64_t gptp_now_ns) -> DecodedPacket;
+    /// Hand the interleaved scratch to the sink and count the packet.
+    [[nodiscard]] auto finish_packet(DecodedPacket const& decoded) -> FeedResult;
 
     AvtpAudioFormat format_{};
 

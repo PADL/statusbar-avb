@@ -1386,6 +1386,33 @@ TEST(am824_pdu, is_valid_rejects_sph_and_fragmented)
     EXPECT_FALSE(pdu.is_valid());
 }
 
+// A wire frame is padded to the 60-octet Ethernet minimum: the bytes past the
+// declared stream_data_length are not audio. The parsed-header overload keeps the
+// same bound as the parsing one, so a decoder that already holds the header can
+// stop at the declared audio without parsing twice.
+TEST(am824_packet, get_audio_payload_with_the_header_stops_at_the_declared_length)
+{
+    Eui48 mac{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56};
+    StreamId sid{mac, 0x0001};
+    std::array<float, 4> audio = {0.5f, -0.5f, 0.25f, -0.25f};  // 2 channels, 2 samples
+    std::array<uint8_t, 96> packet{};
+    size_t const bytes = am824_create_packet(sid, 0, 0, Am824SampleRate::rate_48_khz, 0, std::span{audio}, 2, 2, std::span{packet});
+    EXPECT_EQ(bytes, 48U);
+
+    // The frame as received: the 48-octet AVTPDU plus padding to a longer frame.
+    std::span<uint8_t const> const padded{packet.data(), 80};
+    auto const pdu = am824_parse_header(padded);
+    EXPECT_TRUE(pdu.has_value());
+    EXPECT_EQ(am824_get_audio_payload(*pdu, padded).size(), 16U);  // 2 * 2 * 4, not 48
+    EXPECT_EQ(am824_get_audio_payload(padded).size(), 16U);
+
+    // A declared length past the buffer is clamped to what the buffer holds.
+    std::span<uint8_t const> const truncated{packet.data(), 40};
+    EXPECT_EQ(am824_get_audio_payload(*pdu, truncated).size(), 8U);
+    // No room past the header: nothing.
+    EXPECT_EQ(am824_get_audio_payload(*pdu, std::span<uint8_t const>{packet.data(), Am824Pdu::HEADER_LENGTH}).size(), 0U);
+}
+
 //
 // Main test runner
 //

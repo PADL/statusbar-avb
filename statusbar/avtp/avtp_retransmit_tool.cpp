@@ -273,13 +273,12 @@ struct Am824RetransmitState
         out_pdu.init(cfg.new_stream_id, ch, rate);
     }
 
-    void process_packet(
-        std::span<uint8_t const> payload, uint64_t gptp_now, uint64_t capture_us, RetransmitConfig const& cfg, FileWriter& writer)
+    /// Decode the input packet into audio_buf; the data blocks it held, 0 when nothing decoded.
+    auto decode_input(std::span<uint8_t const> payload, uint64_t gptp_now) -> uint8_t
     {
         Am824Pdu in_pdu{};
         span_load(in_pdu, payload.subspan(0, Am824Pdu::HEADER_LENGTH));
-        auto const audio_payload = payload.subspan(Am824Pdu::HEADER_LENGTH);
-
+        auto const audio_payload = am824_get_audio_payload(in_pdu, payload);  // declared length, not the padding
         uint8_t sample_count = 0;
         am824_deserialize_mbla(
             in_ctx, in_pdu, audio_payload, gptp_now, [&](uint8_t ch_idx, std::span<float> samples, uint64_t, uint64_t) {
@@ -290,7 +289,13 @@ struct Am824RetransmitState
                     sample_count = static_cast<uint8_t>(samples.size());
                 }
             });
+        return sample_count;
+    }
 
+    void process_packet(
+        std::span<uint8_t const> payload, uint64_t gptp_now, uint64_t capture_us, RetransmitConfig const& cfg, FileWriter& writer)
+    {
+        uint8_t const sample_count = decode_input(payload, gptp_now);
         if (sample_count == 0) {
             return;
         }
@@ -367,13 +372,12 @@ struct AafRetransmitState
         , fmt{aaf_format_from_name(cfg.aaf_format).value_or(AafFormat::int_24bit)}
     {}
 
-    void process_packet(
-        std::span<uint8_t const> payload, uint64_t gptp_now, uint64_t capture_us, RetransmitConfig const& cfg, FileWriter& writer)
+    /// Decode the input packet into audio_buf; the samples per channel it held, 0 when nothing decoded.
+    auto decode_input(std::span<uint8_t const> payload, uint64_t gptp_now) -> uint16_t
     {
         AafPdu in_pdu{};
         span_load(in_pdu, payload.subspan(0, AafPdu::HEADER_LENGTH));
-        auto const audio_payload = payload.subspan(AafPdu::HEADER_LENGTH);
-
+        auto const audio_payload = aaf_get_audio_payload(in_pdu, payload);  // declared length, not the padding
         uint16_t sample_count = 0;
         aaf_stream_deserialize(
             in_ctx, in_pdu, audio_payload, gptp_now, [&](uint8_t ch_idx, std::span<float> samples, uint64_t, uint64_t) {
@@ -384,14 +388,19 @@ struct AafRetransmitState
                     sample_count = static_cast<uint16_t>(samples.size());
                 }
             });
+        return sample_count;
+    }
 
+    void process_packet(
+        std::span<uint8_t const> payload, uint64_t gptp_now, uint64_t capture_us, RetransmitConfig const& cfg, FileWriter& writer)
+    {
+        uint16_t const sample_count = decode_input(payload, gptp_now);
         if (sample_count == 0) {
             return;
         }
 
         AafPdu out_pdu{};
-        size_t const bps = aaf_bytes_per_sample(fmt);
-        std::vector<uint8_t> out_payload(static_cast<size_t>(sample_count) * cfg.channels * bps);
+        std::vector<uint8_t> out_payload(static_cast<size_t>(sample_count) * cfg.channels * aaf_bytes_per_sample(fmt));
         size_t const out_bytes = aaf_stream_serialize(
             out_ctx, out_pdu, std::span{out_payload}, sample_count, gptp_now, [&](uint8_t ch_idx, std::span<float> dest) {
                 for (size_t i = 0; i < dest.size(); ++i) {

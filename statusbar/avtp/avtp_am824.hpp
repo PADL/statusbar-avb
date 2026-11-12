@@ -803,9 +803,16 @@ static_assert(offsetof(Am824Pdu, cip_header) == 24, "cip_header must be at offse
 /// @param packet Raw packet data including the AM824 header
 [[nodiscard]] auto am824_parse_header(std::span<uint8_t const> packet) noexcept -> std::optional<Am824Pdu>;
 
-/// Get audio payload span from a packet
+/// Get audio payload span from a packet: the bytes after the header, bounded by the
+/// declared stream_data_length and by what the buffer holds (never the frame's padding).
 /// @param packet Raw packet data including the AM824 header
 [[nodiscard]] auto am824_get_audio_payload(std::span<uint8_t const> packet) noexcept -> std::span<uint8_t const>;
+
+/// The same bound for a packet whose header the caller has already parsed.
+/// @param pdu    The packet's header, as loaded from @p packet
+/// @param packet Raw packet data including the AM824 header
+[[nodiscard]] auto am824_get_audio_payload(Am824Pdu const& pdu, std::span<uint8_t const> packet) noexcept
+    -> std::span<uint8_t const>;
 
 }  // namespace statusbar::avtp
 

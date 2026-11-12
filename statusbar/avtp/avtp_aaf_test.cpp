@@ -1042,6 +1042,35 @@ TEST(aaf_rt_coverage, sample_rate_hz_all_rates)
     EXPECT_EQ(aaf_sample_rate_hz(ruser), 0U);
 }
 
+// The parsed-header overload keeps the stream_data_length bound of the parsing one:
+// a padded frame yields the declared audio, never the padding.
+TEST(aaf_packet, get_audio_payload_with_the_header_stops_at_the_declared_length)
+{
+    Eui48 mac{0x00, 0x1C, 0xAB, 0x12, 0x34, 0x56};
+    StreamId sid{mac, 0x0001};
+    std::array<float, 4> audio = {0.5f, -0.5f, 0.25f, -0.25f};  // 2 channels, 2 samples
+    std::array<uint8_t, 96> packet{};
+    AafStreamContext ctx{
+        .stream_id = sid,
+        .sequence_num = 0,
+        .format = AafFormat::int_24bit,
+        .sample_rate = AafSampleRate::rate_48_khz,
+        .bit_depth = 24,
+        .channel_count = 2,
+        .sample_count = 2,
+    };
+    size_t const bytes = aaf_create_packet(ctx, 0, std::span{audio}, std::span{packet});
+    EXPECT_EQ(bytes, 36U);
+
+    std::span<uint8_t const> const padded{packet.data(), 64};
+    auto const pdu = aaf_parse_header(padded);
+    EXPECT_TRUE(pdu.has_value());
+    EXPECT_EQ(aaf_get_audio_payload(*pdu, padded).size(), 12U);  // 2 * 2 * 3, not 40
+    EXPECT_EQ(aaf_get_audio_payload(padded).size(), 12U);
+    std::span<uint8_t const> const truncated{packet.data(), 30};
+    EXPECT_EQ(aaf_get_audio_payload(*pdu, truncated).size(), 6U);
+}
+
 //
 // Main test runner
 //

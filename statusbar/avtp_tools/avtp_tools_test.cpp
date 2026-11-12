@@ -13,6 +13,7 @@
 #include "statusbar/tsn/tsn.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -392,6 +393,48 @@ TEST(avtp_audio_stream_decoder, diagnostic_fires_on_unusable_first_packet)
     EXPECT_EQ(result.status, FeedStatus::format_error);
     EXPECT_FALSE(dec.initialized());
     EXPECT_FALSE(seen_diagnostic.empty());
+}
+
+// The AM824 twin of the AAF padding test: on the wire a short AVTPDU is padded to the
+// 60-octet Ethernet minimum. Decoding the frame's tail instead of the declared
+// stream_data_length turned the padding into silent samples, one extra block a packet,
+// and the DBC and presentation time walked ahead of the talker.
+TEST(avtp_audio_stream_decoder, am824_payload_padding_is_not_decoded_as_audio)
+{
+    constexpr uint8_t channels = 2;
+    constexpr uint8_t samples_per_packet = 2;
+    statusbar::tsn::StreamId sid;
+    sid.from_uint64(0x0102030405060708ULL);
+    std::array<float, 4> const audio{0.5f, -0.5f, 0.25f, -0.25f};  // interleaved, 2 frames
+    std::vector<uint8_t> packet(statusbar::avtp::Am824Pdu::HEADER_LENGTH + audio.size() * 4, uint8_t{0});
+    size_t const bytes = statusbar::avtp::am824_create_packet(
+        sid,
+        0,
+        1'000'000U,
+        statusbar::avtp::Am824SampleRate::rate_48_khz,
+        0,
+        std::span{audio},
+        channels,
+        samples_per_packet,
+        std::span<uint8_t>(packet));
+    EXPECT_EQ(bytes, packet.size());
+
+    // Pad to the Ethernet minimum: 12 more octets that would decode as 1.5 silent frames.
+    packet.resize(60, uint8_t{0x40});
+
+    AvtpAudioStreamDecoder dec;
+    std::vector<float> received;
+    dec.set_sink([&](AvtpAudioSamples const& s) -> bool {
+        received.assign(s.interleaved.begin(), s.interleaved.end());
+        return true;
+    });
+    auto const result = dec.feed(std::span<uint8_t const>(packet));
+    EXPECT_EQ(result.status, FeedStatus::ok);
+    EXPECT_EQ(dec.sample_frames_delivered(), size_t{samples_per_packet});
+    EXPECT_EQ(received.size(), size_t{samples_per_packet} * channels);
+    for (size_t i = 0; i < audio.size(); ++i) {
+        EXPECT_TRUE(std::abs(received[i] - audio[i]) < 1e-4f);
+    }
 }
 
 TEST_MAIN(statusbar_avtp_tools, avtp_tools_test)

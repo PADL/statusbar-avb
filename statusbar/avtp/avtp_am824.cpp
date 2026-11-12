@@ -276,8 +276,19 @@ auto am824_get_audio_payload(std::span<uint8_t const> packet) noexcept -> std::s
     // Ethernet minimum, and returning that padding would decode as bogus samples.
     // Still clamp to what the buffer actually holds so we never over-read.
     auto const pdu = am824_parse_header(packet);
-    size_t const declared = pdu.has_value() ? pdu->audio_payload_length() : available;
-    return packet.subspan(Am824Pdu::HEADER_LENGTH, std::min(declared, available));
+    if (!pdu) {
+        return packet.subspan(Am824Pdu::HEADER_LENGTH, available);
+    }
+    return am824_get_audio_payload(*pdu, packet);
+}
+
+auto am824_get_audio_payload(Am824Pdu const& pdu, std::span<uint8_t const> packet) noexcept -> std::span<uint8_t const>
+{
+    if (packet.size() <= Am824Pdu::HEADER_LENGTH) {
+        return {};
+    }
+    size_t const available = packet.size() - Am824Pdu::HEADER_LENGTH;
+    return packet.subspan(Am824Pdu::HEADER_LENGTH, std::min<size_t>(pdu.audio_payload_length(), available));
 }
 
 auto am824_sample_rate_name(Am824SampleRate const rate) noexcept -> std::string_view

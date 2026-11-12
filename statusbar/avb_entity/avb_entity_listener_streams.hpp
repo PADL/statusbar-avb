@@ -200,6 +200,19 @@ struct ListenerStreams
     /// @p stream_index (listener connected + stream_id at offset 4 matches).
     [[nodiscard]] auto frame_is_for_listener(uint16_t stream_index, std::span<uint8_t const> frame) const -> bool;
 
+    /// The slot a received frame belongs to (its kind matches the AVTP subtype and
+    /// its stream_id the stream connected to that input), or nullptr.
+    [[nodiscard]] auto find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
+
+    /// One received AM824 frame for @p slot: parse, decode to the consumer, count, hand on.
+    void receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    /// The frame's AM824 header when it is one; a bad frame is counted and yields nullopt.
+    [[nodiscard]] auto parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+        -> std::optional<avtp::Am824Pdu>;
+    /// Decode the audio to the slot's consumer and count the packet; the samples per channel it held.
+    [[nodiscard]] auto deliver_am824_audio(
+        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,
     /// unit-tested tally_stream_input_packet). See the entity-level doc for ts_sparse.
     void update_stream_input_counters(

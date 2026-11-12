@@ -177,6 +177,17 @@ auto AvtpAudioStreamDecoder::decode_aaf_payload(std::span<uint8_t const> payload
     return FeedResult{.sequence_gap_observed = gap_seen, .samples_delivered = true};
 }
 
+namespace {
+
+auto am824_header_of(std::span<uint8_t const> payload) -> avtp::Am824Pdu
+{
+    avtp::Am824Pdu pdu;
+    span_load(pdu, payload.subspan(0, avtp::Am824Pdu::HEADER_LENGTH));
+    return pdu;
+}
+
+}  // namespace
+
 auto AvtpAudioStreamDecoder::decode_am824_payload(std::span<uint8_t const> payload, uint64_t gptp_now_ns) -> FeedResult
 {
     // Format validity is established by initialize_am824() — it emplaces
@@ -187,66 +198,73 @@ auto AvtpAudioStreamDecoder::decode_am824_payload(std::span<uint8_t const> paylo
     if (!am824_ctx_ || bytes_per_frame == 0) {
         return FeedResult{.status = FeedStatus::format_error};
     }
-
-    avtp::Am824Pdu pdu;
-    span_load(pdu, payload.subspan(0, avtp::Am824Pdu::HEADER_LENGTH));
-    auto const audio = payload.subspan(avtp::Am824Pdu::HEADER_LENGTH);
-
-    size_t const expected_samples = audio.size() / bytes_per_frame;
-    if (expected_samples == 0) {
+    auto const pdu = am824_header_of(payload);
+    // stream_data_length is the bound, not the frame's tail: a minimum-size Ethernet
+    // frame is padded past the declared audio, and padding decoded as quadlets is
+    // silent samples that walk the DBC and presentation time ahead one block a packet.
+    auto const audio = avtp::am824_get_audio_payload(pdu, payload);
+    if (audio.size() / bytes_per_frame == 0) {
         return FeedResult{};
     }
+    return deliver_am824(pdu, audio, audio.size() / bytes_per_frame, gptp_now_ns);
+}
 
+auto AvtpAudioStreamDecoder::deliver_am824(
+    avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, size_t expected_samples, uint64_t gptp_now_ns) -> FeedResult
+{
     ChannelInterleaver il{scratch_, format_.channel_count};
     il.prepare(expected_samples);
+    DecodedPacket const decoded = run_am824(pdu, audio, il, gptp_now_ns);
+    if (!decoded.fired) {
+        return FeedResult{.sequence_gap_observed = decoded.gap_seen};
+    }
+    return finish_packet(decoded);
+}
 
-    bool fired = false;
-    size_t got_frames = 0;
-    uint64_t pts_ns = 0;
+auto AvtpAudioStreamDecoder::run_am824(
+    avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, ChannelInterleaver& il, uint64_t gptp_now_ns) -> DecodedPacket
+{
     uint64_t const gaps_before = am824_ctx_->sequence_gaps;
-
+    DecodedPacket decoded{};
     avtp::am824_deserialize_mbla(
         *am824_ctx_,
         pdu,
         audio,
         gptp_now_ns,
         [&](uint8_t channel, std::span<float> samples, uint64_t sample_pts_ns, uint64_t /*period*/) {
-            fired = true;
-            got_frames = samples.size();
+            decoded.fired = true;
+            decoded.got_frames = samples.size();
             il.deposit(channel, samples);
             if (channel == 0) {
-                pts_ns = sample_pts_ns;
+                decoded.pts_ns = sample_pts_ns;
             }
         });
-
-    bool const gap_seen = am824_ctx_->sequence_gaps > gaps_before;
-    if (gap_seen) {
+    decoded.gap_seen = am824_ctx_->sequence_gaps > gaps_before;
+    if (decoded.gap_seen) {
         ++sequence_gaps_observed_;
         if (diagnostic_) {
             diagnostic_(std::format("gap at AM824 packet #{}: +{}", packets_decoded_ + 1, am824_ctx_->sequence_gaps - gaps_before));
         }
     }
+    return decoded;
+}
 
-    if (!fired) {
-        return FeedResult{.sequence_gap_observed = gap_seen};
-    }
-
+auto AvtpAudioStreamDecoder::finish_packet(DecodedPacket const& decoded) -> FeedResult
+{
     if (packets_decoded_ == 0) {
-        first_gptp_pts_ns_ = pts_ns;
+        first_gptp_pts_ns_ = decoded.pts_ns;
     }
-
     AvtpAudioSamples const out{
-        .interleaved = std::span<float const>(scratch_.data(), got_frames * format_.channel_count),
-        .frames = got_frames,
-        .gptp_pts_ns = pts_ns,
+        .interleaved = std::span<float const>(scratch_.data(), decoded.got_frames * format_.channel_count),
+        .frames = decoded.got_frames,
+        .gptp_pts_ns = decoded.pts_ns,
     };
     if (sink_ && !sink_(out)) {
-        return FeedResult{.status = FeedStatus::sink_error, .sequence_gap_observed = gap_seen};
+        return FeedResult{.status = FeedStatus::sink_error, .sequence_gap_observed = decoded.gap_seen};
     }
-
     ++packets_decoded_;
-    sample_frames_delivered_ += got_frames;
-    return FeedResult{.sequence_gap_observed = gap_seen, .samples_delivered = true};
+    sample_frames_delivered_ += decoded.got_frames;
+    return FeedResult{.sequence_gap_observed = decoded.gap_seen, .samples_delivered = true};
 }
 
 }  // namespace statusbar::avtp_tools

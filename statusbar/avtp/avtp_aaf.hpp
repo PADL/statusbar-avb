@@ -751,9 +751,15 @@ struct AafStreamContext
 /// @param packet Raw packet data including the AAF header
 [[nodiscard]] auto aaf_parse_header(std::span<uint8_t const> packet) noexcept -> std::optional<AafPdu>;
 
-/// Get audio payload span from a packet
+/// Get audio payload span from a packet: the bytes after the header, bounded by the
+/// declared stream_data_length and by what the buffer holds (never the frame's padding).
 /// @param packet Raw packet data including the AAF header
 [[nodiscard]] auto aaf_get_audio_payload(std::span<uint8_t const> packet) noexcept -> std::span<uint8_t const>;
+
+/// The same bound for a packet whose header the caller has already parsed.
+/// @param pdu    The packet's header, as loaded from @p packet
+/// @param packet Raw packet data including the AAF header
+[[nodiscard]] auto aaf_get_audio_payload(AafPdu const& pdu, std::span<uint8_t const> packet) noexcept -> std::span<uint8_t const>;
 
 }  // namespace statusbar::avtp
 

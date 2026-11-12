@@ -342,8 +342,19 @@ auto aaf_get_audio_payload(std::span<uint8_t const> const packet) noexcept -> st
     // packet is padded to the 60-byte Ethernet minimum, and returning that padding
     // would decode as bogus samples. Clamp to the buffer so we never over-read.
     auto const pdu = aaf_parse_header(packet);
-    size_t const declared = pdu.has_value() ? pdu->get_stream_data_length() : available;
-    return packet.subspan(AafPdu::HEADER_LENGTH, std::min(declared, available));
+    if (!pdu) {
+        return packet.subspan(AafPdu::HEADER_LENGTH, available);
+    }
+    return aaf_get_audio_payload(*pdu, packet);
+}
+
+auto aaf_get_audio_payload(AafPdu const& pdu, std::span<uint8_t const> const packet) noexcept -> std::span<uint8_t const>
+{
+    if (packet.size() <= AafPdu::HEADER_LENGTH) {
+        return {};
+    }
+    size_t const available = packet.size() - AafPdu::HEADER_LENGTH;
+    return packet.subspan(AafPdu::HEADER_LENGTH, std::min<size_t>(pdu.get_stream_data_length(), available));
 }
 
 auto aaf_format_name(AafFormat const format) noexcept -> std::string_view

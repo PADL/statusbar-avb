@@ -352,12 +352,8 @@ void ListenerStreams::end_port_cycle()
     (void)port_->port().end_cycle();
 }
 
-void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
+auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*
 {
-    if (frame.empty()) {
-        return;
-    }
-
     // Find the slot this frame belongs to: kind must match the AVTP subtype and
     // the frame's stream_id must match the stream connected to that input (the
     // promiscuous socket also sees our own TX and any other stream on the
@@ -367,66 +363,96 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
         : frame[0] == avtp::AvtpSubtype::crf                                ? StreamKind::crf
                                                                             : StreamKind::other;
     if (subtype_kind == StreamKind::other) {
-        return;
+        return nullptr;
     }
-    ListenerStreamSlot* slot = nullptr;
     for (auto& s : slots_) {
         if (s.spec.format.kind == subtype_kind && frame_is_for_listener(s.spec.index, frame)) {
-            slot = &s;
-            break;
+            return &s;
         }
     }
+    return nullptr;
+}
+
+auto ListenerStreams::parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+    -> std::optional<avtp::Am824Pdu>
+{
+    if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
+        return std::nullopt;
+    }
+    avtp::Am824Pdu pdu{};
+    span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
+    if (!pdu.is_valid()) {
+        slot.rx_bad.add(1);
+        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
+        return std::nullopt;
+    }
+    return pdu;
+}
+
+auto ListenerStreams::deliver_am824_audio(
+    ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t
+{
+    uint64_t samples_this = 0;
+    avtp::am824_deserialize_mbla(
+        *slot.am824,
+        pdu,
+        audio,
+        static_cast<uint64_t>(gptp_now_ns),
+        [&samples_this, &slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+            samples_this = s.size();
+            // Kit phase 2: decoded floats + reconstructed PTS reach the
+            // registered per-stream consumer (previously discarded).
+            if (slot.consume) {
+                slot.consume(ch, s, pts, period);
+            }
+        });
+    slot.rx_packets.add(1);
+    slot.rx_samples.add(samples_this);
+    return samples_this;
+}
+
+void ListenerStreams::receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+{
+    auto const pdu = parse_am824_frame(slot, frame, gptp_now_ns);
+    if (!pdu) {
+        return;
+    }
+    // The declared audio, not the frame's tail: a minimum-size frame carries
+    // padding that would decode as silent samples and drift the DBC.
+    std::span<uint8_t const> const audio = avtp::am824_get_audio_payload(*pdu, frame);
+    uint64_t const samples_this = deliver_am824_audio(slot, *pdu, audio, gptp_now_ns);
+    update_stream_input_counters(
+        slot,
+        pdu->stream_header.sequence_num.get(),
+        pdu->avtp_timestamp(),
+        pdu->stream_header.tv(),
+        pdu->stream_header.tu(),
+        pdu->stream_header.mr(),
+        /*format_ok=*/true,
+        samples_this,
+        /*ts_sparse=*/true,  // 61883-6 SYT cadence: tv=0 between SYT packets is normal
+        gptp_now_ns);
+
+    // Hand the accepted audio to the RX sink (today the WAN tunnel; the sink
+    // decides whether to consume it -- e.g. only when this is the configured
+    // tunnel source). The listener does not know what the sink does with it.
+    if (audio_sink_ != nullptr) {
+        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::am824_mbla, audio);
+    }
+}
+
+void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
+{
+    if (frame.empty()) {
+        return;
+    }
+    ListenerStreamSlot* const slot = find_slot_for_frame(frame);
     if (slot == nullptr) {
         return;
     }
 
     if (slot->am824) {
-        // --- AM824 ---
-        if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
-            return;
-        }
-        avtp::Am824Pdu pdu{};
-        span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
-        if (!pdu.is_valid()) {
-            slot->rx_bad.add(1);
-            update_stream_input_counters(*slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
-            return;
-        }
-        std::span<uint8_t const> const audio = frame.subspan(avtp::Am824Pdu::HEADER_LENGTH);
-        uint64_t samples_this = 0;
-        avtp::am824_deserialize_mbla(
-            *slot->am824,
-            pdu,
-            audio,
-            static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
-                samples_this = s.size();
-                // Kit phase 2: decoded floats + reconstructed PTS reach the
-                // registered per-stream consumer (previously discarded).
-                if (slot->consume) {
-                    slot->consume(ch, s, pts, period);
-                }
-            });
-        slot->rx_packets.add(1);
-        slot->rx_samples.add(samples_this);
-        update_stream_input_counters(
-            *slot,
-            pdu.stream_header.sequence_num.get(),
-            pdu.avtp_timestamp(),
-            pdu.stream_header.tv(),
-            pdu.stream_header.tu(),
-            pdu.stream_header.mr(),
-            /*format_ok=*/true,
-            samples_this,
-            /*ts_sparse=*/true,  // 61883-6 SYT cadence: tv=0 between SYT packets is normal
-            gptp_now_ns);
-
-        // Hand the accepted audio to the RX sink (today the WAN tunnel; the sink
-        // decides whether to consume it -- e.g. only when this is the configured
-        // tunnel source). The listener does not know what the sink does with it.
-        if (audio_sink_ != nullptr) {
-            audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::am824_mbla, audio);
-        }
+        receive_am824_frame(*slot, frame, gptp_now_ns);
     } else if (slot->aaf) {
         // --- AAF ---
         auto pdu_opt = avtp::aaf_parse_header(frame);
