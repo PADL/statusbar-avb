@@ -73,7 +73,7 @@ void Am824StreamInputContext::update_sequence_num(uint8_t seq_num) noexcept
     last_sequence_num = seq_num;
 }
 
-void Am824StreamInputContext::process_packet_header(Am824Pdu const& pdu, uint8_t sample_count, uint64_t gptp_now_ns) noexcept
+void Am824StreamInputContext::process_packet_header(Am824Pdu const& pdu, size_t /*sample_count*/, uint64_t gptp_now_ns) noexcept
 {
     uint8_t const dbc = pdu.data_block_count();
     update_sequence_num(pdu.sequence_num());

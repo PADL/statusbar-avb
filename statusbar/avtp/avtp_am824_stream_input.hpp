@@ -10,15 +10,19 @@
 /// MIDI, and SMPTE.
 
 #include "statusbar/avtp/avtp_am824_stream.hpp"
-#include "statusbar/sg14/inplace_vector.h"
 
 namespace statusbar::avtp {
 
-/// Check if AM824 deserialize frame parameters are valid
+/// Check if AM824 deserialize frame parameters are valid: at least one data block, a
+/// channel count the scratch has lanes for, and a packet whose quadlets fit the decode
+/// scratch. The scratch is one block of MaxChannels * MaxSamples floats shared by all
+/// channels, so the bound is on the packet's quadlet count, not on samples per channel:
+/// a 192 kHz class B stereo packet (48 data blocks, 96 quadlets) fits as well as a
+/// 48 kHz 16-channel one (6 blocks, 96 quadlets).
 template <size_t MaxChannels, size_t MaxSamples>
-[[nodiscard]] constexpr auto is_valid_am824_deserialize_params(uint8_t samples, uint8_t channels) noexcept -> bool
+[[nodiscard]] constexpr auto is_valid_am824_deserialize_params(size_t samples, uint8_t channels) noexcept -> bool
 {
-    return samples != 0 && channels != 0 && channels <= MaxChannels && samples <= MaxSamples;
+    return samples != 0 && channels != 0 && channels <= MaxChannels && samples * channels <= MaxChannels * MaxSamples;
 }
 
 /// Per-stream state for AM824 deserialization (listener/receiver side).
@@ -72,18 +76,50 @@ struct Am824StreamInputContext
 
     /// Update context state from a packet header (combines sequence, DBC, and timestamp updates).
     /// @param pdu          The parsed AM824 PDU header
-    /// @param sample_count Number of samples in this packet
+    /// @param sample_count Number of data blocks (samples per channel) in this packet
     /// @param gptp_now_ns  Approximate gPTP time when the packet was received (full 64-bit)
-    void process_packet_header(Am824Pdu const& pdu, uint8_t sample_count, uint64_t gptp_now_ns) noexcept;
+    void process_packet_header(Am824Pdu const& pdu, size_t sample_count, uint64_t gptp_now_ns) noexcept;
 };
+
+/// The data blocks in a packet the deserializers accept, with the header processed:
+/// 0 when the packet is empty or over the scratch's capacity (then the header is not
+/// processed either; the packet is dropped whole).
+template <size_t MaxChannels, size_t MaxSamples>
+[[nodiscard]] auto am824_accept_packet(
+    Am824StreamInputContext& ctx, Am824Pdu const& pdu, std::span<uint8_t const> payload, uint64_t gptp_now_ns) noexcept -> size_t
+{
+    uint8_t const channels = ctx.config.channel_count;
+    size_t const samples = channels == 0 ? 0 : payload.size() / (size_t{4} * channels);
+    if (!is_valid_am824_deserialize_params<MaxChannels, MaxSamples>(samples, channels)) {
+        return 0;
+    }
+    ctx.process_packet_header(pdu, samples, gptp_now_ns);
+    return samples;
+}
+
+/// Decode MBLA quadlets into lanes: lane ch (at ch * samples) holds channel ch's
+/// samples in order. Wire layout: data blocks are channel-interleaved
+///   [ch0_s0, ch1_s0, ..., chN_s0, ch0_s1, ch1_s1, ..., chN_s1, ...]
+inline void am824_decode_mbla_lanes(
+    std::span<uint8_t const> payload, uint8_t channels, size_t samples, std::span<float> lanes) noexcept
+{
+    for (size_t s = 0; s < samples; ++s) {
+        for (uint8_t ch = 0; ch < channels; ++ch) {
+            ieee::quadlet_t q{};
+            span_load(q, payload.subspan(((s * channels) + ch) * 4));
+            lanes[(ch * samples) + s] = am824_sample_to_float(parse_am824_quadlet(q));
+        }
+    }
+}
 
 /// Deserialize MBLA-only AM824 stream — no label checking (hot path)
 ///
 /// Assumes all channel slots contain MBLA audio (label 0x40).
 /// Calls on_audio once per channel with decoded float samples and presentation time.
 ///
-/// @tparam MaxChannels   Maximum channel count for scratch allocation (default: Am824Pdu::MAX_CHANNELS)
-/// @tparam MaxSamples    Maximum samples per packet for scratch allocation (default: Am824Pdu::MAX_SAMPLES_PER_PACKET)
+/// @tparam MaxChannels   Maximum channel count (default: Am824Pdu::MAX_CHANNELS)
+/// @tparam MaxSamples    Scratch size per channel lane; the scratch (MaxChannels * MaxSamples floats) is shared
+///                      by all channels, so a packet may carry up to that many quadlets (default: Am824Pdu::MAX_SAMPLES_PER_PACKET)
 /// @param ctx         Stream input context (updated with DBC/timestamp/sequence state)
 /// @param pdu         Parsed AM824 PDU (header already validated)
 /// @param payload     Audio payload bytes (after the 32-byte Am824Pdu header)
@@ -98,37 +134,61 @@ void am824_deserialize_mbla(
     uint64_t gptp_now_ns,
     AudioCallback const& on_audio)
 {
-    uint8_t const channels = ctx.config.channel_count;
-    if (channels == 0) {
+    size_t const samples = am824_accept_packet<MaxChannels, MaxSamples>(ctx, pdu, payload, gptp_now_ns);
+    if (samples == 0) {
         return;
     }
-    uint8_t const samples = static_cast<uint8_t>(payload.size() / (size_t{4} * channels));
-    if (!is_valid_am824_deserialize_params<MaxChannels, MaxSamples>(samples, channels)) {
-        return;
-    }
-
-    ctx.process_packet_header(pdu, samples, gptp_now_ns);
-
+    std::array<float, MaxChannels * MaxSamples> scratch{};
+    am824_decode_mbla_lanes(payload, ctx.config.channel_count, samples, scratch);
     uint64_t const base_pts = ctx.compute_base_pts_ns();
-    uint64_t const period = ctx.config.sample_period_ns;
-
-    // Decode quadlets into per-channel scratch buffers
-    // Layout: data blocks are channel-interleaved
-    //   [ch0_s0, ch1_s0, ..., chN_s0, ch0_s1, ch1_s1, ..., chN_s1, ...]
-    std::array<std::array<float, MaxSamples>, MaxChannels> scratch{};
-
-    for (uint8_t s = 0; s < samples; ++s) {
-        for (uint8_t ch = 0; ch < channels; ++ch) {
-            ieee::quadlet_t q{};
-            span_load(q, payload.subspan(static_cast<size_t>((s * channels) + ch) * 4));
-            scratch[ch][s] = am824_sample_to_float(parse_am824_quadlet(q));
-        }
-    }
-
-    for (uint8_t ch = 0; ch < channels; ++ch) {
-        on_audio(ch, std::span<float>{scratch[ch].data(), samples}, base_pts, period);
+    for (uint8_t ch = 0; ch < ctx.config.channel_count; ++ch) {
+        on_audio(ch, std::span<float>{scratch.data() + (ch * samples), samples}, base_pts, ctx.config.sample_period_ns);
     }
 }
+
+/// The scratch of the mixed deserializer: one lane per channel in each store (lane ch
+/// at ch * samples), with a fill count per lane, since a channel yields at most one
+/// sample, or three MIDI bytes, per data block and not every data block carries one.
+template <size_t MaxChannels, size_t MaxSamples>
+struct Am824MixedLanes
+{
+    std::array<float, MaxChannels * MaxSamples> audio{};
+    std::array<size_t, MaxChannels> audio_count{};
+    std::array<uint8_t, MaxChannels * MaxSamples * 3> midi{};
+    std::array<size_t, MaxChannels> midi_count{};
+
+    [[nodiscard]] auto audio_lane(uint8_t ch, size_t samples) noexcept -> std::span<float>
+    {
+        return std::span<float>{audio.data() + (ch * samples), audio_count[ch]};
+    }
+    [[nodiscard]] auto midi_lane(uint8_t ch, size_t samples) const noexcept -> std::span<uint8_t const>
+    {
+        return std::span<uint8_t const>{midi.data() + (ch * samples * 3), midi_count[ch]};
+    }
+
+    /// Sort one quadlet by label into the lanes; SMPTE parts go straight to @p on_smpte.
+    template <typename SmpteCb>
+    void take(uint8_t ch, size_t samples, uint32_t quadlet, uint64_t base_pts, uint64_t period, SmpteCb const& on_smpte)
+    {
+        uint8_t const label = static_cast<uint8_t>((quadlet >> 24) & 0xFFU);
+        uint8_t const label_upper = label & 0xF0U;
+        if (label_upper == 0x40U) {
+            // MBLA audio (0x40-0x4F)
+            audio[(ch * samples) + audio_count[ch]] = am824_sample_to_float(parse_am824_quadlet(quadlet));
+            ++audio_count[ch];
+        } else if (label_upper == 0x80U && label <= 0x83U) {
+            // MIDI conformant (0x80-0x83)
+            midi_count[ch] += am824_extract_midi_bytes(quadlet, midi.data() + (ch * samples * 3) + midi_count[ch]);
+        } else if (label >= 0x88U && label <= 0x8BU) {
+            // SMPTE time code conformant (0x88-0x8B)
+            std::array<uint8_t, 3> smpte_bytes{};
+            uint8_t const part = am824_extract_smpte_part(quadlet, smpte_bytes);
+            if (part > 0) {
+                on_smpte(ch, part, std::span<uint8_t const, 3>{smpte_bytes}, base_pts, period);
+            }
+        }
+    }
+};
 
 /// Deserialize mixed AM824 stream — dispatches by label per channel
 ///
@@ -138,8 +198,9 @@ void am824_deserialize_mbla(
 ///   SMPTE (0x88-0x8B) → on_smpte: called per non-empty quadlet with part number
 ///   Other labels → silently skipped
 ///
-/// @tparam MaxChannels   Maximum channel count for scratch allocation (default: Am824Pdu::MAX_CHANNELS)
-/// @tparam MaxSamples    Maximum samples per packet for scratch allocation (default: Am824Pdu::MAX_SAMPLES_PER_PACKET)
+/// @tparam MaxChannels   Maximum channel count (default: Am824Pdu::MAX_CHANNELS)
+/// @tparam MaxSamples    Scratch size per channel lane; the scratch (MaxChannels * MaxSamples floats) is shared
+///                      by all channels, so a packet may carry up to that many quadlets (default: Am824Pdu::MAX_SAMPLES_PER_PACKET)
 /// @param gptp_now_ns Approximate gPTP time when the packet was received (full 64-bit).
 template <
     size_t MaxChannels = Am824Pdu::MAX_CHANNELS,
@@ -156,63 +217,25 @@ void am824_deserialize_mixed(
     MidiCb const& on_midi,
     SmpteCb const& on_smpte)
 {
-    uint8_t const channels = ctx.config.channel_count;
-    if (channels == 0) {
+    size_t const samples = am824_accept_packet<MaxChannels, MaxSamples>(ctx, pdu, payload, gptp_now_ns);
+    if (samples == 0) {
         return;
     }
-    uint8_t const samples = static_cast<uint8_t>(payload.size() / (size_t{4} * channels));
-    if (!is_valid_am824_deserialize_params<MaxChannels, MaxSamples>(samples, channels)) {
-        return;
-    }
-
-    ctx.process_packet_header(pdu, samples, gptp_now_ns);
-
     uint64_t const base_pts = ctx.compute_base_pts_ns();
-    uint64_t const period = ctx.config.sample_period_ns;
-
-    // Per-channel scratch buffers
-    std::array<statusbar::sg14::inplace_vector<float, MaxSamples>, MaxChannels> audio_scratch{};
-
-    constexpr size_t max_midi_bytes = MaxSamples * 3;
-    std::array<std::array<uint8_t, max_midi_bytes>, MaxChannels> midi_scratch{};
-    std::array<size_t, MaxChannels> midi_count{};
-
-    for (uint8_t s = 0; s < samples; ++s) {
-        for (uint8_t ch = 0; ch < channels; ++ch) {
+    Am824MixedLanes<MaxChannels, MaxSamples> lanes{};
+    for (size_t s = 0; s < samples; ++s) {
+        for (uint8_t ch = 0; ch < ctx.config.channel_count; ++ch) {
             ieee::quadlet_t q{};
-            span_load(q, payload.subspan(static_cast<size_t>((s * channels) + ch) * 4));
-            uint32_t const quadlet = q;
-
-            uint8_t const label = static_cast<uint8_t>((quadlet >> 24) & 0xFFU);
-            uint8_t const label_upper = label & 0xF0U;
-
-            if (label_upper == 0x40U) {
-                // MBLA audio (0x40-0x4F)
-                audio_scratch[ch].push_back(am824_sample_to_float(parse_am824_quadlet(quadlet)));
-            } else if (label_upper == 0x80U && label <= 0x83U) {
-                // MIDI conformant (0x80-0x83)
-                uint8_t const n = am824_extract_midi_bytes(quadlet, midi_scratch[ch].data() + midi_count[ch]);
-                midi_count[ch] += n;
-            } else if (label >= 0x88U && label <= 0x8BU) {
-                // SMPTE time code conformant (0x88-0x8B)
-                std::array<uint8_t, 3> smpte_bytes{};
-                uint8_t const part = am824_extract_smpte_part(quadlet, smpte_bytes);
-                if (part > 0) {
-                    on_smpte(ch, part, std::span<uint8_t const, 3>{smpte_bytes}, base_pts, period);
-                }
-            }
+            span_load(q, payload.subspan(((s * ctx.config.channel_count) + ch) * 4));
+            lanes.take(ch, samples, q, base_pts, ctx.config.sample_period_ns, on_smpte);
         }
     }
-
-    for (uint8_t ch = 0; ch < channels; ++ch) {
-        if (!audio_scratch[ch].empty()) {
-            on_audio(ch, std::span<float>{audio_scratch[ch]}, base_pts, period);
+    for (uint8_t ch = 0; ch < ctx.config.channel_count; ++ch) {
+        if (lanes.audio_count[ch] > 0) {
+            on_audio(ch, lanes.audio_lane(ch, samples), base_pts, ctx.config.sample_period_ns);
         }
-    }
-
-    for (uint8_t ch = 0; ch < channels; ++ch) {
-        if (midi_count[ch] > 0) {
-            on_midi(ch, std::span<uint8_t const>{midi_scratch[ch].data(), midi_count[ch]}, base_pts, period);
+        if (lanes.midi_count[ch] > 0) {
+            on_midi(ch, lanes.midi_lane(ch, samples), base_pts, ctx.config.sample_period_ns);
         }
     }
 }

@@ -323,18 +323,43 @@ TEST(aaf_stream_input_safety, user_specified_format_zero_bps_rejected)
     EXPECT_FALSE(called);
 }
 
-TEST(aaf_stream_input_safety, samples_above_template_max_rejected)
+TEST(aaf_stream_input_safety, a_packet_over_the_scratch_capacity_is_rejected)
 {
-    // MaxSamples defaults to 256. A payload sized for 300 samples must
-    // trip the upper bound and produce no callback.
+    // The scratch holds MaxChannels * MaxSamples samples in all. Two lanes of 128
+    // cannot take 300 samples of 2 channels; the guard rejects before the header.
     AafStreamInputContext ctx{AafFormat::int_16bit, AafSampleRate::rate_48_khz, 2, 16};
     auto pdu = build_aaf_pdu(AafFormat::int_16bit, AafSampleRate::rate_48_khz, 2, 16, 300, true, 0, 0);
     std::vector<uint8_t> payload(300U * 2U * 2U);  // 300 samples × 2 channels × 2 bytes
     bool called = false;
-    aaf_stream_deserialize(
+    aaf_stream_deserialize</*MaxChannels=*/2, /*MaxSamples=*/128>(
         ctx, pdu, std::span<uint8_t const>{payload}, 0U, [&](uint8_t, std::span<float>, uint64_t, uint64_t) { called = true; });
     EXPECT_FALSE(called);
     EXPECT_EQ(ctx.packets_received, 0U);
+}
+
+// The bound is the scratch's capacity, not MaxSamples per channel: a mono int16 packet
+// filling an Ethernet frame carries 700-odd samples, which the per-channel bound of
+// 256 dropped before the header was read.
+TEST(aaf_stream_input, a_full_frame_of_mono_int16_decodes_with_the_default_scratch)
+{
+    constexpr uint16_t samples = 700;
+    AafStreamInputContext ctx{AafFormat::int_16bit, AafSampleRate::rate_48_khz, 1, 16};
+    auto pdu = build_aaf_pdu(AafFormat::int_16bit, AafSampleRate::rate_48_khz, 1, 16, samples, true, 1'000'000U, 0);
+    std::vector<uint8_t> payload(size_t{samples} * 2U);
+    for (size_t s = 0; s < samples; ++s) {
+        payload[s * 2] = static_cast<uint8_t>(s >> 8);  // a ramp, big-endian int16
+        payload[(s * 2) + 1] = static_cast<uint8_t>(s & 0xFFU);
+    }
+    size_t got = 0;
+    float last = 0.0f;
+    aaf_stream_deserialize(
+        ctx, pdu, std::span<uint8_t const>{payload}, 1'000'000U, [&](uint8_t, std::span<float> s, uint64_t, uint64_t) {
+            got = s.size();
+            last = s.back();
+        });
+    EXPECT_EQ(got, size_t{samples});
+    EXPECT_TRUE(last > 0.0f);  // the lane is this channel's samples in order
+    EXPECT_EQ(ctx.packets_received, 1U);
 }
 
 TEST(aaf_stream_input_safety, format_mismatch_silently_uses_ctx_format)

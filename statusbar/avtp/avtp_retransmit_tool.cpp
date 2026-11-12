@@ -28,6 +28,7 @@
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/tsn/tsn_stream_id_format.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -283,10 +284,11 @@ struct Am824RetransmitState
         am824_deserialize_mbla(
             in_ctx, in_pdu, audio_payload, gptp_now, [&](uint8_t ch_idx, std::span<float> samples, uint64_t, uint64_t) {
                 if (ch_idx < Am824Pdu::MAX_CHANNELS) {
-                    for (size_t i = 0; i < samples.size() && i < Am824Pdu::MAX_SAMPLES_PER_PACKET; ++i) {
+                    size_t const kept = std::min<size_t>(samples.size(), Am824Pdu::MAX_SAMPLES_PER_PACKET);
+                    for (size_t i = 0; i < kept; ++i) {
                         audio_buf[ch_idx][i] = samples[i];
                     }
-                    sample_count = static_cast<uint8_t>(samples.size());
+                    sample_count = static_cast<uint8_t>(kept);  // what audio_buf holds, never more
                 }
             });
         return sample_count;
@@ -382,10 +384,11 @@ struct AafRetransmitState
         aaf_stream_deserialize(
             in_ctx, in_pdu, audio_payload, gptp_now, [&](uint8_t ch_idx, std::span<float> samples, uint64_t, uint64_t) {
                 if (ch_idx < MAX_CH) {
-                    for (size_t i = 0; i < samples.size() && i < MAX_SAMP; ++i) {
+                    size_t const kept = std::min<size_t>(samples.size(), MAX_SAMP);
+                    for (size_t i = 0; i < kept; ++i) {
                         audio_buf[ch_idx][i] = samples[i];
                     }
-                    sample_count = static_cast<uint16_t>(samples.size());
+                    sample_count = static_cast<uint16_t>(kept);  // what audio_buf holds, never more
                 }
             });
         return sample_count;

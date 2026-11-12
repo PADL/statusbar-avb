@@ -552,14 +552,14 @@ struct Am824Pdu
     }
 
     /// Calculate sample count from stream_data_length and channel count
-    [[nodiscard]] constexpr auto sample_count() const noexcept -> uint8_t
+    [[nodiscard]] constexpr auto sample_count() const noexcept -> uint16_t
     {
         uint16_t const payload = audio_payload_length();
         uint8_t const channels = channel_count();
         if (channels == 0) {
             return 0U;
         }
-        return static_cast<uint8_t>(payload / (channels * BYTES_PER_SAMPLE));
+        return static_cast<uint16_t>(payload / (channels * BYTES_PER_SAMPLE));  // a mono 1500-octet frame is 369
     }
 
     /// Set dimensions (sample count and channel count) and update stream_data_length

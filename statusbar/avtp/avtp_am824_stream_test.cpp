@@ -710,18 +710,87 @@ TEST(am824_stream_input_safety, payload_at_exact_one_frame_boundary)
     EXPECT_EQ(ctx.packets_received, 1U);
 }
 
-TEST(am824_stream_input_safety, samples_above_max_samples_template_bound)
+TEST(am824_stream_input_safety, a_packet_over_the_scratch_capacity_is_rejected)
 {
-    // MaxSamples default = Am824Pdu::MAX_SAMPLES_PER_PACKET. Override
-    // it to 4, then hand in a payload sized for 10 samples — guard
-    // must reject.
+    // The scratch holds MaxChannels * MaxSamples quadlets in all. One lane of 4
+    // cannot take a 10-block mono packet; the guard rejects before the header.
     Am824StreamInputContext ctx{Am824SampleRate::rate_48_khz, 1};
     Am824Pdu pdu{};
     std::array<uint8_t, 40> payload{};  // 10 samples × 1 channel × 4 = 40
     bool called = false;
-    am824_deserialize_mbla<Am824Pdu::MAX_CHANNELS, /*MaxSamples=*/4>(
+    am824_deserialize_mbla</*MaxChannels=*/1, /*MaxSamples=*/4>(
         ctx, pdu, std::span<uint8_t const>{payload}, 0U, [&](uint8_t, std::span<float>, uint64_t, uint64_t) { called = true; });
     EXPECT_FALSE(called);
+    EXPECT_EQ(ctx.packets_received, 0U);
+}
+
+// The bound is the scratch's capacity, not MaxSamples per channel: 192 kHz class B
+// carries 48 data blocks a packet, which the per-channel bound of 32 dropped before
+// the header was even read, so a 192 kHz stream decoded nothing and every packet
+// counted as a sequence gap.
+TEST(am824_stream_mbla, a_192_khz_class_b_stereo_packet_decodes_with_the_default_scratch)
+{
+    EXPECT_TRUE(48 > Am824Pdu::MAX_SAMPLES_PER_PACKET);  // the shape the old bound dropped
+    Am824StreamInputContext ctx{Am824SampleRate::rate_192_khz, 2};
+    auto payload = build_mbla_payload(2, 48);
+    auto pdu = build_am824_pdu(2, 48, 0, true, 1'000'000, 0);
+    pdu.set_sample_rate(Am824SampleRate::rate_192_khz);
+
+    int callbacks = 0;
+    am824_deserialize_mbla(ctx, pdu, std::span{payload}, 1'000'000U, [&](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t) {
+        EXPECT_EQ(s.size(), 48U);
+        EXPECT_EQ(pts, 1'000'000U);
+        // Lane ch holds channel ch's samples in order: the last is the largest (build_mbla_payload ramps).
+        EXPECT_TRUE(s[47] > s[0]);
+        (void)ch;
+        ++callbacks;
+    });
+    EXPECT_EQ(callbacks, 2);
+    EXPECT_EQ(ctx.packets_received, 1U);
+    EXPECT_EQ(ctx.sequence_gaps, 0U);
+}
+
+TEST(am824_stream_mixed, a_192_khz_class_b_stereo_packet_decodes_with_the_default_scratch)
+{
+    Am824StreamInputContext ctx{Am824SampleRate::rate_192_khz, 2};
+    auto payload = build_mbla_payload(2, 48);
+    auto pdu = build_am824_pdu(2, 48, 0, true, 1'000'000, 0);
+    int callbacks = 0;
+    am824_deserialize_mixed(
+        ctx,
+        pdu,
+        std::span{payload},
+        1'000'000U,
+        [&](uint8_t, std::span<float> s, uint64_t, uint64_t) {
+            EXPECT_EQ(s.size(), 48U);
+            ++callbacks;
+        },
+        [](uint8_t, std::span<uint8_t const>, uint64_t, uint64_t) {},
+        [](uint8_t, uint8_t, std::span<uint8_t const, 3>, uint64_t, uint64_t) {});
+    EXPECT_EQ(callbacks, 2);
+}
+
+// The data block count is no longer an octet: a mono packet filling a 1500-octet
+// frame has 300-odd blocks, which an 8-bit count folded to 44 or so.
+TEST(am824_stream_mbla, a_mono_packet_of_300_blocks_keeps_its_count)
+{
+    Am824StreamInputContext ctx{Am824SampleRate::rate_48_khz, 1};
+    std::vector<uint8_t> payload(300U * 4U);
+    for (size_t s = 0; s < 300; ++s) {
+        auto const q = quadlet_bytes(AM824_LABEL_MBLA, 0x000100U * static_cast<uint32_t>(s + 1));
+        for (size_t i = 0; i < 4; ++i) {
+            payload[(s * 4) + i] = q[i];
+        }
+    }
+    Am824Pdu pdu{};
+    pdu.init(StreamId{}, 1, Am824SampleRate::rate_48_khz);
+    pdu.set_stream_data_length(static_cast<uint16_t>(Cip61883Header::LENGTH + payload.size()));
+    EXPECT_EQ(pdu.sample_count(), 300U);
+
+    size_t got = 0;
+    am824_deserialize_mbla(
+        ctx, pdu, std::span{payload}, 0U, [&](uint8_t, std::span<float> s, uint64_t, uint64_t) { got = s.size(); });
+    EXPECT_EQ(got, 300U);
 }
 
 TEST_MAIN(statusbar_avtp, avtp_am824_stream_test)
