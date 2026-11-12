@@ -1003,7 +1003,7 @@ class MsrpParticipantT
     }
     [[nodiscard]] static auto leaving(registrar_sm::Def::Event const event) noexcept -> bool
     {
-        return event == registrar_sm::Def::Event::RLeave || event == registrar_sm::Def::Event::RLeaveImmediate;
+        return event == registrar_sm::Def::Event::RLeave;  // instant leave is the same event (set_instant_leave)
     }
     [[nodiscard]] static auto same_stream(TalkerAdvertiseFirstValue const& a, TalkerAdvertiseFirstValue const& b) noexcept -> bool
     {
