@@ -525,12 +525,18 @@ auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::sp
     if (frame.size() < 12) {
         return false;
     }
-    auto const* ls = components_.acmp_listener.get_stream(stream_index);
-    if (ls == nullptr || !ls->connected) {
-        return false;
-    }
-    auto const id_bytes = make_const_span(ls->stream_id);  // 8 bytes
-    return std::equal(id_bytes.begin(), id_bytes.end(), frame.begin() + 4);
+    auto const* slot = slot_for(stream_index);
+    return slot != nullptr && slot_receives(*slot, frame);
+}
+
+auto ListenerStreams::slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool
+{
+    // The connection as the reactor published it (on_listener_connected), not
+    // the ACMP listener's record, which that thread writes with no hand-off.
+    uint64_t const connected = slot.rx_stream_id.load();
+    ieee::Eui64 carried{};
+    span_load(carried, frame.subspan(4, ieee::Eui64::LENGTH));
+    return connected != 0 && carried.to_uint64() == connected;
 }
 
 void ListenerStreams::update_stream_input_counters(
@@ -688,6 +694,15 @@ auto ListenerStreams::attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint c
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }
 
+auto ListenerStreams::attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint const now)
+    -> bool
+{
+    // One attachment per stream a slot holds: a slot already on this stream
+    // re-declares nothing, so attach and withdraw stay one-for-one however
+    // many times a controller repeats the CONNECT.
+    return held.stream_id != stream_id ? attach_ready(stream_id, now) : held_ready(stream_id);
+}
+
 auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
 {
     auto const sid = to_stream_id(stream_id);
@@ -706,18 +721,16 @@ void ListenerStreams::on_listener_connected(
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
-    // One attachment per stream a slot holds: a slot already on this stream
-    // re-declares nothing, so attach and withdraw stay one-for-one however
-    // many times a controller repeats the CONNECT.
-    bool const fresh = slot->connection.stream_id != stream_id;
-    bool const ready = fresh ? attach_ready(stream_id, now) : held_ready(stream_id);
+    bool const ready = attach_or_held_ready(slot->connection, stream_id, now);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
+    slot->rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
     log_connected(stream_index, dest_mac, ready, slot->connection.group.has_value());
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        slot->rx_stream_id.publish(0);  // no frame is this input's any more
         release_connection(slot->connection, now);
     }
     if (logger_) {

@@ -33,6 +33,7 @@
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp/avtp_crf_stream_input.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_published.hpp"
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -70,8 +71,14 @@ struct ListenerConnection
 struct ListenerStreamSlot
 {
     StreamSpec spec{};
-    /// The connection this input holds, empty while disconnected.
+    /// The connection this input holds, empty while disconnected. Reactor thread.
     ListenerConnection connection{};
+    /// The stream this input receives, as the reactor published it at
+    /// CONNECT_RX and cleared it at DISCONNECT_RX; zero while disconnected.
+    /// The RX thread matches frames against this (frame_is_for_listener), not
+    /// against the ACMP listener's own record, which the reactor writes with
+    /// no hand-off.
+    itc::Published<uint64_t> rx_stream_id{};
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
     std::optional<avtp::CrfStreamInputContext> crf{};
@@ -197,7 +204,8 @@ struct ListenerStreams
     void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns);
 
     /// True if @p frame belongs to the stream currently connected to STREAM_INPUT
-    /// @p stream_index (listener connected + stream_id at offset 4 matches).
+    /// @p stream_index: the slot's published connection is set and the
+    /// stream_id at offset 4 matches it. RX thread.
     [[nodiscard]] auto frame_is_for_listener(uint16_t stream_index, std::span<uint8_t const> frame) const -> bool;
 
     /// The slot a received frame belongs to (its kind matches the AVTP subtype and
@@ -269,6 +277,12 @@ struct ListenerStreams
     auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
     /// Whether the declaration already standing for @p stream_id is Ready.
     [[nodiscard]] auto held_ready(ieee::Eui64 const& stream_id) const -> bool;
+    /// Declare @p stream_id when @p held is not on it yet, else ask after the
+    /// standing declaration: true when the reservation is Ready.
+    auto attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
+    /// Whether @p frame (an AVTPDU of 12 octets or more) carries the stream
+    /// @p slot has published as its connection. RX thread.
+    [[nodiscard]] static auto slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool;
     void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);
 
     /// Move a pending set_consume registration into its newly-opened slot.

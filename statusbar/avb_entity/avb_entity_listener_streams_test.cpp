@@ -15,9 +15,11 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -168,6 +170,35 @@ TEST(listener_connection, the_same_stream_connected_twice_is_withdrawn_by_one_di
 
 // A stream index with no RX slot is not one of our inputs: nothing is
 // declared for it and nothing joined, and no slot is invented.
+// The RX thread matches a frame to its input by the connection the reactor
+// published at CONNECT_RX and cleared at DISCONNECT_RX, not by reading the
+// ACMP listener's record under the reactor: here that record never connects
+// and the match follows the published connection alone.
+TEST(listener_connection, the_drain_matches_frames_by_the_published_connection)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+
+    std::array<uint8_t, 24> frame{};
+    frame[0] = avtp::AvtpSubtype::aaf;
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+    auto other = frame;
+    span_copy(std::span<uint8_t>{other}.subspan(4, 8), make_const_span(STREAM_2));
+
+    EXPECT_FALSE(ls.frame_is_for_listener(0, frame));  // nothing connected yet
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_FALSE(donor->components().acmp_listener.is_connected(0));
+    EXPECT_TRUE(ls.frame_is_for_listener(0, frame));
+    EXPECT_FALSE(ls.frame_is_for_listener(0, other));
+    EXPECT_FALSE(ls.frame_is_for_listener(1, frame));  // no such input
+    EXPECT_FALSE(ls.frame_is_for_listener(0, std::span<uint8_t const>{frame}.first(11)));
+
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    EXPECT_FALSE(ls.frame_is_for_listener(0, frame));
+}
+
 TEST(listener_connection, a_connect_for_an_index_without_a_slot_declares_nothing)
 {
     auto donor = make_donor();
