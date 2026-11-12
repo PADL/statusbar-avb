@@ -1199,15 +1199,18 @@ auto AemCommandHandler::handle_acquire_entity(
     return acquire_outcome(status, cmd, command_data, out_buffer);
 }
 
-auto AemCommandHandler::release_acquisition(AemDu const& header) noexcept -> uint8_t
+auto AemCommandHandler::release_acquisition(AemDu const& header) -> uint8_t
 {
     if (!(acquired_ && acquiring_controller_ == header.controller_entity_id)) {
         return AEM_STATUS_ENTITY_ACQUIRED;
     }
-    acquired_ = false;
-    acquired_persistent_ = false;
-    acquiring_controller_ = {};
-    acquiring_controller_mac_ = {};
+    release_acquisition();
+    // The owner letting go answers what the handshake was asking it: the
+    // entity is free, and the contender waiting on that answer takes it now
+    // rather than at the handshake's timeout, or never.
+    if (pending_acquire_.active) {
+        grant_pending_acquire();
+    }
     return AEM_STATUS_SUCCESS;
 }
 
@@ -1223,6 +1226,14 @@ auto AemCommandHandler::take_acquisition(
     }
     if (acquiring_controller_ == header.controller_entity_id) {
         return AEM_STATUS_SUCCESS;  // already this controller's
+    }
+    // While the owner is being asked on one contender's behalf the entity is
+    // still the owner's: that contender asking again (its retransmit) is told
+    // IN_PROGRESS once more, anyone else ENTITY_ACQUIRED, and the handshake
+    // runs on for the one it was begun for.
+    if (pending_acquire_.active) {
+        bool const same_contender = pending_acquire_.requester_header.controller_entity_id == header.controller_entity_id;
+        return same_contender ? AEM_STATUS_IN_PROGRESS : AEM_STATUS_ENTITY_ACQUIRED;
     }
     // Acquired by another controller: ask it whether it is still there, unless
     // its acquisition is PERSISTENT or nobody can carry the question. The final
@@ -1259,8 +1270,9 @@ auto AemCommandHandler::acquire_outcome(
     if (status == AEM_STATUS_IN_PROGRESS) {
         return {.status = AEM_STATUS_IN_PROGRESS, .size = 0};
     }
-    // A release that succeeded answers no flags and no owner; everything else
-    // echoes the flags and names the owner (zero when the entity is free).
+    // A release that succeeded answers no flags; everything else echoes the
+    // flags. Every answer names the owner: zero when the entity is free, the
+    // contender a release handed it to, else whoever holds it.
     uint32_t const flags = (cmd.is_release() && status == AEM_STATUS_SUCCESS) ? 0U : uint32_t{cmd.flags};
     return build_acquire_response(
         {.status = status, .flags = flags, .entity_id = acquiring_controller_, .command_data = command_data}, out_buffer);
@@ -1620,46 +1632,40 @@ void AemCommandHandler::controller_available_response_received()
     if (!pending_acquire_.active) {
         return;
     }
-
-    // Current owner is alive — deny the pending requester with ENTITY_ACQUIRED.
+    // Current owner is alive: deny the pending requester with ENTITY_ACQUIRED.
     // The final response is sent here via the send_response callback rather
     // than being returned to the caller, because the IN_PROGRESS path in
     // process_packet() has already returned by the time we get here.
-    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
-    auto const original_command_data = std::span<uint8_t const>{pending_acquire_.command_data_copy};
-    auto const response = build_acquire_response(
-        {.status = AEM_STATUS_ENTITY_ACQUIRED,
-         .flags = pending_acquire_.requester_flags,
-         .entity_id = acquiring_controller_,
-         .command_data = original_command_data},
-        out_buffer);
-    (void)send_response(
-        pending_acquire_.requester_mac,
-        pending_acquire_.requester_header,
-        response.status,
-        std::span<uint8_t const>{out_buffer.data(), response.size});
-
+    answer_pending_acquire(AEM_STATUS_ENTITY_ACQUIRED);
     pending_acquire_ = {};
 }
 
 void AemCommandHandler::controller_available_timed_out()
 {
-    if (!pending_acquire_.active) {
-        return;
+    if (pending_acquire_.active) {
+        grant_pending_acquire();
     }
+}
 
-    // Current owner is gone — transfer acquisition to the requester and
-    // send a SUCCESS response. See controller_available_response_received
+void AemCommandHandler::grant_pending_acquire()
+{
+    // The owner is gone or has let go: transfer acquisition to the requester
+    // and send a SUCCESS response. See controller_available_response_received
     // above for why the response is emitted here rather than returned.
     acquired_ = true;
     acquiring_controller_ = pending_acquire_.requester_header.controller_entity_id;
     acquiring_controller_mac_ = pending_acquire_.requester_mac;
     acquired_persistent_ = (pending_acquire_.requester_flags & 0x01u) != 0u;
+    answer_pending_acquire(AEM_STATUS_SUCCESS);
+    pending_acquire_ = {};
+}
 
+void AemCommandHandler::answer_pending_acquire(uint8_t const status)
+{
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
     auto const original_command_data = std::span<uint8_t const>{pending_acquire_.command_data_copy};
     auto const response = build_acquire_response(
-        {.status = AEM_STATUS_SUCCESS,
+        {.status = status,
          .flags = pending_acquire_.requester_flags,
          .entity_id = acquiring_controller_,
          .command_data = original_command_data},
@@ -1670,8 +1676,6 @@ void AemCommandHandler::controller_available_timed_out()
         response.status,
         std::span<uint8_t const>{out_buffer.data(), response.size});
     notify_on_success(AEM_COMMAND_ACQUIRE_ENTITY, response, out_buffer);
-
-    pending_acquire_ = {};
 }
 
 }  // namespace statusbar::nanoavb

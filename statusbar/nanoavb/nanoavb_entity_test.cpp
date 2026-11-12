@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -1867,6 +1868,137 @@ auto capture_sends(AemCommandHandler& handler, std::vector<CapturedSend>& sends)
 }
 
 }  // namespace
+
+// 7.4.1: while the entity asks its owner whether it is still there on one
+// contender's behalf, it is still the owner's. That contender asking again
+// (its retransmit) is told IN_PROGRESS once more without the owner being
+// asked twice; another contender is told ENTITY_ACQUIRED at once, naming the
+// owner; and the handshake stays the first's: when the owner stays silent it
+// is the contender that was waiting, not the last to ask, that takes the entity.
+TEST(nanoavb_entity_acquire, a_contender_during_the_handshake_does_not_take_it_over)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    int asked = 0;
+    handler.send_controller_available = [&](Eui64 const&) {
+        ++asked;
+        return true;
+    };
+    auto const now = sm::TimePoint{};
+    handler.set_event_time(now);
+    Eui64 const controller_c{0xC0, 0, 0, 0, 0, 0, 0, 0x0C};
+    Eui48 const mac_c{0x02, 0, 0, 0, 0, 0x0C};
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> const acquire{};
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 1);
+    EXPECT_TRUE(handler.acquiring_controller() == kControllerA);
+
+    // B contends: the owner is asked, B waits.
+    sends.clear();
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 2);
+    EXPECT_EQ(asked, 1);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_TRUE(handler.has_pending_acquire());
+
+    // B again, its retransmit: IN_PROGRESS again, the owner not asked twice.
+    sends.clear();
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 2);
+    EXPECT_EQ(asked, 1);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+
+    // C contends meanwhile: denied at once, told who owns the entity; B's wait stands.
+    sends.clear();
+    inject_command(handler, kEntity, controller_c, mac_c, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 3);
+    EXPECT_EQ(asked, 1);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(sends[0].dest, mac_c);
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_ENTITY_ACQUIRED);
+    AemAcquireEntityPayload denied{};
+    span_load(denied, body_of(sends[0]).first(AemAcquireEntityPayload::LENGTH));
+    EXPECT_TRUE(denied.owner_entity_id == kControllerA);
+    EXPECT_TRUE(handler.has_pending_acquire());
+
+    // The owner stays silent: B takes the entity; C hears nothing more.
+    sends.clear();
+    handler.tick(now + std::chrono::milliseconds(AEM_TIMEOUT_MS));
+    EXPECT_FALSE(handler.has_pending_acquire());
+    EXPECT_TRUE(handler.acquiring_controller() == kControllerB);
+    auto const* granted = solicited(sends);
+    EXPECT_TRUE(granted != nullptr);
+    EXPECT_EQ(granted->dest, kMacB);
+    EXPECT_EQ(header_of(*granted).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(header_of(*granted).sequence_id.get(), 2);
+    for (auto const& s : sends) {
+        EXPECT_FALSE(s.dest == mac_c);
+    }
+}
+
+// The owner releasing the entity while the handshake is out answers what the
+// handshake was asking it: the entity is free, and the contender waiting on
+// that answer takes it then and there, told SUCCESS as its owner. The owner's
+// CONTROLLER_AVAILABLE response arriving afterwards has nothing left to decide.
+TEST(nanoavb_entity_acquire, the_owner_releasing_during_the_handshake_hands_the_entity_to_the_contender)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    handler.send_controller_available = [](Eui64 const&) { return true; };
+    auto const now = sm::TimePoint{};
+    handler.set_event_time(now);
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> const acquire{};
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 1);
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 2);
+    EXPECT_TRUE(handler.has_pending_acquire());
+
+    AemAcquireEntityPayload release{};
+    release.set_release(true);
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> release_bytes{};
+    span_store(release_bytes, release);
+    sends.clear();
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, release_bytes, 5);
+    EXPECT_FALSE(handler.has_pending_acquire());
+    EXPECT_TRUE(handler.is_acquired());
+    EXPECT_TRUE(handler.acquiring_controller() == kControllerB);
+
+    // A's release is answered SUCCESS; B's wait is answered SUCCESS naming B.
+    int to_a = 0;
+    int to_b = 0;
+    for (auto const& s : sends) {
+        auto const hdr = header_of(s);
+        if (hdr.is_unsolicited()) {
+            continue;
+        }
+        AemAcquireEntityPayload answer{};
+        span_load(answer, body_of(s).first(AemAcquireEntityPayload::LENGTH));
+        EXPECT_EQ(hdr.status(), AEM_STATUS_SUCCESS);
+        if (s.dest == kMacA) {
+            ++to_a;
+            EXPECT_EQ(hdr.sequence_id.get(), 5);
+        }
+        if (s.dest == kMacB) {
+            ++to_b;
+            EXPECT_EQ(hdr.sequence_id.get(), 2);
+            EXPECT_TRUE(answer.owner_entity_id == kControllerB);
+        }
+    }
+    EXPECT_EQ(to_a, 1);
+    EXPECT_EQ(to_b, 1);
+
+    // The owner's late answer, and the handshake's timeout, change nothing.
+    sends.clear();
+    handler.controller_available_response_received();
+    handler.tick(now + std::chrono::milliseconds(AEM_TIMEOUT_MS));
+    EXPECT_TRUE(sends.empty());
+    EXPECT_TRUE(handler.acquiring_controller() == kControllerB);
+}
 
 TEST(nanoavb_entity_notify_cor1, acquire_notifies_registered_and_acquirer)
 {

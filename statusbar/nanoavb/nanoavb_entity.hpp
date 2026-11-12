@@ -330,6 +330,7 @@ class AemCommandHandler
     void release_acquisition() noexcept
     {
         acquired_ = false;
+        acquired_persistent_ = false;
         acquiring_controller_ = {};
         acquiring_controller_mac_ = {};
     }
@@ -553,16 +554,28 @@ class AemCommandHandler
     [[nodiscard]] auto handle_acquire_entity(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
-    /// The acquisition's RELEASE: SUCCESS for the owner, ENTITY_ACQUIRED for anyone else.
-    [[nodiscard]] auto release_acquisition(AemDu const& header) noexcept -> uint8_t;
+    /// The acquisition's RELEASE: SUCCESS for the owner, ENTITY_ACQUIRED for
+    /// anyone else. An owner letting go while a CONTROLLER_AVAILABLE handshake
+    /// is out hands the entity to the contender waiting on it.
+    [[nodiscard]] auto release_acquisition(AemDu const& header) -> uint8_t;
 
     /// Take, keep or contest the acquisition: SUCCESS, IN_PROGRESS (a
-    /// CONTROLLER_AVAILABLE handshake with the owner has begun) or ENTITY_ACQUIRED.
+    /// CONTROLLER_AVAILABLE handshake with the owner has begun, or is still
+    /// out for this same contender) or ENTITY_ACQUIRED (the owner holds it,
+    /// persistently or while a handshake is out for another contender).
     [[nodiscard]] auto take_acquisition(
         AemDu const& header, AemAcquireEntityPayload const& cmd, std::span<uint8_t const> command_data) -> uint8_t;
 
     /// Park the requester and ask the current owner whether it is still there.
     void begin_controller_available_handshake(AemDu const& header, uint32_t flags, std::span<uint8_t const> command_data);
+
+    /// The owner is gone or has let go: the parked contender takes the entity
+    /// and is told SUCCESS as its owner; the handshake is over.
+    void grant_pending_acquire();
+
+    /// Send the parked contender its ACQUIRE_ENTITY answer, @p status naming
+    /// the owner now in place, and on SUCCESS the unsolicited notification.
+    void answer_pending_acquire(uint8_t status);
 
     /// The ACQUIRE_ENTITY response for @p status: nothing yet for IN_PROGRESS,
     /// else the flags (zero after a successful release) and the owner.
