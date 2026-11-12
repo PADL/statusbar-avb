@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// AEM Controller State Machine - sends AEM commands and tracks responses
-/// Handles IN_PROGRESS timeout extension per IEEE 1722.1 Clause 9.2.1.2.5
+/// Handles IN_PROGRESS timeout extension per IEEE 1722.1 Clause 9.2.1.2.5 and
+/// the single retry of a timed-out command per Clause 9.3.6 (Figure 9-4).
 
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
 #include "statusbar/buffer/buffer.hpp"
@@ -71,6 +72,7 @@ struct AemInflightCommand
     statusbar::sg14::inplace_vector<uint8_t, MAX_PAYLOAD> payload;  ///< Command payload copy
     AemCommandTracker tracker;                                      ///< IN_PROGRESS timeout tracker
     AemCommandCompletion completion;                                ///< fires once with the outcome (may be unset)
+    bool retried{false};                                            ///< the one retry has gone out (9.3.6.3.1)
 };
 
 //
@@ -125,7 +127,8 @@ struct AemControllerContext
         64>
         on_response;
 
-    /// Called when a command times out
+    /// Called when a command's retry has timed out too (9.3.6.3.4 timeout):
+    /// the first timeout re-sends the command and reports nothing.
     statusbar::sg14::inplace_function<void(AemDu const& header), 64> on_timeout;
 
     // Inflight management — thin wrappers over the SlotTable so existing

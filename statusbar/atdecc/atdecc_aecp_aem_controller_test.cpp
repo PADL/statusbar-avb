@@ -7,6 +7,7 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <vector>
@@ -158,14 +159,96 @@ TEST(aem_controller_sm, timeout)
     ctx.command_params = {.target_entity_id = TARGET_ID, .command_code = AEM_COMMAND_READ_DESCRIPTOR};
     sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
 
-    // Timeout at 260ms
+    // Timeout at 260ms: the retry goes out, the application hears nothing yet.
     auto idx = ctx.find_timed_out(test_time(260));
     EXPECT_TRUE(idx < AemControllerContext::MAX_INFLIGHT);
 
     ctx.current_inflight_index = idx;
     sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(260));
+    EXPECT_FALSE(timed_out);
+    EXPECT_EQ(ctx.inflight_count(), 1U);
+    EXPECT_EQ(ctx.find_timed_out(test_time(400)), AemControllerContext::MAX_INFLIGHT);
+
+    // The retry's timeout is the one reported.
+    idx = ctx.find_timed_out(test_time(520));
+    EXPECT_TRUE(idx < AemControllerContext::MAX_INFLIGHT);
+    ctx.current_inflight_index = idx;
+    sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(520));
 
     EXPECT_TRUE(timed_out);
+    EXPECT_EQ(ctx.inflight_count(), 0U);
+}
+
+// IEEE 1722.1-2021 Figure 9-4 TIMEOUT: a command that has not been retried is
+// sent again (9.3.6.3.1 txCommand as a retry: same sequence_id, timeout
+// restarted); only the retry's timeout reaches the application.
+TEST(aem_controller_sm, first_timeout_resends_the_same_frame_once)
+{
+    AemControllerContext ctx;
+    ctx.my_id = CONTROLLER_ID;
+
+    std::vector<std::vector<uint8_t>> sent;
+    ctx.tx_command = [&](std::span<uint8_t const> packet) {
+        sent.emplace_back(packet.begin(), packet.end());
+        return true;
+    };
+    int timeouts_reported = 0;
+    ctx.on_timeout = [&](AemDu const&) { ++timeouts_reported; };
+
+    AemControllerStateMachine<> sm;
+    sm.handle_event(ctx, AemControllerEvent::UCT, test_time(0));
+
+    std::array<uint8_t, 8> const payload = {0x00, 0x00, 0x00, 0x00, 0x00, 0x1A, 0x00, 0x07};
+    int completions = 0;
+    ctx.command_params = {
+        .target_entity_id = TARGET_ID,
+        .command_code = AEM_COMMAND_READ_DESCRIPTOR,
+        .command_data = payload,
+        .completion = [&](AemCommandResult const&) { ++completions; },
+    };
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+    EXPECT_EQ(sent.size(), 1U);
+
+    // First timeout: the identical frame again, nothing reported, still inflight.
+    ctx.current_inflight_index = ctx.find_timed_out(test_time(251));
+    sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(251));
+    EXPECT_EQ(sent.size(), 2U);
+    EXPECT_TRUE(sent[1] == sent[0]);
+    EXPECT_EQ(timeouts_reported, 0);
+    EXPECT_EQ(completions, 0);
+    EXPECT_EQ(ctx.inflight_count(), 1U);
+    EXPECT_EQ(ctx.find_timed_out(test_time(500)), AemControllerContext::MAX_INFLIGHT);
+
+    // A response to the retry completes the command as usual.
+    AemDu resp{};
+    span_load(resp, make_const_span(sent[1]));
+    resp.init_response(AEM_COMMAND_READ_DESCRIPTOR, AEM_STATUS_SUCCESS, AemDu::AEM_DATA_LENGTH);
+    resp.target_entity_id = TARGET_ID;
+    resp.controller_entity_id = CONTROLLER_ID;
+    ctx.rcvd_header = resp;
+    ctx.rcvd_response_data = {};
+    ctx.current_inflight_index = ctx.find_inflight(resp.sequence_id.get());
+    EXPECT_TRUE(ctx.current_inflight_index < AemControllerContext::MAX_INFLIGHT);
+    sm.handle_event(ctx, AemControllerEvent::RcvdResponse, test_time(300));
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(timeouts_reported, 0);
+    EXPECT_EQ(ctx.inflight_count(), 0U);
+
+    // A second command whose retry also goes unanswered is reported once.
+    ctx.command_params = {
+        .target_entity_id = TARGET_ID,
+        .command_code = AEM_COMMAND_READ_DESCRIPTOR,
+        .command_data = payload,
+        .completion = [&](AemCommandResult const&) { ++completions; },
+    };
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(1000));
+    ctx.current_inflight_index = ctx.find_timed_out(test_time(1251));
+    sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(1251));
+    ctx.current_inflight_index = ctx.find_timed_out(test_time(1502));
+    sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(1502));
+    EXPECT_EQ(sent.size(), 4U);
+    EXPECT_EQ(timeouts_reported, 1);
+    EXPECT_EQ(completions, 2);
     EXPECT_EQ(ctx.inflight_count(), 0U);
 }
 
@@ -301,9 +384,14 @@ TEST(aem_controller_completion, fires_on_timeout_with_sent_payload)
     };
     sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
 
+    // The first timeout retries; the retry's timeout fires the completion.
     ctx.current_inflight_index = ctx.find_timed_out(test_time(260));
     EXPECT_TRUE(ctx.current_inflight_index < AemControllerContext::MAX_INFLIGHT);
     sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(260));
+    EXPECT_EQ(fired, 0);
+    ctx.current_inflight_index = ctx.find_timed_out(test_time(520));
+    EXPECT_TRUE(ctx.current_inflight_index < AemControllerContext::MAX_INFLIGHT);
+    sm.handle_event(ctx, AemControllerEvent::Timeout, test_time(520));
 
     EXPECT_EQ(fired, 1);
     EXPECT_TRUE(delivery == AemCommandDelivery::TimedOut);

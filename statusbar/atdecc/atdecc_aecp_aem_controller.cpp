@@ -114,6 +114,47 @@ void handle_aem_response(AemControllerContext& ctx, sm::TimePoint event_time)
     ctx.remove_inflight(idx);
 }
 
+namespace {
+
+/// txCommand(inflight[x].command) of Figure 9-4 TIMEOUT, as a retry
+/// (9.3.6.3.1): the frame that went out, same sequence_id, back on the wire,
+/// the entry marked retried and its AEM timeout restarted. False when it could
+/// not be sent, in which case the timeout stands.
+auto retry_command(AemControllerContext& ctx, AemInflightCommand& entry, sm::TimePoint const event_time) -> bool
+{
+    std::array<uint8_t, AemDu::LENGTH + AemInflightCommand::MAX_PAYLOAD> send_buffer{};
+    auto const out_frame = span_pack_header_payload(
+        send_buffer, entry.sent_header, std::span<uint8_t const>{entry.payload.data(), entry.payload.size()});
+    if (!ctx.tx_command || !ctx.tx_command(out_frame)) {
+        return false;
+    }
+    entry.retried = true;
+    entry.tracker.start(entry.sent_header.sequence_id.get(), entry.sent_header.command_code(), event_time);
+    return true;
+}
+
+/// timeout(inflight[x]) of 9.3.6.3.4: the application hears of the command
+/// whose retry has timed out too, and the entry is removed.
+void report_timeout(AemControllerContext& ctx, AemInflightCommand& entry, size_t const idx, sm::TimePoint const event_time)
+{
+    if (ctx.on_timeout) {
+        ctx.on_timeout(entry.sent_header);
+    }
+    if (entry.completion) {
+        entry.completion(AemCommandResult{
+            .delivery = AemCommandDelivery::TimedOut,
+            .status = 0,
+            .command_type = entry.sent_header.command_code(),
+            .target_entity_id = entry.sent_header.target_entity_id,
+            .sent_payload = std::span<uint8_t const>{entry.payload.data(), entry.payload.size()},
+            .response = {},
+            .at = event_time});
+    }
+    ctx.remove_inflight(idx);
+}
+
+}  // namespace
+
 void handle_aem_timeout(AemControllerContext& ctx, sm::TimePoint const event_time)
 {
     auto const idx = ctx.current_inflight_index;
@@ -121,21 +162,13 @@ void handle_aem_timeout(AemControllerContext& ctx, sm::TimePoint const event_tim
     if (entry == nullptr) {
         return;
     }
-
-    if (ctx.on_timeout) {
-        ctx.on_timeout(entry->sent_header);
+    // Figure 9-4 TIMEOUT: a command that has not been retried is sent again;
+    // only the retry's timeout reaches the application. The ACMP controller
+    // beside this one does the same, as 8.1 and 9.3.6 both ask.
+    if (!entry->retried && retry_command(ctx, *entry, event_time)) {
+        return;
     }
-    if (entry->completion) {
-        entry->completion(AemCommandResult{
-            .delivery = AemCommandDelivery::TimedOut,
-            .status = 0,
-            .command_type = entry->sent_header.command_code(),
-            .target_entity_id = entry->sent_header.target_entity_id,
-            .sent_payload = std::span<uint8_t const>{entry->payload.data(), entry->payload.size()},
-            .response = {},
-            .at = event_time});
-    }
-    ctx.remove_inflight(idx);
+    report_timeout(ctx, *entry, idx, event_time);
 }
 
 }  // namespace statusbar::atdecc::aem_controller_actions
