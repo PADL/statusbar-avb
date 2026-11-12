@@ -1396,6 +1396,123 @@ TEST(listener_sm, disconnect_not_connected)
     EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_SUCCESS);
 }
 
+namespace {
+
+/// A listener context with sink 0 connected to TALKER_ID on VLAN 7, recording
+/// what it sends.
+struct ConnectedListener
+{
+    ListenerContext<> ctx{4};
+    std::vector<AcmpCommandResponse> sent_commands;
+    std::vector<AcmpCommandResponse> sent_responses;
+    AcmpListenerStateMachine<> sm;
+
+    ConnectedListener()
+    {
+        ctx.my_id = LISTENER_ID;
+        auto* stream = ctx.get_stream(0);
+        stream->connected = true;
+        stream->talker_entity_id = TALKER_ID;
+        stream->talker_unique_id = 0;
+        stream->stream_id = STREAM_ID;
+        stream->stream_vlan_id = 7;
+        ctx.tx_command = [this](AcmpCommandResponse const& c) {
+            sent_commands.push_back(c);
+            return true;
+        };
+        ctx.tx_response = [this](AcmpCommandResponse const& r) {
+            sent_responses.push_back(r);
+            return true;
+        };
+        sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
+    }
+
+    void disconnect_rx(uint16_t seq, int at_ms)
+    {
+        ctx.rcvd_cmd_resp = {};
+        ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+        ctx.rcvd_cmd_resp.controller_entity_id = CONTROLLER_ID;
+        ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
+        ctx.rcvd_cmd_resp.talker_entity_id = TALKER_ID;
+        ctx.rcvd_cmd_resp.listener_unique_id = 0;
+        ctx.rcvd_cmd_resp.talker_unique_id = 0;
+        ctx.rcvd_cmd_resp.sequence_id = seq;
+        sm.handle_event(ctx, ListenerEvent::RcvdDisconnectRx, test_time(at_ms));
+    }
+};
+
+}  // namespace
+
+// IEEE 1722.1-2021 Figure 8-3 DISCONNECT RX COMMAND: disconnectListener runs
+// before txCommand(DISCONNECT_TX_COMMAND), and 8.1.2: one retry on timeout.
+TEST(listener_sm, disconnect_frees_the_sink_before_the_talker_answers_and_retries_once)
+{
+    ConnectedListener l;
+    l.disconnect_rx(42, 0);
+
+    // The DISCONNECT_TX went out with the connection's VLAN and our id, and the
+    // sink is already free: a dead talker cannot keep it connected.
+    EXPECT_EQ(l.sent_commands.size(), 1U);
+    EXPECT_EQ(l.sent_commands[0].message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND);
+    EXPECT_EQ(l.sent_commands[0].stream_vlan_id.get(), 7);
+    EXPECT_TRUE(l.sent_commands[0].listener_entity_id == LISTENER_ID);
+    EXPECT_TRUE(l.sent_commands[0].talker_entity_id == TALKER_ID);
+    EXPECT_FALSE(l.ctx.get_stream(0)->connected);
+    EXPECT_TRUE(l.ctx.get_stream(0)->talker_entity_id == Eui64{});
+    EXPECT_TRUE(l.ctx.has_pending);
+    EXPECT_TRUE(l.sent_responses.empty());
+
+    // First timeout: the same DISCONNECT_TX again (txCommand(..., TRUE)), no
+    // answer to the controller yet.
+    l.sm.handle_event(l.ctx, ListenerEvent::TxTimeout, test_time(300));
+    EXPECT_EQ(l.sent_commands.size(), 2U);
+    EXPECT_EQ(l.sent_commands[1].message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND);
+    EXPECT_EQ(l.sent_commands[1].sequence_id.get(), l.sent_commands[0].sequence_id.get());
+    EXPECT_EQ(l.sent_commands[1].stream_vlan_id.get(), 7);
+    EXPECT_TRUE(l.ctx.retried);
+    EXPECT_TRUE(l.sent_responses.empty());
+
+    // Second timeout: LISTENER_TALKER_TIMEOUT to the controller, nothing pending,
+    // the sink still free.
+    l.sm.handle_event(l.ctx, ListenerEvent::TxTimeout, test_time(600));
+    EXPECT_EQ(l.sent_commands.size(), 2U);
+    EXPECT_EQ(l.sent_responses.size(), 1U);
+    EXPECT_EQ(l.sent_responses[0].message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE);
+    EXPECT_EQ(l.sent_responses[0].status(), ACMP_STATUS_LISTENER_TALKER_TIMEOUT);
+    EXPECT_EQ(l.sent_responses[0].sequence_id.get(), 42);
+    EXPECT_FALSE(l.ctx.has_pending);
+    EXPECT_FALSE(l.ctx.get_stream(0)->connected);
+}
+
+// Figure 8-3 DISCONNECT TX RESPONSE: the talker's status is relayed as it
+// stands; the sink was freed when the command went out.
+TEST(listener_sm, disconnect_relays_the_talker_status_with_the_sink_already_free)
+{
+    ConnectedListener l;
+    l.disconnect_rx(7, 0);
+    EXPECT_EQ(l.sent_commands.size(), 1U);
+
+    auto resp = l.sent_commands[0];
+    resp.set_message_type(ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE);
+    resp.set_status(ACMP_STATUS_TALKER_MISBEHAVING);
+    l.ctx.rcvd_cmd_resp = resp;
+    EXPECT_EQ(listener_event_for_talker_response(l.ctx, resp), ListenerEvent::RcvdDisconnectTxResp);
+    l.sm.handle_event(l.ctx, ListenerEvent::RcvdDisconnectTxResp, test_time(50));
+
+    EXPECT_EQ(l.sent_responses.size(), 1U);
+    EXPECT_EQ(l.sent_responses[0].message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE);
+    EXPECT_EQ(l.sent_responses[0].status(), ACMP_STATUS_TALKER_MISBEHAVING);
+    EXPECT_EQ(l.sent_responses[0].sequence_id.get(), 7);
+    EXPECT_FALSE(l.ctx.has_pending);
+    EXPECT_FALSE(l.ctx.get_stream(0)->connected);
+
+    // The freed sink accepts a new disconnect idempotently and a new connect.
+    l.disconnect_rx(8, 100);
+    EXPECT_EQ(l.sent_responses.size(), 2U);
+    EXPECT_EQ(l.sent_responses[1].status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(l.sent_commands.size(), 1U);
+}
+
 TEST(listener_sm, get_rx_state)
 {
     ListenerContext ctx(4);

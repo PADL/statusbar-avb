@@ -3,7 +3,7 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// ACMP Listener State Machine - IEEE 1722.1-2021 Clause 8.2.5
+/// ACMP Listener State Machine - IEEE 1722.1-2021 Clause 8.2.4
 /// Implements the ATDECC Listener state machine for managing stream connections
 
 #include "statusbar/atdecc/atdecc_acmp.hpp"
@@ -21,7 +21,7 @@
 namespace statusbar::atdecc {
 
 //
-// Listener State Machine Definition (Figure 8-4)
+// Listener State Machine Definition (Figure 8-3)
 //
 
 /// Listener state machine states
@@ -75,6 +75,11 @@ struct ListenerContext
     // Pending command waiting for talker response
     AcmpCommandResponse pending_command{};
 
+    // The command relayed to the talker for pending_command (CONNECT_TX or
+    // DISCONNECT_TX), kept so the one retry re-sends exactly what went out
+    // (IEEE 1722.1-2021 8.2.4.2.4 txCommand(..., TRUE)).
+    AcmpCommandResponse pending_tx_command{};
+
     // Response to send
     AcmpCommandResponse response{};
 
@@ -84,7 +89,7 @@ struct ListenerContext
     // Whether we have a pending command
     bool has_pending{false};
 
-    // Whether we have already retried the pending connect command
+    // Whether the one retry of pending_tx_command has been sent
     bool retried{false};
 
     // The stream index being processed
@@ -128,6 +133,7 @@ struct ListenerContext
         has_pending = false;
         retried = false;
         pending_command = AcmpCommandResponse{};
+        pending_tx_command = AcmpCommandResponse{};
     }
 
     /// Check if the pending command has timed out
