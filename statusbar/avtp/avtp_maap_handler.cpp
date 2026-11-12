@@ -154,43 +154,54 @@ auto MaapHandler::poll_timeout_ms(std::optional<int64_t> const deadline_ns, int6
 
 void MaapHandler::receive(Eui48 const& src_mac, std::span<uint8_t const> frame, int64_t now_ns)
 {
-    using S = maap_sm::Def::State;
-    using E = maap_sm::Def::Event;
-
-    // Our own frames (egress tap) and frames received while we hold no allocation
-    // carry no conflict for us.
-    if (src_mac == ctx_.our_mac || ctx_.requested_count == 0) {
+    auto const du = conflicting_pdu(src_mac, frame);
+    if (!du) {
         return;
     }
-    auto const st = sm_.current_state();
-    if (st != S::Probe && st != S::Defend) {
-        return;
+    ctx_.last_received_pdu = *du;
+    ctx_.last_received_sender = src_mac;
+    if (auto const ev = conflict_event(*du, src_mac)) {
+        dispatch(*ev, now_ns);
     }
+}
 
+auto MaapHandler::conflicting_pdu(Eui48 const& src_mac, std::span<uint8_t const> frame) const -> std::optional<MaapDu>
+{
+    // Our own frames (egress tap), frames received while we hold no allocation
+    // and frames received while idle carry no conflict for us (Table B.7 note b).
+    if (src_mac == ctx_.our_mac || ctx_.requested_count == 0 || !is_probing_or_defending()) {
+        return std::nullopt;
+    }
     MaapDu du{};
     if (statusbar::protocol::load(frame, &du) == 0 || !du.is_valid()) {
-        return;
+        return std::nullopt;
     }
     if (!overlaps(du.requested_start_address, du.requested_count.get())) {
-        return;  // different address range — not our conflict
+        return std::nullopt;  // different address range: not our conflict
     }
+    return du;
+}
 
-    ctx_.last_received_pdu = du;
-    ctx_.last_received_sender = src_mac;
-
+auto MaapHandler::conflict_event(MaapDu const& du, Eui48 const& src_mac) const -> std::optional<maap_sm::Def::Event>
+{
+    using Def = maap_sm::Def;
+    bool const defending = sm_.current_state() == Def::State::Defend;
+    // B.3.6.4: compare_MAC is TRUE when our MAC is the lower in octet-wise reverse
+    // order, and then "no further processing or protocol action is taken".
+    bool const we_win = maap_sm::compare_mac(ctx_.our_mac, src_mac);
     if (du.is_probe()) {
-        // B.3.6.4: a conflicting PROBE during our own probing is resolved by MAC
-        // priority — if we win, ignore it and keep our address; if we lose, yield.
-        // Once we are defending, we always answer a probe with a DEFEND.
-        if (st == S::Probe && maap_sm::compare_mac(ctx_.our_mac, src_mac)) {
-            return;  // we win the tie-break; keep probing our address
-        }
-        dispatch(E::rProbe, now_ns);
-    } else if (du.is_defend()) {
-        dispatch(E::rDefend, now_ns);
-    } else if (du.is_announce()) {
-        dispatch(E::rAnnounce, now_ns);
+        // Table B.7 rProbe: while probing, compare_MAC decides who yields; while
+        // defending, every probe of our range is answered with a DEFEND.
+        return (!defending && we_win) ? std::nullopt : std::optional{Def::Event::rProbe};
     }
+    // Table B.7 rDefend/rAnnounce: a defender runs compare_MAC first (note d) and
+    // the lower MAC keeps the range; a prober yields to either without comparing.
+    if (defending && we_win) {
+        return std::nullopt;
+    }
+    return du.is_defend()  ? std::optional{Def::Event::rDefend}
+        : du.is_announce() ? std::optional{Def::Event::rAnnounce}
+                           : std::nullopt;
 }
 
 void MaapHandler::dispatch(maap_sm::Def::Event ev, int64_t now_ns)

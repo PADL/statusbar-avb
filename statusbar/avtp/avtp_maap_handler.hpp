@@ -136,6 +136,20 @@ class MaapHandler
     /// MAAP_LATE_TICK_ALLOWANCE_US to spare under the top.
     [[nodiscard]] auto interval_ns(uint64_t base_us, uint64_t variation_us) noexcept -> int64_t;
 
+    /// The received PDU when it is a valid MAAP PDU from another station that
+    /// conflicts with the range we are probing or defending; nullopt otherwise.
+    [[nodiscard]] auto conflicting_pdu(Eui48 const& src_mac, std::span<uint8_t const> frame) const -> std::optional<MaapDu>;
+
+    /// The SM event a conflicting PDU raises, after Table B.7's compare_MAC
+    /// (B.3.6.4) has been applied; nullopt when the comparison says to ignore it.
+    [[nodiscard]] auto conflict_event(MaapDu const& du, Eui48 const& src_mac) const -> std::optional<maap_sm::Def::Event>;
+
+    [[nodiscard]] auto is_probing_or_defending() const noexcept -> bool
+    {
+        auto const st = sm_.current_state();
+        return st == maap_sm::Def::State::Probe || st == maap_sm::Def::State::Defend;
+    }
+
     /// True if [their_start, their_start+their_count) overlaps our current range.
     [[nodiscard]] auto overlaps(Eui48 const& their_start, uint16_t their_count) const noexcept -> bool;
 

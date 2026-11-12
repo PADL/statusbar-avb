@@ -211,22 +211,91 @@ TEST(maap_handler, version_zero_probe_against_us_still_defended)
     EXPECT_TRUE(rig.sent.back().is_defend());
 }
 
-TEST(maap_handler, announce_against_us_while_defending_fires_lost_and_repicks)
+// Table B.7 DEFEND column, rAnnounce/rDefend: compare_MAC runs first (note d).
+// Our MAC {02:..:01} loses the octet-wise reverse comparison (B.3.6.4) to a
+// sender ending in 00, so the conflicting ANNOUNCE makes us yield.
+TEST(maap_handler, announce_from_a_lower_mac_while_defending_fires_lost_and_repicks)
 {
     Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
     rig.handler.acquire(2, SEC);
     rig.run_until_acquired();
     Eui48 const old_addr = rig.handler.address();
 
-    // A conflicting ANNOUNCE means another station owns the range — we yield.
     auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_ANNOUNCE, old_addr, 2);
-    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x09}, frame, 100 * SEC);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x00}, frame, 100 * SEC);
 
     EXPECT_EQ(rig.handler.state(), statusbar::avtp::maap_sm::Def::State::Probe);
     EXPECT_EQ(rig.lost_calls, 1);
     EXPECT_TRUE(rig.lost_start.has_value());
     EXPECT_EQ(*rig.lost_start, old_addr);        // reported the address we left
     EXPECT_NE(rig.handler.address(), old_addr);  // re-picked a new one
+}
+
+TEST(maap_handler, defend_from_a_lower_mac_while_defending_fires_lost_and_repicks)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    Eui48 const old_addr = rig.handler.address();
+
+    auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_DEFEND, old_addr, 2);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x00}, frame, 100 * SEC);
+
+    EXPECT_EQ(rig.handler.state(), statusbar::avtp::maap_sm::Def::State::Probe);
+    EXPECT_EQ(rig.lost_calls, 1);
+    EXPECT_NE(rig.handler.address(), old_addr);
+}
+
+// The other direction of note d: when compare_MAC is TRUE (our MAC is the lower),
+// "no further processing or protocol action is taken and the protocol state does
+// not change". A higher MAC cannot evict a defender with an ANNOUNCE or a DEFEND.
+TEST(maap_handler, announce_from_a_higher_mac_while_defending_is_ignored)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    Eui48 const addr = rig.handler.address();
+    auto const sent_before = rig.sent.size();
+
+    auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_ANNOUNCE, addr, 2);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x09}, frame, 100 * SEC);
+
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.handler.address(), addr);
+    EXPECT_EQ(rig.lost_calls, 0);
+    EXPECT_EQ(rig.sent.size(), sent_before);  // no protocol action at all
+}
+
+TEST(maap_handler, defend_from_a_higher_mac_while_defending_is_ignored)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    Eui48 const addr = rig.handler.address();
+    auto const sent_before = rig.sent.size();
+
+    auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_DEFEND, addr, 2);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x09}, frame, 100 * SEC);
+
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.handler.address(), addr);
+    EXPECT_EQ(rig.lost_calls, 0);
+    EXPECT_EQ(rig.sent.size(), sent_before);
+}
+
+// Table B.7 PROBE column: rDefend/rAnnounce have no compare_MAC. A prober yields
+// to a defender or announcer whatever the MACs say.
+TEST(maap_handler, announce_from_a_higher_mac_while_probing_still_repicks)
+{
+    Rig rig{Eui48{0x00, 0, 0, 0, 0, 0x01}};  // we would win a comparison
+    rig.handler.acquire(2, SEC);
+    Eui48 const first = rig.handler.address();
+
+    auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_ANNOUNCE, first, 2);
+    rig.handler.receive(Eui48{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, frame, 2 * SEC);
+
+    EXPECT_EQ(rig.handler.state(), statusbar::avtp::maap_sm::Def::State::Probe);
+    EXPECT_NE(rig.handler.address(), first);
 }
 
 TEST(maap_handler, non_overlapping_frame_is_ignored)
