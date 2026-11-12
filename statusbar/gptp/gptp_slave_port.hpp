@@ -220,6 +220,10 @@ class GptpSlavePort
     [[nodiscard]] auto current_port_state() const noexcept -> port_state_sm::Def::State;
     [[nodiscard]] auto current_ppm() const noexcept -> double { return servo_.current_ppm(); }
     [[nodiscard]] auto sync_quality() const noexcept -> SyncQuality const& { return sync_quality_; }
+    /// Sync, Pdelay_Req and Pdelay_Resp frames that arrived with no RX timestamp
+    /// and were dropped for it (see receive_frame). A steadily rising count means
+    /// the socket is not delivering stamps for this traffic.
+    [[nodiscard]] auto rx_timestamps_missing() const noexcept -> uint64_t { return rx_timestamps_missing_; }
 
   private:
     //
@@ -272,6 +276,7 @@ class GptpSlavePort
     int64_t mean_link_delay_ns_{0};
     double neighbor_rate_ratio_{1.0};
     SyncQuality sync_quality_{};
+    uint64_t rx_timestamps_missing_{0};
 
     //
     // Small scalars packed together at the end to avoid padding gaps.

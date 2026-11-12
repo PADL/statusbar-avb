@@ -13,6 +13,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <system_error>
+#include <variant>
 
 namespace statusbar::gptp {
 
@@ -175,6 +176,17 @@ void GptpSlavePort::on_link_down(TimePoint now)
 // Ingress
 // =============================================================
 
+namespace {
+/// The event messages: their arrival time is a measurement (t2 of a Sync, t2 of
+/// a Pdelay_Req, t4 of a Pdelay_Resp). Follow_Up, Announce and Signaling
+/// carry their times in the body.
+auto carries_rx_timestamp(GptpMessage const& parsed) noexcept -> bool
+{
+    return std::holds_alternative<SyncMessage>(parsed) || std::holds_alternative<PdelayReqMessage>(parsed) ||
+        std::holds_alternative<PdelayRespMessage>(parsed);
+}
+}  // namespace
+
 void GptpSlavePort::receive_frame(
     std::span<uint8_t const> gptp_payload, int64_t rx_hw_timestamp_ns, TimePoint now, int64_t const rx_app_ns)
 {  // NOLINT(statusbar-block-statements) one frame's ingress validation and dispatch
@@ -195,6 +207,17 @@ void GptpSlavePort::receive_frame(
 
     auto const parsed = parse_gptp(gptp_payload);
     if (!parsed.has_value()) {
+        return;
+    }
+
+    // A stamp-bearing message whose frame carried no RX timestamp (the kernel
+    // returned no SO_TIMESTAMPING cmsg for it) is a failed read, not a time of
+    // zero: zero fed to the servo is a phase error of the whole epoch, and zero
+    // as t4 is a link delay far past the neighbor threshold. Count it and drop
+    // the message for timing purposes; the receipt timeouts see the gap as the
+    // lost message it is. General messages carry no stamp and pass.
+    if (rx_hw_timestamp_ns == 0 && carries_rx_timestamp(*parsed)) {
+        ++rx_timestamps_missing_;
         return;
     }
 

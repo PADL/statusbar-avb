@@ -202,6 +202,152 @@ TEST(gptp_slave_port, sync_follow_up_pair_reaches_servo)
 }
 
 // ===========================================================================
+// A frame that arrived with no RX timestamp is a failed read, not a time of 0
+// ===========================================================================
+
+// An unstamped Sync never reaches the servo: the pairing it would have started
+// does not happen, so its Follow_Up finds nothing to pair with. The count says
+// why. The next stamped pair syncs the port as usual.
+TEST(gptp_slave_port, unstamped_sync_never_reaches_the_servo)
+{
+    SoftwareOps sw;
+    auto cfg = GptpConfig::avnu_automotive_slave_defaults();
+    cfg.pdelay_mode = PdelayMode::Disabled;
+    cfg.manual_peer_delay_ns = 500;
+    GptpSlavePort port{cfg, sw.make_ops()};
+    TestClock clock;
+    port.start(clock.now, true);
+
+    int sync_updates = 0;
+    Observer obs{};
+    obs.on_sync_update = [&](int64_t, double) { ++sync_updates; };
+    (void)port.subscribe(obs);
+    auto const gm = gm_port_identity();
+
+    auto const t1 = clock.advance(std::chrono::milliseconds(125));
+    sw.current_time_ns = 2'000'000'000LL;
+    auto const sync_1 = make_sync(1, gm);
+    port.receive_frame(std::span<uint8_t const>(sync_1), /*rx_hw_timestamp_ns=*/0, t1);
+    auto const fup_1 = make_follow_up_with_tlv(1, Timestamp{1, 999'999'500}, 0, gm, 0);
+    port.receive_frame(std::span<uint8_t const>(fup_1), 0, t1);
+    EXPECT_EQ(sync_updates, 0);
+    EXPECT_FALSE(port.is_synchronized());
+    EXPECT_EQ(port.rx_timestamps_missing(), 1U);
+
+    auto const t2 = clock.advance(std::chrono::milliseconds(125));
+    sw.current_time_ns = 2'125'000'000LL;
+    auto const sync_2 = make_sync(2, gm);
+    port.receive_frame(std::span<uint8_t const>(sync_2), sw.current_time_ns, t2);
+    auto const fup_2 = make_follow_up_with_tlv(2, Timestamp{2, 124'999'500}, 0, gm, 0);
+    port.receive_frame(std::span<uint8_t const>(fup_2), 0, t2);
+    EXPECT_EQ(sync_updates, 1);
+    EXPECT_TRUE(port.is_synchronized());
+    EXPECT_EQ(port.rx_timestamps_missing(), 1U);
+}
+
+// An unstamped Pdelay_Req has no t2 to answer with; answering with 0 would hand
+// the peer a link delay of the whole epoch. It is dropped, and the peer sees a
+// lost response.
+TEST(gptp_slave_port, unstamped_pdelay_req_is_not_answered)
+{
+    SoftwareOps sw;
+    int send_count = 0;
+    auto ops = sw.make_ops();
+    ops.send_frame = [&send_count](std::span<uint8_t const>) -> TxResult {
+        ++send_count;
+        return TxResult{.ok = true, .tx_timestamp_ns = 0};
+    };
+    GptpSlavePort port{GptpConfig::avnu_automotive_slave_defaults(), ops};
+    TestClock clock;
+    port.start(clock.now, true);
+    send_count = 0;
+
+    PdelayReqMessage req{};
+    req.init(7);
+    req.header.source_port_identity = gm_port_identity();
+    std::array<uint8_t, PdelayReqMessage::LENGTH> buf{};
+    (void)store_unchecked(std::span<uint8_t>(buf), req);
+    port.receive_frame(std::span<uint8_t const>(buf), /*rx_hw_timestamp_ns=*/0, clock.now);
+    EXPECT_EQ(send_count, 0);
+    EXPECT_EQ(port.rx_timestamps_missing(), 1U);
+}
+
+namespace {
+/// Answer the port's in-flight Pdelay_Req (its sequence id captured by the test's
+/// send_frame) with a Pdelay_Resp stamped @p t4 and its Follow_Up: t2 and t3 are 500
+/// ns apart on the peer, so with t1 = 1 s and t4 = t1 + 1000 ns the link delay is
+/// 250 ns less the port's PHY compensation.
+void answer_pdelay_req(GptpSlavePort& port, uint16_t seq, int64_t t4, TimePoint now)
+{
+    PdelayRespMessage resp{};
+    resp.init(seq);
+    resp.header.source_port_identity = gm_port_identity();
+    resp.requesting_port_identity = SourcePortIdentity{};
+    resp.request_receipt_timestamp = Timestamp{1, 500};
+    std::array<uint8_t, PdelayRespMessage::LENGTH> resp_buf{};
+    (void)store_unchecked(std::span<uint8_t>(resp_buf), resp);
+    port.receive_frame(std::span<uint8_t const>(resp_buf), t4, now);
+
+    PdelayRespFollowUpMessage fup{};
+    fup.init(seq);
+    fup.header.source_port_identity = gm_port_identity();
+    fup.response_origin_timestamp = Timestamp{1, 1000};
+    std::array<uint8_t, PdelayRespFollowUpMessage::LENGTH> fup_buf{};
+    (void)store_unchecked(std::span<uint8_t>(fup_buf), fup);
+    port.receive_frame(std::span<uint8_t const>(fup_buf), 0, now);
+}
+}  // namespace
+
+// An unstamped Pdelay_Resp carries no t4. It is dropped rather than measured:
+// the exchange stays open and runs into the receipt timeout like any lost
+// response, which the lost-response allowance absorbs, instead of a link
+// delay of the whole epoch dropping asCapable on the spot.
+TEST(gptp_slave_port, unstamped_pdelay_resp_is_a_lost_response_not_a_measurement)
+{
+    SoftwareOps sw;
+    std::optional<uint16_t> req_seq{};
+    auto ops = sw.make_ops();
+    ops.send_frame = [&req_seq](std::span<uint8_t const> frame) -> TxResult {
+        MessageHeader hdr;
+        span_load(hdr, frame);
+        if (hdr.is_pdelay_req()) {
+            req_seq = hdr.sequence_id.get();
+        }
+        return TxResult{.ok = true, .tx_timestamp_ns = 1'000'000'000LL};
+    };
+    GptpSlavePort port{GptpConfig::standard_defaults(), ops};
+    TestClock clock;
+    port.start(clock.now, true);
+
+    // A stamped exchange: asCapable, with a measured link delay.
+    port.tick(clock.advance(std::chrono::seconds(2)));
+    EXPECT_TRUE(req_seq.has_value());
+    if (!req_seq.has_value()) {
+        return;
+    }
+    answer_pdelay_req(port, *req_seq, 1'000'001'000LL, clock.now);
+    EXPECT_TRUE(port.as_capable());
+    int64_t const measured_delay = port.mean_link_delay_ns();
+    EXPECT_TRUE(measured_delay != 0);
+
+    // The next response arrives unstamped: dropped, nothing measured, asCapable kept.
+    req_seq.reset();
+    port.tick(clock.advance(std::chrono::seconds(2)));
+    EXPECT_TRUE(req_seq.has_value());
+    if (!req_seq.has_value()) {
+        return;
+    }
+    answer_pdelay_req(port, *req_seq, /*t4=*/0, clock.now);
+    EXPECT_EQ(port.rx_timestamps_missing(), 1U);
+    EXPECT_EQ(port.mean_link_delay_ns(), measured_delay);
+    EXPECT_TRUE(port.as_capable());
+    // The open exchange is a lost response when its receipt timeout runs out,
+    // one of the allowed few, so asCapable still holds.
+    port.tick(clock.advance(std::chrono::seconds(2)));
+    EXPECT_TRUE(port.as_capable());
+}
+
+// ===========================================================================
 // Observer unsubscribe
 // ===========================================================================
 
