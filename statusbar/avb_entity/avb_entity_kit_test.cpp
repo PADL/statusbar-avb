@@ -283,7 +283,10 @@ struct MilanKit
               nullptr,
               std::pmr::get_default_resource()}
         , reactor{stop, std::move(clock), 0}
-    {}
+    {
+        // A Milan entity's MSRP leaves at once on rLv! (Milan v1.3 Section 4.2.7.2.2), as atdecc.profile = "milan13".
+        kit.host().components().msrp_handler.set_instant_leave(milan != false);
+    }
     MilanKit(MilanKit const&) = delete;
     auto operator=(MilanKit const&) -> MilanKit& = delete;
     MilanKit(MilanKit&&) = delete;
@@ -3858,7 +3861,7 @@ TEST(avb_entity_kit_counters, gptp_gm_changed_follows_the_grandmaster_in_force)
         .grandmaster_lost = [&m](int64_t) { m.kit.note_grandmaster_lost(); }});
     gptp::AnnounceMessage announce{};
     announce.init();
-    announce.header.log_message_interval = 0;  // 1 s: lost after 4.5 s
+    announce.header.log_message_interval = 0;  // 1 s: lost after 3 s
     announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
 
     int64_t t = MilanKit::steady_ns();
@@ -3900,10 +3903,10 @@ TEST(avb_entity_kit_milan_talker, listeners_are_notified_through_registering_not
     EXPECT_EQ(registering(), std::optional<uint32_t>{atdecc::aem::stream_info_flags_ex::REGISTERING});
     EXPECT_EQ(m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, 0).connection_count.get(), uint16_t{0});
 
-    // The Leave ages the registration out on the entity's leave timer.
+    // The Leave ages the registration out on the entity's leave timer (Milan LeaveTime, 5 s).
     m.aem.clear();
     m.bridge_withdraw(0);
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 60; ++i) {
         m.bridge_now += std::chrono::milliseconds(100);
         m.kit.host().components().msrp_handler.tick(m.bridge_now);
     }
