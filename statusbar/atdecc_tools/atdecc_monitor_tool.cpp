@@ -14,6 +14,7 @@
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_format.hpp"
+#include "statusbar/atdecc_tools/atdecc_enumerator.hpp"
 #include "statusbar/atdecc_tools/atdecc_tools_common.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
@@ -51,13 +52,9 @@ using namespace statusbar::atdecc::aem;
 using namespace statusbar::ieee;
 using namespace statusbar::net;
 
-// Defensive caps against a hostile/corrupt CONFIGURATION descriptor: real entities
-// have at most tens of any descriptor type and far fewer than 108 types, so these
-// bound enumeration hard (a raw 65535 x 65535 would otherwise be ~4 billion enqueues).
-constexpr uint16_t MAX_DESCRIPTORS_PER_TYPE = 60000;  // nadia-CP-scale: 55k CONTROLs is a real model
-constexpr uint16_t MAX_DESCRIPTOR_TYPES = 108;        // total AVDECC descriptor types
-
 using atdecc_tools::CommonConfig;
+using atdecc_tools::Enumerator;
+using atdecc_tools::EnumeratorHooks;
 
 // Env-gated tracing for --enumerate (set STATUSBAR_ENUM_DEBUG=1).
 [[nodiscard]] auto enum_debug() -> bool
@@ -337,10 +334,14 @@ using SendMulticastFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t
 class MonitorCore
 {
   public:
-    MonitorCore(Eui64 controller_id, MonitorCallbacks callbacks, bool show_descriptors)
+    /// @param auto_read_entity  read ENTITY descriptor 0 of every entity on
+    ///        discovery (the passive monitor's one read). The enumerator issues
+    ///        every read itself so its accounting is symmetric; it passes false.
+    MonitorCore(Eui64 controller_id, MonitorCallbacks callbacks, bool show_descriptors, bool auto_read_entity = true)
         : controller_{controller_id}
         , callbacks_{std::move(callbacks)}
         , show_descriptors_{show_descriptors}
+        , auto_read_entity_{auto_read_entity}
     {
         wire_controller();
         controller_.start();
@@ -355,6 +356,9 @@ class MonitorCore
     /// Send initial ENTITY_DISCOVER broadcast. Call after set_senders in live
     /// mode. Skipped in pcap mode (no sender).
     void discover_all() { controller_.discover_all(); }
+
+    /// The controller, for a host that issues its own reads.
+    [[nodiscard]] auto controller() noexcept -> nanoavb::NanoAvbAemController& { return controller_; }
 
     void dispatch_frame(int64_t now_ns, Eui48 const& src_mac, std::span<uint8_t const> payload)
     {
@@ -398,14 +402,18 @@ class MonitorCore
                     if (callbacks_.on_entity_available) {
                         callbacks_.on_entity_available(e);
                     }
-                    controller_.read_descriptor(e.adpdu.entity_id, DESCRIPTOR_ENTITY, 0);
+                    if (auto_read_entity_) {
+                        controller_.read_descriptor(e.adpdu.entity_id, DESCRIPTOR_ENTITY, 0);
+                    }
                 },
             .on_entity_updated =
                 [this](DiscoveredEntity const& e) {
                     if (callbacks_.on_entity_updated) {
                         callbacks_.on_entity_updated(e);
                     }
-                    controller_.read_descriptor(e.adpdu.entity_id, DESCRIPTOR_ENTITY, 0);
+                    if (auto_read_entity_) {
+                        controller_.read_descriptor(e.adpdu.entity_id, DESCRIPTOR_ENTITY, 0);
+                    }
                 },
             .on_entity_departing =
                 [this](Eui64 id) {
@@ -513,6 +521,7 @@ class MonitorCore
     SendMulticastFn send_mcast_;
     SendUnicastFn send_unicast_;
     bool show_descriptors_;
+    bool auto_read_entity_;
 };
 
 // ---------------------------------------------------------------------------
@@ -617,225 +626,6 @@ void print_active_streams(StreamMap const& streams, int64_t now_ns)
             age_ms % 1000);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Enumerator — headless full descriptor-tree walk (--enumerate).
-//
-// The passive monitor only auto-reads the ENTITY descriptor. The enumerator
-// actively walks the whole AEM model of each discovered entity (optionally
-// filtered to --target): ENTITY -> CONFIGURATION -> every (type, index) listed
-// in the configuration's descriptor_counts, pretty-printing each, then signals
-// completion so the tool exits (vs the monitor which runs until Ctrl-C).
-//
-// MonitorCore already auto-issues READ_DESCRIPTOR(ENTITY,0) on discovery; that
-// response seeds the walk via on_response(). Subsequent reads are issued here,
-// bounded by MAX_INFLIGHT to stay under the AEM controller's in-flight cap.
-// ---------------------------------------------------------------------------
-
-[[nodiscard]] auto be16_at(std::span<uint8_t const> b, size_t off) -> uint16_t
-{
-    if (off + 1 >= b.size()) {
-        return 0;
-    }
-    ieee::doublet_t v{};
-    statusbar::span_load(v, b.subspan(off, sizeof(v)));
-    return v.get();
-}
-
-class Enumerator
-{
-  public:
-    Enumerator(std::optional<Eui64> target, int64_t quiet_ns)
-        : target_filter_{target}
-        , quiet_ns_{quiet_ns}
-    {}
-
-    // From MonitorCallbacks.on_entity_available / on_entity_updated. MonitorCore
-    // auto-issues the ENTITY read; we just register the target and note timing.
-    void on_entity(DiscoveredEntity const& e, int64_t now_ns)
-    {
-        Eui64 const id = e.adpdu.entity_id;
-        if (target_filter_ && !eui_eq(id, *target_filter_)) {
-            return;
-        }
-        last_discovery_ns_ = now_ns;
-        if (targets_.emplace(id, TargetState{}).second) {
-            std::println(
-                "\n=== entity {}  caps=[{}] ===",
-                ieee::to_string(id).view(),
-                entity_capabilities_to_string(e.adpdu.entity_capabilities.get()));
-        }
-    }
-
-    // From MonitorCallbacks.on_aem_response.
-    void on_response(
-        nanoavb::NanoAvbAemController& controller, Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data)
-    {
-        controller_ = &controller;
-        if (cmd != AEM_COMMAND_READ_DESCRIPTOR) {
-            return;
-        }
-        auto it = targets_.find(target);
-        if (it == targets_.end()) {
-            return;  // not one we're walking
-        }
-        if (data.size() < AemReadDescriptorResponsePayload::LENGTH) {
-            return;
-        }
-        auto const body = data.subspan(AemReadDescriptorResponsePayload::LENGTH);
-
-        if (status != AEM_STATUS_SUCCESS || body.size() < 4) {
-            // A read we issued failed; release its slot and keep going. (The
-            // ENTITY read is auto-issued by MonitorCore and not counted.)
-            if (enum_debug()) {
-                std::println(stderr, "[enum] error resp: status={} data_len={}", status, data.size());
-            }
-            release_one();
-            return;
-        }
-
-        uint16_t const dtype = be16_at(body, 0);
-        uint16_t const dindex = be16_at(body, 2);
-        if (enum_debug()) {
-            std::println(
-                stderr,
-                "[enum] resp type={:#06x} idx={} status={} blen={} q={} out={}",
-                dtype,
-                dindex,
-                status,
-                body.size(),
-                queue_.size(),
-                outstanding_);
-        }
-        bool const is_entity = (dtype == DESCRIPTOR_ENTITY);
-        if (!is_entity) {
-            release_one();
-        }
-
-        ReadKey const key{target, dtype, dindex};
-        if (printed_.insert(key).second) {
-            std::string out;
-            format_descriptor(std::back_inserter(out), body);
-            std::print("{}", out);
-        }
-        if (expanded_.insert(key).second) {
-            if (dtype == DESCRIPTOR_ENTITY) {
-                it->second.seen_entity = true;
-                // configurations_count at offset 308 of the ENTITY descriptor.
-                uint16_t const n_configs = be16_at(body, 308);
-                if (enum_debug()) {
-                    std::println(stderr, "[enum] ENTITY n_configs={}", n_configs);
-                }
-                for (uint16_t c = 0; c < n_configs; ++c) {
-                    enqueue(target, DESCRIPTOR_CONFIGURATION, c);
-                }
-            } else if (dtype == DESCRIPTOR_CONFIGURATION) {
-                it->second.seen_config = true;
-                // descriptor_counts: count at offset 70, table offset at 72.
-                // Both counts are untrusted uint16 -- bound them so a hostile
-                // CONFIGURATION can't drive ~4 billion enqueues (M2 DoS).
-                uint16_t const counts = std::min<uint16_t>(be16_at(body, 70), MAX_DESCRIPTOR_TYPES);
-                uint16_t off = be16_at(body, 72);
-                if (off < 74) {
-                    off = 74;
-                }
-                for (uint16_t i = 0; i < counts; ++i) {
-                    size_t const base = static_cast<size_t>(off) + (static_cast<size_t>(i) * 4);
-                    uint16_t const t = be16_at(body, base);
-                    uint16_t const cnt = std::min<uint16_t>(be16_at(body, base + 2), MAX_DESCRIPTORS_PER_TYPE);
-                    if (t == DESCRIPTOR_ENTITY || t == DESCRIPTOR_CONFIGURATION) {
-                        continue;  // already covered; avoid recursion
-                    }
-                    for (uint16_t k = 0; k < cnt; ++k) {
-                        enqueue(target, t, k);
-                    }
-                }
-            }
-        }
-        // NOTE: do not issue reads here. This callback runs inside the
-        // controller's receive_aecp(); issuing read_descriptor re-entrantly can
-        // mutate its in-flight list mid-dispatch. The main loop calls pump().
-    }
-
-    // From MonitorCallbacks.on_aem_timeout.
-    void on_timeout(Eui64 /*target*/, uint16_t /*cmd*/) { release_one(); }
-
-    // Issue queued reads up to the in-flight cap. Safe to call from the main
-    // loop too, so progress continues even if responses are sparse.
-    void pump()
-    {
-        if (controller_ == nullptr) {
-            return;
-        }
-        while (outstanding_ < MAX_INFLIGHT && !queue_.empty()) {
-            auto [t, type, index] = queue_.front();
-            queue_.pop_front();
-            bool const ok = controller_->read_descriptor(t, type, index);
-            if (enum_debug()) {
-                std::println(stderr, "[enum] read type={:#06x} idx={} ok={}", type, index, ok);
-            }
-            if (ok) {
-                ++outstanding_;
-            } else {
-                queue_.push_front({t, type, index});  // controller busy; retry next pump
-                break;
-            }
-        }
-    }
-
-    [[nodiscard]] auto finished(int64_t now_ns) const -> bool
-    {
-        if (targets_.empty() || !queue_.empty() || outstanding_ > 0) {
-            return false;
-        }
-        for (auto const& [id, st] : targets_) {
-            if (!st.seen_entity || !st.seen_config) {
-                return false;
-            }
-        }
-        // Explicit single target: done as soon as its tree is walked. Otherwise
-        // wait out a quiet window so slow-to-advertise entities aren't missed.
-        return target_filter_.has_value() || (now_ns - last_discovery_ns_) > quiet_ns_;
-    }
-
-    [[nodiscard]] auto entity_count() const noexcept -> size_t { return targets_.size(); }
-
-  private:
-    struct TargetState
-    {
-        bool seen_entity{false};
-        bool seen_config{false};
-    };
-    using ReadKey = std::tuple<Eui64, uint16_t, uint16_t>;
-    static constexpr int MAX_INFLIGHT = 4;
-
-    static auto eui_eq(Eui64 const& a, Eui64 const& b) -> bool { return !(a < b) && !(b < a); }
-
-    void release_one() noexcept
-    {
-        if (outstanding_ > 0) {
-            --outstanding_;
-        }
-    }
-
-    void enqueue(Eui64 t, uint16_t type, uint16_t index)
-    {
-        if (queued_.insert(ReadKey{t, type, index}).second) {
-            queue_.push_back({t, type, index});
-        }
-    }
-
-    std::optional<Eui64> target_filter_;
-    int64_t quiet_ns_;
-    int64_t last_discovery_ns_{0};
-    nanoavb::NanoAvbAemController* controller_{nullptr};
-    std::map<Eui64, TargetState> targets_;
-    std::deque<std::tuple<Eui64, uint16_t, uint16_t>> queue_;
-    std::set<ReadKey> queued_;
-    std::set<ReadKey> printed_;
-    std::set<ReadKey> expanded_;
-    int outstanding_{0};
-};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -950,66 +740,136 @@ auto run_offline(MonitorConfig const& config) -> int
     return 0;
 }
 
-auto run_enumerate(MonitorConfig const& config) -> int
+/// The controller id for an enumerate run, announced; nullopt after reporting
+/// why the interface could not be used.
+auto resolve_enumerate_controller(MonitorConfig const& config) -> std::optional<Eui64>
 {
     auto id_result = atdecc_tools::resolve_controller_id(config, atdecc_tools::TOOL_ID_DISCOVER);
     if (!id_result.has_value()) {
         std::println(stderr, "Error: cannot open interface '{}': {}", config.interface_name, id_result.error().message());
-        return 1;
+        return std::nullopt;
     }
-    Eui64 const controller_id = *id_result;
     std::println(
-        "statusbar-atdecc-monitor enumerate on '{}' controller_id={}",
-        config.interface_name,
-        ieee::to_string(controller_id).view());
+        "statusbar-atdecc-monitor enumerate on '{}' controller_id={}", config.interface_name, ieee::to_string(*id_result).view());
+    return *id_result;
+}
 
+/// The raw socket on the configured interface, or nullopt after reporting.
+auto open_enumerate_socket(MonitorConfig const& config) -> std::optional<RawnetContext>
+{
     RawnetContext rawnet;
     auto open_result = rawnet.open(config.interface_name, avtp::AVTP_ETHERTYPE, &ATDECC_MULTICAST_MAC);
     if (!open_result) {
         std::println(stderr, "Error: failed to open raw socket on '{}' (root/cap_net_raw required)", config.interface_name);
-        return 1;
+        return std::nullopt;
     }
+    return rawnet;
+}
 
-    g_now_fn = elapsed_ns;
+/// The enumerator's hooks over a MonitorCore that may not exist yet (`core_ptr`
+/// is set once it does): reads go to its controller, descriptors to stdout.
+auto make_enumerator_hooks(MonitorCore*& core_ptr) -> EnumeratorHooks
+{
+    EnumeratorHooks hooks{};
+    hooks.read_descriptor = [&core_ptr](Eui64 const& t, uint16_t type, uint16_t index) {
+        return core_ptr != nullptr && core_ptr->controller().read_descriptor(t, type, index);
+    };
+    hooks.on_descriptor = [](Eui64 const& /*target*/, std::span<uint8_t const> body) {
+        std::string out;
+        format_descriptor(std::back_inserter(out), body);
+        std::print("{}", out);
+    };
+    hooks.debug = enum_debug();
+    return hooks;
+}
 
-    constexpr int64_t QUIET_NS = 2'500'000'000;  // no-new-entity window for enumerate-all
-    Enumerator enumerator{config.target, QUIET_NS};
-
+/// MonitorCore callbacks that feed the enumerator.
+auto make_enumerator_callbacks(Enumerator& enumerator) -> MonitorCallbacks
+{
     MonitorCallbacks cbs{};
     cbs.on_entity_available = [&enumerator](DiscoveredEntity const& e) { enumerator.on_entity(e, elapsed_ns()); };
     cbs.on_entity_updated = [&enumerator](DiscoveredEntity const& e) { enumerator.on_entity(e, elapsed_ns()); };
     cbs.on_aem_response =
-        [&enumerator](nanoavb::NanoAvbAemController& c, Eui64 t, uint16_t cmd, uint8_t s, std::span<uint8_t const> d) {
-            enumerator.on_response(c, t, cmd, s, d);
+        [&enumerator](nanoavb::NanoAvbAemController& /*c*/, Eui64 t, uint16_t cmd, uint8_t s, std::span<uint8_t const> d) {
+            enumerator.on_response(t, cmd, s, d);
         };
     cbs.on_aem_timeout = [&enumerator](nanoavb::NanoAvbAemController& /*c*/, Eui64 t, uint16_t cmd) {
         enumerator.on_timeout(t, cmd);
     };
+    return cbs;
+}
 
-    auto core = std::make_unique<MonitorCore>(controller_id, std::move(cbs), /*show_descriptors=*/false);
-    auto* core_ptr = core.get();
-    auto monitor = std::make_unique<MonitorPollable>(std::move(rawnet), *core_ptr);
+/// One --enumerate run: the enumerator, the MonitorCore it drives (the
+/// enumerator issues every READ_DESCRIPTOR itself, MonitorCore's ENTITY
+/// auto-read is off, so each read it counts in is one it counts out), and the
+/// loop to a verdict.
+class EnumerateSession
+{
+  public:
+    static constexpr int64_t QUIET_NS = 2'500'000'000;  // no-new-entity window for enumerate-all
 
-    auto& stop = statusbar::itc::install_stop_signal();
-    MessageReactor reactor{stop, elapsed_ns, 10};
-    reactor.add(std::move(monitor));
+    explicit EnumerateSession(std::optional<Eui64> target)
+        : enumerator_{target, QUIET_NS, make_enumerator_hooks(core_ptr_)}
+    {}
 
-    int64_t const deadline = elapsed_ns() + static_cast<int64_t>(config.enumerate_secs * 1e9);
-    std::println("Enumerating (timeout {:.0f}s, Ctrl-C to stop)...", config.enumerate_secs);
-    while (!stop.stop_requested()) {
-        (void)reactor.poll_once(100);
-        enumerator.pump();
-        int64_t const now = elapsed_ns();
-        if (enumerator.finished(now) || now >= deadline) {
-            break;
+    auto run(Eui64 const& controller_id, RawnetContext rawnet, double enumerate_secs) -> int
+    {
+        auto& stop = statusbar::itc::install_stop_signal();
+        MessageReactor reactor{stop, elapsed_ns, 10};
+        start(controller_id, std::move(rawnet), reactor);
+        std::println("Enumerating (timeout {:.0f}s, Ctrl-C to stop)...", enumerate_secs);
+        loop(reactor, stop, elapsed_ns() + static_cast<int64_t>(enumerate_secs * 1e9));
+        return report();
+    }
+
+  private:
+    void start(Eui64 const& controller_id, RawnetContext rawnet, MessageReactor& reactor)
+    {
+        core_ = std::make_unique<MonitorCore>(
+            controller_id, make_enumerator_callbacks(enumerator_), /*show_descriptors=*/false, /*auto_read_entity=*/false);
+        core_ptr_ = core_.get();
+        reactor.add(std::make_unique<MonitorPollable>(std::move(rawnet), *core_ptr_));
+    }
+
+    void loop(MessageReactor& reactor, statusbar::itc::StopToken const& stop, int64_t deadline)
+    {
+        while (!stop.stop_requested()) {
+            (void)reactor.poll_once(100);
+            enumerator_.pump();
+            int64_t const now = elapsed_ns();
+            if (enumerator_.finished(now) || now >= deadline) {
+                break;
+            }
         }
     }
 
-    bool const done = enumerator.finished(elapsed_ns());
-    size_t const n = enumerator.entity_count();
-    std::println(
-        "\n{} ({} entit{} enumerated).", done ? "Enumeration complete" : "Enumeration stopped (timeout)", n, n == 1 ? "y" : "ies");
-    return done ? 0 : 2;
+    auto report() -> int
+    {
+        bool const done = enumerator_.finished(elapsed_ns());
+        size_t const n = enumerator_.entity_count();
+        std::println(
+            "\n{} ({} entit{} enumerated).",
+            done ? "Enumeration complete" : "Enumeration stopped (timeout)",
+            n,
+            n == 1 ? "y" : "ies");
+        return done ? 0 : 2;
+    }
+
+    MonitorCore* core_ptr_{nullptr};
+    Enumerator enumerator_;
+    std::unique_ptr<MonitorCore> core_;
+};
+
+auto run_enumerate(MonitorConfig const& config) -> int
+{
+    auto const controller_id = resolve_enumerate_controller(config);
+    auto rawnet = controller_id ? open_enumerate_socket(config) : std::nullopt;
+    if (!rawnet) {
+        return 1;
+    }
+    g_now_fn = elapsed_ns;
+    EnumerateSession session{config.target};
+    return session.run(*controller_id, std::move(*rawnet), config.enumerate_secs);
 }
 
 }  // namespace

@@ -25,6 +25,7 @@ statusbar_add_module(
   atdecc_controller_service_test.cpp
   atdecc_reactor_marshal_test.cpp
   atdecc_ctl_resolve_test.cpp
+  atdecc_enumerator_test.cpp
   atdecc_aem_validate_test.cpp)
 
 # macOS backend over the system AVB framework (AudioVideoBridging). The
