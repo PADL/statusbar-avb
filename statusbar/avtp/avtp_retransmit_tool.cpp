@@ -3,7 +3,7 @@
 
 /// AVTP Stream Retransmit Tool
 ///
-/// Reads a pcap/pcapng capture containing AVTP streams, parses each packet
+/// Reads a pcap or pcapng capture containing AVTP streams (802.1Q tagged or not), parses each packet
 /// through the appropriate stream input context, and re-serializes through
 /// an output context into a new pcap file. Validates the full round-trip:
 /// wire → deserialize → serialize → wire.
@@ -15,6 +15,7 @@
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
+#include "statusbar/avtp/avtp_capture_frame.hpp"
 #include "statusbar/avtp/avtp_common_header.hpp"
 #include "statusbar/avtp/avtp_crf_stream_input.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
@@ -31,8 +32,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <vector>
@@ -185,8 +189,94 @@ struct PcapLoopStats
     uint32_t gptp_syncs{0};
 };
 
-/// Common pcap reading loop. Parses Ethernet headers, processes gPTP for
-/// clock recovery, and calls on_avtp for each AVTP packet matching
+/// The capture's first four octets, or nullopt when the file cannot be read that far.
+[[nodiscard]] auto capture_magic(std::string const& path) -> std::optional<std::array<uint8_t, 4>>
+{
+    std::unique_ptr<FILE, int (*)(FILE*)> const file{std::fopen(path.c_str(), "rb"), &std::fclose};
+    std::array<uint8_t, 4> magic{};
+    if (!file || std::fread(magic.data(), 1, magic.size(), file.get()) != magic.size()) {
+        return std::nullopt;
+    }
+    return magic;
+}
+
+/// Open the capture with @p Reader and walk it; false, with the reason printed, when
+/// it does not open or does not read through.
+template <typename Reader, typename OnPacket>
+auto walk_capture_with(std::string const& path, OnPacket const& on_packet) -> bool
+{
+    auto reader = Reader::open(path);
+    if (!reader) {
+        std::print(stderr, "error: open capture '{}': {}\n", path, reader.error().message());
+        return false;
+    }
+    auto const walk = pcap::for_each_packet(*reader, on_packet);
+    if (!walk) {
+        std::print(stderr, "error: capture read: {}\n", walk.error().message());
+        return false;
+    }
+    return true;
+}
+
+/// Walk a capture whatever its container: classic pcap through pcap::FileReader,
+/// pcapng through PcapngReader, as the first four octets say.
+template <typename OnPacket>
+auto walk_capture(std::string const& path, OnPacket const& on_packet) -> bool
+{
+    auto const magic = capture_magic(path);
+    auto const format = magic ? capture_format_of(*magic) : CaptureFormat::unknown;
+    if (format == CaptureFormat::pcapng) {
+        return walk_capture_with<PcapngReader>(path, on_packet);
+    }
+    if (format == CaptureFormat::pcap) {
+        return walk_capture_with<FileReader>(path, on_packet);
+    }
+    std::print(stderr, "error: '{}' is neither a pcap nor a pcapng capture\n", path);
+    return false;
+}
+
+/// The clock and the counts one capture walk accumulates.
+struct PcapLoopState
+{
+    GptpClockState gptp;
+    PcapLoopStats stats;
+};
+
+/// True for the AVTPDU the run is after: AVTP, long enough, of the subtype, of the stream.
+[[nodiscard]] auto is_wanted_avtp(
+    InnerEthernetPayload const& inner, uint8_t expected_subtype, size_t min_pdu_len, StreamId const& sid) -> bool
+{
+    return inner.ethertype == ETHERTYPE_AVTP && inner.payload.size() >= min_pdu_len && inner.payload[0] == expected_subtype &&
+        avtp_match_stream_id(inner.payload, sid);
+}
+
+/// One captured frame, after its 802.1Q tag: gPTP feeds the clock, the wanted AVTPDUs
+/// go to @p on_avtp with the recovered gPTP time, everything else is counted and dropped.
+template <typename OnAvtp>
+void handle_capture_frame(
+    RetransmitConfig const& cfg,
+    uint8_t expected_subtype,
+    size_t min_pdu_len,
+    PcapLoopState& st,
+    uint64_t capture_us,
+    InnerEthernetPayload const& inner,
+    FileWriter& writer,
+    OnAvtp& on_avtp)
+{
+    ++st.stats.total;
+    if (inner.ethertype == ETHERTYPE_GPTP) {
+        st.gptp.process(capture_us, inner.payload);
+        return;
+    }
+    if (!is_wanted_avtp(inner, expected_subtype, min_pdu_len, cfg.stream_id)) {
+        return;
+    }
+    ++st.stats.matched;
+    on_avtp(inner.payload, st.gptp.to_gptp_ns(capture_us), capture_us, writer);
+}
+
+/// Common capture reading loop. Parses Ethernet headers (through any 802.1Q tag),
+/// processes gPTP for clock recovery, and calls on_avtp for each AVTP packet matching
 /// expected_subtype and stream_id.
 ///
 /// on_avtp receives (payload, gptp_now_ns, capture_us, writer).
@@ -194,51 +284,26 @@ template <typename OnAvtp>
 // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - on_avtp is called, not forwarded
 auto run_pcap_loop(RetransmitConfig const& cfg, uint8_t expected_subtype, size_t min_pdu_len, OnAvtp&& on_avtp) -> PcapLoopStats
 {
-    auto reader_result = PcapngReader::open(cfg.input_file);
-    if (!reader_result) {
-        std::print(stderr, "error: open pcap '{}': {}\n", cfg.input_file, reader_result.error().message());
-        return {};
-    }
-    auto& reader = *reader_result;
-
     auto writer_result = FileWriter::open(cfg.output_file);
     if (!writer_result) {
         std::print(stderr, "error: create pcap '{}': {}\n", cfg.output_file, writer_result.error().message());
         return {};
     }
-    auto& writer = *writer_result;
-
-    GptpClockState gptp;
-    PcapLoopStats stats;
-
-    auto const walk = pcap::for_each_packet(
-        reader, [&](uint64_t capture_us, Eui48 const& /*da*/, Eui48 const& /*sa*/, uint16_t ethertype, Packet const& payload) {
-            ++stats.total;
-
-            if (ethertype == ETHERTYPE_GPTP) {
-                gptp.process(capture_us, std::span<uint8_t const>{payload});
-                return;
-            }
-            if (ethertype != ETHERTYPE_AVTP || payload.size() < min_pdu_len) {
-                return;
-            }
-            if (payload[0] != expected_subtype) {
-                return;
-            }
-            if (!avtp_match_stream_id(std::span<uint8_t const>{payload}, cfg.stream_id)) {
-                return;
-            }
-
-            ++stats.matched;
-            uint64_t const gptp_now = gptp.to_gptp_ns(capture_us);
-            on_avtp(std::span<uint8_t const>{payload}, gptp_now, capture_us, writer);
+    PcapLoopState st;
+    (void)walk_capture(
+        cfg.input_file, [&](uint64_t capture_us, Eui48 const& /*da*/, Eui48 const& /*sa*/, uint16_t ethertype, Packet const& raw) {
+            handle_capture_frame(
+                cfg,
+                expected_subtype,
+                min_pdu_len,
+                st,
+                capture_us,
+                strip_vlan_tag(ethertype, std::span<uint8_t const>{raw}),
+                *writer_result,
+                on_avtp);
         });
-    if (!walk) {
-        std::print(stderr, "error: pcap read: {}\n", walk.error().message());
-    }
-
-    stats.gptp_syncs = gptp.sync_count;
-    return stats;
+    st.stats.gptp_syncs = st.gptp.sync_count;
+    return st.stats;
 }
 
 /// Write a retransmitted AVTP frame to the pcap writer.
