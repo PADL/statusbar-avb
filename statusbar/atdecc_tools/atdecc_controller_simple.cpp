@@ -141,42 +141,44 @@ auto ControllerSimple::drain_events() -> std::vector<ControllerEvent>
     return out;
 }
 
-void ControllerSimple::fetch_entity_descriptors(Eui64 entity_id, int64_t /*now_ns*/)
-{
-    auto const* entity = service_->find_entity(entity_id);
-    uint16_t n_talkers = 0;
-    uint16_t n_listeners = 0;
-    if (entity != nullptr) {
-        n_talkers = entity->adpdu.talker_stream_sources.get();
-        n_listeners = entity->adpdu.listener_stream_sinks.get();
-    }
+namespace {
 
-    // Build the expected (type, index) list. ENTITY + CONFIGURATION +
-    // AVB_INTERFACE + CLOCK_SOURCE + CLOCK_DOMAIN + per-stream descriptors.
-    std::vector<std::pair<uint16_t, uint16_t>> expected_descs;
-    expected_descs.reserve(5 + n_talkers + n_listeners);
-    expected_descs.emplace_back(DESCRIPTOR_ENTITY, 0);
-    expected_descs.emplace_back(DESCRIPTOR_CONFIGURATION, 0);
-    expected_descs.emplace_back(DESCRIPTOR_AVB_INTERFACE, 0);
-    expected_descs.emplace_back(DESCRIPTOR_CLOCK_SOURCE, 0);
-    expected_descs.emplace_back(DESCRIPTOR_CLOCK_DOMAIN, 0);
+/// The descriptors an EntityDetail is built from: ENTITY, CONFIGURATION,
+/// AVB_INTERFACE, CLOCK_SOURCE and CLOCK_DOMAIN, plus one STREAM_OUTPUT per
+/// advertised talker source and one STREAM_INPUT per listener sink.
+auto detail_descriptor_keys(DiscoveredEntity const* entity) -> std::set<std::pair<uint16_t, uint16_t>>
+{
+    uint16_t const n_talkers = (entity != nullptr) ? entity->adpdu.talker_stream_sources.get() : uint16_t{0};
+    uint16_t const n_listeners = (entity != nullptr) ? entity->adpdu.listener_stream_sinks.get() : uint16_t{0};
+    std::set<std::pair<uint16_t, uint16_t>> keys{
+        {DESCRIPTOR_ENTITY, 0},
+        {DESCRIPTOR_CONFIGURATION, 0},
+        {DESCRIPTOR_AVB_INTERFACE, 0},
+        {DESCRIPTOR_CLOCK_SOURCE, 0},
+        {DESCRIPTOR_CLOCK_DOMAIN, 0}};
     for (uint16_t i = 0; i < n_talkers; ++i) {
-        expected_descs.emplace_back(DESCRIPTOR_STREAM_OUTPUT, i);
+        keys.emplace(DESCRIPTOR_STREAM_OUTPUT, i);
     }
     for (uint16_t i = 0; i < n_listeners; ++i) {
-        expected_descs.emplace_back(DESCRIPTOR_STREAM_INPUT, i);
+        keys.emplace(DESCRIPTOR_STREAM_INPUT, i);
     }
+    return keys;
+}
 
+}  // namespace
+
+void ControllerSimple::fetch_entity_descriptors(Eui64 entity_id, int64_t /*now_ns*/)
+{
     EntityDetailBuilder builder{};
     builder.entity_id = entity_id;
-    builder.expected = expected_descs.size();
+    builder.expected = detail_descriptor_keys(service_->find_entity(entity_id));
 
     // Seed from cache for descriptors the background discovery has already
     // fetched; enqueue the rest through the unified queue, which respects
     // the AEM inflight cap and retries. Sending them all directly here used
     // to overflow the 8-slot inflight tracker and silently drop responses.
     auto& rec = entities_[entity_id];
-    for (auto const& [type, index] : expected_descs) {
+    for (auto const& [type, index] : builder.expected) {
         auto const data_it = rec.descriptor_cache.find({type, index});
         if (data_it != rec.descriptor_cache.end()) {
             builder.receive(type, index, data_it->second.success, make_const_span(data_it->second.data));
@@ -467,11 +469,13 @@ void ControllerSimple::emit_command_send_failure(ieee::Eui64 const& target, uint
 void ControllerSimple::EntityDetailBuilder::receive(
     uint16_t desc_type, uint16_t desc_index, bool success, std::span<uint8_t const> data)
 {
-    // Deduplicate: only count each (type, index) pair once. This protects
-    // against responses arriving from both the detail-fetch path and the
-    // background stream-query path at the same time.
+    // Only the descriptors this detail asked for count toward completion: the
+    // background crawl's responses (STRINGS, CONTROLs, every other type) flow
+    // through here too and used to complete the detail early with empty
+    // sections. Each (type, index) counts once, so a duplicate from the stream
+    // query path cannot either.
     auto const key = std::make_pair(desc_type, desc_index);
-    if (seen.contains(key)) {
+    if (!expected.contains(key) || seen.contains(key)) {
         return;
     }
     seen.insert(key);

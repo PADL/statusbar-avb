@@ -12,6 +12,7 @@
 #include "statusbar/atdecc_tools/atdecc_controller_simple.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -170,6 +171,42 @@ auto make_acmp_response(uint8_t message_type, uint8_t status) -> AcmpDu
     acmp.listener_entity_id = ENTITY_B;
     acmp.listener_unique_id = 1;
     return acmp;
+}
+
+/// Deliver one READ_DESCRIPTOR response through the AEM broadcast surface, the
+/// way a backend does: the request payload names the descriptor asked for, the
+/// response carries the 4-byte READ_DESCRIPTOR header and then `body`.
+void respond_read_descriptor(
+    ControllerServiceSink& sink, Eui64 const& target, uint16_t type, uint16_t index, uint8_t status, std::span<uint8_t const> body)
+{
+    aem::AemReadDescriptorCommandPayload request{};
+    request.descriptor_type = ieee::doublet_t{type};
+    request.descriptor_index = ieee::doublet_t{index};
+    std::array<uint8_t, aem::AemReadDescriptorCommandPayload::LENGTH> sent{};
+    span_store(std::span{sent}, request);
+    std::vector<uint8_t> data(aem::AemReadDescriptorResponsePayload::LENGTH, 0);
+    data.insert(data.end(), body.begin(), body.end());
+    sink.on_aem_response(target, AEM_COMMAND_READ_DESCRIPTOR, status, sent, data);
+}
+
+/// A minimal descriptor body: its type and index, then zero bytes up to `size`.
+auto descriptor_body(uint16_t type, uint16_t index, size_t size = 8) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> body(size, 0);
+    ieee::doublet_t const t{type};
+    ieee::doublet_t const i{index};
+    span_store(std::span{body}.subspan(0, 2), t);
+    span_store(std::span{body}.subspan(2, 2), i);
+    return body;
+}
+
+auto count_detail_ready(std::vector<atdecc_tools::ControllerEvent> const& events) -> int
+{
+    int n = 0;
+    for (auto const& ev : events) {
+        n += std::holds_alternative<EntityDetailReadyEvent>(ev) ? 1 : 0;
+    }
+    return n;
 }
 
 }  // namespace
@@ -411,6 +448,50 @@ TEST(controller_service_seam, unsolicited_responses_surface_as_events)
         }
     }
     EXPECT_TRUE(surfaced);
+}
+
+// The detail builder completes on the descriptors IT asked for, not on any
+// READ_DESCRIPTOR response: the background crawl's responses used to count
+// toward completion and finish the detail early with empty sections.
+TEST(controller_service_seam, entity_detail_counts_only_the_descriptors_it_asked_for)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    (void)h.ctrl->drain_events();
+    auto& sink = h.fake->sink();
+
+    // No streams advertised: the detail is ENTITY, CONFIGURATION, AVB_INTERFACE,
+    // CLOCK_SOURCE and CLOCK_DOMAIN, five descriptors.
+    h.ctrl->fetch_entity_descriptors(ENTITY_A, 0);
+    EXPECT_EQ(count_detail_ready(h.ctrl->drain_events()), 0);
+
+    // Five responses from the background crawl, for descriptors the detail did
+    // not ask for: not complete.
+    for (uint16_t i = 0; i < 5; ++i) {
+        auto const body = descriptor_body(aem::DESCRIPTOR_STRINGS, i);
+        respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_STRINGS, i, AEM_STATUS_SUCCESS, body);
+    }
+    EXPECT_EQ(count_detail_ready(h.ctrl->drain_events()), 0);
+
+    // Four of the five it asked for, one of them twice: still not complete.
+    for (uint16_t type :
+         {aem::DESCRIPTOR_ENTITY, aem::DESCRIPTOR_AVB_INTERFACE, aem::DESCRIPTOR_CLOCK_SOURCE, aem::DESCRIPTOR_CLOCK_DOMAIN}) {
+        auto const body = descriptor_body(type, 0);
+        respond_read_descriptor(sink, ENTITY_A, type, 0, AEM_STATUS_SUCCESS, body);
+    }
+    auto const dup = descriptor_body(aem::DESCRIPTOR_CLOCK_DOMAIN, 0);
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CLOCK_DOMAIN, 0, AEM_STATUS_SUCCESS, dup);
+    EXPECT_EQ(count_detail_ready(h.ctrl->drain_events()), 0);
+
+    // The last one, answered with an error: counted, and the detail is ready once.
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_NO_SUCH_DESCRIPTOR, {});
+    auto const events = h.ctrl->drain_events();
+    EXPECT_EQ(count_detail_ready(events), 1);
+    for (auto const& ev : events) {
+        if (auto const* d = std::get_if<EntityDetailReadyEvent>(&ev)) {
+            EXPECT_TRUE(d->detail.entity_id == ENTITY_A);
+        }
+    }
 }
 
 //

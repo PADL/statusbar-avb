@@ -223,27 +223,28 @@ class ControllerSimple : public net::Pollable
     };
 
     // Entity detail builder for descriptor browsing.
-    // Deduplicates responses by (descriptor_type, descriptor_index) so that
-    // duplicate responses from the background stream query path don't corrupt
-    // the detail view or cause premature completion.
+    // Completes when every (descriptor_type, descriptor_index) it asked for has
+    // answered, once each: a response for a descriptor it did not ask for (the
+    // background crawl's STRINGS, CONTROLs, ...) or a duplicate from the stream
+    // query path neither corrupts the detail view nor completes it early.
     struct EntityDetailBuilder
     {
         ieee::Eui64 entity_id{};
-        size_t expected{0};
-        std::set<std::pair<uint16_t, uint16_t>> seen;
-        std::vector<uint8_t> entity_desc_data;   // raw ENTITY descriptor payload
-        std::vector<uint8_t> avb_iface_data;     // raw AVB_INTERFACE descriptor payload
-        std::vector<uint8_t> clock_domain_data;  // raw CLOCK_DOMAIN descriptor payload
+        std::set<std::pair<uint16_t, uint16_t>> expected;  ///< the descriptors the detail is built from
+        std::set<std::pair<uint16_t, uint16_t>> seen;      ///< those of them that have answered
+        std::vector<uint8_t> entity_desc_data;             // raw ENTITY descriptor payload
+        std::vector<uint8_t> avb_iface_data;               // raw AVB_INTERFACE descriptor payload
+        std::vector<uint8_t> clock_domain_data;            // raw CLOCK_DOMAIN descriptor payload
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> clock_source_descs;
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> stream_output_descs;
         std::vector<std::pair<uint16_t, std::vector<uint8_t>>> stream_input_descs;
 
-        [[nodiscard]] auto is_complete() const noexcept -> bool { return seen.size() >= expected; }
+        [[nodiscard]] auto is_complete() const noexcept -> bool { return seen.size() >= expected.size(); }
 
-        /// Record a response for this (type, index). Returns true if new, false if duplicate.
-        /// Called once per response; pass status to indicate success vs. error.
-        /// On success, stores the descriptor data. On error, the (type, index) is marked
-        /// as received but no data is stored.
+        /// Record a response for this (type, index). A descriptor not in
+        /// `expected`, or one already seen, is ignored. On success, stores the
+        /// descriptor data. On error, the (type, index) is marked as received
+        /// but no data is stored.
         void receive(uint16_t desc_type, uint16_t desc_index, bool success, std::span<uint8_t const> data);
 
         [[nodiscard]] auto build() const -> EntityDetail;
