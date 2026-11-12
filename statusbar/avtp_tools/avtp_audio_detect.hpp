@@ -43,9 +43,18 @@ enum class StreamKind : uint8_t
     return payload.size() >= avtp::AafPdu::HEADER_LENGTH && payload[0] == avtp::AvtpSubtype::aaf;
 }
 
+/// True when the payload is an IEC 61883-6 AM824 audio AVTPDU. The subtype alone also
+/// covers 61883-4 (MPEG-TS), 61883-8 and source-packet-header or fragmented CIPs, whose
+/// payloads are not audio quadlets; the CIP header has to say AM824 (Am824Pdu::is_valid:
+/// FMT 0x10, no SPH, FN 0) before anything decodes the payload as audio.
 [[nodiscard]] inline auto payload_is_am824(std::span<uint8_t const> payload) noexcept -> bool
 {
-    return payload.size() >= avtp::Am824Pdu::HEADER_LENGTH && payload[0] == avtp::AvtpSubtype::iec_61883_iidc;
+    if (payload.size() < avtp::Am824Pdu::HEADER_LENGTH || payload[0] != avtp::AvtpSubtype::iec_61883_iidc) {
+        return false;
+    }
+    avtp::Am824Pdu pdu;
+    span_load(pdu, payload.subspan(0, avtp::Am824Pdu::HEADER_LENGTH));
+    return pdu.is_valid();
 }
 
 // Extract the AVTP stream id from an audio payload of the given kind.

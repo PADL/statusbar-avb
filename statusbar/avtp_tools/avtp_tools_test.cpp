@@ -10,6 +10,7 @@
 #include "statusbar/avtp_tools/avtp_channel_interleaver.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/test/test.hpp"
+#include "statusbar/tsn/tsn.hpp"
 
 #include <array>
 #include <cstdint>
@@ -40,12 +41,58 @@ TEST(avtp_audio_detect, payload_with_aaf_subtype_byte_recognized)
     EXPECT_FALSE(payload_is_am824(std::span<uint8_t const>(buf)));
 }
 
-TEST(avtp_audio_detect, payload_with_am824_subtype_byte_recognized)
+namespace {
+
+/// A 61883 header with the subtype byte of AM824; the CIP fields are the caller's to bend.
+auto am824_header(statusbar::avtp::Am824Pdu const& pdu) -> std::vector<uint8_t>
 {
     std::vector<uint8_t> buf(statusbar::avtp::Am824Pdu::HEADER_LENGTH, 0);
-    buf[0] = statusbar::avtp::AvtpSubtype::iec_61883_iidc;
+    statusbar::span_store(std::span<uint8_t>(buf), pdu);
+    return buf;
+}
+
+auto valid_am824_pdu() -> statusbar::avtp::Am824Pdu
+{
+    statusbar::avtp::Am824Pdu pdu{};
+    pdu.init(statusbar::tsn::StreamId{}, 2, statusbar::avtp::Am824SampleRate::rate_48_khz);
+    return pdu;
+}
+
+}  // namespace
+
+TEST(avtp_audio_detect, am824_header_recognized_when_the_cip_says_am824)
+{
+    auto const buf = am824_header(valid_am824_pdu());
     EXPECT_TRUE(payload_is_am824(std::span<uint8_t const>(buf)));
     EXPECT_FALSE(payload_is_aaf(std::span<uint8_t const>(buf)));
+}
+
+// The 61883 subtype is shared: 61883-4 MPEG-TS (FMT 0x20) has the same subtype byte and
+// is not audio. Classifying on the subtype alone decoded its payload as AM824 samples.
+TEST(avtp_audio_detect, am824_subtype_with_a_61883_4_cip_is_not_audio)
+{
+    auto pdu = valid_am824_pdu();
+    pdu.cip_header.set_fmt(0x20U);
+    auto const buf = am824_header(pdu);
+    EXPECT_EQ(buf[0], statusbar::avtp::AvtpSubtype::iec_61883_iidc);
+    EXPECT_FALSE(payload_is_am824(std::span<uint8_t const>(buf)));
+}
+
+// A source-packet-header CIP prepends a timestamp to each source packet: the flat
+// quadlet layout the AM824 decoders assume does not hold, so it is not AM824 audio.
+TEST(avtp_audio_detect, am824_subtype_with_a_source_packet_header_is_not_audio)
+{
+    auto pdu = valid_am824_pdu();
+    pdu.cip_header.fn_qpc_sph = 0x04U;  // SPH
+    auto const buf = am824_header(pdu);
+    EXPECT_FALSE(payload_is_am824(std::span<uint8_t const>(buf)));
+}
+
+TEST(avtp_audio_detect, am824_subtype_byte_alone_is_not_audio)
+{
+    std::vector<uint8_t> buf(statusbar::avtp::Am824Pdu::HEADER_LENGTH, 0);
+    buf[0] = statusbar::avtp::AvtpSubtype::iec_61883_iidc;  // sv 0, no FMT, no channels
+    EXPECT_FALSE(payload_is_am824(std::span<uint8_t const>(buf)));
 }
 
 TEST(avtp_audio_detect, stream_id_extracted_from_aaf_header_bytes)
