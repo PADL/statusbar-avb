@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <format>
 #include <initializer_list>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -859,26 +860,41 @@ void ControllerSimple::handle_aem_response(
         return;
     }
     if (cmd == AEM_COMMAND_GET_STREAM_FORMAT) {
-        handle_get_stream_format_response(target, status, data);
+        handle_get_stream_format_response(target, status, sent_payload, data);
         return;
     }
+    if (cmd == AEM_COMMAND_GET_COUNTERS && handle_get_counters_response(target, status, data)) {
+        return;
+    }
+    report_command_status(target, cmd, status, data);
+}
+
+auto ControllerSimple::handle_get_counters_response(Eui64 const& target, uint8_t const status, std::span<uint8_t const> data)
+    -> bool
+{  // NOLINT(statusbar-block-statements) a flat sequence of field assignments from the payload into the event, no logic
     // GET_COUNTERS: parse the 136-byte AemCountersPayload and surface a
     // CountersReadyEvent so a supervise/diagnostic caller can sample a
     // specific counter (FRAMES_RX / FRAMES_TX) across two passes.
-    if (cmd == AEM_COMMAND_GET_COUNTERS && status == AEM_STATUS_SUCCESS && data.size() >= sizeof(AemCountersPayload)) {
-        AemCountersPayload cp{};
-        span_load(cp, data.subspan(0, sizeof(AemCountersPayload)));
-        CountersReadyEvent ev{};
-        ev.entity_id = target;
-        ev.descriptor_type = cp.descriptor_type.get();
-        ev.descriptor_index = cp.descriptor_index.get();
-        ev.counters_valid = cp.counters_valid.get();
-        for (size_t i = 0; i < ev.counters.size(); ++i) {
-            ev.counters[i] = cp.counters[i].get();
-        }
-        pending_events_.emplace_back(ev);
-        return;
+    if (status != AEM_STATUS_SUCCESS || data.size() < sizeof(AemCountersPayload)) {
+        return false;
     }
+    AemCountersPayload cp{};
+    span_load(cp, data.subspan(0, sizeof(AemCountersPayload)));
+    CountersReadyEvent ev{};
+    ev.entity_id = target;
+    ev.descriptor_type = cp.descriptor_type.get();
+    ev.descriptor_index = cp.descriptor_index.get();
+    ev.counters_valid = cp.counters_valid.get();
+    for (size_t i = 0; i < ev.counters.size(); ++i) {
+        ev.counters[i] = cp.counters[i].get();
+    }
+    pending_events_.emplace_back(ev);
+    return true;
+}
+
+void ControllerSimple::report_command_status(
+    Eui64 const& target, uint16_t const cmd, uint8_t const status, std::span<uint8_t const> data)
+{
     auto const* const name_rec = find_entity(target);
     std::string name =
         (name_rec != nullptr && !name_rec->name.empty()) ? name_rec->name : std::string{ieee::to_string(target).view()};
@@ -1203,36 +1219,64 @@ void ControllerSimple::handle_strings_descriptor_response(
     }
 }
 
-void ControllerSimple::handle_get_stream_format_response(Eui64 target, uint8_t status, std::span<uint8_t const> data)
+namespace {
+
+/// The (descriptor_type, descriptor_index) a GET_STREAM_FORMAT command asked
+/// about, from the request payload, or nullopt if it is too short to say.
+auto requested_stream_key(std::span<uint8_t const> sent_payload) -> std::optional<std::pair<uint16_t, uint16_t>>
 {
+    if (sent_payload.size() < AemGetStreamFormatCommandPayload::LENGTH) {
+        return std::nullopt;
+    }
+    AemGetStreamFormatCommandPayload sent_cmd{};
+    span_load(sent_cmd, sent_payload.subspan(0, AemGetStreamFormatCommandPayload::LENGTH));
+    return std::pair{sent_cmd.descriptor_type.get(), sent_cmd.descriptor_index.get()};
+}
+
+/// The text shown for a stream's format: the format on success, the status
+/// name in parentheses on an error, nothing if a SUCCESS response is short.
+auto stream_format_text(uint8_t status, std::span<uint8_t const> data) -> std::string
+{
+    if (status != AEM_STATUS_SUCCESS) {
+        return std::format("({})", aem_status_name(status));
+    }
     if (data.size() < AemStreamFormatPayload::LENGTH) {
-        return;
+        return {};
     }
     AemStreamFormatPayload resp{};
     span_load(resp, data.subspan(0, AemStreamFormatPayload::LENGTH));
-    uint16_t const desc_type = resp.descriptor_type.get();
-    uint16_t const idx = resp.descriptor_index.get();
+    return avtp::stream_format_to_string(std::bit_cast<ieee::octlet_t>(resp.stream_format).get());
+}
 
-    // A response-supplied descriptor_index can be up to 65535; we only ever request
-    // indices below the cap, so ignore anything beyond it rather than resize a
-    // vector to ~64K entries from a single crafted response (M2 DoS).
-    if (idx >= MAX_DESCRIPTORS_PER_TYPE) {
+}  // namespace
+
+void ControllerSimple::handle_get_stream_format_response(
+    Eui64 target, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data)
+{
+    // Keyed on the REQUEST's descriptor_type/index, not the response's echo:
+    // entities zero the echoed fields on an error, which left the pending
+    // query uncleared (re-sent every retry period for ever) and put the
+    // error text in slot 0 of the wrong list.
+    auto const requested = requested_stream_key(sent_payload);
+    if (!requested) {
         return;
     }
-    auto& rec = entities_[target];
+    auto const [desc_type, idx] = *requested;
+    // We only ever ask about indices below the cap; never resize a vector to
+    // ~64K entries on a crafted request echo (M2 DoS).
+    if (idx < MAX_DESCRIPTORS_PER_TYPE) {
+        stream_format_slot(entities_[target], desc_type, idx) = stream_format_text(status, data);
+    }
+    clear_pending_format_query(target, desc_type, idx);
+}
+
+auto ControllerSimple::stream_format_slot(EntityRecord& rec, uint16_t const desc_type, uint16_t const idx) -> std::string&
+{
     auto& vec = (desc_type == DESCRIPTOR_STREAM_OUTPUT) ? rec.talker_formats : rec.listener_formats;
     if (vec.size() <= idx) {
         vec.resize(static_cast<size_t>(idx) + 1);
     }
-
-    if (status == AEM_STATUS_SUCCESS) {
-        uint64_t const fmt = std::bit_cast<ieee::octlet_t>(resp.stream_format).get();
-        vec[idx] = avtp::stream_format_to_string(fmt);
-    } else {
-        vec[idx] = std::format("({})", aem_status_name(status));
-    }
-
-    clear_pending_format_query(target, desc_type, idx);
+    return vec[idx];
 }
 
 void ControllerSimple::clear_pending_format_query(Eui64 const& target, uint16_t desc_type, uint16_t idx)

@@ -526,6 +526,54 @@ TEST(controller_service_seam, a_configuration_enqueues_at_most_the_per_configura
     EXPECT_EQ(h.ctrl->queued_descriptor_reads() - before, ControllerSimple::MAX_DESCRIPTORS_PER_CONFIGURATION);
 }
 
+// A GET_STREAM_FORMAT response is keyed on the request it answers. Entities
+// zero the echoed descriptor_type/index on an error, which used to leave the
+// query pending and re-sent every retry period for ever.
+TEST(controller_service_seam, an_error_stream_format_response_with_zeroed_echo_clears_its_query)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    auto& sink = h.fake->sink();
+
+    // One listener sink in the configuration: one GET_STREAM_FORMAT query.
+    auto const body = configuration_body({{aem::DESCRIPTOR_STREAM_INPUT, 1}});
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_SUCCESS, body);
+    EXPECT_EQ(h.ctrl->pending_stream_format_queries(), 1U);
+
+    auto count_format_sends = [&] {
+        size_t n = 0;
+        for (auto const& c : h.fake->calls()) {
+            n += (c.op == "send" && c.a == AEM_COMMAND_GET_STREAM_FORMAT) ? 1 : 0;
+        }
+        return n;
+    };
+    h.ctrl->tick(1'000'000'000);
+    EXPECT_EQ(count_format_sends(), 1U);
+    std::vector<uint8_t> request;
+    for (auto const& c : h.fake->calls()) {
+        if (c.op == "send" && c.a == AEM_COMMAND_GET_STREAM_FORMAT) {
+            request = c.payload;
+        }
+    }
+    EXPECT_EQ(request.size(), aem::AemGetStreamFormatCommandPayload::LENGTH);
+
+    // The entity answers NOT_SUPPORTED with the echoed type and index zeroed.
+    std::array<uint8_t, aem::AemStreamFormatPayload::LENGTH> const zeroed{};
+    sink.on_aem_response(ENTITY_A, AEM_COMMAND_GET_STREAM_FORMAT, AEM_STATUS_NOT_SUPPORTED, request, zeroed);
+
+    EXPECT_EQ(h.ctrl->pending_stream_format_queries(), 0U);
+    h.ctrl->tick(10'000'000'000);
+    EXPECT_EQ(count_format_sends(), 1U);  // not re-sent
+
+    // The status lands on the sink that was asked about, not slot 0 of a zeroed type.
+    for (auto const& e : h.ctrl->get_display_entities()) {
+        if (e.entity_id == ENTITY_A) {
+            EXPECT_EQ(e.listener_stream_formats.size(), 1U);
+            EXPECT_TRUE(!e.listener_stream_formats.empty() && e.listener_stream_formats[0] == "(Not Supported)");
+        }
+    }
+}
+
 //
 // Test Runner
 //

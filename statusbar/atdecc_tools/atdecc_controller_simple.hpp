@@ -142,6 +142,9 @@ class ControllerSimple : public net::Pollable
     /// diagnostic: the crawl's backlog).
     [[nodiscard]] auto queued_descriptor_reads() const noexcept -> size_t { return descriptor_read_queue_.size(); }
 
+    /// GET_STREAM_FORMAT queries still awaiting an answer (a diagnostic).
+    [[nodiscard]] auto pending_stream_format_queries() const noexcept -> size_t { return stream_format_queries_.size(); }
+
   private:
     void wire_service();
 
@@ -160,13 +163,21 @@ class ControllerSimple : public net::Pollable
     void handle_acmp_observed(atdecc::AcmpDu const& acmp);
     void handle_aem_response(
         ieee::Eui64 target, uint16_t cmd, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data);
+    /// Surface a successful GET_COUNTERS response as a CountersReadyEvent;
+    /// false if the response was not one to surface.
+    auto handle_get_counters_response(ieee::Eui64 const& target, uint8_t status, std::span<uint8_t const> data) -> bool;
+    /// The status line for a command with no typed handler.
+    void report_command_status(ieee::Eui64 const& target, uint16_t cmd, uint8_t status, std::span<uint8_t const> data);
     void handle_read_descriptor_response(
         ieee::Eui64 target, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data);
     void handle_stream_descriptor_response(
         ieee::Eui64 target, uint8_t status, uint16_t desc_type, uint16_t desc_index, std::span<uint8_t const> desc_payload);
     void handle_strings_descriptor_response(
         ieee::Eui64 target, uint8_t status, uint16_t strings_desc_idx, std::span<uint8_t const> desc_payload);
-    void handle_get_stream_format_response(ieee::Eui64 target, uint8_t status, std::span<uint8_t const> data);
+    /// `sent_payload` is the GET_STREAM_FORMAT request: the response's echoed
+    /// descriptor_type/index are zeroed by some entities on an error.
+    void handle_get_stream_format_response(
+        ieee::Eui64 target, uint8_t status, std::span<uint8_t const> sent_payload, std::span<uint8_t const> data);
     void clear_pending_format_query(ieee::Eui64 const& target, uint16_t desc_type, uint16_t idx);
     /// Enqueue a GET_STREAM_FORMAT query. Deduplicates against the queue.
     void enqueue_stream_format_query(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index);
@@ -315,6 +326,8 @@ class ControllerSimple : public net::Pollable
     auto enqueue_configuration_reads(ieee::Eui64 const& target, statusbar::atdecc::aem::DescriptorConfiguration const& cfg)
         -> EntityDescriptorCounts;
     static void note_stream_counts(EntityDescriptorCounts& counts, uint16_t entry_type, uint16_t entry_count);
+    /// The format text slot for one stream descriptor, grown to hold it.
+    static auto stream_format_slot(EntityRecord& rec, uint16_t desc_type, uint16_t idx) -> std::string&;
 
     /// The record for @p id, or nullptr if the entity is unknown. Read-side helper
     /// for the many `if (found) use field` call sites.
