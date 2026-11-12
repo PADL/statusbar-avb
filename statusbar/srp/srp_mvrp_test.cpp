@@ -457,6 +457,91 @@ TEST(mvrp_participant, a_leaveall_in_the_same_tick_does_not_expire_the_registrar
     EXPECT_FALSE(b.has_vlan(200));
 }
 
+namespace {
+
+/// The LeaveAllEvent bit of the first VectorAttribute of an MVRP PDU:
+/// ProtocolVersion, AttributeType, AttributeLength, then the VectorHeader
+/// (IEEE 802.1Q 10.8.2.6, bit 13 of the 16-bit header).
+auto first_vector_has_leave_all(std::vector<uint8_t> const& pdu) -> bool
+{
+    if (pdu.size() < 5) {
+        return false;
+    }
+    return (pdu[3] & 0x20U) != 0U;
+}
+
+}  // namespace
+
+// The LeaveAll timer's PDU carries the LeaveAllEvent (IEEE 802.1Q 10.7.5.4),
+// and the peer's Applicants re-declare on it. Before, the flag was never set
+// on the wire: peers saw only our re-declarations and the registrations of
+// our VLANs on their side flapped every LeaveAll period.
+TEST(mvrp_participant, the_leaveall_timer_puts_the_leaveall_event_on_the_wire)
+{
+    MvrpParticipant a{test_mvrp_config(), 0xcc33};
+    MvrpParticipant b{test_mvrp_config(), 0xdd44};
+    MvrpFabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    b.set_send_pdu(fab.make_b_sender());
+    MvrpTestClock c{};
+    a.start(c.now);
+    b.start(c.now);
+    (void)a.declare_vlan(200, c.now);
+    auto const t1 = c.advance(std::chrono::milliseconds(150));
+    a.tick(t1);
+    fab.deliver_a_to_b(b, t1);
+    EXPECT_TRUE(b.has_vlan(200));
+    fab.b_to_a.clear();
+
+    // b declares nothing itself: its LeaveAll (timer 5 to 15 s) goes out
+    // on its own, as a vector of no values with the LeaveAllEvent set.
+    auto const t2 = c.advance(std::chrono::seconds(20));
+    b.tick(t2);
+    bool leave_all_seen = false;
+    for (auto const& pdu : fab.b_to_a) {
+        if (first_vector_has_leave_all(pdu)) {
+            leave_all_seen = true;
+        }
+    }
+    EXPECT_TRUE(leave_all_seen);
+
+    // a receives it: its Applicant for 200 re-declares on its join timer.
+    fab.deliver_b_to_a(a, t2);
+    auto const t3 = c.advance(std::chrono::milliseconds(300));
+    a.tick(t3);
+    EXPECT_FALSE(fab.a_to_b.empty());
+    fab.deliver_a_to_b(b, t3);
+    EXPECT_TRUE(b.has_vlan(200));
+}
+
+// A LeaveAll with declarations of our own rides the first vector, and the
+// flag is set once per PDU.
+TEST(mvrp_participant, a_leaveall_with_declarations_sets_the_flag_on_the_first_vector_only)
+{
+    MvrpParticipant a{test_mvrp_config(), 0xcc33};
+    MvrpFabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    MvrpTestClock c{};
+    a.start(c.now);
+    (void)a.declare_vlan(200, c.now);
+    (void)a.declare_vlan(300, c.now);
+    a.tick(c.advance(std::chrono::milliseconds(150)));
+    fab.a_to_b.clear();
+
+    a.tick(c.advance(std::chrono::seconds(20)));
+    size_t flagged_pdus = 0;
+    for (auto const& pdu : fab.a_to_b) {
+        if (first_vector_has_leave_all(pdu)) {
+            ++flagged_pdus;
+            // Two VLANs, two vectors of one value each: only the first flagged.
+            // Each vector: header(2) + FirstValue(2) + one ThreePacked octet(1).
+            EXPECT_TRUE(pdu.size() >= 3 + 5 + 5);
+            EXPECT_EQ(pdu[3 + 5] & 0x20U, 0U);
+        }
+    }
+    EXPECT_EQ(flagged_pdus, size_t{1});
+}
+
 TEST(mvrp_participant, receive_too_short)
 {
     MvrpParticipant p{test_mvrp_config(), 0x1234};

@@ -427,8 +427,14 @@ class MvrpParticipantT
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::TxLeaveAll, now);
             mrp::dispatch_registrar(rec, registrar_sm::Def::Event::TxLeaveAll, now, port_.timers());
         }
-        port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::Tx, now);
-        build_and_send_pdu(now);
+        // Tx takes the LeaveAll FSM back to Passive with tx_leaveall_pending,
+        // and that is what puts the LeaveAll on the wire (IEEE 802.1Q
+        // 10.7.5.4): the PDU carries the LeaveAllEvent, so the peers' Registrars
+        // go to Lv and their Applicants re-declare. Without it the peers only
+        // saw our own re-declarations, and their registrations of our VLANs
+        // flapped on every LeaveAll period.
+        auto const& lva_ctx = port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::Tx, now);
+        build_and_send_pdu(now, lva_ctx.tx_leaveall_pending);
     }
 
     void on_periodic_timer(TimePoint now)
@@ -514,68 +520,107 @@ class MvrpParticipantT
         }
     }
 
-    void build_and_send_pdu(TimePoint now)
+    /// Encode and send one PDU: every attribute with a transmit pending, the
+    /// first vector carrying the LeaveAllEvent when @p leave_all. A LeaveAll
+    /// with nothing to declare goes out on its own, as a vector of no values
+    /// (IEEE 802.1Q 10.8.2.6: the FirstValue field is present, NumberOfValues 0).
+    void build_and_send_pdu(TimePoint now, bool leave_all = false)
     {
         for (auto& rec : vlans_) {
             mrp::dispatch_applicant_tx(rec, now);
         }
+        if (!any_tx_pending() && !leave_all) {
+            return;
+        }
+        pdu_buffer_.rewind();
+        if (!append_pdu_header()) {
+            return;
+        }
+        append_vectors(leave_all);
+        finish_and_send_pdu();
+    }
 
-        size_t emit_count = 0;
+    [[nodiscard]] auto any_tx_pending() const noexcept -> bool
+    {
         for (auto const& rec : vlans_) {
             if (rec.applicant_ctx.tx_pending) {
-                ++emit_count;
+                return true;
             }
         }
-        if (emit_count == 0) {
-            return;
-        }
+        return false;
+    }
 
-        pdu_buffer_.rewind();
-        if (!detail_mvrp::append_u8(pdu_buffer_, PROTOCOL_VERSION)) {
-            return;
-        }
-        if (!detail_mvrp::append_u8(pdu_buffer_, static_cast<uint8_t>(AttributeType::VlanIdentifier))) {
-            return;
-        }
-        if (!detail_mvrp::append_u8(pdu_buffer_, static_cast<uint8_t>(AttributeLength::VlanIdentifier))) {
-            return;
-        }
+    /// ProtocolVersion, AttributeType, AttributeLength.
+    [[nodiscard]] auto append_pdu_header() -> bool
+    {
+        return detail_mvrp::append_u8(pdu_buffer_, PROTOCOL_VERSION) &&
+            detail_mvrp::append_u8(pdu_buffer_, static_cast<uint8_t>(AttributeType::VlanIdentifier)) &&
+            detail_mvrp::append_u8(pdu_buffer_, static_cast<uint8_t>(AttributeLength::VlanIdentifier));
+    }
 
+    /// The VectorAttributes: one of one value per attribute with a transmit
+    /// pending, the first carrying the LeaveAllEvent when @p leave_all; a
+    /// LeaveAll with nothing to declare as a vector of no values whose
+    /// FirstValue (VID 0) declares nothing.
+    void append_vectors(bool const leave_all)
+    {
+        bool leave_all_pending = leave_all;
         for (auto& rec : vlans_) {
             if (!rec.applicant_ctx.tx_pending) {
                 continue;
             }
-            bool const reg_in = rec.registrar_is_in();
-            auto const wire_event = detail_mvrp::translate_sndmsg(rec.applicant_ctx.send_msg, reg_in);
-
-            mrp::VectorAttributeHeader vh{};
-            vh.set(false, 1);
-            if (!detail_mvrp::append_be16(pdu_buffer_, vh.vector_header.get())) {
+            if (!append_vlan_vector(rec, leave_all_pending)) {
                 break;
             }
-
-            std::array<uint8_t, 2> fv_buf{};
-            (void)store_unchecked(std::span<uint8_t>(fv_buf), rec.first_value);
-            if (!static_cast<bool>(pdu_buffer_.append(std::span<uint8_t const>(fv_buf)))) {
-                break;
-            }
-            if (!detail_mvrp::append_u8(
-                    pdu_buffer_, mrp::pack3_events(wire_event, mrp::AttributeEvent::Mt, mrp::AttributeEvent::Mt))) {
-                break;
-            }
-
-            rec.applicant_ctx.tx_pending = false;
-            rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
-            rec.applicant_ctx.encode = applicant_sm::Encoding::None;
+            leave_all_pending = false;
         }
+        if (leave_all_pending) {
+            (void)(append_vector_header(true, 0) && append_first_value(VlanIdentifierFirstValue{}));
+        }
+    }
 
+    /// One VectorAttribute of one value for @p rec; the record's transmit is
+    /// consumed once the whole vector is in the buffer.
+    [[nodiscard]] auto append_vlan_vector(AttributeRecord<VlanIdentifierFirstValue>& rec, bool const leave_all) -> bool
+    {
+        if (!append_vector_header(leave_all, 1) || !append_first_value(rec.first_value) || !append_event(rec)) {
+            return false;
+        }
+        rec.applicant_ctx.tx_pending = false;
+        rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
+        rec.applicant_ctx.encode = applicant_sm::Encoding::None;
+        return true;
+    }
+
+    [[nodiscard]] auto append_vector_header(bool const leave_all, uint16_t const number_of_values) -> bool
+    {
+        mrp::VectorAttributeHeader vh{};
+        vh.set(leave_all, number_of_values);
+        return detail_mvrp::append_be16(pdu_buffer_, vh.vector_header.get());
+    }
+
+    [[nodiscard]] auto append_first_value(VlanIdentifierFirstValue const& fv) -> bool
+    {
+        std::array<uint8_t, 2> fv_buf{};
+        (void)store_unchecked(std::span<uint8_t>(fv_buf), fv);
+        return static_cast<bool>(pdu_buffer_.append(std::span<uint8_t const>(fv_buf)));
+    }
+
+    /// The one ThreePacked octet of a one-value vector: the record's event, then two Mt.
+    [[nodiscard]] auto append_event(AttributeRecord<VlanIdentifierFirstValue> const& rec) -> bool
+    {
+        auto const wire_event = detail_mvrp::translate_sndmsg(rec.applicant_ctx.send_msg, rec.registrar_is_in());
+        return detail_mvrp::append_u8(pdu_buffer_, mrp::pack3_events(wire_event, mrp::AttributeEvent::Mt, mrp::AttributeEvent::Mt));
+    }
+
+    /// The two EndMarks, then the PDU to whoever sends.
+    void finish_and_send_pdu()
+    {
         (void)detail_mvrp::append_be16(pdu_buffer_, mrp::END_MARK);
         (void)detail_mvrp::append_be16(pdu_buffer_, mrp::END_MARK);
-
         if (send_pdu_) {
             (void)send_pdu_(pdu_buffer_.get_span());
         }
-        (void)now;
     }
 
     auto find_or_create_vlan(uint16_t vid) -> AttributeRecord<VlanIdentifierFirstValue>*
