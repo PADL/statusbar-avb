@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <initializer_list>
+#include <print>
 #include <span>
 #include <string>
 #include <utility>
@@ -1006,47 +1008,56 @@ void ControllerSimple::handle_read_descriptor_response(
     }
 }
 
-void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& target, std::span<uint8_t const> desc_payload)
+namespace {
+
+/// How many of a descriptor_counts entry's descriptors the crawl reads: the
+/// advertised count, bounded per type and by what is left of the
+/// configuration's budget, which the read count is taken from. A bound that
+/// bites is noted on stderr; real entities never reach either.
+auto bounded_read_count(uint16_t const entry_type, uint16_t const entry_count, size_t& budget) -> uint16_t
 {
-    if (desc_payload.size() < DescriptorConfiguration::LENGTH) {
-        return;
+    auto const read_count = static_cast<uint16_t>(std::min<size_t>({entry_count, MAX_DESCRIPTORS_PER_TYPE, budget}));
+    budget -= read_count;
+    if (read_count < entry_count) {
+        std::print(
+            stderr,
+            "[atdecc] entity advertises {} descriptors of type 0x{:04x}; enumerating only {} (caps: {} per type, {} per "
+            "configuration)\n",
+            entry_count,
+            entry_type,
+            read_count,
+            MAX_DESCRIPTORS_PER_TYPE,
+            ControllerSimple::MAX_DESCRIPTORS_PER_CONFIGURATION);
     }
-    // Use span_load_padded (not span_load) because DescriptorConfiguration
-    // now contains a max-sized inline descriptor_counts array and sizeof
-    // is larger than the wire payload. span_load_padded copies up to
-    // min(src.size(), sizeof(T)) and zero-fills the rest, so both the
-    // fixed header and the populated trailer entries land in the struct.
-    DescriptorConfiguration cfg{};
-    span_load_padded(cfg, desc_payload);
+    return read_count;
+}
 
+}  // namespace
+
+void ControllerSimple::note_stream_counts(EntityDescriptorCounts& counts, uint16_t const entry_type, uint16_t const entry_count)
+{
+    if (entry_type == DESCRIPTOR_STREAM_INPUT) {
+        counts.stream_inputs = entry_count;
+    } else if (entry_type == DESCRIPTOR_STREAM_OUTPUT) {
+        counts.stream_outputs = entry_count;
+    }
+}
+
+auto ControllerSimple::enqueue_configuration_reads(Eui64 const& target, DescriptorConfiguration const& cfg)
+    -> EntityDescriptorCounts
+{
     EntityDescriptorCounts counts{};
-    auto const n = static_cast<size_t>(cfg.descriptor_counts_count.get());
-    auto const n_clamped = std::min<size_t>(n, DescriptorConfiguration::MAX_DESCRIPTOR_COUNTS);
-
+    // One budget for the whole configuration: the per-type bound alone let
+    // one CONFIGURATION enqueue 108 x 60000 reads (and as many set inserts)
+    // synchronously inside a single response callback.
+    size_t budget = MAX_DESCRIPTORS_PER_CONFIGURATION;
     // Walk the descriptor_counts table in declaration order, enqueueing
     // a READ_DESCRIPTOR for every (type, index) the entity advertises.
     // The unified queue dedupes against EntityRecord::requested_descriptors.
-    for (size_t i = 0; i < n_clamped; ++i) {
-        auto const& entry = cfg.descriptor_counts[i];
+    for (auto const& entry : cfg.used_descriptor_counts()) {
         auto const entry_type = entry.descriptor_type.get();
-        auto const entry_count = entry.count.get();
-        if (entry_type == DESCRIPTOR_STREAM_INPUT) {
-            counts.stream_inputs = entry_count;
-        } else if (entry_type == DESCRIPTOR_STREAM_OUTPUT) {
-            counts.stream_outputs = entry_count;
-        }
-        // Bound enumeration so a hostile/corrupt count can't drive millions of
-        // queued reads + set inserts (M2 DoS). Real entities never exceed this.
-        uint16_t const read_count = std::min<uint16_t>(entry_count, MAX_DESCRIPTORS_PER_TYPE);
-        if (read_count < entry_count) {
-            std::print(
-                stderr,
-                "[atdecc] entity advertises {} descriptors of type 0x{:04x} (> {}); enumerating only {}\n",
-                entry_count,
-                entry_type,
-                MAX_DESCRIPTORS_PER_TYPE,
-                read_count);
-        }
+        note_stream_counts(counts, entry_type, entry.count.get());
+        auto const read_count = bounded_read_count(entry_type, entry.count.get(), budget);
         for (uint16_t idx = 0; idx < read_count; ++idx) {
             enqueue_descriptor_read(target, entry_type, idx);
             if (entry_type == DESCRIPTOR_STREAM_INPUT || entry_type == DESCRIPTOR_STREAM_OUTPUT) {
@@ -1054,7 +1065,22 @@ void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& tar
             }
         }
     }
-    entities_[target].descriptor_counts = counts;
+    return counts;
+}
+
+void ControllerSimple::handle_configuration_descriptor_response(Eui64 const& target, std::span<uint8_t const> desc_payload)
+{
+    if (desc_payload.size() < DescriptorConfiguration::LENGTH) {
+        return;
+    }
+    // Use span_load_padded (not span_load) because DescriptorConfiguration
+    // contains a max-sized inline descriptor_counts array and sizeof is
+    // larger than the wire payload. span_load_padded copies up to
+    // min(src.size(), sizeof(T)) and zero-fills the rest, so both the
+    // fixed header and the populated trailer entries land in the struct.
+    DescriptorConfiguration cfg{};
+    span_load_padded(cfg, desc_payload);
+    entities_[target].descriptor_counts = enqueue_configuration_reads(target, cfg);
 }
 
 /// Resolve a stream name from cached STRINGS payload data.

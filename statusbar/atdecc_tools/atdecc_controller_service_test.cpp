@@ -200,6 +200,21 @@ auto descriptor_body(uint16_t type, uint16_t index, size_t size = 8) -> std::vec
     return body;
 }
 
+/// A CONFIGURATION descriptor body advertising `entries` of (type, count).
+auto configuration_body(std::vector<std::pair<uint16_t, uint16_t>> const& entries) -> std::vector<uint8_t>
+{
+    aem::DescriptorConfiguration cfg{};
+    cfg.descriptor_counts_count = ieee::doublet_t{static_cast<uint16_t>(entries.size())};
+    for (size_t i = 0; i < entries.size(); ++i) {
+        cfg.descriptor_counts[i].descriptor_type = ieee::doublet_t{entries[i].first};
+        cfg.descriptor_counts[i].count = ieee::doublet_t{entries[i].second};
+    }
+    std::vector<uint8_t> body(sizeof(cfg), 0);
+    span_store(std::span{body}, cfg);
+    body.resize(cfg.wire_size());
+    return body;
+}
+
 auto count_detail_ready(std::vector<atdecc_tools::ControllerEvent> const& events) -> int
 {
     int n = 0;
@@ -492,6 +507,23 @@ TEST(controller_service_seam, entity_detail_counts_only_the_descriptors_it_asked
             EXPECT_TRUE(d->detail.entity_id == ENTITY_A);
         }
     }
+}
+
+// One CONFIGURATION cannot enqueue more than MAX_DESCRIPTORS_PER_CONFIGURATION
+// reads: the per-type cap alone let 108 types x 60000 reads be enqueued
+// synchronously inside one response callback.
+TEST(controller_service_seam, a_configuration_enqueues_at_most_the_per_configuration_budget)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    auto& sink = h.fake->sink();
+    auto const before = h.ctrl->queued_descriptor_reads();
+
+    // Two types of 60000 each (each within the per-type cap): 120000 advertised.
+    auto const body = configuration_body({{aem::DESCRIPTOR_CONTROL, 60000}, {aem::DESCRIPTOR_MATRIX, 60000}});
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_SUCCESS, body);
+
+    EXPECT_EQ(h.ctrl->queued_descriptor_reads() - before, ControllerSimple::MAX_DESCRIPTORS_PER_CONFIGURATION);
 }
 
 //

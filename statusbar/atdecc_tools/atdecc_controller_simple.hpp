@@ -17,6 +17,7 @@
 
 #include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
+#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc_tools/atdecc_aem_validate.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_model.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_service.hpp"
@@ -42,6 +43,13 @@ namespace statusbar::atdecc_tools {
 class ControllerSimple : public net::Pollable
 {
   public:
+    /// The most READ_DESCRIPTORs one CONFIGURATION descriptor can enqueue, over
+    /// all its descriptor types together. Above the largest real model (a
+    /// 55k-CONTROL processor proxy) and far below what a corrupt or hostile
+    /// descriptor_counts table (108 types x 60000) could otherwise demand in
+    /// one response callback.
+    static constexpr size_t MAX_DESCRIPTORS_PER_CONFIGURATION = 100'000;
+
     /// A pending GET_STREAM_FORMAT query tracked for retry
     struct PendingStreamFormatQuery
     {
@@ -130,6 +138,10 @@ class ControllerSimple : public net::Pollable
     /// Emit a status event from outside (e.g. tool-layer messages).
     void emit_status(std::string_view msg);
 
+    /// READ_DESCRIPTORs queued or in flight through the unified queue (a
+    /// diagnostic: the crawl's backlog).
+    [[nodiscard]] auto queued_descriptor_reads() const noexcept -> size_t { return descriptor_read_queue_.size(); }
+
   private:
     void wire_service();
 
@@ -171,8 +183,9 @@ class ControllerSimple : public net::Pollable
     void send_next_stream_format_query(int64_t now_ns);
 
     /// Parse a CONFIGURATION descriptor's descriptor_counts table and queue
-    /// READ_DESCRIPTOR for every entry, in declaration order. Also queues
-    /// GET_STREAM_FORMAT for stream descriptors.
+    /// READ_DESCRIPTOR for every entry, in declaration order, within
+    /// MAX_DESCRIPTORS_PER_CONFIGURATION. Also queues GET_STREAM_FORMAT for
+    /// stream descriptors.
     void handle_configuration_descriptor_response(ieee::Eui64 const& target, std::span<uint8_t const> desc_payload);
 
     std::unique_ptr<ControllerService> service_;
@@ -296,6 +309,12 @@ class ControllerSimple : public net::Pollable
         std::optional<EntityDescriptorCounts> descriptor_counts;
     };
     std::map<ieee::Eui64, EntityRecord> entities_;
+
+    /// The descriptor_counts walk behind handle_configuration_descriptor_response:
+    /// returns the stream counts it saw.
+    auto enqueue_configuration_reads(ieee::Eui64 const& target, statusbar::atdecc::aem::DescriptorConfiguration const& cfg)
+        -> EntityDescriptorCounts;
+    static void note_stream_counts(EntityDescriptorCounts& counts, uint16_t entry_type, uint16_t entry_count);
 
     /// The record for @p id, or nullptr if the entity is unknown. Read-side helper
     /// for the many `if (found) use field` call sites.
