@@ -409,7 +409,10 @@ void NanoAvbAemController::receive_aecp(std::span<uint8_t const> payload, TimePo
         return;
     }
 
-    auto idx = aem_ctx_.find_inflight(header.sequence_id.get());
+    // Matched on sequence_id, responding entity and command code: a stale or
+    // duplicate response from another entity with the same sequence_id must
+    // not complete (and cache under the wrong entity) a command sent elsewhere.
+    auto idx = aem_ctx_.find_inflight(header);
     if (idx >= AemControllerContext::MAX_INFLIGHT) {
         return;
     }

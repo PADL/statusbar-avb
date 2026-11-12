@@ -274,6 +274,49 @@ TEST(aem_controller_sm, multiple_inflight)
     EXPECT_EQ(ctx.next_sequence_id, 3U);
 }
 
+// A response is matched to the command it answers by sequence_id AND the
+// entity that answered AND the command code: another entity's response with
+// the same sequence_id (sequence_ids are only unique per controller/target
+// pair) must not complete a command sent elsewhere.
+TEST(aem_controller_sm, response_matches_target_and_command_not_sequence_alone)
+{
+    AemControllerContext ctx;
+    ctx.my_id = CONTROLLER_ID;
+    std::vector<std::vector<uint8_t>> sent;
+    ctx.tx_command = [&](std::span<uint8_t const> packet) {
+        sent.emplace_back(packet.begin(), packet.end());
+        return true;
+    };
+
+    AemControllerStateMachine<> sm;
+    sm.handle_event(ctx, AemControllerEvent::UCT, test_time(0));
+    ctx.command_params = {.target_entity_id = TARGET_ID, .command_code = AEM_COMMAND_READ_DESCRIPTOR};
+    sm.handle_event(ctx, AemControllerEvent::DoCommand, test_time(0));
+    EXPECT_EQ(sent.size(), 1U);
+
+    AemDu answer{};
+    span_load(answer, make_const_span(sent[0]));
+    answer.init_response(AEM_COMMAND_READ_DESCRIPTOR, AEM_STATUS_SUCCESS, AemDu::AEM_DATA_LENGTH);
+    answer.controller_entity_id = CONTROLLER_ID;
+
+    // Same sequence_id from a different entity: not ours.
+    Eui64 const OTHER_ID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x99};
+    AemDu from_other = answer;
+    from_other.target_entity_id = OTHER_ID;
+    EXPECT_EQ(ctx.find_inflight(from_other), AemControllerContext::MAX_INFLIGHT);
+
+    // Same sequence_id and entity, a different command: not ours either.
+    AemDu other_command = answer;
+    other_command.target_entity_id = TARGET_ID;
+    other_command.init_response(AEM_COMMAND_GET_STREAM_FORMAT, AEM_STATUS_SUCCESS, AemDu::AEM_DATA_LENGTH);
+    EXPECT_EQ(ctx.find_inflight(other_command), AemControllerContext::MAX_INFLIGHT);
+
+    // The entity we asked, echoing our command code: found.
+    answer.target_entity_id = TARGET_ID;
+    EXPECT_TRUE(ctx.find_inflight(answer) < AemControllerContext::MAX_INFLIGHT);
+    EXPECT_EQ(ctx.find_inflight(answer), ctx.find_inflight(answer.sequence_id.get()));
+}
+
 TEST(aem_controller_sm, unknown_sequence_ignored)
 {
     AemControllerContext ctx;

@@ -179,6 +179,56 @@ TEST(nanoavb_controller, send_aem_after_discovery)
     EXPECT_EQ(controller.aem_inflight_count(), 1U);
 }
 
+// The controller's inflight match is on sequence_id, responding entity and
+// command code, so another entity's response carrying our sequence_id leaves
+// our command inflight and is not reported as that entity's answer.
+TEST(nanoavb_controller, another_entitys_response_with_our_sequence_id_completes_nothing)
+{
+    std::vector<std::vector<uint8_t>> unicast_sent;
+    std::vector<Eui64> answered_by;
+    AemControllerEntityCallbacks callbacks;
+    callbacks.send_atdecc_unicast = [&](Eui48 const&, std::span<uint8_t const> packet) {
+        unicast_sent.emplace_back(packet.begin(), packet.end());
+        return true;
+    };
+    callbacks.on_aem_response = [&](Eui64 target, uint16_t, uint8_t, std::span<uint8_t const>, std::span<uint8_t const>) {
+        answered_by.push_back(target);
+    };
+
+    NanoAvbAemController controller{CONTROLLER_ID, callbacks};
+    controller.start();
+    AdpDu adp{};
+    adp.init_entity_available(TARGET_ID, 31);
+    adp.available_index = 1;
+    controller.receive_adp(adp, TARGET_MAC, test_time(0));
+    controller.read_descriptor(TARGET_ID, 0x0000, 0x0000);
+    EXPECT_EQ(unicast_sent.size(), 1U);
+    EXPECT_EQ(controller.aem_inflight_count(), 1U);
+
+    AemDu sent{};
+    span_load(sent, make_const_span(unicast_sent[0]));
+
+    // Another entity answers with the same sequence_id (its own counter): dropped.
+    Eui64 const OTHER_ID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x99};
+    AemDu du{};
+    du.init_response(AEM_COMMAND_READ_DESCRIPTOR, AEM_STATUS_SUCCESS, AemDu::AEM_DATA_LENGTH);
+    du.controller_entity_id = CONTROLLER_ID;
+    du.target_entity_id = OTHER_ID;
+    du.sequence_id = sent.sequence_id;
+    auto const other_header = make_const_span(du);
+    controller.receive_aecp(std::vector<uint8_t>(other_header.begin(), other_header.end()), test_time(10));
+    EXPECT_EQ(controller.aem_inflight_count(), 1U);
+    EXPECT_TRUE(answered_by.empty());
+
+    // The entity we asked answers: completed and reported as its answer.
+    du.target_entity_id = TARGET_ID;
+    auto const header = make_const_span(du);
+    controller.receive_aecp(std::vector<uint8_t>(header.begin(), header.end()), test_time(20));
+    EXPECT_EQ(controller.aem_inflight_count(), 0U);
+    EXPECT_EQ(answered_by.size(), 1U);
+    EXPECT_TRUE(!answered_by.empty() && answered_by[0] == TARGET_ID);
+}
+
 TEST(nanoavb_controller, unsolicited_response_reaches_callback)
 {
     std::vector<uint8_t> body_seen;

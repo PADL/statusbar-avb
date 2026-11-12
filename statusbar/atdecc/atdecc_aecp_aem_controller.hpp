@@ -134,11 +134,26 @@ struct AemControllerContext
     // Inflight management — thin wrappers over the SlotTable so existing
     // call sites keep compiling unchanged.
 
-    /// Find inflight by sequence_id. Returns `MAX_INFLIGHT` if not found.
+    /// Find inflight by sequence_id alone. Returns `MAX_INFLIGHT` if not found.
+    /// For a response off the wire use the AemDu overload: a sequence_id is only
+    /// unique per (controller, target) pair.
     [[nodiscard]] auto find_inflight(uint16_t sequence_id) const -> size_t
     {
         return inflight.find_if(
             [sequence_id](AemInflightCommand const& e) { return e.sent_header.sequence_id.get() == sequence_id; });
+    }
+
+    /// Find the inflight command a response answers: sent with its sequence_id,
+    /// to the entity that answered, for the command code it echoes. A late or
+    /// duplicate response from another entity that happens to carry the same
+    /// sequence_id answers nothing. Returns `MAX_INFLIGHT` if not found.
+    [[nodiscard]] auto find_inflight(AemDu const& response) const -> size_t
+    {
+        return inflight.find_if([&response](AemInflightCommand const& e) {
+            return e.sent_header.sequence_id == response.sequence_id &&
+                e.sent_header.target_entity_id == response.target_entity_id &&
+                e.sent_header.command_code() == response.command_code();
+        });
     }
 
     /// Find first timed-out inflight. Returns `MAX_INFLIGHT` if none.
